@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Calx">
+  <title>Calx</title>
+  <!--
+    A C whose two ends run on at 45 degrees and cross to make the x. The stroke
+    rising from the bottom of the C passes over; the one falling into its top is
+    cut. C radius 24, stroke 16, gap 4. The tips end level with the top and
+    bottom of the C.
+    One color: fill is currentColor, so it takes the text color when inlined
+    and is black when loaded as an image. calx-mark-white.svg is the white copy.
+  -->
+  <path fill="currentColor" d="M78.142 49.858 L69.657 41.373 A32 32 0 1 0 69.657 86.627 L110.627 45.657 A8 8 0 0 0 99.314 34.343 L58.343 75.314 A16 16 0 1 1 58.343 52.686 L66.828 61.172 Z M95.113 66.828 L110.627 82.343 A8 8 0 0 1 99.314 93.657 L83.799 78.142 Z"/>
+</svg>

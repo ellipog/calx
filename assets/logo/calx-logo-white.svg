@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" color="#fff" viewBox="0 12 399.761 92" role="img" aria-label="Calx">
+  <title>Calx</title>
+  <!-- White copy of calx-logo.svg, for dark backgrounds. -->
+  <g fill="currentColor">
+    <path d="M90.725 37.671 L78.527 25.473 A46 46 0 1 0 78.527 90.527 L137.422 31.632 A11.5 11.5 0 0 0 121.159 15.368 L62.263 74.263 A23 23 0 1 1 62.263 41.737 L74.461 53.934 Z M115.12 62.066 L137.422 84.368 A11.5 11.5 0 0 1 121.159 100.632 L98.856 78.329 Z"/>
+    <!-- Wordmark: rounded strokes of 16, the c opens at 45 degrees, and the x has the mark's crossing -->
+    <path d="M225.418 49.373 A32 32 0 1 0 225.418 94.627 A8 8 0 0 0 214.104 83.314 A16 16 0 1 1 214.104 60.686 A8 8 0 0 0 225.418 49.373 Z"/>
+    <path fill-rule="evenodd" d="M235.761 72 a32 32 0 1 0 64 0 a32 32 0 1 0 -64 0Z M251.761 72 a16 16 0 1 0 32 0 a16 16 0 1 0 -32 0Z"/>
+    <rect x="283.761" y="40" width="16" height="64" rx="8"/>
+    <rect x="311.761" y="12" width="16" height="92" rx="8"/>
+    <path d="M349.418 101.657 L397.418 53.657 A8 8 0 0 0 386.104 42.343 L338.104 90.343 A8 8 0 0 0 349.418 101.657 Z M364.933 57.858 L349.418 42.343 A8 8 0 0 0 338.104 53.657 L353.619 69.172 Z M381.903 74.828 L397.418 90.343 A8 8 0 0 1 386.104 101.657 L370.589 86.142 Z"/>
+  </g>
+</svg>
