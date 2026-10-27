@@ -2705,7 +2705,12 @@ private:
         if (const LoopBorrow* b = loop_conflict(place, l)) {
             std::string what = b->path.empty() ? std::string(n) : place_text(place);
             std::string over = b->path.empty() ? what : place_text(b->place);
-            error(place->span, q(what) + " can't be changed while a `for` loop goes over " + (over == what ? "it" : q(over)));
+            if (b->shown) {
+                error(place->span, q(place_text(place)) + " can't be changed after " + q("{" + place_text(b->place) + "}") +
+                                       " in the same string, which shows it as it is once every part is worked out; work this part out first, into a variable");
+            } else {
+                error(place->span, q(what) + " can't be changed while a `for` loop goes over " + (over == what ? "it" : q(over)));
+            }
             l->used = l->mutated = true;
             return;
         }
@@ -2738,11 +2743,14 @@ private:
         else l->mutated = true;
     }
 
-    // A place a `for` loop goes over: its root variable, and the fields to it.
+    // A place a `for` loop goes over: its root variable, and the fields to it. A string's `{...}`
+    // part that's a place keeps it the same way for the parts after it, since the string is made
+    // once they're all worked out (`shown`).
     struct LoopBorrow {
         const Local* root;
         std::vector<std::uint32_t> path;
         const Expr* place;
+        bool shown = false;
     };
 
     // The fields from a place's root to its first index: `p.a.b` is a then b, `p.a[i].b` is a. What
@@ -2960,7 +2968,7 @@ private:
             pl.outer.insert(visible_.begin(), visible_.begin() + static_cast<std::ptrdiff_t>(outer));
             par_.push_back(std::move(pl));
         }
-        if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over});
+        if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over, false});
         check_block(s->body, nullptr, BlockUse::stmt);
         if (borrowed) loop_borrows_.pop_back();
         loops_.pop_back();
@@ -3364,10 +3372,16 @@ private:
             not_yet(e->span, "string prefixes");
             return T.error;
         }
+        // The parts are worked out in order. A part that's `Copy` is copied then, but one that owns
+        // memory is shown as it is once they all are, so a later part can't change it.
+        std::size_t held = loop_borrows_.size();
         for (Expr* part : e->interpolations) {
             Type* t = check(part, nullptr);
             if (!is_bad(t) && !printable(t)) error(part->span, name_of(t) + " can't be shown in a string" + lacking(t, true));
+            Local* root = place_root(part);
+            if (root && !is_bad(t) && !is_copy(t)) loop_borrows_.push_back({root, field_path(part), part, true});
         }
+        loop_borrows_.resize(held);
         e->is_const = e->interpolations.empty();
         if (printed) return T.str;
         if (!e->interpolations.empty() || expected == T.string) return T.string;

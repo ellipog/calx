@@ -88,6 +88,8 @@ private:
         // A `for` loop: what it goes over, and the fields from the root to it, up to an index.
         const Expr* over = nullptr;
         std::vector<std::uint32_t> path;
+        // A string's `{...}` part, which holds `over` until the string is made, instead of a loop.
+        bool shown = false;
     };
 
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -280,6 +282,8 @@ private:
             if (b->by) {
                 error(e->span, "can't move " + name_of(l) + " while " + name_of(b->by) + " is a view into it");
                 note(b->at, name_of(b->by) + " is a view into " + name_of(l) + " here");
+            } else if (b->shown) {
+                error(e->span, "can't move " + name_of(l) + shown_after(b));
             } else {
                 error(e->span, "can't move " + name_of(l) + " while a `for` loop goes over " + looped(b));
             }
@@ -293,8 +297,10 @@ private:
     // A pattern takes the whole value of `l` apart.
     void take(Local* l, Span at) {
         if (const Borrow* b = borrowed(l)) {
-            error(at, "can't take " + name_of(l) + " apart while " + (b->by ? name_of(b->by) + " is a view into it"
-                                                                             : "a `for` loop goes over " + looped(b)));
+            error(at, "can't take " + name_of(l) + " apart" +
+                          (b->by      ? " while " + name_of(b->by) + " is a view into it"
+                           : b->shown ? shown_after(b)
+                                      : " while a `for` loop goes over " + looped(b)));
             return;
         }
         set(l, moved);
@@ -352,6 +358,11 @@ private:
 
     // What a `for` loop goes over, for a message about its whole root: `it`, or the field.
     std::string looped(const Borrow* b) const { return b->path.empty() ? "it" : q(place_text(b->over)); }
+    // Why a string's part keeps what's moved, for the end of a message.
+    std::string shown_after(const Borrow* b) const {
+        return " after " + q("{" + place_text(b->over) + "}") +
+               " in the same string, which shows it as it is once every part is worked out; work this part out first, into a variable";
+    }
 
     // The fields from a place's root to its first index, as the checker's loop rule counts them.
     static std::vector<std::uint32_t> field_path(const Expr* e) {
@@ -548,7 +559,7 @@ private:
             if (!l->owns) {
                 view_of_[l] = why;
                 part_of_[l] = whole;
-                if (root && !scan_) borrows_.push_back({root, l, p->span, nullptr, {}});
+                if (root && !scan_) borrows_.push_back({root, l, p->span, nullptr, {}, false});
             }
             if (!scan_) {
                 declare(l);
@@ -680,7 +691,7 @@ private:
         }
         auto iteration = [&] {
             scopes_.emplace_back();
-            if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it)});
+            if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it), false});
             if (s->local) {
                 s->local->owns = copyable(s->local->type);
                 if (!s->local->owns) view_of_[s->local] = ViewOf::element;
@@ -739,10 +750,19 @@ private:
     void expr(Expr* e, Use u) {
         if (!e) return;
         switch (e->kind) {
-            case ExprKind::string_lit:
-                for (Expr* x : e->interpolations) expr(x, Use::view);
+            case ExprKind::string_lit: {
+                // A part that's a place and owns memory is held until the string is made, so the
+                // parts after it can't move it.
+                std::size_t held = borrows_.size();
+                for (Expr* x : e->interpolations) {
+                    expr(x, Use::view);
+                    Local* root = place_root(x);
+                    if (root && !copyable(x->type)) borrows_.push_back({root, nullptr, x->span, x, field_path(x), true});
+                }
+                borrows_.resize(held);
                 if (!e->interpolations.empty()) rvalue(e, u);
                 return;
+            }
             case ExprKind::name:
             case ExprKind::self: name(e, u); return;
             case ExprKind::unary: expr(e->lhs, Use::view); return;
@@ -887,6 +907,10 @@ private:
                                q(place_text(e) + ".copy()") + copy_hint(e->type));
         } else if (const Borrow* b = borrowed(l, &w.path)) {
             std::string over = b->by || b->path.empty() ? r : place_text(b->over);
+            if (b->shown) {
+                error(e->span, "can't move " + q(place_text(e)) + shown_after(b));
+                return;
+            }
             error(e->span, "can't move " + q(place_text(e)) + " while " +
                                (b->by ? name_of(b->by) + " is a view into " + q(r)
                                       : "a `for` loop goes over " + (over == place_text(e) ? std::string("it") : q(over))));

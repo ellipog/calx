@@ -28,6 +28,17 @@ The argument is a `str` or a `String`. A string literal there can interpolate: `
 
 Every interpolation runs, left to right, before anything is written, as Java builds the whole string first. So a function called inside `{...}` that prints writes its output before the line it's in.
 
+A value that's `Copy`, such as a number, is copied when its `{...}` runs. A variable, field or element that owns memory, such as a list or a map, is written as it is once they've all run, so a later `{...}` can't change it or move it, which is a compile error. Work that one out first, into a variable. Reading from it, as `{xs.len()}` does, holds nothing:
+
+```calx
+fn main() {
+    var xs: List<i32> = [1, 2, 3]
+    println("{xs.len()} {xs.pop()} {xs}")    // out: 3 some(3) [1, 2]
+    let last = xs.pop()
+    println("{xs} {last}")    // out: [1] some(2)
+}
+```
+
 Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on Windows and Linux: `\n` is never turned into `\r\n`.
 
 Standard error isn't buffered. `eprint` and `eprintln` first write out whatever standard output has waiting, so when both go to one terminal they appear in the order they were written. A program whose standard output is a protocol, such as the rig's adapter, logs with them. [`std.io`](../std/io.md) reads and writes bytes.

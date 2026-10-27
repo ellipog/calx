@@ -73,7 +73,8 @@ fn main() {
     xs[1] += 1
     println("{xs[1]}")                             // out: 3
     xs.clear()
-    println("{xs} {xs.pop() ?? 0}")                // out: [] 0
+    let none_left = xs.pop() ?? 0
+    println("{xs} {none_left}")                    // out: [] 0
 
     // Lists that own memory: their elements are freed with them.
     var words: List<String> = ["one", "two"]

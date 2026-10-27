@@ -102,7 +102,8 @@ fn main() {
 
     // Views don't move; `own` parameters do.
     let v = String("view")
-    println("{len_of(v)} {v} {keep(v)}")           // out: 4 view view
+    println("{len_of(v)} {v}")                     // out: 4 view
+    println("{keep(v)}")                           // out: view
     var r = String("orig")
     replace(mut r)
     println(r)                                     // out: replaced

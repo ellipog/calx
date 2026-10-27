@@ -1,0 +1,37 @@
+// A string's `{...}` parts are worked out in order before it's made. A part that's `Copy` is
+// copied then, but a place that owns memory is shown as it is once they all are, so a later part
+// can't change it, or what holds it or what's in it. A part that only reads from it, such as
+// `{xs.len()}`, holds nothing.
+struct Pair {
+    a: List<i32>,
+    b: List<i32>,
+}
+
+fn grow(xs: mut List<i32>) -> i32 {
+    xs.push(9)
+    return 0
+}
+
+fn bump(n: mut i32) -> i32 {
+    n += 1
+    return n
+}
+
+fn main() {
+    var xs: List<i32> = [1, 2, 3]
+    println("{xs.len()} {xs.pop()} {xs}")
+    println("{xs} {xs.pop()}")    // error: `xs` can't be changed after `{xs}` in the same string
+    println("{xs[0]} {grow(mut xs)}")
+    var ls: List<List<i32>> = [[1]]
+    println("{ls[0]} {ls.pop()}")    // error: `ls` can't be changed after `{ls[...]}` in the same string
+    var p = Pair { a: [1], b: [2] }
+    println("{p.a} {grow(mut p.b)}")
+    println("{p.a} {grow(mut p.a)}")    // error: `p.a` can't be changed after `{p.a}` in the same string
+    println("{p} {grow(mut p.b)}")    // error: `p.b` can't be changed after `{p}` in the same string
+    var m = Map<i32, i32>()
+    m.insert(1, 1)
+    println("{m.remove(1)} {m}")
+    println("{m} {m.remove(1)}")    // error: `m` can't be changed after `{m}` in the same string
+    var n = 1
+    println("{n} {bump(mut n)} {n}")
+}

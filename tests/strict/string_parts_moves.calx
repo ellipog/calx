@@ -1,0 +1,10 @@
+// A part of a string that's a place is held until the string is made, so a later part can't move
+// it.
+fn eat(xs: own List<String>) -> usize {
+    return xs.len()
+}
+
+fn main() {
+    let ys: List<String> = ["a", "b"]
+    println("{ys} {eat(ys)}")    // error: can't move `ys` after `{ys}` in the same string
+}
