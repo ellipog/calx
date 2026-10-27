@@ -24,7 +24,7 @@ For now a program is one file, and that file is its module.
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C. `build` defaults to the file's name in the current folder |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took |
-| `--verbose` | Print the clang commands |
+| `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
 
 ## Exit status
@@ -45,7 +45,11 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 | debug (the default) | `-O0` | Fast builds while you work |
 | release | `-O2 -march=x86-64-v3` | Speed |
 
-In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+
+Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
+
+On Windows, debug builds use the C runtime DLL that comes with Visual Studio, since linking the static one puts its debug information into every PDB and doubles the link time. Release builds link the C runtime statically, so they run on any Windows machine.
 
 ## Fast builds (D64)
 
@@ -56,14 +60,18 @@ Building should take moments, so the command avoids every step it can:
 - **The runtime is compiled once** per build mode and clang version, then reused from the cache.
 - When nothing changed at all, `calx run` reuses the linked program and only starts it.
 - Programs link with lld when it's installed next to clang or on `PATH`.
+- **The linker runs directly.** clang's driver only works out the linker's command line, and starting clang costs about 18 ms. So the first link asks clang for that command once, and caches it. If a cached command fails, say after a Visual Studio update, clang works it out again.
 
-Measured on the reference machine (an i9-13900K on Windows 11) with a small program:
+Measured on the reference machine (an i9-13900K) with a small program, in debug mode:
 
-| | Time |
-| --- | --- |
-| `calx run` with nothing changed | 15 ms |
-| `calx check` | 6 ms |
-| `calx run` with a cold cache, compiling the runtime too | about 230 ms |
+| | Windows 11 | Linux (WSL 2) |
+| --- | --- | --- |
+| `calx run` with nothing changed | 13 ms | 13 ms |
+| `calx check` | 6 ms | 10 ms |
+| `calx run` after an edit | 110 ms, of which 70 ms is Windows Defender | 40 ms |
+| `calx run` with a cold cache, compiling the runtime too | 250 ms | 125 ms |
+
+Windows Defender scans every new executable the first time it starts, which costs about 70 ms and comes after the build. An exclusion for the cache folder removes that, at the cost of Defender no longer scanning what's built there.
 
 ## Environment
 
@@ -73,7 +81,7 @@ Measured on the reference machine (an i9-13900K on Windows 11) with a small prog
 | `CALX_HOME` | Where the runtime is. Otherwise, the source tree the compiler was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
-The cache only ever grows. Deleting it is always safe.
+The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. Deleting it is always safe.
 
 ## Errors
 

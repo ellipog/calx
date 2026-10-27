@@ -28,6 +28,9 @@ std::string hash_hex(const std::vector<std::string_view>& parts);
 // Runs a program and waits for it. Returns its exit status, or -1 if it couldn't start.
 int run_process(const std::vector<std::string>& argv);
 
+// Runs a program with its standard output and error going to the file `output`.
+int run_to_file(const std::vector<std::string>& argv, const std::string& output);
+
 // Starts several programs at once and waits for all of them. Returns the first nonzero status.
 int run_parallel(const std::vector<std::vector<std::string>>& commands);
 
