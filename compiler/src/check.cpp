@@ -89,7 +89,8 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "Copy", "Equal", "Display",
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "Copy",
+                              "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
@@ -100,6 +101,8 @@ public:
         n_JavaHashSet_ = ctx.names.intern("JavaHashSet");
         n_OpenHashMap_ = ctx.names.intern("OpenHashMap");
         n_OpenHashSet_ = ctx.names.intern("OpenHashSet");
+        n_LinkedMap_ = ctx.names.intern("LinkedMap");
+        n_LinkedSet_ = ctx.names.intern("LinkedSet");
         n_JavaHash_ = ctx.names.intern("JavaHash");
         n_java_hash_ = ctx.names.intern("java_hash");
         n_Hash_ = ctx.names.intern("Hash");
@@ -2035,7 +2038,7 @@ private:
                     return T.list_of(elem);
                 }
                 if (is_table_name(n) && !env_type(n)) {
-                    bool map = n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_;
+                    bool map = is_map_name(n);
                     TableKind table = table_kind(n);
                     if (t->args.size() != (map ? 2u : 1u)) {
                         std::string name(text(n));
@@ -3583,15 +3586,16 @@ private:
     }
 
     // A key of a map or a value of a set must have `Hash`, and one of Java's or fastutil's
-    // tables `JavaHash`, which brings `Equal` (D105, D107). While types are still being resolved,
-    // the check waits, like the bounds, since the key's fields may not be known yet.
+    // tables `JavaHash`, which brings `Equal` (D105, D107). A linked table is Calx's own, so its
+    // keys need `Hash` (D109). While types are still being resolved, the check waits, like the
+    // bounds, since the key's fields may not be known yet.
     void check_key(const Type* key, Span span, TableKind table) {
         if (defer_bounds_) {
             deferred_keys_.push_back({key, span, table});
             return;
         }
         if (is_bad(key)) return;
-        if (table != TableKind::native) {
+        if (table == TableKind::java || table == TableKind::fastutil) {
             if (java_hashable(key)) return;
             error(span, name_of(key) + " can't be a key of " +
                             (table == TableKind::java ? "a `JavaHashMap` or a `JavaHashSet`" : "an `OpenHashMap` or an `OpenHashSet`") +
@@ -5399,7 +5403,7 @@ private:
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (is_table_name(n) && !find_local(n)) {
-                return table_call(e, expected, n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_, table_kind(n));
+                return table_call(e, expected, is_map_name(n), table_kind(n));
             }
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
                 for (const Arg& a : e->args) check(a.value, nullptr);
@@ -6434,28 +6438,41 @@ private:
         return t;
     }
 
+    bool is_map_name(Name n) const { return n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_ || n == n_LinkedMap_; }
     bool is_table_name(Name n) const {
-        return n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_ || n == n_OpenHashMap_ || n == n_OpenHashSet_;
+        return is_map_name(n) || n == n_Set_ || n == n_JavaHashSet_ || n == n_OpenHashSet_ || n == n_LinkedSet_;
     }
     TableKind table_kind(Name n) const {
         if (n == n_JavaHashMap_ || n == n_JavaHashSet_) return TableKind::java;
         if (n == n_OpenHashMap_ || n == n_OpenHashSet_) return TableKind::fastutil;
+        if (n == n_LinkedMap_ || n == n_LinkedSet_) return TableKind::linked;
         return TableKind::native;
     }
     static std::string table_suffix(const Type* t) {
-        return t->table == TableKind::java ? "_j" : t->table == TableKind::fastutil ? "_o" : "_";
+        switch (t->table) {
+            case TableKind::java: return "_j";
+            case TableKind::fastutil: return "_o";
+            case TableKind::linked: return "_l";
+            default: return "_";
+        }
     }
 
     // `Map<String, i32>()` and `Set<i32>()`: an empty map or set, from the generic arguments or the
     // type expected. It allocates nothing until something goes in. `JavaHashMap<K, V>(n)` is
     // Java's `new HashMap<>(n)`, whose first table has room for `n` (D105), and
     // `OpenHashMap<K, V>(n, f)` is fastutil's constructor, for `n` keys at the load factor `f` (D107).
+    // A linked table's order doesn't depend on its size, so it takes nothing (D109).
     Type* table_call(Expr* e, Type* expected, bool map, TableKind table) {
         Expr* callee = e->callee;
         callee->ref = Ref::type;
         TypeKind kind = map ? TypeKind::map : TypeKind::set;
         bool java = table == TableKind::java, open = table == TableKind::fastutil;
-        std::string name = java ? (map ? "JavaHashMap" : "JavaHashSet") : open ? (map ? "OpenHashMap" : "OpenHashSet") : map ? "Map" : "Set";
+        bool linked = table == TableKind::linked;
+        std::string name = java     ? (map ? "JavaHashMap" : "JavaHashSet")
+                           : open   ? (map ? "OpenHashMap" : "OpenHashSet")
+                           : linked ? (map ? "LinkedMap" : "LinkedSet")
+                           : map    ? "Map"
+                                    : "Set";
         std::string example = name + (map ? "<String, i32>()" : "<i32>()");
         Type* t = nullptr;
         std::size_t want = map ? 2 : 1;
@@ -6493,7 +6510,9 @@ private:
                 error(e->args[0].span, java ? q(name + "<...>()") + " takes at most one argument, the capacity Java's " +
                                                   (map ? "`new HashMap<>(n)`" : "`new HashSet<>(n)`") + " starts with"
                                        : open ? q(name + "<...>()") + " takes at most two arguments, the expected size and the load factor, as fastutil's constructor does"
-                                              : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
+                                       : linked ? q(name + "<...>()") + " takes no arguments, since how big a table starts doesn't change "
+                                                  "the order of its keys; make room with `reserve(n)`"
+                                                : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
                 return T.error;
             }
         }
@@ -6654,7 +6673,9 @@ private:
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
             // Java's and fastutil's tables don't say how many keys fit.
-            else if (m == "capacity" && recv->table == TableKind::native) b = BMethod::capacity, result = T.usize;
+            else if (m == "capacity" && (recv->table == TableKind::native || recv->table == TableKind::linked)) {
+                b = BMethod::capacity, result = T.usize;
+            }
             else if (m == "compute_if_absent" && map && recv->table == TableKind::java) {
                 b = BMethod::compute_if_absent, changes = true, params = {recv->key, recv->elem}, result = T.bool_;
             }
@@ -6667,6 +6688,30 @@ private:
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
             // fastutil's `trim()`, which shrinks the table to the smallest that holds its keys.
             else if (m == "trim" && recv->table == TableKind::fastutil) b = BMethod::trim, changes = true;
+            // A linked table's two ends, as fastutil's linked tables and Java's `SequencedMap` and
+            // `SequencedSet` have them: a key at an end, taking one out, moving a key to one, and
+            // putting a key at one, where it moves if it's there already (D109).
+            else if (recv->table == TableKind::linked) {
+                Type* key = map ? recv->key : recv->elem;
+                if (m == "first" || m == "last") b = m == "first" ? BMethod::first : BMethod::last, result = T.optional_of(key);
+                else if (m == "pop_first" || m == "pop_last") {
+                    b = m == "pop_first" ? BMethod::pop_first : BMethod::pop_last, changes = true;
+                    result = T.optional_of(map ? recv->entry : recv->elem);
+                } else if (m == "move_to_first" || m == "move_to_last") {
+                    b = m == "move_to_first" ? BMethod::move_to_first : BMethod::move_to_last, changes = true, params = {look};
+                    result = T.bool_;
+                } else if (m == "insert_first" || m == "insert_last") {
+                    b = m == "insert_first" ? BMethod::insert_first : BMethod::insert_last, changes = true;
+                    params = map ? std::vector<Type*>{recv->key, recv->elem} : std::vector<Type*>{recv->elem};
+                }
+                if ((b == BMethod::first || b == BMethod::last) && !is_copy(key) && !is_bad(key)) {
+                    error(e->callee->span, q(m) + " copies the key out, so it needs keys that are `Copy`, and " + name_of(key) +
+                                               " owns memory; take it out with " + q(b == BMethod::first ? "pop_first" : "pop_last") +
+                                               ", or read it in a loop, which starts at the first");
+                    for (Arg& a : e->args) check(a.value, nullptr);
+                    return T.error;
+                }
+            }
             if (b == BMethod::get && !is_copy(recv->elem) && !is_bad(recv->elem)) {
                 error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(recv->elem) +
                                            " owns memory; read it in place with `m[key]`");
@@ -7021,7 +7066,7 @@ private:
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
-    Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_JavaHash_, n_java_hash_;
+    Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

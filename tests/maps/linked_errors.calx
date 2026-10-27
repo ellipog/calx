@@ -1,0 +1,28 @@
+// What `LinkedMap` and `LinkedSet` can't do: hold a key without `Hash`, take a size, copy out a
+// key that owns memory, use the methods only fastutil's or Java's tables have, or change during a
+// loop over them. Their ends are theirs alone.
+fn keyed<T>(x: T) -> LinkedSet<T> {    // error: `T` can't be a key of a map or a set, since it has no `Hash`; give `T` the bound `Hash`
+    var s = LinkedSet<T>()    // error: `T` can't be a key of a map or a set, since it has no `Hash`; give `T` the bound `Hash`
+    s.insert(x)
+    return s
+}
+
+fn main() {
+    let a = LinkedMap<f64, i32>()    // error: `f64` can't be a key of a map or a set, since it has no `Hash`
+    let b = LinkedMap<i32, i32>(16)    // error: `LinkedMap<...>()` takes no arguments, since how big a table starts doesn't change the order of its keys; make room with `reserve(n)`
+    var words = LinkedSet<String>()
+    words.insert(String("stone"))
+    println("{words.first()}")    // error: `first` copies the key out, so it needs keys that are `Copy`, and `String` owns memory; take it out with `pop_first`, or read it in a loop, which starts at the first
+    words.trim()    // error: `LinkedSet<String>` has no method `trim`
+    var m = LinkedMap<i32, i32>()
+    _ = m.compute_if_absent(1, 2)    // error: `LinkedMap<i32, i32>` has no method `compute_if_absent`
+    for (k, _) in m {
+        m.insert_first(k, 0)    // error: `m` can't be changed while a `for` loop goes over it
+    }
+    let fixed = LinkedSet<i32>()
+    _ = fixed.pop_first()    // error: `fixed` can't be changed; declare it with `var` to change it
+    let plain = Map<i32, i32>()
+    plain.insert_last(1, 2)    // error: `Map<i32, i32>` has no method `insert_last`
+    let h: LinkedMap<i32, i32> = Map<i32, i32>()    // error: expected `LinkedMap<i32, i32>`, found `Map<i32, i32>`
+    println("{a.len()} {b.len()} {h.len()} {plain.len()} {keyed(1).len()} {m.capacity()}")
+}

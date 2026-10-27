@@ -112,7 +112,10 @@ Type* Types::map_of(Type* key, Type* value, TableKind table) {
     auto it = map_map_.find(k);
     if (it != map_map_.end()) return it->second;
     Type* entry = tuple_of({key, value});
-    const char* name = table == TableKind::java ? "JavaHashMap<" : table == TableKind::fastutil ? "OpenHashMap<" : "Map<";
+    const char* name = table == TableKind::java       ? "JavaHashMap<"
+                       : table == TableKind::fastutil ? "OpenHashMap<"
+                       : table == TableKind::linked   ? "LinkedMap<"
+                                                      : "Map<";
     Type* t = make(TypeKind::map, arena_.copy(std::string(name) + std::string(key->name) + ", " + std::string(value->name) + ">"));
     t->table = table;
     t->key = key;
@@ -129,7 +132,10 @@ Type* Types::set_of(Type* elem, TableKind table) {
     auto k = std::make_pair(elem, table);
     auto it = set_map_.find(k);
     if (it != set_map_.end()) return it->second;
-    const char* name = table == TableKind::java ? "JavaHashSet<" : table == TableKind::fastutil ? "OpenHashSet<" : "Set<";
+    const char* name = table == TableKind::java       ? "JavaHashSet<"
+                       : table == TableKind::fastutil ? "OpenHashSet<"
+                       : table == TableKind::linked   ? "LinkedSet<"
+                                                      : "Set<";
     Type* t = make(TypeKind::set, arena_.copy(std::string(name) + std::string(elem->name) + ">"));
     t->table = table;
     t->elem = elem;

@@ -924,6 +924,13 @@ void cx_table_free(void* slots, cx_usize buckets, cx_usize size) {
     cx_free(slots, table_slot_bytes(buckets, size) + buckets + CX_GROUP);
 }
 
+cx_u32* cx_lk_alloc(cx_usize buckets) {
+    if (buckets > (cx_usize)0xFFFFFFFFu) cx_panic_capacity();
+    return (cx_u32*)cx_alloc(buckets * 2 * sizeof(cx_u32));
+}
+
+void cx_lk_free(cx_u32* link, cx_usize buckets) { cx_free(link, buckets * 2 * sizeof(cx_u32)); }
+
 /* --- parallel for ---------------------------------------------------------------------------
  * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The
  * iterations are split into chunks, which threads claim in order from a shared counter. The

@@ -240,11 +240,10 @@ These iterate in exactly the order the Java collections do, for the same sequenc
 | Calx | Java |
 | --- | --- |
 | `JavaHashMap<K, V>`, `JavaHashSet<T>` | `java.util.HashMap`, `HashSet`, including hash spreading, power-of-two tables, the resize split order and tree bins. Built: [Java's hash maps](reference/java-maps.md) (D105) |
-| `java.LinkedHashMap<K, V>`, `java.LinkedHashSet<T>` | `LinkedHashMap`, `LinkedHashSet`, insertion order and access order |
+| `LinkedMap<K, V>`, `LinkedSet<T>` | `LinkedHashMap`, `LinkedHashSet`, and fastutil's linked tables such as `Long2ObjectLinkedOpenHashMap`: the order keys went in, which no hashing changes, so it's Calx's own table with a list through it, with Java's `putFirst` and fastutil's `getAndMoveToFirst` and `removeLast`, and access order written as `move_to_last`. Built: [Linked maps and sets](reference/linked-maps.md) (D109) |
 | `java.TreeMap<K, V>`, `java.TreeSet<T>` | `TreeMap`, `TreeSet` (`SortedMap` in the samples) |
 | `java.ArrayList<T>`, `java.ArrayDeque<T>` | The same, including growth sizes where they can be seen |
 | `OpenHashMap<K, V>`, `OpenHashSet<T>` | fastutil's open hash maps and sets, `Long2ObjectOpenHashMap`, `Object2IntOpenHashMap`, `LongOpenHashSet` and the rest, the key type picking the class, with fastutil's hash mixing (`HashCommon.mix`), load factors, removal by shifting and shrinking. Built: [fastutil's hash maps](reference/fastutil-maps.md) (D107) |
-| fastutil's `Linked` versions, such as `Long2ObjectLinkedOpenHashMap` | The order keys were added in, with fastutil's `moveToFirst` and `moveToLast` |
 
 Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the numbers, `bool`, `char`, `rune`, text and lists, as Java's boxes, `String` and `List` have it, and a struct or an enum writes its own, as a Java class does: Calcite writes it for vanilla's types, such as `BlockPos`. Built: [`JavaHash`](reference/java-maps.md#javahash).
 
@@ -254,7 +253,7 @@ Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the 
 | --- | --- |
 | `List<T>` | A growable array. Built: [Lists](reference/lists.md) |
 | `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen. Built: [Maps and sets](reference/maps.md) |
-| `LinkedMap<K, V>` | A map that iterates in insertion order |
+| `LinkedMap<K, V>`, `LinkedSet<T>` | A map or a set that iterates in the order keys went in, which is Java's and fastutil's too. Built: [Linked maps and sets](reference/linked-maps.md) |
 | `SortedMap<K, V>` | A B-tree map in key order |
 | `SlotMap<T>` | Storage behind `Handle<T>` |
 | `BitSet`, `Deque<T>` | |

@@ -108,7 +108,7 @@ The order is fastutil's, worked out from rules its tables keep:
 - A table can't change during a loop over it, which is a compile error. fastutil lets an iterator remove the key it's on, which moves other keys and changes the order the rest of the loop goes in; there's no way to write that yet, and code that does it waits for it.
 - Keys and values can't be null. An `Object2…` table's null key, which fastutil keeps apart like an integer table's 0, isn't there.
 - fastutil's `Reference2…` tables, and its `Custom` ones with a hash strategy, aren't built. A `Reference2…` table places keys by their addresses, so vanilla's own order changes from run to run, and where it shows, Calcite picks a fixed one (D27).
-- fastutil's linked tables, `Long2ObjectLinkedOpenHashMap` and the rest, go in the order keys were added, and are still to build.
+- fastutil's linked tables, `Long2ObjectLinkedOpenHashMap` and the rest, go in the order keys were added, which doesn't come from fastutil's hashing, so they're [`LinkedMap` and `LinkedSet`](linked-maps.md).
 
 ## In C
 

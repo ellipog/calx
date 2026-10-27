@@ -158,6 +158,8 @@ enum class BMethod : std::uint8_t {
     utf16_len,  // on text, as Java's `length()`
     compute_if_absent,  // on a `JavaHashMap`, as Java's `computeIfAbsent` adds a key
     trim,  // on an `OpenHashMap` or an `OpenHashSet`, as fastutil's `trim()`
+    // On a `LinkedMap` or a `LinkedSet`, at the ends of the order its keys are in (D109).
+    first, last, pop_first, pop_last, move_to_first, move_to_last, insert_first, insert_last,
     runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };

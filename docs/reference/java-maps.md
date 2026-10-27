@@ -5,7 +5,7 @@ description: JavaHashMap<K, V> and JavaHashSet<T>, which go over their keys in t
 
 # Java's hash maps
 
-`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code where vanilla's order shows, such as the order it ticks things in or sends them to a client. Vanilla's fastutil tables are [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), and everywhere else, [`Map` and `Set`](maps.md) are faster.
+`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code where vanilla's order shows, such as the order it ticks things in or sends them to a client. Vanilla's fastutil tables are [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), Java's `LinkedHashMap` and `LinkedHashSet` are [`LinkedMap` and `LinkedSet`](linked-maps.md), and everywhere else, [`Map` and `Set`](maps.md) are faster.
 
 ```calx
 fn main() {

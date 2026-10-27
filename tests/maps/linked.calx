@@ -1,0 +1,126 @@
+// `LinkedMap` and `LinkedSet` go over their keys in the order they went in, as Java's
+// `LinkedHashMap` and `LinkedHashSet` and fastutil's linked tables do (D109). The expected output is
+// what Java 25 gives for the same operations.
+struct BlockPos {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+fn firsts<K: Hash + Copy>(xs: List<K>) -> LinkedSet<K> {
+    var s = LinkedSet<K>()
+    for x in xs {
+        s.insert(x)
+    }
+    return s
+}
+
+fn main() {
+    // A key put again keeps its place; one taken out and put back goes last.
+    var m = LinkedMap<String, i32>()
+    for w in ["stone", "dirt", "grass", "sand", "gravel"] {
+        m.insert(String(w), i32.wrap(w.len()))
+    }
+    m.insert(String("dirt"), 40)
+    _ = m.remove("grass")
+    m.insert(String("grass"), 50)
+    m["sand"] += 1
+    println("{m} {m.len()} {m.contains("grass")} {m.get("sand")}")    // out: {stone: 5, dirt: 40, sand: 5, gravel: 6, grass: 50} 5 true some(5)
+
+    // The ends, and taking them out.
+    var ids = LinkedMap<i64, String>()
+    for i in 0i64..5 {
+        ids.insert(i * 10, "v{i}")
+    }
+    println("{ids.first()} {ids.last()} {ids.pop_first()} {ids.pop_last()} {ids}")    // out: some(0) some(40) some((0, v0)) some((40, v4)) {10: v1, 20: v2, 30: v3}
+    let empty = LinkedMap<i64, String>()
+    println("{empty.first()} {empty.len()}")    // out: none 0
+
+    // A cache of the 3 used last, as vanilla's region file cache keeps one with fastutil's
+    // `getAndMoveToFirst`, `putAndMoveToFirst` and `removeLast`.
+    var cache = LinkedMap<i64, String>()
+    for r in [1i64, 2, 3, 1, 4, 2, 5] {
+        if cache.move_to_first(r) {
+            continue
+        }
+        if cache.len() == 3 {
+            let dropped = cache.pop_last()
+            println("drop {dropped}")
+        }
+        cache.insert_first(r, "region {r}")
+    }
+    // out: drop some((2, region 2))
+    // out: drop some((3, region 3))
+    // out: drop some((1, region 1))
+    println("{cache}")    // out: {5: region 5, 2: region 2, 4: region 4}
+
+    // Putting a key at an end moves it there if it's in already, with its new value.
+    var order = LinkedSet<i32>()
+    for k in [5, 3, 8, 1] {
+        order.insert(k)
+    }
+    order.insert(3)
+    order.insert_first(8)
+    order.insert_last(5)
+    order.insert_first(9)
+    println("{order} {order.first()} {order.last()}")    // out: {9, 8, 3, 1, 5} some(9) some(5)
+    println("{order.move_to_last(9)} {order.move_to_first(7)} {order}")    // out: true false {8, 3, 1, 5, 9}
+    var scores = LinkedMap<i32, i32>()
+    scores.insert(1, 10)
+    scores.insert(2, 20)
+    scores.insert_first(2, 21)
+    scores.insert_last(3, 30)
+    println("{scores}")    // out: {2: 21, 1: 10, 3: 30}
+
+    // The order holds as the table grows and keys come out.
+    var big = LinkedSet<i32>()
+    for i in 0..1000 {
+        big.insert((i * 7919) % 1000)
+    }
+    for i in 0..990 {
+        big.remove((i * 7919) % 1000)
+    }
+    println("{big}")    // out: {810, 729, 648, 567, 486, 405, 324, 243, 162, 81}
+    big.clear()
+    big.insert(4)
+    big.insert(2)
+    println("{big} {big.len()}")    // out: {4, 2} 2
+
+    // `==` doesn't look at the order, as Java's `equals` doesn't; a copy keeps it.
+    var a = LinkedSet<i32>()
+    var b = LinkedSet<i32>()
+    for k in [1, 2, 3] {
+        a.insert(k)
+    }
+    for k in [3, 2, 1] {
+        b.insert(k)
+    }
+    let c = a.copy()
+    println("{a == b} {a} {b} {c}")    // out: true {1, 2, 3} {3, 2, 1} {1, 2, 3}
+
+    // Struct keys, generic code, and taking keys out one at a time.
+    var queue = LinkedSet<BlockPos>()
+    for i in 0..4 {
+        queue.insert(BlockPos { x: i, y: 64, z: -i })
+    }
+    queue.insert_first(BlockPos { x: 2, y: 64, z: -2 })
+    var lines = String()
+    while not queue.is_empty() {
+        let p = queue.pop_first()!
+        if not lines.is_empty() {
+            lines.push_str(" ")
+        }
+        lines.push_str("{p.x},{p.z}")
+    }
+    println(lines)    // out: 2,-2 0,0 1,-1 3,-3
+    let seen: List<i32> = [4, 1, 4, 2, 1]
+    let fs = firsts(seen)
+    var total = 0
+    for k in fs {
+        if k == 2 {
+            break
+        }
+        total = total * 10 + k
+    }
+    println("{fs} {total}")    // out: {4, 1, 2} 41
+}

@@ -343,6 +343,50 @@ cx_usize cx_table_buckets_for(cx_usize n);
 cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
 /* Frees what cx_table_alloc gave for `buckets` slots of `size` bytes. */
 void cx_table_free(void* slots, cx_usize buckets, cx_usize size);
+
+/* A `LinkedMap` or a `LinkedSet` is a table as above with a list through its full slots, in the
+ * order their keys went in (D109). `link[2 * i]` is the slot before slot `i` and `link[2 * i + 1]`
+ * the one after, so both are in the same cache line; `first` and `last` are the ends. Each is the
+ * slot plus 1, and 0 for none, so a table that's all zeros is an empty list. Only full slots'
+ * links are ever read. */
+typedef struct cx_lhead {
+    cx_u32* link;
+    cx_u32 first, last;
+} cx_lhead;
+CX_INLINE void cx_lk_unlink(cx_lhead* l, cx_usize i) {
+    cx_u32 prev = l->link[2 * i], next = l->link[2 * i + 1];
+    if (prev) l->link[2 * (prev - 1) + 1] = next;
+    else l->first = next;
+    if (next) l->link[2 * (next - 1)] = prev;
+    else l->last = prev;
+}
+CX_INLINE void cx_lk_push_back(cx_lhead* l, cx_usize i) {
+    cx_u32 at = (cx_u32)i + 1;
+    l->link[2 * i] = l->last;
+    l->link[2 * i + 1] = 0;
+    if (l->last) l->link[2 * (l->last - 1) + 1] = at;
+    else l->first = at;
+    l->last = at;
+}
+CX_INLINE void cx_lk_push_front(cx_lhead* l, cx_usize i) {
+    cx_u32 at = (cx_u32)i + 1;
+    l->link[2 * i] = 0;
+    l->link[2 * i + 1] = l->first;
+    if (l->first) l->link[2 * (l->first - 1)] = at;
+    else l->last = at;
+    l->first = at;
+}
+/* Moves slot `i`, which is in the list, to its front or its back. */
+CX_INLINE void cx_lk_move(cx_lhead* l, cx_usize i, cx_bool front) {
+    cx_u32 at = (cx_u32)i + 1;
+    if ((front ? l->first : l->last) == at) return;
+    cx_lk_unlink(l, i);
+    if (front) cx_lk_push_front(l, i);
+    else cx_lk_push_back(l, i);
+}
+/* The links for a table of `buckets` slots, which can't have more than a `cx_u32` counts. */
+cx_u32* cx_lk_alloc(cx_usize buckets);
+void cx_lk_free(cx_u32* link, cx_usize buckets);
 CX_COLD void cx_panic_key(const char* at);
 /* An `OpenHashMap`'s or an `OpenHashSet`'s load factor isn't between 0 and 1, or it's asked for
  * more keys than fastutil's tables hold. */
