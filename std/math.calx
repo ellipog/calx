@@ -1,7 +1,7 @@
 /// Math functions: fast, accurate to about half an ULP, and the same on every platform, since
 /// they're written in Calx and use no system library (D97).
 ///
-/// `exp`, `log` and `pow` are Calx's own, from tables and polynomials that
+/// `exp`, `log`, `pow`, `sin`, `cos` and `tan` are Calx's own, from tables and polynomials that
 /// `tools/math_tables.py` generates. The rest call `std.java.math`, the port of fdlibm, which is
 /// as fast as the system libraries there. They give `StrictMath`'s results today, but only
 /// `std.java.math` promises it: code that must compute what vanilla computes imports that.
@@ -23,7 +23,8 @@ pub const E: f64 = 2.718281828459045
 // exp, log and pow follow Tang's table-driven method ("Table-driven implementation of the
 // exponential function", 1989), with a table of 128 entries for each and the bits of each entry
 // laid out as in ARM's optimized-routines, so a table read and an integer add give 2^(k/128).
-// Every rounding the error analysis relies on is a fused multiply-add, which IEEE 754 defines
+// sin, cos and tan reduce by pi/2, and share one kernel (see `part`). Every rounding the error
+// analysis relies on is a fused multiply-add or a plain operation, which IEEE 754 defines
 // exactly, so the results are the same on every machine.
 
 const TWO52: f64 = 4503599627370496.0
@@ -258,6 +259,25 @@ const LOG_T: [f64; 384] = [
     0.734375, 0.30873548164959175, 2.1522127491642888e-14,
     0.73046875, 0.3140688276250785, -1.0263280755261064e-13,
 ]
+
+const TRIG_INV_PIO2: f64 = 0.6366197723675814    // 2 / pi
+const TRIG_NEG_PIO2_1: f64 = -1.5707963267948966    // pi / 2 as three doubles, the first negated
+const TRIG_PIO2_2: f64 = 6.123233995736766e-17
+const TRIG_PIO2_3: f64 = -1.4973849048591698e-33
+// For each quadrant: AR, AC, GR, GC, GZ, then -1/6 or -1/2 as hi + lo, then Q, within
+// 2^-62.9 for sin and 2^-58.6 for cos
+const TRIG_K: [f64; 64] = [
+    1.0, 0.0, 0.0, 1.0, -0.5, -0.16666666666666666, -9.25185853854297e-18,
+    0.008333333333333333, -0.00019841269841268963, 2.755731922232514e-06, -2.505210723636112e-08, 1.6058684389134287e-10, -7.595310565638177e-13, 0.0, 0.0, 0.0,
+    0.0, 1.0, -1.0, 0.0, -0.16666666666666666, -0.5, 0.0,
+    0.041666666666666664, -0.0013888888888887398, 2.4801587298765916e-05, -2.755731727175974e-07, 2.087614626040957e-09, -1.1382631029181099e-11, 0.0, 0.0, 0.0,
+    -1.0, 0.0, 0.0, -1.0, -0.5, -0.16666666666666666, -9.25185853854297e-18,
+    0.008333333333333333, -0.00019841269841268963, 2.755731922232514e-06, -2.505210723636112e-08, 1.6058684389134287e-10, -7.595310565638177e-13, 0.0, 0.0, 0.0,
+    0.0, -1.0, 1.0, 0.0, -0.16666666666666666, -0.5, 0.0,
+    0.041666666666666664, -0.0013888888888887398, 2.4801587298765916e-05, -2.755731727175974e-07, 2.087614626040957e-09, -1.1382631029181099e-11, 0.0, 0.0, 0.0,
+]
+const TRIG_TINY: u64 = 0x3e40000000000000    // 2^-27
+const TRIG_BIG: u64 = 0x4130000000000000     // 2^20
 
 /// e to the power `x`, within 0.51 ULP of the exact result. It overflows to `Infinity` above
 /// about 709.78 and underflows to `0.0` below about -745.13.
@@ -509,19 +529,100 @@ pub fn expm1(x: f64) -> f64 {
     return java_expm1(x)
 }
 
-/// The sine of `x` in radians. Infinity and NaN give NaN.
+/// The sine of `x` in radians, within 0.53 ULP of the exact result for |x| < 2^20. Infinity and
+/// NaN give NaN.
 pub fn sin(x: f64) -> f64 {
-    return java_sin(x)
+    let ix = x.to_bits() & 0x7fffffffffffffff
+    if ix - TRIG_TINY >= TRIG_BIG - TRIG_TINY {
+        // |x| < 2^-27, where sin x rounds to x, or |x| >= 2^20, infinite or NaN
+        return if ix < TRIG_TINY { x } else { java_sin(x) }
+    }
+    let (hi, lo, k) = reduce(x)
+    let (v, tail) = part(hi, lo, k)
+    return v + tail
 }
 
-/// The cosine of `x` in radians. Infinity and NaN give NaN.
+/// The cosine of `x` in radians, within 0.53 ULP of the exact result for |x| < 2^20. Infinity
+/// and NaN give NaN.
 pub fn cos(x: f64) -> f64 {
-    return java_cos(x)
+    let ix = x.to_bits() & 0x7fffffffffffffff
+    if ix - TRIG_TINY >= TRIG_BIG - TRIG_TINY {
+        return if ix < TRIG_TINY { 1.0 } else { java_cos(x) }
+    }
+    // cos x = sin(x + pi/2)
+    let (hi, lo, k) = reduce(x)
+    let (v, tail) = part(hi, lo, k + 1)
+    return v + tail
 }
 
-/// The tangent of `x` in radians. Infinity and NaN give NaN.
+/// The tangent of `x` in radians, within 0.56 ULP of the exact result for |x| < 2^20. Infinity
+/// and NaN give NaN.
 pub fn tan(x: f64) -> f64 {
-    return java_tan(x)
+    let ix = x.to_bits() & 0x7fffffffffffffff
+    if ix - TRIG_TINY >= TRIG_BIG - TRIG_TINY {
+        return if ix < TRIG_TINY { x } else { java_tan(x) }
+    }
+    // tan x = sin(x) / sin(x + pi/2), each as two doubles, and the quotient corrected by its
+    // remainder, so it's rounded once, at the end.
+    let (hi, lo, k) = reduce(x)
+    let (n_v, n_tail) = part(hi, lo, k)
+    let (d_v, d_tail) = part(hi, lo, k + 1)
+    let n = n_v + n_tail
+    let n_lo = (n_v - n) + n_tail
+    let d = d_v + d_tail
+    let d_lo = (d_v - d) + d_tail
+    let y = 1.0 / d
+    let q = n * y
+    let rem = q.mul_add(-d, n) + q.mul_add(-d_lo, n_lo)
+    return rem.mul_add(y, q)
+}
+
+// x = k pi/2 + r, with |r| <= pi/4, for |x| < 2^20: r as hi + lo, and the bits whose last two
+// are k mod 4.
+fn reduce(x: f64) -> (f64, f64, u64) {
+    let kd = x.mul_add(TRIG_INV_PIO2, EXP_SHIFT)
+    let k = kd - EXP_SHIFT
+    // x - k pio2_1 is exact: a multiple of 2^-53 below 1.
+    let r1 = k.mul_add(TRIG_NEG_PIO2_1, x)
+    let p2 = k * TRIG_PIO2_2
+    let hi = r1 - p2
+    let back = hi - r1
+    let lo = ((r1 - (hi - back)) - (p2 + back)) - k.mul_add(TRIG_PIO2_3, k.mul_add(TRIG_PIO2_2, -p2))
+    return (hi, lo, kd.to_bits())
+}
+
+// sin(r + k pi/2) as v + tail, for r = hi + lo, |r| <= pi/4.
+//
+// That's sin(r), cos(r), -sin(r) or -cos(r) as k is 0, 1, 2 or 3 mod 4. Each is
+// a + a r^2 c1 + a r^4 Q(r^2), with a = r, c1 = -1/6 for sin, and a = 1, c1 = -1/2 for cos, so
+// one sum computes all four, with what differs read from TRIG_K: on random arguments a branch on
+// k would be mispredicted three times in four. a + a r^2 c1 is summed as two doubles, and
+// a r^4 is too, so the only large rounding is the caller's.
+fn part(hi: f64, lo: f64, k: u64) -> (f64, f64) {
+    let i = usize.wrap(k & 3) * 16
+    let z = hi * hi
+    let z_lo = hi.mul_add(hi, -z)
+    let a = TRIG_K[i].mul_add(hi, TRIG_K[i + 1])
+    // a z c1 as d + d_lo
+    let m = a * z
+    let m_lo = a.mul_add(z, -m) + a * z_lo
+    let c1 = TRIG_K[i + 5]
+    let d = m * c1
+    let d_lo = m.mul_add(c1, -d) + m_lo.mul_add(c1, m * TRIG_K[i + 6])
+    let s = a + d
+    let e = (a - s) + d
+    // lo times the derivative, cos(hi) or -sin(hi), signed
+    let g = TRIG_K[i + 2].mul_add(hi, TRIG_K[i + 3]) * TRIG_K[i + 4].mul_add(z, 1.0)
+    let t = lo.mul_add(g, e + d_lo)
+    // a z^2 as mz + mz_lo
+    let mz = m * z
+    let mz_lo = m.mul_add(z, -mz) + m.mul_add(z_lo, m_lo * z)
+    let z2 = z * z
+    let q = z2.mul_add(
+        z2.mul_add(z.mul_add(TRIG_K[i + 12], TRIG_K[i + 11]), z.mul_add(TRIG_K[i + 10], TRIG_K[i + 9])),
+        z.mul_add(TRIG_K[i + 8], TRIG_K[i + 7]),
+    )
+    return (s, mz.mul_add(q, mz_lo.mul_add(q, t)))
 }
 
 /// The arc sine of `x`, from -pi/2 to pi/2. Outside [-1, 1] it's NaN.

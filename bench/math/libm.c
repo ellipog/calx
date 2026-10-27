@@ -1,5 +1,7 @@
 // The C library's math functions on bench/math/math.calx's inputs and loops. Build with
-// clang -O3 -march=x86-64-v3 -fno-builtin libm.c -lm, so the calls stay calls.
+// clang -O3 -march=x86-64-v3 -fno-builtin libm.c -lm, so the calls stay calls. The empty asm
+// after each loop does what std.hint.black_box does in math.calx: without it, clang sees that
+// only the last run's sum is used, and drops the other runs' additions.
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -16,7 +18,7 @@ static double *inputs(uint64_t s, int n, double lo, double hi) {
     for (int i = 0; i < n; i++) { s = s * 6364136223846793005ULL + 1442695040888963407ULL; xs[i] = lo + (hi - lo) * ((double)(s >> 11) * 1.1102230246251565e-16); }
     return xs;
 }
-#define TIME1(NAME, EXPR) { double best = 1e30, sum = 0; for (int r = 0; r < 7; r++) { double t0 = now(), acc = 0; for (int i = 0; i < n; i++) acc += EXPR; double t = now() - t0; if (t < best) best = t; sum = acc; } printf("%s: %.4f ns/call (sum %.17g)\n", NAME, best * 1e9 / n, sum); }
+#define TIME1(NAME, EXPR) { double best = 1e30, sum = 0; for (int r = 0; r < 7; r++) { double t0 = now(), acc = 0; for (int i = 0; i < n; i++) acc += EXPR; __asm__ volatile("" : "+x"(acc)); double t = now() - t0; if (t < best) best = t; sum = acc; } printf("%s: %.4f ns/call (sum %.17g)\n", NAME, best * 1e9 / n, sum); }
 int main(void) {
     int n = 2000000;
     double *sm = inputs(2, n, -20, 20), *pos = inputs(3, n, 0, 1000), *base = inputs(4, n, 0, 10), *expo = inputs(5, n, -5, 5);

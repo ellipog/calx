@@ -98,4 +98,4 @@ calx build --release -o math bench/math/math.calx
 clang -O3 -march=x86-64-v3 -fno-builtin -o libm bench/math/libm.c -lm
 ```
 
-Both print a sum of the results, which must agree to the last digit or two. Each Calx loop passes its sum through [`std.hint.black_box`](../docs/std/hint.md) before the clock is read again: release builds inline `std.math` into the loop (D99), and clang could otherwise move a loop with no side effects past the clock. The times, on the reference machine (i9-13900K, pinned to one P-core), are in [std.math](../docs/std/math.md#speed).
+Both print a sum of the results, which must agree to the last digit or two. Each Calx loop passes its sum through [`std.hint.black_box`](../docs/std/hint.md) before the clock is read again: release builds inline `std.math` into the loop (D99), and clang could otherwise move a loop with no side effects past the clock. `libm.c` has an empty `asm` in the same place, since clang otherwise sees that only the last of the 7 sums is used and drops the others' additions. The times, on the reference machine (i9-13900K, pinned to one P-core), are in [std.math](../docs/std/math.md#speed).
