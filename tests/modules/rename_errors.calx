@@ -1,0 +1,20 @@
+// file: main.calx
+import geo.{area as size, area as size2}    // error: `area` is already imported, as `size`
+import geo.{LIMIT as LIMIT}    // error: `LIMIT as LIMIT` doesn't rename anything; import it as `LIMIT`
+import geo.{twice as main}    // error: `main` is already the name of a function here; Calx doesn't allow shadowing
+import geo.{twice as double}    // error: `double` is imported but never used
+
+fn main() {
+    println("{size(2.0)}")
+}
+
+// file: geo.calx
+pub fn area(s: f64) -> f64 {
+    return s * s
+}
+
+pub fn twice(n: i32) -> i32 {
+    return n * 2
+}
+
+pub const LIMIT: i32 = 10

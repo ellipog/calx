@@ -319,6 +319,14 @@ private:
                 continue;
             }
             for (const ImportName& n : it->import_names) {
+                // The name it has here: its own, or the one `as` gives it.
+                Name local = n.alias ? n.alias : n.name;
+                Span local_span = n.alias ? n.alias_span : n.span;
+                if (n.alias == n.name) {
+                    error(n.alias_span, q(std::string(text(n.name)) + " as " + std::string(text(n.name))) +
+                                            " doesn't rename anything; import it as " + q(text(n.name)));
+                    continue;
+                }
                 auto found = from->items.find(n.name);
                 if (found == from->items.end()) {
                     error(n.span, q(from_name) + " has no " + q(text(n.name)));
@@ -330,17 +338,28 @@ private:
                     note(target->name_span, "it's declared here");
                     continue;
                 }
-                if (auto own = here->items.find(n.name); own != here->items.end()) {
-                    error(n.span, q(text(n.name)) + " is already the name of a " + item_kind(own->second) +
-                                      " here; Calx doesn't allow shadowing");
+                if (auto own = here->items.find(local); own != here->items.end()) {
+                    error(local_span, q(text(local)) + " is already the name of a " + item_kind(own->second) +
+                                          " here; Calx doesn't allow shadowing" +
+                                          (n.alias ? "" : std::string(", but `as` can rename the import")));
                     continue;
                 }
-                if (auto prev = here->imports.find(n.name); prev != here->imports.end()) {
-                    error(n.span, q(text(n.name)) + " is already imported");
+                if (auto prev = here->imports.find(local); prev != here->imports.end()) {
+                    error(local_span, q(text(local)) + " is already imported");
                     note(prev->second.span, "it's imported here");
                     continue;
                 }
-                here->imports.emplace(n.name, Scope::Import{target, n.span, false});
+                // One name for each item: a second would only be a second way to say the same thing.
+                bool twice = false;
+                for (const auto& [other, imp] : here->imports) {
+                    if (imp.item != target) continue;
+                    error(local_span, q(text(n.name)) + " is already imported, as " + q(text(other)));
+                    note(imp.span, "it's imported here");
+                    twice = true;
+                    break;
+                }
+                if (twice) continue;
+                here->imports.emplace(local, Scope::Import{target, local_span, false});
             }
         }
     }
@@ -6253,6 +6272,7 @@ private:
         else if (m == "sqrt" && is_float(recv)) pm = PrimMethod::sqrt;
         else if (m == "floor" && is_float(recv)) pm = PrimMethod::floor;
         else if (m == "ceil" && is_float(recv)) pm = PrimMethod::ceil;
+        else if (m == "mul_add" && is_float(recv)) pm = PrimMethod::mul_add, args = 2;
         else if (m == "wrapping_add" && is_int(recv)) pm = PrimMethod::wrapping_add, args = 1;
         else if (m == "wrapping_sub" && is_int(recv)) pm = PrimMethod::wrapping_sub, args = 1;
         else if (m == "wrapping_mul" && is_int(recv)) pm = PrimMethod::wrapping_mul, args = 1;
@@ -6281,7 +6301,7 @@ private:
         }
         e->prim = pm;
         if (static_cast<int>(e->args.size()) != args) {
-            error(e->span, q(m) + " takes " + (args ? "one argument" : "no arguments"));
+            error(e->span, q(m) + " takes " + (args == 2 ? "two arguments" : args ? "one argument" : "no arguments"));
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }

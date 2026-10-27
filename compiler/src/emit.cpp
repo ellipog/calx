@@ -3189,6 +3189,9 @@ static void $reserve($T* m, cx_usize n) {
             case PrimMethod::sqrt: r = std::string(t->bits == 32 ? "__builtin_sqrtf(" : "__builtin_sqrt(") + v[0] + ")"; break;
             case PrimMethod::floor: r = std::string(t->bits == 32 ? "__builtin_floorf(" : "__builtin_floor(") + v[0] + ")"; break;
             case PrimMethod::ceil: r = std::string(t->bits == 32 ? "__builtin_ceilf(" : "__builtin_ceil(") + v[0] + ")"; break;
+            case PrimMethod::mul_add:
+                r = std::string(t->bits == 32 ? "__builtin_fmaf(" : "__builtin_fma(") + v[0] + ", " + v[1] + ", " + v[2] + ")";
+                break;
             case PrimMethod::wrapping_add: r = operate(Op::add, t, t, v[0], v[1], e->args[0].value, e->span); break;
             case PrimMethod::wrapping_sub: r = operate(Op::sub, t, t, v[0], v[1], e->args[0].value, e->span); break;
             case PrimMethod::wrapping_mul: r = operate(Op::mul, t, t, v[0], v[1], e->args[0].value, e->span); break;

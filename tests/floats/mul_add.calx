@@ -1,0 +1,10 @@
+// x.mul_add(a, b) is x * a + b rounded once, as IEEE 754's fusedMultiplyAdd and Java's Math.fma.
+// a * b + c on its own rounds twice, since Calx never contracts (D63).
+fn main() {
+    let x = 0.1
+    println("{x.mul_add(10.0, -1.0)} {x * 10.0 - 1.0}")    // out: 5.551115123125783E-17 0.0
+    let f: f32 = 0.1
+    println("{f.mul_add(10.0, -1.0)} {f * 10.0 - 1.0}")    // out: 1.4901161E-8 0.0
+    let inf = f64.INFINITY
+    println("{inf.mul_add(0.0, 1.0)} {2.0.mul_add(3.0, 4.0)}")    // out: NaN 10.0
+}

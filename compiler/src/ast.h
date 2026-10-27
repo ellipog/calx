@@ -162,7 +162,7 @@ enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
 enum class PrimMethod : std::uint8_t {
     none, abs, min, max, is_nan, sqrt, floor, ceil, wrapping_add, wrapping_sub, wrapping_mul, floor_div, floor_mod,
     checked_add, checked_sub, checked_mul, checked_div, checked_rem, saturating_add, saturating_sub, saturating_mul,
-    to_bits, rotate_left, rotate_right, total_cmp,
+    to_bits, rotate_left, rotate_right, total_cmp, mul_add,
     parse, from_bits, from_utf8,  // prim_static
 };
 
@@ -403,8 +403,9 @@ struct VariantDecl {
 
 struct ImportName {
     Name name;
-    Name alias;
+    Name alias;  // `Name as Alias`; no name when it isn't renamed
     Span span;
+    Span alias_span;
 };
 
 struct Item {

@@ -10,7 +10,7 @@ description: f32 and f64 arithmetic, printing and methods, matching Java's float
 | Rule | Calx | Emitted C |
 | --- | --- | --- |
 | Format | IEEE 754, round to nearest even, no flush-to-zero | SSE2 on x86-64, never x87 |
-| Contraction | No fused multiply-add and no reassociation. `a * b + c` rounds twice, as in Java | `-ffp-contract=off`, and never `-ffast-math` |
+| Contraction | No fused multiply-add and no reassociation. `a * b + c` rounds twice, as in Java. `a.mul_add(b, c)` asks for the fused one | `-ffp-contract=off`, and never `-ffast-math` |
 | `%` | The remainder of truncating division, Java's `%` on doubles | `fmod` |
 | Comparison | IEEE: NaN is unequal to everything, including itself, and `-0.0 == 0.0` | |
 | Mixing | There's none. `f32 * i32` doesn't compile, and Java's implicit widening is written out: `f64(meters * f32.nearest(packets))` | |
@@ -56,6 +56,7 @@ fn main() {
 | `x.min(y)`, `x.max(y)` | Java's `Math.min` and `Math.max`: NaN if either is NaN, and `-0.0` is less than `0.0`. Not C's `fmin`, which ignores NaN |
 | `x.sqrt()` | The square root, correctly rounded |
 | `x.floor()`, `x.ceil()` | Rounded down or up to an integer value, still a float |
+| `x.mul_add(a, b)` | `x * a + b`, rounded once: IEEE 754's fused multiply-add and Java's `Math.fma`. It's exact everywhere, so every machine gives the same bits; with `x86-64-v3`, as in release builds, it's one instruction |
 | `x.is_nan()` | Whether it's NaN |
 | `x.total_cmp(y)` | Java's `Double.compare` and `Float.compare`, as an [`Ordering`](comparing.md#order): `-0.0` comes before `0.0`, and NaN after everything, equal to every NaN. Floats have no `Order`, since `<` can't order NaN, so this is how to sort by one |
 | `x.to_bits()` | The IEEE 754 bits, a `u64` for `f64` and a `u32` for `f32`: Java's `doubleToRawLongBits` and `floatToRawIntBits`, which keep a NaN's payload |

@@ -659,6 +659,12 @@ private:
                     ImportName n;
                     n.span = peek().span;
                     n.name = ident("in the import list");
+                    // `as` is a word only here, so it stays free for names everywhere else.
+                    if (at(Tok::ident) && ctx_.names.text(peek().name) == "as") {
+                        next();
+                        n.alias_span = peek().span;
+                        n.alias = ident("after `as`");
+                    }
                     names.push_back(n);
                     skip_newlines();
                     if (!accept(Tok::comma)) break;

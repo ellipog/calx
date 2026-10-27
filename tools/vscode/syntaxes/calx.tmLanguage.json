@@ -130,6 +130,11 @@
             "1": { "name": "keyword.other.$1.calx" },
             "2": { "name": "entity.name.namespace.calx" }
           }
+        },
+        {
+          "comment": "`Name as Other` in an import list, the only place `as` is a word",
+          "match": "(?<=[A-Za-z0-9_])\\s+(as)\\s+(?=[A-Za-z_])",
+          "captures": { "1": { "name": "keyword.other.as.calx" } }
         }
       ]
     },

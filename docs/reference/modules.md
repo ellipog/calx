@@ -65,6 +65,28 @@ They're compiled like the program's own modules, each to its own C file, which t
 `import a.b.{X, Y}` brings the `pub` items `X` and `Y` of module `a.b` into this one, to use as if they were declared here.
 
 - Each imported name must be used, and it can't be a name this module declares or has already imported, since there's no shadowing.
+- `import a.b.{X as Y}` brings `X` in as `Y`, for two modules that use one name. An item is imported once, under one name, and `X as X` is an error.
+
+```calx
+// file: main.calx
+import geo.{area as square_area}
+import circle.{area}
+
+fn main() {
+    println("{square_area(2.0)} {area(1.0)}")    // out: 4.0 3.0
+}
+
+// file: geo.calx
+pub fn area(side: f64) -> f64 {
+    return side * side
+}
+
+// file: circle.calx
+pub fn area(r: f64) -> f64 {
+    return 3.0 * r * r
+}
+```
+
 - `import a.b` alone is an error: say what to import. Reaching items through a module's name, as in `b.f()`, isn't built yet.
 - A type's methods and its interfaces' functions come with the type. Once a module has a `Square`, its `pub` methods work, and so do the functions of every `pub` interface it implements, without importing anything more.
 
@@ -152,4 +174,4 @@ Since a file holds exactly what it uses, its text changes only when something it
 
 A function is `static` unless another module's file calls it, which lets clang inline it and drop it. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
 
-Packages (`calx.toml`), reaching items through a module's name, and renaming imports are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).
+Packages (`calx.toml`) and reaching items through a module's name are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).

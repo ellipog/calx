@@ -1,0 +1,18 @@
+// `as` gives an import another name here, for two modules that use one name.
+// file: main.calx
+import geo.{area as square_area}
+import circle.{area}
+
+fn main() {
+    println("{square_area(2.0)} {area(1.0)}")    // out: 4.0 3.0
+}
+
+// file: geo.calx
+pub fn area(side: f64) -> f64 {
+    return side * side
+}
+
+// file: circle.calx
+pub fn area(r: f64) -> f64 {
+    return 3.0 * r * r
+}

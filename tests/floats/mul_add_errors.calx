@@ -1,0 +1,6 @@
+fn main() {
+    let x = 0.1
+    println("{x.mul_add(1.0)}")    // error: `mul_add` takes two arguments
+    let n = 3
+    println("{n.mul_add(1, 2)}")    // error: `i32` has no method `mul_add`
+}

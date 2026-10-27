@@ -140,6 +140,7 @@ const cases = [
     ['pub fn area(self) -> f64 {', 'pub', 'storage.modifier'],
     ['import std.math.{sin, cos}', 'import', 'keyword.other.import'],
     ['import std.math.{sin, cos}', 'std.math', 'entity.name.namespace'],
+    ['import std.java.math.{sin as java_sin}', 'as', 'keyword.other.as'],
     ['module example.basics', 'example.basics', 'entity.name.namespace'],
     ['@packet(id: 3)', 'packet', 'entity.name.function.decorator'],
     ['/// Doc with `code`.', '`code`', 'markup.inline.raw'],
