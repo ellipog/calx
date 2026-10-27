@@ -1,0 +1,17 @@
+// D63: `T(x)` only where it's exact; everything else names what it does.
+fn main() {
+    let small: i32 = -5
+    println("{i64(small)} {f64(small)} {i16.wrap(70000)}")       // out: -5 -5.0 4464
+    println("{i8.wrap(200)} {u8.wrap(-1)} {u32.wrap(small)}")    // out: -56 255 4294967291
+    let byte: u8 = 200
+    println("{i32(byte)} {u16(byte)} {f32(byte)}")              // out: 200 200 200.0
+    let c: char = 'A'
+    println("{i32(c)} {char.wrap(66)} {u16(c)}")                // out: 65 B 65
+    let r = 'é'
+    println("{u32(r)} {i64(r)}")                                // out: 233 233
+    let len: usize = 7
+    println("{u64(len)} {usize(4000000000u32)}")                // out: 7 4000000000
+    let big = 9007199254740993i64
+    println("{f64.nearest(big)}")                               // out: 9.007199254740992E15
+    println("{f32.nearest(16777217)}")                          // out: 1.6777216E7
+}

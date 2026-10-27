@@ -1,0 +1,32 @@
+struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Vec2 {
+    fn zero() -> Vec2 {
+        return Vec2 { x: 0.0, y: 0.0 }
+    }
+
+    fn length(self) -> f64 {
+        return (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    fn plus(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+
+    fn scale(v: mut Vec2, by: f64) {
+        v.x *= by
+        v.y *= by
+    }
+}
+
+fn main() {
+    var v = Vec2 { x: 3.0, y: 4.0 }
+    println("{v.length()}")                    // out: 5.0
+    v.scale(2.0)
+    println("{v.x} {v.y}")                     // out: 6.0 8.0
+    let w = v.plus(Vec2.zero()).plus(Vec2 { x: 1.0, y: 1.0 })
+    println("{w.x} {w.y}")                     // out: 7.0 9.0
+}

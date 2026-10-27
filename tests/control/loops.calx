@@ -1,0 +1,48 @@
+fn main() {
+    var total = 0
+    for i in 0..5 {
+        total += i
+    }
+    println("{total}")                     // out: 10
+    var count = 0
+    for i in 1..=10 {
+        if i % 2 == 0 {
+            continue
+        }
+        if i > 7 {
+            break
+        }
+        count += 1
+    }
+    println("{count}")                     // out: 4
+    // An inclusive range up to the maximum stops there.
+    var last: u8 = 0
+    for b in 250u8..=255 {
+        last = b
+    }
+    println("{last}")                      // out: 255
+    var n = 0
+    while n < 100 {
+        n += 7
+    }
+    println("{n}")                         // out: 105
+    var steps = 0
+    loop {
+        steps += 1
+        if steps == 3 {
+            break
+        }
+    }
+    println("{steps}")                     // out: 3
+    var k = 1
+    let found = loop {
+        k *= 3
+        if k > 50 {
+            break k
+        }
+    }
+    println("{found}")                     // out: 81
+    for _ in 0..0 {
+        println("never")
+    }
+}

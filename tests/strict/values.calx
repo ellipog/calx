@@ -1,0 +1,18 @@
+fn three() -> i32 {
+    return 3
+}
+
+fn tail() -> i32 {
+    var x = 1
+    x += 1
+    x                                // error: a function gives back its value with `return`
+}
+
+fn main() {
+    three()                          // error: value is unused; discard it with `_ = ...`
+    _ = three()
+    1 + 2                            // error: value is unused
+    let _t = tail()
+    let _ = three()                  // error: write `_ = ...` to discard a value
+    _ = println("x")                 // error: there's no value here to discard
+}

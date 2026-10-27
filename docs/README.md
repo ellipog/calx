@@ -11,10 +11,29 @@ These pages are the source for the Calx docs website. Until the site exists, rea
 
 In reading order:
 
+### Reference
+
+What's built, one page per feature:
+
+1. [The calx command](reference/command.md): check, build, run, emit-c, and how builds stay fast
+2. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
+3. [Types](reference/types.md): the primitive types, arrays, structs and unit
+4. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
+5. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
+6. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
+7. [Conversions](reference/conversions.md): exact `T(x)` and the named lossy conversions
+8. [Control flow](reference/control-flow.md): if, while, for, loop, break and continue
+9. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
+10. [Structs](reference/structs.md): fields, defaults, literals and methods
+11. [Printing and panics](reference/printing.md): print, println, assert and panic
+12. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+
+### Design
+
 1. [Calx spec](CALX_SPEC.md): every feature that is designed but not built yet
 2. [Tick-loop benchmark](benchmarks.md): the workload behind the Phase 3 performance gate
 
-The guide and the reference start in Phase 3, when the first features ship.
+The guide starts once enough of the language is built to write a real program.
 
 ## How the docs are organized
 

@@ -1,0 +1,29 @@
+const UNUSED: i32 = 1               // error: constant `UNUSED` is never used
+
+struct Lonely {                      // error: struct `Lonely` is never used
+    x: i32
+}
+
+fn helper(a: i32, b: i32) -> i32 {  // error: parameter `b` is never used
+    return a
+}
+
+fn never_called() {                  // error: function `never_called` is never used
+}
+
+fn change(n: mut i32) -> i32 {       // error: parameter `n` is `mut` but never changed
+    return n
+}
+
+fn main() {
+    let x = 5                        // error: `x` is never used
+    var y = 1                        // error: `y` is declared with `var` but never changed
+    var counter = 0                  // error: `counter` is never used
+    counter += 1
+    let _fine = 3
+    var z = 2
+    z += helper(y, 0)
+    println("{z}")
+    var w = 5
+    _ = change(mut w)
+}

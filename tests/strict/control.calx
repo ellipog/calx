@@ -1,0 +1,18 @@
+fn missing(x: i32) -> i32 {
+    if x > 0 {
+        return 1
+    }
+}                                    // error: can reach its end without returning a value
+
+fn main() {
+    _ = missing(1)
+    while true {                     // error: write `loop` for a loop that only ends with `break`
+        break
+    }
+    if true {                        // error: this condition is always true
+    }
+    let x = 1
+    let _v = if x > 0 { 1 }          // error: an `if` used as a value needs an `else`
+    return
+    println("unreachable")           // error: this code is never reached
+}

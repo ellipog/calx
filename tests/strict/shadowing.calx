@@ -1,0 +1,18 @@
+const LIMIT: i32 = 10
+
+fn twice(x: i32) -> i32 {
+    let x = x * 2                    // error: `x` is already defined; Calx doesn't allow shadowing
+    return x
+}
+
+fn main() {
+    let a = 1
+    if a > 0 {
+        let a = 2                    // error: `a` is already defined
+        println("{a}")
+    }
+    let LIMIT = 3                    // error: is already the name of a constant
+    let twice = 4                    // error: is already the name of a function
+    let i32 = 5                      // error: `i32` is a built-in name
+    println("{a} {LIMIT} {twice} {i32}")
+}

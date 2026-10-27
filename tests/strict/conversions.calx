@@ -1,0 +1,16 @@
+fn main() {
+    let wide: i64 = 5
+    let narrow: i32 = 7
+    let f = 2.5
+    let _a = wide + narrow           // error: expected `i64`, found `i32`; convert it with `i64(...)`
+    let _b = i32(wide)               // error: can lose information; keep the low bits with `i32.wrap(...)`
+    let _c = i32(f)                  // error: Java's cast is `i32.saturate(...)`
+    let _d = i64(wide)               // error: is already an `i64`
+    let _e = i64.wrap(narrow)        // error: can't lose information; write `i64(...)`
+    let _g = i8.saturate(f)          // error: only `i32.saturate` and `i64.saturate` exist
+    let _h = f64.nearest(narrow)     // error: is exact; write `f64(...)`
+    let _i = f32(narrow)             // error: round it with `f32.nearest(...)`
+    let _j = i32(true)               // error: bools don't convert
+    let _k = u32(narrow)             // error: keep the low bits with `u32.wrap(...)`
+    let _l: f64 = narrow             // error: expected `f64`, found `i32`
+}

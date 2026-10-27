@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.20)
+project(calx LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+add_executable(calx
+    src/main.cpp
+    src/source.cpp
+    src/lexer.cpp
+    src/parser.cpp
+    src/types.cpp
+    src/check.cpp
+    src/emit.cpp
+    src/toolchain.cpp
+)
+
+# The runtime's sources, which the driver compiles (once, then from the cache) into every program.
+# CALX_HOME at run time overrides this, for an installed compiler.
+get_filename_component(CALX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+target_compile_definitions(calx PRIVATE CALX_DEFAULT_HOME="${CALX_ROOT}")
+
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(calx PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(calx PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
+if(WIN32)
+    target_compile_definitions(calx PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()

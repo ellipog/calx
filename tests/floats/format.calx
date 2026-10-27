@@ -1,0 +1,11 @@
+// Floats print as Java's Double.toString and Float.toString do.
+fn main() {
+    println("{0.1 + 0.2} {100.0} {1.0e7} {9999999.0}")       // out: 0.30000000000000004 100.0 1.0E7 9999999.0
+    println("{0.001} {0.0009} {1.0e-5} {123456789.0}")       // out: 0.001 9.0E-4 1.0E-5 1.23456789E8
+    let zero = 0.0
+    println("{-zero} {1.0 / zero} {-1.0 / zero} {zero / zero}")   // out: -0.0 Infinity -Infinity NaN
+    println("{f64.MAX} {4.9e-324}")                          // out: 1.7976931348623157E308 4.9E-324
+    println("{0.1f32} {1.0f32 / 3.0f32} {1.0e10f32} {16777216.0f32}")   // out: 0.1 0.33333334 1.0E10 1.6777216E7
+    println("{f32.nearest(0.1)} {f64(0.1f32)}")              // out: 0.1 0.10000000149011612
+    println("{2.5 % 1.0} {-7.5 % 2.0}")                      // out: 0.5 -1.5
+}

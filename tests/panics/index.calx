@@ -1,0 +1,7 @@
+fn main() {
+    let xs = [1, 2, 3]
+    var i: usize = 0
+    i += 3
+    println("before")     // out: before
+    println("{xs[i]}")    // panic: index 3 is out of bounds for length 3
+}

@@ -1,0 +1,17 @@
+// Overflow wraps for every integer type, as in Java, when the values aren't constants.
+fn main() {
+    let max = i32.MAX
+    let min = i32.MIN
+    println("{max + 1} {min - 1} {max * 2}")    // out: -2147483648 2147483647 -2
+    let lmax = i64.MAX
+    println("{lmax + 1}")                       // out: -9223372036854775808
+    let b: i8 = 127
+    let s: i16 = -32768
+    println("{b + 1} {s - 1} {b * b}")          // out: -128 32767 1
+    let u: u8 = 255
+    let w: u32 = 0
+    let z: u64 = 0
+    println("{u + 1} {w - 1} {z - 1}")          // out: 0 4294967295 18446744073709551615
+    println("{-min} {min.abs()} {(-5).abs()}")  // out: -2147483648 -2147483648 5
+    println("{max.wrapping_add(1)} {i32.MAX.wrapping_mul(2)}")   // out: -2147483648 -2
+}

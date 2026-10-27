@@ -1,0 +1,14 @@
+fn main() {
+    let a = true
+    let b = false
+    let x = 6
+    let n = 3
+    let _p = a or b and a            // error: `and` and `or` together need parentheses
+    let _q = (a or b) and a
+    let _r = x & 3 | 1               // error: `&`, `|` and `^` together need parentheses
+    let _s = (x & 3) | 1
+    let _t = 1 << n - 1              // error: a shift next to `+` or `-` needs parentheses
+    let _u = 1 << (n - 1)
+    let _v = x + n << 2              // error: a shift next to `+` or `-` needs parentheses
+    let _w = x | 1 | 2
+}

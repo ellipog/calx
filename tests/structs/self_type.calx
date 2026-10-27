@@ -1,0 +1,20 @@
+// `Self` names the impl block's struct, in types, literals and static calls.
+struct Counter {
+    n: i32
+    step: i32 = 1
+}
+
+impl Counter {
+    fn new(n: i32) -> Self {
+        return Self { n }
+    }
+
+    fn doubled(self) -> Self {
+        return Self.new(self.n * 2)
+    }
+}
+
+fn main() {
+    let c = Counter.new(21).doubled()
+    println("{c.n} {c.step}")    // out: 42 1
+}

@@ -1,0 +1,12 @@
+fn main() {
+    let _a: u8 = 256                 // error: 256 doesn't fit in `u8` (0 to 255)
+    let _b: i32 = 0x9E3779B9         // error: 0x9E3779B9 doesn't fit in `i32`
+    let _c = -1u32                   // error: `u32` can't be negative
+    let _d: i8 = -129                // error: -129 doesn't fit in `i8`
+    let _e: f64 = 5                  // error: write `5.0`
+    let _f = 5f32                    // error: write a float literal with a fraction
+    let _g: i32 = 2.5                // error: a float literal isn't an `i32`
+    let _h = 99999999999999999999    // error: too large for any integer type
+    let _i = 1.0e999                 // error: too large for f64
+    let _j: char = '\u{1F600}'      // error: doesn't fit in a char
+}

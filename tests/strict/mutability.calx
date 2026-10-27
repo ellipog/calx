@@ -1,0 +1,29 @@
+struct P {
+    x: i32
+}
+
+fn read_only(p: P) {
+    p.x = 5                          // error: parameter `p` can't be changed; take it as `mut`
+}
+
+fn change(p: mut P) {
+    p.x = 1
+}
+
+fn both(a: mut P, b: P) -> i32 {
+    a.x = b.x
+    return a.x
+}
+
+fn main() {
+    let fixed = P { x: 1 }
+    fixed.x = 2                      // error: `fixed` can't be changed; declare it with `var`
+    var p = P { x: 1 }
+    change(p)                        // error: so pass it as `mut ...`
+    read_only(fixed)
+    _ = both(mut p, p)               // error: is passed as `mut`, so it can't be used again in the same call
+    var ys = [1, 2]
+    for y in ys {
+        ys[0] = y                    // error: can't be changed while a `for` loop goes over it
+    }
+}

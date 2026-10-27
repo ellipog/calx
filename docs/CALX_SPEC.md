@@ -68,15 +68,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 
 ### Primitive types
 
-| Type | Meaning |
-| --- | --- |
-| `i8`, `i16`, `i32`, `i64` | Signed integers, two's complement. `i8` is Java's `byte`, `i16` is `short`, `i32` is `int`, `i64` is `long` |
-| `u8`, `u16`, `u32`, `u64` | Unsigned integers, for wire formats and bit work |
-| `char` | An unsigned 16-bit UTF-16 code unit: Java's `char` |
-| `rune` | A Unicode scalar value, what iterating a string gives |
-| `f32`, `f64` | IEEE 754 binary32 and binary64: Java's `float` and `double` |
-| `bool` | `true` or `false` |
-| `usize` | An index or length. 64-bit on every platform Calx targets, 32-bit on `wasm32` |
+Built: see [Types](reference/types.md).
 
 ### Compound types
 
@@ -200,34 +192,17 @@ Handles are `Copy` and `Send`, which makes them the way to refer to an entity, p
 
 ## Integer and float semantics
 
-Calx matches Java exactly. Each rule below says what Calx does and how the C emitter does it, because each is undefined or implementation-defined in C.
+Calx matches Java exactly. What's built is in the reference: [Integers](reference/integers.md), [Floats](reference/floats.md) and [Conversions](reference/conversions.md). Still to build:
 
-### Integers
-
-| Rule | Calx | Emitted C |
+| Feature | Calx | Emitted C |
 | --- | --- | --- |
-| Overflow | `+`, `-`, `*` and unary `-` wrap (two's complement) for every integer type, as Java does. `checked_add`, `saturating_add` and the like exist for code that wants otherwise | Arithmetic on the unsigned type of the same width, then conversion back, which is defined in C23. Also built with `-fwrapv` |
-| Shifts | `<<`, `>>` and `>>>` are defined on `i32`, `i64`, `u32` and `u64`. The count is masked to 31 or 63, as in Java. `>>` is arithmetic on signed types, and `>>>` is a logical shift on any type. Shifting an `i8` or `i16` means converting it first, as Java promotes it | `x << (n & 31)` |
-| `MIN / -1` | Gives `MIN`. `MIN % -1` gives `0` | A branch on `-1` before the division, which traps on x86 otherwise |
-| Division by zero | **Panics**, for `/` and `%` on every integer type (D55). Java throws `ArithmeticException`, which vanilla never catches, so this is the same outcome. `checked_div` returns `none` instead | A branch on zero, then the runtime's panic |
-| Rounding | Division truncates toward zero, and the remainder takes the dividend's sign, as in Java and C. `floor_div` and `floor_mod` are Java's `Math.floorDiv` and `Math.floorMod` | Plain `/` and `%` after the checks |
-| Conversions | Always explicit, and named by what they do ([Strictness](#strictness-d63)). `i64(x)` only widens. `i8.wrap(x)` keeps the low bits, as Java's narrowing casts do. `i8.try_from(x)` returns `i8?` | Casts through unsigned types, so they're defined |
-| Literals | An integer literal takes its type from context, defaulting to `i32`. A suffix fixes it: `5i64`, `255u8`. A literal that doesn't fit its type is a compile error, hex included: Java's `0x9E3779B9` as an `int` is `i32.wrap(0x9E3779B9u32)` | |
-
-### Floats
-
-| Rule | Calx | Emitted C |
-| --- | --- | --- |
-| Format | IEEE 754 binary32 and binary64, round to nearest even, no flush-to-zero | SSE2 on x86-64, never x87 |
-| Contraction | No fused multiply-add unless written as `fma(a, b, c)`, and no reassociation. `a * b + c` rounds twice, as in Java | `-ffp-contract=off`, never `-ffast-math` |
-| Float to integer | `i32.saturate(f)` and `i64.saturate(f)` clamp at the type's bounds, and NaN gives 0, as Java's casts do. They're the only two: Java's `(byte) f` converts to `int` first, so it's written `i8.wrap(i32.saturate(f))` | An explicit range and NaN check, since out-of-range conversion is undefined in C |
-| Integer to float | `f64(n)` where every value fits exactly, such as an `i32`. Otherwise `f64.nearest(n)`, which rounds to nearest even, as Java's `(double) aLong` does. `f32.nearest(d)` is Java's `(float) d` | A plain cast |
-| Literals | Unsuffixed float literals are `f64`. `1.0e-5f32` is an `f32`. A literal keeps its type, so Java's `1.0E-5F` widened to a double is written `f64(1.0e-5f32)` | |
-| Comparison | `==` and `<` are IEEE: NaN is unequal to everything, and `-0.0 == 0.0`. `total_cmp` is Java's `Double.compare` order, for sorting | |
-| `min`, `max` | Java's: NaN if either argument is NaN, and `-0.0` is less than `0.0` | Not C's `fmin`, which ignores NaN |
+| Checked and saturating arithmetic | `checked_add`, `saturating_add` and the like, for code that doesn't want wrapping. The `checked_` methods return `T?` | Clang's overflow builtins |
+| `checked_div` | Returns `none` on division by zero, instead of panicking | A branch on zero |
+| `T.try_from(x)` | Returns `T?`, empty when the value doesn't fit `T` | A range check |
+| `fma(a, b, c)` | A fused multiply-add, rounding once. Otherwise `a * b + c` rounds twice, as in Java | `__builtin_fma` |
+| `total_cmp` | Java's `Double.compare` order, for sorting | |
 | `round` | Java's `Math.round`: the nearest integer, with halves rounded up, saturating like a cast | |
-| Text | `f.java_string()` prints exactly what Java's `Double.toString` and `Float.toString` print (the shortest form that reads back the same, JDK 19 and later), for SNBT and JSON output | |
-| Mixed arithmetic | There is none. `f32 * i32` doesn't compile, and Java's implicit widening is written out: `f64(meters * f32.nearest(packets))` | |
+| `f.java_string()` | A `String` holding exactly what Java's `Double.toString` and `Float.toString` give, for SNBT and JSON. Printing a float already uses this format | |
 
 ### Transcendental functions
 
@@ -253,56 +228,14 @@ Calx matches Java exactly. Each rule below says what Calx does and how the C emi
 
 ## Strictness (D63)
 
-Calx's checker is stricter than Rust's. Calcite ports Java, and silent conversions and precedence slips are exactly where bit-exactness breaks, so the compiler rejects them. Every rule here is an error, and there's no flag that turns one off. The only warnings are for deprecated APIs.
+Calx's checker is stricter than Rust's: every rule is an error, no flag turns one off, and the only warnings are for deprecated APIs. The rules that are built are in [Strictness](reference/strictness.md), which links each to its feature's page. These apply to features that aren't built yet:
 
-**Conversions.** `T(x)` compiles only when every value of `x`'s type is exactly a `T`, so it can never change a value. Every other conversion names what it does:
-
-| Written | Does | Java |
-| --- | --- | --- |
-| `i64(x)`, `f64(x)` for an `i32` | Converts exactly | Widening |
-| `i8.wrap(x)`, `u32.wrap(x)` | Keeps the low bits, between any two integer types | `(byte) x`, and reading an `int` as unsigned |
-| `i32.saturate(f)`, `i64.saturate(f)` | Clamps to the type's range, and NaN gives 0 | `(int) f`, `(long) d` |
-| `f32.nearest(x)`, `f64.nearest(x)` | Rounds to the nearest float, ties to even | `(float) d`, `(double) aLong` |
-| `T.try_from(x)` | Returns `T?`, empty when the value doesn't fit | |
-
-- `bool` converts to and from nothing. Write `if b { 1 } else { 0 }`.
-- `usize` is judged at both its widths, 32-bit and 64-bit, so a conversion is exact only if it's exact on every target. `usize(n)` from a `u32` compiles, and `u64(len)` from a `usize` compiles, but `u32(len)` doesn't.
-- Indexes and lengths are `usize`, so `xs[i]` with an `i32` doesn't compile.
-- A `T` never becomes a `T?` by itself: write `some(x)`.
-
-**Literals.** A literal must fit its type, hex included, and an unsigned type takes no negative literal. A literal takes its type from where it's used, and only defaults to `i32` or `f64` when nothing gives it one.
-
-**Nothing is dropped silently.**
-
-- An expression on its own line must have the unit type. A value nobody wants is discarded explicitly, with `_ = f()`. So an ignored error or an ignored result is always visible.
-- Unused locals, parameters, imports and private items are errors. A name starting with `_` says the item is unused on purpose.
-- A `var` that's never assigned again must be a `let`, and a `mut` parameter that's never changed must be a plain one.
-- Code after a `return`, `break`, `continue`, `fail` or a call that never returns is an error.
-
-**No shadowing.** A local can't take a name that's already visible, whether that's another local, a parameter, or an item in scope. Rust allows `let x = x + 1`. Calx doesn't, since a ported function that reuses a name is usually a bug.
-
-**Parentheses where precedence surprises.** These mixtures need parentheses:
-
-- `and` with `or`: `a or (b and c)`
-- `&`, `|` and `^` with each other: `(a & b) | c`
-- a shift with `+` or `-`: `1 << (n - 1)`, the classic slip
-- `??` with any other binary operator
-
-Comparisons don't chain at all: `a < b < c` doesn't compile.
-
-**Operators.**
-
-- Both sides of an arithmetic, bitwise or comparison operator have the same type.
-- Unary `-` doesn't apply to unsigned types, and `~` doesn't apply to `bool`, which uses `not`.
-- A shift count can be any integer type, and a variable count is masked as in Java. A constant count must be at least 0 and less than the type's width, since `x << 32` on an `i32` shifts by 0 in Java and is always a mistake.
-- A constant expression that overflows its type is an error, even though the same operation wraps at run time. `wrapping_add` and the other `wrapping_` methods say that wrapping is meant.
-- Comparing with a NaN constant is an error, since it's always false or always true. Use `x.is_nan()`.
-
-**Control flow.**
-
-- `match` must cover every case, and an arm that can never match is an error.
-- `if` used as a value needs an `else`.
-- A function gives back a value only through `return`. Its body's last line can't be a bare value. Blocks used as values and closures still end with their value.
+- **Optionals.** A `T` never becomes a `T?` by itself: write `some(x)`. An optional compares only with another optional. `T.try_from(x)` is the checked conversion.
+- **Unused imports** are errors, like unused names.
+- **Unreachable code** includes code after `fail`.
+- **Parentheses.** `??` with any other binary operator needs them.
+- **`match`** must cover every case, and an arm that can never match is an error.
+- **Closures** end with their value, like blocks used as values. Only a function's body has to use `return`.
 
 ## Memory model (D48)
 
@@ -315,7 +248,7 @@ Comparisons don't chain at all: `a < b < c` doesn't compile.
 
 ### Views
 
-Functions take parameters in one of three modes:
+Functions take parameters in one of three modes. The modes and the rule against passing a `mut` value twice in one call are built ([Functions](reference/functions.md#parameter-modes)); moves and the rest of this section aren't.
 
 | Mode | Written | The function gets | The caller passes |
 | --- | --- | --- | --- |
@@ -359,6 +292,8 @@ fn tick_all(r: mut Region) {
 - **Every plugin instance allocates from its own heap**, which the host supplies. A region instance's heap is reset after each handler, since region code keeps no state (D42) and anything lasting is encoded into host-owned bytes. The global instance's heap lives as long as the instance. Stopping an instance frees its whole heap at once, so a panicking plugin can't leak memory.
 
 ## Panics
+
+What a panic does in a plain program is built: see [Printing and panics](reference/printing.md#panics). The rest of this section isn't.
 
 - A panic is an unrecoverable bug: a failed bounds check, a division by zero, `opt!` on `none`, `map[h]` on a stale handle, or `panic("message")`.
 - Calx can't catch a panic. Expected failures are errors (`! E`).
@@ -555,13 +490,13 @@ What Calx leaves out, on purpose:
 | Generics and interfaces, monomorphized into C (D26) | [Interfaces and generics](#interfaces-and-generics-d26) |
 | No null: absence is an optional type (D23) | [Optionals](#optionals-no-null-d23) |
 | Handle types for game objects, checked on use (D24) | [Handles](#handles-d24) |
-| Signed overflow wraps | [Integers](#integers) |
-| Shift counts masked, `>>>` exists | [Integers](#integers) |
-| `MIN / -1` and `MIN % -1` | [Integers](#integers) |
-| Integer division by zero: pick a behavior | [Integers](#integers): panics (D55) |
-| Float to int saturates, NaN to 0 | [Floats](#floats) |
-| `char` unsigned 16-bit, `byte` signed | [Primitive types](#primitive-types) |
-| IEEE floats, no contraction, no fast-math | [Floats](#floats) |
+| Signed overflow wraps | [Integers](reference/integers.md) |
+| Shift counts masked, `>>>` exists | [Integers](reference/integers.md) |
+| `MIN / -1` and `MIN % -1` | [Integers](reference/integers.md) |
+| Integer division by zero: pick a behavior | [Integers](reference/integers.md): panics (D55) |
+| Float to int saturates, NaN to 0 | [Floats](reference/floats.md) |
+| `char` unsigned 16-bit, `byte` signed | [Types](reference/types.md) |
+| IEEE floats, no contraction, no fast-math | [Floats](reference/floats.md) |
 | Transcendentals ported from fdlibm, matching `StrictMath` bit for bit | [Transcendental functions](#transcendental-functions) |
 | Memory-safe outside `unsafe` (D23) | [Memory safety](#memory-safety-d23) |
 | `unsafe` and `extern` only for Calcite core and trusted plugins | [`unsafe`](#unsafe), [FFI](#ffi) |

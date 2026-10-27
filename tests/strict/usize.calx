@@ -1,0 +1,11 @@
+fn main() {
+    let len: usize = 3
+    let big: u64 = 5
+    let i: i32 = 1
+    let xs = [1, 2, 3]
+    let _a = u32(len)                // error: can lose information
+    let _b = usize(big)              // error: can lose information
+    let _c = xs[i]                   // error: expected `usize`, found `i32`
+    let _d: usize = 5000000000       // error: which is 32 bits on some targets
+    let _e = u64(len)
+}

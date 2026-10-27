@@ -1,0 +1,8 @@
+fn main() {
+    println("hello, calx")    // out: hello, calx
+    print("no newline, ")
+    println("then one")       // out: no newline, then one
+    println()                 // out:
+    println("braces \{like this\}")    // out: braces {like this}
+    println("unicode \u{e9} é")         // out: unicode é é
+}

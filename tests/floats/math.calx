@@ -1,0 +1,9 @@
+// min and max follow Java: NaN wins, and -0.0 is less than 0.0.
+fn main() {
+    let neg_zero = -0.0
+    let zero = 0.0
+    let nan = f64.NAN
+    println("{neg_zero.min(zero)} {zero.max(neg_zero)} {nan.max(1.0)} {zero.min(nan)}")   // out: -0.0 0.0 NaN NaN
+    println("{2.0.sqrt()} {(-2.5).floor()} {(-2.5).ceil()} {(-3.0).abs()}")   // out: 1.4142135623730951 -3.0 -2.0 3.0
+    println("{nan.is_nan()} {zero.is_nan()}")                 // out: true false
+}

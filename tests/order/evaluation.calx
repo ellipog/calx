@@ -1,0 +1,36 @@
+// Operands and arguments run left to right, as in Java, even though C leaves the order open.
+struct Counter {
+    n: i32
+}
+
+fn next(c: mut Counter) -> i32 {
+    c.n += 1
+    return c.n
+}
+
+fn pair(a: i32, b: i32) -> i32 {
+    return a * 100 + b
+}
+
+fn minus(a: i32, b: i32) -> i32 {
+    return a - b
+}
+
+struct Point {
+    x: i32
+    y: i32
+}
+
+fn main() {
+    var c = Counter { n: 0 }
+    println("{next(mut c) * 10 + next(mut c)}")        // out: 12
+    println("{next(mut c) - next(mut c)}")             // out: -1
+    println("{pair(next(mut c), next(mut c))}")        // out: 506
+    let p = Point { y: next(mut c), x: next(mut c) }
+    println("{p.x} {p.y}")                             // out: 8 7
+    println("{minus(b: next(mut c), a: next(mut c))}") // out: 1
+    // Java saves the old value before running the right side.
+    c.n = 10
+    c.n += next(mut c)
+    println("{c.n}")                                   // out: 21
+}

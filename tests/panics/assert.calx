@@ -1,0 +1,5 @@
+fn main() {
+    let x = 5
+    assert(x == 5)
+    assert(x > 10, "x is only {x}")    // panic: assertion failed: x is only 5
+}

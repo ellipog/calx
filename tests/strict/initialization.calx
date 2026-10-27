@@ -1,0 +1,8 @@
+// A variable gets its value where it's declared, and a loop variable can't be assigned.
+fn main() {
+    let x: i32       // error: give `x` a value; Calx has no uninitialized variables
+    println("{x}")
+    for i in 0..3 {
+        i = 5        // error: the loop variable `i` can't be changed; copy it into a `var`
+    }
+}

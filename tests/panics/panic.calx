@@ -1,0 +1,4 @@
+fn main() {
+    let level = 3
+    panic("level {level} is too deep")    // panic: level 3 is too deep
+}

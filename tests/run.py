@@ -1,0 +1,217 @@
+"""The compiler test suite (P3.9): small Calx programs with their expected results.
+
+    py -I tests/run.py                    # build the compiler, then run every test in debug mode
+    py -I tests/run.py --modes debug,release
+    py -I tests/run.py tests/integers     # only the tests under a folder, or single files
+    py -I tests/run.py --no-build         # use the compiler as it is
+
+A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/` or
+`docs/guide/` (D41). It says what should happen in comments:
+
+    println("{1 + 2}")    // out: 3
+    let x: u8 = 300       // error: doesn't fit in `u8`
+    panic("no")           // panic: no
+
+- `// out: TEXT` is one line of expected output. All of them together, in order, must be exactly
+  what the program prints. A program with no `out` lines must print nothing.
+- `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
+  `error` lines must fail to compile, with exactly those errors and no others.
+- `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
+
+On Linux, use `python3` for `py`.
+"""
+
+import argparse
+import concurrent.futures
+import os
+import pathlib
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+PLATFORM = "windows" if os.name == "nt" else "linux"
+BUILD = ROOT / "build" / "compiler" / PLATFORM
+CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
+DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "guide"]
+
+EXPECT = re.compile(r"//\s*(out|error|panic):(.*)$")
+DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
+PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
+
+
+class Test:
+    def __init__(self, name, source, path=None):
+        self.name = name
+        self.source = source
+        self.path = path  # a file on disk, or None for a docs example
+        self.out = []
+        self.errors = []  # (line, text)
+        self.panic = None  # (line, text)
+        for n, line in enumerate(source.splitlines(), 1):
+            m = EXPECT.search(line)
+            if not m:
+                continue
+            kind, text = m.group(1), m.group(2)
+            text = text[1:] if text.startswith(" ") else text
+            if kind == "out":
+                self.out.append(text)
+            elif kind == "error":
+                self.errors.append((n, text.strip()))
+            else:
+                self.panic = (n, text.strip())
+
+
+def build_compiler():
+    if not (BUILD / "build.ninja").exists():
+        cmd = ["cmake", "-S", str(ROOT / "compiler"), "-B", str(BUILD), "-G", "Ninja"]
+        cmd.append("-DCMAKE_CXX_COMPILER=" + os.environ.get("CXX", "clang++"))
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["ninja", "-C", str(BUILD)], check=True, stdout=subprocess.DEVNULL)
+
+
+def find_tests(selected):
+    tests = []
+    roots = [pathlib.Path(s).resolve() for s in selected] if selected else [ROOT / "tests"] + DOC_DIRS
+    for root in roots:
+        if root.is_file():
+            files = [root]
+        elif root.exists():
+            files = sorted(root.rglob("*.calx")) + sorted(root.rglob("*.md"))
+        else:
+            files = []
+        for f in files:
+            rel = f.relative_to(ROOT).as_posix()
+            if f.suffix == ".calx":
+                tests.append(Test(rel, f.read_text(encoding="utf-8"), f))
+            elif any(d in f.parents for d in DOC_DIRS):
+                tests.extend(doc_examples(f, rel))
+    return tests
+
+
+def doc_examples(path, rel):
+    """Every ```calx block in a docs page is a test. Other fences (```text, ```sh) aren't."""
+    out = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == "```calx":
+            start = i + 1
+            j = start
+            while j < len(lines) and lines[j].strip() != "```":
+                j += 1
+            # Blank lines first, so error line numbers in the example match the page.
+            source = "\n" * start + "\n".join(lines[start:j]) + "\n"
+            out.append(Test(f"{rel}:{start + 1}", source))
+            i = j
+        i += 1
+    return out
+
+
+def run_test(test, mode):
+    with tempfile.TemporaryDirectory() as tmp:
+        if test.path:
+            path = test.path
+            shown = test.name
+        else:
+            path = pathlib.Path(tmp) / "example.calx"
+            path.write_text(test.source, encoding="utf-8")
+            shown = str(path)
+        if test.errors:
+            return check_errors(test, path)
+        cmd = [str(CALX), "run", str(path)]
+        if mode == "release":
+            cmd.insert(2, "--release")
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT)
+        problems = []
+        if test.panic:
+            if p.returncode != 101:
+                problems.append(f"expected a panic (status 101), got status {p.returncode}")
+            m = next((PANIC.match(l) for l in p.stderr.splitlines() if PANIC.match(l)), None)
+            if not m:
+                problems.append("no panic message on stderr")
+            else:
+                if int(m.group(2)) != test.panic[0]:
+                    problems.append(f"panicked on line {m.group(2)}, expected line {test.panic[0]}")
+                if test.panic[1] not in m.group(4):
+                    problems.append(f"panic message {m.group(4)!r} doesn't contain {test.panic[1]!r}")
+        elif p.returncode != 0:
+            problems.append(f"exit status {p.returncode}")
+        got = p.stdout.splitlines()
+        if got != test.out:
+            problems.append(diff(test.out, got))
+        if problems and p.stderr.strip() and not test.panic:
+            problems.append("stderr:\n" + indent(p.stderr.rstrip()))
+        return problems
+
+
+def check_errors(test, path):
+    p = subprocess.run([str(CALX), "check", str(path)], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", cwd=ROOT)
+    problems = []
+    if p.returncode == 0:
+        return ["expected compile errors, but it compiled"]
+    actual = []
+    for line in p.stderr.splitlines():
+        m = DIAG.match(line)
+        if m:
+            actual.append((int(m.group(2)), m.group(4)))
+    remaining = list(actual)
+    for line, text in test.errors:
+        match = next((a for a in remaining if a[0] == line and text in a[1]), None)
+        if match:
+            remaining.remove(match)
+        else:
+            on_line = [a[1] for a in actual if a[0] == line]
+            problems.append(f"line {line}: expected an error containing {text!r}" +
+                            (f"; got {on_line}" if on_line else "; got none there"))
+    for line, text in remaining:
+        problems.append(f"line {line}: unexpected error: {text}")
+    return problems
+
+
+def diff(want, got):
+    lines = ["output differs:"]
+    for i in range(max(len(want), len(got))):
+        w = want[i] if i < len(want) else "<nothing>"
+        g = got[i] if i < len(got) else "<nothing>"
+        mark = "  " if w == g else "! "
+        lines.append(f"  {mark}line {i + 1}: expected {w!r}" + ("" if w == g else f", got {g!r}"))
+    return "\n".join(lines)
+
+
+def indent(text):
+    return "\n".join("    " + l for l in text.splitlines())
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*", help="test files or folders (default: all)")
+    ap.add_argument("--modes", default="debug", help="comma-separated build modes: debug, release")
+    ap.add_argument("--no-build", action="store_true", help="don't rebuild the compiler first")
+    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4)
+    args = ap.parse_args()
+    if not args.no_build:
+        build_compiler()
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    tests = find_tests(args.paths)
+    jobs = [(t, m) for t in tests for m in (modes if not t.errors else modes[:1])]
+    failed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(lambda tm: (tm, run_test(*tm)), jobs))
+    for (test, mode), problems in results:
+        if problems:
+            failed += 1
+            print(f"FAIL {test.name} [{mode}]")
+            for p in problems:
+                print(indent(p))
+    passed = len(jobs) - failed
+    print(f"{passed} passed, {failed} failed ({len(tests)} tests, modes: {', '.join(modes)}, "
+          f"{platform.system()} {platform.machine()})")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

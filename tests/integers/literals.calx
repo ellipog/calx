@@ -1,0 +1,9 @@
+fn main() {
+    println("{0xFF} {0b1010} {0o17} {1_000_000}")    // out: 255 10 15 1000000
+    println("{-128i8} {255u8} {5i64} {0xFFFFFFFFu32}")   // out: -128 255 5 4294967295
+    let x: u16 = 65535
+    let y: i64 = 1 << 40
+    println("{x} {y}")                                // out: 65535 1099511627776
+    println("{i32.wrap(0x9E3779B9u32)}")              // out: -1640531527
+    println("{i8.MIN} {i8.MAX} {u16.MAX} {i16.MIN}")  // out: -128 127 65535 -32768
+}

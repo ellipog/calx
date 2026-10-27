@@ -1,0 +1,23 @@
+// Ranges stop at MAX without overflowing, and `_` skips the variable.
+fn main() {
+    var count = 0
+    for _ in 0..3 {
+        count += 1
+    }
+    var last: u8 = 0
+    for b in 250u8..=u8.MAX {
+        last = b
+    }
+    var low: i32 = 0
+    for i in (i32.MAX - 2)..=i32.MAX {
+        low = i
+    }
+    var empty = 0
+    for _ in 5..5 {
+        empty += 1
+    }
+    for _ in 5..=4 {
+        empty += 1
+    }
+    println("{count} {last} {low} {empty}")    // out: 3 255 2147483647 0
+}

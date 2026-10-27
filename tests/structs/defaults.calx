@@ -1,0 +1,22 @@
+struct Settings {
+    distance: i32 = 10
+    hardcore: bool = false
+    scale: f64 = 1.5
+}
+
+struct Pos {
+    x: i32
+    y: i32 = 64
+    z: i32
+}
+
+fn main() {
+    let s = Settings()
+    println("{s.distance} {s.hardcore} {s.scale}")    // out: 10 false 1.5
+    let t = Settings { hardcore: true }
+    println("{t.distance} {t.hardcore}")              // out: 10 true
+    let x = 3
+    let z = -7
+    let p = Pos { x, z }
+    println("{p.x} {p.y} {p.z}")                      // out: 3 64 -7
+}

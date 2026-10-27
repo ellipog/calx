@@ -1,0 +1,19 @@
+const SIZE: usize = 4
+
+fn main() {
+    var grid = [0; 16]
+    for i in 0..16usize {
+        grid[i] = i32.wrap(i * 3)
+    }
+    println("{grid[0]} {grid[5]} {grid[15]}")       // out: 0 15 45
+    let primes = [2, 3, 5, 7, 11]
+    var sum = 0
+    for p in primes {
+        sum += p
+    }
+    println("{sum}")                                // out: 28
+    let fixed: [i64; SIZE] = [1, 2, 3, 4]
+    println("{fixed[3]}")                           // out: 4
+    let floats = [0.5; 3]
+    println("{floats[2]}")                          // out: 0.5
+}

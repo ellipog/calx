@@ -1,0 +1,7 @@
+// Java's float-to-integer casts saturate, and NaN gives 0.
+fn main() {
+    println("{i32.saturate(3.99)} {i32.saturate(-3.99)} {i32.saturate(1.0e10)}")   // out: 3 -3 2147483647
+    println("{i64.saturate(1.0e19)} {i64.saturate(-1.0e19)}")   // out: 9223372036854775807 -9223372036854775808
+    println("{i32.saturate(f64.NAN)} {i32.saturate(f64.NEG_INFINITY)}")   // out: 0 -2147483648
+    println("{i8.wrap(i32.saturate(300.5))} {i32.saturate(2.5f32)}")    // out: 44 2
+}

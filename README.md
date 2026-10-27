@@ -11,7 +11,19 @@ What sets it apart:
 - **Memory-safe by default.** Unchecked code is opt-in and limited to the server core and plugins you trust.
 - **Region actors.** The only concurrency model. Results are deterministic whatever the thread count.
 
-Status: Phase 0, design on paper. There's no compiler yet.
+Status: Phase 3. The compiler builds and runs programs with integers, floats, arrays, structs, methods and the control flow, with Java's results on Windows and Linux. Enums, optionals, generics, modules, the standard library and actors come next. The [reference](docs/README.md#reference) lists what's built.
+
+## Building
+
+You need CMake, Ninja and clang (LLVM 18 or later, with lld).
+
+```sh
+cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++
+ninja -C build/compiler
+build/compiler/calx run tests/basics/hello.calx
+```
+
+`python tests/run.py` builds the compiler and runs the test suite, which includes every example in the reference.
 
 Acta board: aaen-studios/clx ([open](https://acta.aaenz.no/aaen-studios/clx)). The phase gates are on Calcite's board, aaen-studios/calcite.
 

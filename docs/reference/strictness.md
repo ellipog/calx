@@ -1,0 +1,64 @@
+---
+title: Strictness
+description: The rules that make Calx's checker stricter than Rust's, and why.
+---
+
+# Strictness (D63)
+
+Calx's checker is stricter than Rust's. Calcite ports Java, and silent conversions and precedence slips are exactly where bit-exactness breaks, so the compiler rejects them. Every rule is an error, and no flag turns one off. There are no warnings, except for deprecated APIs once there are any.
+
+Each rule is on the page of the feature it's about:
+
+| Rule | Page |
+| --- | --- |
+| `T(x)` only converts exactly. Lossy conversions are named: `wrap`, `saturate`, `nearest` | [Conversions](conversions.md) |
+| A conversion is exact only if it is at both of `usize`'s widths | [Conversions](conversions.md#usize) |
+| Indexes are `usize` | [Types](types.md#arrays) |
+| A literal must fit its type, hex included. Unsigned types take no negative literal | [Integers](integers.md#literals) |
+| A constant expression that overflows is an error | [Integers](integers.md#constant-expressions) |
+| A constant shift count must be under the type's width | [Integers](integers.md#operators) |
+| Comparing with a NaN constant is an error | [Floats](floats.md#constants) |
+| Unused variables, parameters, functions, structs and constants are errors, and so are a `var` that never changes and a `mut` parameter that's never changed | [Variables](variables.md#unused-names) |
+| No shadowing | [Variables](variables.md#no-shadowing) |
+| Code that can never run is an error | [Control flow](control-flow.md#unreachable-code) |
+| A function returns with `return`, on every path | [Functions](functions.md#returning) |
+
+## Nothing is dropped silently
+
+An expression on its own line must have the unit type `()`. A value nobody wants is discarded explicitly with `_ = f()`, so an ignored result is always visible.
+
+```calx
+fn three() -> i32 {
+    return 3
+}
+
+fn main() {
+    three()        // error: this `i32` value is unused; discard it with `_ = ...`
+    _ = three()
+}
+```
+
+## Parentheses
+
+These mixtures need parentheses, since their precedence surprises people:
+
+- `and` with `or`: `a or (b and c)`
+- `&`, `|` and `^` with each other: `(a & b) | c`
+- a shift with `+` or `-`: `1 << (n - 1)`, the classic slip
+
+Comparisons don't chain: `a < b < c` doesn't compile.
+
+```calx
+fn main() {
+    let a = true
+    let n = 3
+    let _x = a or a and a    // error: `and` and `or` together need parentheses
+    let _y = 1 << n - 1      // error: a shift next to `+` or `-` needs parentheses
+}
+```
+
+## Conditions
+
+A literal `true` or `false` as a condition is an error, since one branch could never run, and `while true` is written `loop`.
+
+The rest of D63 applies to features that aren't built yet, and is in the [spec](../CALX_SPEC.md#strictness-d63): optionals are never made implicitly, `??` needs parentheses next to other operators, and `match` must cover every case.

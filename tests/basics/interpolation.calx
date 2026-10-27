@@ -1,0 +1,13 @@
+fn main() {
+    let n = 42
+    let big = 9000000000i64
+    let neg: i8 = -5
+    let x = 2.5
+    let yes = true
+    let c: char = 'A'
+    let r = '€'
+    let s = "text"
+    println("{n} {big} {neg} {x} {yes} {c} {r} {s}")    // out: 42 9000000000 -5 2.5 true A € text
+    println("{n + 1}{n * 2}")                         // out: 4384
+    println("{u64.MAX} {i64.MIN}")                    // out: 18446744073709551615 -9223372036854775808
+}
