@@ -7,11 +7,35 @@ Calx is a compiled systems language built for [Calcite](https://github.com/ellip
 
 What sets it apart:
 
+- **Faster than Rust.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
 - **Java-exact math.** Integers and floats behave exactly as they do in Java, so Calcite can reproduce vanilla Minecraft bit for bit.
-- **Memory-safe by default.** Unchecked code is opt-in and limited to the server core and plugins you trust.
-- **Region actors.** The only concurrency model. Results are deterministic whatever the thread count.
+- **Memory-safe by default.** Ownership is checked at compile time and costs nothing at run time: no garbage collector, no reference counts. Unchecked code is opt-in and limited to the server core and plugins you trust.
+- **Deterministic parallelism.** `parallel for` runs a loop's iterations across every core, and the compiler checks that no iteration touches what another one changes. A program prints the same output with one thread or many. Region actors come next.
+- **Stricter than Rust.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
+- **Fast to build.** `calx run` on a small program takes about 0.3 s from an empty cache and under 25 ms when nothing changed.
 
-Status: Phase 3. The compiler builds and runs programs with integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List` and the control flow, with Java's results on Windows and Linux. Ownership is checked at compile time and costs nothing at run time: no garbage collector, no reference counts. The standard library and actors come next. The [reference](docs/README.md#reference) lists what's built.
+Status: Phase 3's gate has passed and is in review. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `unsafe` code with C functions, and `parallel for`. They give Java's results on Windows and Linux. The standard library has `std.io`, `std.env`, `std.time`, `std.math` and `std.pool`. Error values (`T ! E`, `fail`, `try`) are next, then Java-compatible collections and actors. The [reference](docs/README.md#reference) lists what's built.
+
+## Performance
+
+Milliseconds per tick on the [tick-loop benchmark](bench/README.md), measured on an i9-13900K. Each figure is the median of 10 runs of 1,000 ticks. The Rust reference was built with rustc 1.91.1, and Calx with clang 23.
+
+| Platform | Calx, 1 worker | Rust, 1 worker | Calx, 24 workers | Rust, 24 workers |
+| --- | --- | --- | --- | --- |
+| Windows 11 | **18.06** | 25.75 | **2.25** | 3.41 |
+| Linux (WSL2) | **18.01** | 26.04 | **2.46** | 3.52 |
+
+Build times on the same machine:
+
+| | Windows 11 | Linux (WSL2) |
+| --- | --- | --- |
+| `calx check`, 64 modules (9,900 lines) | 32 ms | 24 ms |
+| Debug build of those 64 modules, empty cache | 520 ms | 278 ms |
+| Debug rebuild after changing one module | 123 ms | 78 ms |
+| `calx run` of a small program, empty cache | 274 ms | 302 ms |
+| `calx run` of it again, nothing changed | 16 ms | 21 ms |
+
+CI runs the benchmark and checks its checksum on every push. It also times the builds. The raw results are in [bench/results](bench/results).
 
 ## Building
 
@@ -23,7 +47,7 @@ ninja -C build/compiler
 build/compiler/calx run tests/basics/hello.calx
 ```
 
-`python tests/run.py` builds the compiler and runs the test suite, which includes every example in the reference.
+`python tests/run.py` builds the compiler and runs the test suite, which includes every example in the docs. CI runs it in debug and release on Windows and Linux.
 
 ## Editors
 
