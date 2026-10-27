@@ -460,7 +460,7 @@ pub fn packet(decl: StructDecl, state: State, direction: Direction, name: str) -
 
 ### Generated data tables
 
-Phase 2's converter writes vanilla's data (block states, registries) as Calx source, which compiles like any other module. That needs nothing special from the compiler, only that large constant arrays compile quickly.
+Phase 2's converter writes vanilla's data as neutral JSON tables: block states, registries, items, packet IDs and the command tree ([Calcite's data generator docs](https://github.com/ellipog/calcite/blob/main/oracle/datagen/README.md)). Calcite's build turns them into Calx source, which compiles like any other module. That needs nothing special from the compiler, only that large constant arrays compile quickly. Block states are stored as arithmetic, each block's first state ID and its properties' value counts, so the tables stay small: 1,286 blocks and 121 properties on 26.3, not 35,723 rows.
 
 ### Debugging
 
