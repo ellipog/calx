@@ -187,7 +187,7 @@ def run_test(test, mode):
             problems.append(diff(test.out, got))
         if not test.panic and p.returncode == 0 and p.stderr.splitlines() != test.stderr:
             problems.append("standard error " + diff(test.stderr, p.stderr.splitlines()))
-        elif problems and p.stderr.strip() and not test.panic:
+        elif problems and p.stderr.strip() and (not test.panic or p.returncode != 101):
             problems.append("stderr:\n" + indent(p.stderr.rstrip()))
         return problems
 

@@ -1,6 +1,7 @@
 #include "toolchain.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,19 @@ constexpr const char* kExe = ".exe";
 constexpr char kPathSep = ':';
 constexpr const char* kExe = "";
 #endif
+
+// A name part no other build, in this process or another, uses at the same time: for the
+// temporary files a build writes into the shared cache before renaming them.
+std::string unique_stamp() {
+    static std::atomic<unsigned long long> count{0};
+#ifdef _WIN32
+    unsigned long long pid = GetCurrentProcessId();
+#else
+    unsigned long long pid = static_cast<unsigned long long>(getpid());
+#endif
+    return std::to_string(pid) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+           "-" + std::to_string(count++);
+}
 
 std::string find_on_path(const std::string& name) {
     std::string path = env("PATH");
@@ -286,7 +300,7 @@ bool read_file(const std::string& path, std::string& out) {
 }
 
 bool write_file_atomic(const std::string& path, const std::string& data) {
-    std::string temp = path + ".tmp" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::string temp = path + ".tmp" + unique_stamp();
     {
         std::ofstream out(temp, std::ios::binary);
         if (!out) return false;
@@ -595,8 +609,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::vector<std::vector<std::string>> compiles;
     std::vector<std::pair<std::string, std::string>> renames;
     auto compile = [&](const std::string& src_path, const std::string& obj, const std::vector<std::string>& extra) {
-        std::string temp = obj + ".tmp" + std::to_string(compiles.size()) +
-                           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        std::string temp = obj + ".tmp" + unique_stamp();
         std::vector<std::string> cmd = {tc.clang, "-c"};
         cmd.insert(cmd.end(), flags.begin(), flags.end());
         cmd.insert(cmd.end(), extra.begin(), extra.end());
@@ -612,13 +625,17 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     } else {
         compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     }
+    // Each build writes its C under a name of its own: two builds that need the same module, such
+    // as a std one, would otherwise share the file, and one could delete it while the other's
+    // clang is still to read it.
+    std::string c_stamp = unique_stamp();
     std::vector<std::string> c_paths;
     for (std::size_t i = 0; i < c_sources.size(); i++) {
         if (file_exists(objs[i])) {
             touch(objs[i]);
             continue;
         }
-        std::string c_path = (fs::path(obj_dir) / (keys[i] + ".c")).string();
+        std::string c_path = (fs::path(obj_dir) / (keys[i] + "." + c_stamp + ".c")).string();
         if (!write_file_atomic(c_path, c_sources[i])) {
             std::fprintf(stderr, "calx: can't write %s\n", c_path.c_str());
             return r;
@@ -654,7 +671,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     auto t1 = std::chrono::steady_clock::now();
     // Linked under a unique name, then renamed, so two builds of one program can't collide. On
     // Windows the PDB keeps the unique name, which the executable records, so debuggers find it.
-    std::string stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::string stamp = unique_stamp();
     std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + kExe)).string();
     std::vector<std::string> inputs = objs;
     inputs.push_back(rt_obj);
