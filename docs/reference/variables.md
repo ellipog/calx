@@ -41,6 +41,7 @@ The compiler rejects names that do nothing (D63). Each of these is an error:
 - A `var` that's never assigned again or changed. Declare it with `let`.
 - A `mut` parameter that's never changed. Take it without `mut`.
 - A function, struct or constant that's never used, unless it's `pub` or it's `main`.
+- An [import](modules.md#importing) that's never used.
 
 Assigning to a variable isn't reading it, so a counter that's only ever increased is unused.
 

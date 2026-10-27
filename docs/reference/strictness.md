@@ -29,6 +29,10 @@ Each rule is on the page of the feature it's about:
 | `let` without `else` needs a pattern that always matches, and `let ... else` and `if let` one that might not | [Patterns](patterns.md#let--else) |
 | Generic code is checked where it's written and uses only what its bounds give. A call whose types can't be worked out is an error, never a guess. Unused generic parameters are errors | [Generics](generics.md#errors) |
 | An impl matches its interface exactly, parameter names included, and has nothing else. Unused impls are errors. A name two interfaces share needs `Iface.method(x)` | [Interfaces](interfaces.md#implementing-one) |
+| A type has one function of each name: its own impl can't reuse a name its interfaces give it | [Interfaces](interfaces.md#implementing-one) |
+| Unused imports are errors, and an import can't shadow a name | [Modules](modules.md#importing) |
+| Private fields and methods stay in their module, and a `pub` signature or field shows only `pub` types | [Modules](modules.md#pub) |
+| An impl goes in its type's module or its interface's | [Modules](modules.md#where-impls-go) |
 
 ## Nothing is dropped silently
 

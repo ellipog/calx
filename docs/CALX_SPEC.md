@@ -353,12 +353,12 @@ So nothing one region can name belongs to another. WASM plugins get the same rul
 
 ## Modules and builds
 
-- **A file is a module.** It starts with `module a.b.c`, and its path must match (`a/b/c.calx`).
-- `import a.b.{X, Y}` brings names in. Imports between modules can't form a cycle.
-- **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages.
-- **Separate compilation (D26).** Each module compiles to one C translation unit and a generated header. A module is recompiled when its source or the public interface of something it imports changes. The compiler tracks this with a hash of each module's public interface.
-- **Generics** are instantiated in the module that uses them. Identical instantiations from different modules are merged at link time, using linkage that lets the linker keep one copy.
-- **Build modes:** `debug` (checks, no optimization, full debug info) and `release` (checks kept, optimized). Bounds checks stay on in both. `unsafe` code is the only way to remove one.
+Built: see [Modules](reference/modules.md) and [the calx command](reference/command.md). Still to build:
+
+- **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
+- **Reaching items through a module's name:** `import std.math`, then `math.floor(x)`.
+- **Renaming imports**, `import a.b.{Name as Other}`, for two modules that use one name.
+- **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
 - **Targets:** `x86_64-windows`, `x86_64-linux` and `wasm32` from Phase 3 and Phase 7. `aarch64-macos` comes later (D7).
 
 ### Build speed (D64)
@@ -461,7 +461,7 @@ What Calx leaves out, on purpose:
 | Same result with one thread and many (D21) | [Parallel loops](#parallel-loops) |
 | Split and merge depend only on world state (D22) | [Lockstep ticks](#lockstep-ticks): no hidden timing |
 | Region scoping enforced at compile time | [Region scoping](#region-scoping) |
-| Each module is its own C translation unit (D26) | [Modules and builds](#modules-and-builds) |
+| Each module is its own C translation unit (D26) | [Modules](reference/modules.md), [Modules and builds](#modules-and-builds) |
 | FFI: `extern`, C ABI, what trusted plugins unlock | [FFI](#ffi) |
 | Codegen hooks: packets, data tables, `#line` | [Codegen hooks](#codegen-hooks) |
 | What Calx leaves out | [Non-goals](#non-goals) |

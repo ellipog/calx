@@ -32,8 +32,9 @@ What's built, one page per feature:
 15. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
 16. [Generics](reference/generics.md): generic functions and types, inference, bounds, and their C
 17. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-18. [Printing and panics](reference/printing.md): print, println, assert and panic
-19. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+18. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+19. [Printing and panics](reference/printing.md): print, println, assert and panic
+20. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Design
 

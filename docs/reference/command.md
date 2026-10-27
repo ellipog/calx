@@ -15,14 +15,14 @@ calx emit-c hello.calx         # print the C it compiles to
 calx version
 ```
 
-For now a program is one file, and that file is its module.
+A program is its main file and the [modules](modules.md) it imports. The command takes the main file.
 
 ## Options
 
 | Option | Meaning |
 | --- | --- |
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
-| `-o PATH` | Where `build` writes the executable, or `emit-c` the C. `build` defaults to the file's name in the current folder |
+| `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. `build` defaults to the file's name in the current folder |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
@@ -58,7 +58,8 @@ On Windows, debug builds use the C runtime DLL that comes with Visual Studio, si
 Building should take moments, so the command avoids every step it can:
 
 - The front end checks the whole program every time. It's fast enough that tracking what to skip would cost more.
-- **The object cache.** clang's output is cached under a hash of the C text, the flags and the clang executable. When the C is unchanged, clang doesn't run.
+- **One C file per module.** Each holds exactly what its module uses, so its text changes only when that does ([modules](modules.md#in-c-d75)). The files that changed compile in parallel.
+- **The object cache.** clang's output is cached under a hash of the C text, the flags and the clang executable. When a file's C is unchanged, clang doesn't run for it.
 - **The runtime is compiled once** per build mode and clang version, then reused from the cache.
 - When nothing changed at all, `calx run` reuses the linked program and only starts it.
 - Programs link with lld when it's installed next to clang or on `PATH`.

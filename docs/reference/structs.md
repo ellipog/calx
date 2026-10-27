@@ -61,6 +61,8 @@ fn main() {
 
 `value.field` reads a field. On a `var`, or a `mut` parameter, it can be assigned. Struct values are copied when assigned, so changing a copy doesn't change the original.
 
+A field is private to its module unless it's marked `pub`, as in `pub x: f64` ([modules](modules.md#pub)). The same goes for a function in an `impl` block.
+
 ## Methods
 
 An `impl Name { }` block adds functions to a struct declared in the same module.

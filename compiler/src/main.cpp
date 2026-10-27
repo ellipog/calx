@@ -10,6 +10,7 @@
 
 #include "check.h"
 #include "emit.h"
+#include "modules.h"
 #include "parser.h"
 #include "source.h"
 #include "toolchain.h"
@@ -136,10 +137,10 @@ int main(int argc, char** argv) {
     Names names;
     Arena arena;
     Types types(arena);
-    Module* module = parse_file(ParseContext{sources, names, arena, diags}, file);
+    std::vector<Module*> modules = load_program(ParseContext{sources, names, arena, diags}, sources, file);
     Program program;
     if (!diags.has_errors()) {
-        check_module(CheckContext{sources, names, arena, diags, types}, module, program, opt.command != "check");
+        check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check");
     }
     if (opt.json) {
         diags.print_json(stdout);
@@ -163,14 +164,31 @@ int main(int argc, char** argv) {
     auto t1 = std::chrono::steady_clock::now();
     EmitOptions eo;
     eo.line_directives = opt.line_directives;
-    std::string c = emit_c(program, sources, names, eo);
+    std::vector<CFile> files = emit_c(program, sources, names, eo);
     double emit_ms = ms(t1);
     if (opt.command == "emit-c") {
+        // One module's C goes to the output as it is. With several, each starts with a line
+        // naming its file, or `-o` names a folder to write them in.
         if (opt.output.empty()) {
-            std::fwrite(c.data(), 1, c.size(), stdout);
-        } else if (!write_file_atomic(opt.output, c)) {
-            std::fprintf(stderr, "calx: can't write %s\n", opt.output.c_str());
-            return 1;
+            for (const CFile& f : files) {
+                if (files.size() > 1) std::printf("// ---- %s\n", f.name.c_str());
+                std::fwrite(f.text.data(), 1, f.text.size(), stdout);
+            }
+        } else if (files.size() == 1) {
+            if (!write_file_atomic(opt.output, files[0].text)) {
+                std::fprintf(stderr, "calx: can't write %s\n", opt.output.c_str());
+                return 1;
+            }
+        } else {
+            std::error_code ec;
+            std::filesystem::create_directories(opt.output, ec);
+            for (const CFile& f : files) {
+                std::string path = (std::filesystem::path(opt.output) / f.name).string();
+                if (!write_file_atomic(path, f.text)) {
+                    std::fprintf(stderr, "calx: can't write %s\n", path.c_str());
+                    return 1;
+                }
+            }
         }
         return 0;
     }
@@ -181,7 +199,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "calx: %s\n", error.c_str());
         return 1;
     }
-    BuildResult b = build_program(tc, c, opt.mode, opt.verbose);
+    std::vector<std::string> c_sources;
+    for (CFile& f : files) c_sources.push_back(std::move(f.text));
+    BuildResult b = build_program(tc, c_sources, opt.mode, opt.verbose);
     if (!b.ok) return 1;
     if (opt.timings) {
         std::fprintf(stderr, "front end: %.1f ms, emit: %.1f ms, clang: %.1f ms, link: %.1f ms%s\n", front_ms, emit_ms,

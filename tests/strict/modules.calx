@@ -1,0 +1,97 @@
+// What crosses a module boundary: `pub` items, fields and methods, imported by name (D73, D74).
+// file: main.calx
+import util.{Counter, Show, twice, secret}           // error: `secret` isn't `pub` in `util`
+import util.{missing}                                // error: `util` has no `missing`
+import util.{LIMIT}                                  // error: `LIMIT` is imported but never used
+import util.{twice}                                  // error: `twice` is already imported
+import util.{Point}                                  // error: `Point` is already the name of a struct here
+import util                                          // error: say what to import from `util`, as in `import util.{Name}`
+import util.{Sealed, Hidden}                         // error: `Hidden` isn't `pub` in `util`
+
+struct Point {
+    x: i32
+}
+
+impl Counter {                                       // error: methods for `Counter` go in its module, `util`
+    fn twice_hits(self) -> i32 {
+        return 2
+    }
+}
+
+impl Show for i32 {                                  // error: an impl of `Show` for `i32` goes in `Show`'s module, `util`
+    fn show(self) -> i32 {
+        return self
+    }
+}
+
+fn main() {
+    var c = Counter.new()
+    c.bump()
+    let h = c.hits                                   // error: field `hits` of `Counter` is private to `util`
+    c.reset()                                        // error: `reset` is private to `util`
+    let d = Counter { hits: 1 }                      // error: field `hits` of `Counter` is private to `util`
+    let s = Sealed {}                                // error: `Sealed` can only be built in `util`, since its field `key` is private there
+    let p = Point { x: twice(1) }
+    println("{h} {p.x} {d.get()}")
+    _ = s
+}
+
+// file: util.calx
+pub const LIMIT: i32 = 10
+
+pub interface Show {
+    fn show(self) -> i32
+}
+
+pub fn twice(n: i32) -> i32 {
+    return n * 2
+}
+
+fn secret() -> i32 {
+    return 1
+}
+
+pub struct Point {
+    pub x: i32
+}
+
+pub struct Counter {
+    hits: i32
+}
+
+pub struct Sealed {
+    key: i32
+}
+
+struct Hidden {
+    v: i32
+}
+
+pub fn hidden() -> Hidden {                          // error: `Hidden` isn't `pub`, so a `pub` function can't return it
+    return Hidden { v: secret() }
+}
+
+pub struct Leaky {
+    pub h: Hidden?                                   // error: `Hidden` isn't `pub`, so a `pub` field of a `pub` struct can't hold it
+}
+
+impl Counter {
+    pub fn new() -> Counter {
+        return Counter { hits: 0 }
+    }
+    pub fn bump(c: mut Counter) {
+        c.hits += 1
+    }
+    pub fn get(self) -> i32 {
+        return self.hits
+    }
+    fn reset(c: mut Counter) {
+        c.hits = 0
+    }
+}
+
+pub fn use_all(s: Sealed) -> i32 {
+    var c = Counter.new()
+    c.reset()
+    return s.key + hidden().v
+}

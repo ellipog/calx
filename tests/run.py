@@ -18,6 +18,10 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   `error` lines must fail to compile, with exactly those errors and no others.
 - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
 
+A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
+main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
+expected the same way.
+
 Each test that expects errors is also checked with `calx check --json --stdin`, the form editors
 use, which must report the same errors at the same places.
 
@@ -42,6 +46,7 @@ CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "guide"]
 
 EXPECT = re.compile(r"//\s*(out|error|panic):(.*)$")
+FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
 
@@ -54,7 +59,14 @@ class Test:
         self.out = []
         self.errors = []  # (line, text)
         self.panic = None  # (line, text)
-        for n, line in enumerate(source.splitlines(), 1):
+        self.files = []  # (name, text) for a test of several modules, the main one first
+        lines = source.splitlines()
+        starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
+        for k, (i, name) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+            # Blank lines first, so each file's line numbers are the test's.
+            self.files.append((name, "\n" * (i + 1) + "\n".join(lines[i + 1:end]) + "\n"))
+        for n, line in enumerate(lines, 1):
             m = EXPECT.search(line)
             if not m:
                 continue
@@ -116,7 +128,14 @@ def doc_examples(path, rel):
 
 def run_test(test, mode):
     with tempfile.TemporaryDirectory() as tmp:
-        if test.path:
+        if test.files:
+            for name, text in test.files:
+                f = pathlib.Path(tmp) / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text, encoding="utf-8")
+            path = pathlib.Path(tmp) / test.files[0][0]
+            shown = test.name
+        elif test.path:
             path = test.path
             shown = test.name
         else:
@@ -164,7 +183,7 @@ def check_errors(test, path):
         if m:
             actual.append((int(m.group(2)), m.group(4)))
             columns.append((int(m.group(2)), int(m.group(3)), m.group(4)))
-    problems += check_json(path, columns)
+    problems += check_json(test, path, columns)
     remaining = list(actual)
     for line, text in test.errors:
         match = next((a for a in remaining if a[0] == line and text in a[1]), None)
@@ -179,7 +198,7 @@ def check_errors(test, path):
     return problems
 
 
-def check_json(path, expected):
+def check_json(test, path, expected):
     """`calx check --json --stdin` must report the errors the text output does, at the same places
     (docs/reference/command.md). `expected` holds (line, byte column, message), both from 1."""
     source = path.read_bytes()
@@ -187,7 +206,7 @@ def check_json(path, expected):
     problems = []
     if p.returncode != 1:
         problems.append(f"--json: exit status {p.returncode}, expected 1")
-    lines = source.decode("utf-8", errors="replace").splitlines()
+    lines = test.source.splitlines() if test.files else source.decode("utf-8", errors="replace").splitlines()
     got = []
     for raw in p.stdout.decode("utf-8", errors="replace").splitlines():
         try:
@@ -201,7 +220,8 @@ def check_json(path, expected):
             continue
         if (end["line"], end["character"]) < (start["line"], start["character"]):
             problems.append(f"--json: the range of {d['message']!r} ends before it starts")
-        if d["file"] != str(path):
+        same = (path.resolve().parent in pathlib.Path(d["file"]).resolve().parents) if test.files else d["file"] == str(path)
+        if not same:
             problems.append(f"--json: {d['message']!r} is in {d['file']!r}, expected {str(path)!r}")
         got.append((line, character, d["message"]))
     # Columns agree where a line is ASCII: editors count UTF-16 units from 0, the text form bytes from 1.

@@ -61,6 +61,7 @@ There's no inheritance and there are no classes. A type gets behavior from its o
 - An impl has only the interface's members. Anything else goes in a separate `impl Square` block.
 - Structs, enums and the primitive types (integers, floats, `bool`, `char`, `rune` and `str`) can implement interfaces.
 - A type implements an interface at most once.
+- A type has one function of each name, as in Java. Its own `impl` blocks can't have a function named like one an interface gives it, a default included. To replace a default, put the function in the interface's impl.
 - An impl for a generic type can have bounds of its own. `impl<T: Code> Code for Wrapper<T>` gives `Wrapper<T>` a code whenever `T` has one.
 
 ```calx
@@ -121,7 +122,7 @@ fn main() {
 
 ## Calling one
 
-Generic code calls through its bounds, and other code calls on the type. A type's own methods come before its interfaces'. When two interfaces a type implements both have the name, `x.go()` is an error, and the interface's name says which one to call:
+Generic code calls through its bounds, and other code calls on the type. A call in generic code always means the bound's function, in every copy. When two interfaces a type implements both have the name, `x.go()` is an error, and the interface's name says which one to call:
 
 ```calx
 interface Up {

@@ -1,0 +1,67 @@
+// Modules import each other's `pub` items by name, from folders under the main module's (D73).
+// file: main.calx
+import geo.shapes.{Square, total}
+import util.{twice, LIMIT, Counter}
+
+fn main() {
+    let s = Square { side: 2.0 }
+    println("{s.area()} {total(s, Square { side: 1.0 })} {twice(LIMIT)}")    // out: 4.0 5.0 20
+    var c = Counter.new()
+    c.bump()
+    c.bump()
+    println("{c.get()} {Square.unit().side}")                                 // out: 2 1.0
+}
+
+// file: geo/shapes.calx
+module geo.shapes
+
+pub interface Shape {
+    fn area(self) -> f64
+}
+
+pub struct Square {
+    pub side: f64
+}
+
+impl Square {
+    pub fn unit() -> Square {
+        return Square { side: 1.0 }
+    }
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+}
+
+pub fn total<T: Shape>(a: T, b: T) -> f64 {
+    return a.area() + b.area()
+}
+
+// file: util.calx
+pub const LIMIT: i32 = 10
+
+pub fn twice(n: i32) -> i32 {
+    return same(n) * 2
+}
+
+fn same(n: i32) -> i32 {
+    return n
+}
+
+pub struct Counter {
+    hits: i32
+}
+
+impl Counter {
+    pub fn new() -> Counter {
+        return Counter { hits: 0 }
+    }
+    pub fn bump(c: mut Counter) {
+        c.hits += 1
+    }
+    pub fn get(self) -> i32 {
+        return self.hits
+    }
+}

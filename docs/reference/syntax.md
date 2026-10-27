@@ -18,7 +18,7 @@ fn main() {
 
 ## Files
 
-A source file is UTF-8, and its name ends in `.calx`. It may start with `module a.b.c`, whose last part must be the file's name: `module example.basics` belongs in `basics.calx`. Without a `module` line, the module is named after the file.
+A source file is UTF-8, and its name ends in `.calx`. Each file is a [module](modules.md). It can start with `module a.b.c`, which must match its place: `module game.world` is `game/world.calx` under the source root. A file at the root can leave the line out, and is then named after the file.
 
 ## Lines and statements
 

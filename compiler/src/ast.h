@@ -11,6 +11,7 @@ struct Stmt;
 struct Type;
 struct Pattern;
 struct TypeExpr;
+struct Module;
 struct Block;
 struct Item;
 
@@ -394,8 +395,10 @@ struct Item {
     // import
     Path import_path;
     Slice<ImportName> import_names;  // `import a.b.{X, Y}`
+    Module* imported = nullptr;      // filled in by the loader: the module it names
 
     // Filled in by the checker.
+    Module* module = nullptr;     // the module it's written in
     Type* declared = nullptr;     // struct: its type; const: the constant's type
     Type* result_type = nullptr;  // fn
     Type* impl_type = nullptr;    // a function in an impl block: the type
@@ -416,9 +419,10 @@ struct Item {
 
 struct Module {
     std::uint32_t file = 0;
-    Path name;  // from `module a.b.c`
+    Path name;  // from `module a.b.c`, or else filled in by the loader from the file's place
     std::string_view doc;
     Slice<Item*> items;
+    std::string_view prefix;  // filled in by the checker: its items' C names start with this
 };
 
 }  // namespace calx

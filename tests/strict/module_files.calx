@@ -1,0 +1,32 @@
+// A module is found by its name, the `module` line agrees with the file's place, and imports
+// can't form a cycle (D73).
+// file: main.calx
+import a.{one}
+import nowhere.{x}                       // error: there's no module `nowhere`; it would be the file
+import B.{two}                           // error: there's no module `B`
+import sub.inner.{three}                 // error: there's no module `sub.inner`
+import sub.bare.{four}
+
+fn main() {
+    println("{one()} {four()}")
+}
+
+// file: a.calx
+import b.{two}
+
+pub fn one() -> i32 {
+    return two()
+}
+
+// file: b.calx
+module c                                 // error: this file is module `b` by its place, so its `module` line must say `module b`
+import a.{one}                           // error: imports can't form a cycle: `a` imports `b`, which imports `a`
+
+pub fn two() -> i32 {
+    return one()
+}
+
+// file: sub/bare.calx
+pub fn four() -> i32 {                   // error: a module in a folder starts with its `module` line: `module sub.bare`
+    return 4
+}

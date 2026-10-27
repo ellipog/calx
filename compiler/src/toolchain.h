@@ -46,7 +46,9 @@ struct BuildResult {
     double link_ms = 0;
 };
 
-// Compiles `c_source` and links it with the runtime, reusing cached objects and executables.
-BuildResult build_program(const Toolchain& tc, const std::string& c_source, BuildMode mode, bool verbose);
+// Compiles each of `c_sources`, one per module, and links them with the runtime. Each object is
+// cached under a hash of its C text, so only files whose text changed are compiled again, all at
+// once (D64), and an unchanged program is reused whole.
+BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose);
 
 }  // namespace calx

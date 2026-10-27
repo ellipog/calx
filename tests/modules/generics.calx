@@ -1,0 +1,80 @@
+// Generics across modules: each module that uses an instance gets its own copy, which can call
+// private functions and read private constants of the generic's module (D75).
+// file: app/main.calx
+module app.main
+
+import app.stats.{Scored, best, scale, Grade, Pair}
+import app.report.{summary}
+
+struct Player {
+    name: str
+    points: i32
+}
+
+impl Scored for Player {
+    fn score(self) -> i32 {
+        return self.points
+    }
+}
+
+fn main() {
+    let a = Player { name: "a", points: 7 }
+    let b = Player { name: "b", points: 9 }
+    println("{best(a, b).name} {scale(3)} {Grade.Gold}")    // out: b 6.0 Gold
+    let p = Pair { left: 1, right: "x" }
+    println("{p.swap().left} {summary(4)}")                  // out: 4 is Silver; x 4
+}
+
+// file: app/stats.calx
+module app.stats
+
+pub interface Scored {
+    fn score(self) -> i32
+}
+
+impl Scored for i32 {
+    fn score(self) -> i32 {
+        return self
+    }
+}
+
+pub enum Grade { Gold, Silver }
+
+const FACTOR: f64 = 2.0
+
+fn pick_first(a: i32, b: i32) -> bool {
+    return a >= b
+}
+
+pub fn best<T: Scored>(a: T, b: T) -> T {
+    return if pick_first(a.score(), b.score()) { a } else { b }
+}
+
+pub fn scale<T: Scored>(x: T) -> f64 {
+    return f64(x.score()) * FACTOR
+}
+
+pub fn grade(n: i32) -> Grade {
+    return if n > 5 { Grade.Gold } else { Grade.Silver }
+}
+
+pub struct Pair<A, B> {
+    pub left: A
+    pub right: B
+}
+
+impl<A, B> Pair<A, B> {
+    pub fn swap(self) -> Pair<B, A> {
+        return Pair { left: self.right, right: self.left }
+    }
+}
+
+// file: app/report.calx
+module app.report
+
+import app.stats.{best, grade}
+
+pub fn summary(n: i32) -> i32 {
+    print("{n} is {grade(n)}; ")
+    return best(n, 1)
+}

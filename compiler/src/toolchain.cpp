@@ -350,7 +350,7 @@ int substitute(std::vector<std::string>& args, const std::string& from, const st
     return count;
 }
 
-const char* const kLinkInputs[] = {"{calx-input-0}", "{calx-input-1}"};
+const char* const kLinkInputs = "{calx-inputs}";  // stands for every object, however many
 const char* const kLinkOutput = "{calx-output}";
 
 // The environment clang reads to find the C runtime and the system libraries.
@@ -388,8 +388,12 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
     std::string log = output + ".log";
     std::error_code ec;
 
-    auto fill = [&](std::vector<std::string> args) {
-        for (std::size_t i = 0; i < inputs.size(); i++) substitute(args, kLinkInputs[i], inputs[i]);
+    auto fill = [&](const std::vector<std::string>& tmpl) {
+        std::vector<std::string> args;
+        for (const std::string& a : tmpl) {
+            if (a == kLinkInputs) args.insert(args.end(), inputs.begin(), inputs.end());
+            else args.push_back(a);
+        }
         substitute(args, kLinkOutput, output);
         return args;
     };
@@ -437,11 +441,19 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
             if (verbose) print_command(driver);
             return run_process(driver) == 0;
         }
-        // Cached only if each input appears exactly once and the template rebuilds this command.
-        std::vector<std::string> tmpl = args;
-        bool exact = substitute(tmpl, output, kLinkOutput) >= 1;
-        for (std::size_t i = 0; i < inputs.size(); i++) {
-            exact = exact && substitute(tmpl, inputs[i], kLinkInputs[i]) == 1;
+        // Cached only if the inputs appear once each, whole and in order, so one placeholder can
+        // stand for them, and the template rebuilds this command.
+        std::vector<std::string> tmpl;
+        auto first = std::find(args.begin(), args.end(), inputs.empty() ? std::string() : inputs[0]);
+        bool exact = !inputs.empty() && first != args.end() &&
+                     static_cast<std::size_t>(args.end() - first) >= inputs.size() &&
+                     std::equal(inputs.begin(), inputs.end(), first);
+        if (exact) {
+            tmpl.assign(args.begin(), first);
+            tmpl.push_back(kLinkInputs);
+            tmpl.insert(tmpl.end(), first + static_cast<std::ptrdiff_t>(inputs.size()), args.end());
+            for (const std::string& in : inputs) exact = exact && std::count(tmpl.begin(), tmpl.end(), in) == 0;
+            exact = exact && substitute(tmpl, output, kLinkOutput) >= 1;
         }
         if (exact && fill(tmpl) == args) {
             std::string text;
@@ -513,7 +525,7 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
 
 }  // namespace
 
-BuildResult build_program(const Toolchain& tc, const std::string& c_source, BuildMode mode, bool verbose) {
+BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose) {
     BuildResult r;
     fs::path runtime = fs::path(tc.home) / "runtime";
     std::string rt_h, rt_c;
@@ -542,9 +554,14 @@ BuildResult build_program(const Toolchain& tc, const std::string& c_source, Buil
 
     std::string obj_dir = (fs::path(tc.cache) / "obj").string();
     std::string rt_key = hash_hex({"runtime", rt_h, rt_c, flag_text, tc.identity});
-    std::string prog_key = hash_hex({"program", c_source, rt_h, flag_text, tc.identity});
     std::string rt_obj = (fs::path(obj_dir) / (rt_key + ".o")).string();
-    std::string prog_obj = (fs::path(obj_dir) / (prog_key + ".o")).string();
+    std::vector<std::string> keys, objs;
+    std::string all_keys = rt_key;
+    for (const std::string& c : c_sources) {
+        keys.push_back(hash_hex({"module", c, rt_h, flag_text, tc.identity}));
+        objs.push_back((fs::path(obj_dir) / (keys.back() + ".o")).string());
+        all_keys += " " + keys.back();
+    }
 
     std::vector<std::string> link_flags;
     if (tc.lld) link_flags.push_back("-fuse-ld=lld");
@@ -557,7 +574,7 @@ BuildResult build_program(const Toolchain& tc, const std::string& c_source, Buil
 #endif
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
-    std::string exe_key = hash_hex({"exe", rt_key, prog_key, link_text, tc.identity});
+    std::string exe_key = hash_hex({"exe", all_keys, link_text, tc.identity});
     r.exe = (fs::path(tc.cache) / "bin" / (exe_key + kExe)).string();
     if (file_exists(r.exe)) {
         touch(r.exe);
@@ -587,16 +604,19 @@ BuildResult build_program(const Toolchain& tc, const std::string& c_source, Buil
     } else {
         compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     }
-    std::string c_path;
-    if (file_exists(prog_obj)) {
-        touch(prog_obj);
-    } else {
-        c_path = (fs::path(obj_dir) / (prog_key + ".c")).string();
-        if (!write_file_atomic(c_path, c_source)) {
+    std::vector<std::string> c_paths;
+    for (std::size_t i = 0; i < c_sources.size(); i++) {
+        if (file_exists(objs[i])) {
+            touch(objs[i]);
+            continue;
+        }
+        std::string c_path = (fs::path(obj_dir) / (keys[i] + ".c")).string();
+        if (!write_file_atomic(c_path, c_sources[i])) {
             std::fprintf(stderr, "calx: can't write %s\n", c_path.c_str());
             return r;
         }
-        compile(c_path, prog_obj, {});
+        c_paths.push_back(c_path);
+        compile(c_path, objs[i], {});
     }
     if (verbose) {
         for (const auto& c : compiles) {
@@ -619,7 +639,7 @@ BuildResult build_program(const Toolchain& tc, const std::string& c_source, Buil
                 return r;
             }
         }
-        if (!c_path.empty()) fs::remove(c_path, ec);
+        for (const std::string& c_path : c_paths) fs::remove(c_path, ec);
     }
     r.compile_ms = ms_since(t0);
 
@@ -628,7 +648,9 @@ BuildResult build_program(const Toolchain& tc, const std::string& c_source, Buil
     // Windows the PDB keeps the unique name, which the executable records, so debuggers find it.
     std::string stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + kExe)).string();
-    if (!link_program(tc, {prog_obj, rt_obj}, temp_exe, link_flags, verbose)) {
+    std::vector<std::string> inputs = objs;
+    inputs.push_back(rt_obj);
+    if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
         std::fprintf(stderr, "calx: linking failed\n");
         return r;
     }

@@ -18,6 +18,7 @@ add_executable(calx
     src/source.cpp
     src/lexer.cpp
     src/parser.cpp
+    src/modules.cpp
     src/types.cpp
     src/check.cpp
     src/emit.cpp

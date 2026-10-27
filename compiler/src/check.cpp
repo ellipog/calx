@@ -80,11 +80,17 @@ public:
         for (const char* b : {"some", "ok", "err"}) reserved_names_.push_back(ctx.names.intern(b));
     }
 
-    void run(Module* m, bool need_main) {
-        module_ = m;
-        prog_.root = m;
-        set_prefix(m);
-        collect(m);
+    void run(const std::vector<Module*>& modules, bool need_main) {
+        prog_.modules = modules;
+        for (Module* m : modules) {
+            auto scope = std::make_unique<Scope>();
+            scope->module = m;
+            scope_ = scope.get();
+            scopes_.emplace(m, std::move(scope));
+            set_prefix(m);
+            collect(m);
+        }
+        for (Module* m : modules) resolve_imports(m);
         resolve_params();
         // Bounds are checked once every impl is known, since a type's fields can need one.
         defer_bounds_ = true;
@@ -92,6 +98,7 @@ public:
         for (Item* it : enums_) resolve_enum(it);
         for (Item* it : interfaces_) collect_interface(it);
         for (Item* it : impls_) collect_impl(it);
+        check_one_name();
         defer_bounds_ = false;
         for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
         // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
@@ -111,17 +118,188 @@ public:
         instance_mode_ = true;
         for (std::size_t i = 0; i < pending_fns_.size(); i++) {
             Item* f = pending_fns_[i];
-            if (!failed_generics_.count(f->origin)) check_fn(f);
+            if (failed_generics_.count(f->origin)) continue;
+            // Copied now, after its definition was checked, so the copy keeps what that check
+            // worked out, such as which interface each call through a bound keeps to.
+            f->body = clone(f->origin->body);
+            check_fn(f);
         }
         instance_mode_ = false;
         order_types();
         check_unused_items();
-        if (need_main) find_main(m);
+        if (need_main) find_main(modules.back());
     }
 
 private:
     // What each generic parameter stands for, in one use.
     using Subst = std::unordered_map<Type*, Type*>;
+
+    // A module's names: what it declares, and what it imports (D73).
+    struct Scope {
+        Module* module = nullptr;
+        std::unordered_map<Name, Item*> items;
+        struct Import {
+            Item* item;
+            Span span;
+            bool used = false;
+        };
+        std::unordered_map<Name, Import> imports;
+    };
+
+    // Work on an item happens among its own module's names. Asked for from another module, say
+    // to resolve an imported struct's fields in the middle of a function, it also sets aside that
+    // function's locals and generic parameters, which mean nothing where the item is.
+    class InModule {
+    public:
+        InModule(Checker& c, const Item* it) : c_(c) {
+            if (!it || !it->module) return;
+            Scope* s = c.scopes_.at(it->module).get();
+            if (s == c.scope_) return;
+            switched_ = true;
+            scope_ = c.scope_;
+            c.scope_ = s;
+            env_.swap(c.env_);
+            visible_.swap(c.visible_);
+            marks_.swap(c.scope_marks_);
+            loops_.swap(c.loops_);
+            fn_ = c.fn_;
+            item_ = c.current_item_;
+            impl_ = c.current_impl_type_;
+            c.fn_ = nullptr;
+            c.current_item_ = nullptr;
+            c.current_impl_type_ = nullptr;
+        }
+        ~InModule() {
+            if (!switched_) return;
+            c_.scope_ = scope_;
+            c_.env_.swap(env_);
+            c_.visible_.swap(visible_);
+            c_.scope_marks_.swap(marks_);
+            c_.loops_.swap(loops_);
+            c_.fn_ = fn_;
+            c_.current_item_ = item_;
+            c_.current_impl_type_ = impl_;
+        }
+        InModule(const InModule&) = delete;
+        InModule& operator=(const InModule&) = delete;
+
+    private:
+        Checker& c_;
+        bool switched_ = false;
+        Scope* scope_ = nullptr;
+        std::vector<std::pair<Name, Type*>> env_;
+        std::vector<Local*> visible_;
+        std::vector<std::size_t> marks_;
+        std::vector<LoopCtx> loops_;
+        Item* fn_ = nullptr;
+        Item* item_ = nullptr;
+        Type* impl_ = nullptr;
+    };
+
+    // The item `n` names in the module being worked on: one of its own, or one it imports.
+    Item* find_item(Name n) {
+        if (auto it = scope_->items.find(n); it != scope_->items.end()) return it->second;
+        if (auto it = scope_->imports.find(n); it != scope_->imports.end()) {
+            it->second.used = true;
+            return it->second.item;
+        }
+        return nullptr;
+    }
+
+    std::string module_name(const Module* m) const {
+        std::string s;
+        for (std::size_t i = 0; i < m->name.parts.size(); i++) {
+            if (i) s += '.';
+            s += text(m->name.parts[i]);
+        }
+        return s;
+    }
+
+    // Whether code in the module being worked on can see `it`: it's `pub`, or it's here.
+    bool visible(const Item* it) const { return it->is_pub || it->module == scope_->module; }
+
+    bool field_visible(const Item* s, const FieldDecl& f) const { return f.is_pub || s->module == scope_->module; }
+
+    void private_field(Span at, const Item* s, const FieldDecl& f) {
+        error(at, "field " + q(text(f.name)) + " of " + q(text(s->name)) + " is private to " + q(module_name(s->module)));
+    }
+
+    void private_member(Span at, const Item* f) {
+        error(at, q(text(f->name)) + " is private to " + q(module_name(f->module)));
+        note(f->name_span, "it's declared here");
+    }
+
+    // Whether other modules can call `f`, so that its signature must show only `pub` types.
+    static bool exported(const Item* f) {
+        if (f->origin) return false;
+        if (f->interface_item && f->impl_type && f->impl_type->kind == TypeKind::param) return f->interface_item->is_pub;
+        if (!f->is_pub) return false;
+        if (!f->impl_type) return true;
+        const Item* owner = f->impl_type->generic ? f->impl_type->generic : f->impl_type->item;
+        return !owner || owner->is_pub;
+    }
+
+    // The first type `t` mentions that isn't `pub`, which a `pub` signature or field can't show.
+    static const Item* private_part(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::struct_:
+            case TypeKind::enum_: {
+                const Item* it = t->generic ? t->generic : t->item;
+                if (it && !it->is_pub) return it;
+                for (const Type* a : t->args) if (const Item* p = private_part(a)) return p;
+                return nullptr;
+            }
+            case TypeKind::optional:
+            case TypeKind::array: return private_part(t->elem);
+            case TypeKind::tuple:
+                for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
+                return nullptr;
+            default: return nullptr;
+        }
+    }
+
+    void public_type(const Type* t, Span at, const char* why) {
+        if (const Item* it = private_part(t)) error(at, q(text(it->name)) + " isn't `pub`, so " + why);
+    }
+
+    // `import a.b.{X, Y}` brings `pub` items of `a.b` in by name.
+    void resolve_imports(Module* m) {
+        Scope* here = scopes_.at(m).get();
+        for (Item* it : m->items) {
+            if (it->kind != ItemKind::import || !it->imported) continue;
+            Scope* from = scopes_.at(it->imported).get();
+            std::string from_name = module_name(it->imported);
+            if (it->import_names.empty()) {
+                error(it->import_path.span, "say what to import from " + q(from_name) + ", as in " +
+                                                q("import " + from_name + ".{Name}"));
+                continue;
+            }
+            for (const ImportName& n : it->import_names) {
+                auto found = from->items.find(n.name);
+                if (found == from->items.end()) {
+                    error(n.span, q(from_name) + " has no " + q(text(n.name)));
+                    continue;
+                }
+                Item* target = found->second;
+                if (!target->is_pub) {
+                    error(n.span, q(text(n.name)) + " isn't `pub` in " + q(from_name));
+                    note(target->name_span, "it's declared here");
+                    continue;
+                }
+                if (auto own = here->items.find(n.name); own != here->items.end()) {
+                    error(n.span, q(text(n.name)) + " is already the name of a " + item_kind(own->second) +
+                                      " here; Calx doesn't allow shadowing");
+                    continue;
+                }
+                if (auto prev = here->imports.find(n.name); prev != here->imports.end()) {
+                    error(n.span, q(text(n.name)) + " is already imported");
+                    note(prev->second.span, "it's imported here");
+                    continue;
+                }
+                here->imports.emplace(n.name, Scope::Import{target, n.span, false});
+            }
+        }
+    }
 
     // --- reporting -----------------------------------------------------------------------
 
@@ -150,30 +328,20 @@ private:
 
     // --- the module ------------------------------------------------------------------------
 
+    // A module's items are named in C after its path: `geo.shapes` gives `geo_shapes__Square`.
     void set_prefix(Module* m) {
-        std::string_view path = ctx_.sources.file(m->file).path;
-        std::size_t slash = path.find_last_of("/\\");
-        std::string_view base = slash == std::string_view::npos ? path : path.substr(slash + 1);
-        std::string_view stem = base.substr(0, base.rfind('.'));
         std::string prefix;
-        if (!m->name.parts.empty()) {
-            std::string_view last = text(m->name.parts[m->name.parts.size() - 1]);
-            if (last != stem) {
-                error(m->name.span, "module " + q(last) + " must be in a file named " + q(std::string(last) + ".calx"));
-            }
-            for (std::size_t i = 0; i < m->name.parts.size(); i++) {
-                if (i) prefix += '_';
-                prefix += text(m->name.parts[i]);
-            }
-        } else {
-            for (char c : stem) prefix += (std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
-            if (prefix.empty() || std::isdigit(static_cast<unsigned char>(prefix[0]))) prefix = "m" + prefix;
+        for (std::size_t i = 0; i < m->name.parts.size(); i++) {
+            if (i) prefix += '_';
+            prefix += text(m->name.parts[i]);
         }
-        prog_.prefix = ctx_.arena.copy(prefix);
+        m->prefix = ctx_.arena.copy(prefix);
     }
 
-    std::string_view c_name(std::initializer_list<std::string_view> parts) {
-        std::string s(prog_.prefix);
+    std::string_view c_name(std::initializer_list<std::string_view> parts) { return c_name_in(scope_->module, parts); }
+
+    std::string_view c_name_in(const Module* m, std::initializer_list<std::string_view> parts) {
+        std::string s(m->prefix);
         for (std::string_view p : parts) {
             s += "__";
             s += p;
@@ -202,7 +370,7 @@ private:
             error(it->name_span, q(text(it->name)) + " is a built-in name");
             return;
         }
-        auto [pos, fresh] = items_.emplace(it->name, it);
+        auto [pos, fresh] = scope_->items.emplace(it->name, it);
         if (!fresh) {
             error(it->name_span, q(text(it->name)) + " is already defined");
             note(pos->second->name_span, "the first definition is here");
@@ -211,6 +379,8 @@ private:
 
     void collect(Module* m) {
         for (Item* it : m->items) {
+            it->module = m;
+            for (Item* member : it->members) member->module = m;
             if (!it->attributes.empty()) {
                 error(it->attributes[0].span, "attributes aren't implemented yet");
             }
@@ -262,7 +432,7 @@ private:
                     }
                     impls_.push_back(it);
                     break;
-                case ItemKind::import: not_yet(it->span, "imports"); break;
+                case ItemKind::import: break;  // resolve_imports
                 case ItemKind::enum_:
                     declare_item(it);
                     it->c_name = c_name({text(it->name)});
@@ -292,6 +462,7 @@ private:
     }
 
     void resolve_fields(Item* s) {
+        InModule in(*this, s);
         if (s->resolved || s->resolving) return;
         s->resolving = true;
         Item* saved = current_item_;
@@ -304,6 +475,7 @@ private:
             }
             current_item_ = s;
             f.resolved = resolve_type(f.type);
+            if (s->is_pub && f.is_pub) public_type(f.resolved, f.type->span, "a `pub` field of a `pub` struct can't hold it");
         }
         pop_env(mark);
         current_item_ = saved;
@@ -314,6 +486,7 @@ private:
     }
 
     void check_defaults(Item* s) {
+        InModule in(*this, s);
         std::size_t before = ctx_.diags.error_count();
         std::size_t mark = push_env(s);
         for (FieldDecl& f : s->fields) {
@@ -331,6 +504,7 @@ private:
     // struct with errors has them reported once.
     void check_instance_defaults(Type* t) {
         if (failed_generics_.count(t->generic)) return;
+        InModule in(*this, t->item);
         std::size_t mark = push_env(t->item);
         for (FieldDecl& f : t->item->fields) {
             if (f.default_value) check(f.default_value, f.resolved);
@@ -341,6 +515,7 @@ private:
     static bool is_type_item(const Item* it) { return it->kind == ItemKind::struct_ || it->kind == ItemKind::enum_; }
 
     void resolve_enum(Item* en) {
+        InModule in(*this, en);
         if (en->resolved || en->resolving) return;
         en->resolving = true;
         Item* saved_item = current_item_;
@@ -356,13 +531,17 @@ private:
                 note(seen[v.name], "the first declaration is here");
             }
             std::vector<Type*> types;
-            for (TypeExpr* p : v.payload) types.push_back(resolve_type(p));
+            for (TypeExpr* p : v.payload) {
+                types.push_back(resolve_type(p));
+                if (en->is_pub) public_type(types.back(), p->span, "a `pub` enum's variants can't hold it");
+            }
             std::unordered_map<Name, Span> fields;
             for (FieldDecl& f : v.fields) {
                 if (!fields.emplace(f.name, f.span).second) {
                     error(f.span, "field " + q(text(f.name)) + " is already declared");
                 }
                 f.resolved = resolve_type(f.type);
+                if (en->is_pub) public_type(f.resolved, f.type->span, "a `pub` enum's variants can't hold it");
                 types.push_back(f.resolved);
                 if (f.default_value) error(f.default_value->span, "a variant's fields can't have defaults");
             }
@@ -450,6 +629,7 @@ private:
     // An interface's functions are generic over `Self`. One with a body is a default, which is
     // checked once for every `Self` and copied for each type that doesn't write its own.
     void collect_interface(Item* it) {
+        InModule in(*this, it);
         Type* self = it->type_params[0];
         std::unordered_map<Name, Item*> seen;
         for (Item* m : it->members) {
@@ -528,6 +708,7 @@ private:
     }
 
     void collect_impl(Item* impl) {
+        InModule in(*this, impl);
         Item* iface = nullptr;
         if (impl->interface) {
             iface = resolve_interface(impl->interface);
@@ -547,6 +728,20 @@ private:
         bool nominal = t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_;
         if (!iface && !nominal) {
             error(impl->self_type->span, "methods can only be added to structs and enums declared in this module");
+            return;
+        }
+        // An impl is in the module of its type or its interface, so there's one place to look
+        // for it, and two modules can't both implement an interface for a type.
+        const Item* owner = nominal ? (t->generic ? t->generic : t->item) : nullptr;
+        bool type_here = owner && owner->module == scope_->module;
+        if (!iface && nominal && !type_here) {
+            error(impl->self_type->span, "methods for " + name_of(t) + " go in its module, " + q(module_name(owner->module)));
+            return;
+        }
+        if (iface && !type_here && iface->module != scope_->module) {
+            error(impl->self_type->span, "an impl of " + q(text(iface->name)) + " for " + name_of(t) + " goes in " +
+                                             q(text(iface->name)) + "'s module, " + q(module_name(iface->module)) +
+                                             (owner ? ", or in " + name_of(t) + "'s, " + q(module_name(owner->module)) : std::string()));
             return;
         }
         if (iface && !nominal && !is_numeric(t) && t->kind != TypeKind::bool_ && t->kind != TypeKind::char_ &&
@@ -630,10 +825,11 @@ private:
             if (t->kind == TypeKind::enum_ && find_variant(t, m->name) != UINT32_MAX) {
                 error(m->name_span, q(text(m->name)) + " is both a variant and a function of " + name_of(t));
             }
-            // Two blocks for overlapping types can't both have the name.
+            // Two blocks for overlapping types can't both have the name. Against the type's
+            // interfaces, that's checked once every impl is known (check_one_name).
             bool clash = false;
             for (ImplInfo* other : same_head) {
-                if (other->iface || !other->members.count(m->name)) continue;
+                if (iface || other->iface || !other->members.count(m->name)) continue;
                 Subst a, b;
                 if (unify(other->self, t, a, other->impl->type_params) || unify(t, other->self, b, impl->type_params)) {
                     error(m->name_span, name_of(t) + " already has a function named " + q(text(m->name)));
@@ -661,6 +857,40 @@ private:
         same_head.push_back(info);
     }
 
+    // A type has one function of each name, as in Java: its own impls can't reuse a name an
+    // interface it implements gives it, a default included, so `x.name()` means one thing.
+    // Replacing a default goes in the interface's impl.
+    void check_one_name() {
+        for (const auto& own : impl_infos_) {
+            if (own->iface) continue;
+            for (ImplInfo* other : impls_by_head_[head(own->self)]) {
+                if (!other->iface) continue;
+                Subst a, b;
+                if (!unify(other->self, own->self, a, other->impl->type_params) &&
+                    !unify(own->self, other->self, b, own->impl->type_params)) {
+                    continue;
+                }
+                for (Item* m : own->impl->members) {
+                    auto mine = own->members.find(m->name);
+                    if (m->kind != ItemKind::fn || mine == own->members.end() || mine->second != m) continue;
+                    Item* theirs = nullptr;
+                    if (auto f = other->members.find(m->name); f != other->members.end()) theirs = f->second;
+                    Item* d = interface_member(other->iface, m->name);
+                    bool is_default = !theirs && d && d->kind == ItemKind::fn && d->body;
+                    if (is_default) theirs = d;
+                    if (!theirs) continue;
+                    std::string iface = std::string(text(other->iface->name));
+                    error(m->name_span, name_of(own->self) + " gets " + q(text(m->name)) + " from " + q(iface) +
+                                            ", so its own impl can't have one; " +
+                                            (is_default ? "to replace the default, put it in the " +
+                                                              q("impl " + iface + " for " + std::string(own->self->name)) + " block"
+                                                        : std::string("rename one of them")));
+                    note(theirs->name_span, "this is the other");
+                }
+            }
+        }
+    }
+
     // --- generics ------------------------------------------------------------------------
     //
     // A generic item is checked once, with each parameter a type of its own that allows only what
@@ -681,7 +911,12 @@ private:
         Item* konst = nullptr;
         Subst s;  // what the member's parameters stand for, as far as the type says
         bool ambiguous = false;
+        Item* iface = nullptr;  // the interface it's from, or null for the type's own impls
     };
+
+    // A function from the type's own impls is seen where it's `pub` or written; one from an
+    // interface, wherever the interface is.
+    bool member_visible(const Member& m) const { return m.iface || !m.fn || visible(m.fn); }
 
     struct DeferredBounds {
         Slice<Type*> params;
@@ -733,6 +968,7 @@ private:
     void resolve_params() {
         std::unordered_map<Item*, std::unordered_map<Name, Span>> seen;
         for (auto& [p, g] : param_decls_) {
+            InModule in(*this, param_owner_[p]);
             auto& names = seen[param_owner_[p]];
             if (!names.emplace(g->name, g->span).second) {
                 error(g->span, "generic parameter " + q(text(g->name)) + " is already declared");
@@ -741,8 +977,8 @@ private:
                 for (Type* other : param_owner_[p]->type_params) {
                     if (param_names_[other] == g->name) param_used_[other] = true;
                 }
-            } else if (auto it = items_.find(g->name); it != items_.end()) {
-                error(g->span, q(text(g->name)) + " is already the name of a " + item_kind(it->second) +
+            } else if (Item* it = find_item(g->name)) {
+                error(g->span, q(text(g->name)) + " is already the name of a " + item_kind(it) +
                                    "; Calx doesn't allow shadowing");
             } else if (is_builtin_name(g->name)) {
                 error(g->span, q(text(g->name)) + " is a built-in name");
@@ -766,14 +1002,14 @@ private:
             error(t->span, "a bound must be an interface");
             return nullptr;
         }
-        auto it = items_.find(t->path.parts[0]);
-        if (it == items_.end() || it->second->kind != ItemKind::interface) {
-            error(t->span, q(path_text(t->path)) + (it == items_.end() ? " isn't defined" : " isn't an interface"));
+        Item* it = find_item(t->path.parts[0]);
+        if (!it || it->kind != ItemKind::interface) {
+            error(t->span, q(path_text(t->path)) + (!it ? " isn't defined" : " isn't an interface"));
             return nullptr;
         }
         if (!t->args.empty()) not_yet(t->args[0]->span, "generic interfaces");
-        it->second->used = true;
-        return it->second;
+        it->used = true;
+        return it;
     }
 
     // A parameter that nothing mentions can't be worked out from a use, so it's an error (D63).
@@ -991,18 +1227,19 @@ private:
     Member lookup(Type* t, Name n, Item* only = nullptr) {
         Member m;
         if (is_bad(t)) return m;
-        auto take = [&](Item* x, Subst s) {
+        auto take = [&](Item* x, Subst s, Item* iface) {
             if (m.fn || m.konst) {
                 m.ambiguous = true;
                 return;
             }
             (x->kind == ItemKind::fn ? m.fn : m.konst) = x;
             m.s = std::move(s);
+            m.iface = iface;
         };
         if (t->kind == TypeKind::param) {
             for (Item* b : t->bounds) {
                 if (only && b != only) continue;
-                if (Item* x = interface_member(b, n)) take(x, Subst{{b->type_params[0], t}});
+                if (Item* x = interface_member(b, n)) take(x, Subst{{b->type_params[0], t}}, b);
             }
             return m;
         }
@@ -1018,11 +1255,11 @@ private:
                 continue;
             }
             info->used = true;
-            take(f->second, std::move(s));
+            take(f->second, std::move(s), nullptr);
         }
         if (m.fn || m.konst || identity) return m;
         for (ImplInfo* info : found->second) {
-            if (!info->iface || (only && info->iface != only)) continue;
+            if (!info->iface || (only && info->iface != only) || !visible(info->iface)) continue;
             Subst s;
             if (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s)) continue;
             Item* x = nullptr;
@@ -1034,7 +1271,7 @@ private:
             }
             if (!x) continue;
             info->used = true;
-            take(x, std::move(s));
+            take(x, std::move(s), info->iface);
         }
         return m;
     }
@@ -1097,7 +1334,7 @@ private:
         t->generic = g;
         t->args = it->type_args;
         for (Type* a : args) t->open = t->open || a->open;
-        it->c_name = c_name({mangle(t)});
+        it->c_name = c_name_in(g->module, {mangle(t)});
         type_instances_.emplace(key, t);
         instances_.push_back(t);
         if (!g->resolved && !g->resolving) {
@@ -1174,7 +1411,7 @@ private:
             p.default_value = clone(p.default_value);
         }
         it->params = ctx_.arena.copy(ps);
-        it->body = clone(f->body);
+        it->body = nullptr;  // copied when it's checked
         it->checked_signature = false;
         it->is_method = false;
         it->used = true;
@@ -1190,7 +1427,7 @@ private:
         base += text(f->name);
         std::size_t own = f->generics.size();
         for (std::size_t k = args.size() - own; k < args.size(); k++) base += "__" + mangle(args[k]);
-        it->c_name = c_name({base});
+        it->c_name = c_name_in(f->module, {base});
         fn_instances_.emplace(key, it);
         check_signature(it);
         pending_fns_.push_back(it);
@@ -1327,19 +1564,19 @@ private:
                 }
                 Type* r = T.primitive(text(n));
                 if (!r) {
-                    auto it = items_.find(n);
+                    Item* it = n == n_Self_ && current_impl_type_ ? nullptr : find_item(n);
                     if (n == n_Self_ && current_impl_type_) {
                         r = current_impl_type_;
-                    } else if (it != items_.end() && is_type_item(it->second)) {
-                        r = it->second->declared;
-                        if (it->second != current_item_) it->second->used = true;
-                        if (!it->second->type_params.empty()) return generic_type(it->second, t->args, t->span);
-                    } else if (it != items_.end() && it->second->kind == ItemKind::interface) {
-                        it->second->used = true;
+                    } else if (it && is_type_item(it)) {
+                        r = it->declared;
+                        if (it != current_item_) it->used = true;
+                        if (!it->type_params.empty()) return generic_type(it, t->args, t->span);
+                    } else if (it && it->kind == ItemKind::interface) {
+                        it->used = true;
                         error(t->span, q(text(n)) + " is an interface, not a type; take a generic parameter with it as a "
                                                     "bound, such as " + q("<T: " + std::string(text(n)) + ">"));
                         return T.error;
-                    } else if (it != items_.end()) {
+                    } else if (it) {
                         error(t->span, q(text(n)) + " isn't a type");
                         return T.error;
                     } else {
@@ -1443,6 +1680,7 @@ private:
     void check_signature(Item* f) {
         if (f->checked_signature) return;
         f->checked_signature = true;
+        InModule in(*this, f);
         Type* saved_impl = current_impl_type_;
         std::size_t mark = push_env(f);
         current_impl_type_ = f->impl_type;
@@ -1479,6 +1717,12 @@ private:
         }
         if (f->error) not_yet(f->error->span, "functions that can fail");
         f->result_type = f->result ? resolve_type(f->result) : T.unit;
+        if (exported(f)) {
+            for (const Param& p : f->params) {
+                if (p.local && p.type) public_type(p.local->type, p.type->span, "a `pub` function can't take it");
+            }
+            if (f->result) public_type(f->result_type, f->result->span, "a `pub` function can't return it");
+        }
         if (f->result && f->result_type->kind == TypeKind::unit) {
             error(f->result->span, "leave out `-> ()`: a function without `->` returns nothing");
         }
@@ -1488,6 +1732,7 @@ private:
 
     void check_const(Item* c) {
         if (c->declared) return;
+        InModule in(*this, c);
         if (checking_consts_.count(c)) {
             error(c->name_span, "constant " + q(text(c->name)) + " refers to itself");
             c->declared = T.error;
@@ -1541,6 +1786,7 @@ private:
     // --- functions -------------------------------------------------------------------------
 
     void check_fn(Item* f) {
+        InModule in(*this, f);
         fn_ = f;
         current_impl_type_ = f->impl_type;
         std::size_t mark = push_env(f);
@@ -1618,11 +1864,11 @@ private:
             error(l->span, q(text(l->name)) + " is already defined; Calx doesn't allow shadowing");
             note(prev->span, "the earlier definition is here");
             prev->used = true;
-        } else if (auto it = items_.find(l->name); it != items_.end()) {
-            error(l->span, q(text(l->name)) + " is already the name of a " + item_kind(it->second) +
+        } else if (Item* it = find_item(l->name)) {
+            error(l->span, q(text(l->name)) + " is already the name of a " + item_kind(it) +
                                "; Calx doesn't allow shadowing");
-            note(it->second->name_span, "it's defined here");
-            it->second->used = true;
+            note(it->name_span, "it's defined here");
+            it->used = true;
         } else if (is_builtin_name(l->name)) {
             error(l->span, q(text(l->name)) + " is a built-in name");
         }
@@ -2374,14 +2620,14 @@ private:
             r.type = p;
             return r;
         }
-        if (auto it = items_.find(n); it != items_.end()) {
-            if (is_type_item(it->second)) {
+        if (Item* it = find_item(n)) {
+            if (is_type_item(it)) {
                 r.kind = NameKind::type;
-                r.type = it->second->declared;
-                r.item = it->second;
+                r.type = it->declared;
+                r.item = it;
             } else {
                 r.kind = NameKind::item;
-                r.item = it->second;
+                r.item = it;
             }
             return r;
         }
@@ -2865,6 +3111,7 @@ private:
             for (std::uint32_t i = 0; i < s->fields.size(); i++) {
                 if (s->fields[i].name == e->member) {
                     e->field_index = i;
+                    if (!field_visible(s, s->fields[i])) private_field(e->span, s, s->fields[i]);
                     return s->fields[i].resolved;
                 }
             }
@@ -2939,7 +3186,8 @@ private:
                 return t;
             }
         }
-        Member mem = lookup(t, e->member);
+        Member mem = lookup(t, e->member, e->only_interface);
+        if (t->kind == TypeKind::param && mem.konst && !mem.ambiguous) e->only_interface = mem.iface;
         if (mem.ambiguous) {
             error(e->span, q(m) + " is in more than one interface " + name_of(t) + " implements");
             return T.error;
@@ -3145,13 +3393,19 @@ private:
                 continue;
             }
             given[index] = true;
+            if (!field_visible(s, s->fields[index])) private_field(f.span, s, s->fields[index]);
             check_inferred(v, s->fields[index].resolved, sub, vars);
             values[index] = v;
         }
         bool missing = false;
         for (std::uint32_t i = 0; i < s->fields.size(); i++) {
             if (!given[i] && !s->fields[i].default_value) {
-                error(e->span, "missing field " + q(text(s->fields[i].name)) + " in " + q(text(s->name)));
+                if (!field_visible(s, s->fields[i])) {
+                    error(e->span, q(text(s->name)) + " can only be built in " + q(module_name(s->module)) + ", since its field " +
+                                       q(text(s->fields[i].name)) + " is private there and has no default");
+                } else {
+                    error(e->span, "missing field " + q(text(s->fields[i].name)) + " in " + q(text(s->name)));
+                }
                 missing = true;
             }
         }
@@ -4148,7 +4402,7 @@ private:
         }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index) {
             // `T.something(...)`: a conversion or a static function.
-            if (callee->lhs->kind == ExprKind::name && !e->only_interface) {
+            if (callee->lhs->kind == ExprKind::name) {
                 Resolved r = resolve_name(callee->lhs->path.parts[0]);
                 if (r.kind == NameKind::type) {
                     Type* t = type_of_name(callee->lhs, r.type);
@@ -4167,6 +4421,9 @@ private:
                 return T.error;
             }
             Member mem = lookup(recv, callee->member, e->only_interface);
+            // Through a parameter, the bound says which interface answers, and an instance, whose
+            // type could have the name in another interface too, keeps to it.
+            if (recv->kind == TypeKind::param && mem.fn && !mem.ambiguous) e->only_interface = mem.iface;
             if (mem.ambiguous) {
                 error(callee->span, q(text(callee->member)) + " is in more than one interface " + name_of(recv) +
                                         " implements; say which, as in " + q(ambiguity_example(recv, callee->member)));
@@ -4179,6 +4436,7 @@ private:
                 return T.error;
             }
             if (mem.fn) {
+                if (!member_visible(mem)) private_member(callee->span, mem.fn);
                 if (!mem.fn->is_method) {
                     error(callee->span, q(text(mem.fn->name)) + " isn't a method; call it as " +
                                             q(std::string(recv->name) + "." + std::string(text(mem.fn->name)) + "(...)"));
@@ -4281,7 +4539,8 @@ private:
             if (i != UINT32_MAX) return variant_call(e, t, i, expected);
             if (m == "try_from") return try_from(e, t);
         }
-        Member mem = lookup(t, e->callee->member);
+        Member mem = lookup(t, e->callee->member, e->only_interface);
+        if (t->kind == TypeKind::param && mem.fn && !mem.ambiguous) e->only_interface = mem.iface;
         if (mem.ambiguous) {
             error(e->callee->span, q(m) + " is in more than one " + (is_identity(t) ? "impl of " : "interface ") + name_of(t) +
                                        (is_identity(t) ? "; give its types, as in " + q(std::string(text(t->generic->name)) + "<...>." + std::string(m) + "(...)")
@@ -4290,6 +4549,7 @@ private:
             return T.error;
         }
         if (mem.fn) {
+            if (!member_visible(mem)) private_member(e->callee->span, mem.fn);
             if (mem.fn->is_method) {
                 error(e->callee->span, q(text(mem.fn->name)) + " is a method; call it on a value: " + q("x." + std::string(m) + "(...)"));
                 for (Arg& a : e->args) check(a.value, nullptr);
@@ -4850,7 +5110,12 @@ private:
             error(info->impl->self_type->span, "this impl of " + q(text(info->iface->name)) + " for " + name_of(info->self) +
                                                    " is never used");
         }
-        for (Item* it : module_->items) {
+        for (const auto& [m, scope] : scopes_) {
+            for (const auto& [n, imp] : scope->imports) {
+                if (!imp.used) error(imp.span, q(text(n)) + " is imported but never used");
+            }
+        }
+        for (Module* mod : prog_.modules) for (Item* it : mod->items) {
             if (it->kind == ItemKind::impl) {
                 for (Item* m : it->members) {
                     if (m->kind == ItemKind::fn && !m->is_pub && !m->used && m->impl_type && !m->interface_item) {
@@ -4860,7 +5125,7 @@ private:
                 continue;
             }
             if (it->is_pub || it->used) continue;
-            if (it->kind == ItemKind::fn && text(it->name) == "main") continue;
+            if (it->kind == ItemKind::fn && text(it->name) == "main" && mod == prog_.modules.back()) continue;
             if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_ || it->kind == ItemKind::interface) {
                 if (it->kind == ItemKind::fn && !it->body) continue;
                 error(it->name_span, std::string(item_kind(it)) + " " + q(text(it->name)) + " is never used");
@@ -4869,8 +5134,9 @@ private:
     }
 
     void find_main(Module* m) {
-        auto it = items_.find(ctx_.names.intern("main"));
-        if (it == items_.end() || it->second->kind != ItemKind::fn) {
+        auto& items = scopes_.at(m)->items;
+        auto it = items.find(ctx_.names.intern("main"));
+        if (it == items.end() || it->second->kind != ItemKind::fn) {
             error(Span{m->file, 0, 0}, "a program needs a `fn main()`");
             return;
         }
@@ -4888,10 +5154,10 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    Module* module_ = nullptr;
     Name n_self_, n_underscore_, n_Self_;
     std::vector<Name> builtin_names_, reserved_names_;
-    std::unordered_map<Name, Item*> items_;
+    std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
+    Scope* scope_ = nullptr;  // the module being worked on
     std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_;
     std::unordered_map<Item*, bool> checking_consts_;
     Item* current_item_ = nullptr;
@@ -4929,9 +5195,9 @@ private:
 
 }  // namespace
 
-void check_module(CheckContext ctx, Module* module, Program& program, bool need_main) {
+void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main) {
     Checker c(ctx, program);
-    c.run(module, need_main);
+    c.run(modules, need_main);
 }
 
 }  // namespace calx
