@@ -11,7 +11,8 @@ The tick-loop benchmark behind the Phase 3 performance gate. [`docs/benchmarks.m
 py -I bench/run.py rust                 # 10 runs each at 1 worker and one per physical core
 py -I bench/run.py rust --record        # the same, written to bench/results/rust-<platform>.json
 py -I bench/run.py rust --threads 1,8 --runs 3 --warmup 20 --ticks 100    # a quick look
-py -I bench/run.py calx --threads 1     # the Calx version, built with build/compiler/<platform>/calx
+py -I bench/run.py calx                 # the Calx version, built with build/compiler/<platform>/calx
+py -I bench/build.py --record           # how fast Calx builds, written to bench/results/build-<platform>.json
 ```
 
 On Linux, use `python3` for `py`. The runner builds the version first, into `build/bench/<platform>/`. Every run of the full 200 + 1,000 ticks must print the checksum in [`expected.json`](expected.json), and every run of a configuration must agree, or the runner stops. Only full runs can be recorded.
@@ -45,6 +46,8 @@ Each pass is a `parallel for` over the regions, on the runtime's pool, and `--th
 | `results/rust-windows.json` | The Rust reference on Windows 11 |
 | `results/rust-linux.json` | The Rust reference on Ubuntu under WSL2, on the same machine |
 | `results/calx-windows.json` | The Calx version on Windows 11 |
+| `results/calx-linux.json` | The Calx version on Ubuntu under WSL2 |
+| `results/build-windows.json`, `results/build-linux.json` | How fast Calx builds, from [`build.py`](build.py) |
 
 Each file names the commit, the machine (CPU, cores, memory, OS), the toolchain (rustc and its LLVM), and every run's mean tick time. The numbers in the gate are the medians.
 
@@ -61,8 +64,27 @@ The machine is an Intel Core i9-13900K: 8 performance cores and 16 efficiency co
 
 The Calx version as recorded, with clang 23.1.4, the same runs:
 
-| Platform | 1 worker | Against Rust |
-| --- | --- | --- |
-| Windows 11 | 17.56 ms per tick (p99 20.03) | 0.68× |
+| Platform | 1 worker | Against Rust | 24 workers | Against Rust |
+| --- | --- | --- | --- | --- |
+| Windows 11 | 18.06 ms per tick (p99 25.35) | 0.70× | 2.25 ms (p99 2.55) | 0.66× |
+| Linux (WSL2) | 18.01 ms (p99 20.57) | 0.69× | 2.46 ms (p99 2.94) | 0.70× |
 
-The checksum was the same. D89 lists the compiler changes behind the lead: `-O3`, telling clang that views are always valid, and letting `mut` arguments be separate fields of one value.
+Every run printed the same checksum as the Rust reference. D89 lists the compiler changes behind the lead: `-O3`, telling clang that views are always valid, and letting `mut` arguments be separate fields of one value. D90 is `parallel for` and its pool. The Windows 1-worker p99 is high because of other load on the machine during that run. An earlier one-worker run on a quieter machine gave 17.56 ms with p99 20.03.
+
+## Build times (D64)
+
+[`build.py`](build.py) times the compiler the way G3.4 measures it. It generates a program of 64 modules, each importing the one before, about 9,900 lines in all, and builds it. It also builds a one-line program and the tick benchmark. Each time is the median of 5, from a fresh process.
+
+| Measure | Windows 11 | Linux (WSL2) | G3.4 |
+| --- | --- | --- | --- |
+| `calx check`, 64 modules | 32 ms | 24 ms | |
+| Debug build, empty cache, 64 modules | 520 ms | 278 ms | |
+| Release build, empty cache, 64 modules | 663 ms | 550 ms | |
+| Debug build after changing one of the 64 | 123 ms | 78 ms | |
+| `calx run` of a small program, empty cache | 274 ms | 302 ms | under 500 ms |
+| `calx run` of it again, nothing changed | 16 ms | 21 ms | under 50 ms |
+| Debug build of the tick benchmark after changing it | 125 ms | 121 ms | under 1 s |
+
+An empty cache means the runtime is built too. The generated program goes in the temp folder, so under WSL it's on Linux's own file system: through `/mnt/c`, reading the 65 files took most of a 420 ms check.
+
+CI runs both scripts on every push, on GitHub's shared runners. There the times are only a rough guide, but the tick benchmark's checksum must still match.

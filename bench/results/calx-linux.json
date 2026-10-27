@@ -1,0 +1,62 @@
+{
+  "impl": "calx",
+  "recorded": "2026-10-27T11:52:40Z",
+  "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
+  "machine": {
+    "platform": "linux",
+    "python": "3.14.4",
+    "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 16,
+    "threads": 32,
+    "memory_gib": 23.3,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "note": "WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"
+  },
+  "toolchain": {
+    "calx": "calx 0.1.0",
+    "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
+    "clang": "Ubuntu clang version 23.1.5 (++20261023092600+395ba2c4d274-1~exp1~20261023092610.88)"
+  },
+  "warmup": 200,
+  "ticks": 1000,
+  "runs": 10,
+  "configs": [
+    {
+      "threads": 1,
+      "median_mean_tick_us": 18010.836,
+      "median_p99_tick_us": 20572.637,
+      "runs_mean_tick_us": [
+        17910.844,
+        17961.38,
+        17976.527,
+        18016.137,
+        18029.739,
+        17991.033,
+        18011.159,
+        18010.512,
+        18144.564,
+        18103.971
+      ],
+      "checksum": "0a7e97a835579c25"
+    },
+    {
+      "threads": 24,
+      "median_mean_tick_us": 2463.815,
+      "median_p99_tick_us": 2935.598,
+      "runs_mean_tick_us": [
+        2436.694,
+        2435.944,
+        2490.129,
+        2462.767,
+        2470.259,
+        2464.863,
+        2480.552,
+        2498.925,
+        2433.468,
+        2450.747
+      ],
+      "checksum": "0a7e97a835579c25"
+    }
+  ]
+}

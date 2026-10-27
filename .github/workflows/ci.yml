@@ -34,6 +34,12 @@ jobs:
         run: clang --version
       - name: Tests
         run: python -I tests/run.py --modes debug,release
+      # A full run must print the expected checksum, with one thread and with several. The
+      # times on a shared runner are only a rough guide.
+      - name: Tick benchmark
+        run: python -I bench/run.py calx --threads 1,4 --runs 1
+      - name: Build times
+        run: python -I bench/build.py --runs 3
 
   # The VS Code extension: its grammar on every example in the repo, and its helpers. The
   # packaged .vsix is kept as an artifact, so it can be installed without a checkout.

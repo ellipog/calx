@@ -1,7 +1,7 @@
 {
   "impl": "calx",
-  "recorded": "2026-10-27T11:11:47Z",
-  "commit": "286ab0920c37ad5bfd7336371f75ce16902613ff",
+  "recorded": "2026-10-27T11:47:10Z",
+  "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
   "machine": {
     "platform": "windows",
     "python": "3.14.6",
@@ -13,7 +13,7 @@
   },
   "toolchain": {
     "calx": "calx 0.1.0",
-    "commit": "286ab0920c37ad5bfd7336371f75ce16902613ff",
+    "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
     "clang": "clang version 23.1.4 (https://github.com/llvm/llvm-project 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5)"
   },
   "warmup": 200,
@@ -22,19 +22,37 @@
   "configs": [
     {
       "threads": 1,
-      "median_mean_tick_us": 17563.553,
-      "median_p99_tick_us": 20028.45,
+      "median_mean_tick_us": 18056.122,
+      "median_p99_tick_us": 25352.1,
       "runs_mean_tick_us": [
-        17531.246,
-        17550.671,
-        17576.435,
-        17585.388,
-        17608.609,
-        17648.693,
-        17536.624,
-        17534.951,
-        17535.594,
-        17965.293
+        17940.765,
+        18086.878,
+        18048.072,
+        18130.686,
+        18187.344,
+        17643.361,
+        18064.172,
+        17724.563,
+        22474.235,
+        17676.695
+      ],
+      "checksum": "0a7e97a835579c25"
+    },
+    {
+      "threads": 24,
+      "median_mean_tick_us": 2245.756,
+      "median_p99_tick_us": 2545.35,
+      "runs_mean_tick_us": [
+        2265.202,
+        2276.795,
+        2240.75,
+        2269.176,
+        2222.776,
+        2245.537,
+        2235.386,
+        2236.6,
+        2251.177,
+        2245.976
       ],
       "checksum": "0a7e97a835579c25"
     }

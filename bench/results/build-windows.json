@@ -1,0 +1,31 @@
+{
+  "recorded": "2026-10-27T11:54:51Z",
+  "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
+  "machine": {
+    "platform": "windows",
+    "python": "3.14.6",
+    "os": "Windows-11-10.0.26200-SP0",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 24,
+    "threads": 32,
+    "memory_gib": 47.7
+  },
+  "calx": "calx 0.1.0",
+  "modules": 64,
+  "lines": 9922,
+  "runs": 5,
+  "seconds": {
+    "check": 0.0325,
+    "cold_debug": 0.5196,
+    "cold_release": 0.6635,
+    "one_module_debug": 0.1233,
+    "small_cold": 0.2741,
+    "small_unchanged": 0.0156,
+    "bench_one_module": 0.1252
+  },
+  "g3_4": {
+    "small_cold": true,
+    "small_unchanged": true,
+    "bench_one_module": true
+  }
+}

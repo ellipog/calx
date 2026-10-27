@@ -1,0 +1,33 @@
+{
+  "recorded": "2026-10-27T11:54:33Z",
+  "commit": "e8b7686382d6f42426dbb297c7680294f0de9938",
+  "machine": {
+    "platform": "linux",
+    "python": "3.14.4",
+    "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 16,
+    "threads": 32,
+    "memory_gib": 23.3,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "note": "WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"
+  },
+  "calx": "calx 0.1.0",
+  "modules": 64,
+  "lines": 9922,
+  "runs": 5,
+  "seconds": {
+    "check": 0.0241,
+    "cold_debug": 0.2782,
+    "cold_release": 0.5497,
+    "one_module_debug": 0.0778,
+    "small_cold": 0.3025,
+    "small_unchanged": 0.0207,
+    "bench_one_module": 0.1214
+  },
+  "g3_4": {
+    "small_cold": true,
+    "small_unchanged": true,
+    "bench_one_module": true
+  }
+}

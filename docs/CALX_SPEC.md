@@ -21,7 +21,7 @@ The examples use the syntax as it stands now. From Phase 3 every example here is
 Calx exists to write Calcite and its plugins. In order:
 
 1. **Java-exact where it matters.** Integer and float results, hash codes and collection orders match Java bit for bit, so Calcite can match vanilla.
-2. **Fast to run, and fast to build.** It compiles to C with no garbage collector and no hidden costs, within about 10% of Rust on the [tick-loop benchmark](benchmarks.md). Unlike Rust, building is quick too: a change rebuilds only what it touched, and `calx run` starts in moments ([Build speed](#build-speed-d64)). When the two conflict, run time wins in release builds and build time wins in debug builds.
+2. **Fast to run, and fast to build.** It compiles to C with no garbage collector and no hidden costs, and runs the [tick-loop benchmark](benchmarks.md) faster than Rust, which is the target, not just a tie (D89). Unlike Rust, building is quick too: a change rebuilds only what it touched, and `calx run` starts in moments ([Build speed](#build-speed-d64)). When the two conflict, run time wins in release builds and build time wins in debug builds.
 3. **Safe and strict by default.** No undefined behavior outside `unsafe`, so an untrusted plugin can't corrupt the server (D23). The type checker is stricter than Rust's ([Strictness](#strictness-d63)).
 4. **Simple to write plugins in.** No lifetimes, no locks, no null. Errors are values. The compiler checks region scoping.
 
@@ -372,7 +372,7 @@ Building and running Calx code has to be fast. The design choices that make it s
 - **Lean C.** Emitted code includes only Calx's small runtime header, never `windows.h` or other large system headers.
 - **`calx run` reuses the last executable** when nothing changed.
 
-Build time is tracked like run time (D34): the time to check and build a large generated program, and the time `calx run` takes on a small one, are recorded per commit in `bench/`.
+Build time is tracked like run time (D34): [`bench/build.py`](../bench/build.py) times checking and building a large generated program, `calx run` on a small one, and rebuilding the tick benchmark after a change. CI runs it on every push, and the results on the reference machine are in `bench/results/`.
 
 ## FFI
 
