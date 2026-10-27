@@ -59,8 +59,7 @@ fn main() {
     var queue = Deque<usize>()
     dist[0] = 0
     queue.push_last(0)
-    loop {
-        let at = queue.pop_first() else break
+    while let at = queue.pop_first() {
         var near = List<usize>()
         if at % w > 0 {
             near.push(at - 1)

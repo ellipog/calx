@@ -23,7 +23,7 @@ What's built, one page per feature:
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
 7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
 8. [Conversions](reference/conversions.md): exact `T(x)`, the named lossy conversions, and `try_from`
-9. [Control flow](reference/control-flow.md): if, while, for, loop, break and continue
+9. [Control flow](reference/control-flow.md): if, while, while let, for, loop, break and continue
 10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
 11. [Structs](reference/structs.md): fields, defaults, literals and methods
 12. [Enums](reference/enums.md): variants with and without data, representations, conversions

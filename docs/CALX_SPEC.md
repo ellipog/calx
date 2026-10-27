@@ -56,7 +56,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - `pub` makes an item visible outside its module. Everything else is private to the module.
 - Attributes are `@name` or `@name(args)` before a declaration ([codegen hooks](#codegen-hooks)).
 - Strings interpolate with `{expr}`: `"moved {d} blocks"`.
-- Loops are `while cond { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`.
+- Loops are `while cond { }`, `while let pattern = value { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`. Built: [control flow](reference/control-flow.md#while-let) (D111)
 - Logic uses words: `and`, `or`, `not`. Comparison and arithmetic use the usual symbols.
 - `match v { Pattern => expr, ... }` matches enum variants, `none` and `some(x)`, `ok(v)` and `err(e)`, literals, tuples and `_`.
 - A function with no `->` returns nothing. `fn f() ! E` returns nothing but can fail with an `E`.

@@ -4598,13 +4598,15 @@ private:
             if (vt->kind == TypeKind::optional) {
                 e->let_unwraps = true;
                 pt = vt->elem;
-                if (reject_optional_pattern(p, "`if let x = opt` already unwraps the optional; match its value directly")) {
+                if (reject_optional_pattern(p, e->from_while ? "`while let x = opt` already unwraps the optional; match its value directly"
+                                                             : "`if let x = opt` already unwraps the optional; match its value directly")) {
                     pt = T.error;
                 }
             }
             push_scope();
             if (check_pattern(p, pt) && !is_bad(pt) && !e->let_unwraps && irrefutable(p, pt, nullptr)) {
-                error(p->span, "this pattern matches every " + name_of(pt) + "; use `let`");
+                error(p->span, "this pattern matches every " + name_of(pt) +
+                                   (e->from_while ? ", so the loop would never stop there; write `loop`, with `let` inside" : "; use `let`"));
             }
             a = check_block(e->block, stmt ? nullptr : expected, stmt ? BlockUse::stmt : BlockUse::value);
             pop_scope();
@@ -4636,7 +4638,7 @@ private:
     }
 
     Type* check_loop(Expr* e, Type* expected, bool stmt) {
-        push_loop(true, stmt, expected);
+        push_loop(!e->from_while, stmt, expected);
         e->loop_id = loops_.back().id;
         check_block(e->block, nullptr, BlockUse::stmt);
         LoopCtx loop = loops_.back();

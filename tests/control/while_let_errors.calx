@@ -1,0 +1,29 @@
+// What `while let` can't do: match every value, which would never stop, match `some(x)` on an
+// optional it already unwraps, break with a value, or be a function's last value.
+fn ends() -> i32 {
+    var q = Deque<i32>()
+    q.push_last(1)
+    while let x = q.pop_first() {
+        println("{x}")
+    }
+}    // error: function `ends` can reach its end without returning a value
+
+fn main() {
+    var q = Deque<i32>()
+    while let x = 5 {    // error: this pattern matches every `i32`, so the loop would never stop there; write `loop`, with `let` inside
+        println("{x}")
+    }
+    while let (a, b) = (q.len(), 1) {    // error: this pattern matches every `(usize, i32)`, so the loop would never stop there; write `loop`, with `let` inside
+        println("{a} {b}")
+    }
+    while let some(x) = q.pop_first() {    // error: `while let x = opt` already unwraps the optional; match its value directly
+        println("{x}")
+    }
+    while let x = q.pop_first() {
+        break x    // error: only `loop` can break with a value
+    }
+    while let x = q.pop_first() {
+        y += x    // error: unknown name `y`
+    }
+    println("{ends()}")
+}

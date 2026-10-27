@@ -233,6 +233,7 @@ struct Expr {
     bool is_nan_const = false;   // `f64.NAN`, which comparing with is an error
     std::uint32_t loop_id = 0;   // loop, match: its labels in C
     bool let_unwraps = false;    // if_: `if let p = opt` matches `p` against the optional's value
+    bool from_while = false;     // loop, if_: what a `while let` is parsed as (D111)
     // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
     // that interface. A copy for an instance keeps the rewrite.
     Item* only_interface = nullptr;

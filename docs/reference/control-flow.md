@@ -1,6 +1,6 @@
 ---
 title: Control flow
-description: if, while, for, loop, break and continue, and which of them give values. match is in Patterns.
+description: if, while, while let, for, loop, break and continue, and which of them give values. match is in Patterns.
 ---
 
 # Control flow
@@ -33,6 +33,37 @@ fn main() {
 ## `while`
 
 `while cond { }` runs the body while `cond` is true. `while true` is an error: write `loop`.
+
+## `while let`
+
+`while let pattern = value { }` works `value` out before each pass, and runs the body while the pattern fits it, with the pattern's names bound for that pass. On an optional, the pattern matches the value inside, as [`if let`](patterns.md#if-let)'s does, so a queue drains with `while let x = q.pop_first()`:
+
+```calx
+fn main() {
+    var queue = Deque<String>()
+    queue.push_last(String("stone"))
+    queue.push_last(String("dirt"))
+    while let block = queue.pop_first() {
+        if block == "stone" {
+            queue.push_last(String("gravel"))
+        }
+        println(block)
+    }
+    // out: stone
+    // out: dirt
+    // out: gravel
+    var stack: List<i32> = [1, 2, 3]
+    var sum = 0
+    while let x = stack.pop() {
+        sum += x
+    }
+    println("{sum}")    // out: 6
+}
+```
+
+- It's `loop { if let pattern = value { ... } else { break } }`, so `break` and `continue` work as in any loop, and `continue` works the value out again. It can't `break` with a value, as a `while` can't.
+- A pattern that fits every value, such as `while let x = 5`, is an error, since the loop could only stop at a `break`: write `loop`, with `let` inside.
+- Each pass owns what the pattern takes from a new value, such as the `String` that `pop_first` gives, and frees it at the end of the pass. Names bound from a variable are views into it, as in `if let`, so the body can't change the variable unless its type is `Copy`.
 
 ## `for`
 

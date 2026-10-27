@@ -844,7 +844,7 @@ private:
         }
         Span end = expect(Tok::rbrace, "to end the block").span;
         // A block's value is its last statement, if that's an expression.
-        if (!stmts.empty() && stmts.back()->kind == StmtKind::expr) {
+        if (!stmts.empty() && stmts.back()->kind == StmtKind::expr && !stmts.back()->value->from_while) {
             b->tail = stmts.back()->value;
             stmts.pop_back();
         }
@@ -910,6 +910,39 @@ private:
         return e;
     }
 
+    // `while let p = e { body }`, which is `loop { if let p = e { body } else { break } }`: the
+    // value is worked out again before each pass, and the loop ends the first time it doesn't
+    // match (D111).
+    Stmt* while_let(Span start) {
+        expect(Tok::kw_let, "");
+        Expr* test = new_expr(ExprKind::if_, start);
+        test->from_while = true;
+        test->let_pattern = pattern();
+        expect(Tok::eq, "after the pattern in `while let`");
+        test->cond = expr_no_struct();
+        test->block = block_body();
+        Span span = Span::join(start, prev_span());
+        Stmt* stop = new_stmt(StmtKind::break_, start);
+        auto* stop_block = ctx_.arena.make<Block>();
+        stop_block->stmts = slice(std::vector<Stmt*>{stop});
+        stop_block->span = start;
+        Expr* otherwise = new_expr(ExprKind::block, start);
+        otherwise->block = stop_block;
+        test->else_ = otherwise;
+        test->span = span;
+        auto* body = ctx_.arena.make<Block>();
+        body->tail = test;
+        body->span = span;
+        Expr* loop = new_expr(ExprKind::loop, start);
+        loop->from_while = true;
+        loop->block = body;
+        loop->span = span;
+        Stmt* s = new_stmt(StmtKind::expr, start);
+        s->value = loop;
+        s->span = span;
+        return s;
+    }
+
     Stmt* simple_jump() {
         Span start = peek().span;
         Tok k = next().kind;
@@ -949,6 +982,10 @@ private:
                 break;
             case Tok::kw_while: {
                 next();
+                if (at(Tok::kw_let)) {
+                    s = while_let(start);
+                    break;
+                }
                 s = new_stmt(StmtKind::while_, start);
                 s->cond = expr_no_struct();
                 s->body = block();

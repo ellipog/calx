@@ -1,0 +1,22 @@
+// A `while let` is a loop: what its body moves can't be used on the next pass, and the names
+// bound from a variable are views into it, which the body can't change.
+fn eat(s: own String) -> usize {
+    return s.len()
+}
+
+fn main() {
+    var q = Deque<i32>()
+    q.push_last(1)
+    let s = String("x")
+    var n = 0usize
+    while let x = q.pop_first() {
+        n += eat(s) + usize.wrap(x)    // error: `s` is moved here on every pass through the loop, so the next pass can't use it; move a copy with `s.copy()`, or give it a new value before the loop comes around
+    }
+    var words: List<String> = ["a", "b"]
+    var w: String? = some(String("start"))
+    while let x = w {
+        println(x)
+        w = words.pop()    // error: `w` can't be changed while `x` is a view into it
+    }
+    println("{n}")
+}

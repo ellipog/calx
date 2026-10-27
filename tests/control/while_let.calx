@@ -1,0 +1,122 @@
+// `while let pattern = value`: the value is worked out before each pass, and the loop ends the
+// first time the pattern doesn't fit. `break` and `continue` work as in any loop.
+
+enum Step {
+    Go(i32)
+    Turn
+    Stop
+}
+
+fn half(n: i32) -> i32? {
+    if n % 2 == 0 and n > 0 {
+        return some(n / 2)
+    }
+    return none
+}
+
+fn steps(at: usize) -> Step {
+    let plan = [Step.Go(2), Step.Turn, Step.Go(5), Step.Stop, Step.Go(9)]
+    return plan[at]
+}
+
+fn drained(q: own Deque<String>) -> usize {
+    var d = q
+    var n = 0usize
+    while let w = d.pop_first() {
+        n += w.len()
+    }
+    return n
+}
+
+fn main() {
+    // A queue of values that own memory: each pass owns what it took.
+    var q = Deque<String>()
+    for w in ["a", "bb", "ccc", "dd", "e"] {
+        q.push_last(String(w))
+    }
+    var total = 0usize
+    while let w = q.pop_first() {
+        if w.len() == 3 {
+            continue
+        }
+        if w == "dd" {
+            break
+        }
+        total += w.len()
+        q.push_last(String("x"))
+        println(w)
+    }
+    // out: a
+    // out: bb
+    println("{total} {q}")    // out: 3 [e, x, x]
+    println("{drained(q)}")    // out: 3
+
+    // An optional from a function.
+    var n = 96
+    var halvings = 0
+    while let h = half(n) {
+        n = h
+        halvings += 1
+    }
+    println("{n} {halvings}")    // out: 3 5
+
+    // A tuple pattern, with the optional unwrapped.
+    var pairs = Deque<(i32, String)>()
+    pairs.push_last((1, String("one")))
+    pairs.push_last((2, String("two")))
+    while let (k, v) = pairs.pop_last() {
+        println("{k} {v}")
+    }
+    // out: 2 two
+    // out: 1 one
+
+    // A variant pattern, which stops at the first value that isn't one.
+    var at = 0usize
+    var walked = 0
+    while let Step.Go(d) = steps(at) {
+        walked += d
+        at += 1
+    }
+    println("{walked} {at}")    // out: 2 1
+
+    // A list used as a stack, growing while it's drained.
+    var stack: List<i32> = [1, 2, 3]
+    var sum = 0
+    while let x = stack.pop() {
+        sum += x
+        if x == 2 {
+            stack.push(10)
+            stack.push(20)
+        }
+    }
+    println("{sum}")    // out: 36
+
+    // A `Copy` optional in a variable, which the body changes.
+    var cur: i32? = some(3)
+    var seen = 0
+    while let c = cur {
+        seen += c
+        cur = if c > 0 { some(c - 1) } else { none }
+    }
+    println("{seen}")    // out: 6
+
+    // Nested, with `break` leaving only the inner loop.
+    var outer = Deque<i32>()
+    for i in 0..3 {
+        outer.push_last(i)
+    }
+    var count = 0
+    while let i = outer.pop_first() {
+        var inner = Deque<i32>()
+        for j in 0..5 {
+            inner.push_last(j)
+        }
+        while let j = inner.pop_first() {
+            if j > i {
+                break
+            }
+            count += 1
+        }
+    }
+    println("{count}")    // out: 6
+}

@@ -236,7 +236,7 @@ fn main() {
 
 ## `if let`
 
-`if let pattern = value { } else { }` runs the first block when the pattern fits, with its names bound only there. Like `let ... else`, on an optional it matches the value inside. It chains with `else if` and `else if let`, and gives a value like any `if`:
+`if let pattern = value { } else { }` runs the first block when the pattern fits, with its names bound only there. [`while let`](control-flow.md#while-let) runs a loop while one fits. Like `let ... else`, on an optional it matches the value inside. It chains with `else if` and `else if let`, and gives a value like any `if`:
 
 ```calx
 enum Shape {
