@@ -298,6 +298,13 @@ enum class StmtKind : std::uint8_t {
     item,      // a nested `fn` or `const`
 };
 
+// A local a `parallel for` body uses from outside it, which the body's C function reaches
+// through the loop's context.
+struct Capture {
+    Local* local = nullptr;
+    bool written = false;  // the body changes elements of it, at the loop's own index
+};
+
 struct Stmt {
     StmtKind kind;
     Span span;
@@ -322,6 +329,7 @@ struct Stmt {
     bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
+    Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).
     Slice<Local*> drops;           // return, break, continue: what's dropped before leaving
     bool drop_old = false;         // assign: the target's old value is dropped first

@@ -67,6 +67,15 @@ struct LoopCtx {
     Type* expected;      // `loop` used as a value: the type wanted
     Type* break_type;    // the type of the breaks so far
     bool has_break;
+    bool parallel = false;  // a `parallel for`, which runs every iteration
+};
+
+// A `parallel for` whose body is being checked (D21).
+struct ParLoop {
+    Stmt* s = nullptr;
+    Local* index = nullptr;                   // the loop variable
+    std::unordered_set<const Local*> outer;   // the locals visible before the loop
+    std::unordered_set<const Expr*> writes;   // the places rooted at those that the body changes
 };
 
 enum class BlockUse { stmt, value, fn_body };
@@ -176,6 +185,7 @@ private:
             visible_.swap(c.visible_);
             marks_.swap(c.scope_marks_);
             loops_.swap(c.loops_);
+            par_.swap(c.par_);
             fn_ = c.fn_;
             item_ = c.current_item_;
             impl_ = c.current_impl_type_;
@@ -190,6 +200,7 @@ private:
             c_.visible_.swap(visible_);
             c_.scope_marks_.swap(marks_);
             c_.loops_.swap(loops_);
+            c_.par_.swap(par_);
             c_.fn_ = fn_;
             c_.current_item_ = item_;
             c_.current_impl_type_ = impl_;
@@ -205,6 +216,7 @@ private:
         std::vector<Local*> visible_;
         std::vector<std::size_t> marks_;
         std::vector<LoopCtx> loops_;
+        std::vector<ParLoop> par_;
         Item* fn_ = nullptr;
         Item* item_ = nullptr;
         Type* impl_ = nullptr;
@@ -2284,6 +2296,9 @@ private:
 
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
+        for (ParLoop& p : par_) {
+            if (p.outer.count(l)) p.writes.insert(place);
+        }
         std::string_view n = text(l->name);
         // After an error, count the write anyway, so the same variable gets no second error.
         if (l->borrowed) {
@@ -2333,6 +2348,9 @@ private:
     }
 
     void check_return(Stmt* s) {
+        if (!par_.empty()) {
+            error(s->span, "a `parallel for` runs every iteration, so its body can't `return`; end an iteration early with `continue`");
+        }
         Type* want = fn_->result_type;
         if (!s->value) {
             if (want->kind != TypeKind::unit && !is_bad(want)) {
@@ -2357,6 +2375,9 @@ private:
         LoopCtx& loop = loops_.back();
         s->loop_id = loop.id;
         loop.has_break = true;
+        if (loop.parallel) {
+            error(s->span, "a `parallel for` runs every iteration, so it can't `break`; end an iteration early with `continue`");
+        }
         if (!s->value) {
             if (loop.is_loop && !loop.stmt) {
                 Type* want = loop.break_type ? loop.break_type : loop.expected;
@@ -2392,10 +2413,16 @@ private:
     }
 
     void check_for(Stmt* s) {
-        if (s->is_parallel) not_yet(s->span, "`parallel for` loops");
         if (s->iter_mut) not_yet(s->span, "`for ... in mut` loops");
+        if (s->pool) not_yet(s->pool->span, "pools for `parallel for`");
         Pattern* p = s->pattern;
         Expr* it = s->value;
+        bool par = s->is_parallel && !s->iter_mut;
+        if (par && it->kind != ExprKind::range) {
+            error(it->span, "a `parallel for` goes over a range of indexes, such as " + q("0..xs.len()") +
+                                "; each iteration reaches its own element with " + q("xs[k]"));
+            par = false;
+        }
         Type* elem = T.error;
         Local* borrowed = nullptr;
         if (it->kind == ExprKind::range) {
@@ -2420,6 +2447,7 @@ private:
             }
         }
         s->elem_type = elem;
+        std::size_t outer = visible_.size();
         push_scope();
         if (p->kind == PatternKind::binding) {
             if (p->is_mut) error(p->span, "a `for` loop's variable can't be `mut`; copy it into a `var`");
@@ -2437,10 +2465,23 @@ private:
         }
         push_loop(false, false, nullptr);
         s->loop_id = loops_.back().id;
+        loops_.back().parallel = par;
+        if (par) {
+            ParLoop pl;
+            pl.s = s;
+            pl.index = s->local;
+            pl.outer.insert(visible_.begin(), visible_.begin() + static_cast<std::ptrdiff_t>(outer));
+            par_.push_back(std::move(pl));
+        }
         if (borrowed) borrowed->borrowed++;
         check_block(s->body, nullptr, BlockUse::stmt);
         if (borrowed) borrowed->borrowed--;
         loops_.pop_back();
+        if (par) {
+            ParLoop pl = std::move(par_.back());
+            par_.pop_back();
+            par_check(pl);
+        }
         pop_scope();
     }
 
@@ -5122,6 +5163,186 @@ private:
         return mentions(b->tail, l, part);
     }
 
+    // --- parallel for (D21) -------------------------------------------------------------------
+    //
+    // A `parallel for`'s iterations run at once, so no two may touch the same memory. An iteration
+    // changes only places it reaches by indexing with the loop's own variable, as in `xs[k]`,
+    // which no other iteration reaches, and it reads nothing another iteration changes. Places
+    // are compared as paths from a local, as for D48, with each index step marked by what it
+    // indexes with.
+
+    static constexpr std::uint32_t kOwnStep = 0xFFFFFFFE;    // `[k]`, with the loop's own variable
+    static constexpr std::uint32_t kFixedStep = 0xFFFFFFFD;  // an index that's the same in every iteration
+    static constexpr std::uint32_t kLenStep = 0xFFFFFFFC;    // a list's length, from `len()`
+
+    static bool index_step(std::uint32_t s) { return s == kIndexStep || s == kOwnStep || s == kFixedStep; }
+
+    struct ParAccess {
+        Local* root;
+        std::vector<std::uint32_t> path;
+        bool write;
+        Expr* e;
+    };
+
+    template <class FE, class FB>
+    static void each_child(Expr* e, FE&& fe, FB&& fb) {
+        for (Expr* x : {e->lhs, e->rhs, e->callee, e->repeat, e->cond, e->else_, e->scrutinee, e->body, e->trailing}) {
+            if (x) fe(x);
+        }
+        for (Arg& a : e->args) fe(a.value);
+        for (Expr* x : e->elems) if (x) fe(x);
+        for (FieldInit& f : e->fields) if (f.value) fe(f.value);
+        for (Expr* x : e->interpolations) fe(x);
+        if (e->block) fb(e->block);
+        for (MatchArm& a : e->arms) {
+            if (a.guard) fe(a.guard);
+            if (a.body) fe(a.body);
+        }
+    }
+
+    template <class FE, class FB>
+    static void each_child(Block* b, FE&& fe, FB&& fb) {
+        for (Stmt* s : b->stmts) {
+            for (Expr* x : {s->value, s->target, s->else_, s->cond, s->pool}) {
+                if (x) fe(x);
+            }
+            if (s->else_block) fb(s->else_block);
+            if (s->body) fb(s->body);
+        }
+        if (b->tail) fe(b->tail);
+    }
+
+    // Whether the expression can differ between iterations: whether it uses a local declared in
+    // the loop, the loop variable included. Nothing outside can change during the loop.
+    bool par_varies(const ParLoop& pl, Expr* e) {
+        if ((e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::local) return !pl.outer.count(e->local);
+        bool v = false;
+        each_child(e, [&](Expr* x) { v = v || par_varies(pl, x); }, [&](Block* b) { v = v || par_varies(pl, b); });
+        return v;
+    }
+
+    bool par_varies(const ParLoop& pl, Block* b) {
+        bool v = false;
+        each_child(b, [&](Expr* x) { v = v || par_varies(pl, x); }, [&](Block* c) { v = v || par_varies(pl, c); });
+        return v;
+    }
+
+    void par_walk(ParLoop& pl, Expr* e, std::vector<ParAccess>& out) {
+        switch (e->kind) {
+            case ExprKind::name:
+            case ExprKind::self:
+            case ExprKind::field:
+            case ExprKind::index:
+            case ExprKind::unwrap:
+                par_place(pl, e, false, out);
+                return;
+            case ExprKind::call:
+                // A method's receiver is a place. `len()` reads only a list's length, which an
+                // iteration changing an element doesn't change.
+                if (e->callee->kind == ExprKind::field) {
+                    bool len = e->call == CallKind::builtin_method &&
+                               (e->bmethod == BMethod::len || e->bmethod == BMethod::is_empty || e->bmethod == BMethod::capacity);
+                    par_place(pl, e->callee->lhs, len, out);
+                }
+                for (Arg& a : e->args) par_walk(pl, a.value, out);
+                if (e->trailing) par_walk(pl, e->trailing, out);
+                return;
+            default:
+                each_child(e, [&](Expr* x) { par_walk(pl, x, out); }, [&](Block* b) { par_walk(pl, b, out); });
+                return;
+        }
+    }
+
+    void par_walk(ParLoop& pl, Block* b, std::vector<ParAccess>& out) {
+        each_child(b, [&](Expr* x) { par_walk(pl, x, out); }, [&](Block* c) { par_walk(pl, c, out); });
+    }
+
+    // A place such as `a.b[k].c`: an access, if it's rooted at a local from outside the loop.
+    void par_place(ParLoop& pl, Expr* e, bool len, std::vector<ParAccess>& out) {
+        std::vector<std::uint32_t> path;
+        Expr* x = e;
+        for (;; x = x->lhs) {
+            if (x->kind == ExprKind::field) {
+                path.push_back(x->field_index);
+            } else if (x->kind == ExprKind::index) {
+                Expr* i = x->rhs;
+                bool own = pl.index && i->kind == ExprKind::name && i->ref == Ref::local && i->local == pl.index;
+                path.push_back(own ? kOwnStep : par_varies(pl, i) ? kIndexStep : kFixedStep);
+                par_walk(pl, i, out);
+            } else if (x->kind != ExprKind::unwrap) {
+                break;  // an optional's value is part of the optional
+            }
+        }
+        if (x->kind == ExprKind::name || x->kind == ExprKind::self) {
+            if (x->ref == Ref::local && pl.outer.count(x->local)) {
+                std::reverse(path.begin(), path.end());
+                if (len) path.push_back(kLenStep);
+                out.push_back({x->local, std::move(path), pl.writes.count(e) != 0, e});
+            }
+            return;
+        }
+        par_walk(pl, x, out);  // part of a value worked out here, such as a call's result
+    }
+
+    // Whether another iteration's write `w` can reach what read `r` reads.
+    static bool par_conflict(const std::vector<std::uint32_t>& r, const std::vector<std::uint32_t>& w) {
+        for (std::size_t k = 0; k < r.size() && k < w.size(); k++) {
+            if (r[k] == kOwnStep && w[k] == kOwnStep) return false;  // both in this iteration's own element
+            if (r[k] == kLenStep || w[k] == kLenStep) return false;  // a list's length, which elements don't hold
+            if (!index_step(r[k]) && !index_step(w[k]) && r[k] != w[k]) return false;
+        }
+        return true;
+    }
+
+    void par_check(ParLoop& pl) {
+        std::vector<ParAccess> acc;
+        par_walk(pl, pl.s->body, acc);
+        std::string k = pl.index ? q(text(pl.index->name)) : std::string("the loop variable");
+        // A write must go through `[k]`, reached through fields and indexes that are the same in
+        // every iteration, so each iteration's is somewhere else.
+        std::vector<bool> bad(acc.size(), false);
+        for (std::size_t i = 0; i < acc.size(); i++) {
+            if (!acc[i].write) continue;
+            const std::vector<std::uint32_t>& path = acc[i].path;
+            std::size_t at = 0;
+            while (at < path.size() && path[at] != kOwnStep && path[at] != kIndexStep) at++;
+            if (at < path.size() && path[at] == kOwnStep) continue;
+            bad[i] = true;
+            std::string place = q(literal_source(acc[i].e));
+            bool indexed = std::any_of(path.begin(), path.end(), index_step);
+            error(acc[i].e->span, (indexed ? place + " can be reached by more than one iteration of the `parallel for`"
+                                           : place + " is shared by every iteration of the `parallel for`") +
+                                      ", so it can't be changed here; an iteration can change only its own elements, "
+                                      "indexed with " + k + " itself");
+        }
+        // A read can't reach what another iteration writes. One error for each place read.
+        std::vector<std::pair<const Local*, std::vector<std::uint32_t>>> reported;
+        for (std::size_t i = 0; i < acc.size(); i++) {
+            if (acc[i].write) continue;
+            for (std::size_t j = 0; j < acc.size(); j++) {
+                if (!acc[j].write || bad[j] || acc[j].root != acc[i].root) continue;
+                if (!par_conflict(acc[i].path, acc[j].path)) continue;
+                std::pair<const Local*, std::vector<std::uint32_t>> key{acc[i].root, acc[i].path};
+                if (std::find(reported.begin(), reported.end(), key) != reported.end()) break;
+                reported.push_back(std::move(key));
+                error(acc[i].e->span, q(literal_source(acc[i].e)) + " can't be read in this `parallel for`, since " +
+                                          "other iterations change it, or part of it, at the same time");
+                note(acc[j].e->span, "they change it here");
+                break;
+            }
+        }
+        std::vector<Capture> caps;
+        for (const ParAccess& a : acc) {
+            auto it = std::find_if(caps.begin(), caps.end(), [&](const Capture& c) { return c.local == a.root; });
+            if (it == caps.end()) {
+                caps.push_back({a.root, false});
+                it = caps.end() - 1;
+            }
+            if (a.write) it->written = true;
+        }
+        pl.s->captures = ctx_.arena.copy(caps);
+    }
+
     Type* construct(Expr* e, Type* t, Type* expected) {
         if (is_identity(t)) {
             if (!expected || expected->generic != t->generic) {
@@ -5722,6 +5943,7 @@ private:
     std::vector<Local*> visible_;
     std::vector<std::size_t> scope_marks_;
     std::vector<LoopCtx> loops_;
+    std::vector<ParLoop> par_;  // the `parallel for` loops around the code being checked, outermost first
     std::uint32_t next_loop_ = 1;
     bool pattern_var_ = false;  // the names a pattern binds are `var`s
     std::vector<std::unique_ptr<DPat>> pool_;

@@ -38,7 +38,8 @@ What's built, one page per feature:
 21. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
 22. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
 23. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-24. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+24. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
+25. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 
@@ -48,6 +49,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 2. [std.math](std/math.md): math functions with `StrictMath`'s results bit for bit
 3. [std.time](std/time.md): a monotonic clock, which only `unsafe` code can read
 4. [std.env](std/env.md): the command-line arguments
+5. [std.pool](std/pool.md): the threads `parallel for` runs on
 
 ### Design
 

@@ -85,6 +85,11 @@ CX_COLD void cx_panic_unwrap(const char* at);
 CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at);
 
+/* `parallel for`: calls `body(ctx, begin, end)` for chunks covering 0..n, on the worker threads
+ * and this one, and returns once every iteration has run. Inside another `parallel for`, it
+ * runs them all on this thread. */
+void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx);
+
 /* Memory. Running out panics. */
 void* cx_alloc(cx_usize size);
 void* cx_realloc(void* p, cx_usize size);

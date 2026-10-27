@@ -320,6 +320,8 @@ impl Counter {
 
 ### Parallel loops
 
+Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). Still to build:
+
 ```calx
 fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
     parallel for c in mut counters.values() {
@@ -328,9 +330,9 @@ fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
 }
 ```
 
-- `parallel for x in mut xs { }` runs the body for every element at once, on the runtime's work-stealing pool. `parallel(pool) for` picks a pool. Each iteration has exclusive access to its own element.
-- **The capture check.** The body may read only values that are `Share`, or read-only views of values nothing writes during the loop. It may write only to its own element. The compiler rejects anything else. That's what makes the result the same at any thread count (D21) without locks.
-- The loop returns when every iteration has finished. That's the barrier.
+- `parallel for x in mut xs { }` gives each iteration a mutable view of its own element, the same as indexing with the loop's variable.
+- `parallel(pool) for` picks a pool.
+- Reading values that are `Share` while something else changes the collection they came from, once shared values exist.
 
 ### Lockstep ticks
 
@@ -456,7 +458,7 @@ What Calx leaves out, on purpose:
 | Actors are the only concurrency model | [Region actors](#region-actors-and-messages), refined by D49 |
 | Lockstep ticks (D19) | [Lockstep ticks](#lockstep-ticks) |
 | Phases and delivery order (D20, now D50) | [Lockstep ticks](#lockstep-ticks) |
-| Same result with one thread and many (D21) | [Parallel loops](#parallel-loops) |
+| Same result with one thread and many (D21) | [Parallel loops](reference/parallel.md) |
 | Split and merge depend only on world state (D22) | [Lockstep ticks](#lockstep-ticks): no hidden timing |
 | Region scoping enforced at compile time | [Region scoping](#region-scoping) |
 | Each module is its own C translation unit (D26) | [Modules](reference/modules.md), [Modules and builds](#modules-and-builds) |

@@ -56,6 +56,7 @@ fn main() {
 - `for i in a..b` counts from `a` up to but not including `b`, and `a..=b` includes `b`. Both ends are integers of the same type, and are evaluated once. `a..=MAX` stops at `MAX` without overflowing.
 - `for x in array` goes over an array's elements in order. The array can't be changed during the loop.
 - The loop variable can't be assigned. `for _ in 0..n` needs no variable.
+- `parallel for i in a..b` runs the iterations at once, on several threads: see [Parallel loops](parallel.md).
 
 ## `loop`
 

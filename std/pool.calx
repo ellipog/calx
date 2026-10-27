@@ -1,0 +1,18 @@
+/// The pool of threads `parallel for` runs on.
+///
+/// A `parallel for` gives the same result with one thread and with many (D21), so the number
+/// of threads changes only how fast a program runs. By default it's the number of logical
+/// processors the program may run on.
+module std.pool
+
+extern "C" fn cx_set_workers(n: usize)
+
+/// Sets how many threads run each `parallel for`, counting the thread that reaches it. With 1,
+/// every `parallel for` runs on that thread alone. Panics if `n` is 0, or if called inside a
+/// `parallel for`.
+pub fn set_workers(n: usize) {
+    if n == 0 {
+        panic("a `parallel for` needs at least one thread")
+    }
+    unsafe { cx_set_workers(n) }
+}

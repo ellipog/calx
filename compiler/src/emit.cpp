@@ -113,7 +113,10 @@ public:
             for (Item* f : p.externs) out_ += fns_.at(f).sig + ";\n";
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
             out_ += "\n";
-            for (Item* f : p.defs) out_ += fns_.at(f).directive + linkage(f, external) + fns_.at(f).sig + fns_.at(f).body;
+            for (Item* f : p.defs) {
+                const FnOut& o = fns_.at(f);
+                out_ += o.helpers + o.directive + linkage(f, external) + o.sig + o.body;
+            }
             if (has_main) {
                 out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    ";
                 out_ += std::string(prog_.main->c_name) + "();\n    return cx_finish();\n}\n";
@@ -161,6 +164,7 @@ private:
         Uses sig_uses;
         std::string body;       // from its `{` to its `}`
         Uses uses;
+        std::string helpers;    // what goes before it: its `parallel for` bodies, as functions
     };
 
     struct ConstOut {
@@ -661,6 +665,7 @@ private:
         frames_.clear();
         loop_frames_.clear();
         hidden_names_.clear();
+        helpers_.clear();
         out_.clear();
         line_file_ = kNoFile;
         line_files_mixed_ = false;
@@ -678,6 +683,7 @@ private:
         indent_ = 0;
         out_ += "}\n\n";
         o.body.swap(out_);
+        o.helpers.swap(helpers_);
         uses_ = nullptr;
         return o;
     }
@@ -837,7 +843,7 @@ private:
                 line("}");
                 break;
             }
-            case StmtKind::for_: full([&] { for_loop(s); }); break;
+            case StmtKind::for_: full([&] { s->is_parallel ? parallel_loop(s) : for_loop(s); }); break;
             default: line("/* unsupported statement */"); break;
         }
     }
@@ -966,6 +972,117 @@ private:
         }
         line("cx_brk" + id + ":;");
         if (s->hidden && s->drop_hidden) line(drop_fn(s->hidden->type) + "(&" + local_name(s->hidden) + ");");
+        indent_--;
+        line("}");
+    }
+
+    // `parallel for k in a..b { body }`: the body becomes a function of its own, which the runtime
+    // calls with chunks of the range, on its threads (D21). The body reaches the locals it uses
+    // from outside through a context struct: numbers by value, since the body can't change them,
+    // and anything else by pointer. The checker made sure iterations never touch the same memory,
+    // so the pointers can be `restrict`, and views are whole and live, as for parameters.
+    void parallel_loop(Stmt* s) {
+        Type* elem = s->elem_type;
+        Expr* it = s->value;
+        std::string id = std::to_string(s->loop_id);
+        std::string name = "cx_par_" + std::string(fn_->c_name) + "_" + id;
+        std::string ctx_t = "struct " + name + "_c";
+        struct Cap {
+            Local* l;
+            bool by_value;
+            std::string type;  // the field's C type
+        };
+        std::vector<Cap> caps;
+        for (const Capture& c : s->captures) {
+            Local* l = c.local;
+            bool pointer = l->is_view || par_pointers_.count(l);
+            bool scalar = l->type->kind == TypeKind::int_ || l->type->kind == TypeKind::float_ ||
+                          l->type->kind == TypeKind::bool_ || l->type->kind == TypeKind::char_ || l->type->kind == TypeKind::rune;
+            if (scalar && !pointer && !c.written) {
+                caps.push_back({l, true, ctype(l->type)});
+            } else {
+                // A view parameter that can't change stays `const`.
+                bool read_only = l->is_view && !par_pointers_.count(l) && l->mode != ParamMode::mut;
+                caps.push_back({l, false, (read_only ? "const " : "") + ctype(l->type) + "*"});
+            }
+        }
+
+        // The body's function, emitted out of line with frames of its own.
+        std::vector<Frame> outer_frames = std::move(frames_);
+        frames_.clear();
+        int outer_indent = indent_;
+        std::uint32_t outer_file = line_file_;
+        bool outer_mixed = line_files_mixed_;
+        line_file_ = kNoFile;
+        line_files_mixed_ = false;
+        std::string fn_text = capture([&] {
+            indent_ = 0;
+            std::string fields;
+            for (const Cap& c : caps) fields += " " + c.type + " " + local_name(c.l) + ";";
+            line(ctx_t + " {" + fields + " cx_u64 cx__lo; };");
+            directive(s->span);
+            line("static void " + name + "(void* cx__v, cx_u64 cx__begin, cx_u64 cx__end) {");
+            indent_ = 1;
+            line(ctx_t + "* cx__c = (" + ctx_t + "*)cx__v;");
+            std::vector<const Local*> pointed;
+            for (const Cap& c : caps) {
+                std::string v = local_name(c.l);
+                if (c.by_value) {
+                    line("const " + c.type + " " + v + " = cx__c->" + v + ";");
+                } else {
+                    line(c.type + " restrict " + v + " = cx__c->" + v + ";");
+                    line("CX_VIEW(" + v + ");");
+                    if (!c.l->is_view && par_pointers_.insert(c.l).second) pointed.push_back(c.l);
+                }
+            }
+            line("for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {");
+            indent_ = 2;
+            loop_frames_[s->loop_id] = frames_.size();
+            if (s->local) {
+                line(ctype(elem) + " " + local_name(s->local) + " = (" + ctype(elem) + ")(cx__c->cx__lo + cx__i);");
+            }
+            stmts(s->body, false);
+            line("cx_cont" + id + ":;");
+            indent_ = 1;
+            line("}");
+            indent_ = 0;
+            line("}");
+            for (const Local* l : pointed) par_pointers_.erase(l);
+        });
+        helpers_ += fn_text + "\n";
+        frames_ = std::move(outer_frames);
+        indent_ = outer_indent;
+        line_file_ = outer_file;
+        line_files_mixed_ = outer_mixed;
+
+        // The loop itself: the range, worked out once, and the call.
+        std::string lo = tmp(), hi = tmp(), c = tmp();
+        std::string t = ctype(elem);
+        line("{");
+        indent_++;
+        line(t + " " + lo + " = " + value(it->lhs, elem) + ";");
+        line(t + " " + hi + " = " + value(it->rhs, elem) + ";");
+        line("if (" + lo + (it->inclusive ? " <= " : " < ") + hi + ") {");
+        indent_++;
+        std::string n = "(cx_u64)" + hi + " - (cx_u64)" + lo;
+        if (it->inclusive) {
+            std::string count = tmp();
+            line("cx_u64 " + count + " = " + n + " + 1;");
+            // Only a range over every 64-bit value has 2^64 iterations.
+            line("if (" + count + " == 0) { cx_panic_begin(" + location(it->span) +
+                 "); cx_print_str((cx_str){(const cx_u8*)\"a `parallel for` can't run 2^64 iterations\", 42}); cx_panic_end(); }");
+            n = count;
+        }
+        std::string inits;
+        for (const Cap& cap : caps) {
+            std::string v = local_name(cap.l);
+            bool pointer = cap.l->is_view || par_pointers_.count(cap.l);
+            inits += (cap.by_value || pointer ? v : "&" + v) + ", ";
+        }
+        line(ctx_t + " " + c + " = {" + inits + "(cx_u64)" + lo + "};");
+        line("cx_parallel(" + n + ", " + name + ", &" + c + ");");
+        indent_--;
+        line("}");
         indent_--;
         line("}");
     }
@@ -1578,7 +1695,7 @@ private:
             case ExprKind::name:
             case ExprKind::self: {
                 const Local* l = e->local;
-                return l->is_view ? "(*" + local_name(l) + ")" : local_name(l);
+                return l->is_view || par_pointers_.count(l) ? "(*" + local_name(l) + ")" : local_name(l);
             }
             case ExprKind::field: return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
@@ -2497,6 +2614,8 @@ private:
     mutable std::unordered_map<const Type*, std::string> compound_names_;
     mutable std::unordered_map<const Local*, std::string> hidden_names_;
     static constexpr std::uint32_t kNoFile = 0xFFFFFFFFu;
+    std::string helpers_;  // the function's `parallel for` bodies so far
+    std::unordered_set<const Local*> par_pointers_;  // locals a `parallel for` body reaches through a pointer
     std::uint32_t line_file_ = kNoFile;  // the file the function's `#line` directives are in
     bool line_files_mixed_ = false;
     std::vector<Frame> frames_;                                 // the statements being emitted, innermost last

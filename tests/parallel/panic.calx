@@ -1,0 +1,22 @@
+// A panic in a `parallel for` reports the first iteration that panicked, after the output of
+// every iteration before it, as one thread running them in order would.
+import std.pool.{set_workers}
+
+fn main() {
+    set_workers(4)
+    var xs = List<i32>()
+    for _ in 0..40 {
+        xs.push(0)
+    }
+    println("start")    // out: start
+    parallel for k in 0usize..xs.len() {
+        if k < 3 or k == 20 {
+            println("ran {k}")
+        }
+        // out: ran 0
+        // out: ran 1
+        // out: ran 2
+        // out: ran 20
+        xs[k] = 10 / ((i32.wrap(k) - 20) * (i32.wrap(k) - 30))    // panic: division by zero
+    }
+}

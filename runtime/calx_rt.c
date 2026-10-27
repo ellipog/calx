@@ -1,7 +1,11 @@
 /* The Calx runtime's compiled part. The driver builds this once per target and build mode and
  * links it into every program. */
+#ifndef _WIN32
+#define _GNU_SOURCE /* sched_getaffinity */
+#endif
 #include "calx_rt.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,24 +15,38 @@
 #include <io.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+/* WaitOnAddress and WakeByAddressAll, for the workers of `parallel for`. */
+#pragma comment(lib, "synchronization.lib")
 #else
 #include <errno.h>
+#include <limits.h>
+#include <linux/futex.h>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 #endif
 
 /* --- output ------------------------------------------------------------------------------- */
 
+/* Standard output's buffer belongs to the main thread. Inside a `parallel for`, every thread
+ * writes to the buffer of the chunk it's running instead (see "parallel for" below). */
 static unsigned char out_buf[1 << 16];
 static size_t out_len;
-static int to_stderr; /* while a panic message is being written */
+static _Thread_local int to_stderr; /* while `eprint` or a panic message is being written */
 static _Thread_local cx_String* fmt_to; /* while a string is being interpolated */
 
 #ifdef CX_DEBUG
 /* Debug builds count the allocations still live, and a program that ends with any left has
  * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug. */
 static cx_usize live_allocs;
+#define COUNT_ALLOC(d) __atomic_fetch_add(&live_allocs, (cx_usize)(d), __ATOMIC_RELAXED)
 #endif
+
+static _Thread_local int par_buffered; /* output goes to the running chunk's buffer */
+static _Thread_local int par_depth;    /* inside a `parallel for`, even one run on this thread alone */
+static void par_write(int stream, const void* p, size_t n);
 
 static void flush_out(void) {
     if (out_len) {
@@ -55,12 +73,17 @@ static void write_bytes(const void* p, size_t n) {
     if (n == 0) return;
     if (fmt_to) {
         cx_string_push_bytes(fmt_to, (const cx_u8*)p, n);
+    } else if (par_buffered) {
+        par_write(to_stderr, p, n);
     } else if (to_stderr) {
         fwrite(p, 1, n, stderr);
     } else {
         out_bytes(p, n);
     }
 }
+
+/* Text for a panic message, or anything else written the way `print` writes. */
+static void panic_text(const char* s) { write_bytes(s, strlen(s)); }
 
 /* --- std.env: the command line, as UTF-8 ------------------------------------------------- */
 
@@ -228,19 +251,31 @@ void cx_print_str(cx_str s) { write_bytes(s.ptr, s.len); }
  * These are declared by std/io.calx as C functions, not in calx_rt.h. */
 
 void cx_err_begin(void) {
-    if (out_len) flush_out();
+    if (out_len && !par_buffered) flush_out();
     to_stderr = 1;
 }
 
 void cx_err_end(void) { to_stderr = 0; }
 
-void cx_out_write(const cx_u8* p, cx_usize n) { out_bytes(p, n); }
+void cx_out_write(const cx_u8* p, cx_usize n) {
+    if (par_buffered) par_write(0, p, n);
+    else out_bytes(p, n);
+}
 
-void cx_out_flush(void) { flush_out(); }
+/* Inside a `parallel for`, output is written when the loop ends, in order. */
+void cx_out_flush(void) {
+    if (!par_buffered) flush_out();
+}
 
 /* Reads at most `n` bytes, returning 0 only at the end of the input. Output waiting in the
  * buffer is written first, since the program may be waiting for an answer to it. */
 cx_usize cx_in_read(cx_u8* p, cx_usize n) {
+    if (par_depth) {
+        /* Which iteration got which bytes would depend on timing. One thread or many, it's the same panic. */
+        cx_panic_begin("<stdin>");
+        panic_text("can't read standard input inside a `parallel for`");
+        cx_panic_end();
+    }
     if (n == 0) return 0;
     if (out_len) flush_out();
 #ifdef _WIN32
@@ -253,7 +288,7 @@ cx_usize cx_in_read(cx_u8* p, cx_usize n) {
 #endif
     if (r < 0) {
         cx_panic_begin("<stdin>");
-        fputs("can't read standard input", stderr);
+        panic_text("can't read standard input");
         cx_panic_end();
     }
     return (cx_usize)r;
@@ -410,14 +445,14 @@ void* cx_alloc(cx_usize size) {
     void* p = malloc(size ? size : 1);
     if (!p) cx_panic_capacity();
 #ifdef CX_DEBUG
-    live_allocs++;
+    COUNT_ALLOC(1);
 #endif
     return p;
 }
 
 void* cx_realloc(void* p, cx_usize size) {
 #ifdef CX_DEBUG
-    if (!p) live_allocs++;
+    if (!p) COUNT_ALLOC(1);
 #endif
     void* q = realloc(p, size ? size : 1);
     if (!q) cx_panic_capacity();
@@ -426,7 +461,7 @@ void* cx_realloc(void* p, cx_usize size) {
 
 void cx_free(void* p) {
 #ifdef CX_DEBUG
-    if (p) live_allocs--;
+    if (p) COUNT_ALLOC(-1);
 #endif
     free(p);
 }
@@ -693,58 +728,375 @@ cx_String* cx_fmt_begin(cx_String* s) {
 
 void cx_fmt_end(cx_String* previous) { fmt_to = previous; }
 
-/* --- panics -------------------------------------------------------------------------------- */
+/* --- panics --------------------------------------------------------------------------------
+ * The message goes through the print functions' path, so inside a `parallel for` it's kept
+ * with the rest of its chunk's output. */
+
+static CX_COLD void par_panicked(void);
 
 void cx_panic_begin(const char* at) {
     fmt_to = 0;
-    flush_out();
+    if (!par_buffered) flush_out();
     to_stderr = 1;
-    fputs("panic at ", stderr);
-    fputs(at, stderr);
-    fputs(": ", stderr);
+    panic_text("panic at ");
+    panic_text(at);
+    panic_text(": ");
 }
 
 void cx_panic_end(void) {
-    fputc('\n', stderr);
+    panic_text("\n");
+    if (par_buffered) par_panicked();
     fflush(stderr);
     exit(101);
 }
 
 void cx_panic_index(cx_usize index, cx_usize length, const char* at) {
+    char text[96];
     cx_panic_begin(at);
-    fprintf(stderr, "index %llu is out of bounds for length %llu", (unsigned long long)index,
-            (unsigned long long)length);
+    snprintf(text, sizeof text, "index %llu is out of bounds for length %llu", (unsigned long long)index,
+             (unsigned long long)length);
+    panic_text(text);
     cx_panic_end();
 }
 
 void cx_panic_div_zero(const char* at) {
     cx_panic_begin(at);
-    fputs("division by zero", stderr);
+    panic_text("division by zero");
     cx_panic_end();
 }
 
 void cx_panic_capacity(void) {
     cx_panic_begin("<memory>");
-    fputs("out of memory", stderr);
+    panic_text("out of memory");
     cx_panic_end();
 }
 
 void cx_panic_insert(cx_usize index, cx_usize length, const char* at) {
+    char text[96];
     cx_panic_begin(at);
-    fprintf(stderr, "can't insert at index %llu in a list of length %llu", (unsigned long long)index,
-            (unsigned long long)length);
+    snprintf(text, sizeof text, "can't insert at index %llu in a list of length %llu", (unsigned long long)index,
+             (unsigned long long)length);
+    panic_text(text);
     cx_panic_end();
 }
 
 void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at) {
+    char text[96];
     cx_panic_begin(at);
-    fprintf(stderr, "can't set the length to %llu in a list with capacity %llu", (unsigned long long)length,
-            (unsigned long long)capacity);
+    snprintf(text, sizeof text, "can't set the length to %llu in a list with capacity %llu", (unsigned long long)length,
+             (unsigned long long)capacity);
+    panic_text(text);
     cx_panic_end();
 }
 
 void cx_panic_unwrap(const char* at) {
     cx_panic_begin(at);
-    fputs("unwrapped `none` with `!`", stderr);
+    panic_text("unwrapped `none` with `!`");
     cx_panic_end();
+}
+
+/* --- parallel for ---------------------------------------------------------------------------
+ * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The
+ * iterations are split into chunks, which threads claim in order from a shared counter. The
+ * checker makes sure no two iterations touch the same memory (D21), so what they compute can't
+ * depend on which thread ran what. What they print is kept per chunk and written in chunk order
+ * when the loop ends, and a panic reports the first iteration that panicked, after the output of
+ * every iteration before it. So the output is the same with one thread and with many, too.
+ *
+ * Workers wait for a job on `par_word`, which is odd while a job is open: they spin for a while,
+ * since loops often come one after another, then sleep on it. A worker joins a job by counting
+ * itself in `par_active` and then checking that the word hasn't changed. The calling thread
+ * closes the job once every chunk is claimed and waits for `par_active` to reach 0, so no worker
+ * reads a job after that, and a sleeping worker is never waited for. Only the main thread starts
+ * jobs: a `parallel for` inside another runs on the thread that reaches it. */
+
+#define PAR_NONE (~(cx_u64)0)
+#define PAR_SPIN_NS 200000u /* how long a worker spins before it sleeps */
+#define PAR_CHUNKS 8        /* chunks per thread, so a slow chunk doesn't hold the rest up */
+#define PAR_SHARED __attribute__((aligned(128))) /* its own pair of cache lines */
+
+typedef void (*par_body)(void* ctx, cx_u64 begin, cx_u64 end);
+
+/* A chunk's output: segments of one byte naming the stream (1 for standard error), the length,
+ * and the bytes. */
+typedef struct {
+    unsigned char* p;
+    size_t len, cap;
+    size_t last; /* where the last segment starts, or SIZE_MAX */
+} par_out;
+
+/* The open job. The main thread writes it before opening the job, and nothing changes it then. */
+static struct {
+    par_body body;
+    void* ctx;
+    cx_u64 n, chunk, chunks;
+    cx_usize threads; /* how many threads may take part, the main thread included */
+} job;
+static unsigned char* par_done; /* per chunk: whether it has run, for a panic */
+static par_out** par_outs;      /* per chunk: what it printed, once it prints */
+static cx_u64 par_cap;          /* the length of both */
+static cx_u32 par_jobs;         /* jobs started */
+static cx_usize par_target;     /* threads to use, the main thread included; 0 until set or read */
+static cx_usize par_started;    /* worker threads started */
+
+static PAR_SHARED cx_u32 par_word;      /* jobs * 2, plus 1 while one is open */
+static PAR_SHARED cx_u64 par_next;      /* the next chunk to claim */
+static PAR_SHARED cx_u32 par_active;    /* workers in the open job */
+static PAR_SHARED cx_u32 par_sleepers;  /* workers asleep on par_word */
+static PAR_SHARED cx_u64 par_panic = PAR_NONE; /* the first chunk that panicked */
+
+static _Thread_local cx_u64 par_chunk; /* the chunk this thread is running */
+static _Thread_local int par_worker;   /* this is a worker thread */
+
+static void par_pause(void) { __builtin_ia32_pause(); }
+
+#ifdef _WIN32
+static void par_sleep(cx_u32 seen) { WaitOnAddress(&par_word, &seen, sizeof seen, INFINITE); }
+static void par_wake(void) { WakeByAddressAll(&par_word); }
+static void par_yield(void) { SwitchToThread(); }
+#else
+static void par_sleep(cx_u32 seen) { syscall(SYS_futex, &par_word, FUTEX_WAIT_PRIVATE, seen, NULL, NULL, 0); }
+static void par_wake(void) { syscall(SYS_futex, &par_word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0); }
+static void par_yield(void) { sched_yield(); }
+#endif
+
+static CX_COLD void par_fail(const char* what) {
+    fputs(what, stderr);
+    fflush(stderr);
+    _Exit(101);
+}
+
+static void par_write(int stream, const void* p, size_t n) {
+    par_out* o = par_outs[par_chunk];
+    if (!o) {
+        o = calloc(1, sizeof *o);
+        if (!o) par_fail("panic at <memory>: out of memory\n");
+        o->last = SIZE_MAX;
+        par_outs[par_chunk] = o;
+    }
+    size_t need = o->len + 1 + sizeof(size_t) + n;
+    if (need > o->cap) {
+        size_t cap = o->cap ? o->cap * 2 : 256;
+        if (cap < need) cap = need;
+        unsigned char* q = realloc(o->p, cap);
+        if (!q) par_fail("panic at <memory>: out of memory\n");
+        o->p = q;
+        o->cap = cap;
+    }
+    size_t len;
+    if (o->last != SIZE_MAX && o->p[o->last] == stream) {
+        memcpy(&len, o->p + o->last + 1, sizeof len);
+        len += n;
+        memcpy(o->p + o->last + 1, &len, sizeof len);
+    } else {
+        o->last = o->len;
+        o->p[o->len] = (unsigned char)stream;
+        len = n;
+        memcpy(o->p + o->len + 1, &len, sizeof len);
+        o->len += 1 + sizeof len;
+    }
+    memcpy(o->p + o->len, p, n);
+    o->len += n;
+}
+
+/* Writes what chunks [0, upto) printed, in order, as if they'd printed it themselves. */
+static void par_replay(cx_u64 upto) {
+    for (cx_u64 c = 0; c < upto; c++) {
+        par_out* o = par_outs[c];
+        if (!o) continue;
+        for (size_t at = 0; at < o->len;) {
+            int stream = o->p[at];
+            size_t len;
+            memcpy(&len, o->p + at + 1, sizeof len);
+            at += 1 + sizeof len;
+            if (stream) {
+                flush_out();
+                fwrite(o->p + at, 1, len, stderr);
+            } else {
+                out_bytes(o->p + at, len);
+            }
+            at += len;
+        }
+        free(o->p);
+        free(o);
+        par_outs[c] = 0;
+    }
+}
+
+/* Claims chunks of the open job and runs them until none are left. */
+static void par_run(void) {
+    par_buffered = 1;
+    for (;;) {
+        if (__atomic_load_n(&par_panic, __ATOMIC_RELAXED) != PAR_NONE) break;
+        cx_u64 c = __atomic_fetch_add(&par_next, 1, __ATOMIC_RELAXED);
+        if (c >= job.chunks) break;
+        par_chunk = c;
+        cx_u64 begin = c * job.chunk;
+        cx_u64 end = job.n - begin < job.chunk ? job.n : begin + job.chunk;
+        job.body(job.ctx, begin, end);
+        __atomic_store_n(&par_done[c], 1, __ATOMIC_RELEASE);
+    }
+    par_buffered = 0;
+}
+
+/* After a panic, on the main thread: once every chunk before the first one that panicked has
+ * run, writes their output and that chunk's, which ends with the panic message, and exits. */
+static CX_COLD void par_end_panic(void) {
+    __atomic_store_n(&par_word, par_jobs * 2, __ATOMIC_SEQ_CST);
+    cx_u64 first;
+    for (unsigned spins = 0;; spins++) {
+        first = __atomic_load_n(&par_panic, __ATOMIC_ACQUIRE);
+        cx_u64 c = 0;
+        while (c < first && __atomic_load_n(&par_done[c], __ATOMIC_ACQUIRE)) c++;
+        if (c == first) break;
+        if (spins < 4096) par_pause();
+        else par_yield();
+    }
+    par_buffered = 0;
+    to_stderr = 0;
+    par_replay(first + 1);
+    flush_out();
+    fflush(stderr);
+    _Exit(101);
+}
+
+static CX_COLD void par_panicked(void) {
+    cx_u64 c = par_chunk;
+    cx_u64 first = __atomic_load_n(&par_panic, __ATOMIC_ACQUIRE);
+    while (c < first && !__atomic_compare_exchange_n(&par_panic, &first, c, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    }
+    if (!par_worker) par_end_panic();
+    /* A worker leaves the job and stops for good; the main thread ends the program. */
+    __atomic_fetch_sub(&par_active, 1, __ATOMIC_RELEASE);
+    for (;;) {
+#ifdef _WIN32
+        Sleep(INFINITE);
+#else
+        pause();
+#endif
+    }
+}
+
+/* Waits until `par_word` isn't `seen`. */
+static void par_wait(cx_u32 seen) {
+    cx_u64 start = cx_clock_ns();
+    for (unsigned spins = 1;; spins++) {
+        if (__atomic_load_n(&par_word, __ATOMIC_ACQUIRE) != seen) return;
+        par_pause();
+        if (spins % 64 == 0 && cx_clock_ns() - start > PAR_SPIN_NS) break;
+    }
+    __atomic_fetch_add(&par_sleepers, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&par_word, __ATOMIC_SEQ_CST) == seen) par_sleep(seen);
+    __atomic_fetch_sub(&par_sleepers, 1, __ATOMIC_RELAXED);
+}
+
+static void par_work(cx_usize id) {
+    par_worker = 1;
+    cx_u32 seen = 0;
+    for (;;) {
+        par_wait(seen);
+        cx_u32 w = __atomic_load_n(&par_word, __ATOMIC_SEQ_CST);
+        seen = w;
+        if (!(w & 1)) continue; /* a job that closed before this worker saw it */
+        __atomic_fetch_add(&par_active, 1, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&par_word, __ATOMIC_SEQ_CST) == w && id + 1 < job.threads) {
+            par_depth = 1;
+            par_run();
+            par_depth = 0;
+        }
+        __atomic_fetch_sub(&par_active, 1, __ATOMIC_RELEASE);
+    }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI par_thread(LPVOID id) {
+    par_work((cx_usize)(uintptr_t)id);
+    return 0;
+}
+#else
+static void* par_thread(void* id) {
+    par_work((cx_usize)(uintptr_t)id);
+    return 0;
+}
+#endif
+
+static cx_usize par_threads(void) {
+    if (!par_target) {
+#ifdef _WIN32
+        long n = (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#else
+        cpu_set_t set;
+        long n = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+        par_target = n > 0 ? (cx_usize)n : 1;
+    }
+    return par_target;
+}
+
+/* Declared by std/pool.calx, which checks that `n` isn't 0. */
+void cx_set_workers(cx_usize n) {
+    if (par_depth) {
+        cx_panic_begin("std.pool.set_workers");
+        panic_text("can't change the number of workers inside a `parallel for`");
+        cx_panic_end();
+    }
+    par_target = n;
+}
+
+void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
+    if (n == 0) return;
+    cx_usize threads = par_threads();
+    if (par_depth || threads <= 1 || n == 1) {
+        par_depth++;
+        body(ctx, 0, n);
+        par_depth--;
+        return;
+    }
+    while (par_started + 1 < threads) {
+        uintptr_t id = par_started;
+#ifdef _WIN32
+        HANDLE h = CreateThread(NULL, 0, par_thread, (LPVOID)id, 0, NULL);
+        if (!h) par_fail("panic at <parallel>: can't start a worker thread\n");
+        CloseHandle(h);
+#else
+        pthread_t t;
+        if (pthread_create(&t, NULL, par_thread, (void*)id)) par_fail("panic at <parallel>: can't start a worker thread\n");
+        pthread_detach(t);
+#endif
+        par_started++;
+    }
+    cx_u64 chunk = n / ((cx_u64)threads * PAR_CHUNKS);
+    if (chunk == 0) chunk = 1;
+    cx_u64 chunks = n / chunk + (n % chunk != 0);
+    if (chunks > par_cap) {
+        free(par_done);
+        free(par_outs);
+        par_done = malloc(chunks);
+        par_outs = calloc(chunks, sizeof *par_outs);
+        if (!par_done || !par_outs) par_fail("panic at <memory>: out of memory\n");
+        par_cap = chunks;
+    }
+    memset(par_done, 0, chunks);
+    job.body = body;
+    job.ctx = ctx;
+    job.n = n;
+    job.chunk = chunk;
+    job.chunks = chunks;
+    job.threads = threads;
+    __atomic_store_n(&par_next, 0, __ATOMIC_RELAXED);
+    par_jobs++;
+    __atomic_store_n(&par_word, par_jobs * 2 + 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&par_sleepers, __ATOMIC_SEQ_CST)) par_wake();
+
+    par_depth = 1;
+    par_run();
+    __atomic_store_n(&par_word, par_jobs * 2, __ATOMIC_SEQ_CST);
+    for (unsigned spins = 0; __atomic_load_n(&par_active, __ATOMIC_SEQ_CST); spins++) {
+        if (__atomic_load_n(&par_panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
+        if (spins < 4096) par_pause();
+        else par_yield();
+    }
+    par_depth = 0;
+    if (__atomic_load_n(&par_panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
+    par_replay(chunks);
 }

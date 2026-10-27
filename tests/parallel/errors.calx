@@ -1,0 +1,50 @@
+// The capture check: an iteration changes only its own elements, and reads nothing another
+// iteration changes.
+
+struct Counter {
+    total: i32,
+    parts: List<i32>,
+}
+
+fn sum(xs: mut List<i32>) -> i32 {
+    parallel for k in 0usize..xs.len() {
+        if xs[k] == 0 {
+            return 1    // error: its body can't `return`
+        }
+        xs[k] = 2
+    }
+    return 0
+}
+
+fn main() {
+    var xs: List<i32> = [0, 0, 0, 0]
+    var c = Counter { total: 0, parts: [0, 0, 0, 0] }
+    let n: usize = 4
+    parallel for k in 0usize..n {
+        c.total += xs[k]    // error: `c.total` is shared by every iteration of the `parallel for`
+    }
+    parallel for k in 0usize..n {
+        xs.push(i32.wrap(k))    // error: `xs` is shared by every iteration
+    }
+    parallel for k in 0usize..n {
+        xs[n - 1 - k] = 1    // error: `xs[n - 1 - k]` can be reached by more than one iteration
+    }
+    parallel for k in 0usize..n {
+        xs[k] = xs[0] + 1    // error: `xs[0]` can't be read in this `parallel for`
+    }
+    parallel for k in 0usize..n {
+        c.parts[k] = c.total + 1
+        let all = c.parts    // error: `c.parts` can't be read in this `parallel for`
+        xs[k] = all[0]
+    }
+    parallel for k in 0usize..n {
+        if k == 2 {
+            break    // error: it can't `break`
+        }
+        xs[k] = 1
+    }
+    parallel for x in xs {    // error: a `parallel for` goes over a range of indexes
+        println("{x}")
+    }
+    println("{sum(mut xs)}")
+}

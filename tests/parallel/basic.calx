@@ -1,0 +1,101 @@
+// `parallel for`: each iteration changes only its own elements, so the result and the output
+// are the same with any number of threads.
+import std.pool.{set_workers}
+
+struct Region {
+    id: usize,
+    total: i64,
+    log: List<i64>,
+}
+
+struct World {
+    regions: List<Region>,
+    seeds: List<i64>,
+    scale: i64,
+}
+
+fn mix(x: i64, k: i64) -> i64 {
+    return x * 6364136223846793005 + k
+}
+
+fn step(r: mut Region, seed: i64, scale: i64) {
+    var x = seed
+    for i in 0i64..2000 {
+        x = mix(x, i * scale)
+    }
+    r.total = x
+    r.log.push(x % 1000)
+}
+
+fn run(threads: usize) -> i64 {
+    set_workers(threads)
+    var w = World { regions: [], seeds: [], scale: 3 }
+    for i in 0usize..100 {
+        w.regions.push(Region { id: i, total: 0, log: [] })
+        w.seeds.push(i64.wrap(i) * 7919)
+    }
+    parallel for k in 0usize..w.regions.len() {
+        step(mut w.regions[k], w.seeds[k], w.scale)
+        w.regions[k].id += w.regions.len()    // the list's length doesn't change
+    }
+    var sum: i64 = 0
+    for r in w.regions {
+        sum = mix(sum, r.total + r.log[0] + i64.wrap(r.id))
+    }
+    return sum
+}
+
+// Nested loops: the inner one runs on the thread that reaches it.
+fn fill(grid: mut List<List<i32>>, base: i32) {
+    parallel for i in 0usize..grid.len() {
+        parallel for j in 0usize..grid[i].len() {
+            grid[i][j] = base + i32.wrap(i * 10 + j)
+        }
+    }
+}
+
+fn main() {
+    let one = run(1)
+    println("{run(8) == one} {run(3) == one}")    // out: true true
+
+    var grid = List<List<i32>>()
+    for _ in 0..3 {
+        grid.push([0, 0, 0, 0])
+    }
+    fill(mut grid, 100)
+    println("{grid[0][3]} {grid[2][1]}")    // out: 103 121
+
+    // Output comes out in the order of the iterations.
+    set_workers(4)
+    parallel for v in -3i32..3 {
+        println("v {v}")
+    }
+    // out: v -3
+    // out: v -2
+    // out: v -1
+    // out: v 0
+    // out: v 1
+    // out: v 2
+
+    // `continue` ends one iteration; an inclusive range includes its end.
+    var hits = [0; 10]
+    parallel for k in 0usize..=9 {
+        if k % 3 != 0 {
+            continue
+        }
+        hits[k] = 1
+        eprintln("hit {k}")
+    }
+    // stderr: hit 0
+    // stderr: hit 3
+    // stderr: hit 6
+    // stderr: hit 9
+    println("{hits[0]}{hits[1]}{hits[2]}{hits[3]}{hits[9]}")    // out: 10011
+
+    // Nothing to do: the body never runs.
+    let none_at_all: usize = 0
+    parallel for k in 5usize..none_at_all {
+        hits[k] = 2
+    }
+    println("{hits[5]}")    // out: 0
+}
