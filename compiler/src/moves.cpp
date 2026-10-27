@@ -752,7 +752,8 @@ private:
                 for (Expr* x : e->elems) expr(x, Use::consume);
                 rvalue(e, u);
                 return;
-            case ExprKind::block: block(e->block, branch_use(e, u)); return;
+            case ExprKind::block:
+            case ExprKind::unsafe_block: block(e->block, branch_use(e, u)); return;
             case ExprKind::if_: if_expr(e, u); return;
             case ExprKind::match: match_expr(e, u); return;
             case ExprKind::loop:
@@ -908,6 +909,10 @@ private:
                 for (const Arg& a : e->args) expr(a.value, Use::consume);
                 break;
             case CallKind::builtin_method: builtin_method(e); break;
+            case CallKind::prim_static:
+                // `String.from_utf8` takes the list's memory for the string.
+                for (const Arg& a : e->args) expr(a.value, e->prim == PrimMethod::from_utf8 ? Use::consume : Use::view);
+                break;
             case CallKind::prim_method:
                 expr(e->callee->lhs, Use::view);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
@@ -934,6 +939,7 @@ private:
                 return;
             case BMethod::pop: case BMethod::clear: case BMethod::remove: case BMethod::swap_remove:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
+            case BMethod::set_len: case BMethod::as_mut_ptr:
                 expr(recv, Use::change);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 return;

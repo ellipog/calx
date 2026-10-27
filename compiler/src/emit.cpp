@@ -61,11 +61,12 @@ public:
             Module* module;
             std::vector<Item*> defs;     // defined here: its own functions, then the instances they reach
             std::vector<Item*> externs;  // written in another module, and called from here
+            std::vector<Item*> c_fns;    // C functions called from here
         };
         std::vector<Plan> plans;
         std::unordered_set<const Item*> external;  // written functions another file calls
         for (Module* m : prog_.modules) {
-            Plan p{m, {}, {}};
+            Plan p{m, {}, {}, {}};
             std::unordered_set<const Item*> seen;
             for (Item* f : prog_.fns) {
                 if (f->module == m && !f->origin && seen.insert(f).second) p.defs.push_back(f);
@@ -73,7 +74,9 @@ public:
             for (std::size_t i = 0; i < p.defs.size(); i++) {
                 for (Item* g : fns_.at(p.defs[i]).uses.fns) {
                     if (!seen.insert(g).second) continue;
-                    if (g->origin || g->module == m) {
+                    if (g->is_extern) {
+                        p.c_fns.push_back(g);
+                    } else if (g->origin || g->module == m) {
                         p.defs.push_back(g);
                     } else {
                         p.externs.push_back(g);
@@ -106,6 +109,7 @@ public:
                 if (all.has(c)) out_ += consts_.at(c).text;
             }
             if (!all.consts.empty()) out_ += "\n";
+            for (Item* f : p.c_fns) out_ += c_declaration(f);
             for (Item* f : p.externs) out_ += fns_.at(f).sig + ";\n";
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
             out_ += "\n";
@@ -164,6 +168,18 @@ private:
         Uses uses;
     };
 
+    // A C function's prototype. Its C name goes to the linker through an asm label, so the Calx
+    // name it's called by in C can't meet anything a header declares.
+    std::string c_declaration(const Item* f) const {
+        std::string s = "extern " + ctype(f->result_type) + " " + std::string(f->c_name) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            if (i) s += ", ";
+            s += ctype(f->params[i].local->type);
+        }
+        if (f->params.empty()) s += "void";
+        return s + ") __asm__(CX_SYMBOL(\"" + std::string(text(f->name)) + "\"));\n";
+    }
+
     // Written functions are `static` unless another file calls them, which lets clang inline and
     // drop them freely. Instances are always `static`: each file has its own copy.
     static std::string linkage(const Item* f, const std::unordered_set<const Item*>& external) {
@@ -212,6 +228,7 @@ private:
             case TypeKind::float_: return t->bits == 32 ? "cx_f32" : "cx_f64";
             case TypeKind::str: return "cx_str";
             case TypeKind::string: return "cx_String";
+            case TypeKind::pointer: return ctype(t->elem) + (t->is_const ? " const*" : "*");
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array:
@@ -956,6 +973,7 @@ private:
             case ExprKind::if_: if_stmt(e); return;
             case ExprKind::match: match_arms(e, nullptr, nullptr); return;
             case ExprKind::block:
+            case ExprKind::unsafe_block:
                 line("{");
                 indent_++;
                 stmts(e->block, false);
@@ -1542,7 +1560,8 @@ private:
             case ExprKind::none_lit: return "((" + ctype(e->type) + "){0})";
             case ExprKind::unwrap: return is_place(e) && !e->lhs->moves ? place(e) : unwrap(e);
             case ExprKind::optional_field: return optional_field(e);
-            case ExprKind::block: return block_value(e->block, e->type);
+            case ExprKind::block:
+            case ExprKind::unsafe_block: return block_value(e->block, e->type);
             case ExprKind::if_: return if_value(e);
             case ExprKind::match: return match_value(e);
             case ExprKind::loop: return loop_value(e);
@@ -1712,6 +1731,7 @@ private:
             case CallKind::convert: return conversion(e);
             case CallKind::construct: return construct(e->type);
             case CallKind::prim_method: return prim_method(e);
+            case CallKind::prim_static: return prim_static(e);
             case CallKind::variant: return variant_call(e);
             case CallKind::some:
                 return "((" + ctype(e->type) + "){ .v = " + value(e->args[0].value, e->type->elem) + ", .has = 1 })";
@@ -2156,7 +2176,8 @@ private:
         Expr* recv = e->callee->lhs;
         Type* t = recv->type;
         std::vector<Operand> ops{{recv, t}};
-        for (const Arg& a : e->args) ops.push_back({a.value, t});
+        bool rotate = e->prim == PrimMethod::rotate_left || e->prim == PrimMethod::rotate_right;
+        for (const Arg& a : e->args) ops.push_back({a.value, rotate ? a.value->type : t});
         std::string decls;
         std::vector<std::string> v = sequence(ops, decls);
         std::string h = helper(t);
@@ -2182,9 +2203,62 @@ private:
             case PrimMethod::saturating_add: r = saturating("add", t, v); break;
             case PrimMethod::saturating_sub: r = saturating("sub", t, v); break;
             case PrimMethod::saturating_mul: r = saturating("mul", t, v); break;
-            case PrimMethod::none: r = "0"; break;
+            case PrimMethod::to_bits:
+                r = t->bits == 32 ? "((union { cx_f32 f; cx_u32 u; }){ .f = " + v[0] + " }).u"
+                                  : "((union { cx_f64 f; cx_u64 u; }){ .f = " + v[0] + " }).u";
+                break;
+            case PrimMethod::rotate_left:
+            case PrimMethod::rotate_right: {
+                // Java's rotations, which take the count modulo the width.
+                std::string bits = std::to_string(t->bits);
+                std::string fn = std::string(e->prim == PrimMethod::rotate_left ? "__builtin_rotateleft" : "__builtin_rotateright") + bits;
+                r = "((" + ctype(t) + ")" + fn + "((" + unsigned_of(t) + ")" + v[0] + ", (cx_u32)" + v[1] + "))";
+                break;
+            }
+            default: r = "0"; break;
         }
         return wrap(decls, r);
+    }
+
+    // `T.parse(text)`, `f64.from_bits(b)` and `String.from_utf8(bytes)`.
+    std::string prim_static(Expr* e) {
+        Type* t = e->named_type;
+        Expr* a = e->args[0].value;
+        std::string o = ctype(e->type), v = tmp(), r = tmp();
+        switch (e->prim) {
+            case PrimMethod::parse: {
+                std::string text = a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+                std::string call;
+                if (is_float(t)) {
+                    call = std::string(t->bits == 32 ? "cx_parse_f32(" : "cx_parse_f64(") + text + ", &" + v + ")";
+                    return "({ " + ctype(t) + " " + v + "; cx_bool " + r + " = " + call + "; (" + o + "){ .v = " + v +
+                           ", .has = " + r + " }; })";
+                }
+                if (t->is_signed) {
+                    std::string lo = t->bits == 64 ? "(-9223372036854775807LL - 1)"
+                                                   : "(-" + std::to_string(1ull << (t->bits - 1)) + "LL)";
+                    std::string hi = std::to_string((1ull << (t->bits - 1)) - 1) + "LL";
+                    call = "cx_parse_i64(" + text + ", " + lo + ", " + hi + ", &" + v + ")";
+                    return "({ cx_i64 " + v + "; cx_bool " + r + " = " + call + "; (" + o + "){ .v = (" + ctype(t) + ")" + v +
+                           ", .has = " + r + " }; })";
+                }
+                std::string hi = t->is_usize ? "(cx_u64)(cx_usize)-1"
+                                 : t->bits == 64 ? "18446744073709551615ULL"
+                                                 : std::to_string((1ull << t->bits) - 1) + "ULL";
+                call = "cx_parse_u64(" + text + ", " + hi + ", &" + v + ")";
+                return "({ cx_u64 " + v + "; cx_bool " + r + " = " + call + "; (" + o + "){ .v = (" + ctype(t) + ")" + v +
+                       ", .has = " + r + " }; })";
+            }
+            case PrimMethod::from_bits:
+                return t->bits == 32 ? "((union { cx_u32 u; cx_f32 f; }){ .u = " + value(a, a->type) + " }).f"
+                                     : "((union { cx_u64 u; cx_f64 f; }){ .u = " + value(a, a->type) + " }).f";
+            case PrimMethod::from_utf8:
+                // The string takes the list's memory, which has the same layout.
+                return "({ " + ctype(a->type) + " " + v + " = " + value(a, a->type) + "; " + o + " " + r + " = {0}; if (cx_utf8_valid(" +
+                       v + ".ptr, " + v + ".len)) { " + r + ".v.ptr = " + v + ".ptr; " + r + ".v.len = " + v + ".len; " + r +
+                       ".v.cap = " + v + ".cap; " + r + ".has = 1; } else { cx_free(" + v + ".ptr); } " + r + "; })";
+            default: return "0";
+        }
     }
 
     // The runtime calls that print a string literal's parts, or a `str` value.
@@ -2264,12 +2338,37 @@ private:
             return copy_fn(t) + "(" + address(recv) + ")";
         }
         std::string p = tmp();
-        if (t->kind == TypeKind::string) {
+        if (t->kind == TypeKind::pointer) {
+            std::string pt = ctype(t);
+            switch (e->bmethod) {
+                case BMethod::ptr_read: return "(*" + expr(recv) + ")";
+                case BMethod::ptr_write: {
+                    std::string v = tmp();
+                    return "({ " + pt + " " + p + " = " + expr(recv) + "; " + ctype(t->elem) + " " + v + " = " + arg(0, t->elem) +
+                           "; *" + p + " = " + v + "; })";
+                }
+                case BMethod::ptr_add: {
+                    std::string n = tmp();
+                    return "({ " + pt + " " + p + " = " + expr(recv) + "; cx_usize " + n + " = " + arg(0, e->args[0].value->type) +
+                           "; " + p + " + " + n + "; })";
+                }
+                case BMethod::ptr_is_null: return "(" + expr(recv) + " == 0)";
+                default: return "0";
+            }
+        }
+        if (t->kind == TypeKind::string || t->kind == TypeKind::str) {
+            bool owned = t->kind == TypeKind::string;
             std::string head = "({ cx_String* " + p + " = " + address(recv) + "; ";
-            std::string view = "({ cx_str " + p + " = cx_sv(" + expr(recv) + "); ";
+            std::string view = "({ cx_str " + p + " = " + (owned ? "cx_sv(" + expr(recv) + ")" : expr(recv)) + "; ";
             switch (e->bmethod) {
                 case BMethod::len: return "(" + expr(recv) + ").len";
                 case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+                case BMethod::as_ptr: return "((cx_u8 const*)(" + expr(recv) + ").ptr)";
+                case BMethod::byte_at: {
+                    std::string i = tmp();
+                    return view + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; " + p + ".ptr[cx_index(" + i + ", " +
+                           p + ".len, " + location(e->args[0].value->span) + ")]; })";
+                }
                 case BMethod::push: return head + "cx_string_push_rune(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
                 case BMethod::push_str: return head + "cx_string_push_str(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::clear: return "cx_string_clear(" + address(recv) + ")";
@@ -2296,6 +2395,11 @@ private:
             case BMethod::len: return "(" + expr(recv) + ").len";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::capacity: return "(" + expr(recv) + ").cap";
+            case BMethod::as_ptr: return "((" + el + " const*)(" + expr(recv) + ").ptr)";
+            case BMethod::as_mut_ptr: return "(" + address(recv) + ")->ptr";
+            case BMethod::set_len:
+                return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (__builtin_expect(" + i + " > " + p +
+                       "->cap, 0)) cx_panic_set_len(" + i + ", " + p + "->cap, " + index_at(0) + "); " + p + "->len = " + i + "; })";
             case BMethod::push:
                 return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow + "1, sizeof(" +
                        el + ")); " + p + "->ptr[" + p + "->len++] = " + v + "; })";
@@ -2351,6 +2455,12 @@ private:
             case Builtin::println:
                 if (!e->args.empty()) print_parts(e->args[0].value, decls, s);
                 return "({ " + decls + s + "cx_print_newline(); })";
+            case Builtin::eprint:
+            case Builtin::eprintln:
+                // The values are worked out before anything goes to standard error.
+                if (!e->args.empty()) print_parts(e->args[0].value, decls, s);
+                if (e->builtin == Builtin::eprintln) s += "cx_print_newline(); ";
+                return "({ " + decls + "cx_err_begin(); " + s + "cx_err_end(); })";
             case Builtin::panic:
                 print_parts(e->args[0].value, decls, s);
                 return "({ " + decls + "cx_panic_begin(" + location(e->span) + "); " + s + "cx_panic_end(); })";

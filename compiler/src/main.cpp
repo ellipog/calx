@@ -137,7 +137,9 @@ int main(int argc, char** argv) {
     Names names;
     Arena arena;
     Types types(arena);
-    std::vector<Module*> modules = load_program(ParseContext{sources, names, arena, diags}, sources, file);
+    std::string home_error;
+    std::string home = find_home(home_error);
+    std::vector<Module*> modules = load_program(ParseContext{sources, names, arena, diags}, sources, file, home, home_error);
     Program program;
     if (!diags.has_errors()) {
         check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check");

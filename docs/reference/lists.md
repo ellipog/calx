@@ -50,6 +50,7 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.reserve(n)` | Makes room for `n` more elements, so the next pushes don't allocate |
 | `xs.clear()` | Frees every element, keeping the memory |
 | `xs.contains(x)` | Whether an element `== x`. The element type must have `==` |
+| `xs.as_ptr()`, `xs.as_mut_ptr()`, `xs.set_len(n)` | A pointer to the elements, and setting the length, for [unsafe code](unsafe.md#pointers) |
 
 - Methods that change the list need a variable declared with `var`, or a `mut` parameter.
 - `push`, `insert` and the literals move the elements in. `pop`, `remove` and `swap_remove` move them out.

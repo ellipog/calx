@@ -77,7 +77,9 @@ public:
         n_self_ = ctx.names.intern("self");
         n_underscore_ = ctx.names.intern("_");
         n_Self_ = ctx.names.intern("Self");
-        for (const char* b : {"print", "println", "panic", "assert"}) builtin_names_.push_back(ctx.names.intern(b));
+        for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
+            builtin_names_.push_back(ctx.names.intern(b));
+        }
         for (const char* b : {"some", "ok", "err", "List", "Copy"}) reserved_names_.push_back(ctx.names.intern(b));
         n_List_ = ctx.names.intern("List");
         n_Copy_ = ctx.names.intern("Copy");
@@ -110,6 +112,7 @@ public:
         defaults_ready_ = true;
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
+        for (Item* f : externs_) check_extern(f);
         for (Item* c : consts_) check_const(c);
         for (Item* f : all_fns_) {
             std::size_t before = ctx_.diags.error_count();
@@ -262,6 +265,7 @@ private:
             }
             case TypeKind::optional:
             case TypeKind::array:
+            case TypeKind::pointer:
             case TypeKind::list: return private_part(t->elem);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
@@ -347,6 +351,8 @@ private:
             if (i) prefix += '_';
             prefix += text(m->name.parts[i]);
         }
+        // `a.b` and `a_b` would both be `a_b`.
+        while (!prefixes_.insert(prefix).second) prefix += '_';
         m->prefix = ctx_.arena.copy(prefix);
     }
 
@@ -400,7 +406,7 @@ private:
             switch (it->kind) {
                 case ItemKind::fn:
                     if (it->is_extern) {
-                        not_yet(it->span, "extern functions");
+                        collect_extern(it);
                         continue;
                     }
                     it->type_params = make_params(it);
@@ -468,7 +474,15 @@ private:
                     break;
                 }
                 case ItemKind::type_alias: not_yet(it->span, "type aliases"); break;
-                case ItemKind::extern_block: not_yet(it->span, "extern blocks"); break;
+                case ItemKind::extern_block:
+                    for (Item* member : it->members) {
+                        if (member->kind != ItemKind::fn) {
+                            error(member->span, "an `extern` block holds only C functions");
+                            continue;
+                        }
+                        collect_extern(member);
+                    }
+                    break;
                 case ItemKind::attribute_block: not_yet(it->span, "attribute blocks"); break;
             }
         }
@@ -1102,6 +1116,7 @@ private:
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list: return T.list_of(subst(t->elem, s));
+            case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
             case TypeKind::tuple: {
                 std::vector<Type*> elems;
                 for (Type* e : t->elems) elems.push_back(subst(e, s));
@@ -1132,6 +1147,8 @@ private:
         if (pattern->kind != actual->kind) return false;
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::pointer:
+                return pattern->is_const == actual->is_const && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::array:
                 return pattern->length == actual->length && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::tuple:
@@ -1359,7 +1376,10 @@ private:
         t->item = it;
         t->generic = g;
         t->args = it->type_args;
-        for (Type* a : args) t->open = t->open || a->open;
+        for (Type* a : args) {
+            t->open = t->open || a->open;
+            t->has_pointer = t->has_pointer || a->has_pointer;
+        }
         it->c_name = c_name_in(g->module, {mangle(t)});
         type_instances_.emplace(key, t);
         instances_.push_back(t);
@@ -1425,6 +1445,12 @@ private:
         if (depth > 64) {
             ctx_.diags.error(site, "the instances of " + q(text(f->name)) + " never end: each one needs another, with bigger types");
             return nullptr;
+        }
+        for (Type* a : args) {
+            if (a->has_pointer) {
+                error(site, q(text(f->name)) + " is generic, and a generic parameter can't be a pointer yet");
+                return nullptr;
+            }
         }
         Item* it = ctx_.arena.make<Item>(*f);
         it->origin = f;
@@ -1573,7 +1599,71 @@ private:
 
     // --- types ---------------------------------------------------------------------------
 
-    Type* resolve_type(TypeExpr* t) {
+    // `extern "C" fn`: a function written in C, called by its C name.
+    void collect_extern(Item* it) {
+        if (it->abi != "C") error(it->span, "the only foreign ABI is \"C\"");
+        if (!it->generics.empty()) error(it->generics[0].span, "a C function can't be generic");
+        if (it->body) error(it->name_span, "an `extern` function is written in C, so it has no body");
+        declare_item(it);
+        // The C name is the function's own, given to the linker by an asm label, so a Calx
+        // declaration never meets a C header's.
+        std::string s = "cx_c_" + std::string(text(it->name));
+        c_names_.insert(s);
+        it->c_name = ctx_.arena.copy(s);
+        externs_.push_back(it);
+    }
+
+    // Whether C has the type: integers, floats, `bool` and pointers to them.
+    static bool c_type(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: return true;
+            case TypeKind::pointer: return c_type(t->elem);
+            default: return false;
+        }
+    }
+
+    void check_extern(Item* f) {
+        check_signature(f);
+        for (const Param& p : f->params) {
+            if (p.is_self) {
+                error(p.span, "a C function has no `self`");
+                continue;
+            }
+            if (p.mode != ParamMode::read) {
+                error(p.span, "a C function takes plain values, so its parameters can't be `mut` or `own`; pass a pointer");
+            }
+            if (p.local && !is_bad(p.local->type) && !c_type(p.local->type)) {
+                error(p.type->span, name_of(p.local->type) + " isn't a C type; a C function takes integers, floats, "
+                                                             "`bool` and pointers to them");
+            }
+        }
+        Type* r = f->result_type;
+        if (f->result && !is_bad(r) && r->kind != TypeKind::unit && !c_type(r)) {
+            error(f->result->span, name_of(r) + " isn't a C type; a C function returns an integer, a float, a `bool`, "
+                                                "a pointer or nothing");
+        }
+        // One C function has one signature, wherever it's declared.
+        auto [pos, fresh] = c_functions_.emplace(text(f->name), f);
+        if (!fresh && !same_signature(pos->second, f)) {
+            error(f->name_span, "C function " + q(text(f->name)) + " is declared differently in " +
+                                    q(module_name(pos->second->module)));
+            note(pos->second->name_span, "that declaration is here");
+        }
+    }
+
+    static bool same_signature(const Item* a, const Item* b) {
+        if (a->params.size() != b->params.size() || a->result_type != b->result_type) return false;
+        for (std::size_t i = 0; i < a->params.size(); i++) {
+            if (!a->params[i].local || !b->params[i].local || a->params[i].local->type != b->params[i].local->type) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // `pointer_ok` is for the places a pointer type can be written: a variable in `unsafe` code,
+    // and a C function's parameters and result. Anything that holds one can't be written yet.
+    Type* resolve_type(TypeExpr* t, bool pointer_ok = false) {
         switch (t->kind) {
             case TypeExprKind::named: {
                 if (t->path.parts.size() != 1) {
@@ -1678,7 +1768,20 @@ private:
                 return optional_type(inner, t->span);
             }
             case TypeExprKind::fn: not_yet(t->span, "function types"); return T.error;
-            case TypeExprKind::pointer: not_yet(t->span, "pointers"); return T.error;
+            case TypeExprKind::pointer: {
+                if (!pointer_ok) {
+                    error(t->span, "a pointer can only be the type of a variable in `unsafe` code, or of a C function's "
+                                   "parameter or result");
+                    return T.error;
+                }
+                Type* inner = resolve_type(t->inner, true);
+                if (is_bad(inner)) return T.error;
+                if (inner->kind == TypeKind::unit || inner->kind == TypeKind::never) {
+                    error(t->inner->span, "a pointer can't point to " + name_of(inner) + "; point to a `u8`");
+                    return T.error;
+                }
+                return T.pointer_of(inner, t->is_const);
+            }
             case TypeExprKind::dyn: not_yet(t->span, "`dyn` types"); return T.error;
         }
         return T.error;
@@ -1743,7 +1846,7 @@ private:
                     }
                 }
             } else {
-                t = resolve_type(p.type);
+                t = resolve_type(p.type, f->is_extern);
             }
             if (t->kind == TypeKind::unit) error(p.type->span, "a parameter can't be `()`");
             if (i == 0 && f->impl_type && t == f->impl_type) f->is_method = true;
@@ -1757,7 +1860,7 @@ private:
             p.local = l;
         }
         if (f->error) not_yet(f->error->span, "functions that can fail");
-        f->result_type = f->result ? resolve_type(f->result) : T.unit;
+        f->result_type = f->result ? resolve_type(f->result, f->is_extern) : T.unit;
         if (exported(f)) {
             for (const Param& p : f->params) {
                 if (p.local && p.type) public_type(p.local->type, p.type->span, "a `pub` function can't take it");
@@ -1973,6 +2076,7 @@ private:
         switch (e->kind) {
             case ExprKind::if_: t = check_if(e, nullptr, true); break;
             case ExprKind::block: t = check_block(e->block, nullptr, BlockUse::stmt); break;
+            case ExprKind::unsafe_block: t = check_unsafe(e, nullptr, true); break;
             case ExprKind::loop: t = check_loop(e, nullptr, true); break;
             case ExprKind::match: t = check_match(e, nullptr, true); break;
             default: t = check(e, nullptr); break;
@@ -2026,7 +2130,7 @@ private:
         bool plain = p->kind == PatternKind::binding && (!std::isupper(static_cast<unsigned char>(text(p->name)[0])) ||
                                                          resolve_name(p->name).kind != NameKind::none);
         if (has_else || !plain) return check_let_pattern(s);
-        Type* declared = s->type ? resolve_type(s->type) : nullptr;
+        Type* declared = s->type ? resolve_type(s->type, unsafe_depth_ > 0) : nullptr;
         if (!s->value) {
             error(p->span, "give " + q(text(p->name)) + " a value; Calx has no uninitialized variables");
             Local* l = new_local(p->name, declared ? declared : T.error, p->span, s->is_var);
@@ -2351,11 +2455,47 @@ private:
     // Checks `e`, which should have type `expected` if that isn't null, and returns its type.
     Type* check(Expr* e, Type* expected) {
         Type* t = infer(e, expected);
+        if (t->has_pointer) t = pointer_value(e, t);
         e->type = t;
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
             mismatch(e, expected, t);
             return T.error;
         }
+        return t;
+    }
+
+    // D23: a pointer is only ever a value of its own, used inside `unsafe`.
+    Type* pointer_value(Expr* e, Type* t) {
+        if (t->kind != TypeKind::pointer) {
+            error(e->span, name_of(t) + " holds a pointer, which can't be inside another type yet");
+            return T.error;
+        }
+        if (unsafe_depth_ == 0) {
+            error(e->span, "this is a pointer, " + name_of(t) + ", which can only be used inside `unsafe`");
+            return T.error;
+        }
+        unsafe_used_ = true;
+        return t;
+    }
+
+    // `unsafe { }`: a block where pointers and C functions can be used. One that uses neither, or
+    // that's already inside another, is an error, so every `unsafe` marks something unsafe.
+    Type* check_unsafe(Expr* e, Type* expected, bool stmt) {
+        Span kw{e->span.file, e->span.begin, e->span.begin + 6};
+        BlockUse use = stmt ? BlockUse::stmt : BlockUse::value;
+        if (unsafe_depth_ > 0) {
+            error(kw, "this is already inside `unsafe`; remove the inner `unsafe`");
+            return check_block(e->block, expected, use);
+        }
+        std::size_t before = ctx_.diags.error_count();
+        unsafe_used_ = false;
+        unsafe_depth_++;
+        Type* t = check_block(e->block, expected, use);
+        unsafe_depth_--;
+        if (!unsafe_used_ && ctx_.diags.error_count() == before) {
+            error(kw, "nothing in this block needs `unsafe`; remove it");
+        }
+        unsafe_used_ = false;
         return t;
     }
 
@@ -2482,7 +2622,7 @@ private:
                 return t->elem;
             }
             case ExprKind::try_: not_yet(e->span, "errors"); return T.error;
-            case ExprKind::unsafe_block: not_yet(e->span, "`unsafe` blocks"); return T.error;
+            case ExprKind::unsafe_block: return check_unsafe(e, expected, false);
         }
         return T.error;
     }
@@ -2701,6 +2841,8 @@ private:
         std::string_view s = text(n);
         r.builtin = s == "print" ? Builtin::print
                     : s == "println" ? Builtin::println
+                    : s == "eprint" ? Builtin::eprint
+                    : s == "eprintln" ? Builtin::eprintln
                     : s == "panic" ? Builtin::panic
                     : s == "assert" ? Builtin::assert_
                                      : Builtin::none;
@@ -2798,7 +2940,7 @@ private:
     static bool equatable(const Type* t) {
         switch (t->kind) {
             case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
-            case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
+            case TypeKind::rune: case TypeKind::str: case TypeKind::string: case TypeKind::pointer: return true;
             case TypeKind::enum_: return !t->has_data;
             case TypeKind::optional: return equatable(t->elem);
             default: return false;
@@ -4551,7 +4693,10 @@ private:
                     return T.error;
                 }
             }
-            if (recv->kind == TypeKind::string || recv->kind == TypeKind::list) return builtin_method(e, recv);
+            if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list) {
+                return builtin_method(e, recv);
+            }
+            if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
             return prim_method(e, recv);
         }
         check(callee, nullptr);
@@ -4615,6 +4760,13 @@ private:
             if (m == "saturate") return conversion(e, t, Conv::saturate);
             if (m == "nearest") return conversion(e, t, Conv::nearest);
             if (m == "try_from") return try_from(e, t);
+            if (m == "parse" && is_numeric(t)) return static_builtin(e, t, PrimMethod::parse, nullptr, T.optional_of(t));
+            if (m == "from_bits" && is_float(t)) {
+                return static_builtin(e, t, PrimMethod::from_bits, t->bits == 32 ? T.u32 : T.u64, t);
+            }
+        }
+        if (t == T.string && m == "from_utf8") {
+            return static_builtin(e, t, PrimMethod::from_utf8, T.list_of(T.u8), T.optional_of(T.string));
         }
         if (t->kind == TypeKind::enum_) {
             std::uint32_t i = find_variant(t, e->callee->member);
@@ -4727,6 +4879,12 @@ private:
         check_signature(f);
         e->call = receiver ? CallKind::method : CallKind::fn;
         e->item = f;
+        if (f->is_extern) {
+            if (unsafe_depth_ == 0) {
+                error(e->callee->span, q(text(f->name)) + " is a C function, so calling it needs `unsafe`");
+            }
+            unsafe_used_ = true;
+        }
         // A generic function's types come from `f<...>`, then the receiver, the arguments in the
         // order they're written, and where the result goes.
         const Slice<Type*>& vars = f->type_params;
@@ -5049,13 +5207,17 @@ private:
         switch (b) {
             case Builtin::print:
             case Builtin::println:
-                if (e->args.size() > 1 || (b == Builtin::print && e->args.empty())) {
-                    error(e->span, std::string(b == Builtin::print ? "`print`" : "`println`") + " takes " +
-                                       (b == Builtin::print ? "one string" : "one string, or nothing"));
+            case Builtin::eprint:
+            case Builtin::eprintln: {
+                bool line = b == Builtin::println || b == Builtin::eprintln;
+                if (e->args.size() > 1 || (!line && e->args.empty())) {
+                    error(e->span, "`" + std::string(text(e->callee->path.parts[0])) + "` takes " +
+                                       (line ? "one string, or nothing" : "one string"));
                     return T.unit;
                 }
                 if (!e->args.empty()) message(e->args[0].value);
                 return T.unit;
+            }
             case Builtin::panic:
                 if (e->args.size() != 1) {
                     error(e->span, "`panic` takes one string: the message");
@@ -5150,18 +5312,28 @@ private:
         bool changes = false;
         std::vector<Type*> params;
         Type* result = T.unit;
-        if (recv->kind == TypeKind::string) {
+        bool needs_unsafe = false;
+        if (recv->kind == TypeKind::string || recv->kind == TypeKind::str) {
+            bool owned = recv->kind == TypeKind::string;
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
-            else if (m == "push") b = BMethod::push, changes = true, params = {T.rune};
+            else if (m == "byte_at") b = BMethod::byte_at, params = {T.usize}, result = T.u8;
+            else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(T.u8, true);
+            else if (m == "contains") b = BMethod::contains, params = {nullptr}, result = T.bool_;
+            else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
+            else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
+            else if (!owned) {
+                if (m == "push" || m == "push_str" || m == "clear" || m == "reserve") {
+                    error(e->callee->span, "a `str` can't change; make a `String` with " + q("String(...)"));
+                    for (Arg& a : e->args) check(a.value, nullptr);
+                    return T.error;
+                }
+            } else if (m == "push") b = BMethod::push, changes = true, params = {T.rune};
             // These only look at the text they're given, so it can be a `str` or a `String`;
             // `nullptr` stands for either.
             else if (m == "push_str") b = BMethod::push_str, changes = true, params = {nullptr};
             else if (m == "clear") b = BMethod::clear, changes = true;
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
-            else if (m == "contains") b = BMethod::contains, params = {nullptr}, result = T.bool_;
-            else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
-            else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
         } else {
             Type* el = recv->elem;
             if (m == "len") b = BMethod::len, result = T.usize;
@@ -5177,6 +5349,9 @@ private:
             else if (m == "truncate") b = BMethod::truncate, changes = true, params = {T.usize};
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+            else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
+            else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
+            else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
         }
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
@@ -5201,6 +5376,18 @@ private:
                 return T.error;
             }
         }
+        if (needs_unsafe) {
+            if (unsafe_depth_ == 0) {
+                error(e->callee->span, q(m) + " can expose memory that was never written, so it needs `unsafe`");
+            }
+            unsafe_used_ = true;
+        }
+        // Reported without returning, so the receiver still counts as changed.
+        if (b == BMethod::set_len && !is_copy(recv->elem) && !is_bad(recv->elem)) {
+            error(e->callee->span, "`set_len` needs elements that are `Copy`, since it neither drops nor makes them, and " +
+                                       name_of(recv->elem) + " owns memory");
+            result = T.error;
+        }
         if (b == BMethod::contains && recv->kind == TypeKind::list && !equatable(recv->elem) && !is_bad(recv->elem)) {
             error(e->callee->span, "`contains` compares with `==`, which " + name_of(recv->elem) + " doesn't have");
             return T.error;
@@ -5221,11 +5408,70 @@ private:
         return result;
     }
 
+    // The methods of `*T` and `*const T`, which only `unsafe` code can call, since the receiver
+    // is a pointer.
+    Type* pointer_method(Expr* e, Type* recv) {
+        std::string_view m = text(e->callee->member);
+        e->call = CallKind::builtin_method;
+        BMethod b = BMethod::none;
+        Type* param = nullptr;
+        Type* result = T.unit;
+        if (m == "read") b = BMethod::ptr_read, result = recv->elem;
+        else if (m == "write") b = BMethod::ptr_write, param = recv->elem;
+        else if (m == "add") b = BMethod::ptr_add, param = T.usize, result = recv;
+        else if (m == "is_null") b = BMethod::ptr_is_null, result = T.bool_;
+        if (b == BMethod::none) {
+            error(e->callee->span, name_of(recv) + " has no method " + q(m));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->bmethod = b;
+        std::size_t want = param ? 1 : 0;
+        if (e->args.size() != want) {
+            error(e->span, q(m) + " takes " + (want ? "one argument" : "no arguments"));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        for (Arg& a : e->args) {
+            if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+            check(a.value, param);
+        }
+        if ((b == BMethod::ptr_read || b == BMethod::ptr_write) && !is_copy(recv->elem)) {
+            error(e->callee->span, q(m) + " copies the value, so it needs a `Copy` type, and " + name_of(recv->elem) +
+                                       " owns memory");
+            return T.error;
+        }
+        if (b == BMethod::ptr_write && recv->is_const) {
+            error(e->callee->span, "can't write through " + name_of(recv) + "; that needs a `*` pointer, such as " +
+                                       q("as_mut_ptr()") + " gives");
+            return T.error;
+        }
+        return result;
+    }
+
+    // `T.parse(text)`, `f64.from_bits(b)` and `String.from_utf8(bytes)`.
+    Type* static_builtin(Expr* e, Type* t, PrimMethod pm, Type* param, Type* result) {
+        std::string what = q(std::string(t->name) + "." + std::string(text(e->callee->member)) + "(...)");
+        Expr* a = single_arg(e, what.c_str());
+        if (!a) return T.error;
+        e->call = CallKind::prim_static;
+        e->prim = pm;
+        e->named_type = t;
+        Type* at = check(a, param);
+        if (is_bad(at)) return T.error;
+        if (!param && at->kind != TypeKind::str && at->kind != TypeKind::string) {
+            error(a->span, what + " takes a `str` or a `String`, not " + a_type(at));
+            return T.error;
+        }
+        return result;
+    }
+
     Type* prim_method(Expr* e, Type* recv) {
         std::string_view m = text(e->callee->member);
         e->call = CallKind::prim_method;
         PrimMethod pm = PrimMethod::none;
         int args = 0;
+        Type* arg_type = recv;
         bool num = is_numeric(recv);
         if (m == "abs" && num) pm = PrimMethod::abs;
         else if (m == "min" && num) pm = PrimMethod::min, args = 1;
@@ -5247,6 +5493,9 @@ private:
         else if (m == "saturating_add" && is_int(recv)) pm = PrimMethod::saturating_add, args = 1;
         else if (m == "saturating_sub" && is_int(recv)) pm = PrimMethod::saturating_sub, args = 1;
         else if (m == "saturating_mul" && is_int(recv)) pm = PrimMethod::saturating_mul, args = 1;
+        else if (m == "to_bits" && is_float(recv)) pm = PrimMethod::to_bits;
+        else if (m == "rotate_left" && is_int(recv)) pm = PrimMethod::rotate_left, args = 1, arg_type = T.i32;
+        else if (m == "rotate_right" && is_int(recv)) pm = PrimMethod::rotate_right, args = 1, arg_type = T.i32;
         if (pm == PrimMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
             for (Arg& a : e->args) check(a.value, nullptr);
@@ -5264,9 +5513,10 @@ private:
         }
         for (Arg& a : e->args) {
             if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
-            check(a.value, recv);
+            check(a.value, arg_type);
         }
         if (pm == PrimMethod::is_nan) return T.bool_;
+        if (pm == PrimMethod::to_bits) return recv->bits == 32 ? T.u32 : T.u64;
         if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);
         Expr* lhs = e->callee->lhs;
         if (args == 1 && lhs->has_bits && e->args[0].value->has_bits && is_int(recv)) {
@@ -5346,6 +5596,14 @@ private:
             }
         }
         for (Module* mod : prog_.modules) for (Item* it : mod->items) {
+            if (it->kind == ItemKind::extern_block) {
+                for (Item* m : it->members) {
+                    if (m->kind == ItemKind::fn && !m->is_pub && !m->used) {
+                        error(m->name_span, "function " + q(text(m->name)) + " is never used");
+                    }
+                }
+                continue;
+            }
             if (it->kind == ItemKind::impl) {
                 for (Item* m : it->members) {
                     if (m->kind == ItemKind::fn && !m->is_pub && !m->used && m->impl_type && !m->interface_item) {
@@ -5357,7 +5615,7 @@ private:
             if (it->is_pub || it->used) continue;
             if (it->kind == ItemKind::fn && text(it->name) == "main" && mod == prog_.modules.back()) continue;
             if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_ || it->kind == ItemKind::interface) {
-                if (it->kind == ItemKind::fn && !it->body) continue;
+                if (it->kind == ItemKind::fn && !it->body && !it->is_extern) continue;
                 error(it->name_span, std::string(item_kind(it)) + " " + q(text(it->name)) + " is never used");
             }
         }
@@ -5388,7 +5646,10 @@ private:
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
     Scope* scope_ = nullptr;  // the module being worked on
-    std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_;
+    std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_, externs_;
+    std::unordered_map<std::string_view, Item*> c_functions_;  // C functions by their C name
+    int unsafe_depth_ = 0;
+    bool unsafe_used_ = false;  // the `unsafe` block being checked has done something unsafe
     std::unordered_map<Item*, bool> checking_consts_;
     Item* current_item_ = nullptr;
     Type* current_impl_type_ = nullptr;
@@ -5416,6 +5677,7 @@ private:
     std::vector<Item*> pending_fns_;
     std::vector<DeferredBounds> deferred_bounds_;
     std::unordered_set<std::string> c_names_;
+    std::unordered_set<std::string> prefixes_;
     std::unordered_set<Item*> failed_generics_;
     std::vector<Type*> pending_defaults_;  // instances made before the generic structs' defaults were checked
     bool defaults_ready_ = false;

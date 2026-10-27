@@ -65,6 +65,10 @@ fn main() {
 - Structs and enums can be generic, as in `Pair<i32, str>` ([generics](generics.md)).
 - An interface isn't a type. It's a bound on a generic parameter ([interfaces](interfaces.md)).
 
+## Pointers
+
+`*T` and `*const T` are raw pointers, for [unsafe code](unsafe.md#pointers) and C functions only.
+
 ## Optionals
 
 `T?` is a `T` that may be absent: `some(x)` or `none`. There's no null ([optionals](optionals.md)).

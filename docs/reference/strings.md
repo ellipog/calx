@@ -35,6 +35,19 @@ fn main() {
 | `"x"` where a `String` is wanted | The literal, for free |
 | `"n = {n}"` | A new string, built from its parts |
 | `s.copy()` | A copy that owns its own memory ([ownership](ownership.md)) |
+| `String.from_utf8(bytes)` | The `List<u8>` as a `String`, or `none` if it isn't UTF-8. The string takes the list's memory, so nothing is copied |
+
+`String.from_utf8` accepts exactly the UTF-8 that encodes Unicode scalar values: no overlong forms, no surrogates, and nothing past U+10FFFF. Java's `new String(bytes, UTF_8)` puts U+FFFD in place of bad bytes instead; a lossy version is designed with the rest of `std.text`.
+
+```calx
+fn main() {
+    let euro: List<u8> = [0xE2, 0x82, 0xAC]
+    let bad: List<u8> = [0xC0, 0x80]
+    println("{String.from_utf8(euro) ?? "?"} {String.from_utf8(bad) ?? "?"}")    // out: € ?
+    let word: str = "hey"
+    println("{word.byte_at(0)} {word.len()}")    // out: 104 3
+}
+```
 
 ## Methods
 
@@ -42,6 +55,7 @@ fn main() {
 | --- | --- |
 | `s.len()` | The length in bytes, a `usize` |
 | `s.is_empty()` | Whether the length is 0 |
+| `s.byte_at(i)` | The byte at offset `i`, a `u8`. Panics if `i` is past the end |
 | `s.push(r)` | Adds the `rune` `r`, as UTF-8 |
 | `s.push_str(t)` | Adds the text `t` |
 | `s.clear()` | Removes all the text, keeping the memory |
@@ -50,7 +64,9 @@ fn main() {
 | `s.starts_with(t)`, `s.ends_with(t)` | Whether `s` begins or ends with `t` |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
+- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `starts_with` and `ends_with`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
+- `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).
 - `s.push_str(s)` is an error, since `s` would change while being read. Push a copy.
 
 ```calx

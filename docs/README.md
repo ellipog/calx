@@ -36,8 +36,15 @@ What's built, one page per feature:
 19. [Generics](reference/generics.md): generic functions and types, inference, bounds, `T: Copy`, and their C
 20. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
 21. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-22. [Printing and panics](reference/printing.md): print, println, assert and panic
-23. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+22. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
+23. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks, raw pointers, and calling C
+24. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+
+### Standard library
+
+The `std` modules, one page each ([modules](reference/modules.md#the-standard-library)):
+
+1. [std.io](std/io.md): standard input and output as bytes
 
 ### Design
 
@@ -52,6 +59,7 @@ The guide starts once enough of the language is built to write a real program.
 | --- | --- | --- | --- |
 | Guide | `guide/` | Learning Calx, in reading order, as tutorials | No |
 | Reference | `reference/` | One page per shipped feature: syntax, meaning, examples, errors | Yes |
+| Standard library | `std/` | One page per `std` module | Yes |
 | Spec | `CALX_SPEC.md` | Features that are designed but not built yet | Yes, until the feature ships |
 
 A feature lives in exactly one normative place. When it ships, its spec section moves to a reference page, and a link is left behind in the spec.

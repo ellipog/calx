@@ -1,0 +1,52 @@
+/// Standard input and output as bytes, for programs that speak a binary protocol.
+///
+/// What `write` writes and what `print` prints share one buffer, so they come out in the order
+/// they were written. The buffer is written out when it fills, at `flush()`, before `read` waits
+/// for input, and when the program ends.
+module std.io
+
+extern "C" {
+    fn cx_in_read(to: *u8, n: usize) -> usize
+    fn cx_out_write(from: *const u8, n: usize)
+    fn cx_out_flush()
+}
+
+/// Reads up to `n` bytes from standard input onto the end of `buf`, and returns how many it
+/// read. That's 0 only at the end of the input, or when `n` is 0.
+pub fn read(buf: mut List<u8>, n: usize) -> usize {
+    buf.reserve(n)
+    unsafe {
+        let start = buf.len()
+        let got = cx_in_read(buf.as_mut_ptr().add(start), n)
+        buf.set_len(start + got)
+        return got
+    }
+}
+
+/// Reads exactly `n` bytes from standard input onto the end of `buf`. Returns `false` if the
+/// input ended first, keeping the bytes that came.
+pub fn read_exact(buf: mut List<u8>, n: usize) -> bool {
+    var left = n
+    while left > 0 {
+        let got = read(mut buf, left)
+        if got == 0 {
+            return false
+        }
+        left -= got
+    }
+    return true
+}
+
+/// Writes the bytes to standard output.
+pub fn write(bytes: List<u8>) {
+    unsafe {
+        cx_out_write(bytes.as_ptr(), bytes.len())
+    }
+}
+
+/// Writes out what's waiting in the output buffer.
+pub fn flush() {
+    unsafe {
+        cx_out_flush()
+    }
+}

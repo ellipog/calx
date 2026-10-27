@@ -1,0 +1,24 @@
+// `T.parse(text)` follows Java's Integer.parseInt: an optional sign, then ASCII digits, in range.
+
+fn show(x: i32?) -> String {
+    return match x {
+        some(v) => "{v}",
+        none => "none",
+    }
+}
+
+fn main() {
+    println("{show(i32.parse("42"))} {show(i32.parse("+5"))} {show(i32.parse("-0"))} {show(i32.parse("007"))}")    // out: 42 5 0 7
+    println("{show(i32.parse("2147483647"))} {show(i32.parse("-2147483648"))}")    // out: 2147483647 -2147483648
+    println("{show(i32.parse("2147483648"))} {show(i32.parse("-2147483649"))}")    // out: none none
+    println("{show(i32.parse(""))} {show(i32.parse("-"))} {show(i32.parse("+"))} {show(i32.parse(" 5"))} {show(i32.parse("5 "))}")    // out: none none none none none
+    println("{show(i32.parse("1_000"))} {show(i32.parse("0x10"))} {show(i32.parse("1.0"))} {show(i32.parse("--1"))}")    // out: none none none none
+    println("{i8.parse("-128") ?? 0} {i8.parse("128") ?? 0} {i16.parse("32767") ?? 0}")    // out: -128 0 32767
+    println("{i64.parse("-9223372036854775808") ?? 0} {i64.parse("9223372036854775808") ?? 0}")    // out: -9223372036854775808 0
+    // Unsigned types take no `-`, not even on zero, as Integer.parseUnsignedInt.
+    println("{u8.parse("255") ?? 1} {u8.parse("256") ?? 1} {u8.parse("-0") ?? 1} {u8.parse("+7") ?? 1}")    // out: 255 1 1 7
+    println("{u64.parse("18446744073709551615") ?? 1} {u64.parse("18446744073709551616") ?? 1}")    // out: 18446744073709551615 1
+    println("{usize.parse("12") ?? 0} {u32.parse("4294967295") ?? 0}")    // out: 12 4294967295
+    let typed = String("-77")
+    println("{i32.parse(typed) ?? 0}")    // out: -77
+}

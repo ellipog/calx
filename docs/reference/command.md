@@ -83,7 +83,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | Variable | Meaning |
 | --- | --- |
 | `CALX_CC` | The clang to use. Otherwise `clang` is found on `PATH` |
-| `CALX_HOME` | Where the runtime is. Otherwise, the source tree the compiler was built from |
+| `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the source tree the compiler was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. Deleting it is always safe.

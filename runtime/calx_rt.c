@@ -11,6 +11,9 @@
 #include <io.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <errno.h>
+#include <unistd.h>
 #endif
 
 /* --- output ------------------------------------------------------------------------------- */
@@ -34,15 +37,8 @@ static void flush_out(void) {
     fflush(stdout);
 }
 
-static void write_bytes(const void* p, size_t n) {
-    if (fmt_to) {
-        cx_string_push_bytes(fmt_to, (const cx_u8*)p, n);
-        return;
-    }
-    if (to_stderr) {
-        fwrite(p, 1, n, stderr);
-        return;
-    }
+static void out_bytes(const void* p, size_t n) {
+    if (n == 0) return; /* an empty string's pointer can be null, which memcpy can't take */
     if (n > sizeof out_buf - out_len) {
         flush_out();
         if (n > sizeof out_buf) {
@@ -54,11 +50,23 @@ static void write_bytes(const void* p, size_t n) {
     out_len += n;
 }
 
+static void write_bytes(const void* p, size_t n) {
+    if (n == 0) return;
+    if (fmt_to) {
+        cx_string_push_bytes(fmt_to, (const cx_u8*)p, n);
+    } else if (to_stderr) {
+        fwrite(p, 1, n, stderr);
+    } else {
+        out_bytes(p, n);
+    }
+}
+
 void cx_start(int argc, char** argv) {
     (void)argc;
     (void)argv;
 #ifdef _WIN32
     /* The same bytes on every platform: no "\n" to "\r\n" translation, and UTF-8 in a console. */
+    _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     SetConsoleOutputCP(CP_UTF8);
@@ -78,6 +86,41 @@ int cx_finish(void) {
 }
 
 void cx_print_str(cx_str s) { write_bytes(s.ptr, s.len); }
+
+/* --- std.io --------------------------------------------------------------------------------
+ * These are declared by std/io.calx as C functions, not in calx_rt.h. */
+
+void cx_err_begin(void) {
+    if (out_len) flush_out();
+    to_stderr = 1;
+}
+
+void cx_err_end(void) { to_stderr = 0; }
+
+void cx_out_write(const cx_u8* p, cx_usize n) { out_bytes(p, n); }
+
+void cx_out_flush(void) { flush_out(); }
+
+/* Reads at most `n` bytes, returning 0 only at the end of the input. Output waiting in the
+ * buffer is written first, since the program may be waiting for an answer to it. */
+cx_usize cx_in_read(cx_u8* p, cx_usize n) {
+    if (n == 0) return 0;
+    if (out_len) flush_out();
+#ifdef _WIN32
+    int r = _read(0, p, n > 0x40000000 ? 0x40000000u : (unsigned)n);
+#else
+    ssize_t r;
+    do {
+        r = read(0, p, n > 0x40000000 ? 0x40000000 : n);
+    } while (r < 0 && errno == EINTR);
+#endif
+    if (r < 0) {
+        cx_panic_begin("<stdin>");
+        fputs("can't read standard input", stderr);
+        cx_panic_end();
+    }
+    return (cx_usize)r;
+}
 
 void cx_print_u64(cx_u64 v) {
     char buf[24];
@@ -334,6 +377,168 @@ cx_String cx_string_from(cx_str s) {
     return r;
 }
 
+cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n) {
+    cx_usize i = 0;
+    while (i < n) {
+        /* Eight ASCII bytes at a time. */
+        if (n - i >= 8) {
+            cx_u64 w;
+            memcpy(&w, p + i, 8);
+            if (!(w & 0x8080808080808080ull)) {
+                i += 8;
+                continue;
+            }
+        }
+        cx_u8 c = p[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        cx_usize len;
+        cx_u32 cp, min;
+        if (c >= 0xC2 && c <= 0xDF) {
+            len = 2, cp = c & 0x1F, min = 0x80;
+        } else if ((c & 0xF0) == 0xE0) {
+            len = 3, cp = c & 0x0F, min = 0x800;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            len = 4, cp = c & 0x07, min = 0x10000;
+        } else {
+            return 0;
+        }
+        if (n - i < len) return 0;
+        for (cx_usize k = 1; k < len; k++) {
+            if ((p[i + k] & 0xC0) != 0x80) return 0;
+            cp = cp << 6 | (p[i + k] & 0x3F);
+        }
+        if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+        i += len;
+    }
+    return 1;
+}
+
+/* --- parsing ------------------------------------------------------------------------------- */
+
+/* The digits after an optional sign, up to `limit`. */
+static cx_bool parse_digits(const cx_u8* p, cx_usize n, cx_u64 limit, cx_u64* out) {
+    if (n == 0) return 0;
+    cx_u64 v = 0;
+    for (cx_usize i = 0; i < n; i++) {
+        unsigned d = (unsigned)p[i] - '0';
+        if (d > 9) return 0;
+        if (d > limit || v > (limit - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    *out = v;
+    return 1;
+}
+
+cx_bool cx_parse_i64(cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out) {
+    *out = 0;
+    if (s.len == 0) return 0;
+    int neg = s.ptr[0] == '-';
+    cx_usize skip = neg || s.ptr[0] == '+';
+    cx_u64 v;
+    if (!parse_digits(s.ptr + skip, s.len - skip, neg ? (cx_u64)0 - (cx_u64)lo : (cx_u64)hi, &v)) return 0;
+    *out = neg ? (cx_i64)((cx_u64)0 - v) : (cx_i64)v;
+    return 1;
+}
+
+cx_bool cx_parse_u64(cx_str s, cx_u64 hi, cx_u64* out) {
+    *out = 0;
+    if (s.len == 0 || s.ptr[0] == '-') return 0;
+    cx_usize skip = s.ptr[0] == '+';
+    return parse_digits(s.ptr + skip, s.len - skip, hi, out);
+}
+
+static int is_digit(cx_u8 c) { return c >= '0' && c <= '9'; }
+static int is_hex(cx_u8 c) { return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+/* Checks `s` against Java's grammar for Double.parseDouble: trimmed of characters up to ' ',
+ * an optional sign, then `NaN`, `Infinity`, a decimal number with an optional exponent, or a hex
+ * number with a binary exponent, then an optional `f`, `F`, `d` or `D`. Returns 0 if it doesn't
+ * match, 2 for NaN and 3 for an infinity, and 1 for a number, which is copied without its suffix
+ * into `buf` (of `cap` bytes) or, if longer, into memory `*heap` that the caller frees. */
+static int java_float(cx_str s, char* buf, size_t cap, char** text, char** heap, int* negative) {
+    const cx_u8* p = s.ptr;
+    size_t n = s.len;
+    while (n && p[0] <= ' ') p++, n--;
+    while (n && p[n - 1] <= ' ') n--;
+    if (n == 0) return 0;
+    size_t i = 0;
+    *negative = p[0] == '-';
+    if (p[0] == '+' || p[0] == '-') i++;
+    if (n - i == 3 && memcmp(p + i, "NaN", 3) == 0) return 2;
+    if (n - i == 8 && memcmp(p + i, "Infinity", 8) == 0) return 3;
+    size_t digits = 0;
+    if (n - i >= 2 && p[i] == '0' && (p[i + 1] == 'x' || p[i + 1] == 'X')) {
+        i += 2;
+        while (i < n && is_hex(p[i])) i++, digits++;
+        if (i < n && p[i] == '.') {
+            i++;
+            while (i < n && is_hex(p[i])) i++, digits++;
+        }
+        if (!digits || i >= n || (p[i] != 'p' && p[i] != 'P')) return 0;
+        i++;
+        if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+        size_t e = 0;
+        while (i < n && is_digit(p[i])) i++, e++;
+        if (!e) return 0;
+    } else {
+        while (i < n && is_digit(p[i])) i++, digits++;
+        if (i < n && p[i] == '.') {
+            i++;
+            while (i < n && is_digit(p[i])) i++, digits++;
+        }
+        if (!digits) return 0;
+        if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+            i++;
+            if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+            size_t e = 0;
+            while (i < n && is_digit(p[i])) i++, e++;
+            if (!e) return 0;
+        }
+    }
+    size_t end = i;
+    if (i < n && (p[i] == 'f' || p[i] == 'F' || p[i] == 'd' || p[i] == 'D')) i++;
+    if (i != n) return 0;
+    char* t = buf;
+    if (end + 1 > cap) t = *heap = (char*)malloc(end + 1);
+    if (!t) cx_panic_capacity();
+    memcpy(t, p, end);
+    t[end] = 0;
+    *text = t;
+    return 1;
+}
+
+cx_bool cx_parse_f64(cx_str s, cx_f64* out) {
+    char buf[128], *text = 0, *heap = 0;
+    int negative;
+    *out = 0;
+    switch (java_float(s, buf, sizeof buf, &text, &heap, &negative)) {
+        case 0: return 0;
+        case 2: *out = __builtin_nan(""); return 1;
+        case 3: *out = negative ? -__builtin_inf() : __builtin_inf(); return 1;
+    }
+    *out = strtod(text, 0);
+    free(heap);
+    return 1;
+}
+
+cx_bool cx_parse_f32(cx_str s, cx_f32* out) {
+    char buf[128], *text = 0, *heap = 0;
+    int negative;
+    *out = 0;
+    switch (java_float(s, buf, sizeof buf, &text, &heap, &negative)) {
+        case 0: return 0;
+        case 2: *out = __builtin_nanf(""); return 1;
+        case 3: *out = negative ? -__builtin_inff() : __builtin_inff(); return 1;
+    }
+    /* Straight to f32, rounding once, as Float.parseFloat does. */
+    *out = strtof(text, 0);
+    free(heap);
+    return 1;
+}
+
 cx_bool cx_str_contains(cx_str hay, cx_str needle) {
     if (needle.len == 0) return 1;
     if (needle.len > hay.len) return 0;
@@ -391,6 +596,13 @@ void cx_panic_insert(cx_usize index, cx_usize length, const char* at) {
     cx_panic_begin(at);
     fprintf(stderr, "can't insert at index %llu in a list of length %llu", (unsigned long long)index,
             (unsigned long long)length);
+    cx_panic_end();
+}
+
+void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at) {
+    cx_panic_begin(at);
+    fprintf(stderr, "can't set the length to %llu in a list with capacity %llu", (unsigned long long)length,
+            (unsigned long long)capacity);
     cx_panic_end();
 }
 

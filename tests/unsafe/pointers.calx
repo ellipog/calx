@@ -1,0 +1,63 @@
+// Raw pointers, inside `unsafe`.
+
+fn sum_by_pointer(xs: List<i32>) -> i32 {
+    var total = 0
+    unsafe {
+        let p = xs.as_ptr()
+        var i: usize = 0
+        while i < xs.len() {
+            total += p.add(i).read()
+            i += 1
+        }
+    }
+    return total
+}
+
+fn fill(xs: mut List<u8>, n: usize, byte: u8) {
+    xs.reserve(n)
+    unsafe {
+        let start = xs.len()
+        let p = xs.as_mut_ptr().add(start)
+        var i: usize = 0
+        while i < n {
+            p.add(i).write(byte)
+            i += 1
+        }
+        xs.set_len(start + n)
+    }
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3, 4]
+    println("{sum_by_pointer(xs)}")    // out: 10
+
+    var bytes: List<u8> = [7]
+    fill(mut bytes, 3, 9)
+    println("{bytes}")    // out: [7, 9, 9, 9]
+
+    // A pointer is a value of its own: it can be copied, compared, and declared with its type.
+    let same = unsafe {
+        let a: *const u8 = bytes.as_ptr()
+        let b = a
+        a == b and a.add(1) != b and not a.is_null()
+    }
+    println("{same}")    // out: true
+
+    // An empty list owns no memory, so its pointer is null.
+    let empty = List<i64>()
+    let null = unsafe { empty.as_ptr().is_null() }
+    println("{null}")    // out: true
+
+    // A string's bytes.
+    let s = String("hey")
+    let first = unsafe { s.as_ptr().read() }
+    let word: str = "abc"
+    let last = unsafe { word.as_ptr().add(2).read() }
+    println("{first} {last}")    // out: 104 99
+
+    // `set_len` can shrink a list of `Copy` values, too.
+    unsafe {
+        bytes.set_len(1)
+    }
+    println("{bytes}")    // out: [7]
+}

@@ -29,6 +29,7 @@ enum class TypeKind : std::uint8_t {
     optional,  // `T?`
     tuple,     // `(A, B)`, with at least two elements
     param,     // a generic function's or type's parameter, such as `T` in `fn f<T: Shape>`
+    pointer,   // `*T` and `*const T`, only in `unsafe` code and `extern` signatures
 };
 
 struct Type {
@@ -49,6 +50,8 @@ struct Type {
     Slice<Item*> bounds;     // param: the interfaces it must implement
     bool copy_bound = false; // param: it has the bound `Copy`
     bool open = false;       // it mentions a parameter, so it's only checked, never emitted
+    bool is_const = false;   // pointer: `*const T`, which can't be written through
+    bool has_pointer = false; // it is or holds a pointer
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -77,6 +80,7 @@ public:
     Type* list_of(Type* elem);
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
+    Type* pointer_of(Type* elem, bool is_const);
     // The arrays, optionals, tuples and lists made so far, in the order they were made.
     const std::vector<Type*>& compounds() const { return compounds_; }
 
@@ -91,6 +95,7 @@ private:
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
+    std::map<std::pair<Type*, bool>, Type*> pointer_map_;
     std::vector<Type*> compounds_;
 };
 

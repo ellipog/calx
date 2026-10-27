@@ -57,6 +57,7 @@ fn main() {
 | `x.sqrt()` | The square root, correctly rounded |
 | `x.floor()`, `x.ceil()` | Rounded down or up to an integer value, still a float |
 | `x.is_nan()` | Whether it's NaN |
+| `x.to_bits()` | The IEEE 754 bits, a `u64` for `f64` and a `u32` for `f32`: Java's `doubleToRawLongBits` and `floatToRawIntBits`, which keep a NaN's payload |
 
 ```calx
 fn main() {
@@ -66,7 +67,33 @@ fn main() {
 }
 ```
 
+`f64.from_bits(b)` and `f32.from_bits(b)` make a float from its bits, as `longBitsToDouble` and `intBitsToFloat` do.
+
+```calx
+fn main() {
+    println("{1.0.to_bits()} {(-0.0f32).to_bits()} {f64.from_bits(0x3fd0000000000000)}")    // out: 4607182418800017408 2147483648 0.25
+}
+```
+
 `round`, `rint`, `total_cmp`, `java_string` and the transcendental functions (`sin`, `pow`, `log` and the rest, ported from fdlibm) are designed in the [spec](../CALX_SPEC.md#transcendental-functions) and not built yet.
+
+## Parsing
+
+`f64.parse(text)` and `f32.parse(text)` read a float from a `str` or a `String`, giving an [optional](optionals.md). They take what Java's `Double.parseDouble` takes, and nothing more:
+
+- Spaces and other characters up to `' '` around it are ignored.
+- An optional sign, then `NaN`, `Infinity`, or a number: digits with an optional `.` and fraction (`1.`, `.5`), and an optional exponent (`e-3`), or a hex number with a binary exponent (`0x1.8p1`).
+- An optional `f`, `F`, `d` or `D` at the end.
+
+The result is correctly rounded. `f32.parse` rounds once, straight from the text, as `Float.parseFloat` does, so it can differ from parsing an `f64` and rounding that to `f32`.
+
+```calx
+fn main() {
+    println("{f64.parse(" 1.5e3 ") ?? 0.0} {f64.parse("-Infinity") ?? 0.0} {f64.parse("0x1p-2") ?? 0.0}")    // out: 1500.0 -Infinity 0.25
+    println("{f64.parse("inf") == none} {f64.parse("1e") == none}")    // out: true true
+    println("{f32.parse("1.00000017881393432617187499") ?? 0.0}")    // out: 1.0000001
+}
+```
 
 ## Converting
 

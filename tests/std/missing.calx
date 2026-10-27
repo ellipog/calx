@@ -1,0 +1,4 @@
+import std.nothing.{x}    // error: the standard library has no module `std.nothing`
+
+fn main() {
+}

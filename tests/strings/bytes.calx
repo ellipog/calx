@@ -1,0 +1,23 @@
+// A string's bytes, and `str` methods.
+
+fn main() {
+    let w: str = "hello"
+    println("{w.len()} {w.is_empty()} {w.contains("ell")} {w.starts_with("he")} {w.ends_with("lo")}")    // out: 5 false true true true
+    println("{w.byte_at(0)} {w.byte_at(4)}")    // out: 104 111
+    let s = String("é!")
+    println("{s.byte_at(0)} {s.byte_at(1)} {s.byte_at(2)}")    // out: 195 169 33
+
+    // `String.from_utf8` takes the list, and gives `none` unless it's UTF-8.
+    let euro: List<u8> = [0xE2, 0x82, 0xAC]
+    println("{String.from_utf8(euro) ?? "bad"}")    // out: €
+    let overlong: List<u8> = [0xC0, 0x80]
+    let surrogate: List<u8> = [0xED, 0xA0, 0x80]
+    let too_big: List<u8> = [0xF4, 0x90, 0x80, 0x80]
+    let cut: List<u8> = [0x61, 0xE2, 0x82]
+    let stray: List<u8> = [0x80]
+    println("{String.from_utf8(overlong) ?? "bad"} {String.from_utf8(surrogate) ?? "bad"} {String.from_utf8(too_big) ?? "bad"} {String.from_utf8(cut) ?? "bad"} {String.from_utf8(stray) ?? "bad"}")    // out: bad bad bad bad bad
+    let long: List<u8> = [0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0xF0, 0x9F, 0x98, 0x80, 0x6A]
+    println("{String.from_utf8(long) ?? "bad"}")    // out: abcdefghi😀j
+    let empty = List<u8>()
+    println("[{String.from_utf8(empty) ?? "bad"}]")    // out: []
+}

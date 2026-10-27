@@ -1,0 +1,15 @@
+// file: main.calx
+// Two modules can declare the same C function, the same way.
+import other.{distance}
+
+extern "C" fn abs(x: i32) -> i32
+
+fn main() {
+    println("{distance(3, 10)} {unsafe { abs(-7) }}")    // out: 7 7
+}
+// file: other.calx
+extern "C" fn abs(x: i32) -> i32
+
+pub fn distance(a: i32, b: i32) -> i32 {
+    return unsafe { abs(a - b) }
+}

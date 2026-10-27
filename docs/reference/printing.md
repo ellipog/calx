@@ -20,6 +20,7 @@ fn main() {
 | --- | --- |
 | `print(s)` | Writes `s` to standard output |
 | `println(s)`, `println()` | Writes `s`, then a newline |
+| `eprint(s)`, `eprintln(s)`, `eprintln()` | The same, to standard error |
 | `assert(cond)`, `assert(cond, s)` | Panics if `cond` is false, with the message `assertion failed: s` |
 | `panic(s)` | Panics with the message `s` |
 
@@ -28,6 +29,8 @@ The argument is a `str` or a `String`. A string literal there can interpolate: `
 Every interpolation runs, left to right, before anything is written, as Java builds the whole string first. So a function called inside `{...}` that prints writes its output before the line it's in.
 
 Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on Windows and Linux: `\n` is never turned into `\r\n`.
+
+Standard error isn't buffered. `eprint` and `eprintln` first write out whatever standard output has waiting, so when both go to one terminal they appear in the order they were written. A program whose standard output is a protocol, such as the rig's adapter, logs with them. [`std.io`](../std/io.md) reads and writes bytes.
 
 ## Panics
 

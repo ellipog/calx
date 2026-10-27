@@ -71,6 +71,7 @@ Type* Types::array_of(Type* elem, std::uint64_t length) {
     t->elem = elem;
     t->length = length;
     t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
     array_map_.emplace(key, t);
     compounds_.push_back(t);
     return t;
@@ -88,6 +89,7 @@ Type* Types::optional_of(Type* elem) {
     Type* t = make(TypeKind::optional, arena_.copy(std::string(elem->name) + "?"));
     t->elem = elem;
     t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
     optional_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -99,6 +101,7 @@ Type* Types::list_of(Type* elem) {
     Type* t = make(TypeKind::list, arena_.copy("List<" + std::string(elem->name) + ">"));
     t->elem = elem;
     t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
     list_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -115,7 +118,10 @@ Type* Types::tuple_of(const std::vector<Type*>& elems) {
     name += ")";
     Type* t = make(TypeKind::tuple, arena_.copy(name));
     t->elems = arena_.copy(elems);
-    for (Type* e : elems) t->open = t->open || e->open;
+    for (Type* e : elems) {
+        t->open = t->open || e->open;
+        t->has_pointer = t->has_pointer || e->has_pointer;
+    }
     tuple_map_.emplace(elems, t);
     compounds_.push_back(t);
     return t;
@@ -124,6 +130,19 @@ Type* Types::tuple_of(const std::vector<Type*>& elems) {
 Type* Types::make_param(std::string_view name) {
     Type* t = make(TypeKind::param, name);
     t->open = true;
+    return t;
+}
+
+Type* Types::pointer_of(Type* elem, bool is_const) {
+    auto key = std::make_pair(elem, is_const);
+    auto it = pointer_map_.find(key);
+    if (it != pointer_map_.end()) return it->second;
+    Type* t = make(TypeKind::pointer, arena_.copy((is_const ? "*const " : "*") + std::string(elem->name)));
+    t->elem = elem;
+    t->is_const = is_const;
+    t->open = elem->open;
+    t->has_pointer = true;
+    pointer_map_.emplace(key, t);
     return t;
 }
 

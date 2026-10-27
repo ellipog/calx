@@ -1,0 +1,50 @@
+// What `unsafe`, pointers and C functions don't allow.
+
+extern "C" fn abs(x: i32) -> i32
+
+extern "C" {
+    pub fn takes_string(s: String)            // error: `String` isn't a C type
+    pub fn gives_list() -> List<u8>           // error: `List<u8>` isn't a C type
+    pub fn changes(x: mut i32)                // error: can't be `mut` or `own`
+    pub fn with_body() {                      // error: has no body
+    }
+}
+
+pub struct Holder {
+    p: *u8                                    // error: a pointer can only be the type of a variable
+}
+
+pub fn safe_param(_p: *const u8) {           // error: a pointer can only be the type of a variable
+}
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+fn main() {
+    let xs: List<u8> = [1, 2]
+    _ = xs.as_ptr()                           // error: can only be used inside `unsafe`
+    _ = abs(-1)                               // error: calling it needs `unsafe`
+    unsafe {                                  // error: nothing in this block needs `unsafe`
+        println("hi")
+    }
+    unsafe {
+        _ = abs(-2)
+        unsafe {                              // error: already inside `unsafe`
+            _ = abs(-3)
+        }
+        let q = xs.as_ptr()
+        q.write(1)                            // error: can't write through `*const u8`
+        let names: List<String> = ["a"]
+        _ = names.as_ptr().read()             // error: needs a `Copy` type
+        _ = [q, q]                            // error: holds a pointer, which can't be inside another type
+        _ = id(q)                             // error: a generic parameter can't be a pointer
+        _ = List<*u8>()                       // error: a pointer can only be the type of a variable
+    }
+    var ys: List<u8> = [3]
+    ys.set_len(0)                             // error: needs `unsafe`
+    var strings: List<String> = ["x"]
+    unsafe {
+        strings.set_len(0)                    // error: needs elements that are `Copy`
+    }
+}

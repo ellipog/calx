@@ -134,7 +134,7 @@ struct Local {
 // What the checker found a name or call to be.
 enum class Ref : std::uint8_t { none, local, fn, const_, type, builtin, variant };
 
-enum class Builtin : std::uint8_t { none, print, println, panic, assert_ };
+enum class Builtin : std::uint8_t { none, print, println, eprint, eprintln, panic, assert_ };
 
 enum class CallKind : std::uint8_t {
     none,
@@ -147,12 +147,14 @@ enum class CallKind : std::uint8_t {
     variant,     // `Shape.Circle(r)`: an enum variant with data; `field_index` is the variant
     some,        // `some(x)`
     try_from,    // `i8.try_from(x)`, `Flag.try_from(n)`: a checked conversion to an optional
-    builtin_method,  // a method of `String` or `List`, or `x.copy()`: `bmethod` says which
+    builtin_method,  // a method of `String`, `str`, `List` or a pointer, or `x.copy()`: `bmethod` says which
+    prim_static, // `i32.parse(s)`, `f64.from_bits(b)`, `String.from_utf8(bytes)`: `prim` says which
 };
 
 enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
-    truncate, push_str, starts_with, ends_with,
+    truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len,
+    ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
@@ -160,6 +162,8 @@ enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
 enum class PrimMethod : std::uint8_t {
     none, abs, min, max, is_nan, sqrt, floor, ceil, wrapping_add, wrapping_sub, wrapping_mul, floor_div, floor_mod,
     checked_add, checked_sub, checked_mul, checked_div, checked_rem, saturating_add, saturating_sub, saturating_mul,
+    to_bits, rotate_left, rotate_right,
+    parse, from_bits, from_utf8,  // prim_static
 };
 
 struct Expr {

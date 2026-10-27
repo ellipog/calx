@@ -1,0 +1,6 @@
+fn main() {
+    var xs: List<u8> = [1, 2]
+    unsafe {
+        xs.set_len(9)    // panic: can't set the length to 9 in a list with capacity 2
+    }
+}

@@ -152,7 +152,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.calx",
-          "match": "\\b(?:print|println|panic|assert|some|ok|err)\\b(?=\\s*\\()"
+          "match": "\\b(?:print|println|eprint|eprintln|panic|assert|some|ok|err)\\b(?=\\s*\\()"
         }
       ]
     },

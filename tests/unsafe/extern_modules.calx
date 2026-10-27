@@ -1,0 +1,15 @@
+// file: main.calx
+// One C function has one signature, wherever it's declared.
+import other.{twice}
+
+extern "C" fn abs(x: i32) -> i32    // error: C function `abs` is declared differently in `other`
+
+fn main() {
+    println("{twice(unsafe { abs(-1) })}")
+}
+// file: other.calx
+extern "C" fn abs(x: i64) -> i64
+
+pub fn twice(x: i32) -> i32 {
+    return x * 2 + i32.wrap(unsafe { abs(0) })
+}

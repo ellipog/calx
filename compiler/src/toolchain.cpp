@@ -155,6 +155,19 @@ int finish(pid_t pid) {
 
 }  // namespace
 
+std::string find_home(std::string& error) {
+    std::string home = env("CALX_HOME");
+#ifdef CALX_DEFAULT_HOME
+    if (home.empty()) home = CALX_DEFAULT_HOME;
+#endif
+    std::error_code ec;
+    if (!fs::is_regular_file(fs::path(home) / "runtime" / "calx_rt.h", ec)) {
+        error = "can't find the Calx runtime under " + (home.empty() ? std::string("CALX_HOME") : home) + "; set CALX_HOME";
+        return "";
+    }
+    return home;
+}
+
 bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = env("CALX_CC");
     if (tc.clang.empty()) tc.clang = find_on_path("clang");
@@ -179,14 +192,8 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
     tc.identity = tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
 
-    tc.home = env("CALX_HOME");
-#ifdef CALX_DEFAULT_HOME
-    if (tc.home.empty()) tc.home = CALX_DEFAULT_HOME;
-#endif
-    if (!fs::is_regular_file(fs::path(tc.home) / "runtime" / "calx_rt.h", ec)) {
-        error = "can't find the Calx runtime under " + tc.home + "; set CALX_HOME";
-        return false;
-    }
+    tc.home = find_home(error);
+    if (tc.home.empty()) return false;
 
     tc.cache = env("CALX_CACHE");
     if (tc.cache.empty()) {

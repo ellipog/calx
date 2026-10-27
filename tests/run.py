@@ -5,8 +5,8 @@
     py -I tests/run.py tests/integers     # only the tests under a folder, or single files
     py -I tests/run.py --no-build         # use the compiler as it is
 
-A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/` or
-`docs/guide/` (D41). It says what should happen in comments:
+A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/`,
+`docs/std/` or `docs/guide/` (D41). It says what should happen in comments:
 
     println("{1 + 2}")    // out: 3
     let x: u8 = 300       // error: doesn't fit in `u8`
@@ -17,6 +17,10 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
 - `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
   `error` lines must fail to compile, with exactly those errors and no others.
 - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
+- `// stderr: TEXT` is one line of expected standard error, like `out`. A program that doesn't
+  panic must write exactly those lines there, so one with none must write nothing.
+- `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
+  the input is empty.
 
 A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -43,9 +47,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PLATFORM = "windows" if os.name == "nt" else "linux"
 BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
-DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "guide"]
+DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
@@ -59,6 +63,8 @@ class Test:
         self.out = []
         self.errors = []  # (line, text)
         self.panic = None  # (line, text)
+        self.stderr = []
+        self.stdin = []
         self.files = []  # (name, text) for a test of several modules, the main one first
         lines = source.splitlines()
         starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
@@ -74,6 +80,10 @@ class Test:
             text = text[1:] if text.startswith(" ") else text
             if kind == "out":
                 self.out.append(text)
+            elif kind == "stderr":
+                self.stderr.append(text)
+            elif kind == "stdin":
+                self.stdin.append(text)
             elif kind == "error":
                 self.errors.append((n, text.strip()))
             else:
@@ -147,7 +157,11 @@ def run_test(test, mode):
         cmd = [str(CALX), "run", str(path)]
         if mode == "release":
             cmd.insert(2, "--release")
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT)
+        # Bytes, so no newline is translated on the way in or out.
+        stdin = "".join(line + "\n" for line in test.stdin).encode("utf-8")
+        p = subprocess.run(cmd, input=stdin, capture_output=True, cwd=ROOT)
+        p.stdout = p.stdout.decode("utf-8", errors="replace")
+        p.stderr = p.stderr.decode("utf-8", errors="replace")
         problems = []
         if test.panic:
             if p.returncode != 101:
@@ -165,7 +179,9 @@ def run_test(test, mode):
         got = p.stdout.splitlines()
         if got != test.out:
             problems.append(diff(test.out, got))
-        if problems and p.stderr.strip() and not test.panic:
+        if not test.panic and p.returncode == 0 and p.stderr.splitlines() != test.stderr:
+            problems.append("standard error " + diff(test.stderr, p.stderr.splitlines()))
+        elif problems and p.stderr.strip() and not test.panic:
             problems.append("stderr:\n" + indent(p.stderr.rstrip()))
         return problems
 

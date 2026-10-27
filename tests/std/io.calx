@@ -1,0 +1,22 @@
+// std.io: standard input and output as bytes.
+import std.io.{read, read_exact, write, flush}
+
+fn main() {
+    var buf = List<u8>()
+    let full = read_exact(mut buf, 6)
+    println("{full} {buf}")    // out: true [104, 101, 108, 108, 111, 10]
+    print("bytes: ")
+    write(buf)                 // out: bytes: hello
+    eprintln("to stderr")      // stderr: to stderr
+    var rest = List<u8>()
+    while read(mut rest, 3) > 0 {
+    }
+    println("{rest.len()}")    // out: 6
+    let more = read_exact(mut rest, 1)
+    println("{more} {read(mut rest, 0)}")    // out: false 0
+    flush()
+    eprint("done ")
+    eprintln("{rest.len()}")   // stderr: done 6
+}
+// stdin: hello
+// stdin: world

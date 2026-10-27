@@ -81,10 +81,24 @@ fn main() {
 | `x.min(y)`, `x.max(y)` | The smaller or larger |
 | `x.wrapping_add(y)`, `wrapping_sub`, `wrapping_mul` | The same as `+`, `-` and `*`, which also wrap. In a constant expression they say that wrapping is meant |
 | `x.floor_div(y)`, `x.floor_mod(y)` | Java's `Math.floorDiv` and `Math.floorMod`, for signed types. They panic on division by zero |
+| `x.rotate_left(n)`, `x.rotate_right(n)` | The bits rotated by `n`, an `i32`, taken modulo the width, as Java's `Integer.rotateLeft` and `Long.rotateLeft` do. Negative `n` rotates the other way |
 
 | `x.checked_add(y)`, `checked_sub`, `checked_mul` | `some` of the result, or `none` if it doesn't fit the type |
 | `x.checked_div(y)`, `checked_rem` | `none` when `y` is 0. `MIN.checked_div(-1)` is `none`, since the result doesn't fit; `MIN.checked_rem(-1)` is `some(0)`, as Java's `%` gives |
 | `x.saturating_add(y)`, `saturating_sub`, `saturating_mul` | The result, clamped to the type's range |
+
+## Parsing
+
+`T.parse(text)` reads an integer from a `str` or a `String`, giving an [optional](optionals.md): `none` unless the whole text is one in range. It follows Java's `Integer.parseInt`: an optional `+` or `-`, then one or more digits, with no spaces, `_` or prefixes. Unsigned types take no `-`, not even before `0`, as `Integer.parseUnsignedInt`.
+
+```calx
+fn main() {
+    println("{i32.parse("-42") ?? 0} {i32.parse("+7") ?? 0} {u8.parse("255") ?? 0}")    // out: -42 7 255
+    println("{i32.parse("2147483648") == none} {i32.parse(" 1") == none} {u32.parse("-0") == none}")    // out: true true true
+}
+```
+
+The digits are ASCII only. Java's `parseInt` also takes other scripts' digits, such as `"١٢"`; that's a deliberate difference, since no protocol or file format sends them.
 
 ## Checked and saturating arithmetic
 

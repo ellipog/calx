@@ -46,7 +46,7 @@ in interface let loop match module mut none not or own parallel pub return self 
 true try type unsafe var while
 ```
 
-The primitive type names (`i32`, `f64`, `bool` and the rest), and `print`, `println`, `panic`, `assert`, `some`, `ok` and `err`, are built in. A declaration or variable can't take one of these names.
+The primitive type names (`i32`, `f64`, `bool` and the rest), and `print`, `println`, `eprint`, `eprintln`, `panic`, `assert`, `some`, `ok` and `err`, are built in. A declaration or variable can't take one of these names.
 
 ## Integer literals
 

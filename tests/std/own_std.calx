@@ -1,0 +1,5 @@
+// file: std/tools.calx
+module std.tools    // error: `std` is the standard library's name
+
+fn main() {
+}

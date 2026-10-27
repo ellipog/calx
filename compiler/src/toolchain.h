@@ -17,6 +17,10 @@ struct Toolchain {
     std::string cache;    // the object cache
 };
 
+// The Calx home: CALX_HOME, or the source tree the compiler was built from. Returns it empty,
+// with the reason in `error`, if it has no runtime.
+std::string find_home(std::string& error);
+
 // Finds clang (CALX_CC, or `clang` on PATH), the Calx home (CALX_HOME, or the source tree the
 // compiler was built from) and the cache (CALX_CACHE, or the platform's cache folder). On failure
 // returns false and puts the reason in `error`.

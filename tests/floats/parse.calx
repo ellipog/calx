@@ -1,0 +1,26 @@
+// `f64.parse(text)` and `f32.parse(text)` follow Java's Double.parseDouble and Float.parseFloat.
+
+fn show(x: f64?) -> String {
+    return match x {
+        some(v) => "{v}",
+        none => "none",
+    }
+}
+
+fn main() {
+    println("{show(f64.parse("1.5"))} {show(f64.parse(" 2 "))} {show(f64.parse("1e3"))} {show(f64.parse(".5"))} {show(f64.parse("5."))}")    // out: 1.5 2.0 1000.0 0.5 5.0
+    println("{show(f64.parse("1.5f"))} {show(f64.parse("-1.5D"))} {show(f64.parse("+0.0"))} {show(f64.parse("-0.0"))}")    // out: 1.5 -1.5 0.0 -0.0
+    println("{show(f64.parse("NaN"))} {show(f64.parse("-Infinity"))} {show(f64.parse("+Infinity"))}")    // out: NaN -Infinity Infinity
+    println("{show(f64.parse("0x1p4"))} {show(f64.parse("0X.8P1"))} {show(f64.parse("-0x1.8p-1"))}")    // out: 16.0 1.0 -0.75
+    println("{show(f64.parse("inf"))} {show(f64.parse("nan"))} {show(f64.parse("1e"))} {show(f64.parse("e5"))} {show(f64.parse("."))}")    // out: none none none none none
+    println("{show(f64.parse("0x1.8"))} {show(f64.parse("1_0"))} {show(f64.parse("1.5ff"))} {show(f64.parse(""))} {show(f64.parse("  "))}")    // out: none none none none none
+    println("{show(f64.parse("NaNd"))} {show(f64.parse("Infinityf"))} {show(f64.parse("1e+"))} {show(f64.parse("0x"))}")    // out: none none none none
+    println("{show(f64.parse("1e400"))} {show(f64.parse("1e-400"))} {show(f64.parse("4.9e-324"))}")    // out: Infinity 0.0 4.9E-324
+    println("{show(f64.parse("0.1"))} {show(f64.parse("2.2250738585072014E-308"))}")    // out: 0.1 2.2250738585072014E-308
+    // Correctly rounded, even with many digits.
+    println("{show(f64.parse("3.14159265358979323846264338327950288419716939937510"))}")    // out: 3.141592653589793
+    // A float rounds once, straight from the text, as Float.parseFloat does; rounding to f64
+    // first would give 1.0000002.
+    println("{f32.parse("1.00000017881393432617187499") ?? 0.0}")    // out: 1.0000001
+    println("{f32.parse("3.4028235e38") ?? 0.0} {f32.parse("1e39") ?? 0.0} {f32.parse("0.1") ?? 0.0}")    // out: 3.4028235E38 Infinity 0.1
+}

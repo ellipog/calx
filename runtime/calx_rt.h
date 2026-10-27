@@ -29,6 +29,12 @@ typedef struct {
 #define CX_INLINE static inline __attribute__((always_inline))
 #define CX_COLD __attribute__((cold, noreturn))
 
+/* A C function's name as the linker sees it, for `extern "C"` declarations: an asm label gives
+ * it, so the name Calx calls it by can't meet one a header declares. */
+#define CX_SYMBOL_2(prefix, name) #prefix name
+#define CX_SYMBOL_1(prefix, name) CX_SYMBOL_2(prefix, name)
+#define CX_SYMBOL(name) CX_SYMBOL_1(__USER_LABEL_PREFIX__, name)
+
 /* `String`: UTF-8 bytes. With `cap` 0 it doesn't own them: an empty string, or a string literal,
  * which costs nothing to make. Changing such a string copies it to the heap first. All zero bits
  * is the empty string, so a value that was moved away can be zeroed and dropped again safely. */
@@ -53,6 +59,11 @@ void cx_print_char(cx_char v);
 void cx_print_rune(cx_rune v);
 void cx_print_newline(void);
 
+/* `eprint` and `eprintln`: between these, the print functions write to standard error, which
+ * isn't buffered. Output waiting for standard output goes first, so the two keep their order. */
+void cx_err_begin(void);
+void cx_err_end(void);
+
 /* A panic: `cx_panic_begin` starts the message on standard error, the print functions add to
  * it, and `cx_panic_end` finishes it and exits with status 101. */
 void cx_panic_begin(const char* at);
@@ -61,6 +72,7 @@ CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_div_zero(const char* at);
 CX_COLD void cx_panic_unwrap(const char* at);
 CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
+CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at);
 
 /* Memory. Running out panics. */
 void* cx_alloc(cx_usize size);
@@ -99,6 +111,16 @@ CX_INLINE void cx_string_clear(cx_String* s) {
     }
 }
 cx_bool cx_str_contains(cx_str hay, cx_str needle);
+/* Whether the bytes are UTF-8: no overlong forms, surrogates, or values past U+10FFFF. */
+cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n);
+
+/* `T.parse(text)`. Integers follow Java's Integer.parseInt: an optional sign (no `-` for unsigned
+ * types), then ASCII digits, in range. Floats follow Double.parseDouble's grammar, and round
+ * correctly. On failure they set `*out` to 0 and return 0. */
+cx_bool cx_parse_i64(cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out);
+cx_bool cx_parse_u64(cx_str s, cx_u64 hi, cx_u64* out);
+cx_bool cx_parse_f64(cx_str s, cx_f64* out);
+cx_bool cx_parse_f32(cx_str s, cx_f32* out);
 CX_INLINE cx_bool cx_str_starts_with(cx_str s, cx_str p) {
     return p.len <= s.len && (p.len == 0 || __builtin_memcmp(s.ptr, p.ptr, p.len) == 0);
 }

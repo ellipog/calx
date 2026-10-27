@@ -1,5 +1,6 @@
 #include "modules.h"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <string>
@@ -15,7 +16,8 @@ std::string q(std::string_view s) { return "`" + std::string(s) + "`"; }
 
 class Loader {
 public:
-    Loader(ParseContext ctx, Sources& sources) : ctx_(ctx), sources_(sources) {}
+    Loader(ParseContext ctx, Sources& sources, const std::string& home, const std::string& home_error)
+        : ctx_(ctx), sources_(sources), home_(home), home_error_(home_error) {}
 
     std::vector<Module*> run(std::uint32_t main_file) {
         Module* m = parse_file(ctx_, main_file);
@@ -48,6 +50,11 @@ public:
             }
         }
         root_ = dir;
+        // `std` is the standard library's, so a program's own modules can't use the name.
+        if (!m->name.parts.empty() && text(m->name.parts[0]) == "std" && !in_std(path)) {
+            ctx_.diags.error(m->name.span.end > m->name.span.begin ? m->name.span : Span{main_file, 0, 0},
+                             "`std` is the standard library's name, so a program's modules can't use it");
+        }
         by_name_[dotted(m->name.parts)] = m;
         visit(m);
         return order_;
@@ -116,10 +123,22 @@ private:
         const Slice<Name>& parts = imp->import_path.parts;
         std::string name = dotted(parts);
         if (auto it = by_name_.find(name); it != by_name_.end()) return it->second;
-        fs::path file = root_;
+        bool is_std = text(parts[0]) == "std";
+        if (is_std && home_.empty()) {
+            ctx_.diags.error(imp->import_path.span, "can't import " + q(name) + ": " + home_error_);
+            by_name_[name] = nullptr;
+            return nullptr;
+        }
+        fs::path base = is_std ? fs::path(home_) : root_;
+        fs::path file = base;
         for (Name p : parts) file /= std::string(text(p));
         file += ".calx";
-        std::uint32_t id = exact_case(parts) ? sources_.load(file.generic_string()) : 0;
+        std::uint32_t id = exact_case(base, parts) ? sources_.load(file.generic_string()) : 0;
+        if (id == 0 && is_std) {
+            ctx_.diags.error(imp->import_path.span, "the standard library has no module " + q(name));
+            by_name_[name] = nullptr;
+            return nullptr;
+        }
         if (id == 0) {
             ctx_.diags.error(imp->import_path.span, "there's no module " + q(name) + "; it would be the file " +
                                                         q(file.generic_string()));
@@ -145,8 +164,8 @@ private:
 
     // Whether the folders and file a module names exist with exactly those letters, so `import
     // Util` finds `util.calx` on neither Windows nor Linux.
-    bool exact_case(const Slice<Name>& parts) const {
-        fs::path dir = root_.empty() ? fs::path(".") : root_;
+    bool exact_case(const fs::path& base, const Slice<Name>& parts) const {
+        fs::path dir = base.empty() ? fs::path(".") : base;
         for (std::size_t i = 0; i < parts.size(); i++) {
             std::string want = std::string(text(parts[i])) + (i + 1 == parts.size() ? ".calx" : "");
             bool found = false;
@@ -163,8 +182,19 @@ private:
         return true;
     }
 
+    // Whether `file` is in the standard library's folder.
+    bool in_std(const fs::path& file) const {
+        if (home_.empty()) return false;
+        std::error_code ec;
+        fs::path std_dir = fs::weakly_canonical(fs::path(home_) / "std", ec);
+        fs::path f = fs::weakly_canonical(file, ec);
+        auto [a, b] = std::mismatch(std_dir.begin(), std_dir.end(), f.begin(), f.end());
+        return a == std_dir.end();
+    }
+
     ParseContext ctx_;
     Sources& sources_;
+    std::string home_, home_error_;
     fs::path root_;
     std::unordered_map<std::string, Module*> by_name_;
     std::unordered_map<Module*, int> state_;  // 1 while visiting, 2 once done
@@ -174,8 +204,9 @@ private:
 
 }  // namespace
 
-std::vector<Module*> load_program(ParseContext ctx, Sources& sources, std::uint32_t main_file) {
-    return Loader(ctx, sources).run(main_file);
+std::vector<Module*> load_program(ParseContext ctx, Sources& sources, std::uint32_t main_file, const std::string& home,
+                                  const std::string& home_error) {
+    return Loader(ctx, sources, home, home_error).run(main_file);
 }
 
 }  // namespace calx

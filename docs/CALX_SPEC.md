@@ -222,7 +222,9 @@ fn tick_all(r: mut Region) {
 
 ### `unsafe`
 
-- `unsafe { }` allows raw pointers (`*T`), pointer arithmetic, unchecked indexing, reinterpreting bytes, and calling `extern` functions.
+Built: `unsafe` blocks, raw pointers and their methods, and calling C functions ([Unsafe code and C functions](reference/unsafe.md)). Still to build:
+
+- Unchecked indexing and reinterpreting bytes inside `unsafe`, and pointers inside other types.
 - It's allowed only in modules the build marks trusted: Calcite core and trusted plugins.
 - The compiler records in every binary whether it contains `unsafe` or `extern`. Calcite refuses to load a native plugin that does unless the server config trusts it (D15).
 - That check protects against mistakes, not against a hostile binary: a native plugin is machine code, so trusting it is trusting whoever built it. WASM is the sandbox for code nobody vouches for.
@@ -370,8 +372,9 @@ Build time is tracked like run time (D34): the time to check and build a large g
 
 ## FFI
 
-- `extern "C" fn name(args) -> ret` declares a C function. Calling one needs `unsafe`.
-- C types are in `std.c`: `c.int`, `c.size_t`, `*T`, `*const T`, and `CStr` for C strings.
+Built: `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)). Still to build:
+
+- C's own type names are in `std.c`: `c.int`, `c.size_t`, and `CStr` for C strings.
 - `@export_c("name")` exports a Calx function with the C ABI. Plugin entry points use it, and the host calls them through it.
 - `extern` is allowed only in trusted modules, the same rule as `unsafe`. A WASM build has no `extern` except the host's imports.
 - Struct layout follows C's rules for `@repr(c)` structs. Other structs' layout is the compiler's choice.

@@ -1,0 +1,5 @@
+fn main() {
+    let w: str = "abc"
+    let i: usize = 3
+    println("{w.byte_at(i)}")    // panic: index 3 is out of bounds for length 3
+}

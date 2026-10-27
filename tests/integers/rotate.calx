@@ -1,0 +1,11 @@
+// `rotate_left` and `rotate_right`, as Java's Integer.rotateLeft and Long.rotateLeft: the count
+// is an i32, taken modulo the width.
+
+fn main() {
+    println("{0x12345678.rotate_left(8)} {0x12345678.rotate_right(8)}")    // out: 878082066 2014458966
+    println("{1.rotate_left(-1)} {1.rotate_left(32)} {1.rotate_right(1)}")    // out: -2147483648 1 -2147483648
+    println("{1i64.rotate_left(65)} {(-2i64).rotate_right(1)} {0x0123456789abcdefu64.rotate_left(16)}")    // out: 2 9223372036854775807 5001117282205630755
+    println("{0x81u8.rotate_left(1)} {0x8001u16.rotate_right(4)}")    // out: 3 6144
+    let n = 3
+    println("{0b1001u32.rotate_right(n)}")    // out: 536870913
+}

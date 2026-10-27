@@ -54,6 +54,12 @@ pub fn spawn(n: i32) -> i32 {
 - Module and folder names match exactly, case included, on Windows as on Linux.
 - Imports can't form a cycle. The error names the modules in the cycle.
 
+## The standard library
+
+Module `std.x` is `std/x.calx` under the Calx home (`CALX_HOME`, [the calx command](command.md#environment)), wherever the program is. It's imported like any module: `import std.io.{read, write}`. `std` is the standard library's name, so a program's own modules can't use it. Its modules have a page each ([std.io](../std/io.md)).
+
+They're compiled like the program's own modules, each to its own C file, which the object cache keeps, so using one costs a build almost nothing after the first.
+
 ## Importing
 
 `import a.b.{X, Y}` brings the `pub` items `X` and `Y` of module `a.b` into this one, to use as if they were declared here.
