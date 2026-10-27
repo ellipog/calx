@@ -1,0 +1,27 @@
+// Constant arrays: tables of numbers known while compiling, nested, repeated and built from other
+// constants. Each is a `static const` in C, read with bounds checks.
+const T: [i32; 3] = [1, 2, 3]
+const D: [f64; 2] = [1.5, -2.5]
+const Z: [i64; 4] = [7; 4]
+const M: [[u8; 2]; 2] = [[1, 2], [3, 4]]
+const N: i32 = 2
+const W: [i32; 2] = [N, N * 3]
+const B: [bool; 2] = [true, false]
+
+fn pick(i: usize) -> i32 {
+    return T[i]
+}
+
+fn three() -> usize {
+    return 3
+}
+
+fn main() {
+    var q = [0.0; 4]
+    q[3] = D[1]
+    var t = T            // a copy, which can change
+    t[0] = 9
+    println("{T[2]} {D[0]} {q[3]} {Z[3]} {M[1][0]} {W}")    // out: 3 1.5 -2.5 7 3 [2, 6]
+    println("{t} {T} {pick(1)} {B[1]}")                     // out: [9, 2, 3] [1, 2, 3] 2 false
+    println("{T[three()]}")                                 // panic: index 3 is out of bounds for length 3
+}

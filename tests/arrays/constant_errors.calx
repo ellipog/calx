@@ -1,0 +1,17 @@
+// What an array constant can't be: anything but numbers, `bool`, `char` and `rune`, the wrong
+// length, or a value only known when the program runs.
+const T: [i32; 2] = [1, 2]
+const S: [String; 1] = ["a"]    // error: constants of this type aren't implemented yet
+const L: [i32; 3] = [1, 2]      // error: expected `[i32; 3]`, found `[i32; 2]`
+
+fn f() -> i32 {
+    return 1
+}
+
+const X: [i32; 2] = [1, f()]    // error: a constant's value must be known at compile time
+
+fn main() {
+    println("{T[5]}")    // error: index 5 is out of bounds for `[i32; 2]`
+    T[0] = 4             // error: can't assign to `T`: it isn't a variable
+    println("{S[0]} {L[0]} {X[0]}")
+}

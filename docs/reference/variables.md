@@ -25,7 +25,24 @@ fn main() {
 
 ## Constants
 
-`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char` or `rune` for now.
+`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char` or `rune`, or arrays of them, such as a table of coefficients:
+
+```calx
+const STEP: i32 = 4
+const WEIGHTS: [f64; 3] = [0.25, 0.5, 0.25]
+const STEPS: [i32; 3] = [STEP, STEP * 2, STEP * 3]
+const GRID: [[u8; 2]; 2] = [[1, 2], [3, 4]]
+
+fn main() {
+    var sum = 0.0
+    for i in 0usize..3 {
+        sum += WEIGHTS[i] * f64(STEPS[i])
+    }
+    println("{sum} {GRID[1][0]}")    // out: 8.0 3
+}
+```
+
+An integer constant is written into the code wherever it's used, so it costs nothing. A float or an array is a `static const` in C, in each file that uses it. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
 
 ## Assignment
 

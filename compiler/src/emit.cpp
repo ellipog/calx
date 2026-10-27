@@ -1325,9 +1325,23 @@ static void $reserve($T* m, cx_usize n) {
     ConstOut emit_const(Item* c) {
         ConstOut o;
         uses_ = &o.uses;
-        o.text = "static const " + ctype(c->declared) + " " + std::string(c->c_name) + " = " + expr(c->value) + ";\n";
+        o.text = "static const " + ctype(c->declared) + " " + std::string(c->c_name) + " = " + const_init(c->value) + ";\n";
         uses_ = nullptr;
         return o;
+    }
+
+    // A constant's value as a C initializer: an array is its elements in braces, as the struct
+    // holding them, rather than a compound literal, which C allows only inside functions.
+    std::string const_init(Expr* e) {
+        if (e->type->kind != TypeKind::array || e->has_bits) return expr(e);
+        std::string s = "{{";
+        if (e->repeat) {
+            std::string x = const_init(e->elems[0]);
+            for (std::uint64_t i = 0; i < e->type->length; i++) s += (i ? ", " : " ") + x;
+        } else {
+            for (std::size_t i = 0; i < e->elems.size(); i++) s += (i ? ", " : " ") + const_init(e->elems[i]);
+        }
+        return s + " }}";
     }
 
     std::string signature(const Item* f) {

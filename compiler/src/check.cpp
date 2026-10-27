@@ -2044,6 +2044,24 @@ private:
         return result_of(ok, e);
     }
 
+    // What a constant can be: a number, `bool`, `char` or `rune`, or an array of them, such as a
+    // table of coefficients.
+    static bool const_type(const Type* t) {
+        if (t->kind == TypeKind::array) return const_type(t->elem);
+        return is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ || t->kind == TypeKind::rune;
+    }
+
+    // Whether an expression's value is known at compile time: a constant, or an array of them.
+    static bool known(const Expr* e) {
+        if (e->is_const) return true;
+        if (e->kind != ExprKind::array_lit) return false;
+        if (e->repeat) return !e->elems.empty() && known(e->elems[0]);
+        for (const Expr* x : e->elems) {
+            if (!known(x)) return false;
+        }
+        return true;
+    }
+
     void check_const(Item* c) {
         if (c->declared) return;
         InModule in(*this, c);
@@ -2077,15 +2095,15 @@ private:
         if (!c->value) {
             error(c->name_span, "constant " + q(text(c->name)) + " needs a value");
         } else if (!is_bad(t)) {
-            if (!(is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ ||
-                  t->kind == TypeKind::rune)) {
+            if (!const_type(t)) {
                 not_yet(c->type->span, "constants of this type");
             } else {
                 Type* vt = check(c->value, t);
-                if (!is_bad(vt) && !c->value->is_const) {
+                if (!is_bad(vt) && !known(c->value)) {
                     error(c->value->span, "a constant's value must be known at compile time");
                 }
-                if (is_float(t)) prog_.consts.push_back(c);
+                // Integers are written where they're used; floats and arrays are C constants.
+                if (is_float(t) || t->kind == TypeKind::array) prog_.consts.push_back(c);
             }
         }
         checking_consts_.erase(c);
