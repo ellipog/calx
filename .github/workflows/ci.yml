@@ -1,0 +1,36 @@
+# Builds the compiler and runs the test suite, including every example in the reference docs
+# (D41), in debug and release builds on both platforms Calx targets.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install clang, lld and Ninja
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang lld ninja-build
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: python -m pip install ninja
+      # Puts the MSVC libraries the linker needs on the environment.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Toolchain
+        run: clang --version
+      - name: Tests
+        run: python -I tests/run.py --modes debug,release
