@@ -182,7 +182,7 @@ Ownership is checked after everything else, so these errors appear once a progra
 - Moving a view: a parameter that isn't `own`, a loop's element, or a name a pattern binds into a value it doesn't own.
 - Moving an element out of a list or array, or a field out of a view.
 - Using a variable whole while one of its fields is moved out.
-- Changing or moving a value while a pattern's names are views into it, or while a `for` loop goes over it.
+- Changing or moving a value while a pattern's names are views into it, or while a `for` loop goes over it, what holds it or what's in it ([looping over a field](control-flow.md#looping-over-a-field)).
 
 Each error says what to write instead: `own`, `.copy()`, `remove`, or the bound `Copy`.
 

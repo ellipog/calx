@@ -125,7 +125,6 @@ struct Local {
     bool used = false;
     bool reassigned = false;
     bool mutated = false;
-    std::uint32_t borrowed = 0;  // nonzero while a `for` loop iterates over it
     // Filled in by the ownership pass (D76).
     bool owns = false;           // it owns its value, so it's dropped when its scope ends
     bool clear_on_move = false;  // it might be moved where it's dropped, so a move zeroes it

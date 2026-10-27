@@ -31,11 +31,11 @@ Where `docs/benchmarks.md` lets an implementation choose, the reference uses:
 
 - **Threads.** Persistent workers that take regions from a shared counter, with a spinning barrier between passes, so no thread starts or sleeps inside a tick. With one worker, everything runs on the main thread.
 - **The fast native map.** The standard `HashMap` (a SwissTable) with an Fx-style multiply hasher, which is about as fast as a general map gets in Rust.
-- **The Java-compatible map.** Written by hand, as the doc requires, with nodes in a vector and a free list.
+- **The Java-compatible map.** Written by hand, as the doc requires, with nodes in a vector and a free list, since Rust has none.
 
 ## The Calx version (`P3.2`)
 
-[`calx/tickbench.calx`](calx/tickbench.calx) is the same program in Calx, with the same algorithms and the same checksum. It's safe Calx: no `unsafe` except reading the clock, and bounds checks left in. The runner builds it with `calx --release`. It takes the same flags as the Rust reference.
+[`calx/tickbench.calx`](calx/tickbench.calx) is the same program in Calx, with the same algorithms and the same checksum. Its Java-compatible map is Calx's own [`JavaHashMap<i64, i32>`](../docs/reference/java-maps.md) (D105), which keeps the rules the Rust one is written from; the workload never makes a tree bin. It's safe Calx: no `unsafe` except reading the clock, and bounds checks left in. The runner builds it with `calx --release`. It takes the same flags as the Rust reference.
 
 Each pass is a `parallel for` over the regions, on the runtime's pool, and `--threads` sets the pool's size with `std.pool.set_workers`. That's the shape of the Rust reference: persistent threads that take regions in order from a shared counter, with the barrier step on the main thread. Each region's messages and handoffs go into its own outbox, which the barrier delivers in sender order, since actors aren't built yet. The checker proves the passes race-free: an iteration changes only `world.blocks[k]` and `world.states[k]`, and the entity pass reads every region's blocks while changing only its own state.
 

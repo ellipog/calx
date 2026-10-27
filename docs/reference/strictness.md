@@ -30,6 +30,7 @@ Each rule is on the page of the feature it's about:
 | A value can't be used after it moves, or after it might have moved, and a move in a loop needs a new value before the next pass | [Ownership](ownership.md#moves) |
 | Only what a function owns can move: views, loop elements and pattern names that only look can't. Neither can list elements or fields of views | [Ownership](ownership.md#views) |
 | A value can't change or move while a pattern's names are views into it | [Ownership](ownership.md#patterns) |
+| What a `for` loop goes over can't change or move during the loop, nor can what holds it or what's in it | [Control flow](control-flow.md#looping-over-a-field) |
 | `.copy()` is only for values that own memory, and `[x; n]` copies only a `Copy` `x` | [Ownership](ownership.md#moves) |
 | Generic code is checked where it's written and uses only what its bounds give. A call whose types can't be worked out is an error, never a guess. Unused generic parameters are errors | [Generics](generics.md#errors) |
 | An impl matches its interface exactly, parameter names included, and has nothing else. Unused impls are errors. A name two interfaces share needs `Iface.method(x)` | [Interfaces](interfaces.md#implementing-one) |

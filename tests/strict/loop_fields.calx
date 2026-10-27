@@ -1,0 +1,28 @@
+// A `for` loop over a field locks that field, what holds it and what's in it, and nothing else.
+// Behind an index, the loop locks the whole list, since two indexes can be the same.
+struct Inner {
+    a: List<i32>,
+    b: List<i32>,
+}
+
+struct Outer {
+    inner: Inner,
+    items: List<Inner>,
+    n: i32,
+}
+
+fn main() {
+    var o = Outer { inner: Inner { a: [1], b: List() }, items: [Inner { a: [1], b: List() }], n: 0 }
+    for x in o.inner.a {
+        o.inner.b.push(x)
+        o.n += x
+        o.inner.a.push(x)    // error: `o.inner.a` can't be changed while a `for` loop goes over it
+        o.inner = Inner { a: List(), b: List() }    // error: `o.inner` can't be changed while a `for` loop goes over `o.inner.a`
+        o = Outer { inner: Inner { a: List(), b: List() }, items: List(), n: 0 }    // error: `o` can't be changed while a `for` loop goes over `o.inner.a`
+    }
+    for x in o.items[0].a {
+        o.n += x
+        o.items[0].b.push(x)    // error: `o.items[...].b` can't be changed while a `for` loop goes over `o.items[...].a`
+    }
+    println("{o.n}")
+}

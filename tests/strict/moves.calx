@@ -6,6 +6,11 @@ struct P {
     age: i32
 }
 
+struct Two {
+    a: List<String>
+    b: List<String>
+}
+
 enum Shape {
     Named(String)
     Empty
@@ -64,6 +69,17 @@ fn main() {
         eat_list(words)              // error: can't move `words` while a `for` loop goes over it
         println(w)
     }
+    var two = Two { a: ["a"], b: ["b"] }
+    for x in two.a {
+        eat_list(two.b)
+        two.b = [x.copy()]
+        eat_list(two.a)              // error: can't move `two.a` while a `for` loop goes over it
+        eat_two(two)                 // error: can't move `two` while a `for` loop goes over `two.a`
+        let Two { a: ta, b: tb } = two    // error: can't take `two` apart while a `for` loop goes over `two.a`
+        eat_list(ta)
+        _ = tb
+    }
+    println("{two.b}")
 
     let p = P { name: "p", age: 1 }
     let name = p.name
@@ -93,4 +109,8 @@ fn main() {
 
 fn eat_list(xs: own List<String>) {
     _ = xs
+}
+
+fn eat_two(t: own Two) {
+    _ = t
 }

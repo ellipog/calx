@@ -93,7 +93,7 @@ fn main() {
 
 ## Loops
 
-`for (k, v) in m` goes over a map's keys and values, and `for x in s` over a set's values. Each is a view. The table can't be changed or moved during the loop, so it can't grow under the loop and leave it reading freed memory.
+`for (k, v) in m` goes over a map's keys and values, and `for x in s` over a set's values. Each is a view. The table can't be changed or moved during the loop, so it can't grow under the loop and leave it reading freed memory. A loop over a table in a field leaves the other fields free to change ([looping over a field](control-flow.md#looping-over-a-field)).
 
 ```calx
 fn main() {

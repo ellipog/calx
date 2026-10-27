@@ -170,7 +170,7 @@ Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take value
 
 ### Views
 
-Built: the three parameter modes, views that can't be moved, stored or returned, pattern names that are views, and the rule against passing a `mut` value twice in one call ([Functions](reference/functions.md#parameter-modes), [Ownership](reference/ownership.md#views)). Still to build:
+Built: the three parameter modes, views that can't be moved, stored or returned, pattern names that are views, the rule against passing a `mut` value twice in one call, and `for` loops that keep only what they go over from changing, so a loop over one field lets the body change the others (D106) ([Functions](reference/functions.md#parameter-modes), [Ownership](reference/ownership.md#views), [Control flow](reference/control-flow.md#looping-over-a-field)). Still to build:
 
 - **Views are second-class.** Besides not being stored or returned, they can't be captured by a closure that outlives the call, or sent. So the compiler never needs lifetimes. It only checks each function body on its own.
 - **No overlapping mutable views.** Within a function, a `mut` view and any other view of the same value can't both be in use. The Calcite sketches hit this four times, and each time it was a real aliasing bug.

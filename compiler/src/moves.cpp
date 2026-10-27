@@ -85,6 +85,9 @@ private:
         Local* root;
         Local* by;     // the name that's a view into it, or null for a `for` loop
         Span at;
+        // A `for` loop: what it goes over, and the fields from the root to it, up to an index.
+        const Expr* over = nullptr;
+        std::vector<std::uint32_t> path;
     };
 
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -278,7 +281,7 @@ private:
                 error(e->span, "can't move " + name_of(l) + " while " + name_of(b->by) + " is a view into it");
                 note(b->at, name_of(b->by) + " is a view into " + name_of(l) + " here");
             } else {
-                error(e->span, "can't move " + name_of(l) + " while a `for` loop goes over it");
+                error(e->span, "can't move " + name_of(l) + " while a `for` loop goes over " + looped(b));
             }
             return;
         }
@@ -291,7 +294,7 @@ private:
     void take(Local* l, Span at) {
         if (const Borrow* b = borrowed(l)) {
             error(at, "can't take " + name_of(l) + " apart while " + (b->by ? name_of(b->by) + " is a view into it"
-                                                                             : std::string("a `for` loop goes over it")));
+                                                                             : "a `for` loop goes over " + looped(b)));
             return;
         }
         set(l, moved);
@@ -333,11 +336,32 @@ private:
         }
     }
 
-    const Borrow* borrowed(const Local* l) const {
+    // What keeps `l` from moving, or the part of it at `path` when that's given. A `for` loop over
+    // a field keeps only that field, what holds it and what's in it.
+    const Borrow* borrowed(const Local* l, const std::vector<std::uint32_t>* path = nullptr) const {
         for (const Borrow& b : borrows_) {
-            if (b.root == l) return &b;
+            if (b.root != l) continue;
+            if (path && !b.by) {
+                std::size_t n = std::min(path->size(), b.path.size());
+                if (!std::equal(path->begin(), path->begin() + static_cast<std::ptrdiff_t>(n), b.path.begin())) continue;
+            }
+            return &b;
         }
         return nullptr;
+    }
+
+    // What a `for` loop goes over, for a message about its whole root: `it`, or the field.
+    std::string looped(const Borrow* b) const { return b->path.empty() ? "it" : q(place_text(b->over)); }
+
+    // The fields from a place's root to its first index, as the checker's loop rule counts them.
+    static std::vector<std::uint32_t> field_path(const Expr* e) {
+        std::vector<std::uint32_t> path;
+        for (; e->kind == ExprKind::field || e->kind == ExprKind::index; e = e->lhs) {
+            if (e->kind == ExprKind::index) path.clear();
+            else path.push_back(e->field_index);
+        }
+        std::reverse(path.begin(), path.end());
+        return path;
     }
 
     // A change to the place rooted at `l`. A `for` loop's own rule is the checker's.
@@ -524,7 +548,7 @@ private:
             if (!l->owns) {
                 view_of_[l] = why;
                 part_of_[l] = whole;
-                if (root && !scan_) borrows_.push_back({root, l, p->span});
+                if (root && !scan_) borrows_.push_back({root, l, p->span, nullptr, {}});
             }
             if (!scan_) {
                 declare(l);
@@ -656,7 +680,7 @@ private:
         }
         auto iteration = [&] {
             scopes_.emplace_back();
-            if (root) borrows_.push_back({root, nullptr, it->span});
+            if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it)});
             if (s->local) {
                 s->local->owns = copyable(s->local->type);
                 if (!s->local->owns) view_of_[s->local] = ViewOf::element;
@@ -861,9 +885,11 @@ private:
             error(e->span, "can't move " + q(place_text(e)) + " out of " + q(r) +
                                (l->owns ? "" : ", a view of the caller's value") + "; move a copy with " +
                                q(place_text(e) + ".copy()") + copy_hint(e->type));
-        } else if (const Borrow* b = borrowed(l)) {
+        } else if (const Borrow* b = borrowed(l, &w.path)) {
+            std::string over = b->by || b->path.empty() ? r : place_text(b->over);
             error(e->span, "can't move " + q(place_text(e)) + " while " +
-                               (b->by ? name_of(b->by) + " is a view into " + q(r) : "a `for` loop goes over " + q(r)));
+                               (b->by ? name_of(b->by) + " is a view into " + q(r)
+                                      : "a `for` loop goes over " + (over == place_text(e) ? std::string("it") : q(over))));
         } else {
             // A field of a local that owns its value moves out, and is zeroed.
             st_.parts.push_back({id(l), w.path, false, e->span});

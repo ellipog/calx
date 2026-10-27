@@ -58,6 +58,29 @@ fn main() {
 - The loop variable can't be assigned. `for _ in 0..n` needs no variable.
 - `parallel for i in a..b` runs the iterations at once, on several threads: see [Parallel loops](parallel.md).
 
+### Looping over a field
+
+What a loop goes over can't change or move until the loop ends, and neither can what holds it or what's in it. A loop over a field, such as `for t in r.scheduled`, keeps only that field: the body can change `r`'s other fields, which the loop never reads (D106).
+
+```calx
+struct Region {
+    scheduled: List<i32>,
+    due: List<i32>,
+}
+
+fn main() {
+    var r = Region { scheduled: [4, 1, 3], due: List() }
+    for t in r.scheduled {
+        if t < 4 {
+            r.due.push(t)    // another field of `r`
+        }
+    }
+    println("{r.due}")    // out: [1, 3]
+}
+```
+
+Changing `r.scheduled`, or `r` as a whole, is still an error in the loop: `r.scheduled` can't be changed while a `for` loop goes over it, and `r` can't be changed while a `for` loop goes over `r.scheduled`. Past an index, the loop keeps the whole list: in a loop over `rs[i].scheduled`, `rs[j].due` could be the same region's, so no element of `rs` can change.
+
 ## `loop`
 
 `loop { }` runs until a `break`. Used as a value, it gives the value of `break value`.

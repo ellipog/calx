@@ -439,166 +439,6 @@ fn section_index(lx: i32, ly: i32, lz: i32) -> usize {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A Java-compatible HashMap<Long, Integer>: Java's hash spreading, power-of-two table, tail
-// insertion, load factor 0.75 and the order-preserving resize split. A bin that would reach
-// Java's treeify threshold on a table of 64 or more stops the run: the benchmark's workload never
-// makes one.
-
-const NIL: u32 = 0xFFFFFFFF
-
-struct Node {
-    hash: i32,
-    key: i64,
-    value: i32,
-    next: u32,
-}
-
-struct JavaHashMap {
-    table: List<u32>,
-    nodes: List<Node>,
-    free: List<u32>,
-    size: usize,
-    threshold: usize,
-}
-
-fn java_hash(key: i64) -> i32 {
-    let h = i32.wrap(key ^ (key >>> 32))
-    return h ^ (h >>> 16)
-}
-
-fn bucket_of(hash: i32, len: usize) -> usize {
-    return usize(u32.wrap(hash)) & (len - 1)
-}
-
-impl JavaHashMap {
-    fn new() -> JavaHashMap {
-        return JavaHashMap { table: List(), nodes: List(), free: List(), size: 0, threshold: 0 }
-    }
-
-    fn alloc(mut self, node: Node) -> u32 {
-        let i = self.free.pop() else {
-            self.nodes.push(node)
-            return u32.wrap(self.nodes.len() - 1)
-        }
-        self.nodes[usize(i)] = node
-        return i
-    }
-
-    fn put(mut self, key: i64, value: i32) {
-        if self.table.is_empty() {
-            self.resize()
-        }
-        let hash = java_hash(key)
-        let bucket = bucket_of(hash, self.table.len())
-        var p = self.table[bucket]
-        if p == NIL {
-            let n = self.alloc(Node { hash: hash, key: key, value: value, next: NIL })
-            self.table[bucket] = n
-        } else {
-            var bin_count = 0
-            loop {
-                let node = self.nodes[usize(p)]
-                if node.hash == hash and node.key == key {
-                    self.nodes[usize(p)].value = value
-                    return
-                }
-                if node.next == NIL {
-                    let n = self.alloc(Node { hash: hash, key: key, value: value, next: NIL })
-                    self.nodes[usize(p)].next = n
-                    if bin_count >= 7 {
-                        // Java's treeifyBin: on a table under 64 it resizes instead.
-                        if self.table.len() >= 64 {
-                            panic("tickbench: a scheduled-tick bin reached Java's treeify threshold")
-                        }
-                        self.resize()
-                    }
-                    break
-                }
-                p = node.next
-                bin_count += 1
-            }
-        }
-        self.size += 1
-        if self.size > self.threshold {
-            self.resize()
-        }
-    }
-
-    fn remove(mut self, key: i64) {
-        let hash = java_hash(key)
-        let bucket = bucket_of(hash, self.table.len())
-        var prev = NIL
-        var p = self.table[bucket]
-        while p != NIL {
-            let node = self.nodes[usize(p)]
-            if node.hash == hash and node.key == key {
-                if prev == NIL {
-                    self.table[bucket] = node.next
-                } else {
-                    self.nodes[usize(prev)].next = node.next
-                }
-                self.free.push(p)
-                self.size -= 1
-                return
-            }
-            prev = p
-            p = node.next
-        }
-    }
-
-    fn resize(mut self) {
-        let old = self.table.len()
-        let grown = if old == 0 { 16usize } else { old * 2 }
-        self.threshold = grown * 3 / 4
-        var table: List<u32> = [NIL; grown]
-        for j in 0usize..old {
-            var lo_head = NIL
-            var lo_tail = NIL
-            var hi_head = NIL
-            var hi_tail = NIL
-            var p = self.table[j]
-            while p != NIL {
-                let next = self.nodes[usize(p)].next
-                self.nodes[usize(p)].next = NIL
-                if (usize(u32.wrap(self.nodes[usize(p)].hash)) & old) == 0 {
-                    if lo_tail == NIL {
-                        lo_head = p
-                    } else {
-                        self.nodes[usize(lo_tail)].next = p
-                    }
-                    lo_tail = p
-                } else {
-                    if hi_tail == NIL {
-                        hi_head = p
-                    } else {
-                        self.nodes[usize(hi_tail)].next = p
-                    }
-                    hi_tail = p
-                }
-                p = next
-            }
-            table[j] = lo_head
-            table[j + old] = hi_head
-        }
-        self.table = table
-    }
-
-    /// The keys whose value is at most `tick`, in Java's iteration order.
-    fn due(self, tick: i32, out: mut List<i64>) {
-        for head in self.table {
-            var p = head
-            while p != NIL {
-                let node = self.nodes[usize(p)]
-                if node.value <= tick {
-                    out.push(node.key)
-                }
-                p = node.next
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
 // The world: regions own their chunks, scheduled ticks, entities and random streams.
 
 struct Chunk {
@@ -644,7 +484,7 @@ struct ChunkRef {
 
 struct State {
     rng: JavaRandom,
-    scheduled: JavaHashMap,
+    scheduled: JavaHashMap<i64, i32>,
     tick_hash: Fnv,
     message_hash: Fnv,
     inbox: List<Message>,
@@ -719,7 +559,7 @@ fn generate() -> World {
     for k in 0usize..REGIONS {
         states.push(State {
             rng: JavaRandom.new(SEED + i64.wrap(k)),
-            scheduled: JavaHashMap.new(),
+            scheduled: JavaHashMap<i64, i32>(),
             tick_hash: Fnv {},
             message_hash: Fnv {},
             inbox: List(),
@@ -769,7 +609,7 @@ fn random_ticks(section: mut Section, st: mut State, cx: i32, cz: i32, sy: i32, 
         if sum % 7 == 0 {
             section.set(usize.wrap(i), (id * 31 + 7) % STATE_COUNT)
             let key = block_key(cx * 16 + lx, MIN_Y + sy * 16 + ly, cz * 16 + lz)
-            st.scheduled.put(key, tick + 2)
+            st.scheduled.insert(key, tick + 2)
         }
     }
     st.tick_hash.feed(section.sum())
@@ -786,10 +626,14 @@ fn block_pass(blocks: mut Blocks, st: mut State, tick: i32) {
 
     // Scheduled ticks that are due, in the map's iteration order.
     st.due.clear()
-    st.scheduled.due(tick, mut st.due)
+    for (key, due) in st.scheduled {
+        if due <= tick {
+            st.due.push(key)
+        }
+    }
     for j in 0usize..st.due.len() {
         let key = st.due[j]
-        st.scheduled.remove(key)
+        _ = st.scheduled.remove(key)
         let x = block_x(key)
         let y = block_y(key)
         let z = block_z(key)
@@ -1035,7 +879,7 @@ fn print_stats(world: World, when: String) {
     }
     var scheduled: usize = 0
     for st in world.states {
-        scheduled += st.scheduled.size
+        scheduled += st.scheduled.len()
     }
     eprintln("{when}: sections single {kinds[0]} linear {kinds[1]} hash {kinds[2]} global {kinds[3]}; scheduled ticks {scheduled}")
 }

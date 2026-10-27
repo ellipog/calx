@@ -1,0 +1,33 @@
+// A `for` loop over a field leaves the value's other fields free to change, as a region collects
+// its due ticks from one field into another.
+struct Region {
+    scheduled: JavaHashMap<i64, i32>,
+    due: List<i64>,
+    count: i32,
+    pair: (List<i32>, List<i32>),
+}
+
+fn collect(r: mut Region, tick: i32) {
+    for (key, at) in r.scheduled {
+        if at <= tick {
+            r.due.push(key)
+            r.count += 1
+        }
+    }
+    for key in r.due {
+        _ = r.scheduled.remove(key)
+    }
+}
+
+fn main() {
+    var r = Region { scheduled: JavaHashMap(), due: List(), count: 0, pair: ([1, 2], List()) }
+    for i in 0i64..6 {
+        r.scheduled.insert(i * 17, i32.wrap(i % 3))
+    }
+    collect(mut r, 1)
+    println("{r.due} {r.count} {r.scheduled}")    // out: [0, 17, 51, 68] 4 {34: 2, 85: 2}
+    for x in r.pair.0 {
+        r.pair.1.push(x * 10)
+    }
+    println("{r.pair.1}")    // out: [10, 20]
+}

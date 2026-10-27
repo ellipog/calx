@@ -97,7 +97,7 @@ The Calx and Rust versions must print the same checksum, with any thread count. 
 
 ## Making the comparison fair
 
-- **Same algorithms.** The Rust version follows this page as closely as the Calx one does, including a hand-written Java-compatible `HashMap` (Rust's standard map iterates in a different order) and Java's `Random`.
+- **Same algorithms.** The Rust version follows this page as closely as the Calx one does, including a hand-written Java-compatible `HashMap` (Rust's standard map iterates in a different order) and Java's `Random`. Calx's map is its built-in [`JavaHashMap`](reference/java-maps.md) (D105), which keeps the same rules.
 - **Idiomatic, safe Rust.** No `unsafe`, bounds checks left in, `std` threads or a small work-stealing pool equivalent to Calx's runtime, and wrapping arithmetic where Java wraps.
 - **Same optimization level.** Rust: `--release` with `lto = "thin"`, `codegen-units = 1` and `panic = "abort"`. Calx: its release mode, clang `-O3` on the emitted C, `-ffp-contract=off`. (This said `-O2` until D89. Rust's `--release` is `opt-level = 3`, so `-O3` is the same level, and `-O2` had held Calx a level below.) Both target `x86-64-v3`, so neither gets wider instructions than the other.
 - **Same toolchain generation.** The clang Calx uses and the LLVM inside rustc are both recorded. If they're far apart, that's noted with the result.

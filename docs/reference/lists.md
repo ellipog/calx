@@ -89,7 +89,7 @@ fn main() {
 
 ## Loops
 
-`for x in xs` goes over the elements in order, and each `x` is a view of the element. The list can't be changed or moved during the loop, so it can't grow under the loop and leave it reading freed memory. To change the elements, loop over the indexes: `for i in 0usize..xs.len()`.
+`for x in xs` goes over the elements in order, and each `x` is a view of the element. The list can't be changed or moved during the loop, so it can't grow under the loop and leave it reading freed memory. To change the elements, loop over the indexes: `for i in 0usize..xs.len()`. A loop over a list in a field leaves the other fields free to change ([looping over a field](control-flow.md#looping-over-a-field)).
 
 ## Sorting
 

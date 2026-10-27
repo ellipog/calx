@@ -2700,8 +2700,10 @@ private:
         }
         std::string_view n = text(l->name);
         // After an error, count the write anyway, so the same variable gets no second error.
-        if (l->borrowed) {
-            error(place->span, q(n) + " can't be changed while a `for` loop goes over it");
+        if (const LoopBorrow* b = loop_conflict(place, l)) {
+            std::string what = b->path.empty() ? std::string(n) : place_text(place);
+            std::string over = b->path.empty() ? what : place_text(b->place);
+            error(place->span, q(what) + " can't be changed while a `for` loop goes over " + (over == what ? "it" : q(over)));
             l->used = l->mutated = true;
             return;
         }
@@ -2732,6 +2734,55 @@ private:
         }
         if (whole) l->reassigned = true;
         else l->mutated = true;
+    }
+
+    // A place a `for` loop goes over: its root variable, and the fields to it.
+    struct LoopBorrow {
+        const Local* root;
+        std::vector<std::uint32_t> path;
+        const Expr* place;
+    };
+
+    // The fields from a place's root to its first index: `p.a.b` is a then b, `p.a[i].b` is a. What
+    // an index reaches can't be told apart from what another index reaches, so a path ends there.
+    static std::vector<std::uint32_t> field_path(const Expr* e) {
+        std::vector<std::uint32_t> path;
+        for (; e->kind == ExprKind::field || e->kind == ExprKind::index; e = e->lhs) {
+            if (e->kind == ExprKind::index) path.clear();
+            else path.push_back(e->field_index);
+        }
+        std::reverse(path.begin(), path.end());
+        return path;
+    }
+
+    // The loop over a place that a change to `place`, rooted at `l`, would change: the loop goes over
+    // `place` or a place inside it, or `place` is inside what the loop goes over. A loop over `p.a`
+    // lets the body change `p.b`.
+    const LoopBorrow* loop_conflict(const Expr* place, const Local* l) const {
+        std::vector<std::uint32_t> path;
+        bool have = false;
+        for (const LoopBorrow& b : loop_borrows_) {
+            if (b.root != l) continue;
+            if (!have) {
+                path = field_path(place);
+                have = true;
+            }
+            std::size_t n = std::min(path.size(), b.path.size());
+            if (std::equal(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(n), b.path.begin())) return &b;
+        }
+        return nullptr;
+    }
+
+    // How a place is written, for messages: `p.name`, `xs[...]`.
+    std::string place_text(const Expr* e) const {
+        switch (e->kind) {
+            case ExprKind::name: return std::string(text(e->path.parts[0]));
+            case ExprKind::self: return "self";
+            case ExprKind::field:
+                return place_text(e->lhs) + "." + (e->is_tuple_index ? std::to_string(e->tuple_index) : std::string(text(e->member)));
+            case ExprKind::index: return place_text(e->lhs) + "[...]";
+            default: return "...";
+        }
     }
 
     // The root variable of a place such as `a.b[i].c`, or null if the expression isn't one.
@@ -2842,6 +2893,7 @@ private:
         }
         Type* elem = T.error;
         Local* borrowed = nullptr;
+        Expr* over = it;
         if (it->kind == ExprKind::range) {
             if (!it->lhs || !it->rhs) {
                 error(it->span, "a `for` loop's range needs both ends");
@@ -2863,6 +2915,7 @@ private:
                 s->text_iter = it->bmethod;
                 elem = it->bmethod == BMethod::runes ? T.rune : T.char_;
                 s->value = it->callee->lhs;
+                over = s->value;
                 borrowed = place_root(s->value);
             } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::set) {
                 elem = t->elem;
@@ -2905,9 +2958,9 @@ private:
             pl.outer.insert(visible_.begin(), visible_.begin() + static_cast<std::ptrdiff_t>(outer));
             par_.push_back(std::move(pl));
         }
-        if (borrowed) borrowed->borrowed++;
+        if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over});
         check_block(s->body, nullptr, BlockUse::stmt);
-        if (borrowed) borrowed->borrowed--;
+        if (borrowed) loop_borrows_.pop_back();
         loops_.pop_back();
         if (par) {
             ParLoop pl = std::move(par_.back());
@@ -6951,6 +7004,8 @@ private:
     std::vector<std::size_t> scope_marks_;
     std::vector<LoopCtx> loops_;
     std::vector<ParLoop> par_;  // the `parallel for` loops around the code being checked, outermost first
+    // The places the `for` loops around the code go over, outermost first.
+    std::vector<LoopBorrow> loop_borrows_;
     std::uint32_t next_loop_ = 1;
     bool pattern_var_ = false;  // the names a pattern binds are `var`s
     std::vector<std::unique_ptr<DPat>> pool_;
