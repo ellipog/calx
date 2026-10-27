@@ -57,6 +57,12 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - Attributes are `@name` or `@name(args)` before a declaration ([codegen hooks](#codegen-hooks)).
 - Strings interpolate with `{expr}`: `"moved {d} blocks"`.
 - Loops are `while cond { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`.
+- Logic uses words: `and`, `or`, `not`. Comparison and arithmetic use the usual symbols.
+- `match v { Pattern => expr, ... }` matches enum variants, `none` and `some(x)`, `ok(v)` and `err(e)`, literals, tuples and `_`.
+- A function with no `->` returns nothing. `fn f() ! E` returns nothing but can fail with an `E`.
+- Calls can name their arguments, `teleport(to: home)`, and parameters can have defaults, `fn f(n: i32 = 3)`.
+- A closure passed as the last argument can follow the call: `p.after(ticks: 60) |p| { ... }`.
+- In an `impl T` block, a function whose first parameter is a `T` in any mode (`self: T`, `r: mut T`, `x: own T`) is a method, called as `value.f(...)`. `self` alone means a read-only `self: T`.
 
 ## Types
 
@@ -364,6 +370,7 @@ impl Counter {
 - An `actor struct` gets an inbox and an outbox from the runtime.
 - Actors are values that live in a collection, not threads.
 - `send dest msg` appends to the current actor's outbox. A message must be `Send`, and sending moves it.
+- The destination is any value whose type implements `Destination<M>`, so libraries decide what can be sent to: Calcite's `PlayerRef`, `global` and `region_at(world, pos, load: true)`. Options after a comma go to the destination: `send p Msg { }, offline: keep`.
 
 ### Parallel loops
 
@@ -375,7 +382,7 @@ fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
 }
 ```
 
-- `parallel for x in mut xs { }` runs the body for every element at once, on the runtime's work-stealing pool. Each iteration has exclusive access to its own element.
+- `parallel for x in mut xs { }` runs the body for every element at once, on the runtime's work-stealing pool. `parallel(pool) for` picks a pool. Each iteration has exclusive access to its own element.
 - **The capture check.** The body may read only values that are `Share`, or read-only views of values nothing writes during the loop. It may write only to its own element. The compiler rejects anything else. That's what makes the result the same at any thread count (D21) without locks.
 - The loop returns when every iteration has finished. That's the barrier.
 
@@ -435,6 +442,8 @@ pub fn packet(decl: StructDecl, state: State, direction: Direction, name: str) -
 - An attribute is a Calx function marked `@attribute`, which the compiler runs while compiling. It gets a typed description of the declaration it's on, and returns new declarations as data.
 - These functions run in the compiler's interpreter. They're deterministic and can't do I/O, except reading files their package lists as build inputs, such as the protocol report that gives packet IDs.
 - Their output is ordinary Calx, type-checked like the rest, and shown by `calx expand` for debugging.
+- **Attribute blocks.** `name { declarations }` at the top level of a module applies the attribute `@name` to every declaration inside it. Calcite's plugin library defines `region` and `global` this way, so the plugin structure in the samples isn't built into the language.
+- **Hidden parameters.** An attribute on a function may add parameters the caller supplies and bind names in the body. That's how a plugin handler sees `region`, `config` and `server` without declaring them: the host passes them in.
 - **String prefixes** like `t"..."` work the same way: a function marked `@prefix("t")` gets the literal and its interpolations at compile time and returns an expression. The Calcite text library checks the tags this way.
 
 ### Generated data tables
