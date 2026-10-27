@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/calx-logo-white.svg">
-  <img src="assets/logo/calx-logo.svg" alt="Calx" height="72">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/calx-banner-dark.png">
+  <img src="assets/logo/calx-banner.png" alt="Calx" width="100%">
 </picture>
 
 Calx is a compiled systems language built for [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux.
