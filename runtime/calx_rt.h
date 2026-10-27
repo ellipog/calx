@@ -232,9 +232,19 @@ CX_INLINE cx_usize cx_table_free_slot(const cx_u8* ctrl, cx_usize mask, cx_u64 h
 /* Marks slot `i` free after its value is taken out. It can become EMPTY, which ends lookups, only
  * if no lookup could have passed it: if a group around it already has an EMPTY. */
 CX_INLINE cx_bool cx_table_erase(cx_u8* ctrl, cx_usize mask, cx_usize i) {
-    cx_u16 before = (cx_u16)cx_group_empty(ctrl + ((i - CX_GROUP) & mask));
-    cx_u16 after = (cx_u16)cx_group_empty(ctrl + i);
-    cx_bool empty = __builtin_clzg(before, 16) + __builtin_ctzg(after, 16) < CX_GROUP;
+    cx_u32 before = cx_group_empty(ctrl + ((i - CX_GROUP) & mask));
+    cx_u32 after = cx_group_empty(ctrl + i);
+    /* The EMPTY bytes just before slot `i` and from it, counted without a branch: 16 when the
+     * group has none. clang 19 counts a 16-bit value directly; before it, an extra bit stops the
+     * count at 16. */
+#if __has_builtin(__builtin_clzg)
+    int lead = __builtin_clzg((cx_u16)before, 16);
+    int trail = __builtin_ctzg((cx_u16)after, 16);
+#else
+    int lead = __builtin_clz((before << 16) | 0x8000u);
+    int trail = __builtin_ctz(after | 0x10000u);
+#endif
+    cx_bool empty = lead + trail < CX_GROUP;
     cx_table_set(ctrl, mask, i, empty ? CX_CTRL_EMPTY : CX_CTRL_DELETED);
     return empty;
 }
