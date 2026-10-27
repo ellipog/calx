@@ -1,0 +1,16 @@
+const R: i64 = i64.round(2.5)    // error: a constant's value must be known at compile time
+const S: i32 = i32.saturate(2.5)    // error: a constant's value must be known at compile time
+
+fn main() {
+    let d = 2.5
+    let f = 2.5f32
+    let n = 3
+    println("{i32.round(d)}")    // error: `i32.round` takes an `f32`, as Java's `Math.round(float)` does; for an `f64`, it's `i64.round`
+    println("{i64.round(f)}")    // error: `i64.round` takes an `f64`, as Java's `Math.round(double)` does; for an `f32`, it's `i32.round`, or `i64.round(f64(f))`
+    println("{i16.round(d)}")    // error: only `i32.round` and `i64.round` exist, matching Java's `Math.round`
+    println("{i64.round(n)}")    // error: `i64.round` rounds a float; write `i64(...)`
+    println("{n.rint()}")    // error: `i32` has no method `rint`
+    _ = i32(n)    // error: `n` is already an `i32`; remove the conversion
+    _ = i32(n + 1)    // error: this is already an `i32`; remove the conversion
+    println("{R} {S}")
+}

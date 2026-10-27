@@ -1,0 +1,20 @@
+// i64.round and i32.round are Java's Math.round(double) and Math.round(float): the nearest
+// integer, halves rounded up, clamped like a cast. rint is Math.rint: halves go to the even one.
+// Every expected value below is what JDK 25 gives.
+
+fn main() {
+    println("{i64.round(2.5)} {i64.round(-2.5)} {i64.round(1.5)} {i64.round(-1.5)} {i64.round(0.5)} {i64.round(-0.5)}")    // out: 3 -2 2 -1 1 0
+    // The double just below 0.5, which floor(x + 0.5) gets wrong, and the one just below -0.5.
+    println("{i64.round(0.49999999999999994)} {i64.round(-0.5000000000000001)} {i64.round(-1.0e-300)}")    // out: 0 -1 0
+    println("{i64.round(4503599627370497.0)} {i64.round(-4503599627370497.0)}")    // out: 4503599627370497 -4503599627370497
+    println("{i64.round(1.0e19)} {i64.round(-1.0e19)} {i64.round(f64.NAN)} {i64.round(f64.INFINITY)}")    // out: 9223372036854775807 -9223372036854775808 0 9223372036854775807
+    println("{i32.round(2.5f32)} {i32.round(-2.5f32)} {i32.round(0.49999997f32)} {i32.round(3.0e9f32)} {i32.round(-3.0e9f32)}")    // out: 3 -2 0 2147483647 -2147483648
+    println("{i32.round(f32.NAN)} {i32.round(16777215.0f32)} {i32.round(-0.5f32)}")    // out: 0 16777215 0
+    println("{2.5.rint()} {3.5.rint()} {(-0.5).rint()} {(-2.5).rint()} {0.49999999999999994.rint()} {1.0e300.rint()}")    // out: 2.0 4.0 -0.0 -2.0 0.0 1.0E300
+    println("{2.5f32.rint()} {(-3.5f32).rint()} {f64.NAN.rint()} {f64.NEG_INFINITY.rint()}")    // out: 2.0 -4.0 NaN -Infinity
+    var sum: i64 = 0
+    for i in 0..1000 {
+        sum += i64.round(f64(i) * 0.25 - 100.0)
+    }
+    println("{sum}")    // out: 25000
+}

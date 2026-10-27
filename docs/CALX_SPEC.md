@@ -128,17 +128,11 @@ Handles are `Copy` and `Send`, which makes them the way to refer to an entity, p
 
 ## Integer and float semantics
 
-Calx matches Java exactly. What's built is in the reference: [Integers](reference/integers.md), [Floats](reference/floats.md) and [Conversions](reference/conversions.md). Still to build:
-
-| Feature | Calx | Emitted C |
-| --- | --- | --- |
-| `fma(a, b, c)` | A fused multiply-add, rounding once. Otherwise `a * b + c` rounds twice, as in Java | `__builtin_fma` |
-| `round` | Java's `Math.round`: the nearest integer, with halves rounded up, saturating like a cast | |
-| `f.java_string()` | A `String` holding exactly what Java's `Double.toString` and `Float.toString` give, for SNBT and JSON. Printing a float already uses this format | |
+Calx matches Java exactly. It's all built, and in the reference: [Integers](reference/integers.md), [Floats](reference/floats.md) and [Conversions](reference/conversions.md). That includes `x.mul_add(a, b)`, Java's `Math.fma`; `i64.round(d)` and `i32.round(f)`, Java's `Math.round`; and `x.rint()`, Java's `Math.rint`. `"{x}"` gives exactly what Java's `Double.toString` and `Float.toString` give, for SNBT and JSON, so there's no separate `java_string` method.
 
 ### Transcendental functions
 
-- `sqrt`, `abs`, `floor`, `ceil` and `mul_add` are methods on the float types. They're exact in IEEE, so every implementation agrees. `rint` is still to build.
+- `sqrt`, `abs`, `floor`, `ceil`, `rint` and `mul_add` are methods on the float types. They're exact in IEEE, so every implementation agrees.
 - Built: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `expm1`, `log`, `log10`, `log1p`, `pow`, `cbrt`, `hypot`, `sinh`, `cosh` and `tanh`, in two modules with the same names (D97):
   - [`std.java.math`](std/java-math.md) gives Java's `StrictMath` results bit for bit on every platform, for code that must compute what vanilla computes. It's ported from fdlibm, the library `StrictMath` is defined by, with fdlibm's license notice kept (D59, D60). Porting is the surest way to get the same constants and order of operations, which decide the last bit. It matched JDK 25 on 1,043,282 arguments, and the rig checks every function against `StrictMath`.
   - [`std.math`](std/math.md) is fast, within about half an ULP, and also the same on every platform, since it's all Calx. Its `exp`, `log`, `pow`, `sin`, `cos` and `tan` are its own, faster than glibc and the Windows CRT and more accurate than fdlibm: `exp`, `log` and `pow` are table-driven, and `sin`, `cos` and `tan` share one kernel with no branch on the quadrant. The rest call `std.java.math` until faster algorithms replace them.

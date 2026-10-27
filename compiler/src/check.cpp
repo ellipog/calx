@@ -5221,6 +5221,7 @@ private:
             if (m == "wrap") return conversion(e, t, Conv::wrap);
             if (m == "saturate") return conversion(e, t, Conv::saturate);
             if (m == "nearest") return conversion(e, t, Conv::nearest);
+            if (m == "round") return conversion(e, t, Conv::round);
             if (m == "try_from") return try_from(e, t);
             if (m == "parse" && is_numeric(t)) return static_builtin(e, t, PrimMethod::parse, nullptr, T.optional_of(t));
             if (m == "from_bits" && is_float(t)) {
@@ -5795,7 +5796,7 @@ private:
                 return to;
             }
         } else if (from == to) {
-            error(e->span, q(a->kind == ExprKind::name ? std::string(text(a->path.parts[0])) : std::string("this")) +
+            error(e->span, (a->kind == ExprKind::name ? q(text(a->path.parts[0])) : std::string("this")) +
                                " is already " + a_type(to) + "; remove the conversion");
             return T.error;
         }
@@ -5843,6 +5844,31 @@ private:
                     return T.error;
                 }
                 break;
+            case Conv::round:
+                // Java's two: `Math.round(double)` gives a `long`, and `Math.round(float)` an `int`.
+                if (!(to == T.i32 || to == T.i64)) {
+                    error(e->span, "only `i32.round` and `i64.round` exist, matching Java's `Math.round`");
+                    return T.error;
+                }
+                if (!is_float(from)) {
+                    error(e->span, q(target + ".round") + " rounds a float; " +
+                                       (exact ? "write " + q(target + "(...)") : lossy_hint(from, to)));
+                    return T.error;
+                }
+                if (to == T.i64 && from != T.f64) {
+                    error(e->span, "`i64.round` takes an `f64`, as Java's `Math.round(double)` does; for an `f32`, "
+                                   "it's `i32.round`, or `i64.round(f64(f))`");
+                    return T.error;
+                }
+                if (to == T.i32 && from != T.f32) {
+                    error(e->span, "`i32.round` takes an `f32`, as Java's `Math.round(float)` does; for an `f64`, "
+                                   "it's `i64.round`");
+                    if (a->kind == ExprKind::float_lit) {
+                        note(a->span, "for a literal, write it with a suffix: " + q(std::string(a->literal.digits) + "f32"));
+                    }
+                    return T.error;
+                }
+                break;
             case Conv::nearest:
                 if (!is_float(to)) {
                     error(e->span, q(target + ".nearest") + " doesn't exist; it rounds to a float type");
@@ -5857,7 +5883,8 @@ private:
         }
         if (a->has_bits && is_integral(from) && is_integral(to)) {
             set_int(e, to, a->const_bits);
-        } else if (a->is_const) {
+        } else if (a->is_const && conv != Conv::saturate && conv != Conv::round) {
+            // `saturate` and `round` are calls in C, which a constant's value can't hold.
             e->is_const = true;
         }
         return to;
@@ -6272,6 +6299,7 @@ private:
         else if (m == "sqrt" && is_float(recv)) pm = PrimMethod::sqrt;
         else if (m == "floor" && is_float(recv)) pm = PrimMethod::floor;
         else if (m == "ceil" && is_float(recv)) pm = PrimMethod::ceil;
+        else if (m == "rint" && is_float(recv)) pm = PrimMethod::rint;
         else if (m == "mul_add" && is_float(recv)) pm = PrimMethod::mul_add, args = 2;
         else if (m == "wrapping_add" && is_int(recv)) pm = PrimMethod::wrapping_add, args = 1;
         else if (m == "wrapping_sub" && is_int(recv)) pm = PrimMethod::wrapping_sub, args = 1;

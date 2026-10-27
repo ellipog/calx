@@ -35,7 +35,7 @@ fn main() {
 }
 ```
 
-The formatting is checked against Java by the rig. It's done in the runtime with the C library's correctly rounded conversions for now.
+The formatting is checked against Java by the rig. It's done in the runtime with the C library's correctly rounded conversions for now. `"{x}"` gives the same text as a `String`, which is what SNBT and JSON need, so there's no `java_string` method: it would be a second way to say the same thing.
 
 ## Constants
 
@@ -56,6 +56,7 @@ fn main() {
 | `x.min(y)`, `x.max(y)` | Java's `Math.min` and `Math.max`: NaN if either is NaN, and `-0.0` is less than `0.0`. Not C's `fmin`, which ignores NaN |
 | `x.sqrt()` | The square root, correctly rounded |
 | `x.floor()`, `x.ceil()` | Rounded down or up to an integer value, still a float |
+| `x.rint()` | Rounded to the nearest integer value, halves to the even one, still a float: Java's `Math.rint` |
 | `x.mul_add(a, b)` | `x * a + b`, rounded once: IEEE 754's fused multiply-add and Java's `Math.fma`. It's exact everywhere, so every machine gives the same bits; with `x86-64-v3`, as in release builds, it's one instruction |
 | `x.is_nan()` | Whether it's NaN |
 | `x.total_cmp(y)` | Java's `Double.compare` and `Float.compare`, as an [`Ordering`](comparing.md#order): `-0.0` comes before `0.0`, and NaN after everything, equal to every NaN. Floats have no `Order`, since `<` can't order NaN, so this is how to sort by one |
@@ -66,6 +67,7 @@ fn main() {
     let neg_zero = -0.0
     let nan = f64.NAN
     println("{neg_zero.min(0.0)} {nan.max(1.0)} {2.0.sqrt()} {(-2.5).floor()}")   // out: -0.0 NaN 1.4142135623730951 -3.0
+    println("{2.5.rint()} {3.5.rint()} {(-0.5).rint()}")   // out: 2.0 4.0 -0.0
     println("{neg_zero.total_cmp(0.0) == Ordering.Less} {nan.total_cmp(f64.INFINITY) == Ordering.Greater}")   // out: true true
 }
 ```
@@ -78,7 +80,7 @@ fn main() {
 }
 ```
 
-`exp`, `log`, `pow`, the trigonometric functions and the rest are in [`std.math`](../std/math.md), which is fast, and [`std.java.math`](../std/java-math.md), which gives `StrictMath`'s results bit for bit. `round`, `rint`, `total_cmp` and `java_string` are designed in the [spec](../CALX_SPEC.md#transcendental-functions) and not built yet.
+`exp`, `log`, `pow`, the trigonometric functions and the rest are in [`std.math`](../std/math.md), which is fast, and [`std.java.math`](../std/java-math.md), which gives `StrictMath`'s results bit for bit.
 
 ## Parsing
 
@@ -100,4 +102,4 @@ fn main() {
 
 ## Converting
 
-Converting a float to an integer is Java's cast, `i32.saturate(f)`: it clamps to the range, and NaN gives 0. Converting to a float rounds with `f32.nearest(x)` unless every value converts exactly ([conversions](conversions.md)).
+Converting a float to an integer is Java's cast, `i32.saturate(f)`: it clamps to the range, and NaN gives 0. `i64.round(d)` and `i32.round(f)` are Java's `Math.round`, which rounds halves up and clamps the same way. Converting to a float rounds with `f32.nearest(x)` unless every value converts exactly ([conversions](conversions.md)).

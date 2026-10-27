@@ -3177,6 +3177,7 @@ static void $reserve($T* m, cx_usize n) {
                 if (to->is_signed) return "((" + ctype(to) + ")(" + unsigned_of(to) + ")" + x + ")";
                 return "((" + ctype(to) + ")" + x + ")";
             case Conv::saturate: return "cx_" + helper(from) + "_to_" + helper(to) + "(" + x + ")";
+            case Conv::round: return "cx_round_" + helper(from) + "(" + x + ")";
             case Conv::none: break;
         }
         return x;
@@ -3203,6 +3204,7 @@ static void $reserve($T* m, cx_usize n) {
             case PrimMethod::sqrt: r = std::string(t->bits == 32 ? "__builtin_sqrtf(" : "__builtin_sqrt(") + v[0] + ")"; break;
             case PrimMethod::floor: r = std::string(t->bits == 32 ? "__builtin_floorf(" : "__builtin_floor(") + v[0] + ")"; break;
             case PrimMethod::ceil: r = std::string(t->bits == 32 ? "__builtin_ceilf(" : "__builtin_ceil(") + v[0] + ")"; break;
+            case PrimMethod::rint: r = std::string(t->bits == 32 ? "__builtin_rintf(" : "__builtin_rint(") + v[0] + ")"; break;
             case PrimMethod::mul_add:
                 r = std::string(t->bits == 32 ? "__builtin_fmaf(" : "__builtin_fma(") + v[0] + ", " + v[1] + ", " + v[2] + ")";
                 break;

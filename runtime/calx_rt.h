@@ -420,6 +420,17 @@ CX_INLINE cx_i32 cx_f32_to_i32(cx_f32 f) { return cx_f32_to_i32_clamp(f); }
 CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) { return cx_f32_to_i64_clamp(f); }
 #endif
 
+/* Java's Math.round: the nearest integer, with halves rounded up, clamped as a cast is. x - floor(x)
+ * is exact, except just below 0, where it can round up to 1, which still rounds to 0 as it should. */
+CX_INLINE cx_i64 cx_round_f64(cx_f64 d) {
+    cx_f64 f = __builtin_floor(d);
+    return cx_f64_to_i64(d - f >= 0.5 ? f + 1.0 : f);
+}
+CX_INLINE cx_i32 cx_round_f32(cx_f32 x) {
+    cx_f32 f = __builtin_floorf(x);
+    return cx_f32_to_i32(x - f >= 0.5f ? f + 1.0f : f);
+}
+
 /* abs, min and max. Integer abs wraps, so abs(MIN) is MIN, as in Java. */
 #define CX_INT_MINMAX(T)                                                                 \
     CX_INLINE cx_##T cx_min_##T(cx_##T a, cx_##T b) { return a <= b ? a : b; }           \

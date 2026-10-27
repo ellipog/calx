@@ -12,6 +12,7 @@ No value changes type by itself in Calx. A conversion is always written, and its
 | `T(x)` | Converts exactly. It compiles only when every value of `x`'s type is exactly a `T`, so it never changes a value | Widening |
 | `T.wrap(x)` | Keeps the low bits, between integer types | `(byte) x`, `(int) aLong`, reading an `int` as unsigned |
 | `i32.saturate(f)`, `i64.saturate(f)` | Clamps a float to the type's range. NaN gives 0 | `(int) f`, `(long) d` |
+| `i64.round(d)`, `i32.round(f)` | The nearest integer, with halves rounded up, clamped as `saturate` does. `i64.round` takes an `f64` and `i32.round` an `f32`, as Java's two do | `Math.round(d)`, `Math.round(f)` |
 | `f32.nearest(x)`, `f64.nearest(x)` | Rounds to the nearest float, ties to even | `(float) d`, `(double) aLong`, `(float) anInt` |
 | `T.try_from(x)` | `some(x)` as a `T` if it's one of `T`'s values, or `none` | A range check before a cast |
 
@@ -23,6 +24,7 @@ fn main() {
     println("{i64(small)} {f64(small)}")                     // out: -5 -5.0
     println("{i32.wrap(big)} {u8.wrap(small)} {i8.wrap(200)}") // out: 705032704 251 -56
     println("{i32.saturate(d)} {i32.saturate(-1.0e20)} {i32.saturate(f64.NAN)}")   // out: 3 -2147483648 0
+    println("{i64.round(d)} {i64.round(-2.5)} {i32.round(0.49999997f32)}")   // out: 4 -2 0
     println("{f32.nearest(0.1)} {f64.nearest(9007199254740993i64)}")   // out: 0.1 9.007199254740992E15
 }
 ```
@@ -32,7 +34,7 @@ fn main() {
 - **Integer to integer:** when the source's whole range fits in the target's. `i32` to `i64`, `u8` to `i16`, `u32` to `u64`. Not `i32` to `u32`, since negative numbers don't fit.
 - **Integer to float:** when every value is exactly representable: up to 24 bits for `f32` (`i16`, `u16`, `u8`, `i8`, `char`) and up to 53 bits for `f64` (`i32`, `u32` and smaller). Not `i64` to `f64`.
 - **Float to float:** `f32` to `f64`.
-- **Float to integer:** never. Use `saturate`.
+- **Float to integer:** never. Use `saturate`, or `round`.
 - **`char`** converts like a `u16`, and **`rune`** like a number from 0 to 0x10FFFF. Only a `u8` converts to a `rune` exactly, since other integers can be surrogates or too large.
 - **`bool`** converts to and from nothing. Write `if b { 1 } else { 0 }`.
 
