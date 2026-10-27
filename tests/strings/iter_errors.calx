@@ -1,0 +1,14 @@
+// Going over a string: `runes()` and `chars()` are only what a `for` loop goes over, a string
+// itself isn't, and the string can't change during the loop.
+
+fn main() {
+    let s = String("abc")
+    _ = s.runes()    // error: `runes` goes over the text in a `for` loop: `for x in s.runes()`
+    for c in s {    // error: a `for` loop goes over a range, an array, a list, a map or a set, not `String`; go over its runes with `s.runes()`, or its UTF-16 units with `s.chars()`
+        println("{c}")
+    }
+    var t = String("xyz")
+    for c in t.chars() {
+        t.push(rune(u8.wrap(u16(c))))    // error: `t` can't be changed while a `for` loop goes over it
+    }
+}

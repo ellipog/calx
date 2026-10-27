@@ -56,6 +56,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
+9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, which NBT uses
 
 ### Design
 

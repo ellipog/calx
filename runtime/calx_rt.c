@@ -565,6 +565,54 @@ cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n) {
     return 1;
 }
 
+/* Java's String.hashCode: h = 31 * h + c over the UTF-16 units, wrapping as an `int` does. Eight
+ * ASCII bytes at a time are one step, h * 31^8 plus each byte times its power, which leaves one
+ * multiply on the chain where the plain loop has eight. */
+cx_i32 cx_str_java_hash(cx_str s) {
+    const cx_u8* p = s.ptr;
+    cx_usize n = s.len, i = 0;
+    cx_u32 h = 0;
+    while (i < n) {
+        if (i + 8 <= n) {
+            cx_u64 w;
+            __builtin_memcpy(&w, p + i, 8);
+            if (!(w & 0x8080808080808080ull)) {
+                const cx_u32 p1 = 31u, p2 = p1 * 31u, p3 = p2 * 31u, p4 = p3 * 31u, p5 = p4 * 31u, p6 = p5 * 31u,
+                             p7 = p6 * 31u, p8 = p7 * 31u;
+                h = h * p8 + p[i] * p7 + p[i + 1] * p6 + p[i + 2] * p5 + p[i + 3] * p4 + p[i + 4] * p3 + p[i + 5] * p2 +
+                    p[i + 6] * p1 + p[i + 7];
+                i += 8;
+                continue;
+            }
+        }
+        if (p[i] < 0x80) {
+            h = h * 31u + p[i++];
+            continue;
+        }
+        cx_rune r = cx_utf8_next(p, &i);
+        if (r < 0x10000) {
+            h = h * 31u + r;
+        } else {
+            r -= 0x10000;
+            h = h * 31u + (0xD800u | (r >> 10));
+            h = h * 31u + (0xDC00u | (r & 0x3FFu));
+        }
+    }
+    return (cx_i32)h;
+}
+
+/* Java's String.length(): a unit for each rune, and two for one past U+FFFF, which is the one whose
+ * first byte is 0xF0 or more. */
+cx_usize cx_str_utf16_len(cx_str s) {
+    cx_usize n = 0;
+    for (cx_usize i = 0; i < s.len; i++) {
+        cx_u8 b = s.ptr[i];
+        n += (b & 0xC0) != 0x80;
+        n += b >= 0xF0;
+    }
+    return n;
+}
+
 /* --- parsing ------------------------------------------------------------------------------- */
 
 /* The digits after an optional sign, up to `limit`. */

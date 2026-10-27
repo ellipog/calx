@@ -155,6 +155,8 @@ enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
     truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get, cmp, sort,
     hash_add,  // `h.add(x)` on a `Hasher`
+    java_hash, utf16_len,  // on text, as Java's `String.hashCode` and `length()`
+    runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
 
@@ -331,6 +333,7 @@ struct Stmt {
     bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
+    BMethod text_iter = BMethod::none;  // for: `s.runes()` or `s.chars()`, with `value` now `s`
     Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).
     Slice<Local*> drops;           // return, break, continue: what's dropped before leaving

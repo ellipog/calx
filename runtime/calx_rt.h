@@ -174,6 +174,44 @@ CX_INLINE void cx_string_clear(cx_String* s) {
 cx_bool cx_str_contains(cx_str hay, cx_str needle);
 /* Whether the bytes are UTF-8: no overlong forms, surrogates, or values past U+10FFFF. */
 cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n);
+/* Java's String.hashCode and length(), over the UTF-16 units the text stands for. */
+cx_i32 cx_str_java_hash(cx_str s);
+cx_usize cx_str_utf16_len(cx_str s);
+/* The rune at `*i` in UTF-8 that's known to be valid, moving `*i` past it. */
+CX_INLINE cx_rune cx_utf8_next(const cx_u8* p, cx_usize* i) {
+    cx_u32 b = p[*i];
+    if (b < 0x80) {
+        *i += 1;
+        return b;
+    }
+    if (b < 0xE0) {
+        cx_rune r = ((b & 0x1F) << 6) | (p[*i + 1] & 0x3F);
+        *i += 2;
+        return r;
+    }
+    if (b < 0xF0) {
+        cx_rune r = ((b & 0x0F) << 12) | ((cx_u32)(p[*i + 1] & 0x3F) << 6) | (p[*i + 2] & 0x3F);
+        *i += 3;
+        return r;
+    }
+    cx_rune r = ((b & 0x07) << 18) | ((cx_u32)(p[*i + 1] & 0x3F) << 12) | ((cx_u32)(p[*i + 2] & 0x3F) << 6) | (p[*i + 3] & 0x3F);
+    *i += 4;
+    return r;
+}
+/* The UTF-16 unit at `*i`, as Java sees the text. A rune past U+FFFF gives its high surrogate,
+ * and leaves the low one in `*low` for the next call. */
+CX_INLINE cx_char cx_utf16_next(const cx_u8* p, cx_usize* i, cx_char* low) {
+    if (*low) {
+        cx_char c = *low;
+        *low = 0;
+        return c;
+    }
+    cx_rune r = cx_utf8_next(p, i);
+    if (r < 0x10000) return (cx_char)r;
+    r -= 0x10000;
+    *low = (cx_char)(0xDC00 | (r & 0x3FF));
+    return (cx_char)(0xD800 | (r >> 10));
+}
 
 /* `T.parse(text)`. Integers follow Java's Integer.parseInt: an optional sign (no `-` for unsigned
  * types), then ASCII digits, in range. Floats follow Double.parseDouble's grammar, and round

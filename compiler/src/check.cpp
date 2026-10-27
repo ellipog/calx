@@ -2836,8 +2836,16 @@ private:
             }
             it->type = elem;
         } else {
+            for_iter_ = it;
             Type* t = check(it, nullptr);
-            if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::set) {
+            for_iter_ = nullptr;
+            if (it->kind == ExprKind::call && (it->bmethod == BMethod::runes || it->bmethod == BMethod::chars) && !is_bad(t)) {
+                // `for r in s.runes()`: the loop decodes the text as it goes, so it goes over `s`.
+                s->text_iter = it->bmethod;
+                elem = it->bmethod == BMethod::runes ? T.rune : T.char_;
+                s->value = it->callee->lhs;
+                borrowed = place_root(s->value);
+            } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::set) {
                 elem = t->elem;
                 borrowed = place_root(it);
             } else if (t->kind == TypeKind::map) {
@@ -2845,7 +2853,10 @@ private:
                 elem = t->entry;
                 borrowed = place_root(it);
             } else if (!is_bad(t)) {
-                error(it->span, "a `for` loop goes over a range, an array, a list, a map or a set, not " + name_of(t));
+                error(it->span, "a `for` loop goes over a range, an array, a list, a map or a set, not " + name_of(t) +
+                                    (t->kind == TypeKind::string || t->kind == TypeKind::str
+                                         ? "; go over its runes with " + q("s.runes()") + ", or its UTF-16 units with " + q("s.chars()")
+                                         : std::string()));
             }
         }
         s->elem_type = elem;
@@ -6445,7 +6456,17 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {nullptr}, result = T.bool_;
             else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
             else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
-            else if (!owned) {
+            else if (m == "java_hash") b = BMethod::java_hash, result = T.i32;
+            else if (m == "utf16_len") b = BMethod::utf16_len, result = T.usize;
+            else if (m == "runes" || m == "chars") {
+                // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
+                if (e != for_iter_) {
+                    error(e->callee->span, q(m) + " goes over the text in a `for` loop: " + q("for x in s." + std::string(m) + "()"));
+                    for (Arg& a : e->args) check(a.value, nullptr);
+                    return T.error;
+                }
+                b = m == "runes" ? BMethod::runes : BMethod::chars, result = recv;
+            } else if (!owned) {
                 if (m == "push" || m == "push_str" || m == "clear" || m == "reserve") {
                     error(e->callee->span, "a `str` can't change; make a `String` with " + q("String(...)"));
                     for (Arg& a : e->args) check(a.value, nullptr);
@@ -6821,6 +6842,7 @@ private:
     std::map<std::pair<const Type*, int>, Item*> hand_;
     Name n_Hasher_, n_add_, n_From_;
     Item* from_iface_ = nullptr;
+    Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,

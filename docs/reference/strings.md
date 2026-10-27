@@ -1,6 +1,6 @@
 ---
 title: Strings
-description: str and String, literals that cost nothing, building strings, their methods, equality, patterns, and their C.
+description: str and String, literals that cost nothing, building strings, their methods, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
 ---
 
 # Strings
@@ -62,9 +62,11 @@ fn main() {
 | `s.reserve(n)` | Makes room for `n` more bytes, so the next pushes don't allocate |
 | `s.contains(t)` | Whether `t` appears in `s`. Every string contains `""` |
 | `s.starts_with(t)`, `s.ends_with(t)` | Whether `s` begins or ends with `t` |
+| `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match vanilla's hashes ([Java's view](#javas-view-of-a-string)) |
+| `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
-- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `starts_with` and `ends_with`.
+- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `starts_with`, `ends_with`, `java_hash` and `utf16_len`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
 - `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).
 - `s.push_str(s)` is an error, since `s` would change while being read. Push a copy.
@@ -82,6 +84,47 @@ fn main() {
     println("[{out}] {out.is_empty()}")    // out: [] true
 }
 ```
+
+## Going over the text
+
+`for r in s.runes()` goes over the runes, the Unicode scalar values. `for c in s.chars()` goes over the UTF-16 units, as Java's `charAt` does, so a rune past U+FFFF is two `char`s, a high surrogate and then a low one:
+
+```calx
+fn main() {
+    let s = "aé\u{1F600}"
+    var runes = 0
+    for r in s.runes() {
+        runes += 1
+        print("{u32(r)} ")
+    }
+    println("({runes} runes)")    // out: 97 233 128512 (3 runes)
+    for c in s.chars() {
+        print("{u16(c)} ")
+    }
+    println("({s.utf16_len()} units)")    // out: 97 233 55357 56832 (4 units)
+}
+```
+
+- The loop decodes the text as it goes, with nothing allocated, since text is always UTF-8.
+- `runes()` and `chars()` are only what a `for` loop goes over, and a string itself isn't, so the loop says which it means.
+- The string can't change while the loop goes over it, as with a list.
+
+## Java's view of a string
+
+Java's strings are UTF-16, and vanilla hashes and measures them that way. `s.java_hash()` and `s.utf16_len()` give what Java's `hashCode()` and `length()` give for the same text, without converting it:
+
+```calx
+fn main() {
+    println("{"hello".java_hash()} {"minecraft:stone".java_hash()}")    // out: 99162322 -1133948840
+    println("{"\u{1F600}".len()} {"\u{1F600}".utf16_len()}")    // out: 4 2
+}
+```
+
+- `java_hash` is what a `java.HashMap` will place a string key by, and what vanilla code that hashes names computes.
+- `utf16_len` is what the protocol's string limits count, such as 16 for a player name and 32767 for a chat message.
+- They matched Java 25 on 20,000 random strings, with U+0000, every length of UTF-8, and surrogate pairs.
+- `java_hash` takes eight ASCII bytes a step, `h * 31^8` plus each byte times its power, so the chain of multiplies is an eighth as long as Java's loop.
+- [Modified UTF-8](../std/text-mutf8.md), which NBT uses, is in `std.text.mutf8`.
 
 ## Comparing and matching
 
@@ -110,7 +153,7 @@ fn main() {
 
 ## Not built yet
 
-Slicing by byte offset, iterating runes and UTF-16 units, Java's `hashCode` and `length()`, Modified UTF-8, case mapping, and `Display` for interpolating other types are designed ([spec](../CALX_SPEC.md#strings-d28)).
+Slicing by byte offset and case mapping are designed ([spec](../CALX_SPEC.md#strings-d28)).
 
 ## In C
 

@@ -1,0 +1,71 @@
+// `std.text.mutf8`: Java's Modified UTF-8, as `writeUTF` writes it and `readUTF` reads it.
+import std.text.mutf8.{DecodeError, decode, encode, encoded_len}
+
+fn bytes_of(s: String) -> List<u8> {
+    var out = List<u8>()
+    encode(s, mut out)
+    return out
+}
+
+fn show(bytes: List<u8>) {
+    match decode(bytes, 0, bytes.len()) {
+        ok(s) => println("ok {s} ({s.len()} bytes)"),
+        err(e) => println("err {e}"),
+    }
+}
+
+fn main() {
+    println("{bytes_of("hello")} {encoded_len("hello")}")    // out: [104, 101, 108, 108, 111] 5
+    // U+0000 is two bytes, so the encoding never holds a zero.
+    println("{bytes_of("a\u{0}b")} {encoded_len("a\u{0}b")}")    // out: [97, 192, 128, 98] 4
+    println("{bytes_of("é€")}")    // out: [195, 169, 226, 130, 172]
+    // Past U+FFFF, each UTF-16 surrogate is three bytes: D83D DE00.
+    println("{bytes_of("\u{1F600}")} {encoded_len("\u{1F600}")}")    // out: [237, 160, 189, 237, 184, 128] 6
+
+    let text = String("héllo \u{0} wörld \u{1F600}!")
+    let enc = bytes_of(text)
+    println("{enc.len() == encoded_len(text)}")    // out: true
+    match decode(enc, 0, enc.len()) {
+        ok(back) => println("{back == text}"),    // out: true
+        err(e) => println("{e}"),
+    }
+
+    // What `readUTF` accepts besides: a plain zero byte, and a longer form than needed.
+    let zero: List<u8> = [97, 0, 98]
+    match decode(zero, 0, zero.len()) {
+        ok(s) => println("{s.len()} {s.byte_at(1)}"),    // out: 3 0
+        err(e) => println("{e}"),
+    }
+    let long_a: List<u8> = [0xC1, 0x81]
+    show(long_a)    // out: ok A (1 bytes)
+    // A surrogate without its pair becomes `?`.
+    let lone_high: List<u8> = [0xED, 0xA0, 0xBD, 0x61]
+    show(lone_high)    // out: ok ?a (2 bytes)
+    let lone_low: List<u8> = [0xED, 0xB8, 0x80]
+    show(lone_low)    // out: ok ? (1 bytes)
+
+    // What it rejects.
+    let cut: List<u8> = [0xC3]
+    show(cut)    // out: err Truncated
+    let cut3: List<u8> = [0x61, 0xE2, 0x82]
+    show(cut3)    // out: err Truncated
+    let not_cont: List<u8> = [0xC3, 0x41]
+    show(not_cont)    // out: err Malformed(1)
+    let stray: List<u8> = [0x80]
+    show(stray)    // out: err Malformed(0)
+    // Four-byte UTF-8 isn't Modified UTF-8.
+    let four: List<u8> = [0xF0, 0x9F, 0x98, 0x80]
+    show(four)    // out: err Malformed(0)
+
+    // Part of a buffer, as NBT reads a string after its length.
+    let framed: List<u8> = [0, 2, 104, 105, 7]
+    match decode(framed, 2, 4) {
+        ok(s) => println(s),    // out: hi
+        err(e) => println("{e}"),
+    }
+    match decode(cut, 0, 1) {
+        ok(s) => println(s),
+        err(DecodeError.Truncated) => println("truncated"),    // out: truncated
+        err(DecodeError.Malformed(at)) => println("at {at}"),
+    }
+}

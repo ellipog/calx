@@ -1831,6 +1831,31 @@ static void $reserve($T* m, cx_usize n) {
                 line("const " + ctype(at) + "* " + arr + " = &" + val + ";");
             }
             std::string elem_at;
+            if (s->text_iter != BMethod::none) {
+                // Decoded as the loop goes. Text is always UTF-8, so nothing is checked. A rune past
+                // U+FFFF is two UTF-16 units, so `chars` keeps the second for the next pass.
+                std::string next;
+                if (s->text_iter == BMethod::runes) {
+                    line("for (cx_usize " + i + " = 0; " + i + " < " + arr + "->len;) {");
+                    next = "cx_utf8_next(" + arr + "->ptr, &" + i + ")";
+                } else {
+                    std::string low = tmp();
+                    line("cx_char " + low + " = 0;");
+                    line("for (cx_usize " + i + " = 0; " + i + " < " + arr + "->len || " + low + ";) {");
+                    next = "cx_utf16_next(" + arr + "->ptr, &" + i + ", &" + low + ")";
+                }
+                indent_++;
+                line(var.empty() ? "(void)" + next + ";" : ctype(elem) + " " + var + " = " + next + ";");
+                stmts(s->body, false);
+                line("cx_cont" + id + ":;");
+                indent_--;
+                line("}");
+                line("cx_brk" + id + ":;");
+                if (s->hidden && s->drop_hidden) line(drop_fn(s->hidden->type) + "(&" + local_name(s->hidden) + ");");
+                indent_--;
+                line("}");
+                return;
+            }
             if (is_table(at)) {
                 // Slot by slot, skipping the empty ones: the order depends only on the hashes and
                 // what was done to the table, so it's the same in every run (D56).
@@ -3509,6 +3534,8 @@ static void $reserve($T* m, cx_usize n) {
                 case BMethod::contains: return view + "cx_str_contains(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";
+                case BMethod::java_hash: return view + "cx_str_java_hash(" + p + "); })";
+                case BMethod::utf16_len: return view + "cx_str_utf16_len(" + p + "); })";
                 default: return "0";
             }
         }

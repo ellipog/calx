@@ -1,0 +1,113 @@
+/// Java's Modified UTF-8, which NBT and Java's `DataOutput.writeUTF` use. It's UTF-8 except in two
+/// ways: U+0000 is the two bytes `C0 80`, so the bytes never hold a zero, and a rune past U+FFFF is
+/// its two UTF-16 surrogates, three bytes each, since Java's text is UTF-16 units.
+module std.text.mutf8
+
+/// Why bytes aren't Modified UTF-8. Decoding reports what Java's `readUTF` would reject.
+pub enum DecodeError {
+    /// The bytes end inside a character.
+    Truncated,
+    /// The byte at this offset can't start a character, or isn't the continuation one needs.
+    Malformed(usize),
+}
+
+/// How many bytes `s` takes in Modified UTF-8: its UTF-8 length, plus one for each U+0000 and two
+/// for each rune past U+FFFF, which is six bytes rather than four.
+pub fn encoded_len(s: String) -> usize {
+    var n = s.len()
+    for i in 0usize..s.len() {
+        let b = s.byte_at(i)
+        if b == 0 {
+            n += 1
+        } else if b >= 0xF0 {
+            n += 2
+        }
+    }
+    return n
+}
+
+/// Adds `s` to `out` in Modified UTF-8, as `writeUTF` writes it after its length.
+pub fn encode(s: String, out: mut List<u8>) {
+    out.reserve(encoded_len(s))
+    for c in s.chars() {
+        let u = u32(c)
+        if u >= 1 and u < 0x80 {
+            out.push(u8.wrap(u))
+        } else if u < 0x800 {
+            out.push(u8.wrap(0xC0 | (u >> 6)))
+            out.push(u8.wrap(0x80 | (u & 0x3F)))
+        } else {
+            out.push(u8.wrap(0xE0 | (u >> 12)))
+            out.push(u8.wrap(0x80 | ((u >> 6) & 0x3F)))
+            out.push(u8.wrap(0x80 | (u & 0x3F)))
+        }
+    }
+}
+
+/// The text in `bytes` from offset `from` up to `to`, decoded as `readUTF` decodes it. It accepts
+/// what Java accepts, including a plain zero byte and longer forms than needed. A surrogate
+/// without its pair, which Java keeps but UTF-8 can't hold, becomes `?`, as Java writes one in
+/// UTF-8. Panics if `from..to` isn't inside `bytes`.
+pub fn decode(bytes: List<u8>, from: usize, to: usize) -> String ! DecodeError {
+    if from > to or to > bytes.len() {
+        panic("decode: {from}..{to} isn't inside {bytes.len()} bytes")
+    }
+    var out = String()
+    out.reserve(to - from)
+    var i = from
+    var high = 0u32  // a high surrogate, waiting for its low one
+    while i < to {
+        let b = u32(bytes[i])
+        var c = 0u32
+        if b < 0x80 {
+            c = b
+            i += 1
+        } else if b >> 5 == 0x6 {
+            if to - i < 2 {
+                fail DecodeError.Truncated
+            }
+            let b2 = u32(bytes[i + 1])
+            if b2 & 0xC0 != 0x80 {
+                fail DecodeError.Malformed(i + 1)
+            }
+            c = ((b & 0x1F) << 6) | (b2 & 0x3F)
+            i += 2
+        } else if b >> 4 == 0xE {
+            if to - i < 3 {
+                fail DecodeError.Truncated
+            }
+            let b2 = u32(bytes[i + 1])
+            let b3 = u32(bytes[i + 2])
+            if b2 & 0xC0 != 0x80 {
+                fail DecodeError.Malformed(i + 1)
+            }
+            if b3 & 0xC0 != 0x80 {
+                fail DecodeError.Malformed(i + 2)
+            }
+            c = ((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+            i += 3
+        } else {
+            fail DecodeError.Malformed(i)
+        }
+        if high != 0 {
+            if c >= 0xDC00 and c <= 0xDFFF {
+                out.push(rune.try_from(0x10000 + ((high - 0xD800) << 10) + (c - 0xDC00))!)
+                high = 0
+                continue
+            }
+            out.push('?')
+            high = 0
+        }
+        if c >= 0xD800 and c <= 0xDBFF {
+            high = c
+        } else if c >= 0xDC00 and c <= 0xDFFF {
+            out.push('?')
+        } else {
+            out.push(rune.try_from(c)!)
+        }
+    }
+    if high != 0 {
+        out.push('?')
+    }
+    return out
+}

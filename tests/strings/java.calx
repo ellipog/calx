@@ -1,0 +1,59 @@
+// Java's view of a string: `java_hash` is `String.hashCode` and `utf16_len` is `length()`, both
+// over UTF-16 units, and `for` goes over the runes or the UTF-16 units. The expected hashes come
+// from Java's algorithm, run separately over each string's UTF-16 encoding.
+
+fn units(s: String) -> String {
+    var out = String()
+    for c in s.chars() {
+        out.push_str("{u16(c)},")
+    }
+    return out
+}
+
+fn count_runes(s: str) -> i32 {
+    var n = 0
+    for _ in s.runes() {
+        n += 1
+    }
+    return n
+}
+
+fn made() -> String {
+    return "a\u{1F600}b"
+}
+
+fn main() {
+    println("{"".java_hash()} {"hello".java_hash()} {"Steve".java_hash()}")    // out: 0 99162322 80208819
+    println("{"minecraft:stone".java_hash()}")    // out: -1133948840
+    println("{"é".java_hash()} {"\u{1F600}".java_hash()}")    // out: 233 1772899
+    // Long enough for eight ASCII bytes at a time, and with runes of every length after them.
+    println("{"abcdefghijklmnopqrstuvwxyz0123456789".java_hash()}")    // out: 1478768498
+    println("{"héllo wörld, \u{1F600} ok then this is long".java_hash()}")    // out: -2058202113
+    let name = String("Notch_1234567")
+    println("{name.java_hash()} {name.utf16_len()}")    // out: 849474381 13
+    println("{"a\u{0}b".java_hash()}")    // out: 93315
+    println("{"".utf16_len()} {"é".utf16_len()} {"€".utf16_len()} {"\u{1F600}".utf16_len()}")    // out: 0 1 1 2
+    println("{"héllo wörld, \u{1F600} ok then this is long".utf16_len()}")    // out: 36
+
+    var runes = String()
+    for r in "aé€\u{1F600}".runes() {
+        runes.push_str("{u32(r)},")
+    }
+    println(runes)    // out: 97,233,8364,128512,
+    // A rune past U+FFFF is two UTF-16 units, a high surrogate and then a low one.
+    println(units("aé\u{1F600}z"))    // out: 97,233,55357,56832,122,
+    println("{count_runes("a\u{1F600}b")} {count_runes("")}")    // out: 3 0
+
+    // `break` and `continue` work as in any loop, and a `String` made for the loop is freed after it.
+    var seen = String()
+    for c in made().chars() {
+        if c == 'b' {
+            break
+        }
+        if c == 'a' {
+            continue
+        }
+        seen.push_str("{u16(c)},")
+    }
+    println(seen)    // out: 55357,56832,
+}
