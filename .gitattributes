@@ -1,0 +1,7 @@
+# LF everywhere so case-file hashes match on Windows and Linux (D39).
+* text=auto eol=lf
+*.png binary
+*.jar binary
+*.nbt binary
+*.mca binary
+*.bin binary
