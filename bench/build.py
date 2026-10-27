@@ -33,6 +33,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+sys.dont_write_bytecode = True  # no __pycache__ in bench/ from loading run.py
 spec = importlib.util.spec_from_file_location("bench_run", HERE / "run.py")
 bench_run = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench_run)
