@@ -1,0 +1,45 @@
+// What lacks `Order`: floats, which have `total_cmp` instead, pointers, maps and sets, what holds
+// them, and a generic parameter without the bound.
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+struct Boxed<T> {
+    value: T,
+}
+
+fn less<T>(a: Boxed<T>, b: Boxed<T>) -> bool {
+    return a < b    // error: values of type `Boxed<T>` can't be compared with `<`; give `T` the bound `Order`
+}
+
+fn least<T: Order>(_xs: List<T>) -> T? {
+    return none
+}
+
+fn same<T: Order>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fn twice<T: Order + Order>(_x: T) {}    // error: `Order` is already a bound of `T`
+
+struct Ordering {}    // error: `Ordering` is a built-in name
+
+fn main() {
+    let p = Point { x: 1.0, y: 2.0 }
+    println("{p < p}")    // error: values of type `Point` can't be compared with `<`, since it holds `f64`, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    println("{1.0 < 2.0}")
+    let _c = 1.0.cmp(2.0)    // error: values of type `f64` can't be compared with `cmp`, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    var fs: List<f32> = [2.0f32, 1.0f32]
+    fs.sort()    // error: `sort` compares with `<`, which `f32` doesn't have, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    let points: List<Point> = []
+    let _l = least(points)    // error: `Point` can't be compared with `<`, which `least` needs for `T`, since it holds `f64`, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    var sets: List<Set<i32>> = []
+    sets.sort()    // error: `sort` compares with `<`, which `Set<i32>` doesn't have, and maps and sets have no `Order`
+    let a = Map<i32, i32>()
+    println("{a < a}")    // error: values of type `Map<i32, i32>` can't be compared with `<`, and maps and sets have no `Order`
+    let xs: List<i32> = [2, 1]
+    xs.sort()    // error: `xs` can't be changed; declare it with `var` to change it
+    println("{same(1, 2)} {less(Boxed { value: 1 }, Boxed { value: 2 })}")
+    twice(1)
+}

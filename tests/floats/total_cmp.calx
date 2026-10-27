@@ -1,0 +1,23 @@
+// `x.total_cmp(y)`: Java's `Double.compare` and `Float.compare`. `-0.0` comes before `0.0`, and
+// NaN after everything, equal to every NaN whatever its sign or payload.
+fn name(o: Ordering) -> str {
+    return match o {
+        Less => "less",
+        Equal => "equal",
+        Greater => "greater",
+    }
+}
+
+fn main() {
+    let nan = f64.NAN
+    let other_nan = f64.from_bits(0xfff0000000000123)    // negative, with a payload
+    println("{name((-0.0).total_cmp(0.0))} {name(0.0.total_cmp(-0.0))} {name((-0.0).total_cmp(-0.0))}")    // out: less greater equal
+    println("{name(nan.total_cmp(nan))} {name(nan.total_cmp(other_nan))} {name(other_nan.total_cmp(nan))}")    // out: equal equal equal
+    println("{name(nan.total_cmp(f64.INFINITY))} {name(f64.NEG_INFINITY.total_cmp(other_nan))}")    // out: greater less
+    println("{name(1.5.total_cmp(2.5))} {name((-1.0e308).total_cmp(f64.NEG_INFINITY))} {name(3.0.total_cmp(3.0))}")    // out: less greater equal
+
+    let n32 = f32.NAN
+    let other32 = f32.from_bits(0xff800001u32)
+    println("{name((-0.0f32).total_cmp(0.0f32))} {name(n32.total_cmp(other32))} {name(n32.total_cmp(f32.MAX))}")    // out: less equal greater
+    println("{name(f32.MIN_POSITIVE.total_cmp(0.0f32))} {name(1.0f32.total_cmp(1.0f32))}")    // out: greater equal
+}

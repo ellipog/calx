@@ -57,6 +57,7 @@ fn main() {
 | `x.sqrt()` | The square root, correctly rounded |
 | `x.floor()`, `x.ceil()` | Rounded down or up to an integer value, still a float |
 | `x.is_nan()` | Whether it's NaN |
+| `x.total_cmp(y)` | Java's `Double.compare` and `Float.compare`, as an [`Ordering`](comparing.md#order): `-0.0` comes before `0.0`, and NaN after everything, equal to every NaN. Floats have no `Order`, since `<` can't order NaN, so this is how to sort by one |
 | `x.to_bits()` | The IEEE 754 bits, a `u64` for `f64` and a `u32` for `f32`: Java's `doubleToRawLongBits` and `floatToRawIntBits`, which keep a NaN's payload |
 
 ```calx
@@ -64,6 +65,7 @@ fn main() {
     let neg_zero = -0.0
     let nan = f64.NAN
     println("{neg_zero.min(0.0)} {nan.max(1.0)} {2.0.sqrt()} {(-2.5).floor()}")   // out: -0.0 NaN 1.4142135623730951 -3.0
+    println("{neg_zero.total_cmp(0.0) == Ordering.Less} {nan.total_cmp(f64.INFINITY) == Ordering.Greater}")   // out: true true
 }
 ```
 

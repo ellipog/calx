@@ -1,0 +1,110 @@
+// `sort` on random lists of many lengths, checked against counting what went in: the result must
+// be in order and hold the same values. Then lists already in order or reversed, values that own
+// memory, which a debug build checks are each freed once, and the types with a derived `Order`.
+struct Item {
+    name: String,
+    count: i32,
+}
+
+enum Slot {
+    Empty
+    Full(Item)
+}
+
+fn next(s: u64) -> u64 {
+    return s * 6364136223846793005u64 + 1442695040888963407u64
+}
+
+// How many lengths from 0 to `n` sorted wrong: out of order, or with values lost or made up.
+fn check_ints(n: usize, range: u64, seed: u64) -> i32 {
+    var bad = 0
+    var s = seed
+    for len in 0usize..n {
+        var xs = List<i64>()
+        var counts = [0i32; 64]
+        for _ in 0usize..len {
+            s = next(s)
+            let v = (s >> 33) % range
+            xs.push(i64.wrap(v) - 20)
+            counts[usize.wrap(v)] += 1
+        }
+        xs.sort()
+        var wrong = false
+        for i in 0usize..xs.len() {
+            if i > 0 and xs[i - 1] > xs[i] {
+                wrong = true
+            }
+            counts[usize.wrap(xs[i] + 20)] -= 1
+        }
+        for c in counts {
+            if c != 0 {
+                wrong = true
+            }
+        }
+        if wrong {
+            bad += 1
+        }
+    }
+    return bad
+}
+
+fn in_order<T: Order>(xs: List<T>) -> bool {
+    for i in 1usize..xs.len() {
+        if xs[i - 1] > xs[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn main() {
+    println("{check_ints(300, 64, 1u64)} {check_ints(300, 3, 2u64)} {check_ints(80, 1, 3u64)}")    // out: 0 0 0
+
+    // Long lists, in order, reversed, and in order but for the ends.
+    var up = List<i32>()
+    var down = List<i32>()
+    var nearly = List<i32>()
+    for i in 0..5000 {
+        up.push(i)
+        down.push(5000 - i)
+        nearly.push(i)
+    }
+    nearly[0] = 9999
+    nearly[4999] = -1
+    up.sort()
+    down.sort()
+    nearly.sort()
+    println("{in_order(up)} {in_order(down)} {in_order(nearly)} {down[0]} {nearly[0]} {nearly[4999]}")    // out: true true true 1 -1 9999
+
+    // Values that own memory move into place; none is copied or freed.
+    var words = List<String>()
+    var s = 7u64
+    for _ in 0..500 {
+        s = next(s)
+        words.push("w{(s >> 40) % 1000u64}")
+    }
+    words.sort()
+    println("{in_order(words)} {words.len()}")    // out: true 500
+    var short: List<String> = ["pear", "fig", "apple", "fig"]
+    short.sort()
+    println("{short}")    // out: [apple, fig, fig, pear]
+
+    var items = List<Item>()
+    for i in 0..100 {
+        items.push(Item { name: "n{(i * 37) % 10}", count: (i * 13) % 7 })
+    }
+    items.sort()
+    println("{in_order(items)} {items[0].name} {items[0].count} {items[99].name} {items[99].count}")    // out: true n0 0 n9 6
+
+    var slots: List<Slot> = [Slot.Full(Item { name: "b", count: 1 }), Slot.Empty, Slot.Full(Item { name: "a", count: 2 }), Slot.Empty]
+    slots.sort()
+    println("{slots}")    // out: [Empty, Empty, Full(Item { name: a, count: 2 }), Full(Item { name: b, count: 1 })]
+
+    var pairs: List<(i32?, str)> = [(some(2), "x"), (none, "y"), (some(1), "z"), (none, "a")]
+    pairs.sort()
+    println("{pairs}")    // out: [(none, a), (none, y), (some(1), z), (some(2), x)]
+
+    var lists: List<List<u8>> = [[2u8], [1u8, 5u8], [], [1u8]]
+    lists.sort()
+    println("{lists}")    // out: [[], [1], [1, 5], [2]]
+}

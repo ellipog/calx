@@ -1,0 +1,108 @@
+// `<`, `<=`, `>`, `>=` and `cmp` on strings, structs, enums, tuples, arrays, lists and optionals:
+// the derived `Order`, which compares what two values hold, in order, until something differs.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Named {
+    name: String,
+    at: Point,
+}
+
+enum Size: u8 {
+    Small = 9
+    Large = 2
+    Medium = 5
+}
+
+enum Shape {
+    Dot
+    Line(i32)
+    Rect { w: i32, h: i32 }
+}
+
+struct Tree {
+    value: i32,
+    kids: List<Tree>,
+}
+
+fn name(o: Ordering) -> str {
+    return match o {
+        Less => "less",
+        Equal => "equal",
+        Greater => "greater",
+    }
+}
+
+fn leaf(v: i32) -> Tree {
+    return Tree { value: v, kids: List<Tree>() }
+}
+
+fn biggest<T: Order>(xs: List<T>) -> usize {
+    var best = 0usize
+    for i in 1usize..xs.len() {
+        if xs[i] > xs[best] {
+            best = i
+        }
+    }
+    return best
+}
+
+fn main() {
+    // Strings compare byte by byte, which for UTF-8 is code point by code point, and a string that
+    // runs out first is less.
+    println("{"apple" < "banana"} {"app" < "apple"} {"Zebra" < "apple"} {"é" > "z"}")    // out: true true true true
+    let s = String("pear")
+    println("{s > "peach"} {s <= String("pear")} {name(s.cmp("pears"))}")             // out: true true less
+
+    // A struct compares its fields in the order they're declared.
+    let p = Point { x: 1, y: 2 }
+    println("{p < Point { x: 1, y: 3 }} {p < Point { x: 0, y: 9 }} {p >= p}")         // out: true false true
+    println("{name(p.cmp(Point { x: 1, y: 2 }))} {name(p.cmp(Point { x: 2, y: 0 }))}")  // out: equal less
+    let a = Named { name: String("b"), at: p }
+    let b = Named { name: String("b"), at: Point { x: 1, y: 1 } }
+    println("{a > b} {name(b.cmp(a))}")                                                   // out: true less
+
+    // An enum's variants come in the order they're declared, whatever their values.
+    println("{Size.Small < Size.Large} {Size.Large < Size.Medium} {Size.Medium > Size.Small}")    // out: true true true
+    println("{name(Size.Large.cmp(Size.Large))}")                                         // out: equal
+    let shapes = [Shape.Rect { w: 1, h: 2 }, Shape.Line(3), Shape.Dot, Shape.Line(1), Shape.Rect { w: 1, h: 1 }]
+    var line = String(name(shapes[0].cmp(shapes[1])))
+    for i in 1usize..4 {
+        line = "{line} {name(shapes[i].cmp(shapes[i + 1]))}"
+    }
+    println(line)    // out: greater greater less less
+    println("{Shape.Rect { w: 2, h: 0 } > Shape.Rect { w: 1, h: 9 }}")                   // out: true
+
+    // Tuples and arrays compare element by element.
+    println("{(1, "b") > (1, "a")} {(0, "z") < (1, "a")} {name((2, 2).cmp((2, 2)))}")    // out: true true equal
+    let xs = [3, 1, 4]
+    println("{xs < [3, 1, 5]} {xs > [2, 9, 9]}")                                          // out: true true
+
+    // A list that runs out first is less.
+    let short: List<i32> = [1, 2]
+    let long: List<i32> = [1, 2, 0]
+    let other: List<i32> = [1, 3]
+    println("{short < long} {other > long} {name(short.cmp(short))}")                     // out: true true equal
+    let t = Tree { value: 1, kids: [leaf(2), leaf(3)] }
+    let u = Tree { value: 1, kids: [leaf(2), leaf(4)] }
+    println("{t < u} {name(u.cmp(t))}")                                                   // out: true greater
+
+    // `none` is less than any value.
+    let none_i: i32? = none
+    let two: i32? = some(2)
+    let three: i32? = some(3)
+    println("{none_i < two} {two < three} {three > none_i} {name(none_i.cmp(none_i))}")   // out: true true true equal
+
+    // Integers, `char`, `rune` and `bool` have `cmp` too, and `false` comes before `true`.
+    println("{name(3.cmp(5))} {name('b'.cmp('a'))} {name(false.cmp(true))} {false < true}")    // out: less greater less true
+
+    // `Ordering` has `Order` and `Equal` itself.
+    println("{Ordering.Less < Ordering.Equal} {Ordering.Greater == 2.cmp(1)}")             // out: true true
+
+    // `T: Order` lets generic code compare.
+    let words: List<String> = ["kiwi", "plum", "fig"]
+    let points: List<Point> = [Point { x: 0, y: 5 }, Point { x: 2, y: 0 }, Point { x: 1, y: 9 }]
+    println("{biggest(words)} {biggest(points)}")                                         // out: 1 1
+}

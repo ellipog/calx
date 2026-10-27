@@ -549,11 +549,14 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose) {
     BuildResult r;
     fs::path runtime = fs::path(tc.home) / "runtime";
-    std::string rt_h, rt_c;
-    if (!read_file((runtime / "calx_rt.h").string(), rt_h) || !read_file((runtime / "calx_rt.c").string(), rt_c)) {
+    std::string rt_h, rt_c, sort_h;
+    if (!read_file((runtime / "calx_rt.h").string(), rt_h) || !read_file((runtime / "calx_rt.c").string(), rt_c) ||
+        !read_file((runtime / "calx_sort.h").string(), sort_h)) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }
+    // Any file may include the sort's template, so the keys cover it as they cover the header.
+    rt_h += sort_h;
     // Java's semantics hold in every mode: wrapping, no contraction (D63, CALX_SPEC.md).
     // Line tables in both modes, so debuggers and profilers show Calx lines through `#line`.
     // They don't change the generated code.
@@ -579,20 +582,35 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string rt_obj = (fs::path(obj_dir) / (rt_key + ".o")).string();
     std::vector<std::string> keys, objs;
     std::string all_keys = rt_key;
-    // The runtime's networking is its own file, linked only into programs that call it, so the
-    // others don't load the socket libraries when they start.
-    bool uses_net = false;
-    for (const std::string& c : c_sources) uses_net = uses_net || c.find("cx_net_") != std::string::npos;
-    std::string net_obj;
-    if (uses_net) {
-        std::string net_c;
-        if (!read_file((runtime / "calx_net.c").string(), net_c)) {
-            std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
-            return r;
+    // Parts of the runtime that only some programs call are files of their own, compiled and
+    // linked only into those: networking, so the others don't load the socket libraries when they
+    // start, and the sorts of integers (D96), which take clang a second to optimize.
+    auto calls = [&](std::initializer_list<const char*> names) {
+        for (const std::string& c : c_sources) {
+            for (const char* n : names) {
+                if (c.find(n) != std::string::npos) return true;
+            }
         }
-        std::string net_key = hash_hex({"runtime-net", rt_h, net_c, flag_text, tc.identity});
-        net_obj = (fs::path(obj_dir) / (net_key + ".o")).string();
-        all_keys += " " + net_key;
+        return false;
+    };
+    std::vector<std::pair<std::string, std::string>> parts;  // each file and its object
+    auto part = [&](const char* file) {
+        std::string text;
+        if (!read_file((runtime / file).string(), text)) return false;
+        std::string key = hash_hex({"runtime-part", file, rt_h, text, flag_text, tc.identity});
+        parts.push_back({file, (fs::path(obj_dir) / (key + ".o")).string()});
+        all_keys += " " + key;
+        return true;
+    };
+    bool parts_ok = true;
+    if (calls({"cx_net_"})) parts_ok = part("calx_net.c");
+    if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
+                           "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool("})) {
+        parts_ok = part("calx_sort.c");
+    }
+    if (!parts_ok) {
+        std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
+        return r;
     }
     // The allocator is a file of its own, linked into every program (D95).
     std::string alloc_c;
@@ -651,9 +669,9 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
     if (file_exists(alloc_obj)) touch(alloc_obj);
     else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-    if (uses_net) {
-        if (file_exists(net_obj)) touch(net_obj);
-        else compile((runtime / "calx_net.c").string(), net_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+    for (const auto& [file, obj] : parts) {
+        if (file_exists(obj)) touch(obj);
+        else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     }
     // Each build writes its C under a name of its own: two builds that need the same module, such
     // as a std one, would otherwise share the file, and one could delete it while the other's
@@ -706,7 +724,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::vector<std::string> inputs = objs;
     inputs.push_back(rt_obj);
     inputs.push_back(alloc_obj);
-    if (uses_net) inputs.push_back(net_obj);
+    for (const auto& [file, obj] : parts) inputs.push_back(obj);
     if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
         std::fprintf(stderr, "calx: linking failed\n");
         return r;

@@ -28,7 +28,7 @@ fn main() {
     let k = p?.x                        // error: `?.` reads a field of an optional
     let o: P? = some(p)
     let l = o.x                         // error: read its field with `?.`, or unwrap it first
-    let m = a < some(3)                 // error: can't be compared with `<`
+    let m = a < 3                       // error: a value doesn't become an optional by itself
     let n = some(())                    // error: an optional can't hold
     println("{b} {c} {d} {f} {g} {h} {i} {j} {k} {l} {m} {n}")
 }

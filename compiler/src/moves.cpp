@@ -953,7 +953,7 @@ private:
             }
             case BMethod::pop: case BMethod::clear: case BMethod::remove: case BMethod::swap_remove:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
-            case BMethod::set_len: case BMethod::as_mut_ptr:
+            case BMethod::set_len: case BMethod::as_mut_ptr: case BMethod::sort:
                 expr(recv, Use::change);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 return;

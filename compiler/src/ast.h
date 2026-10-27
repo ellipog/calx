@@ -153,7 +153,7 @@ enum class CallKind : std::uint8_t {
 
 enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
-    truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get,
+    truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get, cmp, sort,
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
 
@@ -162,7 +162,7 @@ enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
 enum class PrimMethod : std::uint8_t {
     none, abs, min, max, is_nan, sqrt, floor, ceil, wrapping_add, wrapping_sub, wrapping_mul, floor_div, floor_mod,
     checked_add, checked_sub, checked_mul, checked_div, checked_rem, saturating_add, saturating_sub, saturating_mul,
-    to_bits, rotate_left, rotate_right,
+    to_bits, rotate_left, rotate_right, total_cmp,
     parse, from_bits, from_utf8,  // prim_static
 };
 

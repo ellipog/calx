@@ -181,12 +181,13 @@ fn main() {
 }
 ```
 
-Generic code is checked once, where it's written, and it can use only what its bounds give it. Without a bound, a value of type `T` can be held, passed, returned, assigned, and put in arrays, tuples, optionals and generic types, but nothing more. Four bounds are built-in properties rather than interfaces, which every type that can have them has:
+Generic code is checked once, where it's written, and it can use only what its bounds give it. Without a bound, a value of type `T` can be held, passed, returned, assigned, and put in arrays, tuples, optionals and generic types, but nothing more. Five bounds are built-in properties rather than interfaces, which every type that can have them has:
 
 | Bound | Gives |
 | --- | --- |
 | `T: Copy` | Using a `T` copies it ([values of type `T`](#values-of-type-t)) |
 | `T: Equal` | `==` and `!=` on `T` ([comparing and printing](comparing.md#equal)) |
+| `T: Order` | `<`, `<=`, `>`, `>=`, `cmp` and sorting on `T`, and `==` too ([comparing and printing](comparing.md#order)) |
 | `T: Display` | `{x}` in a string ([comparing and printing](comparing.md#display)) |
 | `T: Hash` | `T` as the key of a `Map` or a `Set`, and `==` too ([maps and sets](maps.md#hash)) |
 

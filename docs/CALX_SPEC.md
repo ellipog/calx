@@ -100,7 +100,6 @@ Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfac
 - **Associated types** in interfaces, and **generic interfaces**, such as `From<T>`.
 - **Generic functions in interfaces**, and **defaults for an interface's constants**.
 - **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
-- **Ordering generic values**, through `Order` ([Derived properties](#derived-properties)). Comparing, printing and hashing them, through `Equal`, `Display` and `Hash`, are built ([Comparing and printing](reference/comparing.md#in-generic-code), [Maps and sets](reference/maps.md#hash)).
 
 ### Derived properties
 
@@ -113,10 +112,9 @@ The compiler works these out for each type, without being asked:
 | `Send` | The value can cross between regions: no views, no closures that capture views, nothing that's only valid in one place. Plain data and handles are `Send` |
 | `Share` | Deeply immutable while shared, so many parallel iterations can read it at once |
 
-Built: `Copy` ([Types](reference/types.md)), `Equal` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds. Still to build:
+Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). Still to build:
 
-- **Writing `Equal`, `Display` or `Hash` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
-- **`Order`**, which sorting and `SortedMap` need ([Collections](#collections-d27)).
+- **Writing `Equal`, `Order`, `Display` or `Hash` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
 - **`Send` and `Share`**, with actors.
 
 ### Handles (D24)
@@ -135,7 +133,6 @@ Calx matches Java exactly. What's built is in the reference: [Integers](referenc
 | Feature | Calx | Emitted C |
 | --- | --- | --- |
 | `fma(a, b, c)` | A fused multiply-add, rounding once. Otherwise `a * b + c` rounds twice, as in Java | `__builtin_fma` |
-| `total_cmp` | Java's `Double.compare` order, for sorting | |
 | `round` | Java's `Math.round`: the nearest integer, with halves rounded up, saturating like a cast | |
 | `f.java_string()` | A `String` holding exactly what Java's `Double.toString` and `Float.toString` give, for SNBT and JSON. Printing a float already uses this format | |
 

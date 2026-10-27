@@ -113,6 +113,38 @@ CX_INLINE cx_str cx_sv(cx_String s) {
     cx_str v = {s.ptr, s.len};
     return v;
 }
+/* -1, 0 or 1, as `a` comes before, is the same as, or comes after `b`, byte by byte. For UTF-8
+ * that's the order of the code points. */
+CX_INLINE int cx_str_cmp(cx_str a, cx_str b) {
+    cx_usize n = a.len < b.len ? a.len : b.len;
+    if (n >= 8) {
+        // Most strings differ in their first 8 bytes, which compare as one big-endian integer.
+        cx_u64 x, y;
+        __builtin_memcpy(&x, a.ptr, 8);
+        __builtin_memcpy(&y, b.ptr, 8);
+        if (x != y) return __builtin_bswap64(x) < __builtin_bswap64(y) ? -1 : 1;
+        int c = __builtin_memcmp(a.ptr + 8, b.ptr + 8, n - 8);
+        if (c) return c < 0 ? -1 : 1;
+    } else {
+        for (cx_usize i = 0; i < n; i++) {
+            if (a.ptr[i] != b.ptr[i]) return a.ptr[i] < b.ptr[i] ? -1 : 1;
+        }
+    }
+    return (a.len > b.len) - (a.len < b.len);
+}
+/* `xs.sort()` on a list of integers, `char`s, `rune`s or `bool`s, from calx_sort.h (D96). */
+void cx_sort_i8(cx_i8* v, cx_usize n);
+void cx_sort_i16(cx_i16* v, cx_usize n);
+void cx_sort_i32(cx_i32* v, cx_usize n);
+void cx_sort_i64(cx_i64* v, cx_usize n);
+void cx_sort_u8(cx_u8* v, cx_usize n);
+void cx_sort_u16(cx_u16* v, cx_usize n);
+void cx_sort_u32(cx_u32* v, cx_usize n);
+void cx_sort_u64(cx_u64* v, cx_usize n);
+void cx_sort_usize(cx_usize* v, cx_usize n);
+void cx_sort_char(cx_char* v, cx_usize n);
+void cx_sort_rune(cx_rune* v, cx_usize n);
+void cx_sort_bool(cx_bool* v, cx_usize n);
 CX_INLINE void cx_drop_String(cx_String* s) {
     if (s->cap) cx_free(s->ptr, s->cap);
 }
@@ -395,5 +427,11 @@ CX_FLOAT_MINMAX(f32, __builtin_signbit)
 CX_FLOAT_MINMAX(f64, __builtin_signbit)
 CX_INLINE cx_f32 cx_abs_f32(cx_f32 a) { return __builtin_fabsf(a); }
 CX_INLINE cx_f64 cx_abs_f64(cx_f64 a) { return __builtin_fabs(a); }
+/* Java's `Double.compare` and `Float.compare`, a total order: -0.0 comes before 0.0, and NaN after
+ * everything, equal to itself. Values that `<` orders take the first two tests; for the rest,
+ * every NaN is made the same, and the bits ordered as a signed integer, which puts -0.0 first. */
+#define CX_TOTAL_CMP(T, I, U, NAN_BITS)                                                      CX_INLINE int cx_total_cmp_##T(cx_##T a, cx_##T b) {                                        if (a < b) return -1;                                                                    if (a > b) return 1;                                                                     I x, y;                                                                                  __builtin_memcpy(&x, &a, sizeof x);                                                      __builtin_memcpy(&y, &b, sizeof y);                                                      if (a != a) x = (I)(U)NAN_BITS;                                                          if (b != b) y = (I)(U)NAN_BITS;                                                          return (x > y) - (x < y);                                                            }
+CX_TOTAL_CMP(f32, cx_i32, cx_u32, 0x7fc00000u)
+CX_TOTAL_CMP(f64, cx_i64, cx_u64, 0x7ff8000000000000ull)
 
 #endif

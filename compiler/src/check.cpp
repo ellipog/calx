@@ -89,13 +89,16 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash"}) {
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash", "Order", "Ordering"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
         n_Map_ = ctx.names.intern("Map");
         n_Set_ = ctx.names.intern("Set");
         n_Hash_ = ctx.names.intern("Hash");
+        n_Order_ = ctx.names.intern("Order");
+        n_Ordering_ = ctx.names.intern("Ordering");
+        n_cmp_ = ctx.names.intern("cmp");
         n_Copy_ = ctx.names.intern("Copy");
         n_Equal_ = ctx.names.intern("Equal");
         n_Display_ = ctx.names.intern("Display");
@@ -1052,7 +1055,8 @@ private:
                 if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
                     Name n = b->path.parts[0];
                     flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
-                         : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound : nullptr;
+                         : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound
+                         : n == n_Order_ ? &p->order_bound : nullptr;
                 }
                 if (flag) {
                     if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
@@ -1264,6 +1268,11 @@ private:
                                 lacking(args[i], p_hash));
                 ok = false;
             }
+            if (params[i]->order_bound && !is_bad(args[i]) && !orderable(args[i])) {
+                error(span, name_of(args[i]) + " can't be compared with `<`, which " + what + " needs for " + q(params[i]->name) +
+                                lacking(args[i], p_order));
+                ok = false;
+            }
             if (params[i]->display_bound && !is_bad(args[i]) && !printable(args[i])) {
                 error(span, name_of(args[i]) + " can't be shown in a string, which " + what + " needs for " +
                                 q(params[i]->name) + lacking(args[i], true));
@@ -1287,6 +1296,7 @@ private:
             if (p->equal_bound && !equatable(it->second)) return false;
             if (p->display_bound && !printable(it->second)) return false;
             if (p->hash_bound && !hashable(it->second)) return false;
+            if (p->order_bound && !orderable(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, b)) return false;
             }
@@ -1823,6 +1833,13 @@ private:
                         return T.error;
                     }
                     return p;
+                }
+                if (n == n_Ordering_) {
+                    if (!t->args.empty()) {
+                        error(t->args[0]->span, "`Ordering` doesn't take generic arguments");
+                        return T.error;
+                    }
+                    return ordering_type();
                 }
                 Type* r = T.primitive(text(n));
                 if (!r) {
@@ -3044,22 +3061,28 @@ private:
     // without the bound, a pointer can't be shown, and neither a float nor a pointer has `Hash`:
     // `NaN` isn't equal to itself, and an address would make a table's order differ between runs
     // (D94). A map or a set has no `Hash` either.
-    enum Prop { p_equal = 0, p_display = 1, p_hash = 2 };
+    enum Prop { p_equal = 0, p_display = 1, p_hash = 2, p_order = 3 };
     bool equatable(const Type* t) { return derived(t, p_equal); }
     bool printable(const Type* t) { return derived(t, p_display); }
     bool hashable(const Type* t) { return derived(t, p_hash); }
+    bool orderable(const Type* t) { return derived(t, p_order); }
 
     bool derived(const Type* t, int prop) {
         switch (t->kind) {
             case TypeKind::bool_: case TypeKind::int_: case TypeKind::char_: case TypeKind::rune: case TypeKind::str:
             case TypeKind::string: return true;
-            case TypeKind::float_: return prop != p_hash;
+            case TypeKind::float_: return prop == p_equal || prop == p_display;
             case TypeKind::pointer: return prop == p_equal;
             case TypeKind::param:
-                return prop == p_equal ? t->equal_bound || t->hash_bound : prop == p_display ? t->display_bound : t->hash_bound;
+                switch (prop) {
+                    case p_equal: return t->equal_bound || t->hash_bound || t->order_bound;
+                    case p_display: return t->display_bound;
+                    case p_hash: return t->hash_bound;
+                    default: return t->order_bound;
+                }
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return derived(t->elem, prop);
-            case TypeKind::map: return prop != p_hash && derived(t->key, prop) && derived(t->elem, prop);
-            case TypeKind::set: return prop != p_hash && derived(t->elem, prop);
+            case TypeKind::map: return prop != p_hash && prop != p_order && derived(t->key, prop) && derived(t->elem, prop);
+            case TypeKind::set: return prop != p_hash && prop != p_order && derived(t->elem, prop);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) {
                     if (!derived(e, prop)) return false;
@@ -3106,12 +3129,18 @@ private:
         std::unordered_set<const Type*> seen;
         const Type* leaf = lacking_part(t, prop, seen);
         if (!leaf) return "";
-        static const char* const names[] = {"`Equal`", "`Display`", "`Hash`"};
+        static const char* const names[] = {"`Equal`", "`Display`", "`Hash`", "`Order`"};
         if (leaf->kind == TypeKind::param) return "; give " + name_of(leaf) + " the bound " + names[prop];
         std::string why;
         if (prop == p_hash && leaf->kind == TypeKind::float_) why = ", and floats have no `Hash`, since `NaN` isn't equal to itself";
         if (prop == p_hash && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Hash`, so a table's order can't depend on addresses";
         if (prop == p_hash && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Hash`";
+        if (prop == p_order && leaf->kind == TypeKind::float_) {
+            why = ", and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with "
+                  "`total_cmp`";
+        }
+        if (prop == p_order && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Order`";
+        if (prop == p_order && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Order`";
         if (leaf == t) return why;
         return ", since it holds " + name_of(leaf) + why;
     }
@@ -3121,11 +3150,11 @@ private:
         switch (t->kind) {
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
             case TypeKind::map:
-                if (prop == p_hash) return t;
+                if (prop == p_hash || prop == p_order) return t;
                 if (const Type* x = lacking_part(t->key, prop, seen)) return x;
                 return lacking_part(t->elem, prop, seen);
             case TypeKind::set:
-                if (prop == p_hash) return t;
+                if (prop == p_hash || prop == p_order) return t;
                 return lacking_part(t->elem, prop, seen);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) {
@@ -3199,6 +3228,12 @@ private:
             r.kind = NameKind::type;
             r.type = current_impl_type_;
             r.item = current_impl_type_->item;
+            return r;
+        }
+        if (n == n_Ordering_) {
+            r.kind = NameKind::type;
+            r.item = ordering_item();
+            r.type = r.item->declared;
             return r;
         }
         if (Type* t = T.primitive(text(n))) {
@@ -3450,10 +3485,11 @@ private:
             if (is_bad(t)) return T.bool_;
             bool ordered = op != Op::eq && op != Op::ne;
             bool ok = is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune ||
-                      (!ordered && equatable(t));
+                      (ordered ? orderable(t) : equatable(t));
             if (!ok) {
                 if (ordered) {
-                    error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) + " yet");
+                    error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) +
+                                       lacking(t, p_order));
                 } else {
                     error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) +
                                        lacking(t, false));
@@ -3465,7 +3501,8 @@ private:
                                    "; use `.is_nan()`");
                 return T.bool_;
             }
-            if (e->lhs->has_bits && e->rhs->has_bits && !is_float(t)) fold_compare(e, t);
+            // An enum's values are ordered as its variants are declared, whatever their values.
+            if (e->lhs->has_bits && e->rhs->has_bits && !is_float(t) && !(ordered && t->kind == TypeKind::enum_)) fold_compare(e, t);
             else if (e->lhs->is_const && e->rhs->is_const) e->is_const = true;
             return T.bool_;
         }
@@ -5029,6 +5066,7 @@ private:
                 return T.error;
             }
             if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
+            if (callee->member == n_cmp_ && !e->only_interface) return cmp_call(e, recv);
             Member mem = lookup(recv, callee->member, e->only_interface);
             // Through a parameter, the bound says which interface answers, and an instance, whose
             // type could have the name in another interface too, keeps to it.
@@ -5925,6 +5963,53 @@ private:
         return is_bad(from) ? T.error : T.string;
     }
 
+    // `a.cmp(b)`: whether `a` is less than, equal to or greater than `b`, as an `Ordering` (D96).
+    Type* cmp_call(Expr* e, Type* recv) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::cmp;
+        if (e->args.size() != 1) {
+            error(e->span, "`cmp` takes one argument, the value to compare with");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Arg& a = e->args[0];
+        if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+        Type* at = check(a.value, recv);
+        if (is_bad(recv) || is_bad(at)) return T.error;
+        if (!orderable(recv)) {
+            error(e->callee->span, "values of type " + name_of(recv) + " can't be compared with `cmp`" + lacking(recv, p_order));
+            return T.error;
+        }
+        return ordering_type();
+    }
+
+    // `Ordering`, what `cmp` gives: a built-in enum whose variants, `Less`, `Equal` and `Greater`,
+    // are in that order, so it has `Order` too.
+    Item* ordering_item() {
+        if (ordering_item_) return ordering_item_;
+        Item* it = ctx_.arena.make<Item>();
+        it->kind = ItemKind::enum_;
+        it->name = n_Ordering_;
+        it->is_pub = true;
+        it->used = true;
+        std::vector<VariantDecl> vs(3);
+        const char* const names[] = {"Less", "Equal", "Greater"};
+        for (std::size_t i = 0; i < 3; i++) {
+            vs[i].name = ctx_.names.intern(names[i]);
+            vs[i].tag = i;
+        }
+        it->variants = ctx_.arena.copy(vs);
+        Type* t = T.make_enum(it, "Ordering");
+        t->repr = T.u8;
+        it->declared = t;
+        it->resolved = true;
+        it->c_name = unique_c_name("cx_Ordering");
+        ordering_item_ = it;
+        return it;
+    }
+
+    Type* ordering_type() { return ordering_item()->declared; }
+
     // `x.copy()`: a copy of a value that owns memory, with memory of its own (D76).
     Type* copy_call(Expr* e, Type* recv) {
         e->call = CallKind::builtin_method;
@@ -6013,6 +6098,7 @@ private:
             else if (m == "truncate") b = BMethod::truncate, changes = true, params = {T.usize};
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+            else if (m == "sort") b = BMethod::sort, changes = true;
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
@@ -6050,6 +6136,11 @@ private:
         if (b == BMethod::set_len && !is_copy(recv->elem) && !is_bad(recv->elem)) {
             error(e->callee->span, "`set_len` needs elements that are `Copy`, since it neither drops nor makes them, and " +
                                        name_of(recv->elem) + " owns memory");
+            result = T.error;
+        }
+        if (b == BMethod::sort && !orderable(recv->elem) && !is_bad(recv->elem)) {
+            error(e->callee->span, "`sort` compares with `<`, which " + name_of(recv->elem) + " doesn't have" +
+                                       lacking(recv->elem, p_order));
             result = T.error;
         }
         if (b == BMethod::contains && recv->kind == TypeKind::list && !equatable(recv->elem) && !is_bad(recv->elem)) {
@@ -6158,6 +6249,7 @@ private:
         else if (m == "saturating_sub" && is_int(recv)) pm = PrimMethod::saturating_sub, args = 1;
         else if (m == "saturating_mul" && is_int(recv)) pm = PrimMethod::saturating_mul, args = 1;
         else if (m == "to_bits" && is_float(recv)) pm = PrimMethod::to_bits;
+        else if (m == "total_cmp" && is_float(recv)) pm = PrimMethod::total_cmp, args = 1;
         else if (m == "rotate_left" && is_int(recv)) pm = PrimMethod::rotate_left, args = 1, arg_type = T.i32;
         else if (m == "rotate_right" && is_int(recv)) pm = PrimMethod::rotate_right, args = 1, arg_type = T.i32;
         if (pm == PrimMethod::none) {
@@ -6180,6 +6272,7 @@ private:
             check(a.value, arg_type);
         }
         if (pm == PrimMethod::is_nan) return T.bool_;
+        if (pm == PrimMethod::total_cmp) return ordering_type();
         if (pm == PrimMethod::to_bits) return recv->bits == 32 ? T.u32 : T.u64;
         if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);
         Expr* lhs = e->callee->lhs;
@@ -6245,6 +6338,7 @@ private:
         };
         for (Item* s : structs_) visit(visit, s->declared);
         for (Item* e : enums_) visit(visit, e->declared);
+        if (ordering_item_) visit(visit, ordering_item_->declared);
         for (std::size_t i = 0; i < instances_.size(); i++) visit(visit, instances_[i]);
         for (Type* a : T.compounds()) visit(visit, a);
         for (std::size_t i = 0; i < later.size(); i++) visit(visit, later[i]);
@@ -6318,15 +6412,16 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    // What `derived` has worked out, for `Equal`, `Display` and `Hash`.
+    // What `derived` has worked out, for `Equal`, `Display`, `Hash` and `Order`.
     struct Derived {
         std::unordered_map<const Type*, bool> known;
         std::vector<const Type*> order;
     };
-    Derived derived_[3];
-    Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_copy_, n_ok_,
-        n_err_;
+    Derived derived_[4];
+    Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
+        n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
+    Item* ordering_item_ = nullptr;  // `Ordering`, made when first needed
     Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
