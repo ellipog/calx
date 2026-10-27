@@ -15,18 +15,19 @@ In reading order:
 
 What's built, one page per feature:
 
-1. [The calx command](reference/command.md): check, build, run, emit-c, and how builds stay fast
-2. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
-3. [Types](reference/types.md): the primitive types, arrays, structs and unit
-4. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
-5. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
-6. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
-7. [Conversions](reference/conversions.md): exact `T(x)` and the named lossy conversions
-8. [Control flow](reference/control-flow.md): if, while, for, loop, break and continue
-9. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
-10. [Structs](reference/structs.md): fields, defaults, literals and methods
-11. [Printing and panics](reference/printing.md): print, println, assert and panic
-12. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+1. [The calx command](reference/command.md): check, build, run, emit-c, how builds stay fast, and errors for editors
+2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
+3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
+4. [Types](reference/types.md): the primitive types, arrays, structs and unit
+5. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
+6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
+7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
+8. [Conversions](reference/conversions.md): exact `T(x)` and the named lossy conversions
+9. [Control flow](reference/control-flow.md): if, while, for, loop, break and continue
+10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
+11. [Structs](reference/structs.md): fields, defaults, literals and methods
+12. [Printing and panics](reference/printing.md): print, println, assert and panic
+13. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Design
 

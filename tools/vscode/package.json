@@ -1,0 +1,117 @@
+{
+  "name": "calx",
+  "displayName": "Calx",
+  "description": "Syntax highlighting, compiler errors as you type, and running files, for the Calx language.",
+  "version": "0.1.0",
+  "publisher": "aaen-studios",
+  "license": "MIT",
+  "private": true,
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ellipog/calx",
+    "directory": "tools/vscode"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "calx",
+        "aliases": ["Calx", "calx"],
+        "extensions": [".calx"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/calx-mark.svg",
+          "dark": "./images/calx-mark-white.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "calx",
+        "scopeName": "source.calx",
+        "path": "./syntaxes/calx.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.calx.codeblock",
+        "path": "./syntaxes/calx.markdown.tmLanguage.json",
+        "injectTo": ["text.html.markdown"],
+        "embeddedLanguages": {
+          "meta.embedded.block.calx": "calx"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "calx.runFile",
+        "title": "Run File",
+        "category": "Calx",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "calx.runFile",
+          "when": "resourceLangId == calx",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "calx.runFile",
+          "when": "editorLangId == calx"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Calx",
+      "properties": {
+        "calx.compilerPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "The `calx` compiler. When empty, it's `build/compiler/<platform>/calx` in a checkout of the calx repo that holds the file or sits next to it, then the one under `$CALX_HOME`, then `calx` on `PATH`."
+        },
+        "calx.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Check the file as you type. When off, it's checked when it's opened and saved."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "calx",
+        "required": ["command", "file"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": ["check", "build", "run"],
+            "description": "The calx command to run."
+          },
+          "file": {
+            "type": "string",
+            "description": "The .calx file, relative to the workspace folder."
+          },
+          "release": {
+            "type": "boolean",
+            "description": "Build with --release."
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node test/run.mjs",
+    "package": "python package.py"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.2.0"
+  }
+}

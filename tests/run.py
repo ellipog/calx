@@ -18,11 +18,15 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   `error` lines must fail to compile, with exactly those errors and no others.
 - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
 
+Each test that expects errors is also checked with `calx check --json --stdin`, the form editors
+use, which must report the same errors at the same places.
+
 On Linux, use `python3` for `py`.
 """
 
 import argparse
 import concurrent.futures
+import json
 import os
 import pathlib
 import platform
@@ -154,10 +158,13 @@ def check_errors(test, path):
     if p.returncode == 0:
         return ["expected compile errors, but it compiled"]
     actual = []
+    columns = []
     for line in p.stderr.splitlines():
         m = DIAG.match(line)
         if m:
             actual.append((int(m.group(2)), m.group(4)))
+            columns.append((int(m.group(2)), int(m.group(3)), m.group(4)))
+    problems += check_json(path, columns)
     remaining = list(actual)
     for line, text in test.errors:
         match = next((a for a in remaining if a[0] == line and text in a[1]), None)
@@ -169,6 +176,43 @@ def check_errors(test, path):
                             (f"; got {on_line}" if on_line else "; got none there"))
     for line, text in remaining:
         problems.append(f"line {line}: unexpected error: {text}")
+    return problems
+
+
+def check_json(path, expected):
+    """`calx check --json --stdin` must report the errors the text output does, at the same places
+    (docs/reference/command.md). `expected` holds (line, byte column, message), both from 1."""
+    source = path.read_bytes()
+    p = subprocess.run([str(CALX), "check", "--json", "--stdin", str(path)], input=source, capture_output=True, cwd=ROOT)
+    problems = []
+    if p.returncode != 1:
+        problems.append(f"--json: exit status {p.returncode}, expected 1")
+    lines = source.decode("utf-8", errors="replace").splitlines()
+    got = []
+    for raw in p.stdout.decode("utf-8", errors="replace").splitlines():
+        try:
+            d = json.loads(raw)
+            start, end = d["range"]["start"], d["range"]["end"]
+            if d["severity"] != "error":
+                continue
+            line, character = start["line"] + 1, start["character"]
+        except (ValueError, KeyError, TypeError):
+            problems.append(f"--json printed a line that isn't a diagnostic: {raw!r}")
+            continue
+        if (end["line"], end["character"]) < (start["line"], start["character"]):
+            problems.append(f"--json: the range of {d['message']!r} ends before it starts")
+        if d["file"] != str(path):
+            problems.append(f"--json: {d['message']!r} is in {d['file']!r}, expected {str(path)!r}")
+        got.append((line, character, d["message"]))
+    # Columns agree where a line is ASCII: editors count UTF-16 units from 0, the text form bytes from 1.
+    want = []
+    for line, col, message in expected:
+        text = lines[line - 1] if 0 < line <= len(lines) else ""
+        want.append((line, col - 1 if text.isascii() else None, message))
+    got = [(l, c if (0 < l <= len(lines) and lines[l - 1].isascii()) else None, m) for l, c, m in got]
+    if sorted(got, key=str) != sorted(want, key=str):
+        problems.append("--json reports different errors from the text output:\n" +
+                        indent("text: " + repr(sorted(want, key=str)) + "\njson: " + repr(sorted(got, key=str))))
     return problems
 
 

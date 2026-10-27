@@ -26,6 +26,8 @@ For now a program is one file, and that file is its module.
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
+| `--json` | Print errors as JSON lines on standard output, [for editors](#errors-for-editors) |
+| `--stdin` | Read the file's text from standard input, with the path naming it |
 
 ## Exit status
 
@@ -86,3 +88,25 @@ The cache keeps the 64 programs and 1024 compiled files used most recently, and 
 ## Errors
 
 Errors are printed in source order, in the form `path:line:column: error: message`, followed by the line and a caret under the problem, the way clang prints them. A note can follow, pointing at a related place. There are no warnings: everything the compiler objects to is an error (D63).
+
+## Errors for editors
+
+`--json` prints the errors on standard output instead, one JSON object per line, for editors and other tools. `--stdin` reads the file's text from standard input, so an editor can check text it hasn't saved. The path on the command line still names the file in errors, and its folder is where imports will be found.
+
+```sh
+calx check --json --stdin src/main.calx < unsaved-text
+```
+
+```json
+{"severity":"error","file":"src/main.calx","range":{"start":{"line":2,"character":14},"end":{"line":2,"character":15}},"message":"unknown name `x`","notes":[]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `severity` | `error`, or `warning` for a deprecation |
+| `file` | The path as the compiler was given it, or `null` for an error that isn't about a place in a file |
+| `range` | Where the problem is. Lines and characters count from 0, and characters are UTF-16 code units, as editors and the Language Server Protocol count them. An empty span becomes the one character it's at, so there's always something to underline |
+| `message` | The message, as the text form prints it |
+| `notes` | Related places, each with its own `file`, `range` and `message` |
+
+The status is 1 when there are errors, as without `--json`. The test suite checks that every error test reports the same errors at the same places in both forms. [Editor support](editors.md) uses this format.

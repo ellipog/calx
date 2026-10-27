@@ -20,6 +20,18 @@ std::pair<std::uint32_t, std::uint32_t> SourceFile::position(std::uint32_t offse
     return {line, offset - line_starts[line - 1] + 1};
 }
 
+std::pair<std::uint32_t, std::uint32_t> SourceFile::editor_position(std::uint32_t offset) const {
+    auto [line, col] = position(offset);
+    std::uint32_t units = 0;
+    for (std::uint32_t i = line_starts[line - 1]; i < offset && i < text.size(); i++) {
+        auto b = static_cast<unsigned char>(text[i]);
+        if ((b & 0xC0) == 0x80) continue;  // a continuation byte
+        units += b >= 0xF0 ? 2 : 1;        // outside the BMP, UTF-16 needs a surrogate pair
+    }
+    (void)col;
+    return {line - 1, units};
+}
+
 std::string_view SourceFile::line_text(std::uint32_t line) const {
     std::uint32_t begin = line_starts[line - 1];
     std::uint32_t end = line < line_starts.size() ? line_starts[line] : static_cast<std::uint32_t>(text.size());
@@ -103,15 +115,76 @@ std::string Diagnostics::format(const Diagnostic& d, bool color) const {
     return out;
 }
 
-void Diagnostics::print(std::FILE* out, bool color) const {
-    // In source order, whichever stage found them, so the lexer's errors don't jump ahead.
-    std::vector<const Diagnostic*> sorted;
-    for (const auto& d : list_) sorted.push_back(&d);
-    std::stable_sort(sorted.begin(), sorted.end(), [](const Diagnostic* a, const Diagnostic* b) {
+// In source order, whichever stage found them, so the lexer's errors don't jump ahead.
+std::vector<const Diagnostic*> Diagnostics::sorted() const {
+    std::vector<const Diagnostic*> out;
+    for (const auto& d : list_) out.push_back(&d);
+    std::stable_sort(out.begin(), out.end(), [](const Diagnostic* a, const Diagnostic* b) {
         if (a->span.file != b->span.file) return a->span.file < b->span.file;
         return a->span.begin < b->span.begin;
     });
-    for (const Diagnostic* d : sorted) std::fputs(format(*d, color).c_str(), out);
+    return out;
+}
+
+void Diagnostics::print(std::FILE* out, bool color) const {
+    for (const Diagnostic* d : sorted()) std::fputs(format(*d, color).c_str(), out);
+}
+
+static std::string json_string(std::string_view s) {
+    std::string out = "\"";
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += static_cast<char>(c);
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof buf, "\\u%04x", c);
+            out += buf;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out + "\"";
+}
+
+// `"file": ..., "range": ...` for a span. An empty span covers the character it's at, so an
+// editor has something to underline.
+std::string Diagnostics::json_location(Span span) const {
+    if (span.file == 0) {
+        return "\"file\":null,\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}}";
+    }
+    const SourceFile& f = sources_.file(span.file);
+    std::uint32_t end = span.end;
+    if (end <= span.begin) {
+        end = span.begin;
+        if (end < f.text.size() && f.text[end] != '\n' && f.text[end] != '\r') {
+            end++;
+            while (end < f.text.size() && (static_cast<unsigned char>(f.text[end]) & 0xC0) == 0x80) end++;
+        }
+    }
+    auto [l0, c0] = f.editor_position(span.begin);
+    auto [l1, c1] = f.editor_position(end);
+    auto pos = [](std::uint32_t l, std::uint32_t c) {
+        return "{\"line\":" + std::to_string(l) + ",\"character\":" + std::to_string(c) + "}";
+    };
+    return "\"file\":" + json_string(f.path) + ",\"range\":{\"start\":" + pos(l0, c0) + ",\"end\":" + pos(l1, c1) + "}";
+}
+
+void Diagnostics::print_json(std::FILE* out) const {
+    for (const Diagnostic* d : sorted()) {
+        std::string s = "{\"severity\":\"" + std::string(label(d->severity)) + "\"," + json_location(d->span) +
+                        ",\"message\":" + json_string(d->message) + ",\"notes\":[";
+        for (std::size_t i = 0; i < d->notes.size(); i++) {
+            if (i) s += ',';
+            s += "{" + json_location(d->notes[i].first) + ",\"message\":" + json_string(d->notes[i].second) + "}";
+        }
+        s += "]}\n";
+        std::fputs(s.c_str(), out);
+    }
 }
 
 }  // namespace calx

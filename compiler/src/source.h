@@ -20,6 +20,8 @@ struct SourceFile {
 
     // 1-based line and column (in bytes) of an offset.
     std::pair<std::uint32_t, std::uint32_t> position(std::uint32_t offset) const;
+    // 0-based line and column in UTF-16 code units, as editors count them.
+    std::pair<std::uint32_t, std::uint32_t> editor_position(std::uint32_t offset) const;
     std::string_view line_text(std::uint32_t line) const;
 };
 
@@ -57,11 +59,16 @@ public:
     std::size_t error_count() const { return errors_; }
     const std::vector<Diagnostic>& all() const { return list_; }
 
-    // Prints everything collected so far, in the order it was reported.
+    // Prints everything collected so far, in source order.
     void print(std::FILE* out, bool color) const;
     std::string format(const Diagnostic& d, bool color) const;
+    // The same, for editors: one JSON object per line (docs/reference/command.md).
+    void print_json(std::FILE* out) const;
 
 private:
+    std::vector<const Diagnostic*> sorted() const;
+    std::string json_location(Span span) const;
+
     void add(Severity severity, Span span, std::string message);
     std::string excerpt(Span span, bool color) const;
 

@@ -6,7 +6,7 @@
 
 | Stage | Files | Does |
 | --- | --- | --- |
-| Sources | `source.h`, `source.cpp` | Loads files, maps offsets to lines and columns, and collects and prints diagnostics |
+| Sources | `source.h`, `source.cpp` | Loads files, maps offsets to lines and columns, and collects and prints diagnostics, as text or as JSON lines for editors |
 | Lexer | `lexer.h`, `lexer.cpp` | Turns text into tokens, and records which tokens start a line, since lines end statements |
 | Parser | `parser.h`, `parser.cpp`, `ast.h` | Builds the syntax tree for a whole file. It parses every planned feature, so the checker can say which ones aren't built yet |
 | Checker | `check.h`, `check.cpp`, `types.h`, `types.cpp` | Resolves names, gives every expression a type, folds constants and applies the strictness rules (D63). It writes what it finds into the tree, such as each call's kind and each name's target |

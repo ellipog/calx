@@ -34,3 +34,28 @@ jobs:
         run: clang --version
       - name: Tests
         run: python -I tests/run.py --modes debug,release
+
+  # The VS Code extension: its grammar on every example in the repo, and its helpers. The
+  # packaged .vsix is kept as an artifact, so it can be installed without a checkout.
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/vscode/package-lock.json
+      - name: Install the test dependencies
+        working-directory: tools/vscode
+        run: npm ci
+      - name: Tests
+        working-directory: tools/vscode
+        run: npm test
+      - name: Package
+        run: python3 -I tools/vscode/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calx-vscode
+          path: build/vscode/*.vsix

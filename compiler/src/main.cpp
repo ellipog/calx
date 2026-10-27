@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -13,6 +15,7 @@
 #include "toolchain.h"
 
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
 #define isatty _isatty
 #define fileno _fileno
@@ -42,7 +45,9 @@ int usage() {
         "  -o PATH     where build and emit-c write\n"
         "  --timings   print how long each step took\n"
         "  --verbose   print the clang commands\n"
-        "  --no-line   leave #line directives out of the C\n",
+        "  --no-line   leave #line directives out of the C\n"
+        "  --json      print errors as JSON lines on standard output, for editors\n"
+        "  --stdin     read the file's text from standard input; the path names it in errors\n",
         stderr);
     return 2;
 }
@@ -56,6 +61,8 @@ struct Options {
     bool timings = false;
     bool verbose = false;
     bool line_directives = true;
+    bool json = false;
+    bool stdin_text = false;
 };
 
 double ms(std::chrono::steady_clock::time_point t) {
@@ -89,6 +96,10 @@ int main(int argc, char** argv) {
             opt.verbose = true;
         } else if (a == "--no-line") {
             opt.line_directives = false;
+        } else if (a == "--json") {
+            opt.json = true;
+        } else if (a == "--stdin") {
+            opt.stdin_text = true;
         } else if (a == "-o" && i + 1 < argc) {
             opt.output = argv[++i];
         } else if (!a.empty() && a[0] == '-') {
@@ -107,7 +118,17 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     Sources sources;
     Diagnostics diags(sources);
-    std::uint32_t file = sources.load(opt.input);
+    std::uint32_t file;
+    if (opt.stdin_text) {
+        // An editor's unsaved text, checked as if it were the file.
+#ifdef _WIN32
+        _setmode(_fileno(stdin), _O_BINARY);
+#endif
+        std::string text((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+        file = sources.add(opt.input, std::move(text));
+    } else {
+        file = sources.load(opt.input);
+    }
     if (file == 0) {
         std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
         return 1;
@@ -120,6 +141,11 @@ int main(int argc, char** argv) {
     if (!diags.has_errors()) {
         check_module(CheckContext{sources, names, arena, diags, types}, module, program, opt.command != "check");
     }
+    if (opt.json) {
+        diags.print_json(stdout);
+        std::fflush(stdout);
+        if (diags.has_errors()) return 1;
+    }
     bool color = isatty(fileno(stderr)) != 0;
     if (diags.has_errors()) {
         diags.print(stderr, color);
@@ -127,7 +153,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%zu error%s\n", n, n == 1 ? "" : "s");
         return 1;
     }
-    diags.print(stderr, color);
+    if (!opt.json) diags.print(stderr, color);
     double front_ms = ms(t0);
     if (opt.command == "check") {
         if (opt.timings) std::fprintf(stderr, "check: %.1f ms\n", front_ms);
