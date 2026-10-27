@@ -1,0 +1,61 @@
+{
+  "impl": "rust",
+  "recorded": "2026-10-27T05:05:41Z",
+  "commit": "364bd60f41fa611b3f94b810e49da611c2292b31",
+  "machine": {
+    "platform": "linux",
+    "python": "3.14.4",
+    "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 16,
+    "threads": 32,
+    "memory_gib": 23.3,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "note": "WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"
+  },
+  "toolchain": {
+    "rustc": "1.91.1",
+    "llvm": "21.1.2"
+  },
+  "warmup": 200,
+  "ticks": 1000,
+  "runs": 10,
+  "configs": [
+    {
+      "threads": 1,
+      "median_mean_tick_us": 26036.506,
+      "median_p99_tick_us": 28667.013,
+      "runs_mean_tick_us": [
+        25896.263,
+        25957.804,
+        25910.051,
+        26066.031,
+        26020.393,
+        26052.62,
+        26010.695,
+        26270.789,
+        26264.412,
+        26236.222
+      ],
+      "checksum": "0a7e97a835579c25"
+    },
+    {
+      "threads": 24,
+      "median_mean_tick_us": 3522.726,
+      "median_p99_tick_us": 4734.292,
+      "runs_mean_tick_us": [
+        3464.563,
+        3478.542,
+        3551.031,
+        3510.937,
+        3556.213,
+        3538.842,
+        3534.516,
+        3470.985,
+        3565.601,
+        3476.761
+      ],
+      "checksum": "0a7e97a835579c25"
+    }
+  ]
+}

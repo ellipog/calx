@@ -1,0 +1,59 @@
+{
+  "impl": "rust",
+  "recorded": "2026-10-27T04:58:33Z",
+  "commit": "364bd60f41fa611b3f94b810e49da611c2292b31",
+  "machine": {
+    "platform": "windows",
+    "python": "3.14.6",
+    "os": "Windows-11-10.0.26200-SP0",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 24,
+    "threads": 32,
+    "memory_gib": 47.7
+  },
+  "toolchain": {
+    "rustc": "1.91.1",
+    "llvm": "21.1.2"
+  },
+  "warmup": 200,
+  "ticks": 1000,
+  "runs": 10,
+  "configs": [
+    {
+      "threads": 1,
+      "median_mean_tick_us": 25747.787,
+      "median_p99_tick_us": 28257.65,
+      "runs_mean_tick_us": [
+        25860.315,
+        25794.232,
+        25692.197,
+        25680.73,
+        25750.162,
+        25745.413,
+        25740.334,
+        25727.284,
+        25754.313,
+        25915.52
+      ],
+      "checksum": "0a7e97a835579c25"
+    },
+    {
+      "threads": 24,
+      "median_mean_tick_us": 3412.159,
+      "median_p99_tick_us": 3669.3,
+      "runs_mean_tick_us": [
+        3410.772,
+        3412.313,
+        3410.817,
+        3410.22,
+        3416.985,
+        3437.199,
+        3439.387,
+        3444.47,
+        3410.527,
+        3412.005
+      ],
+      "checksum": "0a7e97a835579c25"
+    }
+  ]
+}
