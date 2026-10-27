@@ -232,12 +232,24 @@ Calx matches Java exactly. Each rule below says what Calx does and how the C emi
 ### Transcendental functions
 
 - `std.math` gives `sqrt`, `abs`, `floor`, `ceil` and `rint`. They're exact in IEEE, so every implementation agrees.
-- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log10`, `log1p`, `pow`, `sinh`, `cosh` and `tanh` are ports of fdlibm, the library behind Java's `StrictMath`. They give `StrictMath`'s results bit for bit on every platform. fdlibm's license permits this.
-- Vanilla calls `Math`, not `StrictMath`: `pow` 70 times, `sin` 29, `cos` 23, `log` 9, `atan2` 9, `acos` 5, `asin` 2 and `log1p` once, plus `Mth`'s sine table, which is filled with `Math.sin` at startup. On x86-64, HotSpot swaps some of these for its own intrinsics, whose results can differ from `StrictMath` by an ulp. The intrinsics also depend on the CPU architecture, so vanilla's own results already vary with the machine.
-- Calx doesn't port HotSpot's intrinsics, because HotSpot is GPL (D8's reasoning). Instead:
-  - The rig's probe (`P1.5`) compares `Math` with `StrictMath` for every function above on the inputs vanilla produces, and checks all 65,536 entries of `Mth`'s sine table exhaustively.
-  - A function that never differs on vanilla's inputs needs nothing more.
-  - A difference that players could see goes in `rig/differences/`, unless a clean implementation from published algorithms can match it (D58).
+- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `expm1`, `log`, `log10`, `log1p`, `pow`, `cbrt`, `hypot`, `sinh`, `cosh` and `tanh` give Java's `StrictMath` results bit for bit on every platform.
+- They're ported from fdlibm, the library `StrictMath` is defined by, with fdlibm's license notice kept (D59, D60). Porting is the surest way to get the same constants and order of operations, which decide the last bit. The rig checks every function against `StrictMath`.
+- Vanilla calls `Math`, not `StrictMath`: `sqrt` 102 times, `pow` 70, `sin` 30, `cos` 23, `log` 9, `atan2` 9, `acos` 5, `asin` 2, and `log1p` and `hypot` once each. `Mth`'s sine table is filled with `Math.sin` at startup, and every `nextGaussian()` goes through `Math.log`.
+- On x86-64, HotSpot replaces some of these with its own intrinsics. The rig measured how far they drift from `StrictMath` on JDK 25.0.5 (`P1.5`, 500,000 arguments per input range):
+
+  | Function | Results that differ from `StrictMath` | Worst |
+  | --- | --- | --- |
+  | `sin`, `cos`, `tan` | 1.7-3.7% | 1 ULP |
+  | `pow` | 8.8-9.8% on ordinary inputs | 1 ULP |
+  | `log` | 7.2% on (0, 1), 0.9% on [1, 10^6) | 1 ULP |
+  | `exp` | 9.4% | 1 ULP |
+  | `log10` | 1.7% | 1 ULP |
+  | `cbrt` | 8.3% | 1 ULP |
+  | `tanh` | 0.7-2.8% | 2 ULP |
+  | `asin`, `acos`, `atan`, `atan2`, `hypot`, `log1p`, `expm1`, `sinh`, `cosh`, `sqrt` | none | |
+
+  `Mth`'s sine table is the same either way, since rounding to `f32` hides the difference.
+- Matching the intrinsics would mean copying HotSpot's stubs, which are GPL and can't go in an MIT project (D59). Instead, the rig's reference is vanilla with HotSpot's flags `-XX:+UnlockDiagnosticVMOptions -XX:-UseLibmIntrinsic`. With them, `Math` matched `StrictMath` bit for bit on all 22 million arguments, so Calx can match that configuration exactly. The rig also records vanilla with default flags, and reports every case where the two differ (D60).
 
 ## Memory model (D48)
 
@@ -483,7 +495,7 @@ What Calx leaves out, on purpose:
 | Float to int saturates, NaN to 0 | [Floats](#floats) |
 | `char` unsigned 16-bit, `byte` signed | [Primitive types](#primitive-types) |
 | IEEE floats, no contraction, no fast-math | [Floats](#floats) |
-| Transcendentals: StrictMath ports, plus HotSpot's `Math` where vanilla relies on it | [Transcendental functions](#transcendental-functions) |
+| Transcendentals ported from fdlibm, matching `StrictMath` bit for bit | [Transcendental functions](#transcendental-functions) |
 | Memory-safe outside `unsafe` (D23) | [Memory safety](#memory-safety-d23) |
 | `unsafe` and `extern` only for Calcite core and trusted plugins | [`unsafe`](#unsafe), [FFI](#ffi) |
 | The emitter proves non-aliasing and emits `restrict` (D26) | [Memory safety](#memory-safety-d23) |
