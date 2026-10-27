@@ -364,30 +364,61 @@ CX_FLOOR(i32)
 CX_FLOOR(i64)
 
 /* Java's float-to-integer casts: clamp to the range, and NaN gives 0. */
-CX_INLINE cx_i32 cx_f64_to_i32(cx_f64 d) {
+static inline cx_i32 cx_f64_to_i32_clamp(cx_f64 d) {
     if (d != d) return 0;
     if (d >= 2147483647.0) return 2147483647;
     if (d <= -2147483648.0) return -2147483647 - 1;
     return (cx_i32)d;
 }
-CX_INLINE cx_i64 cx_f64_to_i64(cx_f64 d) {
+static inline cx_i64 cx_f64_to_i64_clamp(cx_f64 d) {
     if (d != d) return 0;
     if (d >= 9223372036854775807.0) return 9223372036854775807LL;
     if (d <= -9223372036854775808.0) return -9223372036854775807LL - 1;
     return (cx_i64)d;
 }
-CX_INLINE cx_i32 cx_f32_to_i32(cx_f32 f) {
+static inline cx_i32 cx_f32_to_i32_clamp(cx_f32 f) {
     if (f != f) return 0;
     if (f >= 2147483648.0f) return 2147483647;
     if (f <= -2147483648.0f) return -2147483647 - 1;
     return (cx_i32)f;
 }
-CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) {
+static inline cx_i64 cx_f32_to_i64_clamp(cx_f32 f) {
     if (f != f) return 0;
     if (f >= 9223372036854775808.0f) return 9223372036854775807LL;
     if (f <= -9223372036854775808.0f) return -9223372036854775807LL - 1;
     return (cx_i64)f;
 }
+#if defined(__x86_64__)
+/* x86's truncating conversions give the type's MIN for NaN and for anything out of range, so one
+ * test of the result finds every case that needs clamping: one compare instead of three. */
+typedef double cx_v2df __attribute__((vector_size(16)));
+typedef float cx_v4sf __attribute__((vector_size(16)));
+CX_INLINE cx_i32 cx_f64_to_i32(cx_f64 d) {
+    cx_i32 r = __builtin_ia32_cvttsd2si((cx_v2df){d, 0.0});
+    if (__builtin_expect(r == -2147483647 - 1, 0)) return cx_f64_to_i32_clamp(d);
+    return r;
+}
+CX_INLINE cx_i64 cx_f64_to_i64(cx_f64 d) {
+    cx_i64 r = __builtin_ia32_cvttsd2si64((cx_v2df){d, 0.0});
+    if (__builtin_expect(r == -9223372036854775807LL - 1, 0)) return cx_f64_to_i64_clamp(d);
+    return r;
+}
+CX_INLINE cx_i32 cx_f32_to_i32(cx_f32 f) {
+    cx_i32 r = __builtin_ia32_cvttss2si((cx_v4sf){f, 0.0f, 0.0f, 0.0f});
+    if (__builtin_expect(r == -2147483647 - 1, 0)) return cx_f32_to_i32_clamp(f);
+    return r;
+}
+CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) {
+    cx_i64 r = __builtin_ia32_cvttss2si64((cx_v4sf){f, 0.0f, 0.0f, 0.0f});
+    if (__builtin_expect(r == -9223372036854775807LL - 1, 0)) return cx_f32_to_i64_clamp(f);
+    return r;
+}
+#else
+CX_INLINE cx_i32 cx_f64_to_i32(cx_f64 d) { return cx_f64_to_i32_clamp(d); }
+CX_INLINE cx_i64 cx_f64_to_i64(cx_f64 d) { return cx_f64_to_i64_clamp(d); }
+CX_INLINE cx_i32 cx_f32_to_i32(cx_f32 f) { return cx_f32_to_i32_clamp(f); }
+CX_INLINE cx_i64 cx_f32_to_i64(cx_f32 f) { return cx_f32_to_i64_clamp(f); }
+#endif
 
 /* abs, min and max. Integer abs wraps, so abs(MIN) is MIN, as in Java. */
 #define CX_INT_MINMAX(T)                                                                 \
