@@ -51,6 +51,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 3. [std.time](std/time.md): a monotonic clock, which only `unsafe` code can read
 4. [std.env](std/env.md): the command-line arguments
 5. [std.pool](std/pool.md): the threads `parallel for` runs on
+6. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
 
 ### Design
 

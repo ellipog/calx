@@ -1,0 +1,80 @@
+// Many connections and more bytes than a socket buffer holds: 16 clients each send 200,000
+// bytes, the server echoes whatever arrives, and each client checks what comes back.
+import std.net.{Event, Net}
+
+const CLIENTS: usize = 16
+const BYTES: usize = 200000
+
+fn pattern(client: usize, i: usize) -> u8 {
+    return u8.wrap(i * 7 + client * 13)
+}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    // Per slot: 0 unused, 1 a client, 2 the server's end of a connection.
+    var role = [0; 64]
+    var client_of = [0usize; 64]
+    var received = [0usize; 64]
+    var wrong = 0
+    for k in 0usize..CLIENTS {
+        let c = net.connect("127.0.0.1", port)!
+        role[c.slot()] = 1
+        client_of[c.slot()] = k
+    }
+    var events = List<Event>()
+    var buf = List<u8>()
+    var closed = 0usize
+    var polls = 0
+    while closed < 2 * CLIENTS and polls < 100000 {
+        net.poll(1000, mut events)
+        polls += 1
+        for e in events {
+            match e {
+                Connected(c) => {
+                    var data = List<u8>()
+                    for i in 0usize..BYTES {
+                        data.push(pattern(client_of[c.slot()], i))
+                    }
+                    net.write(c, data)
+                }
+                Accepted(c) => {
+                    role[c.slot()] = 2
+                    received[c.slot()] = 0
+                }
+                Received(c) => {
+                    buf.clear()
+                    _ = net.read(c, mut buf)
+                    let s = c.slot()
+                    if role[s] == 2 {
+                        net.write(c, buf)
+                    } else {
+                        for b in buf {
+                            if b != pattern(client_of[s], received[s]) {
+                                wrong += 1
+                            }
+                            received[s] += 1
+                        }
+                        if received[s] == BYTES {
+                            net.close(c)
+                        }
+                    }
+                }
+                Closed(c) => {
+                    closed += 1
+                    if role[c.slot()] == 2 {
+                        role[c.slot()] = 0
+                    }
+                }
+            }
+        }
+    }
+    var complete = 0
+    for s in 0usize..64 {
+        if role[s] == 1 and received[s] == BYTES {
+            complete += 1
+        }
+    }
+    println("{complete} clients got all {BYTES} bytes back")    // out: 16 clients got all 200000 bytes back
+    println("{wrong} wrong bytes, {closed} closed")             // out: 0 wrong bytes, 32 closed
+}

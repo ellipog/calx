@@ -1,0 +1,28 @@
+// Listening where another socket already listens, and on a host that can't be an address.
+import std.net.{Net, NetError}
+
+fn describe(e: NetError) -> String {
+    return match e {
+        AddressInUse => String("address in use"),
+        BadAddress => String("bad address"),
+        Refused => String("refused"),
+        Os(code) => "system error {code}",
+    }
+}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    match net.listen("127.0.0.1", port) {
+        ok(_) => println("listened twice"),
+        err(e) => println(describe(e)),    // out: address in use
+    }
+    var long = String()
+    for _ in 0..300 {
+        long.push('a')
+    }
+    match net.connect(long, 25565) {
+        ok(_) => println("connected"),
+        err(e) => println(describe(e)),    // out: bad address
+    }
+}

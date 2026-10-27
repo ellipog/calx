@@ -30,6 +30,8 @@ expected the same way.
 Each test that expects errors is also checked with `calx check --json --stdin`, the form editors
 use, which must report the same errors at the same places.
 
+A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
+
 On Linux, use `python3` for `py`.
 """
 
@@ -40,6 +42,7 @@ import os
 import pathlib
 import platform
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,6 +57,7 @@ EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin|args):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
+RUN_SECONDS = 120
 
 
 class Test:
@@ -165,7 +169,9 @@ def run_test(test, mode):
             cmd += ["--", *test.args]
         # Bytes, so no newline is translated on the way in or out.
         stdin = "".join(line + "\n" for line in test.stdin).encode("utf-8")
-        p = subprocess.run(cmd, input=stdin, capture_output=True, cwd=ROOT)
+        p = run_limited(cmd, stdin)
+        if p is None:
+            return [f"still running after {RUN_SECONDS} seconds, so it was stopped"]
         p.stdout = p.stdout.decode("utf-8", errors="replace")
         p.stderr = p.stderr.decode("utf-8", errors="replace")
         problems = []
@@ -190,6 +196,24 @@ def run_test(test, mode):
         elif problems and p.stderr.strip() and (not test.panic or p.returncode != 101):
             problems.append("stderr:\n" + indent(p.stderr.rstrip()))
         return problems
+
+
+def run_limited(cmd, stdin):
+    """Runs `cmd`, or returns None if it outlasts RUN_SECONDS. `calx run` starts the program as
+    its own child, so the whole tree is stopped: the program would otherwise keep the pipes open."""
+    group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          cwd=ROOT, **group) as p:
+        try:
+            out, err = p.communicate(stdin, timeout=RUN_SECONDS)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            else:
+                os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+            return None
+        return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 def check_errors(test, path):

@@ -1039,6 +1039,15 @@ static cx_usize par_threads(void) {
     return par_target;
 }
 
+/* For the parts of the runtime in other files, such as calx_net.c. */
+int cx_in_parallel(void) { return par_depth; }
+
+void cx_panic_text(const char* at, const char* message) {
+    cx_panic_begin(at);
+    panic_text(message);
+    cx_panic_end();
+}
+
 /* Declared by std/pool.calx, which checks that `n` isn't 0. */
 void cx_set_workers(cx_usize n) {
     if (par_depth) {

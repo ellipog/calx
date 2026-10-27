@@ -579,6 +579,21 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string rt_obj = (fs::path(obj_dir) / (rt_key + ".o")).string();
     std::vector<std::string> keys, objs;
     std::string all_keys = rt_key;
+    // The runtime's networking is its own file, linked only into programs that call it, so the
+    // others don't load the socket libraries when they start.
+    bool uses_net = false;
+    for (const std::string& c : c_sources) uses_net = uses_net || c.find("cx_net_") != std::string::npos;
+    std::string net_obj;
+    if (uses_net) {
+        std::string net_c;
+        if (!read_file((runtime / "calx_net.c").string(), net_c)) {
+            std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
+            return r;
+        }
+        std::string net_key = hash_hex({"runtime-net", rt_h, net_c, flag_text, tc.identity});
+        net_obj = (fs::path(obj_dir) / (net_key + ".o")).string();
+        all_keys += " " + net_key;
+    }
     for (const std::string& c : c_sources) {
         keys.push_back(hash_hex({"module", c, rt_h, flag_text, tc.identity}));
         objs.push_back((fs::path(obj_dir) / (keys.back() + ".o")).string());
@@ -624,6 +639,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         touch(rt_obj);
     } else {
         compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+    }
+    if (uses_net) {
+        if (file_exists(net_obj)) touch(net_obj);
+        else compile((runtime / "calx_net.c").string(), net_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     }
     // Each build writes its C under a name of its own: two builds that need the same module, such
     // as a std one, would otherwise share the file, and one could delete it while the other's
@@ -675,6 +694,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + kExe)).string();
     std::vector<std::string> inputs = objs;
     inputs.push_back(rt_obj);
+    if (uses_net) inputs.push_back(net_obj);
     if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
         std::fprintf(stderr, "calx: linking failed\n");
         return r;
