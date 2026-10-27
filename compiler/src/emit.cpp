@@ -57,89 +57,61 @@ public:
         for (Item* f : prog_.fns) fns_.emplace(f, emit_fn(f));
         for (Item* c : prog_.consts) consts_.emplace(c, emit_const(c));
 
-        struct Plan {
-            Module* module;
-            std::vector<Item*> defs;     // defined here: its own functions, then the instances they reach
-            std::vector<Item*> externs;  // written in another module, and called from here
-            std::vector<Item*> c_fns;    // C functions called from here
-        };
         std::vector<Plan> plans;
         std::unordered_set<const Item*> external;  // written functions another file calls
+        Module* main_module = prog_.modules.empty() ? nullptr : prog_.modules.back();
         for (Module* m : prog_.modules) {
-            Plan p{m, {}, {}, {}};
+            Plan p;
+            p.module = m;
+            p.has_main = m == main_module && prog_.main;
             std::unordered_set<const Item*> seen;
+            auto take = [&](Item* g) {
+                if (!seen.insert(g).second) return;
+                if (g->is_extern) {
+                    p.c_fns.push_back(g);
+                } else if (g->origin || g->module == m) {
+                    p.defs.push_back(g);
+                } else {
+                    p.externs.push_back(g);
+                    external.insert(g);
+                }
+            };
             for (Item* f : prog_.fns) {
                 if (f->module == m && !f->origin && seen.insert(f).second) p.defs.push_back(f);
             }
-            for (std::size_t i = 0; i < p.defs.size(); i++) {
-                for (Item* g : fns_.at(p.defs[i]).uses.fns) {
-                    if (!seen.insert(g).second) continue;
-                    if (g->is_extern) {
-                        p.c_fns.push_back(g);
-                    } else if (g->origin || g->module == m) {
-                        p.defs.push_back(g);
-                    } else {
-                        p.externs.push_back(g);
-                        external.insert(g);
+            // The glue calls what a type writes for itself (D102), which can need more functions
+            // and more glue, until nothing new turns up.
+            for (std::size_t done = 0;;) {
+                for (; done < p.defs.size(); done++) {
+                    for (Item* g : fns_.at(p.defs[done]).uses.fns) take(g);
+                }
+                if (p.defs.empty() && !p.has_main) break;  // types and constants go where they're used
+                gather(p);
+                std::size_t defs = p.defs.size(), externs = p.externs.size();
+                for (int prop = 0; prop < 4; prop++) {
+                    for (const Type* t : p.glue[prop]) {
+                        if (Item* h = hand(t, prop)) take(h);
                     }
                 }
+                if (p.defs.size() == defs && p.externs.size() == externs) break;
             }
             plans.push_back(std::move(p));
         }
 
         std::vector<CFile> files;
-        Module* main_module = prog_.modules.empty() ? nullptr : prog_.modules.back();
         for (const Plan& p : plans) {
-            bool has_main = p.module == main_module && prog_.main;
-            if (p.defs.empty() && !has_main) continue;  // types and constants go where they're used
-            Uses all;
-            for (Item* f : p.defs) {
-                all.merge(fns_.at(f).sig_uses);
-                all.merge(fns_.at(f).uses);
-            }
-            for (Item* f : p.externs) all.merge(fns_.at(f).sig_uses);
-            // A constant's value can name other constants.
-            for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
-            // A `main` that fails shows its error.
-            if (has_main && prog_.main->result_type->is_result) {
-                const Type* rt = prog_.main->result_type;
-                all.add_type(rt);
-                if (has_glue(rt->args[1])) all.add_show(rt->args[1]);
-                else if (rt->args[1]->kind == TypeKind::enum_) all.add_name(rt->args[1]);
-            }
-            // Comparing or showing a type compares or shows what it holds.
-            for (std::size_t i = 0; i < all.eqs.size(); i++) {
-                for (const Type* x : held(all.eqs[i])) {
-                    if (has_glue(x)) all.add_eq(x);
-                }
-            }
-            for (std::size_t i = 0; i < all.shows.size(); i++) {
-                for (const Type* x : held(all.shows[i])) {
-                    if (has_glue(x)) all.add_show(x);
-                    else if (x->kind == TypeKind::enum_) all.add_name(x);
-                }
-            }
-            // Ordering a type orders what it holds, and sorting a list orders its elements.
-            for (const Type* t : all.sorts) {
-                if (has_cmp_glue(t)) all.add_cmp(t);
-            }
-            for (std::size_t i = 0; i < all.cmps.size(); i++) {
-                for (const Type* x : held(all.cmps[i])) {
-                    if (has_cmp_glue(x)) all.add_cmp(x);
-                }
-            }
-            for (const Type* t : all.names) all.add_type(t);
-            for (const Type* t : all.eqs) all.add_type(t);
-            for (const Type* t : all.shows) all.add_type(t);
-            for (const Type* t : all.cmps) all.add_type(t);
+            bool has_main = p.has_main;
+            if (p.defs.empty() && !has_main) continue;
+            const Uses& all = p.all;
             printed_ = std::unordered_set<const Type*>(all.names.begin(), all.names.end());
-            equated_ = std::unordered_set<const Type*>(all.eqs.begin(), all.eqs.end());
+            equated_ = std::unordered_set<const Type*>(p.glue[prop_equal].begin(), p.glue[prop_equal].end());
             shown_ = std::unordered_set<const Type*>(all.shows.begin(), all.shows.end());
+            hashed_ = std::unordered_set<const Type*>(p.glue[prop_hash].begin(), p.glue[prop_hash].end());
             compared_ = std::unordered_set<const Type*>(all.cmps.begin(), all.cmps.end());
             sorted_ = all.sorts;
 
             out_ = "// Generated by calx. Do not edit.\n#include \"calx_rt.h\"\n\n";
-            emit_types(all.types);
+            std::vector<const Type*> order = emit_types(all.types);
             for (const Item* c : prog_.consts) {
                 if (all.has(c)) out_ += consts_.at(c).text;
             }
@@ -148,6 +120,8 @@ public:
             for (Item* f : p.externs) out_ += fns_.at(f).sig + ";\n";
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
             out_ += "\n";
+            // After the functions' declarations, as a type's glue can call what it writes for itself.
+            emit_glue(order);
             for (Item* f : p.defs) {
                 const FnOut& o = fns_.at(f);
                 out_ += o.helpers + o.directive + linkage(f, external) + o.sig + o.body;
@@ -161,8 +135,8 @@ public:
                     std::string e = "r.u.v1." + variant_field(rt, 1, 0);
                     const Type* et = rt->args[1];
                     out_ += ctype(rt) + " r = " + std::string(prog_.main->c_name) + "();\n";
-                    out_ += "    if (r.tag != 0) {\n        cx_err_begin();\n        cx_print_str(" + str_const("error: ") +
-                            ");\n        " + show_value(et, e) + "\n        cx_print_newline();\n        cx_err_end();\n";
+                    out_ += "    if (r.tag != 0) {\n        cx_out_to was = cx_err_begin();\n        cx_print_str(" + str_const("error: ") +
+                            ");\n        " + show_value(et, e) + "\n        cx_print_newline();\n        cx_err_end(was);\n";
                     if (!is_copy(et)) out_ += "        " + drop_fn(et) + "(&" + e + ");\n";
                     out_ += "        int status = cx_finish();\n        return status ? status : 1;\n    }\n    ";
                 } else {
@@ -227,6 +201,96 @@ private:
             for (const Type* t : o.sorts) add_sort(t);
         }
     };
+
+    struct Plan {
+        Module* module = nullptr;
+        bool has_main = false;
+        std::vector<Item*> defs;     // defined here: its own functions, then the instances they reach
+        std::vector<Item*> externs;  // written in another module, and called from here
+        std::vector<Item*> c_fns;    // C functions called from here
+        Uses all;                    // what they use, and the glue that takes
+        std::vector<const Type*> glue[4];  // by `Property`, the types with glue, which may call `hand`
+    };
+
+    // Everything a file's functions use, and the glue that takes: comparing or showing a type
+    // compares or shows what it holds, and a map's or a set's functions hash and compare its keys.
+    void gather(Plan& p) {
+        Uses all;
+        for (Item* f : p.defs) {
+            all.merge(fns_.at(f).sig_uses);
+            all.merge(fns_.at(f).uses);
+        }
+        for (Item* f : p.externs) all.merge(fns_.at(f).sig_uses);
+        // A constant's value can name other constants.
+        for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
+        // A `main` that fails shows its error.
+        if (p.has_main && prog_.main->result_type->is_result) {
+            const Type* rt = prog_.main->result_type;
+            all.add_type(rt);
+            if (show_glue(rt->args[1])) all.add_show(rt->args[1]);
+            else if (rt->args[1]->kind == TypeKind::enum_) all.add_name(rt->args[1]);
+        }
+        for (std::size_t i = 0; i < all.eqs.size(); i++) {
+            for (const Type* x : held(all.eqs[i])) {
+                if (eq_glue(x)) all.add_eq(x);
+            }
+        }
+        for (std::size_t i = 0; i < all.shows.size(); i++) {
+            for (const Type* x : held(all.shows[i])) {
+                if (show_glue(x)) all.add_show(x);
+                else if (x->kind == TypeKind::enum_) all.add_name(x);
+            }
+        }
+        // Ordering a type orders what it holds, and sorting a list orders its elements.
+        for (const Type* t : all.sorts) {
+            if (has_cmp_glue(t)) all.add_cmp(t);
+        }
+        for (std::size_t i = 0; i < all.cmps.size(); i++) {
+            for (const Type* x : held(all.cmps[i])) {
+                if (has_cmp_glue(x)) all.add_cmp(x);
+            }
+        }
+        for (const Type* t : all.names) all.add_type(t);
+        for (const Type* t : all.eqs) all.add_type(t);
+        for (const Type* t : all.shows) all.add_type(t);
+        for (const Type* t : all.cmps) all.add_type(t);
+        std::unordered_set<const Type*> eqs(all.eqs.begin(), all.eqs.end()), hashes;
+        std::vector<const Type*> eq_order(all.eqs.begin(), all.eqs.end()), hash_order;
+        std::function<void(const Type*, bool)> reach = [&](const Type* x, bool hash) {
+            if (!(hash ? hash_glue(x) : eq_glue(x)) || !(hash ? hashes : eqs).insert(x).second) return;
+            (hash ? hash_order : eq_order).push_back(x);
+            for (const Type* h : held(x)) reach(h, hash);
+        };
+        for (const Type* x : closure(all.types)) {
+            if (!is_table(x)) continue;
+            reach(table_key(x), true);
+            reach(table_key(x), false);
+        }
+        p.glue[prop_equal] = std::move(eq_order);
+        p.glue[prop_display] = all.shows;
+        p.glue[prop_hash] = std::move(hash_order);
+        p.glue[prop_order] = all.cmps;
+        p.all = std::move(all);
+    }
+
+    // What a struct or an enum writes for a derived property, which its glue calls (D102).
+    Item* hand(const Type* t, int prop) const {
+        auto it = prog_.hand[prop].find(t);
+        return it == prog_.hand[prop].end() ? nullptr : it->second;
+    }
+
+    // A call of the hand-written `f` on the glue's own parameters, each a value, so a view's
+    // address is taken.
+    static std::string call_hand(const Item* f, std::initializer_list<const char*> args) {
+        std::string s = std::string(f->c_name) + "(";
+        std::size_t i = 0;
+        for (const char* a : args) {
+            if (i) s += ", ";
+            s += (f->params[i].local && f->params[i].local->is_view ? "&" : "") + std::string(a);
+            i++;
+        }
+        return s + ")";
+    }
 
     struct FnOut {
         std::string directive;  // the `#line` before it
@@ -404,7 +468,18 @@ private:
     // Every type the program uses, each after the types it holds. An optional is its value and a
     // flag, a tuple a struct of `f0`, `f1`..., and an enum with data a tag and a union of its
     // variants' values. An enum without data is its tag.
-    void emit_types(const std::vector<const Type*>& used) {
+    std::vector<const Type*> emit_types(const std::vector<const Type*>& used) {
+        std::unordered_set<const Type*> need = closure(used);
+        std::vector<const Type*> order;
+        for (const Type* t : prog_.type_order) {
+            if (need.count(t)) order.push_back(t);
+        }
+        emit_type_defs(order);
+        return order;
+    }
+
+    // The types in `used`, and those they hold.
+    static std::unordered_set<const Type*> closure(const std::vector<const Type*>& used) {
         std::unordered_set<const Type*> need;
         std::function<void(const Type*)> close = [&](const Type* t) {
             switch (t->kind) {
@@ -428,10 +503,10 @@ private:
             }
         };
         for (const Type* t : used) close(t);
-        std::vector<const Type*> order;
-        for (const Type* t : prog_.type_order) {
-            if (need.count(t)) order.push_back(t);
-        }
+        return need;
+    }
+
+    void emit_type_defs(const std::vector<const Type*>& order) {
         // Each is declared first, so a list can point to any of them.
         for (const Type* t : order) {
             if (t->kind == TypeKind::enum_ && !t->has_data) {
@@ -496,19 +571,6 @@ private:
             }
             out_ += "    }\n    return " + str_const("") + ";\n}\n";
         }
-        // A map's or a set's functions hash and compare its keys, and what those hold.
-        hashed_.clear();
-        std::function<void(const Type*, std::unordered_set<const Type*>&)> reach = [&](const Type* x,
-                                                                                    std::unordered_set<const Type*>& set) {
-            if (!has_glue(x) || !set.insert(x).second) return;
-            for (const Type* h : held(x)) reach(h, set);
-        };
-        for (const Type* x : order) {
-            if (!is_table(x)) continue;
-            reach(table_key(x), hashed_);
-            reach(table_key(x), equated_);
-        }
-        emit_glue(order);
         if (!order.empty()) out_ += "\n";
     }
 
@@ -574,9 +636,21 @@ private:
     }
 
     // Whether ordering the type takes a function of its own.
-    static bool has_cmp_glue(const Type* t) {
+    bool has_cmp_glue(const Type* t) const {
+        if (hand(t, prop_order)) return true;
         if (t->kind == TypeKind::enum_ && !t->has_data) return !tags_in_order(t);
         return has_glue(t);
+    }
+
+    // Whether values `cmp` calls equal are the same value, so a sort needn't keep them in order:
+    // the type's `Order` is derived, and so is that of everything it holds (D102).
+    bool exact_order(const Type* t, std::unordered_set<const Type*>& seen) const {
+        if (hand(t, prop_order)) return false;
+        if (!seen.insert(t).second) return true;
+        for (const Type* x : held(t)) {
+            if (!exact_order(x, seen)) return false;
+        }
+        return true;
     }
 
     std::string cmp_fn(const Type* t) const {
@@ -587,9 +661,10 @@ private:
 
     // `xs.sort()` on the list `l` points to. The runtime sorts integers, `char`, `rune` and `bool`,
     // and an enum whose values go up as it declares them is sorted as its values; for anything
-    // else the file has a sort of its own, from `calx_sort.h`.
-    std::string sort_call(const Type* t, const std::string& l) const {
-        const Type* key = t->kind == TypeKind::enum_ && !t->has_data && tags_in_order(t) ? t->repr : t;
+    // else the file has a sort of its own, from `calx_sort.h`. A stable one takes `at`, the sort's
+    // place, for the panic when a hand-written `Order` contradicts itself.
+    std::string sort_call(const Type* t, const std::string& l, const std::string& at) const {
+        const Type* key = t->kind == TypeKind::enum_ && !t->has_data && tags_in_order(t) && !hand(t, prop_order) ? t->repr : t;
         switch (key->kind) {
             case TypeKind::int_: case TypeKind::char_: case TypeKind::rune: case TypeKind::bool_:
                 return "cx_sort_" + helper(key) + "((" + ctype(key) + "*)" + l + "->ptr, " + l + "->len)";
@@ -597,7 +672,9 @@ private:
         }
         (void)ctype(t);
         if (uses_) uses_->add_sort(t);
-        return "cx_sort_" + part(t) + "(" + l + "->ptr, " + l + "->len)";
+        std::unordered_set<const Type*> seen;
+        std::string where = exact_order(t, seen) ? "" : ", " + at;
+        return "cx_sort_" + part(t) + "(" + l + "->ptr, " + l + "->len" + where + ")";
     }
 
     // -1, 0 or 1, as `a` is less than, equal to or greater than `b`, both places of type `t`.
@@ -609,7 +686,8 @@ private:
     }
 
     // Whether `<` on the type is one comparison in C.
-    static bool scalar_order(const Type* t) {
+    bool scalar_order(const Type* t) const {
+        if (hand(t, prop_order)) return false;
         switch (t->kind) {
             case TypeKind::int_: case TypeKind::char_: case TypeKind::rune: case TypeKind::bool_: return true;
             case TypeKind::enum_: return !t->has_data && tags_in_order(t);
@@ -632,7 +710,7 @@ private:
     // compares every member and combines the results with `&` and `|`, so there's no branch to
     // mispredict: `a.x < b.x | (a.x == b.x & a.y < b.y)`.
     std::string less(const Type* t, const std::string& a, const std::string& b) {
-        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::tuple) {
+        if ((t->kind == TypeKind::struct_ || t->kind == TypeKind::tuple) && !hand(t, prop_order)) {
             Parts parts = ordered_parts(t);
             bool scalars = !parts.empty() && parts.size() <= 8;
             for (const auto& [m, x] : parts) scalars = scalars && scalar_order(x);
@@ -653,6 +731,8 @@ private:
     // runs out first is less, `none` is less than `some`, and an enum's variants come in the order
     // they're declared.
     std::string cmp_body(const Type* t) {
+        // `Ordering`'s variants are -1, 0 and 1, plus one.
+        if (Item* h = hand(t, prop_order)) return "    return (int)" + call_hand(h, {"a", "b"}) + " - 1;\n";
         auto all = [&](const Parts& parts) {
             std::string s;
             for (const auto& [m, x] : parts) {
@@ -714,7 +794,9 @@ private:
 
     // A file's own instance of the sort, for a type the runtime doesn't sort.
     std::string sort_bodies(const Type* t) {
-        return "#define CX_SORT_T " + ctype(t) + "\n#define CX_SORT_NAME cx_sort_" + part(t) +
+        std::unordered_set<const Type*> seen;
+        std::string stable = exact_order(t, seen) ? "" : "#define CX_SORT_STABLE\n";
+        return stable + "#define CX_SORT_T " + ctype(t) + "\n#define CX_SORT_NAME cx_sort_" + part(t) +
                "\n#define CX_SORT_LESS(cx_sa, cx_sb) " + less(t, "(*cx_sa)", "(*cx_sb)") +
                "\n#define CX_SORT_STATIC\n#include \"calx_sort.h\"\n";
     }
@@ -768,13 +850,13 @@ private:
     std::string hash_value(const Type* t, const std::string& v) {
         if (t->kind == TypeKind::str) return "cx_hash_str(" + v + ")";
         if (t->kind == TypeKind::string) return "cx_hash_str(cx_sv(" + v + "))";
-        if (has_glue(t)) return hash_fn(t) + "(" + v + ")";
+        if (hash_glue(t)) return hash_fn(t) + "(" + v + ")";
         return "cx_hash_word(CX_HASH_SEED, " + hash_word(t, v) + ")";
     }
     // What a value adds to the hash of what holds it: a number, or what's stored as one, as
     // itself, and anything else as its own hash.
     std::string hash_word(const Type* t, const std::string& v) {
-        if (t->kind == TypeKind::str || t->kind == TypeKind::string || has_glue(t)) return hash_value(t, v);
+        if (t->kind == TypeKind::str || t->kind == TypeKind::string || hash_glue(t)) return hash_value(t, v);
         if (is_int(t) && t->is_signed) return "(cx_u64)(cx_i64)(" + v + ")";
         return "(cx_u64)(" + v + ")";
     }
@@ -782,6 +864,11 @@ private:
     // Everything a value holds, in order, folded into the hash. An enum's variant, an optional's
     // flag and a list's length go in first, so `[1], [2]` and `[1, 2]` differ.
     std::string hash_body(const Type* t) {
+        if (Item* f = hand(t, prop_hash)) {
+            const Type* ht = prog_.hasher;
+            return "    " + ctype(ht) + " h = {0};\n    h" + member(ht, 0) + " = CX_HASH_SEED;\n    " + call_hand(f, {"v", "h"}) +
+                   ";\n    return h" + member(ht, 0) + ";\n";
+        }
         std::string s = "    cx_u64 h = CX_HASH_SEED;\n";
         auto add = [&](const Type* x, const std::string& v, const std::string& indent) {
             return indent + "h = cx_hash_word(h, " + hash_word(x, v) + ");\n";
@@ -998,6 +1085,7 @@ static void $reserve($T* m, cx_usize n) {
     // Two values are equal when everything they hold is, in order. An enum's also have the same
     // variant, and a list's the same length.
     std::string eq_body(const Type* t) {
+        if (Item* h = hand(t, prop_equal)) return "    return " + call_hand(h, {"a", "b"}) + ";\n";
         auto all = [&](const Parts& parts) {
             std::string s;
             for (const auto& [m, x] : parts) {
@@ -1054,6 +1142,7 @@ static void $reserve($T* m, cx_usize n) {
     // variant as it's built, `Circle(1.0)`, a tuple as `(1, 2)`, an array or a list as `[1, 2]`,
     // and an optional as `some(1)` or `none`. Text inside appears without quotes, as in a list.
     std::string show_body(const Type* t) {
+        if (Item* h = hand(t, prop_display)) return "    " + call_hand(h, {"v"}) + ";\n";
         auto print = [&](const std::string& s) { return "    cx_print_str(" + str_const(s) + ");\n"; };
         // `open`, then each part, labelled with its name if it has one, then `close`. The text
         // between two parts is written in one go.
@@ -1155,7 +1244,12 @@ static void $reserve($T* m, cx_usize n) {
         return "cx_eq_" + part(t);
     }
 
-    // Whether comparing or showing the type takes a function of its own: it holds other values.
+    // Whether comparing, showing or hashing the type takes a function of its own: it writes its
+    // own, or it holds other values.
+    bool eq_glue(const Type* t) const { return has_glue(t) || hand(t, prop_equal); }
+    bool show_glue(const Type* t) const { return has_glue(t) || hand(t, prop_display); }
+    bool hash_glue(const Type* t) const { return has_glue(t) || hand(t, prop_hash); }
+
     static bool has_glue(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
@@ -1305,6 +1399,7 @@ static void $reserve($T* m, cx_usize n) {
 
     // The call that prints the value `v` of type `t`.
     std::string show_value(const Type* t, const std::string& v) {
+        if (hand(t, prop_display)) return show_fn(t) + "(" + v + ");";
         if (is_int(t)) return t->is_signed ? "cx_print_i64((cx_i64)" + v + ");" : "cx_print_u64((cx_u64)" + v + ");";
         if (is_float(t)) return std::string(t->bits == 32 ? "cx_print_f32(" : "cx_print_f64(") + v + ");";
         switch (t->kind) {
@@ -2620,7 +2715,7 @@ static void $reserve($T* m, cx_usize n) {
         if ((op == Op::eq || op == Op::ne) && lt->kind == TypeKind::optional) return optional_equal(e);
         std::string decls;
         std::vector<std::string> v = sequence({{e->lhs, lt}, {e->rhs, rt}}, decls);
-        if ((op == Op::eq || op == Op::ne) && (lt->kind == TypeKind::str || lt->kind == TypeKind::string || has_glue(lt))) {
+        if ((op == Op::eq || op == Op::ne) && (lt->kind == TypeKind::str || lt->kind == TypeKind::string || eq_glue(lt))) {
             return wrap(decls, (op == Op::ne ? "(!" : "(") + equal(lt, v[0], v[1]) + ")");
         }
         bool ordered = op == Op::lt || op == Op::le || op == Op::gt || op == Op::ge;
@@ -2632,6 +2727,7 @@ static void $reserve($T* m, cx_usize n) {
 
     // Whether `a` and `b`, of type `t`, are equal. For an optional they must be places.
     std::string equal(const Type* t, const std::string& a, const std::string& b) {
+        if (hand(t, prop_equal)) return eq_fn(t) + "(" + a + ", " + b + ")";
         switch (t->kind) {
             case TypeKind::str: return "cx_str_eq(" + a + ", " + b + ")";
             case TypeKind::string: return "cx_str_eq(cx_sv(" + a + "), cx_sv(" + b + "))";
@@ -3355,6 +3451,13 @@ static void $reserve($T* m, cx_usize n) {
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
             return copy_fn(t) + "(" + address(recv) + ")";
         }
+        if (e->bmethod == BMethod::hash_add) {
+            Type* at = e->args[0].value->type;
+            std::string decls;
+            std::vector<std::string> v = sequence({{e->args[0].value, at}}, decls);
+            std::string h = "(" + address(recv) + ")->" + member(t, 0).substr(1);
+            return wrap(decls, "(" + h + " = cx_hash_word(" + h + ", " + hash_word(at, v[0]) + "))");
+        }
         if (e->bmethod == BMethod::cmp) {
             // `Ordering`'s variants are -1, 0 and 1, plus one.
             std::string decls;
@@ -3461,7 +3564,7 @@ static void $reserve($T* m, cx_usize n) {
                        "); (void)cx_index(" + j + ", " + p + "->len, " + index_at(1) + "); " + el + " " + v + " = " + p +
                        "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p + "->ptr[" + j + "]; " + p + "->ptr[" + j + "] = " +
                        v + "; })";
-            case BMethod::sort: return head + sort_call(et, p) + "; })";
+            case BMethod::sort: return head + sort_call(et, p, location(e->span)) + "; })";
             case BMethod::contains: {
                 std::string r = tmp();
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " + el + " " + v + " = " + arg(0, et) +
@@ -3486,7 +3589,10 @@ static void $reserve($T* m, cx_usize n) {
                 // The values are worked out before anything goes to standard error.
                 if (!e->args.empty()) print_parts(e->args[0].value, decls, s);
                 if (e->builtin == Builtin::eprintln) s += "cx_print_newline(); ";
-                return "({ " + decls + "cx_err_begin(); " + s + "cx_err_end(); })";
+                {
+                    std::string was = tmp();
+                    return "({ " + decls + "cx_out_to " + was + " = cx_err_begin(); " + s + "cx_err_end(" + was + "); })";
+                }
             case Builtin::panic:
                 print_parts(e->args[0].value, decls, s);
                 return "({ " + decls + "cx_panic_begin(" + location(e->span) + "); " + s + "cx_panic_end(); })";

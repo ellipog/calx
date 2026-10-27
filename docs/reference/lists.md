@@ -111,14 +111,14 @@ fn main() {
 }
 ```
 
-Whether a sort is stable, keeping equal elements in the order they were in, can't matter here: a derived `Order` compares everything a value holds, so equal elements are the same value. That leaves `sort` free to use whatever is fastest, which Rust's `sort` isn't, as a type there can order by part of itself. A type that writes its own `Order`, when that's built, will be sorted stably, as Java's `List.sort` is.
+Whether a sort is stable, keeping equal elements in the order they were in, can't matter here: a derived `Order` compares everything a value holds, so equal elements are the same value. That leaves `sort` free to use whatever is fastest, which Rust's `sort` isn't, as a type there can order by part of itself. A type that [writes its own `Order`](comparing.md#writing-your-own), or holds one that does, is sorted stably, as Java's `List.sort` is ([below](#stable-sorting)).
 
 - **Lists already in order**, or in reverse, are found in one pass, which compares 16 elements at a time with no branch between.
 - **Integers**, `char`, `rune` and `bool` in lists of a few hundred or more are radix sorted. A first pass finds which bytes differ between elements, and each of those takes one pass that moves every element by it, with no comparisons. When only one byte differs, as in a list of block IDs below 256, counting each value is enough, and the list is rewritten in place.
 - **Everything else** is quicksorted, with the median of 3 elements as the pivot, or of 3 medians of 3 in longer runs. The partition never branches on a comparison, as a mispredicted branch would cost more than the comparison. A pivot equal to the one before it means the run holds many copies of it, and they're set aside in one pass, so lists of few distinct values sort in linear time. Runs of 16 or fewer are sorted by insertion, or for integers by a sorting network, and a run split badly too often is heapsorted, so the worst case stays O(n log n).
 - **Structs and tuples of scalars** compare every field without a branch: `a.x < b.x | (a.x == b.x & a.y < b.y)`.
 
-Moving an element copies its bytes, as every move does ([ownership](ownership.md)), so nothing is copied deeply or freed. Radix sorting takes a buffer the size of the list; nothing else allocates.
+Moving an element copies its bytes, as every move does ([ownership](ownership.md)), so nothing is copied deeply or freed. Radix sorting takes a buffer the size of the list, and so does a stable sort; nothing else allocates.
 
 On the reference machine, an i9-13900K, against Rust 1.91's `sort` and `sort_unstable` in a release build for `x86-64-v3`, each pinned to one core, the best of 15 to 2,000 runs, in milliseconds:
 
@@ -132,6 +132,28 @@ On the reference machine, an i9-13900K, against Rust 1.91's `sort` and `sort_uns
 | 1,000,000 random `i32` | 3.9 | 13.1 | 10.6 |
 | 200,000 structs of `i32`, `i32`, `i64` | 4.7 | 7.9 | 6.4 |
 | 200,000 strings of 4 to 9 bytes | 7.7 | 15.0 | 13.0 |
+
+### Stable sorting
+
+A type with a hand-written `Order` can call two different values equal, so its lists are sorted stably (D102):
+
+- **Lists already in order**, or strictly in reverse, are found in one pass, as above. Reversing a list with no two elements equal keeps it stable.
+- **Everything else** is quicksorted stably, with the same pivots, from more elements in long runs, and the same setting aside of a pivot's copies. The partition never branches on a comparison: each element is written either where the left side ends, never past the element being read, or to a buffer the size of the list, choosing by pointer, and the right side is copied back after the left.
+- **Runs of 32 or fewer** are sorted with no branch on a comparison either: 4 at a time by a network that keeps equal elements in order, then merged in pairs, from both ends at once, so the front and back steps don't wait on each other.
+- **A run split badly too often** is merge sorted, so the worst case stays O(n log n).
+
+Merging from both ends with two runs of the same length can't read past either run unless `cmp` contradicts itself. A check at the end of each merge finds that, and `sort` panics rather than leave an element twice and another gone.
+
+Against Rust's `sort_by` on a `key` field, its stable sort, in the same setup, for structs of an `i32` and an `i64` ordered by the `i64`:
+
+| List | Calx `sort` | Rust `sort_by` |
+| --- | --- | --- |
+| 1,000,000 random | 22.1 | 27.0 |
+| 200,000 random | 3.6 | 4.5 |
+| 10,000 random | 0.098 | 0.124 |
+| 1,000,000 of 16 values | 6.6 | 10.8 |
+| 1,000,000 in order | 0.76 | 1.02 |
+| 1,000,000 in reverse | 1.44 | 1.64 |
 
 ## Printing
 

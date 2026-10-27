@@ -172,7 +172,7 @@ fn main() {
 }
 ```
 
-Like `Equal` and `Display`, `Hash` is a property, not an interface, and the name is reserved. A type writing its own is designed but not built ([spec](../CALX_SPEC.md#derived-properties)).
+Like `Equal` and `Display`, `Hash` is a property: every type that can have it does. A struct or an enum can [write its own](comparing.md#writing-your-own), adding what its `eq` compares with `h.add(x)`. One that writes its own `Equal` has no derived `Hash`, since that would hash what `eq` ignores, so it writes `Hash` too to be a key.
 
 ## Comparing and printing
 

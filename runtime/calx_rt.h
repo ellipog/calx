@@ -71,9 +71,15 @@ void cx_print_rune(cx_rune v);
 void cx_print_newline(void);
 
 /* `eprint` and `eprintln`: between these, the print functions write to standard error, which
- * isn't buffered. Output waiting for standard output goes first, so the two keep their order. */
-void cx_err_begin(void);
-void cx_err_end(void);
+ * isn't buffered. Output waiting for standard output goes first, so the two keep their order.
+ * Afterwards they write where they were writing, which matters inside a `show` written by hand
+ * (D102): one that calls `eprint` while its value goes into a string. */
+typedef struct {
+    void* fmt;
+    int err;
+} cx_out_to;
+cx_out_to cx_err_begin(void);
+void cx_err_end(cx_out_to was);
 
 /* A panic: `cx_panic_begin` starts the message on standard error, the print functions add to
  * it, and `cx_panic_end` finishes it and exits with status 101. */
@@ -103,6 +109,8 @@ cx_usize cx_alloc_live(void);
  * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. */
 void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
 CX_COLD void cx_panic_capacity(void);
+/* `sort` found that a hand-written `Order` contradicts itself (D102). */
+CX_COLD void cx_panic_order(const char* at);
 
 /* Strings. */
 CX_INLINE cx_String cx_string_lit(const char* p, cx_usize len) {

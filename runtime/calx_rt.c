@@ -246,12 +246,18 @@ void cx_print_str(cx_str s) { write_bytes(s.ptr, s.len); }
 /* --- std.io --------------------------------------------------------------------------------
  * These are declared by std/io.calx as C functions, not in calx_rt.h. */
 
-void cx_err_begin(void) {
+cx_out_to cx_err_begin(void) {
+    cx_out_to was = {fmt_to, to_stderr};
     if (out_len && !par_buffered) flush_out();
+    fmt_to = 0;
     to_stderr = 1;
+    return was;
 }
 
-void cx_err_end(void) { to_stderr = 0; }
+void cx_err_end(cx_out_to was) {
+    fmt_to = (cx_String*)was.fmt;
+    to_stderr = was.err;
+}
 
 void cx_out_write(const cx_u8* p, cx_usize n) {
     if (par_buffered) par_write(0, p, n);
@@ -739,6 +745,12 @@ void cx_panic_div_zero(const char* at) {
 void cx_panic_capacity(void) {
     cx_panic_begin("<memory>");
     panic_text("out of memory");
+    cx_panic_end();
+}
+
+void cx_panic_order(const char* at) {
+    cx_panic_begin(at);
+    panic_text("`sort` found an `Order` that contradicts itself, such as one where a < b and b < a");
     cx_panic_end();
 }
 

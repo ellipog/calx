@@ -9,12 +9,15 @@
  *   CX_SORT_UNKEY(k)    the element whose key is `k`. Long lists are then radix sorted
  *   CX_SORT_NETWORK     optional: sort short runs with a sorting network, for integers
  *   CX_SORT_STATIC      optional: make the function `static`
+ *   CX_SORT_STABLE      optional: keep equal elements in the order they were in. The function
+ *                       then takes `const char* at` too, where the sort is, for the panic
+ *                       when an `Order` contradicts itself
  *
  * and include this file, once for each element type. It undefines them all.
  *
- * Equal elements may change places: an `Order` that's derived compares everything a value holds,
- * so two equal elements are the same value, and no program can tell them apart. That leaves the
- * fastest algorithms free to use:
+ * Without CX_SORT_STABLE, equal elements may change places: an `Order` that's derived compares
+ * everything a value holds, so two equal elements are the same value, and no program can tell them
+ * apart. That leaves the fastest algorithms free to use:
  *
  * - A list already in order, or in reverse order, is found in one pass and done.
  * - Integers in long lists are radix sorted, a byte at a time from the lowest, skipping each byte
@@ -27,8 +30,17 @@
  *   or for integers sorted by a network, and a run that's been split too unevenly too often is
  *   heapsorted, so the worst case is O(n log n).
  *
+ * An `Order` written by hand can call two different values equal, so a type that has one, or holds
+ * one, is sorted stably (D102), as Java's `List.sort` is. That's a quicksort too, with the same
+ * pivots, the same setting aside of a pivot's copies, and runs of up to 20 insertion sorted, which
+ * keeps equal elements in order. Its partition keeps them in order as well: each element is
+ * written to a buffer, those going left from its front and the rest from its back, choosing which
+ * by pointer, with no branch; then the left ones are copied back, and the right ones copied back
+ * in reverse. A run split too unevenly too often is merge sorted.
+ *
  * Moving an element copies its bytes, as every move in Calx does, so nothing is copied deeply,
- * dropped or freed. The only memory used is the radix sort's buffer, the size of the list. */
+ * dropped or freed. The only memory used is the radix sort's buffer, or the stable sort's, the
+ * size of the list. */
 
 #define CX_SORT_CAT2(a, b) a##b
 #define CX_SORT_CAT(a, b) CX_SORT_CAT2(a, b)
@@ -53,6 +65,26 @@ static void CX_SORT_F(_insertion)(CX_SORT_T* v, cx_usize n) {
     }
 }
 
+/* The index of the median of v[a], v[b] and v[c]. */
+static inline cx_usize CX_SORT_F(_median)(const CX_SORT_T* v, cx_usize a, cx_usize b, cx_usize c) {
+    int ab = CX_SORT_LESS(&v[a], &v[b]), ac = CX_SORT_LESS(&v[a], &v[c]);
+    if (ab != ac) return a;  // v[a] is between the other two
+    // v[a] is the least or the greatest, so the median is the lesser or the greater of the others.
+    return CX_SORT_LESS(&v[b], &v[c]) == ab ? b : c;
+}
+
+static inline cx_usize CX_SORT_F(_pivot)(const CX_SORT_T* v, cx_usize n) {
+    cx_usize e = n / 8, a = 0, b = e * 4, c = e * 7;
+    if (n >= 64) {
+        cx_usize s = e / 2;
+        a = CX_SORT_F(_median)(v, a, a + s, a + 2 * s);
+        b = CX_SORT_F(_median)(v, b - s, b, b + s);
+        c = CX_SORT_F(_median)(v, c - s, c, c + s);
+    }
+    return CX_SORT_F(_median)(v, a, b, c);
+}
+
+#ifndef CX_SORT_STABLE
 #ifdef CX_SORT_NETWORK
 /* Sorts up to 16 elements with no branch on a comparison: runs of 4 by a sorting network, then
  * runs merged in pairs through a buffer, taking from one side or the other by choosing a
@@ -122,25 +154,6 @@ static void CX_SORT_F(_heap)(CX_SORT_T* v, cx_usize n) {
         CX_SORT_SWAP(v[0], v[end]);
         CX_SORT_F(_sift)(v, end, 0);
     }
-}
-
-/* The index of the median of v[a], v[b] and v[c]. */
-static inline cx_usize CX_SORT_F(_median)(const CX_SORT_T* v, cx_usize a, cx_usize b, cx_usize c) {
-    int ab = CX_SORT_LESS(&v[a], &v[b]), ac = CX_SORT_LESS(&v[a], &v[c]);
-    if (ab != ac) return a;  // v[a] is between the other two
-    // v[a] is the least or the greatest, so the median is the lesser or the greater of the others.
-    return CX_SORT_LESS(&v[b], &v[c]) == ab ? b : c;
-}
-
-static inline cx_usize CX_SORT_F(_pivot)(const CX_SORT_T* v, cx_usize n) {
-    cx_usize e = n / 8, a = 0, b = e * 4, c = e * 7;
-    if (n >= 64) {
-        cx_usize s = e / 2;
-        a = CX_SORT_F(_median)(v, a, a + s, a + 2 * s);
-        b = CX_SORT_F(_median)(v, b - s, b, b + s);
-        c = CX_SORT_F(_median)(v, c - s, c, c + s);
-    }
-    return CX_SORT_F(_median)(v, a, b, c);
 }
 
 /* Moves the elements of v[0..n) that go left, those less than the pivot, or with `le` those not
@@ -287,10 +300,189 @@ static int CX_SORT_F(_radix)(CX_SORT_T* v, cx_usize n) {
 }
 #endif
 
+#else
+/* Merges v[0..mid) and v[mid..n), each in order, through `buf`, which holds `mid` elements. */
+static void CX_SORT_F(_merge_stable)(CX_SORT_T* v, cx_usize mid, cx_usize n, CX_SORT_T* buf) {
+    __builtin_memcpy(buf, v, mid * sizeof(CX_SORT_T));
+    const CX_SORT_T *l = buf, *le = buf + mid, *r = v + mid, *re = v + n;
+    CX_SORT_T* d = v;
+    while (l < le && r < re) {
+        int right = CX_SORT_LESS(r, l);
+        *d++ = *(__builtin_unpredictable(right) ? r : l);
+        r += right;
+        l += !right;
+    }
+    // What's left of the right half is already in place.
+    if (l < le) __builtin_memcpy(d, l, (cx_usize)(le - l) * sizeof(CX_SORT_T));
+}
+
+/* A merge sort, for a run the quicksort split too unevenly too often. */
+static void CX_SORT_F(_merge_sort)(CX_SORT_T* v, cx_usize n, CX_SORT_T* buf) {
+    if (n <= 20) {
+        CX_SORT_F(_insertion)(v, n);
+        return;
+    }
+    cx_usize mid = n / 2;
+    CX_SORT_F(_merge_sort)(v, mid, buf);
+    CX_SORT_F(_merge_sort)(v + mid, n - mid, buf);
+    if (CX_SORT_LESS(&v[mid], &v[mid - 1])) CX_SORT_F(_merge_stable)(v, mid, n, buf);
+}
+
+/* Moves the elements of v[0..n) that go left, those less than the pivot, or with `le` those not
+ * greater than it, to the front, and the rest after them, each in the order they were in. Says
+ * how many go left. Those that do are written where the left side ends, which is never past the
+ * element being read, and the rest to `buf`, which holds n elements, then copied back after them. */
+static inline __attribute__((always_inline)) cx_usize CX_SORT_F(_split)(CX_SORT_T* v, cx_usize n, CX_SORT_T* buf,
+                                                                         const CX_SORT_T* pivot, int le) {
+    CX_SORT_T* lo = v;
+    CX_SORT_T* hi = buf;
+    for (cx_usize i = 0; i < n; i++) {
+        int goes = le ? !CX_SORT_LESS(pivot, &v[i]) : CX_SORT_LESS(&v[i], pivot);
+        *(__builtin_unpredictable(goes) ? lo : hi) = v[i];
+        lo += goes;
+        hi += !goes;
+    }
+    cx_usize mid = (cx_usize)(lo - v);
+    __builtin_memcpy(lo, buf, (n - mid) * sizeof(CX_SORT_T));
+    return mid;
+}
+
+/* The median of v[a], v[a + 4e] and v[a + 7e], each found the same way from the eighth of the
+ * run around it while that's long enough: for a long run, a pivot from many more elements, so
+ * the run splits more evenly, which matters more when every split copies half the run. */
+static cx_usize CX_SORT_F(_median_far)(const CX_SORT_T* v, cx_usize a, cx_usize e) {
+    cx_usize b = a + 4 * e, c = a + 7 * e;
+    if (e >= 8) {
+        cx_usize f = e / 8;
+        a = CX_SORT_F(_median_far)(v, a, f);
+        b = CX_SORT_F(_median_far)(v, b, f);
+        c = CX_SORT_F(_median_far)(v, c, f);
+    }
+    return CX_SORT_F(_median)(v, a, b, c);
+}
+
+/* v[0..4) in order into d[0..4), equal elements in the order they were in, with no branch: two
+ * ordered pairs, then the least of their firsts and the greatest of their seconds, then the two
+ * left, which are ordered by where they came from before they're compared. */
+static inline void CX_SORT_F(_sort4)(const CX_SORT_T* v, CX_SORT_T* d) {
+    int x = CX_SORT_LESS(&v[1], &v[0]), y = CX_SORT_LESS(&v[3], &v[2]);
+    const CX_SORT_T *a = v + x, *b = v + !x, *c = v + 2 + y, *e = v + 2 + !y;
+    int p = __builtin_unpredictable(CX_SORT_LESS(c, a)), q = __builtin_unpredictable(CX_SORT_LESS(e, b));
+    const CX_SORT_T* least = p ? c : a;
+    const CX_SORT_T* most = q ? b : e;
+    const CX_SORT_T* l = p ? a : q ? c : b;
+    const CX_SORT_T* r = q ? e : p ? b : c;
+    int z = CX_SORT_LESS(r, l);
+    d[0] = *least;
+    d[1] = *(__builtin_unpredictable(z) ? r : l);
+    d[2] = *(__builtin_unpredictable(z) ? l : r);
+    d[3] = *most;
+}
+
+/* Merges l[0..le) and r[0..re), each in order, into d, taking from the right only when it's
+ * strictly less, by choosing a pointer. */
+static inline void CX_SORT_F(_merge_into)(const CX_SORT_T* l, const CX_SORT_T* le, const CX_SORT_T* r,
+                                          const CX_SORT_T* re, CX_SORT_T* d) {
+    while (l < le && r < re) {
+        int right = CX_SORT_LESS(r, l);
+        *d++ = *(__builtin_unpredictable(right) ? r : l);
+        r += right;
+        l += !right;
+    }
+    while (l < le) *d++ = *l++;
+    while (r < re) *d++ = *r++;
+}
+
+/* Merges v[0..h) and v[h..2h), each in order, into d, from both ends at once: the front takes
+ * the lesser, the left one if they're equal, and the back the greater, the right one if they're
+ * equal. The two don't wait on each other, so a step costs half as much. With runs of the same
+ * length, each side's last step is the one that empties a run, so neither reads past its own run;
+ * an `Order` that contradicts itself could make them, which the check at the end finds, before
+ * an element that's been written twice can be dropped twice. */
+static inline void CX_SORT_F(_merge_both)(const CX_SORT_T* v, cx_usize h, CX_SORT_T* d, const char* at) {
+    const CX_SORT_T *l = v, *r = v + h, *lb = v + h - 1, *rb = v + 2 * h - 1;
+    CX_SORT_T *df = d, *db = d + 2 * h - 1;
+    for (cx_usize k = h; k; k--) {
+        int f = CX_SORT_LESS(r, l);
+        *df++ = *(__builtin_unpredictable(f) ? r : l);
+        r += f;
+        l += !f;
+        int b = CX_SORT_LESS(rb, lb);
+        *db-- = *(__builtin_unpredictable(b) ? lb : rb);
+        lb -= b;
+        rb -= !b;
+    }
+    if (l != lb + 1 || r != rb + 1) cx_panic_order(at);
+}
+
+/* Sorts up to 32 elements stably with no branch on a comparison, through `buf`: runs of 4 by
+ * `_sort4`, what's left by insertion, then runs merged in pairs, back and forth, from both ends
+ * when they're the same length. */
+static void CX_SORT_F(_small_stable)(CX_SORT_T* v, cx_usize n, CX_SORT_T* buf, const char* at) {
+    cx_usize k = 0;
+    for (; k + 4 <= n; k += 4) CX_SORT_F(_sort4)(v + k, buf + k);
+    if (k < n) {
+        __builtin_memcpy(buf + k, v + k, (n - k) * sizeof(CX_SORT_T));
+        CX_SORT_F(_insertion)(buf + k, n - k);
+    }
+    CX_SORT_T *from = buf, *to = v;
+    for (cx_usize w = 4; w < n; w *= 2) {
+        for (cx_usize i = 0; i < n; i += 2 * w) {
+            cx_usize m = i + w < n ? i + w : n, e = i + 2 * w < n ? i + 2 * w : n;
+            if (e - m == w) CX_SORT_F(_merge_both)(from + i, w, to + i, at);
+            else CX_SORT_F(_merge_into)(from + i, from + m, from + m, from + e, to + i);
+        }
+        CX_SORT_T* t = from;
+        from = to;
+        to = t;
+    }
+    if (from != v) __builtin_memcpy(v, from, n * sizeof(CX_SORT_T));
+}
+
+/* Every value in v[0..n) is at least `*floor`, the pivot that set the run apart, if there is one.
+ * `limit` is how many more partitions may go before merge sort takes over. */
+static void CX_SORT_F(_stable_quick)(CX_SORT_T* v, cx_usize n, CX_SORT_T* buf, const CX_SORT_T* floor, int limit,
+                                      const char* at) {
+    CX_SORT_T below;  // the pivot the rest of the run comes after, copied, since elements move
+    for (;;) {
+        if (n <= 32) {
+            CX_SORT_F(_small_stable)(v, n, buf, at);
+            return;
+        }
+        if (limit == 0) {
+            CX_SORT_F(_merge_sort)(v, n, buf);
+            return;
+        }
+        limit--;
+        CX_SORT_T pivot = v[n >= 512 ? CX_SORT_F(_median_far)(v, 0, n / 8) : CX_SORT_F(_pivot)(v, n)];
+        if (floor && !CX_SORT_LESS(floor, &pivot)) {
+            // The pivot equals the floor, so every value not greater than it equals it: set them
+            // all aside, and sort what's greater.
+            cx_usize same = CX_SORT_F(_split)(v, n, buf, &pivot, 1);
+            v += same;
+            n -= same;
+            floor = 0;
+            continue;
+        }
+        // At least the pivot goes right; if nothing goes left, the next pivot finds its copies.
+        cx_usize mid = CX_SORT_F(_split)(v, n, buf, &pivot, 0);
+        CX_SORT_F(_stable_quick)(v, mid, buf, floor, limit, at);
+        below = pivot;
+        floor = &below;
+        v += mid;
+        n -= mid;
+    }
+}
+#endif
+
 #ifdef CX_SORT_STATIC
 static
 #endif
+#ifdef CX_SORT_STABLE
+void CX_SORT_NAME(CX_SORT_T* v, cx_usize n, const char* at) {
+#else
 void CX_SORT_NAME(CX_SORT_T* v, cx_usize n) {
+#endif
     if (n < 2) return;
     // A list in order, or strictly in reverse. The elements are compared 16 at a time with no
     // branch between, so the compiler can compare several at once.
@@ -308,10 +500,21 @@ void CX_SORT_NAME(CX_SORT_T* v, cx_usize n) {
         }
         return;
     }
+#ifdef CX_SORT_STABLE
+    if (n <= 20) {
+        CX_SORT_F(_insertion)(v, n);
+        return;
+    }
+    cx_usize bytes = n * sizeof(CX_SORT_T);
+    CX_SORT_T* buf = (CX_SORT_T*)cx_alloc(bytes);
+    CX_SORT_F(_stable_quick)(v, n, buf, 0, 2 * (63 - __builtin_clzll((unsigned long long)n)), at);
+    cx_free(buf, bytes);
+#else
 #ifdef CX_SORT_KEY
     if (n >= 128 && CX_SORT_F(_radix)(v, n)) return;
 #endif
     CX_SORT_F(_quick)(v, n, 0, 2 * (63 - __builtin_clzll((unsigned long long)n)));
+#endif
 }
 
 #undef CX_SORT_SWAP
@@ -326,3 +529,4 @@ void CX_SORT_NAME(CX_SORT_T* v, cx_usize n) {
 #undef CX_SORT_UNKEY
 #undef CX_SORT_STATIC
 #undef CX_SORT_NETWORK
+#undef CX_SORT_STABLE

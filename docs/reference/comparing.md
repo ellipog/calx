@@ -1,6 +1,6 @@
 ---
 title: Comparing and printing
-description: The derived Equal, Order and Display, which give ==, < and {x} to structs, enums, tuples, arrays, optionals, lists, maps and sets; Ordering and cmp; the bounds T: Equal, T: Order and T: Display; and their C.
+description: The derived Equal, Order and Display, which give ==, < and {x} to structs, enums, tuples, arrays, optionals, lists, maps and sets; Ordering and cmp; the bounds T: Equal, T: Order and T: Display; writing your own; and their C.
 ---
 
 # Comparing and printing
@@ -210,7 +210,115 @@ fn main() {
 }
 ```
 
-Like `Copy` and `Hash`, `Equal`, `Order` and `Display` are properties, not interfaces: no `impl` gives them, and the names are reserved, as is `Ordering`. A type writing its own, to compare only some fields or to show itself another way, is designed but not built ([spec](../CALX_SPEC.md#derived-properties)).
+Like `Copy`, `Equal`, `Order`, `Display` and `Hash` are properties: every type that can have one does, with nothing to write. As bounds, they mean the property, however the type has it. The names are reserved, as are `Ordering` and `Hasher`.
+
+## Writing your own
+
+A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in place of the derived one, by implementing the interface of that name (D102). The four are built in, so there's nothing to import:
+
+| Interface | Function | What calls it |
+| --- | --- | --- |
+| `Equal` | `fn eq(self, other: Self) -> bool` | `==` and `!=`, `contains`, a map's or a set's keys |
+| `Display` | `fn show(self)` | `{x}` in a string |
+| `Hash` | `fn hash(self, h: mut Hasher)` | A map's or a set's keys |
+| `Order` | `fn cmp(self, other: Self) -> Ordering` | `<`, `<=`, `>`, `>=`, `a.cmp(b)` and `sort` |
+
+What holds the type uses its function too: a list of them shows each one its way, and a struct with one as a field compares that field with it.
+
+```calx
+struct BlockPos {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+impl Display for BlockPos {
+    fn show(self) {
+        print("{self.x}, {self.y}, {self.z}")
+    }
+}
+
+// A player is the same player whatever its score.
+struct Player {
+    name: String,
+    score: i32,
+}
+
+impl Equal for Player {
+    fn eq(self, other: Self) -> bool {
+        return self.name == other.name
+    }
+}
+
+impl Hash for Player {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.name)
+    }
+}
+
+// Highest score first.
+impl Order for Player {
+    fn cmp(self, other: Self) -> Ordering {
+        return other.score.cmp(self.score)
+    }
+}
+
+struct Spawn {
+    at: BlockPos,
+    dimension: str,
+}
+
+fn main() {
+    let p = BlockPos { x: 1, y: 64, z: -3 }
+    println("{p}")    // out: 1, 64, -3
+    println("{Spawn { at: p, dimension: "overworld" }}")    // out: Spawn { at: 1, 64, -3, dimension: overworld }
+
+    var online = Set<Player>()
+    online.insert(Player { name: String("Alex"), score: 3 })
+    online.insert(Player { name: String("Alex"), score: 9 })
+    println("{online.len()}")    // out: 1
+
+    var board: List<Player> = [
+        Player { name: String("a"), score: 1 },
+        Player { name: String("b"), score: 5 },
+        Player { name: String("c"), score: 1 },
+        Player { name: String("d"), score: 5 },
+    ]
+    board.sort()
+    var names = String()
+    for q in board {
+        names.push_str(q.name)
+    }
+    println(names)    // out: bdac
+}
+```
+
+- **`show`** writes the value with `print`, which goes wherever the value is going: standard output, standard error for `eprint`, or the `String` an interpolation is building. `eprint` inside `show` still writes to standard error, and what comes after it goes back where it was going.
+- **`h.add(x)`** adds a value with `Hash` to the hash, so a `hash` adds what its type's `eq` compares, field by field. The `Hasher` mixes them as a derived `Hash` does; nothing else can make one.
+- **A type that writes its own `Equal` has no derived `Hash`.** That `Hash` would hash fields `eq` ignores, so two keys `eq` calls equal could land in different places, and a lookup would miss. To be a key, the type writes its own `Hash` too, adding only what `eq` compares. Writing `Hash` needs `Equal`, derived or written.
+- **A type that writes its own `Order` is sorted stably**, as Java's `List.sort` is: elements `cmp` calls equal keep the order they were in, as `a` before `c` above. So is a type that holds one ([sorting](lists.md#sorting)). `cmp` should call two values `Equal` only when `==` does, and say `Less` one way exactly when it says `Greater` the other. A `sort` that finds a `cmp` breaking that, in a way that would lose an element, panics.
+- **The functions are called only by what they're behind**, so there's one way to compare, show or hash a value, whatever its type: `a.eq(b)`, `p.show()` and `Equal.eq(a, b)` are errors that say what to write.
+- **Only structs and enums write their own.** Numbers, strings, lists and the rest keep theirs. A generic type can: with `impl<T: Display> Display for Boxed<T>`, `Boxed<T>` shows its way for each `T` that has `Display`.
+
+```calx
+struct Pos {
+    x: i32,
+    z: i32,
+}
+
+impl Equal for Pos {
+    fn eq(self, other: Self) -> bool {
+        return self.x == other.x and self.z == other.z
+    }
+}
+
+fn main() {
+    let p = Pos { x: 1, z: 2 }
+    println("{p.eq(p)}")    // error: `eq` is what `==` calls; compare with `a == b`
+    let seen = Set<Pos>()    // error: `Pos` can't be a key of a map or a set, since it has no `Hash`, and `Pos` has an `Equal` of its own, so it needs a `Hash` of its own that agrees with it
+    println("{seen.len()}")
+}
+```
 
 ## In C
 
@@ -219,3 +327,5 @@ A file that compares or prints a struct, an enum with data, a tuple, an array, a
 `cx_eq_` is the field comparisons, in order, joined with `&&`, so comparing two `Point`s is two integer comparisons once clang inlines it. `cx_show_` writes each piece straight to the output, or to the `String` being built, so showing a value builds no strings for its parts, and the text between two values is written in one go.
 
 Ordering one of those types, or an enum whose values don't go up in the order its variants are declared, takes `cx_cmp_<type>(a, b)`, which gives -1, 0 or 1: the parts compared in turn until one differs. `a.cmp(b)` adds 1, so `Less`, `Equal` and `Greater` are 0, 1 and 2. Strings compare with `cx_str_cmp`, which compares the first 8 bytes as one big-endian integer, since most strings differ there, before calling `memcmp` on the rest.
+
+A type that [writes its own](#writing-your-own) gets the same functions, which call what it wrote: `cx_eq_BlockPos(a, b)` returns `app__BlockPos__Equal__eq(&a, &b)`, and clang inlines one into the other. `cx_hash_` makes a `Hasher`, seeded as every hash is, hands it to `hash`, and gives back what it holds; `cx_cmp_` takes 1 from what `cmp` gives. They come after the file's function declarations, since they call one. A list of a type whose `Order` is written, or that holds one, is sorted by `calx_sort.h` with `CX_SORT_STABLE` ([sorting](lists.md#sorting)), which also takes the place of the `sort` call, for the panic.

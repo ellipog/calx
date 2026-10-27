@@ -154,6 +154,7 @@ enum class CallKind : std::uint8_t {
 enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
     truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get, cmp, sort,
+    hash_add,  // `h.add(x)` on a `Hasher`
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
 
@@ -469,6 +470,7 @@ struct Module {
     std::string_view doc;
     Slice<Item*> items;
     std::string_view prefix;  // filled in by the checker: its items' C names start with this
+    bool builtin = false;     // `std.core`, which the compiler holds, not a file (D102)
 };
 
 // Calls `fe` on each expression directly inside `e`, and `fb` on each block.

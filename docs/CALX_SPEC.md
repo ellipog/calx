@@ -108,13 +108,12 @@ The compiler works these out for each type, without being asked:
 | Property | Holds when |
 | --- | --- |
 | `Copy` | Every field is `Copy` and the type owns no heap memory. Copying is implicit only for these |
-| `Equal`, `Display`, `Hash`, `Order` | Every field has them. A type can implement them by hand instead |
+| `Equal`, `Display`, `Hash`, `Order` | Every field has them. A struct or an enum can write its own instead |
 | `Send` | The value can cross between regions: no views, no closures that capture views, nothing that's only valid in one place. Plain data and handles are `Send` |
 | `Share` | Deeply immutable while shared, so many parallel iterations can read it at once |
 
-Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). Still to build:
+Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). A struct or an enum can [write its own](reference/comparing.md#writing-your-own) `Equal`, `Display`, `Hash` or `Order` by implementing the built-in interface of that name (D102): to compare only some fields, to show a block position as `1, 64, -3`, or to keep a field out of logs. What holds it uses it too, a type with its own `Equal` writes its own `Hash` to be a key, and one with its own `Order` is sorted stably. Still to build:
 
-- **Writing `Equal`, `Order`, `Display` or `Hash` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
 - **`Send` and `Share`**, with actors.
 
 ### Handles (D24)

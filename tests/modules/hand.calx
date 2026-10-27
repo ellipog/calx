@@ -1,0 +1,72 @@
+// What a type writes for its derived properties (D102), used from another module: the glue there
+// calls the functions in the type's module, and a generic type's are instances in the caller's.
+// file: app/main.calx
+module app.main
+
+import app.geo.{BlockPos, Wrap, Route}
+
+fn main() {
+    let a = BlockPos { x: 1, y: 64, z: -3 }
+    let b = BlockPos { x: 0, y: 70, z: 2 }
+    println("{a}")    // out: 1 64 -3
+    var heights = Map<BlockPos, i32>()
+    heights.insert(a, 1)
+    heights.insert(BlockPos { x: 1, y: 0, z: -3 }, 2)
+    heights.insert(b, 3)
+    println("{heights.len()} {heights[BlockPos { x: 1, y: 99, z: -3 }]}")    // out: 2 2
+    var ps: List<BlockPos> = [a, b, BlockPos { x: 5, y: 1, z: 0 }]
+    ps.sort()
+    println("{ps}")    // out: [5 1 0, 1 64 -3, 0 70 2]
+    println("{Wrap { inner: a }} {Wrap { inner: true }}")    // out: (1 64 -3) (true)
+    println("{Route { stops: [a, b] }}")    // out: Route { stops: [1 64 -3, 0 70 2] }
+}
+
+// file: app/geo.calx
+module app.geo
+
+pub struct BlockPos {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl Display for BlockPos {
+    fn show(self) {
+        print("{self.x} {self.y} {self.z}")
+    }
+}
+
+// The same column is the same place, whatever the height.
+impl Equal for BlockPos {
+    fn eq(self, other: Self) -> bool {
+        return self.x == other.x and self.z == other.z
+    }
+}
+
+impl Hash for BlockPos {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.x)
+        h.add(self.z)
+    }
+}
+
+// Lowest first.
+impl Order for BlockPos {
+    fn cmp(self, other: Self) -> Ordering {
+        return self.y.cmp(other.y)
+    }
+}
+
+pub struct Wrap<T> {
+    pub inner: T,
+}
+
+impl<T: Display> Display for Wrap<T> {
+    fn show(self) {
+        print("({self.inner})")
+    }
+}
+
+pub struct Route {
+    pub stops: List<BlockPos>,
+}

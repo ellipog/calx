@@ -89,7 +89,8 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash", "Order", "Ordering"}) {
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash", "Order", "Ordering",
+                              "Hasher"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
@@ -103,6 +104,8 @@ public:
         n_Equal_ = ctx.names.intern("Equal");
         n_Display_ = ctx.names.intern("Display");
         n_copy_ = ctx.names.intern("copy");
+        n_Hasher_ = ctx.names.intern("Hasher");
+        n_add_ = ctx.names.intern("add");
         n_ok_ = ctx.names.intern("ok");
         n_err_ = ctx.names.intern("err");
     }
@@ -117,6 +120,9 @@ public:
             set_prefix(m);
             collect(m);
         }
+        for (Module* m : modules) {
+            if (m->builtin) find_core(m);
+        }
         for (Module* m : modules) resolve_imports(m);
         resolve_params();
         // Bounds are checked once every impl is known, since a type's fields can need one.
@@ -126,6 +132,14 @@ public:
         for (Item* it : interfaces_) collect_interface(it);
         for (Item* it : impls_) collect_impl(it);
         check_one_name();
+        // What was worked out about the derived properties before every impl was known could be
+        // wrong for a type that writes its own.
+        for (Derived& d : derived_) {
+            d.known.clear();
+            d.order.clear();
+        }
+        hand_ready_ = true;
+        check_hand_written();
         defer_bounds_ = false;
         for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
         for (const auto& [key, span] : deferred_keys_) check_key(key, span);
@@ -242,7 +256,29 @@ private:
             it->second.used = true;
             return it->second.item;
         }
+        // `std.core`'s names are reserved, so no module declares them, and every module sees them.
+        if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_)) {
+            if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
+        }
         return nullptr;
+    }
+
+    // `std.core`: the interfaces of the derived properties, and `Hasher` (D102).
+    void find_core(Module* m) {
+        core_scope_ = scopes_.at(m).get();
+        const Name names[] = {n_Equal_, n_Display_, n_Hash_, n_Order_};
+        for (int p = 0; p < 4; p++) prop_iface_[p] = core_scope_->items.at(names[p]);
+        Item* h = core_scope_->items.at(n_Hasher_);
+        hasher_type_ = h->declared;
+        prog_.hasher = hasher_type_;
+    }
+
+    // Which derived property an interface is, or -1.
+    int prop_of(const Item* iface) const {
+        for (int p = 0; p < 4; p++) {
+            if (iface && iface == prop_iface_[p]) return p;
+        }
+        return -1;
     }
 
     std::string module_name(const Module* m) const {
@@ -435,7 +471,7 @@ private:
     }
 
     void declare_item(Item* it) {
-        if (is_builtin_name(it->name)) {
+        if (is_builtin_name(it->name) && !scope_->module->builtin) {
             error(it->name_span, q(text(it->name)) + " is a built-in name");
             it->used = true;  // nothing can name it, so "never used" would only repeat the error
             return;
@@ -783,7 +819,7 @@ private:
         if (!ok) {
             error(m->name_span, q(text(m->name)) + " doesn't match " + q(text(iface->name)) + ", which declares it as " +
                                     q(signature_text(want, s)));
-            note(want->name_span, "it's declared here");
+            if (!want->module->builtin) note(want->name_span, "it's declared here");
         }
     }
 
@@ -806,6 +842,11 @@ private:
             }
         }
         bool nominal = t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_;
+        if (prop_of(iface) >= 0 && !nominal) {
+            error(impl->self_type->span, name_of(t) + "'s " + q(text(iface->name)) +
+                                             " is built in; only a struct or an enum can write its own");
+            return;
+        }
         if (!iface && !nominal) {
             error(impl->self_type->span, "methods can only be added to structs and enums declared in this module");
             return;
@@ -3129,6 +3170,9 @@ private:
             default: return false;
         }
         if (t->is_result) return false;
+        if (hand(t, prop)) return true;
+        // A `Hash` of everything it holds could differ for values its own `Equal` calls equal.
+        if (prop == p_hash && hand(t, p_equal)) return false;
         Derived& d = derived_[prop];
         auto it = d.known.find(t);
         if (it != d.known.end()) return it->second;
@@ -3161,6 +3205,46 @@ private:
         return ok;
     }
 
+    // The function a struct or an enum writes for a derived property, through an impl of its
+    // interface in `std.core`, or null (D102). For a generic type with real arguments, it's the
+    // instance, which the emitter calls in place of the derived one.
+    Item* hand(const Type* ct, int prop) {
+        if (!hand_ready_ || (ct->kind != TypeKind::struct_ && ct->kind != TypeKind::enum_)) return nullptr;
+        auto key = std::make_pair(ct, prop);
+        if (auto it = hand_.find(key); it != hand_.end()) return it->second;
+        Type* t = const_cast<Type*>(ct);
+        Item* r = nullptr;
+        if (auto found = impls_by_head_.find(head(t)); found != impls_by_head_.end()) {
+            for (ImplInfo* info : found->second) {
+                if (info->iface != prop_iface_[prop]) continue;
+                Subst s;
+                if (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s)) continue;
+                auto m = info->members.find(prop_iface_[prop]->members[0]->name);
+                if (m == info->members.end()) break;  // reported as missing
+                info->used = true;
+                r = m->second;
+                if (!r->type_params.empty() && !t->open) {
+                    std::vector<Type*> args;
+                    for (Type* p : r->type_params) args.push_back(s.at(p));
+                    r = instance_fn(r, args, info->impl->self_type->span);
+                }
+                break;
+            }
+        }
+        hand_[key] = r;
+        if (r && !t->open && r->type_params.empty()) prog_.hand[prop][t] = r;
+        return r;
+    }
+
+    // `Hash` needs `Equal`, since a map compares the keys it finds by their hash.
+    void check_hand_written() {
+        for (const auto& info : impl_infos_) {
+            if (prop_of(info->iface) != p_hash || equatable(info->self)) continue;
+            error(info->impl->self_type->span, "`Hash` needs `Equal`, which " + name_of(info->self) + " doesn't have" +
+                                                   lacking(info->self, p_equal));
+        }
+    }
+
     // Why a type lacks a derived property, to end a message with: what inside it lacks it.
     std::string lacking(const Type* t, int prop) {
         std::unordered_set<const Type*> seen;
@@ -3172,6 +3256,9 @@ private:
         if (prop == p_hash && leaf->kind == TypeKind::float_) why = ", and floats have no `Hash`, since `NaN` isn't equal to itself";
         if (prop == p_hash && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Hash`, so a table's order can't depend on addresses";
         if (prop == p_hash && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Hash`";
+        if (prop == p_hash && (leaf->kind == TypeKind::struct_ || leaf->kind == TypeKind::enum_)) {
+            why = ", and " + name_of(leaf) + " has an `Equal` of its own, so it needs a `Hash` of its own that agrees with it";
+        }
         if (prop == p_order && leaf->kind == TypeKind::float_) {
             why = ", and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with "
                   "`total_cmp`";
@@ -3199,12 +3286,14 @@ private:
                 }
                 return nullptr;
             case TypeKind::struct_:
+                if (prop == p_hash && hand(t, p_equal)) return t;
                 for (const FieldDecl& f : t->item->fields) {
                     if (!f.resolved) continue;
                     if (const Type* x = lacking_part(f.resolved, prop, seen)) return x;
                 }
                 return nullptr;
             case TypeKind::enum_:
+                if (prop == p_hash && hand(t, p_equal)) return t;
                 for (const VariantDecl& v : t->item->variants) {
                     for (const Type* e : v.types) {
                         if (const Type* x = lacking_part(e, prop, seen)) return x;
@@ -5104,6 +5193,7 @@ private:
             }
             if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
             if (callee->member == n_cmp_ && !e->only_interface) return cmp_call(e, recv);
+            if (callee->member == n_add_ && recv == hasher_type_ && !e->only_interface) return hash_add(e);
             Member mem = lookup(recv, callee->member, e->only_interface);
             // Through a parameter, the bound says which interface answers, and an instance, whose
             // type could have the name in another interface too, keeps to it.
@@ -5116,6 +5206,11 @@ private:
             }
             if (!mem.fn && e->only_interface) {
                 error(callee->lhs->span, name_of(recv) + " doesn't implement " + q(text(e->only_interface->name)));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+            if (mem.fn && prop_of(mem.iface) >= 0) {
+                error(callee->span, called_by_name(mem.iface));
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
@@ -5171,6 +5266,11 @@ private:
     Type* interface_call(Expr* e, Item* iface) {
         Expr* callee = e->callee;
         use_item(iface);
+        if (prop_of(iface) >= 0) {
+            error(callee->span, called_by_name(iface));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
         Item* member = interface_member(iface, callee->member);
         if (!member || member->kind != ItemKind::fn) {
             error(callee->span, q(text(iface->name)) + " has no function " + q(text(callee->member)));
@@ -5198,6 +5298,40 @@ private:
         e->args = ctx_.arena.copy(rest);
         e->only_interface = iface;
         return call(e, nullptr);
+    }
+
+    // A derived property's function is called by what it's behind, so there's one way to compare,
+    // show or hash a value whether its type writes its own or not.
+    std::string called_by_name(const Item* iface) {
+        switch (prop_of(iface)) {
+            case p_equal: return "`eq` is what `==` calls; compare with `a == b`";
+            case p_display: return "`show` is what `{x}` calls; show a value with `print(\"{x}\")`";
+            case p_hash: return "`hash` is what maps and sets call; inside a `hash`, add a value with `h.add(x)`";
+            default: return "call `cmp` on a value: `a.cmp(b)`";
+        }
+    }
+
+    // `h.add(x)`: folds a value into the hash a hand-written `hash` makes (D102).
+    Type* hash_add(Expr* e) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::hash_add;
+        if (e->args.size() != 1) {
+            error(e->span, "`add` takes one argument, the value to add to the hash");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Arg& a = e->args[0];
+        if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+        Type* at = check(a.value, nullptr);
+        if (is_bad(at)) return T.error;
+        if (!hashable(at)) {
+            error(a.value->span, "values of type " + name_of(at) + " can't be hashed" + lacking(at, p_hash));
+            return T.error;
+        }
+        Expr* lhs = e->callee->lhs;
+        if (Local* root = place_root(lhs)) require_writable(lhs, root, false);
+        else error(lhs->span, "`add` changes the `Hasher`, so call it on a variable");
+        return T.unit;
     }
 
     std::string ambiguity_example(Type* t, Name member) {
@@ -6484,6 +6618,13 @@ private:
         std::vector<const Type*> order;
     };
     Derived derived_[4];
+    // D102: `std.core`'s names, its interfaces by property, and each type's hand-written functions.
+    Scope* core_scope_ = nullptr;
+    Item* prop_iface_[4] = {};
+    Type* hasher_type_ = nullptr;
+    bool hand_ready_ = false;  // every impl is known
+    std::map<std::pair<const Type*, int>, Item*> hand_;
+    Name n_Hasher_, n_add_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

@@ -1,0 +1,23 @@
+// An `Order` written by hand that contradicts itself, here saying a < b and b < a for half the
+// pairs: `sort` finds it while merging, and panics rather than leave a list with an element twice
+// and another gone (D102).
+struct Coin {
+    v: i32,
+}
+
+impl Order for Coin {
+    fn cmp(self, other: Self) -> Ordering {
+        return if (self.v + other.v) % 2 == 1 { Ordering.Less } else { Ordering.Greater }
+    }
+}
+
+fn main() {
+    var xs: List<Coin> = []
+    var i = 0
+    while i < 21 {
+        xs.push(Coin { v: (i * 7919) % 1009 })
+        i += 1
+    }
+    xs.sort()    // panic: `sort` found an `Order` that contradicts itself
+    println("{xs.len()}")
+}

@@ -24,7 +24,7 @@ fn main() {
 | `assert(cond)`, `assert(cond, s)` | Panics if `cond` is false, with the message `assertion failed: s` |
 | `panic(s)` | Panics with the message `s` |
 
-The argument is a `str` or a `String`. A string literal there can interpolate: `{expr}` writes the value of `expr`, with no string built in between. Every value can be interpolated except a pointer, and a generic parameter without the bound `Display`: numbers, `bool`, text, and structs, enums, tuples, arrays, optionals and lists of them ([comparing and printing](comparing.md#display)). Floats print as Java prints them ([floats](floats.md#printing)), and a struct prints as its literal, such as `Point { x: 1, y: 2 }`. An interpolating literal anywhere else builds a `String` ([strings](strings.md#literals)).
+The argument is a `str` or a `String`. A string literal there can interpolate: `{expr}` writes the value of `expr`, with no string built in between. Every value can be interpolated except a pointer, and a generic parameter without the bound `Display`: numbers, `bool`, text, and structs, enums, tuples, arrays, optionals and lists of them ([comparing and printing](comparing.md#display)). Floats print as Java prints them ([floats](floats.md#printing)), and a struct prints as its literal, such as `Point { x: 1, y: 2 }`, unless it [writes its own `Display`](comparing.md#writing-your-own). An interpolating literal anywhere else builds a `String` ([strings](strings.md#literals)).
 
 Every interpolation runs, left to right, before anything is written, as Java builds the whole string first. So a function called inside `{...}` that prints writes its output before the line it's in.
 

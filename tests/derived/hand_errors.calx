@@ -1,0 +1,85 @@
+// Writing `Equal`, `Display`, `Hash` or `Order` by hand (D102): only structs and enums can, with
+// the interface's signature; the functions are called through `==`, `{x}`, maps and `cmp`, not by
+// name; and a type with its own `Equal` has no derived `Hash`.
+struct Pos {
+    x: i32,
+    z: i32,
+}
+
+impl Equal for Pos {
+    fn eq(self, other: Self) -> bool {
+        return self.x == other.x
+    }
+}
+
+impl Display for Pos {
+    fn show(self) {
+        print("{self.x}")
+    }
+}
+
+struct Holder {
+    at: Pos,
+}
+
+struct Wrong {
+    v: i32,
+}
+
+impl Equal for Wrong {
+    fn eq(self, that: Self) -> bool {    // error: `eq` doesn't match `Equal`, which declares it as `fn eq(self, other: Wrong) -> bool`
+        return self.v == that.v
+    }
+}
+
+impl Order for Wrong {}    // error: the impl of `Order` for `Wrong` is missing `cmp`
+
+impl Display for i32 {    // error: `i32`'s `Display` is built in; only a struct or an enum can write its own
+    fn show(self) {
+        print("{self}")
+    }
+}
+
+struct Cell<T> {
+    v: T,
+}
+
+impl<T> Hash for Cell<T> {    // error: `Hash` needs `Equal`, which `Cell<T>` doesn't have; give `T` the bound `Equal`
+    fn hash(self, h: mut Hasher) {
+        h.add(1)
+    }
+}
+
+struct Hasher {}    // error: `Hasher` is a built-in name
+
+struct Odd {
+    v: f64,
+}
+
+impl Equal for Odd {
+    fn eq(self, other: Self) -> bool {
+        return self.v == other.v
+    }
+}
+
+impl Hash for Odd {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.v)    // error: values of type `f64` can't be hashed, and floats have no `Hash`
+    }
+}
+
+pub fn hash_twice(h: Hasher, x: i32) {
+    h.add(x)    // error: parameter `h` can't be changed; take it as `mut` to change it
+}
+
+fn main() {
+    let p = Pos { x: 1, z: 2 }
+    let _s = Set<Pos>()    // error: `Pos` can't be a key of a map or a set, since it has no `Hash`, and `Pos` has an `Equal` of its own, so it needs a `Hash` of its own that agrees with it
+    let _m = Map<Holder, i32>()    // error: `Holder` can't be a key of a map or a set, since it has no `Hash`, since it holds `Pos`, and `Pos` has an `Equal` of its own
+    println("{p.eq(p)}")    // error: `eq` is what `==` calls; compare with `a == b`
+    p.show()    // error: `show` is what `{x}` calls; show a value with `print("{x}")`
+    println("{Equal.eq(p, p)}")    // error: `eq` is what `==` calls
+    let _h = Hasher { state: 0 }    // error: field `state` of `Hasher` is private to `std.core`
+    let _c = Cell { v: 1 }
+    let _w = Wrong { v: 1 }
+}

@@ -1,0 +1,234 @@
+// `Equal`, `Display`, `Hash` and `Order` written by hand, through impls of `std.core`'s
+// interfaces (D102): the glue for what holds the type calls them, and so do `==`, `{x}`, maps,
+// sets, `<`, `cmp` and `sort`.
+struct BlockPos {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+impl Display for BlockPos {
+    fn show(self) {
+        print("{self.x}, {self.y}, {self.z}")
+    }
+}
+
+// Equal by name, whatever the score.
+struct Player {
+    name: String,
+    score: i32,
+}
+
+impl Equal for Player {
+    fn eq(self, other: Self) -> bool {
+        return self.name == other.name
+    }
+}
+
+impl Hash for Player {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.name)
+    }
+}
+
+// Ordered by score alone, highest first, so sorting must keep equal scores in place.
+struct Entry {
+    name: str,
+    score: i32,
+}
+
+impl Order for Entry {
+    fn cmp(self, other: Self) -> Ordering {
+        return other.score.cmp(self.score)
+    }
+}
+
+struct Ranked {
+    score: i32,
+    at: i32,
+}
+
+impl Order for Ranked {
+    fn cmp(self, other: Self) -> Ordering {
+        return other.score.cmp(self.score)
+    }
+}
+
+// A unit enum that shows and orders its own way.
+enum Dir {
+    North
+    East
+    South
+    West
+}
+
+impl Display for Dir {
+    fn show(self) {
+        let c = match self {
+            Dir.North => "N"
+            Dir.East => "E"
+            Dir.South => "S"
+            Dir.West => "W"
+        }
+        print(c)
+    }
+}
+
+impl Order for Dir {
+    fn cmp(self, other: Self) -> Ordering {
+        return self.rank().cmp(other.rank())
+    }
+}
+
+impl Dir {
+    fn rank(self) -> i32 {
+        return match self {
+            Dir.North => 3
+            Dir.East => 1
+            Dir.South => 0
+            Dir.West => 2
+        }
+    }
+}
+
+// A generic type writes its own for each `T` that has what it needs.
+struct Boxed<T> {
+    value: T,
+}
+
+impl<T: Display> Display for Boxed<T> {
+    fn show(self) {
+        print("<{self.value}>")
+    }
+}
+
+// Shows itself with `print`, which writes where the value is going, and logs with `eprintln`,
+// which writes to standard error wherever that is.
+struct Noisy {
+    n: i32,
+}
+
+impl Display for Noisy {
+    fn show(self) {
+        eprintln("showing {self.n}")
+        print("#{self.n}")
+    }
+}
+
+fn all<T: Display>(xs: List<Boxed<T>>) -> String {
+    return "{xs}"
+}
+
+// Derived, around one that's written by hand.
+struct Move {
+    from: BlockPos,
+    to: BlockPos,
+}
+
+// Hashes only the key, and compares only the key, which agree.
+struct Cached {
+    key: i64,
+    note: String,
+}
+
+impl Equal for Cached {
+    fn eq(self, other: Self) -> bool {
+        return self.key == other.key
+    }
+}
+
+impl Hash for Cached {
+    fn hash(self, h: mut Hasher) {
+        h.add(self.key)
+    }
+}
+
+fn main() {
+    let p = BlockPos { x: 1, y: -2, z: 3 }
+    println("{p}")    // out: 1, -2, 3
+    println("at {p}!")    // out: at 1, -2, 3!
+    let s = "[{p}]"
+    println(s)    // out: [1, -2, 3]
+    println("{Move { from: p, to: BlockPos { x: 0, y: 0, z: 0 } }}")    // out: Move { from: 1, -2, 3, to: 0, 0, 0 }
+    let ps: List<BlockPos> = [p, p]
+    println("{ps}")    // out: [1, -2, 3, 1, -2, 3]
+    let some_p: BlockPos? = some(p)
+    println("{some_p}")    // out: some(1, -2, 3)
+    println("{p == p}")    // out: true
+    eprintln("{p}")    // stderr: 1, -2, 3
+
+    let a = Player { name: String("Alex"), score: 10 }
+    let b = Player { name: String("Alex"), score: 99 }
+    let c = Player { name: String("Steve"), score: 10 }
+    println("{a == b} {a != b} {a == c}")    // out: true false false
+    var seen = Set<Player>()
+    seen.insert(a)
+    seen.insert(b)
+    seen.insert(c)
+    println("{seen.len()}")    // out: 2
+    var scores = Map<Player, i32>()
+    scores.insert(Player { name: String("Alex"), score: 0 }, 1)
+    scores.insert(Player { name: String("Alex"), score: 5 }, 2)
+    println("{scores.len()} {scores[Player { name: String("Alex"), score: -1 }]}")    // out: 1 2
+    let team: List<Player> = [Player { name: String("Steve"), score: 1 }]
+    println("{team.contains(Player { name: String("Steve"), score: 7 })}")    // out: true
+
+    var board: List<Entry> = [
+        Entry { name: "a", score: 1 },
+        Entry { name: "b", score: 5 },
+        Entry { name: "c", score: 1 },
+        Entry { name: "d", score: 5 },
+        Entry { name: "e", score: 3 },
+    ]
+    board.sort()
+    var order = String()
+    for e in board {
+        order.push_str(e.name)
+    }
+    println(order)    // out: bdeac
+    let x = Entry { name: "x", score: 1 }
+    let y = Entry { name: "y", score: 2 }
+    println("{x < y} {x > y} {x.cmp(y) == Ordering.Greater}")    // out: false true true
+
+    // Long enough for the merge sort: scores 0 to 9 in a scrambled order, each remembering where
+    // it was, which must go up among equal scores.
+    var many: List<Ranked> = []
+    var seed: u32 = 12345
+    var i = 0
+    while i < 1000 {
+        seed = seed * 1103515245 + 12345
+        many.push(Ranked { score: i32.wrap((seed >> 16) % 10), at: i })
+        i += 1
+    }
+    many.sort()
+    var stable = true
+    var j: usize = 1
+    while j < many.len() {
+        let (u, v) = (many[j - 1], many[j])
+        stable = stable and (u.score > v.score or (u.score == v.score and u.at < v.at))
+        j += 1
+    }
+    println("{stable}")    // out: true
+
+    var dirs: List<Dir> = [Dir.North, Dir.East, Dir.South, Dir.West]
+    dirs.sort()
+    println("{dirs}")    // out: [S, E, W, N]
+    println("{Dir.North > Dir.West}")    // out: true
+
+    println("{Boxed { value: p }}")    // out: <1, -2, 3>
+    println("{Boxed { value: 7 }}")    // out: <7>
+
+    let s2 = "[{Noisy { n: 4 }}]"    // stderr: showing 4
+    println(s2)    // out: [#4]
+    eprintln("e {Noisy { n: 5 }} e")    // stderr: e showing 5
+    // stderr: #5 e
+    println("{Noisy { n: 6 }}")    // out: #6
+    // stderr: showing 6
+    let bs: List<Boxed<i32>> = [Boxed { value: 1 }, Boxed { value: 2 }]
+    println(all(bs))    // out: [<1>, <2>]
+
+    var cache = Map<Cached, i32>()
+    cache.insert(Cached { key: 1, note: String("one") }, 1)
+    cache.insert(Cached { key: 1, note: String("uno") }, 2)
+    println("{cache.len()}")    // out: 1
+}

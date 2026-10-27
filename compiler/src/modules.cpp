@@ -14,12 +14,41 @@ namespace {
 
 std::string q(std::string_view s) { return "`" + std::string(s) + "`"; }
 
+// `std.core`: the interfaces behind the derived properties, which a struct or an enum implements to
+// write its own (D102). Every program has it, and nothing imports it: the checker finds these
+// names here when a module doesn't declare them, and they're reserved, so none can.
+const char* const kCore = R"(module std.core
+
+pub interface Equal {
+    fn eq(self, other: Self) -> bool
+}
+
+pub interface Display {
+    fn show(self)
+}
+
+pub interface Hash {
+    fn hash(self, h: mut Hasher)
+}
+
+pub interface Order {
+    fn cmp(self, other: Self) -> Ordering
+}
+
+pub struct Hasher {
+    state: u64
+}
+)";
+
 class Loader {
 public:
     Loader(ParseContext ctx, Sources& sources, const std::string& home, const std::string& home_error)
         : ctx_(ctx), sources_(sources), home_(home), home_error_(home_error) {}
 
     std::vector<Module*> run(std::uint32_t main_file) {
+        Module* core = parse_file(ctx_, sources_.add("<std.core>", kCore));
+        core->builtin = true;
+        order_.push_back(core);
         Module* m = parse_file(ctx_, main_file);
         fs::path path(sources_.file(main_file).path);
         std::string stem = path.stem().string();
