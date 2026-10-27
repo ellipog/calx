@@ -119,7 +119,7 @@ fn main() {
 
 A `match` arm, `if let` or `let` with a pattern either looks at its value or takes it apart:
 
-- It **takes the value apart** when one of the names it binds that owns memory is moved somewhere, or is bound with `var`. Its names then own their parts, and the rest of the value is freed. The value counts as moved.
+- It **takes the value apart** when one of the names it binds that owns memory is moved somewhere, has a field moved out of it, or is bound with `var`. Its names then own their parts, and the rest of the value is freed. The value counts as moved.
 - Otherwise it **looks**: its names are views into the value. While they're in use, the value can't be changed or moved.
 
 ```calx

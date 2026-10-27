@@ -829,7 +829,8 @@ private:
         bool keep = u == Use::consume && !copyable(e->type);
         bool whole = is_local_name(e);
         if (scan_) {
-            if (keep && whole) moved_any_.insert(l);
+            // Moving a field counts too: a pattern's name whose field moves must own its value.
+            if (keep && (whole || w.fields_only)) moved_any_.insert(l);
             return;
         }
         use(e, l, w.path);

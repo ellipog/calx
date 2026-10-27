@@ -27,6 +27,14 @@ fn len_of(s: String) -> usize {
     return s.len()
 }
 
+fn add_to(s: mut String, t: String) {
+    s.push_str(t)
+}
+
+fn maybe_team(n: str) -> Team? {
+    return some(Team { lead: person(n), tags: ["t"] })
+}
+
 fn keep(s: own String) -> String {
     return s
 }
@@ -184,6 +192,20 @@ fn main() {
         _ => String("other"),
     }
     println("{chosen} {built} {picked}")           // out: big inside three
+
+    // A `mut` argument beside a block or `match` that doesn't mention it.
+    var buf = String("a")
+    add_to(mut buf, if count > 2 { "b" } else { "c" })
+    add_to(mut buf, match count {
+        3 => "d",
+        _ => "e",
+    })
+    println(buf)                                   // out: abd
+
+    // Moving a field out of a name that `let ... else` binds: the name owns the value.
+    let crew = maybe_team("Zed") else return
+    let boss = crew.lead
+    println("{boss.name} {crew.tags}")             // out: Zed [t]
 
     // Discarding.
     _ = person("Ivy")

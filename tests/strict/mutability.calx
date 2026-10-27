@@ -22,6 +22,7 @@ fn main() {
     change(p)                        // error: so pass it as `mut ...`
     read_only(fixed)
     _ = both(mut p, p)               // error: is passed as `mut`, so it can't be used again in the same call
+    _ = both(mut p, if p.x > 0 { P { x: 0 } } else { p })    // error: is passed as `mut`, so it can't be used again in the same call
     var ys = [1, 2]
     for y in ys {
         ys[0] = y                    // error: can't be changed while a `for` loop goes over it

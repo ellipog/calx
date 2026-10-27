@@ -5054,8 +5054,19 @@ private:
         for (const FieldInit& f : e->fields) if (mentions(f.value, l)) return true;
         for (const Expr* x : e->interpolations) if (mentions(x, l)) return true;
         if (mentions(e->repeat, l) || mentions(e->cond, l) || mentions(e->else_, l)) return true;
-        if (e->block || e->scrutinee) return true;  // blocks are rare in arguments; assume they might
+        if (mentions(e->block, l) || mentions(e->scrutinee, l) || mentions(e->body, l)) return true;
+        for (const MatchArm& a : e->arms) if (mentions(a.guard, l) || mentions(a.body, l)) return true;
         return false;
+    }
+
+    static bool mentions(const Block* b, const Local* l) {
+        if (!b) return false;
+        for (const Stmt* s : b->stmts) {
+            if (mentions(s->value, l) || mentions(s->target, l) || mentions(s->else_, l) || mentions(s->cond, l) ||
+                mentions(s->pool, l) || mentions(s->else_block, l) || mentions(s->body, l))
+                return true;
+        }
+        return mentions(b->tail, l);
     }
 
     Type* construct(Expr* e, Type* t, Type* expected) {
