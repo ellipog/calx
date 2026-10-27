@@ -1,0 +1,153 @@
+// `JavaHashMap` and `JavaHashSet` (D105): Java's `HashMap` and `HashSet`, which go over their keys
+// in the order Java's do after the same operations. Every order here is what Java 25 prints for
+// the same program.
+
+struct Pos {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+// Vanilla's `Vec3i.hashCode`.
+impl JavaHash for Pos {
+    fn java_hash(self) -> i32 {
+        return (self.y + self.z * 31) * 31 + self.x
+    }
+}
+
+fn count<K: JavaHash + Copy>(xs: List<K>) -> JavaHashMap<K, i32> {
+    var m = JavaHashMap<K, i32>()
+    for x in xs {
+        if m.contains(x) {
+            m[x] += 1
+        } else {
+            m.insert(x, 1)
+        }
+    }
+    return m
+}
+
+// Three `Aa` or `BB` after `start`: `Aa` and `BB` hash the same, so these eight strings do.
+fn same_hash(start: str, i: i32) -> String {
+    var s = String(start)
+    for j in 0..3 {
+        s.push_str(if ((i >> j) & 1) != 0 { "Aa" } else { "BB" })
+    }
+    return s
+}
+
+fn main() {
+    // Strings, in Java's order, which isn't the order they went in.
+    var blocks = JavaHashMap<String, i32>()
+    for name in ["stone", "dirt", "grass", "sand", "gravel", "oak_log", "water", "lava"] {
+        blocks.insert(String(name), i32.wrap(name.len()))
+    }
+    println("{blocks}")    // out: {gravel: 6, sand: 4, lava: 4, oak_log: 7, grass: 5, dirt: 4, water: 5, stone: 5}
+    blocks["dirt"] += 10
+    println("{blocks["dirt"]} {blocks.get("lava")} {blocks.contains("air")} {blocks.contains("sand")}")    // out: 14 some(4) false true
+    println("{blocks.remove("sand")} {blocks.remove("sand")} {blocks.len()}")    // out: some(4) none 7
+
+    // Integers, through enough resizes to split bins, and `Long`'s hash, which folds the top
+    // half into the bottom.
+    var nums = JavaHashSet<i32>()
+    for i in 0..20 {
+        nums.insert(i * 7919)
+    }
+    println("{nums}")    // out: {0, 118785, 102947, 87109, 71271, 55433, 39595, 142542, 23757, 7919, 126704, 110866, 95028, 79190, 63352, 47514, 31676, 134623, 15838, 150461}
+    var longs = JavaHashSet<i64>()
+    for i in 0i64..6 {
+        longs.insert((i << 32) | (i * 3))
+    }
+    println("{longs}")    // out: {0, 4294967299, 8589934598, 17179869196, 12884901897, 21474836495}
+
+    // `insert` adds a key at the end of its bin, and `compute_if_absent`, as Java's
+    // `computeIfAbsent` does, at the front. 0, 16 and 32 share a bin of 16.
+    var a = JavaHashMap<i32, i32>()
+    var b = JavaHashMap<i32, i32>()
+    for k in [0, 16, 32] {
+        a.insert(k, 1)
+        _ = b.compute_if_absent(k, 1)
+    }
+    println("{a} {b}")    // out: {0: 1, 16: 1, 32: 1} {32: 1, 16: 1, 0: 1}
+    println("{b.compute_if_absent(16, 2)} {b[16]}")    // out: false 1
+
+    // The first table has 16 bins, or what `JavaHashSet(n)` asks for: 17 and 1 share a bin of 16,
+    // not of 32. `reserve` is the room Java's `putAll` and `new HashMap<>(m)` make first.
+    var small = JavaHashSet<i32>(32)
+    var dflt = JavaHashSet<i32>()
+    for k in [17, 1, 33] {
+        small.insert(k)
+        dflt.insert(k)
+    }
+    println("{small} {dflt}")    // out: {1, 33, 17} {17, 1, 33}
+    var copied = JavaHashMap<i32, i32>()
+    copied.reserve(13)
+    for k in 0..13 {
+        copied.insert(k * 16, k)
+    }
+    println("{copied}")    // out: {0: 0, 32: 2, 64: 4, 96: 6, 128: 8, 160: 10, 192: 12, 16: 1, 48: 3, 80: 5, 112: 7, 144: 9, 176: 11}
+    // `clear` keeps the table, as Java's does: 33 and 49 are in different bins of 32.
+    dflt.clear()
+    dflt.insert(33)
+    dflt.insert(49)
+    println("{dflt}")    // out: {33, 49}
+
+    // Past eight keys in a bin of a table of 64 bins, the bin is a tree, which Java orders by
+    // hash, then by `compareTo`, which orders strings by UTF-16 unit: U+42BFF before U+E000,
+    // where UTF-8 has them the other way round. Its root goes first.
+    var same = JavaHashSet<String>()
+    for start in ["x", "\u{E000}ua", "\u{42BFF}a"] {
+        for i in 0..8 {
+            same.insert(same_hash(start, i))
+        }
+    }
+    println("{same.len()} {same}")    // out: 24 {uaAaBBAa, uaBBBBBB, uaAaBBBB, uaBBAaBB, uaAaAaBB, uaBBBBAa, uaBBAaAa, uaAaAaAa, 񂯿aBBBBBB, 񂯿aBBBBAa, 񂯿aAaBBBB, 񂯿aBBAaAa, 񂯿aAaAaBB, 񂯿aAaAaAa, 񂯿aAaBBAa, 񂯿aBBAaBB, xBBBBBB, xAaBBBB, xBBAaBB, xAaAaBB, xBBBBAa, xAaBBAa, xBBAaAa, xAaAaAa}
+    for i in 0..8 {
+        if i % 3 != 0 {
+            same.remove(same_hash("x", i))
+        }
+    }
+    println("{same.len()} {same}")    // out: 19 {uaAaBBAa, uaBBBBBB, uaAaBBBB, uaBBAaBB, uaAaAaBB, uaBBBBAa, uaBBAaAa, uaAaAaAa, 񂯿aBBBBBB, 񂯿aBBBBAa, 񂯿aAaBBBB, 񂯿aBBAaAa, 񂯿aAaAaBB, 񂯿aAaAaAa, 񂯿aAaBBAa, 񂯿aBBAaBB, xBBBBBB, xAaAaBB, xBBAaAa}
+
+    // A key of a type that writes its own `java_hash`.
+    var ps = JavaHashSet<Pos>()
+    for x in 0..3 {
+        for z in 0..3 {
+            ps.insert(Pos { x: x * 31, y: 64 - x, z: z })
+        }
+    }
+    var line = String()
+    for p in ps {
+        if not line.is_empty() {
+            line.push(' ')
+        }
+        line.push_str("{p.x},{p.y},{p.z}")
+    }
+    println(line)    // out: 0,64,0 31,63,0 62,62,0 0,64,1 31,63,1 62,62,1 0,64,2 31,63,2 62,62,2
+
+    // `java_hash` is Java's `hashCode` of each type.
+    println("{5.java_hash()} {(-5i8).java_hash()} {255u8.java_hash()} {0xFFFFFFFFu32.java_hash()} {(-1i64).java_hash()} {(1u64 << 63).java_hash()} {true.java_hash()} {false.java_hash()}")    // out: 5 -5 255 -1 0 -2147483648 1231 1237
+    let surrogate = char.try_from(0xD83D) ?? 'a'
+    println("{'é'.java_hash()} {'\u{1F600}'.java_hash()} {surrogate.java_hash()} {1.5f32.java_hash()} {f64.NAN.java_hash()} {(-0.0).java_hash()} {1.5.java_hash()}")    // out: 233 128512 55357 1069547520 2146959360 -2147483648 1073217536
+    let ab: List<String> = ["a", "b"]
+    let nums123: List<i32> = [1, 2, 3]
+    let nested: List<List<i32>> = [[1], [2, 3]]
+    println("{"".java_hash()} {"hello".java_hash()} {String("héllo \u{1F600}").java_hash()} {ab.java_hash()} {nums123.java_hash()} {nested.java_hash()}")    // out: 0 99162322 395407605 4066 30817 2979
+
+    let words: List<str> = ["b", "a", "b", "c", "b"]
+    println("{count(words)}")    // out: {a: 1, b: 3, c: 1}
+    // A copy is the same table, in the same order; `==` doesn't look at the order.
+    let c1 = blocks.copy()
+    println("{c1 == blocks} {c1}")    // out: true {gravel: 6, lava: 4, oak_log: 7, grass: 5, dirt: 14, water: 5, stone: 5}
+    var total = 0
+    for (k, v) in blocks {
+        if v > 10 {
+            continue
+        }
+        if k == "water" {
+            break
+        }
+        total += v
+    }
+    println("{total}")    // out: 22
+}

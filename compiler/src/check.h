@@ -3,6 +3,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ast.h"
@@ -20,7 +21,8 @@ struct CheckContext {
 };
 
 // The derived properties a struct or an enum can write its own of, in `Program::hand`'s order.
-enum Property : int { prop_equal, prop_display, prop_hash, prop_order };
+enum Property : int { prop_equal, prop_display, prop_hash, prop_order, prop_java_hash };
+constexpr int kProps = 5;
 
 // What the emitter needs, once a program has checked without errors.
 struct Program {
@@ -29,9 +31,11 @@ struct Program {
     std::vector<Item*> fns;        // every function with a body: the written ones, then the instances
     std::vector<Item*> consts;     // constants the emitter defines in C: the floats
     // For each `Property`, the types that write their own and the function that does it: `eq`,
-    // `show`, `hash` or `cmp`, or its instance for a generic type (D102).
-    std::unordered_map<const Type*, Item*> hand[4];
+    // `show`, `hash`, `cmp` or `java_hash`, or its instance for a generic type (D102).
+    std::unordered_map<const Type*, Item*> hand[kProps];
     const Type* hasher = nullptr;  // `std.core`'s `Hasher`, what a hand-written `hash` adds to
+    // The keys of `JavaHashMap` and `JavaHashSet` with `Order`, which a tree bin sorts by (D105).
+    std::unordered_set<const Type*> java_ordered;
     Item* main = nullptr;
 };
 

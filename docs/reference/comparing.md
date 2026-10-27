@@ -210,11 +210,11 @@ fn main() {
 }
 ```
 
-Like `Copy`, `Equal`, `Order`, `Display` and `Hash` are properties: every type that can have one does, with nothing to write. As bounds, they mean the property, however the type has it. The names are reserved, as are `Ordering` and `Hasher`.
+Like `Copy`, `Equal`, `Order`, `Display` and `Hash` are properties: every type that can have one does, with nothing to write. As bounds, they mean the property, however the type has it. [`JavaHash`](java-maps.md#javahash), Java's `hashCode`, is one too, built into numbers, text and lists, which a struct or an enum writes for itself, as a Java class does. The names are reserved, as are `Ordering` and `Hasher`.
 
 ## Writing your own
 
-A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in place of the derived one, by implementing the interface of that name (D102). The four are built in, so there's nothing to import:
+A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in place of the derived one, by implementing the interface of that name (D102), and its `JavaHash`, which has no derived one (D105). They're built in, so there's nothing to import:
 
 | Interface | Function | What calls it |
 | --- | --- | --- |
@@ -222,6 +222,7 @@ A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in 
 | `Display` | `fn show(self)` | `{x}` in a string |
 | `Hash` | `fn hash(self, h: mut Hasher)` | A map's or a set's keys |
 | `Order` | `fn cmp(self, other: Self) -> Ordering` | `<`, `<=`, `>`, `>=`, `a.cmp(b)` and `sort` |
+| `JavaHash` | `fn java_hash(self) -> i32` | `x.java_hash()`, a `JavaHashMap`'s or a `JavaHashSet`'s keys ([Java's hash maps](java-maps.md#javahash)) |
 
 What holds the type uses its function too: a list of them shows each one its way, and a struct with one as a field compares that field with it.
 

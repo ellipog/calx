@@ -943,7 +943,7 @@ private:
                 expr(recv, Use::change);
                 expr(arg(0), recv->type && recv->type->kind == TypeKind::list ? Use::consume : Use::view);
                 return;
-            case BMethod::insert: {
+            case BMethod::insert: case BMethod::compute_if_absent: {
                 // A list's index is read; a map's key and value, and a set's value, move in.
                 expr(recv, Use::change);
                 bool list = recv->type && recv->type->kind == TypeKind::list;

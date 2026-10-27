@@ -3,6 +3,7 @@
 
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "common.h"
@@ -23,8 +24,8 @@ enum class TypeKind : std::uint8_t {
     str,       // a read-only view of UTF-8 bytes
     string,    // `String`: UTF-8 bytes it owns
     list,      // `List<T>`: a growable array that owns its elements
-    map,       // `Map<K, V>`: a hash table of keys to values, which it owns
-    set,       // `Set<T>`: a hash table of values, which it owns
+    map,       // `Map<K, V>` or `JavaHashMap<K, V>`: a hash table of keys to values, which it owns
+    set,       // `Set<T>` or `JavaHashSet<T>`: a hash table of values, which it owns
     struct_,
     array,     // `[T; N]`
     enum_,
@@ -61,6 +62,8 @@ struct Type {
     bool is_const = false;   // pointer: `*const T`, which can't be written through
     bool has_pointer = false; // it is or holds a pointer
     bool is_result = false;  // enum_: `T ! E`, what a call to a function that can fail gives back
+    bool java = false;       // map, set: `JavaHashMap` or `JavaHashSet`, which go in Java's order (D105)
+    bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -87,8 +90,9 @@ public:
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
-    Type* map_of(Type* key, Type* value);
-    Type* set_of(Type* elem);
+    // With `java`, `JavaHashMap<K, V>` and `JavaHashSet<T>`, which iterate in Java's order (D105).
+    Type* map_of(Type* key, Type* value, bool java = false);
+    Type* set_of(Type* elem, bool java = false);
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
@@ -105,8 +109,8 @@ private:
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
-    std::map<std::pair<Type*, Type*>, Type*> map_map_;
-    std::map<Type*, Type*> set_map_;
+    std::map<std::tuple<Type*, Type*, bool>, Type*> map_map_;
+    std::map<std::pair<Type*, bool>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
     std::vector<Type*> compounds_;

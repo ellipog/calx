@@ -42,6 +42,10 @@ pub struct Hasher {
 pub interface From<T> {
     fn from(value: own T) -> Self
 }
+
+pub interface JavaHash {
+    fn java_hash(self) -> i32
+}
 )";
 
 class Loader {

@@ -88,7 +88,7 @@ public:
                 if (p.defs.empty() && !p.has_main) break;  // types and constants go where they're used
                 gather(p);
                 std::size_t defs = p.defs.size(), externs = p.externs.size();
-                for (int prop = 0; prop < 4; prop++) {
+                for (int prop = 0; prop < kProps; prop++) {
                     for (const Type* t : p.glue[prop]) {
                         if (Item* h = hand(t, prop)) take(h);
                     }
@@ -209,7 +209,7 @@ private:
         std::vector<Item*> externs;  // written in another module, and called from here
         std::vector<Item*> c_fns;    // C functions called from here
         Uses all;                    // what they use, and the glue that takes
-        std::vector<const Type*> glue[4];  // by `Property`, the types with glue, which may call `hand`
+        std::vector<const Type*> glue[kProps];  // by `Property`, the types with glue, which may call `hand`
     };
 
     // Everything a file's functions use, and the glue that takes: comparing or showing a type
@@ -241,6 +241,12 @@ private:
                 else if (x->kind == TypeKind::enum_) all.add_name(x);
             }
         }
+        // A Java table's tree bins order its keys, when they have `Order` (D105).
+        for (const Type* x : closure(all.types)) {
+            if (is_table(x) && x->java && prog_.java_ordered.count(table_key(x)) && has_cmp_glue(table_key(x))) {
+                all.add_cmp(table_key(x));
+            }
+        }
         // Ordering a type orders what it holds, and sorting a list orders its elements.
         for (const Type* t : all.sorts) {
             if (has_cmp_glue(t)) all.add_cmp(t);
@@ -261,15 +267,24 @@ private:
             (hash ? hash_order : eq_order).push_back(x);
             for (const Type* h : held(x)) reach(h, hash);
         };
+        // A Java table hashes its keys with `java_hash`, which a struct or an enum writes, and which
+        // a list of them calls for each element.
+        std::vector<const Type*> java_order;
+        std::unordered_set<const Type*> java_seen;
         for (const Type* x : closure(all.types)) {
             if (!is_table(x)) continue;
-            reach(table_key(x), true);
+            if (!x->java) reach(table_key(x), true);
             reach(table_key(x), false);
+            if (!x->java) continue;
+            const Type* k = table_key(x);
+            while (k->kind == TypeKind::list) k = k->elem;
+            if (hand(k, prop_java_hash) && java_seen.insert(k).second) java_order.push_back(k);
         }
         p.glue[prop_equal] = std::move(eq_order);
         p.glue[prop_display] = all.shows;
         p.glue[prop_hash] = std::move(hash_order);
         p.glue[prop_order] = all.cmps;
+        p.glue[prop_java_hash] = std::move(java_order);
         p.all = std::move(all);
     }
 
@@ -389,8 +404,8 @@ private:
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
             case TypeKind::list: s = "cx_list_" + part(t->elem); break;
-            case TypeKind::map: s = "cx_map_" + part(t->key) + "_" + part(t->elem); break;
-            case TypeKind::set: s = "cx_set_" + part(t->elem); break;
+            case TypeKind::map: s = std::string(t->java ? "cx_jmap_" : "cx_map_") + part(t->key) + "_" + part(t->elem); break;
+            case TypeKind::set: s = std::string(t->java ? "cx_jset_" : "cx_set_") + part(t->elem); break;
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -514,6 +529,7 @@ private:
             } else {
                 out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
             }
+            if (is_table(t) && t->java) out_ += "typedef struct " + jnode(t) + " " + jnode(t) + ";\n";
         }
         for (const Type* t : order) {
             switch (t->kind) {
@@ -528,6 +544,12 @@ private:
                     break;
                 case TypeKind::map:
                 case TypeKind::set:
+                    if (t->java) {
+                        // The runtime's table, with its nodes' type (D105).
+                        out_ += "struct " + ctype(t) + " { union { cx_jtable t; struct { cx_i32* heads; " + jnode(t) +
+                                "* nodes; cx_jtnode* tree; cx_usize len; cx_u32 cap, thr, used, room, spare; }; }; };\n";
+                        break;
+                    }
                     // The control bytes, the slots, the slot count less one, the values in it, and
                     // how many more fit before it must grow (D94).
                     out_ += "struct " + ctype(t) + " { cx_u8* ctrl; " + ctype(slot_type(t)) +
@@ -561,6 +583,12 @@ private:
                     break;
                 }
                 default: break;
+            }
+        }
+        // A Java table's nodes hold its keys and values, so they come once every type is whole.
+        for (const Type* t : order) {
+            if (is_table(t) && t->java) {
+                out_ += "struct " + jnode(t) + " { cx_i32 hash; cx_i32 next; " + ctype(slot_type(t)) + " v; };\n";
             }
         }
         for (const Type* t : order) {
@@ -819,6 +847,25 @@ private:
         }
         return s + indent + "    }\n" + indent + "}\n";
     }
+    // `body` for each slot `i` of the table `tab` that holds a value. A Java table goes bin by bin,
+    // in Java's order (D105).
+    static std::string each_slot(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) {
+        if (!t->java) return each_full(tab, indent, body);
+        std::string s = indent + "for (cx_u32 bin = 0; bin < " + tab + "cap; bin++) {\n" + indent + "    for (cx_i32 i = cx_jt_first(" +
+                        tab + "heads[bin]); i >= 0; i = " + tab + "nodes[i].next) {\n";
+        for (std::size_t at = 0; at < body.size();) {
+            std::size_t end = body.find('\n', at);
+            s += "    " + body.substr(at, end - at + 1);
+            at = end + 1;
+        }
+        return s + indent + "    }\n" + indent + "}\n";
+    }
+    // What slot `i` of the table `tab` holds.
+    static std::string slot_at(const Type* t, const std::string& tab, const std::string& i) {
+        return t->java ? tab + "nodes[" + i + "].v" : tab + "slots[" + i + "]";
+    }
+    // A Java table's node: a hash, the next node in its bin, and a slot.
+    std::string jnode(const Type* t) const { return ctype(t) + "_node"; }
     // What a table's keys are: a map's keys, or a set's values.
     static Type* table_key(const Type* t) { return t->kind == TypeKind::map ? t->key : t->elem; }
     // What a slot holds: a map's `(K, V)`, or a set's value.
@@ -830,7 +877,38 @@ private:
     std::string lookup_ctype(const Type* t) { return str_key(t) ? "cx_str" : ctype(table_key(t)); }
     static std::string as_lookup(const Type* t, const std::string& k) { return str_key(t) ? "cx_sv(" + k + ")" : k; }
     std::string lookup_hash(const Type* t, const std::string& k) {
+        if (t->java) return "cx_jt_spread(" + (str_key(t) ? "cx_str_java_hash(" + k + ")" : java_hash_of(table_key(t), k)) + ")";
         return str_key(t) ? "cx_hash_str(" + k + ")" : hash_value(table_key(t), k);
+    }
+    // The order a Java table's tree bins sort by: its keys' `Order`, or none (D105).
+    std::string java_order(const Type* t) { return prog_.java_ordered.count(table_key(t)) ? table_fn("jorder", t) : "0"; }
+
+    // Java's `hashCode` of the value `v`, a place, of type `t` (D105): what a struct or an enum
+    // writes, and Java's own for the rest, as `Integer`, `Long`, `Boolean`, `Character`,
+    // `String`, `List`, `Float` and `Double` have it.
+    std::string java_hash_of(const Type* t, const std::string& v) {
+        if (Item* h = hand(t, prop_java_hash)) {
+            if (uses_) uses_->add_fn(h);
+            return call_hand(h, {v.c_str()});
+        }
+        switch (t->kind) {
+            case TypeKind::bool_: return "((" + v + ") ? 1231 : 1237)";
+            case TypeKind::int_:
+                if (t->bits == 64) return "cx_java_long_hash((cx_u64)(" + v + "))";
+                return "((cx_i32)(" + v + "))";
+            case TypeKind::char_: case TypeKind::rune: return "((cx_i32)(" + v + "))";
+            case TypeKind::float_: return std::string(t->bits == 32 ? "cx_java_float_hash(" : "cx_java_double_hash(") + v + ")";
+            case TypeKind::str: return "cx_str_java_hash(" + v + ")";
+            case TypeKind::string: return "cx_str_java_hash(cx_sv(" + v + "))";
+            case TypeKind::list: {
+                // `31 * h` plus each element's, from 1.
+                std::string l = tmp(), h = tmp(), i = tmp();
+                return "({ const " + ctype(t) + "* " + l + " = &" + v + "; cx_i32 " + h + " = 1; for (cx_usize " + i + " = 0; " + i +
+                       " < " + l + "->len; " + i + "++) " + h + " = 31 * " + h + " + " + java_hash_of(t->elem, l + "->ptr[" + i + "]") +
+                       "; " + h + "; })";
+            }
+            default: return "0";
+        }
     }
     // A key argument, as `lookup_ctype` has it: a `String` key's can be a `str` or a `String`.
     std::string lookup_value(Expr* a, const Type* t) {
@@ -928,6 +1006,7 @@ private:
     }
 
     std::string table_decls(const Type* t) {
+        if (t->java) return jtable_decls(t);
         bool map = t->kind == TypeKind::map;
         return fill(std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
                                 "static void $grow($T* m, cx_usize buckets);\n") +
@@ -941,6 +1020,7 @@ private:
     // Putting a key that's there replaces its value and drops the key given. Growing moves every
     // value into a new table, so it's out of line: it's rare, and `put` stays small.
     std::string table_bodies(const Type* t) {
+        if (t->java) return jtable_bodies(t);
         bool map = t->kind == TypeKind::map;
         const Type* k = table_key(t);
         const Type* slot = slot_type(t);
@@ -1033,10 +1113,251 @@ static void $reserve($T* m, cx_usize n) {
 )", names);
     }
 
+
+    // --- Java's tables (D105) --------------------------------------------------------------------
+
+    std::vector<std::pair<std::string, std::string>> jtable_names(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        return {
+            {"$find", table_fn("find", t)}, {"$tfind", table_fn("tfind", t)}, {"$put", table_fn("put", t)},
+            {"$cia", table_fn("cia", t)}, {"$take", table_fn("take", t)}, {"$clear", table_fn("clear", t)},
+            {"$order", table_fn("jorder", t)}, {"$ORD", java_order(t)}, {"$N", jnode(t)}, {"$T", ctype(t)},
+            {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
+            {"$V", map ? ctype(t->elem) : std::string()},
+        };
+    }
+
+    std::string jtable_decls(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        std::string s;
+        if (prog_.java_ordered.count(table_key(t))) s += "static int $order(const void* nodes, cx_i32 a, cx_i32 b);\n";
+        s += "static cx_i32 $tfind(const $T* m, cx_i32 p, cx_i32 h, $KL k);\n"
+             "CX_INLINE cx_i32 $find(const $T* m, $KL k, cx_i32 h);\n";
+        s += map ? "static inline void $put($T* m, $K k, $V v);\nstatic inline cx_bool $cia($T* m, $K k, $V v);\n"
+                 : "static inline void $put($T* m, $K k);\n";
+        s += "static inline cx_i32 $take($T* m, $KL k, cx_i32 h);\nstatic void $clear($T* m);\n";
+        return fill(s, jtable_names(t));
+    }
+
+    // Finding a key goes down its bin, comparing hashes, then keys: a list in order, or a tree by
+    // hash, and by `Order` among equal hashes where the keys have it. `put` adds a key at the end
+    // of its list, which becomes a tree with its ninth; `cia`, Java's `computeIfAbsent`, adds one
+    // at the front. What doesn't depend on the key's type, growing and the trees, is the
+    // runtime's, in calx_jtable.c.
+    std::string jtable_bodies(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        const Type* k = table_key(t);
+        const Type* slot = slot_type(t);
+        bool ordered = prog_.java_ordered.count(k) != 0;
+        bool text = k->kind == TypeKind::str || k->kind == TypeKind::string;
+        auto key_at = [&](const std::string& node) { return slot_key(t, "m->nodes[" + node + "].v"); };
+        // A key in a node against the lookup's `k`, and against the key `k` being added.
+        auto eq_look = [&](const std::string& node) {
+            return str_key(t) ? "cx_str_eq(cx_sv(" + key_at(node) + "), k)" : equal(k, key_at(node), "k");
+        };
+        auto eq_key = [&](const std::string& node) {
+            return str_key(t) ? "cx_str_eq(cx_sv(" + key_at(node) + "), cx_sv(k))" : equal(k, key_at(node), "k");
+        };
+        std::string replace;
+        if (map) {
+            if (!is_copy(t->elem)) replace += "                " + drop_fn(t->elem) + "(&m->nodes[j].v.f1);\n";
+            replace += "                m->nodes[j].v.f1 = v;\n";
+        }
+        if (!is_copy(k)) replace += "                " + drop_fn(k) + "(&k);\n";
+        std::string drop_both;
+        if (!is_copy(k)) drop_both += "                " + drop_fn(k) + "(&k);\n";
+        if (map && !is_copy(t->elem)) drop_both += "                " + drop_fn(t->elem) + "(&v);\n";
+        std::string order_step, order_fn;
+        if (ordered) {
+            std::string a = slot_key(t, "nd[a].v"), b = slot_key(t, "nd[b].v");
+            std::string cmp_ab = text ? "cx_jt_str_order(" + (k->kind == TypeKind::string ? "cx_sv(" + a + "), cx_sv(" + b + ")" : a + ", " + b) + ")"
+                                      : compare(k, a, b);
+            order_fn = "static int $order(const void* nodes, cx_i32 a, cx_i32 b) {\n    const $N* nd = (const $N*)nodes;\n    return " +
+                       cmp_ab + ";\n}\n";
+            std::string kp = key_at("p");
+            std::string cmp_kp = text ? "cx_jt_str_order(k, " + (k->kind == TypeKind::string ? "cx_sv(" + kp + ")" : kp) + ")"
+                                      : compare(k, "k", kp);
+            order_step = "            int d = " + cmp_kp + ";\n            if (d) {\n                p = d < 0 ? m->tree[p].left : m->tree[p].right;\n"
+                         "                continue;\n            }\n";
+        }
+        std::string drop_all = is_copy(slot) ? std::string() : each_slot(t, "m->", "    ", "        " + drop_fn(slot) + "(&m->nodes[i].v);\n");
+        auto names = jtable_names(t);
+        names.insert(names.begin(), {
+            {"$orderfn", order_fn}, {"$orderstep", order_step}, {"$eqp", eq_look("p")}, {"$eqi", eq_look("i")},
+            {"$eqj", eq_key("j")}, {"$hash", "cx_jt_spread(" + java_hash_of(k, "k") + ")"}, {"$lookup", as_lookup(t, "k")},
+            {"$replace", replace}, {"$dropboth", drop_both}, {"$dropall", drop_all},
+            {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"},
+        });
+        std::string s = R"($orderfn static cx_i32 $tfind(const $T* m, cx_i32 p, cx_i32 h, $KL k) {
+    while (p >= 0) {
+        cx_i32 ph = m->nodes[p].hash;
+        if (ph > h) p = m->tree[p].left;
+        else if (ph < h) p = m->tree[p].right;
+        else if ($eqp) return p;
+        else {
+$orderstep            // The same hash, and keys nothing orders: it could be on either side.
+            if (m->tree[p].right >= 0) {
+                cx_i32 q = $tfind(m, m->tree[p].right, h, k);
+                if (q >= 0) return q;
+            }
+            p = m->tree[p].left;
+        }
+    }
+    return -1;
+}
+CX_INLINE cx_i32 $find(const $T* m, $KL k, cx_i32 h) {
+    if (!m->cap) return -1;
+    cx_i32 head = m->heads[(cx_u32)h & (m->cap - 1)];
+    if (__builtin_expect(head < 0, 0)) return $tfind(m, -head - 1, h, k);
+    for (cx_i32 i = head - 1; i >= 0; i = m->nodes[i].next) {
+        if (m->nodes[i].hash == h && $eqi) return i;
+    }
+    return -1;
+}
+static inline void $put($T* m, $params) {
+    cx_i32 h = $hash;
+    if (__builtin_expect(!m->cap, 0)) cx_jt_resize(&m->t, sizeof($N), $ORD);
+    cx_u32 b = (cx_u32)h & (m->cap - 1);
+    cx_i32 head = m->heads[b], x;
+    if (head == 0) {
+        x = cx_jt_new_node(&m->t, sizeof($N));
+        m->nodes[x] = ($N){ h, -1, $new };
+        m->heads[b] = x + 1;
+    } else if (__builtin_expect(head > 0, 1)) {
+        cx_i32 j = head - 1, n = 0;
+        for (;;) {
+            if (m->nodes[j].hash == h && $eqj) {
+$replace                return;
+            }
+            if (m->nodes[j].next < 0) break;
+            j = m->nodes[j].next;
+            n++;
+        }
+        x = cx_jt_new_node(&m->t, sizeof($N));
+        m->nodes[x] = ($N){ h, -1, $new };
+        m->nodes[j].next = x;
+        if (__builtin_expect(n >= 7, 0)) cx_jt_treeify_bin(&m->t, sizeof($N), $ORD, h);
+    } else {
+        cx_i32 j = $tfind(m, -head - 1, h, $lookup);
+        if (j >= 0) {
+$replace            return;
+        }
+        x = cx_jt_new_node(&m->t, sizeof($N));
+        m->nodes[x] = ($N){ h, -1, $new };
+        cx_jt_tree_put(&m->t, sizeof($N), $ORD, b, x);
+    }
+    if (++m->len > m->thr) cx_jt_resize(&m->t, sizeof($N), $ORD);
+}
+)";
+        if (map) s += R"(static inline cx_bool $cia($T* m, $K k, $V v) {
+    cx_i32 h = $hash;
+    if (m->len > m->thr || !m->cap) cx_jt_resize(&m->t, sizeof($N), $ORD);
+    cx_u32 b = (cx_u32)h & (m->cap - 1);
+    cx_i32 head = m->heads[b], x;
+    if (head < 0) {
+        if ($tfind(m, -head - 1, h, $lookup) >= 0) {
+$dropboth            return 0;
+        }
+        x = cx_jt_new_node(&m->t, sizeof($N));
+        m->nodes[x] = ($N){ h, -1, $new };
+        cx_jt_tree_put(&m->t, sizeof($N), $ORD, b, x);
+    } else {
+        cx_i32 n = 0;
+        for (cx_i32 j = head - 1; j >= 0; j = m->nodes[j].next, n++) {
+            if (m->nodes[j].hash == h && $eqj) {
+$dropboth                return 0;
+            }
+        }
+        x = cx_jt_new_node(&m->t, sizeof($N));
+        m->nodes[x] = ($N){ h, head - 1, $new };
+        m->heads[b] = x + 1;
+        if (__builtin_expect(n >= 7, 0)) cx_jt_treeify_bin(&m->t, sizeof($N), $ORD, h);
+    }
+    m->len++;
+    return 1;
+}
+)";
+        s += R"(static inline cx_i32 $take($T* m, $KL k, cx_i32 h) {
+    if (!m->cap) return -1;
+    cx_u32 b = (cx_u32)h & (m->cap - 1);
+    cx_i32 head = m->heads[b];
+    if (__builtin_expect(head < 0, 0)) {
+        cx_i32 z = $tfind(m, -head - 1, h, k);
+        if (z >= 0) {
+            cx_jt_tree_remove(&m->t, sizeof($N), b, z);
+            m->len--;
+        }
+        return z;
+    }
+    for (cx_i32 i = head - 1, before = -1; i >= 0; before = i, i = m->nodes[i].next) {
+        if (m->nodes[i].hash == h && $eqi) {
+            if (before < 0) m->heads[b] = m->nodes[i].next + 1;
+            else m->nodes[before].next = m->nodes[i].next;
+            m->len--;
+            return i;
+        }
+    }
+    return -1;
+}
+static void $clear($T* m) {
+$dropall    cx_jt_clear(&m->t);
+}
+)";
+        return fill(s, names);
+    }
+
+    // `m.insert(k, v)` and the rest, on a Java table.
+    std::string jtable_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        bool map = t->kind == TypeKind::map;
+        Type* k = table_key(t);
+        std::string tc = ctype(t), p = tmp(), key = tmp(), i = tmp();
+        std::string head = "({ " + tc + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + tc + "* " + p + " = " + address(recv) + "; ";
+        auto look = [&](Expr* a) { return lookup_ctype(t) + " " + key + " = " + lookup_value(a, t) + "; "; };
+        auto found = [&](Expr* a) {
+            return look(a) + "cx_i32 " + i + " = " + table_fn("find", t) + "(" + p + ", " + key + ", " + lookup_hash(t, key) + "); ";
+        };
+        std::string slot = p + "->nodes[" + i + "].v";
+        std::string release = "cx_jt_release(&" + p + "->t, sizeof(" + jnode(t) + "), " + i + "); ";
+        switch (e->bmethod) {
+            case BMethod::len: return "(" + expr(recv) + ").len";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::insert: case BMethod::compute_if_absent: {
+                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
+                std::string v = tmp();
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " +
+                       table_fn(e->bmethod == BMethod::insert ? "put" : "cia", t) + "(" + p + ", " + key + ", " + v + "); })";
+            }
+            case BMethod::contains: return view + found(e->args[0].value) + i + " >= 0; })";
+            case BMethod::get: {
+                std::string o = ctype(e->type);
+                return view + found(e->args[0].value) + i + " < 0 ? (" + o + "){0} : (" + o + "){ .v = " + slot + ".f1, .has = 1 }; })";
+            }
+            case BMethod::remove: {
+                std::string s = head + look(e->args[0].value) + "cx_i32 " + i + " = " + table_fn("take", t) + "(" + p + ", " + key + ", " +
+                                lookup_hash(t, key) + "); ";
+                std::string drop_key = is_copy(k) ? std::string() : drop_fn(k) + "(&" + slot_key(t, slot) + "); ";
+                if (!map) return s + "if (" + i + " >= 0) { " + drop_key + release + "} })";
+                std::string o = ctype(e->type), r = tmp();
+                return s + o + " " + r + " = {0}; if (" + i + " >= 0) { " + r + ".v = " + slot + ".f1; " + r + ".has = 1; " + drop_key +
+                       release + "} " + r + "; })";
+            }
+            case BMethod::clear: return table_fn("clear", t) + "(" + address(recv) + ")";
+            case BMethod::reserve:
+                return head + "cx_usize " + key + " = " + value(e->args[0].value, e->args[0].value->type) + "; cx_jt_reserve(&" + p +
+                       "->t, sizeof(" + jnode(t) + "), " + java_order(t) + ", " + key + "); })";
+            default: return "0";
+        }
+    }
+
     // `m.insert(k, v)` and the rest. The receiver is found first, then the arguments, in order.
     std::string table_method(Expr* e) {
         Expr* recv = e->callee->lhs;
         Type* t = recv->type;
+        if (t->java) return jtable_method(e);
         bool map = t->kind == TypeKind::map;
         Type* k = table_key(t);
         std::string tc = ctype(t), p = tmp(), key = tmp(), i = tmp();
@@ -1115,6 +1436,16 @@ static void $reserve($T* m, cx_usize n) {
                        equal(t->elem, "a.ptr[i]", "b.ptr[i]") + ") return 0;\n    }\n    return 1;\n";
             case TypeKind::map:
             case TypeKind::set: {
+                if (t->java) {
+                    // A node keeps its key's hash, so it isn't worked out again.
+                    std::string key = slot_key(t, "a.nodes[i].v");
+                    std::string body = "        cx_i32 j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) +
+                                       ", a.nodes[i].hash);\n        if (j < 0) return 0;\n";
+                    if (t->kind == TypeKind::map) {
+                        body += "        if (!" + equal(t->elem, "a.nodes[i].v.f1", "b.nodes[j].v.f1") + ") return 0;\n";
+                    }
+                    return "    if (a.len != b.len) return 0;\n" + each_slot(t, "a.", "    ", body) + "    return 1;\n";
+                }
                 // The same keys, each with an equal value, whatever order they're in.
                 std::string key = slot_key(t, "a.slots[i]");
                 std::string body = "        cx_usize j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) + ", " +
@@ -1178,12 +1509,13 @@ static void $reserve($T* m, cx_usize n) {
             case TypeKind::map:
             case TypeKind::set: {
                 // `{a: 1, b: 2}` and `{1, 2}`, in the order a loop goes.
+                std::string at = slot_at(t, "v.", "i");
                 std::string body = "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        " +
-                                   show_value(table_key(t), slot_key(t, "v.slots[i]")) + "\n";
+                                   show_value(table_key(t), slot_key(t, at)) + "\n";
                 if (t->kind == TypeKind::map) {
-                    body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, "v.slots[i].f1") + "\n";
+                    body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, at + ".f1") + "\n";
                 }
-                return print("{") + "    cx_bool first = 1;\n" + each_full("v.", "    ", body) + print("}");
+                return print("{") + "    cx_bool first = 1;\n" + each_slot(t, "v.", "    ", body) + print("}");
             }
             case TypeKind::array:
             case TypeKind::list: {
@@ -1294,6 +1626,12 @@ static void $reserve($T* m, cx_usize n) {
                 break;
             case TypeKind::map:
             case TypeKind::set:
+                if (t->java) {
+                    s += "    if (!p->heads) return;\n";
+                    if (!is_copy(slot_type(t))) s += each_slot(t, "p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->nodes[i].v);\n");
+                    s += "    cx_jt_free(&p->t, sizeof(" + jnode(t) + "));\n";
+                    break;
+                }
                 // A table that was never filled, or was moved out of, has no slots.
                 s += "    if (!p->slots) return;\n";
                 if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
@@ -1343,6 +1681,12 @@ static void $reserve($T* m, cx_usize n) {
             case TypeKind::map:
             case TypeKind::set: {
                 const Type* st = slot_type(t);
+                if (t->java) {
+                    // The same bins, trees and order: the arrays as they are, then what they own.
+                    s += "    if (!p->heads) return r;\n    r.t = cx_jt_copy(&p->t, sizeof(" + jnode(t) + "));\n";
+                    if (!is_copy(st)) s += each_slot(t, "p->", "    ", "        r.nodes[i].v = " + copy_fn(st) + "(&p->nodes[i].v);\n");
+                    break;
+                }
                 std::string e = ctype(st);
                 s += "    if (!p->slots) return r;\n    r.ctrl = cx_table_alloc(p->mask + 1, sizeof(" + e +
                      "), (void**)&r.slots);\n    __builtin_memcpy(r.ctrl, p->ctrl, p->mask + 1 + CX_GROUP);\n";
@@ -1831,6 +2175,7 @@ static void $reserve($T* m, cx_usize n) {
                 line("const " + ctype(at) + "* " + arr + " = &" + val + ";");
             }
             std::string elem_at;
+            bool bins = false;  // a Java table, gone over bin by bin, then along each bin
             if (s->text_iter != BMethod::none) {
                 // Decoded as the loop goes. Text is always UTF-8, so nothing is checked. A rune past
                 // U+FFFF is two UTF-16 units, so `chars` keeps the second for the next pass.
@@ -1856,7 +2201,17 @@ static void $reserve($T* m, cx_usize n) {
                 line("}");
                 return;
             }
-            if (is_table(at)) {
+            if (is_table(at) && at->java) {
+                // In Java's order (D105).
+                std::string b = tmp();
+                elem_at = arr + "->nodes[" + i + "].v";
+                line("for (cx_u32 " + b + " = 0; " + b + " < " + arr + "->cap; " + b + "++) {");
+                indent_++;
+                line("for (cx_i32 " + i + " = cx_jt_first(" + arr + "->heads[" + b + "]); " + i + " >= 0; " + i + " = " + arr +
+                     "->nodes[" + i + "].next) {");
+                indent_++;
+                bins = true;
+            } else if (is_table(at)) {
                 // Slot by slot, skipping the empty ones: the order depends only on the hashes and
                 // what was done to the table, so it's the same in every run (D56).
                 elem_at = arr + "->slots[" + i + "]";
@@ -1881,6 +2236,10 @@ static void $reserve($T* m, cx_usize n) {
             line("cx_cont" + id + ":;");
             indent_--;
             line("}");
+            if (bins) {
+                indent_--;
+                line("}");
+            }
         }
         line("cx_brk" + id + ":;");
         if (s->hidden && s->drop_hidden) line(drop_fn(s->hidden->type) + "(&" + local_name(s->hidden) + ");");
@@ -2677,6 +3036,13 @@ static void $reserve($T* m, cx_usize n) {
         }
         // index
         Type* at = e->lhs->type;
+        if (at->kind == TypeKind::map && at->java) {
+            std::string b = tmp(), k = tmp(), i = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
+                   lookup_value(e->rhs, at) + "; cx_i32 " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
+                   lookup_hash(at, k) + "); if (__builtin_expect(" + i + " < 0, 0)) cx_panic_key(" + location(e->rhs->span) + "); &" +
+                   b + "->nodes[" + i + "].v.f1; }))";
+        }
         if (at->kind == TypeKind::map) {
             // The map is found first, then the key. A key that isn't there panics.
             std::string b = tmp(), k = tmp(), i = tmp();
@@ -2827,7 +3193,12 @@ static void $reserve($T* m, cx_usize n) {
         switch (e->call) {
             case CallKind::builtin: return builtin(e);
             case CallKind::convert: return conversion(e);
-            case CallKind::construct: return construct(e->type);
+            case CallKind::construct:
+                // `JavaHashMap<K, V>(n)`: Java's first table has room for `n`.
+                if (!e->args.empty() && is_table(e->type) && e->type->java) {
+                    return "((" + ctype(e->type) + "){ .thr = cx_jt_size_for(" + value(e->args[0].value, e->args[0].value->type) + ") })";
+                }
+                return construct(e->type);
             case CallKind::prim_method: return prim_method(e);
             case CallKind::prim_static: return prim_static(e);
             case CallKind::variant: return variant_call(e);
@@ -2875,6 +3246,7 @@ static void $reserve($T* m, cx_usize n) {
     std::string construct(Type* t) {
         if (t->kind == TypeKind::string || t->kind == TypeKind::list) return "((" + ctype(t) + "){0})";
         // An empty table points at the shared control bytes, so a lookup needs no check for it.
+        if (is_table(t) && t->java) return "((" + ctype(t) + "){0})";
         if (is_table(t)) return "((" + ctype(t) + "){ .ctrl = (cx_u8*)cx_table_empty })";
         std::string s = "((" + ctype(t) + "){";
         bool first = true;
@@ -3489,6 +3861,11 @@ static void $reserve($T* m, cx_usize n) {
             std::string h = "(" + address(recv) + ")->" + member(t, 0).substr(1);
             return wrap(decls, "(" + h + " = cx_hash_word(" + h + ", " + hash_word(at, v[0]) + "))");
         }
+        if (e->bmethod == BMethod::java_hash) {
+            std::string decls, x = tmp();
+            std::vector<std::string> v = sequence({{recv, t}}, decls);
+            return wrap(decls, "({ " + ctype(t) + " " + x + " = " + v[0] + "; " + java_hash_of(t, x) + "; })");
+        }
         if (e->bmethod == BMethod::cmp) {
             // `Ordering`'s variants are -1, 0 and 1, plus one.
             std::string decls;
@@ -3534,7 +3911,6 @@ static void $reserve($T* m, cx_usize n) {
                 case BMethod::contains: return view + "cx_str_contains(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";
-                case BMethod::java_hash: return view + "cx_str_java_hash(" + p + "); })";
                 case BMethod::utf16_len: return view + "cx_str_utf16_len(" + p + "); })";
                 default: return "0";
             }

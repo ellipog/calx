@@ -1,0 +1,46 @@
+// What `JavaHashMap` and `JavaHashSet` can't do: hold a key without `JavaHash`, which a struct or
+// an enum writes for itself, or use the methods only Calx's own tables have.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Box<T> {
+    v: T,
+}
+
+impl<T> JavaHash for Box<T> {    // error: `JavaHash` needs `Equal`, which `Box<T>` doesn't have; give `T` the bound `Equal`
+    fn java_hash(self) -> i32 {
+        return 0
+    }
+}
+
+impl JavaHash for i32 {    // error: `i32`'s `JavaHash` is built in; only a struct or an enum can write its own
+    fn java_hash(self) -> i32 {
+        return self
+    }
+}
+
+fn keyed<T>(x: T) -> JavaHashSet<T> {    // error: `T` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`; give `T` the bound `JavaHash`
+    var s = JavaHashSet<T>()    // error: `T` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`; give `T` the bound `JavaHash`
+    s.insert(x)
+    return s
+}
+
+fn main() {
+    let a = JavaHashMap<f64, i32>()    // error: `f64` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`, and floats have no `JavaHash`: `==` on them isn't Java's `equals`, so they can't be keys
+    let b = JavaHashSet<Point>()    // error: `Point` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`, and a struct or an enum has the `JavaHash` it writes, as a Java class has the `hashCode` it writes: `impl JavaHash for Point`
+    let c = JavaHashSet<(i32, i32)>()    // error: `(i32, i32)` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`, and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in
+    let d = JavaHashSet<List<Point>>()    // error: `List<Point>` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`, since it holds `Point`, and a struct or an enum has the `JavaHash` it writes, as a Java class has the `hashCode` it writes: `impl JavaHash for Point`
+    let m = JavaHashMap<i32, i32>()
+    println("{m.capacity()}")    // error: `JavaHashMap<i32, i32>` has no method `capacity`
+    let n = Map<i32, i32>()
+    _ = n.compute_if_absent(1, 2)    // error: `Map<i32, i32>` has no method `compute_if_absent`
+    let e = JavaHashMap<i32, i32>(1, 2)    // error: `JavaHashMap<...>()` takes at most one argument, the capacity Java's `new HashMap<>(n)` starts with
+    let f: JavaHashMap<i32, i32> = Map<i32, i32>()    // error: expected `JavaHashMap<i32, i32>`, found `Map<i32, i32>`
+    println("{(1, 2).java_hash()}")    // error: `(i32, i32)` has no `java_hash`, since it has no `JavaHash`, and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in
+    println("{JavaHash.java_hash(5)}")    // error: call `java_hash` on a value: `x.java_hash()`
+    println("{5.java_hash(1)}")    // error: `java_hash` takes no arguments
+    let g = Box { v: Point { x: 1, y: 2 } }
+    println("{a.len()} {b.len()} {c.len()} {d.len()} {e.len()} {f.len()} {keyed(1).len()} {g.v.x}")
+}

@@ -25,7 +25,7 @@ fn main() {
 }
 ```
 
-They're the native tables for code where the order of the keys can't be seen. Code that must iterate in the order vanilla's `HashMap` does uses the Java-compatible maps, which are designed but not built yet ([spec](../CALX_SPEC.md#collections-d27)).
+They're the native tables for code where the order of the keys can't be seen. Code that must iterate in the order vanilla's `HashMap` does uses [`JavaHashMap` and `JavaHashSet`](java-maps.md), which go in Java's order.
 
 ## Making one
 
@@ -112,7 +112,7 @@ fn main() {
 
 A loop goes over the keys in an order that depends only on the keys and on what was done to the table, in what order. There's no random seed, so it's the same in every run, on every platform and with any number of threads ([spec](../CALX_SPEC.md#native), D56). Code that leans on the order by mistake gives the same answer every time, even if it isn't vanilla's.
 
-The order isn't the order the keys went in, though, and any `insert` or `remove` can change it. Code where the order shows, such as what's sent to a client, uses a Java-compatible map, or sorts.
+The order isn't the order the keys went in, though, and any `insert` or `remove` can change it. Code where the order shows, such as what's sent to a client, uses a [`JavaHashMap`](java-maps.md), or sorts.
 
 ```calx
 fn main() {

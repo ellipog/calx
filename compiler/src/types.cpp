@@ -107,12 +107,14 @@ Type* Types::list_of(Type* elem) {
     return t;
 }
 
-Type* Types::map_of(Type* key, Type* value) {
-    auto k = std::make_pair(key, value);
+Type* Types::map_of(Type* key, Type* value, bool java) {
+    auto k = std::make_tuple(key, value, java);
     auto it = map_map_.find(k);
     if (it != map_map_.end()) return it->second;
     Type* entry = tuple_of({key, value});
-    Type* t = make(TypeKind::map, arena_.copy("Map<" + std::string(key->name) + ", " + std::string(value->name) + ">"));
+    Type* t = make(TypeKind::map, arena_.copy(std::string(java ? "JavaHashMap<" : "Map<") + std::string(key->name) + ", " +
+                                              std::string(value->name) + ">"));
+    t->java = java;
     t->key = key;
     t->elem = value;
     t->entry = entry;
@@ -123,14 +125,16 @@ Type* Types::map_of(Type* key, Type* value) {
     return t;
 }
 
-Type* Types::set_of(Type* elem) {
-    auto it = set_map_.find(elem);
+Type* Types::set_of(Type* elem, bool java) {
+    auto k = std::make_pair(elem, java);
+    auto it = set_map_.find(k);
     if (it != set_map_.end()) return it->second;
-    Type* t = make(TypeKind::set, arena_.copy("Set<" + std::string(elem->name) + ">"));
+    Type* t = make(TypeKind::set, arena_.copy(std::string(java ? "JavaHashSet<" : "Set<") + std::string(elem->name) + ">"));
+    t->java = java;
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
-    set_map_.emplace(elem, t);
+    set_map_.emplace(k, t);
     compounds_.push_back(t);
     return t;
 }

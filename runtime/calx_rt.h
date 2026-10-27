@@ -345,6 +345,71 @@ cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
 void cx_table_free(void* slots, cx_usize buckets, cx_usize size);
 CX_COLD void cx_panic_key(const char* at);
 
+/* The tables behind `JavaHashMap` and `JavaHashSet`, in calx_jtable.c (D105): Java's HashMap,
+ * which iterates in Java's order. `heads` is a power of two bins, each 0 when empty, the first
+ * node plus one for a list, and minus that for a red-black tree. The nodes are in one array, each
+ * starting with its key's spread hash and the next node in its bin, or -1; the compiler's node
+ * type follows them with the key, or the key and value. A node that's removed waits in `spare`
+ * for the next key. Tree bins keep their links in `tree`, beside the nodes, made with the first. */
+typedef struct {
+    cx_i32 prev, parent, left, right;
+    cx_bool red;
+} cx_jtnode;
+typedef struct {
+    cx_i32* heads;    /* `cap` bins, or null before the first key */
+    void* nodes;      /* room for `room` nodes, `used` of them handed out */
+    cx_jtnode* tree;  /* the tree links, for `room` nodes, or null */
+    cx_usize len;     /* the keys */
+    cx_u32 cap;       /* the bins */
+    cx_u32 thr;       /* Java's threshold: the table doubles when `len` passes it. Before the first
+                       * table, the bins Java's `new HashMap<>(n)` asked for, or 0 for 16 */
+    cx_u32 used;
+    cx_u32 room;
+    cx_u32 spare;     /* a removed node plus one, or 0; its `next` is the one removed before it */
+} cx_jtable;
+/* Whether node `a`'s key orders before (-1), with (0) or after (1) node `b`'s, for tree bins. */
+typedef int (*cx_jt_order)(const void* nodes, cx_i32 a, cx_i32 b);
+#define CX_JT_HASH(nodes, size, i) (((cx_i32*)((char*)(nodes) + (cx_usize)(i) * (size)))[0])
+#define CX_JT_NEXT(nodes, size, i) (((cx_i32*)((char*)(nodes) + (cx_usize)(i) * (size)))[1])
+/* Java spreads a key's `hashCode` so its top bits pick bins in small tables too. */
+CX_INLINE cx_i32 cx_jt_spread(cx_i32 h) { return h ^ (cx_i32)((cx_u32)h >> 16); }
+/* The first node of a bin, or -1. */
+CX_INLINE cx_i32 cx_jt_first(cx_i32 head) { return (head < 0 ? -head : head) - 1; }
+CX_INLINE cx_i32 cx_java_long_hash(cx_u64 v) { return (cx_i32)(v ^ (v >> 32)); }
+/* `Float.hashCode` and `Double.hashCode`: the bits, with every NaN as Java's one NaN. */
+CX_INLINE cx_i32 cx_java_float_hash(cx_f32 f) {
+    cx_u32 b = 0x7FC00000u;
+    if (f == f) __builtin_memcpy(&b, &f, 4);
+    return (cx_i32)b;
+}
+CX_INLINE cx_i32 cx_java_double_hash(cx_f64 d) {
+    cx_u64 b = 0x7FF8000000000000ull;
+    if (d == d) __builtin_memcpy(&b, &d, 8);
+    return (cx_i32)(b ^ (b >> 32));
+}
+/* The bins Java's `new HashMap<>(n)` starts with: the power of two at least `n`. */
+cx_u32 cx_jt_size_for(cx_usize n);
+/* A node for a new key, with its hash and `next` still to set. The nodes can move. */
+cx_i32 cx_jt_new_node(cx_jtable* m, cx_usize size);
+CX_INLINE void cx_jt_release(cx_jtable* m, cx_usize size, cx_i32 i) {
+    CX_JT_NEXT(m->nodes, size, i) = (cx_i32)m->spare - 1;
+    m->spare = (cx_u32)i + 1;
+}
+/* Java's resize: the first table, or twice the bins, each bin split in order. */
+void cx_jt_resize(cx_jtable* m, cx_usize size, cx_jt_order order);
+/* A list bin that a key made too long: a tree, or a table twice the size if it's small. */
+void cx_jt_treeify_bin(cx_jtable* m, cx_usize size, cx_jt_order order, cx_i32 h);
+/* Adds the node `x`, with its hash and key set, to the tree in bin `b`. */
+void cx_jt_tree_put(cx_jtable* m, cx_usize size, cx_jt_order order, cx_u32 b, cx_i32 x);
+/* Takes the node `z` out of the tree in bin `b`, which may become a list. */
+void cx_jt_tree_remove(cx_jtable* m, cx_usize size, cx_u32 b, cx_i32 z);
+void cx_jt_reserve(cx_jtable* m, cx_usize size, cx_jt_order order, cx_usize n);
+void cx_jt_free(cx_jtable* m, cx_usize size);
+cx_jtable cx_jt_copy(const cx_jtable* m, cx_usize size);
+void cx_jt_clear(cx_jtable* m);
+/* Java's `String.compareTo`, by UTF-16 unit: -1, 0 or 1. */
+int cx_jt_str_order(cx_str a, cx_str b);
+
 /* Bounds checks. */
 CX_INLINE cx_usize cx_index(cx_usize i, cx_usize length, const char* at) {
     if (__builtin_expect(i >= length, 0)) cx_panic_index(i, length, at);

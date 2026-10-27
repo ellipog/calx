@@ -108,10 +108,11 @@ The compiler works these out for each type, without being asked:
 | --- | --- |
 | `Copy` | Every field is `Copy` and the type owns no heap memory. Copying is implicit only for these |
 | `Equal`, `Display`, `Hash`, `Order` | Every field has them. A struct or an enum can write its own instead |
+| `JavaHash` | Java's `hashCode`: built into numbers, `bool`, `char`, `rune`, text and lists. A struct or an enum has the one it writes, as a Java class does |
 | `Send` | The value can cross between regions: no views, no closures that capture views, nothing that's only valid in one place. Plain data and handles are `Send` |
 | `Share` | Deeply immutable while shared, so many parallel iterations can read it at once |
 
-Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). A struct or an enum can [write its own](reference/comparing.md#writing-your-own) `Equal`, `Display`, `Hash` or `Order` by implementing the built-in interface of that name (D102): to compare only some fields, to show a block position as `1, 64, -3`, or to keep a field out of logs. What holds it uses it too, a type with its own `Equal` writes its own `Hash` to be a key, and one with its own `Order` is sorted stably. Still to build:
+Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). A struct or an enum can [write its own](reference/comparing.md#writing-your-own) `Equal`, `Display`, `Hash` or `Order` by implementing the built-in interface of that name (D102): to compare only some fields, to show a block position as `1, 64, -3`, or to keep a field out of logs. What holds it uses it too, a type with its own `Equal` writes its own `Hash` to be a key, and one with its own `Order` is sorted stably. [`JavaHash`](reference/java-maps.md#javahash) is the key of a `JavaHashMap` (D105). Still to build:
 
 - **`Send` and `Share`**, with actors.
 
@@ -238,13 +239,13 @@ These iterate in exactly the order the Java collections do, for the same sequenc
 
 | Calx | Java |
 | --- | --- |
-| `java.HashMap<K, V>`, `java.HashSet<T>` | `java.util.HashMap`, `HashSet`, including hash spreading, power-of-two tables, the resize split order and tree bins |
+| `JavaHashMap<K, V>`, `JavaHashSet<T>` | `java.util.HashMap`, `HashSet`, including hash spreading, power-of-two tables, the resize split order and tree bins. Built: [Java's hash maps](reference/java-maps.md) (D105) |
 | `java.LinkedHashMap<K, V>`, `java.LinkedHashSet<T>` | `LinkedHashMap`, `LinkedHashSet`, insertion order and access order |
 | `java.TreeMap<K, V>`, `java.TreeSet<T>` | `TreeMap`, `TreeSet` (`SortedMap` in the samples) |
 | `java.ArrayList<T>`, `java.ArrayDeque<T>` | The same, including growth sizes where they can be seen |
 | `fastutil.Long2ObjectOpenHashMap<V>`, `Int2ObjectOpenHashMap<V>`, `Object2IntOpenHashMap<K>`, their `Linked` versions, and the matching sets | fastutil's open-addressing maps, with its own hash mixing (`HashCommon.mix`) and load factors |
 
-Keys hash with the `JavaHash` interface: Java's `hashCode` for each type. The standard library implements it for the boxed primitive equivalents, strings, and records of them. Calcite implements it for vanilla's types, such as `BlockPos`.
+Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the numbers, `bool`, `char`, `rune`, text and lists, as Java's boxes, `String` and `List` have it, and a struct or an enum writes its own, as a Java class does: Calcite writes it for vanilla's types, such as `BlockPos`. Built: [`JavaHash`](reference/java-maps.md#javahash).
 
 ### Native
 

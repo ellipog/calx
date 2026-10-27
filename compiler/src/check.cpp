@@ -89,13 +89,17 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash", "Order", "Ordering",
-                              "Hasher", "From"}) {
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "Copy", "Equal", "Display",
+                              "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
         n_Map_ = ctx.names.intern("Map");
         n_Set_ = ctx.names.intern("Set");
+        n_JavaHashMap_ = ctx.names.intern("JavaHashMap");
+        n_JavaHashSet_ = ctx.names.intern("JavaHashSet");
+        n_JavaHash_ = ctx.names.intern("JavaHash");
+        n_java_hash_ = ctx.names.intern("java_hash");
         n_Hash_ = ctx.names.intern("Hash");
         n_Order_ = ctx.names.intern("Order");
         n_Ordering_ = ctx.names.intern("Ordering");
@@ -144,7 +148,7 @@ public:
         check_hand_written();
         defer_bounds_ = false;
         for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
-        for (const auto& [key, span] : deferred_keys_) check_key(key, span);
+        for (const auto& [key, span, java] : deferred_keys_) check_key(key, span, java);
         // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
         for (Item* it : structs_) check_defaults(it);
         defaults_ready_ = true;
@@ -171,6 +175,11 @@ public:
         }
         instance_mode_ = false;
         order_types();
+        for (Type* t : T.compounds()) {
+            if (t->java && !t->open && orderable(t->kind == TypeKind::map ? t->key : t->elem)) {
+                prog_.java_ordered.insert(t->kind == TypeKind::map ? t->key : t->elem);
+            }
+        }
         check_unused_items();
         // Ownership follows the types, so it waits for a program without type errors, as Rust's
         // borrow checker does. An instance's errors were its definition's (D76).
@@ -259,18 +268,19 @@ private:
             return it->second.item;
         }
         // `std.core`'s names are reserved, so no module declares them, and every module sees them.
-        if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_ || n == n_From_)) {
+        if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_ || n == n_From_ ||
+                            n == n_JavaHash_)) {
             if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
         }
         return nullptr;
     }
 
     // `std.core`: the interfaces of the derived properties, and `Hasher` (D102), and `From`, which
-    // `try` converts an error with (D103).
+    // `try` converts an error with (D103), and `JavaHash` (D105).
     void find_core(Module* m) {
         core_scope_ = scopes_.at(m).get();
-        const Name names[] = {n_Equal_, n_Display_, n_Hash_, n_Order_};
-        for (int p = 0; p < 4; p++) prop_iface_[p] = core_scope_->items.at(names[p]);
+        const Name names[] = {n_Equal_, n_Display_, n_Hash_, n_Order_, n_JavaHash_};
+        for (int p = 0; p < kProps; p++) prop_iface_[p] = core_scope_->items.at(names[p]);
         Item* h = core_scope_->items.at(n_Hasher_);
         hasher_type_ = h->declared;
         prog_.hasher = hasher_type_;
@@ -279,7 +289,7 @@ private:
 
     // Which derived property an interface is, or -1.
     int prop_of(const Item* iface) const {
-        for (int p = 0; p < 4; p++) {
+        for (int p = 0; p < kProps; p++) {
             if (iface && iface == prop_iface_[p]) return p;
         }
         return -1;
@@ -1139,7 +1149,7 @@ private:
                     Name n = b->path.parts[0];
                     flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
                          : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound
-                         : n == n_Order_ ? &p->order_bound : nullptr;
+                         : n == n_Order_ ? &p->order_bound : n == n_JavaHash_ ? &p->java_hash_bound : nullptr;
                 }
                 if (flag) {
                     if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
@@ -1334,8 +1344,8 @@ private:
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list: return T.list_of(subst(t->elem, s));
-            case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s));
-            case TypeKind::set: return T.set_of(subst(t->elem, s));
+            case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->java);
+            case TypeKind::set: return T.set_of(subst(t->elem, s), t->java);
             case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
             case TypeKind::tuple: {
                 std::vector<Type*> elems;
@@ -1364,7 +1374,7 @@ private:
             return it->second == actual;
         }
         if (!pattern->open) return pattern == actual;
-        if (pattern->kind != actual->kind) return false;
+        if (pattern->kind != actual->kind || pattern->java != actual->java) return false;
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::set: return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
@@ -1444,6 +1454,11 @@ private:
                                 lacking(args[i], p_hash));
                 ok = false;
             }
+            if (params[i]->java_hash_bound && !is_bad(args[i]) && !java_hashable(args[i])) {
+                error(span, name_of(args[i]) + " has no `JavaHash`, which " + what + " needs for " + q(params[i]->name) +
+                                lacking(args[i], p_java_hash));
+                ok = false;
+            }
             if (params[i]->order_bound && !is_bad(args[i]) && !orderable(args[i])) {
                 error(span, name_of(args[i]) + " can't be compared with `<`, which " + what + " needs for " + q(params[i]->name) +
                                 lacking(args[i], p_order));
@@ -1479,6 +1494,7 @@ private:
             if (p->display_bound && !printable(it->second)) return false;
             if (p->hash_bound && !hashable(it->second)) return false;
             if (p->order_bound && !orderable(it->second)) return false;
+            if (p->java_hash_bound && !java_hashable(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, subst_iface(b, s))) return false;
             }
@@ -1604,8 +1620,8 @@ private:
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + "_list";
-            case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + "_map";
-            case TypeKind::set: return mangle(t->elem) + "_set";
+            case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + (t->java ? "_jmap" : "_map");
+            case TypeKind::set: return mangle(t->elem) + (t->java ? "_jset" : "_set");
             case TypeKind::tuple: {
                 std::string s = "tup";
                 for (Type* e : t->elems) s += "_" + mangle(e);
@@ -2016,11 +2032,14 @@ private:
                     }
                     return T.list_of(elem);
                 }
-                if ((n == n_Map_ || n == n_Set_) && !env_type(n)) {
-                    bool map = n == n_Map_;
+                if ((n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_) && !env_type(n)) {
+                    bool map = n == n_Map_ || n == n_JavaHashMap_;
+                    bool java = n == n_JavaHashMap_ || n == n_JavaHashSet_;
                     if (t->args.size() != (map ? 2u : 1u)) {
-                        error(t->span, map ? "`Map` takes two generic arguments, the types of its keys and values: `Map<String, i32>`"
-                                           : "`Set` takes one generic argument, the type of its values: `Set<i32>`");
+                        std::string name(text(n));
+                        error(t->span, map ? q(name) + " takes two generic arguments, the types of its keys and values: " +
+                                                 q(name + "<String, i32>")
+                                           : q(name) + " takes one generic argument, the type of its values: " + q(name + "<i32>"));
                         return T.error;
                     }
                     std::vector<Type*> args;
@@ -2033,8 +2052,8 @@ private:
                         }
                         args.push_back(x);
                     }
-                    check_key(args[0], t->args[0]->span);
-                    return map ? T.map_of(args[0], args[1]) : T.set_of(args[0]);
+                    check_key(args[0], t->args[0]->span, java);
+                    return map ? T.map_of(args[0], args[1], java) : T.set_of(args[0], java);
                 }
                 if (Type* p = env_type(n)) {
                     if (!t->args.empty()) {
@@ -3306,12 +3325,15 @@ private:
     // map or a set has `Equal` and `Display` the same way. So a generic parameter lacks one
     // without the bound, a pointer can't be shown, and neither a float nor a pointer has `Hash`:
     // `NaN` isn't equal to itself, and an address would make a table's order differ between runs
-    // (D94). A map or a set has no `Hash` either.
-    enum Prop { p_equal = 0, p_display = 1, p_hash = 2, p_order = 3 };
+    // (D94). A map or a set has no `Hash` either. `JavaHash`, Java's `hashCode`, is built into the
+    // integers, `bool`, `char`, `rune`, text and lists of them, as Java's boxes, `String` and
+    // `List` have it; a struct or an enum only has one it writes, as a Java class does (D105).
+    enum Prop { p_equal = 0, p_display = 1, p_hash = 2, p_order = 3, p_java_hash = 4 };
     bool equatable(const Type* t) { return derived(t, p_equal); }
     bool printable(const Type* t) { return derived(t, p_display); }
     bool hashable(const Type* t) { return derived(t, p_hash); }
     bool orderable(const Type* t) { return derived(t, p_order); }
+    bool java_hashable(const Type* t) { return derived(t, p_java_hash); }
 
     bool derived(const Type* t, int prop) {
         switch (t->kind) {
@@ -3321,15 +3343,19 @@ private:
             case TypeKind::pointer: return prop == p_equal;
             case TypeKind::param:
                 switch (prop) {
-                    case p_equal: return t->equal_bound || t->hash_bound || t->order_bound;
+                    case p_equal: return t->equal_bound || t->hash_bound || t->order_bound || t->java_hash_bound;
                     case p_display: return t->display_bound;
                     case p_hash: return t->hash_bound;
+                    case p_java_hash: return t->java_hash_bound;
                     default: return t->order_bound;
                 }
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return derived(t->elem, prop);
-            case TypeKind::map: return prop != p_hash && prop != p_order && derived(t->key, prop) && derived(t->elem, prop);
-            case TypeKind::set: return prop != p_hash && prop != p_order && derived(t->elem, prop);
+            case TypeKind::list: return derived(t->elem, prop);
+            case TypeKind::optional: case TypeKind::array: return prop != p_java_hash && derived(t->elem, prop);
+            case TypeKind::map:
+                return prop != p_hash && prop != p_order && prop != p_java_hash && derived(t->key, prop) && derived(t->elem, prop);
+            case TypeKind::set: return prop != p_hash && prop != p_order && prop != p_java_hash && derived(t->elem, prop);
             case TypeKind::tuple:
+                if (prop == p_java_hash) return false;
                 for (const Type* e : t->elems) {
                     if (!derived(e, prop)) return false;
                 }
@@ -3339,6 +3365,8 @@ private:
         }
         if (t->is_result) return false;
         if (hand(t, prop)) return true;
+        // Java's `hashCode` of a class is what the class writes, so there's nothing to derive.
+        if (prop == p_java_hash) return false;
         // A `Hash` of everything it holds could differ for values its own `Equal` calls equal.
         if (prop == p_hash && hand(t, p_equal)) return false;
         Derived& d = derived_[prop];
@@ -3404,12 +3432,13 @@ private:
         return r;
     }
 
-    // `Hash` needs `Equal`, since a map compares the keys it finds by their hash.
+    // `Hash` and `JavaHash` need `Equal`, since a map compares the keys it finds by their hash.
     void check_hand_written() {
         for (const auto& info : impl_infos_) {
-            if (prop_of(info->iface) != p_hash || equatable(info->self)) continue;
-            error(info->impl->self_type->span, "`Hash` needs `Equal`, which " + name_of(info->self) + " doesn't have" +
-                                                   lacking(info->self, p_equal));
+            int prop = prop_of(info->iface);
+            if ((prop != p_hash && prop != p_java_hash) || equatable(info->self)) continue;
+            error(info->impl->self_type->span, std::string(prop == p_hash ? "`Hash`" : "`JavaHash`") + " needs `Equal`, which " +
+                                                   name_of(info->self) + " doesn't have" + lacking(info->self, p_equal));
         }
     }
 
@@ -3418,7 +3447,7 @@ private:
         std::unordered_set<const Type*> seen;
         const Type* leaf = lacking_part(t, prop, seen);
         if (!leaf) return "";
-        static const char* const names[] = {"`Equal`", "`Display`", "`Hash`", "`Order`"};
+        static const char* const names[] = {"`Equal`", "`Display`", "`Hash`", "`Order`", "`JavaHash`"};
         if (leaf->kind == TypeKind::param) return "; give " + name_of(leaf) + " the bound " + names[prop];
         std::string why;
         if (prop == p_hash && leaf->kind == TypeKind::float_) why = ", and floats have no `Hash`, since `NaN` isn't equal to itself";
@@ -3433,12 +3462,24 @@ private:
         }
         if (prop == p_order && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Order`";
         if (prop == p_order && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Order`";
+        if (prop == p_java_hash) {
+            if (leaf->kind == TypeKind::float_) {
+                why = ", and floats have no `JavaHash`: `==` on them isn't Java's `equals`, so they can't be keys";
+            } else if (leaf->kind == TypeKind::struct_ || leaf->kind == TypeKind::enum_) {
+                why = ", and a struct or an enum has the `JavaHash` it writes, as a Java class has the `hashCode` it writes: " +
+                      q("impl JavaHash for " + std::string(leaf->name));
+            } else if (leaf->kind != TypeKind::pointer) {
+                why = ", and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in";
+            }
+        }
         if (leaf == t) return why;
         return ", since it holds " + name_of(leaf) + why;
     }
 
     const Type* lacking_part(const Type* t, int prop, std::unordered_set<const Type*>& seen) {
         if (derived(t, prop) || !seen.insert(t).second) return nullptr;
+        // What Java's `hashCode` is built into goes only through a list.
+        if (prop == p_java_hash && t->kind != TypeKind::list) return t;
         switch (t->kind) {
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
             case TypeKind::map:
@@ -3472,14 +3513,22 @@ private:
         }
     }
 
-    // A key of a map or a value of a set must have `Hash`. While types are still being resolved,
+    // A key of a map or a value of a set must have `Hash`, and one of a `JavaHashMap` or a
+    // `JavaHashSet` `JavaHash`, which brings `Equal` (D105). While types are still being resolved,
     // the check waits, like the bounds, since the key's fields may not be known yet.
-    void check_key(const Type* key, Span span) {
+    void check_key(const Type* key, Span span, bool java) {
         if (defer_bounds_) {
-            deferred_keys_.push_back({key, span});
+            deferred_keys_.push_back({key, span, java});
             return;
         }
-        if (is_bad(key) || hashable(key)) return;
+        if (is_bad(key)) return;
+        if (java) {
+            if (java_hashable(key)) return;
+            error(span, name_of(key) + " can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`" +
+                            lacking(key, p_java_hash));
+            return;
+        }
+        if (hashable(key)) return;
         error(span, name_of(key) + " can't be a key of a map or a set, since it has no `Hash`" + lacking(key, p_hash));
     }
 
@@ -5279,7 +5328,9 @@ private:
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
-            if ((n == n_Map_ || n == n_Set_) && !find_local(n)) return table_call(e, expected, n == n_Map_);
+            if ((n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_) && !find_local(n)) {
+                return table_call(e, expected, n == n_Map_ || n == n_JavaHashMap_, n == n_JavaHashMap_ || n == n_JavaHashSet_);
+            }
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
                 for (const Arg& a : e->args) check(a.value, nullptr);
                 error(e->span, q(text(n)) + " only matches a result; a function that can fail gives back its value with "
@@ -5361,6 +5412,7 @@ private:
             }
             if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
             if (callee->member == n_cmp_ && !e->only_interface) return cmp_call(e, recv);
+            if (callee->member == n_java_hash_ && !e->only_interface) return java_hash_call(e, recv);
             if (callee->member == n_add_ && recv == hasher_type_ && !e->only_interface) return hash_add(e);
             Member mem = lookup(recv, callee->member, e->only_interface);
             // Through a parameter, the bound says which interface answers, and an instance, whose
@@ -5475,6 +5527,7 @@ private:
             case p_equal: return "`eq` is what `==` calls; compare with `a == b`";
             case p_display: return "`show` is what `{x}` calls; show a value with `print(\"{x}\")`";
             case p_hash: return "`hash` is what maps and sets call; inside a `hash`, add a value with `h.add(x)`";
+            case p_java_hash: return "call `java_hash` on a value: `x.java_hash()`";
             default: return "call `cmp` on a value: `a.cmp(b)`";
         }
     }
@@ -6312,12 +6365,14 @@ private:
     }
 
     // `Map<String, i32>()` and `Set<i32>()`: an empty map or set, from the generic arguments or the
-    // type expected. It allocates nothing until something goes in.
-    Type* table_call(Expr* e, Type* expected, bool map) {
+    // type expected. It allocates nothing until something goes in. `JavaHashMap<K, V>(n)` is
+    // Java's `new HashMap<>(n)`, whose first table has room for `n` (D105).
+    Type* table_call(Expr* e, Type* expected, bool map, bool java) {
         Expr* callee = e->callee;
         callee->ref = Ref::type;
         TypeKind kind = map ? TypeKind::map : TypeKind::set;
-        const char* name = map ? "Map" : "Set";
+        std::string name = java ? (map ? "JavaHashMap" : "JavaHashSet") : map ? "Map" : "Set";
+        std::string example = name + (map ? "<String, i32>()" : "<i32>()");
         Type* t = nullptr;
         std::size_t want = map ? 2 : 1;
         if (callee->type_args.size() == want) {
@@ -6327,27 +6382,36 @@ private:
                 if (is_bad(x)) return T.error;
                 args.push_back(x);
             }
-            check_key(args[0], callee->type_args[0]->span);
-            t = map ? T.map_of(args[0], args[1]) : T.set_of(args[0]);
+            check_key(args[0], callee->type_args[0]->span, java);
+            t = map ? T.map_of(args[0], args[1], java) : T.set_of(args[0], java);
         } else if (!callee->type_args.empty()) {
-            error(callee->span, map ? "`Map` takes two generic arguments, the types of its keys and values: `Map<String, i32>()`"
-                                    : "`Set` takes one generic argument, the type of its values: `Set<i32>()`");
+            error(callee->span, map ? q(name) + " takes two generic arguments, the types of its keys and values: " + q(example)
+                                    : q(name) + " takes one generic argument, the type of its values: " + q(example));
             return T.error;
-        } else if (expected && expected->kind == kind) {
+        } else if (expected && expected->kind == kind && expected->java == java) {
             t = expected;
         } else {
-            error(e->span, std::string("can't tell what this ") + (map ? "map" : "set") + " holds; give it, as in `" +
-                               (map ? "Map<String, i32>()" : "Set<i32>()") + "`, or give the variable a type");
+            error(e->span, std::string("can't tell what this ") + (map ? "map" : "set") + " holds; give it, as in " + q(example) +
+                               ", or give the variable a type");
             return T.error;
         }
-        for (Arg& a : e->args) check(a.value, nullptr);
-        if (!e->args.empty()) {
-            error(e->args[0].span, std::string("`") + name + "<...>()` takes no arguments; add to it with `insert`");
-            return T.error;
+        if (java && e->args.size() == 1) {
+            // Java's initial capacity, which sets the size of the first table.
+            Arg& a = e->args[0];
+            if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+            check(a.value, T.usize);
+        } else {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (!e->args.empty()) {
+                error(e->args[0].span, java ? q(name + "<...>()") + " takes at most one argument, the capacity Java's " +
+                                                  (map ? "`new HashMap<>(n)`" : "`new HashSet<>(n)`") + " starts with"
+                                            : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
+                return T.error;
+            }
         }
         callee->named_type = t;
         e->call = CallKind::construct;
-        e->is_const = true;
+        e->is_const = e->args.empty() || e->args[0].value->is_const;
         return t;
     }
 
@@ -6385,6 +6449,24 @@ private:
             return T.error;
         }
         return ordering_type();
+    }
+
+    // `x.java_hash()`: Java's `hashCode` of the value, built in or written with `impl JavaHash`,
+    // and on a float `Float.hashCode` or `Double.hashCode`, for a `java_hash` that adds one up.
+    Type* java_hash_call(Expr* e, Type* recv) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::java_hash;
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->span, "`java_hash` takes no arguments");
+            return T.error;
+        }
+        if (is_bad(recv)) return T.error;
+        if (recv->kind != TypeKind::float_ && !java_hashable(recv)) {
+            error(e->callee->span, name_of(recv) + " has no `java_hash`, since it has no `JavaHash`" + lacking(recv, p_java_hash));
+            return T.error;
+        }
+        return T.i32;
     }
 
     // `Ordering`, what `cmp` gives: a built-in enum whose variants, `Less`, `Equal` and `Greater`,
@@ -6456,7 +6538,6 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {nullptr}, result = T.bool_;
             else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
             else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
-            else if (m == "java_hash") b = BMethod::java_hash, result = T.i32;
             else if (m == "utf16_len") b = BMethod::utf16_len, result = T.usize;
             else if (m == "runes" || m == "chars") {
                 // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
@@ -6483,7 +6564,11 @@ private:
             Type* look = lookup_key(recv);
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
-            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            // Java's tables don't say how many keys fit.
+            else if (m == "capacity" && !recv->java) b = BMethod::capacity, result = T.usize;
+            else if (m == "compute_if_absent" && map && recv->java) {
+                b = BMethod::compute_if_absent, changes = true, params = {recv->key, recv->elem}, result = T.bool_;
+            }
             else if (m == "insert") b = BMethod::insert, changes = true, params = map ? std::vector<Type*>{recv->key, recv->elem}
                                                                                          : std::vector<Type*>{recv->elem};
             else if (m == "remove") b = BMethod::remove, changes = true, params = {look}, result = map ? T.optional_of(recv->elem) : T.unit;
@@ -6833,10 +6918,10 @@ private:
         std::unordered_map<const Type*, bool> known;
         std::vector<const Type*> order;
     };
-    Derived derived_[4];
+    Derived derived_[kProps];
     // D102: `std.core`'s names, its interfaces by property, and each type's hand-written functions.
     Scope* core_scope_ = nullptr;
-    Item* prop_iface_[4] = {};
+    Item* prop_iface_[kProps] = {};
     Type* hasher_type_ = nullptr;
     bool hand_ready_ = false;  // every impl is known
     std::map<std::pair<const Type*, int>, Item*> hand_;
@@ -6845,6 +6930,7 @@ private:
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
+    Name n_JavaHashMap_, n_JavaHashSet_, n_JavaHash_, n_java_hash_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
@@ -6884,7 +6970,7 @@ private:
     std::unordered_map<Item*, std::vector<Type*>> unfilled_;
     std::vector<Item*> pending_fns_;
     std::vector<DeferredBounds> deferred_bounds_;
-    std::vector<std::pair<const Type*, Span>> deferred_keys_;
+    std::vector<std::tuple<const Type*, Span, bool>> deferred_keys_;
     std::unordered_set<std::string> c_names_;
     std::unordered_set<std::string> prefixes_;
     std::unordered_set<Item*> failed_generics_;

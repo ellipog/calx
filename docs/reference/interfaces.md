@@ -63,7 +63,7 @@ There's no inheritance and there are no classes. A type gets behavior from its o
 - A type implements an interface at most once.
 - A type has one function of each name, as in Java. Its own `impl` blocks can't have a function named like one an interface gives it, a default included. To replace a default, put the function in the interface's impl.
 - An impl for a generic type can have bounds of its own. `impl<T: Code> Code for Wrapper<T>` gives `Wrapper<T>` a code whenever `T` has one.
-- `Equal`, `Display`, `Hash` and `Order` are interfaces too, built in, which a struct or an enum implements to write its own derived property ([comparing and printing](comparing.md#writing-your-own)).
+- `Equal`, `Display`, `Hash`, `Order` and `JavaHash` are interfaces too, built in, which a struct or an enum implements to write its own property ([comparing and printing](comparing.md#writing-your-own)).
 
 ```calx
 interface Code {
