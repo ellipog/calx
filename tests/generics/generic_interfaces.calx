@@ -1,0 +1,111 @@
+// Generic interfaces (D103): an interface with parameters of its own after `Self`, implemented
+// once for each list of arguments, used as a bound that can mention other parameters, and with
+// defaults that use its parameters.
+
+interface Into<T> {
+    fn into(self) -> T
+
+    fn twice(self) -> List<T> {
+        return [self.into(), self.into()]
+    }
+}
+
+struct Meters {
+    v: i32,
+}
+
+impl Into<i64> for Meters {
+    fn into(self) -> i64 {
+        return i64(self.v) * 1000
+    }
+}
+
+impl Into<String> for Meters {
+    fn into(self) -> String {
+        return "{self.v} m"
+    }
+}
+
+// An integer can be one too, and the bound on `T` comes along.
+impl Into<f64> for i32 {
+    fn into(self) -> f64 {
+        return f64(self) / 2.0
+    }
+}
+
+interface Scale<T> {
+    fn scale(self, by: T) -> Self
+}
+
+impl Scale<i32> for Meters {
+    fn scale(self, by: i32) -> Self {
+        return Meters { v: self.v * by }
+    }
+}
+
+impl Scale<Meters> for Meters {
+    fn scale(self, by: Meters) -> Self {
+        return Meters { v: self.v * by.v }
+    }
+}
+
+struct Pair<A> {
+    a: A,
+    b: A,
+}
+
+// A generic impl, whose interface argument mentions its parameter.
+impl<A: Copy> Into<List<A>> for Pair<A> {
+    fn into(self) -> List<A> {
+        return [self.a, self.b]
+    }
+}
+
+// Through a bound: the result's type says which.
+fn total<T: Into<i64>>(xs: List<T>) -> i64 {
+    var sum = 0i64
+    for x in xs {
+        let n: i64 = x.into()
+        sum += n
+    }
+    return sum
+}
+
+// A bound that mentions another parameter.
+fn convert<A, B: From<A>>(a: own A) -> B {
+    return B.from(a)
+}
+
+struct Celsius {
+    v: f64,
+}
+
+struct Kelvin {
+    v: f64,
+}
+
+impl From<Celsius> for Kelvin {
+    fn from(value: own Celsius) -> Self {
+        return Kelvin { v: value.v + 273.15 }
+    }
+}
+
+fn main() {
+    let m = Meters { v: 3 }
+    let a: i64 = m.into()
+    let s: String = m.into()
+    println("{a} {s}")    // out: 3000 3 m
+    let h: f64 = 5.into()
+    println("{h}")    // out: 2.5
+    // The arguments choose between `Scale<i32>` and `Scale<Meters>`.
+    println("{m.scale(2).v} {m.scale(Meters { v: 4 }).v}")    // out: 6 12
+    let ms: List<String> = m.twice()
+    println("{ms}")    // out: [3 m, 3 m]
+    let both: List<Meters> = [Meters { v: 1 }, Meters { v: 2 }]
+    println("{total(both)}")    // out: 3000
+    let p = Pair { a: 1u8, b: 2u8 }
+    let l: List<u8> = p.into()
+    println("{l}")    // out: [1, 2]
+    let k: Kelvin = convert(Celsius { v: 10.0 })
+    println("{k.v}")    // out: 283.15
+}

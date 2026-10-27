@@ -1,0 +1,111 @@
+// `try` converts the call's error to the function's through `From` (D103). Errors that own
+// memory move into the conversion, which the debug build's leak check confirms.
+
+enum IoError {
+    Closed,
+    Short(usize),
+}
+
+struct ParseError {
+    line: i32,
+    message: String,
+}
+
+enum AppError {
+    Io(IoError),
+    Parse(ParseError),
+    Other(String),
+}
+
+impl From<IoError> for AppError {
+    fn from(value: own IoError) -> Self {
+        return AppError.Io(value)
+    }
+}
+
+impl From<ParseError> for AppError {
+    fn from(value: own ParseError) -> Self {
+        return AppError.Parse(value)
+    }
+}
+
+impl From<String> for AppError {
+    fn from(value: own String) -> Self {
+        return AppError.Other(value)
+    }
+}
+
+fn read(n: usize) -> List<u8> ! IoError {
+    if n == 0 {
+        fail IoError.Closed
+    }
+    if n > 3 {
+        fail IoError.Short(n - 3)
+    }
+    var out = List<u8>()
+    for i in 0usize..n {
+        out.push(u8.wrap(i + 1))
+    }
+    return out
+}
+
+fn parse(bytes: List<u8>) -> i32 ! ParseError {
+    if bytes.len() < 2 {
+        fail ParseError { line: 1, message: String("too short") }
+    }
+    return i32(bytes[0]) * 10 + i32(bytes[1])
+}
+
+fn named(s: str) -> i32 ! String {
+    if s == "" {
+        fail String("no name")
+    }
+    return 7
+}
+
+fn load(n: usize, name: str) -> i32 ! AppError {
+    let kept = String("kept")    // dropped on every error path
+    let bytes = try read(n)
+    let v = try parse(bytes)
+    let w = try named(name)
+    return v + w + i32.wrap(kept.len())
+}
+
+fn report(n: usize, name: str) {
+    match load(n, name) {
+        ok(v) => println("{v}"),
+        err(AppError.Io(e)) => println("io: {e}"),
+        err(AppError.Parse(e)) => println("parse at {e.line}: {e.message}"),
+        err(AppError.Other(s)) => println("other: {s}"),
+    }
+}
+
+// Explicitly, the arguments choose between the impls.
+fn direct() {
+    let a = AppError.from(IoError.Closed)
+    let b = AppError.from(String("by hand"))
+    println("{a}")
+    println("{b}")
+}
+
+// Generic code converts through a bound.
+fn lift<E: From<IoError>>(n: usize) -> usize ! E {
+    let bytes = try read(n)
+    return bytes.len()
+}
+
+fn main() {
+    report(2, "x")    // out: 23
+    report(0, "x")    // out: io: Closed
+    report(5, "x")    // out: io: Short(2)
+    report(1, "x")    // out: parse at 1: too short
+    report(3, "")    // out: other: no name
+    direct()
+    // out: Io(Closed)
+    // out: Other(by hand)
+    match lift<AppError>(9) {
+        ok(n) => println("{n}"),
+        err(e) => println("lifted: {e}"),    // out: lifted: Io(Short(6))
+    }
+    println("{lift<AppError>(2)!}")    // out: 2
+}

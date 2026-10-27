@@ -90,7 +90,7 @@ public:
             builtin_names_.push_back(ctx.names.intern(b));
         }
         for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash", "Order", "Ordering",
-                              "Hasher"}) {
+                              "Hasher", "From"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
@@ -106,6 +106,7 @@ public:
         n_copy_ = ctx.names.intern("copy");
         n_Hasher_ = ctx.names.intern("Hasher");
         n_add_ = ctx.names.intern("add");
+        n_From_ = ctx.names.intern("From");
         n_ok_ = ctx.names.intern("ok");
         n_err_ = ctx.names.intern("err");
     }
@@ -124,9 +125,10 @@ public:
             if (m->builtin) find_core(m);
         }
         for (Module* m : modules) resolve_imports(m);
-        resolve_params();
-        // Bounds are checked once every impl is known, since a type's fields can need one.
+        // Bounds are checked once every impl is known, since a type's fields can need one, and so
+        // can a bound's own arguments, as in `T: From<Wrapper<U>>`.
         defer_bounds_ = true;
+        resolve_params();
         for (Item* it : structs_) resolve_fields(it);
         for (Item* it : enums_) resolve_enum(it);
         for (Item* it : interfaces_) collect_interface(it);
@@ -257,13 +259,14 @@ private:
             return it->second.item;
         }
         // `std.core`'s names are reserved, so no module declares them, and every module sees them.
-        if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_)) {
+        if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_ || n == n_From_)) {
             if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
         }
         return nullptr;
     }
 
-    // `std.core`: the interfaces of the derived properties, and `Hasher` (D102).
+    // `std.core`: the interfaces of the derived properties, and `Hasher` (D102), and `From`, which
+    // `try` converts an error with (D103).
     void find_core(Module* m) {
         core_scope_ = scopes_.at(m).get();
         const Name names[] = {n_Equal_, n_Display_, n_Hash_, n_Order_};
@@ -271,6 +274,7 @@ private:
         Item* h = core_scope_->items.at(n_Hasher_);
         hasher_type_ = h->declared;
         prog_.hasher = hasher_type_;
+        from_iface_ = core_scope_->items.at(n_From_);
     }
 
     // Which derived property an interface is, or -1.
@@ -548,15 +552,17 @@ private:
                     enums_.push_back(it);
                     break;
                 case ItemKind::interface: {
-                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic interfaces");
                     declare_item(it);
-                    // `Self` is a parameter of every function in the interface, bounded by it.
+                    // `Self` is a parameter of every function in the interface, bounded by it, and
+                    // a generic interface's own parameters come after it: `From<T>` is `Self, T`.
                     Type* self = T.make_param("Self");
                     param_names_[self] = n_Self_;
-                    std::vector<Item*> bound{it};
-                    self->bounds = ctx_.arena.copy(bound);
                     std::vector<Type*> params{self};
+                    for (Type* p : make_params(it)) params.push_back(p);
                     it->type_params = ctx_.arena.copy(params);
+                    std::vector<Type*> own(params.begin() + 1, params.end());
+                    std::vector<Item*> bound{iface_instance(it, own)};
+                    self->bounds = ctx_.arena.copy(bound);
                     interfaces_.push_back(it);
                     break;
                 }
@@ -768,7 +774,9 @@ private:
                 }
                 Type* saved = current_impl_type_;
                 current_impl_type_ = self;
+                std::size_t env_mark = push_env(it);
                 m->declared = resolve_type(m->type);
+                pop_env(env_mark);
                 current_impl_type_ = saved;
                 continue;
             }
@@ -784,6 +792,7 @@ private:
             pop_env(mark);
             if (m->body && m->generics.empty()) all_fns_.push_back(m);
         }
+        report_unused_params(it, "isn't used by any of its members");
     }
 
     // `fn area(self) -> f64`, with `Self` as `t`, for messages.
@@ -806,7 +815,7 @@ private:
     // An impl's function must have exactly the interface's signature, with its type for `Self`,
     // parameter names included, since calls can name their arguments.
     void check_conforms(Item* m, Item* want, Type* t, Item* iface) {
-        Subst s{{iface->type_params[0], t}};
+        Subst s = iface_subst(iface, t);
         bool ok = m->params.size() == want->params.size();
         for (std::size_t i = 0; ok && i < m->params.size(); i++) {
             const Param& a = m->params[i];
@@ -817,7 +826,7 @@ private:
         Type* r = subst(want->result_type, s);
         ok = ok && (m->result_type == r || is_bad(m->result_type) || is_bad(r));
         if (!ok) {
-            error(m->name_span, q(text(m->name)) + " doesn't match " + q(text(iface->name)) + ", which declares it as " +
+            error(m->name_span, q(text(m->name)) + " doesn't match " + q(iface_text(iface)) + ", which declares it as " +
                                     q(signature_text(want, s)));
             if (!want->module->builtin) note(want->name_span, "it's declared here");
         }
@@ -826,13 +835,11 @@ private:
     void collect_impl(Item* impl) {
         InModule in(*this, impl);
         Item* iface = nullptr;
-        if (impl->interface) {
-            iface = resolve_interface(impl->interface);
-            if (!iface) return;
-        }
         std::size_t mark = push_env(impl);
+        if (impl->interface) iface = resolve_interface(impl->interface);
         Type* t = resolve_type(impl->self_type);
         pop_env(mark);
+        if (impl->interface && !iface) return;
         if (is_bad(t)) return;
         // Every parameter must be in the type, or a use couldn't tell what it stands for.
         for (Type* p : impl->type_params) {
@@ -872,11 +879,25 @@ private:
         }
         auto& same_head = impls_by_head_[head(t)];
         if (iface) {
+            if (iface_root(iface) == from_iface_ && iface->type_args[0] == t) {
+                error(impl->interface->span, "a value is already its own type; `try` passes " + name_of(t) +
+                                                 " up as it is, so it needs no " + q(iface_text(iface)));
+                return;
+            }
+            // Two impls of `From` are separate interfaces when their arguments differ.
+            auto args_unify = [&](Item* pattern, Item* actual, Subst& s, const Slice<Type*>& vars) {
+                for (std::size_t k = 0; k < pattern->type_args.size(); k++) {
+                    if (!unify(pattern->type_args[k], actual->type_args[k], s, vars)) return false;
+                }
+                return true;
+            };
             for (ImplInfo* other : same_head) {
-                if (other->iface != iface) continue;
+                if (!other->iface || iface_root(other->iface) != iface_root(iface)) continue;
                 Subst a, b;
-                if (unify(other->self, t, a, other->impl->type_params) || unify(t, other->self, b, impl->type_params)) {
-                    error(impl->self_type->span, q(text(iface->name)) + " is already implemented for " + name_of(t));
+                Slice<Type*> theirs = other->impl->type_params, mine = impl->type_params;
+                if ((unify(other->self, t, a, theirs) && args_unify(other->iface, iface, a, theirs)) ||
+                    (unify(t, other->self, b, mine) && args_unify(iface, other->iface, b, mine))) {
+                    error(impl->self_type->span, q(iface_text(iface)) + " is already implemented for " + name_of(t));
                     note(other->impl->self_type->span, "the other impl is here");
                     return;
                 }
@@ -923,11 +944,11 @@ private:
             // An interface's members carry its name in C, so a profile or a stack trace says which
             // impl ran: `Lift__Up__go` and `Lift__Down__go`.
             std::string owner = mangle(t);
-            if (iface) owner += "__" + std::string(text(iface->name));
+            if (iface) owner += "__" + iface_mangle(iface);
             if (m->kind == ItemKind::const_) {
                 m->c_name = c_name({owner, text(m->name)});
                 m->impl_type = t;
-                m->result_type = subst(want->declared, Subst{{iface->type_params[0], t}});
+                m->result_type = subst(want->declared, iface_subst(iface, t));
                 info->members.emplace(m->name, m);
                 consts_.push_back(m);
                 continue;
@@ -976,7 +997,7 @@ private:
                 }
             }
             if (!missing.empty()) {
-                error(impl->self_type->span, "the impl of " + q(text(iface->name)) + " for " + name_of(t) + " is missing " + missing);
+                error(impl->self_type->span, "the impl of " + q(iface_text(iface)) + " for " + name_of(t) + " is missing " + missing);
             }
         }
         same_head.push_back(info);
@@ -1109,6 +1130,8 @@ private:
                 error(g->span, q(text(g->name)) + " is a built-in name");
             }
             std::vector<Item*> bounds;
+            // A bound can mention the other parameters: `U: From<T>`.
+            std::size_t env_mark = push_env(param_owner_[p]);
             for (TypeExpr* b : g->bounds) {
                 // The derived properties, which every type that can have them has without an impl.
                 bool* flag = nullptr;
@@ -1126,15 +1149,17 @@ private:
                 Item* iface = resolve_interface(b);
                 if (!iface) continue;
                 if (std::find(bounds.begin(), bounds.end(), iface) != bounds.end()) {
-                    error(b->span, q(text(iface->name)) + " is already a bound of " + q(text(g->name)));
+                    error(b->span, q(iface_text(iface)) + " is already a bound of " + q(text(g->name)));
                     continue;
                 }
                 bounds.push_back(iface);
             }
+            pop_env(env_mark);
             p->bounds = ctx_.arena.copy(bounds);
         }
     }
 
+    // `Shape`, or `From<IoError>`: the interface, with its arguments if it's generic.
     Item* resolve_interface(TypeExpr* t) {
         if (t->kind != TypeExprKind::named || t->path.parts.size() != 1) {
             error(t->span, "a bound must be an interface");
@@ -1145,9 +1170,96 @@ private:
             error(t->span, q(path_text(t->path)) + (!it ? " isn't defined" : " isn't an interface"));
             return nullptr;
         }
-        if (!t->args.empty()) not_yet(t->args[0]->span, "generic interfaces");
         it->used = true;
+        std::size_t n = it->type_params.size() - 1;
+        std::string name(text(it->name));
+        if (t->args.size() != n) {
+            if (t->args.empty()) {
+                error(t->span, q(name) + " is generic; give its " + (n == 1 ? "type" : "types") + ", as in " + q(name + "<...>"));
+            } else if (n == 0) {
+                error(t->args[0]->span, q(name) + " isn't generic");
+            } else {
+                error(t->span, q(name) + " takes " + std::to_string(n) + (n == 1 ? " type" : " types") + ", but " +
+                                   std::to_string(t->args.size()) + (t->args.size() == 1 ? " was given" : " were given"));
+            }
+            for (TypeExpr* a : t->args) resolve_type(a);
+            return nullptr;
+        }
+        std::vector<Type*> args;
+        bool bad = false;
+        for (TypeExpr* a : t->args) {
+            Type* x = resolve_type(a);
+            if (x->kind == TypeKind::unit || x->kind == TypeKind::never) {
+                error(a->span, name_of(x) + " can't be a generic argument");
+                x = T.error;
+            }
+            bad = bad || is_bad(x);
+            args.push_back(x);
+        }
+        if (bad) return nullptr;
+        if (!check_bounds(own_params(it), args, t->span, q(name))) return nullptr;
+        return iface_instance(it, args);
+    }
+
+    // --- generic interfaces (D103) -------------------------------------------------------------
+    //
+    // `From<IoError>` is the generic interface `From` with its arguments: an item of its own, made
+    // once for each list of arguments, so two uses of the same ones are the same pointer. Its
+    // members are the generic interface's, with `Self` and its parameters for what it's used with.
+    // A plain interface is its own instance.
+
+    Item* iface_instance(Item* g, const std::vector<Type*>& args) {
+        if (args.empty()) return g;
+        auto key = std::make_pair(g, args);
+        if (auto it = iface_instances_.find(key); it != iface_instances_.end()) return it->second;
+        Item* it = ctx_.arena.make<Item>(*g);
+        it->origin = g;
+        it->type_args = ctx_.arena.copy(args);
+        iface_instances_.emplace(key, it);
         return it;
+    }
+
+    static Item* iface_root(Item* i) { return i->origin ? i->origin : i; }
+    static const Item* iface_root(const Item* i) { return i->origin ? i->origin : i; }
+
+    // A generic interface's own parameters, after `Self`.
+    static Slice<Type*> own_params(const Item* iface) {
+        const Item* g = iface_root(iface);
+        return Slice<Type*>({g->type_params.data + 1, g->type_params.count - 1});
+    }
+
+    // What `Self` and the interface's parameters stand for in its members.
+    Subst iface_subst(const Item* inst, Type* self) {
+        const Item* g = iface_root(inst);
+        Subst s{{g->type_params[0], self}};
+        for (std::size_t k = 0; k < inst->type_args.size(); k++) s.emplace(g->type_params[k + 1], inst->type_args[k]);
+        return s;
+    }
+
+    Item* subst_iface(Item* i, const Subst& s) {
+        if (i->type_args.empty() || s.empty()) return i;
+        std::vector<Type*> args;
+        for (Type* a : i->type_args) args.push_back(subst(a, s));
+        return iface_instance(iface_root(i), args);
+    }
+
+    // `From<IoError>`, for messages.
+    std::string iface_text(const Item* i) const {
+        std::string s(text(iface_root(i)->name));
+        if (i->type_args.empty()) return s;
+        s += '<';
+        for (std::size_t k = 0; k < i->type_args.size(); k++) {
+            if (k) s += ", ";
+            s += i->type_args[k]->name;
+        }
+        return s + '>';
+    }
+
+    // `From_IoError`, in C names, so a type's impls of `From` don't meet.
+    std::string iface_mangle(const Item* i) const {
+        std::string s(text(iface_root(i)->name));
+        for (Type* a : i->type_args) s += "_" + mangle(a);
+        return s;
     }
 
     // A parameter that nothing mentions can't be worked out from a use, so it's an error (D63).
@@ -1313,6 +1425,10 @@ private:
             return true;
         }
         bool ok = true;
+        Subst bound_args;  // a bound can mention the other parameters: `U: From<T>`
+        for (Type* p : params) {
+            for (Item* b : p->bounds) if (!b->type_args.empty()) bound_args = binding(params, args);
+        }
         for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
             if (params[i]->copy_bound && !is_bad(args[i]) && !is_copy(args[i])) {
                 error(span, name_of(args[i]) + " isn't `Copy`, which " + what + " needs for " + q(params[i]->name));
@@ -1339,9 +1455,15 @@ private:
                 ok = false;
             }
             for (Item* b : params[i]->bounds) {
-                if (satisfies(args[i], b)) continue;
-                error(span, name_of(args[i]) + " doesn't implement " + q(text(b->name)) + ", which " + what +
-                                " needs for " + q(params[i]->name));
+                Item* want = subst_iface(b, bound_args);
+                if (satisfies(args[i], want)) continue;
+                // An interface's own function, called on a type: `AppError.from(e)`.
+                if (params[i] == iface_root(b)->type_params[0]) {
+                    error(span, name_of(args[i]) + " doesn't implement " + q(iface_text(want)));
+                } else {
+                    error(span, name_of(args[i]) + " doesn't implement " + q(iface_text(want)) + ", which " + what +
+                                    " needs for " + q(params[i]->name));
+                }
                 ok = false;
             }
         }
@@ -1358,7 +1480,7 @@ private:
             if (p->hash_bound && !hashable(it->second)) return false;
             if (p->order_bound && !orderable(it->second)) return false;
             for (Item* b : p->bounds) {
-                if (!satisfies(it->second, b)) return false;
+                if (!satisfies(it->second, subst_iface(b, s))) return false;
             }
         }
         return true;
@@ -1370,6 +1492,16 @@ private:
         return t;
     }
 
+    // Whether the impl `info` is of `want` for `t`, binding the impl's parameters in `s`.
+    bool impl_matches(const ImplInfo* info, Type* t, const Item* want, Subst& s) {
+        if (!info->iface || iface_root(info->iface) != iface_root(want)) return false;
+        if (!unify(info->self, t, s, info->impl->type_params)) return false;
+        for (std::size_t k = 0; k < want->type_args.size() && k < info->iface->type_args.size(); k++) {
+            if (!unify(info->iface->type_args[k], want->type_args[k], s, info->impl->type_params)) return false;
+        }
+        return true;
+    }
+
     bool satisfies(Type* t, Item* iface) {
         if (is_bad(t)) return true;
         if (t->kind == TypeKind::param) {
@@ -1379,9 +1511,8 @@ private:
         auto it = impls_by_head_.find(head(t));
         if (it == impls_by_head_.end()) return false;
         for (ImplInfo* info : it->second) {
-            if (info->iface != iface) continue;
             Subst s;
-            if (unify(info->self, t, s, info->impl->type_params) && bounds_hold(info->impl->type_params, s)) {
+            if (impl_matches(info, t, iface, s) && bounds_hold(info->impl->type_params, s)) {
                 info->used = true;
                 return true;
             }
@@ -1404,6 +1535,16 @@ private:
         if (is_bad(t)) return m;
         auto take = [&](Item* x, Subst s, Item* iface) {
             if (m.fn || m.konst) {
+                // Two impls of one generic interface, such as `From<IoError>` and `From<ParseError>`:
+                // the call's arguments choose, through the interface's own function (D103).
+                if (iface && m.iface && m.fn && x->kind == ItemKind::fn && iface_root(iface) == iface_root(m.iface) &&
+                    !iface->type_args.empty()) {
+                    Item* g = iface_root(iface);
+                    m.fn = interface_member(g, n);
+                    m.s = Subst{{g->type_params[0], t}};
+                    m.iface = g;
+                    return;
+                }
                 m.ambiguous = true;
                 return;
             }
@@ -1413,8 +1554,8 @@ private:
         };
         if (t->kind == TypeKind::param) {
             for (Item* b : t->bounds) {
-                if (only && b != only) continue;
-                if (Item* x = interface_member(b, n)) take(x, Subst{{b->type_params[0], t}}, b);
+                if (only && iface_root(b) != iface_root(only)) continue;
+                if (Item* x = interface_member(b, n)) take(x, iface_subst(b, t), b);
             }
             return m;
         }
@@ -1434,7 +1575,7 @@ private:
         }
         if (m.fn || m.konst || identity) return m;
         for (ImplInfo* info : found->second) {
-            if (!info->iface || (only && info->iface != only) || !visible(info->iface)) continue;
+            if (!info->iface || (only && iface_root(info->iface) != iface_root(only)) || !visible(iface_root(info->iface))) continue;
             Subst s;
             if (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s)) continue;
             Item* x = nullptr;
@@ -1442,7 +1583,7 @@ private:
                 x = f->second;
             } else if (Item* d = interface_member(info->iface, n); d && d->kind == ItemKind::fn && d->body) {
                 x = d;  // the interface's default, for this `Self`
-                s = Subst{{info->iface->type_params[0], t}};
+                s = iface_subst(subst_iface(info->iface, s), t);
             }
             if (!x) continue;
             info->used = true;
@@ -1657,7 +1798,15 @@ private:
         std::string base;
         if (it->impl_type) {
             base = mangle(it->impl_type) + "__";
-            if (f->interface_item) base += std::string(text(f->interface_item->name)) + "__";
+            if (Item* i = f->interface_item) {
+                // A generic interface's default is generic over the interface's parameters too.
+                if (!i->origin && i->type_params.size() > 1 && f->type_params.size() >= i->type_params.size()) {
+                    i = iface_instance(i, std::vector<Type*>(args.begin() + 1, args.begin() + i->type_params.size()));
+                } else {
+                    i = subst_iface(i, s);
+                }
+                base += iface_mangle(i) + "__";
+            }
         }
         base += text(f->name);
         std::size_t own = f->generics.size();
@@ -2807,9 +2956,17 @@ private:
                                "`match`, or declare `! " + std::string(err_type(t)->name) + "` on " + q(text(fn_->name)));
             return ok_type(t);
         }
-        if (err_type(rt) != err_type(t)) {
-            error(e->span, "`try` passes the error up, but this call fails with " + a_type(err_type(t)) + " and " +
-                               q(text(fn_->name)) + " fails with " + a_type(err_type(rt)));
+        // An instance's copy of the expression starts again, since its types may need no conversion.
+        e->item = nullptr;
+        Type* from = err_type(t);
+        Type* to = err_type(rt);
+        if (from != to && !is_bad(from) && !is_bad(to)) {
+            e->item = error_conversion(from, to, e->span);
+            if (!e->item) {
+                error(e->span, "`try` passes the error up, but this call fails with " + a_type(from) + " and " +
+                                   q(text(fn_->name)) + " fails with " + a_type(to) + "; to convert one to the other, implement " +
+                                   q("From<" + std::string(from->name) + ">") + " for " + name_of(to));
+            }
         }
         return ok_type(t);
     }
@@ -5205,7 +5362,7 @@ private:
                 return T.error;
             }
             if (!mem.fn && e->only_interface) {
-                error(callee->lhs->span, name_of(recv) + " doesn't implement " + q(text(e->only_interface->name)));
+                error(callee->lhs->span, name_of(recv) + " doesn't implement " + q(iface_text(e->only_interface)));
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
@@ -5644,11 +5801,49 @@ private:
         for (Type* a : args) open = open || a->open;
         // Inside a generic definition the call is only checked; its instance comes with the caller's.
         if (!open) {
-            Item* inst = instance_fn(f, args, e->span);
+            Item* inst = in_interface(f) ? impl_fn(f, args, e->span) : instance_fn(f, args, e->span);
             if (!inst) return T.error;
             e->item = inst;
         }
         return result;
+    }
+
+    // Whether `f` is declared in an interface, rather than in an impl.
+    static bool in_interface(const Item* f) {
+        return f->interface_item && !f->interface_item->origin && f->impl_type == f->interface_item->type_params[0];
+    }
+
+    // An interface's function for real types, `Self` and then the interface's own parameters: the
+    // impl's, or the interface's default when the impl doesn't replace it. A call reaches here with
+    // the interface's function when the arguments chose between impls (D103).
+    Item* impl_fn(Item* f, const std::vector<Type*>& args, Span site) {
+        Item* g = f->interface_item;
+        Item* want = iface_instance(g, std::vector<Type*>(args.begin() + 1, args.begin() + g->type_params.size()));
+        if (auto found = impls_by_head_.find(head(args[0])); found != impls_by_head_.end()) {
+            for (ImplInfo* info : found->second) {
+                Subst s;
+                if (!impl_matches(info, args[0], want, s) || !bounds_hold(info->impl->type_params, s)) continue;
+                info->used = true;
+                auto m = info->members.find(f->name);
+                if (m == info->members.end()) break;
+                Item* x = m->second;
+                if (x->type_params.empty()) return x;
+                std::vector<Type*> xs;
+                for (Type* p : x->type_params) xs.push_back(s.count(p) ? s.at(p) : T.error);
+                return instance_fn(x, xs, site);
+            }
+        }
+        return f->body ? instance_fn(f, args, site) : nullptr;
+    }
+
+    // The function `try` converts an error with: `to`'s `from`, through `From<from>` (D103). In
+    // generic code it's the interface's, and each instance finds its impl.
+    Item* error_conversion(Type* from, Type* to, Span site) {
+        std::vector<Type*> arg{from};
+        if (!satisfies(to, iface_instance(from_iface_, arg))) return nullptr;
+        Item* f = from_iface_->members[0];
+        if (from->open || to->open) return f;
+        return impl_fn(f, {to, from}, site);
     }
 
     // A place such as `a.b[i].c` as its root and its steps from there, outermost first: a field's
@@ -6549,7 +6744,7 @@ private:
             if (!info->iface || info->used || info->iface->is_pub) continue;
             const Item* owner = info->self->generic ? info->self->generic : info->self->item;
             if (owner && owner->is_pub) continue;
-            error(info->impl->self_type->span, "this impl of " + q(text(info->iface->name)) + " for " + name_of(info->self) +
+            error(info->impl->self_type->span, "this impl of " + q(iface_text(info->iface)) + " for " + name_of(info->self) +
                                                    " is never used");
         }
         for (const auto& [m, scope] : scopes_) {
@@ -6624,7 +6819,10 @@ private:
     Type* hasher_type_ = nullptr;
     bool hand_ready_ = false;  // every impl is known
     std::map<std::pair<const Type*, int>, Item*> hand_;
-    Name n_Hasher_, n_add_;
+    Name n_Hasher_, n_add_, n_From_;
+    Item* from_iface_ = nullptr;
+    // D103: each generic interface with each list of arguments it's used with.
+    std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

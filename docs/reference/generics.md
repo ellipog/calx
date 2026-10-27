@@ -212,6 +212,33 @@ Arithmetic and conversions on a `T` need the standard interfaces that will say w
 
 A bound on a struct's or enum's parameter, as in `struct Holder<T: Shape>`, applies to every use of the type.
 
+A [generic interface](interfaces.md#generic-interfaces) as a bound names its arguments, which can be the other parameters (D103):
+
+```calx
+struct Celsius {
+    v: f64,
+}
+
+struct Kelvin {
+    v: f64,
+}
+
+impl From<Celsius> for Kelvin {
+    fn from(value: own Celsius) -> Self {
+        return Kelvin { v: value.v + 273.15 }
+    }
+}
+
+fn convert<A, B: From<A>>(a: own A) -> B {
+    return B.from(a)
+}
+
+fn main() {
+    let k: Kelvin = convert(Celsius { v: 10.0 })
+    println("{k.v}")    // out: 283.15
+}
+```
+
 ## Values of type `T`
 
 Generic code can't know whether `T` owns memory, as a `String` does, so it treats every `T` as a value that might ([ownership](ownership.md)):

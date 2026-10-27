@@ -2958,7 +2958,13 @@ static void $reserve($T* m, cx_usize n) {
         indent_++;
         std::string leave = capture([&] {
             std::string r = tmp();
-            line(ctype(fr) + " " + r + " = " + variant_value(fr, 1, {t + ".u.v1." + variant_field(rt, 1, 0)}) + ";");
+            std::string err = t + ".u.v1." + variant_field(rt, 1, 0);
+            // The function's error type has a `From` for the call's: `AppError.from(err)` (D103).
+            if (Item* conv = e->item) {
+                if (uses_) uses_->add_fn(conv);
+                err = call_hand(conv, {err.c_str()});
+            }
+            line(ctype(fr) + " " + r + " = " + variant_value(fr, 1, {err}) + ";");
             exit_drops(0, e->exit_drops);
             line("return " + r + ";");
         });

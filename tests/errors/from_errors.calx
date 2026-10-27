@@ -1,0 +1,108 @@
+// Generic interfaces and `From` (D103): a generic interface is always used with its arguments,
+// a type implements it once for each, `From` follows its signature, and `try` passes up only an
+// error the function's error type converts from.
+
+enum IoError {
+    Closed,
+}
+
+enum AppError {
+    Io(IoError),
+    Other,
+}
+
+impl From<IoError> for AppError {
+    fn from(value: own IoError) -> Self {
+        return AppError.Io(value)
+    }
+}
+
+impl From<IoError> for AppError {    // error: `From<IoError>` is already implemented for `AppError`
+    fn from(value: own IoError) -> Self {
+        return AppError.Io(value)
+    }
+}
+
+impl From<i32> for AppError {
+    fn from(value: own i32) -> Self {
+        _ = value
+        return AppError.Other
+    }
+}
+
+impl From<AppError> for AppError {    // error: a value is already its own type; `try` passes `AppError` up as it is, so it needs no `From<AppError>`
+    fn from(value: own AppError) -> Self {
+        return value
+    }
+}
+
+enum Wrong {
+    A,
+}
+
+impl From<IoError> for Wrong {
+    fn from(value: IoError) -> Self {    // error: `from` doesn't match `From<IoError>`, which declares it as `fn from(value: own IoError) -> Wrong`
+        _ = value
+        return Wrong.A
+    }
+}
+
+pub interface Unused<T> {    // error: generic parameter `T` isn't used by any of its members
+    fn get(self) -> i32
+}
+
+interface Plain {
+    fn get(self) -> i32
+}
+
+interface Pick<T> {
+    fn pick(self) -> T
+}
+
+impl Pick<i32> for IoError {
+    fn pick(self) -> i32 {
+        return 1
+    }
+}
+
+impl Pick<bool> for IoError {
+    fn pick(self) -> bool {
+        return true
+    }
+}
+
+struct From {}    // error: `From` is a built-in name
+
+fn closed() -> i32 ! IoError {
+    fail IoError.Closed
+}
+
+fn other() -> i32 ! Wrong {
+    fail Wrong.A
+}
+
+fn pass() -> i32 ! AppError {
+    let a = try closed()
+    let b = try other()    // error: `try` passes the error up, but this call fails with a `Wrong` and `pass` fails with an `AppError`; to convert one to the other, implement `From<Wrong>` for `AppError`
+    return a + b
+}
+
+pub fn bare<T: From>(x: T) {    // error: `From` is generic; give its type, as in `From<...>`
+    _ = x
+}
+
+pub fn extra<T: Plain<i32>>(x: T) {    // error: `Plain` isn't generic
+    _ = x
+}
+
+fn main() {
+    // With more than one impl, the argument chooses.
+    let w = AppError.from(Wrong.A)    // error: `AppError` doesn't implement `From<Wrong>`
+    _ = w
+    let k = AppError.from(5)
+    _ = k
+    let n: i32 = IoError.Closed.pick()
+    _ = n
+    _ = IoError.Closed.pick()    // error: can't tell what `T` is in this call to `pick`
+    _ = pass()!
+}

@@ -87,17 +87,16 @@ Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns
 
 ### Errors are values
 
-Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). Still to build:
+Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). `try` converts the call's error to the function's through the built-in `From<T>` when their types differ ([converting errors](reference/errors.md#converting-errors), D103). Still to build:
 
-- `try` converting the error through `From` when the call's error type differs from the function's.
 - `! E` in function types, `fn(A) -> R ! E`, with closures.
 
 ### Interfaces and generics (D26)
 
-Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md). Still to build:
+Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103). Still to build:
 
 - **`dyn Shape`:** an owned value of any type implementing `Shape`, called through a table, for the places that need it (the host's handler tables).
-- **Associated types** in interfaces, and **generic interfaces**, such as `From<T>`.
+- **Associated types** in interfaces.
 - **Generic functions in interfaces**, and **defaults for an interface's constants**.
 - **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
 

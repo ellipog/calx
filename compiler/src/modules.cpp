@@ -38,6 +38,10 @@ pub interface Order {
 pub struct Hasher {
     state: u64
 }
+
+pub interface From<T> {
+    fn from(value: own T) -> Self
+}
 )";
 
 class Loader {

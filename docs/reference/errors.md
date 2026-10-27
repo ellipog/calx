@@ -1,6 +1,6 @@
 ---
 title: Errors
-description: Functions that can fail, fail, try, matching ok and err, unwrapping with !, and their C.
+description: Functions that can fail, fail, try, converting errors with From, matching ok and err, unwrapping with !, and their C.
 ---
 
 # Errors
@@ -72,7 +72,7 @@ The call to a function that can fail gives a result, `T ! E`: either `ok` with t
 
 | Written | Does |
 | --- | --- |
-| `try f()` | `f`'s value. If `f` fails, the function returns the same error |
+| `try f()` | `f`'s value. If `f` fails, the function returns the error, [converted](#converting-errors) if its type is different |
 | `match f() { ok(v) => ..., err(e) => ... }` | Runs the arm that matches. Every case must be covered |
 | `if let ok(v) = f() { }` | Runs the block if `f` succeeds. `if let err(e) = f()` runs it if `f` fails |
 | `let ok(v) = f() else { return }` | Binds the value, or runs the `else`, which must leave |
@@ -96,7 +96,7 @@ fn main() {
 
 ## `try`
 
-`try f()` is `f`'s value when `f` succeeds. When it fails, the function returns that error at once, and everything it owns is dropped, as a `return` there would drop it. The function must fail with the same error type as `f`. `try` can go anywhere a value can, even inside another call:
+`try f()` is `f`'s value when `f` succeeds. When it fails, the function returns that error at once, and everything it owns is dropped, as a `return` there would drop it. The function fails with the same error type as `f`, or one that [converts from it](#converting-errors). `try` can go anywhere a value can, even inside another call:
 
 ```calx
 struct Reader {
@@ -147,6 +147,98 @@ fn main() {
 ```
 
 `try` in a function that can't fail is an error, since there's nowhere to pass the error to. Handle it with `match` there.
+
+### Converting errors
+
+A function that calls code with several error types fails with one of its own, usually an enum with a variant for each. `try` converts the call's error to the function's through `From`, which the function's error type implements once for each type it converts from (D103):
+
+```calx
+enum IoError {
+    Closed,
+}
+
+enum CodecError {
+    TooLong(i32),
+}
+
+enum NetError {
+    Io(IoError),
+    Codec(CodecError),
+}
+
+impl From<IoError> for NetError {
+    fn from(value: own IoError) -> Self {
+        return NetError.Io(value)
+    }
+}
+
+impl From<CodecError> for NetError {
+    fn from(value: own CodecError) -> Self {
+        return NetError.Codec(value)
+    }
+}
+
+fn read(open: bool) -> i32 ! IoError {
+    if not open {
+        fail IoError.Closed
+    }
+    return 300
+}
+
+fn check(n: i32) -> i32 ! CodecError {
+    if n > 255 {
+        fail CodecError.TooLong(n)
+    }
+    return n
+}
+
+fn packet(open: bool) -> i32 ! NetError {
+    let n = try read(open)    // an `IoError` becomes a `NetError`
+    return try check(n)       // and so does a `CodecError`
+}
+
+fn main() {
+    match packet(false) {
+        ok(n) => println("{n}"),
+        err(e) => println("{e}"),    // out: Io(Closed)
+    }
+    match packet(true) {
+        ok(n) => println("{n}"),
+        err(e) => println("{e}"),    // out: Codec(TooLong(300))
+    }
+}
+```
+
+- `From<T>` is built in, like `Equal`, so there's nothing to import, and no module can declare another `From`. Its one function is `fn from(value: own T) -> Self`, and it's a [generic interface](interfaces.md#generic-interfaces): `From<IoError>` and `From<CodecError>` are separate interfaces, so a type can implement both.
+- The impl goes in the error type's module, since `From` is built in. `try` converts with it in any module.
+- `from` takes the error as `own`, so an error that owns memory, such as a `String`, moves into the new one, with no copy.
+- `NetError.from(e)` converts by hand, and the argument's type chooses the impl.
+- A type has no `From` for itself, and writing one is an error: `try` passes an error of the function's own type up as it is.
+- A call whose error has no conversion is an error that says which `From` to implement:
+
+```calx
+enum IoError {
+    Closed,
+}
+
+enum NetError {
+    Timeout,
+}
+
+fn read() -> i32 ! IoError {
+    fail IoError.Closed
+}
+
+fn packet() -> i32 ! NetError {
+    return try read()    // error: `try` passes the error up, but this call fails with an `IoError` and `packet` fails with a `NetError`; to convert one to the other, implement `From<IoError>` for `NetError`
+}
+
+fn main() {
+    println("{packet()!}")
+}
+```
+
+Generic code converts through a bound: `fn lift<E: From<IoError>>() -> i32 ! E` can `try` a call that fails with an `IoError`.
 
 ## Matching `ok` and `err`
 
@@ -286,4 +378,6 @@ static cx_Result_i32_ReadError game__short(const cx_list_u8* restrict bytes) {
 
 When an earlier part of the same expression made a value that's owned, such as the `name.copy()` in `pair(name.copy(), try read())`, the value waits in a temporary of the statement. The `try` is worked out before the call, and the temporary is cleared only as the value moves into it. So passing the error up drops the value, and the normal path doesn't drop it twice, whatever order C evaluates the arguments in.
 
-Still to build, in the [spec](../CALX_SPEC.md#errors-are-values): converting an error to the function's error type through `From`, and `! E` in function types.
+A `try` that converts calls the impl's `from` on the error, in the unlikely branch, before the drops: `.u.v1 = { .f0 = game__NetError__From_IoError__from(cx_t1.u.v1.f0) }`. The impl's C name includes the interface's arguments, so a type's impls of `From` don't meet. In a release build, a small `from`, such as one that wraps the error in a variant, is inlined, so the conversion costs no call.
+
+Still to build, in the [spec](../CALX_SPEC.md#errors-are-values): `! E` in function types.

@@ -1,0 +1,81 @@
+// `From` across modules (D103): the impls sit with the error type, and `try` in another module
+// converts through them.
+// file: main.calx
+import net.{NetError, read_packet}
+import codec.{Packet, decode}
+
+fn first_id(bytes: List<u8>) -> i32 ! NetError {
+    let p: Packet = try read_packet(bytes)
+    return p.id
+}
+
+// Converted here, through the impl in `net`.
+fn direct(bytes: List<u8>) -> i32 ! NetError {
+    let p = try decode(bytes)
+    return p.id + 1
+}
+
+fn main() {
+    let good: List<u8> = [2, 7, 9]
+    println("{first_id(good)!}")    // out: 7
+    let empty = List<u8>()
+    match first_id(empty) {
+        ok(id) => println("{id}"),
+        err(e) => println("{e}"),    // out: Codec(Empty)
+    }
+    let long: List<u8> = [200]
+    match first_id(long) {
+        ok(id) => println("{id}"),
+        err(e) => println("{e}"),    // out: Codec(TooLong(200))
+    }
+    println("{direct(good)!}")    // out: 8
+    match direct(long) {
+        ok(id) => println("{id}"),
+        err(e) => println("{e}"),    // out: Codec(TooLong(200))
+    }
+}
+
+// file: codec.calx
+module codec
+
+pub enum CodecError {
+    Empty,
+    TooLong(u8),
+}
+
+pub struct Packet {
+    pub id: i32,
+}
+
+pub fn decode(bytes: List<u8>) -> Packet ! CodecError {
+    if bytes.is_empty() {
+        fail CodecError.Empty
+    }
+    if bytes[0] > 100 {
+        fail CodecError.TooLong(bytes[0])
+    }
+    return Packet { id: i32(bytes[1]) }
+}
+
+// file: net.calx
+module net
+
+import codec.{CodecError, Packet, decode}
+
+pub enum NetError {
+    Closed,
+    Codec(CodecError),
+}
+
+impl From<CodecError> for NetError {
+    fn from(value: own CodecError) -> Self {
+        return NetError.Codec(value)
+    }
+}
+
+pub fn read_packet(bytes: List<u8>) -> Packet ! NetError {
+    if bytes.len() > 1000 {
+        fail NetError.Closed
+    }
+    return try decode(bytes)
+}

@@ -1,6 +1,6 @@
 ---
 title: Interfaces
-description: Interfaces with methods, static functions, constants and defaults; impls for structs, enums and primitives; and calls that name their interface.
+description: Interfaces with methods, static functions, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; and calls that name their interface.
 ---
 
 # Interfaces
@@ -156,17 +156,90 @@ fn main() {
 }
 ```
 
+## Generic interfaces
+
+An interface can have parameters of its own, after `Self`. Each use gives them, and each list of arguments is a separate interface, so a type can implement `Into<i64>` and `Into<String>` both (D103):
+
+```calx
+interface Into<T> {
+    fn into(self) -> T
+
+    fn twice(self) -> List<T> {
+        return [self.into(), self.into()]
+    }
+}
+
+struct Meters {
+    v: i32,
+}
+
+impl Into<i64> for Meters {
+    fn into(self) -> i64 {
+        return i64(self.v) * 1000
+    }
+}
+
+impl Into<String> for Meters {
+    fn into(self) -> String {
+        return "{self.v} m"
+    }
+}
+
+interface Scale<T> {
+    fn scale(self, by: T) -> Self
+}
+
+impl Scale<i32> for Meters {
+    fn scale(self, by: i32) -> Self {
+        return Meters { v: self.v * by }
+    }
+}
+
+impl Scale<Meters> for Meters {
+    fn scale(self, by: Meters) -> Self {
+        return Meters { v: self.v * by.v }
+    }
+}
+
+// The bound names the arguments, and can mention other parameters, as in `B: From<A>`.
+fn total<T: Into<i64>>(xs: List<T>) -> i64 {
+    var sum = 0i64
+    for x in xs {
+        let n: i64 = x.into()
+        sum += n
+    }
+    return sum
+}
+
+fn main() {
+    let m = Meters { v: 3 }
+    let a: i64 = m.into()
+    let s: String = m.into()
+    println("{a} {s}")    // out: 3000 3 m
+    println("{m.scale(2).v} {m.scale(Meters { v: 4 }).v}")    // out: 6 12
+    let both: List<Meters> = [m, Meters { v: 1 }]
+    println("{total(both)}")    // out: 4000
+}
+```
+
+- When a type implements an interface for more than one list of arguments, a call chooses between the impls the way a generic function's call works out its types: from the arguments, then from where the result goes. `m.scale(2)` takes `Scale<i32>`, and `let a: i64 = m.into()` takes `Into<i64>`. A call that neither settles is an error, as a generic call is.
+- A generic interface is always written with its arguments: a bound `T: Into` is an error that asks for them.
+- An impl for a generic type can use its parameters in the arguments: `impl<A: Copy> Into<List<A>> for Pair<A>`.
+- Defaults can use the interface's parameters, as `twice` does.
+- Every parameter must be used by a member, or no use could tell what it is.
+- [`From<T>`](errors.md#converting-errors) is a built-in generic interface, which `try` converts errors with.
+
 ## Errors
 
 Besides mismatched and missing members (D72):
 
-- Implementing the same interface twice for a type.
+- Implementing the same interface twice for a type, or a generic interface twice with the same arguments.
 - A member that isn't in the interface.
 - An interface used as a type, as in `fn f(s: Shape)`. Take a generic parameter with it as a bound instead: `fn f<T: Shape>(s: T)`.
 - An impl that's never used, when neither the interface nor the type is `pub`.
 
 ## In C
 
-Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`. Constants are inlined. Nothing is looked up at run time.
+Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`, and for a generic interface's arguments too, such as `Meters__Into_i64__into`. Constants are inlined. Nothing is looked up at run time, even when a call chooses between impls: the checker chooses.
 
-`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types, generic interfaces and the operator interfaces ([spec](../CALX_SPEC.md#interfaces-and-generics-d26)).
+`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types and the operator interfaces ([spec](../CALX_SPEC.md#interfaces-and-generics-d26)).
