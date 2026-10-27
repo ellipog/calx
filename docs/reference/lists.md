@@ -92,7 +92,7 @@ fn main() {
 
 ## Printing
 
-A list of printable elements shows as `[1, 2, 3]`, the way Java's `ArrayList.toString` does. Strings in a list appear without quotes, and nested lists print nested.
+A list shows as `[1, 2, 3]`, the way Java's `ArrayList.toString` does, when its elements can be shown. Strings in a list appear without quotes, and nested lists print nested. Two lists compare with `==` when they have the same length and equal elements in order ([comparing and printing](comparing.md)).
 
 ## In C
 

@@ -89,7 +89,7 @@ fn main() {
 
 ## Comparing
 
-`==` and `!=` compare two optionals: they're equal when both are `none`, or both hold equal values. An optional compares only with another optional, so it's `opt == some(3)`, not `opt == 3`. A float inside compares as floats do, so `some(NaN)` doesn't equal itself. `<` and the other orderings don't apply.
+`==` and `!=` compare two optionals: they're equal when both are `none`, or both hold equal values. In a string, an optional shows as `some(3)` or `none` ([comparing and printing](comparing.md)). An optional compares only with another optional, so it's `opt == some(3)`, not `opt == 3`. A float inside compares as floats do, so `some(NaN)` doesn't equal itself. `<` and the other orderings don't apply.
 
 ```calx
 fn main() {

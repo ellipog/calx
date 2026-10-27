@@ -75,7 +75,6 @@ Built: see [Types](reference/types.md).
 Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)) and [Lists](reference/lists.md). Still to build:
 
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
-- **Comparing and printing** enums with data and tuples, through the derived `Equal` and `Display` ([Derived properties](#derived-properties)).
 - **Functions and closures:** `fn(A) -> B` for a plain function. Closures are written `|a| expr` and have their own types, accepted through interfaces such as `Fn(A) -> B`.
 
 ### Optionals, no null (D23)
@@ -88,10 +87,9 @@ Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns
 
 ### Errors are values
 
-Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, and `f()!`. A result is handled at the call, so it's never stored or dropped (D91). Still to build:
+Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). Still to build:
 
 - `try` converting the error through `From` when the call's error type differs from the function's.
-- `fn main() ! E`, which prints the error and exits with status 1.
 - `! E` in function types, `fn(A) -> R ! E`, with closures.
 
 ### Interfaces and generics (D26)
@@ -102,7 +100,7 @@ Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfac
 - **Associated types** in interfaces, and **generic interfaces**, such as `From<T>`.
 - **Generic functions in interfaces**, and **defaults for an interface's constants**.
 - **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
-- **Comparing, printing and hashing generic values**, through `Equal`, `Display` and `Hash` ([Derived properties](#derived-properties)).
+- **Hashing and ordering generic values**, through `Hash` and `Order` ([Derived properties](#derived-properties)). Comparing and printing them, through `Equal` and `Display`, are built ([Comparing and printing](reference/comparing.md#in-generic-code)).
 
 ### Derived properties
 
@@ -111,9 +109,15 @@ The compiler works these out for each type, without being asked:
 | Property | Holds when |
 | --- | --- |
 | `Copy` | Every field is `Copy` and the type owns no heap memory. Copying is implicit only for these |
-| `Equal`, `Hash`, `Order` | Every field has them. A type can implement them by hand instead |
+| `Equal`, `Display`, `Hash`, `Order` | Every field has them. A type can implement them by hand instead |
 | `Send` | The value can cross between regions: no views, no closures that capture views, nothing that's only valid in one place. Plain data and handles are `Send` |
 | `Share` | Deeply immutable while shared, so many parallel iterations can read it at once |
+
+Built: `Copy` ([Types](reference/types.md)), and `Equal` and `Display` ([Comparing and printing](reference/comparing.md)), with their bounds. Still to build:
+
+- **Writing `Equal` or `Display` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
+- **`Hash` and `Order`**, which native `Map` and `Set` and sorting need ([Collections](#collections-d27)).
+- **`Send` and `Share`**, with actors.
 
 ### Handles (D24)
 
@@ -237,7 +241,7 @@ Built: `str` and `String`, literals as either, interpolation into a `String`, th
   - `s.utf16_len()` is Java's `String.length()`, which the protocol's string limits count in.
   - `std.text.mutf8` encodes and decodes Java's Modified UTF-8, which NBT uses.
   - `to_lower_root` and `to_upper_root` match Java's `toLowerCase(Locale.ROOT)`.
-- **Interpolation** calls the `Display` interface for types beyond the built-in ones: `"{x}"`. Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
+- **Interpolation** of a type with a `Display` of its own calls it ([Derived properties](#derived-properties)). Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
 
 ## Collections (D27)
 

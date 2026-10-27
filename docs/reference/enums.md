@@ -81,7 +81,7 @@ fn main() {
 
 ## Comparing and printing
 
-An enum without data compares with `==` and `!=`, and prints its variant's name. One with data does neither yet: compare it with `match`.
+Enums compare with `==` and `!=`, and print the variant: an enum without data prints its variant's name, and one with data prints the variant as it's built, such as `Circle(1.5)` ([comparing and printing](comparing.md)).
 
 ```calx
 enum Color { Red, Green, Blue }

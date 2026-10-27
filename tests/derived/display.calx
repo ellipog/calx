@@ -1,0 +1,59 @@
+// Interpolating structs, enums with data, tuples, arrays, optionals and lists: the derived
+// `Display`, which writes a value the way the code builds it.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Empty {}
+
+struct Player {
+    name: String,
+    at: Point,
+    health: f32,
+    friends: List<String>,
+    mode: Mode,
+    title: String?,
+}
+
+enum Mode { Survival, Creative }
+
+enum Shape {
+    Nothing
+    Circle(f64)
+    Line(Point, Point)
+    Rect { w: f64, h: f64 }
+}
+
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+fn main() {
+    println("{Point { x: 1, y: -2 }}")                  // out: Point { x: 1, y: -2 }
+    println("{Empty {}}")                                // out: Empty {}
+    let p = Player {
+        name: String("Steve"),
+        at: Point { x: 0, y: 64 },
+        health: 20.0,
+        friends: [String("Alex")],
+        mode: Mode.Creative,
+        title: none,
+    }
+    println("{p}")
+    // out: Player { name: Steve, at: Point { x: 0, y: 64 }, health: 20.0, friends: [Alex], mode: Creative, title: none }
+    let shapes = [Shape.Nothing, Shape.Circle(1.5), Shape.Line(Point { x: 0, y: 0 }, Point { x: 1, y: 1 }), Shape.Rect { w: 2.0, h: 3.0 }]
+    println("{shapes}")
+    // out: [Nothing, Circle(1.5), Line(Point { x: 0, y: 0 }, Point { x: 1, y: 1 }), Rect { w: 2.0, h: 3.0 }]
+    println("{(1, 'a', true)} {[1, 2, 3]}")             // out: (1, a, true) [1, 2, 3]
+    let fixed = [Mode.Survival; 2]
+    println("{fixed}")                                   // out: [Survival, Survival]
+    let some_x: i32? = some(5)
+    let no_x: i32? = none
+    println("{some_x} {no_x}")                           // out: some(5) none
+    let pair = Pair { first: 1, second: String("one") }
+    println("{pair}")                                    // out: Pair { first: 1, second: one }
+    let text = "at {Point { x: 3, y: 4 }}"
+    println(text)                                        // out: at Point { x: 3, y: 4 }
+}

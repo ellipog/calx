@@ -1,0 +1,25 @@
+// A `main` that fails: what it printed stays, its error goes to standard error after it, and
+// the program exits with status 1. The error owns a `String`, which is freed on the way out.
+enum ConfigError {
+    Missing(String)
+    BadPort { text: String, line: i32 }
+}
+
+fn port(text: str, line: i32) -> u16 ! ConfigError {
+    if text.is_empty() {
+        fail ConfigError.Missing(String("port"))
+    }
+    let n = u16.parse(text) else {
+        fail ConfigError.BadPort { text: String(text), line: line }
+    }
+    return n
+}
+
+fn main() ! ConfigError {
+    let a = try port("25565", 1)
+    println("port {a}")                 // out: port 25565
+    let b = try port("lots", 2)
+    println("port {b}")
+}
+// stderr: error: BadPort { text: lots, line: 2 }
+// status: 1

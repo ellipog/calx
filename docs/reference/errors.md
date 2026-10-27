@@ -187,6 +187,30 @@ fn main() {
 }
 ```
 
+## A `main` that fails
+
+`fn main() ! E` can pass errors up with `try` too. If it fails, the program writes `error: ` and the error to standard error, after what it printed before, and exits with status 1. The error is shown with [`Display`](comparing.md#display), so `E` must be a type that can be shown:
+
+```calx
+fn port(text: str) -> u16 ! String {
+    let n = u16.parse(text) else {
+        fail "{text} isn't a port"
+    }
+    return n
+}
+
+fn main() ! String {
+    let p = try port("25565")
+    println("listening on {p}")    // out: listening on 25565
+    _ = try port("lots")
+    println("not reached")
+}
+// stderr: error: lots isn't a port
+// status: 1
+```
+
+`main` still takes no parameters, and returns nothing when it succeeds.
+
 ## In a `parallel for`
 
 Every iteration of a [`parallel for`](parallel.md) runs, so its body can't `fail` or pass an error up with `try`. Each iteration keeps its own outcome instead, in its own element:
@@ -262,4 +286,4 @@ static cx_Result_i32_ReadError game__short(const cx_list_u8* restrict bytes) {
 
 When an earlier part of the same expression made a value that's owned, such as the `name.copy()` in `pair(name.copy(), try read())`, the value waits in a temporary of the statement. The `try` is worked out before the call, and the temporary is cleared only as the value moves into it. So passing the error up drops the value, and the normal path doesn't drop it twice, whatever order C evaluates the arguments in.
 
-Still to build, in the [spec](../CALX_SPEC.md#errors-are-values): converting an error to the function's error type through `From`, `fn main() ! E`, and `! E` in function types.
+Still to build, in the [spec](../CALX_SPEC.md#errors-are-values): converting an error to the function's error type through `From`, and `! E` in function types.

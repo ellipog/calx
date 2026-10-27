@@ -49,6 +49,8 @@ struct Type {
     Slice<Type*> args;       // struct_, enum_: the instance's arguments
     Slice<Item*> bounds;     // param: the interfaces it must implement
     bool copy_bound = false; // param: it has the bound `Copy`
+    bool equal_bound = false;   // param: it has the bound `Equal`, so `==` works on it
+    bool display_bound = false; // param: it has the bound `Display`, so it can be shown in a string
     bool open = false;       // it mentions a parameter, so it's only checked, never emitted
     bool is_const = false;   // pointer: `*const T`, which can't be written through
     bool has_pointer = false; // it is or holds a pointer

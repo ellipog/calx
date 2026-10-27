@@ -1,0 +1,67 @@
+// `==` and `!=` on structs, enums with data, tuples, arrays, lists and what they hold: the
+// derived `Equal`, which compares everything a value holds, in order.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Named {
+    name: String,
+    at: Point,
+    tags: List<String>,
+}
+
+enum Shape {
+    Empty
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+}
+
+struct Tree {
+    value: i32,
+    kids: List<Tree>,
+}
+
+fn named(name: str) -> Named {
+    return Named { name: String(name), at: Point { x: 1, y: 2 }, tags: [String("a")] }
+}
+
+fn leaf(v: i32) -> Tree {
+    return Tree { value: v, kids: List<Tree>() }
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    println("{p == Point { x: 1, y: 2 }} {p != Point { x: 2, y: 1 }}")    // out: true true
+    let a = named("a")
+    println("{a == named("a")} {a == named("b")}")                      // out: true false
+    let circle = Shape.Circle(1.0)
+    println("{circle == Shape.Circle(1.0)} {circle == Shape.Circle(2.0)} {circle == Shape.Empty}")
+    // out: true false false
+    println("{Shape.Rect { w: 1.0, h: 2.0 } == Shape.Rect { w: 1.0, h: 2.0 }} {Shape.Empty == Shape.Empty}")
+    // out: true true
+    // Floats compare as floats do, so NaN inside never equals itself.
+    let nan = 0.0 / 0.0
+    println("{Shape.Circle(nan) == Shape.Circle(nan)}")                // out: false
+    let t = (1, String("x"), Point { x: 0, y: 0 })
+    println("{t == (1, String("x"), Point { x: 0, y: 0 })} {t == (1, String("y"), Point { x: 0, y: 0 })}")
+    // out: true false
+    let xs = [1, 2, 3]
+    println("{xs == [1, 2, 3]} {xs == [1, 2, 4]}")                    // out: true false
+    let ps: List<Point> = [Point { x: 1, y: 1 }]
+    var qs: List<Point> = [Point { x: 1, y: 1 }]
+    println("{ps == qs}")                                              // out: true
+    qs.push(Point { x: 2, y: 2 })
+    println("{ps == qs} {ps != qs}")                                   // out: false true
+    println("{qs.contains(Point { x: 2, y: 2 })} {qs.contains(p)}")    // out: true false
+    let some_p: Point? = some(p)
+    println("{some_p == some(Point { x: 1, y: 2 })} {some_p == none}") // out: true false
+    // A type that holds itself through a list.
+    var t1 = leaf(1)
+    t1.kids.push(leaf(2))
+    var t2 = leaf(1)
+    t2.kids.push(leaf(2))
+    println("{t1 == t2}")                                              // out: true
+    t2.kids[0].kids.push(leaf(3))
+    println("{t1 == t2}")                                              // out: false
+}

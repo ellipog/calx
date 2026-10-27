@@ -89,9 +89,13 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Copy"}) reserved_names_.push_back(ctx.names.intern(b));
+        for (const char* b : {"some", "ok", "err", "List", "Copy", "Equal", "Display"}) {
+            reserved_names_.push_back(ctx.names.intern(b));
+        }
         n_List_ = ctx.names.intern("List");
         n_Copy_ = ctx.names.intern("Copy");
+        n_Equal_ = ctx.names.intern("Equal");
+        n_Display_ = ctx.names.intern("Display");
         n_copy_ = ctx.names.intern("copy");
         n_ok_ = ctx.names.intern("ok");
         n_err_ = ctx.names.intern("err");
@@ -152,7 +156,7 @@ public:
             for (Item* f : all_fns_) check_moves(mc, f, true);
             for (Item* f : pending_fns_) check_moves(mc, f, false);
         }
-        if (need_main) find_main(modules.back());
+        find_main(modules.back(), need_main);
     }
 
 private:
@@ -1036,10 +1040,16 @@ private:
             }
             std::vector<Item*> bounds;
             for (TypeExpr* b : g->bounds) {
-                if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->path.parts[0] == n_Copy_ &&
-                    b->args.empty()) {
-                    if (p->copy_bound) error(b->span, "`Copy` is already a bound of " + q(text(g->name)));
-                    p->copy_bound = true;
+                // The derived properties, which every type that can have them has without an impl.
+                bool* flag = nullptr;
+                if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
+                    Name n = b->path.parts[0];
+                    flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
+                         : n == n_Display_ ? &p->display_bound : nullptr;
+                }
+                if (flag) {
+                    if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
+                    *flag = true;
                     continue;
                 }
                 Item* iface = resolve_interface(b);
@@ -1233,6 +1243,16 @@ private:
                 error(span, name_of(args[i]) + " isn't `Copy`, which " + what + " needs for " + q(params[i]->name));
                 ok = false;
             }
+            if (params[i]->equal_bound && !is_bad(args[i]) && !equatable(args[i])) {
+                error(span, name_of(args[i]) + " can't be compared with `==`, which " + what + " needs for " +
+                                q(params[i]->name) + lacking(args[i], false));
+                ok = false;
+            }
+            if (params[i]->display_bound && !is_bad(args[i]) && !printable(args[i])) {
+                error(span, name_of(args[i]) + " can't be shown in a string, which " + what + " needs for " +
+                                q(params[i]->name) + lacking(args[i], true));
+                ok = false;
+            }
             for (Item* b : params[i]->bounds) {
                 if (satisfies(args[i], b)) continue;
                 error(span, name_of(args[i]) + " doesn't implement " + q(text(b->name)) + ", which " + what +
@@ -1248,6 +1268,8 @@ private:
             auto it = s.find(p);
             if (it == s.end()) return false;
             if (p->copy_bound && !is_copy(it->second)) return false;
+            if (p->equal_bound && !equatable(it->second)) return false;
+            if (p->display_bound && !printable(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, b)) return false;
             }
@@ -2643,11 +2665,8 @@ private:
         Type* rt = fn_->result_type;
         if (is_bad(rt)) return ok_type(t);
         if (!rt->is_result) {
-            std::string how = !fn_->impl_type && text(fn_->name) == "main"
-                                  ? "match `ok` and `err` with `match`, or unwrap it with `!`"
-                                  : "handle the error with `match`, or declare `! " + std::string(err_type(t)->name) + "` on " +
-                                        q(text(fn_->name));
-            error(e->span, "`try` passes the error up, but " + q(text(fn_->name)) + " can't fail; " + how);
+            error(e->span, "`try` passes the error up, but " + q(text(fn_->name)) + " can't fail; handle the error with " +
+                               "`match`, or declare `! " + std::string(err_type(t)->name) + "` on " + q(text(fn_->name)));
             return ok_type(t);
         }
         if (err_type(rt) != err_type(t)) {
@@ -2967,7 +2986,7 @@ private:
         }
         for (Expr* part : e->interpolations) {
             Type* t = check(part, nullptr);
-            if (!is_bad(t) && !printable(t)) error(part->span, name_of(t) + " can't be shown in a string yet");
+            if (!is_bad(t) && !printable(t)) error(part->span, name_of(t) + " can't be shown in a string" + lacking(t, true));
         }
         e->is_const = e->interpolations.empty();
         if (printed) return T.str;
@@ -2975,14 +2994,98 @@ private:
         return T.str;
     }
 
-    // What `{x}` in a string can show.
-    static bool printable(const Type* t) {
+    // The derived properties `Equal` and `Display`: whether `==` works on the type, and whether
+    // `{x}` in a string can show it. A struct, enum, tuple, array, optional or list has one when
+    // everything it holds does, so only a generic parameter without the bound lacks either, and
+    // a pointer can't be shown.
+    bool equatable(const Type* t) { return derived(t, false); }
+    bool printable(const Type* t) { return derived(t, true); }
+
+    bool derived(const Type* t, bool show) {
         switch (t->kind) {
-            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: case TypeKind::char_:
+            case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
             case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
-            case TypeKind::enum_: return !t->has_data;
-            case TypeKind::list: return printable(t->elem);
+            case TypeKind::pointer: return !show;
+            case TypeKind::param: return show ? t->display_bound : t->equal_bound;
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return derived(t->elem, show);
+            case TypeKind::tuple:
+                for (const Type* e : t->elems) {
+                    if (!derived(e, show)) return false;
+                }
+                return true;
+            case TypeKind::struct_: case TypeKind::enum_: break;
             default: return false;
+        }
+        if (t->is_result) return false;
+        Derived& d = derived_[show];
+        auto it = d.known.find(t);
+        if (it != d.known.end()) return it->second;
+        // A type that holds itself, through a list, has the property while it's worked out. If it
+        // turns out not to, what was worked out meanwhile may have leaned on that, so it's forgotten.
+        std::size_t mark = d.order.size();
+        d.known[t] = true;
+        d.order.push_back(t);
+        bool ok = true;
+        if (t->kind == TypeKind::struct_) {
+            for (const FieldDecl& f : t->item->fields) {
+                if (!f.resolved) {
+                    // Still being resolved, so there's nothing to know yet.
+                    for (std::size_t i = mark; i < d.order.size(); i++) d.known.erase(d.order[i]);
+                    d.order.resize(mark);
+                    return true;
+                }
+                ok = ok && derived(f.resolved, show);
+            }
+        } else {
+            for (const VariantDecl& v : t->item->variants) {
+                for (const Type* x : v.types) ok = ok && derived(x, show);
+            }
+        }
+        if (!ok) {
+            for (std::size_t i = mark + 1; i < d.order.size(); i++) d.known.erase(d.order[i]);
+            d.order.resize(mark + 1);
+        }
+        d.known[t] = ok;
+        return ok;
+    }
+
+    // Why a type lacks `Equal` or `Display`, to end a message with: the parameter or pointer
+    // inside it that does.
+    std::string lacking(const Type* t, bool show) {
+        std::unordered_set<const Type*> seen;
+        const Type* leaf = lacking_part(t, show, seen);
+        if (!leaf) return "";
+        std::string what = show ? "`Display`" : "`Equal`";
+        if (leaf->kind == TypeKind::param) {
+            return "; give " + name_of(leaf) + " the bound " + what;
+        }
+        if (leaf == t) return "";
+        return ", since it holds " + name_of(leaf);
+    }
+
+    const Type* lacking_part(const Type* t, bool show, std::unordered_set<const Type*>& seen) {
+        if (derived(t, show) || !seen.insert(t).second) return nullptr;
+        switch (t->kind) {
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, show, seen);
+            case TypeKind::tuple:
+                for (const Type* e : t->elems) {
+                    if (const Type* x = lacking_part(e, show, seen)) return x;
+                }
+                return nullptr;
+            case TypeKind::struct_:
+                for (const FieldDecl& f : t->item->fields) {
+                    if (!f.resolved) continue;
+                    if (const Type* x = lacking_part(f.resolved, show, seen)) return x;
+                }
+                return nullptr;
+            case TypeKind::enum_:
+                for (const VariantDecl& v : t->item->variants) {
+                    for (const Type* e : v.types) {
+                        if (const Type* x = lacking_part(e, show, seen)) return x;
+                    }
+                }
+                return nullptr;
+            default: return t;
         }
     }
 
@@ -3129,17 +3232,6 @@ private:
     }
 
     // --- operators ---------------------------------------------------------------------------
-
-    // Whether `==` and `!=` work on the type.
-    static bool equatable(const Type* t) {
-        switch (t->kind) {
-            case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
-            case TypeKind::rune: case TypeKind::str: case TypeKind::string: case TypeKind::pointer: return true;
-            case TypeKind::enum_: return !t->has_data;
-            case TypeKind::optional: return equatable(t->elem);
-            default: return false;
-        }
-    }
 
     static bool is_bitwise(Op op) { return op == Op::bit_and || op == Op::bit_or || op == Op::bit_xor; }
     static bool is_additive(Op op) { return op == Op::add || op == Op::sub; }
@@ -3289,7 +3381,12 @@ private:
             bool ok = is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune ||
                       (!ordered && equatable(t));
             if (!ok) {
-                error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) + " yet");
+                if (ordered) {
+                    error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) + " yet");
+                } else {
+                    error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) +
+                                       lacking(t, false));
+                }
                 return T.bool_;
             }
             if (e->lhs->is_nan_const || e->rhs->is_nan_const) {
@@ -6035,11 +6132,13 @@ private:
         }
     }
 
-    void find_main(Module* m) {
+    // `calx check` takes a library too, so only a program must have a `main`. One that's there
+    // is checked either way, so an editor shows what's wrong with it.
+    void find_main(Module* m, bool need_main) {
         auto& items = scopes_.at(m)->items;
         auto it = items.find(ctx_.names.intern("main"));
         if (it == items.end() || it->second->kind != ItemKind::fn) {
-            error(Span{m->file, 0, 0}, "a program needs a `fn main()`");
+            if (need_main) error(Span{m->file, 0, 0}, "a program needs a `fn main()`");
             return;
         }
         Item* f = it->second;
@@ -6048,8 +6147,13 @@ private:
             return;
         }
         if (f->is_unsafe) error(f->name_span, "`main` can't be `unsafe`");
-        if (!f->params.empty() || (f->result_type && f->result_type->kind != TypeKind::unit)) {
-            error(f->name_span, "`main` takes no parameters and returns nothing");
+        Type* rt = f->result_type;
+        if (!f->params.empty() || (rt && rt->kind != TypeKind::unit && !(rt->is_result && ok_type(rt) == T.unit))) {
+            error(f->name_span, "`main` takes no parameters and returns nothing, though it can fail: `fn main() ! E`");
+        } else if (rt && rt->is_result && !is_bad(err_type(rt)) && !printable(err_type(rt))) {
+            // A failing `main` shows its error.
+            error(f->name_span, "`main` fails with " + a_type(err_type(rt)) + ", which can't be shown in a string" +
+                                    lacking(err_type(rt), true));
         }
         prog_.main = f;
     }
@@ -6057,7 +6161,13 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_copy_, n_ok_, n_err_;
+    // What `derived` has worked out, for `Equal` (0) and `Display` (1).
+    struct Derived {
+        std::unordered_map<const Type*, bool> known;
+        std::vector<const Type*> order;
+    };
+    Derived derived_[2];
+    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_Equal_, n_Display_, n_copy_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
     Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
     std::vector<Name> builtin_names_, reserved_names_;

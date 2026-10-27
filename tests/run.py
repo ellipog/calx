@@ -22,6 +22,7 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
 - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
   the input is empty.
 - `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces.
+- `// status: N` is the exit status the program must end with, which is 0 without one.
 
 A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -53,7 +54,7 @@ BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin|args):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin|args|status):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
@@ -71,6 +72,7 @@ class Test:
         self.stderr = []
         self.stdin = []
         self.args = []
+        self.status = 0
         self.files = []  # (name, text) for a test of several modules, the main one first
         lines = source.splitlines()
         starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
@@ -92,6 +94,8 @@ class Test:
                 self.stdin.append(text)
             elif kind == "args":
                 self.args.append(text)
+            elif kind == "status":
+                self.status = int(text)
             elif kind == "error":
                 self.errors.append((n, text.strip()))
             else:
@@ -186,12 +190,12 @@ def run_test(test, mode):
                     problems.append(f"panicked on line {m.group(2)}, expected line {test.panic[0]}")
                 if test.panic[1] not in m.group(4):
                     problems.append(f"panic message {m.group(4)!r} doesn't contain {test.panic[1]!r}")
-        elif p.returncode != 0:
-            problems.append(f"exit status {p.returncode}")
+        elif p.returncode != test.status:
+            problems.append(f"exit status {p.returncode}" + (f", expected {test.status}" if test.status else ""))
         got = p.stdout.splitlines()
         if got != test.out:
             problems.append(diff(test.out, got))
-        if not test.panic and p.returncode == 0 and p.stderr.splitlines() != test.stderr:
+        if not test.panic and p.returncode == test.status and p.stderr.splitlines() != test.stderr:
             problems.append("standard error " + diff(test.stderr, p.stderr.splitlines()))
         elif problems and p.stderr.strip() and (not test.panic or p.returncode != 101):
             problems.append("stderr:\n" + indent(p.stderr.rstrip()))

@@ -33,7 +33,5 @@ fn main() {
     let g = u8.wrap(Flag.On)            // error: converts to a `u8` exactly; write `u8(...)`
     let h = Color.try_from(0u8)         // error: has no representation to convert from
     let i = Flag.try_from(1i32)         // error: expected `u8`, found `i32`
-    let j = Shape.Circle(1.0) == Shape.Empty   // error: can't be compared with `==`
-    println("{Shape.Empty}")            // error: `Shape` can't be shown in a string yet
-    println("{a} {b} {c} {d} {e} {f} {g} {h} {i} {j}")
+    println("{a} {b} {c} {d} {e} {f} {g} {h} {i}")
 }

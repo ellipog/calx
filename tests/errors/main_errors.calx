@@ -1,0 +1,4 @@
+// What `main` can't be: returning a value, even one that can fail.
+fn main() -> i32 ! String {    // error: `main` takes no parameters and returns nothing, though it can fail: `fn main() ! E`
+    return 1
+}

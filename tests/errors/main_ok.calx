@@ -1,0 +1,11 @@
+// A `main` that can fail but doesn't ends like any other, with status 0.
+fn check(n: i32) ! String {
+    if n < 0 {
+        fail "negative: {n}"
+    }
+}
+
+fn main() ! String {
+    try check(1)
+    println("fine")    // out: fine
+}

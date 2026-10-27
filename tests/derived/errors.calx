@@ -1,0 +1,35 @@
+// What lacks `Equal` or `Display`: a generic parameter without the bound, what holds one, and a
+// pointer, which can't be shown.
+struct Boxed<T> {
+    value: T,
+}
+
+fn same<T>(a: Boxed<T>, b: Boxed<T>) -> bool {
+    return a == b    // error: values of type `Boxed<T>` can't be compared with `==`; give `T` the bound `Equal`
+}
+
+fn show<T: Equal>(x: (T, i32)) {
+    println("{x}")    // error: `(T, i32)` can't be shown in a string; give `T` the bound `Display`
+}
+
+fn shown<T: Display>(x: T) {
+    println("{x}")
+}
+
+fn twice<T: Display + Display>(x: T) {    // error: `Display` is already a bound of `T`
+    println("{x}")
+}
+
+struct Equal {}    // error: `Equal` is a built-in name
+
+fn main() {
+    let xs: List<i32> = [1]
+    unsafe {
+        let p = xs.as_ptr()
+        println("{p}")    // error: `*const i32` can't be shown in a string
+        shown(p)          // error: `*const i32` can't be shown in a string, which `shown` needs for `T`
+    }
+    println("{same(Boxed { value: 1 }, Boxed { value: 1 })}")
+    show((1, 2))
+    twice(1)
+}

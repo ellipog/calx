@@ -34,7 +34,7 @@ fn main() {
 - `(a, b, ...)` builds one, running its parts left to right. A tuple has at least two parts: `(x)` is just `x` in parentheses, and `()` is the [unit value](types.md#the-unit-type).
 - `t.0`, `t.1` and so on read a part. On a `var` they can be assigned.
 - Tuples are values, copied when assigned, like structs.
-- Tuples don't compare with `==` or print yet. `match` sees inside them.
+- Tuples compare with `==` part by part, and print as `(1, a, true)` ([comparing and printing](comparing.md)). `match` sees inside them.
 
 ## Destructuring
 

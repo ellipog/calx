@@ -47,7 +47,7 @@ pub fn unused<T>() -> i32 {                     // error: generic parameter `T` 
 }
 
 pub fn same<T>(a: T, b: T) -> bool {
-    return a == b                               // error: values of type `T` can't be compared with `==` yet
+    return a == b                               // error: values of type `T` can't be compared with `==`; give `T` the bound `Equal`
 }
 
 pub fn add<T>(a: T, b: T) -> T {
@@ -55,7 +55,7 @@ pub fn add<T>(a: T, b: T) -> T {
 }
 
 pub fn show<T>(x: T) {
-    println("{x}")                              // error: `T` can't be shown in a string yet
+    println("{x}")                              // error: `T` can't be shown in a string; give `T` the bound `Display`
 }
 
 pub fn build<T>() -> T {

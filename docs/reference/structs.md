@@ -63,6 +63,8 @@ fn main() {
 
 A field is private to its module unless it's marked `pub`, as in `pub x: f64` ([modules](modules.md#pub)). The same goes for a function in an `impl` block.
 
+Two structs of the same type compare with `==` field by field, and `{p}` in a string shows one as its literal, `Point { x: 1, y: 2 }` ([comparing and printing](comparing.md)).
+
 ## Methods
 
 An `impl Name { }` block adds functions to a struct declared in the same module.

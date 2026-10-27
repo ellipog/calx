@@ -78,7 +78,7 @@ fn main() {
         ok(v) => println("{v}"),    // error: `ok` matches the result of a call that can fail, and this is an `i32`
         _ => println("other"),
     }
-    _ = try parse(8)    // error: `try` passes the error up, but `main` can't fail; match `ok` and `err` with `match`, or unwrap it with `!`
+    _ = try parse(8)    // error: `try` passes the error up, but `main` can't fail; handle the error with `match`, or declare `! ParseError` on `main`
     let m = 9
     _ = try m    // error: `try` passes up the error of a call that can fail, but this is an `i32`, which can't fail
     var out = [0; 4]

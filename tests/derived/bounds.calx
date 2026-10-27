@@ -1,0 +1,41 @@
+// `T: Equal` and `T: Display` let generic code compare and print what it's given. Every type
+// that can have them does, so any of them can be the argument.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+enum Item { Stone, Sword(i32) }
+
+fn index_of<T: Equal>(xs: List<T>, x: T) -> usize? {
+    for i in 0usize..xs.len() {
+        if xs[i] == x {
+            return some(i)
+        }
+    }
+    return none
+}
+
+fn labelled<T: Display>(label: str, x: T) -> String {
+    return "{label}: {x}"
+}
+
+struct Slot<T: Equal + Display> {
+    item: T,
+    count: i32,
+}
+
+fn describe<T: Equal + Display>(s: Slot<T>, wanted: T) -> String {
+    return if s.item == wanted { "{s} matches" } else { "{s} doesn't match" }
+}
+
+fn main() {
+    let ps: List<Point> = [Point { x: 0, y: 0 }, Point { x: 1, y: 2 }]
+    println("{index_of(ps, Point { x: 1, y: 2 })} {index_of(ps, Point { x: 5, y: 5 })}")    // out: some(1) none
+    let words: List<String> = [String("a"), String("b")]
+    println("{index_of(words, String("b"))}")                         // out: some(1)
+    println(labelled("at", Point { x: 3, y: 4 }))                     // out: at: Point { x: 3, y: 4 }
+    println(labelled("items", [Item.Stone, Item.Sword(5)]))           // out: items: [Stone, Sword(5)]
+    let s = Slot { item: Item.Sword(5), count: 1 }
+    println(describe(s, Item.Sword(5)))                               // out: Slot { item: Sword(5), count: 1 } matches
+}

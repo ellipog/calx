@@ -181,17 +181,32 @@ fn main() {
 }
 ```
 
-Generic code is checked once, where it's written, and it can use only what its bounds give it. Without a bound, a value of type `T` can be held, passed, returned, assigned, and put in arrays, tuples, optionals and generic types, but nothing more. Comparing, printing, arithmetic and conversions need the standard interfaces that will say what they mean for each type, such as `Equal` and `Display`, which aren't built yet:
+Generic code is checked once, where it's written, and it can use only what its bounds give it. Without a bound, a value of type `T` can be held, passed, returned, assigned, and put in arrays, tuples, optionals and generic types, but nothing more. Three bounds are built-in properties rather than interfaces, which every type that can have them has:
+
+| Bound | Gives |
+| --- | --- |
+| `T: Copy` | Using a `T` copies it ([values of type `T`](#values-of-type-t)) |
+| `T: Equal` | `==` and `!=` on `T` ([comparing and printing](comparing.md#equal)) |
+| `T: Display` | `{x}` in a string ([comparing and printing](comparing.md#display)) |
 
 ```calx
-fn same<T>(a: T, b: T) -> bool {
-    return a == b    // error: values of type `T` can't be compared with `==` yet
+fn count<T: Equal>(xs: List<T>, x: T) -> usize {
+    var n = 0usize
+    for y in xs {
+        if y == x {
+            n += 1
+        }
+    }
+    return n
 }
 
 fn main() {
-    println("{same(1, 1)}")
+    let xs: List<(i32, bool)> = [(1, true), (2, false), (1, true)]
+    println("{count(xs, (1, true))}")    // out: 2
 }
 ```
+
+Arithmetic and conversions on a `T` need the standard interfaces that will say what they mean for each type, which aren't built yet.
 
 A bound on a struct's or enum's parameter, as in `struct Holder<T: Shape>`, applies to every use of the type.
 
