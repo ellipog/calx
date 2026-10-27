@@ -1,0 +1,13 @@
+/// Hints to the optimizer, for benchmarks.
+///
+/// Release builds optimize the whole program at once (D99), so a loop whose result is only
+/// summed can be moved out from between two readings of the clock, or computed when the program
+/// is built. `black_box` stops that.
+module std.hint
+
+/// Gives back `x`, in a way the optimizer can't see through: it can't know the result, so it
+/// can't compute what depends on it in advance, and it must have `x` ready by this call, so it
+/// can't drop the work that made `x` or move it past the call. It costs about one store.
+pub fn black_box<T>(x: own T) -> T {
+    return x
+}

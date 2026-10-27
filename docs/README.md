@@ -55,6 +55,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 5. [std.env](std/env.md): the command-line arguments
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
+8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 
 ### Design
 

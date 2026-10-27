@@ -574,6 +574,12 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         flags.push_back("-O3");
         flags.push_back("-march=x86-64-v3");
     }
+    // Release builds compile each file to LLVM bitcode, and optimize the program as a whole when
+    // it links (ThinLTO), so a small function inlines into every module that calls it, as it would
+    // within one, and so do the runtime's. Only lld can; without it each file is optimized alone
+    // (D99).
+    bool lto = mode == BuildMode::release && tc.lld;
+    if (lto) flags.push_back("-flto=thin");
     std::string flag_text;
     for (const std::string& f : flags) flag_text += f + " ";
 
@@ -636,6 +642,29 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 #else
     link_flags.push_back("-lm");
 #endif
+    if (lto) {
+        // lld keeps each file's machine code in a cache of its own, so a link after an edit
+        // compiles again only the files the edit could change. It prunes the cache itself.
+        std::string lto_cache = (fs::path(tc.cache) / "lto").string();
+        link_flags.push_back("-flto=thin");
+#ifdef _WIN32
+        // The driver doesn't pass the optimization level to lld-link, which would use -O2.
+        for (const char* f : {"/opt:lldlto=3", "/lldltocachepolicy:cache_size_bytes=512m"}) {
+            link_flags.push_back("-Xlinker");
+            link_flags.push_back(f);
+        }
+        link_flags.push_back("-Xlinker");
+        link_flags.push_back("/lldltocache:" + lto_cache);
+#else
+        link_flags.push_back("-O3");
+        link_flags.push_back("-march=x86-64-v3");
+        for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
+                                     "--thinlto-cache-dir=" + lto_cache}) {
+            link_flags.push_back("-Xlinker");
+            link_flags.push_back(f);
+        }
+#endif
+    }
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
     std::string exe_key = hash_hex({"exe", all_keys, link_text, tc.identity});

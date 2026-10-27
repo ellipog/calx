@@ -45,9 +45,11 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 | Mode | clang flags | For |
 | --- | --- | --- |
 | debug (the default) | `-O0 -DCX_DEBUG` | Fast builds while you work |
-| release | `-O3 -march=x86-64-v3` | Speed |
+| release | `-O3 -march=x86-64-v3 -flto=thin` | Speed |
 
 Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+
+Release builds also optimize the program as a whole when it links, with ThinLTO (D99). Each module is a C file of its own, so without it a call from one module to another could never be inlined, however small the function: a loop that adds vectors from another module ran 4.6 times faster with it, and one that packs block positions 7.6 times. The runtime's functions inline the same way. lld does this, so it needs lld next to clang or on `PATH`; with another linker, each file is optimized alone. Since clang can then see that a call to a function in another module has no side effects, a benchmark should pass what it measures through [`std.hint.black_box`](../std/hint.md).
 
 In debug builds the runtime checks memory: a block freed twice or with the wrong size stops the program, and a program that ends with blocks still allocated says so. Either way it exits with status 102. The compiler frees every value exactly once ([ownership](ownership.md#in-c)), so that's a bug in Calx, worth reporting. Release builds don't check, and use Calx's own allocator, which is faster than the system's.
 
@@ -65,6 +67,7 @@ Building should take moments, so the command avoids every step it can:
 - **The runtime is compiled once** per build mode and clang version, then reused from the cache.
 - When nothing changed at all, `calx run` reuses the linked program and only starts it.
 - Programs link with lld when it's installed next to clang or on `PATH`.
+- **Release links reuse their work.** lld keeps the machine code ThinLTO made for each file in a cache of its own, so after an edit it compiles again only the files the edit could change. A release build of a 64-module program takes 0.26 s after an edit to one module, against 0.89 s from an empty cache.
 - **The linker runs directly.** clang's driver only works out the linker's command line, and starting clang costs about 18 ms. So the first link asks clang for that command once, and caches it. If a cached command fails, say after a Visual Studio update, clang works it out again.
 
 Measured on the reference machine (an i9-13900K) with a small program, in debug mode:
@@ -86,7 +89,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the source tree the compiler was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
-The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. Deleting it is always safe.
+The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
 ## Errors
 

@@ -1433,6 +1433,11 @@ static void $reserve($T* m, cx_usize n) {
         for (const Param& p : f->params) {
             if (p.local->is_view) line("CX_VIEW(" + local_name(p.local) + ");");
         }
+        if (is_black_box(f)) {
+            // An empty instruction that clang must assume reads and writes the argument, and any
+            // memory, so it can't know what `black_box` gives back, nor move work across it.
+            for (const Param& p : f->params) line("__asm__ volatile(\"\" : : \"r\"(&" + local_name(p.local) + ") : \"memory\");");
+        }
         stmts(f->body, /*value=*/false);
         if (f->result_type->is_result && f->result_type->item->variants[0].types.empty()) {
             line("return " + variant_value(f->result_type, 0, {}) + ";");
@@ -1443,6 +1448,15 @@ static void $reserve($T* m, cx_usize n) {
         o.helpers.swap(helpers_);
         uses_ = nullptr;
         return o;
+    }
+
+    // `std.hint.black_box`, or an instance of it. Its Calx body says what it gives back; the
+    // emitter adds what hides that from clang.
+    bool is_black_box(const Item* f) const {
+        const Item* g = f->origin ? f->origin : f;
+        if (!g->module || text(g->name) != "black_box") return false;
+        const Path& m = g->module->name;
+        return m.parts.size() == 2 && text(m.parts[0]) == "std" && text(m.parts[1]) == "hint";
     }
 
     // A block's statements, and its tail as a statement. With `value`, the tail is left out for

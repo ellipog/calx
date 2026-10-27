@@ -8,7 +8,8 @@ one before it, and times the compiler on it and on a small program and the tick 
 - check: `calx check` on the large program, which runs the whole front end.
 - cold: a debug build of the large program into an empty cache, so every module, the runtime
   and the link happen, and the same in release mode.
-- one module: a debug build of the large program after changing one module.
+- one module: a debug build of the large program after changing one module, and a release
+  build, which also optimizes the program as a whole when it links (D99).
 - small cold, small unchanged: `calx run` on a small program with an empty cache, then again
   with nothing changed (G3.4: under 0.5 s and 50 ms).
 - bench one module: a debug build of the tick benchmark after changing its own module, with the
@@ -189,12 +190,16 @@ def main():
         timed(["build", str(big), "-o", str(out)], warm)
         state = {"tweak": 0}
 
-        def one_module():
-            state["tweak"] += 1
-            (big.parent / "m0.calx").write_text(module(0, state["tweak"]), encoding="utf-8", newline="\n")
-            return timed(["build", str(big), "-o", str(out)], warm)
+        def one_module(mode):
+            def run():
+                state["tweak"] += 1
+                (big.parent / "m0.calx").write_text(module(0, state["tweak"]), encoding="utf-8", newline="\n")
+                return timed(["build"] + mode + [str(big), "-o", str(out)], warm)
+            return run
 
-        results["one_module_debug_s"] = median_of(args.runs, one_module)
+        results["one_module_debug_s"] = median_of(args.runs, one_module([]))
+        timed(["build", "--release", str(big), "-o", str(out)], warm)
+        results["one_module_release_s"] = median_of(args.runs, one_module(["--release"]))
 
         def small_cold():
             cache = tmp / f"small{time.perf_counter_ns()}"

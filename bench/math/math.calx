@@ -1,6 +1,9 @@
 // std.math against the C library on the same inputs: bench/math/libm.c is the same loops in C.
 // The Windows CRT and glibc are what Rust's f64 methods call.
+// Release builds inline std.math into each loop (D99), so clang could move a loop with no side
+// effects past the second reading of the clock; `black_box` makes it finish before that.
 import std.math.{acos, atan2, cos, exp, log, pow, sin, tan}
+import std.hint.{black_box}
 import std.time.{Instant}
 
 fn inputs(seed: u64, n: usize, lo: f64, hi: f64) -> List<f64> {
@@ -26,6 +29,7 @@ fn time_exp(xs: List<f64>) {
         for x in xs {
             acc += exp(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -42,6 +46,7 @@ fn time_log(xs: List<f64>) {
         for x in xs {
             acc += log(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -58,6 +63,7 @@ fn time_pow(xs: List<f64>, ys: List<f64>) {
         for i in 0usize..xs.len() {
             acc += pow(xs[i], ys[i])
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -74,6 +80,7 @@ fn time_sin(xs: List<f64>) {
         for x in xs {
             acc += sin(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -90,6 +97,7 @@ fn time_cos(xs: List<f64>) {
         for x in xs {
             acc += cos(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -106,6 +114,7 @@ fn time_tan(xs: List<f64>) {
         for x in xs {
             acc += tan(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -122,6 +131,7 @@ fn time_atan2(xs: List<f64>, ys: List<f64>) {
         for i in 0usize..xs.len() {
             acc += atan2(xs[i], ys[i])
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc
@@ -138,6 +148,7 @@ fn time_acos(xs: List<f64>) {
         for x in xs {
             acc += acos(x)
         }
+        acc = black_box(acc)
         let t = unsafe { Instant.now() }.secs_since(t0)
         best = best.min(t)
         sum = acc

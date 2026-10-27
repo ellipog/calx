@@ -1,0 +1,28 @@
+// std.hint: black_box gives back what it's given, of any type.
+import std.hint.{black_box}
+
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn main() {
+    println("{black_box(41) + 1} {black_box(0.1) + 0.2}")    // out: 42 0.30000000000000004
+    println("{black_box(-0.0)} {black_box(true)}")           // out: -0.0 true
+    let s = black_box(String("hello"))
+    println("{s} {s.len()}")                                  // out: hello 5
+    var xs = black_box(List<i64>())
+    xs.push(3)
+    xs = black_box(xs)
+    xs.push(4)
+    println("{xs}")                                           // out: [3, 4]
+    let p = black_box(Point { x: 1, y: -2 })
+    println("{p.x} {p.y}")                                    // out: 1 -2
+
+    // Summing behind it, as a benchmark does.
+    var acc: i64 = 0
+    for i in 0i64..1000 {
+        acc += black_box(i)
+    }
+    println("{black_box(acc)}")                               // out: 499500
+}

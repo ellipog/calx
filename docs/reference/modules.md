@@ -172,6 +172,6 @@ Each module becomes one C file, named after it, such as `game_world.c`. It's com
 
 Since a file holds exactly what it uses, its text changes only when something it uses changes, and the [object cache](command.md#fast-builds-d64) compiles only those files again. The front end still checks the whole program every time.
 
-A function is `static` unless another module's file calls it, which lets clang inline it and drop it. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
+A function is `static` unless another module's file calls it, which lets clang inline it and drop it. Release builds inline across files too, when they link (ThinLTO, D99), so splitting code into modules costs nothing at run time. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
 
 Packages (`calx.toml`) and reaching items through a module's name are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).
