@@ -8,7 +8,7 @@ description: Generic functions, structs and enums, how a call works out its type
 A generic function or type takes types as parameters, written in `<...>` after its name. Each use with real types gets its own copy in C, so generic code runs as fast as code written for one type.
 
 ```calx
-fn choose<T>(c: bool, a: T, b: T) -> T {
+fn choose<T>(c: bool, a: own T, b: own T) -> T {
     return if c { a } else { b }
 }
 
@@ -29,15 +29,15 @@ fn main() {
 `fn name<T, U>(...)` declares the parameters. A call usually works them out from its arguments ([below](#how-a-call-works-out-its-types)), and can also give them, right after the name: `choose<i64>(true, 7, 8)`.
 
 ```calx
-fn choose<T>(c: bool, a: T, b: T) -> T {
+fn choose<T>(c: bool, a: own T, b: own T) -> T {
     return if c { a } else { b }
 }
 
-fn first<T>(xs: [T; 3]) -> T {
+fn first<T: Copy>(xs: [T; 3]) -> T {
     return xs[0]
 }
 
-fn swap<A, B>(t: (A, B)) -> (B, A) {
+fn swap<A, B>(t: own (A, B)) -> (B, A) {
     let (a, b) = t
     return (b, a)
 }
@@ -52,6 +52,7 @@ fn main() {
 - In an expression, `<` right after a name, with no space, starts its types. With a space it's less-than ([syntax](syntax.md#generic-types-in-expressions)).
 - Every parameter must be used. A parameter can't take the name of a type or of anything else in the module, since there's no shadowing.
 - A generic function can call itself and other generic functions.
+- `T` might own memory, so its values move rather than copy, and parameters that keep one are `own` ([below](#values-of-type-t)).
 
 ## Generic structs and enums
 
@@ -62,13 +63,13 @@ struct Pair<A, B> {
 }
 
 impl<A, B> Pair<A, B> {
-    fn swap(self) -> Pair<B, A> {
+    fn swap(own self) -> Pair<B, A> {
         return Pair { a: self.b, b: self.a }
     }
-    fn with<C>(self, c: C) -> Pair<A, C> {
+    fn with<C>(own self, c: own C) -> Pair<A, C> {
         return Pair { a: self.a, b: c }
     }
-    fn of(a: A, b: B) -> Pair<A, B> {
+    fn of(a: own A, b: own B) -> Pair<A, B> {
         return Pair { a, b }
     }
 }
@@ -85,7 +86,7 @@ enum Either<L, R> {
     Neither
 }
 
-fn left_or<L, R>(e: Either<L, R>, other: L) -> L {
+fn left_or<L, R>(e: own Either<L, R>, other: own L) -> L {
     return match e {
         Left(x) => x,
         _ => other,
@@ -123,7 +124,7 @@ A call looks in this order:
 4. The type the result is expected to have.
 
 ```calx
-fn choose<T>(c: bool, a: T, b: T) -> T {
+fn choose<T>(c: bool, a: own T, b: own T) -> T {
     return if c { a } else { b }
 }
 
@@ -194,12 +195,53 @@ fn main() {
 
 A bound on a struct's or enum's parameter, as in `struct Holder<T: Shape>`, applies to every use of the type.
 
+## Values of type `T`
+
+Generic code can't know whether `T` owns memory, as a `String` does, so it treats every `T` as a value that might ([ownership](ownership.md)):
+
+- Assigning one, passing it to an `own` parameter, returning it, or putting it in a struct, tuple or list moves it. After that, the variable it was in can't be used.
+- A parameter without `own` is a view of the caller's value, so it can be read and passed on, but not moved away. A function that keeps or returns a `T` it's given takes it as `own T`.
+- `T: Copy` is a bound saying `T` owns no memory. Its values then copy, as numbers do, and an element can be read out of an array of them.
+- `x.copy()` makes a copy that owns memory of its own, for any `T`.
+
+```calx
+fn first<T: Copy>(xs: [T; 3]) -> T {
+    return xs[0]
+}
+
+fn pick<T>(c: bool, a: own T, b: own T) -> T {
+    return if c { a } else { b }    // the one not picked is freed here
+}
+
+fn twice<T>(x: T) -> (T, T) {
+    return (x.copy(), x.copy())
+}
+
+fn main() {
+    println("{first([4, 5, 6])} {pick(false, String("kept"), String("chosen"))}")    // out: 4 chosen
+    let (a, b) = twice(String("echo"))
+    println("{a} {b}")                                                                 // out: echo echo
+}
+```
+
+Without `Copy`, reading an element out moves it, which an array that's only being looked at can't allow:
+
+```calx
+fn first<T>(xs: [T; 3]) -> T {
+    return xs[0]    // error: can't move an element out of `xs`; move a copy with `.copy()`, or give `T` the bound `Copy`
+}
+
+fn main() {
+    println("{first([1, 2, 3])}")
+}
+```
+
 ## Optionals inside optionals
 
 Written out, [optionals](optionals.md) don't nest, so `i32??` isn't a type. Through a parameter they do. `find` below returns a `T?`, and with `T` being `i32?` that's an optional holding an optional. `some(none)`, found but empty, then differs from `none`, not found:
 
 ```calx
-fn find<T>(xs: [T; 2], i: usize) -> T? {
+fn find<T: Copy>(xs: [T; 2], i: usize) -> T? {
     if i < 2 {
         return some(xs[i])
     }

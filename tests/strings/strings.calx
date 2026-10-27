@@ -1,0 +1,96 @@
+// `String`: literals, building, methods, equality, patterns and printing. Debug builds check
+// that everything allocated is freed.
+
+struct Tag {
+    label: String = "none"
+    weight: i32 = 1
+}
+
+fn shout(s: String) -> String {
+    var out = s.copy()
+    out.push('!')
+    return out
+}
+
+fn describe(n: i32) -> String {
+    return match n {
+        0 => "zero",
+        1 => "one",
+        _ => "many: {n}",
+    }
+}
+
+fn kind(s: String) -> i32 {
+    return match s {
+        "a" => 1,
+        "bb" => 2,
+        _ => 3,
+    }
+}
+
+fn main() {
+    // Literals cost nothing, and grow into memory of their own when changed.
+    var s: String = "ab"
+    println("{s} {s.len()} {s.is_empty()}")    // out: ab 2 false
+    s.push('c')
+    s.push('é')
+    s.push_str("de")
+    println("{s} {s.len()}")                   // out: abcéde 7
+
+    // Building one from parts.
+    let n = 42
+    let built = "n = {n}, half = {n / 2}, s = {s}"
+    println(built)                             // out: n = 42, half = 21, s = abcéde
+    var empty = String()
+    println("[{empty}] {empty.is_empty()}")    // out: [] true
+    empty.reserve(10)
+    empty.push_str("now")
+    println(empty)                             // out: now
+    empty.clear()
+    println("[{empty}] {empty.len()}")         // out: [] 0
+    let from = String("from a str")
+    println(from)                              // out: from a str
+
+    // Looking inside. These take a `str` or a `String`.
+    println("{s.contains("cé")} {s.contains("x")} {s.contains("")}")         // out: true false true
+    let part: str = "bc"
+    let whole = String("abcd")
+    println("{whole.contains(part)} {whole.starts_with(whole)} {s.contains(whole)}")    // out: true true false
+    var joined = String()
+    joined.push_str(part)
+    joined.push_str(whole)
+    println(joined)                            // out: bcabcd
+    println("{s.starts_with("abc")} {s.ends_with("de")} {s.ends_with("x")}")  // out: true true false
+
+    // Equality compares the text, wherever it lives.
+    var t = String("ab")
+    t.push('c')
+    let u: String = "abc"
+    println("{t == u} {t != u} {t == "abd"}")    // out: true false false
+
+    // Strings returned, passed, and held in structs.
+    println(shout(u))                            // out: abc!
+    println("{shout("hey")} {shout(t)}")         // out: hey! abc!
+    println("{describe(0)} {describe(1)} {describe(7)}")    // out: zero one many: 7
+    println("{kind("a")} {kind("bb")} {kind(u)}")           // out: 1 2 3
+    let tag = Tag { label: "big" }
+    let plain = Tag {}
+    println("{tag.label} {tag.weight} {plain.label}")       // out: big 1 none
+
+    // Reassigning frees the old text.
+    var w = String("first")
+    w = "second {n}"
+    w = shout(w.copy())
+    println(w)                                   // out: second 42!
+
+    // Nested building, and a string in an optional.
+    let inner = "<{n}>"
+    let outer = "[{inner}{"!"}]"
+    println(outer)                               // out: [<42>!]
+    let maybe: String? = some(String("here"))
+    if let m = maybe {
+        println("got {m}")                       // out: got here
+    }
+    let other: String? = none
+    println("{other ?? "fallback"}")             // out: fallback
+}

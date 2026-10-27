@@ -1,0 +1,28 @@
+// The checker's rules for `String`, `List` and `.copy()`.
+
+struct P {
+    x: i32
+}
+
+fn main() {
+    let fixed: List<i32> = [1]
+    fixed.push(2)                    // error: `fixed` can't be changed; declare it with `var`
+    var s = String("s")
+    s.push_str(s)                    // error: `s` is changed by `push_str`, so it can't be what's pushed; push a copy
+    let words: List<String> = [String("w"); 3]    // error: `[x; n]` copies `x`, but `String` isn't `Copy`; push copies in a loop instead
+    let n = 5
+    _ = n.copy()                     // error: `i32` is `Copy`, so use it as it is
+    let ps: List<P> = [P { x: 1 }]
+    _ = ps.contains(P { x: 1 })      // error: `contains` compares with `==`, which `P` doesn't have
+    _ = s.reverse()                  // error: `String` has no method `reverse`
+    _ = s.contains('c')              // error: `contains` takes a `str` or a `String`, not a `rune`
+    _ = fixed.len(1)                 // error: `len` takes no arguments
+    let unknown = List()             // error: can't tell what this list holds
+    let made = List<i32>(4)          // error: `List<T>()` takes no arguments
+    let wrong = String(1)            // error: expected `str`
+    println("{ps}")                  // error: can't be shown in a string yet
+    _ = words
+    _ = unknown
+    _ = made
+    _ = wrong
+}

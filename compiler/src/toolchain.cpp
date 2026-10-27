@@ -540,6 +540,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                                       "-gline-tables-only"};
     if (mode == BuildMode::debug) {
         flags.push_back("-O0");
+        flags.push_back("-DCX_DEBUG");  // the runtime checks that everything allocated is freed
 #ifdef _WIN32
         // The DLL C runtime. Linking the static one copies its debug info into every PDB, which
         // doubles the link time. Release builds link it statically, so they run anywhere.

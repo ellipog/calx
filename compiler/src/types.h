@@ -21,6 +21,8 @@ enum class TypeKind : std::uint8_t {
     rune,      // a Unicode scalar value
     float_,    // f32, f64
     str,       // a read-only view of UTF-8 bytes
+    string,    // `String`: UTF-8 bytes it owns
+    list,      // `List<T>`: a growable array that owns its elements
     struct_,
     array,     // `[T; N]`
     enum_,
@@ -34,7 +36,7 @@ struct Type {
     std::uint8_t bits = 0;   // int_ and float_; usize says 64, and is_usize marks it
     bool is_signed = false;
     bool is_usize = false;
-    Type* elem = nullptr;    // array, optional
+    Type* elem = nullptr;    // array, optional, list
     std::uint64_t length = 0;
     Slice<Type*> elems;      // tuple
     Item* item = nullptr;    // struct_, enum_
@@ -45,6 +47,7 @@ struct Type {
     Item* generic = nullptr; // struct_, enum_: the generic item this is an instance of
     Slice<Type*> args;       // struct_, enum_: the instance's arguments
     Slice<Item*> bounds;     // param: the interfaces it must implement
+    bool copy_bound = false; // param: it has the bound `Copy`
     bool open = false;       // it mentions a parameter, so it's only checked, never emitted
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
@@ -63,6 +66,7 @@ public:
     Type* rune;
     Type* f32, *f64;
     Type* str;
+    Type* string;
 
     // The primitive named `name`, or null.
     Type* primitive(std::string_view name) const;
@@ -70,9 +74,10 @@ public:
     Type* make_enum(Item* item, std::string_view name);
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
+    Type* list_of(Type* elem);
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
-    // The arrays, optionals and tuples made so far, in the order they were made.
+    // The arrays, optionals, tuples and lists made so far, in the order they were made.
     const std::vector<Type*>& compounds() const { return compounds_; }
 
 private:
@@ -84,6 +89,7 @@ private:
     std::vector<std::pair<std::string_view, Type*>> primitives_;
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
     std::map<Type*, Type*> optional_map_;
+    std::map<Type*, Type*> list_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::vector<Type*> compounds_;
 };
@@ -98,5 +104,10 @@ inline bool is_integral(const Type* t) {
 }
 // Bad types never cause a second error.
 inline bool is_bad(const Type* t) { return t->kind == TypeKind::error; }
+
+// Whether the type owns no heap memory, so copying it is just copying its bytes (the derived
+// property `Copy`). A value of any other type moves when it's assigned or passed to `own`, and
+// is dropped at the end of its owner's scope. A generic parameter is `Copy` only with the bound.
+bool is_copy(const Type* t);
 
 }  // namespace calx

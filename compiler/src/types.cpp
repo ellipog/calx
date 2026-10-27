@@ -1,5 +1,7 @@
 #include "types.h"
 
+#include "ast.h"
+
 namespace calx {
 
 Types::Types(Arena& arena) : arena_(arena) {
@@ -26,7 +28,8 @@ Types::Types(Arena& arena) : arena_(arena) {
     f64 = make(TypeKind::float_, "f64");
     f64->bits = 64;
     str = make(TypeKind::str, "str");
-    for (Type* t : {bool_, i8, i16, i32, i64, u8, u16, u32, u64, usize, char_, rune, f32, f64, str}) {
+    string = make(TypeKind::string, "String");
+    for (Type* t : {bool_, i8, i16, i32, i64, u8, u16, u32, u64, usize, char_, rune, f32, f64, str, string}) {
         primitives_.push_back({t->name, t});
     }
 }
@@ -90,6 +93,17 @@ Type* Types::optional_of(Type* elem) {
     return t;
 }
 
+Type* Types::list_of(Type* elem) {
+    auto it = list_map_.find(elem);
+    if (it != list_map_.end()) return it->second;
+    Type* t = make(TypeKind::list, arena_.copy("List<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    list_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 Type* Types::tuple_of(const std::vector<Type*>& elems) {
     auto it = tuple_map_.find(elems);
     if (it != tuple_map_.end()) return it->second;
@@ -112,5 +126,39 @@ Type* Types::make_param(std::string_view name) {
     t->open = true;
     return t;
 }
+
+namespace {
+
+// A struct that holds itself is an error found later; the depth stops the walk before then.
+bool copy_walk(const Type* t, int depth) {
+    if (depth > 64) return true;
+    switch (t->kind) {
+        case TypeKind::string: case TypeKind::list: return false;
+        case TypeKind::param: return t->copy_bound;
+        case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
+        case TypeKind::tuple:
+            for (const Type* e : t->elems) {
+                if (!copy_walk(e, depth + 1)) return false;
+            }
+            return true;
+        case TypeKind::struct_:
+            for (const FieldDecl& f : t->item->fields) {
+                if (f.resolved && !copy_walk(f.resolved, depth + 1)) return false;
+            }
+            return true;
+        case TypeKind::enum_:
+            for (const VariantDecl& v : t->item->variants) {
+                for (const Type* x : v.types) {
+                    if (!copy_walk(x, depth + 1)) return false;
+                }
+            }
+            return true;
+        default: return true;
+    }
+}
+
+}  // namespace
+
+bool is_copy(const Type* t) { return copy_walk(t, 0); }
 
 }  // namespace calx

@@ -1,6 +1,6 @@
 ---
 title: Types
-description: The primitive types, arrays, structs, enums, optionals, tuples and the unit type.
+description: The primitive types, arrays, strings, lists, structs, enums, optionals, tuples, the unit type, and which types are Copy.
 ---
 
 # Types
@@ -16,7 +16,7 @@ description: The primitive types, arrays, structs, enums, optionals, tuples and 
 | `bool` | `true` or `false` |
 | `char` | An unsigned 16-bit UTF-16 code unit: Java's `char`. Not a number: convert it to do arithmetic |
 | `rune` | A Unicode scalar value: what iterating a string will give |
-| `str` | A read-only view of UTF-8 text. String literals are `str` |
+| `str` | A read-only view of UTF-8 text. String literals are `str`, or `String` where one is wanted ([strings](strings.md)) |
 
 Integers behave exactly as Java's do, including overflow, division and shifts ([integers](integers.md)). So do floats ([floats](floats.md)). No type converts to another by itself ([conversions](conversions.md)).
 
@@ -31,7 +31,7 @@ fn main() {
 
 ## Arrays
 
-`[T; N]` holds exactly `N` values of type `T`, where `N` is a constant `usize`. Arrays are values: assigning one or passing it by `own` copies it.
+`[T; N]` holds exactly `N` values of type `T`, where `N` is a constant `usize`. Arrays are values, stored where they're declared. An array of `Copy` elements is `Copy`, and one of elements that own memory moves ([ownership](ownership.md)).
 
 ```calx
 const SIDE: usize = 3
@@ -52,6 +52,11 @@ fn main() {
 - `for x in a` goes over the elements in order ([control flow](control-flow.md#for)).
 - An empty `[]` needs its type from where it's used.
 
+## Strings and lists
+
+- `String` owns UTF-8 text and can change it ([strings](strings.md)).
+- `List<T>` is a growable array that owns its elements ([lists](lists.md)).
+
 ## Structs, enums and tuples
 
 - A struct holds named fields ([structs](structs.md)).
@@ -63,6 +68,10 @@ fn main() {
 ## Optionals
 
 `T?` is a `T` that may be absent: `some(x)` or `none`. There's no null ([optionals](optionals.md)).
+
+## `Copy` and owning types
+
+A type is `Copy` when its values own no memory: the primitive types, enums without data, and arrays, tuples, optionals, structs and enums made only of `Copy` types. Assigning or passing one copies it. `String`, `List` and the types that hold them own memory, so they move instead, and are freed when their owner ends ([ownership](ownership.md)).
 
 ## The unit type
 

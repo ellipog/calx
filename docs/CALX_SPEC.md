@@ -72,10 +72,9 @@ Built: see [Types](reference/types.md).
 
 ### Compound types
 
-Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md) and fixed arrays ([Types](reference/types.md#arrays)). Still to build:
+Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)) and [Lists](reference/lists.md). Still to build:
 
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
-- **Lists:** `List<T>`, growable, owning their elements.
 - **Comparing and printing** enums with data and tuples, through the derived `Equal` and `Display` ([Derived properties](#derived-properties)).
 - **Functions and closures:** `fn(A) -> B` for a plain function. Closures are written `|a| expr` and have their own types, accepted through interfaces such as `Fn(A) -> B`.
 
@@ -190,23 +189,16 @@ Calx's checker is stricter than Rust's: every rule is an error, no flag turns on
 
 ### Ownership
 
-- Every value has one owner: a variable, a field, or an element of a collection.
-- Assigning or passing a non-`Copy` value moves it, and using the old name afterwards is a compile error. `.copy()` makes an explicit copy.
-- A value is destroyed when its owner goes out of scope, in reverse order of declaration. There's no garbage collector and no reference counting in safe code.
+Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take values apart, and freeing in reverse order of declaration ([Ownership](reference/ownership.md)). Still to build:
+
 - `Box<T>` owns a value on the heap, for recursive types. `Shared<T>` is an immutable value with an atomic reference count, for data many regions read: registries, config and the tick snapshot. It's `Share`, and nothing can change it.
 
 ### Views
 
-Functions take parameters in one of three modes. The modes and the rule against passing a `mut` value twice in one call are built ([Functions](reference/functions.md#parameter-modes)); moves and the rest of this section aren't.
+Built: the three parameter modes, views that can't be moved, stored or returned, pattern names that are views, and the rule against passing a `mut` value twice in one call ([Functions](reference/functions.md#parameter-modes), [Ownership](reference/ownership.md#views)). Still to build:
 
-| Mode | Written | The function gets | The caller passes |
-| --- | --- | --- | --- |
-| Read | `x: T` | A read-only view, or a copy for small `Copy` types | `value` |
-| Mutate | `x: mut T` | A mutable view | `mut value` |
-| Take | `x: own T` | Ownership. The caller can't use the value afterwards | `value` |
-
-- **Views are second-class.** They can be passed and used, but not stored in a field, returned, captured by a closure that outlives the call, or sent. So the compiler never needs lifetimes. It only checks each function body on its own.
-- **No overlapping mutable views.** Within a call, a value passed as `mut` can't also be passed again, as either mode. Within a function, a `mut` view and any other view of the same value can't both be in use. The Calcite sketches hit this four times, and each time it was a real aliasing bug.
+- **Views are second-class.** Besides not being stored or returned, they can't be captured by a closure that outlives the call, or sent. So the compiler never needs lifetimes. It only checks each function body on its own.
+- **No overlapping mutable views.** Within a function, a `mut` view and any other view of the same value can't both be in use. The Calcite sketches hit this four times, and each time it was a real aliasing bug.
 - **Projections.** `p.data(Homes)` or `r.chunks[c]` can return a view into the receiver, valid for the expression or for a `let` binding in the same block.
 - **`checkout`.** This is for the element-and-owner case:
 
@@ -252,15 +244,16 @@ What a panic does in a plain program is built: see [Printing and panics](referen
 
 ## Strings (D28)
 
-- `String` owns UTF-8 bytes and is always valid UTF-8. `str` is a read-only view of a string's bytes. String literals are `str` until something needs to own them.
+Built: `str` and `String`, literals as either, interpolation into a `String`, the basic methods, `==` and string patterns ([Strings](reference/strings.md)). Still to build:
+
+- `String` is always valid UTF-8, and `str` will be able to view part of a `String`.
 - **Indexing is by byte offset.** `s[a..b]` panics if `a` or `b` isn't on a character boundary. `s.runes()` iterates Unicode scalar values, and `s.chars()` iterates UTF-16 code units, as Java sees the string.
 - **Java compatibility:**
   - `s.java_hash()` is Java's `String.hashCode`, computed over UTF-16 code units.
   - `s.utf16_len()` is Java's `String.length()`, which the protocol's string limits count in.
   - `std.text.mutf8` encodes and decodes Java's Modified UTF-8, which NBT uses.
   - `to_lower_root` and `to_upper_root` match Java's `toLowerCase(Locale.ROOT)`.
-- **Interpolation** calls the `Display` interface: `"{x}"`. Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
-- `==` compares contents.
+- **Interpolation** calls the `Display` interface for types beyond the built-in ones: `"{x}"`. Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
 
 ## Collections (D27)
 
@@ -284,7 +277,7 @@ Keys hash with the `JavaHash` interface: Java's `hashCode` for each type. The st
 
 | Type | Use |
 | --- | --- |
-| `List<T>` | A growable array |
+| `List<T>` | A growable array. Built: [Lists](reference/lists.md) |
 | `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen |
 | `LinkedMap<K, V>` | A map that iterates in insertion order |
 | `SortedMap<K, V>` | A B-tree map in key order |

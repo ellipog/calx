@@ -23,7 +23,7 @@ fn main() {
 | `assert(cond)`, `assert(cond, s)` | Panics if `cond` is false, with the message `assertion failed: s` |
 | `panic(s)` | Panics with the message `s` |
 
-The argument is a `str`. A string literal there can interpolate: `{expr}` writes the value of `expr`. Integers, floats, `bool`, `char`, `rune`, `str` and [enums without data](enums.md#comparing-and-printing) can be interpolated. Floats print as Java prints them ([floats](floats.md#printing)), and enums print their variant's name. Interpolation elsewhere needs `String`, which isn't built yet.
+The argument is a `str` or a `String`. A string literal there can interpolate: `{expr}` writes the value of `expr`, with no string built in between. Integers, floats, `bool`, `char`, `rune`, `str`, `String`, [enums without data](enums.md#comparing-and-printing) and [lists](lists.md#printing) of them can be interpolated. Floats print as Java prints them ([floats](floats.md#printing)), and enums print their variant's name. An interpolating literal anywhere else builds a `String` ([strings](strings.md#literals)).
 
 Every interpolation runs, left to right, before anything is written, as Java builds the whole string first. So a function called inside `{...}` that prints writes its output before the line it's in.
 

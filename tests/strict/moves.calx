@@ -1,0 +1,96 @@
+// The ownership pass's errors (D76). It runs only on code without other errors, so this file
+// has only its errors.
+
+struct P {
+    name: String
+    age: i32
+}
+
+enum Shape {
+    Named(String)
+    Empty
+}
+
+fn eat(s: own String) {
+    _ = s
+}
+
+fn eat_p(p: own P) {
+    _ = p
+}
+
+fn view(p: P) -> P {
+    return p                         // error: `p` is a view of the caller's value, so it can't be moved; take it as `p: own P`
+}
+
+fn mut_view(s: mut String) -> String {
+    s.push('!')
+    return s                         // error: `s` is a `mut` view of the caller's value, so it can't be moved; move a copy with `s.copy()`
+}
+
+fn field_of_view(p: P) -> String {
+    return p.name                    // error: can't move `p.name` out of `p`, a view of the caller's value; move a copy with `p.name.copy()`
+}
+
+fn part_of_view(s: Shape) -> String {
+    return match s {
+        Named(n) => n,               // error: `n` is part of `s`, which can't be taken apart here, so `n` can't be moved
+        Empty => "",
+    }
+}
+
+fn main() {
+    let a = String("a")
+    eat(a)
+    eat(a)                           // error: `a` was moved, so it can't be used here
+
+    let b = String("b")
+    if a.len() > 0 {
+        eat(b)
+    }
+    println(b)                       // error: `b` might have been moved, so it can't be used here
+
+    let c = String("c")
+    for _ in 0..2 {
+        eat(c)                       // error: `c` is moved here on every pass through the loop, so the next pass can't use it
+    }
+
+    let words: List<String> = ["x"]
+    for w in words {
+        eat(w)                       // error: `w` is an element the loop looks at, so it can't be moved; move a copy with `w.copy()`
+    }
+    eat(words[0])                    // error: can't move an element out of `words`; take it out with `remove` or `swap_remove`
+    for w in words {
+        eat_list(words)              // error: can't move `words` while a `for` loop goes over it
+        println(w)
+    }
+
+    let p = P { name: "p", age: 1 }
+    let name = p.name
+    eat_p(p)                         // error: `p.name` was moved, so `p` can't be used here
+    println(name)
+
+    var q = P { name: "q", age: 2 }
+    let P { name: qn, .. } = q
+    q.age = 3                        // error: `q` can't be changed while `qn` is a view into it
+    println(qn)
+
+    let r = P { name: "r", age: 3 }
+    let P { name: rn, .. } = r
+    eat_p(r)                         // error: can't move `r` while `rn` is a view into it
+    println(rn)
+
+    let op: P? = some(P { name: "o", age: 6 })
+    let on = op?.name                // error: `?.` can only read a field that's `Copy` for now; unwrap the optional first
+    _ = on
+
+    var s = String("s")
+    _ = view(P { name: "v", age: 4 })
+    _ = mut_view(mut s)
+    _ = field_of_view(P { name: "f", age: 5 })
+    _ = part_of_view(Shape.Empty)
+}
+
+fn eat_list(xs: own List<String>) {
+    _ = xs
+}

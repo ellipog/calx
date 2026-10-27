@@ -6,16 +6,16 @@ struct Pair<A, B> {
 }
 
 impl<A, B> Pair<A, B> {
-    fn swap(self) -> Pair<B, A> {
+    fn swap(own self) -> Pair<B, A> {
         return Pair { a: self.b, b: self.a }
     }
-    fn first(self) -> A {
+    fn first(own self) -> A {
         return self.a
     }
-    fn with<C>(self, c: C) -> Pair<A, C> {
+    fn with<C>(own self, c: own C) -> Pair<A, C> {
         return Pair { a: self.a, b: c }
     }
-    fn of(a: A, b: B) -> Pair<A, B> {
+    fn of(a: own A, b: own B) -> Pair<A, B> {
         return Pair { a, b }
     }
 }
@@ -37,14 +37,14 @@ enum Tree<T> {
     Node { left: T, right: T }
 }
 
-fn left_or<L, R>(e: Either<L, R>, d: L) -> L {
+fn left_or<L, R>(e: own Either<L, R>, d: own L) -> L {
     return match e {
         Left(x) => x,
         _ => d,
     }
 }
 
-fn right_of<T>(t: Tree<T>) -> T {
+fn right_of<T>(t: own Tree<T>) -> T {
     return match t {
         Leaf(x) => x,
         Node { right, .. } => right,

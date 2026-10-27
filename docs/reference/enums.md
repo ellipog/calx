@@ -116,4 +116,4 @@ fn main() {
 
 ## In memory
 
-An enum without data is its representation, or the smallest of `u8`, `u16` and `u32` that numbers its variants. One with data is a tag of that size followed by the largest variant's fields, as a C tagged union. Copying an enum copies its data; enums that own memory come with `String` and `List`.
+An enum without data is its representation, or the smallest of `u8`, `u16` and `u32` that numbers its variants. One with data is a tag of that size followed by the largest variant's fields, as a C tagged union. An enum whose variants hold only `Copy` values is `Copy`. One that holds a `String` or a `List` owns memory, and moves ([ownership](ownership.md)).

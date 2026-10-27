@@ -1,4 +1,5 @@
 #include "check.h"
+#include "moves.h"
 
 #include <algorithm>
 #include <cctype>
@@ -77,7 +78,10 @@ public:
         n_underscore_ = ctx.names.intern("_");
         n_Self_ = ctx.names.intern("Self");
         for (const char* b : {"print", "println", "panic", "assert"}) builtin_names_.push_back(ctx.names.intern(b));
-        for (const char* b : {"some", "ok", "err"}) reserved_names_.push_back(ctx.names.intern(b));
+        for (const char* b : {"some", "ok", "err", "List", "Copy"}) reserved_names_.push_back(ctx.names.intern(b));
+        n_List_ = ctx.names.intern("List");
+        n_Copy_ = ctx.names.intern("Copy");
+        n_copy_ = ctx.names.intern("copy");
     }
 
     void run(const std::vector<Module*>& modules, bool need_main) {
@@ -127,6 +131,13 @@ public:
         instance_mode_ = false;
         order_types();
         check_unused_items();
+        // Ownership follows the types, so it waits for a program without type errors, as Rust's
+        // borrow checker does. An instance's errors were its definition's (D76).
+        if (ctx_.diags.error_count() == 0) {
+            MoveContext mc{ctx_.names, ctx_.arena, ctx_.diags};
+            for (Item* f : all_fns_) check_moves(mc, f, true);
+            for (Item* f : pending_fns_) check_moves(mc, f, false);
+        }
         if (need_main) find_main(modules.back());
     }
 
@@ -250,7 +261,8 @@ private:
                 return nullptr;
             }
             case TypeKind::optional:
-            case TypeKind::array: return private_part(t->elem);
+            case TypeKind::array:
+            case TypeKind::list: return private_part(t->elem);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
                 return nullptr;
@@ -368,6 +380,7 @@ private:
     void declare_item(Item* it) {
         if (is_builtin_name(it->name)) {
             error(it->name_span, q(text(it->name)) + " is a built-in name");
+            it->used = true;  // nothing can name it, so "never used" would only repeat the error
             return;
         }
         auto [pos, fresh] = scope_->items.emplace(it->name, it);
@@ -985,6 +998,12 @@ private:
             }
             std::vector<Item*> bounds;
             for (TypeExpr* b : g->bounds) {
+                if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->path.parts[0] == n_Copy_ &&
+                    b->args.empty()) {
+                    if (p->copy_bound) error(b->span, "`Copy` is already a bound of " + q(text(g->name)));
+                    p->copy_bound = true;
+                    continue;
+                }
                 Item* iface = resolve_interface(b);
                 if (!iface) continue;
                 if (std::find(bounds.begin(), bounds.end(), iface) != bounds.end()) {
@@ -1053,7 +1072,7 @@ private:
         if (!t->open) return false;
         switch (t->kind) {
             case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
-            case TypeKind::optional: case TypeKind::array: return unresolved(t->elem, vars, s);
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return unresolved(t->elem, vars, s);
             case TypeKind::tuple:
                 for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
                 return false;
@@ -1082,6 +1101,7 @@ private:
             }
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
+            case TypeKind::list: return T.list_of(subst(t->elem, s));
             case TypeKind::tuple: {
                 std::vector<Type*> elems;
                 for (Type* e : t->elems) elems.push_back(subst(e, s));
@@ -1111,7 +1131,7 @@ private:
         if (!pattern->open) return pattern == actual;
         if (pattern->kind != actual->kind) return false;
         switch (pattern->kind) {
-            case TypeKind::optional: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::optional: case TypeKind::list: return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::array:
                 return pattern->length == actual->length && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::tuple:
@@ -1168,6 +1188,10 @@ private:
         }
         bool ok = true;
         for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
+            if (params[i]->copy_bound && !is_bad(args[i]) && !is_copy(args[i])) {
+                error(span, name_of(args[i]) + " isn't `Copy`, which " + what + " needs for " + q(params[i]->name));
+                ok = false;
+            }
             for (Item* b : params[i]->bounds) {
                 if (satisfies(args[i], b)) continue;
                 error(span, name_of(args[i]) + " doesn't implement " + q(text(b->name)) + ", which " + what +
@@ -1182,6 +1206,7 @@ private:
         for (Type* p : params) {
             auto it = s.find(p);
             if (it == s.end()) return false;
+            if (p->copy_bound && !is_copy(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, b)) return false;
             }
@@ -1286,6 +1311,7 @@ private:
             }
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
+            case TypeKind::list: return mangle(t->elem) + "_list";
             case TypeKind::tuple: {
                 std::string s = "tup";
                 for (Type* e : t->elems) s += "_" + mangle(e);
@@ -1555,6 +1581,19 @@ private:
                     return T.error;
                 }
                 Name n = t->path.parts[0];
+                if (n == n_List_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`List` takes one generic argument, the type of its elements: `List<i32>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem)) return T.error;
+                    if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+                        error(t->args[0]->span, "a list can't hold " + name_of(elem));
+                        return T.error;
+                    }
+                    return T.list_of(elem);
+                }
                 if (Type* p = env_type(n)) {
                     if (!t->args.empty()) {
                         error(t->args[0]->span, q(text(n)) + " doesn't take generic arguments");
@@ -1670,7 +1709,9 @@ private:
     // Read parameters of these types are passed as views, since copying them could be costly.
     static bool is_view_type(const Type* t) {
         switch (t->kind) {
-            case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: return true;
+            case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
+            case TypeKind::list: case TypeKind::param:
+                return true;
             case TypeKind::enum_: return t->has_data;
             case TypeKind::optional: return is_view_type(t->elem);
             default: return false;
@@ -2142,6 +2183,11 @@ private:
             return;
         }
         if (l->is_param) {
+            if (l->mode == ParamMode::own) {
+                if (whole) l->reassigned = true;
+                else l->mutated = true;
+                return;
+            }
             if (l->mode != ParamMode::mut) {
                 error(place->span, "parameter " + q(n) + " can't be changed; take it as `mut` to change it");
                 l->used = true;
@@ -2257,11 +2303,11 @@ private:
             it->type = elem;
         } else {
             Type* t = check(it, nullptr);
-            if (t->kind == TypeKind::array) {
+            if (t->kind == TypeKind::array || t->kind == TypeKind::list) {
                 elem = t->elem;
                 borrowed = place_root(it);
             } else if (!is_bad(t)) {
-                error(it->span, "a `for` loop goes over a range or an array, not " + name_of(t));
+                error(it->span, "a `for` loop goes over a range, an array or a list, not " + name_of(t));
             }
         }
         s->elem_type = elem;
@@ -2324,6 +2370,10 @@ private:
         } else if (is_integral(want) && is_integral(got)) {
             msg += "; " + (exact_conversion(got, want) ? "convert it with " + q(std::string(want->name) + "(...)")
                                                         : lossy_hint(got, want));
+        } else if (want == T.string && got == T.str) {
+            msg += "; make one with " + q("String(...)");
+        } else if (want == T.str && got == T.string) {
+            msg += "; take a `String` here instead";
         } else if (want->kind == TypeKind::optional && want->elem == got) {
             msg += "; a value doesn't become an optional by itself: write " + q("some(...)");
         } else if (got->kind == TypeKind::optional && got->elem == want) {
@@ -2389,7 +2439,7 @@ private:
                 e->is_const = e->has_bits = true;
                 e->const_bits = e->bool_value;
                 return T.bool_;
-            case ExprKind::string_lit: return string_literal(e, false);
+            case ExprKind::string_lit: return string_literal(e, expected, false);
             case ExprKind::none_lit:
                 e->is_const = true;
                 if (expected && expected->kind == TypeKind::optional) return expected;
@@ -2573,27 +2623,33 @@ private:
         return t;
     }
 
-    Type* string_literal(Expr* e, bool allow_interpolation) {
+    // A string literal is a `str`, or a `String` where one is expected, which costs nothing since
+    // the `String` doesn't own the literal's bytes. One with `{...}` parts is a `String` built when
+    // it runs, except as the message of `print` and the others, which print the parts (`printed`).
+    Type* string_literal(Expr* e, Type* expected, bool printed) {
         if (e->literal.name) {
             not_yet(e->span, "string prefixes");
             return T.error;
         }
-        if (!e->interpolations.empty() && !allow_interpolation) {
-            error(e->span, "interpolated strings need `String`, which isn't implemented yet; they work in "
-                           "`print`, `println`, `panic` and `assert` for now");
-            for (Expr* part : e->interpolations) check(part, nullptr);  // so their names count as used
-            return T.error;
-        }
         for (Expr* part : e->interpolations) {
             Type* t = check(part, nullptr);
-            if (is_bad(t)) continue;
-            if (!(is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ ||
-                  t->kind == TypeKind::rune || t->kind == TypeKind::str || (t->kind == TypeKind::enum_ && !t->has_data))) {
-                error(part->span, name_of(t) + " can't be shown in a string yet");
-            }
+            if (!is_bad(t) && !printable(t)) error(part->span, name_of(t) + " can't be shown in a string yet");
         }
         e->is_const = e->interpolations.empty();
+        if (printed) return T.str;
+        if (!e->interpolations.empty() || expected == T.string) return T.string;
         return T.str;
+    }
+
+    // What `{x}` in a string can show.
+    static bool printable(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: case TypeKind::char_:
+            case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
+            case TypeKind::enum_: return !t->has_data;
+            case TypeKind::list: return printable(t->elem);
+            default: return false;
+        }
     }
 
     // --- names -----------------------------------------------------------------------------
@@ -2742,7 +2798,7 @@ private:
     static bool equatable(const Type* t) {
         switch (t->kind) {
             case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
-            case TypeKind::rune: return true;
+            case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
             case TypeKind::enum_: return !t->has_data;
             case TypeKind::optional: return equatable(t->elem);
             default: return false;
@@ -3213,6 +3269,7 @@ private:
     Type* index_type(Expr* e, Type* base) {
         Type* it = check(e->rhs, T.usize);
         if (is_bad(base)) return T.error;
+        if (base->kind == TypeKind::list) return base->elem;
         if (base->kind != TypeKind::array) {
             error(e->lhs->span, name_of(base) + " can't be indexed");
             return T.error;
@@ -3281,7 +3338,9 @@ private:
             return T.error;
         }
         Type* rhs_want = expected;
-        if (!rhs_want && is_untyped_literal(e->rhs)) {
+        if (!rhs_want && e->rhs->kind == ExprKind::string_lit && lt->elem->kind == TypeKind::string) {
+            rhs_want = lt->elem;  // a literal is a `String` where one is wanted
+        } else if (!rhs_want && is_untyped_literal(e->rhs)) {
             // `none` or `some(...)` on the right chains to another optional, unless the value is
             // itself an optional (from generic code), where flattening is the only use: `r ?? none`.
             bool optional_literal = e->rhs->kind == ExprKind::none_lit || is_some_call(e->rhs);
@@ -3483,6 +3542,7 @@ private:
     }
 
     Type* array_literal(Expr* e, Type* expected) {
+        if (expected && expected->kind == TypeKind::list) return list_literal(e, expected);
         Type* want = expected && expected->kind == TypeKind::array ? expected->elem : nullptr;
         if (e->repeat) {
             Type* elem = check(e->elems[0], want);
@@ -3509,6 +3569,23 @@ private:
             return T.error;
         }
         return T.array_of(elem, e->elems.size());
+    }
+
+    // `[a, b]` where a list is expected. `[]` is an empty list, which allocates nothing.
+    Type* list_literal(Expr* e, Type* list) {
+        Type* want = list->elem;
+        if (e->repeat) {
+            Type* elem = check(e->elems[0], want);
+            check(e->repeat, T.usize);
+            if (!is_bad(elem) && !is_copy(elem) && !instance_mode_) {
+                error(e->elems[0]->span, "`[x; n]` copies `x`, but " + name_of(elem) +
+                                             " isn't `Copy`; push copies in a loop instead");
+            }
+            return list;
+        }
+        for (Expr* x : e->elems) check(x, want);
+        e->is_const = e->elems.empty();
+        return list;
     }
 
     // --- control flow ------------------------------------------------------------------------
@@ -3909,14 +3986,15 @@ private:
             error(p->span, "match a float with comparisons in an `if`; NaN and -0.0 make float patterns misleading");
             return false;
         }
-        if (!(is_integral(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::str)) {
+        bool text = t->kind == TypeKind::str || t->kind == TypeKind::string;
+        if (!(is_integral(t) || t->kind == TypeKind::bool_ || text)) {
             error(p->span, "a literal can't match " + a_type(t));
             check(p->value, nullptr);
             return false;
         }
         Type* lt = check(p->value, t);
         if (is_bad(lt)) return false;
-        if (t->kind == TypeKind::str) {
+        if (text) {
             if (p->value->kind != ExprKind::string_lit || !p->value->interpolations.empty()) {
                 error(p->value->span, "a string pattern must be a plain string literal");
                 return false;
@@ -4025,7 +4103,7 @@ private:
                     d->index = static_cast<std::uint32_t>(p->value->const_bits);
                     return d;
                 }
-                if (t->kind == TypeKind::str) {
+                if (t->kind == TypeKind::str || t->kind == TypeKind::string) {
                     DPat* d = make_dpat(DPat::str);
                     for (const StringPart& part : p->value->literal.parts) {
                         if (!part.is_expr) d->string = part.text;
@@ -4344,6 +4422,7 @@ private:
         if (callee->kind == ExprKind::name) {
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
+            if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
                 not_yet(e->span, "errors");
                 return T.error;
@@ -4367,6 +4446,7 @@ private:
                     callee->ref = Ref::type;
                     callee->named_type = t;
                     if (t->kind == TypeKind::struct_) return construct(e, t, expected);
+                    if (t == T.string) return string_call(e);
                     if (t->kind == TypeKind::enum_) {
                         error(callee->span, "build " + a_type(t) + " from one of its variants, such as " + q(variant_text(t, 0)));
                         for (Arg& a : e->args) check(a.value, nullptr);
@@ -4420,6 +4500,7 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
+            if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
             Member mem = lookup(recv, callee->member, e->only_interface);
             // Through a parameter, the bound says which interface answers, and an instance, whose
             // type could have the name in another interface too, keeps to it.
@@ -4470,6 +4551,7 @@ private:
                     return T.error;
                 }
             }
+            if (recv->kind == TypeKind::string || recv->kind == TypeKind::list) return builtin_method(e, recv);
             return prim_method(e, recv);
         }
         check(callee, nullptr);
@@ -4958,9 +5040,10 @@ private:
         }
         auto message = [&](Expr* m) {
             if (m->kind == ExprKind::string_lit) {
-                m->type = string_literal(m, true);
+                m->type = string_literal(m, nullptr, true);
             } else {
-                check(m, T.str);
+                Type* t = check(m, nullptr);
+                if (!is_bad(t) && t != T.str && t != T.string) error(m->span, "expected a string, found " + name_of(t));
             }
         };
         switch (b) {
@@ -4995,6 +5078,147 @@ private:
             case Builtin::none: break;
         }
         return T.error;
+    }
+
+    // `List<i32>()`: an empty list, from the generic argument or the type expected.
+    Type* list_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* t = nullptr;
+        if (callee->type_args.size() == 1) {
+            Type* elem = resolve_type(callee->type_args[0]);
+            if (is_bad(elem)) return T.error;
+            t = T.list_of(elem);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`List` takes one generic argument, the type of its elements: `List<i32>()`");
+            return T.error;
+        } else if (expected && expected->kind == TypeKind::list) {
+            t = expected;
+        } else {
+            error(e->span, "can't tell what this list holds; give it, as in `List<i32>()`, or give the variable a type");
+            return T.error;
+        }
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->args[0].span, "`List<T>()` takes no arguments; push the elements, or write them as `[a, b]`");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        e->is_const = true;
+        return t;
+    }
+
+    // `String()` is empty, and `String(s)` is the `str` as a `String`.
+    Type* string_call(Expr* e) {
+        if (e->args.empty()) {
+            e->call = CallKind::construct;
+            e->is_const = true;
+            return T.string;
+        }
+        Expr* a = single_arg(e, "`String(...)`");
+        if (!a) return T.error;
+        e->call = CallKind::convert;
+        e->conv = Conv::exact;
+        e->named_type = T.string;
+        Type* from = check(a, T.str);
+        return is_bad(from) ? T.error : T.string;
+    }
+
+    // `x.copy()`: a copy of a value that owns memory, with memory of its own (D76).
+    Type* copy_call(Expr* e, Type* recv) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::copy;
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->span, "`copy` takes no arguments");
+            return T.error;
+        }
+        if (is_bad(recv)) return T.error;
+        if (is_copy(recv) && recv->kind != TypeKind::param && !instance_mode_) {
+            error(e->callee->span, name_of(recv) + " is `Copy`, so use it as it is; `.copy()` is for values that own memory");
+            return T.error;
+        }
+        return recv;
+    }
+
+    // The methods of `String` and `List<T>`.
+    Type* builtin_method(Expr* e, Type* recv) {
+        std::string_view m = text(e->callee->member);
+        e->call = CallKind::builtin_method;
+        BMethod b = BMethod::none;
+        bool changes = false;
+        std::vector<Type*> params;
+        Type* result = T.unit;
+        if (recv->kind == TypeKind::string) {
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "push") b = BMethod::push, changes = true, params = {T.rune};
+            // These only look at the text they're given, so it can be a `str` or a `String`;
+            // `nullptr` stands for either.
+            else if (m == "push_str") b = BMethod::push_str, changes = true, params = {nullptr};
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "contains") b = BMethod::contains, params = {nullptr}, result = T.bool_;
+            else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
+            else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
+        } else {
+            Type* el = recv->elem;
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            else if (m == "push") b = BMethod::push, changes = true, params = {el};
+            else if (m == "pop") b = BMethod::pop, changes = true, result = T.optional_of(el);
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "insert") b = BMethod::insert, changes = true, params = {T.usize, el};
+            else if (m == "remove") b = BMethod::remove, changes = true, params = {T.usize}, result = el;
+            else if (m == "swap_remove") b = BMethod::swap_remove, changes = true, params = {T.usize}, result = el;
+            else if (m == "swap") b = BMethod::swap, changes = true, params = {T.usize, T.usize};
+            else if (m == "truncate") b = BMethod::truncate, changes = true, params = {T.usize};
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+        }
+        if (b == BMethod::none) {
+            error(e->callee->span, name_of(recv) + " has no method " + q(m));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->bmethod = b;
+        if (e->args.size() != params.size()) {
+            error(e->span, q(m) + " takes " +
+                               (params.empty() ? std::string("no arguments")
+                                               : params.size() == 1 ? std::string("one argument")
+                                                                    : std::to_string(params.size()) + " arguments"));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        for (std::size_t i = 0; i < params.size(); i++) {
+            Arg& a = e->args[i];
+            if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+            Type* at = check(a.value, params[i]);
+            if (!params[i] && !is_bad(at) && at->kind != TypeKind::str && at->kind != TypeKind::string) {
+                error(a.value->span, q(m) + " takes a `str` or a `String`, not " + a_type(at));
+                return T.error;
+            }
+        }
+        if (b == BMethod::contains && recv->kind == TypeKind::list && !equatable(recv->elem) && !is_bad(recv->elem)) {
+            error(e->callee->span, "`contains` compares with `==`, which " + name_of(recv->elem) + " doesn't have");
+            return T.error;
+        }
+        if (changes) {
+            Expr* lhs = e->callee->lhs;
+            if (Local* root = place_root(lhs)) {
+                require_writable(lhs, root, false);
+                // D48: the string being added can't be the one it's added to.
+                if (b == BMethod::push_str && mentions(e->args[0].value, root)) {
+                    error(e->args[0].value->span, q(text(root->name)) + " is changed by `push_str`, so it can't be "
+                                                  "what's pushed; push a copy");
+                }
+            } else {
+                error(lhs->span, q(m) + " changes " + name_of(recv) + ", so call it on a variable");
+            }
+        }
+        return result;
     }
 
     Type* prim_method(Expr* e, Type* recv) {
@@ -5065,11 +5289,17 @@ private:
         auto visit = [&](auto& self, Type* t) -> void {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
-                case TypeKind::tuple: break;
+                case TypeKind::tuple: case TypeKind::list: break;
                 default: return;
             }
             int& st = state[t];
             if (st == 2) return;
+            if (t->kind == TypeKind::list) {
+                // Its elements are behind a pointer, so it needs only their declaration.
+                st = 2;
+                if (!t->open) prog_.type_order.push_back(t);
+                return;
+            }
             if (st == 1) {
                 if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
                     const Item* owner = t->generic ? t->generic : t->item;
@@ -5154,7 +5384,7 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    Name n_self_, n_underscore_, n_Self_;
+    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_copy_;
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
     Scope* scope_ = nullptr;  // the module being worked on

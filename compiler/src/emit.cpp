@@ -182,13 +182,21 @@ private:
         return std::string(s);
     }
 
-    std::string local_name(const Local* l) const { return ident(l->name); }
+    std::string local_name(const Local* l) const {
+        if (!l->name) {
+            // A value the ownership pass holds for a `match`, `if let`, `let` or `for`.
+            auto it = hidden_names_.find(l);
+            if (it != hidden_names_.end()) return it->second;
+            return hidden_names_.emplace(l, "cx_h" + std::to_string(hidden_names_.size() + 1)).first->second;
+        }
+        return ident(l->name);
+    }
 
     std::string ctype(const Type* t) const {
         if (uses_) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: uses_->add_type(t); break;
+                case TypeKind::tuple: case TypeKind::list: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -203,11 +211,13 @@ private:
             case TypeKind::rune: return "cx_rune";
             case TypeKind::float_: return t->bits == 32 ? "cx_f32" : "cx_f64";
             case TypeKind::str: return "cx_str";
+            case TypeKind::string: return "cx_String";
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array:
             case TypeKind::optional:
-            case TypeKind::tuple: return compound_name(t);
+            case TypeKind::tuple:
+            case TypeKind::list: return compound_name(t);
         }
         return "void";
     }
@@ -221,6 +231,7 @@ private:
         switch (t->kind) {
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
+            case TypeKind::list: s = "cx_list_" + part(t->elem); break;
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -241,7 +252,9 @@ private:
     std::string part(const Type* t) const {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
-            case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: return compound_name(t).substr(3);
+            case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
+                return compound_name(t).substr(3);
+            case TypeKind::string: return "String";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
             case TypeKind::float_: return t->bits == 32 ? "f32" : "f64";
             case TypeKind::bool_: return "bool";
@@ -300,7 +313,7 @@ private:
         std::function<void(const Type*)> close = [&](const Type* t) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: break;
+                case TypeKind::tuple: case TypeKind::list: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -309,7 +322,7 @@ private:
                 case TypeKind::enum_:
                     for (const VariantDecl& v : t->item->variants) for (const Type* x : v.types) close(x);
                     break;
-                case TypeKind::array: case TypeKind::optional: close(t->elem); break;
+                case TypeKind::array: case TypeKind::optional: case TypeKind::list: close(t->elem); break;
                 default: for (const Type* e : t->elems) close(e); break;
             }
         };
@@ -318,27 +331,31 @@ private:
         for (const Type* t : prog_.type_order) {
             if (need.count(t)) order.push_back(t);
         }
+        // Each is declared first, so a list can point to any of them.
         for (const Type* t : order) {
-            if (t->kind == TypeKind::struct_ || (t->kind == TypeKind::enum_ && t->has_data)) {
-                out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
-            } else if (t->kind == TypeKind::enum_) {
+            if (t->kind == TypeKind::enum_ && !t->has_data) {
                 out_ += "typedef " + ctype(t->repr) + " " + ctype(t) + ";\n";
+            } else {
+                out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
             }
         }
         for (const Type* t : order) {
             switch (t->kind) {
                 case TypeKind::array:
-                    out_ += "typedef struct { " + ctype(t->elem) + " v[" + std::to_string(t->length) + "]; } " + ctype(t) + ";\n";
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + " v[" + std::to_string(t->length) + "]; };\n";
                     break;
                 case TypeKind::optional:
-                    out_ += "typedef struct { " + ctype(t->elem) + " v; cx_bool has; } " + ctype(t) + ";\n";
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + " v; cx_bool has; };\n";
+                    break;
+                case TypeKind::list:
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; };\n";
                     break;
                 case TypeKind::tuple:
-                    out_ += "typedef struct {";
+                    out_ += "struct " + ctype(t) + " {";
                     for (std::size_t i = 0; i < t->elems.size(); i++) {
                         out_ += " " + ctype(t->elems[i]) + " f" + std::to_string(i) + ";";
                     }
-                    out_ += " } " + ctype(t) + ";\n";
+                    out_ += " };\n";
                     break;
                 case TypeKind::struct_:
                     out_ += "struct " + ctype(t) + " {";
@@ -364,6 +381,12 @@ private:
             }
         }
         for (const Type* t : order) {
+            // A list's show function prints its enums' names.
+            const Type* x = t;
+            while (x->kind == TypeKind::list && printable(x)) x = x->elem;
+            if (x != t && x->kind == TypeKind::enum_) printed_.insert(x);
+        }
+        for (const Type* t : order) {
             if (t->kind != TypeKind::enum_ || t->has_data || !printed_.count(t)) continue;
             out_ += "static cx_str " + enum_name_fn(t) + "(" + ctype(t) + " v) {\n    switch (v) {\n";
             for (const VariantDecl& v : t->item->variants) {
@@ -371,7 +394,171 @@ private:
             }
             out_ += "    }\n    return " + str_const("") + ";\n}\n";
         }
+        emit_glue(order);
         if (!order.empty()) out_ += "\n";
+    }
+
+    // --- drop, copy and show ---------------------------------------------------------------------
+
+    // Every type in the file that owns memory gets a function that frees it and one that copies
+    // it, and a list one that prints it, all `static inline`, so the unused ones cost nothing.
+    void emit_glue(const std::vector<const Type*>& order) {
+        std::vector<const Type*> owning, shown;
+        for (const Type* t : order) {
+            if (!is_copy(t)) owning.push_back(t);
+            if (t->kind == TypeKind::list && printable(t)) shown.push_back(t);
+        }
+        if (owning.empty() && shown.empty()) return;
+        for (const Type* t : owning) {
+            std::string c = ctype(t);
+            out_ += "static inline void " + drop_fn(t) + "(" + c + "* p);\n";
+            out_ += "static inline " + c + " " + copy_fn(t) + "(const " + c + "* p);\n";
+        }
+        for (const Type* t : shown) out_ += "static inline void " + show_fn(t) + "(" + ctype(t) + " l);\n";
+        for (const Type* t : owning) {
+            out_ += "static inline void " + drop_fn(t) + "(" + ctype(t) + "* p) {\n" + drop_body(t) + "}\n";
+            out_ += "static inline " + ctype(t) + " " + copy_fn(t) + "(const " + ctype(t) + "* p) {\n" + copy_body(t) + "}\n";
+        }
+        for (const Type* t : shown) {
+            out_ += "static inline void " + show_fn(t) + "(" + ctype(t) + " l) {\n    cx_print_str(" + str_const("[") +
+                    ");\n    for (cx_usize i = 0; i < l.len; i++) {\n        if (i) cx_print_str(" + str_const(", ") +
+                    ");\n        " + show_value(t->elem, "l.ptr[i]") + "\n    }\n    cx_print_str(" + str_const("]") + ");\n}\n";
+        }
+    }
+
+    std::string drop_fn(const Type* t) const {
+        (void)ctype(t);
+        return "cx_drop_" + part(t);
+    }
+    std::string copy_fn(const Type* t) const {
+        (void)ctype(t);
+        return "cx_copy_" + part(t);
+    }
+    std::string show_fn(const Type* t) const {
+        (void)ctype(t);
+        return "cx_show_" + part(t);
+    }
+
+    static bool printable(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::int_: case TypeKind::float_: case TypeKind::bool_: case TypeKind::char_:
+            case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
+            case TypeKind::enum_: return !t->has_data;
+            case TypeKind::list: return printable(t->elem);
+            default: return false;
+        }
+    }
+
+    // Frees what the value at `p` owns.
+    std::string drop_body(const Type* t) {
+        std::string s;
+        auto part_drop = [&](const Type* x, const std::string& at) {
+            if (!is_copy(x)) s += "    " + drop_fn(x) + "(&" + at + ");\n";
+        };
+        switch (t->kind) {
+            case TypeKind::list:
+                if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
+                s += "    cx_free(p->ptr);\n";
+                break;
+            case TypeKind::struct_:
+                for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
+                break;
+            case TypeKind::tuple:
+                for (std::size_t i = 0; i < t->elems.size(); i++) part_drop(t->elems[i], "p->f" + std::to_string(i));
+                break;
+            case TypeKind::array:
+                s += "    for (cx_usize i = 0; i < " + std::to_string(t->length) + "; i++) " + drop_fn(t->elem) + "(&p->v[i]);\n";
+                break;
+            case TypeKind::optional: s += "    if (p->has) " + drop_fn(t->elem) + "(&p->v);\n"; break;
+            case TypeKind::enum_: {
+                s += "    switch (p->tag) {\n";
+                const Slice<VariantDecl>& vs = t->item->variants;
+                for (std::uint32_t i = 0; i < vs.size(); i++) {
+                    bool any = false;
+                    for (const Type* x : vs[i].types) any = any || !is_copy(x);
+                    if (!any) continue;
+                    s += "    case " + int_const(t->repr, vs[i].tag) + ":\n";
+                    for (std::size_t k = 0; k < vs[i].types.size(); k++) {
+                        if (is_copy(vs[i].types[k])) continue;
+                        s += "        " + drop_fn(vs[i].types[k]) + "(&p->u.v" + std::to_string(i) + "." +
+                             variant_field(t, i, k) + ");\n";
+                    }
+                    s += "        break;\n";
+                }
+                s += "    default: break;\n    }\n";
+                break;
+            }
+            default: break;
+        }
+        return s;
+    }
+
+    // A copy of the value at `p` that owns memory of its own.
+    std::string copy_body(const Type* t) {
+        std::string c = ctype(t);
+        std::string s = "    " + c + " r = *p;\n";
+        auto part_copy = [&](const Type* x, const std::string& to, const std::string& from) {
+            if (!is_copy(x)) s += "    " + to + " = " + copy_fn(x) + "(&" + from + ");\n";
+        };
+        switch (t->kind) {
+            case TypeKind::list: {
+                std::string e = ctype(t->elem);
+                s = "    " + c + " r = {0};\n    if (!p->len) return r;\n    r.ptr = (" + e + "*)cx_alloc(p->len * sizeof(" + e +
+                    "));\n    r.len = r.cap = p->len;\n";
+                if (is_copy(t->elem)) s += "    __builtin_memcpy(r.ptr, p->ptr, p->len * sizeof(" + e + "));\n";
+                else s += "    for (cx_usize i = 0; i < p->len; i++) r.ptr[i] = " + copy_fn(t->elem) + "(&p->ptr[i]);\n";
+                break;
+            }
+            case TypeKind::struct_:
+                for (const FieldDecl& f : t->item->fields) part_copy(f.resolved, "r." + ident(f.name), "p->" + ident(f.name));
+                break;
+            case TypeKind::tuple:
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    part_copy(t->elems[i], "r.f" + std::to_string(i), "p->f" + std::to_string(i));
+                }
+                break;
+            case TypeKind::array:
+                s += "    for (cx_usize i = 0; i < " + std::to_string(t->length) + "; i++) r.v[i] = " + copy_fn(t->elem) +
+                     "(&p->v[i]);\n";
+                break;
+            case TypeKind::optional: s += "    if (p->has) r.v = " + copy_fn(t->elem) + "(&p->v);\n"; break;
+            case TypeKind::enum_: {
+                s += "    switch (p->tag) {\n";
+                const Slice<VariantDecl>& vs = t->item->variants;
+                for (std::uint32_t i = 0; i < vs.size(); i++) {
+                    bool any = false;
+                    for (const Type* x : vs[i].types) any = any || !is_copy(x);
+                    if (!any) continue;
+                    s += "    case " + int_const(t->repr, vs[i].tag) + ":\n";
+                    for (std::size_t k = 0; k < vs[i].types.size(); k++) {
+                        if (is_copy(vs[i].types[k])) continue;
+                        std::string f = ".u.v" + std::to_string(i) + "." + variant_field(t, i, k);
+                        s += "        r" + f + " = " + copy_fn(vs[i].types[k]) + "(&p->" + f.substr(1) + ");\n";
+                    }
+                    s += "        break;\n";
+                }
+                s += "    default: break;\n    }\n";
+                break;
+            }
+            default: break;
+        }
+        return s + "    return r;\n";
+    }
+
+    // The call that prints the value `v` of type `t`.
+    std::string show_value(const Type* t, const std::string& v) {
+        if (is_int(t)) return t->is_signed ? "cx_print_i64((cx_i64)" + v + ");" : "cx_print_u64((cx_u64)" + v + ");";
+        if (is_float(t)) return std::string(t->bits == 32 ? "cx_print_f32(" : "cx_print_f64(") + v + ");";
+        switch (t->kind) {
+            case TypeKind::bool_: return "cx_print_bool(" + v + ");";
+            case TypeKind::char_: return "cx_print_char(" + v + ");";
+            case TypeKind::rune: return "cx_print_rune(" + v + ");";
+            case TypeKind::str: return "cx_print_str(" + v + ");";
+            case TypeKind::string: return "cx_print_str(cx_sv(" + v + "));";
+            case TypeKind::enum_: return "cx_print_str(" + enum_name_fn(t) + "(" + v + "));";
+            case TypeKind::list: return show_fn(t) + "(" + v + ");";
+            default: return "";
+        }
     }
 
     ConstOut emit_const(Item* c) {
@@ -406,10 +593,19 @@ private:
         out_ += '\n';
     }
 
+    // `#line`. A function's first one names its file, and the rest in that file give just the
+    // line, which keeps the C small. Text can be emitted out of order, so once any directive
+    // names another file, every later one names its file again.
     void directive(Span s) {
         if (!opt_.line_directives) return;
         auto [ln, col] = sources_.file(s.file).position(s.begin);
         (void)col;
+        if (s.file == line_file_ && !line_files_mixed_) {
+            out_ += "#line " + std::to_string(ln) + "\n";
+            return;
+        }
+        if (line_file_ != kNoFile && s.file != line_file_) line_files_mixed_ = true;
+        line_file_ = s.file;
         out_ += "#line " + std::to_string(ln) + " " + c_string_literal(abs_path(s.file)) + "\n";
     }
 
@@ -445,7 +641,12 @@ private:
         FnOut o;
         fn_ = f;
         tmp_ = 0;
+        frames_.clear();
+        loop_frames_.clear();
+        hidden_names_.clear();
         out_.clear();
+        line_file_ = kNoFile;
+        line_files_mixed_ = false;
         directive(f->name_span);
         o.directive.swap(out_);
         uses_ = &o.sig_uses;
@@ -467,61 +668,219 @@ private:
         for (Stmt* s : b->stmts) stmt(s);
         if (b->tail && !value) {
             directive(b->tail->span);
-            expr_stmt(b->tail);
+            full([&] { expr_stmt(b->tail); });
         }
+        if (!value) drops(b->drops);
+    }
+
+    // --- ownership (D76) ---------------------------------------------------------------------------
+
+    // What matching a pattern takes: the tests, all of which must hold, and the names it binds,
+    // each with the C for its value.
+    struct Match {
+        std::vector<std::string> tests;
+        std::vector<std::pair<const Local*, std::string>> binds;
+    };
+
+    // The new values a statement only looks at, which live until it ends. Each is declared zeroed
+    // before the statement, so dropping one that never got its value is safe.
+    struct Frame {
+        std::vector<std::pair<std::string, const Type*>> temps;
+    };
+
+    // Emits a statement in its own frame: its temporaries are declared before it and dropped
+    // after it.
+    void full(const std::function<void()>& body) {
+        frames_.emplace_back();
+        std::string text = capture(body);
+        Frame f = std::move(frames_.back());
+        frames_.pop_back();
+        for (const auto& [name, t] : f.temps) line(ctype(t) + " " + name + " = " + zero(t) + ";");
+        out_ += text;
+        for (auto it = f.temps.rbegin(); it != f.temps.rend(); ++it) line(drop_fn(it->second) + "(&" + it->first + ");");
+    }
+
+    // A condition, with its own temporaries dropped once it's worked out.
+    std::string condition_expr(Expr* e) {
+        frames_.emplace_back();
+        std::string c = expr(e);
+        Frame f = std::move(frames_.back());
+        frames_.pop_back();
+        if (f.temps.empty()) return c;
+        std::string s = "({ ", r = tmp();
+        for (const auto& [name, t] : f.temps) s += ctype(t) + " " + name + " = " + zero(t) + "; ";
+        s += "cx_bool " + r + " = " + c + "; ";
+        for (auto it = f.temps.rbegin(); it != f.temps.rend(); ++it) s += drop_fn(it->second) + "(&" + it->first + "); ";
+        return s + r + "; })";
+    }
+
+    // Drops the locals in `ls`, in that order.
+    void drops(const Slice<Local*>& ls) {
+        for (Local* l : ls) line(drop_fn(l->type) + "(&" + local_name(l) + ");");
+    }
+
+    // Before leaving early: the temporaries of the statements being left, from frame `from` in.
+    void exit_drops(std::size_t from, const Slice<Local*>& ls) {
+        for (std::size_t i = frames_.size(); i-- > from;) {
+            const Frame& f = frames_[i];
+            for (auto it = f.temps.rbegin(); it != f.temps.rend(); ++it) line(drop_fn(it->second) + "(&" + it->first + ");");
+        }
+        drops(ls);
+    }
+
+    bool exit_needs_drops(std::size_t from, const Slice<Local*>& ls) const {
+        if (!ls.empty()) return true;
+        for (std::size_t i = from; i < frames_.size(); i++) {
+            if (!frames_[i].temps.empty()) return true;
+        }
+        return false;
+    }
+
+    // A new value kept for the statement: `(*(t = v, &t))`, a place that lasts until it ends.
+    std::string temp_of(Expr* e) {
+        std::string t = tmp();
+        frames_.back().temps.emplace_back(t, e->type);
+        return "(*(" + t + " = " + expr_value(e) + ", &" + t + "))";
+    }
+
+    // Zeroes the parts of the value at `at` that a pattern binds, so dropping the value frees only
+    // the rest.
+    void zero_bound(const Match& m) {
+        for (const auto& [l, v] : m.binds) {
+            if (!is_copy(l->type)) line(v + " = " + zero(l->type) + ";");
+        }
+    }
+
+    // A pattern that takes its value apart: its names now own their parts, and the rest of the
+    // value is dropped. The value is zeroed after, since a field it's in is still dropped with
+    // the rest of its local.
+    void take_apart(const Match& m, const std::string& at, const Type* t) {
+        zero_bound(m);
+        line(drop_fn(t) + "(&" + at + ");");
+        line(at + " = " + zero(t) + ";");
     }
 
     void stmt(Stmt* s) {
         directive(s->span);
         switch (s->kind) {
             case StmtKind::let: {
+                if (s->pattern->kind == PatternKind::wildcard && !s->else_ && !s->else_block) {
+                    full([&] { discard(s->value, s->drop_value); });
+                    break;
+                }
                 if (s->else_ || s->else_block || s->pattern->kind != PatternKind::binding) {
-                    let_pattern(s);
+                    full([&] { let_pattern(s); });
                     break;
                 }
                 Local* l = s->local;
                 if (!l || l->type->kind == TypeKind::error || s->value->type->kind == TypeKind::never) {
-                    expr_stmt(s->value);
+                    full([&] { expr_stmt(s->value); });
                     break;
                 }
-                line(ctype(l->type) + " " + local_name(l) + " = " + value(s->value, l->type) + ";");
+                full([&] { line(ctype(l->type) + " " + local_name(l) + " = " + value(s->value, l->type) + ";"); });
                 break;
             }
-            case StmtKind::assign: assign(s); break;
-            case StmtKind::expr: expr_stmt(s->value); break;
-            case StmtKind::return_:
-                if (!s->value) {
-                    line("return;");
-                } else if (s->value->type->kind == TypeKind::never) {
-                    expr_stmt(s->value);
-                } else {
-                    line("return " + value(s->value, fn_->result_type) + ";");
+            case StmtKind::assign: full([&] { assign(s); }); break;
+            case StmtKind::expr: full([&] { expr_stmt(s->value); }); break;
+            case StmtKind::return_: ret(s); break;
+            case StmtKind::break_: {
+                std::string id = std::to_string(s->loop_id);
+                std::size_t from = loop_frames_.count(s->loop_id) ? loop_frames_[s->loop_id] : frames_.size();
+                if (s->value && s->value->type->kind != TypeKind::unit && s->value->type->kind != TypeKind::never) {
+                    full([&] { line("cx_lv" + id + " = " + value(s->value, s->value->type) + ";"); });
+                } else if (s->value) {
+                    full([&] { expr_stmt(s->value); });
                 }
+                exit_drops(from, s->drops);
+                line("goto cx_brk" + id + ";");
                 break;
-            case StmtKind::break_:
-                if (s->value && s->value->type->kind != TypeKind::unit) {
-                    line("{ cx_lv" + std::to_string(s->loop_id) + " = " + value(s->value, s->value->type) + "; goto cx_brk" +
-                         std::to_string(s->loop_id) + "; }");
-                } else {
-                    if (s->value) expr_stmt(s->value);
-                    line("goto cx_brk" + std::to_string(s->loop_id) + ";");
-                }
+            }
+            case StmtKind::continue_: {
+                std::size_t from = loop_frames_.count(s->loop_id) ? loop_frames_[s->loop_id] : frames_.size();
+                exit_drops(from, s->drops);
+                line("goto cx_cont" + std::to_string(s->loop_id) + ";");
                 break;
-            case StmtKind::continue_: line("goto cx_cont" + std::to_string(s->loop_id) + ";"); break;
+            }
             case StmtKind::while_: {
                 std::string id = std::to_string(s->loop_id);
-                line("while (" + expr(s->cond) + ") {");
+                line("{");
                 indent_++;
+                line("while (" + condition_expr(s->cond) + ") {");
+                indent_++;
+                loop_frames_[s->loop_id] = frames_.size();
                 stmts(s->body, false);
                 line("cx_cont" + id + ":;");
                 indent_--;
                 line("}");
                 line("cx_brk" + id + ":;");
+                indent_--;
+                line("}");
                 break;
             }
-            case StmtKind::for_: for_loop(s); break;
+            case StmtKind::for_: full([&] { for_loop(s); }); break;
             default: line("/* unsupported statement */"); break;
         }
+    }
+
+    // `return`: its value, then what's dropped, then the jump.
+    void ret(Stmt* s) {
+        if (s->value && s->value->type->kind == TypeKind::never) {
+            full([&] { expr_stmt(s->value); });
+            return;
+        }
+        frames_.emplace_back();
+        std::string body = capture([&] {
+            if (!s->value) {
+                exit_drops(0, s->drops);
+                line("return;");
+            } else {
+                // Worked out first, since it can need temporaries of its own.
+                std::string v = value(s->value, fn_->result_type);
+                if (exit_needs_drops(0, s->drops)) {
+                    std::string r = tmp();
+                    line(ctype(fn_->result_type) + " " + r + " = " + v + ";");
+                    exit_drops(0, s->drops);
+                    line("return " + r + ";");
+                } else {
+                    line("return " + v + ";");
+                }
+            }
+        });
+        Frame f = std::move(frames_.back());
+        frames_.pop_back();
+        bool braces = !f.temps.empty();
+        if (braces) {
+            line("{");
+            indent_++;
+            for (const auto& [name, t] : f.temps) line(ctype(t) + " " + name + " = " + zero(t) + ";");
+            std::string pad(4, ' ');
+            std::string shifted;
+            std::size_t start = 0;
+            while (start < body.size()) {
+                std::size_t end = body.find('\n', start);
+                if (end == std::string::npos) end = body.size();
+                std::string ln = body.substr(start, end - start);
+                shifted += (ln.empty() || ln[0] == '#' ? "" : pad) + ln + "\n";
+                start = end + 1;
+            }
+            out_ += shifted;
+            indent_--;
+            line("}");
+        } else {
+            out_ += body;
+        }
+    }
+
+    // `let _ = e` and `_ = e`: worked out, and dropped if it's a new value that owns memory.
+    void discard(Expr* v, bool drop) {
+        if (!drop) {
+            std::string x = expr(v);
+            if (v->type->kind == TypeKind::never || v->type->kind == TypeKind::unit) line(x + ";");
+            else line("(void)(" + x + ");");
+            return;
+        }
+        std::string t = tmp();
+        line("{ " + ctype(v->type) + " " + t + " = " + value(v, v->type) + "; " + drop_fn(v->type) + "(&" + t + "); }");
     }
 
     void for_loop(Stmt* s) {
@@ -531,6 +890,7 @@ private:
         Expr* it = s->value;
         line("{");
         indent_++;
+        loop_frames_[s->loop_id] = frames_.size();
         if (it->kind == ExprKind::range) {
             std::string i = tmp(), end = tmp();
             line(ctype(elem) + " " + i + " = " + value(it->lhs, elem) + ";");
@@ -553,24 +913,30 @@ private:
             line("}");
         } else {
             Type* at = it->type;
+            bool list = at->kind == TypeKind::list;
             std::string arr = tmp(), i = tmp();
             // A variable is read in place, since the loop can't change it. Anything else is
-            // evaluated once into a temporary.
-            if (is_place(it) && !effects(it)) {
+            // evaluated once, into the ownership pass's local when it owns memory.
+            if (s->hidden) {
+                line(ctype(at) + " " + local_name(s->hidden) + " = " + value(it, at) + ";");
+                line("const " + ctype(at) + "* " + arr + " = &" + local_name(s->hidden) + ";");
+            } else if (is_place(it) && !effects(it)) {
                 line("const " + ctype(at) + "* " + arr + " = &" + place(it) + ";");
             } else {
                 std::string val = tmp();
                 line(ctype(at) + " " + val + " = " + value(it, at) + ";");
                 line("const " + ctype(at) + "* " + arr + " = &" + val + ";");
             }
-            line("for (cx_usize " + i + " = 0; " + i + " < " + std::to_string(at->length) + "; " + i + "++) {");
+            std::string n = list ? arr + "->len" : std::to_string(at->length);
+            std::string elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
+            line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
             indent_++;
             if (!var.empty()) {
-                line(ctype(elem) + " " + var + " = " + arr + "->v[" + i + "];");
+                line(ctype(elem) + " " + var + " = " + elem_at + ";");
             } else if (s->pattern->kind != PatternKind::wildcard) {
                 // `for (a, b) in pairs`: the checker made sure the pattern matches every element.
                 Match m;
-                walk(s->pattern, arr + "->v[" + i + "]", m);
+                walk(s->pattern, elem_at, m);
                 bind(m);
             }
             stmts(s->body, false);
@@ -578,9 +944,10 @@ private:
             indent_--;
             line("}");
         }
+        line("cx_brk" + id + ":;");
+        if (s->hidden && s->drop_hidden) line(drop_fn(s->hidden->type) + "(&" + local_name(s->hidden) + ");");
         indent_--;
         line("}");
-        line("cx_brk" + id + ":;");
     }
 
     // An expression whose value isn't used.
@@ -599,6 +966,7 @@ private:
                 std::string id = std::to_string(e->loop_id);
                 line("for (;;) {");
                 indent_++;
+                loop_frames_[e->loop_id] = frames_.size();
                 stmts(e->block, false);
                 line("cx_cont" + id + ":;");
                 indent_--;
@@ -617,11 +985,14 @@ private:
             // `if let p = v`: its names exist only in the first block.
             line("{");
             indent_++;
-            Match m = let_match(e->let_pattern, e->cond, e->let_unwraps);
+            std::string at;
+            Match m = let_match(e, at);
             line("if (" + condition(m) + ") {");
             indent_++;
             bind(m);
+            if (e->let_consumes) take_apart(m, at, e->cond->type);
             stmts(e->block, false);
+            drops(e->let_drops);
             indent_--;
             if (e->else_) {
                 line("} else {");
@@ -631,11 +1002,12 @@ private:
                 indent_--;
             }
             line("}");
+            if (e->hidden && e->drop_hidden) line(drop_fn(e->hidden->type) + "(&" + local_name(e->hidden) + ");");
             indent_--;
             line("}");
             return;
         }
-        line("if (" + expr(e->cond) + ") {");
+        line("if (" + condition_expr(e->cond) + ") {");
         indent_++;
         stmts(e->block, false);
         indent_--;
@@ -648,7 +1020,7 @@ private:
                 indent_--;
                 el = nullptr;
             } else if (el->kind == ExprKind::if_) {
-                line("} else if (" + expr(el->cond) + ") {");
+                line("} else if (" + condition_expr(el->cond) + ") {");
                 indent_++;
                 stmts(el->block, false);
                 indent_--;
@@ -666,13 +1038,6 @@ private:
 
     // --- patterns --------------------------------------------------------------------------------
 
-    // What matching a pattern takes: the tests, all of which must hold, and the names it binds,
-    // each with the C for its value.
-    struct Match {
-        std::vector<std::string> tests;
-        std::vector<std::pair<const Local*, std::string>> binds;
-    };
-
     // Collects the tests and bindings for matching `p` against the value at `at`, a C place.
     void walk(const Pattern* p, const std::string& at, Match& m) {
         const Type* t = p->type;
@@ -682,8 +1047,9 @@ private:
                 if (p->local) m.binds.emplace_back(p->local, at);
                 return;
             case PatternKind::literal:
-                if (t->kind == TypeKind::str) {
-                    m.tests.push_back("cx_str_eq(" + at + ", " + str_const(literal_text(p->value)) + ")");
+                if (t->kind == TypeKind::str || t->kind == TypeKind::string) {
+                    std::string v = t->kind == TypeKind::string ? "cx_sv(" + at + ")" : at;
+                    m.tests.push_back("cx_str_eq(" + v + ", " + str_const(literal_text(p->value)) + ")");
                 } else {
                     m.tests.push_back(at + " == " + expr(p->value));
                 }
@@ -753,22 +1119,30 @@ private:
 
     // The value being matched, in a place: the variable itself when reading it can't change
     // anything, or a temporary. Declares the temporary at the current indent.
-    std::string scrutinee(Expr* v, bool may_change) {
-        if (!may_change && is_place(v) && !place_has_effects(v)) return place(v);
+    std::string scrutinee(Expr* v, bool may_change, Local* hidden) {
+        if (hidden) {
+            line(ctype(v->type) + " " + local_name(hidden) + " = " + value(v, v->type) + ";");
+            return local_name(hidden);
+        }
+        // A value that owns memory isn't copied: the names bound are views into it, or take it apart.
+        bool owning = !is_copy(v->type);
+        if ((!may_change || owning) && is_place(v) && !place_has_effects(v)) return place(v);
         std::string t = tmp();
         line(ctype(v->type) + " " + t + " = " + value(v, v->type) + ";");
         return t;
     }
 
-    // `if let p = v` and `let p = v else`. When `unwraps`, `v` is an optional and `p` matches its value.
-    Match let_match(const Pattern* p, Expr* v, bool unwraps) {
-        std::string at = scrutinee(v, false);
+    // `if let p = v`. When it unwraps, `v` is an optional and `p` matches its value. `at` is
+    // where the value is.
+    Match let_match(Expr* e, std::string& at) {
+        at = scrutinee(e->cond, false, e->hidden);
         Match m;
-        if (unwraps) {
+        std::string inner = at;
+        if (e->let_unwraps) {
             m.tests.push_back(at + ".has");
-            at += ".v";
+            inner += ".v";
         }
-        walk(p, at, m);
+        walk(e->let_pattern, inner, m);
         return m;
     }
 
@@ -778,9 +1152,19 @@ private:
             expr_stmt(s->value);
             return;
         }
-        // A temporary, since the names it binds outlive any statement the value could be read in.
-        std::string t = tmp();
-        line(ctype(s->value->type) + " " + t + " = " + value(s->value, s->value->type) + ";");
+        // A temporary, since the names it binds outlive any statement the value could be read in,
+        // unless it's a place that owns memory, whose names are views into it.
+        std::string t;
+        Type* vt = s->value->type;
+        if (s->hidden) {
+            t = local_name(s->hidden);
+            line(ctype(vt) + " " + t + " = " + value(s->value, vt) + ";");
+        } else if (!is_copy(vt) && is_place(s->value) && !place_has_effects(s->value)) {
+            t = place(s->value);
+        } else {
+            t = tmp();
+            line(ctype(vt) + " " + t + " = " + value(s->value, vt) + ";");
+        }
         Match m;
         std::string at = t;
         if (s->let_unwraps) {
@@ -801,6 +1185,7 @@ private:
             line("}");
         }
         bind(m);
+        if (s->consumes) take_apart(m, t, vt);
     }
 
     // A `match`'s arms, as an if-chain that jumps to the end after the arm that ran. With `r`, each
@@ -812,7 +1197,7 @@ private:
         std::string end = "cx_brk" + std::to_string(e->loop_id);
         line("{");
         indent_++;
-        std::string at = scrutinee(e->scrutinee, guards);
+        std::string at = scrutinee(e->scrutinee, guards, e->hidden);
         for (std::size_t i = 0; i < e->arms.size(); i++) {
             const MatchArm& arm = e->arms[i];
             bool last = i + 1 == e->arms.size();
@@ -823,12 +1208,17 @@ private:
             indent_++;
             bind(m);
             if (arm.guard) {
-                line("if (" + expr(arm.guard) + ") {");
+                line("if (" + condition_expr(arm.guard) + ") {");
                 indent_++;
             }
+            if (arm.consumes) take_apart(m, at, e->scrutinee->type);
             directive(arm.body->span);
-            if (r && arm.body->type->kind != TypeKind::never) line(*r + " = " + value(arm.body, t) + ";");
-            else expr_stmt(arm.body);
+            if (r && arm.body->type->kind != TypeKind::never) {
+                full([&] { line(*r + " = " + value(arm.body, t) + ";"); });
+            } else {
+                full([&] { expr_stmt(arm.body); });
+            }
+            drops(arm.drops);
             if (!last || arm.guard) line("goto " + end + ";");
             if (arm.guard) {
                 indent_--;
@@ -838,9 +1228,10 @@ private:
             line("}");
             if (last && arm.guard) line("__builtin_unreachable();");
         }
+        line(end + ":;");
+        if (e->hidden && e->drop_hidden) line(drop_fn(e->hidden->type) + "(&" + local_name(e->hidden) + ");");
         indent_--;
         line("}");
-        line(end + ":;");
     }
 
     std::string match_value(Expr* e) {
@@ -860,13 +1251,24 @@ private:
     void assign(Stmt* s) {
         Expr* target = s->target;
         if (target->kind == ExprKind::name && target->ref != Ref::local) {
-            // `_ = e`
-            std::string v = expr(s->value);
-            if (s->value->type->kind == TypeKind::never) line(v + ";");
-            else line("(void)(" + v + ");");
+            discard(s->value, s->drop_value);  // `_ = e`
             return;
         }
         Type* t = target->type;
+        if (s->drop_old) {
+            // The new value is worked out before the old one is dropped, since it can read it.
+            std::string c = ctype(t), v = tmp();
+            if (place_has_effects(target)) {
+                std::string p = tmp();
+                line("{ " + c + "* " + p + " = &" + place(target) + "; " + c + " " + v + " = " + value(s->value, t) + "; " +
+                     drop_fn(t) + "(" + p + "); *" + p + " = " + v + "; }");
+            } else {
+                std::string p = place(target);
+                line("{ " + c + " " + v + " = " + value(s->value, t) + "; " + drop_fn(t) + "(&" + p + "); " + p + " = " + v +
+                     "; }");
+            }
+            return;
+        }
         if (!s->compound) {
             // Java evaluates the place's parts, then the value, then stores.
             if (effects(s->value) && place_has_effects(target)) {
@@ -899,7 +1301,10 @@ private:
         if (e->has_bits) return false;
         switch (e->kind) {
             case ExprKind::int_lit: case ExprKind::float_lit: case ExprKind::char_lit: case ExprKind::bool_lit:
-            case ExprKind::string_lit: case ExprKind::name: case ExprKind::self:
+            case ExprKind::name: case ExprKind::self:
+                return false;
+            case ExprKind::string_lit:
+                for (const Expr* x : e->interpolations) if (effects(x)) return true;
                 return false;
             case ExprKind::unary: return effects(e->lhs);
             case ExprKind::binary:
@@ -926,6 +1331,10 @@ private:
                     for (const Arg& a : e->args) if (effects(a.value)) return true;
                     return effects(e->callee->lhs);
                 }
+                if (e->call == CallKind::builtin_method) {
+                    BMethod b = e->bmethod;
+                    if (b == BMethod::len || b == BMethod::is_empty || b == BMethod::capacity) return effects(e->callee->lhs);
+                }
                 return true;
             case ExprKind::struct_lit:
                 for (const FieldInit& f : e->fields) if (effects(f.value)) return true;
@@ -938,17 +1347,20 @@ private:
     }
 
     static bool is_constant(const Expr* e) {
-        return e->has_bits || e->kind == ExprKind::string_lit || e->kind == ExprKind::float_lit;
+        return e->has_bits || (e->kind == ExprKind::string_lit && e->interpolations.empty()) || e->kind == ExprKind::float_lit;
     }
 
     static bool is_place(const Expr* e) {
-        while (e->kind == ExprKind::field || e->kind == ExprKind::index) e = e->lhs;
+        while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) e = e->lhs;
         return (e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::local;
     }
 
+    // Whether finding the place can panic or run code: a list's index is always checked when it
+    // runs, an array's unless it's a constant.
     static bool place_has_effects(const Expr* e) {
-        while (e->kind == ExprKind::field || e->kind == ExprKind::index) {
-            if (e->kind == ExprKind::index && !e->rhs->has_bits) return true;
+        while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) {
+            if (e->kind == ExprKind::unwrap) return true;
+            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list)) return true;
             e = e->lhs;
         }
         return false;
@@ -969,16 +1381,17 @@ private:
         int last = -1;
         for (int i = 0; i < static_cast<int>(ops.size()); i++) {
             const Operand& o = ops[i];
-            bool temp_view = o.pass == Pass::address && !is_place(o.e);
+            bool temp_view = o.pass == Pass::address && !is_place(o.e) && !o.e->temp;
             if (effects(o.e) || temp_view) last = i;
         }
         std::vector<std::string> out;
         for (int i = 0; i < static_cast<int>(ops.size()); i++) {
             const Operand& o = ops[i];
             if (o.pass == Pass::address) {
-                if (is_place(o.e)) {
+                if (is_place(o.e) || o.e->temp) {
+                    // A temporary is a place that lasts until the statement ends.
                     std::string a = "&" + place(o.e);
-                    if (i < last && place_has_effects(o.e)) {
+                    if (i < last && (o.e->temp || place_has_effects(o.e))) {
                         std::string t = tmp();
                         decls += ctype(o.want) + "* " + t + " = " + a + "; ";
                         a = t;
@@ -1020,7 +1433,7 @@ private:
     std::string zero(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
-            case TypeKind::tuple:
+            case TypeKind::tuple: case TypeKind::string: case TypeKind::list:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -1072,13 +1485,43 @@ private:
         return s;
     }
 
+    // An expression, with what the ownership pass decided about it: a new value kept for the
+    // statement, a move that zeroes what it leaves, or a field moved out of a new value.
     std::string expr(Expr* e) {
+        if (e->temp && !frames_.empty()) return temp_of(e);
+        return expr_value(e);
+    }
+
+    std::string expr_value(Expr* e) {
+        if (e->moves && e->kind == ExprKind::field) {
+            // A field moved out of a local: it's zeroed, so dropping the local frees the rest.
+            std::string p = place_or_value(e), v = tmp();
+            return "({ " + ctype(e->type) + " " + v + " = " + p + "; " + p + " = " + zero(e->type) + "; " + v + "; })";
+        }
+        if (e->moves && e->local && e->local->clear_on_move) {
+            std::string p = local_name(e->local), v = tmp();
+            return "({ " + ctype(e->type) + " " + v + " = " + p + "; " + p + " = " + zero(e->type) + "; " + v + "; })";
+        }
+        if (e->part_move) {
+            Type* bt = e->lhs->type;
+            std::string b = tmp(), v = tmp();
+            std::string f = b + member(bt, e->field_index);
+            return "({ " + ctype(bt) + " " + b + " = " + expr(e->lhs) + "; " + ctype(e->type) + " " + v + " = " + f + "; " + f +
+                   " = " + zero(e->type) + "; " + drop_fn(bt) + "(&" + b + "); " + v + "; })";
+        }
+        return expr_inner(e);
+    }
+
+    std::string expr_inner(Expr* e) {
         if (e->has_bits) {
             if (is_float(e->type)) return float_const(e->type, e->const_bits);
             return int_const(e->type, e->const_bits);
         }
         switch (e->kind) {
-            case ExprKind::string_lit: return str_const(literal_text(e));
+            case ExprKind::string_lit:
+                if (e->type->kind != TypeKind::string) return str_const(literal_text(e));
+                if (!e->interpolations.empty()) return string_value(e);
+                return "cx_string_lit(" + c_string_literal(literal_text(e)) + ", " + std::to_string(literal_text(e).size()) + ")";
             case ExprKind::name:
             case ExprKind::self:
                 if (e->ref == Ref::const_) {
@@ -1094,10 +1537,10 @@ private:
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
             case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
-            case ExprKind::array_lit: return array_literal(e);
+            case ExprKind::array_lit: return e->type->kind == TypeKind::list ? list_literal(e) : array_literal(e);
             case ExprKind::tuple: return e->elems.empty() ? "" : tuple_literal(e);  // `()` is nothing
             case ExprKind::none_lit: return "((" + ctype(e->type) + "){0})";
-            case ExprKind::unwrap: return unwrap(e);
+            case ExprKind::unwrap: return is_place(e) && !e->lhs->moves ? place(e) : unwrap(e);
             case ExprKind::optional_field: return optional_field(e);
             case ExprKind::block: return block_value(e->block, e->type);
             case ExprKind::if_: return if_value(e);
@@ -1117,9 +1560,17 @@ private:
             }
             case ExprKind::field: return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
+            case ExprKind::unwrap: {
+                std::string p = tmp(), at = place(e->lhs);
+                return "(*({ __typeof__(&" + at + ") " + p + " = &" + at + "; if (__builtin_expect(!" + p +
+                       "->has, 0)) cx_panic_unwrap(" + location(e->span) + "); &" + p + "->v; }))";
+            }
             default: return "(" + expr(e) + ")";
         }
     }
+
+    // The address of a place, or of a temporary.
+    std::string address(Expr* e) { return "&" + place(e); }
 
     std::string place_or_value(Expr* e) {
         if (e->kind == ExprKind::field) {
@@ -1128,6 +1579,17 @@ private:
         }
         // index
         Type* at = e->lhs->type;
+        if (at->kind == TypeKind::list) {
+            std::string loc = location(e->rhs->span);
+            if (is_place(e->lhs) && !place_has_effects(e->lhs) && !effects(e->rhs)) {
+                std::string b = place(e->lhs);
+                return b + ".ptr[cx_index(" + expr(e->rhs) + ", " + b + ".len, " + loc + ")]";
+            }
+            // The list is found first, then the index, and the list's length read after.
+            std::string b = tmp(), i = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; cx_usize " + i + " = " +
+                   value(e->rhs, e->rhs->type) + "; &" + b + "->ptr[cx_index(" + i + ", " + b + "->len, " + loc + ")]; }))";
+        }
         std::string base;
         std::string decls;
         if (is_place(e->lhs)) {
@@ -1172,7 +1634,21 @@ private:
         if ((op == Op::eq || op == Op::ne) && lt->kind == TypeKind::optional) return optional_equal(e);
         std::string decls;
         std::vector<std::string> v = sequence({{e->lhs, lt}, {e->rhs, rt}}, decls);
+        if ((op == Op::eq || op == Op::ne) && (lt->kind == TypeKind::str || lt->kind == TypeKind::string)) {
+            return wrap(decls, (op == Op::ne ? "(!" : "(") + equal(lt, v[0], v[1]) + ")");
+        }
         return wrap(decls, operate(op, lt, rt, v[0], v[1], e->rhs, e->span));
+    }
+
+    // Whether `a` and `b`, of type `t`, are equal. For an optional they must be places.
+    std::string equal(const Type* t, const std::string& a, const std::string& b) {
+        switch (t->kind) {
+            case TypeKind::str: return "cx_str_eq(" + a + ", " + b + ")";
+            case TypeKind::string: return "cx_str_eq(cx_sv(" + a + "), cx_sv(" + b + "))";
+            case TypeKind::optional:
+                return "(" + a + ".has == " + b + ".has && (!" + a + ".has || " + equal(t->elem, a + ".v", b + ".v") + "))";
+            default: return "(" + a + " == " + b + ")";
+        }
     }
 
     // `a op b` on already-evaluated operands.
@@ -1240,6 +1716,7 @@ private:
             case CallKind::some:
                 return "((" + ctype(e->type) + "){ .v = " + value(e->args[0].value, e->type->elem) + ", .has = 1 })";
             case CallKind::try_from: return try_from(e);
+            case CallKind::builtin_method: return builtin_method(e);
             case CallKind::fn:
             case CallKind::method: return fn_call(e);
             default: return "0";
@@ -1278,6 +1755,7 @@ private:
     }
 
     std::string construct(Type* t) {
+        if (t->kind == TypeKind::string || t->kind == TypeKind::list) return "((" + ctype(t) + "){0})";
         std::string s = "((" + ctype(t) + "){";
         bool first = true;
         for (const FieldDecl& f : t->item->fields) {
@@ -1404,7 +1882,7 @@ private:
         std::string decls;
         std::vector<std::string> v = sequence({{e->lhs, t}, {e->rhs, t}}, decls);
         std::string a = tmp(), b = tmp();
-        std::string eq = a + ".has == " + b + ".has && (!" + a + ".has || " + a + ".v == " + b + ".v)";
+        std::string eq = equal(t, a, b);
         return "({ " + decls + ctype(t) + " " + a + " = " + v[0] + "; " + ctype(t) + " " + b + " = " + v[1] + "; " +
                (ne ? "!(" + eq + ")" : eq) + "; })";
     }
@@ -1537,7 +2015,16 @@ private:
         std::string body = capture([&] {
             indent_++;
             stmts(b, true);
-            if (b->tail) line(value(b->tail, t) + ";");
+            if (b->tail && b->drops.empty()) {
+                line(value(b->tail, t) + ";");
+            } else if (b->tail) {
+                std::string r = tmp();
+                line(ctype(t) + " " + r + " = " + value(b->tail, t) + ";");
+                drops(b->drops);
+                line(r + ";");
+            } else {
+                drops(b->drops);
+            }
             indent_--;
         });
         return "({\n" + body + std::string(static_cast<std::size_t>(indent_) * 4, ' ') + "})";
@@ -1550,7 +2037,7 @@ private:
         if (!e->let_pattern && e->block->stmts.empty() && e->block->tail && el->kind == ExprKind::block && el->block->stmts.empty() &&
             el->block->tail && e->block->tail->type->kind != TypeKind::never &&
             el->block->tail->type->kind != TypeKind::never) {
-            return "(" + expr(e->cond) + " ? " + value(e->block->tail, t) + " : " + value(el->block->tail, t) + ")";
+            return "(" + condition_expr(e->cond) + " ? " + value(e->block->tail, t) + " : " + value(el->block->tail, t) + ")";
         }
         std::string r = tmp();
         std::string body = capture([&] {
@@ -1567,12 +2054,17 @@ private:
         if (e->let_pattern) {
             line("{");
             indent_++;
-            Match m = let_match(e->let_pattern, e->cond, e->let_unwraps);
+            std::string at;
+            Match m = let_match(e, at);
             line("if (" + condition(m) + ") {");
             indent_++;
             bind(m);
+            if (e->let_consumes) take_apart(m, at, e->cond->type);
             indent_--;
             branch_body(e->block, t, r);
+            indent_++;
+            drops(e->let_drops);
+            indent_--;
             line("} else {");
             if (e->else_->kind == ExprKind::if_) {
                 indent_++;
@@ -1582,11 +2074,12 @@ private:
                 branch_body(e->else_->block, t, r);
             }
             line("}");
+            if (e->hidden && e->drop_hidden) line(drop_fn(e->hidden->type) + "(&" + local_name(e->hidden) + ");");
             indent_--;
             line("}");
             return;
         }
-        line("if (" + expr(e->cond) + ") {");
+        line("if (" + condition_expr(e->cond) + ") {");
         branch_body(e->block, t, r);
         Expr* el = e->else_;
         if (el->kind == ExprKind::if_) {
@@ -1609,6 +2102,7 @@ private:
             if (b->tail->type->kind == TypeKind::never) expr_stmt(b->tail);
             else line(r + " = " + value(b->tail, t) + ";");
         }
+        drops(b->drops);
         indent_--;
     }
 
@@ -1620,6 +2114,7 @@ private:
             if (t->kind != TypeKind::never && t->kind != TypeKind::unit) line(ctype(t) + " cx_lv" + id + ";");
             line("for (;;) {");
             indent_++;
+            loop_frames_[e->loop_id] = frames_.size();
             stmts(e->block, false);
             line("cx_cont" + id + ":;");
             indent_--;
@@ -1635,6 +2130,14 @@ private:
         Type* to = e->type;
         Expr* a = e->args[0].value;
         Type* from = a->type;
+        if (to->kind == TypeKind::string) {
+            // A literal costs nothing; any other `str` is copied, since it could be a view of
+            // memory something else owns.
+            if (a->kind == ExprKind::string_lit && a->interpolations.empty()) {
+                return "cx_string_lit(" + c_string_literal(literal_text(a)) + ", " + std::to_string(literal_text(a).size()) + ")";
+            }
+            return "cx_string_from(" + expr(a) + ")";
+        }
         std::string x = expr(a);
         switch (e->conv) {
             case Conv::exact:
@@ -1689,7 +2192,7 @@ private:
     // out first, left to right, into `decls`, and only then is anything printed.
     void print_parts(Expr* m, std::string& decls, std::string& out) {
         if (m->kind != ExprKind::string_lit) {
-            out += "cx_print_str(" + expr(m) + "); ";
+            out += show_value(m->type, expr(m)) + " ";
             return;
         }
         std::vector<Operand> ops;
@@ -1710,23 +2213,132 @@ private:
                 continue;
             }
             Expr* x = m->interpolations[next];
-            Type* t = x->type;
-            std::string v = values[next++];
-            if (is_int(t)) {
-                out += t->is_signed ? "cx_print_i64((cx_i64)" + v + "); " : "cx_print_u64((cx_u64)" + v + "); ";
-            } else if (is_float(t)) {
-                out += std::string(t->bits == 32 ? "cx_print_f32(" : "cx_print_f64(") + v + "); ";
-            } else if (t->kind == TypeKind::bool_) {
-                out += "cx_print_bool(" + v + "); ";
-            } else if (t->kind == TypeKind::char_) {
-                out += "cx_print_char(" + v + "); ";
-            } else if (t->kind == TypeKind::rune) {
-                out += "cx_print_rune(" + v + "); ";
-            } else if (t->kind == TypeKind::str) {
-                out += "cx_print_str(" + v + "); ";
-            } else if (t->kind == TypeKind::enum_) {
-                out += "cx_print_str(" + enum_name_fn(t) + "(" + v + ")); ";
+            out += show_value(x->type, values[next++]) + " ";
+        }
+    }
+
+    // A string literal with `{...}` parts, as a `String`: the values are worked out, then printed
+    // into the string.
+    std::string string_value(Expr* e) {
+        std::string decls, out;
+        print_parts(e, decls, out);
+        std::string s = tmp(), prev = tmp();
+        return "({ " + decls + "cx_String " + s + " = {0}; cx_String* " + prev + " = cx_fmt_begin(&" + s + "); " + out +
+               "cx_fmt_end(" + prev + "); " + s + "; })";
+    }
+
+    // `[a, b]` and `[x; n]` as a list. The elements are worked out in order, straight into the
+    // memory the list owns.
+    std::string list_literal(Expr* e) {
+        Type* t = e->type;
+        std::string l = ctype(t), el = ctype(t->elem);
+        if (e->repeat) {
+            std::string v = tmp(), n = tmp(), r = tmp(), i = tmp();
+            return "({ " + el + " " + v + " = " + value(e->elems[0], t->elem) + "; cx_usize " + n + " = " +
+                   value(e->repeat, e->repeat->type) + "; " + l + " " + r + " = {0}; if (" + n + ") { " + r + ".ptr = (" + el +
+                   "*)cx_grow(0, &" + r + ".cap, 0, " + n + ", sizeof(" + el + ")); for (cx_usize " + i + " = 0; " + i + " < " +
+                   n + "; " + i + "++) " + r + ".ptr[" + i + "] = " + v + "; " + r + ".len = " + n + "; } " + r + "; })";
+        }
+        if (e->elems.empty()) return "((" + l + "){0})";
+        std::string p = tmp(), n = std::to_string(e->elems.size());
+        std::string s = "({ " + el + "* " + p + " = (" + el + "*)cx_alloc(" + n + " * sizeof(" + el + ")); ";
+        for (std::size_t k = 0; k < e->elems.size(); k++) {
+            s += p + "[" + std::to_string(k) + "] = " + value(e->elems[k], t->elem) + "; ";
+        }
+        return s + "(" + l + "){ " + p + ", " + n + ", " + n + " }; })";
+    }
+
+    // The methods of `String` and `List`, and `x.copy()`. Each finds the value it's called on,
+    // then works out its arguments in order.
+    std::string builtin_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        auto arg = [&](std::size_t i, Type* want) { return value(e->args[i].value, want); };
+        // A `str` or a `String` argument, as a `str`.
+        auto text_arg = [&](std::size_t i) {
+            Expr* a = e->args[i].value;
+            return a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+        };
+        if (e->bmethod == BMethod::copy) {
+            if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
+            return copy_fn(t) + "(" + address(recv) + ")";
+        }
+        std::string p = tmp();
+        if (t->kind == TypeKind::string) {
+            std::string head = "({ cx_String* " + p + " = " + address(recv) + "; ";
+            std::string view = "({ cx_str " + p + " = cx_sv(" + expr(recv) + "); ";
+            switch (e->bmethod) {
+                case BMethod::len: return "(" + expr(recv) + ").len";
+                case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+                case BMethod::push: return head + "cx_string_push_rune(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
+                case BMethod::push_str: return head + "cx_string_push_str(" + p + ", " + text_arg(0) + "); })";
+                case BMethod::clear: return "cx_string_clear(" + address(recv) + ")";
+                case BMethod::reserve: return head + "cx_string_reserve(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
+                case BMethod::contains: return view + "cx_str_contains(" + p + ", " + text_arg(0) + "); })";
+                case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
+                case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";
+                default: return "0";
             }
+        }
+        Type* et = t->elem;
+        std::string l = ctype(t), el = ctype(et);
+        std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";
+        std::string grow = p + "->ptr = (" + el + "*)cx_grow(" + p + "->ptr, &" + p + "->cap, " + p + "->len, ";
+        auto drop_from = [&](const std::string& from) {
+            if (is_copy(et)) return std::string();
+            std::string i = tmp();
+            return "for (cx_usize " + i + " = " + from + "; " + i + " < " + p + "->len; " + i + "++) " + drop_fn(et) + "(&" + p +
+                   "->ptr[" + i + "]); ";
+        };
+        std::string i = tmp(), j = tmp(), v = tmp();
+        auto index_at = [&](std::size_t k) { return location(e->args[k].value->span); };
+        switch (e->bmethod) {
+            case BMethod::len: return "(" + expr(recv) + ").len";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::capacity: return "(" + expr(recv) + ").cap";
+            case BMethod::push:
+                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow + "1, sizeof(" +
+                       el + ")); " + p + "->ptr[" + p + "->len++] = " + v + "; })";
+            case BMethod::pop: {
+                std::string o = ctype(e->type);
+                return head + p + "->len ? (" + o + "){ .v = " + p + "->ptr[--" + p + "->len], .has = 1 } : (" + o + "){0}; })";
+            }
+            case BMethod::clear: return head + drop_from("0") + p + "->len = 0; })";
+            case BMethod::truncate:
+                return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (" + i + " < " + p + "->len) { " +
+                       drop_from(i) + p + "->len = " + i + "; } })";
+            case BMethod::reserve:
+                return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (" + i + " > " + p + "->cap - " + p +
+                       "->len) " + grow + i + ", sizeof(" + el + ")); })";
+            case BMethod::insert:
+                return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; " + el + " " + v + " = " + arg(1, et) +
+                       "; if (__builtin_expect(" + i + " > " + p + "->len, 0)) cx_panic_insert(" + i + ", " + p + "->len, " +
+                       index_at(0) + "); if (" + p + "->len == " + p + "->cap) " + grow + "1, sizeof(" + el +
+                       ")); __builtin_memmove(" + p + "->ptr + " + i + " + 1, " + p + "->ptr + " + i + ", (" + p + "->len - " + i +
+                       ") * sizeof(" + el + ")); " + p + "->ptr[" + i + "] = " + v + "; " + p + "->len++; })";
+            case BMethod::remove:
+                return head + "cx_usize " + i + " = cx_index(" + arg(0, e->args[0].value->type) + ", " + p + "->len, " +
+                       index_at(0) + "); " + el + " " + v + " = " + p + "->ptr[" + i + "]; __builtin_memmove(" + p + "->ptr + " +
+                       i + ", " + p + "->ptr + " + i + " + 1, (" + p + "->len - " + i + " - 1) * sizeof(" + el + ")); " + p +
+                       "->len--; " + v + "; })";
+            case BMethod::swap_remove:
+                return head + "cx_usize " + i + " = cx_index(" + arg(0, e->args[0].value->type) + ", " + p + "->len, " +
+                       index_at(0) + "); " + el + " " + v + " = " + p + "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p +
+                       "->ptr[--" + p + "->len]; " + v + "; })";
+            case BMethod::swap:
+                // Both indexes are worked out before either is checked, as Java's `Collections.swap` does.
+                return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; cx_usize " + j + " = " +
+                       arg(1, e->args[1].value->type) + "; (void)cx_index(" + i + ", " + p + "->len, " + index_at(0) +
+                       "); (void)cx_index(" + j + ", " + p + "->len, " + index_at(1) + "); " + el + " " + v + " = " + p +
+                       "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p + "->ptr[" + j + "]; " + p + "->ptr[" + j + "] = " +
+                       v + "; })";
+            case BMethod::contains: {
+                std::string r = tmp();
+                return "({ const " + l + "* " + p + " = " + address(recv) + "; " + el + " " + v + " = " + arg(0, et) +
+                       "; cx_bool " + r + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + p + "->len; " + i + "++) if (" +
+                       equal(et, p + "->ptr[" + i + "]", v) + ") { " + r + " = 1; break; } " + r + "; })";
+            }
+            default: return "0";
         }
     }
 
@@ -1770,6 +2382,12 @@ private:
     Uses* uses_ = nullptr;  // where ctype and the rest note what's named, while emitting one function
     std::unordered_set<const Type*> printed_;  // the enums whose names the file being written prints
     mutable std::unordered_map<const Type*, std::string> compound_names_;
+    mutable std::unordered_map<const Local*, std::string> hidden_names_;
+    static constexpr std::uint32_t kNoFile = 0xFFFFFFFFu;
+    std::uint32_t line_file_ = kNoFile;  // the file the function's `#line` directives are in
+    bool line_files_mixed_ = false;
+    std::vector<Frame> frames_;                                 // the statements being emitted, innermost last
+    std::unordered_map<std::uint32_t, std::size_t> loop_frames_;  // a loop's id: how many frames are outside it
     mutable std::unordered_set<std::string> compound_used_;
 };
 

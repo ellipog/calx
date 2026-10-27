@@ -208,6 +208,8 @@ private:
 
     // After an error in an item: skip to the next line that starts at the item's nesting level.
     void recover_item() {
+        // The error may have left a condition's rule set; statements and items allow struct literals.
+        no_struct_ = false;
         int depth = 0;
         while (!at(Tok::eof)) {
             Tok k = peek().kind;
@@ -233,6 +235,8 @@ private:
 
     // After an error in a statement: skip to the end of its line, or to its block's closing brace.
     void recover_stmt() {
+        // The error may have left a condition's rule set; statements and items allow struct literals.
+        no_struct_ = false;
         int depth = 0;
         while (!at(Tok::eof)) {
             Tok k = peek().kind;
@@ -414,7 +418,14 @@ private:
     Param param() {
         Param p;
         p.span = peek().span;
-        if (at(Tok::kw_self)) {
+        if ((at(Tok::kw_mut) || at(Tok::kw_own)) && peek(1).kind == Tok::kw_self) {
+            // `mut self` and `own self`
+            p.mode = at(Tok::kw_mut) ? ParamMode::mut : ParamMode::own;
+            next();
+            next();
+            p.is_self = true;
+            p.name = ctx_.names.intern("self");
+        } else if (at(Tok::kw_self)) {
             next();
             p.is_self = true;
             p.name = ctx_.names.intern("self");
@@ -1221,6 +1232,14 @@ private:
             if (!binary_op(peek().kind, b) || b.prec < min_prec) break;
             // `a | b` after a call could also start a trailing closure; postfix() takes those first.
             Span op_span = next().span;
+            // `&&` and `||` from other languages: two of the same token, touching.
+            if ((b.op == Op::bit_and && at(Tok::amp)) || (b.op == Op::bit_or && at(Tok::pipe))) {
+                if (peek().span.begin == op_span.end) {
+                    bool is_and = b.op == Op::bit_and;
+                    fail(Span::join(op_span, peek().span), std::string("Calx writes `") + (is_and ? "and" : "or") +
+                                                               "`, not `" + (is_and ? "&&" : "||") + "`");
+                }
+            }
             skip_newlines();
             Expr* rhs = binary(b.right_assoc ? b.prec : b.prec + 1);
             Expr* e = new_expr(ExprKind::binary, Span::join(start, prev_span()));
@@ -1645,6 +1664,9 @@ private:
                 return e;
             }
             case Tok::pipe: return closure();
+            case Tok::bang:
+                // `!` after a value unwraps an optional; before one it's another language's `not`.
+                fail(start, "Calx writes `not x`, not `!x`; `x!` unwraps an optional");
             default:
                 fail(start, std::string("expected an expression, found ") + tok_text(peek().kind));
         }

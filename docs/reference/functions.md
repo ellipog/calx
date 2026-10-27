@@ -1,6 +1,6 @@
 ---
 title: Functions
-description: Declaring and calling functions, parameter modes, named arguments, returns, and main.
+description: Declaring and calling functions, parameter modes, self, named arguments, returns, and main.
 ---
 
 # Functions
@@ -43,11 +43,13 @@ fn main() {
 
 | Mode | Written | The function gets | The caller passes |
 | --- | --- | --- | --- |
-| Read | `x: T` | A read-only view, or a copy for numbers and other small values | `value` |
+| Read | `x: T` | A read-only view, or a copy for numbers and other small `Copy` values | `value` |
 | Mutate | `x: mut T` | A mutable view: changes reach the caller's value | `mut value` |
-| Take | `x: own T` | The value itself | `value` |
+| Take | `x: own T` | The value itself, which it now owns and can change. A value that owns memory moves in ([ownership](ownership.md)) | `value` |
 
 - A read parameter can't be changed. A `mut` parameter must be changed somewhere, or it's an error.
+- A read or `mut` parameter is a view of the caller's value, so it can't be moved, returned or stored. A function that keeps what it's given takes it as `own`.
+- A method takes its value the same three ways: `self`, `mut self` and `own self`.
 - `mut` at the call site shows which arguments can change. Only a variable, or a field or element of one, can be passed as `mut`.
 - Within one call, a value passed as `mut` can't appear in any other argument (D48), so the views never overlap. The emitted C marks them `restrict`.
 

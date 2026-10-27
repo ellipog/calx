@@ -1,11 +1,11 @@
 // What a generic call learns its types from: written types, then the value it's called on, then
 // the arguments in order, with untyped literals waiting for the others, then the type expected
 // of the result.
-fn pick<T>(c: bool, x: T, y: T) -> T {
+fn pick<T: Copy>(c: bool, x: T, y: T) -> T {
     return if c { x } else { y }
 }
 
-fn make<T>(x: T) -> T? {
+fn make<T>(x: own T) -> T? {
     return some(x)
 }
 
@@ -13,7 +13,7 @@ fn empty<T>() -> T? {
     return none
 }
 
-fn get<T>(o: T?) -> T? {
+fn get<T>(o: own T?) -> T? {
     return o
 }
 

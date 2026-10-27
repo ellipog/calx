@@ -18,6 +18,13 @@
 static unsigned char out_buf[1 << 16];
 static size_t out_len;
 static int to_stderr; /* while a panic message is being written */
+static _Thread_local cx_String* fmt_to; /* while a string is being interpolated */
+
+#ifdef CX_DEBUG
+/* Debug builds count the allocations still live, and a program that ends with any left has
+ * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug. */
+static cx_usize live_allocs;
+#endif
 
 static void flush_out(void) {
     if (out_len) {
@@ -28,6 +35,10 @@ static void flush_out(void) {
 }
 
 static void write_bytes(const void* p, size_t n) {
+    if (fmt_to) {
+        cx_string_push_bytes(fmt_to, (const cx_u8*)p, n);
+        return;
+    }
     if (to_stderr) {
         fwrite(p, 1, n, stderr);
         return;
@@ -56,6 +67,13 @@ void cx_start(int argc, char** argv) {
 
 int cx_finish(void) {
     flush_out();
+#ifdef CX_DEBUG
+    if (live_allocs) {
+        fprintf(stderr, "calx: %llu allocations were never freed; this is a bug in calx, please report it\n",
+                (unsigned long long)live_allocs);
+        return 102;
+    }
+#endif
     return 0;
 }
 
@@ -206,9 +224,137 @@ static void print_float(double v, int is_float) {
 void cx_print_f64(cx_f64 v) { print_float(v, 0); }
 void cx_print_f32(cx_f32 v) { print_float(v, 1); }
 
+/* --- memory and strings ------------------------------------------------------------------ */
+
+void* cx_alloc(cx_usize size) {
+    void* p = malloc(size ? size : 1);
+    if (!p) cx_panic_capacity();
+#ifdef CX_DEBUG
+    live_allocs++;
+#endif
+    return p;
+}
+
+void* cx_realloc(void* p, cx_usize size) {
+#ifdef CX_DEBUG
+    if (!p) live_allocs++;
+#endif
+    void* q = realloc(p, size ? size : 1);
+    if (!q) cx_panic_capacity();
+    return q;
+}
+
+void cx_free(void* p) {
+#ifdef CX_DEBUG
+    if (p) live_allocs--;
+#endif
+    free(p);
+}
+
+void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    /* No buffer can be bigger than half the address space. */
+    cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
+    if (extra > max - len) cx_panic_capacity();
+    cx_usize need = len + extra;
+    if (need <= *cap) return ptr;
+    cx_usize n = *cap <= max / 2 ? *cap * 2 : max;
+    if (n < need) n = need;
+    if (n < 4 && max >= 4) n = 4;
+    ptr = cx_realloc(ptr, n * size);
+    *cap = n;
+    return ptr;
+}
+
+void cx_string_reserve(cx_String* s, cx_usize extra) {
+    if (extra > (cx_usize)-1 / 2 - s->len) cx_panic_capacity();
+    cx_usize need = s->len + extra;
+    if (s->cap == 0) {
+        /* Not owned yet: copy the literal's bytes into a buffer of its own. */
+        if (need == 0) return;
+        cx_usize n = need < 16 ? 16 : need;
+        cx_u8* p = (cx_u8*)cx_alloc(n);
+        if (s->len) memcpy(p, s->ptr, s->len);
+        s->ptr = p;
+        s->cap = n;
+        return;
+    }
+    if (need <= s->cap) return;
+    cx_usize n = s->cap * 2;
+    if (n < need) n = need;
+    s->ptr = (cx_u8*)cx_realloc(s->ptr, n);
+    s->cap = n;
+}
+
+void cx_string_push_bytes(cx_String* s, const cx_u8* p, cx_usize n) {
+    if (n == 0) return;
+    cx_string_reserve(s, n);
+    memcpy(s->ptr + s->len, p, n);
+    s->len += n;
+}
+
+void cx_string_push_rune(cx_String* s, cx_rune c) {
+    cx_u8 b[4];
+    cx_usize n;
+    if (c < 0x80) {
+        b[0] = (cx_u8)c;
+        n = 1;
+    } else if (c < 0x800) {
+        b[0] = (cx_u8)(0xC0 | (c >> 6));
+        b[1] = (cx_u8)(0x80 | (c & 0x3F));
+        n = 2;
+    } else if (c < 0x10000) {
+        b[0] = (cx_u8)(0xE0 | (c >> 12));
+        b[1] = (cx_u8)(0x80 | ((c >> 6) & 0x3F));
+        b[2] = (cx_u8)(0x80 | (c & 0x3F));
+        n = 3;
+    } else {
+        b[0] = (cx_u8)(0xF0 | (c >> 18));
+        b[1] = (cx_u8)(0x80 | ((c >> 12) & 0x3F));
+        b[2] = (cx_u8)(0x80 | ((c >> 6) & 0x3F));
+        b[3] = (cx_u8)(0x80 | (c & 0x3F));
+        n = 4;
+    }
+    cx_string_push_bytes(s, b, n);
+}
+
+/* A copy owns its bytes, except that a literal's copy is the literal again. */
+cx_String cx_copy_String(const cx_String* s) {
+    if (s->cap == 0) return *s;
+    cx_String r = {0, 0, 0};
+    if (s->len == 0) return r;
+    r.ptr = (cx_u8*)cx_alloc(s->len);
+    memcpy(r.ptr, s->ptr, s->len);
+    r.len = r.cap = s->len;
+    return r;
+}
+
+cx_String cx_string_from(cx_str s) {
+    cx_String r = {0, 0, 0};
+    cx_string_push_bytes(&r, s.ptr, s.len);
+    return r;
+}
+
+cx_bool cx_str_contains(cx_str hay, cx_str needle) {
+    if (needle.len == 0) return 1;
+    if (needle.len > hay.len) return 0;
+    for (cx_usize i = 0; i + needle.len <= hay.len; i++) {
+        if (hay.ptr[i] == needle.ptr[0] && memcmp(hay.ptr + i, needle.ptr, needle.len) == 0) return 1;
+    }
+    return 0;
+}
+
+cx_String* cx_fmt_begin(cx_String* s) {
+    cx_String* previous = fmt_to;
+    fmt_to = s;
+    return previous;
+}
+
+void cx_fmt_end(cx_String* previous) { fmt_to = previous; }
+
 /* --- panics -------------------------------------------------------------------------------- */
 
 void cx_panic_begin(const char* at) {
+    fmt_to = 0;
     flush_out();
     to_stderr = 1;
     fputs("panic at ", stderr);
@@ -232,6 +378,19 @@ void cx_panic_index(cx_usize index, cx_usize length, const char* at) {
 void cx_panic_div_zero(const char* at) {
     cx_panic_begin(at);
     fputs("division by zero", stderr);
+    cx_panic_end();
+}
+
+void cx_panic_capacity(void) {
+    cx_panic_begin("<memory>");
+    fputs("out of memory", stderr);
+    cx_panic_end();
+}
+
+void cx_panic_insert(cx_usize index, cx_usize length, const char* at) {
+    cx_panic_begin(at);
+    fprintf(stderr, "can't insert at index %llu in a list of length %llu", (unsigned long long)index,
+            (unsigned long long)length);
     cx_panic_end();
 }
 

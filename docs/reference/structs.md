@@ -59,7 +59,7 @@ fn main() {
 
 ## Fields
 
-`value.field` reads a field. On a `var`, or a `mut` parameter, it can be assigned. Struct values are copied when assigned, so changing a copy doesn't change the original.
+`value.field` reads a field. On a `var`, or a `mut` parameter, it can be assigned. A struct of `Copy` fields is copied when assigned, so changing a copy doesn't change the original. A struct with a field that owns memory, such as a `String`, moves instead ([ownership](ownership.md)).
 
 A field is private to its module unless it's marked `pub`, as in `pub x: f64` ([modules](modules.md#pub)). The same goes for a function in an `impl` block.
 
@@ -67,7 +67,7 @@ A field is private to its module unless it's marked `pub`, as in `pub x: f64` ([
 
 An `impl Name { }` block adds functions to a struct declared in the same module.
 
-- A function whose first parameter is the struct, in any mode, is a method, called as `value.method(...)`. `self` alone is a read-only `self: Name`. A method that changes its value takes it as `mut`, such as `v: mut Vec2`, and is called on a variable.
+- A function whose first parameter is the struct, in any mode, is a method, called as `value.method(...)`. `self` alone is a read-only `self: Name`. A method that changes its value takes `mut self`, and is called on a variable. One that keeps or takes its value apart takes `own self`, which moves the value in.
 - Any other function in the block is called as `Name.function(...)`.
 - Inside an impl block, `Self` means the struct.
 - A struct can't have a field and a method with the same name.

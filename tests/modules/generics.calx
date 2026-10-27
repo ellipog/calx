@@ -46,7 +46,7 @@ fn pick_first(a: i32, b: i32) -> bool {
     return a >= b
 }
 
-pub fn best<T: Scored>(a: T, b: T) -> T {
+pub fn best<T: Scored + Copy>(a: T, b: T) -> T {
     return if pick_first(a.score(), b.score()) { a } else { b }
 }
 
@@ -64,7 +64,7 @@ pub struct Pair<A, B> {
 }
 
 impl<A, B> Pair<A, B> {
-    pub fn swap(self) -> Pair<B, A> {
+    pub fn swap(own self) -> Pair<B, A> {
         return Pair { left: self.right, right: self.left }
     }
 }

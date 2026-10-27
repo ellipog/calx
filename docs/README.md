@@ -18,7 +18,7 @@ What's built, one page per feature:
 1. [The calx command](reference/command.md): check, build, run, emit-c, how builds stay fast, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
-4. [Types](reference/types.md): the primitive types, arrays, and where the other types are
+4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are
 5. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
 7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
@@ -30,11 +30,14 @@ What's built, one page per feature:
 13. [Tuples](reference/tuples.md): values grouped by position, and destructuring
 14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
 15. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
-16. [Generics](reference/generics.md): generic functions and types, inference, bounds, and their C
-17. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-18. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-19. [Printing and panics](reference/printing.md): print, println, assert and panic
-20. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+16. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods and matching
+17. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
+18. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+19. [Generics](reference/generics.md): generic functions and types, inference, bounds, `T: Copy`, and their C
+20. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+21. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+22. [Printing and panics](reference/printing.md): print, println, assert and panic
+23. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Design
 

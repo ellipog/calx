@@ -1,0 +1,7 @@
+fn main() {
+    var xs: List<String> = ["a", "b"]
+    xs.push("c")
+    println("{xs[2]}")    // out: c
+    let i = xs.len()
+    println("{xs[i]}")    // panic: index 3 is out of bounds for length 3
+}

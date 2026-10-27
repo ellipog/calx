@@ -1,0 +1,192 @@
+// Ownership (D76): moves, views, drops on every way out, partial moves, patterns that take a
+// value apart, and temporaries. Debug builds check that everything allocated is freed, so a
+// missed drop fails this test, and a double drop crashes it.
+
+struct Person {
+    name: String
+    nick: String
+    age: i32
+}
+
+struct Team {
+    lead: Person
+    tags: List<String>
+}
+
+enum Shape {
+    Named(String)
+    Box { label: String, size: usize }
+    Empty
+}
+
+fn person(n: str) -> Person {
+    return Person { name: String(n), nick: "{n}y", age: 30 }
+}
+
+fn len_of(s: String) -> usize {
+    return s.len()
+}
+
+fn keep(s: own String) -> String {
+    return s
+}
+
+fn eat(s: own String) {
+    _ = s
+}
+
+fn replace(s: mut String) {
+    s = "replaced"
+}
+
+fn label_of(s: own Shape) -> String {
+    return match s {
+        Named(n) => n,
+        Box { label, .. } => label,
+        Empty => "empty",
+    }
+}
+
+fn peek(s: Shape) -> usize {
+    return match s {
+        Named(n) => n.len(),
+        Box { label, size } => label.len() + size,
+        Empty => 0,
+    }
+}
+
+fn first_long(words: List<String>, min: usize) -> String? {
+    for w in words {
+        if w.len() >= min {
+            return some(w.copy())
+        }
+    }
+    return none
+}
+
+fn early(flag: bool) -> usize {
+    let a = String("a")
+    let b = String("bb")
+    if flag {
+        return a.len()
+    }
+    let c = String("ccc")
+    return b.len() + c.len()
+}
+
+fn main() {
+    // A move leaves nothing behind to free; a reassignment brings the variable back.
+    var s = String("one")
+    let t = s
+    s = String("two")
+    println("{s} {t}")                             // out: two one
+
+    // Moved on one path only: freed at the end only if it's still there.
+    for flag in [true, false] {
+        let m = String("maybe")
+        if flag {
+            eat(m)
+        }
+        println("{flag}")
+    }
+    // out: true
+    // out: false
+
+    // Views don't move; `own` parameters do.
+    let v = String("view")
+    println("{len_of(v)} {v} {keep(v)}")           // out: 4 view view
+    var r = String("orig")
+    replace(mut r)
+    println(r)                                     // out: replaced
+
+    // Moving fields out of a struct, and putting them back.
+    var p = person("Ann")
+    let name = p.name
+    println("{name} {p.nick} {p.age}")             // out: Ann Anny 30
+    p.name = "Bea"
+    println("{p.name}")                            // out: Bea
+    let q = person("Cy")
+    let nick = q.nick
+    println(nick)                                  // out: Cyy
+
+    // Fields of new values: the rest is freed at once.
+    let just = person("Di").name
+    println(just)                                  // out: Di
+    let team = Team { lead: person("Ed"), tags: ["x", "y"] }
+    let lead = team.lead
+    println("{lead.name} {team.tags}")             // out: Ed [x, y]
+
+    // Patterns that take a value apart, and ones that only look.
+    println("{label_of(Shape.Named("n"))} {label_of(Shape.Box { label: "b", size: 2 })} {label_of(Shape.Empty)}")    // out: n b empty
+    let sh = Shape.Box { label: "boxed", size: 3 }
+    println("{peek(sh)} {peek(Shape.Named("abc"))}")    // out: 8 3
+    match sh {
+        Box { label, .. } => println(label),
+        _ => println("other"),
+    }
+    // out: boxed
+    let pair = (String("left"), String("right"))
+    let (l, rr) = pair
+    let kept = l
+    println("{kept} {rr}")                         // out: left right
+    let opt: String? = some(String("inside"))
+    if let o = opt {
+        let taken = o
+        println(taken)                             // out: inside
+    }
+    let Person { name: pn, nick: _, age: _ } = person("Flo")
+    let pn2 = pn
+    println(pn2)                                   // out: Flo
+
+    // Temporaries live until the end of their statement.
+    println("{len_of(String("temp"))} {person("Gus").name.len()}")    // out: 4 3
+    var count = 0usize
+    while String("abc").len() > count {
+        count += 1
+    }
+    println("{count}")                             // out: 3
+    if person("Hal").nick == "Haly" {
+        println("match")                           // out: match
+    }
+
+    // Leaving early frees what's live.
+    println("{early(true)} {early(false)}")        // out: 1 5
+    let words: List<String> = ["a", "abc", "abcd"]
+    println("{first_long(words, 3) ?? "none"} {first_long(words, 9) ?? "none"}")    // out: abc none
+    var found = String()
+    for w in words {
+        let probe = w.copy()
+        if probe.len() == 1 {
+            continue
+        }
+        if probe.len() == 4 {
+            found = probe
+            break
+        }
+    }
+    println(found)                                 // out: abcd
+    var looped = String("x")
+    for i in 0..3 {
+        let next = "{looped}{i}"
+        looped = next
+    }
+    println(looped)                                // out: x012
+
+    // Blocks and branches whose values own memory.
+    let chosen = if count > 2 { String("big") } else { String("small") }
+    let built = {
+        let a = String("in")
+        let b = "{a}side"
+        b
+    }
+    let picked: String = match count {
+        3 => "three",
+        _ => String("other"),
+    }
+    println("{chosen} {built} {picked}")           // out: big inside three
+
+    // Discarding.
+    _ = person("Ivy")
+    let copy = words.copy()
+    _ = copy
+}

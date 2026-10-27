@@ -1,17 +1,18 @@
 // Generic functions: inference from arguments, explicit types, recursion, and generic calls
-// inside generic code. Each set of types makes one C function.
-fn pick<T>(c: bool, x: T, y: T) -> T {
+// inside generic code. Each set of types makes one C function. Values of a parameter move
+// unless it has the bound `Copy` (D76).
+fn pick<T: Copy>(c: bool, x: T, y: T) -> T {
     if c {
         return x
     }
     return y
 }
 
-fn first<T>(xs: [T; 3]) -> T {
+fn first<T: Copy>(xs: [T; 3]) -> T {
     return xs[0]
 }
 
-fn last<T>(xs: [T; 3]) -> T {
+fn last<T: Copy>(xs: [T; 3]) -> T {
     var out = xs[0]
     for x in xs {
         out = x
@@ -19,7 +20,7 @@ fn last<T>(xs: [T; 3]) -> T {
     return out
 }
 
-fn swap<A, B>(t: (A, B)) -> (B, A) {
+fn swap<A, B>(t: own (A, B)) -> (B, A) {
     let (a, b) = t
     return (b, a)
 }
@@ -31,11 +32,11 @@ fn count<T>(x: T, n: i32) -> i32 {
     return count(x, n - 1) + 1
 }
 
-fn twice<T>(x: T) -> (T, T) {
+fn twice<T: Copy>(x: T) -> (T, T) {
     return (pick(true, x, x), x)
 }
 
-fn find<T>(xs: [T; 3], at: usize) -> T? {
+fn find<T: Copy>(xs: [T; 3], at: usize) -> T? {
     if at < 3 {
         return some(xs[at])
     }

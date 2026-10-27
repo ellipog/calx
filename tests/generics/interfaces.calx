@@ -67,12 +67,12 @@ fn label<T: Shape>(x: T) -> str {
     return T.name()
 }
 
-struct Holder<T: Shape> {
+struct Holder<T: Shape + Copy> {
     items: [T; 2]
     corners: i32 = T.sides
 }
 
-impl<T: Shape> Holder<T> {
+impl<T: Shape + Copy> Holder<T> {
     fn biggest(self) -> T {
         var b = T.unit()
         for x in self.items {

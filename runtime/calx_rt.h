@@ -29,6 +29,15 @@ typedef struct {
 #define CX_INLINE static inline __attribute__((always_inline))
 #define CX_COLD __attribute__((cold, noreturn))
 
+/* `String`: UTF-8 bytes. With `cap` 0 it doesn't own them: an empty string, or a string literal,
+ * which costs nothing to make. Changing such a string copies it to the heap first. All zero bits
+ * is the empty string, so a value that was moved away can be zeroed and dropped again safely. */
+typedef struct {
+    cx_u8* ptr;
+    cx_usize len;
+    cx_usize cap;
+} cx_String;
+
 /* Startup and exit, called by the generated `main`. */
 void cx_start(int argc, char** argv);
 int cx_finish(void);
@@ -51,6 +60,56 @@ CX_COLD void cx_panic_end(void);
 CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_div_zero(const char* at);
 CX_COLD void cx_panic_unwrap(const char* at);
+CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
+
+/* Memory. Running out panics. */
+void* cx_alloc(cx_usize size);
+void* cx_realloc(void* p, cx_usize size);
+void cx_free(void* p);
+/* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
+ * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. */
+void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
+CX_COLD void cx_panic_capacity(void);
+
+/* Strings. */
+CX_INLINE cx_String cx_string_lit(const char* p, cx_usize len) {
+    cx_String s = {(cx_u8*)p, len, 0};
+    return s;
+}
+CX_INLINE cx_str cx_sv(cx_String s) {
+    cx_str v = {s.ptr, s.len};
+    return v;
+}
+CX_INLINE void cx_drop_String(cx_String* s) {
+    if (s->cap) cx_free(s->ptr);
+}
+cx_String cx_copy_String(const cx_String* s);
+/* A `String` that owns a copy of the bytes. */
+cx_String cx_string_from(cx_str s);
+void cx_string_push_bytes(cx_String* s, const cx_u8* p, cx_usize n);
+void cx_string_push_rune(cx_String* s, cx_rune r);
+void cx_string_reserve(cx_String* s, cx_usize extra);
+CX_INLINE void cx_string_push_str(cx_String* s, cx_str v) { cx_string_push_bytes(s, v.ptr, v.len); }
+CX_INLINE void cx_string_clear(cx_String* s) {
+    if (s->cap) {
+        s->len = 0;
+    } else {
+        s->ptr = 0;
+        s->len = 0;
+    }
+}
+cx_bool cx_str_contains(cx_str hay, cx_str needle);
+CX_INLINE cx_bool cx_str_starts_with(cx_str s, cx_str p) {
+    return p.len <= s.len && (p.len == 0 || __builtin_memcmp(s.ptr, p.ptr, p.len) == 0);
+}
+CX_INLINE cx_bool cx_str_ends_with(cx_str s, cx_str p) {
+    return p.len <= s.len && (p.len == 0 || __builtin_memcmp(s.ptr + s.len - p.len, p.ptr, p.len) == 0);
+}
+
+/* Interpolation into a `String`: between `cx_fmt_begin` and `cx_fmt_end`, the print functions
+ * add to the string instead of writing output. They nest. */
+cx_String* cx_fmt_begin(cx_String* s);
+void cx_fmt_end(cx_String* previous);
 
 /* Whether two strings hold the same bytes, for string patterns. */
 CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {

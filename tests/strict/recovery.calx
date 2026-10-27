@@ -1,0 +1,23 @@
+// A syntax error in a condition doesn't leave the parser thinking it's still in one.
+
+struct Holder {
+    n: i32
+}
+
+fn f() {
+    while !true {                    // error: Calx writes `not x`, not `!x`
+    }
+}
+
+fn g(a: bool, b: bool) -> bool {
+    return a && b                    // error: Calx writes `and`, not `&&`
+}
+
+fn h(a: bool, b: bool) -> bool {
+    return a || b                    // error: Calx writes `or`, not `||`
+}
+
+fn main() {
+    let x = Holder { n: 1 }
+    _ = x
+}

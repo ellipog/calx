@@ -1,0 +1,119 @@
+// `List<T>`: literals, every method, indexing, loops, nesting and printing. Debug builds check
+// that everything allocated is freed.
+
+enum Color {
+    Red
+    Green
+}
+
+struct Item {
+    name: String
+    count: i32
+}
+
+fn squares(n: i32) -> List<i32> {
+    var xs = List<i32>()
+    for i in 0..n {
+        xs.push(i * i)
+    }
+    return xs
+}
+
+fn total(xs: List<i32>) -> i64 {
+    var sum = 0i64
+    for x in xs {
+        sum += i64(x)
+    }
+    return sum
+}
+
+fn double_all(xs: mut List<i32>) {
+    for i in 0usize..xs.len() {
+        xs[i] = xs[i] * 2
+    }
+}
+
+fn names(items: List<Item>) -> List<String> {
+    var out: List<String> = []
+    for it in items {
+        out.push(it.name.copy())
+    }
+    return out
+}
+
+fn main() {
+    // Literals.
+    let a: List<i32> = [1, 2, 3]
+    let empty: List<i32> = []
+    let zeros: List<u8> = [0; 4]
+    println("{a} {empty} {zeros}")                 // out: [1, 2, 3] [] [0, 0, 0, 0]
+    println("{a.len()} {empty.is_empty()} {a[0]} {a[2]}")    // out: 3 true 1 3
+
+    // Growing and shrinking.
+    var xs = squares(5)
+    println("{xs} {total(xs)}")                    // out: [0, 1, 4, 9, 16] 30
+    xs.push(25)
+    let top = xs.pop()
+    println("{top ?? -1} {xs.len()}")              // out: 25 5
+    xs.insert(0, -1)
+    xs.insert(6, 99)
+    println("{xs}")                                // out: [-1, 0, 1, 4, 9, 16, 99]
+    let r = xs.remove(1)
+    let s = xs.swap_remove(0)
+    println("{r} {s} {xs}")                        // out: 0 -1 [99, 1, 4, 9, 16]
+    xs.swap(0, 4)
+    println("{xs}")                                // out: [16, 1, 4, 9, 99]
+    xs.truncate(3)
+    xs.truncate(10)
+    println("{xs} {xs.contains(4)} {xs.contains(5)}")    // out: [16, 1, 4] true false
+    xs.reserve(100)
+    println("{xs.capacity() >= 103} {xs.len()}")    // out: true 3
+    double_all(mut xs)
+    println("{xs}")                                // out: [32, 2, 8]
+    xs[1] += 1
+    println("{xs[1]}")                             // out: 3
+    xs.clear()
+    println("{xs} {xs.pop() ?? 0}")                // out: [] 0
+
+    // Lists that own memory: their elements are freed with them.
+    var words: List<String> = ["one", "two"]
+    words.push(String("three"))
+    words.push("four {words.len()}")
+    println("{words}")                             // out: [one, two, three, four 3]
+    let gone = words.remove(0)
+    words[0] = "TWO"
+    words.insert(1, gone)
+    println("{words} {words.contains("one")}")     // out: [TWO, one, three, four 3] true
+    words.truncate(2)
+    println("{words}")                             // out: [TWO, one]
+    let copied = words.copy()
+    words.clear()
+    println("{copied} {words}")                    // out: [TWO, one] []
+
+    // Structs holding strings, in a list.
+    var items: List<Item> = []
+    items.push(Item { name: "apple", count: 3 })
+    items.push(Item { name: String("pear"), count: 1 })
+    println("{names(items)}")                      // out: [apple, pear]
+    var n = 0
+    for it in items {
+        n += it.count
+    }
+    println("{n}")                                 // out: 4
+    items[1].count = 7
+    items[0].name.push('s')
+    println("{items[0].name} {items[1].count}")    // out: apples 7
+
+    // Lists of lists, and of enums.
+    var grid: List<List<i32>> = [[1, 2], [3]]
+    grid.push([])
+    grid[2].push(4)
+    println("{grid} {grid[0][1]}")                 // out: [[1, 2], [3], [4]] 2
+    let colors: List<Color> = [Color.Red, Color.Green, Color.Red]
+    println("{colors}")                            // out: [Red, Green, Red]
+    println("{colors.contains(Color.Green)}")      // out: true
+
+    // Optionals in a list compare with `==`.
+    let maybe: List<i32?> = [some(1), none]
+    println("{maybe.contains(none)} {maybe.contains(some(1))} {maybe.contains(some(2))}")    // out: true true false
+}

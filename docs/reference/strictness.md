@@ -27,6 +27,10 @@ Each rule is on the page of the feature it's about:
 | A `match` covers every value, and every arm can match | [Patterns](patterns.md#every-case-every-arm-d63) |
 | A capitalized name in a pattern is a variant or constant, never a binding. A record pattern names every field or ends in `..` | [Patterns](patterns.md#names-in-patterns) |
 | `let` without `else` needs a pattern that always matches, and `let ... else` and `if let` one that might not | [Patterns](patterns.md#let--else) |
+| A value can't be used after it moves, or after it might have moved, and a move in a loop needs a new value before the next pass | [Ownership](ownership.md#moves) |
+| Only what a function owns can move: views, loop elements and pattern names that only look can't. Neither can list elements or fields of views | [Ownership](ownership.md#views) |
+| A value can't change or move while a pattern's names are views into it | [Ownership](ownership.md#patterns) |
+| `.copy()` is only for values that own memory, and `[x; n]` copies only a `Copy` `x` | [Ownership](ownership.md#moves) |
 | Generic code is checked where it's written and uses only what its bounds give. A call whose types can't be worked out is an error, never a guess. Unused generic parameters are errors | [Generics](generics.md#errors) |
 | An impl matches its interface exactly, parameter names included, and has nothing else. Unused impls are errors. A name two interfaces share needs `Iface.method(x)` | [Interfaces](interfaces.md#implementing-one) |
 | A type has one function of each name: its own impl can't reuse a name its interfaces give it | [Interfaces](interfaces.md#implementing-one) |

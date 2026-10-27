@@ -1,0 +1,6 @@
+fn main() {
+    var xs: List<i32> = [1, 2]
+    xs.insert(2, 3)
+    println("{xs}")       // out: [1, 2, 3]
+    xs.insert(5, 4)       // panic: can't insert at index 5 in a list of length 3
+}

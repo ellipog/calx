@@ -1,0 +1,5 @@
+fn main() {
+    var xs: List<i32> = [7]
+    println("{xs.remove(0)} {xs.len()}")    // out: 7 0
+    _ = xs.remove(0)                         // panic: index 0 is out of bounds for length 0
+}

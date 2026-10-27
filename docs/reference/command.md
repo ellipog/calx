@@ -36,18 +36,20 @@ A program is its main file and the [modules](modules.md) it imports. The command
 | 0 | Success |
 | 1 | The program has errors, or building it failed |
 | 2 | The command line is wrong |
-| *the program's* | `calx run` exits with the program's status: 0, or 101 after a [panic](printing.md#panics) |
+| *the program's* | `calx run` exits with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
 
 ## Build modes
 
-Both modes keep every check: bounds checks, division by zero, and Java's integer and float semantics. They differ only in how much clang optimizes.
+Both modes keep every check: bounds checks, division by zero, and Java's integer and float semantics. They differ in how much clang optimizes, and in one check of the compiler itself.
 
 | Mode | clang flags | For |
 | --- | --- | --- |
-| debug (the default) | `-O0` | Fast builds while you work |
+| debug (the default) | `-O0 -DCX_DEBUG` | Fast builds while you work |
 | release | `-O2 -march=x86-64-v3` | Speed |
 
 In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+
+In debug builds the runtime counts allocations, and a program that ends with any still live says so and exits with status 102. The compiler frees every value ([ownership](ownership.md)), so that's a bug in Calx, worth reporting. Release builds don't count.
 
 Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
 

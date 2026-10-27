@@ -14,6 +14,7 @@ struct TypeExpr;
 struct Module;
 struct Block;
 struct Item;
+struct Local;
 
 // `a.b.c`: a dotted name, resolved by the checker.
 struct Path {
@@ -101,6 +102,9 @@ struct MatchArm {
     Expr* guard = nullptr;  // `p if cond => e`
     Expr* body = nullptr;
     Span span;
+    // Filled in by the ownership pass.
+    bool consumes = false;      // the arm takes the value apart: its names own their parts
+    Slice<Local*> drops;        // the names it owns that are dropped when it ends
 };
 
 struct Param;
@@ -122,6 +126,9 @@ struct Local {
     bool reassigned = false;
     bool mutated = false;
     std::uint32_t borrowed = 0;  // nonzero while a `for` loop iterates over it
+    // Filled in by the ownership pass (D76).
+    bool owns = false;           // it owns its value, so it's dropped when its scope ends
+    bool clear_on_move = false;  // it might be moved where it's dropped, so a move zeroes it
 };
 
 // What the checker found a name or call to be.
@@ -140,6 +147,12 @@ enum class CallKind : std::uint8_t {
     variant,     // `Shape.Circle(r)`: an enum variant with data; `field_index` is the variant
     some,        // `some(x)`
     try_from,    // `i8.try_from(x)`, `Flag.try_from(n)`: a checked conversion to an optional
+    builtin_method,  // a method of `String` or `List`, or `x.copy()`: `bmethod` says which
+};
+
+enum class BMethod : std::uint8_t {
+    none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
+    truncate, push_str, starts_with, ends_with,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
@@ -196,6 +209,7 @@ struct Expr {
     Builtin builtin = Builtin::none;
     Conv conv = Conv::none;
     PrimMethod prim = PrimMethod::none;
+    BMethod bmethod = BMethod::none;
     std::uint32_t field_index = 0;  // field: the field, or the tuple element; a variant: its index
     Slice<Expr*> ordered_args;   // call: the arguments in parameter order, after names are matched
     // A compile-time constant. When `has_bits`, its value is in `const_bits`: integers, chars and
@@ -210,6 +224,15 @@ struct Expr {
     // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
     // that interface. A copy for an instance keeps the rewrite.
     Item* only_interface = nullptr;
+    // Filled in by the ownership pass (D76).
+    bool moves = false;          // name: this use moves the local's value away
+    bool temp = false;           // a new value that isn't `Copy`, only looked at: it's kept in a
+                                 // temporary that's dropped at the end of the statement
+    bool part_move = false;      // field: moved out of a new value, whose other parts are dropped
+    Local* hidden = nullptr;     // match, if let: the new value matched, held for the arms
+    bool drop_hidden = false;    // match, if let: `hidden` is dropped when it ends
+    bool let_consumes = false;   // if let: the first branch takes the value apart
+    Slice<Local*> let_drops;     // if let: what the first branch drops when it ends
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -295,6 +318,13 @@ struct Stmt {
     bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
+    // Filled in by the ownership pass (D76).
+    Slice<Local*> drops;           // return, break, continue: what's dropped before leaving
+    bool drop_old = false;         // assign: the target's old value is dropped first
+    bool drop_value = false;       // let `_ = e`: the value is dropped at once
+    bool consumes = false;         // let with a pattern: it takes the value apart
+    Local* hidden = nullptr;       // let with a pattern, for: the new value matched or iterated
+    bool drop_hidden = false;      // for: `hidden` is dropped after the loop
 };
 
 struct Block {
@@ -302,6 +332,7 @@ struct Block {
     Slice<Stmt*> stmts;
     // The last expression, if the block ends with one: the block's value.
     Expr* tail = nullptr;
+    Slice<Local*> drops;  // filled in by the ownership pass: what's dropped at its end
 };
 
 // ---------------------------------------------------------------------------------------------
