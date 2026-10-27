@@ -6,6 +6,7 @@
 //     tickbench [--threads N] [--warmup 200] [--ticks 1000] [--stats]
 
 import std.env.{args}
+import std.pool.{set_workers}
 import std.time.{Instant}
 
 const SEED: i64 = 20261027
@@ -1104,9 +1105,7 @@ fn fixed3(x: f64) -> String {
 
 fn main() {
     let o = parse_args()
-    if o.threads > 1 {
-        panic("tickbench: more than one worker isn't built yet")
-    }
+    set_workers(o.threads)
     let started = unsafe { Instant.now() }
     var world = generate()
     let generated = unsafe { Instant.now() }.secs_since(started)
@@ -1124,10 +1123,10 @@ fn main() {
         }
         let t0 = unsafe { Instant.now() }
         let t = i32.wrap(tick)
-        for k in 0usize..REGIONS {
+        parallel for k in 0usize..REGIONS {
             block_pass(mut world.blocks[k], mut world.states[k], t)
         }
-        for k in 0usize..REGIONS {
+        parallel for k in 0usize..REGIONS {
             entity_pass(world.blocks, world.chunk_map, k, mut world.states[k])
         }
         barrier(mut world, mut checksum)

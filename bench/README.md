@@ -36,7 +36,7 @@ Where `docs/benchmarks.md` lets an implementation choose, the reference uses:
 
 [`calx/tickbench.calx`](calx/tickbench.calx) is the same program in Calx, with the same algorithms and the same checksum. It's safe Calx: no `unsafe` except reading the clock, and bounds checks left in. The runner builds it with `calx --release`. It takes the same flags as the Rust reference.
 
-It runs one worker for now. `parallel for`, which the multi-worker passes need, isn't built yet, so `--threads` above 1 stops with an error.
+Each pass is a `parallel for` over the regions, on the runtime's pool, and `--threads` sets the pool's size with `std.pool.set_workers`. That's the shape of the Rust reference: persistent threads that take regions in order from a shared counter, with the barrier step on the main thread. Each region's messages and handoffs go into its own outbox, which the barrier delivers in sender order, since actors aren't built yet. The checker proves the passes race-free: an iteration changes only `world.blocks[k]` and `world.states[k]`, and the entity pass reads every region's blocks while changing only its own state.
 
 ## Results
 
