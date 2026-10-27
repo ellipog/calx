@@ -21,8 +21,8 @@ The examples use the syntax as it stands now. From Phase 3 every example here is
 Calx exists to write Calcite and its plugins. In order:
 
 1. **Java-exact where it matters.** Integer and float results, hash codes and collection orders match Java bit for bit, so Calcite can match vanilla.
-2. **Fast.** It compiles to C with no garbage collector and no hidden costs, within about 10% of Rust on the [tick-loop benchmark](benchmarks.md).
-3. **Safe by default.** No undefined behavior outside `unsafe`, so an untrusted plugin can't corrupt the server (D23).
+2. **Fast to run, and fast to build.** It compiles to C with no garbage collector and no hidden costs, within about 10% of Rust on the [tick-loop benchmark](benchmarks.md). Unlike Rust, building is quick too: a change rebuilds only what it touched, and `calx run` starts in moments ([Build speed](#build-speed-d64)). When the two conflict, run time wins in release builds and build time wins in debug builds.
+3. **Safe and strict by default.** No undefined behavior outside `unsafe`, so an untrusted plugin can't corrupt the server (D23). The type checker is stricter than Rust's ([Strictness](#strictness-d63)).
 4. **Simple to write plugins in.** No lifetimes, no locks, no null. Errors are values. The compiler checks region scoping.
 
 ## Syntax overview
@@ -94,7 +94,7 @@ There is no null. A value that may be absent is `T?`:
 fn find(names: List<String>, wanted: String) -> usize? {
     for (i, n) in names.enumerate() {
         if n == wanted {
-            return i
+            return some(i)
         }
     }
     return none
@@ -113,10 +113,10 @@ fn first_letter(s: String) -> rune {
 }
 ```
 
-- `none` is the empty value. A plain `T` converts to `T?` where one is expected.
+- `none` is the empty value and `some(x)` holds a value. A plain `T` never turns into a `T?` by itself, so `return i` in a function returning `usize?` doesn't compile (D63).
 - `if let x = opt { }`, `let x = opt else <diverge>`, `a ?? b`, `a?.b`, `opt.map(f)` and `opt.or(default)`.
 - `opt!` unwraps, and panics if it's empty.
-- `T? == T` compares: false when the optional is empty.
+- An optional compares only with another optional: `opt == some(3)`, not `opt == 3`.
 
 ### Errors are values
 
@@ -211,8 +211,8 @@ Calx matches Java exactly. Each rule below says what Calx does and how the C emi
 | `MIN / -1` | Gives `MIN`. `MIN % -1` gives `0` | A branch on `-1` before the division, which traps on x86 otherwise |
 | Division by zero | **Panics**, for `/` and `%` on every integer type (D55). Java throws `ArithmeticException`, which vanilla never catches, so this is the same outcome. `checked_div` returns `none` instead | A branch on zero, then the runtime's panic |
 | Rounding | Division truncates toward zero, and the remainder takes the dividend's sign, as in Java and C. `floor_div` and `floor_mod` are Java's `Math.floorDiv` and `Math.floorMod` | Plain `/` and `%` after the checks |
-| Conversions | Always explicit: `i32(x)`, `i8(x)`, `f64(n)`. Narrowing keeps the low bits, as Java's casts do. `x.try_into(T)` returns `T?` | Casts through unsigned types, so they're defined |
-| Literals | An integer literal takes its type from context, defaulting to `i32`. A suffix fixes it: `5i64`, `255u8`. A literal that doesn't fit its type is a compile error | |
+| Conversions | Always explicit, and named by what they do ([Strictness](#strictness-d63)). `i64(x)` only widens. `i8.wrap(x)` keeps the low bits, as Java's narrowing casts do. `i8.try_from(x)` returns `i8?` | Casts through unsigned types, so they're defined |
+| Literals | An integer literal takes its type from context, defaulting to `i32`. A suffix fixes it: `5i64`, `255u8`. A literal that doesn't fit its type is a compile error, hex included: Java's `0x9E3779B9` as an `int` is `i32.wrap(0x9E3779B9u32)` | |
 
 ### Floats
 
@@ -220,14 +220,14 @@ Calx matches Java exactly. Each rule below says what Calx does and how the C emi
 | --- | --- | --- |
 | Format | IEEE 754 binary32 and binary64, round to nearest even, no flush-to-zero | SSE2 on x86-64, never x87 |
 | Contraction | No fused multiply-add unless written as `fma(a, b, c)`, and no reassociation. `a * b + c` rounds twice, as in Java | `-ffp-contract=off`, never `-ffast-math` |
-| Float to integer | `i32(f)` and `i64(f)` saturate at the type's bounds, and NaN gives 0, as Java's casts do. `i8(f)` and `i16(f)` convert to `i32` first and then narrow, which is what `(byte) f` does in Java | An explicit range and NaN check, since out-of-range conversion is undefined in C |
-| Integer to float | Rounds to nearest even | A plain cast |
+| Float to integer | `i32.saturate(f)` and `i64.saturate(f)` clamp at the type's bounds, and NaN gives 0, as Java's casts do. They're the only two: Java's `(byte) f` converts to `int` first, so it's written `i8.wrap(i32.saturate(f))` | An explicit range and NaN check, since out-of-range conversion is undefined in C |
+| Integer to float | `f64(n)` where every value fits exactly, such as an `i32`. Otherwise `f64.nearest(n)`, which rounds to nearest even, as Java's `(double) aLong` does. `f32.nearest(d)` is Java's `(float) d` | A plain cast |
 | Literals | Unsuffixed float literals are `f64`. `1.0e-5f32` is an `f32`. A literal keeps its type, so Java's `1.0E-5F` widened to a double is written `f64(1.0e-5f32)` | |
 | Comparison | `==` and `<` are IEEE: NaN is unequal to everything, and `-0.0 == 0.0`. `total_cmp` is Java's `Double.compare` order, for sorting | |
 | `min`, `max` | Java's: NaN if either argument is NaN, and `-0.0` is less than `0.0` | Not C's `fmin`, which ignores NaN |
 | `round` | Java's `Math.round`: the nearest integer, with halves rounded up, saturating like a cast | |
 | Text | `f.java_string()` prints exactly what Java's `Double.toString` and `Float.toString` print (the shortest form that reads back the same, JDK 19 and later), for SNBT and JSON output | |
-| Mixed arithmetic | There is none. `f32 * i32` doesn't compile, and Java's implicit widening is written out: `f64(meters * f32(packets))` | |
+| Mixed arithmetic | There is none. `f32 * i32` doesn't compile, and Java's implicit widening is written out: `f64(meters * f32.nearest(packets))` | |
 
 ### Transcendental functions
 
@@ -250,6 +250,59 @@ Calx matches Java exactly. Each rule below says what Calx does and how the C emi
 
   `Mth`'s sine table is the same either way, since rounding to `f32` hides the difference.
 - Matching the intrinsics would mean copying HotSpot's stubs, which are GPL and can't go in an MIT project (D59). Instead, the rig's reference is vanilla with HotSpot's flags `-XX:+UnlockDiagnosticVMOptions -XX:-UseLibmIntrinsic`. With them, `Math` matched `StrictMath` bit for bit on all 22 million arguments, so Calx can match that configuration exactly. The rig also records vanilla with default flags, and reports every case where the two differ (D60).
+
+## Strictness (D63)
+
+Calx's checker is stricter than Rust's. Calcite ports Java, and silent conversions and precedence slips are exactly where bit-exactness breaks, so the compiler rejects them. Every rule here is an error, and there's no flag that turns one off. The only warnings are for deprecated APIs.
+
+**Conversions.** `T(x)` compiles only when every value of `x`'s type is exactly a `T`, so it can never change a value. Every other conversion names what it does:
+
+| Written | Does | Java |
+| --- | --- | --- |
+| `i64(x)`, `f64(x)` for an `i32` | Converts exactly | Widening |
+| `i8.wrap(x)`, `u32.wrap(x)` | Keeps the low bits, between any two integer types | `(byte) x`, and reading an `int` as unsigned |
+| `i32.saturate(f)`, `i64.saturate(f)` | Clamps to the type's range, and NaN gives 0 | `(int) f`, `(long) d` |
+| `f32.nearest(x)`, `f64.nearest(x)` | Rounds to the nearest float, ties to even | `(float) d`, `(double) aLong` |
+| `T.try_from(x)` | Returns `T?`, empty when the value doesn't fit | |
+
+- `bool` converts to and from nothing. Write `if b { 1 } else { 0 }`.
+- `usize` is judged at both its widths, 32-bit and 64-bit, so a conversion is exact only if it's exact on every target. `usize(n)` from a `u32` compiles, and `u64(len)` from a `usize` compiles, but `u32(len)` doesn't.
+- Indexes and lengths are `usize`, so `xs[i]` with an `i32` doesn't compile.
+- A `T` never becomes a `T?` by itself: write `some(x)`.
+
+**Literals.** A literal must fit its type, hex included, and an unsigned type takes no negative literal. A literal takes its type from where it's used, and only defaults to `i32` or `f64` when nothing gives it one.
+
+**Nothing is dropped silently.**
+
+- An expression on its own line must have the unit type. A value nobody wants is discarded explicitly, with `_ = f()`. So an ignored error or an ignored result is always visible.
+- Unused locals, parameters, imports and private items are errors. A name starting with `_` says the item is unused on purpose.
+- A `var` that's never assigned again must be a `let`, and a `mut` parameter that's never changed must be a plain one.
+- Code after a `return`, `break`, `continue`, `fail` or a call that never returns is an error.
+
+**No shadowing.** A local can't take a name that's already visible, whether that's another local, a parameter, or an item in scope. Rust allows `let x = x + 1`. Calx doesn't, since a ported function that reuses a name is usually a bug.
+
+**Parentheses where precedence surprises.** These mixtures need parentheses:
+
+- `and` with `or`: `a or (b and c)`
+- `&`, `|` and `^` with each other: `(a & b) | c`
+- a shift with `+` or `-`: `1 << (n - 1)`, the classic slip
+- `??` with any other binary operator
+
+Comparisons don't chain at all: `a < b < c` doesn't compile.
+
+**Operators.**
+
+- Both sides of an arithmetic, bitwise or comparison operator have the same type.
+- Unary `-` doesn't apply to unsigned types, and `~` doesn't apply to `bool`, which uses `not`.
+- A shift count can be any integer type, and a variable count is masked as in Java. A constant count must be at least 0 and less than the type's width, since `x << 32` on an `i32` shifts by 0 in Java and is always a mistake.
+- A constant expression that overflows its type is an error, even though the same operation wraps at run time. `wrapping_add` and the other `wrapping_` methods say that wrapping is meant.
+- Comparing with a NaN constant is an error, since it's always false or always true. Use `x.is_nan()`.
+
+**Control flow.**
+
+- `match` must cover every case, and an arm that can never match is an error.
+- `if` used as a value needs an `else`.
+- A function gives back a value only through `return`. Its body's last line can't be a bare value. Blocks used as values and closures still end with their value.
 
 ## Memory model (D48)
 
@@ -424,6 +477,20 @@ So nothing one region can name belongs to another. WASM plugins get the same rul
 - **Build modes:** `debug` (checks, no optimization, full debug info) and `release` (checks kept, optimized). Bounds checks stay on in both. `unsafe` code is the only way to remove one.
 - **Targets:** `x86_64-windows`, `x86_64-linux` and `wasm32` from Phase 3 and Phase 7. `aarch64-macos` comes later (D7).
 
+### Build speed (D64)
+
+Building and running Calx code has to be fast. The design choices that make it so:
+
+- **A fast front end.** Lexing, parsing, checking and emitting C use arena allocation and interned names, with no heap allocation per node and no whole-program analysis beyond what monomorphization needs. The front end always rechecks everything, because that's cheaper than tracking what to skip.
+- **Clang only where the C changed.** Each module becomes its own C file. An object is cached under a hash of the C text, the flags and the clang version, so a module whose C is unchanged is never compiled again, and changed modules compile in parallel.
+- **The runtime is built once** per target and build mode, and reused.
+- **Debug builds use `-O0`** with line tables only. Release builds use `-O2`.
+- **lld links** on both platforms, since it's several times faster than the default linkers.
+- **Lean C.** Emitted code includes only Calx's small runtime header, never `windows.h` or other large system headers.
+- **`calx run` reuses the last executable** when nothing changed.
+
+Build time is tracked like run time (D34): the time to check and build a large generated program, and the time `calx run` takes on a small one, are recorded per commit in `bench/`.
+
 ## FFI
 
 - `extern "C" fn name(args) -> ret` declares a C function. Calling one needs `unsafe`.
@@ -514,3 +581,5 @@ What Calx leaves out, on purpose:
 | FFI: `extern`, C ABI, what trusted plugins unlock | [FFI](#ffi) |
 | Codegen hooks: packets, data tables, `#line` | [Codegen hooks](#codegen-hooks) |
 | What Calx leaves out | [Non-goals](#non-goals) |
+| Stricter types than Rust (D63) | [Strictness](#strictness-d63) |
+| Fast builds and fast `calx run` (D64) | [Build speed](#build-speed-d64) |
