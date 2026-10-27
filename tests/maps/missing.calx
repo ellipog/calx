@@ -1,0 +1,7 @@
+// Reading a key that isn't there panics, as indexing past a list's end does.
+fn main() {
+    var m = Map<i32, i32>()
+    m.insert(1, 10)
+    println("{m[1]}")    // out: 10
+    println("{m[2]}")    // panic: the key isn't in the map; add it with `insert`
+}

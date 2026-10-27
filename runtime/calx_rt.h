@@ -155,6 +155,102 @@ CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {
     return a.len == b.len && (a.len == 0 || __builtin_memcmp(a.ptr, b.ptr, a.len) == 0);
 }
 
+/* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
+ * every run, so a table's layout, and the order a loop goes over it, depend only on what was
+ * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */
+#define CX_HASH_SEED 0x243F6A8885A308D3ull
+#define CX_HASH_MUL 0x9E3779B97F4A7C15ull
+CX_INLINE cx_u64 cx_hash_mix(cx_u64 a, cx_u64 b) {
+    __uint128_t r = (__uint128_t)a * b;
+    return (cx_u64)r ^ (cx_u64)(r >> 64);
+}
+CX_INLINE cx_u64 cx_hash_word(cx_u64 h, cx_u64 w) { return cx_hash_mix(h ^ w, CX_HASH_MUL); }
+cx_u64 cx_hash_bytes(const cx_u8* p, cx_usize n);
+CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
+
+/* The tables behind `Map` and `Set`: open addressing, with a control byte per slot that's EMPTY,
+ * DELETED, or the top 7 bits of the hash of what's there. Lookups compare 16 control bytes at
+ * once, and the 16 after the last slot repeat the first 16, so a group never wraps. A table has
+ * a power of two slots, at least 4, filled to at most 7/8. An empty table has no slots, and its
+ * control bytes are `cx_table_empty`'s, which every lookup stops at. */
+#define CX_CTRL_EMPTY ((cx_u8)0x80)
+#define CX_CTRL_DELETED ((cx_u8)0xFE)
+#define CX_GROUP 16
+#define CX_NOT_FOUND ((cx_usize)-1)
+extern const cx_u8 cx_table_empty[CX_GROUP];
+
+#if defined(__SSE2__)
+typedef char cx_group_v __attribute__((vector_size(16), aligned(1)));
+CX_INLINE cx_u32 cx_group_match(const cx_u8* g, cx_u8 b) {
+    cx_group_v v = *(const cx_group_v*)g;
+    return (cx_u32)__builtin_ia32_pmovmskb128(v == (char)b);
+}
+/* EMPTY or DELETED: the control bytes with the top bit set. */
+CX_INLINE cx_u32 cx_group_free(const cx_u8* g) {
+    return (cx_u32)__builtin_ia32_pmovmskb128(*(const cx_group_v*)g);
+}
+#else
+CX_INLINE cx_u32 cx_group_match(const cx_u8* g, cx_u8 b) {
+    cx_u32 m = 0;
+    for (int i = 0; i < CX_GROUP; i++) m |= (cx_u32)(g[i] == b) << i;
+    return m;
+}
+CX_INLINE cx_u32 cx_group_free(const cx_u8* g) {
+    cx_u32 m = 0;
+    for (int i = 0; i < CX_GROUP; i++) m |= (cx_u32)(g[i] >> 7) << i;
+    return m;
+}
+#endif
+CX_INLINE cx_u32 cx_group_empty(const cx_u8* g) { return cx_group_match(g, CX_CTRL_EMPTY); }
+/* The slots that hold a value. A loop over a table goes a group at a time: from 0 in steps of
+ * 16 while the step is at most the mask, then over these bits. A table smaller than a group has
+ * EMPTY bytes after its slots, so only its own show. */
+CX_INLINE cx_u32 cx_group_full(const cx_u8* g) { return ~cx_group_free(g) & 0xFFFFu; }
+CX_INLINE cx_u8 cx_table_tag(cx_u64 h) { return (cx_u8)(h >> 57); }
+/* How many values fit in a table of `buckets` slots. */
+CX_INLINE cx_usize cx_table_capacity(cx_usize buckets) { return buckets < 8 ? buckets - 1 : buckets / 8 * 7; }
+/* Sets slot `i`'s control byte, and its copy past the end if it has one. */
+CX_INLINE void cx_table_set(cx_u8* ctrl, cx_usize mask, cx_usize i, cx_u8 c) {
+    ctrl[i] = c;
+    ctrl[((i - CX_GROUP) & mask) + CX_GROUP] = c;
+}
+/* The first EMPTY or DELETED slot where the hash `h` would go. A group can show a slot past the
+ * end of a table smaller than a group, which wraps to a full one; then the first group has one. */
+CX_INLINE cx_usize cx_table_free_slot(const cx_u8* ctrl, cx_usize mask, cx_u64 h) {
+    cx_usize pos = (cx_usize)h & mask, stride = 0;
+    for (;;) {
+        cx_u32 bits = cx_group_free(ctrl + pos);
+        if (bits) {
+            cx_usize i = (pos + (cx_usize)__builtin_ctz(bits)) & mask;
+            if (__builtin_expect(ctrl[i] < 0x80, 0)) i = (cx_usize)__builtin_ctz(cx_group_free(ctrl));
+            return i;
+        }
+        stride += CX_GROUP;
+        pos = (pos + stride) & mask;
+    }
+}
+/* Marks slot `i` free after its value is taken out. It can become EMPTY, which ends lookups, only
+ * if no lookup could have passed it: if a group around it already has an EMPTY. */
+CX_INLINE cx_bool cx_table_erase(cx_u8* ctrl, cx_usize mask, cx_usize i) {
+    cx_u16 before = (cx_u16)cx_group_empty(ctrl + ((i - CX_GROUP) & mask));
+    cx_u16 after = (cx_u16)cx_group_empty(ctrl + i);
+    cx_bool empty = __builtin_clzg(before, 16) + __builtin_ctzg(after, 16) < CX_GROUP;
+    cx_table_set(ctrl, mask, i, empty ? CX_CTRL_EMPTY : CX_CTRL_DELETED);
+    return empty;
+}
+/* The slot count to grow to when a value needs room: double, or the same count again if half
+ * the room went to DELETED slots, which rebuilding frees. */
+CX_INLINE cx_usize cx_table_grown(cx_usize buckets, cx_usize len) {
+    if (buckets == 0) return 4;
+    return len + 1 <= cx_table_capacity(buckets) / 2 ? buckets : buckets * 2;
+}
+/* The slot count with room for `n` values. */
+cx_usize cx_table_buckets_for(cx_usize n);
+/* A table of `buckets` slots of `size` bytes, all EMPTY: gives the control bytes, and the slots
+ * through `slots`. One allocation holds both, so freeing the slots frees the table. */
+cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
+CX_COLD void cx_panic_key(const char* at);
+
 /* Bounds checks. */
 CX_INLINE cx_usize cx_index(cx_usize i, cx_usize length, const char* at) {
     if (__builtin_expect(i >= length, 0)) cx_panic_index(i, length, at);

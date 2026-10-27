@@ -100,7 +100,7 @@ Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfac
 - **Associated types** in interfaces, and **generic interfaces**, such as `From<T>`.
 - **Generic functions in interfaces**, and **defaults for an interface's constants**.
 - **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
-- **Hashing and ordering generic values**, through `Hash` and `Order` ([Derived properties](#derived-properties)). Comparing and printing them, through `Equal` and `Display`, are built ([Comparing and printing](reference/comparing.md#in-generic-code)).
+- **Ordering generic values**, through `Order` ([Derived properties](#derived-properties)). Comparing, printing and hashing them, through `Equal`, `Display` and `Hash`, are built ([Comparing and printing](reference/comparing.md#in-generic-code), [Maps and sets](reference/maps.md#hash)).
 
 ### Derived properties
 
@@ -113,10 +113,10 @@ The compiler works these out for each type, without being asked:
 | `Send` | The value can cross between regions: no views, no closures that capture views, nothing that's only valid in one place. Plain data and handles are `Send` |
 | `Share` | Deeply immutable while shared, so many parallel iterations can read it at once |
 
-Built: `Copy` ([Types](reference/types.md)), and `Equal` and `Display` ([Comparing and printing](reference/comparing.md)), with their bounds. Still to build:
+Built: `Copy` ([Types](reference/types.md)), `Equal` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds. Still to build:
 
-- **Writing `Equal` or `Display` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
-- **`Hash` and `Order`**, which native `Map` and `Set` and sorting need ([Collections](#collections-d27)).
+- **Writing `Equal`, `Display` or `Hash` by hand**, in place of the derived one: to compare only some fields, to show a type another way, such as a block position as `1, 2, 3`, or to keep a field out of logs. Interpolation calls the type's own `Display` when it has one.
+- **`Order`**, which sorting and `SortedMap` need ([Collections](#collections-d27)).
 - **`Send` and `Share`**, with actors.
 
 ### Handles (D24)
@@ -266,7 +266,7 @@ Keys hash with the `JavaHash` interface: Java's `hashCode` for each type. The st
 | Type | Use |
 | --- | --- |
 | `List<T>` | A growable array. Built: [Lists](reference/lists.md) |
-| `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen |
+| `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen. Built: [Maps and sets](reference/maps.md) |
 | `LinkedMap<K, V>` | A map that iterates in insertion order |
 | `SortedMap<K, V>` | A B-tree map in key order |
 | `SlotMap<T>` | Storage behind `Handle<T>` |

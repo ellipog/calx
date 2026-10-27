@@ -107,6 +107,34 @@ Type* Types::list_of(Type* elem) {
     return t;
 }
 
+Type* Types::map_of(Type* key, Type* value) {
+    auto k = std::make_pair(key, value);
+    auto it = map_map_.find(k);
+    if (it != map_map_.end()) return it->second;
+    Type* entry = tuple_of({key, value});
+    Type* t = make(TypeKind::map, arena_.copy("Map<" + std::string(key->name) + ", " + std::string(value->name) + ">"));
+    t->key = key;
+    t->elem = value;
+    t->entry = entry;
+    t->open = key->open || value->open;
+    t->has_pointer = key->has_pointer || value->has_pointer;
+    map_map_.emplace(k, t);
+    compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::set_of(Type* elem) {
+    auto it = set_map_.find(elem);
+    if (it != set_map_.end()) return it->second;
+    Type* t = make(TypeKind::set, arena_.copy("Set<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    set_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 Type* Types::tuple_of(const std::vector<Type*>& elems) {
     auto it = tuple_map_.find(elems);
     if (it != tuple_map_.end()) return it->second;
@@ -152,7 +180,7 @@ namespace {
 bool copy_walk(const Type* t, int depth) {
     if (depth > 64) return true;
     switch (t->kind) {
-        case TypeKind::string: case TypeKind::list: return false;
+        case TypeKind::string: case TypeKind::list: case TypeKind::map: case TypeKind::set: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
         case TypeKind::tuple:

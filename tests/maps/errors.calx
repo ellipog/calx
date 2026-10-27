@@ -1,0 +1,28 @@
+// What a map or a set can't do: a key without `Hash`, indexing a set, `get` of a value that owns
+// memory, and changing a table a loop goes over.
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+fn keyed<T>(x: T) -> Set<T> {    // error: `T` can't be a key of a map or a set, since it has no `Hash`; give `T` the bound `Hash`
+    var s = Set<T>()             // error: `T` can't be a key of a map or a set, since it has no `Hash`; give `T` the bound `Hash`
+    s.insert(x)
+    return s
+}
+
+fn main() {
+    let a = Map<f64, i32>()      // error: `f64` can't be a key of a map or a set, since it has no `Hash`, and floats have no `Hash`, since `NaN` isn't equal to itself
+    let b = Set<Point>()         // error: `Point` can't be a key of a map or a set, since it has no `Hash`, since it holds `f64`, and floats have no `Hash`, since `NaN` isn't equal to itself
+    var s = Set<i32>()
+    s.insert(1)
+    println("{s[1]}")            // error: a set can't be indexed; ask whether it has a value with `contains`
+    var m = Map<i32, String>()
+    m.insert(1, "one")
+    let one = m.get(1)           // error: `get` copies the value out, so it needs values that are `Copy`, and `String` owns memory; read it in place with `m[key]`
+    for (k, _) in m {
+        m.insert(k + 1, "more")  // error: `m` can't be changed while a `for` loop goes over it
+    }
+    let c = Map()                // error: can't tell what this map holds
+    println("{a.len()} {b.len()} {one} {c.len()} {keyed(1).len()}")
+}

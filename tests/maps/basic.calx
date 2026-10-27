@@ -1,0 +1,48 @@
+// A map from names to counts, and a set of numbers: inserting, replacing, reading and changing
+// in place, removing, and growing well past the first table.
+fn main() {
+    var counts = Map<String, i32>()
+    println("{counts.len()} {counts.is_empty()}")          // out: 0 true
+    counts.insert("stone", 1)
+    counts.insert("dirt", 5)
+    counts.insert("stone", 2)                              // replaces
+    println("{counts.len()} {counts["stone"]} {counts["dirt"]}")    // out: 2 2 5
+    counts["dirt"] += 10
+    println("{counts["dirt"]} {counts.contains("dirt")} {counts.contains("sand")}")    // out: 15 true false
+    println("{counts.get("stone")} {counts.get("sand")}")  // out: some(2) none
+    let name = "stone"
+    println("{counts[name]}")                              // out: 2
+    println("{counts.remove("stone")} {counts.remove("stone")} {counts.len()}")    // out: some(2) none 1
+
+    var squares = Map<i64, i64>()
+    for i in 0i64..10000 {
+        squares.insert(i, i * i)
+    }
+    var sum = 0i64
+    for i in 0i64..10000 {
+        sum += squares[i]
+    }
+    println("{squares.len()} {sum}")                       // out: 10000 333283335000
+    for i in 0i64..10000 {
+        if i % 3 != 0 {
+            _ = squares.remove(i)
+        }
+    }
+    println("{squares.len()} {squares[9999]} {squares.contains(9998)}")    // out: 3334 99980001 false
+    var total = 0i64
+    for (k, v) in squares {
+        total += v - k * k
+    }
+    println("{total}")                                     // out: 0
+
+    var seen = Set<i32>()
+    for x in [3, 1, 3, 2, 1] {
+        seen.insert(x)
+    }
+    println("{seen.len()} {seen.contains(2)} {seen.contains(4)}")    // out: 3 true false
+    seen.remove(3)
+    seen.remove(7)
+    println("{seen.len()}")                                // out: 2
+    seen.clear()
+    println("{seen.len()} {seen.is_empty()}")              // out: 0 true
+}

@@ -153,7 +153,7 @@ enum class CallKind : std::uint8_t {
 
 enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
-    truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len,
+    truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get,
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
 

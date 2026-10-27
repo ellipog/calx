@@ -1,0 +1,25 @@
+// A loop goes over a map in an order that depends only on the keys and what was done to the
+// map, so it's the same in every run and on every platform (D56). These lines were written by
+// one run, and the suite checks every other platform prints the same.
+fn main() {
+    var m = Map<i32, i32>()
+    for i in 0..12 {
+        m.insert(i * 7, i)
+    }
+    _ = m.remove(14)
+    _ = m.remove(35)
+    println("{m}")
+    // out: {49: 7, 56: 8, 28: 4, 0: 0, 77: 11, 63: 9, 7: 1, 70: 10, 21: 3, 42: 6}
+    var names = Set<String>()
+    for s in ["stone", "dirt", "grass", "sand", "gravel", "oak_log", "water", "lava"] {
+        names.insert(String(s))
+    }
+    println("{names}")
+    // out: {water, stone, grass, dirt, lava, oak_log, sand, gravel}
+    var pairs = Map<(i32, i32), bool>()
+    for x in -2..3 {
+        pairs.insert((x, x * x), x > 0)
+    }
+    println("{pairs}")
+    // out: {(1, 1): true, (0, 0): false, (-2, 4): false, (-1, 1): false, (2, 4): true}
+}

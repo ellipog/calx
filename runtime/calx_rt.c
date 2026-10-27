@@ -801,6 +801,79 @@ void cx_panic_unwrap_err(const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_key(const char* at) {
+    cx_panic_begin(at);
+    panic_text("the key isn't in the map; add it with `insert`");
+    cx_panic_end();
+}
+
+/* --- hashing and tables (D94) ---------------------------------------------------------------- */
+
+static cx_u64 read_u64(const cx_u8* p) {
+    cx_u64 v;
+    memcpy(&v, p, 8);
+    return v;
+}
+static cx_u64 read_u32(const cx_u8* p) {
+    cx_u32 v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+/* 16 bytes at a time, each pair of words folded into the state. The last 16, or the whole of a
+ * shorter text, are read as two words that may overlap, so no byte is read twice in a way that
+ * depends on where the text sits in memory. Reads are little-endian on every target Calx has. */
+cx_u64 cx_hash_bytes(const cx_u8* p, cx_usize n) {
+    cx_u64 h = CX_HASH_SEED ^ ((cx_u64)n * CX_HASH_MUL);
+    cx_u64 a, b;
+    if (n <= 16) {
+        if (n >= 8) {
+            a = read_u64(p);
+            b = read_u64(p + n - 8);
+        } else if (n >= 4) {
+            a = read_u32(p);
+            b = read_u32(p + n - 4);
+        } else if (n > 0) {
+            a = ((cx_u64)p[0] << 16) | ((cx_u64)p[n >> 1] << 8) | p[n - 1];
+            b = 0;
+        } else {
+            a = b = 0;
+        }
+    } else {
+        while (n > 16) {
+            h = cx_hash_mix(read_u64(p) ^ 0xA0761D6478BD642Full, read_u64(p + 8) ^ h);
+            p += 16;
+            n -= 16;
+        }
+        a = read_u64(p + n - 16);
+        b = read_u64(p + n - 8);
+    }
+    return cx_hash_mix(a ^ 0xE7037ED1A0B428DBull, b ^ h);
+}
+
+const cx_u8 cx_table_empty[CX_GROUP] = {
+    CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY,
+    CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY, CX_CTRL_EMPTY,
+};
+
+cx_usize cx_table_buckets_for(cx_usize n) {
+    if (n < 4) return 4;
+    if (n < 8) return 8;
+    if (n > ((cx_usize)-1 >> 4)) cx_panic_capacity();
+    cx_usize want = n * 8 / 7 + 1, b = 16;
+    while (b < want) b *= 2;
+    return b;
+}
+
+cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots) {
+    if (buckets > ((cx_usize)-1 >> 1) / (size + 1)) cx_panic_capacity();
+    cx_usize bytes = (buckets * size + 15) & ~(cx_usize)15;
+    cx_u8* base = (cx_u8*)cx_alloc(bytes + buckets + CX_GROUP);
+    memset(base + bytes, CX_CTRL_EMPTY, buckets + CX_GROUP);
+    *slots = base;
+    return base + bytes;
+}
+
 /* --- parallel for ---------------------------------------------------------------------------
  * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The
  * iterations are split into chunks, which threads claim in order from a shared counter. The

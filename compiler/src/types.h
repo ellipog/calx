@@ -23,6 +23,8 @@ enum class TypeKind : std::uint8_t {
     str,       // a read-only view of UTF-8 bytes
     string,    // `String`: UTF-8 bytes it owns
     list,      // `List<T>`: a growable array that owns its elements
+    map,       // `Map<K, V>`: a hash table of keys to values, which it owns
+    set,       // `Set<T>`: a hash table of values, which it owns
     struct_,
     array,     // `[T; N]`
     enum_,
@@ -37,7 +39,9 @@ struct Type {
     std::uint8_t bits = 0;   // int_ and float_; usize says 64, and is_usize marks it
     bool is_signed = false;
     bool is_usize = false;
-    Type* elem = nullptr;    // array, optional, list
+    Type* elem = nullptr;    // array, optional, list, set; map: the values
+    Type* key = nullptr;     // map: the keys
+    Type* entry = nullptr;   // map: `(K, V)`, what the table holds and a `for` loop goes over
     std::uint64_t length = 0;
     Slice<Type*> elems;      // tuple
     Item* item = nullptr;    // struct_, enum_
@@ -51,6 +55,7 @@ struct Type {
     bool copy_bound = false; // param: it has the bound `Copy`
     bool equal_bound = false;   // param: it has the bound `Equal`, so `==` works on it
     bool display_bound = false; // param: it has the bound `Display`, so it can be shown in a string
+    bool hash_bound = false;    // param: it has the bound `Hash`, so it can be a key, and `==` works on it
     bool open = false;       // it mentions a parameter, so it's only checked, never emitted
     bool is_const = false;   // pointer: `*const T`, which can't be written through
     bool has_pointer = false; // it is or holds a pointer
@@ -81,10 +86,12 @@ public:
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
+    Type* map_of(Type* key, Type* value);
+    Type* set_of(Type* elem);
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
-    // The arrays, optionals, tuples and lists made so far, in the order they were made.
+    // The arrays, optionals, tuples, lists, maps and sets made so far, in the order they were made.
     const std::vector<Type*>& compounds() const { return compounds_; }
 
 private:
@@ -97,6 +104,8 @@ private:
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
+    std::map<std::pair<Type*, Type*>, Type*> map_map_;
+    std::map<Type*, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
     std::vector<Type*> compounds_;

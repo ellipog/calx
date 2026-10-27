@@ -1,0 +1,7 @@
+// A value that owns memory can't be moved out of a map by indexing, which would leave a hole.
+fn main() {
+    var m = Map<i32, String>()
+    m.insert(1, "one")
+    let taken = m[1]    // error: can't move a value out of `m`; take it out with `remove`, or move a copy with `.copy()`
+    println(taken)
+}

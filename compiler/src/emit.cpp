@@ -264,7 +264,7 @@ private:
         if (uses_) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: uses_->add_type(t); break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -286,7 +286,9 @@ private:
             case TypeKind::array:
             case TypeKind::optional:
             case TypeKind::tuple:
-            case TypeKind::list: return compound_name(t);
+            case TypeKind::list:
+            case TypeKind::map:
+            case TypeKind::set: return compound_name(t);
         }
         return "void";
     }
@@ -301,6 +303,8 @@ private:
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
             case TypeKind::list: s = "cx_list_" + part(t->elem); break;
+            case TypeKind::map: s = "cx_map_" + part(t->key) + "_" + part(t->elem); break;
+            case TypeKind::set: s = "cx_set_" + part(t->elem); break;
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -322,6 +326,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
+            case TypeKind::map: case TypeKind::set:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
@@ -382,7 +387,7 @@ private:
         std::function<void(const Type*)> close = [&](const Type* t) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -391,7 +396,12 @@ private:
                 case TypeKind::enum_:
                     for (const VariantDecl& v : t->item->variants) for (const Type* x : v.types) close(x);
                     break;
-                case TypeKind::array: case TypeKind::optional: case TypeKind::list: close(t->elem); break;
+                case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::set: close(t->elem); break;
+                case TypeKind::map:
+                    close(t->key);
+                    close(t->elem);
+                    close(t->entry);
+                    break;
                 default: for (const Type* e : t->elems) close(e); break;
             }
         };
@@ -418,6 +428,13 @@ private:
                     break;
                 case TypeKind::list:
                     out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; };\n";
+                    break;
+                case TypeKind::map:
+                case TypeKind::set:
+                    // The control bytes, the slots, the slot count less one, the values in it, and
+                    // how many more fit before it must grow (D94).
+                    out_ += "struct " + ctype(t) + " { cx_u8* ctrl; " + ctype(slot_type(t)) +
+                            "* slots; cx_usize mask; cx_usize len; cx_usize growth; };\n";
                     break;
                 case TypeKind::tuple:
                     out_ += "struct " + ctype(t) + " {";
@@ -457,6 +474,18 @@ private:
             }
             out_ += "    }\n    return " + str_const("") + ";\n}\n";
         }
+        // A map's or a set's functions hash and compare its keys, and what those hold.
+        hashed_.clear();
+        std::function<void(const Type*, std::unordered_set<const Type*>&)> reach = [&](const Type* x,
+                                                                                    std::unordered_set<const Type*>& set) {
+            if (!has_glue(x) || !set.insert(x).second) return;
+            for (const Type* h : held(x)) reach(h, set);
+        };
+        for (const Type* x : order) {
+            if (!is_table(x)) continue;
+            reach(table_key(x), hashed_);
+            reach(table_key(x), equated_);
+        }
         emit_glue(order);
         if (!order.empty()) out_ += "\n";
     }
@@ -468,13 +497,15 @@ private:
     // prints, and those they hold, get a function that does that: the derived `Equal` and
     // `Display`, which go through each value in turn.
     void emit_glue(const std::vector<const Type*>& order) {
-        std::vector<const Type*> owning, eqs, shows;
+        std::vector<const Type*> owning, eqs, shows, hashes, tables;
         for (const Type* t : order) {
             if (!is_copy(t)) owning.push_back(t);
             if (equated_.count(t)) eqs.push_back(t);
             if (shown_.count(t)) shows.push_back(t);
+            if (hashed_.count(t)) hashes.push_back(t);
+            if (is_table(t)) tables.push_back(t);
         }
-        if (owning.empty() && eqs.empty() && shows.empty()) return;
+        if (owning.empty() && eqs.empty() && shows.empty() && tables.empty()) return;
         for (const Type* t : owning) {
             std::string c = ctype(t);
             out_ += "static inline void " + drop_fn(t) + "(" + c + "* p);\n";
@@ -482,6 +513,8 @@ private:
         }
         for (const Type* t : eqs) out_ += "static inline cx_bool " + eq_fn(t) + "(" + ctype(t) + " a, " + ctype(t) + " b);\n";
         for (const Type* t : shows) out_ += "static inline void " + show_fn(t) + "(" + ctype(t) + " v);\n";
+        for (const Type* t : hashes) out_ += "static inline cx_u64 " + hash_fn(t) + "(" + ctype(t) + " v);\n";
+        for (const Type* t : tables) out_ += table_decls(t);
         for (const Type* t : owning) {
             out_ += "static inline void " + drop_fn(t) + "(" + ctype(t) + "* p) {\n" + drop_body(t) + "}\n";
             out_ += "static inline " + ctype(t) + " " + copy_fn(t) + "(const " + ctype(t) + "* p) {\n" + copy_body(t) + "}\n";
@@ -490,6 +523,285 @@ private:
             out_ += "static inline cx_bool " + eq_fn(t) + "(" + ctype(t) + " a, " + ctype(t) + " b) {\n" + eq_body(t) + "}\n";
         }
         for (const Type* t : shows) out_ += "static inline void " + show_fn(t) + "(" + ctype(t) + " v) {\n" + show_body(t) + "}\n";
+        for (const Type* t : hashes) {
+            out_ += "static inline cx_u64 " + hash_fn(t) + "(" + ctype(t) + " v) {\n" + hash_body(t) + "}\n";
+        }
+        for (const Type* t : tables) out_ += table_bodies(t);
+    }
+
+    // --- maps and sets (D94) -------------------------------------------------------------------
+
+    static bool is_table(const Type* t) { return t->kind == TypeKind::map || t->kind == TypeKind::set; }
+
+    // `body`, whose lines are already indented one step past `indent`, run for each slot `i` of
+    // the table `tab` (`m->` or `v.`) that holds a value: a group of 16 control bytes at a time,
+    // so finding the full slots takes no branch per slot.
+    static std::string each_full(const std::string& tab, const std::string& indent, const std::string& body) {
+        std::string s = indent + "for (cx_usize g = 0; g <= " + tab + "mask; g += CX_GROUP) {\n" + indent +
+                        "    for (cx_u32 bits = cx_group_full(" + tab + "ctrl + g); bits; bits &= bits - 1) {\n" + indent +
+                        "        cx_usize i = g + (cx_usize)__builtin_ctz(bits);\n";
+        for (std::size_t at = 0; at < body.size();) {
+            std::size_t end = body.find('\n', at);
+            s += "    " + body.substr(at, end - at + 1);
+            at = end + 1;
+        }
+        return s + indent + "    }\n" + indent + "}\n";
+    }
+    // What a table's keys are: a map's keys, or a set's values.
+    static Type* table_key(const Type* t) { return t->kind == TypeKind::map ? t->key : t->elem; }
+    // What a slot holds: a map's `(K, V)`, or a set's value.
+    static Type* slot_type(const Type* t) { return t->kind == TypeKind::map ? t->entry : t->elem; }
+    // The key in the slot `s`.
+    static std::string slot_key(const Type* t, const std::string& s) { return t->kind == TypeKind::map ? s + ".f0" : s; }
+    // A `String` key is looked up as a `cx_str`, so a lookup never makes a `String`.
+    static bool str_key(const Type* t) { return table_key(t)->kind == TypeKind::string; }
+    std::string lookup_ctype(const Type* t) { return str_key(t) ? "cx_str" : ctype(table_key(t)); }
+    static std::string as_lookup(const Type* t, const std::string& k) { return str_key(t) ? "cx_sv(" + k + ")" : k; }
+    std::string lookup_hash(const Type* t, const std::string& k) {
+        return str_key(t) ? "cx_hash_str(" + k + ")" : hash_value(table_key(t), k);
+    }
+    // A key argument, as `lookup_ctype` has it: a `String` key's can be a `str` or a `String`.
+    std::string lookup_value(Expr* a, const Type* t) {
+        if (str_key(t)) return a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+        return value(a, table_key(t));
+    }
+    std::string table_fn(const char* what, const Type* t) const {
+        (void)ctype(t);
+        return std::string("cx_") + what + "_" + part(t);
+    }
+    std::string hash_fn(const Type* t) const {
+        (void)ctype(t);
+        return "cx_hash_" + part(t);
+    }
+
+    // The hash of the value `v` of type `t`: equal values hash the same.
+    std::string hash_value(const Type* t, const std::string& v) {
+        if (t->kind == TypeKind::str) return "cx_hash_str(" + v + ")";
+        if (t->kind == TypeKind::string) return "cx_hash_str(cx_sv(" + v + "))";
+        if (has_glue(t)) return hash_fn(t) + "(" + v + ")";
+        return "cx_hash_word(CX_HASH_SEED, " + hash_word(t, v) + ")";
+    }
+    // What a value adds to the hash of what holds it: a number, or what's stored as one, as
+    // itself, and anything else as its own hash.
+    std::string hash_word(const Type* t, const std::string& v) {
+        if (t->kind == TypeKind::str || t->kind == TypeKind::string || has_glue(t)) return hash_value(t, v);
+        if (is_int(t) && t->is_signed) return "(cx_u64)(cx_i64)(" + v + ")";
+        return "(cx_u64)(" + v + ")";
+    }
+
+    // Everything a value holds, in order, folded into the hash. An enum's variant, an optional's
+    // flag and a list's length go in first, so `[1], [2]` and `[1, 2]` differ.
+    std::string hash_body(const Type* t) {
+        std::string s = "    cx_u64 h = CX_HASH_SEED;\n";
+        auto add = [&](const Type* x, const std::string& v, const std::string& indent) {
+            return indent + "h = cx_hash_word(h, " + hash_word(x, v) + ");\n";
+        };
+        switch (t->kind) {
+            case TypeKind::struct_:
+                for (std::uint32_t i = 0; i < t->item->fields.size(); i++) s += add(t->item->fields[i].resolved, "v" + member(t, i), "    ");
+                break;
+            case TypeKind::tuple:
+                for (std::uint32_t i = 0; i < t->elems.size(); i++) s += add(t->elems[i], "v" + member(t, i), "    ");
+                break;
+            case TypeKind::optional:
+                s += "    h = cx_hash_word(h, v.has);\n    if (v.has) " + add(t->elem, "v.v", "").substr(0) ;
+                break;
+            case TypeKind::array:
+                s += "    for (cx_usize i = 0; i < " + std::to_string(t->length) + "; i++) " + add(t->elem, "v.v[i]", "");
+                break;
+            case TypeKind::list:
+                s += "    h = cx_hash_word(h, v.len);\n    for (cx_usize i = 0; i < v.len; i++) " + add(t->elem, "v.ptr[i]", "");
+                break;
+            default: {
+                s += "    h = cx_hash_word(h, (cx_u64)v.tag);\n    switch (v.tag) {\n";
+                const Slice<VariantDecl>& vs = t->item->variants;
+                for (std::uint32_t i = 0; i < vs.size(); i++) {
+                    if (vs[i].types.empty()) continue;
+                    s += "    case " + int_const(t->repr, vs[i].tag) + ":\n";
+                    for (std::size_t k = 0; k < vs[i].types.size(); k++) {
+                        s += add(vs[i].types[k], "v.u.v" + std::to_string(i) + "." + variant_field(t, i, k), "        ");
+                    }
+                    s += "        break;\n";
+                }
+                s += "    default: break;\n    }\n";
+                break;
+            }
+        }
+        return s + "    return h;\n";
+    }
+
+    // `$name` in `text` replaced by its value.
+    static std::string fill(std::string text, const std::vector<std::pair<std::string, std::string>>& with) {
+        for (const auto& [k, v] : with) {
+            for (std::size_t at = text.find(k); at != std::string::npos; at = text.find(k, at + v.size())) {
+                text.replace(at, k.size(), v);
+            }
+        }
+        return text;
+    }
+
+    std::vector<std::pair<std::string, std::string>> table_names(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        return {
+            {"$find", table_fn("find", t)}, {"$grow", table_fn("grow", t)}, {"$put", table_fn("put", t)},
+            {"$clear", table_fn("clear", t)}, {"$reserve", table_fn("reserve", t)}, {"$T", ctype(t)},
+            {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
+            {"$V", map ? ctype(t->elem) : std::string()},
+        };
+    }
+
+    std::string table_decls(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        return fill(std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
+                                "static void $grow($T* m, cx_usize buckets);\n") +
+                        (map ? "static inline void $put($T* m, $K k, $V v);\n" : "static inline void $put($T* m, $K k);\n") +
+                        "static void $clear($T* m);\nstatic void $reserve($T* m, cx_usize n);\n",
+                    table_names(t));
+    }
+
+    // Finding a key looks at the 16 control bytes from where its hash points, and at each slot
+    // whose byte is the hash's top 7 bits; an EMPTY byte among the 16 means it isn't there.
+    // Putting a key that's there replaces its value and drops the key given. Growing moves every
+    // value into a new table, so it's out of line: it's rare, and `put` stays small.
+    std::string table_bodies(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        const Type* k = table_key(t);
+        const Type* slot = slot_type(t);
+        std::string eq = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, "m->slots[i]") + "), k)" : equal(k, slot_key(t, "m->slots[i]"), "k");
+        std::string eqj = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, "m->slots[j]") + "), cx_sv(k))" : equal(k, slot_key(t, "m->slots[j]"), "k");
+        std::string drop_slots = is_copy(slot) ? std::string() : each_full("m->", "    ", "        " + drop_fn(slot) + "(&m->slots[i]);\n");
+        std::string move_slots = each_full("m->", "        ", "            cx_u64 h = " + hash_value(k, slot_key(t, "m->slots[i]")) +
+                                                                ";\n            cx_usize j = cx_table_free_slot(ctrl, mask, h);\n"
+                                                                "            cx_table_set(ctrl, mask, j, cx_table_tag(h));\n"
+                                                                "            slots[j] = m->slots[i];\n");
+        std::string replace;
+        if (map) {
+            if (!is_copy(t->elem)) replace += "                " + drop_fn(t->elem) + "(&m->slots[j].f1);\n";
+            replace += "                m->slots[j].f1 = v;\n";
+        }
+        if (!is_copy(k)) replace += "                " + drop_fn(k) + "(&k);\n";
+        auto names = table_names(t);
+        names.insert(names.begin(), {
+            {"$eqj", eqj}, {"$eq", eq}, {"$slothash", hash_value(k, slot_key(t, "m->slots[i]"))}, {"$hash", hash_value(k, "k")},
+            {"$lookup", as_lookup(t, "k")}, {"$replace", replace}, {"$dropall", drop_slots},
+            {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"}, {"$moveall", move_slots},
+        });
+        return fill(R"(CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h) {
+    cx_u8 tag = cx_table_tag(h);
+    cx_usize pos = (cx_usize)h & m->mask, stride = 0;
+    for (;;) {
+        const cx_u8* g = m->ctrl + pos;
+        for (cx_u32 bits = cx_group_match(g, tag); bits; bits &= bits - 1) {
+            cx_usize i = (pos + (cx_usize)__builtin_ctz(bits)) & m->mask;
+            if ($eq) return i;
+        }
+        if (cx_group_empty(g)) return CX_NOT_FOUND;
+        stride += CX_GROUP;
+        pos = (pos + stride) & m->mask;
+    }
+}
+static __attribute__((noinline)) void $grow($T* m, cx_usize buckets) {
+    $S* slots;
+    cx_u8* ctrl = cx_table_alloc(buckets, sizeof($S), (void**)&slots);
+    cx_usize mask = buckets - 1;
+    if (m->slots) {
+$moveall        cx_free(m->slots);
+    }
+    m->ctrl = ctrl;
+    m->slots = slots;
+    m->mask = mask;
+    m->growth = cx_table_capacity(buckets) - m->len;
+}
+static inline void $put($T* m, $params) {
+    cx_u64 h = $hash;
+    cx_u8 tag = cx_table_tag(h);
+    cx_usize pos = (cx_usize)h & m->mask, stride = 0, i = CX_NOT_FOUND;
+    // One probe finds the key, or the first free slot on the way to where it would be.
+    for (;;) {
+        const cx_u8* g = m->ctrl + pos;
+        for (cx_u32 bits = cx_group_match(g, tag); bits; bits &= bits - 1) {
+            cx_usize j = (pos + (cx_usize)__builtin_ctz(bits)) & m->mask;
+            if ($eqj) {
+$replace                return;
+            }
+        }
+        cx_u32 free = cx_group_free(g);
+        if (free && i == CX_NOT_FOUND) i = (pos + (cx_usize)__builtin_ctz(free)) & m->mask;
+        if (cx_group_empty(g)) break;
+        stride += CX_GROUP;
+        pos = (pos + stride) & m->mask;
+    }
+    if (__builtin_expect(m->ctrl[i] < 0x80, 0)) i = (cx_usize)__builtin_ctz(cx_group_free(m->ctrl));
+    if (__builtin_expect(m->growth == 0 && m->ctrl[i] == CX_CTRL_EMPTY, 0)) {
+        $grow(m, cx_table_grown(m->slots ? m->mask + 1 : 0, m->len));
+        i = cx_table_free_slot(m->ctrl, m->mask, h);
+    }
+    m->growth -= m->ctrl[i] == CX_CTRL_EMPTY;
+    cx_table_set(m->ctrl, m->mask, i, cx_table_tag(h));
+    m->slots[i] = $new;
+    m->len++;
+}
+static void $clear($T* m) {
+    if (!m->slots) return;
+$dropall    __builtin_memset(m->ctrl, CX_CTRL_EMPTY, m->mask + 1 + CX_GROUP);
+    m->len = 0;
+    m->growth = cx_table_capacity(m->mask + 1);
+}
+static void $reserve($T* m, cx_usize n) {
+    if (n <= m->growth) return;
+    cx_usize b = cx_table_buckets_for(m->len + n);
+    if (m->slots && b < m->mask + 1) b = m->mask + 1;
+    $grow(m, b);
+}
+)", names);
+    }
+
+    // `m.insert(k, v)` and the rest. The receiver is found first, then the arguments, in order.
+    std::string table_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        bool map = t->kind == TypeKind::map;
+        Type* k = table_key(t);
+        std::string tc = ctype(t), p = tmp(), key = tmp(), i = tmp();
+        std::string head = "({ " + tc + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + tc + "* " + p + " = " + address(recv) + "; ";
+        auto found = [&](Expr* a) {
+            return lookup_ctype(t) + " " + key + " = " + lookup_value(a, t) + "; cx_usize " + i + " = " + table_fn("find", t) + "(" + p +
+                   ", " + key + ", " + lookup_hash(t, key) + "); ";
+        };
+        std::string slot = p + "->slots[" + i + "]";
+        std::string erase = p + "->growth += cx_table_erase(" + p + "->ctrl, " + p + "->mask, " + i + "); " + p + "->len--; ";
+        switch (e->bmethod) {
+            case BMethod::len: return "(" + expr(recv) + ").len";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::capacity: return view + p + "->len + " + p + "->growth; })";
+            case BMethod::insert: {
+                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
+                std::string v = tmp();
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + table_fn("put", t) + "(" + p + ", " +
+                       key + ", " + v + "); })";
+            }
+            case BMethod::contains: return view + found(e->args[0].value) + i + " != CX_NOT_FOUND; })";
+            case BMethod::get: {
+                std::string o = ctype(e->type);
+                return view + found(e->args[0].value) + i + " == CX_NOT_FOUND ? (" + o + "){0} : (" + o + "){ .v = " + slot +
+                       ".f1, .has = 1 }; })";
+            }
+            case BMethod::remove: {
+                std::string s = head + found(e->args[0].value);
+                std::string drop_key = is_copy(k) ? std::string() : drop_fn(k) + "(&" + slot_key(t, slot) + "); ";
+                if (!map) return s + "if (" + i + " != CX_NOT_FOUND) { " + drop_key + erase + "} })";
+                std::string o = ctype(e->type), r = tmp();
+                return s + o + " " + r + " = {0}; if (" + i + " != CX_NOT_FOUND) { " + r + ".v = " + slot + ".f1; " + r +
+                       ".has = 1; " + drop_key + erase + "} " + r + "; })";
+            }
+            case BMethod::clear: return table_fn("clear", t) + "(" + address(recv) + ")";
+            case BMethod::reserve:
+                return head + "cx_usize " + key + " = " + value(e->args[0].value, e->args[0].value->type) + "; " + table_fn("reserve", t) +
+                       "(" + p + ", " + key + "); })";
+            default: return "0";
+        }
     }
 
     using Parts = std::vector<std::pair<std::string, const Type*>>;  // members, as `.x` or `.f0`, and their types
@@ -524,6 +836,15 @@ private:
             case TypeKind::list:
                 return "    if (a.len != b.len) return 0;\n    for (cx_usize i = 0; i < a.len; i++) {\n        if (!" +
                        equal(t->elem, "a.ptr[i]", "b.ptr[i]") + ") return 0;\n    }\n    return 1;\n";
+            case TypeKind::map:
+            case TypeKind::set: {
+                // The same keys, each with an equal value, whatever order they're in.
+                std::string key = slot_key(t, "a.slots[i]");
+                std::string body = "        cx_usize j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) + ", " +
+                                   hash_value(table_key(t), key) + ");\n        if (j == CX_NOT_FOUND) return 0;\n";
+                if (t->kind == TypeKind::map) body += "        if (!" + equal(t->elem, "a.slots[i].f1", "b.slots[j].f1") + ") return 0;\n";
+                return "    if (a.len != b.len) return 0;\n" + each_full("a.", "    ", body) + "    return 1;\n";
+            }
             default: {
                 std::string s = "    if (a.tag != b.tag) return 0;\n    switch (a.tag) {\n";
                 const Slice<VariantDecl>& vs = t->item->variants;
@@ -576,6 +897,16 @@ private:
             case TypeKind::optional:
                 return "    if (!v.has) {\n    " + print("none") + "        return;\n    }\n" + print("some(") + "    " +
                        show_value(t->elem, "v.v") + "\n" + print(")");
+            case TypeKind::map:
+            case TypeKind::set: {
+                // `{a: 1, b: 2}` and `{1, 2}`, in the order a loop goes.
+                std::string body = "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        " +
+                                   show_value(table_key(t), slot_key(t, "v.slots[i]")) + "\n";
+                if (t->kind == TypeKind::map) {
+                    body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, "v.slots[i].f1") + "\n";
+                }
+                return print("{") + "    cx_bool first = 1;\n" + each_full("v.", "    ", body) + print("}");
+            }
             case TypeKind::array:
             case TypeKind::list: {
                 std::string n = t->kind == TypeKind::array ? std::to_string(t->length) : "v.len";
@@ -639,7 +970,7 @@ private:
     static bool has_glue(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: return true;
+            case TypeKind::optional: case TypeKind::map: case TypeKind::set: return true;
             case TypeKind::enum_: return t->has_data;
             default: return false;
         }
@@ -654,7 +985,11 @@ private:
                 for (const VariantDecl& v : t->item->variants) out.insert(out.end(), v.types.begin(), v.types.end());
                 break;
             case TypeKind::tuple: out.assign(t->elems.begin(), t->elems.end()); break;
-            case TypeKind::array: case TypeKind::list: case TypeKind::optional: out.push_back(t->elem); break;
+            case TypeKind::array: case TypeKind::list: case TypeKind::optional: case TypeKind::set: out.push_back(t->elem); break;
+            case TypeKind::map:
+                out.push_back(t->key);
+                out.push_back(t->elem);
+                break;
             default: break;
         }
         return out;
@@ -673,6 +1008,13 @@ private:
             case TypeKind::list:
                 if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
                 s += "    cx_free(p->ptr);\n";
+                break;
+            case TypeKind::map:
+            case TypeKind::set:
+                // A table that was never filled, or was moved out of, has no slots.
+                s += "    if (!p->slots) return;\n";
+                if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
+                s += "    cx_free(p->slots);\n";
                 break;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
@@ -715,6 +1057,19 @@ private:
             if (!is_copy(x)) s += "    " + to + " = " + copy_fn(x) + "(&" + from + ");\n";
         };
         switch (t->kind) {
+            case TypeKind::map:
+            case TypeKind::set: {
+                const Type* st = slot_type(t);
+                std::string e = ctype(st);
+                s += "    if (!p->slots) return r;\n    r.ctrl = cx_table_alloc(p->mask + 1, sizeof(" + e +
+                     "), (void**)&r.slots);\n    __builtin_memcpy(r.ctrl, p->ctrl, p->mask + 1 + CX_GROUP);\n";
+                if (is_copy(st)) {
+                    s += "    __builtin_memcpy(r.slots, p->slots, (p->mask + 1) * sizeof(" + e + "));\n";
+                } else {
+                    s += each_full("p->", "    ", "        r.slots[i] = " + copy_fn(st) + "(&p->slots[i]);\n");
+                }
+                break;
+            }
             case TypeKind::list: {
                 std::string e = ctype(t->elem);
                 s = "    " + c + " r = {0};\n    if (!p->len) return r;\n    r.ptr = (" + e + "*)cx_alloc(p->len * sizeof(" + e +
@@ -773,7 +1128,7 @@ private:
                 if (t->has_data) return show_fn(t) + "(" + v + ");";
                 return "cx_print_str(" + enum_name_fn(t) + "(" + v + "));";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: return show_fn(t) + "(" + v + ");";
+            case TypeKind::optional: case TypeKind::map: case TypeKind::set: return show_fn(t) + "(" + v + ");";
             default: return "";
         }
     }
@@ -1163,10 +1518,20 @@ private:
                 line(ctype(at) + " " + val + " = " + value(it, at) + ";");
                 line("const " + ctype(at) + "* " + arr + " = &" + val + ";");
             }
-            std::string n = list ? arr + "->len" : std::to_string(at->length);
-            std::string elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
-            line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
-            indent_++;
+            std::string elem_at;
+            if (is_table(at)) {
+                // Slot by slot, skipping the empty ones: the order depends only on the hashes and
+                // what was done to the table, so it's the same in every run (D56).
+                elem_at = arr + "->slots[" + i + "]";
+                line("for (cx_usize " + i + " = 0; " + i + " <= " + arr + "->mask; " + i + "++) {");
+                indent_++;
+                line("if (" + arr + "->ctrl[" + i + "] >= 0x80) continue;");
+            } else {
+                std::string n = list ? arr + "->len" : std::to_string(at->length);
+                elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
+                line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
+                indent_++;
+            }
             if (!var.empty()) {
                 line(ctype(elem) + " " + var + " = " + elem_at + ";");
             } else if (s->pattern->kind != PatternKind::wildcard) {
@@ -1708,7 +2073,10 @@ private:
     static bool place_has_effects(const Expr* e) {
         while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) {
             if (e->kind == ExprKind::unwrap) return true;
-            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list)) return true;
+            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list ||
+                                               e->lhs->type->kind == TypeKind::map)) {
+                return true;
+            }
             e = e->lhs;
         }
         return false;
@@ -1824,7 +2192,7 @@ private:
     std::string zero(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
-            case TypeKind::tuple: case TypeKind::string: case TypeKind::list:
+            case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::map: case TypeKind::set:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -1972,6 +2340,14 @@ private:
         }
         // index
         Type* at = e->lhs->type;
+        if (at->kind == TypeKind::map) {
+            // The map is found first, then the key. A key that isn't there panics.
+            std::string b = tmp(), k = tmp(), i = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
+                   lookup_value(e->rhs, at) + "; cx_usize " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
+                   lookup_hash(at, k) + "); if (__builtin_expect(" + i + " == CX_NOT_FOUND, 0)) cx_panic_key(" +
+                   location(e->rhs->span) + "); &" + b + "->slots[" + i + "].f1; }))";
+        }
         if (at->kind == TypeKind::list) {
             std::string loc = location(e->rhs->span);
             if (is_place(e->lhs) && !place_has_effects(e->lhs) && !effects(e->rhs)) {
@@ -2044,6 +2420,7 @@ private:
                 if (t->has_data) return eq_fn(t) + "(" + a + ", " + b + ")";
                 return "(" + a + " == " + b + ")";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
+            case TypeKind::map: case TypeKind::set:
                 return eq_fn(t) + "(" + a + ", " + b + ")";
             default: return "(" + a + " == " + b + ")";
         }
@@ -2155,6 +2532,8 @@ private:
 
     std::string construct(Type* t) {
         if (t->kind == TypeKind::string || t->kind == TypeKind::list) return "((" + ctype(t) + "){0})";
+        // An empty table points at the shared control bytes, so a lookup needs no check for it.
+        if (is_table(t)) return "((" + ctype(t) + "){ .ctrl = (cx_u8*)cx_table_empty })";
         std::string s = "((" + ctype(t) + "){";
         bool first = true;
         for (const FieldDecl& f : t->item->fields) {
@@ -2789,6 +3168,7 @@ private:
                 default: return "0";
             }
         }
+        if (is_table(t)) return table_method(e);
         Type* et = t->elem;
         std::string l = ctype(t), el = ctype(et);
         std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";
@@ -2903,6 +3283,7 @@ private:
     std::unordered_set<const Type*> printed_;  // the enums whose names the file being written prints
     std::unordered_set<const Type*> equated_;  // the types it compares with a function of their own
     std::unordered_set<const Type*> shown_;    // the types it prints with a function of their own
+    std::unordered_set<const Type*> hashed_;   // the types its maps and sets hash with a function of their own
     mutable std::unordered_map<const Type*, std::string> compound_names_;
     mutable std::unordered_map<const Local*, std::string> hidden_names_;
     static constexpr std::uint32_t kNoFile = 0xFFFFFFFFu;

@@ -851,10 +851,12 @@ private:
         Expr* base = e->lhs;
         std::string r(text(l->name));
         if (e->kind == ExprKind::index) {
-            bool list = base->type && base->type->kind == TypeKind::list;
-            error(e->span, "can't move an element out of " + q(place_text(base)) +
-                               (list ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
-                                     : "; move a copy with `.copy()`") + copy_hint(e->type));
+            TypeKind k = base->type ? base->type->kind : TypeKind::error;
+            const char* how = k == TypeKind::list ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
+                            : k == TypeKind::map  ? "; take it out with `remove`, or move a copy with `.copy()`"
+                                                  : "; move a copy with `.copy()`";
+            error(e->span, std::string("can't move ") + (k == TypeKind::map ? "a value" : "an element") + " out of " +
+                               q(place_text(base)) + how + copy_hint(e->type));
         } else if (!w.fields_only || !l->owns) {
             error(e->span, "can't move " + q(place_text(e)) + " out of " + q(r) +
                                (l->owns ? "" : ", a view of the caller's value") + "; move a copy with " +
@@ -941,11 +943,14 @@ private:
                 expr(recv, Use::change);
                 expr(arg(0), recv->type && recv->type->kind == TypeKind::list ? Use::consume : Use::view);
                 return;
-            case BMethod::insert:
+            case BMethod::insert: {
+                // A list's index is read; a map's key and value, and a set's value, move in.
                 expr(recv, Use::change);
-                expr(arg(0), Use::view);
-                expr(arg(1), Use::consume);
+                bool list = recv->type && recv->type->kind == TypeKind::list;
+                expr(arg(0), list ? Use::view : Use::consume);
+                if (arg(1)) expr(arg(1), Use::consume);
                 return;
+            }
             case BMethod::pop: case BMethod::clear: case BMethod::remove: case BMethod::swap_remove:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
             case BMethod::set_len: case BMethod::as_mut_ptr:

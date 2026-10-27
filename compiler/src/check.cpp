@@ -89,10 +89,13 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Copy", "Equal", "Display"}) {
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "Copy", "Equal", "Display", "Hash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
+        n_Map_ = ctx.names.intern("Map");
+        n_Set_ = ctx.names.intern("Set");
+        n_Hash_ = ctx.names.intern("Hash");
         n_Copy_ = ctx.names.intern("Copy");
         n_Equal_ = ctx.names.intern("Equal");
         n_Display_ = ctx.names.intern("Display");
@@ -122,6 +125,7 @@ public:
         check_one_name();
         defer_bounds_ = false;
         for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
+        for (const auto& [key, span] : deferred_keys_) check_key(key, span);
         // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
         for (Item* it : structs_) check_defaults(it);
         defaults_ready_ = true;
@@ -284,7 +288,10 @@ private:
             case TypeKind::optional:
             case TypeKind::array:
             case TypeKind::pointer:
-            case TypeKind::list: return private_part(t->elem);
+            case TypeKind::list: case TypeKind::set: return private_part(t->elem);
+            case TypeKind::map:
+                if (const Item* p = private_part(t->key)) return p;
+                return private_part(t->elem);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
                 return nullptr;
@@ -1045,7 +1052,7 @@ private:
                 if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
                     Name n = b->path.parts[0];
                     flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
-                         : n == n_Display_ ? &p->display_bound : nullptr;
+                         : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound : nullptr;
                 }
                 if (flag) {
                     if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
@@ -1120,7 +1127,8 @@ private:
         if (!t->open) return false;
         switch (t->kind) {
             case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return unresolved(t->elem, vars, s);
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::set: return unresolved(t->elem, vars, s);
+            case TypeKind::map: return unresolved(t->key, vars, s) || unresolved(t->elem, vars, s);
             case TypeKind::tuple:
                 for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
                 return false;
@@ -1150,6 +1158,8 @@ private:
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list: return T.list_of(subst(t->elem, s));
+            case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s));
+            case TypeKind::set: return T.set_of(subst(t->elem, s));
             case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
             case TypeKind::tuple: {
                 std::vector<Type*> elems;
@@ -1180,7 +1190,8 @@ private:
         if (!pattern->open) return pattern == actual;
         if (pattern->kind != actual->kind) return false;
         switch (pattern->kind) {
-            case TypeKind::optional: case TypeKind::list: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::optional: case TypeKind::list: case TypeKind::set: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::pointer:
                 return pattern->is_const == actual->is_const && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::array:
@@ -1248,6 +1259,11 @@ private:
                                 q(params[i]->name) + lacking(args[i], false));
                 ok = false;
             }
+            if (params[i]->hash_bound && !is_bad(args[i]) && !hashable(args[i])) {
+                error(span, name_of(args[i]) + " has no `Hash`, which " + what + " needs for " + q(params[i]->name) +
+                                lacking(args[i], p_hash));
+                ok = false;
+            }
             if (params[i]->display_bound && !is_bad(args[i]) && !printable(args[i])) {
                 error(span, name_of(args[i]) + " can't be shown in a string, which " + what + " needs for " +
                                 q(params[i]->name) + lacking(args[i], true));
@@ -1270,6 +1286,7 @@ private:
             if (p->copy_bound && !is_copy(it->second)) return false;
             if (p->equal_bound && !equatable(it->second)) return false;
             if (p->display_bound && !printable(it->second)) return false;
+            if (p->hash_bound && !hashable(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, b)) return false;
             }
@@ -1376,6 +1393,8 @@ private:
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + "_list";
+            case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + "_map";
+            case TypeKind::set: return mangle(t->elem) + "_set";
             case TypeKind::tuple: {
                 std::string s = "tup";
                 for (Type* e : t->elems) s += "_" + mangle(e);
@@ -1778,6 +1797,26 @@ private:
                     }
                     return T.list_of(elem);
                 }
+                if ((n == n_Map_ || n == n_Set_) && !env_type(n)) {
+                    bool map = n == n_Map_;
+                    if (t->args.size() != (map ? 2u : 1u)) {
+                        error(t->span, map ? "`Map` takes two generic arguments, the types of its keys and values: `Map<String, i32>`"
+                                           : "`Set` takes one generic argument, the type of its values: `Set<i32>`");
+                        return T.error;
+                    }
+                    std::vector<Type*> args;
+                    for (TypeExpr* a : t->args) {
+                        Type* x = resolve_type(a);
+                        if (is_bad(x)) return T.error;
+                        if (x->kind == TypeKind::unit || x->kind == TypeKind::never) {
+                            error(a->span, std::string(map ? "a map" : "a set") + " can't hold " + name_of(x));
+                            return T.error;
+                        }
+                        args.push_back(x);
+                    }
+                    check_key(args[0], t->args[0]->span);
+                    return map ? T.map_of(args[0], args[1]) : T.set_of(args[0]);
+                }
                 if (Type* p = env_type(n)) {
                     if (!t->args.empty()) {
                         error(t->args[0]->span, q(text(n)) + " doesn't take generic arguments");
@@ -1907,7 +1946,7 @@ private:
     static bool is_view_type(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
-            case TypeKind::list: case TypeKind::param:
+            case TypeKind::list: case TypeKind::map: case TypeKind::set: case TypeKind::param:
                 return true;
             case TypeKind::enum_: return t->has_data;
             case TypeKind::optional: return is_view_type(t->elem);
@@ -2554,11 +2593,15 @@ private:
             it->type = elem;
         } else {
             Type* t = check(it, nullptr);
-            if (t->kind == TypeKind::array || t->kind == TypeKind::list) {
+            if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::set) {
                 elem = t->elem;
                 borrowed = place_root(it);
+            } else if (t->kind == TypeKind::map) {
+                // Each key and its value, as a tuple of views: `for (k, v) in m`.
+                elem = t->entry;
+                borrowed = place_root(it);
             } else if (!is_bad(t)) {
-                error(it->span, "a `for` loop goes over a range, an array or a list, not " + name_of(t));
+                error(it->span, "a `for` loop goes over a range, an array, a list, a map or a set, not " + name_of(t));
             }
         }
         s->elem_type = elem;
@@ -2994,30 +3037,39 @@ private:
         return T.str;
     }
 
-    // The derived properties `Equal` and `Display`: whether `==` works on the type, and whether
-    // `{x}` in a string can show it. A struct, enum, tuple, array, optional or list has one when
-    // everything it holds does, so only a generic parameter without the bound lacks either, and
-    // a pointer can't be shown.
-    bool equatable(const Type* t) { return derived(t, false); }
-    bool printable(const Type* t) { return derived(t, true); }
+    // The derived properties `Equal`, `Display` and `Hash`: whether `==` works on the type,
+    // whether `{x}` in a string can show it, and whether it can be a map's key or in a set. A
+    // struct, enum, tuple, array, optional or list has one when everything it holds does, and a
+    // map or a set has `Equal` and `Display` the same way. So a generic parameter lacks one
+    // without the bound, a pointer can't be shown, and neither a float nor a pointer has `Hash`:
+    // `NaN` isn't equal to itself, and an address would make a table's order differ between runs
+    // (D94). A map or a set has no `Hash` either.
+    enum Prop { p_equal = 0, p_display = 1, p_hash = 2 };
+    bool equatable(const Type* t) { return derived(t, p_equal); }
+    bool printable(const Type* t) { return derived(t, p_display); }
+    bool hashable(const Type* t) { return derived(t, p_hash); }
 
-    bool derived(const Type* t, bool show) {
+    bool derived(const Type* t, int prop) {
         switch (t->kind) {
-            case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
-            case TypeKind::rune: case TypeKind::str: case TypeKind::string: return true;
-            case TypeKind::pointer: return !show;
-            case TypeKind::param: return show ? t->display_bound : t->equal_bound;
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return derived(t->elem, show);
+            case TypeKind::bool_: case TypeKind::int_: case TypeKind::char_: case TypeKind::rune: case TypeKind::str:
+            case TypeKind::string: return true;
+            case TypeKind::float_: return prop != p_hash;
+            case TypeKind::pointer: return prop == p_equal;
+            case TypeKind::param:
+                return prop == p_equal ? t->equal_bound || t->hash_bound : prop == p_display ? t->display_bound : t->hash_bound;
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return derived(t->elem, prop);
+            case TypeKind::map: return prop != p_hash && derived(t->key, prop) && derived(t->elem, prop);
+            case TypeKind::set: return prop != p_hash && derived(t->elem, prop);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) {
-                    if (!derived(e, show)) return false;
+                    if (!derived(e, prop)) return false;
                 }
                 return true;
             case TypeKind::struct_: case TypeKind::enum_: break;
             default: return false;
         }
         if (t->is_result) return false;
-        Derived& d = derived_[show];
+        Derived& d = derived_[prop];
         auto it = d.known.find(t);
         if (it != d.known.end()) return it->second;
         // A type that holds itself, through a list, has the property while it's worked out. If it
@@ -3034,11 +3086,11 @@ private:
                     d.order.resize(mark);
                     return true;
                 }
-                ok = ok && derived(f.resolved, show);
+                ok = ok && derived(f.resolved, prop);
             }
         } else {
             for (const VariantDecl& v : t->item->variants) {
-                for (const Type* x : v.types) ok = ok && derived(x, show);
+                for (const Type* x : v.types) ok = ok && derived(x, prop);
             }
         }
         if (!ok) {
@@ -3049,44 +3101,63 @@ private:
         return ok;
     }
 
-    // Why a type lacks `Equal` or `Display`, to end a message with: the parameter or pointer
-    // inside it that does.
-    std::string lacking(const Type* t, bool show) {
+    // Why a type lacks a derived property, to end a message with: what inside it lacks it.
+    std::string lacking(const Type* t, int prop) {
         std::unordered_set<const Type*> seen;
-        const Type* leaf = lacking_part(t, show, seen);
+        const Type* leaf = lacking_part(t, prop, seen);
         if (!leaf) return "";
-        std::string what = show ? "`Display`" : "`Equal`";
-        if (leaf->kind == TypeKind::param) {
-            return "; give " + name_of(leaf) + " the bound " + what;
-        }
-        if (leaf == t) return "";
-        return ", since it holds " + name_of(leaf);
+        static const char* const names[] = {"`Equal`", "`Display`", "`Hash`"};
+        if (leaf->kind == TypeKind::param) return "; give " + name_of(leaf) + " the bound " + names[prop];
+        std::string why;
+        if (prop == p_hash && leaf->kind == TypeKind::float_) why = ", and floats have no `Hash`, since `NaN` isn't equal to itself";
+        if (prop == p_hash && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Hash`, so a table's order can't depend on addresses";
+        if (prop == p_hash && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Hash`";
+        if (leaf == t) return why;
+        return ", since it holds " + name_of(leaf) + why;
     }
 
-    const Type* lacking_part(const Type* t, bool show, std::unordered_set<const Type*>& seen) {
-        if (derived(t, show) || !seen.insert(t).second) return nullptr;
+    const Type* lacking_part(const Type* t, int prop, std::unordered_set<const Type*>& seen) {
+        if (derived(t, prop) || !seen.insert(t).second) return nullptr;
         switch (t->kind) {
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, show, seen);
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
+            case TypeKind::map:
+                if (prop == p_hash) return t;
+                if (const Type* x = lacking_part(t->key, prop, seen)) return x;
+                return lacking_part(t->elem, prop, seen);
+            case TypeKind::set:
+                if (prop == p_hash) return t;
+                return lacking_part(t->elem, prop, seen);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) {
-                    if (const Type* x = lacking_part(e, show, seen)) return x;
+                    if (const Type* x = lacking_part(e, prop, seen)) return x;
                 }
                 return nullptr;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) {
                     if (!f.resolved) continue;
-                    if (const Type* x = lacking_part(f.resolved, show, seen)) return x;
+                    if (const Type* x = lacking_part(f.resolved, prop, seen)) return x;
                 }
                 return nullptr;
             case TypeKind::enum_:
                 for (const VariantDecl& v : t->item->variants) {
                     for (const Type* e : v.types) {
-                        if (const Type* x = lacking_part(e, show, seen)) return x;
+                        if (const Type* x = lacking_part(e, prop, seen)) return x;
                     }
                 }
                 return nullptr;
             default: return t;
         }
+    }
+
+    // A key of a map or a value of a set must have `Hash`. While types are still being resolved,
+    // the check waits, like the bounds, since the key's fields may not be known yet.
+    void check_key(const Type* key, Span span) {
+        if (defer_bounds_) {
+            deferred_keys_.push_back({key, span});
+            return;
+        }
+        if (is_bad(key) || hashable(key)) return;
+        error(span, name_of(key) + " can't be a key of a map or a set, since it has no `Hash`" + lacking(key, p_hash));
     }
 
     // --- names -----------------------------------------------------------------------------
@@ -3700,6 +3771,20 @@ private:
     }
 
     Type* index_type(Expr* e, Type* base) {
+        if (base->kind == TypeKind::map) {
+            // `m[key]`: the value of a key that's there. A `String` key can be a `str`.
+            Type* look = lookup_key(base);
+            Type* kt = check(e->rhs, look);
+            if (!look && !is_bad(kt) && kt->kind != TypeKind::str && kt->kind != TypeKind::string) {
+                error(e->rhs->span, "a `String` key is looked up with a `str` or a `String`, not " + a_type(kt));
+            }
+            return base->elem;
+        }
+        if (base->kind == TypeKind::set) {
+            check(e->rhs, nullptr);
+            error(e->span, "a set can't be indexed; ask whether it has a value with `contains`");
+            return T.error;
+        }
         Type* it = check(e->rhs, T.usize);
         if (is_bad(base)) return T.error;
         if (base->kind == TypeKind::list) return base->elem;
@@ -4863,6 +4948,7 @@ private:
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
+            if ((n == n_Map_ || n == n_Set_) && !find_local(n)) return table_call(e, expected, n == n_Map_);
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
                 for (const Arg& a : e->args) check(a.value, nullptr);
                 error(e->span, q(text(n)) + " only matches a result; a function that can fail gives back its value with "
@@ -4993,7 +5079,8 @@ private:
                     return T.error;
                 }
             }
-            if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list) {
+            if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list ||
+                recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
                 return builtin_method(e, recv);
             }
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
@@ -5782,6 +5869,46 @@ private:
         return t;
     }
 
+    // `Map<String, i32>()` and `Set<i32>()`: an empty map or set, from the generic arguments or the
+    // type expected. It allocates nothing until something goes in.
+    Type* table_call(Expr* e, Type* expected, bool map) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        TypeKind kind = map ? TypeKind::map : TypeKind::set;
+        const char* name = map ? "Map" : "Set";
+        Type* t = nullptr;
+        std::size_t want = map ? 2 : 1;
+        if (callee->type_args.size() == want) {
+            std::vector<Type*> args;
+            for (TypeExpr* a : callee->type_args) {
+                Type* x = resolve_type(a);
+                if (is_bad(x)) return T.error;
+                args.push_back(x);
+            }
+            check_key(args[0], callee->type_args[0]->span);
+            t = map ? T.map_of(args[0], args[1]) : T.set_of(args[0]);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, map ? "`Map` takes two generic arguments, the types of its keys and values: `Map<String, i32>()`"
+                                    : "`Set` takes one generic argument, the type of its values: `Set<i32>()`");
+            return T.error;
+        } else if (expected && expected->kind == kind) {
+            t = expected;
+        } else {
+            error(e->span, std::string("can't tell what this ") + (map ? "map" : "set") + " holds; give it, as in `" +
+                               (map ? "Map<String, i32>()" : "Set<i32>()") + "`, or give the variable a type");
+            return T.error;
+        }
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->args[0].span, std::string("`") + name + "<...>()` takes no arguments; add to it with `insert`");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        e->is_const = true;
+        return t;
+    }
+
     // `String()` is empty, and `String(s)` is the `str` as a `String`.
     Type* string_call(Expr* e) {
         if (e->args.empty()) {
@@ -5815,7 +5942,14 @@ private:
         return recv;
     }
 
-    // The methods of `String` and `List<T>`.
+    // A map's or a set's key argument: a `String` key is looked up with a `str` or a `String`, so
+    // looking one up never makes a `String`. `nullptr` stands for either, as for text.
+    static Type* lookup_key(const Type* table) {
+        Type* k = table->kind == TypeKind::map ? table->key : table->elem;
+        return k->kind == TypeKind::string ? nullptr : k;
+    }
+
+    // The methods of `String`, `List<T>`, `Map<K, V>` and `Set<T>`.
     Type* builtin_method(Expr* e, Type* recv) {
         std::string_view m = text(e->callee->member);
         e->call = CallKind::builtin_method;
@@ -5845,6 +5979,25 @@ private:
             else if (m == "push_str") b = BMethod::push_str, changes = true, params = {nullptr};
             else if (m == "clear") b = BMethod::clear, changes = true;
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+        } else if (recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
+            bool map = recv->kind == TypeKind::map;
+            Type* look = lookup_key(recv);
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            else if (m == "insert") b = BMethod::insert, changes = true, params = map ? std::vector<Type*>{recv->key, recv->elem}
+                                                                                         : std::vector<Type*>{recv->elem};
+            else if (m == "remove") b = BMethod::remove, changes = true, params = {look}, result = map ? T.optional_of(recv->elem) : T.unit;
+            else if (m == "contains") b = BMethod::contains, params = {look}, result = T.bool_;
+            else if (m == "get" && map) b = BMethod::get, params = {look}, result = T.optional_of(recv->elem);
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            if (b == BMethod::get && !is_copy(recv->elem) && !is_bad(recv->elem)) {
+                error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(recv->elem) +
+                                           " owns memory; read it in place with `m[key]`");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
         } else {
             Type* el = recv->elem;
             if (m == "len") b = BMethod::len, result = T.usize;
@@ -6044,21 +6197,24 @@ private:
     // value, and rejects a struct or enum that holds itself.
     void order_types() {
         std::unordered_map<Type*, int> state;  // 1 visiting, 2 done
+        std::vector<Type*> later;
         std::unordered_set<const Item*> reported;
         // Generic declarations are walked too, to find a type that holds itself, but only closed
         // types are emitted.
         auto visit = [&](auto& self, Type* t) -> void {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: break;
                 default: return;
             }
             int& st = state[t];
             if (st == 2) return;
-            if (t->kind == TypeKind::list) {
-                // Its elements are behind a pointer, so it needs only their declaration.
+            if (t->kind == TypeKind::list || t->kind == TypeKind::map || t->kind == TypeKind::set) {
+                // Its elements are behind a pointer, so it needs only their declaration. A map's
+                // `(K, V)`, which its functions read, is ordered once everything else is.
                 st = 2;
                 if (!t->open) prog_.type_order.push_back(t);
+                if (t->kind == TypeKind::map) later.push_back(t->entry);
                 return;
             }
             if (st == 1) {
@@ -6091,6 +6247,7 @@ private:
         for (Item* e : enums_) visit(visit, e->declared);
         for (std::size_t i = 0; i < instances_.size(); i++) visit(visit, instances_[i]);
         for (Type* a : T.compounds()) visit(visit, a);
+        for (std::size_t i = 0; i < later.size(); i++) visit(visit, later[i]);
     }
 
     void check_unused_items() {
@@ -6161,13 +6318,14 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    // What `derived` has worked out, for `Equal` (0) and `Display` (1).
+    // What `derived` has worked out, for `Equal`, `Display` and `Hash`.
     struct Derived {
         std::unordered_map<const Type*, bool> known;
         std::vector<const Type*> order;
     };
-    Derived derived_[2];
-    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_Equal_, n_Display_, n_copy_, n_ok_, n_err_;
+    Derived derived_[3];
+    Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_copy_, n_ok_,
+        n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
     Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
     std::vector<Name> builtin_names_, reserved_names_;
@@ -6204,6 +6362,7 @@ private:
     std::unordered_map<Item*, std::vector<Type*>> unfilled_;
     std::vector<Item*> pending_fns_;
     std::vector<DeferredBounds> deferred_bounds_;
+    std::vector<std::pair<const Type*, Span>> deferred_keys_;
     std::unordered_set<std::string> c_names_;
     std::unordered_set<std::string> prefixes_;
     std::unordered_set<Item*> failed_generics_;

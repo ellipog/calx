@@ -1,11 +1,11 @@
 ---
 title: Comparing and printing
-description: The derived Equal and Display, which give == and {x} to structs, enums, tuples, arrays, optionals and lists; the bounds T: Equal and T: Display; and their C.
+description: The derived Equal and Display, which give == and {x} to structs, enums, tuples, arrays, optionals, lists, maps and sets; the bounds T: Equal and T: Display; and their C.
 ---
 
 # Comparing and printing
 
-A value can be compared with `==` and shown in a string whenever everything it holds can. These are two of the derived properties ([spec](../CALX_SPEC.md#derived-properties)): the compiler works them out for each type, so there's nothing to write.
+A value can be compared with `==` and shown in a string whenever everything it holds can. These are two of the derived properties ([spec](../CALX_SPEC.md#derived-properties)): the compiler works them out for each type, so there's nothing to write. A third, [`Hash`](maps.md#hash), says which types can be the keys of a map.
 
 ```calx
 struct Point {
@@ -41,6 +41,7 @@ fn main() {
 | A tuple or an array | Every part is equal |
 | An optional | Both are `none`, or both hold equal values ([optionals](optionals.md#comparing)) |
 | `List<T>` | Both have the same length, and equal elements in the same order |
+| `Map<K, V>`, `Set<T>` | Both have the same keys, with equal values, in any order ([maps and sets](maps.md#comparing-and-printing)) |
 | `String` and `str` | Both hold the same bytes |
 | A float | As floats compare: `NaN` never equals anything, and `0.0 == -0.0` ([floats](floats.md)) |
 
@@ -75,6 +76,7 @@ fn main() {
 | An enum | The variant, as it's built but without the enum's name: `Stone`, `Sword(5)`, `Rect { w: 2.0, h: 3.0 }` |
 | A tuple | `(1, a, true)` |
 | An array or a `List` | `[1, 2, 3]`, as Java's `ArrayList.toString` ([lists](lists.md#printing)) |
+| A `Map` or a `Set` | `{1: one, 2: two}` or `{1, 2}`, in the order a loop goes ([maps and sets](maps.md#order)) |
 | An optional | `some(5)` or `none` |
 | `String`, `str`, `char`, `rune` | The text itself, without quotes, even inside a struct or a list |
 | A number or a `bool` | As Java prints it ([integers](integers.md), [floats](floats.md#printing)) |
@@ -132,10 +134,10 @@ fn main() {
 }
 ```
 
-Like `Copy`, `Equal` and `Display` are properties, not interfaces: no `impl` gives them, and the names are reserved. A type writing its own, to compare only some fields or to show itself another way, is designed but not built ([spec](../CALX_SPEC.md#derived-properties)).
+Like `Copy` and `Hash`, `Equal` and `Display` are properties, not interfaces: no `impl` gives them, and the names are reserved. A type writing its own, to compare only some fields or to show itself another way, is designed but not built ([spec](../CALX_SPEC.md#derived-properties)).
 
 ## In C
 
-A file that compares or prints a struct, an enum with data, a tuple, an array, an optional or a list gets a `static inline` function for it, and for each such type it holds: `cx_eq_<type>(a, b)` and `cx_show_<type>(v)`. Only the ones the file uses are made.
+A file that compares or prints a struct, an enum with data, a tuple, an array, an optional, a list or a table gets a `static inline` function for it, and for each such type it holds: `cx_eq_<type>(a, b)` and `cx_show_<type>(v)`. A key type gets `cx_hash_<type>(v)` the same way. Only the ones the file uses are made.
 
 `cx_eq_` is the field comparisons, in order, joined with `&&`, so comparing two `Point`s is two integer comparisons once clang inlines it. `cx_show_` writes each piece straight to the output, or to the `String` being built, so showing a value builds no strings for its parts, and the text between two values is written in one go.

@@ -14,7 +14,7 @@ What sets it apart:
 - **Stricter than Rust.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
 - **Fast to build.** `calx run` on a small program takes about 0.3 s from an empty cache and under 25 ms when nothing changed.
 
-Status: Phase 3's gate has passed and is in review. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, error values (`T ! E`, `fail`, `try`), `unsafe` code with C functions, and `parallel for`. They give Java's results on Windows and Linux. The standard library has `std.io`, `std.env`, `std.time`, `std.math`, `std.pool` and `std.net`, TCP driven by events on IOCP and epoll. Java-compatible collections and strings are next, then actors. The [reference](docs/README.md#reference) lists what's built.
+Status: Phase 3's gate has passed and is in review. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), `unsafe` code with C functions, and `parallel for`. They give Java's results on Windows and Linux. The standard library has `std.io`, `std.env`, `std.time`, `std.math`, `std.pool` and `std.net`, TCP driven by events on IOCP and epoll. Java-compatible collections and strings are next, then actors. The [reference](docs/README.md#reference) lists what's built.
 
 ## Performance
 

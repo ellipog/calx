@@ -1,0 +1,125 @@
+// Random inserts, removes and lookups checked against plain arrays, over key ranges from a few
+// keys to thousands: tables smaller than a group, DELETED slots left by removing, and growing
+// and rebuilding after them. Every count printed is a mismatch with the arrays, so all are 0.
+
+fn next(s: u64) -> u64 {
+    return s * 6364136223846793005u64 + 1442695040888963407u64
+}
+
+fn churn(keys: usize, ops: i32, seed: u64) {
+    var m = Map<usize, i64>()
+    var has = [false; 4096]
+    var vals = [0i64; 4096]
+    var s = seed
+    var bad = 0
+    var count = 0usize
+    for op in 0..ops {
+        s = next(s)
+        let k = usize.wrap(s >> 33) % keys
+        let what = (s >> 20) % 8u64
+        if what < 4u64 {
+            m.insert(k, i64(op))
+            if not has[k] {
+                count += 1
+            }
+            has[k] = true
+            vals[k] = i64(op)
+        } else if what < 7u64 {
+            let got = m.remove(k)
+            if has[k] {
+                count -= 1
+                if got != some(vals[k]) {
+                    bad += 1
+                }
+            } else if got != none {
+                bad += 1
+            }
+            has[k] = false
+        } else if m.contains(k) != has[k] {
+            bad += 1
+        }
+        if m.len() != count {
+            bad += 1
+        }
+    }
+    var seen = 0usize
+    for (k, v) in m {
+        if not has[k] or vals[k] != v {
+            bad += 1
+        }
+        seen += 1
+    }
+    for k in 0usize..keys {
+        if m.get(k) != (if has[k] { some(vals[k]) } else { none }) {
+            bad += 1
+        }
+    }
+    println("{keys} keys: {bad} wrong, {seen == count}")
+}
+
+// String keys go through the other `put`: the key compared as a `str`, and dropped when a key
+// that's there is inserted again.
+fn names(ops: i32) {
+    var m = Map<String, i32>()
+    var has = [false; 50]
+    var s = 7u64
+    var bad = 0
+    for op in 0..ops {
+        s = next(s)
+        let k = usize.wrap(s >> 33) % 50
+        let name = "block_{k}"
+        if (s >> 20) % 3u64 == 0u64 {
+            if (m.remove(name) != none) != has[k] {
+                bad += 1
+            }
+            has[k] = false
+        } else {
+            m.insert(name, op)
+            has[k] = true
+        }
+    }
+    for k in 0usize..50 {
+        if m.contains("block_{k}") != has[k] {
+            bad += 1
+        }
+    }
+    println("names: {bad} wrong")
+}
+
+fn sets(ops: i32) {
+    var t = Set<u32>()
+    var has = [false; 300]
+    var s = 99u64
+    var bad = 0
+    for _ in 0..ops {
+        s = next(s)
+        let k = u32.wrap(s >> 33) % 300u32
+        if (s >> 20) % 2u64 == 0u64 {
+            t.insert(k)
+            has[usize(k)] = true
+        } else {
+            t.remove(k)
+            has[usize(k)] = false
+        }
+    }
+    var n = 0usize
+    for k in 0usize..300 {
+        if t.contains(u32.wrap(k)) != has[k] {
+            bad += 1
+        }
+        if has[k] {
+            n += 1
+        }
+    }
+    println("set: {bad} wrong, {t.len() == n}")
+}
+
+fn main() {
+    churn(3, 2000, 1u64)           // out: 3 keys: 0 wrong, true
+    churn(12, 5000, 2u64)          // out: 12 keys: 0 wrong, true
+    churn(40, 20000, 3u64)         // out: 40 keys: 0 wrong, true
+    churn(700, 50000, 4u64)        // out: 700 keys: 0 wrong, true
+    churn(4096, 200000, 5u64)      // out: 4096 keys: 0 wrong, true
+    names(20000)                   // out: names: 0 wrong
+    sets(30000)                    // out: set: 0 wrong, true
+}
