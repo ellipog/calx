@@ -689,6 +689,11 @@ private:
                 if (!scan_) declare(hidden);
             }
         }
+        // The ends of `m.range(a..b)` are worked out after `m`, before the loop (D112).
+        if (s->range_of) {
+            if (s->range_of->lhs) expr(s->range_of->lhs, Use::view);
+            if (s->range_of->rhs) expr(s->range_of->rhs, Use::view);
+        }
         auto iteration = [&] {
             scopes_.emplace_back();
             if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it), false});

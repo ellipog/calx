@@ -161,6 +161,9 @@ enum class BMethod : std::uint8_t {
     // On a `LinkedMap` or a `LinkedSet`, at the ends of the order its keys are in (D109).
     first, last, pop_first, pop_last, move_to_first, move_to_last, insert_first, insert_last,
     push_first, push_last,  // on a `Deque`, which has `first`, `last`, `pop_first` and `pop_last` too
+    // On a `SortedMap` or a `SortedSet`, which has the ends too: the nearest key on a side, and
+    // the keys in a range, only as what a `for` loop goes over (D112).
+    floor, ceiling, lower, higher, range,
     runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };
@@ -340,6 +343,7 @@ struct Stmt {
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
     BMethod text_iter = BMethod::none;  // for: `s.runes()` or `s.chars()`, with `value` now `s`
+    Expr* range_of = nullptr;      // for: the range of `m.range(a..b)`, with `value` now `m` (D112)
     Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).
     Slice<Local*> drops;           // return, break, continue: what's dropped before leaving

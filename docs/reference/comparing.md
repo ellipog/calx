@@ -42,7 +42,7 @@ fn main() {
 | An optional | Both are `none`, or both hold equal values ([optionals](optionals.md#comparing)) |
 | `List<T>` | Both have the same length, and equal elements in the same order |
 | `Deque<T>` | The same, from each one's first element ([deques](deques.md#whats-different)) |
-| `Map<K, V>`, `Set<T>` | Both have the same keys, with equal values, in any order ([maps and sets](maps.md#comparing-and-printing)) |
+| `Map<K, V>`, `Set<T>` | Both have the same keys, with equal values, in any order ([maps and sets](maps.md#comparing-and-printing)), and the other maps and sets the same way |
 | `String` and `str` | Both hold the same bytes |
 | A float | As floats compare: `NaN` never equals anything, and `0.0 == -0.0` ([floats](floats.md)) |
 
@@ -223,7 +223,7 @@ A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in 
 | `Equal` | `fn eq(self, other: Self) -> bool` | `==` and `!=`, `contains`, a map's or a set's keys |
 | `Display` | `fn show(self)` | `{x}` in a string |
 | `Hash` | `fn hash(self, h: mut Hasher)` | A map's or a set's keys |
-| `Order` | `fn cmp(self, other: Self) -> Ordering` | `<`, `<=`, `>`, `>=`, `a.cmp(b)` and `sort` |
+| `Order` | `fn cmp(self, other: Self) -> Ordering` | `<`, `<=`, `>`, `>=`, `a.cmp(b)`, `sort`, and the keys of a `SortedMap` or a `SortedSet` ([sorted maps](sorted-maps.md#keys)) |
 | `JavaHash` | `fn java_hash(self) -> i32` | `x.java_hash()`, the keys of a `JavaHashMap`, a `JavaHashSet`, an `OpenHashMap` or an `OpenHashSet` ([Java's hash maps](java-maps.md#javahash)) |
 
 What holds the type uses its function too: a list of them shows each one its way, and a struct with one as a field compares that field with it.

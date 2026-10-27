@@ -549,14 +549,16 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose) {
     BuildResult r;
     fs::path runtime = fs::path(tc.home) / "runtime";
-    std::string rt_h, rt_c, sort_h;
+    std::string rt_h, rt_c, sort_h, btree_h;
     if (!read_file((runtime / "calx_rt.h").string(), rt_h) || !read_file((runtime / "calx_rt.c").string(), rt_c) ||
-        !read_file((runtime / "calx_sort.h").string(), sort_h)) {
+        !read_file((runtime / "calx_sort.h").string(), sort_h) || !read_file((runtime / "calx_btree.h").string(), btree_h)) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }
-    // Any file may include the sort's template, so the keys cover it as they cover the header.
+    // Any file may include the sort's template or the sorted tables' (D112), so the keys cover them
+    // as they cover the header.
     rt_h += sort_h;
+    rt_h += btree_h;
     // Java's semantics hold in every mode: wrapping, no contraction (D63, CALX_SPEC.md).
     // Line tables in both modes, so debuggers and profilers show Calx lines through `#line`.
     // They don't change the generated code.

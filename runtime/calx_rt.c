@@ -856,6 +856,12 @@ void cx_panic_key(const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_range(const char* at) {
+    cx_panic_begin(at);
+    panic_text("the range ends before it starts");
+    cx_panic_end();
+}
+
 void cx_panic_load_factor(const char* at) {
     cx_panic_begin(at);
     panic_text("the load factor must be greater than 0 and less than 1");

@@ -1,0 +1,18 @@
+fn main() {
+    var s = SortedSet<i32>()
+    for i in 0..10 {
+        s.insert(i)
+    }
+    var n = 0
+    for x in s.range(3..3) {
+        n += x
+    }
+    for x in s.range(3..=3) {
+        n += x
+    }
+    println("{n}")    // out: 3
+    let from = 7
+    for x in s.range(from..2) {    // panic: the range ends before it starts
+        n += x
+    }
+}

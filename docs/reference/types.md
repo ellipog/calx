@@ -57,6 +57,7 @@ fn main() {
 - `String` owns UTF-8 text and can change it ([strings](strings.md)).
 - `List<T>` is a growable array that owns its elements ([lists](lists.md)).
 - `Deque<T>` is a growable ring, added to and taken from at both ends ([deques](deques.md)).
+- `Map<K, V>` and `Set<T>` are hash tables ([maps and sets](maps.md)), and `SortedMap<K, V>` and `SortedSet<T>` keep their keys in order ([sorted maps](sorted-maps.md)).
 
 ## Structs, enums and tuples
 

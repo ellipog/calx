@@ -391,6 +391,8 @@ CX_INLINE void cx_lk_move(cx_lhead* l, cx_usize i, cx_bool front) {
 cx_u32* cx_lk_alloc(cx_usize buckets);
 void cx_lk_free(cx_u32* link, cx_usize buckets);
 CX_COLD void cx_panic_key(const char* at);
+/* `m.range(a..b)` on a `SortedMap` or a `SortedSet`, with `b` before `a` (D112). */
+CX_COLD void cx_panic_range(const char* at);
 /* An `OpenHashMap`'s or an `OpenHashSet`'s load factor isn't between 0 and 1, or it's asked for
  * more keys than fastutil's tables hold. */
 CX_COLD void cx_panic_load_factor(const char* at);

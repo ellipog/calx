@@ -241,7 +241,7 @@ These iterate in exactly the order the Java collections do, for the same sequenc
 | --- | --- |
 | `JavaHashMap<K, V>`, `JavaHashSet<T>` | `java.util.HashMap`, `HashSet`, including hash spreading, power-of-two tables, the resize split order and tree bins. Built: [Java's hash maps](reference/java-maps.md) (D105) |
 | `LinkedMap<K, V>`, `LinkedSet<T>` | `LinkedHashMap`, `LinkedHashSet`, and fastutil's linked tables such as `Long2ObjectLinkedOpenHashMap`: the order keys went in, which no hashing changes, so it's Calx's own table with a list through it, with Java's `putFirst` and fastutil's `getAndMoveToFirst` and `removeLast`, and access order written as `move_to_last`. Built: [Linked maps and sets](reference/linked-maps.md) (D109) |
-| `java.TreeMap<K, V>`, `java.TreeSet<T>` | `TreeMap`, `TreeSet` (`SortedMap` in the samples) |
+| `SortedMap<K, V>`, `SortedSet<T>` | `TreeMap`, `TreeSet`, and fastutil's tree tables such as `LongAVLTreeSet`: key order, which no tree's shape changes, so it's Calx's own B+ tree, with the nearest key on either side as `floor`, `ceiling`, `lower` and `higher`, and `subMap`, `headMap` and `tailMap` written as a loop over `range(a..b)`. A comparator is a key type with that `Order`. Built: [Sorted maps and sets](reference/sorted-maps.md) (D112) |
 | `java.ArrayList<T>` | The same, including growth sizes where they can be seen |
 | `Deque<T>` | `ArrayDeque`, and the `Queue` and `Deque` vanilla keeps in a `LinkedList` or an `ArrayDeque`: their order is the order elements went in at each end, which growth never changes, so the native `Deque` is them. Built: [Deques](reference/deques.md) (D110) |
 | `OpenHashMap<K, V>`, `OpenHashSet<T>` | fastutil's open hash maps and sets, `Long2ObjectOpenHashMap`, `Object2IntOpenHashMap`, `LongOpenHashSet` and the rest, the key type picking the class, with fastutil's hash mixing (`HashCommon.mix`), load factors, removal by shifting and shrinking. Built: [fastutil's hash maps](reference/fastutil-maps.md) (D107) |
@@ -255,7 +255,7 @@ Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the 
 | `List<T>` | A growable array. Built: [Lists](reference/lists.md) |
 | `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen. Built: [Maps and sets](reference/maps.md) |
 | `LinkedMap<K, V>`, `LinkedSet<T>` | A map or a set that iterates in the order keys went in, which is Java's and fastutil's too. Built: [Linked maps and sets](reference/linked-maps.md) |
-| `SortedMap<K, V>` | A B-tree map in key order |
+| `SortedMap<K, V>`, `SortedSet<T>` | A B+ tree map or set in key order, with ranges, which is Java's and fastutil's order too. Built: [Sorted maps and sets](reference/sorted-maps.md) |
 | `SlotMap<T>` | Storage behind `Handle<T>` |
 | `Deque<T>` | A growable ring, added to and taken from at both ends. Built: [Deques](reference/deques.md) |
 | `BitSet` | |

@@ -1,0 +1,8 @@
+// A value that owns memory can't be moved out of a sorted map by indexing, which would leave a
+// hole; it's taken out with `remove`, `pop_first` or `pop_last`.
+fn main() {
+    var m = SortedMap<i32, String>()
+    m.insert(1, String("one"))
+    let taken = m[1]    // error: can't move a value out of `m`; take it out with `remove`, or move a copy with `.copy()`
+    println(taken)
+}

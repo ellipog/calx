@@ -1,0 +1,7 @@
+fn main() {
+    var m = SortedMap<String, i32>()
+    m.insert(String("stone"), 1)
+    m["stone"] += 1
+    println("{m["stone"]}")    // out: 2
+    m["dirt"] = 5    // panic: the key isn't in the map; add it with `insert`
+}

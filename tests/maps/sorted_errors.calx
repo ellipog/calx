@@ -1,0 +1,34 @@
+// What `SortedMap` and `SortedSet` can't do: hold a key without `Order`, take a comparator or a
+// size, copy out a key that owns memory, go over a range anywhere but in a `for` loop, or change
+// during a loop over them.
+fn keyed<T>(x: T) -> SortedSet<T> {    // error: `T` can't be a key of a `SortedMap` or a `SortedSet`, since it has no `Order`; give `T` the bound `Order`
+    var s = SortedSet<T>()    // error: `T` can't be a key of a `SortedMap` or a `SortedSet`, since it has no `Order`; give `T` the bound `Order`
+    s.insert(x)
+    return s
+}
+
+fn main() {
+    let a = SortedSet<f64>()    // error: `f64` can't be a key of a `SortedMap` or a `SortedSet`, since it has no `Order`, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    let b = SortedMap<i32, i32>(16)    // error: `SortedMap<...>()` takes no arguments, since its keys go in their `Order`; keys that go in another order are of a type with that `Order`
+    var words = SortedSet<String>()
+    words.insert(String("stone"))
+    println("{words.first()}")    // error: `first` copies the key out, so it needs keys that are `Copy`, and `String` owns memory; take it out with `pop_first`, or read it in a loop, which starts at the least
+    println("{words.floor("t")}")    // error: `floor` copies the key out, so it needs keys that are `Copy`, and `String` owns memory; go over the keys from it with `for k in s.range(x..)`
+    words.reserve(8)    // error: `SortedSet<String>` has no method `reserve`
+    var m = SortedMap<i32, i32>()
+    m.insert_last(1, 2)    // error: `SortedMap<i32, i32>` has no method `insert_last`
+    let r = m.range(1..3)    // error: `range` goes over the keys in a `for` loop: `for (k, v) in m.range(a..b)`
+    for (k, _) in m.range(4) {    // error: `range` takes a range of keys: `a..b`, `a..=b`, `a..`, `..b` or `..=b`
+        println("{k}")
+    }
+    for (k, _) in m.range("a"..) {    // error: expected `i32`, found `str`
+        println("{k}")
+    }
+    for (k, _) in m.range(0..10) {
+        m.insert(k + 1, 0)    // error: `m` can't be changed while a `for` loop goes over it
+    }
+    let fixed = SortedSet<i32>()
+    _ = fixed.pop_first()    // error: `fixed` can't be changed; declare it with `var` to change it
+    let h: SortedMap<i32, i32> = Map<i32, i32>()    // error: expected `SortedMap<i32, i32>`, found `Map<i32, i32>`
+    println("{a.len()} {b.len()} {h.len()} {keyed(1).len()} {r.len()}")
+}

@@ -1,0 +1,173 @@
+// `SortedMap` and `SortedSet`: keys in their `Order`, the nearest key on either side, ranges, and
+// keys and values that own memory, as Java's `TreeMap` and `TreeSet` (D112).
+struct Pos {
+    x: i32
+    z: i32
+}
+
+enum Stage {
+    Empty
+    Structures
+    Noise
+    Full
+}
+
+fn total(m: SortedMap<i32, i32>) -> i32 {
+    var t = 0
+    for (_, v) in m {
+        t += v
+    }
+    return t
+}
+
+fn main() {
+    // In order, whatever order they went in, and each key once.
+    var m = SortedMap<i32, i32>()
+    for k in [5, 3, 9, 1, 7, 3] {
+        m.insert(k, k * 10)
+    }
+    println("{m}")    // out: {1: 10, 3: 30, 5: 50, 7: 70, 9: 90}
+    println("{m.len()} {m.first()} {m.last()}")    // out: 5 some(1) some(9)
+    println("{m.floor(4)} {m.ceiling(4)} {m.lower(5)} {m.higher(5)}")    // out: some(3) some(5) some(3) some(7)
+    println("{m.floor(0)} {m.ceiling(10)} {m.floor(9)} {m.ceiling(1)}")    // out: none none some(9) some(1)
+    m[3] += 1
+    println("{m.get(3)} {m.get(4)} {m.contains(9)} {total(m)}")    // out: some(31) none true 251
+    println("{m.remove(5)} {m.remove(5)} {m.pop_first()} {m.pop_last()}")    // out: some(50) none some((1, 10)) some((9, 90))
+    println("{m}")    // out: {3: 31, 7: 70}
+
+    // Ranges, from where they start to where they end; an end left out is the table's.
+    var big = SortedMap<i64, String>()
+    for i in 0..20 {
+        big.insert(i64(i * 5), "v{i}")
+    }
+    var got = List<String>()
+    for (k, v) in big.range(12..30) {
+        got.push("{k}={v}")
+    }
+    println("{got}")    // out: [15=v3, 20=v4, 25=v5]
+    var ks = List<i64>()
+    for (k, _) in big.range(15..=30) {
+        ks.push(k)
+    }
+    for (k, _) in big.range(..10) {
+        ks.push(-k)
+    }
+    println("{ks}")    // out: [15, 20, 25, 30, 0, -5]
+    ks.clear()
+    for (k, _) in big.range(..=10) {
+        ks.push(k)
+    }
+    for (k, _) in big.range(88..) {
+        ks.push(k)
+    }
+    for (k, _) in big.range(40..40) {
+        ks.push(k)
+    }
+    for (k, _) in big.range(1000..) {
+        ks.push(k)
+    }
+    println("{ks}")    // out: [0, 5, 10, 90, 95]
+    var seen = 0
+    for (k, v) in big.range(0..) {
+        if k == 10 {
+            continue
+        }
+        if v == "v6" {
+            break
+        }
+        seen += 1
+    }
+    println("{seen}")    // out: 5
+    big[10].push_str("!")
+    println("{big[10]} {big.len()}")    // out: v2! 20
+
+    // Text keys are found by a `str`, in byte order, which is code point order.
+    var names = SortedSet<String>()
+    for n in ["stone", "Stone", "dirt", "dirt", "éclair", "zinc"] {
+        names.insert(String(n))
+    }
+    println("{names}")    // out: {Stone, dirt, stone, zinc, éclair}
+    println("{names.contains("dirt")} {names.contains("Dirt")}")    // out: true false
+    var from_d: usize = 0
+    for n in names.range("d".."t") {
+        from_d += n.len()
+    }
+    println("{from_d}")    // out: 9
+    names.remove("stone")
+    println("{names.pop_first()} {names}")    // out: some(Stone) {dirt, zinc, éclair}
+    // The ends of a range are views, so they're still there after it.
+    let lo = String("d")
+    let hi = String("z")
+    var count = 0
+    for _ in names.range(lo..hi) {
+        count += 1
+    }
+    println("{count} {lo}{hi}")    // out: 1 dz
+
+    // Keys compared field by field, as their derived `Order` does, and enums in the order of their
+    // variants.
+    var at = SortedMap<Pos, String>()
+    at.insert(Pos { x: 1, z: 2 }, String("b"))
+    at.insert(Pos { x: 0, z: 9 }, String("a"))
+    at.insert(Pos { x: 1, z: -4 }, String("c"))
+    var shown = List<String>()
+    for (p, s) in at {
+        shown.push("{p.x},{p.z}:{s}")
+    }
+    println("{shown}")    // out: [0,9:a, 1,-4:c, 1,2:b]
+    println("{at.floor(Pos { x: 1, z: 0 })}")    // out: some(Pos { x: 1, z: -4 })
+    var stages = SortedSet<Stage>()
+    stages.insert(Stage.Full)
+    stages.insert(Stage.Empty)
+    stages.insert(Stage.Noise)
+    println("{stages} {stages.higher(Stage.Structures)}")    // out: {Empty, Noise, Full} some(Noise)
+    var pairs = SortedSet<(i32, i32)>()
+    for p in [(2, 1), (1, 5), (2, 0), (1, 5)] {
+        pairs.insert(p)
+    }
+    println("{pairs}")    // out: {(1, 5), (2, 0), (2, 1)}
+
+    // Values that own memory, and tables in tables.
+    var lists = SortedMap<String, List<String>>()
+    lists.insert(String("b"), [String("x")])
+    lists.insert(String("a"), [])
+    lists["a"].push(String("y"))
+    lists["b"].push(String("z"))
+    println("{lists}")    // out: {a: [y], b: [x, z]}
+    if let (k, v) = lists.pop_last() {
+        println("{k} {v} {lists.len()}")    // out: b [x, z] 1
+    }
+    var nested = SortedMap<i32, SortedSet<String>>()
+    nested.insert(2, SortedSet<String>())
+    nested[2].insert(String("q"))
+    nested[2].insert(String("p"))
+    nested.insert(1, SortedSet<String>())
+    let copy = nested.copy()
+    nested[1].insert(String("r"))
+    println("{copy} {nested}")    // out: {1: {}, 2: {p, q}} {1: {r}, 2: {p, q}}
+    println("{copy == nested}")    // out: false
+    _ = nested[1].pop_first()
+    println("{copy == nested}")    // out: true
+    let empty = SortedSet<i32>()
+    println("{empty} {empty.first()} {empty.floor(3)} {empty.len()} {empty.is_empty()}")    // out: {} none none 0 true
+
+    // Many keys: in order, out of order, and taken out again, so nodes split and merge.
+    var many = SortedSet<i32>()
+    for i in 0..5000 {
+        many.insert((i * 7919) % 5000)
+    }
+    var sorted = many.len() == 5000
+    var expect = 0
+    for x in many {
+        sorted = sorted and x == expect
+        expect += 1
+    }
+    for i in 0..5000 {
+        if i % 3 != 0 {
+            many.remove(i)
+        }
+    }
+    println("{sorted} {many.len()} {many.first()} {many.last()} {many.ceiling(4000)}")    // out: true 1667 some(0) some(4998) some(4002)
+    many.clear()
+    println("{many.len()} {many}")    // out: 0 {}
+}

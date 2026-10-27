@@ -39,7 +39,7 @@ enum class TypeKind : std::uint8_t {
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
 // table (D107), or Calx's own with a list through its keys in the order they went in (D109).
 // Each goes in its own order.
-enum class TableKind : std::uint8_t { native, java, fastutil, linked };
+enum class TableKind : std::uint8_t { native, java, fastutil, linked, sorted };
 
 struct Type {
     TypeKind kind;

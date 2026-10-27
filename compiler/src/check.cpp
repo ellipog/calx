@@ -89,13 +89,15 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "Copy",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
+        n_SortedMap_ = ctx.names.intern("SortedMap");
+        n_SortedSet_ = ctx.names.intern("SortedSet");
         n_Map_ = ctx.names.intern("Map");
         n_Set_ = ctx.names.intern("Set");
         n_JavaHashMap_ = ctx.names.intern("JavaHashMap");
@@ -2941,7 +2943,14 @@ private:
             for_iter_ = it;
             Type* t = check(it, nullptr);
             for_iter_ = nullptr;
-            if (it->kind == ExprKind::call && (it->bmethod == BMethod::runes || it->bmethod == BMethod::chars) && !is_bad(t)) {
+            if (it->kind == ExprKind::call && it->bmethod == BMethod::range && !is_bad(t)) {
+                // `for (k, v) in m.range(a..b)`: the loop goes over `m`, from `a` (D112).
+                s->range_of = it->args[0].value;
+                elem = t->kind == TypeKind::map ? t->entry : t->elem;
+                s->value = it->callee->lhs;
+                over = s->value;
+                borrowed = place_root(s->value);
+            } else if (it->kind == ExprKind::call && (it->bmethod == BMethod::runes || it->bmethod == BMethod::chars) && !is_bad(t)) {
                 // `for r in s.runes()`: the loop decodes the text as it goes, so it goes over `s`.
                 s->text_iter = it->bmethod;
                 elem = it->bmethod == BMethod::runes ? T.rune : T.char_;
@@ -3618,6 +3627,11 @@ private:
             return;
         }
         if (is_bad(key)) return;
+        if (table == TableKind::sorted) {
+            if (orderable(key)) return;
+            error(span, name_of(key) + " can't be a key of a `SortedMap` or a `SortedSet`, since it has no `Order`" + lacking(key, p_order));
+            return;
+        }
         if (table == TableKind::java || table == TableKind::fastutil) {
             if (java_hashable(key)) return;
             error(span, name_of(key) + " can't be a key of " +
@@ -6528,14 +6542,56 @@ private:
         return "";
     }
 
-    bool is_map_name(Name n) const { return n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_ || n == n_LinkedMap_; }
+    // `m.range(a..b)`, only as what a `for` loop goes over: the keys from `a` up to but not
+    // including `b`, or to `b` with `a..=b`, and from the least or to the greatest when an end is
+    // left out (D112). The ends are looked up as keys are.
+    Type* range_method(Expr* e, Type* recv, Type* look) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::range;
+        if (e != for_iter_) {
+            error(e->callee->span, "`range` goes over the keys in a `for` loop: " +
+                                       q(recv->kind == TypeKind::map ? "for (k, v) in m.range(a..b)" : "for k in s.range(a..b)"));
+            for (Arg& a : e->args) {
+                if (a.value->kind != ExprKind::range) {
+                    check(a.value, nullptr);
+                    continue;
+                }
+                if (a.value->lhs) check(a.value->lhs, look);
+                if (a.value->rhs) check(a.value->rhs, look);
+                a.value->type = look;
+            }
+            return T.error;
+        }
+        if (e->args.size() != 1 || e->args[0].value->kind != ExprKind::range || e->args[0].name || e->args[0].is_mut) {
+            error(e->span, "`range` takes a range of keys: `a..b`, `a..=b`, `a..`, `..b` or `..=b`");
+            for (Arg& a : e->args) {
+                if (a.value->kind != ExprKind::range) check(a.value, nullptr);
+            }
+            return T.error;
+        }
+        Expr* r = e->args[0].value;
+        bool bad = false;
+        if (r->lhs) bad = is_bad(check(r->lhs, look)) || bad;
+        if (r->rhs) bad = is_bad(check(r->rhs, look)) || bad;
+        if (!r->rhs && r->inclusive) {
+            error(r->span, "`..=` needs the key it goes up to");
+            bad = true;
+        }
+        r->type = look;
+        return bad ? T.error : recv;
+    }
+
+    bool is_map_name(Name n) const {
+        return n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_ || n == n_LinkedMap_ || n == n_SortedMap_;
+    }
     bool is_table_name(Name n) const {
-        return is_map_name(n) || n == n_Set_ || n == n_JavaHashSet_ || n == n_OpenHashSet_ || n == n_LinkedSet_;
+        return is_map_name(n) || n == n_Set_ || n == n_JavaHashSet_ || n == n_OpenHashSet_ || n == n_LinkedSet_ || n == n_SortedSet_;
     }
     TableKind table_kind(Name n) const {
         if (n == n_JavaHashMap_ || n == n_JavaHashSet_) return TableKind::java;
         if (n == n_OpenHashMap_ || n == n_OpenHashSet_) return TableKind::fastutil;
         if (n == n_LinkedMap_ || n == n_LinkedSet_) return TableKind::linked;
+        if (n == n_SortedMap_ || n == n_SortedSet_) return TableKind::sorted;
         return TableKind::native;
     }
     static std::string table_suffix(const Type* t) {
@@ -6543,6 +6599,7 @@ private:
             case TableKind::java: return "_j";
             case TableKind::fastutil: return "_o";
             case TableKind::linked: return "_l";
+            case TableKind::sorted: return "_s";
             default: return "_";
         }
     }
@@ -6558,11 +6615,12 @@ private:
         TypeKind kind = map ? TypeKind::map : TypeKind::set;
         bool java = table == TableKind::java, open = table == TableKind::fastutil;
         bool linked = table == TableKind::linked;
-        std::string name = java     ? (map ? "JavaHashMap" : "JavaHashSet")
-                           : open   ? (map ? "OpenHashMap" : "OpenHashSet")
-                           : linked ? (map ? "LinkedMap" : "LinkedSet")
-                           : map    ? "Map"
-                                    : "Set";
+        std::string name = java                         ? (map ? "JavaHashMap" : "JavaHashSet")
+                           : open                       ? (map ? "OpenHashMap" : "OpenHashSet")
+                           : linked                     ? (map ? "LinkedMap" : "LinkedSet")
+                           : table == TableKind::sorted ? (map ? "SortedMap" : "SortedSet")
+                           : map                        ? "Map"
+                                                        : "Set";
         std::string example = name + (map ? "<String, i32>()" : "<i32>()");
         Type* t = nullptr;
         std::size_t want = map ? 2 : 1;
@@ -6603,7 +6661,11 @@ private:
                                        : open ? q(name + "<...>()") + " takes at most two arguments, the expected size and the load factor, as fastutil's constructor does"
                                        : linked ? q(name + "<...>()") + " takes no arguments, since how big a table starts doesn't change "
                                                   "the order of its keys; make room with `reserve(n)`"
-                                                : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
+                                       // Java's `new TreeMap<>(comparator)`.
+                                       : table == TableKind::sorted
+                                           ? q(name + "<...>()") + " takes no arguments, since its keys go in their `Order`; keys that go in "
+                                                                   "another order are of a type with that `Order`"
+                                           : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
                 return T.error;
             }
         }
@@ -6776,18 +6838,34 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {look}, result = T.bool_;
             else if (m == "get" && map) b = BMethod::get, params = {look}, result = T.optional_of(recv->elem);
             else if (m == "clear") b = BMethod::clear, changes = true;
-            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            // A tree grows a node at a time, so there's no room to make.
+            else if (m == "reserve" && recv->table != TableKind::sorted) b = BMethod::reserve, changes = true, params = {T.usize};
             // fastutil's `trim()`, which shrinks the table to the smallest that holds its keys.
             else if (m == "trim" && recv->table == TableKind::fastutil) b = BMethod::trim, changes = true;
             // A linked table's two ends, as fastutil's linked tables and Java's `SequencedMap` and
             // `SequencedSet` have them: a key at an end, taking one out, moving a key to one, and
             // putting a key at one, where it moves if it's there already (D109).
-            else if (recv->table == TableKind::linked) {
+            // A sorted table's ends are its least and greatest keys, and it finds the nearest key
+            // on either side of one, as Java's `NavigableMap` does (D112).
+            else if (recv->table == TableKind::linked || recv->table == TableKind::sorted) {
                 Type* key = map ? recv->key : recv->elem;
+                bool sorted = recv->table == TableKind::sorted;
                 if (m == "first" || m == "last") b = m == "first" ? BMethod::first : BMethod::last, result = T.optional_of(key);
                 else if (m == "pop_first" || m == "pop_last") {
                     b = m == "pop_first" ? BMethod::pop_first : BMethod::pop_last, changes = true;
                     result = T.optional_of(map ? recv->entry : recv->elem);
+                } else if (sorted && (m == "floor" || m == "ceiling" || m == "lower" || m == "higher")) {
+                    b = m == "floor" ? BMethod::floor : m == "ceiling" ? BMethod::ceiling : m == "lower" ? BMethod::lower : BMethod::higher;
+                    params = {look}, result = T.optional_of(key);
+                    if (!is_copy(key) && !is_bad(key)) {
+                        error(e->callee->span, q(m) + " copies the key out, so it needs keys that are `Copy`, and " + name_of(key) +
+                                                   " owns memory; go over the keys from it with " + q("for k in s.range(x..)"));
+                        for (Arg& a : e->args) check(a.value, nullptr);
+                        return T.error;
+                    }
+                } else if (sorted && m == "range") {
+                    return range_method(e, recv, look);
+                } else if (sorted) {
                 } else if (m == "move_to_first" || m == "move_to_last") {
                     b = m == "move_to_first" ? BMethod::move_to_first : BMethod::move_to_last, changes = true, params = {look};
                     result = T.bool_;
@@ -6798,7 +6876,7 @@ private:
                 if ((b == BMethod::first || b == BMethod::last) && !is_copy(key) && !is_bad(key)) {
                     error(e->callee->span, q(m) + " copies the key out, so it needs keys that are `Copy`, and " + name_of(key) +
                                                " owns memory; take it out with " + q(b == BMethod::first ? "pop_first" : "pop_last") +
-                                               ", or read it in a loop, which starts at the first");
+                                               ", or read it in a loop, which starts at the " + (sorted ? "least" : "first"));
                     for (Arg& a : e->args) check(a.value, nullptr);
                     return T.error;
                 }
@@ -7181,7 +7259,7 @@ private:
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
-    Name n_Deque_;
+    Name n_Deque_, n_SortedMap_, n_SortedSet_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

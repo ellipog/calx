@@ -127,6 +127,7 @@ Type* Types::map_of(Type* key, Type* value, TableKind table) {
     const char* name = table == TableKind::java       ? "JavaHashMap<"
                        : table == TableKind::fastutil ? "OpenHashMap<"
                        : table == TableKind::linked   ? "LinkedMap<"
+                       : table == TableKind::sorted   ? "SortedMap<"
                                                       : "Map<";
     Type* t = make(TypeKind::map, arena_.copy(std::string(name) + std::string(key->name) + ", " + std::string(value->name) + ">"));
     t->table = table;
@@ -147,6 +148,7 @@ Type* Types::set_of(Type* elem, TableKind table) {
     const char* name = table == TableKind::java       ? "JavaHashSet<"
                        : table == TableKind::fastutil ? "OpenHashSet<"
                        : table == TableKind::linked   ? "LinkedSet<"
+                       : table == TableKind::sorted   ? "SortedSet<"
                                                       : "Set<";
     Type* t = make(TypeKind::set, arena_.copy(std::string(name) + std::string(elem->name) + ">"));
     t->table = table;

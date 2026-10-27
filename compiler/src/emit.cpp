@@ -241,9 +241,11 @@ private:
                 else if (x->kind == TypeKind::enum_) all.add_name(x);
             }
         }
-        // A Java table's tree bins order its keys, when they have `Order` (D105).
+        // A Java table's tree bins order its keys, when they have `Order` (D105), and a sorted
+        // table's always do (D112).
         for (const Type* x : closure(all.types)) {
-            if (is_table(x) && x->table == TableKind::java && prog_.java_ordered.count(table_key(x)) && has_cmp_glue(table_key(x))) {
+            if (!is_table(x) || !has_cmp_glue(table_key(x))) continue;
+            if ((x->table == TableKind::java && prog_.java_ordered.count(table_key(x))) || x->table == TableKind::sorted) {
                 all.add_cmp(table_key(x));
             }
         }
@@ -275,7 +277,7 @@ private:
             if (!is_table(x)) continue;
             if (own_table(x)) reach(table_key(x), true);
             reach(table_key(x), false);
-            if (own_table(x)) continue;
+            if (own_table(x) || x->table == TableKind::sorted) continue;
             const Type* k = table_key(x);
             while (k->kind == TypeKind::list) k = k->elem;
             if (hand(k, prop_java_hash) && java_seen.insert(k).second) java_order.push_back(k);
@@ -551,6 +553,12 @@ private:
                     break;
                 case TypeKind::map:
                 case TypeKind::set:
+                    if (t->table == TableKind::sorted) {
+                        // A B+ tree: its root, its first and last leaves, its keys, and how many
+                        // levels of inner nodes it has (D112).
+                        out_ += "struct " + ctype(t) + " { void* root; void* first; void* last; cx_usize len; cx_u32 height; };\n";
+                        break;
+                    }
                     if (t->table == TableKind::fastutil) {
                         // The slots, a hash word for each when the keys aren't integers, and the
                         // runtime's header (D107).
@@ -900,6 +908,7 @@ private:
             case TableKind::java: return "cx_j";
             case TableKind::fastutil: return "cx_o";
             case TableKind::linked: return "cx_l";
+            case TableKind::sorted: return "cx_s";
             default: return "cx_";
         }
     }
@@ -1066,7 +1075,101 @@ private:
         };
     }
 
+    // --- sorted maps and sets (D112) -------------------------------------------------------------
+
+    // A sorted table's functions, from the template `calx_btree.h`. They come before the glue's
+    // bodies, which free, copy and go over a tree with them.
+    std::string sorted_decls(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        const Type* k = table_key(t);
+        std::string c = ctype(t);
+        std::string s = "#define CX_BT_T " + c + "\n#define CX_BT_NAME " + c + "\n#define CX_BT_K " + ctype(k) + "\n";
+        if (map) s += "#define CX_BT_V " + ctype(t->elem) + "\n";
+        s += "#define CX_BT_KL " + lookup_ctype(t) + "\n#define CX_BT_LOOK(cx_lk) " + sorted_look(t, "(cx_lk)") +
+             "\n#define CX_BT_LESS(cx_la, cx_lb) " + sorted_less(t, "(cx_la)", "(cx_lb)") + "\n";
+        if (scalar_order(k)) s += "#define CX_BT_SCALAR\n";
+        if (!is_copy(k)) s += "#define CX_BT_DROP_K(cx_p) " + drop_fn(k) + "(cx_p)\n#define CX_BT_COPY_K(cx_p) " + copy_fn(k) + "(cx_p)\n";
+        if (map && !is_copy(t->elem)) {
+            s += "#define CX_BT_DROP_V(cx_p) " + drop_fn(t->elem) + "(cx_p)\n#define CX_BT_COPY_V(cx_p) " + copy_fn(t->elem) + "(cx_p)\n";
+        }
+        return s + "#include \"calx_btree.h\"\n";
+    }
+    // A key, a place, as it's looked up: a `String` as a `str`.
+    static std::string sorted_look(const Type* t, const std::string& k) { return str_key(t) ? "cx_sv(" + k + ")" : k; }
+    // Whether the looked-up key `a` comes before `b`, both places.
+    std::string sorted_less(const Type* t, const std::string& a, const std::string& b) {
+        return str_key(t) ? "(cx_str_cmp(" + a + ", " + b + ") < 0)" : less(table_key(t), a, b);
+    }
+    std::string sorted_leaf(const Type* t) const { return ctype(t) + "_leaf"; }
+    // `body`, whose lines are already indented one step past `indent`, for each key of the sorted
+    // table `tab` (`a.`, `v.` or `p->`), in order, as `cx_l->k[i]`, with its value `cx_l->v[i]`.
+    std::string each_sorted(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) const {
+        std::string lf = sorted_leaf(t);
+        std::string s = indent + "for (const " + lf + "* cx_l = (const " + lf + "*)" + tab + "first; cx_l; cx_l = cx_l->next) {\n" + indent +
+                        "    for (cx_u32 i = 0; i < cx_l->n; i++) {\n";
+        for (std::size_t at = 0; at < body.size();) {
+            std::size_t end = body.find('\n', at);
+            s += "    " + body.substr(at, end - at + 1);
+            at = end + 1;
+        }
+        return s + indent + "    }\n" + indent + "}\n";
+    }
+
+    // `m.insert(k, v)` and the rest, on a sorted table. The receiver is found first, then the
+    // arguments, in order.
+    std::string sorted_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        bool map = t->kind == TypeKind::map;
+        Type* k = table_key(t);
+        std::string tc = ctype(t), lf = sorted_leaf(t), p = tmp(), key = tmp(), r = tmp();
+        std::string head = "({ " + tc + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + tc + "* " + p + " = " + address(recv) + "; ";
+        auto look = [&](Expr* a) { return lookup_ctype(t) + " " + key + " = " + lookup_value(a, t) + "; "; };
+        std::string o = ctype(e->type);
+        switch (e->bmethod) {
+            case BMethod::len: return "(" + expr(recv) + ").len";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::insert: {
+                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                if (!map) return s + tc + "_put(" + p + ", " + key + "); })";
+                std::string v = tmp();
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + tc + "_put(" + p + ", " + key + ", " +
+                       v + "); })";
+            }
+            case BMethod::contains: return view + look(e->args[0].value) + tc + "_has(" + p + ", " + key + "); })";
+            case BMethod::get:
+                return view + look(e->args[0].value) + "const " + ctype(t->elem) + "* " + r + " = " + tc + "_at(" + p + ", " + key + "); " + r +
+                       " ? (" + o + "){ .v = *" + r + ", .has = 1 } : (" + o + "){0}; })";
+            case BMethod::remove:
+                if (!map) return head + look(e->args[0].value) + "(void)" + tc + "_del(" + p + ", " + key + "); })";
+                return head + look(e->args[0].value) + o + " " + r + " = {0}; " + r + ".has = " + tc + "_del(" + p + ", " + key + ", &" + r +
+                       ".v); " + r + "; })";
+            case BMethod::clear: return tc + "_clear(" + address(recv) + ")";
+            case BMethod::first:
+                return view + o + " " + r + " = {0}; if (" + p + "->root) { " + r + ".v = ((const " + lf + "*)" + p + "->first)->k[0]; " + r +
+                       ".has = 1; } " + r + "; })";
+            case BMethod::last: {
+                std::string l = tmp();
+                return view + o + " " + r + " = {0}; if (" + p + "->root) { const " + lf + "* " + l + " = (const " + lf + "*)" + p +
+                       "->last; " + r + ".v = " + l + "->k[" + l + "->n - 1]; " + r + ".has = 1; } " + r + "; })";
+            }
+            case BMethod::pop_first: case BMethod::pop_last: {
+                std::string last = e->bmethod == BMethod::pop_last ? "1" : "0";
+                return head + o + " " + r + " = {0}; " + r + ".has = " + tc + "_pop(" + p + ", " + last + ", " +
+                       (map ? "&" + r + ".v.f0, &" + r + ".v.f1" : "&" + r + ".v") + "); " + r + "; })";
+            }
+            case BMethod::ceiling: case BMethod::higher: case BMethod::floor: case BMethod::lower: {
+                const char* how = e->bmethod == BMethod::ceiling ? "0" : e->bmethod == BMethod::higher ? "1" : e->bmethod == BMethod::floor ? "2" : "3";
+                return view + look(e->args[0].value) + "const " + ctype(k) + "* " + r + " = " + tc + "_near(" + p + ", " + key + ", " + how +
+                       "); " + r + " ? (" + o + "){ .v = *" + r + ", .has = 1 } : (" + o + "){0}; })";
+            }
+            default: return "0";
+        }
+    }
+
     std::string table_decls(const Type* t) {
+        if (t->table == TableKind::sorted) return sorted_decls(t);
         if (t->table == TableKind::fastutil) return otable_decls(t);
         if (t->table == TableKind::java) return jtable_decls(t);
         bool map = t->kind == TypeKind::map;
@@ -1089,6 +1192,7 @@ private:
     // key: each key's old links go with it, and its new slot is left in its old links' place, so a
     // second pass can turn each old neighbour into its new slot.
     std::string table_bodies(const Type* t) {
+        if (t->table == TableKind::sorted) return "";
         if (t->table == TableKind::fastutil) return otable_bodies(t);
         if (t->table == TableKind::java) return jtable_bodies(t);
         bool map = t->kind == TypeKind::map, linked = t->table == TableKind::linked;
@@ -1758,6 +1862,7 @@ $dropall    m->len = 0;
     std::string table_method(Expr* e) {
         Expr* recv = e->callee->lhs;
         Type* t = recv->type;
+        if (t->table == TableKind::sorted) return sorted_method(e);
         if (t->table == TableKind::fastutil) return otable_method(e);
         if (t->table == TableKind::java) return jtable_method(e);
         bool map = t->kind == TypeKind::map;
@@ -1870,6 +1975,16 @@ $dropall    m->len = 0;
                        equal(t->elem, "a.ptr[j]", "b.ptr[k]") + ") return 0;\n    }\n    return 1;\n";
             case TypeKind::map:
             case TypeKind::set: {
+                if (t->table == TableKind::sorted) {
+                    // Both in key order, so side by side.
+                    std::string lf = sorted_leaf(t);
+                    std::string body = "        if (j == y->n) {\n            y = y->next;\n            j = 0;\n        }\n        if (!" +
+                                       equal(table_key(t), "cx_l->k[i]", "y->k[j]") + ") return 0;\n";
+                    if (t->kind == TypeKind::map) body += "        if (!" + equal(t->elem, "cx_l->v[i]", "y->v[j]") + ") return 0;\n";
+                    body += "        j++;\n";
+                    return "    if (a.len != b.len) return 0;\n    const " + lf + "* y = (const " + lf + "*)b.first;\n    cx_u32 j = 0;\n" +
+                           each_sorted(t, "a.", "    ", body) + "    return 1;\n";
+                }
                 if (t->table == TableKind::fastutil) {
                     // A slot's hash word places it in any table, so it isn't worked out again.
                     std::string key = slot_key(t, "a.slots[i]");
@@ -1953,6 +2068,14 @@ $dropall    m->len = 0;
                        show_value(t->elem, "v.v") + "\n" + print(")");
             case TypeKind::map:
             case TypeKind::set: {
+                if (t->table == TableKind::sorted) {
+                    std::string body = "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        " +
+                                       show_value(table_key(t), "cx_l->k[i]") + "\n";
+                    if (t->kind == TypeKind::map) {
+                        body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, "cx_l->v[i]") + "\n";
+                    }
+                    return print("{") + "    cx_bool first = 1;\n" + each_sorted(t, "v.", "    ", body) + print("}");
+                }
                 // `{a: 1, b: 2}` and `{1, 2}`, in the order a loop goes.
                 std::string at = slot_at(t, "v.", "i");
                 std::string body = "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        " +
@@ -2082,6 +2205,10 @@ $dropall    m->len = 0;
                 break;
             case TypeKind::map:
             case TypeKind::set:
+                if (t->table == TableKind::sorted) {
+                    s += "    " + ctype(t) + "_clear(p);\n";
+                    break;
+                }
                 if (t->table == TableKind::fastutil) {
                     s += "    if (!p->slots) return;\n";
                     if (!is_copy(slot_type(t))) s += each_slot(t, "p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
@@ -2144,6 +2271,8 @@ $dropall    m->len = 0;
         switch (t->kind) {
             case TypeKind::map:
             case TypeKind::set: {
+                // The same shape, so the same leaves.
+                if (t->table == TableKind::sorted) return "    return " + c + "_copy(p);\n";
                 const Type* st = slot_type(t);
                 if (t->table == TableKind::fastutil) {
                     // The same slots, so the same order.
@@ -2721,6 +2850,34 @@ $dropall    m->len = 0;
                 line("for (cx_i32 " + i + " = cx_jt_first(" + arr + "->heads[" + b + "]); " + i + " >= 0; " + i + " = " + arr +
                      "->nodes[" + i + "].next) {");
                 indent_++;
+                bins = true;
+            } else if (is_table(at) && at->table == TableKind::sorted) {
+                // In key order, along the leaves, from where a range starts and until it ends (D112).
+                std::string lf = sorted_leaf(at), l = tmp(), from = tmp(), lo = tmp(), hi = tmp();
+                Expr* r = s->range_of;
+                std::string key_at = l + "->k[" + i + "]";
+                elem_at = at->kind == TypeKind::map ? "((" + ctype(at->entry) + "){ " + key_at + ", " + l + "->v[" + i + "] })" : key_at;
+                if (r && r->lhs) line(lookup_ctype(at) + " " + lo + " = " + lookup_value(r->lhs, at) + ";");
+                if (r && r->rhs) line(lookup_ctype(at) + " " + hi + " = " + lookup_value(r->rhs, at) + ";");
+                // As Java's `subMap` throws and Rust's `range` panics.
+                if (r && r->lhs && r->rhs) {
+                    line("if (__builtin_expect(" + sorted_less(at, hi, lo) + ", 0)) cx_panic_range(" + location(r->span) + ");");
+                }
+                if (r && r->lhs) {
+                    line("cx_u32 " + from + ";");
+                    line("const " + lf + "* " + l + " = " + ctype(at) + "_seek(" + arr + ", " + lo + ", &" + from + ");");
+                } else {
+                    line("cx_u32 " + from + " = 0;");
+                    line("const " + lf + "* " + l + " = (const " + lf + "*)" + arr + "->first;");
+                }
+                line("for (; " + l + "; " + l + " = " + l + "->next, " + from + " = 0) {");
+                indent_++;
+                line("for (cx_u32 " + i + " = " + from + "; " + i + " < " + l + "->n; " + i + "++) {");
+                indent_++;
+                if (r && r->rhs) {
+                    std::string k = sorted_look(at, key_at);
+                    line("if (" + (r->inclusive ? sorted_less(at, hi, k) : "!" + sorted_less(at, k, hi)) + ") goto cx_brk" + id + ";");
+                }
                 bins = true;
             } else if (is_table(at) && at->table == TableKind::linked) {
                 // Along the list, in the order the keys went in (D109).
@@ -3573,6 +3730,12 @@ $dropall    m->len = 0;
         }
         // index
         Type* at = e->lhs->type;
+        if (at->kind == TypeKind::map && at->table == TableKind::sorted) {
+            std::string b = tmp(), k = tmp(), v = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
+                   lookup_value(e->rhs, at) + "; " + ctype(at->elem) + "* " + v + " = " + ctype(at) + "_at(" + b + ", " + k +
+                   "); if (__builtin_expect(!" + v + ", 0)) cx_panic_key(" + location(e->rhs->span) + "); " + v + "; }))";
+        }
         if (at->kind == TypeKind::map && at->table == TableKind::fastutil) {
             std::string b = tmp(), k = tmp(), i = tmp();
             return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
