@@ -45,6 +45,7 @@ What's built, one page per feature:
 The `std` modules, one page each ([modules](reference/modules.md#the-standard-library)):
 
 1. [std.io](std/io.md): standard input and output as bytes
+2. [std.math](std/math.md): math functions with `StrictMath`'s results bit for bit
 
 ### Design
 

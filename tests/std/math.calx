@@ -1,0 +1,32 @@
+// std.math gives StrictMath's results bit for bit. The bits below are Java 25's
+// StrictMath.log; build/scratch's wider check covered 4,518 arguments.
+
+import std.math.{log}
+
+fn check(x: f64, want: u64) {
+    let got = log(x).to_bits()
+    if got != want {
+        panic("log({x}) has bits {got}, want {want}")
+    }
+}
+
+fn main() {
+    println("{log(1.0)} {log(2.0)} {log(10.0)}")    // out: 0.0 0.6931471805599453 2.302585092994046
+    println("{log(0.0)} {log(-1.0)} {log(f64.INFINITY)}")    // out: -Infinity NaN Infinity
+
+    check(0.0, 18442240474082181120)
+    check(-0.0, 18442240474082181120)
+    check(-1.0, 18444492273895866368)
+    check(0.5, 13827790571168217583)
+    check(f64.from_bits(1), 13873131416795836867)          // the smallest subnormal
+    check(f64.from_bits(0x12688b70e62b), 13872861916001309960)    // 1e-310
+    check(f64.MAX, 4649454530587146735)
+    check(f64.NAN, 9221120237041090560)
+    check(f64.NEG_INFINITY, 18444492273895866368)
+    check(f64.from_bits(0x3ff000001ad7f29b), 4502148214114968722)  // 1.0000001
+    check(f64.from_bits(0x3fefffffca501acb), 13725520251716934559) // 0.9999999
+    check(f64.from_bits(0x4005bf0a8b145769), 4607182418800017408)  // e, whose log is exactly 1
+    check(1e300, 4649287341619838901)
+    check(f64.from_bits(0x3ff0000000001198), 4427487034449327700)  // 1 + 1e-12, the |f| < 2^-20 path
+    println("ok")    // out: ok
+}

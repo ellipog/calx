@@ -1,0 +1,112 @@
+/// Math functions that give Java's `StrictMath` results bit for bit, on every platform.
+///
+/// They're ported from fdlibm, the library `StrictMath` is defined by, keeping its constants
+/// and its order of operations, which decide the last bit (D59, D60). `sqrt`, `floor` and
+/// `ceil` are methods on the float types, since IEEE 754 makes them exact everywhere.
+module std.math
+
+// log is ported from fdlibm 5.3's e_log.c, under this notice:
+//
+// ====================================================
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//
+// Developed at SunSoft, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+// ====================================================
+
+const LN2_HI: f64 = 6.93147180369123816490e-01    // 3fe62e42 fee00000
+const LN2_LO: f64 = 1.90821492927058770002e-10    // 3dea39ef 35793c76
+const TWO54: f64 = 1.80143985094819840000e+16     // 43500000 00000000
+const LG1: f64 = 6.666666666666735130e-01         // 3fe55555 55555593
+const LG2: f64 = 3.999999999940941908e-01         // 3fd99999 9997fa04
+const LG3: f64 = 2.857142874366239149e-01         // 3fd24924 94229359
+const LG4: f64 = 2.222219843214978396e-01         // 3fcc71c5 1d8e78af
+const LG5: f64 = 1.818357216161805012e-01         // 3fc74664 96cb03de
+const LG6: f64 = 1.531383769920937332e-01         // 3fc39a09 d078c69f
+const LG7: f64 = 1.479819860511658591e-01         // 3fc2f112 df3e5244
+
+/// The high 32 bits of a double, as fdlibm's `__HI`.
+fn high(x: f64) -> i32 {
+    return i32.wrap(x.to_bits() >> 32)
+}
+
+/// The low 32 bits, as fdlibm's `__LO`.
+fn low(x: f64) -> i32 {
+    return i32.wrap(x.to_bits())
+}
+
+/// `x` with its high 32 bits replaced.
+fn with_high(x: f64, hi: i32) -> f64 {
+    return f64.from_bits((u64(u32.wrap(hi)) << 32) | (x.to_bits() & 0xffffffff))
+}
+
+/// The natural logarithm, as Java's `StrictMath.log` and, in the rig's reference configuration,
+/// `Math.log`. `log(0.0)` is `-Infinity`, and a negative number or NaN gives NaN.
+pub fn log(x: f64) -> f64 {
+    // Reduce x to 2^k (1 + f), with sqrt(2)/2 < 1 + f < sqrt(2), then approximate
+    // log(1 + f) = 2s + s * R(s * s), where s = f / (2 + f).
+    var v = x
+    var hx = high(v)
+    let lx = low(v)
+    var k = 0
+    if hx < 0x00100000 {
+        // Zero, negative or subnormal.
+        if ((hx & 0x7fffffff) | lx) == 0 {
+            return -TWO54 / 0.0
+        }
+        if hx < 0 {
+            return (v - v) / 0.0
+        }
+        k -= 54
+        v *= TWO54
+        hx = high(v)
+    }
+    if hx >= 0x7ff00000 {
+        return v + v
+    }
+    k += (hx >> 20) - 1023
+    hx &= 0x000fffff
+    let i = (hx + 0x95f64) & 0x100000
+    v = with_high(v, hx | (i ^ 0x3ff00000))
+    k += i >> 20
+    let f = v - 1.0
+    if (0x000fffff & (2 + hx)) < 3 {
+        // |f| < 2^-20
+        if f == 0.0 {
+            if k == 0 {
+                return 0.0
+            }
+            let dk = f64(k)
+            return dk * LN2_HI + dk * LN2_LO
+        }
+        let r = f * f * (0.5 - 0.33333333333333333 * f)
+        if k == 0 {
+            return f - r
+        }
+        let dk = f64(k)
+        return dk * LN2_HI - ((r - dk * LN2_LO) - f)
+    }
+    let s = f / (2.0 + f)
+    let dk = f64(k)
+    let z = s * s
+    var m = hx - 0x6147a
+    let w = z * z
+    let j = 0x6b851 - hx
+    let t1 = w * (LG2 + w * (LG4 + w * LG6))
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)))
+    m |= j
+    let r = t2 + t1
+    if m > 0 {
+        let hfsq = 0.5 * f * f
+        if k == 0 {
+            return f - (hfsq - s * (hfsq + r))
+        }
+        return dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+    }
+    if k == 0 {
+        return f - s * (f - r)
+    }
+    return dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
+}

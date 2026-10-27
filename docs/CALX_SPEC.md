@@ -159,6 +159,7 @@ Calx matches Java exactly. What's built is in the reference: [Integers](referenc
 
 - `std.math` gives `sqrt`, `abs`, `floor`, `ceil` and `rint`. They're exact in IEEE, so every implementation agrees.
 - `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `expm1`, `log`, `log10`, `log1p`, `pow`, `cbrt`, `hypot`, `sinh`, `cosh` and `tanh` give Java's `StrictMath` results bit for bit on every platform.
+- Built so far: `log`, in [`std.math`](std/math.md).
 - They're ported from fdlibm, the library `StrictMath` is defined by, with fdlibm's license notice kept (D59, D60). Porting is the surest way to get the same constants and order of operations, which decide the last bit. The rig checks every function against `StrictMath`.
 - Vanilla calls `Math`, not `StrictMath`: `sqrt` 102 times, `pow` 70, `sin` 30, `cos` 23, `log` 9, `atan2` 9, `acos` 5, `asin` 2, and `log1p` and `hypot` once each. `Mth`'s sine table is filled with `Math.sin` at startup, and every `nextGaussian()` goes through `Math.log`.
 - On x86-64, HotSpot replaces some of these with its own intrinsics. The rig measured how far they drift from `StrictMath` on JDK 25.0.5 (`P1.5`, 500,000 arguments per input range):

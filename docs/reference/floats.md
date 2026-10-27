@@ -75,7 +75,7 @@ fn main() {
 }
 ```
 
-`round`, `rint`, `total_cmp`, `java_string` and the transcendental functions (`sin`, `pow`, `log` and the rest, ported from fdlibm) are designed in the [spec](../CALX_SPEC.md#transcendental-functions) and not built yet.
+`log`, with `StrictMath`'s results bit for bit, is in [`std.math`](../std/math.md). `round`, `rint`, `total_cmp`, `java_string` and the other transcendental functions (`sin`, `pow` and the rest, ported from fdlibm) are designed in the [spec](../CALX_SPEC.md#transcendental-functions) and not built yet.
 
 ## Parsing
 
