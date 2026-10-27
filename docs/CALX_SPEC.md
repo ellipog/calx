@@ -415,7 +415,7 @@ Phase 2's converter writes vanilla's data as neutral JSON tables: block states, 
 
 ### Debugging
 
-The emitter writes `#line` directives, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C (`P3.10`).
+Built: the emitter writes `#line` directives and both build modes keep line tables, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C ([build modes](reference/command.md#build-modes)). Editors get errors as you type ([editor support](reference/editors.md)). Still to build: a Calx stack trace in panic messages, which Calcite's crash reports need ([Panics](#panics)).
 
 ## Non-goals
 

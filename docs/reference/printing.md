@@ -36,6 +36,8 @@ Standard error isn't buffered. `eprint` and `eprintln` first write out whatever 
 
 A panic is an unrecoverable bug: an index out of bounds, a division by zero, `opt!` on `none`, a failed `assert`, or `panic(...)`. The program writes its output so far, then prints `panic at file:line:column: message` to standard error and exits with status 101.
 
+Inside a `parallel for`, what's printed and which panic is reported are the same as if the iterations ran one after another ([parallel loops](parallel.md#the-same-result-with-any-number-of-threads)).
+
 ```calx
 fn main() {
     let xs = [1, 2, 3]
