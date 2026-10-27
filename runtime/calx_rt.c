@@ -457,6 +457,24 @@ void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize s
     return ptr;
 }
 
+void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    cx_usize old = *cap;
+    ptr = cx_grow(ptr, cap, len, extra, size);
+    cx_usize n = *cap;
+    if (n == old || *head + len <= old) return ptr;
+    /* The ring wrapped: `a` elements from `head` to the old end, then `b` from the start. The
+       shorter run moves, the one at the start to just past the old end if it fits there. */
+    cx_usize a = old - *head, b = len - a;
+    char* p = (char*)ptr;
+    if (b <= a && b <= n - old) {
+        memcpy(p + old * size, p, b * size);
+    } else {
+        memmove(p + (n - a) * size, p + *head * size, a * size);
+        *head = n - a;
+    }
+    return ptr;
+}
+
 void cx_string_reserve(cx_String* s, cx_usize extra) {
     if (extra > (cx_usize)-1 / 2 - s->len) cx_panic_capacity();
     cx_usize need = s->len + extra;

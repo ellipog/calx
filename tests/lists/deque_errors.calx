@@ -1,0 +1,35 @@
+// What a `Deque` can't do: take a size or elements as arguments, hold nothing, copy out an
+// element that owns memory with `first` or `last`, be ordered, or use Java's and Rust's names for
+// its methods, which the error gives in Calx. A literal whose type is wrong gets one error.
+struct Cell {
+    x: f64,
+}
+
+fn main() {
+    let a = Deque<i32>(16)    // error: `Deque<T>()` takes no arguments; push the elements, or write them as `[a, b]`
+    let b = Deque()    // error: can't tell what this deque holds; give it, as in `Deque<i32>()`, or give the variable a type
+    let c: Deque<i32, i32> = Deque<i32>()    // error: `Deque` takes one generic argument, the type of its elements: `Deque<i32>`
+    let u: Deque<()> = []    // error: a deque can't hold `()`
+    let lu = List<()>()    // error: a list can't hold `()`
+    let n: Nope = []    // error: unknown type `Nope`
+    var d = Deque<i32>()
+    d.push(1)    // error: `Deque<i32>` has no method `push`; a deque adds at either end, with `push_last`, or `push_first`, which is Java's `push`
+    _ = d.pop()    // error: `Deque<i32>` has no method `pop`; a deque takes from either end, with `pop_last`, or `pop_first`, which is Java's `pop`
+    d.offer(2)    // error: `Deque<i32>` has no method `offer`; a deque's is `push_last`
+    d.push_front(3)    // error: `Deque<i32>` has no method `push_front`; a deque's is `push_first`
+    _ = d.poll()    // error: `Deque<i32>` has no method `poll`; a deque's is `pop_first`
+    _ = d.pollLast()    // error: `Deque<i32>` has no method `pollLast`; a deque's is `pop_last`
+    _ = d.peek()    // error: `Deque<i32>` has no method `peek`; a deque's is `first`
+    _ = d.back()    // error: `Deque<i32>` has no method `back`; a deque's is `last`
+    _ = d.size()    // error: `Deque<i32>` has no method `size`; a deque's is `len`
+    d.sort()    // error: `Deque<i32>` has no method `sort`
+    d.push_last(1.5)    // error: a float literal isn't an `i32`
+    let words = Deque<String>()
+    println("{words.first()}")    // error: `first` copies the element out, so it needs elements that are `Copy`, and `String` owns memory; read it in place with `d[0]`
+    println("{words.last()}")    // error: `last` copies the element out, so it needs elements that are `Copy`, and `String` owns memory; read it in place with `d[d.len() - 1]`
+    let e = Deque<i32>()
+    println("{d < e}")    // error: values of type `Deque<i32>` can't be compared with `<`
+    let cells = Deque<Cell>()
+    let by = Set<Deque<Cell>>()    // error: `Deque<Cell>` can't be a key of a map or a set, since it has no `Hash`
+    println("{a.len()} {b.len()} {c.len()} {u.len()} {cells.len()} {by.len()} {lu.len()} {n}")
+}

@@ -41,6 +41,7 @@ fn main() {
 | A tuple or an array | Every part is equal |
 | An optional | Both are `none`, or both hold equal values ([optionals](optionals.md#comparing)) |
 | `List<T>` | Both have the same length, and equal elements in the same order |
+| `Deque<T>` | The same, from each one's first element ([deques](deques.md#whats-different)) |
 | `Map<K, V>`, `Set<T>` | Both have the same keys, with equal values, in any order ([maps and sets](maps.md#comparing-and-printing)) |
 | `String` and `str` | Both hold the same bytes |
 | A float | As floats compare: `NaN` never equals anything, and `0.0 == -0.0` ([floats](floats.md)) |
@@ -141,6 +142,7 @@ fn main() {
 | An enum | The variant, as it's built but without the enum's name: `Stone`, `Sword(5)`, `Rect { w: 2.0, h: 3.0 }` |
 | A tuple | `(1, a, true)` |
 | An array or a `List` | `[1, 2, 3]`, as Java's `ArrayList.toString` ([lists](lists.md#printing)) |
+| A `Deque` | `[1, 2, 3]`, from the first element, as Java's `ArrayDeque.toString` |
 | A `Map` or a `Set` | `{1: one, 2: two}` or `{1, 2}`, in the order a loop goes ([maps and sets](maps.md#order)) |
 | An optional | `some(5)` or `none` |
 | `String`, `str`, `char`, `rune` | The text itself, without quotes, even inside a struct or a list |

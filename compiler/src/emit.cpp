@@ -365,7 +365,7 @@ private:
         if (uses_) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: uses_->add_type(t); break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -388,6 +388,7 @@ private:
             case TypeKind::optional:
             case TypeKind::tuple:
             case TypeKind::list:
+            case TypeKind::deque:
             case TypeKind::map:
             case TypeKind::set: return compound_name(t);
         }
@@ -404,6 +405,7 @@ private:
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
             case TypeKind::list: s = "cx_list_" + part(t->elem); break;
+            case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
             default:
@@ -427,7 +429,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
-            case TypeKind::map: case TypeKind::set:
+            case TypeKind::deque: case TypeKind::map: case TypeKind::set:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
@@ -499,7 +501,7 @@ private:
         std::function<void(const Type*)> close = [&](const Type* t) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -508,7 +510,7 @@ private:
                 case TypeKind::enum_:
                     for (const VariantDecl& v : t->item->variants) for (const Type* x : v.types) close(x);
                     break;
-                case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::set: close(t->elem); break;
+                case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set: close(t->elem); break;
                 case TypeKind::map:
                     close(t->key);
                     close(t->elem);
@@ -541,6 +543,11 @@ private:
                     break;
                 case TypeKind::list:
                     out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; };\n";
+                    break;
+                case TypeKind::deque:
+                    // A list's buffer as a ring, from `head` round to just before it, so a list's
+                    // literal is a deque's too (D110).
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; cx_usize head; };\n";
                     break;
                 case TypeKind::map:
                 case TypeKind::set:
@@ -1016,6 +1023,10 @@ private:
                 break;
             case TypeKind::list:
                 s += "    h = cx_hash_word(h, v.len);\n    for (cx_usize i = 0; i < v.len; i++) " + add(t->elem, "v.ptr[i]", "");
+                break;
+            case TypeKind::deque:
+                s += "    h = cx_hash_word(h, v.len);\n    for (cx_usize i = 0, j = v.head; i < v.len; i++, j = j + 1 == v.cap ? 0 : j + 1) " +
+                     add(t->elem, "v.ptr[j]", "");
                 break;
             default: {
                 s += "    h = cx_hash_word(h, (cx_u64)v.tag);\n    switch (v.tag) {\n";
@@ -1852,6 +1863,11 @@ $dropall    m->len = 0;
             case TypeKind::list:
                 return "    if (a.len != b.len) return 0;\n    for (cx_usize i = 0; i < a.len; i++) {\n        if (!" +
                        equal(t->elem, "a.ptr[i]", "b.ptr[i]") + ") return 0;\n    }\n    return 1;\n";
+            case TypeKind::deque:
+                // In order from each one's first element, wherever that is in its ring.
+                return "    if (a.len != b.len) return 0;\n    for (cx_usize i = 0, j = a.head, k = b.head; i < a.len; i++, j = j + 1 == a.cap ? 0 : j + 1, "
+                       "k = k + 1 == b.cap ? 0 : k + 1) {\n        if (!" +
+                       equal(t->elem, "a.ptr[j]", "b.ptr[k]") + ") return 0;\n    }\n    return 1;\n";
             case TypeKind::map:
             case TypeKind::set: {
                 if (t->table == TableKind::fastutil) {
@@ -1953,6 +1969,10 @@ $dropall    m->len = 0;
                 return print("[") + "    for (cx_usize i = 0; i < " + n + "; i++) {\n        if (i) cx_print_str(" +
                        str_const(", ") + ");\n        " + show_value(t->elem, at) + "\n    }\n" + print("]");
             }
+            case TypeKind::deque:
+                // `[1, 2]`, from the first element, as Java's `ArrayDeque` prints.
+                return print("[") + "    for (cx_usize i = 0, j = v.head; i < v.len; i++, j = j + 1 == v.cap ? 0 : j + 1) {\n        if (i) cx_print_str(" +
+                       str_const(", ") + ");\n        " + show_value(t->elem, "v.ptr[j]") + "\n    }\n" + print("]");
             default: {
                 std::string s = "    switch (v.tag) {\n";
                 const Slice<VariantDecl>& vs = t->item->variants;
@@ -2014,7 +2034,7 @@ $dropall    m->len = 0;
     static bool has_glue(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: case TypeKind::map: case TypeKind::set: return true;
+            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return true;
             case TypeKind::enum_: return t->has_data;
             default: return false;
         }
@@ -2029,7 +2049,7 @@ $dropall    m->len = 0;
                 for (const VariantDecl& v : t->item->variants) out.insert(out.end(), v.types.begin(), v.types.end());
                 break;
             case TypeKind::tuple: out.assign(t->elems.begin(), t->elems.end()); break;
-            case TypeKind::array: case TypeKind::list: case TypeKind::optional: case TypeKind::set: out.push_back(t->elem); break;
+            case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::optional: case TypeKind::set: out.push_back(t->elem); break;
             case TypeKind::map:
                 out.push_back(t->key);
                 out.push_back(t->elem);
@@ -2051,6 +2071,13 @@ $dropall    m->len = 0;
         switch (t->kind) {
             case TypeKind::list:
                 if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
+                s += "    cx_free(p->ptr, p->cap * sizeof(*p->ptr));\n";
+                break;
+            case TypeKind::deque:
+                if (!is_copy(t->elem)) {
+                    s += "    for (cx_usize i = 0, j = p->head; i < p->len; i++, j = j + 1 == p->cap ? 0 : j + 1) " + drop_fn(t->elem) +
+                         "(&p->ptr[j]);\n";
+                }
                 s += "    cx_free(p->ptr, p->cap * sizeof(*p->ptr));\n";
                 break;
             case TypeKind::map:
@@ -2162,6 +2189,20 @@ $dropall    m->len = 0;
                 else s += "    for (cx_usize i = 0; i < p->len; i++) r.ptr[i] = " + copy_fn(t->elem) + "(&p->ptr[i]);\n";
                 break;
             }
+            case TypeKind::deque: {
+                // In order from the first element, so the copy's ring starts at 0 (D110).
+                std::string e = ctype(t->elem);
+                s = "    " + c + " r = {0};\n    if (!p->len) return r;\n    r.ptr = (" + e + "*)cx_alloc(p->len * sizeof(" + e +
+                    "));\n    r.len = r.cap = p->len;\n";
+                if (is_copy(t->elem)) {
+                    s += "    cx_usize a = p->cap - p->head < p->len ? p->cap - p->head : p->len;\n    __builtin_memcpy(r.ptr, p->ptr + p->head, a * sizeof(" +
+                         e + "));\n    __builtin_memcpy(r.ptr + a, p->ptr, (p->len - a) * sizeof(" + e + "));\n";
+                } else {
+                    s += "    for (cx_usize i = 0, j = p->head; i < p->len; i++, j = j + 1 == p->cap ? 0 : j + 1) r.ptr[i] = " + copy_fn(t->elem) +
+                         "(&p->ptr[j]);\n";
+                }
+                break;
+            }
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) part_copy(f.resolved, "r." + ident(f.name), "p->" + ident(f.name));
                 break;
@@ -2213,7 +2254,7 @@ $dropall    m->len = 0;
                 if (t->has_data) return show_fn(t) + "(" + v + ");";
                 return "cx_print_str(" + enum_name_fn(t) + "(" + v + "));";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: case TypeKind::map: case TypeKind::set: return show_fn(t) + "(" + v + ");";
+            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return show_fn(t) + "(" + v + ");";
             default: return "";
         }
     }
@@ -2699,6 +2740,18 @@ $dropall    m->len = 0;
                      " - 1) {");
                 indent_++;
                 line("cx_usize " + i + " = " + g + " + (cx_usize)__builtin_ctz(" + bits + ");");
+                bins = true;
+            } else if (at->kind == TypeKind::deque) {
+                // From the first element to the end of the buffer, then on from its start: at most
+                // two runs, each a plain loop (D110).
+                std::string g = tmp(), n = tmp(), end = tmp();
+                elem_at = arr + "->ptr[" + i + "]";
+                line("for (cx_usize " + g + " = " + arr + "->head, " + n + " = " + arr + "->len; " + n + "; " + g + " = 0) {");
+                indent_++;
+                line("cx_usize " + end + " = " + arr + "->cap - " + g + " < " + n + " ? " + arr + "->cap : " + g + " + " + n + ";");
+                line(n + " -= " + end + " - " + g + ";");
+                line("for (cx_usize " + i + " = " + g + "; " + i + " < " + end + "; " + i + "++) {");
+                indent_++;
                 bins = true;
             } else {
                 std::string n = list ? arr + "->len" : std::to_string(at->length);
@@ -3251,7 +3304,7 @@ $dropall    m->len = 0;
     static bool place_has_effects(const Expr* e) {
         while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) {
             if (e->kind == ExprKind::unwrap) return true;
-            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list ||
+            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
                                                e->lhs->type->kind == TypeKind::map)) {
                 return true;
             }
@@ -3370,7 +3423,8 @@ $dropall    m->len = 0;
     std::string zero(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
-            case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::map: case TypeKind::set:
+            case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map:
+            case TypeKind::set:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -3474,7 +3528,8 @@ $dropall    m->len = 0;
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
             case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
-            case ExprKind::array_lit: return e->type->kind == TypeKind::list ? list_literal(e) : array_literal(e);
+            case ExprKind::array_lit:
+                return e->type->kind == TypeKind::list || e->type->kind == TypeKind::deque ? list_literal(e) : array_literal(e);
             case ExprKind::tuple: return e->elems.empty() ? "" : tuple_literal(e);  // `()` is nothing
             case ExprKind::none_lit: return "((" + ctype(e->type) + "){0})";
             case ExprKind::unwrap: return is_place(e) && !e->lhs->moves ? place(e) : unwrap(e);
@@ -3539,6 +3594,14 @@ $dropall    m->len = 0;
                    lookup_value(e->rhs, at) + "; cx_usize " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
                    lookup_hash(at, k) + "); if (__builtin_expect(" + i + " == CX_NOT_FOUND, 0)) cx_panic_key(" +
                    location(e->rhs->span) + "); &" + b + "->slots[" + i + "].f1; }))";
+        }
+        if (at->kind == TypeKind::deque) {
+            // The deque is found first, then the index, which counts from its first element round
+            // its ring (D110).
+            std::string b = tmp(), i = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; cx_usize " + i + " = " + b + "->head + cx_index(" +
+                   value(e->rhs, e->rhs->type) + ", " + b + "->len, " + location(e->rhs->span) + "); &" + b + "->ptr[" + i + " >= " + b +
+                   "->cap ? " + i + " - " + b + "->cap : " + i + "]; }))";
         }
         if (at->kind == TypeKind::list) {
             std::string loc = location(e->rhs->span);
@@ -3617,7 +3680,7 @@ $dropall    m->len = 0;
                 if (t->has_data) return eq_fn(t) + "(" + a + ", " + b + ")";
                 return "(" + a + " == " + b + ")";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::map: case TypeKind::set:
+            case TypeKind::deque: case TypeKind::map: case TypeKind::set:
                 return eq_fn(t) + "(" + a + ", " + b + ")";
             default: return "(" + a + " == " + b + ")";
         }
@@ -3741,7 +3804,7 @@ $dropall    m->len = 0;
     }
 
     std::string construct(Type* t) {
-        if (t->kind == TypeKind::string || t->kind == TypeKind::list) return "((" + ctype(t) + "){0})";
+        if (t->kind == TypeKind::string || t->kind == TypeKind::list || t->kind == TypeKind::deque) return "((" + ctype(t) + "){0})";
         // An empty table points at the shared control bytes, so a lookup needs no check for it.
         if (is_table(t) && !own_table(t)) return "((" + ctype(t) + "){0})";
         if (is_table(t)) return "((" + ctype(t) + "){ .ctrl = (cx_u8*)cx_table_empty })";
@@ -4336,6 +4399,67 @@ $dropall    m->len = 0;
         return s + "(" + l + "){ " + p + ", " + n + ", " + n + " }; })";
     }
 
+    // The methods of a `Deque` (D110). Its elements run from `head` round its ring, so the one `k`
+    // after the first is at `head + k`, less `cap` when that's past the end.
+    std::string deque_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        Type* et = t->elem;
+        std::string d = ctype(t), el = ctype(et), p = tmp(), v = tmp(), i = tmp(), r = tmp();
+        auto arg = [&](std::size_t k, Type* want) { return value(e->args[k].value, want); };
+        std::string head = "({ " + d + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + d + "* " + p + " = " + address(recv) + "; ";
+        // `i`, the slot `k` places past the first.
+        auto at = [&](const std::string& k) {
+            return "cx_usize " + i + " = " + p + "->head + " + k + "; if (" + i + " >= " + p + "->cap) " + i + " -= " + p + "->cap; ";
+        };
+        auto grow = [&](const std::string& n) {
+            return p + "->ptr = (" + el + "*)cx_deque_grow(" + p + "->ptr, &" + p + "->head, &" + p + "->cap, " + p + "->len, " + n +
+                   ", sizeof(" + el + ")); ";
+        };
+        // `body` for each element, as `p->ptr[j]`, from the first.
+        auto each = [&](const std::string& body) {
+            std::string k = tmp(), j = tmp();
+            return "for (cx_usize " + k + " = 0, " + j + " = " + p + "->head; " + k + " < " + p + "->len; " + k + "++, " + j + " = " + j +
+                   " + 1 == " + p + "->cap ? 0 : " + j + " + 1) " + fill(body, {{"$j", j}}) + " ";
+        };
+        std::string o = e->type ? ctype(e->type) : "";
+        switch (e->bmethod) {
+            case BMethod::len: return "(" + expr(recv) + ").len";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::capacity: return "(" + expr(recv) + ").cap";
+            case BMethod::push_last:
+                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + at(p + "->len") +
+                       p + "->ptr[" + i + "] = " + v + "; " + p + "->len++; })";
+            case BMethod::push_first:
+                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + p + "->head = (" +
+                       p + "->head ? " + p + "->head : " + p + "->cap) - 1; " + p + "->ptr[" + p + "->head] = " + v + "; " + p + "->len++; })";
+            case BMethod::pop_first:
+                return head + o + " " + r + " = {0}; if (" + p + "->len) { " + r + ".v = " + p + "->ptr[" + p + "->head]; " + r +
+                       ".has = 1; " + p + "->head = " + p + "->head + 1 == " + p + "->cap ? 0 : " + p + "->head + 1; " + p + "->len--; } " +
+                       r + "; })";
+            case BMethod::pop_last:
+                return head + o + " " + r + " = {0}; if (" + p + "->len) { " + p + "->len--; " + at(p + "->len") + r + ".v = " + p +
+                       "->ptr[" + i + "]; " + r + ".has = 1; } " + r + "; })";
+            case BMethod::first:
+                return view + o + " " + r + " = {0}; if (" + p + "->len) { " + r + ".v = " + p + "->ptr[" + p + "->head]; " + r +
+                       ".has = 1; } " + r + "; })";
+            case BMethod::last:
+                return view + o + " " + r + " = {0}; if (" + p + "->len) { " + at(p + "->len - 1") + r + ".v = " + p + "->ptr[" + i +
+                       "]; " + r + ".has = 1; } " + r + "; })";
+            case BMethod::clear:
+                return head + (is_copy(et) ? std::string() : each(drop_fn(et) + "(&" + p + "->ptr[$j]);")) + p + "->len = 0; " + p +
+                       "->head = 0; })";
+            case BMethod::reserve:
+                return head + "cx_usize " + v + " = " + arg(0, e->args[0].value->type) + "; if (" + v + " > " + p + "->cap - " + p +
+                       "->len) " + grow(v) + "})";
+            case BMethod::contains:
+                return view + el + " " + v + " = " + arg(0, et) + "; cx_bool " + r + " = 0; " +
+                       each("if (" + equal(et, p + "->ptr[$j]", v) + ") { " + r + " = 1; break; }") + r + "; })";
+            default: return "0";
+        }
+    }
+
     // The methods of `String` and `List`, and `x.copy()`. Each finds the value it's called on,
     // then works out its arguments in order.
     std::string builtin_method(Expr* e) {
@@ -4413,6 +4537,7 @@ $dropall    m->len = 0;
             }
         }
         if (is_table(t)) return table_method(e);
+        if (t->kind == TypeKind::deque) return deque_method(e);
         Type* et = t->elem;
         std::string l = ctype(t), el = ctype(et);
         std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";

@@ -896,7 +896,8 @@ private:
         std::string r(text(l->name));
         if (e->kind == ExprKind::index) {
             TypeKind k = base->type ? base->type->kind : TypeKind::error;
-            const char* how = k == TypeKind::list ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
+            const char* how = k == TypeKind::list  ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
+                            : k == TypeKind::deque ? "; take it out with `pop_first` or `pop_last`, or move a copy with `.copy()`"
                             : k == TypeKind::map  ? "; take it out with `remove`, or move a copy with `.copy()`"
                                                   : "; move a copy with `.copy()`";
             error(e->span, std::string("can't move ") + (k == TypeKind::map ? "a value" : "an element") + " out of " +
@@ -989,6 +990,10 @@ private:
         Expr* recv = e->callee->lhs;
         auto arg = [&](std::size_t i) { return i < e->args.size() ? e->args[i].value : nullptr; };
         switch (e->bmethod) {
+            case BMethod::push_first: case BMethod::push_last:
+                expr(recv, Use::change);
+                expr(arg(0), Use::consume);
+                return;
             case BMethod::push:
                 expr(recv, Use::change);
                 expr(arg(0), recv->type && recv->type->kind == TypeKind::list ? Use::consume : Use::view);

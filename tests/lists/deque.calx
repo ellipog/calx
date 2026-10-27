@@ -1,0 +1,126 @@
+// `Deque<T>`: added to and taken from at both ends, indexed from the first, and grown while its
+// ring has wrapped round its buffer. Checked against Java 25's `ArrayDeque`.
+
+struct Job {
+    id: i32,
+    name: String,
+}
+
+fn total(d: Deque<i32>) -> i64 {
+    var s = 0i64
+    for x in d {
+        s += i64(x)
+    }
+    return s
+}
+
+fn rotated(d: own Deque<i32>, k: i32) -> Deque<i32> {
+    var r = d
+    for _ in 0..k {
+        if let x = r.pop_first() {
+            r.push_last(x)
+        }
+    }
+    return r
+}
+
+fn main() {
+    var d = Deque<i32>()
+    for i in 0..5 {
+        d.push_last(i)
+    }
+    _ = d.pop_first()
+    _ = d.pop_first()
+    d.push_last(5)
+    d.push_last(6)
+    d.push_first(1)
+    println("{d} {d.len()}")    // out: [1, 2, 3, 4, 5, 6] 6
+    // Growing at both ends while the ring has wrapped keeps the order.
+    for i in 7..20 {
+        d.push_last(i)
+        d.push_first(-i)
+    }
+    println("{d}")    // out: [-19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    println("{d[0]} {d[1]} {d[d.len() - 1]} {d.first()} {d.last()} {total(d)}")    // out: -19 -18 19 some(-19) some(19) 21
+    d[0] = 100
+    d[d.len() - 1] += 1
+    println("{d.first()} {d.last()} {d.contains(100)} {d.contains(-19)}")    // out: some(100) some(20) true false
+
+    // Copies and `==` go in order from the first, wherever that is in the ring.
+    let c = d.copy()
+    var e = Deque<i32>()
+    for x in c {
+        e.push_last(x)
+    }
+    println("{c == d} {e == d}")    // out: true true
+    _ = e.pop_last()
+    println("{e == d} {e.len()}")    // out: false 31
+
+    // An empty deque.
+    var none_yet = Deque<i64>()
+    println("{none_yet} {none_yet.is_empty()} {none_yet.first()} {none_yet.last()}")    // out: [] true none none
+    println("{none_yet.pop_first()} {none_yet.pop_last()}")    // out: none none
+    none_yet.reserve(10)
+    println("{none_yet.capacity() >= 10} {none_yet.len()}")    // out: true 0
+
+    // Elements that own memory are moved in and out, and freed by `clear` and at the end.
+    var words = Deque<String>()
+    for w in ["a", "b", "c", "d", "e"] {
+        words.push_first(String(w))
+        words.push_last(String(w))
+    }
+    println("{words}")    // out: [e, d, c, b, a, a, b, c, d, e]
+    let f = words.pop_first()
+    let l = words.pop_last()
+    println("{f} {l} {words.len()} {words[0]} {words.contains(String("a"))}")    // out: some(e) some(e) 8 d true
+    words.clear()
+    println("{words} {words.is_empty()}")    // out: [] true
+    words.push_last(String("again"))
+    println("{words}")    // out: [again]
+
+    var jobs = Deque<Job>()
+    jobs.push_last(Job { id: 1, name: String("load") })
+    jobs.push_last(Job { id: 2, name: String("light") })
+    jobs.push_first(Job { id: 0, name: String("gen") })
+    jobs[1].name.push_str("ed")
+    loop {
+        if let j = jobs.pop_first() {
+            println("{j.id} {j.name}")
+        } else {
+            break
+        }
+    }
+    // out: 0 gen
+    // out: 1 loaded
+    // out: 2 light
+
+    // A literal, and a list's repeat form, are deques where one is expected.
+    let lit: Deque<i32> = [1, 2, 3]
+    var zeros: Deque<i64> = [0i64; 3]
+    zeros.push_first(9)
+    println("{lit} {zeros} {rotated(lit.copy(), 2)}")    // out: [1, 2, 3] [9, 0, 0, 0] [3, 1, 2]
+
+    // A deque is a map's key or a set's value when its elements are.
+    var seen = Set<Deque<i32>>()
+    seen.insert(lit.copy())
+    seen.insert(rotated(lit.copy(), 3))
+    seen.insert(rotated(lit.copy(), 1))
+    println("{seen.len()} {seen.contains(lit)}")    // out: 2 true
+
+    // A queue that stays small, as a flood fill's does, and one that fills and empties.
+    var q = Deque<i64>()
+    var sum = 0i64
+    for i in 0..100000 {
+        q.push_last(i64(i))
+        if i % 3 == 0 {
+            if let x = q.pop_first() {
+                sum += x
+            }
+        }
+    }
+    var rest = 0i64
+    for x in q {
+        rest += x
+    }
+    println("{sum} {rest} {q.len()}")    // out: 555561111 4444388889 66666
+}

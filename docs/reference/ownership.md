@@ -27,7 +27,7 @@ fn main() {
 A type is `Copy` when its values own no memory. Copying one copies its bytes, and both copies can be used.
 
 - `Copy`: the integers, floats, `bool`, `char`, `rune` and `str`, enums without data, and arrays, tuples, optionals, structs and enums whose parts are all `Copy`.
-- Owning: `String`, `List<T>`, and anything that holds one.
+- Owning: `String`, `List<T>`, `Deque<T>`, the maps and sets, and anything that holds one.
 - A generic parameter is `Copy` only with the bound `T: Copy` ([generics](generics.md#values-of-type-t)).
 
 Nothing marks a type `Copy`: it follows from what the type holds. A struct that gains a `String` field stops being `Copy`, and the compiler then checks every use of it as an owning value.

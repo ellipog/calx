@@ -1,0 +1,11 @@
+fn main() {
+    var d = Deque<i32>()
+    for i in 0..4 {
+        d.push_first(i)
+    }
+    _ = d.pop_last()
+    println("{d}")    // out: [3, 2, 1]
+    var i: usize = 0
+    i += 3
+    println("{d[i]}")    // panic: index 3 is out of bounds for length 3
+}

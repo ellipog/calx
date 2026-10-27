@@ -1,0 +1,8 @@
+// An element that owns memory can't be moved out of a deque by indexing, which would leave a
+// hole; it's taken out from an end.
+fn main() {
+    var d = Deque<String>()
+    d.push_last(String("stone"))
+    let taken = d[0]    // error: can't move an element out of `d`; take it out with `pop_first` or `pop_last`, or move a copy with `.copy()`
+    println(taken)
+}

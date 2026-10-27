@@ -107,6 +107,18 @@ Type* Types::list_of(Type* elem) {
     return t;
 }
 
+Type* Types::deque_of(Type* elem) {
+    auto it = deque_map_.find(elem);
+    if (it != deque_map_.end()) return it->second;
+    Type* t = make(TypeKind::deque, arena_.copy("Deque<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    deque_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 Type* Types::map_of(Type* key, Type* value, TableKind table) {
     auto k = std::make_tuple(key, value, table);
     auto it = map_map_.find(k);
@@ -191,7 +203,7 @@ namespace {
 bool copy_walk(const Type* t, int depth) {
     if (depth > 64) return true;
     switch (t->kind) {
-        case TypeKind::string: case TypeKind::list: case TypeKind::map: case TypeKind::set: return false;
+        case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
         case TypeKind::tuple:

@@ -89,12 +89,13 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "Copy",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "Copy",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
+        n_Deque_ = ctx.names.intern("Deque");
         n_Map_ = ctx.names.intern("Map");
         n_Set_ = ctx.names.intern("Set");
         n_JavaHashMap_ = ctx.names.intern("JavaHashMap");
@@ -346,7 +347,7 @@ private:
             case TypeKind::optional:
             case TypeKind::array:
             case TypeKind::pointer:
-            case TypeKind::list: case TypeKind::set: return private_part(t->elem);
+            case TypeKind::list: case TypeKind::deque: case TypeKind::set: return private_part(t->elem);
             case TypeKind::map:
                 if (const Item* p = private_part(t->key)) return p;
                 return private_part(t->elem);
@@ -1318,7 +1319,8 @@ private:
         if (!t->open) return false;
         switch (t->kind) {
             case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::set: return unresolved(t->elem, vars, s);
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+                return unresolved(t->elem, vars, s);
             case TypeKind::map: return unresolved(t->key, vars, s) || unresolved(t->elem, vars, s);
             case TypeKind::tuple:
                 for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
@@ -1349,6 +1351,7 @@ private:
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list: return T.list_of(subst(t->elem, s));
+            case TypeKind::deque: return T.deque_of(subst(t->elem, s));
             case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
             case TypeKind::set: return T.set_of(subst(t->elem, s), t->table);
             case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
@@ -1381,7 +1384,8 @@ private:
         if (!pattern->open) return pattern == actual;
         if (pattern->kind != actual->kind || pattern->table != actual->table) return false;
         switch (pattern->kind) {
-            case TypeKind::optional: case TypeKind::list: case TypeKind::set: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+                return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::pointer:
                 return pattern->is_const == actual->is_const && unify(pattern->elem, actual->elem, s, vars);
@@ -1625,6 +1629,7 @@ private:
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + "_list";
+            case TypeKind::deque: return mangle(t->elem) + "_deque";
             case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
             case TypeKind::set: return mangle(t->elem) + table_suffix(t) + "set";
             case TypeKind::tuple: {
@@ -2037,6 +2042,19 @@ private:
                     }
                     return T.list_of(elem);
                 }
+                if (n == n_Deque_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`Deque` takes one generic argument, the type of its elements: `Deque<i32>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem)) return T.error;
+                    if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+                        error(t->args[0]->span, "a deque can't hold " + name_of(elem));
+                        return T.error;
+                    }
+                    return T.deque_of(elem);
+                }
                 if (is_table_name(n) && !env_type(n)) {
                     bool map = is_map_name(n);
                     TableKind table = table_kind(n);
@@ -2196,7 +2214,7 @@ private:
     static bool is_view_type(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
-            case TypeKind::list: case TypeKind::map: case TypeKind::set: case TypeKind::param:
+            case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
                 return true;
             case TypeKind::enum_: return t->has_data;
             case TypeKind::optional: return is_view_type(t->elem);
@@ -2930,7 +2948,7 @@ private:
                 s->value = it->callee->lhs;
                 over = s->value;
                 borrowed = place_root(s->value);
-            } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::set) {
+            } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::set) {
                 elem = t->elem;
                 borrowed = place_root(it);
             } else if (t->kind == TypeKind::map) {
@@ -3422,6 +3440,8 @@ private:
                     default: return t->order_bound;
                 }
             case TypeKind::list: return derived(t->elem, prop);
+            // Java's `ArrayDeque` has neither `hashCode` nor `compareTo`.
+            case TypeKind::deque: return prop != p_java_hash && prop != p_order && derived(t->elem, prop);
             case TypeKind::optional: case TypeKind::array: return prop != p_java_hash && derived(t->elem, prop);
             case TypeKind::map:
                 return prop != p_hash && prop != p_order && prop != p_java_hash && derived(t->key, prop) && derived(t->elem, prop);
@@ -3554,6 +3574,9 @@ private:
         if (prop == p_java_hash && t->kind != TypeKind::list) return t;
         switch (t->kind) {
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
+            case TypeKind::deque:
+                if (prop == p_order) return t;
+                return lacking_part(t->elem, prop, seen);
             case TypeKind::map:
                 if (prop == p_hash || prop == p_order) return t;
                 if (const Type* x = lacking_part(t->key, prop, seen)) return x;
@@ -4146,6 +4169,7 @@ private:
         if (t->kind == TypeKind::enum_ && is_identity(t)) {
             std::uint32_t i = find_variant(t, e->member);
             if (i != UINT32_MAX && t->item->variants[i].types.empty()) {
+                if (expected && is_bad(expected)) return T.error;
                 if (!expected || expected->generic != t->generic) {
                     error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
                                        q(std::string(text(t->generic->name)) + "<...>." + std::string(m)) +
@@ -4241,7 +4265,7 @@ private:
         }
         Type* it = check(e->rhs, T.usize);
         if (is_bad(base)) return T.error;
-        if (base->kind == TypeKind::list) return base->elem;
+        if (base->kind == TypeKind::list || base->kind == TypeKind::deque) return base->elem;
         if (base->kind != TypeKind::array) {
             error(e->lhs->span, name_of(base) + " can't be indexed");
             return T.error;
@@ -4514,7 +4538,7 @@ private:
     }
 
     Type* array_literal(Expr* e, Type* expected) {
-        if (expected && expected->kind == TypeKind::list) return list_literal(e, expected);
+        if (expected && (expected->kind == TypeKind::list || expected->kind == TypeKind::deque)) return list_literal(e, expected);
         Type* want = expected && expected->kind == TypeKind::array ? expected->elem : nullptr;
         if (e->repeat) {
             Type* elem = check(e->elems[0], want);
@@ -4527,6 +4551,7 @@ private:
             return T.array_of(elem, e->repeat->const_bits);
         }
         if (e->elems.empty()) {
+            if (expected && is_bad(expected)) return T.error;
             if (!want) {
                 error(e->span, "can't tell what this empty array holds; give it a type");
                 return T.error;
@@ -5402,6 +5427,7 @@ private:
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
+            if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
             if (is_table_name(n) && !find_local(n)) {
                 return table_call(e, expected, is_map_name(n), table_kind(n));
             }
@@ -5544,7 +5570,7 @@ private:
                 }
             }
             if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list ||
-                recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
+                recv->kind == TypeKind::deque || recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
                 return builtin_method(e, recv);
             }
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
@@ -6202,8 +6228,10 @@ private:
     Type* construct(Expr* e, Type* t, Type* expected) {
         if (is_identity(t)) {
             if (!expected || expected->generic != t->generic) {
-                error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
-                                   q(std::string(text(t->generic->name)) + "<...>()") + ", or give the variable a type");
+                if (!expected || !is_bad(expected)) {
+                    error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
+                                       q(std::string(text(t->generic->name)) + "<...>()") + ", or give the variable a type");
+                }
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
@@ -6417,6 +6445,10 @@ private:
         if (callee->type_args.size() == 1) {
             Type* elem = resolve_type(callee->type_args[0]);
             if (is_bad(elem)) return T.error;
+            if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+                error(callee->type_args[0]->span, "a list can't hold " + name_of(elem));
+                return T.error;
+            }
             t = T.list_of(elem);
         } else if (!callee->type_args.empty()) {
             error(callee->span, "`List` takes one generic argument, the type of its elements: `List<i32>()`");
@@ -6424,6 +6456,8 @@ private:
         } else if (expected && expected->kind == TypeKind::list) {
             t = expected;
         } else {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (expected && is_bad(expected)) return T.error;
             error(e->span, "can't tell what this list holds; give it, as in `List<i32>()`, or give the variable a type");
             return T.error;
         }
@@ -6436,6 +6470,60 @@ private:
         e->call = CallKind::construct;
         e->is_const = true;
         return t;
+    }
+
+    // `Deque<i32>()`: an empty deque, from the generic argument or the type expected.
+    Type* deque_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* t = nullptr;
+        if (callee->type_args.size() == 1) {
+            Type* elem = resolve_type(callee->type_args[0]);
+            if (is_bad(elem)) return T.error;
+            if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+                error(callee->type_args[0]->span, "a deque can't hold " + name_of(elem));
+                return T.error;
+            }
+            t = T.deque_of(elem);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`Deque` takes one generic argument, the type of its elements: `Deque<i32>()`");
+            return T.error;
+        } else if (expected && expected->kind == TypeKind::deque) {
+            t = expected;
+        } else {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (expected && is_bad(expected)) return T.error;
+            error(e->span, "can't tell what this deque holds; give it, as in `Deque<i32>()`, or give the variable a type");
+            return T.error;
+        }
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->args[0].span, "`Deque<T>()` takes no arguments; push the elements, or write them as `[a, b]`");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        e->is_const = true;
+        return t;
+    }
+
+    // What a deque calls a method of Java's `ArrayDeque` or Rust's `VecDeque` (D110).
+    static std::string deque_hint(std::string_view m) {
+        if (m == "push") return "; a deque adds at either end, with `push_last`, or `push_first`, which is Java's `push`";
+        if (m == "pop") return "; a deque takes from either end, with `pop_last`, or `pop_first`, which is Java's `pop`";
+        static const std::pair<std::string_view, std::string_view> names[] = {
+            {"add", "push_last"},       {"addLast", "push_last"},     {"offer", "push_last"},      {"offerLast", "push_last"},
+            {"push_back", "push_last"}, {"addFirst", "push_first"},   {"offerFirst", "push_first"}, {"push_front", "push_first"},
+            {"poll", "pop_first"},      {"pollFirst", "pop_first"},   {"remove", "pop_first"},     {"removeFirst", "pop_first"},
+            {"pop_front", "pop_first"}, {"pollLast", "pop_last"},     {"removeLast", "pop_last"},  {"pop_back", "pop_last"},
+            {"peek", "first"},          {"peekFirst", "first"},       {"getFirst", "first"},       {"element", "first"},
+            {"front", "first"},         {"peekLast", "last"},         {"getLast", "last"},         {"back", "last"},
+            {"size", "len"},
+        };
+        for (const auto& [java, calx] : names) {
+            if (m == java) return "; a deque's is `" + std::string(calx) + "`";
+        }
+        return "";
     }
 
     bool is_map_name(Name n) const { return n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_ || n == n_LinkedMap_; }
@@ -6492,6 +6580,7 @@ private:
         } else if (expected && expected->kind == kind && expected->table == table) {
             t = expected;
         } else {
+            if (expected && is_bad(expected)) return T.error;
             error(e->span, std::string("can't tell what this ") + (map ? "map" : "set") + " holds; give it, as in " + q(example) +
                                ", or give the variable a type");
             return T.error;
@@ -6718,6 +6807,28 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
+        } else if (recv->kind == TypeKind::deque) {
+            // Java's `ArrayDeque`: added to and taken from at both ends, with the names a
+            // `LinkedMap` has for its ends.
+            Type* el = recv->elem;
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            else if (m == "push_first") b = BMethod::push_first, changes = true, params = {el};
+            else if (m == "push_last") b = BMethod::push_last, changes = true, params = {el};
+            else if (m == "pop_first") b = BMethod::pop_first, changes = true, result = T.optional_of(el);
+            else if (m == "pop_last") b = BMethod::pop_last, changes = true, result = T.optional_of(el);
+            else if (m == "first") b = BMethod::first, result = T.optional_of(el);
+            else if (m == "last") b = BMethod::last, result = T.optional_of(el);
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+            if ((b == BMethod::first || b == BMethod::last) && !is_copy(el) && !is_bad(el)) {
+                error(e->callee->span, q(m) + " copies the element out, so it needs elements that are `Copy`, and " + name_of(el) +
+                                           " owns memory; read it in place with " + q(b == BMethod::first ? "d[0]" : "d[d.len() - 1]"));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
         } else {
             Type* el = recv->elem;
             if (m == "len") b = BMethod::len, result = T.usize;
@@ -6739,7 +6850,7 @@ private:
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
         }
         if (b == BMethod::none) {
-            error(e->callee->span, name_of(recv) + " has no method " + q(m));
+            error(e->callee->span, name_of(recv) + " has no method " + q(m) + (recv->kind == TypeKind::deque ? deque_hint(m) : ""));
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
@@ -6778,7 +6889,8 @@ private:
                                        lacking(recv->elem, p_order));
             result = T.error;
         }
-        if (b == BMethod::contains && recv->kind == TypeKind::list && !equatable(recv->elem) && !is_bad(recv->elem)) {
+        if (b == BMethod::contains && (recv->kind == TypeKind::list || recv->kind == TypeKind::deque) && !equatable(recv->elem) &&
+            !is_bad(recv->elem)) {
             error(e->callee->span, "`contains` compares with `==`, which " + name_of(recv->elem) + " doesn't have");
             return T.error;
         }
@@ -6934,12 +7046,12 @@ private:
         auto visit = [&](auto& self, Type* t) -> void {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::map: case TypeKind::set: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: break;
                 default: return;
             }
             int& st = state[t];
             if (st == 2) return;
-            if (t->kind == TypeKind::list || t->kind == TypeKind::map || t->kind == TypeKind::set) {
+            if (t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::map || t->kind == TypeKind::set) {
                 // Its elements are behind a pointer, so it needs only their declaration. A map's
                 // `(K, V)`, which its functions read, is ordered once everything else is.
                 st = 2;
@@ -7067,6 +7179,7 @@ private:
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
+    Name n_Deque_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

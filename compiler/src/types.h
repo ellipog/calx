@@ -24,6 +24,7 @@ enum class TypeKind : std::uint8_t {
     str,       // a read-only view of UTF-8 bytes
     string,    // `String`: UTF-8 bytes it owns
     list,      // `List<T>`: a growable array that owns its elements
+    deque,     // `Deque<T>`: a growable ring of elements, which it owns, taken from and added at both ends
     map,       // `Map<K, V>` or `JavaHashMap<K, V>`: a hash table of keys to values, which it owns
     set,       // `Set<T>` or `JavaHashSet<T>`: a hash table of values, which it owns
     struct_,
@@ -95,6 +96,7 @@ public:
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
+    Type* deque_of(Type* elem);
     // `JavaHashMap<K, V>` and `OpenHashMap<K, V>`, and their sets, with their kinds (D105, D107).
     Type* map_of(Type* key, Type* value, TableKind table = TableKind::native);
     Type* set_of(Type* elem, TableKind table = TableKind::native);
@@ -114,6 +116,7 @@ private:
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
+    std::map<Type*, Type*> deque_map_;
     std::map<std::tuple<Type*, Type*, TableKind>, Type*> map_map_;
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;

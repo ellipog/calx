@@ -56,6 +56,7 @@ fn main() {
 
 - `String` owns UTF-8 text and can change it ([strings](strings.md)).
 - `List<T>` is a growable array that owns its elements ([lists](lists.md)).
+- `Deque<T>` is a growable ring, added to and taken from at both ends ([deques](deques.md)).
 
 ## Structs, enums and tuples
 

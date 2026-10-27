@@ -108,6 +108,9 @@ cx_usize cx_alloc_live(void);
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
  * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. */
 void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
+/* Room for `extra` more in a deque's ring, which runs from `*head` round its buffer: grown as a
+   list's is, then with the run that wrapped moved so the ring is whole again (D110). */
+void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
 CX_COLD void cx_panic_capacity(void);
 /* `sort` found that a hand-written `Order` contradicts itself (D102). */
 CX_COLD void cx_panic_order(const char* at);
