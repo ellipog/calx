@@ -29,17 +29,18 @@ What's built, one page per feature:
 12. [Enums](reference/enums.md): variants with and without data, representations, conversions
 13. [Tuples](reference/tuples.md): values grouped by position, and destructuring
 14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
-15. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
-16. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods and matching
-17. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
-18. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
-19. [Generics](reference/generics.md): generic functions and types, inference, bounds, `T: Copy`, and their C
-20. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-21. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-22. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
-23. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-24. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
-25. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+15. [Errors](reference/errors.md): functions that can fail, `fail`, `try`, matching `ok` and `err`, `!`, and their C
+16. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
+17. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods and matching
+18. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
+19. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+20. [Generics](reference/generics.md): generic functions and types, inference, bounds, `T: Copy`, and their C
+21. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+22. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+23. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
+24. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+25. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
+26. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 

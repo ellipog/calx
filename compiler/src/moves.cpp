@@ -380,7 +380,8 @@ private:
                                                      : ViewOf::read_param;
             declare(l);
         }
-        bool value = f->result_type && f->result_type->kind != TypeKind::unit && f->result_type->kind != TypeKind::never;
+        Type* r = f->result_type && f->result_type->is_result ? f->result_type->args[0] : f->result_type;
+        bool value = r && r->kind != TypeKind::unit && r->kind != TypeKind::never;
         // The parameters are in the body's scope, so its end drops the `own` ones.
         block(f->body, value ? Use::consume : Use::view, false);
         scopes_.clear();
@@ -416,6 +417,7 @@ private:
             case StmtKind::assign: assign(s); break;
             case StmtKind::expr: expr(s->value, Use::view); break;
             case StmtKind::return_:
+            case StmtKind::fail:
                 if (s->value) expr(s->value, Use::consume);
                 s->drops = drops_from(0);
                 st_ = dead_state();
@@ -733,6 +735,12 @@ private:
                 return;
             case ExprKind::index:
             case ExprKind::unwrap: project(e, u); return;
+            case ExprKind::try_:
+                // The error path leaves the function, dropping what a `return` here would.
+                expr(e->lhs, Use::consume);
+                e->exit_drops = drops_from(0);
+                rvalue(e, u);
+                return;
             case ExprKind::optional_field:
                 expr(e->lhs, Use::view);
                 if (e->type && e->type->kind == TypeKind::optional && !copyable(e->type->elem)) {

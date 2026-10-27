@@ -1,0 +1,101 @@
+// Errors passed up through methods, loops, generics and nested calls. When `try` passes an
+// error up, everything owned so far is dropped, which the debug build's leak check confirms.
+
+struct Reader {
+    bytes: List<u8>,
+    at: usize,
+}
+
+impl Reader {
+    fn byte(self: mut Reader) -> u8 ! String {
+        if self.at >= self.bytes.len() {
+            fail "ran out at {self.at}"
+        }
+        let b = self.bytes[self.at]
+        self.at += 1
+        return b
+    }
+
+    fn varint(self: mut Reader) -> i32 ! String {
+        var value = 0
+        var shift = 0
+        loop {
+            let b = try self.byte()
+            value |= (i32(b) & 0x7f) << shift
+            if b & 0x80 == 0 {
+                return value
+            }
+            shift += 7
+            if shift >= 35 {
+                fail "varint too long"
+            }
+        }
+    }
+}
+
+fn pair(a: own String, b: i32) -> String {
+    return "{a}={b}"
+}
+
+fn labelled(r: mut Reader) -> String ! String {
+    // The copy is made before `try` can leave, and must be dropped if it does.
+    let name = String("key")
+    return pair(name.copy(), try r.varint())
+}
+
+fn kept(r: mut Reader) -> List<String> ! String {
+    var out = List<String>()
+    out.push(String("first"))
+    let n = try r.varint()
+    out.push("{n}")
+    return out
+}
+
+fn first<T: Copy>(xs: List<T>) -> T ! String {
+    if xs.is_empty() {
+        fail String("empty")
+    }
+    return xs[0]
+}
+
+fn nested(r: mut Reader) -> i32 ! String {
+    return try add(try r.varint(), try r.varint())
+}
+
+fn add(a: i32, b: i32) -> i32 ! String {
+    if a + b > 1000 {
+        fail "too big"
+    }
+    return a + b
+}
+
+fn main() {
+    var r = Reader { bytes: [0xac, 0x02, 0x05], at: 0 }
+    println("{r.varint()!}")    // out: 300
+    println(labelled(mut r)!)    // out: key=5
+    match labelled(mut r) {
+        ok(s) => println(s),
+        err(e) => println("error: {e}"),    // out: error: ran out at 3
+    }
+    var r2 = Reader { bytes: [0x07], at: 0 }
+    match kept(mut r2) {
+        ok(xs) => println("{xs}"),    // out: [first, 7]
+        err(e) => println("error: {e}"),
+    }
+    match kept(mut r2) {
+        ok(xs) => println("{xs}"),
+        err(e) => println("error: {e}"),    // out: error: ran out at 1
+    }
+    let xs: List<i64> = [4, 5]
+    println("{first(xs)!}")    // out: 4
+    let empty = List<i64>()
+    if let err(e) = first(empty) {
+        println(e)    // out: empty
+    }
+    var r3 = Reader { bytes: [1, 2, 0xff, 0x7f], at: 0 }
+    println("{nested(mut r3)!}")    // out: 3
+    match nested(mut r3) {
+        ok(n) => println("{n}"),
+        err(e) => println(e),    // out: ran out at 4
+    }
+}

@@ -52,6 +52,7 @@ struct Type {
     bool open = false;       // it mentions a parameter, so it's only checked, never emitted
     bool is_const = false;   // pointer: `*const T`, which can't be written through
     bool has_pointer = false; // it is or holds a pointer
+    bool is_result = false;  // enum_: `T ! E`, what a call to a function that can fail gives back
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };

@@ -795,6 +795,12 @@ void cx_panic_unwrap(const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_unwrap_err(const char* at) {
+    cx_panic_begin(at);
+    panic_text("unwrapped an error with `!`");
+    cx_panic_end();
+}
+
 /* --- parallel for ---------------------------------------------------------------------------
  * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The
  * iterations are split into chunks, which threads claim in order from a shared counter. The

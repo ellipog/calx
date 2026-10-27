@@ -237,6 +237,7 @@ struct Expr {
     bool drop_hidden = false;    // match, if let: `hidden` is dropped when it ends
     bool let_consumes = false;   // if let: the first branch takes the value apart
     Slice<Local*> let_drops;     // if let: what the first branch drops when it ends
+    Slice<Local*> exit_drops;    // try_: what's dropped when it passes the error up
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -468,5 +469,36 @@ struct Module {
     Slice<Item*> items;
     std::string_view prefix;  // filled in by the checker: its items' C names start with this
 };
+
+// Calls `fe` on each expression directly inside `e`, and `fb` on each block.
+template <class FE, class FB>
+void each_child(Expr* e, FE&& fe, FB&& fb) {
+    for (Expr* x : {e->lhs, e->rhs, e->callee, e->repeat, e->cond, e->else_, e->scrutinee, e->body, e->trailing}) {
+        if (x) fe(x);
+    }
+    for (Arg& a : e->args) fe(a.value);
+    for (Expr* x : e->elems) if (x) fe(x);
+    for (FieldInit& f : e->fields) if (f.value) fe(f.value);
+    for (Expr* x : e->interpolations) fe(x);
+    if (e->block) fb(e->block);
+    for (MatchArm& a : e->arms) {
+        if (a.guard) fe(a.guard);
+        if (a.body) fe(a.body);
+    }
+}
+
+// Calls `fe` on each expression directly inside the block's statements and tail, and `fb` on
+// each block they hold.
+template <class FE, class FB>
+void each_child(Block* b, FE&& fe, FB&& fb) {
+    for (Stmt* s : b->stmts) {
+        for (Expr* x : {s->value, s->target, s->else_, s->cond, s->pool}) {
+            if (x) fe(x);
+        }
+        if (s->else_block) fb(s->else_block);
+        if (s->body) fb(s->body);
+    }
+    if (b->tail) fe(b->tail);
+}
 
 }  // namespace calx

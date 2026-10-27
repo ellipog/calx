@@ -1,0 +1,89 @@
+// What the checker rejects: a result is handled where the call is, and errors go only where
+// they're declared.
+
+enum ParseError {
+    Empty
+    Bad(i32)
+}
+
+enum IoError {
+    Closed
+}
+
+fn parse(n: i32) -> i32 ! ParseError {
+    if n < 0 {
+        fail ParseError.Bad(n)
+    }
+    return n
+}
+
+fn read() -> i32 ! IoError {
+    fail IoError.Closed
+}
+
+fn save(n: i32) ! IoError {
+    if n > 9 {
+        fail IoError.Closed
+    }
+}
+
+fn take(n: i32) -> i32 {
+    return n
+}
+
+fn plain(n: i32) -> i32 {
+    let a = try parse(n)    // error: `try` passes the error up, but `plain` can't fail; handle the error with `match`, or declare `! ParseError` on `plain`
+    if a > 3 {
+        fail ParseError.Empty    // error: `fail` returns an error, but `plain` can't fail
+    }
+    return a
+}
+
+fn mixed() -> i32 ! ParseError {
+    _ = try read()    // error: this call fails with an `IoError` and `mixed` fails with a `ParseError`
+    fail IoError.Closed    // error: expected `ParseError`, found `IoError`
+}
+
+fn short() -> i32 ! ParseError {
+    if try parse(1) > 0 {
+        return 1
+    }
+}    // error: function `short` can reach its end without returning a value
+
+fn nothing() ! () {    // error: a function can't fail with `()`
+}
+
+extern "C" fn c_abs(n: i32) -> i32 ! ParseError    // error: a C function can't fail
+
+fn main() {
+    _ = plain(1)
+    _ = mixed()!
+    _ = short()!
+    nothing()!
+    _ = unsafe { c_abs(1) }!
+    parse(1)    // error: `parse` can fail, so handle its error here
+    _ = parse(2)    // error: `parse` can fail, so handle its error here
+    let r = parse(3)    // error: `parse` can fail, so handle its error here
+    println("{take(parse(4))} {r}")    // error: `parse` can fail, so handle its error here
+    _ = ok(5)    // error: `ok` only matches a result
+    match save(1) {
+        ok(_) => println("saved"),    // error: `ok` holds nothing here, since the call returns no value: write `ok`
+        err(_) => println("failed"),
+    }
+    match parse(6) {    // error: this `match` doesn't cover `err(ParseError.Bad(_))`
+        ok(v) => println("{v}"),
+        err(ParseError.Empty) => println("empty"),
+    }
+    match 7 {
+        ok(v) => println("{v}"),    // error: `ok` matches the result of a call that can fail, and this is an `i32`
+        _ => println("other"),
+    }
+    _ = try parse(8)    // error: `try` passes the error up, but `main` can't fail; match `ok` and `err` with `match`, or unwrap it with `!`
+    let m = 9
+    _ = try m    // error: `try` passes up the error of a call that can fail, but this is an `i32`, which can't fail
+    var out = [0; 4]
+    parallel for k in 0usize..4 {
+        out[k] = try parse(i32.wrap(k))    // error: its body can't pass an error up with `try`
+    }
+    println("{out[0]}")
+}

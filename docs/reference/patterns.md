@@ -100,6 +100,7 @@ fn main() {
 | `Rect { w, h }`, `Rect { w: 0.0, .. }` | A variant with fields. `w` alone binds `w`, `w: p` matches `p`, and `..` skips the fields not named |
 | `Empty` | A variant without data |
 | `some(p)`, `none` | An optional that holds a value matching `p`, or is empty |
+| `ok(p)`, `err(p)` | The result of a call that can fail: its value matching `p`, or its error matching `p`. `ok` is written alone when the function returns nothing ([Errors](errors.md#matching-ok-and-err)) |
 | `(p, q)` | A tuple, part by part |
 | `p \| q` | Either. The alternatives can't bind names yet |
 

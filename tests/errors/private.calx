@@ -1,0 +1,18 @@
+// A `pub` function can't fail with a type other modules can't name.
+// file: main.calx
+import hidden.{leak}
+
+fn main() {
+    leak()!
+}
+
+// file: hidden.calx
+module hidden
+
+enum Gone {
+    Away
+}
+
+pub fn leak() ! Gone {    // error: a `pub` function can't fail with it
+    fail Gone.Away
+}

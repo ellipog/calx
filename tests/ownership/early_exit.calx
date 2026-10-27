@@ -1,0 +1,19 @@
+// A value worked out for a call, then left behind when a later argument leaves the function, is
+// dropped on the way out. The debug build's leak check confirms it.
+fn pair(a: own String, n: i32) -> String {
+    return "{a}{n}"
+}
+
+fn pick(n: i32) -> String {
+    let s = "a{n}"
+    let t = pair(s.copy(), match n {
+        0 => return String("zero"),
+        _ => n,
+    })
+    return t
+}
+
+fn main() {
+    println(pick(0))    // out: zero
+    println(pick(2))    // out: a22
+}

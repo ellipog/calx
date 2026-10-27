@@ -93,6 +93,8 @@ public:
         n_List_ = ctx.names.intern("List");
         n_Copy_ = ctx.names.intern("Copy");
         n_copy_ = ctx.names.intern("copy");
+        n_ok_ = ctx.names.intern("ok");
+        n_err_ = ctx.names.intern("err");
     }
 
     void run(const std::vector<Module*>& modules, bool need_main) {
@@ -376,6 +378,10 @@ private:
             s += "__";
             s += p;
         }
+        return unique_c_name(std::move(s));
+    }
+
+    std::string_view unique_c_name(std::string s) {
         // Instances' names are made up, so they could meet a written one.
         if (!c_names_.insert(s).second) {
             for (int i = 2;; i++) {
@@ -661,6 +667,7 @@ private:
     }
 
     std::string variant_text(const Type* t, std::uint32_t i) const {
+        if (t->is_result) return std::string(text(t->item->variants[i].name));  // `ok` and `err`, written alone
         std::string_view owner = t->generic && t->item == t->generic ? text(t->generic->name) : t->name;
         return std::string(owner) + "." + std::string(text(t->item->variants[i].name));
     }
@@ -1343,6 +1350,7 @@ private:
                 for (Type* a : t->args) s += "_" + mangle(a);
                 return s;
             }
+            case TypeKind::unit: return "unit";
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + "_list";
@@ -1371,6 +1379,46 @@ private:
         return s;
     }
 
+    // `T ! E`, what a call to a function that can fail gives back: an instance of a built-in enum
+    // whose variants are `ok(T)` and `err(E)`, so patterns, `match` and ownership work as for any
+    // enum. `ok` holds nothing when `T` is `()`. A result is never stored: it's handled where the
+    // call is, by `try`, `match`, `if let`, `let ... else` or `!` (D91).
+    Item* result_item() {
+        if (result_item_) return result_item_;
+        Item* it = ctx_.arena.make<Item>();
+        it->kind = ItemKind::enum_;
+        it->name = ctx_.names.intern("Result");
+        Type* ok = T.make_param("T");
+        Type* err = T.make_param("E");
+        param_names_[ok] = ctx_.names.intern("T");
+        param_names_[err] = ctx_.names.intern("E");
+        std::vector<Type*> params{ok, err};
+        it->type_params = ctx_.arena.copy(params);
+        std::vector<VariantDecl> vs(2);
+        std::vector<Type*> a{ok}, b{err};
+        vs[0].name = n_ok_;
+        vs[0].types = ctx_.arena.copy(a);
+        vs[1].name = n_err_;
+        vs[1].types = ctx_.arena.copy(b);
+        vs[1].tag = 1;
+        it->variants = ctx_.arena.copy(vs);
+        Type* t = T.make_enum(it, "Result");
+        t->has_data = true;
+        t->repr = T.u8;
+        t->is_result = true;
+        it->declared = t;
+        it->resolved = true;
+        result_item_ = it;
+        return it;
+    }
+
+    Type* result_of(Type* ok, Type* err) { return instance_type(result_item(), {ok, err}); }
+    static Type* ok_type(const Type* t) { return t->args[0]; }
+    static Type* err_type(const Type* t) { return t->args[1]; }
+    // What a `return` in the function gives back: for one that can fail, the value it has when it
+    // doesn't.
+    static Type* returns(const Item* f) { return f->result_type->is_result ? ok_type(f->result_type) : f->result_type; }
+
     // The instance of a generic struct or enum for `args`: a copy of the item whose fields or
     // variants have the arguments' types.
     Type* instance_type(Item* g, const std::vector<Type*>& args) {
@@ -1382,6 +1430,10 @@ private:
             name += args[i]->name;
         }
         name += ">";
+        if (g == result_item_) {
+            name = (args[0]->kind == TypeKind::unit ? std::string("()") : std::string(args[0]->name)) + " ! " +
+                   std::string(args[1]->name);
+        }
         std::string_view nm = ctx_.arena.copy(name);
         Type* t = g->kind == ItemKind::struct_ ? T.make_struct(nullptr, nm) : T.make_enum(nullptr, nm);
         Item* it = ctx_.arena.make<Item>(*g);
@@ -1393,11 +1445,12 @@ private:
         t->item = it;
         t->generic = g;
         t->args = it->type_args;
+        t->is_result = g == result_item_;
         for (Type* a : args) {
             t->open = t->open || a->open;
             t->has_pointer = t->has_pointer || a->has_pointer;
         }
-        it->c_name = c_name_in(g->module, {mangle(t)});
+        it->c_name = g->module ? c_name_in(g->module, {mangle(t)}) : unique_c_name("cx_" + mangle(t));
         type_instances_.emplace(key, t);
         instances_.push_back(t);
         if (!g->resolved && !g->resolving) {
@@ -1438,6 +1491,8 @@ private:
                 v.types = ctx_.arena.copy(ts);
                 v.fields = fields(v.fields);
             }
+            // `ok` holds nothing when the function returns nothing.
+            if (g == result_item_ && vs[0].types.size() == 1 && vs[0].types[0]->kind == TypeKind::unit) vs[0].types = {};
             it->variants = ctx_.arena.copy(vs);
             t->has_data = g->declared->has_data;
             t->repr = g->declared->repr;
@@ -1876,7 +1931,6 @@ private:
             l->is_view = p.mode == ParamMode::mut || (p.mode == ParamMode::read && is_view_type(t));
             p.local = l;
         }
-        if (f->error) not_yet(f->error->span, "functions that can fail");
         f->result_type = f->result ? resolve_type(f->result, f->is_extern) : T.unit;
         if (exported(f)) {
             for (const Param& p : f->params) {
@@ -1887,8 +1941,29 @@ private:
         if (f->result && f->result_type->kind == TypeKind::unit) {
             error(f->result->span, "leave out `-> ()`: a function without `->` returns nothing");
         }
+        if (f->error) f->result_type = fails_with(f, f->result_type);
         pop_env(mark);
         current_impl_type_ = saved_impl;
+    }
+
+    // `-> T ! E`: the function returns a `T` or fails with an `E`.
+    Type* fails_with(Item* f, Type* ok) {
+        Type* e = resolve_type(f->error);
+        if (is_bad(e) || is_bad(ok)) return T.error;
+        if (f->is_extern) {
+            error(f->error->span, "a C function can't fail; declare what it returns, and check it in Calx");
+            return T.error;
+        }
+        if (e->kind == TypeKind::unit || e->kind == TypeKind::never) {
+            error(f->error->span, "a function can't fail with " + name_of(e) + "; give the error a type, such as an enum");
+            return T.error;
+        }
+        if (ok->kind == TypeKind::never) {
+            error(f->result->span, "a function that can fail can't return `never`");
+            return T.error;
+        }
+        if (exported(f)) public_type(e, f->error->span, "a `pub` function can't fail with it");
+        return result_of(ok, e);
     }
 
     void check_const(Item* c) {
@@ -1959,7 +2034,7 @@ private:
             if (p.local) declare(p.local);
         }
         Type* body = check_block(f->body, nullptr, BlockUse::fn_body);
-        if (f->result_type->kind != TypeKind::unit && !is_bad(f->result_type) && body->kind != TypeKind::never) {
+        if (returns(f)->kind != TypeKind::unit && !is_bad(f->result_type) && body->kind != TypeKind::never) {
             Span end{f->body->span.file, f->body->span.end - 1, f->body->span.end};
             error(end, "function " + q(text(f->name)) + " can reach its end without returning a value");
         }
@@ -2100,7 +2175,7 @@ private:
         }
         e->type = t;
         if (t->kind == TypeKind::unit || t->kind == TypeKind::never || is_bad(t)) return t;
-        if (fn_tail && fn_ && t == fn_->result_type) {
+        if (fn_tail && fn_ && t == returns(fn_)) {
             error(e->span, "a function gives back its value with `return`: write `return` before this");
             return T.never;  // so there's no second error about a missing return
         } else {
@@ -2123,7 +2198,7 @@ private:
                 return true;
             case StmtKind::while_: check_while(s); return false;
             case StmtKind::for_: check_for(s); return false;
-            case StmtKind::fail: not_yet(s->span, "errors"); return true;
+            case StmtKind::fail: check_fail(s); return true;
             case StmtKind::checkout: not_yet(s->span, "`checkout` statements"); return false;
             case StmtKind::send: not_yet(s->span, "`send` statements"); return false;
             case StmtKind::item: not_yet(s->span, "nested declarations"); return false;
@@ -2181,14 +2256,14 @@ private:
         Type* vt;
         if (has_else && declared && !is_bad(declared)) {
             // The type given is the pattern's: the optional's value, for an optional.
-            vt = check(s->value, nullptr);
+            vt = handled(s->value);
             if (!is_bad(vt) && vt != declared && !(vt->kind == TypeKind::optional && vt->elem == declared)) {
                 error(s->value->span, "expected " + name_of(declared) + " or " + name_of(T.optional_of(declared)) +
                                           ", found " + name_of(vt));
                 vt = T.error;
             }
         } else {
-            vt = check(s->value, declared);
+            vt = has_else ? handled(s->value, declared) : check(s->value, declared);
         }
         if (vt->kind == TypeKind::never) vt = T.error;
         if (vt->kind == TypeKind::unit) {
@@ -2351,7 +2426,7 @@ private:
         if (!par_.empty()) {
             error(s->span, "a `parallel for` runs every iteration, so its body can't `return`; end an iteration early with `continue`");
         }
-        Type* want = fn_->result_type;
+        Type* want = returns(fn_);
         if (!s->value) {
             if (want->kind != TypeKind::unit && !is_bad(want)) {
                 error(s->span, "function " + q(text(fn_->name)) + " must return " + a_type(want));
@@ -2364,6 +2439,24 @@ private:
             return;
         }
         check(s->value, want);
+    }
+
+    // `fail e`: returns the error `e` from a function that can fail.
+    void check_fail(Stmt* s) {
+        if (!par_.empty()) {
+            error(s->span, "a `parallel for` runs every iteration, so its body can't `fail`; keep each iteration's error in "
+                           "an element of its own, such as `errors[k]`");
+        }
+        Type* rt = fn_->result_type;
+        if (!rt->is_result) {
+            check(s->value, nullptr);
+            if (!is_bad(rt)) {
+                error(s->span, "`fail` returns an error, but " + q(text(fn_->name)) +
+                                   " can't fail; declare what it fails with after `!`, as in `fn parse(s: str) -> i32 ! ParseError`");
+            }
+            return;
+        }
+        check(s->value, err_type(rt));
     }
 
     void check_break(Stmt* s) {
@@ -2502,12 +2595,66 @@ private:
     Type* check(Expr* e, Type* expected) {
         Type* t = infer(e, expected);
         if (t->has_pointer) t = pointer_value(e, t);
+        if (t->is_result && e != result_ok_) t = result_value(e);
         e->type = t;
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
             mismatch(e, expected, t);
             return T.error;
         }
         return t;
+    }
+
+    // `e`, where it may be a `T ! E`: the operand of `try` or `!`, or what `match`, `if let` or
+    // `let ... else` matches.
+    Type* handled(Expr* e, Type* expected = nullptr) {
+        Expr* saved = result_ok_;
+        result_ok_ = e;
+        Type* t = check(e, expected);
+        result_ok_ = saved;
+        return t;
+    }
+
+    // D91: a result is handled where the call is, so an error is never stored, passed on or
+    // dropped without the code saying what happens to it.
+    Type* result_value(Expr* e) {
+        std::string what = e->kind == ExprKind::call && e->item ? q(text(e->item->name)) : std::string("this call");
+        error(e->span, what + " can fail, so handle its error here: pass it up with `try`, match `ok` and `err` with "
+                              "`match`, or unwrap it with `!`");
+        return T.error;
+    }
+
+    // `try f()`: the call's value, or its error returned from this function.
+    Type* check_try(Expr* e) {
+        Type* t = handled(e->lhs);
+        if (is_bad(t)) return T.error;
+        if (!t->is_result) {
+            error(e->span, "`try` passes up the error of a call that can fail, but this is " + a_type(t) + ", which can't fail");
+            return T.error;
+        }
+        if (!par_.empty()) {
+            error(e->span, "a `parallel for` runs every iteration, so its body can't pass an error up with `try`; "
+                           "handle it with `match`");
+            return ok_type(t);
+        }
+        if (!fn_) {
+            error(e->span, "`try` passes an error up, so it can only be used in a function");
+            return ok_type(t);
+        }
+        Type* rt = fn_->result_type;
+        if (is_bad(rt)) return ok_type(t);
+        if (!rt->is_result) {
+            std::string how = !fn_->impl_type && text(fn_->name) == "main"
+                                  ? "match `ok` and `err` with `match`, or unwrap it with `!`"
+                                  : "handle the error with `match`, or declare `! " + std::string(err_type(t)->name) + "` on " +
+                                        q(text(fn_->name));
+            error(e->span, "`try` passes the error up, but " + q(text(fn_->name)) + " can't fail; " + how);
+            return ok_type(t);
+        }
+        if (err_type(rt) != err_type(t)) {
+            error(e->span, "`try` passes the error up, but this call fails with " + a_type(err_type(t)) + " and " +
+                               q(text(fn_->name)) + " fails with " + a_type(err_type(rt)));
+        }
+        return ok_type(t);
     }
 
     // D23: a pointer is only ever a value of its own, used inside `unsafe`.
@@ -2659,15 +2806,16 @@ private:
             case ExprKind::closure: not_yet(e->span, "closures"); return T.error;
             case ExprKind::optional_field: return optional_field(e);
             case ExprKind::unwrap: {
-                Type* t = check(e->lhs, nullptr);
+                Type* t = handled(e->lhs);
                 if (is_bad(t)) return T.error;
+                if (t->is_result) return ok_type(t);
                 if (t->kind != TypeKind::optional) {
-                    error(e->span, "`!` unwraps an optional, but this is " + a_type(t));
+                    error(e->span, "`!` unwraps an optional or the result of a call that can fail, but this is " + a_type(t));
                     return T.error;
                 }
                 return t->elem;
             }
-            case ExprKind::try_: not_yet(e->span, "errors"); return T.error;
+            case ExprKind::try_: return check_try(e);
             case ExprKind::unsafe_block: return check_unsafe(e, expected, false);
         }
         return T.error;
@@ -3783,7 +3931,7 @@ private:
         if (e->let_pattern) {
             // `if let p = v`: the pattern's names are visible in the first block only.
             Pattern* p = e->let_pattern;
-            Type* vt = check(e->cond, nullptr);
+            Type* vt = handled(e->cond);
             if (vt->kind == TypeKind::never) vt = T.error;
             Type* pt = vt;
             if (vt->kind == TypeKind::optional) {
@@ -3840,7 +3988,7 @@ private:
     // --- match ------------------------------------------------------------------------------
 
     Type* check_match(Expr* e, Type* expected, bool stmt) {
-        Type* st = check(e->scrutinee, nullptr);
+        Type* st = handled(e->scrutinee);
         if (st->kind == TypeKind::never) st = T.error;
         e->loop_id = next_loop_++;
         if (e->arms.empty()) {
@@ -3979,9 +4127,16 @@ private:
                     return check_pattern(p->elems[0], t->elem);
                 }
                 if (path.parts.size() == 1 && (first == "ok" || first == "err")) {
-                    not_yet(p->span, "errors");
-                    bind_names(p);
-                    return false;
+                    if (!t->is_result) {
+                        error(p->span, q(first) + " matches the result of a call that can fail, and this is " + a_type(t));
+                        bind_names(p);
+                        return false;
+                    }
+                    if (first == "ok" && t->item->variants[0].types.empty() && !p->elems.empty()) {
+                        error(p->span, "`ok` holds nothing here, since the call returns no value: write `ok`");
+                        bind_names(p);
+                        return false;
+                    }
                 }
                 if (path.parts.size() >= 2 && p->elems.empty()) {
                     Resolved r = resolve_name(path.parts[0]);
@@ -4612,7 +4767,9 @@ private:
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
-                not_yet(e->span, "errors");
+                for (const Arg& a : e->args) check(a.value, nullptr);
+                error(e->span, q(text(n)) + " only matches a result; a function that can fail gives back its value with "
+                                            "`return` and its error with `fail`");
                 return T.error;
             }
             Resolved r = resolve_name(n);
@@ -5183,34 +5340,6 @@ private:
         bool write;
         Expr* e;
     };
-
-    template <class FE, class FB>
-    static void each_child(Expr* e, FE&& fe, FB&& fb) {
-        for (Expr* x : {e->lhs, e->rhs, e->callee, e->repeat, e->cond, e->else_, e->scrutinee, e->body, e->trailing}) {
-            if (x) fe(x);
-        }
-        for (Arg& a : e->args) fe(a.value);
-        for (Expr* x : e->elems) if (x) fe(x);
-        for (FieldInit& f : e->fields) if (f.value) fe(f.value);
-        for (Expr* x : e->interpolations) fe(x);
-        if (e->block) fb(e->block);
-        for (MatchArm& a : e->arms) {
-            if (a.guard) fe(a.guard);
-            if (a.body) fe(a.body);
-        }
-    }
-
-    template <class FE, class FB>
-    static void each_child(Block* b, FE&& fe, FB&& fb) {
-        for (Stmt* s : b->stmts) {
-            for (Expr* x : {s->value, s->target, s->else_, s->cond, s->pool}) {
-                if (x) fe(x);
-            }
-            if (s->else_block) fb(s->else_block);
-            if (s->body) fb(s->body);
-        }
-        if (b->tail) fe(b->tail);
-    }
 
     // Whether the expression can differ between iterations: whether it uses a local declared in
     // the loop, the loop variable included. Nothing outside can change during the loop.
@@ -5928,7 +6057,9 @@ private:
     CheckContext ctx_;
     Types& T;
     Program& prog_;
-    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_copy_;
+    Name n_self_, n_underscore_, n_Self_, n_List_, n_Copy_, n_copy_, n_ok_, n_err_;
+    Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
+    Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
     Scope* scope_ = nullptr;  // the module being worked on

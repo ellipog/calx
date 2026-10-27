@@ -680,6 +680,9 @@ private:
             if (p.local->is_view) line("CX_VIEW(" + local_name(p.local) + ");");
         }
         stmts(f->body, /*value=*/false);
+        if (f->result_type->is_result && f->result_type->item->variants[0].types.empty()) {
+            line("return " + variant_value(f->result_type, 0, {}) + ";");
+        }
         indent_ = 0;
         out_ += "}\n\n";
         o.body.swap(out_);
@@ -808,7 +811,8 @@ private:
             }
             case StmtKind::assign: full([&] { assign(s); }); break;
             case StmtKind::expr: full([&] { expr_stmt(s->value); }); break;
-            case StmtKind::return_: ret(s); break;
+            case StmtKind::return_:
+            case StmtKind::fail: ret(s); break;
             case StmtKind::break_: {
                 std::string id = std::to_string(s->loop_id);
                 std::size_t from = loop_frames_.count(s->loop_id) ? loop_frames_[s->loop_id] : frames_.size();
@@ -854,14 +858,24 @@ private:
             full([&] { expr_stmt(s->value); });
             return;
         }
+        Type* rt = fn_->result_type;
         frames_.emplace_back();
         std::string body = capture([&] {
-            if (!s->value) {
+            if (!s->value && !rt->is_result) {
                 exit_drops(0, s->drops);
                 line("return;");
             } else {
-                // Worked out first, since it can need temporaries of its own.
-                std::string v = value(s->value, fn_->result_type);
+                // Worked out first, since it can need temporaries of its own. In a function that
+                // can fail, `return v` gives back `ok(v)` and `fail e` gives back `err(e)`.
+                std::string v;
+                if (rt->is_result) {
+                    std::uint32_t i = s->kind == StmtKind::fail ? 1 : 0;
+                    std::vector<std::string> parts;
+                    if (s->value) parts.push_back(value(s->value, rt->item->variants[i].types[0]));
+                    v = variant_value(rt, i, parts);
+                } else {
+                    v = value(s->value, rt);
+                }
                 if (exit_needs_drops(0, s->drops)) {
                     std::string r = tmp();
                     line(ctype(fn_->result_type) + " " + r + " = " + v + ";");
@@ -1523,13 +1537,19 @@ private:
             if (effects(o.e) || temp_view) last = i;
         }
         std::vector<std::string> out;
+        // An owned operand waits in a statement temporary when a later one can leave early (see
+        // below). Then the last operand with an effect is worked out in order too, so the C
+        // arguments have no effects left but the moves out of those temporaries, and C's
+        // unspecified argument order can't run a move before the operand that leaves.
+        bool held = false;
         for (int i = 0; i < static_cast<int>(ops.size()); i++) {
             const Operand& o = ops[i];
+            bool in_order = i < last || (i == last && held);
             if (o.pass == Pass::address) {
                 if (is_place(o.e) || o.e->temp) {
                     // A temporary is a place that lasts until the statement ends.
                     std::string a = "&" + place(o.e);
-                    if (i < last && (o.e->temp || place_has_effects(o.e))) {
+                    if (in_order && (o.e->temp || place_has_effects(o.e))) {
                         std::string t = tmp();
                         decls += ctype(o.want) + "* " + t + " = " + a + "; ";
                         a = t;
@@ -1543,14 +1563,51 @@ private:
                 continue;
             }
             std::string v = value(o.e, o.want);
-            if (i < last && !is_constant(o.e)) {
+            if (in_order && !is_constant(o.e)) {
                 std::string t = tmp();
-                decls += ctype(o.want) + " " + t + " = " + v + "; ";
-                v = t;
+                if (i < last && !is_copy(o.want) && exits_after(ops, i)) {
+                    // A later operand can leave the statement, and this value must be dropped
+                    // then: it waits in one of the statement's temporaries, zeroed as it moves on.
+                    held = true;
+                    frames_.back().temps.emplace_back(t, o.want);
+                    decls += t + " = " + v + "; ";
+                    v = "({ " + ctype(o.want) + " " + t + "_v = " + t + "; " + t + " = " + zero(o.want) + "; " + t + "_v; })";
+                } else {
+                    decls += ctype(o.want) + " " + t + " = " + v + "; ";
+                    v = t;
+                }
             }
             out.push_back(v);
         }
         return out;
+    }
+
+    static bool exits_after(const std::vector<Operand>& ops, int i) {
+        for (std::size_t j = static_cast<std::size_t>(i) + 1; j < ops.size(); j++) {
+            if (may_exit(ops[j].e)) return true;
+        }
+        return false;
+    }
+
+    // Whether working out `e` can leave the statement early: a `try`, or a `return`, `fail`,
+    // `break` or `continue` inside it.
+    static bool may_exit(Expr* e) {
+        if (e->kind == ExprKind::try_) return true;
+        bool v = false;
+        each_child(e, [&](Expr* x) { v = v || may_exit(x); }, [&](Block* b) { v = v || may_exit(b); });
+        return v;
+    }
+
+    static bool may_exit(Block* b) {
+        for (const Stmt* s : b->stmts) {
+            if (s->kind == StmtKind::return_ || s->kind == StmtKind::fail || s->kind == StmtKind::break_ ||
+                s->kind == StmtKind::continue_) {
+                return true;
+            }
+        }
+        bool v = false;
+        each_child(b, [&](Expr* x) { v = v || may_exit(x); }, [&](Block* c) { v = v || may_exit(c); });
+        return v;
     }
 
     static std::string wrap(const std::string& decls, const std::string& e) {
@@ -1679,6 +1736,7 @@ private:
             case ExprKind::tuple: return e->elems.empty() ? "" : tuple_literal(e);  // `()` is nothing
             case ExprKind::none_lit: return "((" + ctype(e->type) + "){0})";
             case ExprKind::unwrap: return is_place(e) && !e->lhs->moves ? place(e) : unwrap(e);
+            case ExprKind::try_: return try_value(e);
             case ExprKind::optional_field: return optional_field(e);
             case ExprKind::block:
             case ExprKind::unsafe_block: return block_value(e->block, e->type);
@@ -1987,8 +2045,39 @@ private:
     }
 
     // `a!`: the value, or a panic for `none`.
+    // The value in a result that's `ok`, as C after the statements in `s`.
+    std::string ok_value(const Type* rt, const std::string& t) {
+        if (rt->item->variants[0].types.empty()) return "";
+        return t + ".u.v0." + variant_field(rt, 0, 0) + "; ";
+    }
+
+    // `try f()`: the call's value, or else its error returned from this function, after the
+    // drops a `return` here would do.
+    std::string try_value(Expr* e) {
+        const Type* rt = e->lhs->type;
+        Type* fr = fn_->result_type;
+        std::string t = tmp();
+        std::string call = expr(e->lhs);
+        indent_++;
+        std::string leave = capture([&] {
+            std::string r = tmp();
+            line(ctype(fr) + " " + r + " = " + variant_value(fr, 1, {t + ".u.v1." + variant_field(rt, 1, 0)}) + ";");
+            exit_drops(0, e->exit_drops);
+            line("return " + r + ";");
+        });
+        indent_--;
+        return "({ " + ctype(rt) + " " + t + " = " + call + "; if (__builtin_expect(" + t + ".tag != " +
+               int_const(rt->repr, 0) + ", 0)) {\n" + leave + std::string(static_cast<std::size_t>(indent_) * 4, ' ') +
+               "} " + ok_value(rt, t) + "})";
+    }
+
     std::string unwrap(Expr* e) {
         std::string t = tmp();
+        if (e->lhs->type->is_result) {
+            const Type* rt = e->lhs->type;
+            return "({ " + ctype(rt) + " " + t + " = " + expr(e->lhs) + "; if (__builtin_expect(" + t + ".tag != " +
+                   int_const(rt->repr, 0) + ", 0)) cx_panic_unwrap_err(" + location(e->span) + "); " + ok_value(rt, t) + "})";
+        }
         return "({ " + ctype(e->lhs->type) + " " + t + " = " + expr(e->lhs) + "; if (__builtin_expect(!" + t +
                ".has, 0)) cx_panic_unwrap(" + location(e->span) + "); " + t + ".v; })";
     }

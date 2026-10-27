@@ -55,6 +55,8 @@ fn main() {
 }
 ```
 
+The result of a call that can fail can't be discarded at all, not even with `_ =`: its error must be passed up with `try`, matched, or unwrapped with `!` ([Errors](errors.md#handling-an-error)).
+
 ## Parentheses
 
 These mixtures need parentheses, since their precedence surprises people:

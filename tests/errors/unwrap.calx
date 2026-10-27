@@ -1,0 +1,12 @@
+// `!` on a call that failed panics, naming where.
+fn half(n: i32) -> i32 ! String {
+    if n % 2 != 0 {
+        fail "{n} is odd"
+    }
+    return n / 2
+}
+
+fn main() {
+    println("{half(8)!}")    // out: 4
+    println("{half(3)!}")    // panic: unwrapped an error with `!`
+}

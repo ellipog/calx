@@ -88,31 +88,11 @@ Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns
 
 ### Errors are values
 
-A function that can fail declares an error type after `!`:
+Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, and `f()!`. A result is handled at the call, so it's never stored or dropped (D91). Still to build:
 
-```calx
-enum ParseError { Empty, TooLong(usize) }
-
-fn parse_name(raw: String) -> String ! ParseError {
-    if raw.is_empty() {
-        fail ParseError.Empty
-    }
-    if raw.len() > 16 {
-        fail ParseError.TooLong(raw.len())
-    }
-    return raw
-}
-
-fn greet(raw: String) -> String ! ParseError {
-    let name = try parse_name(raw)    // passes the error up
-    return "hi {name}"
-}
-```
-
-- `fail e` returns the error.
-- `try f()` returns early with the error, converted through `From` if the types differ.
-- `match` on a call's result sees `ok(v)` and `err(e)`.
-- There are no exceptions. Panics are for bugs ([Panics](#panics)).
+- `try` converting the error through `From` when the call's error type differs from the function's.
+- `fn main() ! E`, which prints the error and exits with status 1.
+- `! E` in function types, `fn(A) -> R ! E`, with closures.
 
 ### Interfaces and generics (D26)
 

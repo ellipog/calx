@@ -1,0 +1,59 @@
+// A function that can fail: `fail`, `try`, `match` on `ok` and `err`, `if let`, `let ... else`
+// and `!`.
+
+enum ParseError {
+    Empty
+    TooLong(usize)
+}
+
+fn parse_name(raw: own String) -> String ! ParseError {
+    if raw.is_empty() {
+        fail ParseError.Empty
+    }
+    if raw.len() > 16 {
+        fail ParseError.TooLong(raw.len())
+    }
+    return raw
+}
+
+fn greet(raw: own String) -> String ! ParseError {
+    let name = try parse_name(raw)
+    return "hi {name}"
+}
+
+fn check(n: i32) ! String {
+    if n < 0 {
+        fail "negative: {n}"
+    }
+}
+
+fn describe(raw: str) {
+    match greet(String(raw)) {
+        ok(s) => println(s),
+        err(ParseError.Empty) => println("empty"),
+        err(TooLong(n)) => println("too long: {n}"),
+    }
+}
+
+fn twice(n: i32) ! String {
+    try check(n)
+    try check(n - 5)
+}
+
+fn main() {
+    describe("steve")    // out: hi steve
+    describe("")    // out: empty
+    describe("abcdefghijklmnopqrstuvwxyz")    // out: too long: 26
+    if let err(e) = twice(3) {
+        println(e)    // out: negative: -2
+    }
+    match twice(9) {
+        ok => println("fine"),    // out: fine
+        err(e) => println(e),
+    }
+    let ok(s) = greet(String("alex")) else {
+        return
+    }
+    println(s)    // out: hi alex
+    println(greet(String("x"))!)    // out: hi x
+}

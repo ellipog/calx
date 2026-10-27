@@ -82,6 +82,7 @@ CX_COLD void cx_panic_end(void);
 CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_div_zero(const char* at);
 CX_COLD void cx_panic_unwrap(const char* at);
+CX_COLD void cx_panic_unwrap_err(const char* at);
 CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at);
 

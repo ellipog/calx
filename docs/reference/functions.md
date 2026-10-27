@@ -29,6 +29,8 @@ fn main() {
 
 A function gives back its value with `return value`, and must return on every path. A function's last line can't be a bare value, unlike a block used as a value, so a function always says where it returns.
 
+A function that can fail declares its error type after `!`, as in `fn parse(s: str) -> i32 ! ParseError`, and returns its error with `fail` ([Errors](errors.md)).
+
 ```calx
 fn double(x: i32) -> i32 {
     x * 2      // error: a function gives back its value with `return`

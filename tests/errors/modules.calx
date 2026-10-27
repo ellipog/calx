@@ -1,0 +1,41 @@
+// A `pub` function that can fail, called from another module, with the same error type there.
+// file: main.calx
+import codec.{Error, decode, sum}
+
+fn main() {
+    let bytes: List<u8> = [3, 1, 2, 3]
+    println("{sum(bytes)!}")    // out: 6
+    let short: List<u8> = [4, 1]
+    match decode(short) {
+        ok(xs) => println("{xs}"),
+        err(Error.Short(n)) => println("short by {n}"),    // out: short by 3
+    }
+}
+
+// file: codec.calx
+module codec
+
+pub enum Error {
+    Short(usize)
+}
+
+pub fn decode(bytes: List<u8>) -> List<u8> ! Error {
+    let n = usize(bytes[0])
+    if bytes.len() < n + 1 {
+        fail Error.Short(n + 1 - bytes.len())
+    }
+    var out = List<u8>()
+    for i in 1usize..n + 1 {
+        out.push(bytes[i])
+    }
+    return out
+}
+
+pub fn sum(bytes: List<u8>) -> i32 ! Error {
+    var total = 0
+    for b in try decode(bytes) {
+        total += i32(b)
+    }
+    return total
+}
+
