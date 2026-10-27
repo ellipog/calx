@@ -1,0 +1,147 @@
+// `PriorityQueue`: the least element first, the array in Java's places, ties, elements that own
+// memory, taking out by value and by marks, and generic code (D113).
+struct Tick {
+    at: i64,
+    order: i64,
+}
+
+// Vanilla's drain order: the time, then the order the ticks were scheduled in.
+impl Order for Tick {
+    fn cmp(self, other: Self) -> Ordering {
+        if self.at != other.at {
+            return self.at.cmp(other.at)
+        }
+        return self.order.cmp(other.order)
+    }
+}
+
+// The derived `Order`, member by member, as one compare of numbers in C.
+struct Key {
+    a: i16,
+    b: i64,
+    up: bool,
+}
+
+struct Level {
+    name: String,
+    ticks: PriorityQueue<Tick>,
+}
+
+fn least<T: Order + Copy>(xs: List<T>) -> T? {
+    var q = PriorityQueue<T>()
+    for x in xs {
+        q.push(x)
+    }
+    return q.peek()
+}
+
+fn main() {
+    var q = PriorityQueue<i32>()
+    for x in [5, 3, 8, 1, 9, 2, 7] {
+        q.push(x)
+    }
+    // A loop and printing go along the array, as Java's iterator and `toString` do.
+    println("{q} {q.len()} {q.peek()}")    // out: [1, 3, 2, 5, 9, 8, 7] 7 some(1)
+    println("{q.pop()} {q.pop()} {q}")    // out: some(1) some(2) [3, 5, 7, 8, 9]
+    println("{q.contains(8)} {q.remove(8)} {q.remove(8)} {q}")    // out: true true false [3, 5, 7, 9]
+    var sum = 0
+    for x in q {
+        sum += x
+    }
+    println("{sum} {q.is_empty()}")    // out: 24 false
+    var marks = List<bool>()
+    for x in q {
+        marks.push(x > 4 and x < 9)
+    }
+    q.remove_marked(marks)
+    println("{q}")    // out: [3, 9]
+    q.clear()
+    println("{q.pop()} {q.peek()} {q.len()}")    // out: none none 0
+
+    // Ticks come out by time, then by the order they were scheduled in.
+    var level = Level { name: String("overworld"), ticks: PriorityQueue<Tick>() }
+    var order = 0i64
+    for at in [20i64, 10, 20, 10, 5] {
+        level.ticks.push(Tick { at: at, order: order })
+        order += 1
+    }
+    var drained = List<String>()
+    while let t = level.ticks.pop() {
+        drained.push("{t.at}/{t.order}")
+    }
+    println("{level.name} {drained}")    // out: overworld [5/4, 10/1, 10/3, 20/0, 20/2]
+
+    // Elements that own memory, freed as they're taken out.
+    var words = PriorityQueue<String>()
+    for w in ["pear", "apple", "fig", "kiwi", "date", "plum"] {
+        words.push(String(w))
+    }
+    println("{words}")    // out: [apple, date, fig, pear, kiwi, plum]
+    let copy = words.copy()
+    println("{words.remove("fig")} {words.remove("lime")} {words}")    // out: true false [apple, date, plum, pear, kiwi]
+    var long = List<bool>()
+    for w in words {
+        long.push(w.len() > 4)
+    }
+    words.remove_marked(long)
+    println("{words} {copy == words}")    // out: [date, kiwi, plum, pear] false
+    if let w = words.pop() {
+        println("{w} {words}")    // out: date [kiwi, pear, plum]
+    }
+    let ns: List<i32> = [4, -2, 9]
+    let cs: List<rune> = ['c', 'a']
+    println("{copy.len()} {least(ns)} {least(cs)}")    // out: 6 some(-2) some(a)
+
+    // Many elements, with many ties, come out in order.
+    var many = PriorityQueue<i64>()
+    var s = 1u64
+    for _ in 0..3000 {
+        s = s * 6364136223846793005u64 + 1442695040888963407u64
+        many.push(i64.wrap((s >> 40) % 500u64))
+    }
+    var last = -1i64
+    var ordered = true
+    var n = 0
+    while let x = many.pop() {
+        ordered = ordered and x >= last
+        last = x
+        n += 1
+    }
+    println("{ordered} {n}")    // out: true 3000
+
+    // Members that compare as one number: negative ones first, then the next member decides.
+    var keys = PriorityQueue<Key>()
+    keys.push(Key { a: 3, b: -1, up: true })
+    keys.push(Key { a: -2, b: 5, up: false })
+    keys.push(Key { a: 3, b: -1, up: false })
+    keys.push(Key { a: -2, b: -7, up: true })
+    keys.push(Key { a: 0, b: 0, up: false })
+    keys.push(Key { a: -2, b: 5, up: true })
+    var shown = List<String>()
+    while let k = keys.pop() {
+        shown.push("{k.a}/{k.b}/{k.up}")
+    }
+    println("{shown}")    // out: [-2/-7/true, -2/5/false, -2/5/true, 0/0/false, 3/-1/false, 3/-1/true]
+    var pairs = PriorityQueue<(i8, rune)>()
+    pairs.push((5i8, 'b'))
+    pairs.push((-3i8, 'z'))
+    pairs.push((5i8, 'a'))
+    pairs.push((-3i8, 'a'))
+    var ps = List<String>()
+    while let t = pairs.pop() {
+        ps.push("{t.0}{t.1}")
+    }
+    println("{ps}")    // out: [-3a, -3z, 5a, 5b]
+    for _ in 0..3000 {
+        s = s * 6364136223846793005u64 + 1442695040888963407u64
+        let a = i16.wrap(i64.wrap((s >> 40) % 21u64) - 10)
+        keys.push(Key { a: a, b: i64.wrap((s >> 20) % 5u64) - 2, up: (s >> 10) % 2u64 == 0u64 })
+    }
+    var prev = Key { a: -32768, b: 0, up: false }
+    var sorted = true
+    while let k = keys.pop() {
+        sorted = sorted and k >= prev
+        prev = k
+    }
+    println("{sorted}")    // out: true
+}

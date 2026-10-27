@@ -107,6 +107,19 @@ Type* Types::list_of(Type* elem) {
     return t;
 }
 
+Type* Types::heap_of(Type* elem) {
+    auto it = heap_map_.find(elem);
+    if (it != heap_map_.end()) return it->second;
+    Type* t = make(TypeKind::list, arena_.copy("PriorityQueue<" + std::string(elem->name) + ">"));
+    t->heap = true;
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    heap_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 Type* Types::deque_of(Type* elem) {
     auto it = deque_map_.find(elem);
     if (it != deque_map_.end()) return it->second;

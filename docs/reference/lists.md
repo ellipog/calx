@@ -5,7 +5,7 @@ description: List<T>, the growable array: literals, methods, indexing, loops, pr
 
 # Lists
 
-`List<T>` is a growable array. It owns its elements, and frees them when it's freed ([ownership](ownership.md)). A queue, which takes from the front, is a [`Deque`](deques.md).
+`List<T>` is a growable array. It owns its elements, and frees them when it's freed ([ownership](ownership.md)). A queue, which takes from the front, is a [`Deque`](deques.md), and one that gives its least element first is a [`PriorityQueue`](priority-queues.md).
 
 ```calx
 fn main() {

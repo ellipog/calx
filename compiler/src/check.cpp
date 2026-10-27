@@ -89,13 +89,14 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
+        n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
         n_SortedMap_ = ctx.names.intern("SortedMap");
         n_SortedSet_ = ctx.names.intern("SortedSet");
         n_Map_ = ctx.names.intern("Map");
@@ -1352,7 +1353,7 @@ private:
             }
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
-            case TypeKind::list: return T.list_of(subst(t->elem, s));
+            case TypeKind::list: return t->heap ? T.heap_of(subst(t->elem, s)) : T.list_of(subst(t->elem, s));
             case TypeKind::deque: return T.deque_of(subst(t->elem, s));
             case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
             case TypeKind::set: return T.set_of(subst(t->elem, s), t->table);
@@ -1384,7 +1385,7 @@ private:
             return it->second == actual;
         }
         if (!pattern->open) return pattern == actual;
-        if (pattern->kind != actual->kind || pattern->table != actual->table) return false;
+        if (pattern->kind != actual->kind || pattern->table != actual->table || pattern->heap != actual->heap) return false;
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
                 return unify(pattern->elem, actual->elem, s, vars);
@@ -1630,7 +1631,7 @@ private:
             case TypeKind::unit: return "unit";
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
-            case TypeKind::list: return mangle(t->elem) + "_list";
+            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
             case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
             case TypeKind::set: return mangle(t->elem) + table_suffix(t) + "set";
@@ -2043,6 +2044,15 @@ private:
                         return T.error;
                     }
                     return T.list_of(elem);
+                }
+                if (n == n_PriorityQueue_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`PriorityQueue` takes one generic argument, the type of its elements: `PriorityQueue<i32>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !heap_elem(elem, t->args[0]->span)) return T.error;
+                    return T.heap_of(elem);
                 }
                 if (n == n_Deque_ && !env_type(n)) {
                     if (t->args.size() != 1) {
@@ -3448,7 +3458,9 @@ private:
                     case p_java_hash: return t->java_hash_bound;
                     default: return t->order_bound;
                 }
-            case TypeKind::list: return derived(t->elem, prop);
+            case TypeKind::list:
+                if (t->heap && (prop == p_hash || prop == p_order || prop == p_java_hash)) return false;
+                return derived(t->elem, prop);
             // Java's `ArrayDeque` has neither `hashCode` nor `compareTo`.
             case TypeKind::deque: return prop != p_java_hash && prop != p_order && derived(t->elem, prop);
             case TypeKind::optional: case TypeKind::array: return prop != p_java_hash && derived(t->elem, prop);
@@ -3563,12 +3575,16 @@ private:
         }
         if (prop == p_order && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Order`";
         if (prop == p_order && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Order`";
+        // Java's `PriorityQueue` has neither `hashCode` nor `compareTo` (D113).
+        if ((prop == p_hash || prop == p_order) && leaf->heap) why = std::string(", and a `PriorityQueue` has no ") + names[prop];
         if (prop == p_java_hash) {
             if (leaf->kind == TypeKind::float_) {
                 why = ", and floats have no `JavaHash`: `==` on them isn't Java's `equals`, so they can't be keys";
             } else if (leaf->kind == TypeKind::struct_ || leaf->kind == TypeKind::enum_) {
                 why = ", and a struct or an enum has the `JavaHash` it writes, as a Java class has the `hashCode` it writes: " +
                       q("impl JavaHash for " + std::string(leaf->name));
+            } else if (leaf->heap) {
+                why = ", and a `PriorityQueue` has no `JavaHash`, as Java's has no `hashCode` of its own";
             } else if (leaf->kind != TypeKind::pointer) {
                 why = ", and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in";
             }
@@ -3580,7 +3596,8 @@ private:
     const Type* lacking_part(const Type* t, int prop, std::unordered_set<const Type*>& seen) {
         if (derived(t, prop) || !seen.insert(t).second) return nullptr;
         // What Java's `hashCode` is built into goes only through a list.
-        if (prop == p_java_hash && t->kind != TypeKind::list) return t;
+        if (prop == p_java_hash && (t->kind != TypeKind::list || t->heap)) return t;
+        if (t->heap && (prop == p_hash || prop == p_order)) return t;
         switch (t->kind) {
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
             case TypeKind::deque:
@@ -4277,6 +4294,12 @@ private:
             error(e->span, "a set can't be indexed; ask whether it has a value with `contains`");
             return T.error;
         }
+        if (base->heap) {
+            check(e->rhs, nullptr);
+            error(e->span, "a `PriorityQueue` can't be indexed, since only its least element has a place that means "
+                           "anything; read it with `peek`, or go over the queue in a loop");
+            return T.error;
+        }
         Type* it = check(e->rhs, T.usize);
         if (is_bad(base)) return T.error;
         if (base->kind == TypeKind::list || base->kind == TypeKind::deque) return base->elem;
@@ -4552,6 +4575,12 @@ private:
     }
 
     Type* array_literal(Expr* e, Type* expected) {
+        if (expected && expected->heap) {
+            for (Expr* x : e->elems) check(x, expected->elem);
+            if (e->repeat) check(e->repeat, T.usize);
+            error(e->span, "a `PriorityQueue` isn't written as a list; make it with `PriorityQueue<T>()` and `push` each element");
+            return T.error;
+        }
         if (expected && (expected->kind == TypeKind::list || expected->kind == TypeKind::deque)) return list_literal(e, expected);
         Type* want = expected && expected->kind == TypeKind::array ? expected->elem : nullptr;
         if (e->repeat) {
@@ -5444,6 +5473,7 @@ private:
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
+            if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
             if (is_table_name(n) && !find_local(n)) {
                 return table_call(e, expected, is_map_name(n), table_kind(n));
             }
@@ -6469,7 +6499,7 @@ private:
         } else if (!callee->type_args.empty()) {
             error(callee->span, "`List` takes one generic argument, the type of its elements: `List<i32>()`");
             return T.error;
-        } else if (expected && expected->kind == TypeKind::list) {
+        } else if (expected && expected->kind == TypeKind::list && !expected->heap) {
             t = expected;
         } else {
             for (Arg& a : e->args) check(a.value, nullptr);
@@ -6521,6 +6551,65 @@ private:
         e->call = CallKind::construct;
         e->is_const = true;
         return t;
+    }
+
+    // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
+    Type* heap_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* t = nullptr;
+        if (callee->type_args.size() == 1) {
+            Type* elem = resolve_type(callee->type_args[0]);
+            if (is_bad(elem) || !heap_elem(elem, callee->type_args[0]->span)) return T.error;
+            t = T.heap_of(elem);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`PriorityQueue` takes one generic argument, the type of its elements: `PriorityQueue<i32>()`");
+            return T.error;
+        } else if (expected && expected->kind == TypeKind::list && expected->heap) {
+            t = expected;
+        } else {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (expected && is_bad(expected)) return T.error;
+            error(e->span, "can't tell what this queue holds; give it, as in `PriorityQueue<i32>()`, or give the variable a type");
+            return T.error;
+        }
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            // Java's `new PriorityQueue<>(n, comparator)`.
+            error(e->args[0].span, "`PriorityQueue<T>()` takes no arguments, since its elements go in their `Order`; elements "
+                                   "that go in another order are of a type with that `Order`, and `reserve(n)` makes room");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        e->is_const = true;
+        return t;
+    }
+
+    // Whether a queue can hold `elem`. One without `Order` is reported, but the queue is still
+    // its type, so what's done to it isn't reported again.
+    bool heap_elem(Type* elem, Span span) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(span, "a queue can't hold " + name_of(elem));
+            return false;
+        }
+        if (!orderable(elem)) {
+            error(span, name_of(elem) + " can't be in a `PriorityQueue`, since it has no `Order`" + lacking(elem, p_order));
+        }
+        return true;
+    }
+
+    // What a queue calls a method of Java's `PriorityQueue` (D113).
+    static std::string heap_hint(std::string_view m) {
+        if (m == "add" || m == "offer") return "; Java's `" + std::string(m) + "` is `push`";
+        if (m == "poll") return "; Java's `poll` is `pop`";
+        if (m == "element") return "; Java's `element` is `peek`";
+        if (m == "size") return "; Java's `size` is `len`";
+        if (m == "remove_if" || m == "removeIf" || m == "retain") {
+            return "; mark the elements in a loop over the queue, then take them out with `remove_marked(marks)`";
+        }
+        if (m == "first") return "; the least element is `peek`";
+        return "";
     }
 
     // What a deque calls a method of Java's `ArrayDeque` or Rust's `VecDeque` (D110).
@@ -6887,6 +6976,27 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
+        } else if (recv->heap) {
+            // Java's `PriorityQueue`: the least element comes out first, and a loop goes in the
+            // order of the heap's array (D113).
+            Type* el = recv->elem;
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            else if (m == "push") b = BMethod::push, changes = true, params = {el};
+            else if (m == "pop") b = BMethod::pop, changes = true, result = T.optional_of(el);
+            else if (m == "peek") b = BMethod::peek, result = T.optional_of(el);
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+            else if (m == "remove") b = BMethod::remove, changes = true, params = {el}, result = T.bool_;
+            else if (m == "remove_marked") b = BMethod::remove_marked, changes = true, params = {T.list_of(T.bool_)};
+            if (b == BMethod::peek && !is_copy(el) && !is_bad(el)) {
+                error(e->callee->span, "`peek` copies the element out, so it needs elements that are `Copy`, and " + name_of(el) +
+                                           " owns memory; take it out with `pop`, or read it in a loop, which starts with it");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
         } else if (recv->kind == TypeKind::deque) {
             // Java's `ArrayDeque`: added to and taken from at both ends, with the names a
             // `LinkedMap` has for its ends.
@@ -6930,7 +7040,8 @@ private:
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
         }
         if (b == BMethod::none) {
-            error(e->callee->span, name_of(recv) + " has no method " + q(m) + (recv->kind == TypeKind::deque ? deque_hint(m) : ""));
+            error(e->callee->span, name_of(recv) + " has no method " + q(m) +
+                                       (recv->kind == TypeKind::deque ? deque_hint(m) : recv->heap ? heap_hint(m) : ""));
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
@@ -7259,7 +7370,7 @@ private:
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
-    Name n_Deque_, n_SortedMap_, n_SortedSet_;
+    Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

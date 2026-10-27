@@ -34,20 +34,21 @@ What's built, one page per feature:
 17. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods and matching
 18. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
 19. [Deques](reference/deques.md): `Deque<T>`, added to and taken from at both ends, its methods, indexing, Java's and Rust's names for them, and its C
-20. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
-21. [Java's hash maps](reference/java-maps.md): `JavaHashMap<K, V>` and `JavaHashSet<T>`, in Java's order, `JavaHash`, Java's methods written in Calx, and their C
-22. [fastutil's hash maps](reference/fastutil-maps.md): `OpenHashMap<K, V>` and `OpenHashSet<T>`, in fastutil's order, which fastutil class each is, fastutil's methods written in Calx, and their C
-23. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
-24. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
-25. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
-26. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
-27. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-28. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-29. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-30. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
-31. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-32. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
-33. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+20. [Priority queues](reference/priority-queues.md): `PriorityQueue<T>`, least first, its elements in Java's places, its methods, taking out marked elements, Java's names for them, and its C
+21. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
+22. [Java's hash maps](reference/java-maps.md): `JavaHashMap<K, V>` and `JavaHashSet<T>`, in Java's order, `JavaHash`, Java's methods written in Calx, and their C
+23. [fastutil's hash maps](reference/fastutil-maps.md): `OpenHashMap<K, V>` and `OpenHashSet<T>`, in fastutil's order, which fastutil class each is, fastutil's methods written in Calx, and their C
+24. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
+25. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
+26. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+27. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
+28. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+29. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
+30. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+31. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
+32. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+33. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
+34. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 

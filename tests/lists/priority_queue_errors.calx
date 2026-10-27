@@ -1,0 +1,34 @@
+// What a `PriorityQueue` can't do: hold elements without `Order`, take a comparator, be indexed
+// or written as a list, copy out an element that owns memory, be a key, or use Java's names.
+struct Job {
+    at: f64,
+}
+
+fn queued<T>(x: T) -> PriorityQueue<T> {    // error: `T` can't be in a `PriorityQueue`, since it has no `Order`; give `T` the bound `Order`
+    var q = PriorityQueue<T>()    // error: `T` can't be in a `PriorityQueue`, since it has no `Order`; give `T` the bound `Order`
+    q.push(x)
+    return q
+}
+
+fn main() {
+    let a = PriorityQueue<f64>()    // error: `f64` can't be in a `PriorityQueue`, since it has no `Order`, and floats have no `Order`
+    let b = PriorityQueue<i32>(11)    // error: `PriorityQueue<T>()` takes no arguments, since its elements go in their `Order`
+    var q = PriorityQueue<i32>()
+    q.push(3)
+    println("{q[0]}")    // error: a `PriorityQueue` can't be indexed, since only its least element has a place that means anything; read it with `peek`, or go over the queue in a loop
+    q.add(4)    // error: `PriorityQueue<i32>` has no method `add`; Java's `add` is `push`
+    _ = q.poll()    // error: `PriorityQueue<i32>` has no method `poll`; Java's `poll` is `pop`
+    q.sort()    // error: `PriorityQueue<i32>` has no method `sort`
+    q.remove_if(1)    // error: `PriorityQueue<i32>` has no method `remove_if`; mark the elements in a loop over the queue, then take them out with `remove_marked(marks)`
+    let c: PriorityQueue<i32> = [1, 2]    // error: a `PriorityQueue` isn't written as a list; make it with `PriorityQueue<T>()` and `push` each element
+    let d: PriorityQueue<i32> = List<i32>()    // error: expected `PriorityQueue<i32>`, found `List<i32>`
+    var words = PriorityQueue<String>()
+    words.push(String("stone"))
+    println("{words.peek()}")    // error: `peek` copies the element out, so it needs elements that are `Copy`, and `String` owns memory; take it out with `pop`, or read it in a loop, which starts with it
+    let seen = Set<PriorityQueue<i32>>()    // error: `PriorityQueue<i32>` can't be a key of a map or a set, since it has no `Hash`, and a `PriorityQueue` has no `Hash`
+    for x in q {
+        q.push(x)    // error: `q` can't be changed while a `for` loop goes over it
+    }
+    let fixed = PriorityQueue<Job>()    // error: `Job` can't be in a `PriorityQueue`, since it has no `Order`, since it holds `f64`
+    println("{a.len()} {b.len()} {c.len()} {d.len()} {seen.len()} {fixed.len()} {queued(1).len()}")
+}

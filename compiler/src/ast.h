@@ -164,6 +164,9 @@ enum class BMethod : std::uint8_t {
     // On a `SortedMap` or a `SortedSet`, which has the ends too: the nearest key on a side, and
     // the keys in a range, only as what a `for` loop goes over (D112).
     floor, ceiling, lower, higher, range,
+    // On a `PriorityQueue`, which has `push`, `pop`, `contains` and `remove` too: the least
+    // element, and taking out the elements a list of marks picks, as Java's iterator does (D113).
+    peek, remove_marked,
     runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };

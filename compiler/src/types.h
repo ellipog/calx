@@ -69,6 +69,10 @@ struct Type {
     bool has_pointer = false; // it is or holds a pointer
     bool is_result = false;  // enum_: `T ! E`, what a call to a function that can fail gives back
     TableKind table = TableKind::native;  // map, set: which table it is
+    // list: a `PriorityQueue<T>`, a binary heap in Java's order (D113). It's a list in memory, so
+    // it's freed, copied, compared, shown and gone over as one, but it's its own type, and only
+    // the heap's methods change it.
+    bool heap = false;
     bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
@@ -97,6 +101,7 @@ public:
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
     Type* deque_of(Type* elem);
+    Type* heap_of(Type* elem);
     // `JavaHashMap<K, V>` and `OpenHashMap<K, V>`, and their sets, with their kinds (D105, D107).
     Type* map_of(Type* key, Type* value, TableKind table = TableKind::native);
     Type* set_of(Type* elem, TableKind table = TableKind::native);
@@ -117,6 +122,7 @@ private:
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
     std::map<Type*, Type*> deque_map_;
+    std::map<Type*, Type*> heap_map_;
     std::map<std::tuple<Type*, Type*, TableKind>, Type*> map_map_;
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;

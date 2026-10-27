@@ -244,6 +244,8 @@ private:
         // A Java table's tree bins order its keys, when they have `Order` (D105), and a sorted
         // table's always do (D112).
         for (const Type* x : closure(all.types)) {
+            // A queue's elements are ordered as it goes (D113).
+            if (x->heap && has_cmp_glue(x->elem)) all.add_cmp(x->elem);
             if (!is_table(x) || !has_cmp_glue(table_key(x))) continue;
             if ((x->table == TableKind::java && prog_.java_ordered.count(table_key(x))) || x->table == TableKind::sorted) {
                 all.add_cmp(table_key(x));
@@ -406,7 +408,7 @@ private:
         switch (t->kind) {
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
-            case TypeKind::list: s = "cx_list_" + part(t->elem); break;
+            case TypeKind::list: s = (t->heap ? "cx_heap_" : "cx_list_") + part(t->elem); break;
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
@@ -633,8 +635,9 @@ private:
     // prints, and those they hold, get a function that does that: the derived `Equal` and
     // `Display`, which go through each value in turn.
     void emit_glue(const std::vector<const Type*>& order) {
-        std::vector<const Type*> owning, eqs, shows, hashes, cmps, tables;
+        std::vector<const Type*> owning, eqs, shows, hashes, cmps, tables, heaps;
         for (const Type* t : order) {
+            if (t->heap) heaps.push_back(t);
             if (!is_copy(t)) owning.push_back(t);
             if (equated_.count(t)) eqs.push_back(t);
             if (shown_.count(t)) shows.push_back(t);
@@ -642,7 +645,7 @@ private:
             if (compared_.count(t)) cmps.push_back(t);
             if (is_table(t)) tables.push_back(t);
         }
-        if (owning.empty() && eqs.empty() && shows.empty() && cmps.empty() && tables.empty() && sorted_.empty()) return;
+        if (owning.empty() && eqs.empty() && shows.empty() && cmps.empty() && tables.empty() && heaps.empty() && sorted_.empty()) return;
         for (const Type* t : owning) {
             std::string c = ctype(t);
             out_ += "static inline void " + drop_fn(t) + "(" + c + "* p);\n";
@@ -653,6 +656,7 @@ private:
         for (const Type* t : hashes) out_ += "static inline cx_u64 " + hash_fn(t) + "(" + ctype(t) + " v);\n";
         for (const Type* t : cmps) out_ += "static inline int " + cmp_fn(t) + "(" + ctype(t) + " a, " + ctype(t) + " b);\n";
         for (const Type* t : tables) out_ += table_decls(t);
+        for (const Type* t : heaps) out_ += heap_decls(t);
         for (const Type* t : owning) {
             out_ += "static inline void " + drop_fn(t) + "(" + ctype(t) + "* p) {\n" + drop_body(t) + "}\n";
             out_ += "static inline " + ctype(t) + " " + copy_fn(t) + "(const " + ctype(t) + "* p) {\n" + copy_body(t) + "}\n";
@@ -777,6 +781,62 @@ private:
         }
         if (t->kind == TypeKind::str || t->kind == TypeKind::string || has_cmp_glue(t)) return "(" + compare(t, a, b) + " < 0)";
         return "(" + a + " < " + b + ")";
+    }
+
+    // The derived `Order` of a struct or tuple of integers, runes, bools and plain enums, as one
+    // compare of numbers: the members' bits side by side in a 64- or 128-bit number, the first
+    // member's highest, so the first difference decides. Each signed member's sign bit is flipped
+    // so it orders as unsigned does, except the first's, which the compare treats as signed. It's
+    // one compare and a subtract with borrow, where `less` is a compare a member that clang may
+    // split into branches. Empty if the members take more than 128 bits, or there's only one.
+    std::string packed_less(const Type* t, const std::string& a, const std::string& b) const {
+        if ((t->kind != TypeKind::struct_ && t->kind != TypeKind::tuple) || hand(t, prop_order)) return "";
+        Parts parts = ordered_parts(t);
+        if (parts.size() < 2) return "";
+        std::vector<std::pair<unsigned, bool>> widths;  // bits, and whether signed
+        unsigned total = 0;
+        for (const auto& [m, x] : parts) {
+            std::pair<unsigned, bool> w;
+            switch (x->kind) {
+                case TypeKind::int_: w = {x->bits, x->is_signed}; break;
+                case TypeKind::char_: w = {16, false}; break;
+                case TypeKind::rune: w = {32, false}; break;
+                case TypeKind::bool_: w = {1, false}; break;
+                case TypeKind::enum_:
+                    if (x->has_data || !tags_in_order(x)) return "";
+                    w = {x->repr->bits, x->repr->is_signed};
+                    break;
+                default: return "";
+            }
+            total += w.first;
+            widths.push_back(w);
+        }
+        if (total > 128) return "";
+        unsigned size = total <= 64 ? 64 : 128;
+        std::string wide = size == 64 ? "cx_u64" : "unsigned __int128";
+        auto key = [&](const std::string& v) {
+            std::string s;
+            unsigned low = size;
+            for (std::size_t i = 0; i < parts.size(); i++) {
+                auto [bits, sign] = widths[i];
+                low -= bits;
+                std::string x = v + parts[i].first;
+                if (bits > 1) {
+                    std::string u = "cx_u" + std::to_string(bits);
+                    x = "(" + u + ")(" + x + ")";
+                    if (sign && i > 0) x = "(" + u + ")(" + x + " ^ (" + u + ")(1ull << " + std::to_string(bits - 1) + "))";
+                }
+                x = "(" + wide + ")" + x;
+                if (low) x = "(" + x + " << " + std::to_string(low) + ")";
+                s += (s.empty() ? "" : " | ") + x;
+            }
+            return "(" + s + ")";
+        };
+        if (widths[0].second) {
+            std::string sw = size == 64 ? "cx_i64" : "__int128";
+            return "((" + sw + ")" + key(a) + " < (" + sw + ")" + key(b) + ")";
+        }
+        return "(" + key(a) + " < " + key(b) + ")";
     }
 
     // The derived `Order`: what two values hold, compared in turn until one differs. A list that
@@ -1073,6 +1133,55 @@ private:
             {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
             {"$V", map ? ctype(t->elem) : std::string()},
         };
+    }
+
+    // --- priority queues (D113) -----------------------------------------------------------------
+
+    // A queue's functions, from the template `calx_heap.h`. Elements that compare as one number
+    // go down two levels a step.
+    std::string heap_decls(const Type* t) {
+        const Type* el = t->elem;
+        std::string packed = packed_less(el, "(cx_ha)", "(cx_hb)");
+        std::string s = "#define CX_HP_T " + ctype(t) + "\n#define CX_HP_NAME " + ctype(t) + "\n#define CX_HP_E " + ctype(el) +
+                        "\n#define CX_HP_LESS(cx_ha, cx_hb) " + (packed.empty() ? less(el, "(cx_ha)", "(cx_hb)") : packed) + "\n";
+        if (!is_copy(el)) s += "#define CX_HP_DROP(cx_p) " + drop_fn(el) + "(cx_p)\n";
+        if (scalar_order(el) || !packed.empty()) s += "#define CX_HP_CHEAP\n";
+        return s + "#include \"calx_heap.h\"\n";
+    }
+
+    // `q.push(x)` and the rest of what only a queue does; what it shares with a list, such as
+    // `len` and `contains`, is a list's.
+    std::string heap_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        Type* et = t->elem;
+        std::string l = ctype(t), el = ctype(et), p = tmp(), v = tmp(), r = tmp(), i = tmp();
+        std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";
+        switch (e->bmethod) {
+            case BMethod::push: return head + el + " " + v + " = " + value(e->args[0].value, et) + "; " + l + "_push(" + p + ", " + v + "); })";
+            case BMethod::pop: {
+                std::string o = ctype(e->type);
+                return head + o + " " + r + " = {0}; " + r + ".has = " + l + "_pop(" + p + ", &" + r + ".v); " + r + "; })";
+            }
+            case BMethod::peek: {
+                std::string o = ctype(e->type);
+                return "({ const " + l + "* " + p + " = " + address(recv) + "; " + p + "->len ? (" + o + "){ .v = " + p +
+                       "->ptr[0], .has = 1 } : (" + o + "){0}; })";
+            }
+            case BMethod::remove: {
+                // Java's `remove(o)`: the first equal one along the array.
+                std::string drop = is_copy(et) ? "" : drop_fn(et) + "(&" + p + "->ptr[" + i + "]); ";
+                return head + el + " " + v + " = " + value(e->args[0].value, et) + "; cx_bool " + r + " = 0; for (cx_usize " + i + " = 0; " + i +
+                       " < " + p + "->len; " + i + "++) if (" + equal(et, p + "->ptr[" + i + "]", v) + ") { " + drop + "(void)" + l +
+                       "_take(" + p + ", " + i + "); " + r + " = 1; break; } " + r + "; })";
+            }
+            case BMethod::remove_marked: {
+                Type* mt = e->args[0].value->type;
+                return head + ctype(mt) + " " + v + " = " + value(e->args[0].value, mt) + "; " + l + "_remove_marked(" + p + ", " + v + ".ptr, " + v +
+                       ".len, " + location(e->span) + "); })";
+            }
+            default: return "0";
+        }
     }
 
     // --- sorted maps and sets (D112) -------------------------------------------------------------
@@ -4701,6 +4810,13 @@ $dropall    m->len = 0;
         }
         if (is_table(t)) return table_method(e);
         if (t->kind == TypeKind::deque) return deque_method(e);
+        if (t->heap) {
+            switch (e->bmethod) {
+                case BMethod::push: case BMethod::pop: case BMethod::peek: case BMethod::remove: case BMethod::remove_marked:
+                    return heap_method(e);
+                default: break;
+            }
+        }
         Type* et = t->elem;
         std::string l = ctype(t), el = ctype(et);
         std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";

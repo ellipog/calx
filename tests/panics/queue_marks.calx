@@ -1,0 +1,10 @@
+fn main() {
+    var q = PriorityQueue<i32>()
+    for x in [4, 1, 3] {
+        q.push(x)
+    }
+    let marks: List<bool> = [true, false, false]
+    q.remove_marked(marks)
+    println("{q}")    // out: [3, 4]
+    q.remove_marked(marks)    // panic: `remove_marked` needs a mark for each element: 3 marks for 2 elements
+}

@@ -1015,6 +1015,7 @@ private:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
             case BMethod::set_len: case BMethod::as_mut_ptr: case BMethod::sort: case BMethod::hash_add: case BMethod::trim:
             case BMethod::pop_first: case BMethod::pop_last: case BMethod::move_to_first: case BMethod::move_to_last:
+            case BMethod::remove_marked:
                 expr(recv, Use::change);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 return;
