@@ -26,11 +26,11 @@ fn main() {
 | `sin(x)`, `cos(x)`, `tan(x)` | In radians. Infinity and NaN give NaN |
 | `asin(x)`, `acos(x)`, `atan(x)` | The inverses. Outside [-1, 1], `asin` and `acos` give NaN |
 | `atan2(y, x)` | The angle of (`x`, `y`), from -pi to pi. `y` comes first, as in Java and C |
-| `hypot(x, y)`, `cbrt(x)` | sqrt(xÂ² + yÂ²) without overflow, and the cube root, negative numbers included |
+| `hypot(x, y)`, `cbrt(x)` | sqrt(x² + y²) without overflow, and the cube root, negative numbers included |
 | `sinh(x)`, `cosh(x)`, `tanh(x)` | The hyperbolic functions |
 | `PI`, `E` | The doubles closest to pi and e |
 
-- Special values are Java's in every function: `pow(x, 0.0)` is `1.0` even for NaN, `pow(Â±1.0, Â±Infinity)` is NaN, and a negative `x` to a power that isn't an integer is NaN.
+- Special values are Java's in every function: `pow(x, 0.0)` is `1.0` even for NaN, `pow(±1.0, ±Infinity)` is NaN, and a negative `x` to a power that isn't an integer is NaN.
 - `sqrt`, `floor`, `ceil`, `abs` and `mul_add` are methods on the float types, since IEEE 754 defines their results exactly ([floats](../reference/floats.md#methods)).
 
 ## Accuracy
@@ -43,7 +43,7 @@ fn main() {
 | `log` | 0.5054 ULP | 99.99% | under 1 ULP |
 | `pow` | 0.5044 ULP | 99.94% | under 1 ULP |
 
-So they're more accurate than `StrictMath`, which is fdlibm: `pow(7.0, 22.0)` is the double nearest 7Â²Â², `3.9098210485829883E18`, where `StrictMath.pow` gives the one below it. The other functions call `std.java.math`, which is fdlibm too, and give `StrictMath`'s results; only `std.java.math` promises that, so a faster algorithm can replace any of them here.
+So they're more accurate than `StrictMath`, which is fdlibm: `pow(7.0, 22.0)` is the double nearest 7²², `3.9098210485829883E18`, where `StrictMath.pow` gives the one below it. The other functions call `std.java.math`, which is fdlibm too, and give `StrictMath`'s results; only `std.java.math` promises that, so a faster algorithm can replace any of them here.
 
 ## Speed
 
@@ -66,8 +66,8 @@ Nanoseconds per call on 2 million random arguments, best of 7, from [`bench/math
 
 They follow Tang's table-driven method, with tables of 128 entries and polynomials that [`tools/math_tables.py`](../../tools/math_tables.py) generates and checks, at 80 digits.
 
-- **`exp`** writes `x` as kÂ·ln2/128 + r, with |r| â‰¤ ln2/256. A table gives 2^(k/128) and a degree 5 polynomial gives e^r. Each table entry is laid out so that adding `k << 45` to its bits gives 2^(k/128), exponent and all, as in ARM's optimized-routines.
-- **`log`** writes `x` as 2^kÂ·z and picks one of 128 values c near z, with log(x) = kÂ·ln2 + log(c) + log1p(z/c - 1). Each 1/c is a multiple of 2^-7 or 2^-8, so z/c - 1 is exact in one fused multiply-add, and the two c next to 1 are 1 itself, so `log` needs no separate path near 1.
+- **`exp`** writes `x` as k·ln2/128 + r, with |r| ≤ ln2/256. A table gives 2^(k/128) and a degree 5 polynomial gives e^r. Each table entry is laid out so that adding `k << 45` to its bits gives 2^(k/128), exponent and all, as in ARM's optimized-routines.
+- **`log`** writes `x` as 2^k·z and picks one of 128 values c near z, with log(x) = k·ln2 + log(c) + log1p(z/c - 1). Each 1/c is a multiple of 2^-7 or 2^-8, so z/c - 1 is exact in one fused multiply-add, and the two c next to 1 are 1 itself, so `log` needs no separate path near 1.
 - **`pow`** computes log(x) as two doubles, accurate to about 2^-68, multiplies by `y` exactly, and takes `exp` of the sum. Most special cases cost one branch.
 - Every rounding they depend on is a fused multiply-add or a plain operation, both of which IEEE 754 defines exactly, so debug and release builds, and every machine, give the same bits.
 
