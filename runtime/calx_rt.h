@@ -91,10 +91,14 @@ CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at
  * runs them all on this thread. */
 void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx);
 
-/* Memory. Running out panics. */
+/* Memory, in calx_alloc.c (D95). A block is freed, or reallocated, with the size it was last
+ * given, which the compiler always knows, so blocks have no header. Freeing a null pointer does
+ * nothing. Running out panics. */
 void* cx_alloc(cx_usize size);
-void* cx_realloc(void* p, cx_usize size);
-void cx_free(void* p);
+void* cx_realloc(void* p, cx_usize old, cx_usize size);
+void cx_free(void* p, cx_usize size);
+/* How many blocks are allocated, in debug builds; 0 in others. */
+cx_usize cx_alloc_live(void);
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
  * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. */
 void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
@@ -110,7 +114,7 @@ CX_INLINE cx_str cx_sv(cx_String s) {
     return v;
 }
 CX_INLINE void cx_drop_String(cx_String* s) {
-    if (s->cap) cx_free(s->ptr);
+    if (s->cap) cx_free(s->ptr, s->cap);
 }
 cx_String cx_copy_String(const cx_String* s);
 /* A `String` that owns a copy of the bytes. */
@@ -259,6 +263,8 @@ cx_usize cx_table_buckets_for(cx_usize n);
 /* A table of `buckets` slots of `size` bytes, all EMPTY: gives the control bytes, and the slots
  * through `slots`. One allocation holds both, so freeing the slots frees the table. */
 cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
+/* Frees what cx_table_alloc gave for `buckets` slots of `size` bytes. */
+void cx_table_free(void* slots, cx_usize buckets, cx_usize size);
 CX_COLD void cx_panic_key(const char* at);
 
 /* Bounds checks. */

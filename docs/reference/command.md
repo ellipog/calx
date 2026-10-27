@@ -49,7 +49,7 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 
 Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
 
-In debug builds the runtime counts allocations, and a program that ends with any still live says so and exits with status 102. The compiler frees every value ([ownership](ownership.md)), so that's a bug in Calx, worth reporting. Release builds don't count.
+In debug builds the runtime checks memory: a block freed twice or with the wrong size stops the program, and a program that ends with blocks still allocated says so. Either way it exits with status 102. The compiler frees every value exactly once ([ownership](ownership.md#in-c)), so that's a bug in Calx, worth reporting. Release builds don't check, and use Calx's own allocator, which is faster than the system's.
 
 Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
 

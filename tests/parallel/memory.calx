@@ -1,0 +1,63 @@
+// Memory that crosses threads: each iteration of a `parallel for` builds strings and lists on
+// the thread that runs it, small ones and ones over 32 KiB, and the main thread frees them in the
+// next round. Freed blocks pile up on one thread and are taken by the others, so the allocator
+// hands memory between threads (D95). The result is the same with any number of threads, and the
+// debug build checks every block is freed once, with the size it was allocated with.
+import std.pool.{set_workers}
+
+struct Region {
+    names: List<String>,
+    big: List<i64>,
+    sum: i64,
+}
+
+fn fill(r: mut Region, k: usize, round: i64) {
+    r.names = []
+    for i in 0usize..(k % 7 + 1) * 20 {
+        r.names.push("r{k}-{round}-{i}")
+    }
+    // Over 32 KiB for some regions, so big blocks cross threads too.
+    let n = (k % 5) * 2000 + 10
+    r.big = [0i64; n]
+    var x = i64.wrap(k) + round
+    for i in 0usize..n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        r.big[i] = x >> 33
+    }
+    var s = 0i64
+    for name in r.names {
+        s += i64.wrap(name.len())
+    }
+    r.sum = s + r.big[n - 1]
+}
+
+fn run(threads: usize) -> i64 {
+    set_workers(threads)
+    var regions = List<Region>()
+    for _ in 0usize..64 {
+        regions.push(Region { names: [], big: [], sum: 0 })
+    }
+    var total = 0i64
+    for round in 0i64..30 {
+        parallel for k in 0usize..regions.len() {
+            fill(mut regions[k], k, round)
+        }
+        for r in regions {
+            total = total * 31 + r.sum
+        }
+        // The main thread frees half of what the workers made, and the next round replaces the rest.
+        for k in 0usize..regions.len() {
+            if k % 2 == 0 {
+                regions[k].names = []
+                regions[k].big = []
+            }
+        }
+    }
+    return total
+}
+
+fn main() {
+    let one = run(1)
+    let many = run(8)
+    println("{one == many}")    // out: true
+}

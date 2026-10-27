@@ -594,6 +594,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         net_obj = (fs::path(obj_dir) / (net_key + ".o")).string();
         all_keys += " " + net_key;
     }
+    // The allocator is a file of its own, linked into every program (D95).
+    std::string alloc_c;
+    if (!read_file((runtime / "calx_alloc.c").string(), alloc_c)) {
+        std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
+        return r;
+    }
+    std::string alloc_key = hash_hex({"runtime-alloc", rt_h, alloc_c, flag_text, tc.identity});
+    std::string alloc_obj = (fs::path(obj_dir) / (alloc_key + ".o")).string();
+    all_keys += " " + alloc_key;
     for (const std::string& c : c_sources) {
         keys.push_back(hash_hex({"module", c, rt_h, flag_text, tc.identity}));
         objs.push_back((fs::path(obj_dir) / (keys.back() + ".o")).string());
@@ -640,6 +649,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     } else {
         compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     }
+    if (file_exists(alloc_obj)) touch(alloc_obj);
+    else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
     if (uses_net) {
         if (file_exists(net_obj)) touch(net_obj);
         else compile((runtime / "calx_net.c").string(), net_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
@@ -694,6 +705,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + kExe)).string();
     std::vector<std::string> inputs = objs;
     inputs.push_back(rt_obj);
+    inputs.push_back(alloc_obj);
     if (uses_net) inputs.push_back(net_obj);
     if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
         std::fprintf(stderr, "calx: linking failed\n");

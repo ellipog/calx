@@ -195,6 +195,11 @@ Ownership costs nothing at run time:
 - A variable that might have moved by the end of its scope is zeroed where it moves, and freeing a zeroed value does nothing. So is a field that's moved out.
 - A new value that's only looked at is a temporary declared before its statement, given its value inside it, and freed after it.
 
-Debug builds count every allocation, and a program that ends with any still live reports it on standard error and exits with status 102. Since the compiler frees every value, that's a bug in Calx, and the test suite runs every test this way.
+Every free gives the size of the block, which the compiler always knows: a list frees `cap` elements, a `String` `cap` bytes, and a table what its mask gives. So blocks have no header, and freeing a small one is a push onto a list. The allocator, in [runtime/calx_alloc.c](../../runtime/calx_alloc.c) (D95):
+
+- Cuts blocks of up to 32 KiB in 40 sizes: steps of 16 bytes up to 128, then four for each doubling. Each thread keeps a list of free blocks of each size, and takes and gives them with no lock. A thread that frees more than it takes passes its blocks on, to the threads that run out.
+- Gets bigger blocks from the system, and keeps one that's freed, up to 256 MiB in all, for the next block of its size. A table or list that grows and is freed every tick reuses the same memory, without the page faults that getting it from the system again would cost.
+
+Debug builds use `malloc` instead, with each block's size in front of it. A block freed twice, or with a size it wasn't allocated with, stops the program with status 102, and so does a program that ends with blocks still allocated, reported on standard error. Since the compiler frees every value exactly once, each of these is a bug in Calx, and the test suite runs every test this way. Builds with AddressSanitizer use `malloc` too, so it sees every block.
 
 Arenas, `Box<T>` for recursive types and `Shared<T>` for data many regions read are designed but not built yet ([spec](../CALX_SPEC.md#memory-model-d48)).

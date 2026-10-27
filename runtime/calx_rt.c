@@ -37,13 +37,6 @@ static size_t out_len;
 static _Thread_local int to_stderr; /* while `eprint` or a panic message is being written */
 static _Thread_local cx_String* fmt_to; /* while a string is being interpolated */
 
-#ifdef CX_DEBUG
-/* Debug builds count the allocations still live, and a program that ends with any left has
- * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug. */
-static cx_usize live_allocs;
-#define COUNT_ALLOC(d) __atomic_fetch_add(&live_allocs, (cx_usize)(d), __ATOMIC_RELAXED)
-#endif
-
 static _Thread_local int par_buffered; /* output goes to the running chunk's buffer */
 static _Thread_local int par_depth;    /* inside a `parallel for`, even one run on this thread alone */
 static void par_write(int stream, const void* p, size_t n);
@@ -236,9 +229,12 @@ void cx_start(int argc, char** argv) {
 int cx_finish(void) {
     flush_out();
 #ifdef CX_DEBUG
-    if (live_allocs) {
+    /* Debug builds count the blocks still allocated, and a program that ends with any left has
+     * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug. */
+    cx_usize live = cx_alloc_live();
+    if (live) {
         fprintf(stderr, "calx: %llu allocations were never freed; this is a bug in calx, please report it\n",
-                (unsigned long long)live_allocs);
+                (unsigned long long)live);
         return 102;
     }
 #endif
@@ -441,31 +437,6 @@ void cx_print_f32(cx_f32 v) { print_float(v, 1); }
 
 /* --- memory and strings ------------------------------------------------------------------ */
 
-void* cx_alloc(cx_usize size) {
-    void* p = malloc(size ? size : 1);
-    if (!p) cx_panic_capacity();
-#ifdef CX_DEBUG
-    COUNT_ALLOC(1);
-#endif
-    return p;
-}
-
-void* cx_realloc(void* p, cx_usize size) {
-#ifdef CX_DEBUG
-    if (!p) COUNT_ALLOC(1);
-#endif
-    void* q = realloc(p, size ? size : 1);
-    if (!q) cx_panic_capacity();
-    return q;
-}
-
-void cx_free(void* p) {
-#ifdef CX_DEBUG
-    if (p) COUNT_ALLOC(-1);
-#endif
-    free(p);
-}
-
 void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
     /* No buffer can be bigger than half the address space. */
     cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
@@ -475,7 +446,7 @@ void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize s
     cx_usize n = *cap <= max / 2 ? *cap * 2 : max;
     if (n < need) n = need;
     if (n < 4 && max >= 4) n = 4;
-    ptr = cx_realloc(ptr, n * size);
+    ptr = cx_realloc(ptr, *cap * size, n * size);
     *cap = n;
     return ptr;
 }
@@ -496,7 +467,7 @@ void cx_string_reserve(cx_String* s, cx_usize extra) {
     if (need <= s->cap) return;
     cx_usize n = s->cap * 2;
     if (n < need) n = need;
-    s->ptr = (cx_u8*)cx_realloc(s->ptr, n);
+    s->ptr = (cx_u8*)cx_realloc(s->ptr, s->cap, n);
     s->cap = n;
 }
 
@@ -865,13 +836,20 @@ cx_usize cx_table_buckets_for(cx_usize n) {
     return b;
 }
 
+/* A table's slots, rounded up to a group, then its control bytes and their copy. */
+static cx_usize table_slot_bytes(cx_usize buckets, cx_usize size) { return (buckets * size + 15) & ~(cx_usize)15; }
+
 cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots) {
     if (buckets > ((cx_usize)-1 >> 1) / (size + 1)) cx_panic_capacity();
-    cx_usize bytes = (buckets * size + 15) & ~(cx_usize)15;
+    cx_usize bytes = table_slot_bytes(buckets, size);
     cx_u8* base = (cx_u8*)cx_alloc(bytes + buckets + CX_GROUP);
     memset(base + bytes, CX_CTRL_EMPTY, buckets + CX_GROUP);
     *slots = base;
     return base + bytes;
+}
+
+void cx_table_free(void* slots, cx_usize buckets, cx_usize size) {
+    cx_free(slots, table_slot_bytes(buckets, size) + buckets + CX_GROUP);
 }
 
 /* --- parallel for ---------------------------------------------------------------------------

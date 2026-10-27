@@ -705,7 +705,7 @@ static __attribute__((noinline)) void $grow($T* m, cx_usize buckets) {
     cx_u8* ctrl = cx_table_alloc(buckets, sizeof($S), (void**)&slots);
     cx_usize mask = buckets - 1;
     if (m->slots) {
-$moveall        cx_free(m->slots);
+$moveall        cx_table_free(m->slots, m->mask + 1, sizeof($S));
     }
     m->ctrl = ctrl;
     m->slots = slots;
@@ -1007,14 +1007,14 @@ static void $reserve($T* m, cx_usize n) {
         switch (t->kind) {
             case TypeKind::list:
                 if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
-                s += "    cx_free(p->ptr);\n";
+                s += "    cx_free(p->ptr, p->cap * sizeof(*p->ptr));\n";
                 break;
             case TypeKind::map:
             case TypeKind::set:
                 // A table that was never filled, or was moved out of, has no slots.
                 s += "    if (!p->slots) return;\n";
                 if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
-                s += "    cx_free(p->slots);\n";
+                s += "    cx_table_free(p->slots, p->mask + 1, sizeof(*p->slots));\n";
                 break;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
@@ -3045,7 +3045,7 @@ static void $reserve($T* m, cx_usize n) {
                 // The string takes the list's memory, which has the same layout.
                 return "({ " + ctype(a->type) + " " + v + " = " + value(a, a->type) + "; " + o + " " + r + " = {0}; if (cx_utf8_valid(" +
                        v + ".ptr, " + v + ".len)) { " + r + ".v.ptr = " + v + ".ptr; " + r + ".v.len = " + v + ".len; " + r +
-                       ".v.cap = " + v + ".cap; " + r + ".has = 1; } else { cx_free(" + v + ".ptr); } " + r + "; })";
+                       ".v.cap = " + v + ".cap; " + r + ".has = 1; } else { cx_free(" + v + ".ptr, " + v + ".cap); } " + r + "; })";
             default: return "0";
         }
     }
