@@ -1,0 +1,81 @@
+// Generic structs and enums: construction with and without written types, methods in generic
+// impls, a generic method, static functions, nesting, and matching.
+struct Pair<A, B> {
+    a: A
+    b: B
+}
+
+impl<A, B> Pair<A, B> {
+    fn swap(self) -> Pair<B, A> {
+        return Pair { a: self.b, b: self.a }
+    }
+    fn first(self) -> A {
+        return self.a
+    }
+    fn with<C>(self, c: C) -> Pair<A, C> {
+        return Pair { a: self.a, b: c }
+    }
+    fn of(a: A, b: B) -> Pair<A, B> {
+        return Pair { a, b }
+    }
+}
+
+struct Counter<T> {
+    value: T
+    hits: i32 = 0
+    best: T? = none
+}
+
+enum Either<L, R> {
+    Left(L)
+    Right(R)
+    Neither
+}
+
+enum Tree<T> {
+    Leaf(T)
+    Node { left: T, right: T }
+}
+
+fn left_or<L, R>(e: Either<L, R>, d: L) -> L {
+    return match e {
+        Left(x) => x,
+        _ => d,
+    }
+}
+
+fn right_of<T>(t: Tree<T>) -> T {
+    return match t {
+        Leaf(x) => x,
+        Node { right, .. } => right,
+    }
+}
+
+fn main() {
+    let p = Pair { a: 1, b: "one" }
+    let q = p.swap()
+    println("{q.a} {q.b} {q.first()} {p.first()}")                  // out: one 1 one 1
+    let r = p.with(2.5)
+    println("{r.a} {r.b}")                                          // out: 1 2.5
+    let s = Pair.of(true, 'c')
+    let t = Pair<i64, u8>.of(5, 6)
+    println("{s.a} {s.b} {t.a} {t.b}")                              // out: true c 5 6
+    var u = Pair<i32, i64> { a: 1, b: 2 }
+    u.a = 3
+    let v: Pair<i32, str> = Pair { a: 4, b: "x" }
+    println("{u.a} {u.b} {v.a} {v.b}")                              // out: 3 2 4 x
+    let nested: Pair<Pair<i32, bool>, str> = Pair { a: Pair { a: 1, b: true }, b: "z" }
+    println("{nested.a.a} {nested.a.b} {nested.b}")                 // out: 1 true z
+
+    var c = Counter { value: 10 }
+    c.hits += 1
+    c.best = some(c.value)
+    println("{c.value} {c.hits} {c.best ?? 0}")                     // out: 10 1 10
+
+    let e: Either<i32, str> = Either.Left(5)
+    let f: Either<i32, str> = Either.Right("x")
+    let g = Either<i32, str>.Neither
+    println("{left_or(e, 0)} {left_or(f, 0)} {left_or(g, -1)}")    // out: 5 0 -1
+    let leaf: Tree<str> = Tree.Leaf("leaf")
+    println("{right_of(Tree.Node { left: 1.5, right: 2.5 })} {right_of(leaf)}") // out: 2.5 leaf
+}

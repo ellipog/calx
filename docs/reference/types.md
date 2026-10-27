@@ -57,6 +57,8 @@ fn main() {
 - A struct holds named fields ([structs](structs.md)).
 - An enum is one of several variants, each of which can carry data ([enums](enums.md)).
 - A tuple, such as `(i32, str)`, groups values by position ([tuples](tuples.md)).
+- Structs and enums can be generic, as in `Pair<i32, str>` ([generics](generics.md)).
+- An interface isn't a type. It's a bound on a generic parameter ([interfaces](interfaces.md)).
 
 ## Optionals
 

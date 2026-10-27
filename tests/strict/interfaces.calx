@@ -1,0 +1,109 @@
+// An impl matches its interface exactly, an interface isn't a type, and a call that two
+// interfaces could answer says which (D72).
+interface Shape {
+    fn area(self) -> f64
+    const sides: i32
+}
+
+pub struct Square {
+    side: f64
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side
+    }
+    const sides = 4
+}
+
+impl Shape for Square {                         // error: `Shape` is already implemented for `Square`
+    fn area(self) -> f64 {
+        return 1.0
+    }
+    const sides = 4
+}
+
+pub struct Tri {
+    base: f64
+}
+
+impl Shape for Tri {                            // error: the impl of `Shape` for `Tri` is missing `sides`
+    fn area(self, scale: f64) -> f64 {          // error: `area` doesn't match `Shape`, which declares it as `fn area(self) -> f64`
+        return self.base * scale
+    }
+    fn perimeter(self) -> f64 {                 // error: `perimeter` isn't part of `Shape`; put it in a separate `impl Tri` block
+        return self.base
+    }
+}
+
+struct Hex {
+    side: f64
+}
+
+impl Shape for Hex {                            // error: this impl of `Shape` for `Hex` is never used
+    fn area(self) -> f64 {
+        return self.side
+    }
+    const sides: i64 = 6                        // error: `sides` is an `i32` in `Shape`
+}
+
+interface Grow {
+    fn grow(self, by: f64) -> f64
+}
+
+impl Grow for Square {
+    fn grow(self, amount: f64) -> f64 {         // error: `grow` doesn't match `Grow`, which declares it as `fn grow(self, by: f64) -> f64`
+        return self.side + amount
+    }
+}
+
+pub fn takes(_s: Shape) -> f64 {                // error: `Shape` is an interface, not a type
+    return 0.0
+}
+
+pub fn total<T: Shape>(a: T) -> f64 {
+    return a.area()
+}
+
+pub fn wrong<T: Square>(a: T) -> T {            // error: `Square` isn't an interface
+    return a
+}
+
+interface Up {
+    fn go(self) -> i32
+}
+
+interface Down {
+    fn go(self) -> i32
+}
+
+pub struct Lift {
+    floor: i32
+}
+
+impl Up for Lift {
+    fn go(self) -> i32 {
+        return self.floor
+    }
+}
+
+impl Down for Lift {
+    fn go(self) -> i32 {
+        return -self.floor
+    }
+}
+
+fn main() {
+    let a = total(1)                            // error: `i32` doesn't implement `Shape`, which `total` needs for `T`
+    let l = Lift { floor: 1 }
+    let b = l.go()                              // error: `go` is in more than one interface `Lift` implements; say which, as in `Up.go(x)`
+    let c = Up.go(l) + Down.go(l)
+    let s = Square { side: 1.0 }
+    let d = Up.go(s)                            // error: `Square` doesn't implement `Up`
+    let e = Shape.sides                         // error: `Shape` is an interface, not a value
+    println("{s.area()} {Square.sides} {c} {s.grow(1.0)} {Hex { side: 2.0 }.side}")
+    _ = a
+    _ = b
+    _ = d
+    _ = e
+}

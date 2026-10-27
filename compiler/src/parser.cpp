@@ -249,6 +249,41 @@ private:
         }
     }
 
+    // Whether a `<` right after a name, with no space before it, starts generic arguments:
+    // `f<i32>(x)`, `Pair<i32, str> { ... }`. It does when a list of types and a matching `>`
+    // follow. A comparison has a space before its `<`, and `a<b>(c)` couldn't be one anyway,
+    // since comparisons don't chain.
+    bool generic_args_ahead() const {
+        if (!at(Tok::lt) || peek().space_before) return false;
+        int depth = 0;
+        for (std::size_t i = pos_; i < toks_.size(); i++) {
+            switch (toks_[i].kind) {
+                case Tok::lt: depth++; break;
+                case Tok::gt: depth--; break;
+                case Tok::shr: depth -= 2; break;
+                case Tok::ushr: depth -= 3; break;
+                case Tok::ident: case Tok::dot: case Tok::comma: case Tok::question: case Tok::lparen:
+                case Tok::rparen: case Tok::lbracket: case Tok::rbracket: case Tok::semicolon: case Tok::int_lit:
+                case Tok::star: case Tok::kw_const: case Tok::kw_fn: case Tok::arrow: case Tok::kw_dyn: break;
+                default: return false;
+            }
+            if (depth == 0) return true;
+            if (depth < 0) return false;
+        }
+        return false;
+    }
+
+    std::vector<TypeExpr*> type_args() {
+        expect(Tok::lt, "");
+        std::vector<TypeExpr*> args;
+        while (!at(Tok::gt) && !at(Tok::shr) && !at(Tok::ushr)) {
+            args.push_back(type());
+            if (!accept(Tok::comma)) break;
+        }
+        expect_close_angle();
+        return args;
+    }
+
     // `>` that closes generic arguments: splits `>>`, `>>>`, `>=` and the like.
     void expect_close_angle() {
         Token& t = toks_[pos_];
@@ -1195,6 +1230,13 @@ private:
             lhs = e;
             BinOp after;
             if (b.prec == kCompare && binary_op(peek().kind, after) && after.prec == kCompare) {
+                // `pick <i64>(...)`: generic types with a space before `<`, which makes it a `<`.
+                if (b.op == Op::lt && after.op == Op::gt && e->lhs->kind == ExprKind::name &&
+                    e->lhs->path.parts.size() == 1) {
+                    std::string n(ctx_.names.text(e->lhs->path.parts[0]));
+                    fail(op_span, "to give `" + n + "` its types, write `" + n +
+                                      "<...>` with no space before `<`; with one, it's a comparison");
+                }
                 fail(peek().span, "comparisons don't chain; write `a < b and b < c`");
             }
             (void)op_span;
@@ -1357,6 +1399,9 @@ private:
     Expr* struct_literal(Expr* type_expr) {
         Expr* s = new_expr(ExprKind::struct_lit, type_expr->span);
         s->type_path = to_path(type_expr);
+        const Expr* base = type_expr;
+        while (base->kind == ExprKind::field) base = base->lhs;
+        s->type_args = base->type_args;
         next();  // `{`
         bool saved = no_struct_;
         no_struct_ = false;
@@ -1527,6 +1572,10 @@ private:
                 std::vector<Name> one{next().name};
                 e->path.parts = slice(one);
                 e->path.span = start;
+                if (!simple && generic_args_ahead()) {
+                    e->type_args = slice(type_args());
+                    e->span = Span::join(start, prev_span());
+                }
                 return e;
             }
             default: break;

@@ -1,0 +1,55 @@
+// Generic functions: inference from arguments, explicit types, recursion, and generic calls
+// inside generic code. Each set of types makes one C function.
+fn pick<T>(c: bool, x: T, y: T) -> T {
+    if c {
+        return x
+    }
+    return y
+}
+
+fn first<T>(xs: [T; 3]) -> T {
+    return xs[0]
+}
+
+fn last<T>(xs: [T; 3]) -> T {
+    var out = xs[0]
+    for x in xs {
+        out = x
+    }
+    return out
+}
+
+fn swap<A, B>(t: (A, B)) -> (B, A) {
+    let (a, b) = t
+    return (b, a)
+}
+
+fn count<T>(x: T, n: i32) -> i32 {
+    if n == 0 {
+        return 0
+    }
+    return count(x, n - 1) + 1
+}
+
+fn twice<T>(x: T) -> (T, T) {
+    return (pick(true, x, x), x)
+}
+
+fn find<T>(xs: [T; 3], at: usize) -> T? {
+    if at < 3 {
+        return some(xs[at])
+    }
+    return none
+}
+
+fn main() {
+    println("{pick(true, 1, 2)} {pick(false, 1.5, 2.5)} {pick(true, "a", "b")}")    // out: 1 2.5 a
+    println("{pick<i64>(true, 7, 8)} {pick<u8>(false, 1, 255)}")                      // out: 7 255
+    println("{first([3, 4, 5])} {last(['x', 'y', 'z'])} {first([true, false, true])}") // out: 3 z true
+    let (a, b) = swap((1, "one"))
+    println("{a} {b}")                                                                // out: one 1
+    println("{count("x", 4)} {count(2.0, 0)}")                                        // out: 4 0
+    let (c, d) = twice(9i16)
+    println("{c} {d}")                                                                // out: 9 9
+    println("{find([1, 2, 3], 1) ?? 0} {find([1, 2, 3], 5) ?? 0}")                    // out: 2 0
+}

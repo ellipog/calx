@@ -67,6 +67,7 @@ Type* Types::array_of(Type* elem, std::uint64_t length) {
     Type* t = make(TypeKind::array, arena_.copy(name));
     t->elem = elem;
     t->length = length;
+    t->open = elem->open;
     array_map_.emplace(key, t);
     compounds_.push_back(t);
     return t;
@@ -83,6 +84,7 @@ Type* Types::optional_of(Type* elem) {
     if (it != optional_map_.end()) return it->second;
     Type* t = make(TypeKind::optional, arena_.copy(std::string(elem->name) + "?"));
     t->elem = elem;
+    t->open = elem->open;
     optional_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -99,8 +101,15 @@ Type* Types::tuple_of(const std::vector<Type*>& elems) {
     name += ")";
     Type* t = make(TypeKind::tuple, arena_.copy(name));
     t->elems = arena_.copy(elems);
+    for (Type* e : elems) t->open = t->open || e->open;
     tuple_map_.emplace(elems, t);
     compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::make_param(std::string_view name) {
+    Type* t = make(TypeKind::param, name);
+    t->open = true;
     return t;
 }
 

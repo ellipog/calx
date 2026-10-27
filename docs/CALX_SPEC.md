@@ -117,35 +117,13 @@ fn greet(raw: String) -> String ! ParseError {
 
 ### Interfaces and generics (D26)
 
-```calx
-interface Shape {
-    fn area(self) -> f64
-    const sides: i32
-}
+Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md). Still to build:
 
-struct Square { side: f64 }
-
-impl Shape for Square {
-    fn area(self) -> f64 {
-        return self.side * self.side
-    }
-    const sides = 4
-}
-
-fn total<T: Shape>(shapes: List<T>) -> f64 {
-    var sum = 0.0
-    for s in shapes {
-        sum += s.area()
-    }
-    return sum
-}
-```
-
-- Interfaces have methods, associated constants and associated types.
-- Generic functions and types are **monomorphized**: each instantiation becomes its own C code, so a generic call costs what a direct call costs.
-- `dyn Shape` is an owned value of any type implementing `Shape`, called through a table, for the places that need it (the host's handler tables).
-- There's no inheritance and there are no classes.
-- **Operators** come from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
+- **`dyn Shape`:** an owned value of any type implementing `Shape`, called through a table, for the places that need it (the host's handler tables).
+- **Associated types** in interfaces, and **generic interfaces**, such as `From<T>`.
+- **Generic functions in interfaces**, and **defaults for an interface's constants**.
+- **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
+- **Comparing, printing and hashing generic values**, through `Equal`, `Display` and `Hash` ([Derived properties](#derived-properties)).
 
 ### Derived properties
 
@@ -458,7 +436,7 @@ What Calx leaves out, on purpose:
 
 | Must (from the plan and decision log) | Settled in |
 | --- | --- |
-| Generics and interfaces, monomorphized into C (D26) | [Interfaces and generics](#interfaces-and-generics-d26) |
+| Generics and interfaces, monomorphized into C (D26) | [Generics](reference/generics.md), [Interfaces](reference/interfaces.md) |
 | No null: absence is an optional type (D23) | [Optionals](reference/optionals.md) |
 | Handle types for game objects, checked on use (D24) | [Handles](#handles-d24) |
 | Signed overflow wraps | [Integers](reference/integers.md) |

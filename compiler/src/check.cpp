@@ -5,9 +5,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace calx {
 
@@ -83,23 +85,51 @@ public:
         prog_.root = m;
         set_prefix(m);
         collect(m);
-        // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
+        resolve_params();
+        // Bounds are checked once every impl is known, since a type's fields can need one.
+        defer_bounds_ = true;
         for (Item* it : structs_) resolve_fields(it);
         for (Item* it : enums_) resolve_enum(it);
-        for (Item* it : structs_) check_defaults(it);
+        for (Item* it : interfaces_) collect_interface(it);
         for (Item* it : impls_) collect_impl(it);
+        defer_bounds_ = false;
+        for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
+        // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
+        for (Item* it : structs_) check_defaults(it);
+        defaults_ready_ = true;
+        for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
         for (Item* c : consts_) check_const(c);
-        for (Item* f : all_fns_) check_fn(f);
+        for (Item* f : all_fns_) {
+            std::size_t before = ctx_.diags.error_count();
+            check_fn(f);
+            if (!f->type_params.empty() && ctx_.diags.error_count() != before) failed_generics_.insert(f);
+        }
+        // Each use of a generic function with real types makes an instance, checked here, which
+        // can need more instances. A definition with errors has had them reported once, so its
+        // instances aren't checked again.
+        instance_mode_ = true;
+        for (std::size_t i = 0; i < pending_fns_.size(); i++) {
+            Item* f = pending_fns_[i];
+            if (!failed_generics_.count(f->origin)) check_fn(f);
+        }
+        instance_mode_ = false;
         order_types();
         check_unused_items();
         if (need_main) find_main(m);
     }
 
 private:
+    // What each generic parameter stands for, in one use.
+    using Subst = std::unordered_map<Type*, Type*>;
+
     // --- reporting -----------------------------------------------------------------------
 
-    void error(Span s, std::string msg) { ctx_.diags.error(s, std::move(msg)); }
+    void error(Span s, std::string msg) {
+        ctx_.diags.error(s, std::move(msg));
+        // An instance's errors are ones its generic definition didn't have, so say which use it was.
+        if (instance_mode_ && fn_ && fn_->origin) note(fn_->instance_site, "in " + q(instance_name(fn_)) + ", needed here");
+    }
     void note(Span s, std::string msg) { ctx_.diags.note(s, std::move(msg)); }
     std::string_view text(Name n) const { return ctx_.names.text(n); }
     std::string name_of(const Type* t) const { return q(t->name); }
@@ -148,6 +178,16 @@ private:
             s += "__";
             s += p;
         }
+        // Instances' names are made up, so they could meet a written one.
+        if (!c_names_.insert(s).second) {
+            for (int i = 2;; i++) {
+                std::string t = s + "_" + std::to_string(i);
+                if (c_names_.insert(t).second) {
+                    s = t;
+                    break;
+                }
+            }
+        }
         return ctx_.arena.copy(s);
     }
 
@@ -180,7 +220,7 @@ private:
                         not_yet(it->span, "extern functions");
                         continue;
                     }
-                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic functions");
+                    it->type_params = make_params(it);
                     if (!it->body) {
                         error(it->name_span, "function " + q(text(it->name)) + " needs a body");
                         continue;
@@ -191,11 +231,12 @@ private:
                     break;
                 case ItemKind::struct_:
                     if (it->is_actor) not_yet(it->span, "actors");
-                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic structs");
                     if (it->is_tuple_struct) not_yet(it->span, "wrapper structs");
                     declare_item(it);
                     it->c_name = c_name({text(it->name)});
-                    it->declared = T.make_struct(it, text(it->name));
+                    it->type_params = make_params(it);
+                    it->declared = T.make_struct(it, generic_name(it));
+                    make_identity(it);
                     structs_.push_back(it);
                     break;
                 case ItemKind::const_:
@@ -204,17 +245,45 @@ private:
                     consts_.push_back(it);
                     break;
                 case ItemKind::impl:
+                    it->type_params = make_params(it);
+                    for (Item* m : it->members) {
+                        if (m->kind != ItemKind::fn) continue;
+                        // A method's own parameters come after the impl's, and can't reuse their names.
+                        std::vector<Type*> all(it->type_params.begin(), it->type_params.end());
+                        for (const GenericParam& g : m->generics) {
+                            for (const GenericParam& outer : it->generics) {
+                                if (g.name == outer.name) {
+                                    error(g.span, q(text(g.name)) + " is already a parameter of the impl; Calx doesn't allow shadowing");
+                                }
+                            }
+                        }
+                        for (Type* own : make_params(m)) all.push_back(own);
+                        m->type_params = ctx_.arena.copy(all);
+                    }
                     impls_.push_back(it);
                     break;
                 case ItemKind::import: not_yet(it->span, "imports"); break;
                 case ItemKind::enum_:
-                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic enums");
                     declare_item(it);
                     it->c_name = c_name({text(it->name)});
-                    it->declared = T.make_enum(it, text(it->name));
+                    it->type_params = make_params(it);
+                    it->declared = T.make_enum(it, generic_name(it));
+                    make_identity(it);
                     enums_.push_back(it);
                     break;
-                case ItemKind::interface: not_yet(it->span, "interfaces"); break;
+                case ItemKind::interface: {
+                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic interfaces");
+                    declare_item(it);
+                    // `Self` is a parameter of every function in the interface, bounded by it.
+                    Type* self = T.make_param("Self");
+                    param_names_[self] = n_Self_;
+                    std::vector<Item*> bound{it};
+                    self->bounds = ctx_.arena.copy(bound);
+                    std::vector<Type*> params{self};
+                    it->type_params = ctx_.arena.copy(params);
+                    interfaces_.push_back(it);
+                    break;
+                }
                 case ItemKind::type_alias: not_yet(it->span, "type aliases"); break;
                 case ItemKind::extern_block: not_yet(it->span, "extern blocks"); break;
                 case ItemKind::attribute_block: not_yet(it->span, "attribute blocks"); break;
@@ -223,6 +292,10 @@ private:
     }
 
     void resolve_fields(Item* s) {
+        if (s->resolved || s->resolving) return;
+        s->resolving = true;
+        Item* saved = current_item_;
+        std::size_t mark = push_env(s);
         std::unordered_map<Name, Span> seen;
         for (FieldDecl& f : s->fields) {
             if (!seen.emplace(f.name, f.span).second) {
@@ -231,11 +304,18 @@ private:
             }
             current_item_ = s;
             f.resolved = resolve_type(f.type);
-            current_item_ = nullptr;
         }
+        pop_env(mark);
+        current_item_ = saved;
+        s->resolving = false;
+        s->resolved = true;
+        report_unused_params(s, "isn't used by any field");
+        fill_unfilled(s);
     }
 
     void check_defaults(Item* s) {
+        std::size_t before = ctx_.diags.error_count();
+        std::size_t mark = push_env(s);
         for (FieldDecl& f : s->fields) {
             if (!f.default_value) continue;
             Type* t = check(f.default_value, f.resolved);
@@ -243,11 +323,28 @@ private:
                 error(f.default_value->span, "a field's default must be a constant");
             }
         }
+        pop_env(mark);
+        if (!s->type_params.empty() && ctx_.diags.error_count() != before) failed_generics_.insert(s);
+    }
+
+    // An instance's copies of the defaults. Its generic struct's defaults were checked first, so a
+    // struct with errors has them reported once.
+    void check_instance_defaults(Type* t) {
+        if (failed_generics_.count(t->generic)) return;
+        std::size_t mark = push_env(t->item);
+        for (FieldDecl& f : t->item->fields) {
+            if (f.default_value) check(f.default_value, f.resolved);
+        }
+        pop_env(mark);
     }
 
     static bool is_type_item(const Item* it) { return it->kind == ItemKind::struct_ || it->kind == ItemKind::enum_; }
 
     void resolve_enum(Item* en) {
+        if (en->resolved || en->resolving) return;
+        en->resolving = true;
+        Item* saved_item = current_item_;
+        std::size_t mark = push_env(en);
         Type* t = en->declared;
         if (en->variants.empty()) error(en->name_span, "an enum needs at least one variant");
         std::unordered_map<Name, Span> seen;
@@ -279,7 +376,8 @@ private:
             v.types = ctx_.arena.copy(types);
             if (!types.empty()) has_data = true;
         }
-        current_item_ = nullptr;
+        pop_env(mark);
+        current_item_ = saved_item;
         t->has_data = has_data;
         if (en->repr) {
             Type* r = resolve_type(en->repr);
@@ -331,6 +429,10 @@ private:
                 if (t->repr->is_signed && (next >> (t->repr->bits - 1)) & 1) next |= ~mask;
             }
         }
+        en->resolving = false;
+        en->resolved = true;
+        report_unused_params(en, "isn't used by any variant");
+        fill_unfilled(en);
     }
 
     static std::uint32_t find_variant(const Type* t, Name n) {
@@ -341,51 +443,869 @@ private:
     }
 
     std::string variant_text(const Type* t, std::uint32_t i) const {
-        return std::string(t->name) + "." + std::string(text(t->item->variants[i].name));
+        std::string_view owner = t->generic && t->item == t->generic ? text(t->generic->name) : t->name;
+        return std::string(owner) + "." + std::string(text(t->item->variants[i].name));
+    }
+
+    // An interface's functions are generic over `Self`. One with a body is a default, which is
+    // checked once for every `Self` and copied for each type that doesn't write its own.
+    void collect_interface(Item* it) {
+        Type* self = it->type_params[0];
+        std::unordered_map<Name, Item*> seen;
+        for (Item* m : it->members) {
+            if (m->kind != ItemKind::fn && m->kind != ItemKind::const_) {
+                error(m->span, "an interface holds functions and constants");
+                continue;
+            }
+            if (!seen.emplace(m->name, m).second) {
+                error(m->name_span, q(text(m->name)) + " is already in " + q(text(it->name)));
+                continue;
+            }
+            m->interface_item = it;
+            m->impl_type = self;
+            if (m->kind == ItemKind::const_) {
+                if (m->value) not_yet(m->value->span, "default values for an interface's constants");
+                if (!m->type) {
+                    error(m->name_span, "give the constant a type: " + q("const " + std::string(text(m->name)) + ": i32"));
+                    m->declared = T.error;
+                    continue;
+                }
+                Type* saved = current_impl_type_;
+                current_impl_type_ = self;
+                m->declared = resolve_type(m->type);
+                current_impl_type_ = saved;
+                continue;
+            }
+            std::size_t mark = env_.size();
+            if (!m->generics.empty()) {
+                not_yet(m->generics[0].span, "generic functions in interfaces");
+                // Its own parameters stand for nothing, so its signature has no further errors.
+                for (const GenericParam& g : m->generics) env_.push_back({g.name, T.error});
+            }
+            m->type_params = it->type_params;
+            m->c_name = c_name({text(it->name), text(m->name)});
+            check_signature(m);
+            pop_env(mark);
+            if (m->body && m->generics.empty()) all_fns_.push_back(m);
+        }
+    }
+
+    // `fn area(self) -> f64`, with `Self` as `t`, for messages.
+    std::string signature_text(const Item* f, const Subst& s) {
+        std::string out = "fn " + std::string(text(f->name)) + "(";
+        for (std::size_t i = 0; i < f->params.size(); i++) {
+            const Param& p = f->params[i];
+            if (i) out += ", ";
+            const char* mode = p.mode == ParamMode::mut ? "mut " : p.mode == ParamMode::own ? "own " : "";
+            Type* t = p.local ? subst(p.local->type, s) : T.error;
+            if (p.is_self) out += p.mode == ParamMode::read ? std::string("self") : "self: " + std::string(mode) + std::string(t->name);
+            else out += std::string(text(p.name)) + ": " + mode + std::string(t->name);
+        }
+        out += ")";
+        Type* r = subst(f->result_type, s);
+        if (r && r->kind != TypeKind::unit) out += " -> " + std::string(r->name);
+        return out;
+    }
+
+    // An impl's function must have exactly the interface's signature, with its type for `Self`,
+    // parameter names included, since calls can name their arguments.
+    void check_conforms(Item* m, Item* want, Type* t, Item* iface) {
+        Subst s{{iface->type_params[0], t}};
+        bool ok = m->params.size() == want->params.size();
+        for (std::size_t i = 0; ok && i < m->params.size(); i++) {
+            const Param& a = m->params[i];
+            const Param& b = want->params[i];
+            ok = a.mode == b.mode && a.is_self == b.is_self && a.name == b.name && a.local && b.local &&
+                 (is_bad(a.local->type) || is_bad(b.local->type) || a.local->type == subst(b.local->type, s));
+        }
+        Type* r = subst(want->result_type, s);
+        ok = ok && (m->result_type == r || is_bad(m->result_type) || is_bad(r));
+        if (!ok) {
+            error(m->name_span, q(text(m->name)) + " doesn't match " + q(text(iface->name)) + ", which declares it as " +
+                                    q(signature_text(want, s)));
+            note(want->name_span, "it's declared here");
+        }
     }
 
     void collect_impl(Item* impl) {
+        Item* iface = nullptr;
         if (impl->interface) {
-            not_yet(impl->interface->span, "interfaces");
-            return;
+            iface = resolve_interface(impl->interface);
+            if (!iface) return;
         }
-        if (!impl->generics.empty()) not_yet(impl->generics[0].span, "generic impls");
+        std::size_t mark = push_env(impl);
         Type* t = resolve_type(impl->self_type);
+        pop_env(mark);
         if (is_bad(t)) return;
-        if (t->kind != TypeKind::struct_ && t->kind != TypeKind::enum_) {
+        // Every parameter must be in the type, or a use couldn't tell what it stands for.
+        for (Type* p : impl->type_params) {
+            std::vector<Type*> one{p};
+            if (!mentions_any(t, Slice<Type*>(ctx_.arena.copy(one)))) {
+                error(param_spans_[p], "generic parameter " + q(p->name) + " must appear in the impl's type, " + name_of(t));
+            }
+        }
+        bool nominal = t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_;
+        if (!iface && !nominal) {
             error(impl->self_type->span, "methods can only be added to structs and enums declared in this module");
             return;
         }
-        auto& table = methods_[t];
+        if (iface && !nominal && !is_numeric(t) && t->kind != TypeKind::bool_ && t->kind != TypeKind::char_ &&
+            t->kind != TypeKind::rune && t->kind != TypeKind::str) {
+            not_yet(impl->self_type->span, "interfaces for this kind of type");
+            return;
+        }
+        auto& same_head = impls_by_head_[head(t)];
+        if (iface) {
+            for (ImplInfo* other : same_head) {
+                if (other->iface != iface) continue;
+                Subst a, b;
+                if (unify(other->self, t, a, other->impl->type_params) || unify(t, other->self, b, impl->type_params)) {
+                    error(impl->self_type->span, q(text(iface->name)) + " is already implemented for " + name_of(t));
+                    note(other->impl->self_type->span, "the other impl is here");
+                    return;
+                }
+            }
+        }
+        impl_infos_.push_back(std::make_unique<ImplInfo>());
+        ImplInfo* info = impl_infos_.back().get();
+        info->impl = impl;
+        info->self = t;
+        info->iface = iface;
+        impl->interface_item = iface;
         for (Item* m : impl->members) {
-            if (m->kind != ItemKind::fn) {
+            Item* want = nullptr;
+            if (iface) {
+                if (m->kind != ItemKind::fn && m->kind != ItemKind::const_) {
+                    error(m->span, "an impl of an interface holds its functions and constants");
+                    continue;
+                }
+                want = interface_member(iface, m->name);
+                if (!want) {
+                    error(m->name_span, q(text(m->name)) + " isn't part of " + q(text(iface->name)) + "; put it in a separate " +
+                                            q("impl " + std::string(t->name)) + " block");
+                    continue;
+                }
+                if (want->kind != m->kind) {
+                    error(m->name_span, q(text(m->name)) + " is a " + (want->kind == ItemKind::fn ? "function" : "constant") +
+                                            " in " + q(text(iface->name)));
+                    continue;
+                }
+                m->interface_item = iface;
+            } else if (m->kind != ItemKind::fn) {
                 error(m->span, "an impl block holds only functions for now");
+                continue;
+            }
+            if (info->members.count(m->name)) {
+                error(m->name_span, name_of(t) + " already has " + (m->kind == ItemKind::fn ? "a function" : "a constant") +
+                                        " named " + q(text(m->name)) + " here");
+                continue;
+            }
+            // An interface's members carry its name in C, so a profile or a stack trace says which
+            // impl ran: `Lift__Up__go` and `Lift__Down__go`.
+            std::string owner = mangle(t);
+            if (iface) owner += "__" + std::string(text(iface->name));
+            if (m->kind == ItemKind::const_) {
+                m->c_name = c_name({owner, text(m->name)});
+                m->impl_type = t;
+                m->result_type = subst(want->declared, Subst{{iface->type_params[0], t}});
+                info->members.emplace(m->name, m);
+                consts_.push_back(m);
                 continue;
             }
             if (!m->body) {
                 error(m->name_span, "function " + q(text(m->name)) + " needs a body");
                 continue;
             }
-            if (!m->generics.empty()) not_yet(m->generics[0].span, "generic functions");
+            if (iface && !m->generics.empty()) not_yet(m->generics[0].span, "generic functions in interfaces");
             m->impl_type = t;
-            m->c_name = c_name({t->name, text(m->name)});
-            for (const FieldDecl& f : t->item->fields) {
-                if (t->kind == TypeKind::struct_ && f.name == m->name) {
-                    error(m->name_span, q(text(m->name)) + " is both a field and a method of " + name_of(t));
-                    note(f.span, "the field is here");
+            m->c_name = c_name({owner, text(m->name)});
+            if (t->kind == TypeKind::struct_) {
+                for (const FieldDecl& f : t->item->fields) {
+                    if (f.name == m->name) {
+                        error(m->name_span, q(text(m->name)) + " is both a field and a method of " + name_of(t));
+                        note(f.span, "the field is here");
+                    }
                 }
             }
             if (t->kind == TypeKind::enum_ && find_variant(t, m->name) != UINT32_MAX) {
                 error(m->name_span, q(text(m->name)) + " is both a variant and a function of " + name_of(t));
             }
-            auto [pos, fresh] = table.emplace(m->name, m);
-            if (!fresh) {
-                error(m->name_span, name_of(t) + " already has a function named " + q(text(m->name)));
-                note(pos->second->name_span, "the first one is here");
-                continue;
+            // Two blocks for overlapping types can't both have the name.
+            bool clash = false;
+            for (ImplInfo* other : same_head) {
+                if (other->iface || !other->members.count(m->name)) continue;
+                Subst a, b;
+                if (unify(other->self, t, a, other->impl->type_params) || unify(t, other->self, b, impl->type_params)) {
+                    error(m->name_span, name_of(t) + " already has a function named " + q(text(m->name)));
+                    note(other->members[m->name]->name_span, "the first one is here");
+                    clash = true;
+                }
             }
+            if (clash) continue;
+            info->members.emplace(m->name, m);
+            check_signature(m);
+            if (want) check_conforms(m, want, t, iface);
             all_fns_.push_back(m);
         }
+        if (iface) {
+            std::string missing;
+            for (Item* w : iface->members) {
+                if ((w->kind == ItemKind::fn && !w->body) || w->kind == ItemKind::const_) {
+                    if (!info->members.count(w->name)) missing += (missing.empty() ? "" : ", ") + q(text(w->name));
+                }
+            }
+            if (!missing.empty()) {
+                error(impl->self_type->span, "the impl of " + q(text(iface->name)) + " for " + name_of(t) + " is missing " + missing);
+            }
+        }
+        same_head.push_back(info);
+    }
+
+    // --- generics ------------------------------------------------------------------------
+    //
+    // A generic item is checked once, with each parameter a type of its own that allows only what
+    // its bounds give it. Each use with real types makes an instance: a copy of the item with the
+    // types in place, which is checked again and emitted like any other item (D26).
+
+    struct ImplInfo {
+        Item* impl = nullptr;
+        Type* self = nullptr;   // the type it's for, which can mention the impl's parameters
+        Item* iface = nullptr;  // null for an impl without an interface
+        std::unordered_map<Name, Item*> members;
+        bool used = false;
+    };
+
+    // What a name on a type, `t.name` or `T.name`, turned out to be.
+    struct Member {
+        Item* fn = nullptr;
+        Item* konst = nullptr;
+        Subst s;  // what the member's parameters stand for, as far as the type says
+        bool ambiguous = false;
+    };
+
+    struct DeferredBounds {
+        Slice<Type*> params;
+        std::vector<Type*> args;
+        Span span;
+        std::string what;
+    };
+
+    Slice<Type*> make_params(Item* it) {
+        std::vector<Type*> out;
+        for (GenericParam& g : it->generics) {
+            Type* p = T.make_param(text(g.name));
+            param_names_[p] = g.name;
+            param_spans_[p] = g.span;
+            param_owner_[p] = it;
+            param_decls_.push_back({p, &g});
+            out.push_back(p);
+        }
+        return ctx_.arena.copy(out);
+    }
+
+    std::string_view generic_name(const Item* it) {
+        if (it->type_params.empty()) return text(it->name);
+        std::string s(text(it->name));
+        s += '<';
+        for (std::size_t i = 0; i < it->type_params.size(); i++) {
+            if (i) s += ", ";
+            s += it->type_params[i]->name;
+        }
+        s += '>';
+        return ctx_.arena.copy(s);
+    }
+
+    // A generic struct or enum's own type is its parameters applied to itself, `Pair<A, B>`. It
+    // appears only inside the declaration; uses elsewhere are instances.
+    void make_identity(Item* it) {
+        if (it->type_params.empty()) return;
+        Type* t = it->declared;
+        t->generic = it;
+        t->args = it->type_params;
+        t->open = true;
+        std::vector<Type*> key(it->type_params.begin(), it->type_params.end());
+        type_instances_.emplace(std::make_pair(it, key), t);
+    }
+
+    bool is_identity(const Type* t) const { return t->generic && t->item == t->generic; }
+
+    // Every generic parameter's name and bounds, once every interface is declared.
+    void resolve_params() {
+        std::unordered_map<Item*, std::unordered_map<Name, Span>> seen;
+        for (auto& [p, g] : param_decls_) {
+            auto& names = seen[param_owner_[p]];
+            if (!names.emplace(g->name, g->span).second) {
+                error(g->span, "generic parameter " + q(text(g->name)) + " is already declared");
+                note(names[g->name], "the first declaration is here");
+                // Either one could be the one meant, so neither is reported as unused.
+                for (Type* other : param_owner_[p]->type_params) {
+                    if (param_names_[other] == g->name) param_used_[other] = true;
+                }
+            } else if (auto it = items_.find(g->name); it != items_.end()) {
+                error(g->span, q(text(g->name)) + " is already the name of a " + item_kind(it->second) +
+                                   "; Calx doesn't allow shadowing");
+            } else if (is_builtin_name(g->name)) {
+                error(g->span, q(text(g->name)) + " is a built-in name");
+            }
+            std::vector<Item*> bounds;
+            for (TypeExpr* b : g->bounds) {
+                Item* iface = resolve_interface(b);
+                if (!iface) continue;
+                if (std::find(bounds.begin(), bounds.end(), iface) != bounds.end()) {
+                    error(b->span, q(text(iface->name)) + " is already a bound of " + q(text(g->name)));
+                    continue;
+                }
+                bounds.push_back(iface);
+            }
+            p->bounds = ctx_.arena.copy(bounds);
+        }
+    }
+
+    Item* resolve_interface(TypeExpr* t) {
+        if (t->kind != TypeExprKind::named || t->path.parts.size() != 1) {
+            error(t->span, "a bound must be an interface");
+            return nullptr;
+        }
+        auto it = items_.find(t->path.parts[0]);
+        if (it == items_.end() || it->second->kind != ItemKind::interface) {
+            error(t->span, q(path_text(t->path)) + (it == items_.end() ? " isn't defined" : " isn't an interface"));
+            return nullptr;
+        }
+        if (!t->args.empty()) not_yet(t->args[0]->span, "generic interfaces");
+        it->second->used = true;
+        return it->second;
+    }
+
+    // A parameter that nothing mentions can't be worked out from a use, so it's an error (D63).
+    void report_unused_params(Item* it, const char* why) {
+        if (it->origin) return;
+        for (Type* p : it->type_params) {
+            if (param_owner_[p] != it || param_used_[p]) continue;
+            error(param_spans_[p], "generic parameter " + q(p->name) + " " + why);
+        }
+    }
+
+    std::size_t push_env(const Item* it) {
+        std::size_t mark = env_.size();
+        const Item* o = it->origin ? it->origin : it;
+        for (std::size_t i = 0; i < o->type_params.size(); i++) {
+            Type* p = o->type_params[i];
+            env_.push_back({param_names_[p], it->origin ? it->type_args[i] : p});
+        }
+        return mark;
+    }
+
+    void pop_env(std::size_t mark) { env_.resize(mark); }
+
+    Type* env_type(Name n) {
+        for (std::size_t i = env_.size(); i-- > 0;) {
+            if (env_[i].first != n) continue;
+            Type* t = env_[i].second;
+            if (t->kind == TypeKind::param) param_used_[t] = true;
+            return t;
+        }
+        return nullptr;
+    }
+
+    static bool contains(const Slice<Type*>& vars, const Type* t) {
+        for (Type* v : vars) if (v == t) return true;
+        return false;
+    }
+
+    // Whether `t` mentions one of `vars` that `s` doesn't give yet.
+    static bool unresolved(const Type* t, const Slice<Type*>& vars, const Subst& s) {
+        if (!t->open) return false;
+        switch (t->kind) {
+            case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
+            case TypeKind::optional: case TypeKind::array: return unresolved(t->elem, vars, s);
+            case TypeKind::tuple:
+                for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
+                return false;
+            case TypeKind::struct_: case TypeKind::enum_:
+                for (Type* a : t->args) if (unresolved(a, vars, s)) return true;
+                return false;
+            default: return false;
+        }
+    }
+
+    static bool mentions_any(const Type* t, const Slice<Type*>& vars) { return unresolved(t, vars, Subst{}); }
+
+    Subst binding(const Slice<Type*>& params, const std::vector<Type*>& args) {
+        Subst s;
+        for (std::size_t i = 0; i < params.size() && i < args.size(); i++) s.emplace(params[i], args[i]);
+        return s;
+    }
+
+    // `t` with the parameters in `s` replaced.
+    Type* subst(Type* t, const Subst& s) {
+        if (!t || !t->open || s.empty()) return t;
+        switch (t->kind) {
+            case TypeKind::param: {
+                auto it = s.find(t);
+                return it == s.end() ? t : it->second;
+            }
+            case TypeKind::optional: return T.optional_of(subst(t->elem, s));
+            case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
+            case TypeKind::tuple: {
+                std::vector<Type*> elems;
+                for (Type* e : t->elems) elems.push_back(subst(e, s));
+                return T.tuple_of(elems);
+            }
+            case TypeKind::struct_: case TypeKind::enum_: {
+                std::vector<Type*> args;
+                for (Type* a : t->args) args.push_back(subst(a, s));
+                return instance_type(t->generic, args);
+            }
+            default: return t;
+        }
+    }
+
+    // Matches `pattern`, which can mention the parameters in `vars`, against `actual`, binding them
+    // in `s`. A parameter already bound must match what it's bound to.
+    bool unify(Type* pattern, Type* actual, Subst& s, const Slice<Type*>& vars) {
+        if (is_bad(actual) || is_bad(pattern) || actual->kind == TypeKind::never) return true;
+        if (pattern->kind == TypeKind::param && contains(vars, pattern)) {
+            auto it = s.find(pattern);
+            if (it == s.end()) {
+                s.emplace(pattern, actual);
+                return true;
+            }
+            return it->second == actual;
+        }
+        if (!pattern->open) return pattern == actual;
+        if (pattern->kind != actual->kind) return false;
+        switch (pattern->kind) {
+            case TypeKind::optional: return unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::array:
+                return pattern->length == actual->length && unify(pattern->elem, actual->elem, s, vars);
+            case TypeKind::tuple:
+                if (pattern->elems.size() != actual->elems.size()) return false;
+                for (std::size_t i = 0; i < pattern->elems.size(); i++) {
+                    if (!unify(pattern->elems[i], actual->elems[i], s, vars)) return false;
+                }
+                return true;
+            case TypeKind::struct_: case TypeKind::enum_:
+                if (pattern->generic != actual->generic) return false;
+                for (std::size_t i = 0; i < pattern->args.size(); i++) {
+                    if (!unify(pattern->args[i], actual->args[i], s, vars)) return false;
+                }
+                return true;
+            default: return pattern == actual;
+        }
+    }
+
+    // `Pair<i32, str>` as written: the instance, after checking the arguments.
+    Type* generic_type(Item* g, Slice<TypeExpr*> written, Span span) {
+        std::size_t n = g->type_params.size();
+        if (written.size() != n) {
+            if (written.empty()) {
+                error(span, q(text(g->name)) + " is generic; give its " + (n == 1 ? "type" : "types") + ", as in " +
+                                q(std::string(text(g->name)) + "<...>"));
+            } else {
+                error(span, q(text(g->name)) + " takes " + std::to_string(n) + (n == 1 ? " type" : " types") + ", but " +
+                                std::to_string(written.size()) + (written.size() == 1 ? " was given" : " were given"));
+            }
+            for (TypeExpr* a : written) resolve_type(a);
+            return T.error;
+        }
+        std::vector<Type*> args;
+        bool bad = false;
+        for (TypeExpr* a : written) {
+            Type* x = resolve_type(a);
+            if (x->kind == TypeKind::unit || x->kind == TypeKind::never) {
+                error(a->span, name_of(x) + " can't be a generic argument");
+                x = T.error;
+            }
+            bad = bad || is_bad(x);
+            args.push_back(x);
+        }
+        if (bad || !check_bounds(g->type_params, args, span, q(text(g->name)))) return T.error;
+        return instance_type(g, args);
+    }
+
+    // Whether each argument implements its parameter's bounds. While the impls are still being
+    // collected, the check waits until they all are.
+    bool check_bounds(const Slice<Type*>& params, const std::vector<Type*>& args, Span span, const std::string& what) {
+        if (defer_bounds_) {
+            deferred_bounds_.push_back({params, args, span, what});
+            return true;
+        }
+        bool ok = true;
+        for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
+            for (Item* b : params[i]->bounds) {
+                if (satisfies(args[i], b)) continue;
+                error(span, name_of(args[i]) + " doesn't implement " + q(text(b->name)) + ", which " + what +
+                                " needs for " + q(params[i]->name));
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    bool bounds_hold(const Slice<Type*>& params, const Subst& s) {
+        for (Type* p : params) {
+            auto it = s.find(p);
+            if (it == s.end()) return false;
+            for (Item* b : p->bounds) {
+                if (!satisfies(it->second, b)) return false;
+            }
+        }
+        return true;
+    }
+
+    static const void* head(const Type* t) {
+        if (t->generic) return t->generic;
+        if (t->item) return t->item;
+        return t;
+    }
+
+    bool satisfies(Type* t, Item* iface) {
+        if (is_bad(t)) return true;
+        if (t->kind == TypeKind::param) {
+            for (Item* b : t->bounds) if (b == iface) return true;
+            return false;
+        }
+        auto it = impls_by_head_.find(head(t));
+        if (it == impls_by_head_.end()) return false;
+        for (ImplInfo* info : it->second) {
+            if (info->iface != iface) continue;
+            Subst s;
+            if (unify(info->self, t, s, info->impl->type_params) && bounds_hold(info->impl->type_params, s)) {
+                info->used = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    Item* interface_member(const Item* iface, Name n) const {
+        for (Item* m : iface->members) {
+            if (m->name == n && (m->kind == ItemKind::fn || m->kind == ItemKind::const_)) return m;
+        }
+        return nullptr;
+    }
+
+    // The function or constant `name` on type `t`: from the bounds of a parameter, or from an impl
+    // block, with the type's own blocks before its interfaces'. A generic type written without its
+    // arguments, `Pair.make(...)`, matches any of its impls, and the call works out the arguments.
+    Member lookup(Type* t, Name n, Item* only = nullptr) {
+        Member m;
+        if (is_bad(t)) return m;
+        auto take = [&](Item* x, Subst s) {
+            if (m.fn || m.konst) {
+                m.ambiguous = true;
+                return;
+            }
+            (x->kind == ItemKind::fn ? m.fn : m.konst) = x;
+            m.s = std::move(s);
+        };
+        if (t->kind == TypeKind::param) {
+            for (Item* b : t->bounds) {
+                if (only && b != only) continue;
+                if (Item* x = interface_member(b, n)) take(x, Subst{{b->type_params[0], t}});
+            }
+            return m;
+        }
+        auto found = impls_by_head_.find(head(t));
+        if (found == impls_by_head_.end()) return m;
+        bool identity = is_identity(t);
+        for (ImplInfo* info : found->second) {
+            if (info->iface || only) continue;
+            auto f = info->members.find(n);
+            if (f == info->members.end()) continue;
+            Subst s;
+            if (!identity && (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s))) {
+                continue;
+            }
+            info->used = true;
+            take(f->second, std::move(s));
+        }
+        if (m.fn || m.konst || identity) return m;
+        for (ImplInfo* info : found->second) {
+            if (!info->iface || (only && info->iface != only)) continue;
+            Subst s;
+            if (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s)) continue;
+            Item* x = nullptr;
+            if (auto f = info->members.find(n); f != info->members.end()) {
+                x = f->second;
+            } else if (Item* d = interface_member(info->iface, n); d && d->kind == ItemKind::fn && d->body) {
+                x = d;  // the interface's default, for this `Self`
+                s = Subst{{info->iface->type_params[0], t}};
+            }
+            if (!x) continue;
+            info->used = true;
+            take(x, std::move(s));
+        }
+        return m;
+    }
+
+    std::string mangle(const Type* t) const {
+        switch (t->kind) {
+            case TypeKind::struct_: case TypeKind::enum_: {
+                const Item* it = t->generic ? t->generic : t->item;
+                std::string s(text(it->name));
+                for (Type* a : t->args) s += "_" + mangle(a);
+                return s;
+            }
+            case TypeKind::optional: return mangle(t->elem) + "_opt";
+            case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
+            case TypeKind::tuple: {
+                std::string s = "tup";
+                for (Type* e : t->elems) s += "_" + mangle(e);
+                return s;
+            }
+            default: return std::string(t->name);
+        }
+    }
+
+    std::string instance_name(const Item* f) const {
+        const Item* o = f->origin ? f->origin : f;
+        std::string s = f->impl_type ? std::string(f->impl_type->name) + "." : "";
+        s += text(f->name);
+        std::size_t own = o->generics.size();
+        if (own && f->type_args.size() >= own) {
+            s += '<';
+            for (std::size_t k = f->type_args.size() - own; k < f->type_args.size(); k++) {
+                if (k != f->type_args.size() - own) s += ", ";
+                s += f->type_args[k]->name;
+            }
+            s += '>';
+        }
+        return s;
+    }
+
+    // The instance of a generic struct or enum for `args`: a copy of the item whose fields or
+    // variants have the arguments' types.
+    Type* instance_type(Item* g, const std::vector<Type*>& args) {
+        auto key = std::make_pair(g, args);
+        if (auto it = type_instances_.find(key); it != type_instances_.end()) return it->second;
+        std::string name = std::string(text(g->name)) + "<";
+        for (std::size_t i = 0; i < args.size(); i++) {
+            if (i) name += ", ";
+            name += args[i]->name;
+        }
+        name += ">";
+        std::string_view nm = ctx_.arena.copy(name);
+        Type* t = g->kind == ItemKind::struct_ ? T.make_struct(nullptr, nm) : T.make_enum(nullptr, nm);
+        Item* it = ctx_.arena.make<Item>(*g);
+        it->origin = g;
+        it->type_args = ctx_.arena.copy(args);
+        it->type_params = {};
+        it->declared = t;
+        it->resolved = it->resolving = false;
+        t->item = it;
+        t->generic = g;
+        t->args = it->type_args;
+        for (Type* a : args) t->open = t->open || a->open;
+        it->c_name = c_name({mangle(t)});
+        type_instances_.emplace(key, t);
+        instances_.push_back(t);
+        if (!g->resolved && !g->resolving) {
+            if (g->kind == ItemKind::struct_) resolve_fields(g);
+            else resolve_enum(g);
+        }
+        if (g->resolved) fill_instance(t);
+        else unfilled_[g].push_back(t);
+        return t;
+    }
+
+    void fill_instance(Type* t) {
+        Item* g = t->generic;
+        Item* it = t->item;
+        std::vector<Type*> args(t->args.begin(), t->args.end());
+        Subst s = binding(g->type_params, args);
+        auto fields = [&](Slice<FieldDecl> from) {
+            std::vector<FieldDecl> fs(from.begin(), from.end());
+            for (FieldDecl& f : fs) {
+                f.resolved = f.resolved ? subst(f.resolved, s) : T.error;
+                // A default can have the parameters' types, as `none` for a `T?`, or mention them,
+                // as `T.sides`, so a real instance checks its own copy.
+                if (f.default_value && !t->open) f.default_value = clone(f.default_value);
+            }
+            return Slice<FieldDecl>(ctx_.arena.copy(fs));
+        };
+        if (g->kind == ItemKind::struct_) {
+            it->fields = fields(g->fields);
+            if (!t->open) {
+                if (defaults_ready_) check_instance_defaults(t);
+                else pending_defaults_.push_back(t);
+            }
+        } else {
+            std::vector<VariantDecl> vs(g->variants.begin(), g->variants.end());
+            for (VariantDecl& v : vs) {
+                std::vector<Type*> ts;
+                for (Type* x : v.types) ts.push_back(subst(x, s));
+                v.types = ctx_.arena.copy(ts);
+                v.fields = fields(v.fields);
+            }
+            it->variants = ctx_.arena.copy(vs);
+            t->has_data = g->declared->has_data;
+            t->repr = g->declared->repr;
+        }
+        it->resolved = true;
+    }
+
+    void fill_unfilled(Item* g) {
+        auto it = unfilled_.find(g);
+        if (it == unfilled_.end()) return;
+        std::vector<Type*> ts = std::move(it->second);
+        unfilled_.erase(it);
+        for (Type* t : ts) fill_instance(t);
+    }
+
+    // The instance of a generic function for `args`, in `type_params` order: a copy of its body,
+    // checked once the bodies written in the module are.
+    Item* instance_fn(Item* f, const std::vector<Type*>& args, Span site) {
+        auto key = std::make_pair(f, args);
+        if (auto it = fn_instances_.find(key); it != fn_instances_.end()) return it->second;
+        std::uint32_t depth = (fn_ ? fn_->instance_depth : 0) + 1;
+        if (depth > 64) {
+            ctx_.diags.error(site, "the instances of " + q(text(f->name)) + " never end: each one needs another, with bigger types");
+            return nullptr;
+        }
+        Item* it = ctx_.arena.make<Item>(*f);
+        it->origin = f;
+        it->type_args = ctx_.arena.copy(args);
+        it->type_params = {};
+        it->generics = {};
+        std::vector<Param> ps(f->params.begin(), f->params.end());
+        for (Param& p : ps) {
+            p.local = nullptr;
+            p.default_value = clone(p.default_value);
+        }
+        it->params = ctx_.arena.copy(ps);
+        it->body = clone(f->body);
+        it->checked_signature = false;
+        it->is_method = false;
+        it->used = true;
+        it->instance_site = site;
+        it->instance_depth = depth;
+        Subst s = binding(f->type_params, args);
+        it->impl_type = f->impl_type ? subst(f->impl_type, s) : nullptr;
+        std::string base;
+        if (it->impl_type) {
+            base = mangle(it->impl_type) + "__";
+            if (f->interface_item) base += std::string(text(f->interface_item->name)) + "__";
+        }
+        base += text(f->name);
+        std::size_t own = f->generics.size();
+        for (std::size_t k = args.size() - own; k < args.size(); k++) base += "__" + mangle(args[k]);
+        it->c_name = c_name({base});
+        fn_instances_.emplace(key, it);
+        check_signature(it);
+        pending_fns_.push_back(it);
+        return it;
+    }
+
+    // Deep copies of a body, for an instance to check on its own. The checker's results are left
+    // out, since the instance gets its own.
+    Block* clone(const Block* b) {
+        if (!b) return nullptr;
+        Block* c = ctx_.arena.make<Block>(*b);
+        std::vector<Stmt*> ss;
+        for (Stmt* x : b->stmts) ss.push_back(clone(x));
+        c->stmts = ctx_.arena.copy(ss);
+        c->tail = clone(b->tail);
+        return c;
+    }
+
+    Stmt* clone(const Stmt* s) {
+        if (!s) return nullptr;
+        Stmt* c = ctx_.arena.make<Stmt>(*s);
+        c->pattern = clone(s->pattern);
+        c->value = clone(s->value);
+        c->target = clone(s->target);
+        c->else_ = clone(s->else_);
+        c->else_block = clone(s->else_block);
+        c->cond = clone(s->cond);
+        c->body = clone(s->body);
+        c->pool = clone(s->pool);
+        c->local = nullptr;
+        c->let_unwraps = false;
+        c->loop_id = 0;
+        c->elem_type = nullptr;
+        return c;
+    }
+
+    Pattern* clone(const Pattern* p) {
+        if (!p) return nullptr;
+        Pattern* c = ctx_.arena.make<Pattern>(*p);
+        std::vector<Pattern*> es;
+        for (Pattern* x : p->elems) es.push_back(clone(x));
+        c->elems = ctx_.arena.copy(es);
+        std::vector<FieldPattern> fs(p->fields.begin(), p->fields.end());
+        for (FieldPattern& f : fs) {
+            f.pattern = clone(f.pattern);
+            f.index = 0;
+        }
+        c->fields = ctx_.arena.copy(fs);
+        c->value = clone(p->value);
+        c->end = clone(p->end);
+        c->type = nullptr;
+        c->local = nullptr;
+        c->variant = 0;
+        return c;
+    }
+
+    Slice<Expr*> clone(const Slice<Expr*>& xs) {
+        std::vector<Expr*> out;
+        for (Expr* x : xs) out.push_back(clone(x));
+        return ctx_.arena.copy(out);
+    }
+
+    Expr* clone(const Expr* e) {
+        if (!e) return nullptr;
+        Expr* c = ctx_.arena.make<Expr>(*e);
+        c->interpolations = clone(e->interpolations);
+        c->lhs = clone(e->lhs);
+        c->rhs = clone(e->rhs);
+        c->callee = clone(e->callee);
+        c->trailing = clone(e->trailing);
+        std::vector<Arg> args(e->args.begin(), e->args.end());
+        for (Arg& a : args) a.value = clone(a.value);
+        c->args = ctx_.arena.copy(args);
+        std::vector<FieldInit> fields(e->fields.begin(), e->fields.end());
+        for (FieldInit& f : fields) f.value = clone(f.value);
+        c->fields = ctx_.arena.copy(fields);
+        // A struct literal's `elems` are its field values, which the checker fills in again.
+        c->elems = e->kind == ExprKind::struct_lit ? Slice<Expr*>{} : clone(e->elems);
+        c->repeat = clone(e->repeat);
+        c->block = clone(e->block);
+        c->cond = clone(e->cond);
+        c->let_pattern = clone(e->let_pattern);
+        c->else_ = clone(e->else_);
+        c->scrutinee = clone(e->scrutinee);
+        std::vector<MatchArm> arms(e->arms.begin(), e->arms.end());
+        for (MatchArm& a : arms) {
+            a.pattern = clone(a.pattern);
+            a.guard = clone(a.guard);
+            a.body = clone(a.body);
+        }
+        c->arms = ctx_.arena.copy(arms);
+        std::vector<Param> params(e->params.begin(), e->params.end());
+        for (Param& p : params) {
+            p.local = nullptr;
+            p.default_value = clone(p.default_value);
+        }
+        c->params = ctx_.arena.copy(params);
+        c->body = clone(e->body);
+        c->type = nullptr;
+        c->ref = Ref::none;
+        c->local = nullptr;
+        c->item = nullptr;
+        c->named_type = nullptr;
+        c->call = CallKind::none;
+        c->builtin = Builtin::none;
+        c->conv = Conv::none;
+        c->prim = PrimMethod::none;
+        c->field_index = 0;
+        c->ordered_args = {};
+        c->is_const = c->has_bits = false;
+        c->const_bits = 0;
+        c->is_nan_const = false;
+        c->loop_id = 0;
+        c->let_unwraps = false;
+        return c;
     }
 
     // --- types ---------------------------------------------------------------------------
@@ -398,6 +1318,13 @@ private:
                     return T.error;
                 }
                 Name n = t->path.parts[0];
+                if (Type* p = env_type(n)) {
+                    if (!t->args.empty()) {
+                        error(t->args[0]->span, q(text(n)) + " doesn't take generic arguments");
+                        return T.error;
+                    }
+                    return p;
+                }
                 Type* r = T.primitive(text(n));
                 if (!r) {
                     auto it = items_.find(n);
@@ -406,6 +1333,12 @@ private:
                     } else if (it != items_.end() && is_type_item(it->second)) {
                         r = it->second->declared;
                         if (it->second != current_item_) it->second->used = true;
+                        if (!it->second->type_params.empty()) return generic_type(it->second, t->args, t->span);
+                    } else if (it != items_.end() && it->second->kind == ItemKind::interface) {
+                        it->second->used = true;
+                        error(t->span, q(text(n)) + " is an interface, not a type; take a generic parameter with it as a "
+                                                    "bound, such as " + q("<T: " + std::string(text(n)) + ">"));
+                        return T.error;
                     } else if (it != items_.end()) {
                         error(t->span, q(text(n)) + " isn't a type");
                         return T.error;
@@ -460,6 +1393,12 @@ private:
             case TypeExprKind::optional: {
                 Type* inner = resolve_type(t->inner);
                 if (is_bad(inner)) return T.error;
+                // `T?` is fine whatever `T` stands for, even an optional: the nesting comes from the
+                // generic code, not from writing `i32??`.
+                if (t->inner->kind == TypeExprKind::named && t->inner->path.parts.size() == 1 &&
+                    env_type(t->inner->path.parts[0])) {
+                    return T.optional_of(inner);
+                }
                 return optional_type(inner, t->span);
             }
             case TypeExprKind::fn: not_yet(t->span, "function types"); return T.error;
@@ -471,7 +1410,7 @@ private:
 
     // `T?`, or an error for the types an optional can't hold.
     Type* optional_type(Type* inner, Span span) {
-        if (inner->kind == TypeKind::optional) {
+        if (inner->kind == TypeKind::optional && !instance_mode_) {
             error(span, "an optional can't hold another optional; use an enum to tell the cases apart");
             return T.error;
         }
@@ -504,6 +1443,8 @@ private:
     void check_signature(Item* f) {
         if (f->checked_signature) return;
         f->checked_signature = true;
+        Type* saved_impl = current_impl_type_;
+        std::size_t mark = push_env(f);
         current_impl_type_ = f->impl_type;
         for (std::size_t i = 0; i < f->params.size(); i++) {
             Param& p = f->params[i];
@@ -541,7 +1482,8 @@ private:
         if (f->result && f->result_type->kind == TypeKind::unit) {
             error(f->result->span, "leave out `-> ()`: a function without `->` returns nothing");
         }
-        current_impl_type_ = nullptr;
+        pop_env(mark);
+        current_impl_type_ = saved_impl;
     }
 
     void check_const(Item* c) {
@@ -551,7 +1493,7 @@ private:
             c->declared = T.error;
             return;
         }
-        if (!c->type) {
+        if (!c->type && !c->result_type) {
             error(c->name_span, "give the constant a type: `const " + std::string(text(c->name)) + ": i32 = ...`");
             c->declared = T.error;
             return;
@@ -567,8 +1509,12 @@ private:
         Type* saved_impl = current_impl_type_;
         fn_ = nullptr;
         current_item_ = c;
-        current_impl_type_ = nullptr;
-        Type* t = resolve_type(c->type);
+        current_impl_type_ = c->impl_type;
+        Type* t = c->type ? resolve_type(c->type) : c->result_type;
+        if (c->type && c->result_type && !is_bad(t) && !is_bad(c->result_type) && t != c->result_type) {
+            error(c->type->span, q(text(c->name)) + " is " + a_type(c->result_type) + " in " + q(text(c->interface_item->name)));
+            t = T.error;
+        }
         if (!c->value) {
             error(c->name_span, "constant " + q(text(c->name)) + " needs a value");
         } else if (!is_bad(t)) {
@@ -597,6 +1543,7 @@ private:
     void check_fn(Item* f) {
         fn_ = f;
         current_impl_type_ = f->impl_type;
+        std::size_t mark = push_env(f);
         visible_.clear();
         scope_marks_.clear();
         loops_.clear();
@@ -610,7 +1557,10 @@ private:
             error(end, "function " + q(text(f->name)) + " can reach its end without returning a value");
         }
         pop_scope();
-        prog_.fns.push_back(f);
+        pop_env(mark);
+        // A generic function is only checked here. Its instances are what's emitted.
+        if (f->type_params.empty()) prog_.fns.push_back(f);
+        else report_unused_params(f, "is never used");
         fn_ = nullptr;
         current_impl_type_ = nullptr;
     }
@@ -627,8 +1577,12 @@ private:
     }
 
     void report_unused(Local* l) {
+        if (instance_mode_) return;  // the generic definition reported these once
         std::string_view n = text(l->name);
         if (l->is_param) {
+            // An interface fixes its functions' parameters, names included, so one impl not using
+            // a parameter is fine.
+            if (fn_ && fn_->interface_item) return;
             if (!l->used && !l->mutated && !starts_with_underscore(n)) {
                 if (l->name == n_self_) {
                     error(l->span, "`self` is never used; make " + q(text(fn_->name)) +
@@ -681,6 +1635,7 @@ private:
             case ItemKind::struct_: return "struct";
             case ItemKind::enum_: return "enum";
             case ItemKind::const_: return "constant";
+            case ItemKind::interface: return "interface";
             default: return "declaration";
         }
     }
@@ -1207,12 +2162,12 @@ private:
                 error(e->span, "a range can only be used in a `for` loop for now");
                 return T.error;
             case ExprKind::call: return call(e, expected);
-            case ExprKind::field: return field(e);
+            case ExprKind::field: return field(e, expected);
             case ExprKind::index: {
                 Type* base = check(e->lhs, nullptr);
                 return index_type(e, base);
             }
-            case ExprKind::struct_lit: return struct_literal(e);
+            case ExprKind::struct_lit: return struct_literal(e, expected);
             case ExprKind::array_lit: return array_literal(e, expected);
             case ExprKind::tuple: return tuple_literal(e, expected);
             case ExprKind::block: return check_block(e->block, expected, BlockUse::value);
@@ -1414,6 +2369,11 @@ private:
             r.local = l;
             return r;
         }
+        if (Type* p = env_type(n)) {
+            r.kind = NameKind::type;
+            r.type = p;
+            return r;
+        }
         if (auto it = items_.find(n); it != items_.end()) {
             if (is_type_item(it->second)) {
                 r.kind = NameKind::type;
@@ -1447,7 +2407,47 @@ private:
     }
 
     void use_item(Item* it) {
-        if (fn_ != it && current_item_ != it) it->used = true;
+        if (it->origin) it = it->origin;  // using an instance uses its generic item
+        if (fn_ != it && current_item_ != it && !(fn_ && fn_->origin == it)) it->used = true;
+    }
+
+    Type* const_ref(Expr* e, Item* c) {
+        check_const(c);
+        e->ref = Ref::const_;
+        e->item = c;
+        e->is_const = true;
+        if (c->value && c->value->has_bits) {
+            e->has_bits = true;
+            e->const_bits = c->value->const_bits;
+            e->is_nan_const = c->value->is_nan_const;
+        }
+        return c->declared;
+    }
+
+    // A type name with generic arguments, `Pair<i32, str>`, as an expression's start.
+    Type* type_of_name(Expr* n, Type* t) {
+        if (n->type_args.empty()) return t;
+        if (!is_identity(t)) {
+            error(n->type_args[0]->span, name_of(t) + " doesn't take generic arguments");
+            return T.error;
+        }
+        return generic_type(t->generic, n->type_args, n->span);
+    }
+
+    // After inference: the instance of `g` that `s` gives, or an error if a parameter is unknown.
+    Type* inferred_instance(Item* g, const Subst& s, Span span, const std::string& example) {
+        std::vector<Type*> args;
+        for (Type* p : g->type_params) {
+            auto it = s.find(p);
+            if (it == s.end()) {
+                error(span, "can't tell what " + q(p->name) + " is in this " + q(text(g->name)) + "; give its types, as in " +
+                                q(example) + ", or give the variable a type");
+                return T.error;
+            }
+            args.push_back(it->second);
+        }
+        if (!check_bounds(g->type_params, args, span, q(text(g->name)))) return T.error;
+        return instance_type(g, args);
     }
 
     Type* name_value(Expr* e) {
@@ -1457,6 +2457,10 @@ private:
             return T.error;
         }
         Resolved r = resolve_name(n);
+        if (!e->type_args.empty() && r.kind != NameKind::type) {
+            error(e->type_args[0]->span, q(text(n)) + " doesn't take generic arguments here");
+            return T.error;
+        }
         switch (r.kind) {
             case NameKind::local:
                 e->ref = Ref::local;
@@ -1465,17 +2469,10 @@ private:
                 return r.local->type;
             case NameKind::item:
                 use_item(r.item);
-                if (r.item->kind == ItemKind::const_) {
-                    check_const(r.item);
-                    e->ref = Ref::const_;
-                    e->item = r.item;
-                    e->is_const = true;
-                    if (r.item->value && r.item->value->has_bits) {
-                        e->has_bits = true;
-                        e->const_bits = r.item->value->const_bits;
-                        e->is_nan_const = r.item->value->is_nan_const;
-                    }
-                    return r.item->declared;
+                if (r.item->kind == ItemKind::const_) return const_ref(e, r.item);
+                if (r.item->kind == ItemKind::interface) {
+                    error(e->span, q(text(n)) + " is an interface, not a value");
+                    return T.error;
                 }
                 error(e->span, "function " + q(text(n)) + " can't be used as a value yet; call it");
                 return T.error;
@@ -1829,14 +2826,16 @@ private:
 
     // --- fields and indexes ----------------------------------------------------------------
 
-    Type* field(Expr* e) {
+    Type* field(Expr* e, Type* expected) {
         // `i32.MAX` and other names inside a type.
         if (e->lhs->kind == ExprKind::name) {
             Resolved r = resolve_name(e->lhs->path.parts[0]);
             if (r.kind == NameKind::type) {
+                Type* t = type_of_name(e->lhs, r.type);
+                if (is_bad(t)) return T.error;
                 e->lhs->ref = Ref::type;
-                e->lhs->named_type = r.type;
-                return associated(e, r.type);
+                e->lhs->named_type = t;
+                return associated(e, t, expected);
             }
         }
         Type* base = check(e->lhs, nullptr);
@@ -1869,8 +2868,7 @@ private:
                     return s->fields[i].resolved;
                 }
             }
-            auto mt = methods_.find(base);
-            if (mt != methods_.end() && mt->second.count(e->member)) {
+            if (lookup(base, e->member).fn) {
                 error(e->span, q(text(e->member)) + " is a method; call it: " + q(std::string(text(e->member)) + "()"));
                 return T.error;
             }
@@ -1881,8 +2879,21 @@ private:
         return T.error;
     }
 
-    Type* associated(Expr* e, Type* t) {
+    Type* associated(Expr* e, Type* t, Type* expected) {
         std::string_view m = text(e->member);
+        // A data-less variant of a generic enum, `Either.Nothing`, takes its types from where it's used.
+        if (t->kind == TypeKind::enum_ && is_identity(t)) {
+            std::uint32_t i = find_variant(t, e->member);
+            if (i != UINT32_MAX && t->item->variants[i].types.empty()) {
+                if (!expected || expected->generic != t->generic) {
+                    error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
+                                       q(std::string(text(t->generic->name)) + "<...>." + std::string(m)) +
+                                       ", or give the variable a type");
+                    return T.error;
+                }
+                t = expected;
+            }
+        }
         if (is_int(t) && (m == "MIN" || m == "MAX")) {
             IntRange r = source_range(t);
             if (t->is_usize && m == "MAX") {
@@ -1928,12 +2939,24 @@ private:
                 return t;
             }
         }
-        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
-            auto mt = methods_.find(t);
-            if (mt != methods_.end() && mt->second.count(e->member)) {
-                error(e->span, q(std::string(t->name) + "." + std::string(m)) + " is a function; call it");
-                return T.error;
+        Member mem = lookup(t, e->member);
+        if (mem.ambiguous) {
+            error(e->span, q(m) + " is in more than one interface " + name_of(t) + " implements");
+            return T.error;
+        }
+        if (mem.konst) {
+            if (t->kind == TypeKind::param) {
+                // Its value is known only once there's a type for `T`, but it's a constant in
+                // every instance, so it can be a field's default.
+                e->is_const = true;
+                return subst(mem.konst->declared, mem.s);
             }
+            use_item(mem.konst);
+            return const_ref(e, mem.konst);
+        }
+        if (mem.fn) {
+            error(e->span, q(std::string(t->name) + "." + std::string(m)) + " is a function; call it");
+            return T.error;
         }
         error(e->span, name_of(t) + (t->kind == TypeKind::enum_ ? " has no variant " : " has nothing named ") + q(m));
         return T.error;
@@ -2011,7 +3034,10 @@ private:
         }
         Type* rhs_want = expected;
         if (!rhs_want && is_untyped_literal(e->rhs)) {
-            rhs_want = (e->rhs->kind == ExprKind::none_lit || is_some_call(e->rhs)) ? lt : lt->elem;
+            // `none` or `some(...)` on the right chains to another optional, unless the value is
+            // itself an optional (from generic code), where flattening is the only use: `r ?? none`.
+            bool optional_literal = e->rhs->kind == ExprKind::none_lit || is_some_call(e->rhs);
+            rhs_want = optional_literal && lt->elem->kind != TypeKind::optional ? lt : lt->elem;
         }
         Type* rt = check(e->rhs, rhs_want);
         if (is_bad(rt)) return T.error;
@@ -2037,12 +3063,19 @@ private:
 
     // --- literals of structs and arrays ------------------------------------------------------
 
-    Type* struct_literal(Expr* e) {
+    Type* struct_literal(Expr* e, Type* expected) {
         if (e->type_path.parts.size() == 2) {
             Resolved r = resolve_name(e->type_path.parts[0]);
             if (r.kind == NameKind::type && r.type->kind == TypeKind::enum_) {
+                if (!e->type_args.empty()) {
+                    r.type = is_identity(r.type) ? generic_type(r.type->generic, e->type_args, e->type_path.span) : T.error;
+                    if (is_bad(r.type)) {
+                        for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
+                        return T.error;
+                    }
+                }
                 std::uint32_t i = find_variant(r.type, e->type_path.parts[1]);
-                if (i != UINT32_MAX && r.type->item->variants[i].has_fields) return record_literal(e, r.type, i);
+                if (i != UINT32_MAX && r.type->item->variants[i].has_fields) return record_literal(e, r.type, i, expected);
                 error(e->type_path.span, i == UINT32_MAX ? name_of(r.type) + " has no variant " + q(text(e->type_path.parts[1]))
                                                          : q(variant_text(r.type, i)) + " has no named fields");
                 for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
@@ -2068,8 +3101,21 @@ private:
             return T.error;
         }
         Type* t = r.type;
+        if (!e->type_args.empty()) {
+            t = is_identity(t) ? generic_type(t->generic, e->type_args, e->type_path.span) : T.error;
+            if (is_bad(t)) {
+                if (!is_identity(r.type)) error(e->type_args[0]->span, name_of(r.type) + " doesn't take generic arguments");
+                for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
+                return T.error;
+            }
+        }
         Item* s = t->item;
-        use_item(s);
+        use_item(s->origin ? s->origin : s);
+        // `Pair { a: 1, b: "x" }`: the types come from the fields, or from where the value goes.
+        bool infer = is_identity(t);
+        Subst sub;
+        Slice<Type*> vars = infer ? s->type_params : Slice<Type*>{};
+        if (infer && expected && expected->generic == s) unify(t, expected, sub, vars);
         std::vector<Expr*> values(s->fields.size(), nullptr);
         std::vector<bool> given(s->fields.size(), false);
         std::vector<Expr*> order;  // the values in the order they're written, which is the order they run
@@ -2090,8 +3136,8 @@ private:
                 f.value = v;
             }
             if (index == UINT32_MAX) {
-                error(f.span, name_of(t) + " has no field " + q(text(f.name)));
-                check(v, nullptr);
+                error(f.span, q(is_identity(t) ? text(s->name) : t->name) + " has no field " + q(text(f.name)));
+                if (v->kind != ExprKind::none_lit) check(v, nullptr);  // `none` alone would be a second error
                 continue;
             }
             if (given[index]) {
@@ -2099,21 +3145,43 @@ private:
                 continue;
             }
             given[index] = true;
-            check(v, s->fields[index].resolved);
+            check_inferred(v, s->fields[index].resolved, sub, vars);
             values[index] = v;
         }
+        bool missing = false;
         for (std::uint32_t i = 0; i < s->fields.size(); i++) {
             if (!given[i] && !s->fields[i].default_value) {
-                error(e->span, "missing field " + q(text(s->fields[i].name)) + " in " + name_of(t));
+                error(e->span, "missing field " + q(text(s->fields[i].name)) + " in " + q(text(s->name)));
+                missing = true;
             }
         }
         e->elems = ctx_.arena.copy(values);
+        if (infer && missing) return T.error;
+        if (infer) return inferred_instance(s, sub, e->type_path.span, std::string(text(s->name)) + "<...> { ... }");
         return t;
     }
 
+    // Checks `v` against `want`, which can mention the parameters in `vars` that are being worked
+    // out. A parameter `s` already gives becomes the expected type; one it doesn't is learned from `v`.
+    Type* check_inferred(Expr* v, Type* want, Subst& s, const Slice<Type*>& vars) {
+        if (vars.empty() || !mentions_any(want, vars)) return check(v, want);
+        Type* w = subst(want, s);
+        if (!unresolved(w, vars, s)) return check(v, w);
+        Type* got = check(v, nullptr);
+        if (!is_bad(got) && !unify(want, got, s, vars)) {
+            mismatch(v, subst(want, s), got);
+            return T.error;
+        }
+        return got;
+    }
+
     // `Shape.Rect { w: 1.0, h: 2.0 }`: like a struct literal, against the variant's fields.
-    Type* record_literal(Expr* e, Type* t, std::uint32_t vi) {
-        use_item(t->item);
+    Type* record_literal(Expr* e, Type* t, std::uint32_t vi, Type* expected) {
+        use_item(t->item->origin ? t->item->origin : t->item);
+        bool infer = is_identity(t);
+        Subst sub;
+        Slice<Type*> vars = infer ? t->item->type_params : Slice<Type*>{};
+        if (infer && expected && expected->generic == t->generic) unify(t, expected, sub, vars);
         const VariantDecl& v = t->item->variants[vi];
         e->ref = Ref::variant;
         e->field_index = vi;
@@ -2141,13 +3209,22 @@ private:
                 error(f.span, "field " + q(text(f.name)) + " is given twice");
                 continue;
             }
-            check(f.value, v.fields[index].resolved);
+            check_inferred(f.value, v.fields[index].resolved, sub, vars);
             values[index] = f.value;
         }
+        bool missing = false;
         for (std::uint32_t i = 0; i < v.fields.size(); i++) {
-            if (!values[i]) error(e->span, "missing field " + q(text(v.fields[i].name)) + " in " + q(variant_text(t, vi)));
+            if (!values[i]) {
+                error(e->span, "missing field " + q(text(v.fields[i].name)) + " in " + q(variant_text(t, vi)));
+                missing = true;
+            }
         }
         e->elems = ctx_.arena.copy(values);
+        if (infer && missing) return T.error;
+        if (infer) {
+            return inferred_instance(t->generic, sub, e->type_path.span,
+                                     std::string(text(t->generic->name)) + "<...>." + std::string(text(v.name)) + " { ... }");
+        }
         return t;
     }
 
@@ -3026,18 +4103,28 @@ private:
                         return T.error;
                     }
                     use_item(r.item);
-                    return fn_call(e, r.item, nullptr);
-                case NameKind::type:
-                    callee->ref = Ref::type;
-                    callee->named_type = r.type;
-                    if (r.type->kind == TypeKind::struct_) return construct(e, r.type);
-                    if (r.type->kind == TypeKind::enum_) {
-                        error(callee->span, "build " + a_type(r.type) + " from one of its variants, such as " +
-                                                q(variant_text(r.type, 0)));
+                    return fn_call(e, r.item, nullptr, expected, Subst{}, callee->type_args);
+                case NameKind::type: {
+                    Type* t = type_of_name(callee, r.type);
+                    if (is_bad(t)) {
                         for (Arg& a : e->args) check(a.value, nullptr);
                         return T.error;
                     }
-                    return conversion(e, r.type, Conv::exact);
+                    callee->ref = Ref::type;
+                    callee->named_type = t;
+                    if (t->kind == TypeKind::struct_) return construct(e, t, expected);
+                    if (t->kind == TypeKind::enum_) {
+                        error(callee->span, "build " + a_type(t) + " from one of its variants, such as " + q(variant_text(t, 0)));
+                        for (Arg& a : e->args) check(a.value, nullptr);
+                        return T.error;
+                    }
+                    if (t->kind == TypeKind::param) {
+                        error(callee->span, q(t->name) + " is a generic parameter, so there's nothing to build or convert to");
+                        for (Arg& a : e->args) check(a.value, nullptr);
+                        return T.error;
+                    }
+                    return conversion(e, t, Conv::exact);
+                }
                 case NameKind::local:
                     r.local->used = true;
                     error(callee->span, q(text(n)) + " is " + a_type(r.local->type) + ", not a function");
@@ -3054,14 +4141,24 @@ private:
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
+        if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
+            !e->only_interface) {
+            Resolved r = resolve_name(callee->lhs->path.parts[0]);
+            if (r.kind == NameKind::item && r.item->kind == ItemKind::interface) return interface_call(e, r.item);
+        }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index) {
             // `T.something(...)`: a conversion or a static function.
-            if (callee->lhs->kind == ExprKind::name) {
+            if (callee->lhs->kind == ExprKind::name && !e->only_interface) {
                 Resolved r = resolve_name(callee->lhs->path.parts[0]);
                 if (r.kind == NameKind::type) {
+                    Type* t = type_of_name(callee->lhs, r.type);
+                    if (is_bad(t)) {
+                        for (Arg& a : e->args) check(a.value, nullptr);
+                        return T.error;
+                    }
                     callee->lhs->ref = Ref::type;
-                    callee->lhs->named_type = r.type;
-                    return static_call(e, r.type);
+                    callee->lhs->named_type = t;
+                    return static_call(e, t, expected);
                 }
             }
             Type* recv = check(callee->lhs, nullptr);
@@ -3069,13 +4166,37 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
-            if (recv->kind == TypeKind::struct_ || recv->kind == TypeKind::enum_) {
-                auto mt = methods_.find(recv);
-                Item* m = nullptr;
-                if (mt != methods_.end()) {
-                    auto it = mt->second.find(callee->member);
-                    if (it != mt->second.end()) m = it->second;
+            Member mem = lookup(recv, callee->member, e->only_interface);
+            if (mem.ambiguous) {
+                error(callee->span, q(text(callee->member)) + " is in more than one interface " + name_of(recv) +
+                                        " implements; say which, as in " + q(ambiguity_example(recv, callee->member)));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+            if (!mem.fn && e->only_interface) {
+                error(callee->lhs->span, name_of(recv) + " doesn't implement " + q(text(e->only_interface->name)));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+            if (mem.fn) {
+                if (!mem.fn->is_method) {
+                    error(callee->span, q(text(mem.fn->name)) + " isn't a method; call it as " +
+                                            q(std::string(recv->name) + "." + std::string(text(mem.fn->name)) + "(...)"));
+                    for (Arg& a : e->args) check(a.value, nullptr);
+                    return T.error;
                 }
+                use_item(mem.fn);
+                return fn_call(e, mem.fn, callee->lhs, expected, std::move(mem.s));
+            }
+            if (recv->kind == TypeKind::param) {
+                error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)) +
+                                        (recv->bounds.empty() ? "; give it a bound that has one, such as " + q("<" + std::string(recv->name) + ": Shape>")
+                                                              : std::string("")));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+            if (recv->kind == TypeKind::struct_ || recv->kind == TypeKind::enum_) {
+                Item* m = nullptr;
                 if (!m) {
                     if (recv->kind == TypeKind::enum_) {
                         error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)));
@@ -3090,13 +4211,6 @@ private:
                     error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)));
                     return T.error;
                 }
-                if (!m->is_method) {
-                    error(callee->span, q(text(m->name)) + " isn't a method; call it as " +
-                                            q(std::string(recv->name) + "." + std::string(text(m->name)) + "(...)"));
-                    return T.error;
-                }
-                use_item(m);
-                return fn_call(e, m, callee->lhs);
             }
             return prim_method(e, recv);
         }
@@ -3105,7 +4219,56 @@ private:
         return T.error;
     }
 
-    Type* static_call(Expr* e, Type* t) {
+    // `Shape.area(x)`: the method `area` of `Shape`, on `x`, for when two interfaces have the
+    // name. It's rewritten as `x.area()` that looks only in `Shape`.
+    Type* interface_call(Expr* e, Item* iface) {
+        Expr* callee = e->callee;
+        use_item(iface);
+        Item* member = interface_member(iface, callee->member);
+        if (!member || member->kind != ItemKind::fn) {
+            error(callee->span, q(text(iface->name)) + " has no function " + q(text(callee->member)));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (!member->is_method) {
+            error(callee->span, "call " + q(text(member->name)) + " on a type that implements " + q(text(iface->name)) +
+                                    ", as in " + q("T." + std::string(text(member->name)) + "(...)"));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (e->args.empty() || e->args[0].name) {
+            error(e->span, q(std::string(text(iface->name)) + "." + std::string(text(member->name))) +
+                               " takes the value to call it on first");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Expr* recv = e->args[0].value;
+        Expr* f = ctx_.arena.make<Expr>(*callee);
+        f->lhs = recv;
+        f->span = callee->span;
+        std::vector<Arg> rest(e->args.begin() + 1, e->args.end());
+        e->callee = f;
+        e->args = ctx_.arena.copy(rest);
+        e->only_interface = iface;
+        return call(e, nullptr);
+    }
+
+    std::string ambiguity_example(Type* t, Name member) {
+        for (Item* b : t->bounds) {
+            if (interface_member(b, member)) return std::string(text(b->name)) + "." + std::string(text(member)) + "(x)";
+        }
+        auto found = impls_by_head_.find(head(t));
+        if (found != impls_by_head_.end()) {
+            for (ImplInfo* info : found->second) {
+                if (info->iface && interface_member(info->iface, member)) {
+                    return std::string(text(info->iface->name)) + "." + std::string(text(member)) + "(x)";
+                }
+            }
+        }
+        return "Interface." + std::string(text(member)) + "(x)";
+    }
+
+    Type* static_call(Expr* e, Type* t, Type* expected) {
         std::string_view m = text(e->callee->member);
         if (is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune) {
             if (m == "wrap") return conversion(e, t, Conv::wrap);
@@ -3115,32 +4278,33 @@ private:
         }
         if (t->kind == TypeKind::enum_) {
             std::uint32_t i = find_variant(t, e->callee->member);
-            if (i != UINT32_MAX) return variant_call(e, t, i);
+            if (i != UINT32_MAX) return variant_call(e, t, i, expected);
             if (m == "try_from") return try_from(e, t);
         }
-        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
-            auto mt = methods_.find(t);
-            if (mt != methods_.end()) {
-                auto it = mt->second.find(e->callee->member);
-                if (it != mt->second.end()) {
-                    Item* f = it->second;
-                    if (f->is_method) {
-                        error(e->callee->span, q(text(f->name)) + " is a method; call it on a value: " +
-                                                   q("x." + std::string(m) + "(...)"));
-                        return T.error;
-                    }
-                    use_item(f);
-                    return fn_call(e, f, nullptr);
-                }
+        Member mem = lookup(t, e->callee->member);
+        if (mem.ambiguous) {
+            error(e->callee->span, q(m) + " is in more than one " + (is_identity(t) ? "impl of " : "interface ") + name_of(t) +
+                                       (is_identity(t) ? "; give its types, as in " + q(std::string(text(t->generic->name)) + "<...>." + std::string(m) + "(...)")
+                                                       : std::string(" implements")));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (mem.fn) {
+            if (mem.fn->is_method) {
+                error(e->callee->span, q(text(mem.fn->name)) + " is a method; call it on a value: " + q("x." + std::string(m) + "(...)"));
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
             }
+            use_item(mem.fn);
+            return fn_call(e, mem.fn, nullptr, expected, std::move(mem.s));
         }
         error(e->callee->span, name_of(t) + " has no function " + q(m));
         for (Arg& a : e->args) check(a.value, nullptr);
         return T.error;
     }
 
-    Type* variant_call(Expr* e, Type* t, std::uint32_t i) {
-        use_item(t->item);
+    Type* variant_call(Expr* e, Type* t, std::uint32_t i, Type* expected) {
+        use_item(t->item->origin ? t->item->origin : t->item);
         const VariantDecl& v = t->item->variants[i];
         e->call = CallKind::variant;
         e->field_index = i;
@@ -3161,14 +4325,23 @@ private:
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
+        // `Either.Left(1)`: a generic enum's types come from the values, or from where it goes.
+        bool infer = is_identity(t);
+        Subst sub;
+        Slice<Type*> vars = infer ? t->item->type_params : Slice<Type*>{};
+        if (infer && expected && expected->generic == t->generic) unify(t, expected, sub, vars);
         std::vector<Expr*> ordered;
         for (std::size_t k = 0; k < e->args.size(); k++) {
             Arg& a = e->args[k];
             if (a.name || a.is_mut) error(a.span, "a variant's values can't be named or `mut`");
-            check(a.value, v.types[k]);
+            check_inferred(a.value, v.types[k], sub, vars);
             ordered.push_back(a.value);
         }
         e->ordered_args = ctx_.arena.copy(ordered);
+        if (infer) {
+            return inferred_instance(t->generic, sub, e->callee->span,
+                                     std::string(text(t->generic->name)) + "<...>." + std::string(text(v.name)) + "(...)");
+        }
         return t;
     }
 
@@ -3207,10 +4380,38 @@ private:
 
     // Checks a call's arguments against `f`'s parameters, matching names, and records them in
     // parameter order. `receiver` is the value a method is called on.
-    Type* fn_call(Expr* e, Item* f, Expr* receiver) {
+    Type* fn_call(Expr* e, Item* f, Expr* receiver, Type* expected = nullptr, Subst s = {},
+                  Slice<TypeExpr*> type_args = {}) {
         check_signature(f);
         e->call = receiver ? CallKind::method : CallKind::fn;
         e->item = f;
+        // A generic function's types come from `f<...>`, then the receiver, the arguments in the
+        // order they're written, and where the result goes.
+        const Slice<Type*>& vars = f->type_params;
+        bool generic = !vars.empty();
+        if (!type_args.empty()) {
+            std::size_t own = f->generics.size();
+            if (!own) {
+                error(type_args[0]->span, q(text(f->name)) + " isn't generic");
+            } else if (type_args.size() != own) {
+                error(type_args[0]->span, q(text(f->name)) + " takes " + std::to_string(own) + (own == 1 ? " type" : " types") +
+                                              ", but " + std::to_string(type_args.size()) +
+                                              (type_args.size() == 1 ? " was given" : " were given"));
+            } else {
+                for (std::size_t k = 0; k < own; k++) {
+                    Type* a = resolve_type(type_args[k]);
+                    if (is_bad(a)) return T.error;
+                    s[vars[vars.size() - own + k]] = a;
+                }
+            }
+        }
+        if (generic && receiver && !f->params.empty() && f->params[0].local) {
+            unify(f->params[0].local->type, receiver->type, s, vars);
+        }
+        if (generic && expected && !is_bad(expected) && f->result_type && mentions_any(f->result_type, vars)) {
+            Subst trial = s;
+            if (unify(f->result_type, expected, trial, vars)) s = std::move(trial);
+        }
         std::size_t first = receiver ? 1 : 0;
         std::size_t n = f->params.size();
         std::vector<Expr*> ordered(n, nullptr);
@@ -3228,6 +4429,8 @@ private:
         bool named_seen = false;
         std::size_t next = first;
         bool ok = true;
+        bool bad_arg = false;
+        std::vector<std::pair<Expr*, Type*>> later;
         for (Arg& a : e->args) {
             std::size_t index;
             if (a.name) {
@@ -3266,7 +4469,14 @@ private:
             }
             const Param& p = f->params[index];
             Type* want = p.local ? p.local->type : T.error;
-            check(a.value, want);
+            // An untyped literal, such as `1` or `none`, waits until the other arguments have said
+            // what the parameters are, so `pick(c, 1, 2i64)` picks between `i64`s.
+            if (generic && is_untyped_literal(a.value) && unresolved(subst(want, s), vars, s)) {
+                later.push_back({a.value, want});
+            } else {
+                Type* got = generic ? check_inferred(a.value, want, s, vars) : check(a.value, want);
+                if (is_bad(got)) bad_arg = true;
+            }
             if (p.mode == ParamMode::mut) {
                 if (!a.is_mut) {
                     error(a.value->span, q(text(f->name)) + " can change " + q(text(p.name)) + ", so pass it as " +
@@ -3281,6 +4491,11 @@ private:
                 error(a.span, q(text(f->name)) + " doesn't change " + q(text(p.name)) + "; remove `mut`");
             }
             ordered[index] = a.value;
+        }
+        for (auto& [v, want] : later) {
+            // A second `none` that still can't tell its type would only repeat the first's error.
+            if (bad_arg && v->kind == ExprKind::none_lit && unresolved(subst(want, s), vars, s)) continue;
+            if (is_bad(check_inferred(v, want, s, vars))) bad_arg = true;
         }
         for (std::size_t i = first; i < n && ok; i++) {
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
@@ -3300,7 +4515,33 @@ private:
             }
         }
         e->ordered_args = ctx_.arena.copy(ordered);
-        return f->result_type ? f->result_type : T.error;
+        Type* result = f->result_type ? f->result_type : T.error;
+        if (!generic) return result;
+        std::vector<Type*> args;
+        for (Type* p : vars) {
+            auto it = s.find(p);
+            if (it == s.end()) {
+                if (ok && !bad_arg) {
+                    error(e->callee->span, "can't tell what " + q(p->name) + " is in this call to " + q(text(f->name)) +
+                                               (f->generics.empty() ? std::string("")
+                                                                    : "; give it, as in " + q(std::string(text(f->name)) + "<...>(...)")));
+                }
+                return T.error;
+            }
+            args.push_back(it->second);
+        }
+        if (!ok) return T.error;
+        if (!check_bounds(vars, args, e->span, q(text(f->name)))) return T.error;
+        result = subst(result, s);
+        bool open = false;
+        for (Type* a : args) open = open || a->open;
+        // Inside a generic definition the call is only checked; its instance comes with the caller's.
+        if (!open) {
+            Item* inst = instance_fn(f, args, e->span);
+            if (!inst) return T.error;
+            e->item = inst;
+        }
+        return result;
     }
 
     // Whether the expression reads or writes the local anywhere.
@@ -3317,9 +4558,18 @@ private:
         return false;
     }
 
-    Type* construct(Expr* e, Type* t) {
+    Type* construct(Expr* e, Type* t, Type* expected) {
+        if (is_identity(t)) {
+            if (!expected || expected->generic != t->generic) {
+                error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
+                                   q(std::string(text(t->generic->name)) + "<...>()") + ", or give the variable a type");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+            t = expected;
+        }
         Item* s = t->item;
-        use_item(s);
+        use_item(s->origin ? s->origin : s);
         e->call = CallKind::construct;
         if (!e->args.empty()) {
             error(e->span, "build " + a_type(t) + " with " + q(std::string(t->name) + " { field: value }") +
@@ -3549,6 +4799,9 @@ private:
     // value, and rejects a struct or enum that holds itself.
     void order_types() {
         std::unordered_map<Type*, int> state;  // 1 visiting, 2 done
+        std::unordered_set<const Item*> reported;
+        // Generic declarations are walked too, to find a type that holds itself, but only closed
+        // types are emitted.
         auto visit = [&](auto& self, Type* t) -> void {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
@@ -3559,7 +4812,10 @@ private:
             if (st == 2) return;
             if (st == 1) {
                 if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
-                    error(t->item->name_span, name_of(t) + " holds itself, so it would have no end");
+                    const Item* owner = t->generic ? t->generic : t->item;
+                    if (reported.insert(owner).second) {
+                        error(owner->name_span, q(text(owner->name)) + " holds itself, so it would have no end");
+                    }
                 }
                 return;
             }
@@ -3578,18 +4834,26 @@ private:
                 }
             }
             state[t] = 2;
-            prog_.type_order.push_back(t);
+            if (!t->open) prog_.type_order.push_back(t);
         };
         for (Item* s : structs_) visit(visit, s->declared);
         for (Item* e : enums_) visit(visit, e->declared);
+        for (std::size_t i = 0; i < instances_.size(); i++) visit(visit, instances_[i]);
         for (Type* a : T.compounds()) visit(visit, a);
     }
 
     void check_unused_items() {
+        for (const auto& info : impl_infos_) {
+            if (!info->iface || info->used || info->iface->is_pub) continue;
+            const Item* owner = info->self->generic ? info->self->generic : info->self->item;
+            if (owner && owner->is_pub) continue;
+            error(info->impl->self_type->span, "this impl of " + q(text(info->iface->name)) + " for " + name_of(info->self) +
+                                                   " is never used");
+        }
         for (Item* it : module_->items) {
             if (it->kind == ItemKind::impl) {
                 for (Item* m : it->members) {
-                    if (m->kind == ItemKind::fn && !m->is_pub && !m->used && m->impl_type) {
+                    if (m->kind == ItemKind::fn && !m->is_pub && !m->used && m->impl_type && !m->interface_item) {
                         error(m->name_span, "function " + q(text(m->name)) + " is never used");
                     }
                 }
@@ -3597,7 +4861,7 @@ private:
             }
             if (it->is_pub || it->used) continue;
             if (it->kind == ItemKind::fn && text(it->name) == "main") continue;
-            if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_) {
+            if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_ || it->kind == ItemKind::interface) {
                 if (it->kind == ItemKind::fn && !it->body) continue;
                 error(it->name_span, std::string(item_kind(it)) + " " + q(text(it->name)) + " is never used");
             }
@@ -3611,6 +4875,10 @@ private:
             return;
         }
         Item* f = it->second;
+        if (!f->type_params.empty()) {
+            error(f->name_span, "`main` can't be generic");
+            return;
+        }
         if (!f->params.empty() || (f->result_type && f->result_type->kind != TypeKind::unit)) {
             error(f->name_span, "`main` takes no parameters and returns nothing");
         }
@@ -3625,7 +4893,6 @@ private:
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<Name, Item*> items_;
     std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_;
-    std::unordered_map<Type*, std::unordered_map<Name, Item*>> methods_;
     std::unordered_map<Item*, bool> checking_consts_;
     Item* current_item_ = nullptr;
     Type* current_impl_type_ = nullptr;
@@ -3636,6 +4903,28 @@ private:
     std::uint32_t next_loop_ = 1;
     bool pattern_var_ = false;  // the names a pattern binds are `var`s
     std::vector<std::unique_ptr<DPat>> pool_;
+    // Generics.
+    std::vector<Item*> interfaces_;
+    std::vector<std::unique_ptr<ImplInfo>> impl_infos_;
+    std::unordered_map<const void*, std::vector<ImplInfo*>> impls_by_head_;
+    std::vector<std::pair<Type*, GenericParam*>> param_decls_;
+    std::unordered_map<Type*, Name> param_names_;
+    std::unordered_map<Type*, Span> param_spans_;
+    std::unordered_map<Type*, Item*> param_owner_;
+    std::unordered_map<Type*, bool> param_used_;
+    std::vector<std::pair<Name, Type*>> env_;
+    std::map<std::pair<Item*, std::vector<Type*>>, Type*> type_instances_;
+    std::map<std::pair<Item*, std::vector<Type*>>, Item*> fn_instances_;
+    std::vector<Type*> instances_;
+    std::unordered_map<Item*, std::vector<Type*>> unfilled_;
+    std::vector<Item*> pending_fns_;
+    std::vector<DeferredBounds> deferred_bounds_;
+    std::unordered_set<std::string> c_names_;
+    std::unordered_set<Item*> failed_generics_;
+    std::vector<Type*> pending_defaults_;  // instances made before the generic structs' defaults were checked
+    bool defaults_ready_ = false;
+    bool defer_bounds_ = false;
+    bool instance_mode_ = false;
 };
 
 }  // namespace

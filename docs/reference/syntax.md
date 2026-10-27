@@ -113,3 +113,7 @@ From loosest to tightest:
 | `.field` `.method()` `f()` `a[i]` `!` `?.field` `.0` | Postfix. `!` and `?.` are for [optionals](optionals.md), `.0` for [tuples](tuples.md) |
 
 `a op= b` is `a = a op b` for every arithmetic, bitwise and shift operator.
+
+## Generic types in expressions
+
+In an expression, `<` right after a name, with no space, starts the name's [generic types](generics.md): `choose<i64>(1, 2)`, `Pair<i32, str>.of(1, "a")`. With a space before it, `<` is less-than, so `a < b` is always a comparison. In a type, such as `let p: Pair<i32, str>`, spaces don't matter.

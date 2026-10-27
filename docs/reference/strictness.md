@@ -27,6 +27,8 @@ Each rule is on the page of the feature it's about:
 | A `match` covers every value, and every arm can match | [Patterns](patterns.md#every-case-every-arm-d63) |
 | A capitalized name in a pattern is a variant or constant, never a binding. A record pattern names every field or ends in `..` | [Patterns](patterns.md#names-in-patterns) |
 | `let` without `else` needs a pattern that always matches, and `let ... else` and `if let` one that might not | [Patterns](patterns.md#let--else) |
+| Generic code is checked where it's written and uses only what its bounds give. A call whose types can't be worked out is an error, never a guess. Unused generic parameters are errors | [Generics](generics.md#errors) |
+| An impl matches its interface exactly, parameter names included, and has nothing else. Unused impls are errors. A name two interfaces share needs `Iface.method(x)` | [Interfaces](interfaces.md#implementing-one) |
 
 ## Nothing is dropped silently
 

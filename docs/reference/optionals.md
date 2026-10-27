@@ -32,7 +32,7 @@ fn main() {
 
 - `some(x)` holds `x`. `none` holds nothing, and takes its type from where it's used: `let n: i32? = none`.
 - A `T` never turns into a `T?` by itself, so `return n` in a function returning `i32?` doesn't compile. Write `return some(n)` (D63).
-- An optional can't hold another optional, or `()`.
+- An optional can't hold another optional, or `()`. Generic code is the exception: a `T?` whose `T` is an optional holds one ([generics](generics.md#optionals-inside-optionals)).
 
 ```calx
 fn half(n: i32) -> i32? {

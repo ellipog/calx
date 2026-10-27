@@ -30,8 +30,10 @@ What's built, one page per feature:
 13. [Tuples](reference/tuples.md): values grouped by position, and destructuring
 14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
 15. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
-16. [Printing and panics](reference/printing.md): print, println, assert and panic
-17. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+16. [Generics](reference/generics.md): generic functions and types, inference, bounds, and their C
+17. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+18. [Printing and panics](reference/printing.md): print, println, assert and panic
+19. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Design
 

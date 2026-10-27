@@ -1,0 +1,164 @@
+// Interfaces: methods, static functions, constants, defaults, `Self`, bounds on functions and
+// types, impls for primitives and for generic types, and `Iface.method(x)`.
+interface Shape {
+    fn area(self) -> f64
+    fn bigger(self, other: Self) -> bool
+    fn unit() -> Self
+    fn name() -> str
+    const sides: i32
+
+    fn weight(self) -> f64 {
+        return self.area() * f64(Self.sides)
+    }
+}
+
+struct Square {
+    side: f64
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+    fn bigger(self, other: Square) -> bool {
+        return self.side > other.side
+    }
+    fn unit() -> Square {
+        return Square { side: 1.0 }
+    }
+    fn name() -> str {
+        return "square"
+    }
+    const sides = 4
+}
+
+enum Dir { North, South }
+
+impl Shape for Dir {
+    fn area(self) -> f64 {
+        return match self {
+            North => 1.0,
+            South => 2.0,
+        }
+    }
+    fn bigger(self, other: Dir) -> bool {
+        return self.area() > other.area()
+    }
+    fn unit() -> Dir {
+        return Dir.North
+    }
+    fn name() -> str {
+        return "dir"
+    }
+    const sides: i32 = 0
+
+    // An impl can replace a default.
+    fn weight(self) -> f64 {
+        return -1.0
+    }
+}
+
+fn total<T: Shape>(a: T, b: T) -> f64 {
+    return a.area() + b.area() + f64(T.sides)
+}
+
+fn label<T: Shape>(x: T) -> str {
+    _ = x
+    return T.name()
+}
+
+struct Holder<T: Shape> {
+    items: [T; 2]
+    corners: i32 = T.sides
+}
+
+impl<T: Shape> Holder<T> {
+    fn biggest(self) -> T {
+        var b = T.unit()
+        for x in self.items {
+            if x.bigger(b) {
+                b = x
+            }
+        }
+        return b
+    }
+}
+
+interface Code {
+    fn code(self) -> i64
+}
+
+impl Code for i32 {
+    fn code(self) -> i64 {
+        return i64(self) * 10
+    }
+}
+
+impl Code for bool {
+    fn code(self) -> i64 {
+        return if self { 1 } else { 0 }
+    }
+}
+
+struct Wrapper<T> {
+    inner: T
+    extra: i64 = 0
+}
+
+// `Wrapper<T>` has a code when `T` has one.
+impl<T: Code> Code for Wrapper<T> {
+    fn code(self) -> i64 {
+        return self.inner.code() + self.extra
+    }
+}
+
+fn sum<T: Code>(a: T, b: T) -> i64 {
+    return a.code() + b.code()
+}
+
+interface Up {
+    fn go(self) -> i32
+}
+
+interface Down {
+    fn go(self) -> i32
+}
+
+struct Lift {
+    floor: i32
+}
+
+impl Up for Lift {
+    fn go(self) -> i32 {
+        return self.floor + 1
+    }
+}
+
+impl Down for Lift {
+    fn go(self) -> i32 {
+        return self.floor - 1
+    }
+}
+
+fn travel<T: Up + Down>(t: T) -> i32 {
+    return Up.go(t) * 100 + Down.go(t)
+}
+
+fn main() {
+    let sq = Square { side: 2.0 }
+    println("{total(sq, Square { side: 1.0 })} {total(Dir.North, Dir.South)}")  // out: 9.0 3.0
+    println("{label(sq)} {label(Dir.South)} {sq.weight()} {Dir.North.weight()}") // out: square dir 16.0 -1.0
+    println("{Square.sides} {Dir.sides} {Square.unit().side}")                 // out: 4 0 1.0
+    let h = Holder { items: [Square { side: 2.0 }, Square { side: 3.0 }] }
+    let d = Holder { items: [Dir.South, Dir.North] }
+    println("{h.biggest().side} {d.biggest()}")                                // out: 3.0 South
+    println("{h.corners} {d.corners}")                                         // out: 4 0
+
+    println("{sum(3, 4)} {sum(true, false)} {7.code()}")                        // out: 70 1 70
+    let w = Wrapper { inner: 5, extra: 2 }
+    let ww = Wrapper { inner: w }
+    println("{w.code()} {ww.code()} {sum(w, Wrapper { inner: 1 })}")           // out: 52 52 62
+
+    let l = Lift { floor: 5 }
+    println("{Up.go(l)} {Down.go(l)} {travel(l)}")                              // out: 6 4 604
+}

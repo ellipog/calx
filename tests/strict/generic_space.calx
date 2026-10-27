@@ -1,0 +1,8 @@
+// In an expression, `<` right after a name starts its generic types; with a space it's less-than (D71).
+fn pick<T>(c: bool, x: T, y: T) -> T {
+    return if c { x } else { y }
+}
+
+fn main() {
+    println("{pick <i64>(true, 7, 8)}")         // error: write `pick<...>` with no space before `<`
+}

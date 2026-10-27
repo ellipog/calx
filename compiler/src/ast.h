@@ -158,6 +158,7 @@ struct Expr {
     Slice<Expr*> interpolations;  // string_lit: the parsed `{expr}` parts, in order
     // Names and fields.
     Path path;          // name
+    Slice<TypeExpr*> type_args;  // name, struct_lit: generic arguments, `f<i32>(x)`, `Pair<i32, str> { ... }`
     Name member;        // field, optional_field: the field name (empty for a tuple index)
     std::uint32_t tuple_index = 0;
     bool is_tuple_index = false;
@@ -205,6 +206,9 @@ struct Expr {
     bool is_nan_const = false;   // `f64.NAN`, which comparing with is an error
     std::uint32_t loop_id = 0;   // loop, match: its labels in C
     bool let_unwraps = false;    // if_: `if let p = opt` matches `p` against the optional's value
+    // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
+    // that interface. A copy for an instance keeps the rewrite.
+    Item* only_interface = nullptr;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -399,6 +403,15 @@ struct Item {
     bool used = false;            // referred to from somewhere other than itself
     bool checked_signature = false;
     std::string_view c_name;
+    // Generics.
+    Slice<Type*> type_params;     // what it's generic over: an impl's parameters, then its own; an interface member's `Self` first
+    Item* origin = nullptr;       // an instance: the generic item it was made from
+    Slice<Type*> type_args;       // an instance: what each of `type_params` stands for
+    Item* interface_item = nullptr;  // impl of an interface, and a member of either: the interface
+    Span instance_site;           // an instance: where it was first needed, for notes on its errors
+    std::uint32_t instance_depth = 0;
+    bool resolved = false;        // struct, enum: its fields have types
+    bool resolving = false;
 };
 
 struct Module {

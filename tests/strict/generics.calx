@@ -1,0 +1,106 @@
+// Generic code is checked where it's written, against its bounds only, and each use gives or
+// shows its types (D70, D71).
+pub struct Pair<A, B> {
+    a: A
+    b: B
+}
+
+pub enum Either<L, R> {
+    Left(L)
+    Right(R)
+    Neither
+}
+
+pub struct Bad<T> {
+    x: T = 0                                    // error: expected `T`, found `i32`
+}
+
+pub struct Node<T> {                            // error: `Node` holds itself, so it would have no end
+    v: T
+    next: Node<T>?
+}
+
+pub struct Square {
+    side: f64
+}
+
+impl<T> Square {                                // error: generic parameter `T` must appear in the impl's type, `Square`
+    pub fn get(self) -> f64 {
+        return self.side
+    }
+}
+
+pub fn pick<T>(c: bool, x: T, y: T) -> T {
+    return if c { x } else { y }
+}
+
+pub fn empty<T>() -> T? {
+    return none
+}
+
+pub fn plain<T>(x: T) -> f64 {
+    return x.area()                             // error: `T` has no method `area`; give it a bound that has one
+}
+
+pub fn unused<T>() -> i32 {                     // error: generic parameter `T` is never used
+    return 1
+}
+
+pub fn same<T>(a: T, b: T) -> bool {
+    return a == b                               // error: values of type `T` can't be compared with `==` yet
+}
+
+pub fn add<T>(a: T, b: T) -> T {
+    return a + b                                // error: `+` needs numbers, not `T`
+}
+
+pub fn show<T>(x: T) {
+    println("{x}")                              // error: `T` can't be shown in a string yet
+}
+
+pub fn build<T>() -> T {
+    return T(1)                                 // error: `T` is a generic parameter, so there's nothing to build
+}
+
+pub fn shadow<Square>(x: Square) -> Square {    // error: `Square` is already the name of a struct
+    return x
+}
+
+pub fn twice<T, T>(x: T) -> T {                 // error: generic parameter `T` is already declared
+    return x
+}
+
+pub fn grow<T>(x: T, n: i32) -> i32 {
+    if n == 0 {
+        return 0
+    }
+    return grow(some(x), n - 1)                 // error: the instances of `grow` never end
+}
+
+pub fn one() -> i32 {
+    return 1
+}
+
+fn main() {
+    let a = pick(true, none, none)              // error: can't tell what kind of optional `none` is
+    let b = empty()                             // error: can't tell what `T` is in this call to `empty`
+    let c: Pair = Pair { a: 1, b: 2 }           // error: `Pair` is generic; give its types, as in `Pair<...>`
+    let d: Pair<i32> = Pair { a: 1, b: 2 }      // error: `Pair` takes 2 types, but 1 was given
+    let e = one<i32>()                          // error: `one` isn't generic
+    let f = pick(true, 1, "a")                  // error: expected `str`, found `i32`
+    let g = Either.Neither                      // error: can't tell what types this `Either` has
+    let h = Pair { a: 1 }                       // error: missing field `b` in `Pair`
+    let i = pick<i32, i32>(true, 1, 2)          // error: `pick` takes 1 type, but 2 were given
+    let j = pick<str>(true, "a", 2)             // error: expected `str`, found `i32`
+    println("{grow(1, 3)}")
+    _ = a
+    _ = b
+    _ = c
+    _ = d
+    _ = e
+    _ = f
+    _ = g
+    _ = h
+    _ = i
+    _ = j
+}

@@ -26,6 +26,7 @@ enum class TypeKind : std::uint8_t {
     enum_,
     optional,  // `T?`
     tuple,     // `(A, B)`, with at least two elements
+    param,     // a generic function's or type's parameter, such as `T` in `fn f<T: Shape>`
 };
 
 struct Type {
@@ -39,6 +40,12 @@ struct Type {
     Item* item = nullptr;    // struct_, enum_
     Type* repr = nullptr;    // enum_: the integer type of its tag
     bool has_data = false;   // enum_: some variant holds data, so it's a tagged union in C
+    // Generics. A use of a generic struct or enum, such as `Pair<i32, str>`, is its own type, with
+    // its own copy of the item whose field types have the arguments in place of the parameters.
+    Item* generic = nullptr; // struct_, enum_: the generic item this is an instance of
+    Slice<Type*> args;       // struct_, enum_: the instance's arguments
+    Slice<Item*> bounds;     // param: the interfaces it must implement
+    bool open = false;       // it mentions a parameter, so it's only checked, never emitted
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -64,6 +71,7 @@ public:
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
     Type* tuple_of(const std::vector<Type*>& elems);
+    Type* make_param(std::string_view name);
     // The arrays, optionals and tuples made so far, in the order they were made.
     const std::vector<Type*>& compounds() const { return compounds_; }
 

@@ -1,0 +1,49 @@
+// What a generic call learns its types from: written types, then the value it's called on, then
+// the arguments in order, with untyped literals waiting for the others, then the type expected
+// of the result.
+fn pick<T>(c: bool, x: T, y: T) -> T {
+    return if c { x } else { y }
+}
+
+fn make<T>(x: T) -> T? {
+    return some(x)
+}
+
+fn empty<T>() -> T? {
+    return none
+}
+
+fn get<T>(o: T?) -> T? {
+    return o
+}
+
+struct Box<T> {
+    v: T
+}
+
+fn main() {
+    // The literal `1` waits, so `T` is `i64` from `2i64`.
+    let a = pick(true, 1, 2i64)
+    let b = pick(false, none, some(4u8))
+    println("{a} {b ?? 0u8}")                    // out: 1 4
+
+    // The expected type gives `T`.
+    let c: i8? = empty()
+    let d: Box<u16> = Box { v: 300 }
+    let e: u64? = pick(true, some(1), none)
+    println("{c ?? -1} {d.v} {e ?? 0}")          // out: -1 300 1
+
+    // An optional of an optional only comes from generic code.
+    let xs: [i32?; 2] = [some(1), none]
+    for x in xs {
+        match make(x) {
+            some(some(v)) => print("{v};"),
+            some(none) => print("empty;"),
+            none => print("never;"),
+        }
+    }
+    println()                                    // out: 1;empty;
+    let r = make(xs[1])
+    println("{(r ?? none) ?? 9} {r! ?? 7}")      // out: 9 7
+    println("{get(some(2)) ?? 0}")               // out: 2
+}

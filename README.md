@@ -11,7 +11,7 @@ What sets it apart:
 - **Memory-safe by default.** Unchecked code is opt-in and limited to the server core and plugins you trust.
 - **Region actors.** The only concurrency model. Results are deterministic whatever the thread count.
 
-Status: Phase 3. The compiler builds and runs programs with integers, floats, arrays, structs, enums, tuples, optionals, `match` and the control flow, with Java's results on Windows and Linux. Strings, generics, modules, the standard library and actors come next. The [reference](docs/README.md#reference) lists what's built.
+Status: Phase 3. The compiler builds and runs programs with integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces and the control flow, with Java's results on Windows and Linux. Strings, modules, the standard library and actors come next. The [reference](docs/README.md#reference) lists what's built.
 
 ## Building
 

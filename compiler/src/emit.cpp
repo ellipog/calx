@@ -82,6 +82,7 @@ private:
         switch (t->kind) {
             case TypeKind::unit:
             case TypeKind::never:
+            case TypeKind::param:  // only in generic definitions, which aren't emitted
             case TypeKind::error: return "void";
             case TypeKind::bool_: return "cx_bool";
             case TypeKind::int_: return t->is_usize ? "cx_usize" : "cx_" + std::string(t->name);
