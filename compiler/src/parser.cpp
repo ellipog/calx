@@ -365,6 +365,12 @@ private:
         Item* it = nullptr;
         switch (peek().kind) {
             case Tok::kw_fn: it = fn_item(start); break;
+            case Tok::kw_unsafe:
+                next();
+                if (!at(Tok::kw_fn)) fail(peek().span, "expected `fn` after `unsafe`");
+                it = fn_item(start);
+                it->is_unsafe = true;
+                break;
             case Tok::kw_struct: it = struct_item(start, false); break;
             case Tok::kw_actor:
                 next();

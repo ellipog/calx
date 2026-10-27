@@ -1,0 +1,21 @@
+// std.time: the monotonic clock.
+import std.time.{Instant}
+
+fn spin(n: i64) -> i64 {
+    var x: i64 = 1
+    for i in 0..n {
+        x = x * 6364136223846793005 + i
+    }
+    return x
+}
+
+fn main() {
+    let start = unsafe { Instant.now() }
+    let x = spin(1000000)
+    let end = unsafe { Instant.now() }
+    let ns = end.nanos_since(start)
+    println("{ns > 0} {ns < 10000000000}")                 // out: true true
+    println("{start.nanos_since(end)}")                    // out: 0
+    println("{end.secs_since(start) * 1.0e9 >= 0.0}")      // out: true
+    println("{x != 0}")                                    // out: true
+}

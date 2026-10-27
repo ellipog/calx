@@ -13,6 +13,7 @@
 #include <windows.h>
 #else
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -61,15 +62,151 @@ static void write_bytes(const void* p, size_t n) {
     }
 }
 
+/* --- std.env: the command line, as UTF-8 ------------------------------------------------- */
+
+typedef struct {
+    cx_u8* ptr;
+    cx_usize len;
+} arg_text;
+
+static arg_text* args;
+static cx_usize arg_count;
+
+static void* must_alloc(size_t n) {
+    void* p = malloc(n ? n : 1);
+    if (!p) {
+        fputs("calx: out of memory reading the command line\n", stderr);
+        exit(101);
+    }
+    return p;
+}
+
+#ifdef _WIN32
+/* Windows passes the command line as one UTF-16 string, so it's split here by the rules the
+ * C runtime documents ("Parsing C command-line arguments"): the program's name ends at the next
+ * quote if it starts with one, and at whitespace if not. Each later argument ends at whitespace
+ * outside quotes. Backslashes are literal unless they come before a quote: then each pair gives
+ * one backslash, and an odd one left over makes the quote literal. Inside quotes, `""` is a
+ * literal quote. Converting to UTF-8 turns an unpaired surrogate into U+FFFD. */
+static void add_wide_arg(const wchar_t* w, int n) {
+    int bytes = n ? WideCharToMultiByte(CP_UTF8, 0, w, n, NULL, 0, NULL, NULL) : 0;
+    arg_text* a = &args[arg_count++];
+    a->ptr = must_alloc((size_t)bytes);
+    a->len = (cx_usize)(bytes ? WideCharToMultiByte(CP_UTF8, 0, w, n, (char*)a->ptr, bytes, NULL, NULL) : 0);
+}
+
+static void read_args(void) {
+    const wchar_t* p = GetCommandLineW();
+    size_t n = wcslen(p);
+    wchar_t* buf = must_alloc((n + 1) * sizeof(wchar_t));
+    args = must_alloc((n / 2 + 2) * sizeof(arg_text)); /* each argument after the first takes 2 characters */
+    int k = 0;
+    if (*p == L'"') {
+        for (p++; *p && *p != L'"'; p++) buf[k++] = *p;
+        if (*p) p++;
+    } else {
+        for (; *p && *p != L' ' && *p != L'\t'; p++) buf[k++] = *p;
+    }
+    add_wide_arg(buf, k);
+    for (;;) {
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!*p) break;
+        int quoted = 0;
+        k = 0;
+        for (;;) {
+            size_t slashes = 0;
+            while (*p == L'\\') slashes++, p++;
+            if (*p == L'"') {
+                for (size_t j = 0; j < slashes / 2; j++) buf[k++] = L'\\';
+                if (slashes % 2) {
+                    buf[k++] = L'"';
+                    p++;
+                } else if (quoted && p[1] == L'"') {
+                    buf[k++] = L'"';
+                    p += 2;
+                } else {
+                    quoted = !quoted;
+                    p++;
+                }
+                continue;
+            }
+            for (size_t j = 0; j < slashes; j++) buf[k++] = L'\\';
+            if (!*p || (!quoted && (*p == L' ' || *p == L'\t'))) break;
+            buf[k++] = *p++;
+        }
+        add_wide_arg(buf, k);
+    }
+    free(buf);
+}
+#else
+/* Linux passes bytes. Any that aren't UTF-8 become U+FFFD, one for each byte that doesn't start
+ * a valid sequence, so every argument is a valid `String`. */
+static void read_args(int argc, char** argv) {
+    args = must_alloc((size_t)(argc > 0 ? argc : 1) * sizeof(arg_text));
+    for (int i = 0; i < argc; i++) {
+        const cx_u8* s = (const cx_u8*)argv[i];
+        size_t n = strlen(argv[i]);
+        cx_u8* out = must_alloc(n * 3);
+        size_t len = 0;
+        for (size_t at = 0; at < n;) {
+            cx_u8 b = s[at];
+            size_t w = b < 0x80 ? 1 : b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+            if (w && at + w <= n && cx_utf8_valid(s + at, w)) {
+                memcpy(out + len, s + at, w);
+                len += w;
+                at += w;
+            } else {
+                memcpy(out + len, "\xEF\xBF\xBD", 3);
+                len += 3;
+                at++;
+            }
+        }
+        args[arg_count].ptr = out;
+        args[arg_count++].len = len;
+    }
+}
+#endif
+
+/* Declared by std/env.calx. Argument 0 is the program's name. */
+cx_usize cx_arg_count(void) { return arg_count; }
+const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }
+cx_usize cx_arg_len(cx_usize i) { return args[i].len; }
+
+/* --- std.time ------------------------------------------------------------------------------ */
+
+#ifdef _WIN32
+static cx_u64 counter_hz;
+#endif
+
+/* Declared by std/time.calx: nanoseconds on a clock that never goes backward. */
+cx_u64 cx_clock_ns(void) {
+#ifdef _WIN32
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    cx_u64 c = (cx_u64)now.QuadPart;
+    return c / counter_hz * 1000000000u + c % counter_hz * 1000000000u / counter_hz;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (cx_u64)ts.tv_sec * 1000000000u + (cx_u64)ts.tv_nsec;
+#endif
+}
+
 void cx_start(int argc, char** argv) {
+#ifdef _WIN32
     (void)argc;
     (void)argv;
-#ifdef _WIN32
     /* The same bytes on every platform: no "\n" to "\r\n" translation, and UTF-8 in a console. */
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     SetConsoleOutputCP(CP_UTF8);
+    LARGE_INTEGER hz;
+    QueryPerformanceFrequency(&hz);
+    counter_hz = (cx_u64)hz.QuadPart;
+    read_args();
+#else
+    read_args(argc, argv);
 #endif
 }
 

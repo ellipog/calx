@@ -37,7 +37,7 @@ What's built, one page per feature:
 20. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
 21. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
 22. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
-23. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks, raw pointers, and calling C
+23. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
 24. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
@@ -46,6 +46,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 
 1. [std.io](std/io.md): standard input and output as bytes
 2. [std.math](std/math.md): math functions with `StrictMath`'s results bit for bit
+3. [std.time](std/time.md): a monotonic clock, which only `unsafe` code can read
+4. [std.env](std/env.md): the command-line arguments
 
 ### Design
 

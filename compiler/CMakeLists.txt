@@ -38,4 +38,7 @@ else()
 endif()
 if(WIN32)
     target_compile_definitions(calx PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    # A manifest that makes the driver's code page UTF-8, so its arguments and paths aren't lossy.
+    # The linker merges it into the one it writes.
+    target_sources(calx PRIVATE src/calx.manifest)
 endif()

@@ -21,6 +21,7 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   panic must write exactly those lines there, so one with none must write nothing.
 - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
   the input is empty.
+- `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces.
 
 A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -49,7 +50,7 @@ BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin|args):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
@@ -65,6 +66,7 @@ class Test:
         self.panic = None  # (line, text)
         self.stderr = []
         self.stdin = []
+        self.args = []
         self.files = []  # (name, text) for a test of several modules, the main one first
         lines = source.splitlines()
         starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
@@ -84,6 +86,8 @@ class Test:
                 self.stderr.append(text)
             elif kind == "stdin":
                 self.stdin.append(text)
+            elif kind == "args":
+                self.args.append(text)
             elif kind == "error":
                 self.errors.append((n, text.strip()))
             else:
@@ -157,6 +161,8 @@ def run_test(test, mode):
         cmd = [str(CALX), "run", str(path)]
         if mode == "release":
             cmd.insert(2, "--release")
+        if test.args:
+            cmd += ["--", *test.args]
         # Bytes, so no newline is translated on the way in or out.
         stdin = "".join(line + "\n" for line in test.stdin).encode("utf-8")
         p = subprocess.run(cmd, input=stdin, capture_output=True, cwd=ROOT)
@@ -267,6 +273,8 @@ def indent(text):
 
 
 def main():
+    # A failing test's output can hold any text, which a Windows console's code page may not.
+    sys.stdout.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", help="test files or folders (default: all)")
     ap.add_argument("--modes", default="debug", help="comma-separated build modes: debug, release")

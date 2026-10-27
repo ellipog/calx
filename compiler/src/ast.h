@@ -413,6 +413,7 @@ struct Item {
     TypeExpr* error = nullptr;   // after `!`
     Block* body = nullptr;       // null for a declaration without a body (interfaces, extern)
     bool is_extern = false;      // `extern "C" fn`
+    bool is_unsafe = false;      // `unsafe fn`: calling it needs `unsafe`
     std::string_view abi;
     // struct, enum, actor
     Slice<FieldDecl> fields;

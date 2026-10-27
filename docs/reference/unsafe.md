@@ -33,7 +33,7 @@ fn main() {
 ## `unsafe` blocks
 
 - `unsafe { }` is a block. Like any block, it can be a statement, or give a value: `let n = unsafe { abs(x) }`.
-- Inside it, and only there, code can use pointers, call C functions, and call `set_len` on a list.
+- Inside it, and only there, code can use pointers, call C functions and [`unsafe` functions](#unsafe-functions), and call `set_len` on a list.
 - A block that does none of these is an error, so every `unsafe` marks something unsafe. So is an `unsafe` inside another, which adds nothing.
 - Its variables end with the block, as any block's do. A pointer can't leave it: the block's value can't be a pointer.
 
@@ -46,6 +46,40 @@ fn main() {
 ```
 
 Which modules may use `unsafe` and `extern` isn't enforced yet. The rule, that only Calcite core and trusted plugins may (D15, D23), comes with plugins.
+
+## `unsafe` functions
+
+`unsafe fn` declares a function that only `unsafe` code can call. It's for a safe-looking function whose caller must know something the compiler can't check, or that reaches what safe Calx mustn't see, such as [the clock](../std/time.md).
+
+```calx
+extern "C" fn abs(x: i32) -> i32
+
+/// Callers promise `x` isn't `i32.MIN`, whose magnitude doesn't fit.
+unsafe fn magnitude(x: i32) -> i32 {
+    return unsafe { abs(x) }
+}
+
+fn main() {
+    let n = unsafe { magnitude(-5) }
+    println("{n}")    // out: 5
+}
+```
+
+Calling it outside `unsafe` is an error:
+
+```calx
+unsafe fn magnitude(x: i32) -> i32 {
+    return x.abs()
+}
+
+fn main() {
+    _ = magnitude(-1)    // error: `magnitude` is an `unsafe` function, so calling it needs `unsafe`
+}
+```
+
+- The body isn't `unsafe` itself: anything unsafe in it still goes in an `unsafe` block, so each unsafe operation is marked where it happens.
+- It can be a method or a static function in an `impl` block, and `pub` like any function.
+- An interface's functions can't be `unsafe`, and neither can a function that implements one, since an interface's functions can be called from anywhere, including generic code. `main` can't be `unsafe` either.
 
 ## Pointers
 

@@ -1,0 +1,31 @@
+// `unsafe fn`: a function only `unsafe` code can call. Its body is checked like any other.
+
+extern "C" fn abs(x: i32) -> i32
+
+/// Gives `x`'s magnitude, but callers promise something the compiler can't check.
+unsafe fn magnitude(x: i32) -> i32 {
+    return unsafe { abs(x) }
+}
+
+pub struct Gauge {
+    pub level: i32,
+}
+
+impl Gauge {
+    unsafe fn read() -> Gauge {
+        return Gauge { level: 7 }
+    }
+
+    unsafe fn bump(mut self, by: i32) {
+        self.level += by
+    }
+}
+
+fn main() {
+    let n = unsafe { magnitude(-5) }
+    var g = unsafe { Gauge.read() }
+    unsafe {
+        g.bump(2)
+    }
+    println("{n} {g.level}")    // out: 5 9
+}

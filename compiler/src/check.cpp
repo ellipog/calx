@@ -670,6 +670,7 @@ private:
             }
             m->interface_item = it;
             m->impl_type = self;
+            if (m->is_unsafe) error(m->name_span, "an interface's functions can't be `unsafe`");
             if (m->kind == ItemKind::const_) {
                 if (m->value) not_yet(m->value->span, "default values for an interface's constants");
                 if (!m->type) {
@@ -811,6 +812,10 @@ private:
                     error(m->name_span, q(text(m->name)) + " is a " + (want->kind == ItemKind::fn ? "function" : "constant") +
                                             " in " + q(text(iface->name)));
                     continue;
+                }
+                if (m->is_unsafe) {
+                    error(m->name_span, q(text(m->name)) + " implements " + q(text(iface->name)) +
+                                            ", whose functions can be called anywhere, so it can't be `unsafe`");
                 }
                 m->interface_item = iface;
             } else if (m->kind != ItemKind::fn) {
@@ -4885,6 +4890,12 @@ private:
             }
             unsafe_used_ = true;
         }
+        if (f->is_unsafe) {
+            if (unsafe_depth_ == 0) {
+                error(e->callee->span, q(text(f->name)) + " is an `unsafe` function, so calling it needs `unsafe`");
+            }
+            unsafe_used_ = true;
+        }
         // A generic function's types come from `f<...>`, then the receiver, the arguments in the
         // order they're written, and where the result goes.
         const Slice<Type*>& vars = f->type_params;
@@ -5644,6 +5655,7 @@ private:
             error(f->name_span, "`main` can't be generic");
             return;
         }
+        if (f->is_unsafe) error(f->name_span, "`main` can't be `unsafe`");
         if (!f->params.empty() || (f->result_type && f->result_type->kind != TypeKind::unit)) {
             error(f->name_span, "`main` takes no parameters and returns nothing");
         }

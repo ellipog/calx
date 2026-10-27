@@ -1,0 +1,31 @@
+// What `unsafe fn` doesn't allow.
+
+extern "C" fn abs(x: i32) -> i32
+
+unsafe fn magnitude(x: i32) -> i32 {
+    return abs(x)                             // error: `abs` is a C function, so calling it needs `unsafe`
+}
+
+pub interface Reads {
+    unsafe fn read(self) -> i32               // error: an interface's functions can't be `unsafe`
+}
+
+pub interface Counts {
+    fn count(self) -> i32
+}
+
+pub struct Box3 {
+    pub n: i32,
+}
+
+impl Counts for Box3 {
+    unsafe fn count(self) -> i32 {            // error: so it can't be `unsafe`
+        return self.n
+    }
+}
+
+fn main() {
+    _ = magnitude(-1)                         // error: `magnitude` is an `unsafe` function, so calling it needs `unsafe`
+    let b = Box3 { n: 1 }
+    println("{b.n}")
+}

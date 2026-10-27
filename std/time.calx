@@ -1,0 +1,33 @@
+/// A monotonic clock, for measuring how long something takes.
+///
+/// Reading the clock needs `unsafe`. Safe Calx can't see time, so what a program computes can't
+/// depend on how fast it ran. Calcite reads the clock once per tick and records it (D44, D54).
+module std.time
+
+extern "C" fn cx_clock_ns() -> u64
+
+/// A moment on a clock that never goes backward, to the nanosecond. It means nothing on its own,
+/// only next to another `Instant` from the same run of the program.
+pub struct Instant {
+    ns: u64,
+}
+
+impl Instant {
+    /// The clock's time now.
+    pub unsafe fn now() -> Instant {
+        return Instant { ns: unsafe { cx_clock_ns() } }
+    }
+
+    /// The nanoseconds from `earlier` to this moment, or 0 if `earlier` is later.
+    pub fn nanos_since(self, earlier: Instant) -> u64 {
+        if self.ns < earlier.ns {
+            return 0
+        }
+        return self.ns - earlier.ns
+    }
+
+    /// The seconds from `earlier` to this moment, or 0 if `earlier` is later.
+    pub fn secs_since(self, earlier: Instant) -> f64 {
+        return f64.nearest(self.nanos_since(earlier)) / 1.0e9
+    }
+}

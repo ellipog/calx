@@ -223,7 +223,7 @@ fn tick_all(r: mut Region) {
 
 ### `unsafe`
 
-Built: `unsafe` blocks, raw pointers and their methods, and calling C functions ([Unsafe code and C functions](reference/unsafe.md)). Still to build:
+Built: `unsafe` blocks, `unsafe fn`, raw pointers and their methods, and calling C functions ([Unsafe code and C functions](reference/unsafe.md)). Still to build:
 
 - Unchecked indexing and reinterpreting bytes inside `unsafe`, and pointers inside other types.
 - It's allowed only in modules the build marks trusted: Calcite core and trusted plugins.
@@ -335,7 +335,7 @@ fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
 
 - The runtime provides the barrier, outboxes and ordered delivery. Calcite's tick loop decides the phases: packet phase, global phase, world phase, barrier (D50). The loop itself is ordinary code; see the tick sketch.
 - **Delivery order** at a barrier is ascending sender ID, then send order (D20). The global actor is sender 0.
-- **No hidden timing.** Nothing in safe Calx can see time, thread IDs or scheduling order. The wall clock comes into Calcite as a recorded input (D44, D54). So region split and merge decisions can only depend on world state (D22).
+- **No hidden timing.** Nothing in safe Calx can see time, thread IDs or scheduling order. The clock is an `unsafe fn` ([std.time](std/time.md)), and the wall clock comes into Calcite as a recorded input (D44, D54). So region split and merge decisions can only depend on world state (D22).
 
 ### Region scoping
 
