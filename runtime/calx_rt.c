@@ -838,6 +838,18 @@ void cx_panic_key(const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_load_factor(const char* at) {
+    cx_panic_begin(at);
+    panic_text("the load factor must be greater than 0 and less than 1");
+    cx_panic_end();
+}
+
+void cx_panic_table_size(const char* at) {
+    cx_panic_begin(at);
+    panic_text("more keys than fastutil's tables hold, which is 2^30 slots at the load factor");
+    cx_panic_end();
+}
+
 /* --- hashing and tables (D94) ---------------------------------------------------------------- */
 
 static cx_u64 read_u64(const cx_u8* p) {

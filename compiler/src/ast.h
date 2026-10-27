@@ -157,6 +157,7 @@ enum class BMethod : std::uint8_t {
     java_hash,  // Java's `hashCode`, on anything with `JavaHash` and on floats (D105)
     utf16_len,  // on text, as Java's `length()`
     compute_if_absent,  // on a `JavaHashMap`, as Java's `computeIfAbsent` adds a key
+    trim,  // on an `OpenHashMap` or an `OpenHashSet`, as fastutil's `trim()`
     runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
 };

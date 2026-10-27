@@ -35,6 +35,10 @@ enum class TypeKind : std::uint8_t {
     pointer,   // `*T` and `*const T`, only in `unsafe` code and `extern` signatures
 };
 
+// Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), or fastutil's open
+// hash table (D107). Each goes in its own order.
+enum class TableKind : std::uint8_t { native, java, fastutil };
+
 struct Type {
     TypeKind kind;
     std::uint8_t bits = 0;   // int_ and float_; usize says 64, and is_usize marks it
@@ -62,7 +66,7 @@ struct Type {
     bool is_const = false;   // pointer: `*const T`, which can't be written through
     bool has_pointer = false; // it is or holds a pointer
     bool is_result = false;  // enum_: `T ! E`, what a call to a function that can fail gives back
-    bool java = false;       // map, set: `JavaHashMap` or `JavaHashSet`, which go in Java's order (D105)
+    TableKind table = TableKind::native;  // map, set: which table it is
     bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
@@ -90,9 +94,9 @@ public:
     Type* array_of(Type* elem, std::uint64_t length);
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
-    // With `java`, `JavaHashMap<K, V>` and `JavaHashSet<T>`, which iterate in Java's order (D105).
-    Type* map_of(Type* key, Type* value, bool java = false);
-    Type* set_of(Type* elem, bool java = false);
+    // `JavaHashMap<K, V>` and `OpenHashMap<K, V>`, and their sets, with their kinds (D105, D107).
+    Type* map_of(Type* key, Type* value, TableKind table = TableKind::native);
+    Type* set_of(Type* elem, TableKind table = TableKind::native);
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
@@ -109,8 +113,8 @@ private:
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
-    std::map<std::tuple<Type*, Type*, bool>, Type*> map_map_;
-    std::map<std::pair<Type*, bool>, Type*> set_map_;
+    std::map<std::tuple<Type*, Type*, TableKind>, Type*> map_map_;
+    std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
     std::vector<Type*> compounds_;

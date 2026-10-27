@@ -243,7 +243,8 @@ These iterate in exactly the order the Java collections do, for the same sequenc
 | `java.LinkedHashMap<K, V>`, `java.LinkedHashSet<T>` | `LinkedHashMap`, `LinkedHashSet`, insertion order and access order |
 | `java.TreeMap<K, V>`, `java.TreeSet<T>` | `TreeMap`, `TreeSet` (`SortedMap` in the samples) |
 | `java.ArrayList<T>`, `java.ArrayDeque<T>` | The same, including growth sizes where they can be seen |
-| `fastutil.Long2ObjectOpenHashMap<V>`, `Int2ObjectOpenHashMap<V>`, `Object2IntOpenHashMap<K>`, their `Linked` versions, and the matching sets | fastutil's open-addressing maps, with its own hash mixing (`HashCommon.mix`) and load factors |
+| `OpenHashMap<K, V>`, `OpenHashSet<T>` | fastutil's open hash maps and sets, `Long2ObjectOpenHashMap`, `Object2IntOpenHashMap`, `LongOpenHashSet` and the rest, the key type picking the class, with fastutil's hash mixing (`HashCommon.mix`), load factors, removal by shifting and shrinking. Built: [fastutil's hash maps](reference/fastutil-maps.md) (D107) |
+| fastutil's `Linked` versions, such as `Long2ObjectLinkedOpenHashMap` | The order keys were added in, with fastutil's `moveToFirst` and `moveToLast` |
 
 Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the numbers, `bool`, `char`, `rune`, text and lists, as Java's boxes, `String` and `List` have it, and a struct or an enum writes its own, as a Java class does: Calcite writes it for vanilla's types, such as `BlockPos`. Built: [`JavaHash`](reference/java-maps.md#javahash).
 

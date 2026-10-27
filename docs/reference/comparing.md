@@ -222,7 +222,7 @@ A struct or an enum can write its own `Equal`, `Display`, `Hash` or `Order`, in 
 | `Display` | `fn show(self)` | `{x}` in a string |
 | `Hash` | `fn hash(self, h: mut Hasher)` | A map's or a set's keys |
 | `Order` | `fn cmp(self, other: Self) -> Ordering` | `<`, `<=`, `>`, `>=`, `a.cmp(b)` and `sort` |
-| `JavaHash` | `fn java_hash(self) -> i32` | `x.java_hash()`, a `JavaHashMap`'s or a `JavaHashSet`'s keys ([Java's hash maps](java-maps.md#javahash)) |
+| `JavaHash` | `fn java_hash(self) -> i32` | `x.java_hash()`, the keys of a `JavaHashMap`, a `JavaHashSet`, an `OpenHashMap` or an `OpenHashSet` ([Java's hash maps](java-maps.md#javahash)) |
 
 What holds the type uses its function too: a list of them shows each one its way, and a struct with one as a field compares that field with it.
 

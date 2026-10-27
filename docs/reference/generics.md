@@ -190,7 +190,7 @@ Generic code is checked once, where it's written, and it can use only what its b
 | `T: Order` | `<`, `<=`, `>`, `>=`, `cmp` and sorting on `T`, and `==` too ([comparing and printing](comparing.md#order)) |
 | `T: Display` | `{x}` in a string ([comparing and printing](comparing.md#display)) |
 | `T: Hash` | `T` as the key of a `Map` or a `Set`, and `==` too ([maps and sets](maps.md#hash)) |
-| `T: JavaHash` | `x.java_hash()`, and `T` as the key of a `JavaHashMap` or a `JavaHashSet`, and `==` too ([Java's hash maps](java-maps.md#javahash)) |
+| `T: JavaHash` | `x.java_hash()`, and `T` as the key of a `JavaHashMap`, a `JavaHashSet`, an `OpenHashMap` or an `OpenHashSet`, and `==` too ([Java's hash maps](java-maps.md#javahash)) |
 
 ```calx
 fn count<T: Equal>(xs: List<T>, x: T) -> usize {

@@ -243,7 +243,7 @@ private:
         }
         // A Java table's tree bins order its keys, when they have `Order` (D105).
         for (const Type* x : closure(all.types)) {
-            if (is_table(x) && x->java && prog_.java_ordered.count(table_key(x)) && has_cmp_glue(table_key(x))) {
+            if (is_table(x) && x->table == TableKind::java && prog_.java_ordered.count(table_key(x)) && has_cmp_glue(table_key(x))) {
                 all.add_cmp(table_key(x));
             }
         }
@@ -267,15 +267,15 @@ private:
             (hash ? hash_order : eq_order).push_back(x);
             for (const Type* h : held(x)) reach(h, hash);
         };
-        // A Java table hashes its keys with `java_hash`, which a struct or an enum writes, and which
-        // a list of them calls for each element.
+        // Java's and fastutil's tables hash their keys with `java_hash`, which a struct or an enum
+        // writes, and which a list of them calls for each element.
         std::vector<const Type*> java_order;
         std::unordered_set<const Type*> java_seen;
         for (const Type* x : closure(all.types)) {
             if (!is_table(x)) continue;
-            if (!x->java) reach(table_key(x), true);
+            if (x->table == TableKind::native) reach(table_key(x), true);
             reach(table_key(x), false);
-            if (!x->java) continue;
+            if (x->table == TableKind::native) continue;
             const Type* k = table_key(x);
             while (k->kind == TypeKind::list) k = k->elem;
             if (hand(k, prop_java_hash) && java_seen.insert(k).second) java_order.push_back(k);
@@ -404,8 +404,10 @@ private:
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
             case TypeKind::list: s = "cx_list_" + part(t->elem); break;
-            case TypeKind::map: s = std::string(t->java ? "cx_jmap_" : "cx_map_") + part(t->key) + "_" + part(t->elem); break;
-            case TypeKind::set: s = std::string(t->java ? "cx_jset_" : "cx_set_") + part(t->elem); break;
+            case TypeKind::map: s = std::string(t->table == TableKind::java ? "cx_jmap_" : t->table == TableKind::fastutil ? "cx_omap_" : "cx_map_") +
+                                    part(t->key) + "_" + part(t->elem); break;
+            case TypeKind::set: s = std::string(t->table == TableKind::java ? "cx_jset_" : t->table == TableKind::fastutil ? "cx_oset_" : "cx_set_") +
+                                    part(t->elem); break;
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -529,7 +531,7 @@ private:
             } else {
                 out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
             }
-            if (is_table(t) && t->java) out_ += "typedef struct " + jnode(t) + " " + jnode(t) + ";\n";
+            if (is_table(t) && t->table == TableKind::java) out_ += "typedef struct " + jnode(t) + " " + jnode(t) + ";\n";
         }
         for (const Type* t : order) {
             switch (t->kind) {
@@ -544,7 +546,14 @@ private:
                     break;
                 case TypeKind::map:
                 case TypeKind::set:
-                    if (t->java) {
+                    if (t->table == TableKind::fastutil) {
+                        // The slots, a hash word for each when the keys aren't integers, and the
+                        // runtime's header (D107).
+                        out_ += "struct " + ctype(t) + " { " + ctype(slot_type(t)) +
+                                "* slots; cx_u32* hash; union { cx_ohead h; struct { cx_u32 n, mask, len, max_fill, min_n; cx_f32 f; cx_bool zero; }; }; };\n";
+                        break;
+                    }
+                    if (t->table == TableKind::java) {
                         // The runtime's table, with its nodes' type (D105).
                         out_ += "struct " + ctype(t) + " { union { cx_jtable t; struct { cx_i32* heads; " + jnode(t) +
                                 "* nodes; cx_jtnode* tree; cx_usize len; cx_u32 cap, thr, used, room, spare; }; }; };\n";
@@ -587,7 +596,7 @@ private:
         }
         // A Java table's nodes hold its keys and values, so they come once every type is whole.
         for (const Type* t : order) {
-            if (is_table(t) && t->java) {
+            if (is_table(t) && t->table == TableKind::java) {
                 out_ += "struct " + jnode(t) + " { cx_i32 hash; cx_i32 next; " + ctype(slot_type(t)) + " v; };\n";
             }
         }
@@ -850,7 +859,16 @@ private:
     // `body` for each slot `i` of the table `tab` that holds a value. A Java table goes bin by bin,
     // in Java's order (D105).
     static std::string each_slot(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) {
-        if (!t->java) return each_full(tab, indent, body);
+        if (t->table == TableKind::fastutil) {
+            // fastutil's order: the key 0 first, in slot `n`, then the last slot to the first (D107).
+            std::string s = int_keys(t) ? indent + "for (cx_u32 i = " + tab + "slots ? " + tab + "n + 1 : 0; i-- > 0;) {\n" + indent +
+                                              "    if (i == " + tab + "n ? !" + tab + "zero : " + slot_key(t, tab + "slots[i]") +
+                                              " == 0) continue;\n"
+                                        : indent + "for (cx_u32 i = " + tab + "slots ? " + tab + "n : 0; i-- > 0;) {\n" + indent +
+                                              "    if (!" + tab + "hash[i]) continue;\n";
+            return s + body + indent + "}\n";
+        }
+        if (t->table != TableKind::java) return each_full(tab, indent, body);
         std::string s = indent + "for (cx_u32 bin = 0; bin < " + tab + "cap; bin++) {\n" + indent + "    for (cx_i32 i = cx_jt_first(" +
                         tab + "heads[bin]); i >= 0; i = " + tab + "nodes[i].next) {\n";
         for (std::size_t at = 0; at < body.size();) {
@@ -862,12 +880,18 @@ private:
     }
     // What slot `i` of the table `tab` holds.
     static std::string slot_at(const Type* t, const std::string& tab, const std::string& i) {
-        return t->java ? tab + "nodes[" + i + "].v" : tab + "slots[" + i + "]";
+        return t->table == TableKind::java ? tab + "nodes[" + i + "].v" : tab + "slots[" + i + "]";
     }
     // A Java table's node: a hash, the next node in its bin, and a slot.
     std::string jnode(const Type* t) const { return ctype(t) + "_node"; }
     // What a table's keys are: a map's keys, or a set's values.
     static Type* table_key(const Type* t) { return t->kind == TypeKind::map ? t->key : t->elem; }
+    // Whether a fastutil table's keys are integers, which it keeps as fastutil's `Int2...` and
+    // `Long2...` tables do, with 0 marking an empty slot (D107).
+    static bool int_keys(const Type* t) {
+        const Type* k = table_key(t);
+        return k->kind == TypeKind::int_ || k->kind == TypeKind::char_ || k->kind == TypeKind::rune;
+    }
     // What a slot holds: a map's `(K, V)`, or a set's value.
     static Type* slot_type(const Type* t) { return t->kind == TypeKind::map ? t->entry : t->elem; }
     // The key in the slot `s`.
@@ -877,8 +901,17 @@ private:
     std::string lookup_ctype(const Type* t) { return str_key(t) ? "cx_str" : ctype(table_key(t)); }
     static std::string as_lookup(const Type* t, const std::string& k) { return str_key(t) ? "cx_sv(" + k + ")" : k; }
     std::string lookup_hash(const Type* t, const std::string& k) {
-        if (t->java) return "cx_jt_spread(" + (str_key(t) ? "cx_str_java_hash(" + k + ")" : java_hash_of(table_key(t), k)) + ")";
+        if (t->table == TableKind::fastutil) return open_hash(t, k, true);
+        if (t->table == TableKind::java) return "cx_jt_spread(" + (str_key(t) ? "cx_str_java_hash(" + k + ")" : java_hash_of(table_key(t), k)) + ")";
         return str_key(t) ? "cx_hash_str(" + k + ")" : hash_value(table_key(t), k);
+    }
+    // The hash fastutil places a key by (D107): `mix` of an integer key itself, as its `Int2...`
+    // and `Long2...` tables have it, and of `hashCode` for the rest, as its `Object2...` tables
+    // have it. With `lookup`, `k` is what a lookup has: a `String` key's is a `str`.
+    std::string open_hash(const Type* t, const std::string& k, bool lookup) {
+        const Type* key = table_key(t);
+        if (int_keys(t)) return key->kind == TypeKind::int_ && key->bits == 64 ? "cx_oh_mix64((cx_u64)(" + k + "))" : "cx_oh_mix32((cx_i32)(" + k + "))";
+        return "cx_oh_mix32(" + (lookup && str_key(t) ? "cx_str_java_hash(" + k + ")" : java_hash_of(key, k)) + ")";
     }
     // The order a Java table's tree bins sort by: its keys' `Order`, or none (D105).
     std::string java_order(const Type* t) { return prog_.java_ordered.count(table_key(t)) ? table_fn("jorder", t) : "0"; }
@@ -1006,7 +1039,8 @@ private:
     }
 
     std::string table_decls(const Type* t) {
-        if (t->java) return jtable_decls(t);
+        if (t->table == TableKind::fastutil) return otable_decls(t);
+        if (t->table == TableKind::java) return jtable_decls(t);
         bool map = t->kind == TypeKind::map;
         return fill(std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
                                 "static void $grow($T* m, cx_usize buckets);\n") +
@@ -1020,7 +1054,8 @@ private:
     // Putting a key that's there replaces its value and drops the key given. Growing moves every
     // value into a new table, so it's out of line: it's rare, and `put` stays small.
     std::string table_bodies(const Type* t) {
-        if (t->java) return jtable_bodies(t);
+        if (t->table == TableKind::fastutil) return otable_bodies(t);
+        if (t->table == TableKind::java) return jtable_bodies(t);
         bool map = t->kind == TypeKind::map;
         const Type* k = table_key(t);
         const Type* slot = slot_type(t);
@@ -1353,11 +1388,318 @@ $dropall    cx_jt_clear(&m->t);
         }
     }
 
+    // --- fastutil's tables (D107) ----------------------------------------------------------------
+
+    std::vector<std::pair<std::string, std::string>> otable_names(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        return {
+            {"$find", table_fn("find", t)}, {"$alloc", table_fn("alloc", t)}, {"$rehash", table_fn("rehash", t)},
+            {"$put", table_fn("put", t)}, {"$shift", table_fn("shift", t)}, {"$take", table_fn("take", t)},
+            {"$clear", table_fn("clear", t)}, {"$reserve", table_fn("reserve", t)}, {"$trim", table_fn("trim", t)},
+            {"$T", ctype(t)}, {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
+            {"$V", map ? ctype(t->elem) : std::string()},
+        };
+    }
+
+    std::string otable_decls(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        return fill(std::string("CX_INLINE cx_i64 $find(const $T* m, $KL k, cx_u32 h);\n"
+                                "static void $alloc($T* m);\nstatic void $rehash($T* m, cx_u32 nn);\n") +
+                        (map ? "static inline void $put($T* m, $K k, $V v);\n" : "static inline void $put($T* m, $K k);\n") +
+                        "static void $shift($T* m, cx_u32 pos);\nstatic inline cx_bool $take($T* m, $KL k, cx_u32 h, $S* out);\n"
+                        "static void $clear($T* m);\nstatic void $reserve($T* m, cx_usize c);\nstatic void $trim($T* m);\n",
+                    otable_names(t));
+    }
+
+    // Finding a key probes from the slot its mixed hash picks to the first empty one. Putting one
+    // adds it at that empty slot, and rehashes when the table was at `max_fill`. Taking one out
+    // moves the keys after it in its run back into the gap, as fastutil's `shiftKeys` does, and
+    // halves the table when it's a quarter full. Rehashing goes from the last slot down, as
+    // fastutil's does, so each key lands where it would in fastutil's table. Integer keys mark
+    // empty slots with 0 and keep the key 0 in slot `n`; other keys have a word per slot, which
+    // keeps the 30 bits of the hash that place them, so rehashing never hashes a key again.
+    std::string otable_bodies(const Type* t) {
+        bool map = t->kind == TypeKind::map;
+        bool ints = int_keys(t);
+        const Type* k = table_key(t);
+        auto key = [&](const std::string& slot) { return slot_key(t, slot); };
+        auto mix = [&](const std::string& v) { return open_hash(t, v, false); };
+        auto eq_look = [&](const std::string& slot) {
+            return str_key(t) ? "cx_str_eq(cx_sv(" + key(slot) + "), k)" : equal(k, key(slot), "k");
+        };
+        auto eq_key = [&](const std::string& slot) {
+            return str_key(t) ? "cx_str_eq(cx_sv(" + key(slot) + "), cx_sv(k))" : equal(k, key(slot), "k");
+        };
+        // A key that's there: its value is replaced, and the key given is dropped.
+        auto replace = [&](const std::string& indent) {
+            std::string r;
+            if (map) {
+                if (!is_copy(t->elem)) r += indent + drop_fn(t->elem) + "(&m->slots[pos].f1);\n";
+                r += indent + "m->slots[pos].f1 = v;\n";
+            }
+            if (!is_copy(k)) r += indent + drop_fn(k) + "(&k);\n";
+            return r;
+        };
+        const Type* slot = slot_type(t);
+        std::string drop_all = is_copy(slot) ? std::string() : each_slot(t, "m->", "    ", "        " + drop_fn(slot) + "(&m->slots[i]);\n");
+        auto names = otable_names(t);
+        names.insert(names.begin(), {
+            {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"}, {"$dropall", drop_all},
+            {"$kpos", key("m->slots[pos]")}, {"$klast", key("m->slots[last]")}, {"$kold", key("old[i]")}, {"$knew", key("slots[pos]")},
+            {"$mixk", mix("k")}, {"$mixc", mix("c")}, {"$mixold", mix(key("old[i]"))}, {"$replace12", replace("            ")},
+            {"$replace16", replace("                ")}, {"$eqlook", eq_look("m->slots[pos]")}, {"$eqkey", eq_key("m->slots[pos]")},
+        });
+        std::string tail = R"(static void $reserve($T* m, cx_usize c) {
+    cx_oh_ready(&m->h);
+    cx_u32 need = cx_oh_reserve_size(&m->h, c);
+    if (need > m->n) $rehash(m, need);
+}
+static void $trim($T* m) {
+    cx_oh_ready(&m->h);
+    cx_u32 l = cx_oh_trim_size(&m->h);
+    if (l) $rehash(m, l);
+}
+)";
+        // Taking a key out, then halving a table that's a quarter full.
+        std::string shrink = "    if (m->n > m->min_n && m->len < m->max_fill / 4 && m->n > 16) $rehash(m, m->n / 2);\n    return 1;\n}\n";
+        if (ints) {
+            return fill(R"(CX_INLINE cx_i64 $find(const $T* m, $K k, cx_u32 h) {
+    if (__builtin_expect(k == 0, 0)) return m->zero ? (cx_i64)m->n : -1;
+    if (__builtin_expect(!m->slots, 0)) return -1;
+    for (cx_u32 pos = h & m->mask;; pos = (pos + 1) & m->mask) {
+        $K c = $kpos;
+        if (c == 0) return -1;
+        if (c == k) return pos;
+    }
+}
+static __attribute__((noinline)) void $alloc($T* m) {
+    cx_oh_ready(&m->h);
+    cx_usize size = ((cx_usize)m->n + 1) * sizeof($S);
+    m->slots = ($S*)cx_alloc(size);
+    __builtin_memset(m->slots, 0, size);
+}
+static __attribute__((noinline)) void $rehash($T* m, cx_u32 nn) {
+    cx_u32 mask = nn - 1;
+    if (m->slots) {
+        $S* old = m->slots;
+        cx_usize size = ((cx_usize)nn + 1) * sizeof($S);
+        $S* slots = ($S*)cx_alloc(size);
+        __builtin_memset(slots, 0, size);
+        cx_u32 i = m->n;
+        for (cx_u32 j = m->len - m->zero; j-- != 0;) {
+            do i--;
+            while ($kold == 0);
+            cx_u32 pos = $mixold & mask;
+            while ($knew != 0) pos = (pos + 1) & mask;
+            slots[pos] = old[i];
+        }
+        slots[nn] = old[m->n];
+        cx_free(old, ((cx_usize)m->n + 1) * sizeof($S));
+        m->slots = slots;
+    }
+    m->n = nn;
+    m->mask = mask;
+    m->max_fill = cx_oh_max_fill(nn, m->f);
+}
+static inline void $put($T* m, $params) {
+    if (__builtin_expect(!m->slots, 0)) $alloc(m);
+    cx_u32 pos;
+    if (__builtin_expect(k == 0, 0)) {
+        pos = m->n;
+        if (m->zero) {
+$replace12            return;
+        }
+        m->zero = 1;
+    } else {
+        for (pos = $mixk & m->mask;; pos = (pos + 1) & m->mask) {
+            $K c = $kpos;
+            if (c == 0) break;
+            if (c == k) {
+$replace16                return;
+            }
+        }
+    }
+    m->slots[pos] = $new;
+    if (m->len++ >= m->max_fill) $rehash(m, cx_oh_array_size((cx_u64)m->len + 1, m->f));
+}
+static void $shift($T* m, cx_u32 pos) {
+    for (;;) {
+        cx_u32 last = pos;
+        pos = (last + 1) & m->mask;
+        for (;;) {
+            $K c = $kpos;
+            if (c == 0) {
+                $klast = 0;
+                return;
+            }
+            cx_u32 slot = $mixc & m->mask;
+            if (last <= pos ? last >= slot || slot > pos : last >= slot && slot > pos) break;
+            pos = (pos + 1) & m->mask;
+        }
+        m->slots[last] = m->slots[pos];
+    }
+}
+static inline cx_bool $take($T* m, $K k, cx_u32 h, $S* out) {
+    cx_i64 i = $find(m, k, h);
+    if (i < 0) return 0;
+    *out = m->slots[i];
+    m->len--;
+    if ((cx_u32)i == m->n) m->zero = 0;
+    else $shift(m, (cx_u32)i);
+)" + shrink + R"(static void $clear($T* m) {
+    if (!m->len) return;
+$dropall    m->len = 0;
+    m->zero = 0;
+    __builtin_memset(m->slots, 0, ((cx_usize)m->n + 1) * sizeof($S));
+}
+)" + tail, names);
+        }
+        return fill(R"(CX_INLINE cx_i64 $find(const $T* m, $KL k, cx_u32 h) {
+    if (__builtin_expect(!m->slots, 0)) return -1;
+    cx_u32 tag = cx_oh_tag(h);
+    for (cx_u32 pos = h & m->mask;; pos = (pos + 1) & m->mask) {
+        cx_u32 c = m->hash[pos];
+        if (c == 0) return -1;
+        if (c == tag && $eqlook) return pos;
+    }
+}
+static __attribute__((noinline)) void $alloc($T* m) {
+    cx_oh_ready(&m->h);
+    cx_usize size = ((cx_usize)m->n + 1) * sizeof($S);
+    m->slots = ($S*)cx_alloc(size);
+    __builtin_memset(m->slots, 0, size);
+    m->hash = (cx_u32*)cx_alloc((cx_usize)m->n * sizeof(cx_u32));
+    __builtin_memset(m->hash, 0, (cx_usize)m->n * sizeof(cx_u32));
+}
+static __attribute__((noinline)) void $rehash($T* m, cx_u32 nn) {
+    cx_u32 mask = nn - 1;
+    if (m->slots) {
+        $S* old = m->slots;
+        cx_u32* oh = m->hash;
+        cx_usize size = ((cx_usize)nn + 1) * sizeof($S);
+        $S* slots = ($S*)cx_alloc(size);
+        __builtin_memset(slots, 0, size);
+        cx_u32* hash = (cx_u32*)cx_alloc((cx_usize)nn * sizeof(cx_u32));
+        __builtin_memset(hash, 0, (cx_usize)nn * sizeof(cx_u32));
+        cx_u32 i = m->n;
+        for (cx_u32 j = m->len; j-- != 0;) {
+            do i--;
+            while (!oh[i]);
+            cx_u32 pos = oh[i] & mask;
+            while (hash[pos]) pos = (pos + 1) & mask;
+            hash[pos] = oh[i];
+            slots[pos] = old[i];
+        }
+        cx_free(old, ((cx_usize)m->n + 1) * sizeof($S));
+        cx_free(oh, (cx_usize)m->n * sizeof(cx_u32));
+        m->slots = slots;
+        m->hash = hash;
+    }
+    m->n = nn;
+    m->mask = mask;
+    m->max_fill = cx_oh_max_fill(nn, m->f);
+}
+static inline void $put($T* m, $params) {
+    if (__builtin_expect(!m->slots, 0)) $alloc(m);
+    cx_u32 h = $mixk, tag = cx_oh_tag(h), pos;
+    for (pos = h & m->mask;; pos = (pos + 1) & m->mask) {
+        cx_u32 c = m->hash[pos];
+        if (c == 0) break;
+        if (c == tag && $eqkey) {
+$replace16                return;
+        }
+    }
+    m->hash[pos] = tag;
+    m->slots[pos] = $new;
+    if (m->len++ >= m->max_fill) $rehash(m, cx_oh_array_size((cx_u64)m->len + 1, m->f));
+}
+static void $shift($T* m, cx_u32 pos) {
+    for (;;) {
+        cx_u32 last = pos, c;
+        pos = (last + 1) & m->mask;
+        for (;;) {
+            c = m->hash[pos];
+            if (c == 0) {
+                m->hash[last] = 0;
+                return;
+            }
+            cx_u32 slot = c & m->mask;
+            if (last <= pos ? last >= slot || slot > pos : last >= slot && slot > pos) break;
+            pos = (pos + 1) & m->mask;
+        }
+        m->hash[last] = c;
+        m->slots[last] = m->slots[pos];
+    }
+}
+static inline cx_bool $take($T* m, $KL k, cx_u32 h, $S* out) {
+    cx_i64 i = $find(m, k, h);
+    if (i < 0) return 0;
+    *out = m->slots[i];
+    m->len--;
+    $shift(m, (cx_u32)i);
+)" + shrink + R"(static void $clear($T* m) {
+    if (!m->len) return;
+$dropall    m->len = 0;
+    __builtin_memset(m->hash, 0, (cx_usize)m->n * sizeof(cx_u32));
+}
+)" + tail, names);
+    }
+
+    // `m.insert(k, v)` and the rest, on a fastutil table.
+    std::string otable_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        bool map = t->kind == TypeKind::map;
+        Type* k = table_key(t);
+        std::string tc = ctype(t), p = tmp(), key = tmp(), i = tmp();
+        std::string head = "({ " + tc + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + tc + "* " + p + " = " + address(recv) + "; ";
+        auto look = [&](Expr* a) { return lookup_ctype(t) + " " + key + " = " + lookup_value(a, t) + "; "; };
+        auto found = [&](Expr* a) {
+            return look(a) + "cx_i64 " + i + " = " + table_fn("find", t) + "(" + p + ", " + key + ", " + lookup_hash(t, key) + "); ";
+        };
+        switch (e->bmethod) {
+            case BMethod::len: return "((cx_usize)(" + expr(recv) + ").len)";
+            case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
+            case BMethod::insert: {
+                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
+                std::string v = tmp();
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + table_fn("put", t) + "(" + p + ", " +
+                       key + ", " + v + "); })";
+            }
+            case BMethod::contains: return view + found(e->args[0].value) + i + " >= 0; })";
+            case BMethod::get: {
+                std::string o = ctype(e->type);
+                return view + found(e->args[0].value) + i + " < 0 ? (" + o + "){0} : (" + o + "){ .v = " + p + "->slots[" + i +
+                       "].f1, .has = 1 }; })";
+            }
+            case BMethod::remove: {
+                // The slot comes out whole, since taking a key out moves others into its place.
+                std::string sl = tmp();
+                std::string s = head + look(e->args[0].value) + ctype(slot_type(t)) + " " + sl + "; cx_bool " + i + " = " +
+                                table_fn("take", t) + "(" + p + ", " + key + ", " + lookup_hash(t, key) + ", &" + sl + "); ";
+                std::string drop_key = is_copy(k) ? std::string() : drop_fn(k) + "(&" + slot_key(t, sl) + "); ";
+                if (!map) return s + "if (" + i + ") { " + drop_key + "} })";
+                std::string o = ctype(e->type), r = tmp();
+                return s + o + " " + r + " = {0}; if (" + i + ") { " + r + ".v = " + sl + ".f1; " + r + ".has = 1; " + drop_key + "} " +
+                       r + "; })";
+            }
+            case BMethod::clear: return table_fn("clear", t) + "(" + address(recv) + ")";
+            case BMethod::reserve:
+                return head + "cx_usize " + key + " = " + value(e->args[0].value, e->args[0].value->type) + "; " + table_fn("reserve", t) +
+                       "(" + p + ", " + key + "); })";
+            case BMethod::trim: return table_fn("trim", t) + "(" + address(recv) + ")";
+            default: return "0";
+        }
+    }
+
     // `m.insert(k, v)` and the rest. The receiver is found first, then the arguments, in order.
     std::string table_method(Expr* e) {
         Expr* recv = e->callee->lhs;
         Type* t = recv->type;
-        if (t->java) return jtable_method(e);
+        if (t->table == TableKind::fastutil) return otable_method(e);
+        if (t->table == TableKind::java) return jtable_method(e);
         bool map = t->kind == TypeKind::map;
         Type* k = table_key(t);
         std::string tc = ctype(t), p = tmp(), key = tmp(), i = tmp();
@@ -1436,7 +1778,18 @@ $dropall    cx_jt_clear(&m->t);
                        equal(t->elem, "a.ptr[i]", "b.ptr[i]") + ") return 0;\n    }\n    return 1;\n";
             case TypeKind::map:
             case TypeKind::set: {
-                if (t->java) {
+                if (t->table == TableKind::fastutil) {
+                    // A slot's hash word places it in any table, so it isn't worked out again.
+                    std::string key = slot_key(t, "a.slots[i]");
+                    std::string h = int_keys(t) ? open_hash(t, key, false) : "a.hash[i]";
+                    std::string body = "        cx_i64 j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) + ", " + h +
+                                       ");\n        if (j < 0) return 0;\n";
+                    if (t->kind == TypeKind::map) {
+                        body += "        if (!" + equal(t->elem, "a.slots[i].f1", "b.slots[j].f1") + ") return 0;\n";
+                    }
+                    return "    if (a.len != b.len) return 0;\n" + each_slot(t, "a.", "    ", body) + "    return 1;\n";
+                }
+                if (t->table == TableKind::java) {
                     // A node keeps its key's hash, so it isn't worked out again.
                     std::string key = slot_key(t, "a.nodes[i].v");
                     std::string body = "        cx_i32 j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) +
@@ -1626,7 +1979,14 @@ $dropall    cx_jt_clear(&m->t);
                 break;
             case TypeKind::map:
             case TypeKind::set:
-                if (t->java) {
+                if (t->table == TableKind::fastutil) {
+                    s += "    if (!p->slots) return;\n";
+                    if (!is_copy(slot_type(t))) s += each_slot(t, "p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
+                    s += "    cx_free(p->slots, ((cx_usize)p->n + 1) * sizeof(*p->slots));\n";
+                    if (!int_keys(t)) s += "    cx_free(p->hash, (cx_usize)p->n * sizeof(cx_u32));\n";
+                    break;
+                }
+                if (t->table == TableKind::java) {
                     s += "    if (!p->heads) return;\n";
                     if (!is_copy(slot_type(t))) s += each_slot(t, "p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->nodes[i].v);\n");
                     s += "    cx_jt_free(&p->t, sizeof(" + jnode(t) + "));\n";
@@ -1681,7 +2041,23 @@ $dropall    cx_jt_clear(&m->t);
             case TypeKind::map:
             case TypeKind::set: {
                 const Type* st = slot_type(t);
-                if (t->java) {
+                if (t->table == TableKind::fastutil) {
+                    // The same slots, so the same order.
+                    std::string e = ctype(st), size = "((cx_usize)p->n + 1) * sizeof(" + e + ")";
+                    s += "    if (!p->slots) return r;\n    r.slots = (" + e + "*)cx_alloc(" + size + ");\n";
+                    if (!int_keys(t)) {
+                        s += "    r.hash = (cx_u32*)cx_alloc((cx_usize)p->n * sizeof(cx_u32));\n"
+                             "    __builtin_memcpy(r.hash, p->hash, (cx_usize)p->n * sizeof(cx_u32));\n";
+                    }
+                    if (is_copy(st)) {
+                        s += "    __builtin_memcpy(r.slots, p->slots, " + size + ");\n";
+                    } else {
+                        s += "    __builtin_memset(r.slots, 0, " + size + ");\n";
+                        s += each_slot(t, "p->", "    ", "        r.slots[i] = " + copy_fn(st) + "(&p->slots[i]);\n");
+                    }
+                    break;
+                }
+                if (t->table == TableKind::java) {
                     // The same bins, trees and order: the arrays as they are, then what they own.
                     s += "    if (!p->heads) return r;\n    r.t = cx_jt_copy(&p->t, sizeof(" + jnode(t) + "));\n";
                     if (!is_copy(st)) s += each_slot(t, "p->", "    ", "        r.nodes[i].v = " + copy_fn(st) + "(&p->nodes[i].v);\n");
@@ -2201,7 +2577,20 @@ $dropall    cx_jt_clear(&m->t);
                 line("}");
                 return;
             }
-            if (is_table(at) && at->java) {
+            if (is_table(at) && at->table == TableKind::fastutil) {
+                // In fastutil's order: the key 0 first, in slot `n`, then the last slot to the
+                // first (D107).
+                elem_at = arr + "->slots[" + i + "]";
+                if (int_keys(at)) {
+                    line("for (cx_u32 " + i + " = " + arr + "->slots ? " + arr + "->n + 1 : 0; " + i + "-- > 0;) {");
+                    indent_++;
+                    line("if (" + i + " == " + arr + "->n ? !" + arr + "->zero : " + slot_key(at, elem_at) + " == 0) continue;");
+                } else {
+                    line("for (cx_u32 " + i + " = " + arr + "->slots ? " + arr + "->n : 0; " + i + "-- > 0;) {");
+                    indent_++;
+                    line("if (!" + arr + "->hash[" + i + "]) continue;");
+                }
+            } else if (is_table(at) && at->table == TableKind::java) {
                 // In Java's order (D105).
                 std::string b = tmp();
                 elem_at = arr + "->nodes[" + i + "].v";
@@ -3036,7 +3425,14 @@ $dropall    cx_jt_clear(&m->t);
         }
         // index
         Type* at = e->lhs->type;
-        if (at->kind == TypeKind::map && at->java) {
+        if (at->kind == TypeKind::map && at->table == TableKind::fastutil) {
+            std::string b = tmp(), k = tmp(), i = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
+                   lookup_value(e->rhs, at) + "; cx_i64 " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
+                   lookup_hash(at, k) + "); if (__builtin_expect(" + i + " < 0, 0)) cx_panic_key(" + location(e->rhs->span) + "); &" +
+                   b + "->slots[" + i + "].f1; }))";
+        }
+        if (at->kind == TypeKind::map && at->table == TableKind::java) {
             std::string b = tmp(), k = tmp(), i = tmp();
             return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
                    lookup_value(e->rhs, at) + "; cx_i32 " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
@@ -3194,8 +3590,16 @@ $dropall    cx_jt_clear(&m->t);
             case CallKind::builtin: return builtin(e);
             case CallKind::convert: return conversion(e);
             case CallKind::construct:
+                // `OpenHashMap<K, V>(n, f)`: fastutil's table for `n` keys at the load factor `f`, 0.75
+                // if it isn't given (D107).
+                if (!e->args.empty() && is_table(e->type) && e->type->table == TableKind::fastutil) {
+                    std::string n = tmp(), f = tmp();
+                    return "({ cx_usize " + n + " = " + value(e->args[0].value, e->args[0].value->type) + "; cx_f32 " + f + " = " +
+                           (e->args.size() > 1 ? value(e->args[1].value, e->args[1].value->type) : std::string("0.75f")) + "; (" +
+                           ctype(e->type) + "){ .h = cx_oh_new(" + n + ", " + f + ", " + location(e->span) + ") }; })";
+                }
                 // `JavaHashMap<K, V>(n)`: Java's first table has room for `n`.
-                if (!e->args.empty() && is_table(e->type) && e->type->java) {
+                if (!e->args.empty() && is_table(e->type) && e->type->table == TableKind::java) {
                     return "((" + ctype(e->type) + "){ .thr = cx_jt_size_for(" + value(e->args[0].value, e->args[0].value->type) + ") })";
                 }
                 return construct(e->type);
@@ -3246,7 +3650,7 @@ $dropall    cx_jt_clear(&m->t);
     std::string construct(Type* t) {
         if (t->kind == TypeKind::string || t->kind == TypeKind::list) return "((" + ctype(t) + "){0})";
         // An empty table points at the shared control bytes, so a lookup needs no check for it.
-        if (is_table(t) && t->java) return "((" + ctype(t) + "){0})";
+        if (is_table(t) && t->table != TableKind::native) return "((" + ctype(t) + "){0})";
         if (is_table(t)) return "((" + ctype(t) + "){ .ctrl = (cx_u8*)cx_table_empty })";
         std::string s = "((" + ctype(t) + "){";
         bool first = true;

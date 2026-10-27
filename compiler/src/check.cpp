@@ -89,7 +89,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "Copy", "Equal", "Display",
+        for (const char* b : {"some", "ok", "err", "List", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "Copy", "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
@@ -98,6 +98,8 @@ public:
         n_Set_ = ctx.names.intern("Set");
         n_JavaHashMap_ = ctx.names.intern("JavaHashMap");
         n_JavaHashSet_ = ctx.names.intern("JavaHashSet");
+        n_OpenHashMap_ = ctx.names.intern("OpenHashMap");
+        n_OpenHashSet_ = ctx.names.intern("OpenHashSet");
         n_JavaHash_ = ctx.names.intern("JavaHash");
         n_java_hash_ = ctx.names.intern("java_hash");
         n_Hash_ = ctx.names.intern("Hash");
@@ -148,7 +150,7 @@ public:
         check_hand_written();
         defer_bounds_ = false;
         for (const DeferredBounds& d : deferred_bounds_) check_bounds(d.params, d.args, d.span, d.what);
-        for (const auto& [key, span, java] : deferred_keys_) check_key(key, span, java);
+        for (const auto& [key, span, table] : deferred_keys_) check_key(key, span, table);
         // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
         for (Item* it : structs_) check_defaults(it);
         defaults_ready_ = true;
@@ -176,7 +178,7 @@ public:
         instance_mode_ = false;
         order_types();
         for (Type* t : T.compounds()) {
-            if (t->java && !t->open && orderable(t->kind == TypeKind::map ? t->key : t->elem)) {
+            if (t->table == TableKind::java && !t->open && orderable(t->kind == TypeKind::map ? t->key : t->elem)) {
                 prog_.java_ordered.insert(t->kind == TypeKind::map ? t->key : t->elem);
             }
         }
@@ -1344,8 +1346,8 @@ private:
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list: return T.list_of(subst(t->elem, s));
-            case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->java);
-            case TypeKind::set: return T.set_of(subst(t->elem, s), t->java);
+            case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
+            case TypeKind::set: return T.set_of(subst(t->elem, s), t->table);
             case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
             case TypeKind::tuple: {
                 std::vector<Type*> elems;
@@ -1374,7 +1376,7 @@ private:
             return it->second == actual;
         }
         if (!pattern->open) return pattern == actual;
-        if (pattern->kind != actual->kind || pattern->java != actual->java) return false;
+        if (pattern->kind != actual->kind || pattern->table != actual->table) return false;
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::set: return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
@@ -1620,8 +1622,8 @@ private:
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + "_list";
-            case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + (t->java ? "_jmap" : "_map");
-            case TypeKind::set: return mangle(t->elem) + (t->java ? "_jset" : "_set");
+            case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
+            case TypeKind::set: return mangle(t->elem) + table_suffix(t) + "set";
             case TypeKind::tuple: {
                 std::string s = "tup";
                 for (Type* e : t->elems) s += "_" + mangle(e);
@@ -2032,9 +2034,9 @@ private:
                     }
                     return T.list_of(elem);
                 }
-                if ((n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_) && !env_type(n)) {
-                    bool map = n == n_Map_ || n == n_JavaHashMap_;
-                    bool java = n == n_JavaHashMap_ || n == n_JavaHashSet_;
+                if (is_table_name(n) && !env_type(n)) {
+                    bool map = n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_;
+                    TableKind table = table_kind(n);
                     if (t->args.size() != (map ? 2u : 1u)) {
                         std::string name(text(n));
                         error(t->span, map ? q(name) + " takes two generic arguments, the types of its keys and values: " +
@@ -2052,8 +2054,8 @@ private:
                         }
                         args.push_back(x);
                     }
-                    check_key(args[0], t->args[0]->span, java);
-                    return map ? T.map_of(args[0], args[1], java) : T.set_of(args[0], java);
+                    check_key(args[0], t->args[0]->span, table);
+                    return map ? T.map_of(args[0], args[1], table) : T.set_of(args[0], table);
                 }
                 if (Type* p = env_type(n)) {
                     if (!t->args.empty()) {
@@ -3566,19 +3568,20 @@ private:
         }
     }
 
-    // A key of a map or a value of a set must have `Hash`, and one of a `JavaHashMap` or a
-    // `JavaHashSet` `JavaHash`, which brings `Equal` (D105). While types are still being resolved,
+    // A key of a map or a value of a set must have `Hash`, and one of Java's or fastutil's
+    // tables `JavaHash`, which brings `Equal` (D105, D107). While types are still being resolved,
     // the check waits, like the bounds, since the key's fields may not be known yet.
-    void check_key(const Type* key, Span span, bool java) {
+    void check_key(const Type* key, Span span, TableKind table) {
         if (defer_bounds_) {
-            deferred_keys_.push_back({key, span, java});
+            deferred_keys_.push_back({key, span, table});
             return;
         }
         if (is_bad(key)) return;
-        if (java) {
+        if (table != TableKind::native) {
             if (java_hashable(key)) return;
-            error(span, name_of(key) + " can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`" +
-                            lacking(key, p_java_hash));
+            error(span, name_of(key) + " can't be a key of " +
+                            (table == TableKind::java ? "a `JavaHashMap` or a `JavaHashSet`" : "an `OpenHashMap` or an `OpenHashSet`") +
+                            ", since it has no `JavaHash`" + lacking(key, p_java_hash));
             return;
         }
         if (hashable(key)) return;
@@ -5381,8 +5384,8 @@ private:
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
-            if ((n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_) && !find_local(n)) {
-                return table_call(e, expected, n == n_Map_ || n == n_JavaHashMap_, n == n_JavaHashMap_ || n == n_JavaHashSet_);
+            if (is_table_name(n) && !find_local(n)) {
+                return table_call(e, expected, n == n_Map_ || n == n_JavaHashMap_ || n == n_OpenHashMap_, table_kind(n));
             }
             if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
                 for (const Arg& a : e->args) check(a.value, nullptr);
@@ -6417,14 +6420,28 @@ private:
         return t;
     }
 
+    bool is_table_name(Name n) const {
+        return n == n_Map_ || n == n_Set_ || n == n_JavaHashMap_ || n == n_JavaHashSet_ || n == n_OpenHashMap_ || n == n_OpenHashSet_;
+    }
+    TableKind table_kind(Name n) const {
+        if (n == n_JavaHashMap_ || n == n_JavaHashSet_) return TableKind::java;
+        if (n == n_OpenHashMap_ || n == n_OpenHashSet_) return TableKind::fastutil;
+        return TableKind::native;
+    }
+    static std::string table_suffix(const Type* t) {
+        return t->table == TableKind::java ? "_j" : t->table == TableKind::fastutil ? "_o" : "_";
+    }
+
     // `Map<String, i32>()` and `Set<i32>()`: an empty map or set, from the generic arguments or the
     // type expected. It allocates nothing until something goes in. `JavaHashMap<K, V>(n)` is
-    // Java's `new HashMap<>(n)`, whose first table has room for `n` (D105).
-    Type* table_call(Expr* e, Type* expected, bool map, bool java) {
+    // Java's `new HashMap<>(n)`, whose first table has room for `n` (D105), and
+    // `OpenHashMap<K, V>(n, f)` is fastutil's constructor, for `n` keys at the load factor `f` (D107).
+    Type* table_call(Expr* e, Type* expected, bool map, TableKind table) {
         Expr* callee = e->callee;
         callee->ref = Ref::type;
         TypeKind kind = map ? TypeKind::map : TypeKind::set;
-        std::string name = java ? (map ? "JavaHashMap" : "JavaHashSet") : map ? "Map" : "Set";
+        bool java = table == TableKind::java, open = table == TableKind::fastutil;
+        std::string name = java ? (map ? "JavaHashMap" : "JavaHashSet") : open ? (map ? "OpenHashMap" : "OpenHashSet") : map ? "Map" : "Set";
         std::string example = name + (map ? "<String, i32>()" : "<i32>()");
         Type* t = nullptr;
         std::size_t want = map ? 2 : 1;
@@ -6435,36 +6452,41 @@ private:
                 if (is_bad(x)) return T.error;
                 args.push_back(x);
             }
-            check_key(args[0], callee->type_args[0]->span, java);
-            t = map ? T.map_of(args[0], args[1], java) : T.set_of(args[0], java);
+            check_key(args[0], callee->type_args[0]->span, table);
+            t = map ? T.map_of(args[0], args[1], table) : T.set_of(args[0], table);
         } else if (!callee->type_args.empty()) {
             error(callee->span, map ? q(name) + " takes two generic arguments, the types of its keys and values: " + q(example)
                                     : q(name) + " takes one generic argument, the type of its values: " + q(example));
             return T.error;
-        } else if (expected && expected->kind == kind && expected->java == java) {
+        } else if (expected && expected->kind == kind && expected->table == table) {
             t = expected;
         } else {
             error(e->span, std::string("can't tell what this ") + (map ? "map" : "set") + " holds; give it, as in " + q(example) +
                                ", or give the variable a type");
             return T.error;
         }
-        if (java && e->args.size() == 1) {
-            // Java's initial capacity, which sets the size of the first table.
-            Arg& a = e->args[0];
-            if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
-            check(a.value, T.usize);
+        if ((java && e->args.size() == 1) || (open && e->args.size() <= 2 && !e->args.empty())) {
+            // Java's initial capacity, which sets the size of the first table, and fastutil's
+            // expected size and load factor.
+            for (std::size_t i = 0; i < e->args.size(); i++) {
+                Arg& a = e->args[i];
+                if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+                check(a.value, i == 0 ? T.usize : T.f32);
+            }
         } else {
             for (Arg& a : e->args) check(a.value, nullptr);
             if (!e->args.empty()) {
                 error(e->args[0].span, java ? q(name + "<...>()") + " takes at most one argument, the capacity Java's " +
                                                   (map ? "`new HashMap<>(n)`" : "`new HashSet<>(n)`") + " starts with"
-                                            : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
+                                       : open ? q(name + "<...>()") + " takes at most two arguments, the expected size and the load factor, as fastutil's constructor does"
+                                              : q(name + "<...>()") + " takes no arguments; add to it with `insert`");
                 return T.error;
             }
         }
         callee->named_type = t;
         e->call = CallKind::construct;
-        e->is_const = e->args.empty() || e->args[0].value->is_const;
+        e->is_const = true;
+        for (Arg& a : e->args) e->is_const = e->is_const && a.value->is_const;
         return t;
     }
 
@@ -6617,9 +6639,9 @@ private:
             Type* look = lookup_key(recv);
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
-            // Java's tables don't say how many keys fit.
-            else if (m == "capacity" && !recv->java) b = BMethod::capacity, result = T.usize;
-            else if (m == "compute_if_absent" && map && recv->java) {
+            // Java's and fastutil's tables don't say how many keys fit.
+            else if (m == "capacity" && recv->table == TableKind::native) b = BMethod::capacity, result = T.usize;
+            else if (m == "compute_if_absent" && map && recv->table == TableKind::java) {
                 b = BMethod::compute_if_absent, changes = true, params = {recv->key, recv->elem}, result = T.bool_;
             }
             else if (m == "insert") b = BMethod::insert, changes = true, params = map ? std::vector<Type*>{recv->key, recv->elem}
@@ -6629,6 +6651,8 @@ private:
             else if (m == "get" && map) b = BMethod::get, params = {look}, result = T.optional_of(recv->elem);
             else if (m == "clear") b = BMethod::clear, changes = true;
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            // fastutil's `trim()`, which shrinks the table to the smallest that holds its keys.
+            else if (m == "trim" && recv->table == TableKind::fastutil) b = BMethod::trim, changes = true;
             if (b == BMethod::get && !is_copy(recv->elem) && !is_bad(recv->elem)) {
                 error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(recv->elem) +
                                            " owns memory; read it in place with `m[key]`");
@@ -6983,7 +7007,7 @@ private:
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
-    Name n_JavaHashMap_, n_JavaHashSet_, n_JavaHash_, n_java_hash_;
+    Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_JavaHash_, n_java_hash_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
@@ -7025,7 +7049,7 @@ private:
     std::unordered_map<Item*, std::vector<Type*>> unfilled_;
     std::vector<Item*> pending_fns_;
     std::vector<DeferredBounds> deferred_bounds_;
-    std::vector<std::tuple<const Type*, Span, bool>> deferred_keys_;
+    std::vector<std::tuple<const Type*, Span, TableKind>> deferred_keys_;
     std::unordered_set<std::string> c_names_;
     std::unordered_set<std::string> prefixes_;
     std::unordered_set<Item*> failed_generics_;

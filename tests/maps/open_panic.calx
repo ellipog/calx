@@ -1,0 +1,8 @@
+// fastutil's load factor is between 0 and 1, as its constructor checks.
+fn main() {
+    var fine = OpenHashSet<i32>(10, 0.99)
+    fine.insert(1)
+    println("{fine}")    // out: {1}
+    let m = OpenHashMap<i32, i32>(4, 1.0)    // panic: the load factor must be greater than 0 and less than 1
+    println("{m.len()}")
+}

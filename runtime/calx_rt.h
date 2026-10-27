@@ -344,6 +344,10 @@ cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
 /* Frees what cx_table_alloc gave for `buckets` slots of `size` bytes. */
 void cx_table_free(void* slots, cx_usize buckets, cx_usize size);
 CX_COLD void cx_panic_key(const char* at);
+/* An `OpenHashMap`'s or an `OpenHashSet`'s load factor isn't between 0 and 1, or it's asked for
+ * more keys than fastutil's tables hold. */
+CX_COLD void cx_panic_load_factor(const char* at);
+CX_COLD void cx_panic_table_size(const char* at);
 
 /* The tables behind `JavaHashMap` and `JavaHashSet`, in calx_jtable.c (D105): Java's HashMap,
  * which iterates in Java's order. `heads` is a power of two bins, each 0 when empty, the first
@@ -409,6 +413,50 @@ cx_jtable cx_jt_copy(const cx_jtable* m, cx_usize size);
 void cx_jt_clear(cx_jtable* m);
 /* Java's `String.compareTo`, by UTF-16 unit: -1, 0 or 1. */
 int cx_jt_str_order(cx_str a, cx_str b);
+
+/* The tables behind `OpenHashMap` and `OpenHashSet` (D107): fastutil's open hash tables, which
+ * iterate in fastutil's order. A table is `n` slots, a power of two, found by linear probing from
+ * the slot its key's mixed hash picks. An integer key of 0 marks an empty slot, so the key 0
+ * itself is kept in slot `n`, past the others, and `zero` says whether it's there. Other keys
+ * have a hash word per slot, 0 when it's empty. The compiler's table type starts with its slots
+ * and those words, then this header; finding, adding, removing and rehashing are the compiler's,
+ * for each key type, and the sizes fastutil picks are here, in calx_ohtable.c. */
+typedef struct {
+    cx_u32 n;         /* the slots, or 0 in a table made without a size, before its first use */
+    cx_u32 mask;      /* n - 1 */
+    cx_u32 len;       /* the keys */
+    cx_u32 max_fill;  /* an insert that finds `len` at this rehashes */
+    cx_u32 min_n;     /* the slots it was made with, which removing keys won't shrink it below */
+    cx_f32 f;         /* the load factor */
+    cx_bool zero;     /* integer keys: whether 0 is a key */
+} cx_ohead;
+/* `HashCommon.mix`: the hash an `int`, a `long` or an object's `hashCode` places a key by. */
+CX_INLINE cx_u32 cx_oh_mix32(cx_i32 x) {
+    cx_u32 h = (cx_u32)x * 0x9E3779B9u;
+    return h ^ (h >> 16);
+}
+CX_INLINE cx_u32 cx_oh_mix64(cx_u64 x) {
+    cx_u64 h = x * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 32;
+    return (cx_u32)(h ^ (h >> 16));
+}
+/* What a slot of a key that isn't an integer keeps of its mixed hash: the 30 bits that place it
+ * in any table, with the top bit set, so no full slot's word is 0. */
+CX_INLINE cx_u32 cx_oh_tag(cx_u32 h) { return (h & 0x3FFFFFFFu) | 0x80000000u; }
+/* fastutil's constructor: the header for `expected` keys at the load factor `f`. */
+cx_ohead cx_oh_new(cx_usize expected, cx_f32 f, const char* at);
+/* A table made without a size becomes fastutil's default one, for 16 keys at 0.75, when it's
+ * first used. */
+CX_INLINE void cx_oh_ready(cx_ohead* h) {
+    if (__builtin_expect(!h->n, 0)) *h = (cx_ohead){ 32, 31, 0, 24, 32, 0.75f, 0 };
+}
+/* `HashCommon.arraySize` and `maxFill`. */
+cx_u32 cx_oh_array_size(cx_u64 expected, cx_f32 f);
+cx_u32 cx_oh_max_fill(cx_u32 n, cx_f32 f);
+/* The slots `putAll` and `addAll` make room in before adding `c` keys. */
+cx_u32 cx_oh_reserve_size(const cx_ohead* h, cx_usize c);
+/* The slots `trim()` shrinks the table to, or 0 when it stays. */
+cx_u32 cx_oh_trim_size(const cx_ohead* h);
 
 /* Bounds checks. */
 CX_INLINE cx_usize cx_index(cx_usize i, cx_usize length, const char* at) {

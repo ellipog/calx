@@ -5,7 +5,7 @@ description: JavaHashMap<K, V> and JavaHashSet<T>, which go over their keys in t
 
 # Java's hash maps
 
-`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code where vanilla's order shows, such as the order it ticks things in or sends them to a client. Everywhere else, [`Map` and `Set`](maps.md) are faster.
+`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code where vanilla's order shows, such as the order it ticks things in or sends them to a client. Vanilla's fastutil tables are [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), and everywhere else, [`Map` and `Set`](maps.md) are faster.
 
 ```calx
 fn main() {
@@ -72,7 +72,7 @@ fn main() {
 
 ## `JavaHash`
 
-A key's bin comes from its `JavaHash`, which is Java's `hashCode`. `x.java_hash()` gives it, as an `i32`.
+A key's bin comes from its `JavaHash`, which is Java's `hashCode`, and so does the slot of a key of an [`OpenHashMap`](fastutil-maps.md) that isn't an integer. `x.java_hash()` gives it, as an `i32`.
 
 | Type | `java_hash` is |
 | --- | --- |

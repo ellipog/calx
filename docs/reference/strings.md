@@ -120,7 +120,7 @@ fn main() {
 }
 ```
 
-- `java_hash` is what a [`JavaHashMap`](java-maps.md) places a string key by, and what vanilla code that hashes names computes. Every type with Java's `hashCode` has it ([`JavaHash`](java-maps.md#javahash)).
+- `java_hash` is what a [`JavaHashMap`](java-maps.md) and an [`OpenHashMap`](fastutil-maps.md) place a string key by, and what vanilla code that hashes names computes. Every type with Java's `hashCode` has it ([`JavaHash`](java-maps.md#javahash)).
 - `utf16_len` is what the protocol's string limits count, such as 16 for a player name and 32767 for a chat message.
 - They matched Java 25 on 20,000 random strings, with U+0000, every length of UTF-8, and surrogate pairs.
 - `java_hash` takes eight ASCII bytes a step, `h * 31^8` plus each byte times its power, so the chain of multiplies is an eighth as long as Java's loop.

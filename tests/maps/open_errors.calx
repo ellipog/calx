@@ -1,0 +1,27 @@
+// What `OpenHashMap` and `OpenHashSet` can't do: hold a key without `JavaHash`, take the wrong
+// arguments, or use the methods only Calx's own tables or Java's have.
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn keyed<T>(x: T) -> OpenHashSet<T> {    // error: `T` can't be a key of an `OpenHashMap` or an `OpenHashSet`, since it has no `JavaHash`; give `T` the bound `JavaHash`
+    var s = OpenHashSet<T>()    // error: `T` can't be a key of an `OpenHashMap` or an `OpenHashSet`, since it has no `JavaHash`; give `T` the bound `JavaHash`
+    s.insert(x)
+    return s
+}
+
+fn main() {
+    let a = OpenHashMap<f64, i32>()    // error: `f64` can't be a key of an `OpenHashMap` or an `OpenHashSet`, since it has no `JavaHash`, and floats have no `JavaHash`: `==` on them isn't Java's `equals`, so they can't be keys
+    let b = OpenHashSet<Point>()    // error: `Point` can't be a key of an `OpenHashMap` or an `OpenHashSet`, since it has no `JavaHash`, and a struct or an enum has the `JavaHash` it writes, as a Java class has the `hashCode` it writes: `impl JavaHash for Point`
+    let m = OpenHashMap<i32, i32>()
+    println("{m.capacity()}")    // error: `OpenHashMap<i32, i32>` has no method `capacity`
+    _ = m.compute_if_absent(1, 2)    // error: `OpenHashMap<i32, i32>` has no method `compute_if_absent`
+    let j = JavaHashMap<i32, i32>()
+    j.trim()    // error: `JavaHashMap<i32, i32>` has no method `trim`
+    let e = OpenHashMap<i32, i32>(1, 0.5, 3)    // error: `OpenHashMap<...>()` takes at most two arguments, the expected size and the load factor, as fastutil's constructor does
+    let wide: f64 = 0.5
+    let g = OpenHashSet<i32>(4, wide)    // error: expected `f32`, found `f64`
+    let h: OpenHashMap<i32, i32> = JavaHashMap<i32, i32>()    // error: expected `OpenHashMap<i32, i32>`, found `JavaHashMap<i32, i32>`
+    println("{a.len()} {b.len()} {e.len()} {g.len()} {h.len()} {keyed(1).len()}")
+}
