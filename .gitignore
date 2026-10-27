@@ -1,1 +1,3 @@
 build/
+# Cargo output, if the benchmark is built outside bench/run.py
+bench/rust/target/
