@@ -29,6 +29,17 @@ typedef struct {
 #define CX_INLINE static inline __attribute__((always_inline))
 #define CX_COLD __attribute__((cold, noreturn))
 
+/* Each function starts with this for every view parameter: a view points at a whole, live,
+ * aligned value for the whole call, since views can't be stored or outlive what they view (D48).
+ * Saying so lets clang read a view's fields once before a loop instead of on every pass, even
+ * after the function is inlined, which a parameter attribute wouldn't survive. */
+#if __has_builtin(__builtin_assume_dereferenceable)
+#define CX_VIEW(p) (__builtin_assume_dereferenceable((p), sizeof(*(p))), \
+                    (void)__builtin_assume_aligned((p), _Alignof(__typeof__(*(p)))))
+#else
+#define CX_VIEW(p) ((void)__builtin_assume_aligned((p), _Alignof(__typeof__(*(p)))))
+#endif
+
 /* A C function's name as the linker sees it, for `extern "C"` declarations: an asm label gives
  * it, so the name Calx calls it by can't meet one a header declares. */
 #define CX_SYMBOL_2(prefix, name) #prefix name

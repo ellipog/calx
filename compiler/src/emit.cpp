@@ -671,6 +671,9 @@ private:
         uses_ = &o.uses;
         out_ = " {\n";
         indent_ = 1;
+        for (const Param& p : f->params) {
+            if (p.local->is_view) line("CX_VIEW(" + local_name(p.local) + ");");
+        }
         stmts(f->body, /*value=*/false);
         indent_ = 0;
         out_ += "}\n\n";

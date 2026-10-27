@@ -5011,14 +5011,18 @@ private:
         for (std::size_t i = first; i < n && ok; i++) {
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
         }
-        // D48: a value passed as `mut` can't be passed again in the same call.
+        // D48: a value passed as `mut` can't be passed again in the same call, nor can any part of
+        // it. Separate fields are separate values, so `mut w.blocks[k]` and `mut w.states[k]` can
+        // go together; two elements of one list can't, since their indexes may be equal.
         for (std::size_t i = 0; i < n; i++) {
             if (!is_mut[i] || !ordered[i]) continue;
-            Local* root = place_root(ordered[i]);
-            if (!root) continue;
+            const Local* root = nullptr;
+            std::vector<std::uint32_t> path;
+            if (!place_path(ordered[i], root, path)) continue;
             for (std::size_t j = 0; j < n; j++) {
                 if (j == i || !ordered[j]) continue;
-                if (mentions(ordered[j], root)) {
+                if (is_mut[j] && j < i) continue;  // the pair was checked from j's side
+                if (mentions(ordered[j], root, &path)) {
                     error(ordered[j]->span, q(text(root->name)) + " is passed as `mut`, so it can't be used again in the same call");
                     note(ordered[i]->span, "it's passed as `mut` here");
                     break;
@@ -5055,29 +5059,67 @@ private:
         return result;
     }
 
-    // Whether the expression reads or writes the local anywhere.
-    static bool mentions(const Expr* e, const Local* l) {
+    // A place such as `a.b[i].c` as its root and its steps from there, outermost first: a field's
+    // index, or kIndexStep for `[i]`. False if the expression isn't a place.
+    static constexpr std::uint32_t kIndexStep = 0xFFFFFFFF;
+    static bool place_path(const Expr* e, const Local*& root, std::vector<std::uint32_t>& path) {
+        path.clear();
+        while (e->kind == ExprKind::field || e->kind == ExprKind::index) {
+            path.push_back(e->kind == ExprKind::index ? kIndexStep : e->field_index);
+            e = e->lhs;
+        }
+        if ((e->kind != ExprKind::name && e->kind != ExprKind::self) || e->ref != Ref::local) return false;
+        root = e->local;
+        std::reverse(path.begin(), path.end());
+        return true;
+    }
+
+    // Whether two places with the same root can be the same memory, or one part of the other:
+    // only a different field at some step keeps them apart.
+    static bool overlap(const std::vector<std::uint32_t>& a, const std::vector<std::uint32_t>& b) {
+        for (std::size_t k = 0; k < a.size() && k < b.size(); k++) {
+            if (a[k] != b[k] && a[k] != kIndexStep && b[k] != kIndexStep) return false;
+        }
+        return true;
+    }
+
+    // Whether the expression reads or writes the local anywhere. With `part`, only uses of the
+    // local that can reach that place count, so `a.x` doesn't touch `a.y`.
+    static bool mentions(const Expr* e, const Local* l, const std::vector<std::uint32_t>* part = nullptr) {
         if (!e) return false;
+        if (part && (e->kind == ExprKind::field || e->kind == ExprKind::index)) {
+            const Local* root = nullptr;
+            std::vector<std::uint32_t> path;
+            if (place_path(e, root, path) && root == l) {
+                if (overlap(*part, path)) return true;
+                // A separate part, but its indexes are expressions of their own.
+                for (const Expr* x = e; x->kind == ExprKind::field || x->kind == ExprKind::index; x = x->lhs) {
+                    if (x->kind == ExprKind::index && mentions(x->rhs, l, part)) return true;
+                }
+                return false;
+            }
+        }
         if ((e->kind == ExprKind::name || e->kind == ExprKind::self) && e->local == l) return true;
-        if (mentions(e->lhs, l) || mentions(e->rhs, l) || mentions(e->callee, l)) return true;
-        for (const Arg& a : e->args) if (mentions(a.value, l)) return true;
-        for (const Expr* x : e->elems) if (mentions(x, l)) return true;
-        for (const FieldInit& f : e->fields) if (mentions(f.value, l)) return true;
-        for (const Expr* x : e->interpolations) if (mentions(x, l)) return true;
-        if (mentions(e->repeat, l) || mentions(e->cond, l) || mentions(e->else_, l)) return true;
-        if (mentions(e->block, l) || mentions(e->scrutinee, l) || mentions(e->body, l)) return true;
-        for (const MatchArm& a : e->arms) if (mentions(a.guard, l) || mentions(a.body, l)) return true;
+        if (mentions(e->lhs, l, part) || mentions(e->rhs, l, part) || mentions(e->callee, l, part)) return true;
+        for (const Arg& a : e->args) if (mentions(a.value, l, part)) return true;
+        for (const Expr* x : e->elems) if (mentions(x, l, part)) return true;
+        for (const FieldInit& f : e->fields) if (mentions(f.value, l, part)) return true;
+        for (const Expr* x : e->interpolations) if (mentions(x, l, part)) return true;
+        if (mentions(e->repeat, l, part) || mentions(e->cond, l, part) || mentions(e->else_, l, part)) return true;
+        if (mentions(e->block, l, part) || mentions(e->scrutinee, l, part) || mentions(e->body, l, part)) return true;
+        for (const MatchArm& a : e->arms) if (mentions(a.guard, l, part) || mentions(a.body, l, part)) return true;
         return false;
     }
 
-    static bool mentions(const Block* b, const Local* l) {
+    static bool mentions(const Block* b, const Local* l, const std::vector<std::uint32_t>* part = nullptr) {
         if (!b) return false;
         for (const Stmt* s : b->stmts) {
-            if (mentions(s->value, l) || mentions(s->target, l) || mentions(s->else_, l) || mentions(s->cond, l) ||
-                mentions(s->pool, l) || mentions(s->else_block, l) || mentions(s->body, l))
+            if (mentions(s->value, l, part) || mentions(s->target, l, part) || mentions(s->else_, l, part) ||
+                mentions(s->cond, l, part) || mentions(s->pool, l, part) || mentions(s->else_block, l, part) ||
+                mentions(s->body, l, part))
                 return true;
         }
-        return mentions(b->tail, l);
+        return mentions(b->tail, l, part);
     }
 
     Type* construct(Expr* e, Type* t, Type* expected) {

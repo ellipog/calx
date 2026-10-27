@@ -45,9 +45,9 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 | Mode | clang flags | For |
 | --- | --- | --- |
 | debug (the default) | `-O0 -DCX_DEBUG` | Fast builds while you work |
-| release | `-O2 -march=x86-64-v3` | Speed |
+| release | `-O3 -march=x86-64-v3` | Speed |
 
-In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
 
 In debug builds the runtime counts allocations, and a program that ends with any still live says so and exits with status 102. The compiler frees every value ([ownership](ownership.md)), so that's a bug in Calx, worth reporting. Release builds don't count.
 

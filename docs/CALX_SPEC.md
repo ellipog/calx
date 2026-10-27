@@ -220,6 +220,7 @@ fn tick_all(r: mut Region) {
 - **No pointers in safe code.** No pointer arithmetic, no casts between unrelated types, no uninitialized values: every variable is assigned before use, and struct fields take their defaults.
 - **No data races.** The only parallelism is `parallel for` ([Region actors](#region-actors-and-messages)), and its capture check makes races impossible.
 - **`restrict`.** Since `mut` views never overlap, the emitter marks every view and owned-value pointer parameter `restrict` in C, which closes Rust's main codegen advantage (D26).
+- **Views are always valid.** Every function starts by telling clang that each view parameter points at a whole, live, aligned value (`CX_VIEW`, from `__builtin_assume_dereferenceable` and `__builtin_assume_aligned`). Views can't be stored or outlive what they view, so that holds for the whole call. Clang can then read a view's fields once before a loop rather than on every pass, even after inlining, which Rust's `dereferenceable` parameter attributes don't survive (D89).
 
 ### `unsafe`
 
@@ -364,7 +365,7 @@ Building and running Calx code has to be fast. The design choices that make it s
 - **A fast front end.** Lexing, parsing, checking and emitting C use arena allocation and interned names, with no heap allocation per node and no whole-program analysis beyond what monomorphization needs. The front end always rechecks everything, because that's cheaper than tracking what to skip.
 - **Clang only where the C changed.** Each module becomes its own C file. An object is cached under a hash of the C text, the flags and the clang version, so a module whose C is unchanged is never compiled again, and changed modules compile in parallel.
 - **The runtime is built once** per target and build mode, and reused.
-- **Debug builds use `-O0`** with line tables only. Release builds use `-O2`.
+- **Debug builds use `-O0`** with line tables only. Release builds use `-O3` (D89).
 - **lld links** on both platforms, since it's several times faster than the default linkers.
 - **Lean C.** Emitted code includes only Calx's small runtime header, never `windows.h` or other large system headers.
 - **`calx run` reuses the last executable** when nothing changed.

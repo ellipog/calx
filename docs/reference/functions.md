@@ -51,7 +51,8 @@ fn main() {
 - A read or `mut` parameter is a view of the caller's value, so it can't be moved, returned or stored. A function that keeps what it's given takes it as `own`.
 - A method takes its value the same three ways: `self`, `mut self` and `own self`.
 - `mut` at the call site shows which arguments can change. Only a variable, or a field or element of one, can be passed as `mut`.
-- Within one call, a value passed as `mut` can't appear in any other argument (D48), so the views never overlap. The emitted C marks them `restrict`.
+- Within one call, a value passed as `mut` can't appear in any other argument, nor can any part of it (D48), so the views never overlap. The emitted C marks them `restrict`.
+- Separate fields are separate values, so `mut w.blocks[k]` and `mut w.states[k]` can go in one call, and so can `mut s.due` and `s.scheduled`. Two elements of one list can't, as in `mut xs[i]` and `xs[j]`, since `i` and `j` may be equal.
 
 ```calx
 struct Pair {
@@ -67,6 +68,31 @@ fn copy_into(to: mut Pair, from: Pair) {
 fn main() {
     var p = Pair { a: 1, b: 2 }
     copy_into(mut p, p)    // error: `p` is passed as `mut`, so it can't be used again in the same call
+}
+```
+
+Fields apart are fine:
+
+```calx
+struct Pair {
+    a: i32
+    b: i32
+}
+
+struct Two {
+    first: Pair
+    second: Pair
+}
+
+fn copy_into(to: mut Pair, from: Pair) {
+    to.a = from.a
+    to.b = from.b
+}
+
+fn main() {
+    var t = Two { first: Pair { a: 1, b: 2 }, second: Pair { a: 0, b: 0 } }
+    copy_into(mut t.second, t.first)
+    println("{t.second.a} {t.second.b}")    // out: 1 2
 }
 ```
 

@@ -93,13 +93,13 @@ The Calx and Rust versions must print the same checksum, with any thread count. 
 | Configurations | 1 worker thread, and one worker per physical core |
 | Platforms | Windows 11 and Linux (Ubuntu under WSL2) on the same machine |
 | Machine | One fixed machine for every recorded number (D34), with its CPU, memory and OS build recorded beside the results. CI machines are too noisy |
-| Gate | Calx's result is at most 1.10 × Rust's in every configuration on both platforms |
+| Gate | Calx's result is at most 1.10 × Rust's in every configuration on both platforms. That's the floor: the target is Calx faster than Rust in every configuration (D89) |
 
 ## Making the comparison fair
 
 - **Same algorithms.** The Rust version follows this page as closely as the Calx one does, including a hand-written Java-compatible `HashMap` (Rust's standard map iterates in a different order) and Java's `Random`.
 - **Idiomatic, safe Rust.** No `unsafe`, bounds checks left in, `std` threads or a small work-stealing pool equivalent to Calx's runtime, and wrapping arithmetic where Java wraps.
-- **Same optimization level.** Rust: `--release` with `lto = "thin"`, `codegen-units = 1` and `panic = "abort"`. Calx: its release mode, clang `-O2` on the emitted C, `-ffp-contract=off`. Both target `x86-64-v3`, so neither gets wider instructions than the other.
+- **Same optimization level.** Rust: `--release` with `lto = "thin"`, `codegen-units = 1` and `panic = "abort"`. Calx: its release mode, clang `-O3` on the emitted C, `-ffp-contract=off`. (This said `-O2` until D89. Rust's `--release` is `opt-level = 3`, so `-O3` is the same level, and `-O2` had held Calx a level below.) Both target `x86-64-v3`, so neither gets wider instructions than the other.
 - **Same toolchain generation.** The clang Calx uses and the LLVM inside rustc are both recorded. If they're far apart, that's noted with the result.
 
 ## Precise rules
@@ -179,8 +179,8 @@ The benchmark lives in [`bench/`](../bench/README.md) (`P3.1`, `P3.11`):
 | Path | What it is |
 | --- | --- |
 | `bench/rust/` | The Rust reference: idiomatic, safe Rust, standard library only |
+| `bench/calx/` | The Calx version (`P3.3`), the same algorithms in Calx |
 | `bench/run.py` | Builds and runs a version, checks its checksum, and records the result |
 | `bench/expected.json` | The checksum every version must print |
 | `bench/results/` | Recorded results, one file per version and platform, naming the commit, the machine and the toolchain |
 
-The Calx version joins them once the compiler can build it.

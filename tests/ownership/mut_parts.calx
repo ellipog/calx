@@ -1,0 +1,39 @@
+// A `mut` argument and other arguments in one call: separate fields are separate values.
+
+struct Pair {
+    a: i32,
+    b: i32,
+}
+
+struct World {
+    blocks: List<Pair>,
+    states: List<Pair>,
+}
+
+fn add_into(to: mut Pair, from: Pair) {
+    to.a += from.a
+    to.b += from.b
+}
+
+fn swap_fields(x: mut Pair, y: mut Pair) {
+    let t = x.a
+    x.a = y.a
+    y.a = t
+}
+
+impl Pair {
+    fn add(mut self, n: i32) {
+        self.a += n
+    }
+}
+
+fn main() {
+    var w = World { blocks: [Pair { a: 1, b: 2 }], states: [Pair { a: 10, b: 20 }] }
+    add_into(mut w.blocks[0], w.states[0])
+    swap_fields(mut w.blocks[0], mut w.states[0])
+    w.blocks[0].add(if w.states.len() == 1 { 0 } else { 1 })
+    println("{w.blocks[0].a} {w.blocks[0].b} {w.states[0].a}")    // out: 10 22 11
+    let k: usize = 0
+    w.states[k].add(w.blocks[k].b)
+    println("{w.states[0].a}")    // out: 33
+}

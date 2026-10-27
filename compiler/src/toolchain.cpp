@@ -554,7 +554,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         flags.push_back("-fms-runtime-lib=dll");
 #endif
     } else {
-        flags.push_back("-O2");
+        flags.push_back("-O3");
         flags.push_back("-march=x86-64-v3");
     }
     std::string flag_text;

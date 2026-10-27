@@ -1,0 +1,43 @@
+// Parts that may be the same memory can't go in one call beside a `mut` argument.
+
+struct Pair {
+    a: i32,
+    b: i32,
+}
+
+struct World {
+    blocks: List<Pair>,
+    states: List<Pair>,
+}
+
+fn add_into(to: mut Pair, from: Pair) {
+    to.a += from.a
+}
+
+fn swap_fields(x: mut Pair, y: mut Pair) {
+    let t = x.a
+    x.a = y.a
+    y.a = t
+}
+
+fn look(w: World, p: mut Pair) {
+    p.a = i32.wrap(w.blocks.len())
+}
+
+impl Pair {
+    fn add(mut self, n: i32) {
+        self.a += n
+    }
+}
+
+fn main() {
+    var w = World { blocks: [Pair { a: 1, b: 2 }, Pair { a: 3, b: 4 }], states: [] }
+    let i: usize = 0
+    let j: usize = 1
+    swap_fields(mut w.blocks[i], mut w.blocks[j])    // error: `w` is passed as `mut`, so it can't be used again in the same call
+    add_into(mut w.blocks[0], w.blocks[1])           // error: `w` is passed as `mut`, so it can't be used again in the same call
+    w.blocks[0].add(w.blocks[0].b)                   // error: `w` is passed as `mut`, so it can't be used again in the same call
+    look(w, mut w.blocks[0])                         // error: `w` is passed as `mut`, so it can't be used again in the same call
+    add_into(mut w.blocks[w.states.len()], w.states[0])
+    println("{w.blocks[0].a}")
+}
