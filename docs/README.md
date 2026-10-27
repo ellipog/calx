@@ -12,6 +12,7 @@ These pages are the source for the Calx docs website. Until the site exists, rea
 In reading order:
 
 1. [Calx spec](CALX_SPEC.md): every feature that is designed but not built yet
+2. [Tick-loop benchmark](benchmarks.md): the workload behind the Phase 3 performance gate
 
 The guide and the reference start in Phase 3, when the first features ship.
 
