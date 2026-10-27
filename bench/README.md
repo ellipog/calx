@@ -11,6 +11,7 @@ The tick-loop benchmark behind the Phase 3 performance gate. [`docs/benchmarks.m
 py -I bench/run.py rust                 # 10 runs each at 1 worker and one per physical core
 py -I bench/run.py rust --record        # the same, written to bench/results/rust-<platform>.json
 py -I bench/run.py rust --threads 1,8 --runs 3 --warmup 20 --ticks 100    # a quick look
+py -I bench/run.py calx --threads 1     # the Calx version, built with build/compiler/<platform>/calx
 ```
 
 On Linux, use `python3` for `py`. The runner builds the version first, into `build/bench/<platform>/`. Every run of the full 200 + 1,000 ticks must print the checksum in [`expected.json`](expected.json), and every run of a configuration must agree, or the runner stops. Only full runs can be recorded.
@@ -31,12 +32,19 @@ Where `docs/benchmarks.md` lets an implementation choose, the reference uses:
 - **The fast native map.** The standard `HashMap` (a SwissTable) with an Fx-style multiply hasher, which is about as fast as a general map gets in Rust.
 - **The Java-compatible map.** Written by hand, as the doc requires, with nodes in a vector and a free list.
 
+## The Calx version (`P3.2`)
+
+[`calx/tickbench.calx`](calx/tickbench.calx) is the same program in Calx, with the same algorithms and the same checksum. It's safe Calx: no `unsafe` except reading the clock, and bounds checks left in. The runner builds it with `calx --release`. It takes the same flags as the Rust reference.
+
+It runs one worker for now. `parallel for`, which the multi-worker passes need, isn't built yet, so `--threads` above 1 stops with an error.
+
 ## Results
 
 | File | What it is |
 | --- | --- |
 | `results/rust-windows.json` | The Rust reference on Windows 11 |
 | `results/rust-linux.json` | The Rust reference on Ubuntu under WSL2, on the same machine |
+| `results/calx-windows.json` | The Calx version on Windows 11 |
 
 Each file names the commit, the machine (CPU, cores, memory, OS), the toolchain (rustc and its LLVM), and every run's mean tick time. The numbers in the gate are the medians.
 
@@ -50,3 +58,11 @@ The Rust reference as recorded, with Rust 1.91.1 (LLVM 21.1.2), 10 runs of 200 w
 Every run printed checksum `0a7e97a835579c25`, at both worker counts. The speedup is well under 24 because 16 of the cores are efficiency cores, and the barrier step (delivery and the checksum) runs on one thread.
 
 The machine is an Intel Core i9-13900K: 8 performance cores and 16 efficiency cores, so 24 physical cores and 32 threads. Both platforms run 1 and 24 workers. WSL2 reports the CPU as 16 cores with 2 threads each, which isn't the real topology, so the Linux runs use the Windows count.
+
+The Calx version as recorded, with clang 23.1.4, the same runs:
+
+| Platform | 1 worker | Against Rust |
+| --- | --- | --- |
+| Windows 11 | 17.56 ms per tick (p99 20.03) | 0.68× |
+
+The checksum was the same. D89 lists the compiler changes behind the lead: `-O3`, telling clang that views are always valid, and letting `mut` arguments be separate fields of one value.

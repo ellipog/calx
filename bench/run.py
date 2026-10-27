@@ -1,6 +1,6 @@
 """Builds and runs the tick-loop benchmark the way docs/benchmarks.md measures it.
 
-    py -I bench/run.py rust [--threads 1,24] [--runs 10] [--warmup 200] [--ticks 1000] [--record]
+    py -I bench/run.py rust|calx [--threads 1,24] [--runs 10] [--warmup 200] [--ticks 1000] [--record]
 
 Each run is a fresh process. The result for a configuration is the median, over its runs, of the
 mean time per measured tick. Every run must print the checksum in bench/expected.json, or the
@@ -40,7 +40,23 @@ def build_rust():
     return target / "release" / f"tickbench{EXE}", toolchain
 
 
-BUILDERS = {"rust": build_rust}
+def build_calx():
+    calx = ROOT / "build" / "compiler" / PLATFORM / f"calx{EXE}"
+    if not calx.exists():
+        sys.exit(f"run: build the compiler first, into {calx.parent} (see compiler/README.md)")
+    exe = BUILD / "calx" / f"tickbench{EXE}"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(calx), "build", "--release", str(HERE / "calx" / "tickbench.calx"), "-o", str(exe)],
+                   cwd=ROOT, check=True)
+    clang = os.environ.get("CALX_CC") or "clang"    # what the driver compiles with
+    try:
+        clang_version = output([clang, "--version"]).splitlines()[0]
+    except (OSError, subprocess.CalledProcessError):
+        clang_version = None
+    return exe, {"calx": output([str(calx), "version"]), "commit": commit(), "clang": clang_version}
+
+
+BUILDERS = {"rust": build_rust, "calx": build_calx}
 
 
 def physical_cores():
