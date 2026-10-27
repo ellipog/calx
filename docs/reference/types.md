@@ -1,6 +1,6 @@
 ---
 title: Types
-description: The primitive types, arrays, structs and the unit type.
+description: The primitive types, arrays, structs, enums, optionals, tuples and the unit type.
 ---
 
 # Types
@@ -52,9 +52,15 @@ fn main() {
 - `for x in a` goes over the elements in order ([control flow](control-flow.md#for)).
 - An empty `[]` needs its type from where it's used.
 
-## Structs
+## Structs, enums and tuples
 
-A struct holds named fields ([structs](structs.md)).
+- A struct holds named fields ([structs](structs.md)).
+- An enum is one of several variants, each of which can carry data ([enums](enums.md)).
+- A tuple, such as `(i32, str)`, groups values by position ([tuples](tuples.md)).
+
+## Optionals
+
+`T?` is a `T` that may be absent: `some(x)` or `none`. There's no null ([optionals](optionals.md)).
 
 ## The unit type
 

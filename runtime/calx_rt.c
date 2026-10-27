@@ -234,3 +234,9 @@ void cx_panic_div_zero(const char* at) {
     fputs("division by zero", stderr);
     cx_panic_end();
 }
+
+void cx_panic_unwrap(const char* at) {
+    cx_panic_begin(at);
+    fputs("unwrapped `none` with `!`", stderr);
+    cx_panic_end();
+}

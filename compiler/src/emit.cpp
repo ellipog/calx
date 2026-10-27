@@ -1,5 +1,6 @@
 #include "emit.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -90,9 +91,32 @@ private:
             case TypeKind::str: return "cx_str";
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::array: return "cx_arr" + std::to_string(t->id);
+            case TypeKind::enum_: return std::string(t->item->c_name);
+            case TypeKind::optional: return "cx_opt" + std::to_string(t->id);
+            case TypeKind::tuple: return "cx_tup" + std::to_string(t->id);
         }
         return "void";
     }
+
+    // The C name of a variant's `k`th value: its field's name, or `f0`, `f1` for unnamed values.
+    std::string variant_field(const Type* t, std::uint32_t i, std::size_t k) const {
+        const VariantDecl& v = t->item->variants[i];
+        return v.has_fields ? ident(v.fields[k].name) : "f" + std::to_string(k);
+    }
+
+    // `.x` or `.f0`: a field of a struct, or an element of a tuple.
+    std::string member(const Type* t, std::uint32_t index) const {
+        if (t->kind == TypeKind::tuple) return ".f" + std::to_string(index);
+        return "." + ident(t->item->fields[index].name);
+    }
+
+    static Type* member_type(const Type* t, std::uint32_t index) {
+        if (t->kind == TypeKind::tuple) return t->elems[index];
+        return t->item->fields[index].resolved;
+    }
+
+    // The function that gives a data-less enum's variant name, for printing.
+    static std::string enum_name_fn(const Type* t) { return "cx_name__" + std::string(t->item->c_name); }
 
     // The unsigned type arithmetic on `t` happens in, so overflow wraps (D63's integer rules).
     static const char* wide_unsigned(const Type* t) { return t->bits == 64 ? "cx_u64" : "cx_u32"; }
@@ -111,18 +135,62 @@ private:
         return std::string(t->name);
     }
 
+    // Every type the program uses, each after the types it holds. An optional is its value and a
+    // flag, a tuple a struct of `f0`, `f1`..., and an enum with data a tag and a union of its
+    // variants' values. An enum without data is its tag.
     void emit_types() {
         for (const Type* t : prog_.type_order) {
-            if (t->kind == TypeKind::struct_) out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
+            if (t->kind == TypeKind::struct_ || (t->kind == TypeKind::enum_ && t->has_data)) {
+                out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
+            } else if (t->kind == TypeKind::enum_) {
+                out_ += "typedef " + ctype(t->repr) + " " + ctype(t) + ";\n";
+            }
         }
         for (const Type* t : prog_.type_order) {
-            if (t->kind == TypeKind::array) {
-                out_ += "typedef struct { " + ctype(t->elem) + " v[" + std::to_string(t->length) + "]; } " + ctype(t) + ";\n";
-            } else {
-                out_ += "struct " + ctype(t) + " {";
-                for (const FieldDecl& f : t->item->fields) out_ += " " + ctype(f.resolved) + " " + ident(f.name) + ";";
-                out_ += " };\n";
+            switch (t->kind) {
+                case TypeKind::array:
+                    out_ += "typedef struct { " + ctype(t->elem) + " v[" + std::to_string(t->length) + "]; } " + ctype(t) + ";\n";
+                    break;
+                case TypeKind::optional:
+                    out_ += "typedef struct { " + ctype(t->elem) + " v; cx_bool has; } " + ctype(t) + ";\n";
+                    break;
+                case TypeKind::tuple:
+                    out_ += "typedef struct {";
+                    for (std::size_t i = 0; i < t->elems.size(); i++) {
+                        out_ += " " + ctype(t->elems[i]) + " f" + std::to_string(i) + ";";
+                    }
+                    out_ += " } " + ctype(t) + ";\n";
+                    break;
+                case TypeKind::struct_:
+                    out_ += "struct " + ctype(t) + " {";
+                    for (const FieldDecl& f : t->item->fields) out_ += " " + ctype(f.resolved) + " " + ident(f.name) + ";";
+                    out_ += " };\n";
+                    break;
+                case TypeKind::enum_: {
+                    if (!t->has_data) break;
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->repr) + " tag; union {";
+                    const Slice<VariantDecl>& vs = t->item->variants;
+                    for (std::uint32_t i = 0; i < vs.size(); i++) {
+                        if (vs[i].types.empty()) continue;
+                        out_ += " struct {";
+                        for (std::size_t k = 0; k < vs[i].types.size(); k++) {
+                            out_ += " " + ctype(vs[i].types[k]) + " " + variant_field(t, i, k) + ";";
+                        }
+                        out_ += " } v" + std::to_string(i) + ";";
+                    }
+                    out_ += " } u; };\n";
+                    break;
+                }
+                default: break;
             }
+        }
+        for (const Type* t : prog_.type_order) {
+            if (t->kind != TypeKind::enum_ || t->has_data) continue;
+            out_ += "static cx_str " + enum_name_fn(t) + "(" + ctype(t) + " v) {\n    switch (v) {\n";
+            for (const VariantDecl& v : t->item->variants) {
+                out_ += "        case " + int_const(t->repr, v.tag) + ": return " + str_const(text(v.name)) + ";\n";
+            }
+            out_ += "    }\n    return " + str_const("") + ";\n}\n";
         }
         if (!prog_.type_order.empty()) out_ += "\n";
     }
@@ -218,6 +286,10 @@ private:
         directive(s->span);
         switch (s->kind) {
             case StmtKind::let: {
+                if (s->else_ || s->else_block || s->pattern->kind != PatternKind::binding) {
+                    let_pattern(s);
+                    break;
+                }
                 Local* l = s->local;
                 if (!l || l->type->kind == TypeKind::error || s->value->type->kind == TypeKind::never) {
                     expr_stmt(s->value);
@@ -304,7 +376,14 @@ private:
             }
             line("for (cx_usize " + i + " = 0; " + i + " < " + std::to_string(at->length) + "; " + i + "++) {");
             indent_++;
-            if (!var.empty()) line(ctype(elem) + " " + var + " = " + arr + "->v[" + i + "];");
+            if (!var.empty()) {
+                line(ctype(elem) + " " + var + " = " + arr + "->v[" + i + "];");
+            } else if (s->pattern->kind != PatternKind::wildcard) {
+                // `for (a, b) in pairs`: the checker made sure the pattern matches every element.
+                Match m;
+                walk(s->pattern, arr + "->v[" + i + "]", m);
+                bind(m);
+            }
             stmts(s->body, false);
             line("cx_cont" + id + ":;");
             indent_--;
@@ -319,6 +398,7 @@ private:
     void expr_stmt(Expr* e) {
         switch (e->kind) {
             case ExprKind::if_: if_stmt(e); return;
+            case ExprKind::match: match_arms(e, nullptr, nullptr); return;
             case ExprKind::block:
                 line("{");
                 indent_++;
@@ -344,13 +424,41 @@ private:
     }
 
     void if_stmt(Expr* e) {
+        if (e->let_pattern) {
+            // `if let p = v`: its names exist only in the first block.
+            line("{");
+            indent_++;
+            Match m = let_match(e->let_pattern, e->cond, e->let_unwraps);
+            line("if (" + condition(m) + ") {");
+            indent_++;
+            bind(m);
+            stmts(e->block, false);
+            indent_--;
+            if (e->else_) {
+                line("} else {");
+                indent_++;
+                if (e->else_->kind == ExprKind::if_) if_stmt(e->else_);
+                else stmts(e->else_->block, false);
+                indent_--;
+            }
+            line("}");
+            indent_--;
+            line("}");
+            return;
+        }
         line("if (" + expr(e->cond) + ") {");
         indent_++;
         stmts(e->block, false);
         indent_--;
         Expr* el = e->else_;
         while (el) {
-            if (el->kind == ExprKind::if_) {
+            if (el->kind == ExprKind::if_ && el->let_pattern) {
+                line("} else {");
+                indent_++;
+                if_stmt(el);
+                indent_--;
+                el = nullptr;
+            } else if (el->kind == ExprKind::if_) {
                 line("} else if (" + expr(el->cond) + ") {");
                 indent_++;
                 stmts(el->block, false);
@@ -365,6 +473,199 @@ private:
             }
         }
         line("}");
+    }
+
+    // --- patterns --------------------------------------------------------------------------------
+
+    // What matching a pattern takes: the tests, all of which must hold, and the names it binds,
+    // each with the C for its value.
+    struct Match {
+        std::vector<std::string> tests;
+        std::vector<std::pair<const Local*, std::string>> binds;
+    };
+
+    // Collects the tests and bindings for matching `p` against the value at `at`, a C place.
+    void walk(const Pattern* p, const std::string& at, Match& m) {
+        const Type* t = p->type;
+        switch (p->kind) {
+            case PatternKind::wildcard: return;
+            case PatternKind::binding:
+                if (p->local) m.binds.emplace_back(p->local, at);
+                return;
+            case PatternKind::literal:
+                if (t->kind == TypeKind::str) {
+                    m.tests.push_back("cx_str_eq(" + at + ", " + str_const(literal_text(p->value)) + ")");
+                } else {
+                    m.tests.push_back(at + " == " + expr(p->value));
+                }
+                return;
+            case PatternKind::range: {
+                std::string lo = at + " >= " + expr(p->value);
+                std::string hi = at + (p->inclusive ? " <= " : " < ") + expr(p->end);
+                // An unsigned range from 0 needs no lower test.
+                bool from_zero = !t->is_signed && p->value->const_bits == 0;
+                m.tests.push_back(from_zero ? hi : "(" + lo + " && " + hi + ")");
+                return;
+            }
+            case PatternKind::none: m.tests.push_back("!" + at + ".has"); return;
+            case PatternKind::variant:
+                if (t->kind == TypeKind::optional) {
+                    m.tests.push_back(at + ".has");
+                    walk(p->elems[0], at + ".v", m);
+                    return;
+                }
+                if (!t->has_data) {
+                    m.tests.push_back(at + " == " + int_const(t->repr, t->item->variants[p->variant].tag));
+                    return;
+                }
+                m.tests.push_back(at + ".tag == " + int_const(t->repr, t->item->variants[p->variant].tag));
+                for (std::size_t k = 0; k < p->elems.size(); k++) {
+                    walk(p->elems[k], at + ".u.v" + std::to_string(p->variant) + "." + variant_field(t, p->variant, k), m);
+                }
+                return;
+            case PatternKind::record:
+                if (t->kind == TypeKind::enum_) {
+                    m.tests.push_back(at + ".tag == " + int_const(t->repr, t->item->variants[p->variant].tag));
+                    for (const FieldPattern& f : p->fields) {
+                        walk(f.pattern, at + ".u.v" + std::to_string(p->variant) + "." + variant_field(t, p->variant, f.index), m);
+                    }
+                    return;
+                }
+                for (const FieldPattern& f : p->fields) walk(f.pattern, at + member(t, f.index), m);
+                return;
+            case PatternKind::tuple:
+                for (std::size_t k = 0; k < p->elems.size(); k++) walk(p->elems[k], at + ".f" + std::to_string(k), m);
+                return;
+            case PatternKind::or_: {
+                // The checker made sure no alternative binds a name.
+                std::string any;
+                for (const Pattern* a : p->elems) {
+                    Match sub;
+                    walk(a, at, sub);
+                    if (sub.tests.empty()) return;  // this alternative always matches
+                    any += (any.empty() ? "(" : " || (") + condition(sub) + ")";
+                }
+                m.tests.push_back("(" + any + ")");
+                return;
+            }
+        }
+    }
+
+    static std::string condition(const Match& m) {
+        if (m.tests.empty()) return "1";
+        std::string c;
+        for (std::size_t i = 0; i < m.tests.size(); i++) c += (i ? " && " : "") + m.tests[i];
+        return c;
+    }
+
+    void bind(const Match& m) {
+        for (const auto& [l, v] : m.binds) line(ctype(l->type) + " " + local_name(l) + " = " + v + ";");
+    }
+
+    // The value being matched, in a place: the variable itself when reading it can't change
+    // anything, or a temporary. Declares the temporary at the current indent.
+    std::string scrutinee(Expr* v, bool may_change) {
+        if (!may_change && is_place(v) && !place_has_effects(v)) return place(v);
+        std::string t = tmp();
+        line(ctype(v->type) + " " + t + " = " + value(v, v->type) + ";");
+        return t;
+    }
+
+    // `if let p = v` and `let p = v else`. When `unwraps`, `v` is an optional and `p` matches its value.
+    Match let_match(const Pattern* p, Expr* v, bool unwraps) {
+        std::string at = scrutinee(v, false);
+        Match m;
+        if (unwraps) {
+            m.tests.push_back(at + ".has");
+            at += ".v";
+        }
+        walk(p, at, m);
+        return m;
+    }
+
+    // `let (a, b) = t`, `let Shape.Circle(r) = s else { ... }` and `let x = opt else return`.
+    void let_pattern(Stmt* s) {
+        if (s->value->type->kind == TypeKind::never || s->value->type->kind == TypeKind::error) {
+            expr_stmt(s->value);
+            return;
+        }
+        // A temporary, since the names it binds outlive any statement the value could be read in.
+        std::string t = tmp();
+        line(ctype(s->value->type) + " " + t + " = " + value(s->value, s->value->type) + ";");
+        Match m;
+        std::string at = t;
+        if (s->let_unwraps) {
+            m.tests.push_back(t + ".has");
+            at += ".v";
+        }
+        walk(s->pattern, at, m);
+        if ((s->else_ || s->else_block) && !m.tests.empty()) {
+            line("if (!(" + condition(m) + ")) {");
+            indent_++;
+            if (s->else_block) {
+                stmts(s->else_block, false);
+            } else {
+                directive(s->else_->span);
+                expr_stmt(s->else_);
+            }
+            indent_--;
+            line("}");
+        }
+        bind(m);
+    }
+
+    // A `match`'s arms, as an if-chain that jumps to the end after the arm that ran. With `r`, each
+    // arm's value goes in it. The last arm needs no test: the checker made sure the arms are
+    // exhaustive, and with no guard on the last arm, whatever reaches it matches it.
+    void match_arms(Expr* e, const std::string* r, Type* t) {
+        bool guards = false;
+        for (const MatchArm& a : e->arms) guards = guards || a.guard;
+        std::string end = "cx_brk" + std::to_string(e->loop_id);
+        line("{");
+        indent_++;
+        std::string at = scrutinee(e->scrutinee, guards);
+        for (std::size_t i = 0; i < e->arms.size(); i++) {
+            const MatchArm& arm = e->arms[i];
+            bool last = i + 1 == e->arms.size();
+            Match m;
+            walk(arm.pattern, at, m);
+            directive(arm.pattern->span);
+            line(last && !arm.guard ? "{" : "if (" + condition(m) + ") {");
+            indent_++;
+            bind(m);
+            if (arm.guard) {
+                line("if (" + expr(arm.guard) + ") {");
+                indent_++;
+            }
+            directive(arm.body->span);
+            if (r && arm.body->type->kind != TypeKind::never) line(*r + " = " + value(arm.body, t) + ";");
+            else expr_stmt(arm.body);
+            if (!last || arm.guard) line("goto " + end + ";");
+            if (arm.guard) {
+                indent_--;
+                line("}");
+            }
+            indent_--;
+            line("}");
+            if (last && arm.guard) line("__builtin_unreachable();");
+        }
+        indent_--;
+        line("}");
+        line(end + ":;");
+    }
+
+    std::string match_value(Expr* e) {
+        Type* t = e->type;
+        bool has_value = t->kind != TypeKind::never && t->kind != TypeKind::unit;
+        std::string r = tmp();
+        std::string body = capture([&] {
+            indent_++;
+            if (has_value) line(ctype(t) + " " + r + ";");
+            match_arms(e, has_value ? &r : nullptr, t);
+            if (has_value) line(r + ";");
+            indent_--;
+        });
+        return "({\n" + body + std::string(static_cast<std::size_t>(indent_) * 4, ' ') + "})";
     }
 
     void assign(Stmt* s) {
@@ -415,11 +716,22 @@ private:
             case ExprKind::binary:
                 if ((e->op == Op::div || e->op == Op::rem) && is_int(e->type) && !e->rhs->has_bits) return true;
                 return effects(e->lhs) || effects(e->rhs);
-            case ExprKind::field: return effects(e->lhs);
+            case ExprKind::none_lit: return false;
+            case ExprKind::field:
+                if (e->ref == Ref::variant) return false;
+                return effects(e->lhs);
+            case ExprKind::optional_field: return effects(e->lhs);
             case ExprKind::index: return true;
+            case ExprKind::tuple:
+                for (const Expr* x : e->elems) if (effects(x)) return true;
+                return false;
             case ExprKind::call:
-                if (e->call == CallKind::convert) return effects(e->args[0].value);
+                if (e->call == CallKind::convert || e->call == CallKind::try_from) return effects(e->args[0].value);
                 if (e->call == CallKind::construct) return false;
+                if (e->call == CallKind::some || e->call == CallKind::variant) {
+                    for (const Arg& a : e->args) if (effects(a.value)) return true;
+                    return false;
+                }
                 if (e->call == CallKind::prim_method) {
                     if (e->prim == PrimMethod::floor_div || e->prim == PrimMethod::floor_mod) return true;
                     for (const Arg& a : e->args) if (effects(a.value)) return true;
@@ -517,14 +829,18 @@ private:
     }
 
     std::string zero(const Type* t) {
-        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::array || t->kind == TypeKind::str) {
-            return "(" + ctype(t) + "){0}";
+        switch (t->kind) {
+            case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
+            case TypeKind::tuple:
+                return "(" + ctype(t) + "){0}";
+            case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
+            default: return "(" + ctype(t) + ")0";
         }
-        return "(" + ctype(t) + ")0";
     }
 
     std::string int_const(const Type* t, std::uint64_t bits) {
         if (t->kind == TypeKind::bool_) return bits ? "1" : "0";
+        if (t->kind == TypeKind::enum_) return int_const(t->repr, bits);
         std::string c = ctype(t);
         if (t->is_signed) {
             auto v = static_cast<std::int64_t>(bits);
@@ -582,12 +898,18 @@ private:
             case ExprKind::binary: return binary(e);
             case ExprKind::call: return call(e);
             case ExprKind::field:
+                if (e->ref == Ref::variant) return variant_value(e->type, e->field_index, {});  // `Shape.Empty`
+                return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
-            case ExprKind::struct_lit: return struct_literal(e);
+            case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
             case ExprKind::array_lit: return array_literal(e);
-            case ExprKind::tuple: return "";  // `()`
+            case ExprKind::tuple: return e->elems.empty() ? "" : tuple_literal(e);  // `()` is nothing
+            case ExprKind::none_lit: return "((" + ctype(e->type) + "){0})";
+            case ExprKind::unwrap: return unwrap(e);
+            case ExprKind::optional_field: return optional_field(e);
             case ExprKind::block: return block_value(e->block, e->type);
             case ExprKind::if_: return if_value(e);
+            case ExprKind::match: return match_value(e);
             case ExprKind::loop: return loop_value(e);
             default: return "/* unsupported */0";
         }
@@ -610,7 +932,7 @@ private:
     std::string place_or_value(Expr* e) {
         if (e->kind == ExprKind::field) {
             std::string base = is_place(e->lhs) ? place(e->lhs) : "(" + expr(e->lhs) + ")";
-            return base + "." + ident(e->lhs->type->item->fields[e->field_index].name);
+            return base + member(e->lhs->type, e->field_index);
         }
         // index
         Type* at = e->lhs->type;
@@ -652,8 +974,10 @@ private:
         Op op = e->op;
         if (op == Op::log_and) return "(" + expr(e->lhs) + " && " + expr(e->rhs) + ")";
         if (op == Op::log_or) return "(" + expr(e->lhs) + " || " + expr(e->rhs) + ")";
+        if (op == Op::coalesce) return coalesce(e);
         Type* lt = e->lhs->type;
         Type* rt = e->rhs->type;
+        if ((op == Op::eq || op == Op::ne) && lt->kind == TypeKind::optional) return optional_equal(e);
         std::string decls;
         std::vector<std::string> v = sequence({{e->lhs, lt}, {e->rhs, rt}}, decls);
         return wrap(decls, operate(op, lt, rt, v[0], v[1], e->rhs, e->span));
@@ -720,6 +1044,10 @@ private:
             case CallKind::convert: return conversion(e);
             case CallKind::construct: return construct(e->type);
             case CallKind::prim_method: return prim_method(e);
+            case CallKind::variant: return variant_call(e);
+            case CallKind::some:
+                return "((" + ctype(e->type) + "){ .v = " + value(e->args[0].value, e->type->elem) + ", .has = 1 })";
+            case CallKind::try_from: return try_from(e);
             case CallKind::fn:
             case CallKind::method: return fn_call(e);
             default: return "0";
@@ -794,6 +1122,204 @@ private:
         return wrap(decls, out + " })");
     }
 
+    // A variant of an enum with data, from its values in order.
+    std::string variant_value(const Type* t, std::uint32_t i, const std::vector<std::string>& values) {
+        std::string s = "((" + ctype(t) + "){ .tag = " + int_const(t->repr, t->item->variants[i].tag);
+        if (!values.empty()) {
+            s += ", .u.v" + std::to_string(i) + " = {";
+            for (std::size_t k = 0; k < values.size(); k++) s += (k ? ", ." : " .") + variant_field(t, i, k) + " = " + values[k];
+            s += " }";
+        }
+        return s + " })";
+    }
+
+    // `Shape.Circle(r)`
+    std::string variant_call(Expr* e) {
+        const VariantDecl& v = e->type->item->variants[e->field_index];
+        std::vector<Operand> ops;
+        for (std::size_t k = 0; k < e->ordered_args.size(); k++) ops.push_back({e->ordered_args[k], v.types[k]});
+        std::string decls;
+        std::vector<std::string> values = sequence(ops, decls);
+        return wrap(decls, variant_value(e->type, e->field_index, values));
+    }
+
+    // `Shape.Rect { w: 1.0, h: 2.0 }`: the values run in the order they're written.
+    std::string record_variant(Expr* e) {
+        const Type* t = e->type;
+        const VariantDecl& v = t->item->variants[e->field_index];
+        std::vector<Operand> ops;
+        std::vector<std::uint32_t> index;
+        for (const FieldInit& f : e->fields) {
+            for (std::uint32_t i = 0; i < v.fields.size(); i++) {
+                if (v.fields[i].name == f.name && e->elems[i] == f.value) {
+                    ops.push_back({f.value, v.fields[i].resolved});
+                    index.push_back(i);
+                }
+            }
+        }
+        std::string decls;
+        std::vector<std::string> values = sequence(ops, decls);
+        std::vector<std::string> by_field(v.fields.size());
+        for (std::size_t i = 0; i < values.size(); i++) by_field[index[i]] = values[i];
+        return wrap(decls, variant_value(t, e->field_index, by_field));
+    }
+
+    std::string tuple_literal(Expr* e) {
+        Type* t = e->type;
+        std::vector<Operand> ops;
+        for (std::size_t i = 0; i < e->elems.size(); i++) ops.push_back({e->elems[i], t->elems[i]});
+        std::string decls;
+        std::vector<std::string> v = sequence(ops, decls);
+        std::string out = "((" + ctype(t) + "){";
+        for (std::size_t i = 0; i < v.size(); i++) out += (i ? ", " : " ") + v[i];
+        return wrap(decls, out + " })");
+    }
+
+    // `a!`: the value, or a panic for `none`.
+    std::string unwrap(Expr* e) {
+        std::string t = tmp();
+        return "({ " + ctype(e->lhs->type) + " " + t + " = " + expr(e->lhs) + "; if (__builtin_expect(!" + t +
+               ".has, 0)) cx_panic_unwrap(" + location(e->span) + "); " + t + ".v; })";
+    }
+
+    // `a ?? b`: `b` runs only when `a` is `none`. When `b` is an optional too, so is the result.
+    std::string coalesce(Expr* e) {
+        Type* lt = e->lhs->type;
+        bool flat = e->type == lt;
+        std::string t = tmp();
+        return "({ " + ctype(lt) + " " + t + " = " + expr(e->lhs) + "; " + t + ".has ? " + t + (flat ? "" : ".v") +
+               " : " + value(e->rhs, e->type) + "; })";
+    }
+
+    // `a?.b`: `none`, or the field as an optional. A field that's an optional already isn't wrapped.
+    std::string optional_field(Expr* e) {
+        Type* lt = e->lhs->type;
+        Type* ft = member_type(lt->elem, e->field_index);
+        std::string o = ctype(e->type);
+        std::string t = tmp();
+        std::string field = t + ".v" + member(lt->elem, e->field_index);
+        std::string some = ft == e->type ? field : "(" + o + "){ .v = " + field + ", .has = 1 }";
+        return "({ " + ctype(lt) + " " + t + " = " + expr(e->lhs) + "; " + t + ".has ? " + some + " : (" + o + "){0}; })";
+    }
+
+    // `==` and `!=` on optionals: equal when both are `none`, or both hold equal values.
+    std::string optional_equal(Expr* e) {
+        bool ne = e->op == Op::ne;
+        Expr* other = e->rhs->kind == ExprKind::none_lit ? e->lhs : e->lhs->kind == ExprKind::none_lit ? e->rhs : nullptr;
+        if (other) return std::string(ne ? "(" : "(!") + "(" + expr(other) + ").has)";
+        Type* t = e->lhs->type;
+        std::string decls;
+        std::vector<std::string> v = sequence({{e->lhs, t}, {e->rhs, t}}, decls);
+        std::string a = tmp(), b = tmp();
+        std::string eq = a + ".has == " + b + ".has && (!" + a + ".has || " + a + ".v == " + b + ".v)";
+        return "({ " + decls + ctype(t) + " " + a + " = " + v[0] + "; " + ctype(t) + " " + b + " = " + v[1] + "; " +
+               (ne ? "!(" + eq + ")" : eq) + "; })";
+    }
+
+    // An integral type's values: from -neg to pos. `usize` is 64 bits in C on every target so far.
+    struct Bounds {
+        std::uint64_t neg, pos;
+    };
+    static Bounds bounds(const Type* t) {
+        if (t->kind == TypeKind::char_) return {0, 0xFFFF};
+        if (t->kind == TypeKind::rune) return {0, 0x10FFFF};
+        if (t->is_usize || (!t->is_signed && t->bits == 64)) return {0, UINT64_MAX};
+        if (t->is_signed) return {std::uint64_t{1} << (t->bits - 1), (std::uint64_t{1} << (t->bits - 1)) - 1};
+        return {0, (std::uint64_t{1} << t->bits) - 1};
+    }
+
+    // `T.try_from(x)`: `x` as a `T` when it's one of T's values, or `none`.
+    std::string try_from(Expr* e) {
+        Type* ot = e->type;
+        Type* to = ot->elem;
+        Expr* a = e->args[0].value;
+        Type* from = a->type;
+        std::string x = tmp();
+        std::vector<std::string> tests;
+        if (to->kind == TypeKind::enum_) {
+            // The tags, as a range when they're consecutive.
+            std::vector<std::int64_t> tags;
+            bool is_signed = to->repr->is_signed;
+            for (const VariantDecl& v : to->item->variants) tags.push_back(static_cast<std::int64_t>(v.tag));
+            auto less = [&](std::int64_t p, std::int64_t q) {
+                return is_signed ? p < q : static_cast<std::uint64_t>(p) < static_cast<std::uint64_t>(q);
+            };
+            std::sort(tags.begin(), tags.end(), less);
+            bool consecutive = true;
+            for (std::size_t i = 1; i < tags.size(); i++) {
+                if (static_cast<std::uint64_t>(tags[i]) != static_cast<std::uint64_t>(tags[i - 1]) + 1) consecutive = false;
+            }
+            auto lo = static_cast<std::uint64_t>(tags.front()), hi = static_cast<std::uint64_t>(tags.back());
+            if (consecutive) {
+                if (is_signed || lo != 0) tests.push_back(x + " >= " + int_const(from, lo));
+                tests.push_back(x + " <= " + int_const(from, hi));
+            } else {
+                std::string any;
+                for (std::size_t i = 0; i < tags.size(); i++) {
+                    any += (i ? " || " : "") + x + " == " + int_const(from, static_cast<std::uint64_t>(tags[i]));
+                }
+                tests.push_back("(" + any + ")");
+            }
+        } else {
+            Bounds f = bounds(from), b = bounds(to);
+            if (f.neg > b.neg) tests.push_back(x + " >= " + int_const(from, 0 - b.neg));
+            if (f.pos > b.pos) tests.push_back(x + " <= " + int_const(from, b.pos));
+            if (to->kind == TypeKind::rune && f.pos >= 0xD800) {
+                tests.push_back("(" + x + " < " + int_const(from, 0xD800) + " || " + x + " > " + int_const(from, 0xDFFF) + ")");
+            }
+        }
+        Match m;
+        m.tests = tests;
+        return "({ " + ctype(from) + " " + x + " = " + expr(a) + "; (" + condition(m) + ") ? (" + ctype(ot) + "){ .v = (" +
+               ctype(to) + ")" + x + ", .has = 1 } : (" + ctype(ot) + "){0}; })";
+    }
+
+    std::string min_const(const Type* t) { return int_const(t, 0 - bounds(t).neg); }
+    std::string max_const(const Type* t) { return int_const(t, bounds(t).pos); }
+
+    // `a.checked_add(b)` and the like: `none` when the result doesn't fit.
+    std::string checked(const char* op, const Type* t, const std::string& ot, const std::vector<std::string>& v) {
+        std::string r = tmp();
+        return "({ " + ctype(t) + " " + r + "; cx_bool " + r + "o = __builtin_" + op + "_overflow(" + v[0] + ", " + v[1] +
+               ", &" + r + "); (" + ot + "){ .v = " + r + ", .has = !" + r + "o }; })";
+    }
+
+    // `checked_div` is `none` for a zero divisor and for MIN / -1. `checked_rem` is `none` only for
+    // a zero divisor, since MIN % -1 is 0, as in Java.
+    std::string checked_div(bool rem, const Type* t, const std::string& ot, const std::vector<std::string>& v) {
+        std::string a = tmp(), b = tmp(), c = ctype(t);
+        std::string head = "({ " + c + " " + a + " = " + v[0] + "; " + c + " " + b + " = " + v[1] + "; ";
+        std::string none = "(" + ot + "){0}";
+        std::string some = "(" + ot + "){ .v = (" + c + ")(" + a + (rem ? " % " : " / ") + b + "), .has = 1 }";
+        if (!t->is_signed) return head + b + " == 0 ? " + none + " : " + some + "; })";
+        std::string minus_one = int_const(t, UINT64_MAX);
+        if (rem) {
+            return head + b + " == 0 ? " + none + " : " + b + " == " + minus_one + " ? (" + ot + "){ .v = 0, .has = 1 } : " +
+                   some + "; })";
+        }
+        return head + "(" + b + " == 0 || (" + a + " == " + min_const(t) + " && " + b + " == " + minus_one + ")) ? " +
+               none + " : " + some + "; })";
+    }
+
+    // `a.saturating_add(b)` and the like: the nearest value of the type when the result doesn't fit.
+    std::string saturating(const char* op, const Type* t, const std::vector<std::string>& v) {
+        std::string a = tmp(), b = tmp(), r = tmp(), c = ctype(t);
+        std::string head = "({ " + c + " " + a + " = " + v[0] + "; " + c + " " + b + " = " + v[1] + "; " + c + " " + r +
+                           "; __builtin_" + op + "_overflow(" + a + ", " + b + ", &" + r + ") ? ";
+        std::string sat;
+        std::string_view o = op;
+        if (!t->is_signed) {
+            sat = o == "sub" ? int_const(t, 0) : max_const(t);
+        } else if (o == "add") {
+            sat = "(" + b + " < 0 ? " + min_const(t) + " : " + max_const(t) + ")";
+        } else if (o == "sub") {
+            sat = "(" + b + " < 0 ? " + max_const(t) + " : " + min_const(t) + ")";
+        } else {
+            sat = "((" + a + " < 0) != (" + b + " < 0) ? " + min_const(t) + " : " + max_const(t) + ")";
+        }
+        return head + sat + " : " + r + "; })";
+    }
+
     std::string array_literal(Expr* e) {
         Type* t = e->type;
         if (e->repeat) {
@@ -828,7 +1354,7 @@ private:
         Type* t = e->type;
         // A simple `if c { a } else { b }` is C's `?:`.
         Expr* el = e->else_;
-        if (e->block->stmts.empty() && e->block->tail && el->kind == ExprKind::block && el->block->stmts.empty() &&
+        if (!e->let_pattern && e->block->stmts.empty() && e->block->tail && el->kind == ExprKind::block && el->block->stmts.empty() &&
             el->block->tail && e->block->tail->type->kind != TypeKind::never &&
             el->block->tail->type->kind != TypeKind::never) {
             return "(" + expr(e->cond) + " ? " + value(e->block->tail, t) + " : " + value(el->block->tail, t) + ")";
@@ -845,6 +1371,28 @@ private:
     }
 
     void branch_chain(Expr* e, Type* t, const std::string& r) {
+        if (e->let_pattern) {
+            line("{");
+            indent_++;
+            Match m = let_match(e->let_pattern, e->cond, e->let_unwraps);
+            line("if (" + condition(m) + ") {");
+            indent_++;
+            bind(m);
+            indent_--;
+            branch_body(e->block, t, r);
+            line("} else {");
+            if (e->else_->kind == ExprKind::if_) {
+                indent_++;
+                branch_chain(e->else_, t, r);
+                indent_--;
+            } else {
+                branch_body(e->else_->block, t, r);
+            }
+            line("}");
+            indent_--;
+            line("}");
+            return;
+        }
         line("if (" + expr(e->cond) + ") {");
         branch_body(e->block, t, r);
         Expr* el = e->else_;
@@ -930,16 +1478,37 @@ private:
             case PrimMethod::wrapping_mul: r = operate(Op::mul, t, t, v[0], v[1], e->args[0].value, e->span); break;
             case PrimMethod::floor_div: r = "cx_floor_div_" + h + "(" + v[0] + ", " + v[1] + ", " + location(e->span) + ")"; break;
             case PrimMethod::floor_mod: r = "cx_floor_mod_" + h + "(" + v[0] + ", " + v[1] + ", " + location(e->span) + ")"; break;
+            case PrimMethod::checked_add: r = checked("add", t, ctype(e->type), v); break;
+            case PrimMethod::checked_sub: r = checked("sub", t, ctype(e->type), v); break;
+            case PrimMethod::checked_mul: r = checked("mul", t, ctype(e->type), v); break;
+            case PrimMethod::checked_div: r = checked_div(false, t, ctype(e->type), v); break;
+            case PrimMethod::checked_rem: r = checked_div(true, t, ctype(e->type), v); break;
+            case PrimMethod::saturating_add: r = saturating("add", t, v); break;
+            case PrimMethod::saturating_sub: r = saturating("sub", t, v); break;
+            case PrimMethod::saturating_mul: r = saturating("mul", t, v); break;
             case PrimMethod::none: r = "0"; break;
         }
         return wrap(decls, r);
     }
 
     // The runtime calls that print a string literal's parts, or a `str` value.
-    void print_parts(Expr* m, std::string& out) {
+    // As in Java, where the string is built before it's printed, the values in braces are worked
+    // out first, left to right, into `decls`, and only then is anything printed.
+    void print_parts(Expr* m, std::string& decls, std::string& out) {
         if (m->kind != ExprKind::string_lit) {
             out += "cx_print_str(" + expr(m) + "); ";
             return;
+        }
+        std::vector<Operand> ops;
+        for (Expr* x : m->interpolations) ops.push_back({x, x->type});
+        std::vector<std::string> values = sequence(ops, decls);
+        // `sequence` leaves only the last operand with an effect in place; it runs first too.
+        for (std::size_t i = ops.size(); i-- > 0;) {
+            if (!effects(ops[i].e)) continue;
+            std::string t = tmp();
+            decls += ctype(ops[i].want) + " " + t + " = " + values[i] + "; ";
+            values[i] = t;
+            break;
         }
         std::size_t next = 0;
         for (const StringPart& p : m->literal.parts) {
@@ -947,9 +1516,9 @@ private:
                 if (!p.text.empty()) out += "cx_print_str(" + str_const(p.text) + "); ";
                 continue;
             }
-            Expr* x = m->interpolations[next++];
+            Expr* x = m->interpolations[next];
             Type* t = x->type;
-            std::string v = expr(x);
+            std::string v = values[next++];
             if (is_int(t)) {
                 out += t->is_signed ? "cx_print_i64((cx_i64)" + v + "); " : "cx_print_u64((cx_u64)" + v + "); ";
             } else if (is_float(t)) {
@@ -962,30 +1531,33 @@ private:
                 out += "cx_print_rune(" + v + "); ";
             } else if (t->kind == TypeKind::str) {
                 out += "cx_print_str(" + v + "); ";
+            } else if (t->kind == TypeKind::enum_) {
+                out += "cx_print_str(" + enum_name_fn(t) + "(" + v + ")); ";
             }
         }
     }
 
     std::string builtin(Expr* e) {
-        std::string s;
+        std::string s, decls;
         switch (e->builtin) {
             case Builtin::print:
-                print_parts(e->args[0].value, s);
-                return "({ " + s + "})";
+                print_parts(e->args[0].value, decls, s);
+                return "({ " + decls + s + "})";
             case Builtin::println:
-                if (!e->args.empty()) print_parts(e->args[0].value, s);
-                return "({ " + s + "cx_print_newline(); })";
+                if (!e->args.empty()) print_parts(e->args[0].value, decls, s);
+                return "({ " + decls + s + "cx_print_newline(); })";
             case Builtin::panic:
-                s = "cx_panic_begin(" + location(e->span) + "); ";
-                print_parts(e->args[0].value, s);
-                return "({ " + s + "cx_panic_end(); })";
+                print_parts(e->args[0].value, decls, s);
+                return "({ " + decls + "cx_panic_begin(" + location(e->span) + "); " + s + "cx_panic_end(); })";
             case Builtin::assert_:
-                s = "cx_panic_begin(" + location(e->span) + "); cx_print_str(" + str_const("assertion failed") + "); ";
+                // The message is worked out only when the assertion fails.
+                s = "cx_print_str(" + str_const("assertion failed") + "); ";
                 if (e->args.size() == 2) {
                     s += "cx_print_str(" + str_const(": ") + "); ";
-                    print_parts(e->args[1].value, s);
+                    print_parts(e->args[1].value, decls, s);
                 }
-                return "({ if (!" + expr(e->args[0].value) + ") { " + s + "cx_panic_end(); } })";
+                return "({ if (!" + expr(e->args[0].value) + ") { " + decls + "cx_panic_begin(" + location(e->span) + "); " +
+                       s + "cx_panic_end(); } })";
             case Builtin::none: break;
         }
         return "0";

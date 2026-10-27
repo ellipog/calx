@@ -1,0 +1,88 @@
+// Enums with and without data: construction, matching, printing and conversions.
+enum Shape {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+    Empty
+}
+
+enum Color { Red, Green, Blue }
+
+// A representation gives the tags values, for the protocol and save formats.
+enum Flag: u8 { OnGround = 1, Sprinting = 4, Sneaking = 8 }
+
+enum Level: i8 { Low = -1, Mid, High }
+
+struct Tile {
+    color: Color = Color.Blue
+    shape: Shape
+}
+
+fn area(s: Shape) -> f64 {
+    return match s {
+        Circle(r) => 3.0 * r * r,
+        Rect { w, h } => w * h,
+        Empty => 0.0,
+    }
+}
+
+fn grow(s: Shape) -> Shape {
+    return match s {
+        Shape.Circle(r) => Shape.Circle(r * 2.0),
+        Shape.Rect { w, h } => Shape.Rect { h: h + 1.0, w: w + 1.0 },
+        Shape.Empty => Shape.Empty,
+    }
+}
+
+impl Color {
+    fn next(self) -> Color {
+        return match self {
+            Red => Color.Green,
+            Green => Color.Blue,
+            Blue => Color.Red,
+        }
+    }
+
+    fn is_warm(self) -> bool {
+        return self == Color.Red
+    }
+}
+
+fn pick(n: i32) -> Shape? {
+    if n > 0 {
+        return some(Shape.Circle(f64(n)))
+    }
+    return none
+}
+
+fn main() {
+    println("{area(Shape.Circle(2.0))} {area(Shape.Rect { w: 2.0, h: 3.0 })} {area(Shape.Empty)}")   // out: 12.0 6.0 0.0
+    println("{area(grow(Shape.Circle(1.0)))} {area(grow(Shape.Rect { w: 1.0, h: 1.0 }))}")          // out: 12.0 4.0
+
+    // Data-less enums print their variant's name, and compare with `==`.
+    let c = Color.Green
+    println("{c} {c.next()} {c.next().next()} {Color.Red.is_warm()} {c == Color.Green}")  // out: Green Blue Red true true
+
+    // With a representation, `u8(flag)` is exact, and `try_from` checks the value.
+    println("{u8(Flag.Sprinting)} {u8(Flag.OnGround) | u8(Flag.Sneaking)}")   // out: 4 9
+    println("{Flag.try_from(8u8) ?? Flag.OnGround} {Flag.try_from(2u8) == none}")   // out: Sneaking true
+    println("{i8(Level.Low)} {i8(Level.High)} {Level.try_from(0i8) ?? Level.Low}")  // out: -1 1 Mid
+    println("{Level.try_from(2i8) == none} {Level.try_from(-2i8) == none}")       // out: true true
+
+    // Enums in structs, with a default.
+    let t = Tile { shape: Shape.Rect { w: 4.0, h: 0.5 } }
+    println("{t.color} {area(t.shape)}")   // out: Blue 2.0
+
+    var s = Shape.Empty
+    s = Shape.Circle(0.5)
+    println("{area(s)}")   // out: 0.75
+
+    // An optional of an enum: `if let` unwraps it and matches the variant.
+    for n in 0..3 {
+        if let Circle(r) = pick(n) {
+            print("{r};")
+        } else {
+            print("none;")
+        }
+    }
+    println()              // out: none;1.0;2.0;
+}

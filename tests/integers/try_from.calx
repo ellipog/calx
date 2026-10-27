@@ -1,0 +1,15 @@
+// `T.try_from(x)` converts when `x` is one of T's values, and gives `none` otherwise.
+fn main() {
+    println("{i8.try_from(127) ?? 0i8} {i8.try_from(128) == none} {i8.try_from(-128) ?? 0i8} {i8.try_from(-129) == none}")
+    // out: 127 true -128 true
+    println("{u8.try_from(-1) == none} {u8.try_from(255) ?? 0u8} {u16.try_from(65536) == none}")   // out: true 255 true
+    println("{i32.try_from(u32.MAX) == none} {i32.try_from(2147483647u32) ?? 0}")    // out: true 2147483647
+    println("{u64.try_from(-1i64) == none} {u64.try_from(i64.MAX) ?? 0u64}")         // out: true 9223372036854775807
+    println("{i64.try_from(u64.MAX) == none} {usize.try_from(-1) == none} {u32.try_from(5usize) ?? 0u32}")   // out: true true 5
+
+    // `char` is a UTF-16 unit, and `rune` a Unicode scalar value, which is never a surrogate.
+    println("{char.try_from(65) ?? '?'} {char.try_from(65536) == none}")    // out: A true
+    println("{rune.try_from(0x1F600) ?? '?'} {rune.try_from(0xD800) == none} {rune.try_from(0x110000) == none}")
+    // out: 😀 true true
+    println("{u8.try_from('é') ?? 0u8} {u8.try_from('€') == none}")       // out: 233 true
+}

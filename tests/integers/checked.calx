@@ -1,0 +1,38 @@
+// `checked_*` give `none` where the result doesn't fit; `saturating_*` give the nearest value.
+fn show(o: i32?) {
+    if let v = o {
+        print("{v};")
+    } else {
+        print("none;")
+    }
+}
+
+fn main() {
+    show(i32.MAX.checked_add(1))
+    show(i32.MAX.checked_add(-1))
+    show(i32.MIN.checked_sub(1))
+    show(46341.checked_mul(46341))
+    show(46340.checked_mul(46340))
+    println()                       // out: none;2147483646;none;none;2147395600;
+
+    show(7.checked_div(2))
+    show(7.checked_div(0))
+    show(i32.MIN.checked_div(-1))
+    show((-7).checked_rem(2))
+    show(7.checked_rem(0))
+    show(i32.MIN.checked_rem(-1))
+    println()                       // out: 3;none;none;-1;none;0;
+
+    // Narrow and unsigned types check against their own range.
+    println("{100i8.checked_add(27i8) ?? 0i8} {100i8.checked_add(28i8) == none}")   // out: 127 true
+    println("{200u8.checked_add(55u8) ?? 0u8} {200u8.checked_add(56u8) == none}")   // out: 255 true
+    println("{0u32.checked_sub(1u32) == none} {u64.MAX.checked_mul(2u64) == none}") // out: true true
+    println("{5usize.checked_sub(6usize) == none} {5usize.checked_sub(5usize) ?? 9usize}") // out: true 0
+
+    println("{i32.MAX.saturating_add(1)} {i32.MIN.saturating_add(-1)} {i32.MIN.saturating_sub(1)} {i32.MAX.saturating_sub(-1)}")
+    // out: 2147483647 -2147483648 -2147483648 2147483647
+    println("{i32.MAX.saturating_mul(2)} {i32.MAX.saturating_mul(-2)} {i32.MIN.saturating_mul(-1)} {6.saturating_mul(7)}")
+    // out: 2147483647 -2147483648 2147483647 42
+    println("{250u8.saturating_add(10u8)} {3u8.saturating_sub(10u8)} {16u8.saturating_mul(16u8)}")   // out: 255 0 255
+    println("{(-100i8).saturating_sub(100i8)} {i64.MAX.saturating_add(1i64)}")   // out: -128 9223372036854775807
+}

@@ -22,6 +22,11 @@ Each rule is on the page of the feature it's about:
 | No shadowing | [Variables](variables.md#no-shadowing) |
 | Code that can never run is an error | [Control flow](control-flow.md#unreachable-code) |
 | A function returns with `return`, on every path | [Functions](functions.md#returning) |
+| A `T` never becomes a `T?` by itself: write `some(x)`. An optional compares only with another optional | [Optionals](optionals.md#making-one) |
+| `??` next to another operator needs parentheses | [Optionals](optionals.md#reading-one) |
+| A `match` covers every value, and every arm can match | [Patterns](patterns.md#every-case-every-arm-d63) |
+| A capitalized name in a pattern is a variant or constant, never a binding. A record pattern names every field or ends in `..` | [Patterns](patterns.md#names-in-patterns) |
+| `let` without `else` needs a pattern that always matches, and `let ... else` and `if let` one that might not | [Patterns](patterns.md#let--else) |
 
 ## Nothing is dropped silently
 
@@ -45,6 +50,7 @@ These mixtures need parentheses, since their precedence surprises people:
 - `and` with `or`: `a or (b and c)`
 - `&`, `|` and `^` with each other: `(a & b) | c`
 - a shift with `+` or `-`: `1 << (n - 1)`, the classic slip
+- `??` with any other operator: `(a ?? 0) + 1`
 
 Comparisons don't chain: `a < b < c` doesn't compile.
 
@@ -61,4 +67,4 @@ fn main() {
 
 A literal `true` or `false` as a condition is an error, since one branch could never run, and `while true` is written `loop`.
 
-The rest of D63 applies to features that aren't built yet, and is in the [spec](../CALX_SPEC.md#strictness-d63): optionals are never made implicitly, `??` needs parentheses next to other operators, and `match` must cover every case.
+The rest of D63 applies to features that aren't built yet, and is in the [spec](../CALX_SPEC.md#strictness-d63).

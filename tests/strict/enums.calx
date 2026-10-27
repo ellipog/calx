@@ -1,0 +1,39 @@
+// Enums: their declarations, representations and conversions. The ones declared only to fail
+// are `pub`, so they aren't also unused.
+pub enum Empty {}                           // error: an enum needs at least one variant
+
+pub enum Twice { A, B, A }                  // error: variant `A` is already declared
+
+pub enum Valued { A = 1 }                   // error: give the enum a representation, such as `enum Valued: u8`
+
+pub enum Big: u8 { A = 255, B }             // error: the value of `B` would overflow `u8`
+
+pub enum Same: u8 { A = 1, B = 1 }          // error: `B` has the same value as `A`
+
+pub enum Wide: f32 { A }                    // error: an enum's representation must be an integer type
+
+pub enum Carries: u8 { A(i32) }             // error: only an enum without data can have a representation
+
+enum Shape {
+    Circle(f64)
+    Empty
+}
+
+enum Color { Red, Green }
+
+enum Flag: u8 { On = 1 }
+
+fn main() {
+    let a = Shape.Circle                // error: holds data; write `Shape.Circle(...)`
+    let b = Shape.Empty(1)              // error: holds no data; write it without parentheses
+    let c = Shape.Circle(1.0, 2.0)      // error: holds 1 value, but 2 were given
+    let d = Shape.Square                // error: `Shape` has no variant `Square`
+    let e = u8(Color.Red)               // error: `Color` has no number to convert; give it a representation
+    let f = Flag(1u8)                   // error: build a `Flag` from one of its variants, such as `Flag.On`
+    let g = u8.wrap(Flag.On)            // error: converts to a `u8` exactly; write `u8(...)`
+    let h = Color.try_from(0u8)         // error: has no representation to convert from
+    let i = Flag.try_from(1i32)         // error: expected `u8`, found `i32`
+    let j = Shape.Circle(1.0) == Shape.Empty   // error: can't be compared with `==`
+    println("{Shape.Empty}")            // error: `Shape` can't be shown in a string yet
+    println("{a} {b} {c} {d} {e} {f} {g} {h} {i} {j}")
+}

@@ -1,6 +1,6 @@
 ---
 title: Control flow
-description: if, while, for, loop, break and continue, and which of them give values.
+description: if, while, for, loop, break and continue, and which of them give values. match is in Patterns.
 ---
 
 # Control flow
@@ -28,6 +28,7 @@ fn main() {
 - `if` is an expression. Used as a value, it needs an `else`, and both branches give the same type. A block's value is its last line.
 - `else` can start the line after the `}`.
 - A literal `true` or `false` as the condition is an error, since one branch could never run.
+- `if let pattern = value` runs the block when a pattern fits, and unwraps optionals ([`if let`](patterns.md#if-let)). `match` picks between many patterns ([patterns](patterns.md)).
 
 ## `while`
 

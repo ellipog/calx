@@ -1,0 +1,15 @@
+fn first(xs: [i32; 3], want: i32) -> usize? {
+    for i in 0usize..3 {
+        if xs[i] == want {
+            return some(i)
+        }
+    }
+    return none
+}
+
+fn main() {
+    let xs = [1, 2, 3]
+    println("{first(xs, 2)!}")     // out: 1
+    let i = first(xs, 5)! // panic: unwrapped `none`
+    println("{i}")
+}

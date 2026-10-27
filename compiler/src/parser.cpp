@@ -818,6 +818,40 @@ private:
         s->else_block = b;
     }
 
+    // A match arm's body: an expression, or a statement that makes sense alone in an arm, which
+    // becomes a block: `return`, `break`, `continue`, `fail` or an assignment.
+    Expr* arm_body() {
+        Span start = peek().span;
+        Stmt* inner = nullptr;
+        switch (peek().kind) {
+            case Tok::kw_return: case Tok::kw_break: case Tok::kw_continue: case Tok::kw_fail:
+                inner = simple_jump();
+                break;
+            default: {
+                Expr* e = expr();
+                Op op{};
+                if (!at(Tok::eq) && !compound_op(peek().kind, op)) return e;
+                bool compound = !at(Tok::eq);
+                next();
+                skip_newlines();
+                inner = new_stmt(StmtKind::assign, start);
+                inner->target = e;
+                inner->op = op;
+                inner->compound = compound;
+                inner->value = expr();
+                inner->span = Span::join(start, prev_span());
+                break;
+            }
+        }
+        auto* b = ctx_.arena.make<Block>();
+        std::vector<Stmt*> one{inner};
+        b->stmts = slice(one);
+        b->span = Span::join(start, prev_span());
+        Expr* e = new_expr(ExprKind::block, b->span);
+        e->block = b;
+        return e;
+    }
+
     Stmt* simple_jump() {
         Span start = peek().span;
         Tok k = next().kind;
@@ -826,7 +860,8 @@ private:
                         : k == Tok::kw_continue ? StmtKind::continue_
                                                 : StmtKind::fail;
         Stmt* s = new_stmt(kind, start);
-        bool has_value = !at(Tok::newline) && !at(Tok::semicolon) && !at(Tok::rbrace) && !at(Tok::eof);
+        // A `,` ends it too, in a match arm.
+        bool has_value = !at(Tok::newline) && !at(Tok::semicolon) && !at(Tok::rbrace) && !at(Tok::comma) && !at(Tok::eof);
         if (kind == StmtKind::fail && !has_value) fail(peek().span, "`fail` needs an error value");
         if (kind != StmtKind::continue_ && has_value) s->value = expr();
         s->span = Span::join(start, prev_span());
@@ -936,7 +971,20 @@ private:
         return p;
     }
 
+    // `A | B | C`: any of the alternatives.
     Pattern* pattern() {
+        Span start = peek().span;
+        Pattern* first = pattern_one();
+        if (!at(Tok::pipe)) return first;
+        std::vector<Pattern*> alts{first};
+        while (accept(Tok::pipe)) alts.push_back(pattern_one());
+        Pattern* p = new_pattern(PatternKind::or_, start);
+        p->elems = slice(alts);
+        p->span = Span::join(start, prev_span());
+        return p;
+    }
+
+    Pattern* pattern_one() {
         Span start = peek().span;
         switch (peek().kind) {
             case Tok::kw_none: next(); return new_pattern(PatternKind::none, start);
@@ -1007,8 +1055,17 @@ private:
                     p->span = Span::join(start, prev_span());
                     return p;
                 }
-                // A lone name binds, unless the checker finds a variant by that name. A dotted
-                // name is always a variant.
+                // `i32.MIN..=-1` and `LOW..HIGH`: a range from a constant.
+                if (at(Tok::dotdot) || at(Tok::dotdoteq)) {
+                    Pattern* p = new_pattern(PatternKind::range, start);
+                    p->value = path_expr(path);
+                    p->inclusive = next().kind == Tok::dotdoteq;
+                    p->end = pattern_literal();
+                    p->span = Span::join(start, prev_span());
+                    return p;
+                }
+                // A lone name binds, unless the checker finds a variant or constant by that name.
+                // A dotted name is a variant, or a constant such as `i32.MAX`.
                 Pattern* p = new_pattern(path.parts.size() == 1 ? PatternKind::binding : PatternKind::variant, start);
                 p->path = path;
                 p->name = path.parts[0];
@@ -1044,9 +1101,25 @@ private:
                 e->span = Span::join(start, prev_span());
                 return e;
             }
+            case Tok::ident: return path_expr(path());  // a constant, as a range's end
             default:
                 fail(start, std::string("expected a pattern, found ") + tok_text(peek().kind));
         }
+    }
+
+    // `a.b.c` as the expression it would be in code: a name, then fields.
+    Expr* path_expr(const Path& path) {
+        Expr* e = new_expr(ExprKind::name, path.span);
+        std::vector<Name> first{path.parts[0]};
+        e->path.parts = slice(first);
+        e->path.span = path.span;
+        for (std::size_t i = 1; i < path.parts.size(); i++) {
+            Expr* f = new_expr(ExprKind::field, path.span);
+            f->lhs = e;
+            f->member = path.parts[i];
+            e = f;
+        }
+        return e;
     }
 
     // --- expressions ---------------------------------------------------------------------
@@ -1390,7 +1463,7 @@ private:
                 if (accept(Tok::kw_if)) arm.guard = expr();
                 expect(Tok::fat_arrow, "after the match pattern");
                 skip_newlines();
-                arm.body = expr();
+                arm.body = arm_body();
                 arm.span = Span::join(arm.span, prev_span());
                 arms.push_back(arm);
                 if (!accept(Tok::comma) && !at(Tok::rbrace)) end_line();

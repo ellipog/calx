@@ -1,0 +1,113 @@
+// A `match` must cover every value, and every arm must be able to match (D63).
+enum Shape {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+    Empty
+}
+
+enum Color { Red, Green, Blue }
+
+enum Step {
+    Walk { fast: bool, dx: i32 }
+    Stop
+}
+
+fn missing(s: Shape, c: Color, n: u8, o: i32?, t: (bool, bool), x: i32, st: Step) {
+    match s {                       // error: doesn't cover `Shape.Empty`
+        Circle(r) => println("{r}"),
+        Rect { w, .. } => println("{w}"),
+    }
+    match c {                       // error: doesn't cover `Color.Blue`
+        Red | Green => println("x"),
+    }
+    match n {                       // error: doesn't cover `101..=199`
+        0..=100 => println("a"),
+        200..=255 => println("b"),
+    }
+    match o {                       // error: doesn't cover `some(_)`
+        some(v) if v > 0 => println("{v}"),
+        none => println("none"),
+    }
+    match t {                       // error: doesn't cover `(false, false)`
+        (true, _) => println("a"),
+        (_, true) => println("b"),
+    }
+    match x {                       // error: doesn't cover `i32.MIN..=-1`
+        0..=i32.MAX => println("a"),
+    }
+    match st {                      // error: doesn't cover `Step.Walk { fast: false, dx: _ }`
+        Walk { fast: true, .. } | Stop => println("b"),
+    }
+}
+
+fn unreachable_arms(c: Color, t: (bool, bool), n: i32) {
+    match c {
+        _ => println("any"),
+        Red => println("red"),          // error: this arm never matches
+    }
+    match t {
+        (true, _) => println("a"),
+        (_, true) => println("b"),
+        (true, true) => println("c"),   // error: this arm never matches
+        _ => println("d"),
+    }
+    match n {
+        0..=10 => println("a"),
+        5 => println("b"),              // error: this arm never matches
+        _ => println("c"),
+    }
+}
+
+fn bad_patterns(s: Shape, c: Color, f: f64, n: i32) {
+    match s {
+        Rect { w } => println("{w}"),   // error: leaves out field `h`
+        _ => println(""),
+    }
+    match s {
+        Circle => println(""),          // error: holds 1 value, but the pattern has 0
+        _ => println(""),
+    }
+    match s {
+        Empty(x) => println("{x}"),     // error: holds no data
+        _ => println(""),
+    }
+    match f {
+        1.5 => println(""),             // error: match a float with comparisons
+        _ => println(""),
+    }
+    match c {
+        Purple => println(""),          // error: `Purple` isn't a variant of `Color`
+        _ => println(""),
+    }
+    match n {
+        5..5 => println(""),            // error: this range is empty
+        some(v) => println("{v}"),      // error: `some` only matches an optional
+        mut m => println("{m}"),        // error: a pattern binds a copy
+        a | b => println(""),           // error: can't bind names yet
+    }
+}
+
+fn lets(s: Shape, o: i32?) {
+    let Circle(r) = s                   // error: doesn't match every `Shape`, such as `Shape.Rect { .. }`
+    println("{r}")
+    let (a, b) = (1, 2) else {          // error: matches every `(i32, i32)`; remove the `else`
+        return
+    }
+    println("{a} {b}")
+    let x = o else {                    // error: must leave
+        println("no")
+    }
+    println("{x}")
+    let some(y) = o else return         // error: already unwraps the optional
+    println("{y}")
+    if let (p, q) = (1, 2) {            // error: matches every `(i32, i32)`; use `let`
+        println("{p} {q}")
+    }
+}
+
+fn main() {
+    missing(Shape.Empty, Color.Red, 0u8, none, (true, true), 0, Step.Stop)
+    unreachable_arms(Color.Red, (true, true), 0)
+    bad_patterns(Shape.Empty, Color.Red, 0.0, 0)
+    lets(Shape.Empty, none)
+}

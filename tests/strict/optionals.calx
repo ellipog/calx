@@ -1,0 +1,34 @@
+// Optionals are explicit: built with `some`, read with `??`, `!`, `if let` or `let ... else` (D63).
+struct P {
+    x: i32
+}
+
+fn half(n: i32) -> i32? {
+    if n % 2 == 0 {
+        return n / 2                    // error: write `some(...)`
+    }
+    return none
+}
+
+fn takes(n: i32) -> i32 {
+    return n
+}
+
+fn main() {
+    let a = half(4)
+    let b: i32 = a                      // error: unwrap it with `??`, `!`, `if let` or `let ... else`
+    let c: i32 = some(3)                // error: `some(...)` makes an optional, so remove it
+    let d = none                        // error: can't tell what kind of optional `none` is
+    let f = takes(a)                    // error: expected `i32`, found `i32?`
+    let g = 5 ?? 0                      // error: `??` needs an optional on the left
+    let h = a ?? "zero"                 // error: `??` needs an `i32` or an `i32?` on the right
+    let i = a ?? 0 + 1                  // error: `??` next to another operator needs parentheses
+    let j = 5!                          // error: `!` unwraps an optional
+    let p = P { x: 1 }
+    let k = p?.x                        // error: `?.` reads a field of an optional
+    let o: P? = some(p)
+    let l = o.x                         // error: read its field with `?.`, or unwrap it first
+    let m = a < some(3)                 // error: can't be compared with `<`
+    let n = some(())                    // error: an optional can't hold
+    println("{b} {c} {d} {f} {g} {h} {i} {j} {k} {l} {m} {n}")
+}

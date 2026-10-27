@@ -72,43 +72,20 @@ Built: see [Types](reference/types.md).
 
 ### Compound types
 
-- **Structs** hold named fields, with optional defaults. `struct Name(String)` is a one-field wrapper, read as `.0`.
-- **Enums** are sum types. A variant can carry data: `enum Shape { Circle(f64), Rect { w: f64, h: f64 } }`. An enum with no data can name a representation and values: `enum Flag: u8 { OnGround = 1 }`.
-- **Tuples:** `(f32, f32)`, destructured with `let (a, b) = t`.
-- **Fixed arrays:** `[T; N]`. **Lists:** `List<T>`, growable, owning their elements.
+Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md) and fixed arrays ([Types](reference/types.md#arrays)). Still to build:
+
+- **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
+- **Lists:** `List<T>`, growable, owning their elements.
+- **Comparing and printing** enums with data and tuples, through the derived `Equal` and `Display` ([Derived properties](#derived-properties)).
 - **Functions and closures:** `fn(A) -> B` for a plain function. Closures are written `|a| expr` and have their own types, accepted through interfaces such as `Fn(A) -> B`.
 
 ### Optionals, no null (D23)
 
-There is no null. A value that may be absent is `T?`:
+Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns.md). Still to build:
 
-```calx
-fn find(names: List<String>, wanted: String) -> usize? {
-    for (i, n) in names.enumerate() {
-        if n == wanted {
-            return some(i)
-        }
-    }
-    return none
-}
-
-fn index_or_zero(names: List<String>, wanted: String) -> usize {
-    let i = find(names, wanted) else return 0     // unwrap, or leave the function
-    return i
-}
-
-fn first_letter(s: String) -> rune {
-    if let r = s.runes().next() {                 // unwrap for one block
-        return r
-    }
-    return 'z'
-}
-```
-
-- `none` is the empty value and `some(x)` holds a value. A plain `T` never turns into a `T?` by itself, so `return i` in a function returning `usize?` doesn't compile (D63).
-- `if let x = opt { }`, `let x = opt else <diverge>`, `a ?? b`, `a?.b`, `opt.map(f)` and `opt.or(default)`.
-- `opt!` unwraps, and panics if it's empty.
-- An optional compares only with another optional: `opt == some(3)`, not `opt == 3`.
+- `opt.map(f)` and `opt.or(default)`, with closures and generics.
+- `?.` calling a method, `opt?.len()`, as well as reading a field.
+- Binding names in or-patterns, `Circle(r) | Ring(r)`, when every alternative binds the same names with the same types.
 
 ### Errors are values
 
@@ -196,9 +173,6 @@ Calx matches Java exactly. What's built is in the reference: [Integers](referenc
 
 | Feature | Calx | Emitted C |
 | --- | --- | --- |
-| Checked and saturating arithmetic | `checked_add`, `saturating_add` and the like, for code that doesn't want wrapping. The `checked_` methods return `T?` | Clang's overflow builtins |
-| `checked_div` | Returns `none` on division by zero, instead of panicking | A branch on zero |
-| `T.try_from(x)` | Returns `T?`, empty when the value doesn't fit `T` | A range check |
 | `fma(a, b, c)` | A fused multiply-add, rounding once. Otherwise `a * b + c` rounds twice, as in Java | `__builtin_fma` |
 | `total_cmp` | Java's `Double.compare` order, for sorting | |
 | `round` | Java's `Math.round`: the nearest integer, with halves rounded up, saturating like a cast | |
@@ -230,11 +204,8 @@ Calx matches Java exactly. What's built is in the reference: [Integers](referenc
 
 Calx's checker is stricter than Rust's: every rule is an error, no flag turns one off, and the only warnings are for deprecated APIs. The rules that are built are in [Strictness](reference/strictness.md), which links each to its feature's page. These apply to features that aren't built yet:
 
-- **Optionals.** A `T` never becomes a `T?` by itself: write `some(x)`. An optional compares only with another optional. `T.try_from(x)` is the checked conversion.
 - **Unused imports** are errors, like unused names.
 - **Unreachable code** includes code after `fail`.
-- **Parentheses.** `??` with any other binary operator needs them.
-- **`match`** must cover every case, and an arm that can never match is an error.
 - **Closures** end with their value, like blocks used as values. Only a function's body has to use `return`.
 
 ## Memory model (D48)
@@ -488,7 +459,7 @@ What Calx leaves out, on purpose:
 | Must (from the plan and decision log) | Settled in |
 | --- | --- |
 | Generics and interfaces, monomorphized into C (D26) | [Interfaces and generics](#interfaces-and-generics-d26) |
-| No null: absence is an optional type (D23) | [Optionals](#optionals-no-null-d23) |
+| No null: absence is an optional type (D23) | [Optionals](reference/optionals.md) |
 | Handle types for game objects, checked on use (D24) | [Handles](#handles-d24) |
 | Signed overflow wraps | [Integers](reference/integers.md) |
 | Shift counts masked, `>>>` exists | [Integers](reference/integers.md) |

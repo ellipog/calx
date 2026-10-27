@@ -1,0 +1,114 @@
+// `match` on integers, characters, strings, bools, tuples, enums and optionals.
+enum Event {
+    Join(str)
+    Move { dx: i32, dz: i32 }
+    Chat(str, bool)
+    Leave
+}
+
+const SPAWN: i32 = 100
+
+fn size(n: i32) -> str {
+    return match n {
+        i32.MIN..=-1 => "negative",
+        0 => "zero",
+        1..10 => "small",
+        SPAWN => "spawn",
+        10..=999 => "medium",
+        _ => "big",
+    }
+}
+
+fn kind(c: char) -> str {
+    return match c {
+        'a'..='z' => "lower",
+        'A'..='Z' => "upper",
+        '0'..='9' => "digit",
+        ' ' | '\t' | '\n' => "space",
+        _ => "other",
+    }
+}
+
+fn command(s: str) -> i32 {
+    return match s {
+        "help" => 1,
+        "stop" | "quit" => 2,
+        _ => 0,
+    }
+}
+
+fn describe(e: Event) {
+    match e {
+        Join(name) => println("join {name}"),
+        Move { dx: 0, dz: 0 } => println("stand"),
+        Move { dx, dz } if dx == dz => println("diagonal {dx}"),
+        Move { dx, .. } => println("move {dx}"),
+        Chat(text, true) => println("loud {text}"),
+        Chat(text, false) => println("say {text}"),
+        Leave => println("leave"),
+    }
+}
+
+fn quadrant(p: (i32, i32)) -> i32 {
+    return match p {
+        (0, _) | (_, 0) => 0,
+        (1..=i32.MAX, 1..=i32.MAX) => 1,
+        (i32.MIN..=-1, 1..=i32.MAX) => 2,
+        (i32.MIN..=-1, i32.MIN..=-1) => 3,
+        (_, _) => 4,
+    }
+}
+
+fn first_word(o: str?) -> str {
+    return match o {
+        some("") => "empty",
+        some(w) => w,
+        none => "nothing",
+    }
+}
+
+fn main() {
+    println("{size(-3)} {size(0)} {size(9)} {size(100)} {size(500)} {size(5000)}")  // out: negative zero small spawn medium big
+    println("{kind('q')} {kind('Q')} {kind('4')} {kind(' ')} {kind('!')}")          // out: lower upper digit space other
+    println("{command("help")} {command("quit")} {command("stop")} {command("x")}") // out: 1 2 2 0
+    describe(Event.Join("Alex"))                 // out: join Alex
+    describe(Event.Move { dx: 0, dz: 0 })        // out: stand
+    describe(Event.Move { dx: 2, dz: 2 })        // out: diagonal 2
+    describe(Event.Move { dx: 3, dz: -1 })       // out: move 3
+    describe(Event.Chat("hi", true))             // out: loud hi
+    describe(Event.Chat("hi", false))            // out: say hi
+    describe(Event.Leave)                        // out: leave
+    println("{quadrant((0, 5))} {quadrant((2, 3))} {quadrant((-2, 3))} {quadrant((-1, -1))} {quadrant((4, -4))}")  // out: 0 1 2 3 4
+    println("{first_word(some(""))} {first_word(some("go"))} {first_word(none)}")  // out: empty go nothing
+
+    // As a statement, with a guard reading the value.
+    for n in 0..4 {
+        match n {
+            x if x % 2 == 0 => println("{x} even"),
+            _ => println("{n} odd"),
+        }
+    }
+    // out: 0 even
+    // out: 1 odd
+    // out: 2 even
+    // out: 3 odd
+
+    // The arms may leave the function or the loop.
+    var total = 0
+    for n in 0..10 {
+        match n {
+            3 => continue,
+            7 => break,
+            _ => total += n,
+        }
+    }
+    println("{total}")   // out: 18
+
+    // A bool is covered by `true` and `false`.
+    let flag = total > 10
+    let word = match flag {
+        true => "yes",
+        false => "no",
+    }
+    println(word)   // out: yes
+}

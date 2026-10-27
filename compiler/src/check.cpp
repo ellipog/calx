@@ -1,9 +1,11 @@
 #include "check.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -81,7 +83,10 @@ public:
         prog_.root = m;
         set_prefix(m);
         collect(m);
+        // Defaults come after the enums, since a default can be a variant, whose tag the enum sets.
         for (Item* it : structs_) resolve_fields(it);
+        for (Item* it : enums_) resolve_enum(it);
+        for (Item* it : structs_) check_defaults(it);
         for (Item* it : impls_) collect_impl(it);
         for (Item* f : all_fns_) check_signature(f);
         for (Item* c : consts_) check_const(c);
@@ -202,7 +207,13 @@ private:
                     impls_.push_back(it);
                     break;
                 case ItemKind::import: not_yet(it->span, "imports"); break;
-                case ItemKind::enum_: not_yet(it->span, "enums"); break;
+                case ItemKind::enum_:
+                    if (!it->generics.empty()) not_yet(it->generics[0].span, "generic enums");
+                    declare_item(it);
+                    it->c_name = c_name({text(it->name)});
+                    it->declared = T.make_enum(it, text(it->name));
+                    enums_.push_back(it);
+                    break;
                 case ItemKind::interface: not_yet(it->span, "interfaces"); break;
                 case ItemKind::type_alias: not_yet(it->span, "type aliases"); break;
                 case ItemKind::extern_block: not_yet(it->span, "extern blocks"); break;
@@ -222,6 +233,9 @@ private:
             f.resolved = resolve_type(f.type);
             current_item_ = nullptr;
         }
+    }
+
+    void check_defaults(Item* s) {
         for (FieldDecl& f : s->fields) {
             if (!f.default_value) continue;
             Type* t = check(f.default_value, f.resolved);
@@ -229,6 +243,105 @@ private:
                 error(f.default_value->span, "a field's default must be a constant");
             }
         }
+    }
+
+    static bool is_type_item(const Item* it) { return it->kind == ItemKind::struct_ || it->kind == ItemKind::enum_; }
+
+    void resolve_enum(Item* en) {
+        Type* t = en->declared;
+        if (en->variants.empty()) error(en->name_span, "an enum needs at least one variant");
+        std::unordered_map<Name, Span> seen;
+        bool has_data = false;
+        current_item_ = en;
+        for (VariantDecl& v : en->variants) {
+            if (!seen.emplace(v.name, v.span).second) {
+                error(v.span, "variant " + q(text(v.name)) + " is already declared");
+                note(seen[v.name], "the first declaration is here");
+            }
+            std::vector<Type*> types;
+            for (TypeExpr* p : v.payload) types.push_back(resolve_type(p));
+            std::unordered_map<Name, Span> fields;
+            for (FieldDecl& f : v.fields) {
+                if (!fields.emplace(f.name, f.span).second) {
+                    error(f.span, "field " + q(text(f.name)) + " is already declared");
+                }
+                f.resolved = resolve_type(f.type);
+                types.push_back(f.resolved);
+                if (f.default_value) error(f.default_value->span, "a variant's fields can't have defaults");
+            }
+            if (v.has_fields && v.fields.empty()) error(v.span, "a variant without data needs no braces");
+            for (std::size_t i = 0; i < types.size(); i++) {
+                if (types[i]->kind == TypeKind::unit || types[i]->kind == TypeKind::never) {
+                    error(v.span, "a variant can't hold " + name_of(types[i]));
+                    types[i] = T.error;
+                }
+            }
+            v.types = ctx_.arena.copy(types);
+            if (!types.empty()) has_data = true;
+        }
+        current_item_ = nullptr;
+        t->has_data = has_data;
+        if (en->repr) {
+            Type* r = resolve_type(en->repr);
+            if (!is_bad(r) && (!is_int(r) || r->is_usize)) {
+                error(en->repr->span, "an enum's representation must be an integer type such as `u8`");
+            } else if (!is_bad(r) && has_data) {
+                error(en->repr->span, "only an enum without data can have a representation");
+            } else if (!is_bad(r)) {
+                t->repr = r;
+            }
+        }
+        bool explicit_repr = t->repr != nullptr;
+        if (!t->repr) {
+            std::size_t n = en->variants.size();
+            t->repr = n <= 256 ? T.u8 : n <= 65536 ? T.u16 : T.u32;
+        }
+        // The tags count up from 0, or from the last value given, as in C.
+        std::uint64_t next = 0;
+        bool next_ok = true;
+        std::unordered_map<std::uint64_t, const VariantDecl*> values;
+        for (VariantDecl& v : en->variants) {
+            if (v.value) {
+                if (!explicit_repr) {
+                    error(v.value->span, "give the enum a representation, such as " +
+                                             q("enum " + std::string(text(en->name)) + ": u8") + ", to set its values");
+                    check(v.value, nullptr);
+                } else {
+                    Type* vt = check(v.value, t->repr);
+                    if (!is_bad(vt) && !v.value->has_bits) {
+                        error(v.value->span, "a variant's value must be a constant");
+                    } else if (!is_bad(vt)) {
+                        next = v.value->const_bits;
+                        next_ok = true;
+                    }
+                }
+            } else if (!next_ok) {
+                error(v.span, "the value of " + q(text(v.name)) + " would overflow " + name_of(t->repr));
+            }
+            v.tag = next;
+            auto [pos, fresh] = values.emplace(next, &v);
+            if (!fresh && next_ok) {
+                error(v.span, q(text(v.name)) + " has the same value as " + q(text(pos->second->name)));
+            }
+            if (next == source_range(t->repr).pos) {
+                next_ok = false;
+            } else {
+                std::uint64_t mask = t->repr->bits == 64 ? UINT64_MAX : (std::uint64_t{1} << t->repr->bits) - 1;
+                next = ((next + 1) & mask);
+                if (t->repr->is_signed && (next >> (t->repr->bits - 1)) & 1) next |= ~mask;
+            }
+        }
+    }
+
+    static std::uint32_t find_variant(const Type* t, Name n) {
+        for (std::uint32_t i = 0; i < t->item->variants.size(); i++) {
+            if (t->item->variants[i].name == n) return i;
+        }
+        return UINT32_MAX;
+    }
+
+    std::string variant_text(const Type* t, std::uint32_t i) const {
+        return std::string(t->name) + "." + std::string(text(t->item->variants[i].name));
     }
 
     void collect_impl(Item* impl) {
@@ -239,8 +352,8 @@ private:
         if (!impl->generics.empty()) not_yet(impl->generics[0].span, "generic impls");
         Type* t = resolve_type(impl->self_type);
         if (is_bad(t)) return;
-        if (t->kind != TypeKind::struct_) {
-            error(impl->self_type->span, "methods can only be added to structs declared in this module");
+        if (t->kind != TypeKind::struct_ && t->kind != TypeKind::enum_) {
+            error(impl->self_type->span, "methods can only be added to structs and enums declared in this module");
             return;
         }
         auto& table = methods_[t];
@@ -257,10 +370,13 @@ private:
             m->impl_type = t;
             m->c_name = c_name({t->name, text(m->name)});
             for (const FieldDecl& f : t->item->fields) {
-                if (f.name == m->name) {
+                if (t->kind == TypeKind::struct_ && f.name == m->name) {
                     error(m->name_span, q(text(m->name)) + " is both a field and a method of " + name_of(t));
                     note(f.span, "the field is here");
                 }
+            }
+            if (t->kind == TypeKind::enum_ && find_variant(t, m->name) != UINT32_MAX) {
+                error(m->name_span, q(text(m->name)) + " is both a variant and a function of " + name_of(t));
             }
             auto [pos, fresh] = table.emplace(m->name, m);
             if (!fresh) {
@@ -285,7 +401,9 @@ private:
                 Type* r = T.primitive(text(n));
                 if (!r) {
                     auto it = items_.find(n);
-                    if (it != items_.end() && it->second->kind == ItemKind::struct_) {
+                    if (n == n_Self_ && current_impl_type_) {
+                        r = current_impl_type_;
+                    } else if (it != items_.end() && is_type_item(it->second)) {
                         r = it->second->declared;
                         if (it->second != current_item_) it->second->used = true;
                     } else if (it != items_.end()) {
@@ -302,10 +420,25 @@ private:
                 }
                 return r;
             }
-            case TypeExprKind::tuple:
+            case TypeExprKind::tuple: {
                 if (t->args.empty()) return T.unit;
-                not_yet(t->span, "tuples");
-                return T.error;
+                std::vector<Type*> elems;
+                bool bad = false;
+                for (TypeExpr* a : t->args) {
+                    Type* et = resolve_type(a);
+                    if (et->kind == TypeKind::unit || et->kind == TypeKind::never) {
+                        error(a->span, "a tuple can't hold " + name_of(et));
+                        bad = true;
+                    }
+                    bad = bad || is_bad(et);
+                    elems.push_back(et);
+                }
+                if (elems.size() < 2) {
+                    error(t->span, "a tuple needs at least two elements");
+                    return T.error;
+                }
+                return bad ? T.error : T.tuple_of(elems);
+            }
             case TypeExprKind::array: {
                 Type* elem = resolve_type(t->inner);
                 Type* len_t = check(t->length, T.usize);
@@ -324,12 +457,29 @@ private:
                 if (current_impl_type_) return current_impl_type_;
                 error(t->span, "`Self` only means something inside an impl block");
                 return T.error;
-            case TypeExprKind::optional: not_yet(t->span, "optional types"); return T.error;
+            case TypeExprKind::optional: {
+                Type* inner = resolve_type(t->inner);
+                if (is_bad(inner)) return T.error;
+                return optional_type(inner, t->span);
+            }
             case TypeExprKind::fn: not_yet(t->span, "function types"); return T.error;
             case TypeExprKind::pointer: not_yet(t->span, "pointers"); return T.error;
             case TypeExprKind::dyn: not_yet(t->span, "`dyn` types"); return T.error;
         }
         return T.error;
+    }
+
+    // `T?`, or an error for the types an optional can't hold.
+    Type* optional_type(Type* inner, Span span) {
+        if (inner->kind == TypeKind::optional) {
+            error(span, "an optional can't hold another optional; use an enum to tell the cases apart");
+            return T.error;
+        }
+        if (inner->kind == TypeKind::unit || inner->kind == TypeKind::never) {
+            error(span, "an optional can't hold " + name_of(inner) + "; use a `bool`");
+            return T.error;
+        }
+        return T.optional_of(inner);
     }
 
     std::string path_text(const Path& p) const {
@@ -341,7 +491,15 @@ private:
         return s;
     }
 
-    static bool is_view_type(const Type* t) { return t->kind == TypeKind::struct_ || t->kind == TypeKind::array; }
+    // Read parameters of these types are passed as views, since copying them could be costly.
+    static bool is_view_type(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: return true;
+            case TypeKind::enum_: return t->has_data;
+            case TypeKind::optional: return is_view_type(t->elem);
+            default: return false;
+        }
+    }
 
     void check_signature(Item* f) {
         if (f->checked_signature) return;
@@ -521,6 +679,7 @@ private:
         switch (it->kind) {
             case ItemKind::fn: return "function";
             case ItemKind::struct_: return "struct";
+            case ItemKind::enum_: return "enum";
             case ItemKind::const_: return "constant";
             default: return "declaration";
         }
@@ -573,6 +732,7 @@ private:
             case ExprKind::if_: t = check_if(e, nullptr, true); break;
             case ExprKind::block: t = check_block(e->block, nullptr, BlockUse::stmt); break;
             case ExprKind::loop: t = check_loop(e, nullptr, true); break;
+            case ExprKind::match: t = check_match(e, nullptr, true); break;
             default: t = check(e, nullptr); break;
         }
         e->type = t;
@@ -610,19 +770,20 @@ private:
 
     bool check_let(Stmt* s) {
         Pattern* p = s->pattern;
+        bool has_else = s->else_ || s->else_block;
         if (p->kind == PatternKind::wildcard) {
-            error(p->span, "write `_ = ...` to discard a value");
+            error(p->span, has_else ? "check for `none` with `if x == none { ... }`" : "write `_ = ...` to discard a value");
             if (s->value) check(s->value, nullptr);
-            return false;
-        }
-        if (p->kind != PatternKind::binding) {
-            not_yet(p->span, "patterns in `let`");
             return false;
         }
         if (p->is_mut) {
             error(p->span, "declare a variable that changes with `var`, not `let mut`");
         }
-        if (s->else_ || s->else_block) not_yet(s->span, "`let ... else`");
+        // A capitalized name can be a variant (`let Empty = s else return`), unless it's already
+        // declared, which gets the clearer error about reusing the name.
+        bool plain = p->kind == PatternKind::binding && (!std::isupper(static_cast<unsigned char>(text(p->name)[0])) ||
+                                                         resolve_name(p->name).kind != NameKind::none);
+        if (has_else || !plain) return check_let_pattern(s);
         Type* declared = s->type ? resolve_type(s->type) : nullptr;
         if (!s->value) {
             error(p->span, "give " + q(text(p->name)) + " a value; Calx has no uninitialized variables");
@@ -643,6 +804,71 @@ private:
         s->local = l;
         declare(l);
         return t->kind == TypeKind::never;
+    }
+
+    // `let p = e`, where `p` is more than a name, and `let p = e else <leave>`.
+    bool check_let_pattern(Stmt* s) {
+        Pattern* p = s->pattern;
+        bool has_else = s->else_ || s->else_block;
+        Type* declared = s->type ? resolve_type(s->type) : nullptr;
+        if (!s->value) {
+            error(p->span, "give the pattern a value: `let ... = value`");
+            return false;
+        }
+        Type* vt;
+        if (has_else && declared && !is_bad(declared)) {
+            // The type given is the pattern's: the optional's value, for an optional.
+            vt = check(s->value, nullptr);
+            if (!is_bad(vt) && vt != declared && !(vt->kind == TypeKind::optional && vt->elem == declared)) {
+                error(s->value->span, "expected " + name_of(declared) + " or " + name_of(T.optional_of(declared)) +
+                                          ", found " + name_of(vt));
+                vt = T.error;
+            }
+        } else {
+            vt = check(s->value, declared);
+        }
+        if (vt->kind == TypeKind::never) vt = T.error;
+        if (vt->kind == TypeKind::unit) {
+            error(s->value->span, "this has no value to bind");
+            vt = T.error;
+        }
+        Type* pt = vt;
+        if (has_else && vt->kind == TypeKind::optional) {
+            s->let_unwraps = true;
+            pt = vt->elem;
+            if (reject_optional_pattern(p, "`let x = opt else` already unwraps the optional; match its value directly")) {
+                pt = T.error;  // its names are declared without another error
+            }
+        }
+        // The `else` can't see the pattern's names, so it's checked first.
+        if (has_else) {
+            Type* et = s->else_block ? check_block(s->else_block, nullptr, BlockUse::stmt) : check_expr_stmt(s->else_, false);
+            if (et->kind != TypeKind::never && !is_bad(et)) {
+                Span es = s->else_block ? s->else_block->span : s->else_->span;
+                error(es, "the `else` of `let ... else` must leave: `return`, `break`, `continue` or a panic");
+            }
+        }
+        pattern_var_ = s->is_var;
+        bool ok = check_pattern(p, pt);
+        pattern_var_ = false;
+        if (p->kind == PatternKind::binding) s->local = p->local;
+        if (!ok || is_bad(pt)) return false;
+        std::string missing;
+        bool all = irrefutable(p, pt, &missing);
+        if (!has_else && !all) {
+            error(p->span, "this pattern doesn't match every " + name_of(pt) + ", such as " + q(missing) +
+                               "; add `else` to leave when it doesn't");
+        } else if (has_else && all && !s->let_unwraps) {
+            error(p->span, "this pattern matches every " + name_of(pt) + "; remove the `else`");
+        }
+        return false;
+    }
+
+    // `some(x)` and `none` in a pattern that already unwraps an optional.
+    bool reject_optional_pattern(Pattern* p, const char* msg) {
+        bool some = p->kind == PatternKind::variant && p->path.parts.size() == 1 && text(p->path.parts[0]) == "some";
+        if (some || p->kind == PatternKind::none) error(p->span, msg);
+        return some || p->kind == PatternKind::none;
     }
 
     // `_ = e` discards; anything else assigns to a place.
@@ -813,10 +1039,6 @@ private:
         if (s->is_parallel) not_yet(s->span, "`parallel for` loops");
         if (s->iter_mut) not_yet(s->span, "`for ... in mut` loops");
         Pattern* p = s->pattern;
-        if (p->kind != PatternKind::binding && p->kind != PatternKind::wildcard) {
-            not_yet(p->span, "patterns in `for`");
-            return;
-        }
         Expr* it = s->value;
         Type* elem = T.error;
         Local* borrowed = nullptr;
@@ -849,6 +1071,13 @@ private:
             l->is_loop_var = true;
             s->local = l;
             declare(l);
+        } else if (p->kind != PatternKind::wildcard) {
+            if (check_pattern(p, elem) && !is_bad(elem)) {
+                std::string missing;
+                if (!irrefutable(p, elem, &missing)) {
+                    error(p->span, "a `for` loop's pattern must match every element, but this one misses " + q(missing));
+                }
+            }
         }
         push_loop(false, false, nullptr);
         s->loop_id = loops_.back().id;
@@ -894,6 +1123,11 @@ private:
         } else if (is_integral(want) && is_integral(got)) {
             msg += "; " + (exact_conversion(got, want) ? "convert it with " + q(std::string(want->name) + "(...)")
                                                         : lossy_hint(got, want));
+        } else if (want->kind == TypeKind::optional && want->elem == got) {
+            msg += "; a value doesn't become an optional by itself: write " + q("some(...)");
+        } else if (got->kind == TypeKind::optional && got->elem == want) {
+            msg += is_some_call(e) ? std::string("; `some(...)` makes an optional, so remove it")
+                                   : std::string("; unwrap it with `??`, `!`, `if let` or `let ... else`");
         }
         error(e->span, msg);
     }
@@ -912,12 +1146,19 @@ private:
         return "there's no conversion between them";
     }
 
-    static bool is_untyped_literal(const Expr* e) {
+    bool is_untyped_literal(const Expr* e) const {
         if (e->kind == ExprKind::int_lit || e->kind == ExprKind::float_lit || e->kind == ExprKind::char_lit) {
             return e->literal.suffix.empty();
         }
         if (e->kind == ExprKind::unary && e->op == Op::neg) return is_untyped_literal(e->lhs);
+        if (e->kind == ExprKind::none_lit) return true;
+        if (is_some_call(e)) return is_untyped_literal(e->args[0].value);
         return false;
+    }
+
+    bool is_some_call(const Expr* e) const {
+        return e->kind == ExprKind::call && e->callee->kind == ExprKind::name && e->args.size() == 1 &&
+               text(e->callee->path.parts[0]) == "some" && !find_local(e->callee->path.parts[0]);
     }
 
     // Two operands that must have the same type. An untyped literal on the left takes its type
@@ -948,7 +1189,16 @@ private:
                 e->const_bits = e->bool_value;
                 return T.bool_;
             case ExprKind::string_lit: return string_literal(e, false);
-            case ExprKind::none_lit: not_yet(e->span, "optionals"); return T.error;
+            case ExprKind::none_lit:
+                e->is_const = true;
+                if (expected && expected->kind == TypeKind::optional) return expected;
+                if (expected && !is_bad(expected)) {
+                    error(e->span, "expected " + name_of(expected) + ", found `none`, which is an optional");
+                } else if (!expected) {
+                    error(e->span, "can't tell what kind of optional `none` is; give it a type, such as "
+                                   "`let x: i32? = none`");
+                }
+                return T.error;
             case ExprKind::name:
             case ExprKind::self: return name_value(e);
             case ExprKind::unary: return unary(e, expected);
@@ -964,17 +1214,22 @@ private:
             }
             case ExprKind::struct_lit: return struct_literal(e);
             case ExprKind::array_lit: return array_literal(e, expected);
-            case ExprKind::tuple:
-                if (e->elems.empty()) return T.unit;
-                not_yet(e->span, "tuples");
-                return T.error;
+            case ExprKind::tuple: return tuple_literal(e, expected);
             case ExprKind::block: return check_block(e->block, expected, BlockUse::value);
             case ExprKind::if_: return check_if(e, expected, false);
             case ExprKind::loop: return check_loop(e, expected, false);
-            case ExprKind::match: not_yet(e->span, "`match` expressions"); return T.error;
+            case ExprKind::match: return check_match(e, expected, false);
             case ExprKind::closure: not_yet(e->span, "closures"); return T.error;
-            case ExprKind::optional_field: not_yet(e->span, "optionals"); return T.error;
-            case ExprKind::unwrap: not_yet(e->span, "optionals"); return T.error;
+            case ExprKind::optional_field: return optional_field(e);
+            case ExprKind::unwrap: {
+                Type* t = check(e->lhs, nullptr);
+                if (is_bad(t)) return T.error;
+                if (t->kind != TypeKind::optional) {
+                    error(e->span, "`!` unwraps an optional, but this is " + a_type(t));
+                    return T.error;
+                }
+                return t->elem;
+            }
             case ExprKind::try_: not_yet(e->span, "errors"); return T.error;
             case ExprKind::unsafe_block: not_yet(e->span, "`unsafe` blocks"); return T.error;
         }
@@ -1125,13 +1380,14 @@ private:
         if (!e->interpolations.empty() && !allow_interpolation) {
             error(e->span, "interpolated strings need `String`, which isn't implemented yet; they work in "
                            "`print`, `println`, `panic` and `assert` for now");
+            for (Expr* part : e->interpolations) check(part, nullptr);  // so their names count as used
             return T.error;
         }
         for (Expr* part : e->interpolations) {
             Type* t = check(part, nullptr);
             if (is_bad(t)) continue;
             if (!(is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ ||
-                  t->kind == TypeKind::rune || t->kind == TypeKind::str)) {
+                  t->kind == TypeKind::rune || t->kind == TypeKind::str || (t->kind == TypeKind::enum_ && !t->has_data))) {
                 error(part->span, name_of(t) + " can't be shown in a string yet");
             }
         }
@@ -1159,7 +1415,7 @@ private:
             return r;
         }
         if (auto it = items_.find(n); it != items_.end()) {
-            if (it->second->kind == ItemKind::struct_) {
+            if (is_type_item(it->second)) {
                 r.kind = NameKind::type;
                 r.type = it->second->declared;
                 r.item = it->second;
@@ -1238,6 +1494,17 @@ private:
     }
 
     // --- operators ---------------------------------------------------------------------------
+
+    // Whether `==` and `!=` work on the type.
+    static bool equatable(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::bool_: case TypeKind::int_: case TypeKind::float_: case TypeKind::char_:
+            case TypeKind::rune: return true;
+            case TypeKind::enum_: return !t->has_data;
+            case TypeKind::optional: return equatable(t->elem);
+            default: return false;
+        }
+    }
 
     static bool is_bitwise(Op op) { return op == Op::bit_and || op == Op::bit_or || op == Op::bit_xor; }
     static bool is_additive(Op op) { return op == Op::add || op == Op::sub; }
@@ -1378,17 +1645,14 @@ private:
             }
             return T.bool_;
         }
-        if (op == Op::coalesce) {
-            not_yet(e->span, "optionals");
-            return T.error;
-        }
+        if (op == Op::coalesce) return coalesce(e, expected);
         bool compare = op == Op::eq || op == Op::ne || op == Op::lt || op == Op::le || op == Op::gt || op == Op::ge;
         if (compare) {
             Type* t = check_pair(e->lhs, e->rhs, nullptr);
             if (is_bad(t)) return T.bool_;
             bool ordered = op != Op::eq && op != Op::ne;
             bool ok = is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune ||
-                      (!ordered && t->kind == TypeKind::bool_);
+                      (!ordered && equatable(t));
             if (!ok) {
                 error(e->span, "values of type " + name_of(t) + " can't be compared with " + q(op_text(op)) + " yet");
                 return T.bool_;
@@ -1575,17 +1839,28 @@ private:
                 return associated(e, r.type);
             }
         }
-        if (e->is_tuple_index) {
-            Type* base = check(e->lhs, nullptr);
-            if (!is_bad(base)) error(e->span, name_of(base) + " has no numbered fields");
-            return T.error;
-        }
         Type* base = check(e->lhs, nullptr);
         return field_type(e, base);
     }
 
     Type* field_type(Expr* e, Type* base) {
         if (is_bad(base)) return T.error;
+        if (e->is_tuple_index) {
+            if (base->kind != TypeKind::tuple) {
+                error(e->span, name_of(base) + " has no numbered fields");
+                return T.error;
+            }
+            if (e->tuple_index >= base->elems.size()) {
+                error(e->span, name_of(base) + " has no element " + std::to_string(e->tuple_index));
+                return T.error;
+            }
+            e->field_index = e->tuple_index;
+            return base->elems[e->tuple_index];
+        }
+        if (base->kind == TypeKind::optional) {
+            error(e->span, name_of(base) + " is an optional; read its field with `?.`, or unwrap it first");
+            return T.error;
+        }
         if (base->kind == TypeKind::struct_) {
             Item* s = base->item;
             for (std::uint32_t i = 0; i < s->fields.size(); i++) {
@@ -1634,14 +1909,33 @@ private:
                 return t;
             }
         }
-        if (t->kind == TypeKind::struct_) {
+        if (t->kind == TypeKind::enum_) {
+            std::uint32_t i = find_variant(t, e->member);
+            if (i != UINT32_MAX) {
+                use_item(t->item);
+                const VariantDecl& v = t->item->variants[i];
+                if (!v.types.empty()) {
+                    error(e->span, q(variant_text(t, i)) + " holds data; write " +
+                                       q(variant_text(t, i) + (v.has_fields ? " { ... }" : "(...)")));
+                    return T.error;
+                }
+                e->ref = Ref::variant;
+                e->field_index = i;
+                if (!t->has_data) {
+                    e->is_const = e->has_bits = true;
+                    e->const_bits = v.tag;
+                }
+                return t;
+            }
+        }
+        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
             auto mt = methods_.find(t);
             if (mt != methods_.end() && mt->second.count(e->member)) {
                 error(e->span, q(std::string(t->name) + "." + std::string(m)) + " is a function; call it");
                 return T.error;
             }
         }
-        error(e->span, name_of(t) + " has nothing named " + q(m));
+        error(e->span, name_of(t) + (t->kind == TypeKind::enum_ ? " has no variant " : " has nothing named ") + q(m));
         return T.error;
     }
 
@@ -1658,14 +1952,113 @@ private:
         return base->elem;
     }
 
+    // --- optionals and tuples -------------------------------------------------------------------
+
+    Type* tuple_literal(Expr* e, Type* expected) {
+        if (e->elems.empty()) return T.unit;
+        if (e->elems.size() < 2) {
+            error(e->span, "a tuple needs at least two elements");
+            for (Expr* x : e->elems) check(x, nullptr);
+            return T.error;
+        }
+        bool fit = expected && expected->kind == TypeKind::tuple && expected->elems.size() == e->elems.size();
+        std::vector<Type*> types;
+        bool bad = false;
+        for (std::size_t i = 0; i < e->elems.size(); i++) {
+            Type* t = check(e->elems[i], fit ? expected->elems[i] : nullptr);
+            if (t->kind == TypeKind::unit || t->kind == TypeKind::never) {
+                error(e->elems[i]->span, "a tuple can't hold " + name_of(t));
+                bad = true;
+            }
+            bad = bad || is_bad(t);
+            types.push_back(t);
+        }
+        if (bad) return T.error;
+        return T.tuple_of(types);
+    }
+
+    Type* some_call(Expr* e, Type* expected) {
+        e->call = CallKind::some;
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            error(e->span, "`some` takes one value");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Type* want = expected && expected->kind == TypeKind::optional ? expected->elem : nullptr;
+        Type* t = check(e->args[0].value, want);
+        if (is_bad(t)) return T.error;
+        if (t->kind == TypeKind::never) return want ? expected : T.error;
+        e->is_const = e->args[0].value->is_const;
+        return optional_type(t, e->span);
+    }
+
+    // `a ?? b`: the optional's value, or `b` when it's empty. `b` runs only then.
+    Type* coalesce(Expr* e, Type* expected) {
+        if (expected && (is_bad(expected) || expected->kind == TypeKind::never || expected->kind == TypeKind::unit)) {
+            expected = nullptr;
+        }
+        Type* lhs_want = nullptr;
+        if (expected) lhs_want = expected->kind == TypeKind::optional ? expected : T.optional_of(expected);
+        Type* lt = check(e->lhs, lhs_want);
+        if (is_bad(lt)) {
+            check(e->rhs, nullptr);
+            return T.error;
+        }
+        if (lt->kind != TypeKind::optional) {
+            error(e->lhs->span, "`??` needs an optional on the left, but this is " + a_type(lt));
+            check(e->rhs, nullptr);
+            return T.error;
+        }
+        Type* rhs_want = expected;
+        if (!rhs_want && is_untyped_literal(e->rhs)) {
+            rhs_want = (e->rhs->kind == ExprKind::none_lit || is_some_call(e->rhs)) ? lt : lt->elem;
+        }
+        Type* rt = check(e->rhs, rhs_want);
+        if (is_bad(rt)) return T.error;
+        if (rt->kind == TypeKind::never || rt == lt->elem) return lt->elem;
+        if (rt == lt) return lt;
+        error(e->rhs->span, "`??` needs " + a_type(lt->elem) + " or " + a_type(lt) + " on the right, not " +
+                                a_type(rt));
+        return T.error;
+    }
+
+    // `a?.b`: the field of the value, or `none`. A field that's already an optional isn't wrapped again.
+    Type* optional_field(Expr* e) {
+        Type* t = check(e->lhs, nullptr);
+        if (is_bad(t)) return T.error;
+        if (t->kind != TypeKind::optional) {
+            error(e->span, "`?.` reads a field of an optional, but this is " + a_type(t) + "; write `.`");
+            return T.error;
+        }
+        Type* ft = field_type(e, t->elem);
+        if (is_bad(ft)) return T.error;
+        return ft->kind == TypeKind::optional ? ft : optional_type(ft, e->span);
+    }
+
     // --- literals of structs and arrays ------------------------------------------------------
 
     Type* struct_literal(Expr* e) {
+        if (e->type_path.parts.size() == 2) {
+            Resolved r = resolve_name(e->type_path.parts[0]);
+            if (r.kind == NameKind::type && r.type->kind == TypeKind::enum_) {
+                std::uint32_t i = find_variant(r.type, e->type_path.parts[1]);
+                if (i != UINT32_MAX && r.type->item->variants[i].has_fields) return record_literal(e, r.type, i);
+                error(e->type_path.span, i == UINT32_MAX ? name_of(r.type) + " has no variant " + q(text(e->type_path.parts[1]))
+                                                         : q(variant_text(r.type, i)) + " has no named fields");
+                for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
+                return T.error;
+            }
+        }
         if (e->type_path.parts.size() != 1) {
             error(e->type_path.span, "unknown type " + q(path_text(e->type_path)));
             return T.error;
         }
         Resolved r = resolve_name(e->type_path.parts[0]);
+        if (r.kind == NameKind::type && r.type->kind == TypeKind::enum_) {
+            error(e->type_path.span, "name the variant: " + q(std::string(r.type->name) + ".Variant { ... }"));
+            for (FieldInit& f : e->fields) if (f.value) check(f.value, nullptr);
+            return T.error;
+        }
         if (r.kind != NameKind::type || r.type->kind != TypeKind::struct_) {
             error(e->type_path.span, q(path_text(e->type_path)) + " isn't a struct");
             for (FieldInit& f : e->fields) {
@@ -1718,6 +2111,46 @@ private:
         return t;
     }
 
+    // `Shape.Rect { w: 1.0, h: 2.0 }`: like a struct literal, against the variant's fields.
+    Type* record_literal(Expr* e, Type* t, std::uint32_t vi) {
+        use_item(t->item);
+        const VariantDecl& v = t->item->variants[vi];
+        e->ref = Ref::variant;
+        e->field_index = vi;
+        std::vector<Expr*> values(v.fields.size(), nullptr);
+        for (FieldInit& f : e->fields) {
+            std::uint32_t index = UINT32_MAX;
+            for (std::uint32_t i = 0; i < v.fields.size(); i++) {
+                if (v.fields[i].name == f.name) index = i;
+            }
+            if (!f.value) {
+                Expr* x = ctx_.arena.make<Expr>();
+                x->kind = ExprKind::name;
+                x->span = f.span;
+                std::vector<Name> one{f.name};
+                x->path.parts = ctx_.arena.copy(one);
+                x->path.span = f.span;
+                f.value = x;
+            }
+            if (index == UINT32_MAX) {
+                error(f.span, q(variant_text(t, vi)) + " has no field " + q(text(f.name)));
+                check(f.value, nullptr);
+                continue;
+            }
+            if (values[index]) {
+                error(f.span, "field " + q(text(f.name)) + " is given twice");
+                continue;
+            }
+            check(f.value, v.fields[index].resolved);
+            values[index] = f.value;
+        }
+        for (std::uint32_t i = 0; i < v.fields.size(); i++) {
+            if (!values[i]) error(e->span, "missing field " + q(text(v.fields[i].name)) + " in " + q(variant_text(t, vi)));
+        }
+        e->elems = ctx_.arena.copy(values);
+        return t;
+    }
+
     Type* array_literal(Expr* e, Type* expected) {
         Type* want = expected && expected->kind == TypeKind::array ? expected->elem : nullptr;
         if (e->repeat) {
@@ -1750,16 +2183,34 @@ private:
     // --- control flow ------------------------------------------------------------------------
 
     Type* check_if(Expr* e, Type* expected, bool stmt) {
+        Type* a = nullptr;
         if (e->let_pattern) {
-            not_yet(e->span, "`if let`");
-            return T.error;
-        }
-        check_condition(e->cond);
-        if (e->cond->kind == ExprKind::bool_lit && e->cond->bool_value) {
-            error(e->cond->span, "this condition is always true");
+            // `if let p = v`: the pattern's names are visible in the first block only.
+            Pattern* p = e->let_pattern;
+            Type* vt = check(e->cond, nullptr);
+            if (vt->kind == TypeKind::never) vt = T.error;
+            Type* pt = vt;
+            if (vt->kind == TypeKind::optional) {
+                e->let_unwraps = true;
+                pt = vt->elem;
+                if (reject_optional_pattern(p, "`if let x = opt` already unwraps the optional; match its value directly")) {
+                    pt = T.error;
+                }
+            }
+            push_scope();
+            if (check_pattern(p, pt) && !is_bad(pt) && !e->let_unwraps && irrefutable(p, pt, nullptr)) {
+                error(p->span, "this pattern matches every " + name_of(pt) + "; use `let`");
+            }
+            a = check_block(e->block, stmt ? nullptr : expected, stmt ? BlockUse::stmt : BlockUse::value);
+            pop_scope();
+        } else {
+            check_condition(e->cond);
+            if (e->cond->kind == ExprKind::bool_lit && e->cond->bool_value) {
+                error(e->cond->span, "this condition is always true");
+            }
         }
         if (stmt) {
-            Type* a = check_block(e->block, nullptr, BlockUse::stmt);
+            if (!a) a = check_block(e->block, nullptr, BlockUse::stmt);
             if (!e->else_) return T.unit;
             Type* b = e->else_->kind == ExprKind::if_ ? check_if(e->else_, nullptr, true)
                                                       : check_block(e->else_->block, nullptr, BlockUse::stmt);
@@ -1767,11 +2218,11 @@ private:
             return a->kind == TypeKind::never && b->kind == TypeKind::never ? T.never : T.unit;
         }
         if (!e->else_) {
-            check_block(e->block, expected, BlockUse::value);
+            if (!a) check_block(e->block, expected, BlockUse::value);
             error(e->span, "an `if` used as a value needs an `else`");
             return T.error;
         }
-        Type* a = check_block(e->block, expected, BlockUse::value);
+        if (!a) a = check_block(e->block, expected, BlockUse::value);
         Type* want = expected ? expected : (a->kind == TypeKind::never || is_bad(a) ? nullptr : a);
         Type* b = check(e->else_, want);
         if (is_bad(a) || is_bad(b)) return T.error;
@@ -1790,6 +2241,767 @@ private:
         return loop.break_type ? loop.break_type : T.unit;
     }
 
+    // --- match ------------------------------------------------------------------------------
+
+    Type* check_match(Expr* e, Type* expected, bool stmt) {
+        Type* st = check(e->scrutinee, nullptr);
+        if (st->kind == TypeKind::never) st = T.error;
+        e->loop_id = next_loop_++;
+        if (e->arms.empty()) {
+            error(e->span, "a `match` needs at least one arm");
+            return T.error;
+        }
+        bool patterns_ok = !is_bad(st);
+        Type* result = nullptr;
+        bool all_never = true, any_bad = false;
+        for (MatchArm& arm : e->arms) {
+            push_scope();
+            patterns_ok = check_pattern(arm.pattern, st) && patterns_ok;
+            if (arm.guard) check_condition(arm.guard);
+            Type* t;
+            if (stmt) {
+                t = check_expr_stmt(arm.body, false);
+            } else {
+                t = check(arm.body, expected ? expected : result);
+                if (!result && !is_bad(t) && t->kind != TypeKind::never) result = t;
+            }
+            if (is_bad(t)) any_bad = true;
+            if (t->kind != TypeKind::never) all_never = false;
+            pop_scope();
+        }
+        if (patterns_ok) check_arms(e, st);
+        if (stmt) return all_never ? T.never : T.unit;
+        if (any_bad) return T.error;
+        if (all_never) return T.never;
+        return result ? result : T.error;
+    }
+
+    // Reports arms that can never match, and a `match` that misses a case (D63).
+    void check_arms(Expr* e, Type* st) {
+        pool_.clear();
+        std::vector<Row> rows;
+        std::vector<Type*> types{st};
+        for (MatchArm& arm : e->arms) {
+            Row q{reduce(arm.pattern)};
+            if (!useful(rows, q, types, nullptr)) {
+                error(arm.pattern->span, "this arm never matches: the arms before it cover every value it would");
+            }
+            if (!arm.guard) rows.push_back(q);
+        }
+        Row w;
+        if (useful(rows, Row{wild()}, types, &w)) {
+            Span at{e->span.file, e->span.begin, e->scrutinee->span.end};
+            error(at, "this `match` doesn't cover " + q(render(w[0], st)) + "; add an arm for it, or `_ =>` for the rest");
+        }
+    }
+
+    // Whether the pattern matches every value of `t`. If not, `missing` gets one it misses.
+    bool irrefutable(Pattern* p, Type* t, std::string* missing) {
+        pool_.clear();
+        std::vector<Row> rows{Row{reduce(p)}};
+        Row w;
+        if (!useful(rows, Row{wild()}, std::vector<Type*>{t}, missing ? &w : nullptr)) return true;
+        if (missing) *missing = render(w[0], t);
+        return false;
+    }
+
+    // --- patterns ----------------------------------------------------------------------------
+
+    // Checks a pattern against a value of type `t`, and declares its names in the current scope.
+    // Returns false after an error, when there's no point judging exhaustiveness.
+    bool check_pattern(Pattern* p, Type* t) {
+        p->type = t;
+        if (is_bad(t)) {
+            bind_names(p);
+            return false;
+        }
+        switch (p->kind) {
+            case PatternKind::wildcard: return true;
+            case PatternKind::binding: {
+                if (t->kind == TypeKind::enum_) {
+                    std::uint32_t i = find_variant(t, p->name);
+                    if (i != UINT32_MAX) {
+                        p->kind = PatternKind::variant;
+                        use_item(t->item);
+                        return check_variant_pattern(p, t, i);
+                    }
+                }
+                std::string_view n = text(p->name);
+                if (std::isupper(static_cast<unsigned char>(n[0]))) {
+                    Resolved r = resolve_name(p->name);
+                    if (r.kind == NameKind::item && r.item->kind == ItemKind::const_) return constant_pattern(p, t);
+                    error(p->span, q(n) + " isn't " + (t->kind == TypeKind::enum_ ? "a variant of " + name_of(t) : std::string("a variant")) +
+                                       "; a name that binds a value starts with a lowercase letter");
+                    return false;
+                }
+                if (p->is_mut) error(p->span, "a pattern binds a copy; to change it, copy it into a `var`");
+                Local* l = new_local(p->name, t, p->span, pattern_var_);
+                p->local = l;
+                declare(l);
+                return true;
+            }
+            case PatternKind::literal: return check_literal_pattern(p, t);
+            case PatternKind::range: return check_range_pattern(p, t);
+            case PatternKind::none:
+                if (t->kind != TypeKind::optional) {
+                    error(p->span, "`none` only matches an optional, and this is " + a_type(t));
+                    return false;
+                }
+                p->variant = 0;
+                return true;
+            case PatternKind::tuple: {
+                if (t->kind != TypeKind::tuple) {
+                    error(p->span, "a tuple pattern can't match " + a_type(t));
+                    bind_names(p);
+                    return false;
+                }
+                if (p->elems.size() != t->elems.size()) {
+                    error(p->span, name_of(t) + " has " + std::to_string(t->elems.size()) + " elements, but the pattern has " +
+                                       std::to_string(p->elems.size()));
+                    bind_names(p);
+                    return false;
+                }
+                bool ok = true;
+                for (std::size_t i = 0; i < p->elems.size(); i++) ok = check_pattern(p->elems[i], t->elems[i]) && ok;
+                return ok;
+            }
+            case PatternKind::variant: {
+                const Path& path = p->path;
+                std::string_view first = text(path.parts[0]);
+                if (path.parts.size() == 1 && first == "some") {
+                    if (t->kind != TypeKind::optional) {
+                        error(p->span, "`some` only matches an optional, and this is " + a_type(t));
+                        bind_names(p);
+                        return false;
+                    }
+                    if (p->elems.size() != 1) {
+                        error(p->span, "`some` holds one value");
+                        bind_names(p);
+                        return false;
+                    }
+                    p->variant = 1;
+                    return check_pattern(p->elems[0], t->elem);
+                }
+                if (path.parts.size() == 1 && (first == "ok" || first == "err")) {
+                    not_yet(p->span, "errors");
+                    bind_names(p);
+                    return false;
+                }
+                if (path.parts.size() >= 2 && p->elems.empty()) {
+                    Resolved r = resolve_name(path.parts[0]);
+                    if (r.kind == NameKind::type && r.type->kind != TypeKind::enum_) return constant_pattern(p, t);
+                }
+                if (t->kind != TypeKind::enum_) {
+                    error(p->span, q(path_text(path)) + " can't match " + a_type(t));
+                    bind_names(p);
+                    return false;
+                }
+                std::uint32_t i = variant_of_path(path, t, p->span);
+                if (i == UINT32_MAX) {
+                    bind_names(p);
+                    return false;
+                }
+                return check_variant_pattern(p, t, i);
+            }
+            case PatternKind::record: return check_record_pattern(p, t);
+            case PatternKind::or_: {
+                bool ok = true, bound = false;
+                for (Pattern* a : p->elems) {
+                    if (binds_lowercase(a)) {
+                        // Once, and its names declared once, however many alternatives bind.
+                        if (!bound) {
+                            error(a->span, "a pattern with `|` can't bind names yet; give each case its own arm");
+                            bind_names(a);
+                        }
+                        bound = true;
+                        ok = false;
+                        continue;
+                    }
+                    ok = check_pattern(a, t) && ok;
+                }
+                return ok;
+            }
+        }
+        return false;
+    }
+
+    // Whether the pattern has a name that would bind a value.
+    bool binds_lowercase(const Pattern* p) const {
+        if (p->kind == PatternKind::binding) return !std::isupper(static_cast<unsigned char>(text(p->name)[0]));
+        for (const Pattern* x : p->elems) if (binds_lowercase(x)) return true;
+        for (const FieldPattern& f : p->fields) if (!f.pattern || binds_lowercase(f.pattern)) return true;
+        return false;
+    }
+
+    // `LIMIT` or `i32.MAX` in a pattern: a constant, matched as its value is.
+    bool constant_pattern(Pattern* p, Type* t) {
+        Expr* e = ctx_.arena.make<Expr>();
+        e->kind = ExprKind::name;
+        e->span = p->span;
+        std::vector<Name> first{p->path.parts[0]};
+        e->path.parts = ctx_.arena.copy(first);
+        e->path.span = p->span;
+        for (std::size_t i = 1; i < p->path.parts.size(); i++) {
+            Expr* f = ctx_.arena.make<Expr>();
+            f->kind = ExprKind::field;
+            f->span = p->span;
+            f->lhs = e;
+            f->member = p->path.parts[i];
+            e = f;
+        }
+        p->kind = PatternKind::literal;
+        p->value = e;
+        return check_literal_pattern(p, t);
+    }
+
+    // The variant a pattern's path names: `Circle` or `Shape.Circle`, for the enum `t`.
+    std::uint32_t variant_of_path(const Path& path, Type* t, Span span) {
+        Name v;
+        if (path.parts.size() == 2) {
+            Resolved r = resolve_name(path.parts[0]);
+            if (r.kind != NameKind::type || r.type != t) {
+                error(span, q(text(path.parts[0])) + " isn't " + name_of(t) + ", the type being matched");
+                return UINT32_MAX;
+            }
+            v = path.parts[1];
+        } else if (path.parts.size() == 1) {
+            v = path.parts[0];
+        } else {
+            error(span, "unknown variant " + q(path_text(path)));
+            return UINT32_MAX;
+        }
+        std::uint32_t i = find_variant(t, v);
+        if (i == UINT32_MAX) error(span, name_of(t) + " has no variant " + q(text(v)));
+        else use_item(t->item);
+        return i;
+    }
+
+    bool check_variant_pattern(Pattern* p, Type* t, std::uint32_t i) {
+        p->variant = i;
+        const VariantDecl& v = t->item->variants[i];
+        if (v.has_fields) {
+            error(p->span, q(variant_text(t, i)) + " has named fields; match it with " + q(variant_text(t, i) + " { ... }"));
+            bind_names(p);
+            return false;
+        }
+        if (p->elems.size() != v.types.size()) {
+            if (v.types.empty()) {
+                error(p->span, q(variant_text(t, i)) + " holds no data; match it without parentheses");
+            } else {
+                error(p->span, q(variant_text(t, i)) + " holds " + std::to_string(v.types.size()) +
+                                   (v.types.size() == 1 ? " value" : " values") + ", but the pattern has " +
+                                   std::to_string(p->elems.size()));
+            }
+            bind_names(p);
+            return false;
+        }
+        bool ok = true;
+        for (std::size_t k = 0; k < p->elems.size(); k++) ok = check_pattern(p->elems[k], v.types[k]) && ok;
+        return ok;
+    }
+
+    bool check_record_pattern(Pattern* p, Type* t) {
+        Slice<FieldDecl> fields;
+        std::string what;
+        if (t->kind == TypeKind::enum_) {
+            std::uint32_t i = variant_of_path(p->path, t, p->span);
+            if (i == UINT32_MAX) {
+                bind_names(p);
+                return false;
+            }
+            const VariantDecl& v = t->item->variants[i];
+            if (!v.has_fields) {
+                error(p->span, q(variant_text(t, i)) + (v.types.empty() ? " holds no data; match it without braces"
+                                                                       : " holds unnamed values; match it with " +
+                                                                             q(variant_text(t, i) + "(...)")));
+                bind_names(p);
+                return false;
+            }
+            p->variant = i;
+            fields = v.fields;
+            what = variant_text(t, i);
+        } else if (t->kind == TypeKind::struct_) {
+            Resolved r;
+            if (p->path.parts.size() == 1) r = resolve_name(p->path.parts[0]);
+            if (r.kind != NameKind::type || r.type != t) {
+                error(p->span, q(path_text(p->path)) + " isn't " + name_of(t) + ", the type being matched");
+                bind_names(p);
+                return false;
+            }
+            use_item(t->item);
+            fields = t->item->fields;
+            what = t->name;
+        } else {
+            error(p->span, "a pattern with fields can't match " + a_type(t));
+            bind_names(p);
+            return false;
+        }
+        std::vector<bool> seen(fields.size(), false);
+        bool ok = true;
+        for (FieldPattern& f : p->fields) {
+            std::uint32_t index = UINT32_MAX;
+            for (std::uint32_t i = 0; i < fields.size(); i++) {
+                if (fields[i].name == f.name) index = i;
+            }
+            if (index == UINT32_MAX || seen[index]) {
+                error(f.span, index == UINT32_MAX ? q(what) + " has no field " + q(text(f.name))
+                                                  : "field " + q(text(f.name)) + " is matched twice");
+                if (f.pattern) bind_names(f.pattern);
+                ok = false;
+                continue;
+            }
+            seen[index] = true;
+            f.index = index;
+            if (!f.pattern) {
+                Pattern* b = ctx_.arena.make<Pattern>();
+                b->kind = PatternKind::binding;
+                b->span = f.span;
+                b->name = f.name;
+                f.pattern = b;
+            }
+            ok = check_pattern(f.pattern, fields[index].resolved) && ok;
+        }
+        if (!p->has_rest) {
+            for (std::uint32_t i = 0; i < fields.size(); i++) {
+                if (!seen[i]) {
+                    error(p->span, "the pattern leaves out field " + q(text(fields[i].name)) +
+                                       "; match it, or end with `..` to skip the rest");
+                    return false;
+                }
+            }
+        }
+        return ok;
+    }
+
+    bool check_literal_pattern(Pattern* p, Type* t) {
+        if (is_float(t)) {
+            error(p->span, "match a float with comparisons in an `if`; NaN and -0.0 make float patterns misleading");
+            return false;
+        }
+        if (!(is_integral(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::str)) {
+            error(p->span, "a literal can't match " + a_type(t));
+            check(p->value, nullptr);
+            return false;
+        }
+        Type* lt = check(p->value, t);
+        if (is_bad(lt)) return false;
+        if (t->kind == TypeKind::str) {
+            if (p->value->kind != ExprKind::string_lit || !p->value->interpolations.empty()) {
+                error(p->value->span, "a string pattern must be a plain string literal");
+                return false;
+            }
+            return true;
+        }
+        if (!p->value->has_bits) {
+            error(p->value->span, "a pattern must be a constant");
+            return false;
+        }
+        return true;
+    }
+
+    bool check_range_pattern(Pattern* p, Type* t) {
+        if (!is_integral(t)) {
+            error(p->span, "a range pattern matches integers and characters, not " + name_of(t));
+            return false;
+        }
+        Type* a = check(p->value, t);
+        Type* b = check(p->end, t);
+        if (is_bad(a) || is_bad(b)) return false;
+        if (!p->value->has_bits || !p->end->has_bits) {
+            error(p->span, "a range pattern's ends must be constants");
+            return false;
+        }
+        std::uint64_t lo = rank(t, p->value->const_bits), hi = rank(t, p->end->const_bits);
+        if (p->inclusive ? lo > hi : lo >= hi) {
+            error(p->span, "this range is empty");
+            return false;
+        }
+        return true;
+    }
+
+    // After an error, declares a pattern's names anyway, so their uses aren't reported again.
+    void bind_names(Pattern* p) {
+        if (!p) return;
+        if (p->kind == PatternKind::binding) {
+            std::string_view n = text(p->name);
+            if (n.empty() || std::isupper(static_cast<unsigned char>(n[0]))) return;
+            Local* l = new_local(p->name, T.error, p->span, false);
+            l->used = l->reassigned = l->mutated = true;
+            p->local = l;
+            declare(l);
+            return;
+        }
+        if (p->kind == PatternKind::or_) {
+            if (!p->elems.empty()) bind_names(p->elems[0]);
+            return;
+        }
+        for (Pattern* x : p->elems) bind_names(x);
+        for (FieldPattern& f : p->fields) {
+            if (f.pattern) {
+                bind_names(f.pattern);
+            } else {
+                Local* l = new_local(f.name, T.error, f.span, false);
+                l->used = l->reassigned = l->mutated = true;
+                declare(l);
+            }
+        }
+    }
+
+    // --- exhaustiveness ----------------------------------------------------------------------
+    // Maranget's usefulness algorithm, on patterns reduced to constructors. An integer or
+    // character is split into intervals, so ranges can cover a type completely.
+
+    struct DPat {
+        enum Kind : std::uint8_t { wild, ctor, range, str, alt } kind = wild;
+        std::uint32_t index = 0;      // a variant, `false` 0 and `true` 1, `none` 0 and `some` 1
+        std::vector<DPat*> args;
+        std::uint64_t lo = 0, hi = 0;  // range: inclusive, as ranks
+        std::string_view string;
+    };
+    using Row = std::vector<DPat*>;
+
+    DPat* make_dpat(DPat::Kind kind) {
+        pool_.push_back(std::make_unique<DPat>());
+        pool_.back()->kind = kind;
+        return pool_.back().get();
+    }
+    DPat* wild() { return make_dpat(DPat::wild); }
+
+    // Integers and characters as unsigned numbers in the same order, so intervals compare simply.
+    static std::uint64_t rank(const Type* t, std::uint64_t bits) {
+        return t->is_signed ? bits ^ (std::uint64_t{1} << 63) : bits;
+    }
+    static std::uint64_t unrank(const Type* t, std::uint64_t r) {
+        return t->is_signed ? r ^ (std::uint64_t{1} << 63) : r;
+    }
+
+    // The values of an integral type, as intervals of ranks. A rune can't be a surrogate.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> domain(const Type* t) const {
+        if (t->kind == TypeKind::rune) return {{0, 0xD7FF}, {0xE000, 0x10FFFF}};
+        IntRange r = source_range(t);
+        if (t->is_signed) return {{rank(t, 0 - r.neg), rank(t, r.pos)}};
+        return {{0, r.pos}};
+    }
+
+    DPat* reduce(Pattern* p) {
+        Type* t = p->type;
+        switch (p->kind) {
+            case PatternKind::wildcard:
+            case PatternKind::binding: return wild();
+            case PatternKind::literal: {
+                if (t->kind == TypeKind::bool_) {
+                    DPat* d = make_dpat(DPat::ctor);
+                    d->index = static_cast<std::uint32_t>(p->value->const_bits);
+                    return d;
+                }
+                if (t->kind == TypeKind::str) {
+                    DPat* d = make_dpat(DPat::str);
+                    for (const StringPart& part : p->value->literal.parts) {
+                        if (!part.is_expr) d->string = part.text;
+                    }
+                    return d;
+                }
+                DPat* d = make_dpat(DPat::range);
+                d->lo = d->hi = rank(t, p->value->const_bits);
+                return d;
+            }
+            case PatternKind::range: {
+                DPat* d = make_dpat(DPat::range);
+                d->lo = rank(t, p->value->const_bits);
+                d->hi = rank(t, p->end->const_bits) - (p->inclusive ? 0 : 1);
+                return d;
+            }
+            case PatternKind::none: return make_dpat(DPat::ctor);
+            case PatternKind::variant: {
+                DPat* d = make_dpat(DPat::ctor);
+                d->index = p->variant;
+                for (Pattern* x : p->elems) d->args.push_back(reduce(x));
+                return d;
+            }
+            case PatternKind::record: {
+                DPat* d = make_dpat(DPat::ctor);
+                d->index = t->kind == TypeKind::enum_ ? p->variant : 0;
+                std::size_t n = ctor_types(t, d->index).size();
+                for (std::size_t i = 0; i < n; i++) d->args.push_back(wild());
+                for (FieldPattern& f : p->fields) d->args[f.index] = reduce(f.pattern);
+                return d;
+            }
+            case PatternKind::tuple: {
+                DPat* d = make_dpat(DPat::ctor);
+                for (Pattern* x : p->elems) d->args.push_back(reduce(x));
+                return d;
+            }
+            case PatternKind::or_: {
+                DPat* d = make_dpat(DPat::alt);
+                for (Pattern* x : p->elems) d->args.push_back(reduce(x));
+                return d;
+            }
+        }
+        return wild();
+    }
+
+    // A row starting with `A | B` stands for a row for each alternative.
+    static void expand(const Row& r, std::vector<Row>& out) {
+        if (r[0]->kind != DPat::alt) {
+            out.push_back(r);
+            return;
+        }
+        for (DPat* a : r[0]->args) {
+            Row n = r;
+            n[0] = a;
+            expand(n, out);
+        }
+    }
+
+    // How many constructors a type has, or -1 for one with too many to list.
+    static int ctor_count(const Type* t) {
+        switch (t->kind) {
+            case TypeKind::enum_: return static_cast<int>(t->item->variants.size());
+            case TypeKind::optional: case TypeKind::bool_: return 2;
+            case TypeKind::tuple: case TypeKind::struct_: return 1;
+            default: return -1;
+        }
+    }
+
+    // The types a constructor holds.
+    std::vector<Type*> ctor_types(const Type* t, std::uint32_t c) const {
+        switch (t->kind) {
+            case TypeKind::enum_: {
+                const VariantDecl& v = t->item->variants[c];
+                return std::vector<Type*>(v.types.begin(), v.types.end());
+            }
+            case TypeKind::optional: return c == 1 ? std::vector<Type*>{t->elem} : std::vector<Type*>{};
+            case TypeKind::tuple: return std::vector<Type*>(t->elems.begin(), t->elems.end());
+            case TypeKind::struct_: {
+                std::vector<Type*> out;
+                for (const FieldDecl& f : t->item->fields) out.push_back(f.resolved);
+                return out;
+            }
+            default: return {};
+        }
+    }
+
+    static bool covers(const DPat* h, const DPat* c) {
+        switch (h->kind) {
+            case DPat::wild: return true;
+            case DPat::ctor: return c->kind == DPat::ctor && h->index == c->index;
+            case DPat::range: return c->kind == DPat::range && h->lo <= c->lo && c->hi <= h->hi;
+            case DPat::str: return c->kind == DPat::str && h->string == c->string;
+            case DPat::alt: return false;  // expanded before this is asked
+        }
+        return false;
+    }
+
+    // Whether `q` matches some value no row matches. If so, `witness` gets such a value.
+    bool useful(const std::vector<Row>& rows, const Row& q, const std::vector<Type*>& types, Row* witness) {
+        if (q.empty()) {
+            if (!rows.empty()) return false;
+            if (witness) witness->clear();
+            return true;
+        }
+        for (const Row& r : rows) {
+            if (r[0]->kind != DPat::alt) continue;
+            std::vector<Row> expanded;
+            for (const Row& x : rows) expand(x, expanded);
+            return useful(expanded, q, types, witness);
+        }
+        if (q[0]->kind == DPat::alt) {
+            for (DPat* a : q[0]->args) {
+                Row n = q;
+                n[0] = a;
+                if (useful(rows, n, types, witness)) return true;
+            }
+            return false;
+        }
+        Type* t = types[0];
+        std::vector<Type*> rest(types.begin() + 1, types.end());
+        Row qrest(q.begin() + 1, q.end());
+        DPat* h = q[0];
+        if (h->kind == DPat::ctor || h->kind == DPat::str) return useful_ctor(rows, h, qrest, t, rest, witness);
+        if (is_integral(t)) {
+            for (auto [lo, hi] : split(rows, t, h)) {
+                DPat* c = make_dpat(DPat::range);
+                c->lo = lo;
+                c->hi = hi;
+                if (useful_ctor(rows, c, qrest, t, rest, witness)) return true;
+            }
+            return false;
+        }
+        int n = ctor_count(t);
+        std::vector<bool> used(n > 0 ? static_cast<std::size_t>(n) : 0, false);
+        for (const Row& r : rows) {
+            if (n > 0 && r[0]->kind == DPat::ctor) used[r[0]->index] = true;
+        }
+        bool complete = n > 0 && std::all_of(used.begin(), used.end(), [](bool b) { return b; });
+        if (complete) {
+            for (int c = 0; c < n; c++) {
+                DPat* k = make_dpat(DPat::ctor);
+                k->index = static_cast<std::uint32_t>(c);
+                for (std::size_t i = 0; i < ctor_types(t, k->index).size(); i++) k->args.push_back(wild());
+                if (useful_ctor(rows, k, qrest, t, rest, witness)) return true;
+            }
+            return false;
+        }
+        // Some constructor isn't covered: only rows starting with a wildcard can match it.
+        std::vector<Row> d;
+        for (const Row& r : rows) {
+            if (r[0]->kind == DPat::wild) d.push_back(Row(r.begin() + 1, r.end()));
+        }
+        Row w;
+        if (!useful(d, qrest, rest, witness ? &w : nullptr)) return false;
+        if (witness) {
+            DPat* k = wild();
+            if (n > 0) {
+                k = make_dpat(DPat::ctor);
+                while (used[k->index]) k->index++;
+                for (std::size_t i = 0; i < ctor_types(t, k->index).size(); i++) k->args.push_back(wild());
+            }
+            witness->clear();
+            witness->push_back(k);
+            witness->insert(witness->end(), w.begin(), w.end());
+        }
+        return true;
+    }
+
+    bool useful_ctor(const std::vector<Row>& rows, DPat* c, const Row& qrest, Type* t, const std::vector<Type*>& rest,
+                     Row* witness) {
+        std::vector<Type*> sub = c->kind == DPat::ctor ? ctor_types(t, c->index) : std::vector<Type*>{};
+        std::size_t arity = sub.size();
+        std::vector<Row> srows;
+        for (const Row& r : rows) {
+            DPat* h = r[0];
+            if (!covers(h, c)) continue;
+            Row n;
+            if (h->kind == DPat::wild) {
+                for (std::size_t i = 0; i < arity; i++) n.push_back(wild());
+            } else if (h->kind == DPat::ctor) {
+                n = h->args;
+            }
+            n.insert(n.end(), r.begin() + 1, r.end());
+            srows.push_back(std::move(n));
+        }
+        Row nq;
+        if (c->kind == DPat::ctor) nq = c->args;
+        while (nq.size() < arity) nq.push_back(wild());
+        nq.insert(nq.end(), qrest.begin(), qrest.end());
+        std::vector<Type*> ntypes = sub;
+        ntypes.insert(ntypes.end(), rest.begin(), rest.end());
+        Row w;
+        if (!useful(srows, nq, ntypes, witness ? &w : nullptr)) return false;
+        if (witness) {
+            DPat* k = make_dpat(c->kind);
+            k->index = c->index;
+            k->lo = c->lo;
+            k->hi = c->hi;
+            k->string = c->string;
+            k->args.assign(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(arity));
+            witness->clear();
+            witness->push_back(k);
+            witness->insert(witness->end(), w.begin() + static_cast<std::ptrdiff_t>(arity), w.end());
+        }
+        return true;
+    }
+
+    // The values `h` stands for (the whole domain for a wildcard), cut into intervals at every
+    // boundary of the ranges in the column, so each interval is covered by a range or not at all.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> split(const std::vector<Row>& rows, const Type* t, const DPat* h) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> base;
+        for (auto [lo, hi] : domain(t)) {
+            if (h->kind == DPat::range) {
+                lo = std::max(lo, h->lo);
+                hi = std::min(hi, h->hi);
+                if (lo > hi) continue;
+            }
+            base.push_back({lo, hi});
+        }
+        std::vector<std::uint64_t> cuts;
+        for (const Row& r : rows) {
+            if (r[0]->kind != DPat::range) continue;
+            cuts.push_back(r[0]->lo);
+            if (r[0]->hi != UINT64_MAX) cuts.push_back(r[0]->hi + 1);
+        }
+        std::sort(cuts.begin(), cuts.end());
+        cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> out;
+        for (auto [lo, hi] : base) {
+            std::uint64_t start = lo;
+            for (std::uint64_t c : cuts) {
+                if (c > start && c <= hi) {
+                    out.push_back({start, c - 1});
+                    start = c;
+                }
+            }
+            out.push_back({start, hi});
+        }
+        return out;
+    }
+
+    // A value a witness stands for, as Calx source.
+    std::string render(const DPat* d, const Type* t) const {
+        if (d->kind == DPat::wild) return "_";
+        auto all_wild = [&] {
+            for (const DPat* a : d->args) if (a->kind != DPat::wild) return false;
+            return true;
+        };
+        switch (t->kind) {
+            case TypeKind::bool_: return d->index ? "true" : "false";
+            case TypeKind::optional: return d->index == 0 ? "none" : "some(" + render(d->args[0], t->elem) + ")";
+            case TypeKind::enum_: {
+                const VariantDecl& v = t->item->variants[d->index];
+                std::string name = variant_text(t, d->index);
+                if (v.types.empty()) return name;
+                if (v.has_fields) {
+                    if (all_wild()) return name + " { .. }";
+                    std::string s = name + " {";
+                    for (std::size_t i = 0; i < d->args.size(); i++) {
+                        s += (i ? ", " : " ") + std::string(text(v.fields[i].name)) + ": " + render(d->args[i], v.types[i]);
+                    }
+                    return s + " }";
+                }
+                std::string s = name + "(";
+                for (std::size_t i = 0; i < d->args.size(); i++) s += (i ? ", " : "") + render(d->args[i], v.types[i]);
+                return s + ")";
+            }
+            case TypeKind::tuple: {
+                std::string s = "(";
+                for (std::size_t i = 0; i < d->args.size(); i++) s += (i ? ", " : "") + render(d->args[i], t->elems[i]);
+                return s + ")";
+            }
+            case TypeKind::struct_: {
+                if (all_wild()) return std::string(t->name) + " { .. }";
+                std::string s = std::string(t->name) + " {";
+                for (std::size_t i = 0; i < d->args.size(); i++) {
+                    s += (i ? ", " : " ") + std::string(text(t->item->fields[i].name)) + ": " +
+                         render(d->args[i], t->item->fields[i].resolved);
+                }
+                return s + " }";
+            }
+            default: break;
+        }
+        if (d->kind == DPat::range) {
+            auto all = domain(t);
+            if (all.size() == 1 && d->lo == all[0].first && d->hi == all[0].second) return "_";
+            if (d->lo == d->hi) return render_value(t, d->lo);
+            return render_value(t, d->lo) + "..=" + render_value(t, d->hi);
+        }
+        return "_";
+    }
+
+    std::string render_value(const Type* t, std::uint64_t r) const {
+        std::uint64_t bits = unrank(t, r);
+        if (t->kind == TypeKind::char_ || t->kind == TypeKind::rune) {
+            if (bits >= 0x20 && bits < 0x7F && bits != '\\' && bits != '\'') return "'" + std::string(1, static_cast<char>(bits)) + "'";
+            char buf[16];
+            std::snprintf(buf, sizeof buf, "'\\u{%llx}'", static_cast<unsigned long long>(bits));
+            return buf;
+        }
+        IntRange range = source_range(t);
+        if (t->is_signed && bits == 0 - range.neg) return std::string(t->name) + ".MIN";
+        if (bits == range.pos && !t->is_usize) return std::string(t->name) + ".MAX";
+        if (t->is_signed) return std::to_string(static_cast<std::int64_t>(bits));
+        return std::to_string(bits);
+    }
+
     // --- calls -------------------------------------------------------------------------------
 
     Type* call(Expr* e, Type* expected) {
@@ -1800,6 +3012,11 @@ private:
         }
         if (callee->kind == ExprKind::name) {
             Name n = callee->path.parts[0];
+            if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
+            if ((text(n) == "ok" || text(n) == "err") && !find_local(n)) {
+                not_yet(e->span, "errors");
+                return T.error;
+            }
             Resolved r = resolve_name(n);
             switch (r.kind) {
                 case NameKind::builtin: return builtin_call(e, r.builtin);
@@ -1814,6 +3031,12 @@ private:
                     callee->ref = Ref::type;
                     callee->named_type = r.type;
                     if (r.type->kind == TypeKind::struct_) return construct(e, r.type);
+                    if (r.type->kind == TypeKind::enum_) {
+                        error(callee->span, "build " + a_type(r.type) + " from one of its variants, such as " +
+                                                q(variant_text(r.type, 0)));
+                        for (Arg& a : e->args) check(a.value, nullptr);
+                        return T.error;
+                    }
                     return conversion(e, r.type, Conv::exact);
                 case NameKind::local:
                     r.local->used = true;
@@ -1824,6 +3047,12 @@ private:
                     for (Arg& a : e->args) check(a.value, nullptr);
                     return T.error;
             }
+        }
+        if (callee->kind == ExprKind::optional_field) {
+            not_yet(callee->span, "`?.` method calls");
+            check(callee->lhs, nullptr);
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
         }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index) {
             // `T.something(...)`: a conversion or a static function.
@@ -1840,7 +3069,7 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
-            if (recv->kind == TypeKind::struct_) {
+            if (recv->kind == TypeKind::struct_ || recv->kind == TypeKind::enum_) {
                 auto mt = methods_.find(recv);
                 Item* m = nullptr;
                 if (mt != methods_.end()) {
@@ -1848,6 +3077,10 @@ private:
                     if (it != mt->second.end()) m = it->second;
                 }
                 if (!m) {
+                    if (recv->kind == TypeKind::enum_) {
+                        error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)));
+                        return T.error;
+                    }
                     for (const FieldDecl& f : recv->item->fields) {
                         if (f.name == callee->member) {
                             error(callee->span, q(text(f.name)) + " is a field of " + name_of(recv) + ", not a method");
@@ -1878,12 +3111,14 @@ private:
             if (m == "wrap") return conversion(e, t, Conv::wrap);
             if (m == "saturate") return conversion(e, t, Conv::saturate);
             if (m == "nearest") return conversion(e, t, Conv::nearest);
-            if (m == "try_from") {
-                not_yet(e->span, "optionals, which `try_from` returns,");
-                return T.error;
-            }
+            if (m == "try_from") return try_from(e, t);
         }
-        if (t->kind == TypeKind::struct_) {
+        if (t->kind == TypeKind::enum_) {
+            std::uint32_t i = find_variant(t, e->callee->member);
+            if (i != UINT32_MAX) return variant_call(e, t, i);
+            if (m == "try_from") return try_from(e, t);
+        }
+        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
             auto mt = methods_.find(t);
             if (mt != methods_.end()) {
                 auto it = mt->second.find(e->callee->member);
@@ -1902,6 +3137,72 @@ private:
         error(e->callee->span, name_of(t) + " has no function " + q(m));
         for (Arg& a : e->args) check(a.value, nullptr);
         return T.error;
+    }
+
+    Type* variant_call(Expr* e, Type* t, std::uint32_t i) {
+        use_item(t->item);
+        const VariantDecl& v = t->item->variants[i];
+        e->call = CallKind::variant;
+        e->field_index = i;
+        if (v.types.empty()) {
+            error(e->span, q(variant_text(t, i)) + " holds no data; write it without parentheses");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (v.has_fields) {
+            error(e->span, q(variant_text(t, i)) + " has named fields; write " + q(variant_text(t, i) + " { ... }"));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (e->args.size() != v.types.size()) {
+            error(e->span, q(variant_text(t, i)) + " holds " + std::to_string(v.types.size()) +
+                               (v.types.size() == 1 ? " value" : " values") + ", but " +
+                               std::to_string(e->args.size()) + " were given");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        std::vector<Expr*> ordered;
+        for (std::size_t k = 0; k < e->args.size(); k++) {
+            Arg& a = e->args[k];
+            if (a.name || a.is_mut) error(a.span, "a variant's values can't be named or `mut`");
+            check(a.value, v.types[k]);
+            ordered.push_back(a.value);
+        }
+        e->ordered_args = ctx_.arena.copy(ordered);
+        return t;
+    }
+
+    // `T.try_from(x)`: `x` as a `T`, or `none` if it doesn't fit.
+    Type* try_from(Expr* e, Type* to) {
+        Expr* a = single_arg(e, "`try_from`");
+        if (!a) return T.error;
+        e->call = CallKind::try_from;
+        e->named_type = to;
+        Type* from = check(a, to->kind == TypeKind::enum_ ? to->repr : nullptr);
+        if (is_bad(from)) return T.error;
+        if (to->kind == TypeKind::enum_) {
+            use_item(to->item);
+            if (to->has_data || !to->item->repr) {
+                error(e->span, name_of(to) + " has no representation to convert from; give it one, such as " +
+                                   q("enum " + std::string(to->name) + ": u8"));
+                return T.error;
+            }
+            return T.optional_of(to);
+        }
+        if (!is_integral(from) || !is_integral(to)) {
+            error(e->span, "`try_from` converts between integer types" +
+                               std::string(is_float(from) ? "; for a float, Java's cast is `saturate`" : ""));
+            return T.error;
+        }
+        if (from == to) {
+            error(e->span, "this is already " + a_type(to) + "; remove the conversion");
+            return T.error;
+        }
+        if (exact_conversion(from, to)) {
+            error(e->span, name_of(from) + " always fits in " + name_of(to) + "; write " + q(std::string(to->name) + "(...)"));
+            return T.error;
+        }
+        return T.optional_of(to);
     }
 
     // Checks a call's arguments against `f`'s parameters, matching names, and records them in
@@ -2012,7 +3313,7 @@ private:
         for (const FieldInit& f : e->fields) if (mentions(f.value, l)) return true;
         for (const Expr* x : e->interpolations) if (mentions(x, l)) return true;
         if (mentions(e->repeat, l) || mentions(e->cond, l) || mentions(e->else_, l)) return true;
-        if (e->block) return true;  // blocks are rare in arguments; assume they might
+        if (e->block || e->scrutinee) return true;  // blocks are rare in arguments; assume they might
         return false;
     }
 
@@ -2054,14 +3355,32 @@ private:
         Type* from = check(a, nullptr);
         if (is_bad(from)) return T.error;
         std::string target(to->name);
-        if (from == to) {
+        if (from->kind == TypeKind::enum_) {
+            // An enum with a representation converts as that integer type does.
+            if (from->has_data || !from->item->repr) {
+                error(e->span, name_of(from) + " has no number to convert; give it a representation, such as " +
+                                   q("enum " + std::string(from->name) + ": u8"));
+                return T.error;
+            }
+            from = from->repr;
+            if (from == to) {
+                if (conv != Conv::exact) {
+                    error(e->span, name_of(a->type) + " converts to " + a_type(to) + " exactly; write " + q(target + "(...)"));
+                    return T.error;
+                }
+                if (a->has_bits) set_int(e, to, a->const_bits);
+                return to;
+            }
+        } else if (from == to) {
             error(e->span, q(a->kind == ExprKind::name ? std::string(text(a->path.parts[0])) : std::string("this")) +
                                " is already " + a_type(to) + "; remove the conversion");
             return T.error;
         }
         bool convertible = (is_integral(from) || is_float(from)) && (is_integral(to) || is_float(to));
         if (!convertible) {
-            if (from->kind == TypeKind::bool_ || to->kind == TypeKind::bool_) {
+            if (to->kind == TypeKind::enum_) {
+                error(e->span, "convert a number to an enum with " + q(std::string(to->name) + ".try_from(...)"));
+            } else if (from->kind == TypeKind::bool_ || to->kind == TypeKind::bool_) {
                 error(e->span, "bools don't convert to or from numbers; write `if b { 1 } else { 0 }`");
             } else {
                 error(e->span, "there's no conversion from " + name_of(from) + " to " + name_of(to));
@@ -2186,6 +3505,14 @@ private:
         else if (m == "wrapping_mul" && is_int(recv)) pm = PrimMethod::wrapping_mul, args = 1;
         else if (m == "floor_div" && is_int(recv) && recv->is_signed) pm = PrimMethod::floor_div, args = 1;
         else if (m == "floor_mod" && is_int(recv) && recv->is_signed) pm = PrimMethod::floor_mod, args = 1;
+        else if (m == "checked_add" && is_int(recv)) pm = PrimMethod::checked_add, args = 1;
+        else if (m == "checked_sub" && is_int(recv)) pm = PrimMethod::checked_sub, args = 1;
+        else if (m == "checked_mul" && is_int(recv)) pm = PrimMethod::checked_mul, args = 1;
+        else if (m == "checked_div" && is_int(recv)) pm = PrimMethod::checked_div, args = 1;
+        else if (m == "checked_rem" && is_int(recv)) pm = PrimMethod::checked_rem, args = 1;
+        else if (m == "saturating_add" && is_int(recv)) pm = PrimMethod::saturating_add, args = 1;
+        else if (m == "saturating_sub" && is_int(recv)) pm = PrimMethod::saturating_sub, args = 1;
+        else if (m == "saturating_mul" && is_int(recv)) pm = PrimMethod::saturating_mul, args = 1;
         if (pm == PrimMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
             for (Arg& a : e->args) check(a.value, nullptr);
@@ -2206,6 +3533,7 @@ private:
             check(a.value, recv);
         }
         if (pm == PrimMethod::is_nan) return T.bool_;
+        if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);
         Expr* lhs = e->callee->lhs;
         if (args == 1 && lhs->has_bits && e->args[0].value->has_bits && is_int(recv)) {
             if (pm == PrimMethod::wrapping_add) set_int(e, recv, lhs->const_bits + e->args[0].value->const_bits);
@@ -2217,34 +3545,44 @@ private:
 
     // --- after the bodies ----------------------------------------------------------------------
 
-    // Puts structs and arrays in an order where each comes after the types it holds by value,
-    // and rejects a struct that holds itself.
+    // Puts the types C needs defined in an order where each comes after the types it holds by
+    // value, and rejects a struct or enum that holds itself.
     void order_types() {
         std::unordered_map<Type*, int> state;  // 1 visiting, 2 done
-        std::vector<Type*> stack;
         auto visit = [&](auto& self, Type* t) -> void {
-            if (t->kind != TypeKind::struct_ && t->kind != TypeKind::array) return;
+            switch (t->kind) {
+                case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
+                case TypeKind::tuple: break;
+                default: return;
+            }
             int& st = state[t];
             if (st == 2) return;
             if (st == 1) {
-                if (t->kind == TypeKind::struct_) {
+                if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
                     error(t->item->name_span, name_of(t) + " holds itself, so it would have no end");
                 }
                 return;
             }
             st = 1;
-            if (t->kind == TypeKind::array) {
+            if (t->kind == TypeKind::array || t->kind == TypeKind::optional) {
                 self(self, t->elem);
-            } else {
+            } else if (t->kind == TypeKind::tuple) {
+                for (Type* x : t->elems) self(self, x);
+            } else if (t->kind == TypeKind::struct_) {
                 for (const FieldDecl& f : t->item->fields) {
                     if (f.resolved) self(self, f.resolved);
+                }
+            } else {
+                for (const VariantDecl& v : t->item->variants) {
+                    for (Type* x : v.types) self(self, x);
                 }
             }
             state[t] = 2;
             prog_.type_order.push_back(t);
         };
         for (Item* s : structs_) visit(visit, s->declared);
-        for (Type* a : T.arrays()) visit(visit, a);
+        for (Item* e : enums_) visit(visit, e->declared);
+        for (Type* a : T.compounds()) visit(visit, a);
     }
 
     void check_unused_items() {
@@ -2259,7 +3597,7 @@ private:
             }
             if (it->is_pub || it->used) continue;
             if (it->kind == ItemKind::fn && text(it->name) == "main") continue;
-            if (it->kind == ItemKind::fn || it->kind == ItemKind::struct_ || it->kind == ItemKind::const_) {
+            if (it->kind == ItemKind::fn || is_type_item(it) || it->kind == ItemKind::const_) {
                 if (it->kind == ItemKind::fn && !it->body) continue;
                 error(it->name_span, std::string(item_kind(it)) + " " + q(text(it->name)) + " is never used");
             }
@@ -2286,7 +3624,7 @@ private:
     Name n_self_, n_underscore_, n_Self_;
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<Name, Item*> items_;
-    std::vector<Item*> structs_, consts_, impls_, all_fns_;
+    std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_;
     std::unordered_map<Type*, std::unordered_map<Name, Item*>> methods_;
     std::unordered_map<Item*, bool> checking_consts_;
     Item* current_item_ = nullptr;
@@ -2296,6 +3634,8 @@ private:
     std::vector<std::size_t> scope_marks_;
     std::vector<LoopCtx> loops_;
     std::uint32_t next_loop_ = 1;
+    bool pattern_var_ = false;  // the names a pattern binds are `var`s
+    std::vector<std::unique_ptr<DPat>> pool_;
 };
 
 }  // namespace

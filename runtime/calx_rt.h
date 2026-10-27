@@ -50,6 +50,12 @@ void cx_panic_begin(const char* at);
 CX_COLD void cx_panic_end(void);
 CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_div_zero(const char* at);
+CX_COLD void cx_panic_unwrap(const char* at);
+
+/* Whether two strings hold the same bytes, for string patterns. */
+CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {
+    return a.len == b.len && (a.len == 0 || __builtin_memcmp(a.ptr, b.ptr, a.len) == 0);
+}
 
 /* Bounds checks. */
 CX_INLINE cx_usize cx_index(cx_usize i, cx_usize length, const char* at) {

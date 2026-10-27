@@ -1,6 +1,6 @@
 ---
 title: Conversions
-description: Converting between number types - exact conversions, and the named lossy ones that match Java's casts.
+description: Converting between number types - exact conversions, the named lossy ones that match Java's casts, try_from, and enums.
 ---
 
 # Conversions
@@ -13,6 +13,7 @@ No value changes type by itself in Calx. A conversion is always written, and its
 | `T.wrap(x)` | Keeps the low bits, between integer types | `(byte) x`, `(int) aLong`, reading an `int` as unsigned |
 | `i32.saturate(f)`, `i64.saturate(f)` | Clamps a float to the type's range. NaN gives 0 | `(int) f`, `(long) d` |
 | `f32.nearest(x)`, `f64.nearest(x)` | Rounds to the nearest float, ties to even | `(float) d`, `(double) aLong`, `(float) anInt` |
+| `T.try_from(x)` | `some(x)` as a `T` if it's one of `T`'s values, or `none` | A range check before a cast |
 
 ```calx
 fn main() {
@@ -76,4 +77,19 @@ fn main() {
 }
 ```
 
-`T.try_from(x)`, which returns an optional that's empty when the value doesn't fit, comes with optionals.
+## `try_from`
+
+`T.try_from(x)` converts an integer, `char` or `rune` to any of those types when the value fits, and gives `none` when it doesn't ([optionals](optionals.md)). It's the checked conversion, for input that might be out of range.
+
+```calx
+fn main() {
+    println("{i8.try_from(127) ?? 0i8} {i8.try_from(128) == none} {u8.try_from(-1) == none}")   // out: 127 true true
+    println("{char.try_from(65) ?? '?'} {rune.try_from(0xD800) == none}")                     // out: A true
+}
+```
+
+A `rune` is never a surrogate, so `rune.try_from` rejects 0xD800 to 0xDFFF as well as values over 0x10FFFF.
+
+## Enums
+
+An enum with a [representation](enums.md#representations) converts to a number exactly as its representation would: `u8(flag)`, `i32(flag)`. `Flag.try_from(n)` goes the other way, taking the representation's type. An enum without a representation doesn't convert.

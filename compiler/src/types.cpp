@@ -68,7 +68,39 @@ Type* Types::array_of(Type* elem, std::uint64_t length) {
     t->elem = elem;
     t->length = length;
     array_map_.emplace(key, t);
-    arrays_.push_back(t);
+    compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::make_enum(Item* item, std::string_view name) {
+    Type* t = make(TypeKind::enum_, name);
+    t->item = item;
+    return t;
+}
+
+Type* Types::optional_of(Type* elem) {
+    auto it = optional_map_.find(elem);
+    if (it != optional_map_.end()) return it->second;
+    Type* t = make(TypeKind::optional, arena_.copy(std::string(elem->name) + "?"));
+    t->elem = elem;
+    optional_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::tuple_of(const std::vector<Type*>& elems) {
+    auto it = tuple_map_.find(elems);
+    if (it != tuple_map_.end()) return it->second;
+    std::string name = "(";
+    for (std::size_t i = 0; i < elems.size(); i++) {
+        if (i) name += ", ";
+        name += elems[i]->name;
+    }
+    name += ")";
+    Type* t = make(TypeKind::tuple, arena_.copy(name));
+    t->elems = arena_.copy(elems);
+    tuple_map_.emplace(elems, t);
+    compounds_.push_back(t);
     return t;
 }
 

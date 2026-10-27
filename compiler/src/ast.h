@@ -124,7 +124,7 @@ struct Local {
 };
 
 // What the checker found a name or call to be.
-enum class Ref : std::uint8_t { none, local, fn, const_, type, builtin };
+enum class Ref : std::uint8_t { none, local, fn, const_, type, builtin, variant };
 
 enum class Builtin : std::uint8_t { none, print, println, panic, assert_ };
 
@@ -136,12 +136,16 @@ enum class CallKind : std::uint8_t {
     builtin,     // `println(...)` and the others in Builtin
     construct,   // `Point()`: a struct with every field at its default
     prim_method, // `x.abs()` and the other methods on primitive types
+    variant,     // `Shape.Circle(r)`: an enum variant with data; `field_index` is the variant
+    some,        // `some(x)`
+    try_from,    // `i8.try_from(x)`, `Flag.try_from(n)`: a checked conversion to an optional
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest };
 
 enum class PrimMethod : std::uint8_t {
     none, abs, min, max, is_nan, sqrt, floor, ceil, wrapping_add, wrapping_sub, wrapping_mul, floor_div, floor_mod,
+    checked_add, checked_sub, checked_mul, checked_div, checked_rem, saturating_add, saturating_sub, saturating_mul,
 };
 
 struct Expr {
@@ -190,7 +194,7 @@ struct Expr {
     Builtin builtin = Builtin::none;
     Conv conv = Conv::none;
     PrimMethod prim = PrimMethod::none;
-    std::uint32_t field_index = 0;  // field
+    std::uint32_t field_index = 0;  // field: the field, or the tuple element; a variant: its index
     Slice<Expr*> ordered_args;   // call: the arguments in parameter order, after names are matched
     // A compile-time constant. When `has_bits`, its value is in `const_bits`: integers, chars and
     // runes as two's complement (sign-extended for signed types), bools as 0 or 1, and floats as
@@ -199,7 +203,8 @@ struct Expr {
     bool has_bits = false;
     std::uint64_t const_bits = 0;
     bool is_nan_const = false;   // `f64.NAN`, which comparing with is an error
-    std::uint32_t loop_id = 0;   // loop: its labels in C
+    std::uint32_t loop_id = 0;   // loop, match: its labels in C
+    bool let_unwraps = false;    // if_: `if let p = opt` matches `p` against the optional's value
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -214,12 +219,14 @@ enum class PatternKind : std::uint8_t {
     record,    // `Rect { w, h: height }`
     tuple,     // `(a, b)`
     none,      // `none`
+    or_,       // `A | B`: any of the alternatives in `elems`
 };
 
 struct FieldPattern {
     Name name;
-    Pattern* pattern = nullptr;  // null for the shorthand `{ w }`
+    Pattern* pattern = nullptr;  // null for the shorthand `{ w }`, until the checker makes it a binding
     Span span;
+    std::uint32_t index = 0;     // filled in by the checker: the field's position
 };
 
 struct Pattern {
@@ -234,6 +241,11 @@ struct Pattern {
     Expr* value = nullptr;      // literal, range start
     Expr* end = nullptr;        // range end
     bool inclusive = false;     // range
+
+    // Filled in by the checker.
+    Type* type = nullptr;       // the type of the value matched
+    Local* local = nullptr;     // binding
+    std::uint32_t variant = 0;  // variant: the enum variant's index; for an optional, 1 is `some`
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -274,7 +286,8 @@ struct Stmt {
     Item* item = nullptr;
 
     // Filled in by the checker.
-    Local* local = nullptr;        // let, for: the variable bound
+    Local* local = nullptr;        // let, for: the variable bound by a plain name
+    bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
 };
@@ -334,6 +347,9 @@ struct VariantDecl {
     Expr* value = nullptr;      // `OnGround = 1`
     std::string_view doc;
     Span span;
+    // Filled in by the checker.
+    Slice<Type*> types;         // the data's types: the payload's, or the fields' in order
+    std::uint64_t tag = 0;      // the value of its tag
 };
 
 struct ImportName {

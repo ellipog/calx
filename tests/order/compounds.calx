@@ -1,0 +1,29 @@
+// Tuples, variants and optionals evaluate their parts left to right, as written, like everything else.
+enum Box {
+    Pair(i32, i32)
+    Named { a: i32, b: i32 }
+}
+
+fn note(n: i32) -> i32 {
+    print("{n} ")
+    return n
+}
+
+fn sum(bx: Box) -> i32 {
+    return match bx {
+        Pair(x, y) => x + y,
+        Named { a, b } => a * 10 + b,
+    }
+}
+
+fn main() {
+    let t = (note(1), note(2), note(3))
+    println("= {t.0 + t.1 + t.2}")                   // out: 1 2 3 = 6
+    println("= {sum(Box.Pair(note(4), note(5)))}")   // out: 4 5 = 9
+    // Fields run in the order they're written, not the order they're declared.
+    println("= {sum(Box.Named { b: note(6), a: note(7) })}")   // out: 6 7 = 76
+    let o = some(note(8))
+    println("= {o ?? 0}")                            // out: 8 = 8
+    println("= {some(note(1)) == some(note(2))}")    // out: 1 2 = false
+    println("= {note(3).checked_add(note(4)) ?? 0}") // out: 3 4 = 7
+}

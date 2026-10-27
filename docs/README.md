@@ -18,16 +18,20 @@ What's built, one page per feature:
 1. [The calx command](reference/command.md): check, build, run, emit-c, how builds stay fast, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
-4. [Types](reference/types.md): the primitive types, arrays, structs and unit
+4. [Types](reference/types.md): the primitive types, arrays, and where the other types are
 5. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
 7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
-8. [Conversions](reference/conversions.md): exact `T(x)` and the named lossy conversions
+8. [Conversions](reference/conversions.md): exact `T(x)`, the named lossy conversions, and `try_from`
 9. [Control flow](reference/control-flow.md): if, while, for, loop, break and continue
 10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
 11. [Structs](reference/structs.md): fields, defaults, literals and methods
-12. [Printing and panics](reference/printing.md): print, println, assert and panic
-13. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+12. [Enums](reference/enums.md): variants with and without data, representations, conversions
+13. [Tuples](reference/tuples.md): values grouped by position, and destructuring
+14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
+15. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
+16. [Printing and panics](reference/printing.md): print, println, assert and panic
+17. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Design
 

@@ -82,4 +82,19 @@ fn main() {
 | `x.wrapping_add(y)`, `wrapping_sub`, `wrapping_mul` | The same as `+`, `-` and `*`, which also wrap. In a constant expression they say that wrapping is meant |
 | `x.floor_div(y)`, `x.floor_mod(y)` | Java's `Math.floorDiv` and `Math.floorMod`, for signed types. They panic on division by zero |
 
-`checked_div`, `checked_add`, `saturating_add` and the like come with optionals.
+| `x.checked_add(y)`, `checked_sub`, `checked_mul` | `some` of the result, or `none` if it doesn't fit the type |
+| `x.checked_div(y)`, `checked_rem` | `none` when `y` is 0. `MIN.checked_div(-1)` is `none`, since the result doesn't fit; `MIN.checked_rem(-1)` is `some(0)`, as Java's `%` gives |
+| `x.saturating_add(y)`, `saturating_sub`, `saturating_mul` | The result, clamped to the type's range |
+
+## Checked and saturating arithmetic
+
+Java's operators wrap, and so do Calx's. Code that wants to notice an overflow says so: the `checked_` methods return an [optional](optionals.md), and the `saturating_` methods stop at `MIN` or `MAX`. They work on every integer type, and compile to clang's overflow builtins, a single flag test.
+
+```calx
+fn main() {
+    println("{i32.MAX.checked_add(1) == none} {i32.MAX.checked_add(-1) ?? 0}")   // out: true 2147483646
+    println("{7.checked_div(0) == none} {i32.MIN.checked_div(-1) == none} {i32.MIN.checked_rem(-1) ?? 9}")   // out: true true 0
+    println("{200u8.checked_add(56u8) == none} {0u32.checked_sub(1u32) == none}")   // out: true true
+    println("{i32.MAX.saturating_add(1)} {250u8.saturating_add(10u8)} {3u8.saturating_sub(10u8)}")   // out: 2147483647 255 0
+}
+```

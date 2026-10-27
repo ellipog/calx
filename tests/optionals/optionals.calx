@@ -1,0 +1,92 @@
+// Optionals: `some`, `none`, `??`, `!`, `?.`, `==`, `if let` and `let ... else`.
+struct Player {
+    name: str
+    health: i32
+    target: i32? = none
+}
+
+fn find(xs: [i32; 4], want: i32) -> usize? {
+    for i in 0usize..4 {
+        if xs[i] == want {
+            return some(i)
+        }
+    }
+    return none
+}
+
+fn half(n: i32) -> i32? {
+    if n % 2 == 0 {
+        return some(n / 2)
+    }
+    return none
+}
+
+fn calls(n: i32) -> i32 {
+    println("calls {n}")
+    return n
+}
+
+// `let ... else` leaves when there's no value.
+fn quarter(n: i32) -> i32 {
+    let h = half(n) else {
+        return -1
+    }
+    let q = half(h) else return -2
+    return q
+}
+
+fn main() {
+    let xs = [5, 7, 9, 7]
+    println("{find(xs, 7) ?? 99} {find(xs, 3) ?? 99}")   // out: 1 99
+
+    // `??` runs its right side only when it needs it.
+    let a = half(4) ?? calls(0)
+    println("{a}")             // out: 2
+    let b = half(3) ?? calls(10)   // out: calls 10
+    println("{b}")             // out: 10
+
+    // `??` with an optional on the right gives an optional.
+    let c = half(3) ?? half(8)
+    println("{c ?? 0}")        // out: 4
+
+    // `==` compares optionals: equal when both are `none`, or both hold equal values.
+    let n: i32? = none
+    println("{n == none} {half(6) == some(3)} {half(6) != some(4)} {half(1) == n}")   // out: true true true true
+    let nan: f64? = some(f64.NAN)
+    println("{nan == nan}")    // out: false
+
+    // `!` unwraps.
+    println("{half(10)!}")     // out: 5
+
+    // `if let` binds the value, and can chain.
+    if let h = half(12) {
+        println("half is {h}")     // out: half is 6
+    }
+    for k in 1..4 {
+        if let h = half(k) {
+            println("{k} halves to {h}")
+        } else if k == 3 {
+            println("3 is odd")
+        } else {
+            println("{k} is odd")
+        }
+    }
+    // out: 1 is odd
+    // out: 2 halves to 1
+    // out: 3 is odd
+    let label = if let h = half(7) { h } else { -7 }
+    println("{label}")         // out: -7
+    for k in 5..8 {
+        let w = if let h = half(k) { h } else if let q = half(k + 1) { q * 10 } else { 0 }
+        print("{w};")
+    }
+    println()                  // out: 30;3;40;
+
+    println("{quarter(8)} {quarter(6)} {quarter(5)}")   // out: 2 -2 -1
+
+    // `?.` reads a field of an optional struct. A field that's an optional isn't wrapped again.
+    let p: Player? = some(Player { name: "Steve", health: 20, target: some(3) })
+    let gone: Player? = none
+    println("{p?.health ?? 0} {gone?.health ?? 0} {p?.target ?? 0} {gone?.target ?? 0}")   // out: 20 0 3 0
+    println("{p!.name}")       // out: Steve
+}

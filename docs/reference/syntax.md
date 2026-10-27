@@ -97,12 +97,12 @@ From loosest to tightest:
 
 | Operators | Notes |
 | --- | --- |
-| `..` `..=` | Ranges, in `for` loops |
+| `..` `..=` | Ranges, in `for` loops and [patterns](patterns.md) |
 | `or` | |
 | `and` | Mixed with `or`, it needs parentheses ([strictness](strictness.md#parentheses)) |
 | `not` | Prefix |
 | `==` `!=` `<` `<=` `>` `>=` | Comparisons don't chain |
-| `??` | Not built yet |
+| `??` | An optional's value or a default ([optionals](optionals.md)). Next to another operator, it needs parentheses |
 | `\|` | |
 | `^` | |
 | `&` | `&`, `\|` and `^` together need parentheses |
@@ -110,6 +110,6 @@ From loosest to tightest:
 | `+` `-` | |
 | `*` `/` `%` | |
 | `-` `~` | Prefix |
-| `.field` `.method()` `f()` `a[i]` | Postfix |
+| `.field` `.method()` `f()` `a[i]` `!` `?.field` `.0` | Postfix. `!` and `?.` are for [optionals](optionals.md), `.0` for [tuples](tuples.md) |
 
 `a op= b` is `a = a op b` for every arithmetic, bitwise and shift operator.

@@ -23,6 +23,9 @@ enum class TypeKind : std::uint8_t {
     str,       // a read-only view of UTF-8 bytes
     struct_,
     array,     // `[T; N]`
+    enum_,
+    optional,  // `T?`
+    tuple,     // `(A, B)`, with at least two elements
 };
 
 struct Type {
@@ -30,9 +33,12 @@ struct Type {
     std::uint8_t bits = 0;   // int_ and float_; usize says 64, and is_usize marks it
     bool is_signed = false;
     bool is_usize = false;
-    Type* elem = nullptr;    // array
+    Type* elem = nullptr;    // array, optional
     std::uint64_t length = 0;
-    Item* item = nullptr;    // struct_
+    Slice<Type*> elems;      // tuple
+    Item* item = nullptr;    // struct_, enum_
+    Type* repr = nullptr;    // enum_: the integer type of its tag
+    bool has_data = false;   // enum_: some variant holds data, so it's a tagged union in C
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -54,8 +60,12 @@ public:
     // The primitive named `name`, or null.
     Type* primitive(std::string_view name) const;
     Type* make_struct(Item* item, std::string_view name);
+    Type* make_enum(Item* item, std::string_view name);
     Type* array_of(Type* elem, std::uint64_t length);
-    const std::vector<Type*>& arrays() const { return arrays_; }
+    Type* optional_of(Type* elem);
+    Type* tuple_of(const std::vector<Type*>& elems);
+    // The arrays, optionals and tuples made so far, in the order they were made.
+    const std::vector<Type*>& compounds() const { return compounds_; }
 
 private:
     Type* make(TypeKind kind, std::string_view name);
@@ -65,7 +75,9 @@ private:
     std::uint32_t next_id_ = 1;
     std::vector<std::pair<std::string_view, Type*>> primitives_;
     std::map<std::pair<Type*, std::uint64_t>, Type*> array_map_;
-    std::vector<Type*> arrays_;
+    std::map<Type*, Type*> optional_map_;
+    std::map<std::vector<Type*>, Type*> tuple_map_;
+    std::vector<Type*> compounds_;
 };
 
 inline bool is_int(const Type* t) { return t->kind == TypeKind::int_; }
