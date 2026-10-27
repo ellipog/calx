@@ -88,3 +88,14 @@ Every run printed the same checksum as the Rust reference. D89 lists the compile
 An empty cache means the runtime is built too. The generated program goes in the temp folder, so under WSL it's on Linux's own file system: through `/mnt/c`, reading the 65 files took most of a 420 ms check.
 
 CI runs both scripts on every push, on GitHub's shared runners. There the times are only a rough guide, but the tick benchmark's checksum must still match.
+
+## Math functions
+
+[`math/math.calx`](math/math.calx) times `std.math`'s `exp`, `log`, `pow`, `sin`, `cos`, `tan`, `atan2` and `acos` on 2 million random arguments each, best of 7, and [`math/libm.c`](math/libm.c) times the C library's on the same arguments in the same loops. The C library is what Rust's `f64::exp`, `ln`, `powf` and the rest call: the Windows CRT, and glibc on Linux.
+
+```sh
+calx build --release -o math bench/math/math.calx
+clang -O3 -march=x86-64-v3 -fno-builtin -o libm bench/math/libm.c -lm
+```
+
+Both print a sum of the results, which must agree to the last digit or two. The times, on the reference machine (i9-13900K, pinned to one P-core), are in [std.math](../docs/std/math.md#speed).

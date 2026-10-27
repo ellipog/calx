@@ -1,32 +1,44 @@
-// std.math gives StrictMath's results bit for bit. The bits below are Java 25's
-// StrictMath.log; build/scratch's wider check covered 4,518 arguments.
+// std.math's exp, log and pow are Calx's own, within 0.51 ULP and almost always correctly
+// rounded: build/scratch's check found 99.9% of 1.6 million results correctly rounded. The
+// bits below are the correctly rounded results, which is what these give, from Python's decimal
+// at 50 digits. The special cases are Java's.
 
-import std.math.{log}
+import std.math.{E, PI, acos, atan2, cos, exp, log, log10, pow, sin}
 
-fn check(x: f64, want: u64) {
-    let got = log(x).to_bits()
-    if got != want {
-        panic("log({x}) has bits {got}, want {want}")
+fn check(what: str, got: f64, want: u64) {
+    if got.to_bits() != want {
+        println("{what} = {got} [{got.to_bits()}], want {f64.from_bits(want)} [{want}]")
     }
 }
 
 fn main() {
-    println("{log(1.0)} {log(2.0)} {log(10.0)}")    // out: 0.0 0.6931471805599453 2.302585092994046
-    println("{log(0.0)} {log(-1.0)} {log(f64.INFINITY)}")    // out: -Infinity NaN Infinity
-
-    check(0.0, 18442240474082181120)
-    check(-0.0, 18442240474082181120)
-    check(-1.0, 18444492273895866368)
-    check(0.5, 13827790571168217583)
-    check(f64.from_bits(1), 13873131416795836867)          // the smallest subnormal
-    check(f64.from_bits(0x12688b70e62b), 13872861916001309960)    // 1e-310
-    check(f64.MAX, 4649454530587146735)
-    check(f64.NAN, 9221120237041090560)
-    check(f64.NEG_INFINITY, 18444492273895866368)
-    check(f64.from_bits(0x3ff000001ad7f29b), 4502148214114968722)  // 1.0000001
-    check(f64.from_bits(0x3fefffffca501acb), 13725520251716934559) // 0.9999999
-    check(f64.from_bits(0x4005bf0a8b145769), 4607182418800017408)  // e, whose log is exactly 1
-    check(1e300, 4649287341619838901)
-    check(f64.from_bits(0x3ff0000000001198), 4427487034449327700)  // 1 + 1e-12, the |f| < 2^-20 path
+    println("{exp(1.0)} {log(2.0)} {pow(2.0, 0.5)}")    // out: 2.718281828459045 0.6931471805599453 1.4142135623730951
+    println("{exp(f64.NEG_INFINITY)} {exp(1000.0)} {exp(-1000.0)} {exp(f64.NAN)}")    // out: 0.0 Infinity 0.0 NaN
+    println("{log(0.0)} {log(-0.0)} {log(-1.0)} {log(f64.INFINITY)}")    // out: -Infinity -Infinity NaN Infinity
+    println("{pow(f64.NAN, 0.0)} {pow(1.0, f64.INFINITY)} {pow(-8.0, 1.0 / 3.0)} {pow(-0.0, -3.0)}")    // out: 1.0 NaN NaN -Infinity
+    println("{pow(-2.0, 3.0)} {pow(-2.0, 1.0e300)} {pow(0.5, -2000.0)} {pow(-1.0e-200, 3.0)}")    // out: -8.0 Infinity Infinity -0.0
+    println("{sin(PI / 6.0)} {cos(PI)} {atan2(1.0, -1.0)} {acos(-1.0) == PI} {log10(1000.0)} {E}")    // out: 0.49999999999999994 -1.0 2.356194490192345 true 3.0 2.718281828459045
+    check("pow(2.0, 10.0)", pow(2.0, 10.0), 0x4090000000000000)
+    check("pow(-3.0, 3.0)", pow(-3.0, 3.0), 0xc03b000000000000)
+    check("pow(10.0, 15.0)", pow(10.0, 15.0), 0x430c6bf526340000)
+    check("pow(0.5, 1074.0)", pow(0.5, 1074.0), 0x0000000000000001)
+    check("pow(1075.0, 7.0)", pow(1075.0, 7.0), 0x44567bfba4b73d41)
+    check("pow(7.0, 22.0)", pow(7.0, 22.0), 0x43cb213cc3a81131)
+    check("pow(745.1332191019411, 10.0)", pow(745.1332191019411, 10.0), 0x45e54fb068581353)
+    check("pow(1e-20, -10.0)", pow(1e-20, -10.0), 0x6974e718d7d7625d)
+    check("exp(1.0)", exp(1.0), 0x4005bf0a8b145769)
+    check("exp(-1.0)", exp(-1.0), 0x3fd78b56362cef38)
+    check("exp(0.5)", exp(0.5), 0x3ffa61298e1e069c)
+    check("exp(10.0)", exp(10.0), 0x40d5829dcf950560)
+    check("exp(700.0)", exp(700.0), 0x7f0d945df4f8ec8e)
+    check("exp(-740.0)", exp(-740.0), 0x0000000000000055)
+    check("exp(1e-10)", exp(1e-10), 0x3ff000000006df38)
+    check("log(2.0)", log(2.0), 0x3fe62e42fefa39ef)
+    check("log(10.0)", log(10.0), 0x40026bb1bbb55516)
+    check("log(0.5)", log(0.5), 0xbfe62e42fefa39ef)
+    check("log(1.0000001)", log(1.0000001), 0x3e7ad7f2847b6492)
+    check("log(1e-300)", log(1e-300), 0xc085963447f87fb5)
+    check("log(5e-324)", log(5e-324), 0xc0874385446d71c3)
+    check("log(1.7976931348623157e+308)", log(1.7976931348623157e+308), 0x40862e42fefa39ef)
     println("ok")    // out: ok
 }

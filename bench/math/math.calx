@@ -1,0 +1,159 @@
+// std.math against the C library on the same inputs: bench/math/libm.c is the same loops in C.
+// The Windows CRT and glibc are what Rust's f64 methods call.
+import std.math.{acos, atan2, cos, exp, log, pow, sin, tan}
+import std.time.{Instant}
+
+fn inputs(seed: u64, n: usize, lo: f64, hi: f64) -> List<f64> {
+    var s = seed
+    var xs = List<f64>()
+    for _ in 0usize..n {
+        s = s * 6364136223846793005 + 1442695040888963407
+        xs.push(lo + (hi - lo) * (f64.nearest(s >> 11) * 1.1102230246251565e-16))
+    }
+    return xs
+}
+
+fn report(name: str, best: f64, n: usize, sum: f64) {
+    println("{name}: {best * 1.0e9 / f64.nearest(n)} ns/call (sum {sum})")
+}
+
+fn time_exp(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += exp(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("exp", best, xs.len(), sum)
+}
+
+fn time_log(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += log(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("log", best, xs.len(), sum)
+}
+
+fn time_pow(xs: List<f64>, ys: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for i in 0usize..xs.len() {
+            acc += pow(xs[i], ys[i])
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("pow", best, xs.len(), sum)
+}
+
+fn time_sin(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += sin(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("sin", best, xs.len(), sum)
+}
+
+fn time_cos(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += cos(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("cos", best, xs.len(), sum)
+}
+
+fn time_tan(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += tan(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("tan", best, xs.len(), sum)
+}
+
+fn time_atan2(xs: List<f64>, ys: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for i in 0usize..xs.len() {
+            acc += atan2(xs[i], ys[i])
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("atan2", best, xs.len(), sum)
+}
+
+fn time_acos(xs: List<f64>) {
+    var best = 1.0e30
+    var sum = 0.0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var acc = 0.0
+        for x in xs {
+            acc += acos(x)
+        }
+        let t = unsafe { Instant.now() }.secs_since(t0)
+        best = best.min(t)
+        sum = acc
+    }
+    report("acos", best, xs.len(), sum)
+}
+
+fn main() {
+    let n = 2000000usize
+    time_exp(inputs(2, n, -20.0, 20.0))
+    time_log(inputs(3, n, 0.0, 1000.0))
+    time_pow(inputs(4, n, 0.0, 10.0), inputs(5, n, -5.0, 5.0))
+    let trig = inputs(1, n, -10.0, 10.0)
+    time_sin(trig.copy())
+    time_cos(trig.copy())
+    time_tan(trig)
+    time_atan2(inputs(6, n, -1.0, 1.0), inputs(7, n, -1.0, 1.0))
+    time_acos(inputs(6, n, -1.0, 1.0))
+}

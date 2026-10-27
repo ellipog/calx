@@ -138,10 +138,10 @@ Calx matches Java exactly. What's built is in the reference: [Integers](referenc
 
 ### Transcendental functions
 
-- `std.math` gives `sqrt`, `abs`, `floor`, `ceil` and `rint`. They're exact in IEEE, so every implementation agrees.
-- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `expm1`, `log`, `log10`, `log1p`, `pow`, `cbrt`, `hypot`, `sinh`, `cosh` and `tanh` give Java's `StrictMath` results bit for bit on every platform.
-- Built so far: `log`, in [`std.math`](std/math.md).
-- They're ported from fdlibm, the library `StrictMath` is defined by, with fdlibm's license notice kept (D59, D60). Porting is the surest way to get the same constants and order of operations, which decide the last bit. The rig checks every function against `StrictMath`.
+- `sqrt`, `abs`, `floor`, `ceil` and `mul_add` are methods on the float types. They're exact in IEEE, so every implementation agrees. `rint` is still to build.
+- Built: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `expm1`, `log`, `log10`, `log1p`, `pow`, `cbrt`, `hypot`, `sinh`, `cosh` and `tanh`, in two modules with the same names (D97):
+  - [`std.java.math`](std/java-math.md) gives Java's `StrictMath` results bit for bit on every platform, for code that must compute what vanilla computes. It's ported from fdlibm, the library `StrictMath` is defined by, with fdlibm's license notice kept (D59, D60). Porting is the surest way to get the same constants and order of operations, which decide the last bit. It matched JDK 25 on 1,043,282 arguments, and the rig checks every function against `StrictMath`.
+  - [`std.math`](std/math.md) is fast, within about half an ULP, and also the same on every platform, since it's all Calx. Its `exp`, `log` and `pow` are its own, table-driven, faster than glibc and the Windows CRT and more accurate than fdlibm. The rest call `std.java.math` until faster algorithms replace them: `sin`, `cos` and `tan` are next, since the Windows CRT beats fdlibm there.
 - Vanilla calls `Math`, not `StrictMath`: `sqrt` 102 times, `pow` 70, `sin` 30, `cos` 23, `log` 9, `atan2` 9, `acos` 5, `asin` 2, and `log1p` and `hypot` once each. `Mth`'s sine table is filled with `Math.sin` at startup, and every `nextGaussian()` goes through `Math.log`.
 - On x86-64, HotSpot replaces some of these with its own intrinsics. The rig measured how far they drift from `StrictMath` on JDK 25.0.5 (`P1.5`, 500,000 arguments per input range):
 
@@ -337,7 +337,6 @@ Built: see [Modules](reference/modules.md) and [the calx command](reference/comm
 
 - **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
 - **Reaching items through a module's name:** `import std.math`, then `math.floor(x)`.
-- **Renaming imports**, `import a.b.{Name as Other}`, for two modules that use one name.
 - **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
 - **Targets:** `x86_64-windows`, `x86_64-linux` and `wasm32` from Phase 3 and Phase 7. `aarch64-macos` comes later (D7).
 
@@ -427,7 +426,7 @@ What Calx leaves out, on purpose:
 | Float to int saturates, NaN to 0 | [Floats](reference/floats.md) |
 | `char` unsigned 16-bit, `byte` signed | [Types](reference/types.md) |
 | IEEE floats, no contraction, no fast-math | [Floats](reference/floats.md) |
-| Transcendentals ported from fdlibm, matching `StrictMath` bit for bit | [Transcendental functions](#transcendental-functions) |
+| Transcendentals: `std.java.math` ported from fdlibm, matching `StrictMath` bit for bit, and a faster `std.math` | [Transcendental functions](#transcendental-functions) |
 | Memory-safe outside `unsafe` (D23) | [Memory safety](#memory-safety-d23) |
 | `unsafe` and `extern` only for Calcite core and trusted plugins | [`unsafe`](#unsafe), [FFI](#ffi) |
 | The emitter proves non-aliasing and emits `restrict` (D26) | [Memory safety](#memory-safety-d23) |
