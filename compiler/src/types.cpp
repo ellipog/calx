@@ -307,29 +307,56 @@ bool is_view_type(const Type* t) {
 
 namespace {
 
+// The structs and enums a walk over a type has gone into. Each is gone into once: the walks
+// stop at the first type that answers the question, so one seen again either answered nothing
+// or is being gone into, as a type that holds itself through a list is. Without it a walk over
+// types that hold each other takes a path for each way down, which for a JSON tree and a text
+// component took minutes.
+// The first few are kept in place, since most walks see few and `is_copy` is asked often.
+struct Seen {
+    const void* first[16];
+    int n = 0;
+    std::vector<const void*> rest;
+
+    // False if `t` was gone into already.
+    bool enter(const Type* t) {
+        const void* item = t->item;
+        for (int i = 0; i < n; i++) {
+            if (first[i] == item) return false;
+        }
+        for (const void* p : rest) {
+            if (p == item) return false;
+        }
+        if (n < 16) first[n++] = item;
+        else rest.push_back(item);
+        return true;
+    }
+};
+
 // A struct that holds itself is an error found later; the depth stops the walk before then.
-bool copy_walk(const Type* t, int depth) {
+bool copy_walk(const Type* t, int depth, Seen& seen) {
     if (depth > 64) return true;
+    if ((t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) && !seen.enter(t)) return true;
     switch (t->kind) {
         case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
         case TypeKind::library: return false;
         case TypeKind::param: return t->copy_bound;
-        case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
+        case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1, seen);
         case TypeKind::tuple:
             for (const Type* e : t->elems) {
-                if (!copy_walk(e, depth + 1)) return false;
+                if (!copy_walk(e, depth + 1, seen)) return false;
             }
             return true;
         case TypeKind::struct_:
             for (const FieldDecl& f : t->item->fields) {
-                if (f.resolved && !copy_walk(f.resolved, depth + 1)) return false;
+                if (f.resolved && !copy_walk(f.resolved, depth + 1, seen)) return false;
             }
             return true;
         case TypeKind::enum_:
             for (const VariantDecl& v : t->item->variants) {
                 for (const Type* x : v.types) {
-                    if (!copy_walk(x, depth + 1)) return false;
+                    if (!copy_walk(x, depth + 1, seen)) return false;
                 }
             }
             return true;
@@ -337,29 +364,30 @@ bool copy_walk(const Type* t, int depth) {
     }
 }
 
-bool send_walk(const Type* t, int depth) {
+bool send_walk(const Type* t, int depth, Seen& seen) {
     if (depth > 64) return true;
+    if ((t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) && !seen.enter(t)) return true;
     if (t->has_pointer || t->scoped) return false;
     switch (t->kind) {
         case TypeKind::pointer: return false;
         case TypeKind::param: return t->send_bound;
         case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
-            return send_walk(t->elem, depth + 1);
-        case TypeKind::map: return send_walk(t->key, depth + 1) && send_walk(t->elem, depth + 1);
+            return send_walk(t->elem, depth + 1, seen);
+        case TypeKind::map: return send_walk(t->key, depth + 1, seen) && send_walk(t->elem, depth + 1, seen);
         case TypeKind::tuple:
             for (const Type* e : t->elems) {
-                if (!send_walk(e, depth + 1)) return false;
+                if (!send_walk(e, depth + 1, seen)) return false;
             }
             return true;
         case TypeKind::struct_:
             for (const FieldDecl& f : t->item->fields) {
-                if (f.resolved && !send_walk(f.resolved, depth + 1)) return false;
+                if (f.resolved && !send_walk(f.resolved, depth + 1, seen)) return false;
             }
             return true;
         case TypeKind::enum_:
             for (const VariantDecl& v : t->item->variants) {
                 for (const Type* x : v.types) {
-                    if (!send_walk(x, depth + 1)) return false;
+                    if (!send_walk(x, depth + 1, seen)) return false;
                 }
             }
             return true;
@@ -369,7 +397,14 @@ bool send_walk(const Type* t, int depth) {
 
 }  // namespace
 
-bool is_copy(const Type* t) { return copy_walk(t, 0); }
-bool is_send(const Type* t) { return send_walk(t, 0); }
+bool is_copy(const Type* t) {
+    Seen seen;
+    return copy_walk(t, 0, seen);
+}
+
+bool is_send(const Type* t) {
+    Seen seen;
+    return send_walk(t, 0, seen);
+}
 
 }  // namespace calx

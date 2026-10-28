@@ -1,0 +1,78 @@
+// Types that hold each other through lists, as a JSON tree, NBT and a text component do. Asking
+// whether one can be copied or sent goes into each type once, so this checks in moments: a walk
+// down every path took minutes for types like these.
+
+enum Json {
+    Null
+    Num(i64)
+    Str(String)
+    Array(List<Json>)
+    Object(List<Member>)
+}
+
+struct Member {
+    key: String
+    value: Json
+}
+
+enum Tag {
+    End
+    Int(i32)
+    Str(String)
+    List(List<Tag>)
+    Compound(List<(String, Tag)>)
+    Text(List<Component>)
+}
+
+struct Component {
+    contents: Contents
+    extra: List<Component>
+}
+
+enum Contents {
+    Text(String)
+    Translatable(Translation)
+    Json(Json)
+    Nbt(Tag)
+}
+
+struct Translation {
+    key: String
+    fallback: String?
+    args: List<Component>
+}
+
+fn count(c: Component) -> i32 {
+    var n = 1
+    match c.contents {
+        Contents.Translatable(t) => {
+            for a in t.args {
+                n += count(a)
+            }
+        },
+        _ => {},
+    }
+    for e in c.extra {
+        n += count(e)
+    }
+    return n
+}
+
+fn main() {
+    let leaf = Component { contents: Contents.Text("a"), extra: [] }
+    let json = Json.Object([Member { key: "k", value: Json.Array([Json.Num(1), Json.Null]) }])
+    let tag = Tag.Compound([("t", Tag.Text([leaf.copy()]))])
+    let args: List<Component> = [leaf.copy(), Component { contents: Contents.Nbt(tag.copy()), extra: [] }]
+    let t = Translation { key: "k", fallback: none, args: args }
+    let c = Component { contents: Contents.Translatable(t), extra: [leaf.copy(), Component { contents: Contents.Json(json.copy()), extra: [] }] }
+    let d = c.copy()
+    println("{count(c)} {count(d)}")      // out: 5 5
+
+    // A component can go to another thread: nothing in it is a pointer.
+    var r = Receiver<Component>()
+    var s = r.sender()
+    s.send(d)
+    if let got = r.next() {
+        println("{count(got)}")           // out: 5
+    }
+}

@@ -7325,31 +7325,42 @@ private:
         return true;
     }
 
-    // An end of a queue or a thread in `t`, which can't be copied, or null.
-    const Type* handle_inside(const Type* t, int depth) {
+    // An end of a queue or a thread in `t`, which can't be copied, or null. Each struct and enum
+    // is gone into once, as `is_copy` goes into them, so types that hold each other through
+    // lists take one path down rather than one for each way.
+    const Type* handle_inside(const Type* t) {
+        std::vector<const Item*> seen;
+        return handle_inside(t, 0, seen);
+    }
+
+    const Type* handle_inside(const Type* t, int depth, std::vector<const Item*>& seen) {
         if (depth > 64) return nullptr;
+        if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
+            if (std::find(seen.begin(), seen.end(), t->item) != seen.end()) return nullptr;
+            seen.push_back(t->item);
+        }
         switch (t->kind) {
             case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: case TypeKind::library: return t;
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
-                return handle_inside(t->elem, depth + 1);
+                return handle_inside(t->elem, depth + 1, seen);
             case TypeKind::map:
-                if (const Type* h = handle_inside(t->key, depth + 1)) return h;
-                return handle_inside(t->elem, depth + 1);
+                if (const Type* h = handle_inside(t->key, depth + 1, seen)) return h;
+                return handle_inside(t->elem, depth + 1, seen);
             case TypeKind::tuple:
                 for (const Type* e : t->elems) {
-                    if (const Type* h = handle_inside(e, depth + 1)) return h;
+                    if (const Type* h = handle_inside(e, depth + 1, seen)) return h;
                 }
                 return nullptr;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) {
                     if (!f.resolved) continue;
-                    if (const Type* h = handle_inside(f.resolved, depth + 1)) return h;
+                    if (const Type* h = handle_inside(f.resolved, depth + 1, seen)) return h;
                 }
                 return nullptr;
             case TypeKind::enum_:
                 for (const VariantDecl& v : t->item->variants) {
                     for (const Type* x : v.types) {
-                        if (const Type* h = handle_inside(x, depth + 1)) return h;
+                        if (const Type* h = handle_inside(x, depth + 1, seen)) return h;
                     }
                 }
                 return nullptr;
@@ -7955,7 +7966,7 @@ private:
                                    "of its elements with `to_list()`");
             return T.error;
         }
-        if (const Type* h = handle_inside(recv, 0)) {
+        if (const Type* h = handle_inside(recv)) {
             error(e->callee->span, name_of(recv) + " can't be copied" + (h == recv ? "" : ", since it holds " + name_of(h)) +
                                        (h->kind == TypeKind::thread    ? "; a thread is joined once, by whatever holds it"
                                         : h->kind == TypeKind::library ? "; a library is closed once, by whatever holds it"
