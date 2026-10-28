@@ -21,7 +21,8 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   all of them together must be the trace's functions and lines, which leave out the file, since
   a module from the standard library is shown by its whole path.
 - `// stderr: TEXT` is one line of expected standard error, like `out`. A program that doesn't
-  panic must write exactly those lines there, so one with none must write nothing.
+  panic must write exactly those lines there, so one with none must write nothing. In a test of
+  several files, their paths in it are just their names.
 - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
   the input is empty.
 - `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces.
@@ -66,6 +67,8 @@ FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
 FRAME = re.compile(r"^\tat (.*)\((.*):(\d+)\)$")
+GENERATED = re.compile(r"^(.*?):(\d+):(\d+): note: in the code ")
+GENERATED_JSON = re.compile(r"^in the code .*?, at .*?:\d+:\d+: (.*)$", re.S)
 RUN_SECONDS = 120
 
 
@@ -206,6 +209,9 @@ def run_test(test, mode):
             return [f"still running after {RUN_SECONDS} seconds, so it was stopped"]
         p.stdout = p.stdout.decode("utf-8", errors="replace")
         p.stderr = p.stderr.decode("utf-8", errors="replace")
+        if test.files:
+            # The test's own files by their names, as it was written, not in the folder it's run in.
+            p.stderr = p.stderr.replace(str(pathlib.Path(tmp)) + os.sep, "").replace(pathlib.Path(tmp).as_posix() + "/", "")
         problems = []
         if test.panic:
             if p.returncode != 101:
@@ -261,11 +267,22 @@ def check_errors(test, path):
         return ["expected compile errors, but it compiled"]
     actual = []
     columns = []
-    for line in p.stderr.splitlines():
+    out = p.stderr.splitlines()
+    for i, line in enumerate(out):
         m = DIAG.match(line)
         if m:
-            actual.append((int(m.group(2)), m.group(4)))
-            columns.append((int(m.group(2)), int(m.group(3)), m.group(4)))
+            at = (int(m.group(2)), int(m.group(3)))
+            message = m.group(4)
+            # An error in code an attribute generated is expected on the attribute, which its
+            # note names, as editors are shown it (D124).
+            if "/expand/" in m.group(1).replace("\\", "/"):
+                for later in out[i + 1:]:
+                    n = GENERATED.match(later)
+                    if n:
+                        at = (int(n.group(2)), int(n.group(3)))
+                        break
+            actual.append((at[0], message))
+            columns.append((at[0], at[1], message))
     problems += check_json(test, path, columns)
     remaining = list(actual)
     for line, text in test.errors:
@@ -307,7 +324,11 @@ def check_json(test, path, expected):
         same = (path.resolve().parent in pathlib.Path(d["file"]).resolve().parents) if test.files else d["file"] == str(path)
         if not same:
             problems.append(f"--json: {d['message']!r} is in {d['file']!r}, expected {str(path)!r}")
-        got.append((line, character, d["message"]))
+        message = d["message"]
+        generated = GENERATED_JSON.match(message)
+        if generated:
+            message = generated.group(1)
+        got.append((line, character, message))
     # Columns agree where a line is ASCII: editors count UTF-16 units from 0, the text form bytes from 1.
     want = []
     for line, col, message in expected:

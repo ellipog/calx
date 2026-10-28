@@ -10,6 +10,7 @@
 
 #include "check.h"
 #include "emit.h"
+#include "expand.h"
 #include "modules.h"
 #include "parser.h"
 #include "source.h"
@@ -39,6 +40,7 @@ int usage() {
         "  build     build a program (-o names the output)\n"
         "  run       build a program and run it; arguments after -- go to the program\n"
         "  emit-c    print the C a program compiles to (-o names a file)\n"
+        "  expand    print the code a program's attributes generate\n"
         "  version   print the compiler's version\n"
         "\n"
         "options:\n"
@@ -117,7 +119,8 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    bool known = opt.command == "check" || opt.command == "build" || opt.command == "run" || opt.command == "emit-c";
+    bool known = opt.command == "check" || opt.command == "build" || opt.command == "run" || opt.command == "emit-c" ||
+                 opt.command == "expand";
     if (!known || opt.input.empty()) return usage();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
@@ -147,25 +150,50 @@ int main(int argc, char** argv) {
     Types types(arena);
     std::string home_error;
     std::string home = find_home(home_error);
-    std::vector<Module*> modules = load_program(ParseContext{sources, names, arena, diags}, sources, file, home, home_error);
-    Program program;
+    bool color = isatty(fileno(stderr)) != 0;
+    ParseContext pc{sources, names, arena, diags};
+    ModuleLoader loader(pc, sources, home, home_error);
+    loader.load(file);
+    // Attributes run first, since what they generate is checked with the rest (D124).
+    bool expanded = true;
+    std::vector<Expansion> shown;
     if (!diags.has_errors()) {
+        ExpandOptions xo;
+        xo.home = home;
+        xo.home_error = home_error;
+        xo.verbose = opt.verbose;
+        xo.json = opt.json;
+        xo.color = color;
+        if (opt.command == "expand") xo.shown = &shown;
+        expanded = expand_attributes(pc, sources, loader, xo);
+    }
+    std::vector<Module*> modules = loader.modules();
+    Program program;
+    if (!diags.has_errors() && expanded && opt.command != "expand") {
         check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check",
                       opt.library);
     }
     if (opt.json) {
         diags.print_json(stdout);
         std::fflush(stdout);
-        if (diags.has_errors()) return 1;
+        if (diags.has_errors() || !expanded) return 1;
     }
-    bool color = isatty(fileno(stderr)) != 0;
     if (diags.has_errors()) {
         diags.print(stderr, color);
         std::size_t n = diags.error_count();
         std::fprintf(stderr, "%zu error%s\n", n, n == 1 ? "" : "s");
         return 1;
     }
+    if (!expanded) return 1;
     if (!opt.json) diags.print(stderr, color);
+    if (opt.command == "expand") {
+        if (shown.empty()) std::printf("// %s uses no attributes that generate code\n", opt.input.c_str());
+        for (std::size_t i = 0; i < shown.size(); i++) {
+            std::printf("%s// %s, in %s\n%s", i ? "\n" : "", shown[i].what.c_str(), shown[i].path.c_str(),
+                        shown[i].code.c_str());
+        }
+        return 0;
+    }
     double front_ms = ms(t0);
     if (opt.command == "check") {
         if (opt.timings) std::fprintf(stderr, "check: %.1f ms\n", front_ms);

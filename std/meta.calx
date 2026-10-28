@@ -1,0 +1,391 @@
+/// Declarations as data, for attributes: Calx functions the compiler runs while it compiles, which
+/// read a declaration and give back code to add beside it (D57, D124).
+///
+/// An attribute is a `pub fn` marked `@attribute`. Its first parameter is the declaration it's on,
+/// a `StructDecl`, an `EnumDecl` or an `FnDecl`, and it returns a `Generated`, or a
+/// `Generated ! String` when it can refuse a declaration, with the reason.
+module std.meta
+
+import std.io.{read, flush}
+
+/// What kind of type a `TypeRef` is.
+pub enum TypeKind {
+    /// `i32`, `Point`, `List<T>`: `name`, and `args` when it has any.
+    Named
+    /// `T?`: `args[0]`.
+    Optional
+    /// `[T; N]`: `args[0]`, and `len`.
+    Array
+    /// `(A, B)`: `args`. `()` has none.
+    Tuple
+    /// `fn(A, B) -> R`: the parameters are `args`; the rest is in `text`.
+    Function
+    /// `*T` and `*const T`: `args[0]`.
+    Pointer
+    /// `dyn Shape`: the interface is `name`.
+    Dyn
+    /// `Self`.
+    SelfType
+}
+
+/// A type as the declaration writes it.
+pub struct TypeRef {
+    pub kind: TypeKind
+    /// The whole type, as written: `List<VarInt>`.
+    pub text: String
+    /// A named type's name as written, such as `List` or `std.c.int`, or a `dyn` type's interface.
+    pub name: String
+    pub args: List<TypeRef>
+    /// An array's length, as written.
+    pub len: String
+}
+
+/// An attribute on a field, which the declaration's own attribute reads. It lists the ones it reads
+/// in its `@attribute(...)`.
+pub struct AttributeUse {
+    pub name: String
+    /// Each argument as written, such as `255` or `"name"` or `MAX_LEN`.
+    pub args: List<String>
+}
+
+/// A field of a struct, or of an enum's variant.
+pub struct Field {
+    pub name: String
+    pub ty: TypeRef
+    pub is_pub: bool
+    /// Its default value as written, or `""` when it has none.
+    pub default: String
+    pub attributes: List<AttributeUse>
+    /// Its `///` lines, joined with newlines.
+    pub doc: String
+}
+
+pub struct StructDecl {
+    pub name: String
+    pub is_pub: bool
+    /// The names of its generic parameters.
+    pub generics: List<String>
+    pub fields: List<Field>
+    pub doc: String
+}
+
+/// A variant of an enum.
+pub struct Variant {
+    pub name: String
+    /// Its data's types, for `Circle(f64)`.
+    pub payload: List<TypeRef>
+    /// Its fields, for `Rect { w: f64, h: f64 }`.
+    pub fields: List<Field>
+    /// Its value as written, for `OnGround = 1`, or `""`.
+    pub value: String
+    pub doc: String
+}
+
+pub struct EnumDecl {
+    pub name: String
+    pub is_pub: bool
+    pub generics: List<String>
+    pub variants: List<Variant>
+    /// Its representation as written, for `enum Flag: u8`, or `""`.
+    pub repr: String
+    pub doc: String
+}
+
+/// How a parameter is passed.
+pub enum Mode {
+    /// Looked at, the default.
+    Read
+    /// `mut`: changed in place.
+    Mut
+    /// `own`: moved in.
+    Own
+}
+
+pub struct Param {
+    pub name: String
+    pub mode: Mode
+    /// Whether it's `self`, whose type is the one the function's `impl` is for.
+    pub is_self: bool
+    /// Its type, as written. A bare `self` has none: its kind is `SelfType`.
+    pub ty: TypeRef
+}
+
+pub struct FnDecl {
+    pub name: String
+    pub is_pub: bool
+    pub is_unsafe: bool
+    pub generics: List<String>
+    pub params: List<Param>
+    /// What it returns, or a `Tuple` with no `args` when it returns nothing.
+    pub result: TypeRef
+    /// What it fails with, after `!`, or a `Tuple` with no `args` when it can't fail.
+    pub error: TypeRef
+    pub can_fail: bool
+    pub doc: String
+}
+
+/// The code an attribute gives back, which the compiler adds to the module the declaration is in.
+/// The code is type-checked like the rest, and `calx expand` shows it.
+pub struct Generated {
+    items: List<String>
+}
+
+impl Generated {
+    pub fn new() -> Generated {
+        return Generated { items: List<String>() }
+    }
+
+    /// Adds items, written as Calx: functions, impls, constants, types and imports. They see what
+    /// the declaration's module sees.
+    pub fn add(mut self, code: own String) {
+        self.items.push(code)
+    }
+}
+
+/// The program the compiler builds to run a program's attributes reads the declarations with
+/// this, one use at a time, and answers each (D124). Nothing else needs it.
+pub struct Request {
+    input: String
+    at: usize
+    left: usize
+    which: usize
+    args: List<String>
+}
+
+impl Request {
+    /// Reads every use from standard input.
+    pub fn load() -> Request {
+        var bytes = List<u8>()
+        loop {
+            if read(mut bytes, 65536) == 0 {
+                break
+            }
+        }
+        var r = Request { input: String.from_utf8(bytes)!, at: 0, left: 0, which: 0, args: List<String>() }
+        r.left = r.count()
+        return r
+    }
+
+    /// Moves to the next use, reading which attribute it is and its arguments. Gives `false`
+    /// after the last.
+    pub fn next(mut self) -> bool {
+        if self.left == 0 {
+            return false
+        }
+        self.left -= 1
+        self.which = self.count()
+        self.args.clear()
+        let n = self.count()
+        for _ in 0..n {
+            let a = self.piece()
+            self.args.push(a)
+        }
+        return true
+    }
+
+    /// Which of the program's attributes this use is, counting from 0.
+    pub fn attribute(self) -> usize {
+        return self.which
+    }
+
+    /// Argument `i`: text.
+    pub fn text(self, i: usize) -> String {
+        return self.args[i].copy()
+    }
+
+    /// Argument `i`: an integer, or an enum's variant by its place.
+    pub fn int(self, i: usize) -> i64 {
+        let s = self.args[i].copy()
+        var n: i64 = 0
+        var at: usize = 0
+        let negative = s.len() > 0 and s.byte_at(0) == 45
+        if negative {
+            at = 1
+        }
+        while at < s.len() {
+            n = n * 10 - i64(s.byte_at(at) - 48)
+            at += 1
+        }
+        if negative {
+            return n
+        }
+        return -n
+    }
+
+    /// Argument `i`: `true` or `false`.
+    pub fn flag(self, i: usize) -> bool {
+        return self.args[i] == "1"
+    }
+
+    /// The declaration the use is on, when it's a struct.
+    pub fn struct_decl(mut self) -> StructDecl {
+        let name = self.piece()
+        let is_pub = self.flag_piece()
+        let doc = self.piece()
+        let generics = self.names()
+        let fields = self.fields()
+        return StructDecl { name: name, is_pub: is_pub, generics: generics, fields: fields, doc: doc }
+    }
+
+    /// The declaration the use is on, when it's an enum.
+    pub fn enum_decl(mut self) -> EnumDecl {
+        let name = self.piece()
+        let is_pub = self.flag_piece()
+        let doc = self.piece()
+        let generics = self.names()
+        let repr = self.piece()
+        var variants = List<Variant>()
+        let n = self.count()
+        for _ in 0..n {
+            let vname = self.piece()
+            let vdoc = self.piece()
+            let value = self.piece()
+            var payload = List<TypeRef>()
+            let k = self.count()
+            for _ in 0..k {
+                let t = self.type_ref()
+                payload.push(t)
+            }
+            let fields = self.fields()
+            variants.push(Variant { name: vname, payload: payload, fields: fields, value: value, doc: vdoc })
+        }
+        return EnumDecl { name: name, is_pub: is_pub, generics: generics, variants: variants, repr: repr, doc: doc }
+    }
+
+    /// The declaration the use is on, when it's a function.
+    pub fn fn_decl(mut self) -> FnDecl {
+        let name = self.piece()
+        let is_pub = self.flag_piece()
+        let doc = self.piece()
+        let generics = self.names()
+        let is_unsafe = self.flag_piece()
+        var params = List<Param>()
+        let n = self.count()
+        for _ in 0..n {
+            let pname = self.piece()
+            let mode = match self.count() {
+                1 => Mode.Mut,
+                2 => Mode.Own,
+                _ => Mode.Read,
+            }
+            let is_self = self.flag_piece()
+            let ty = self.type_ref()
+            params.push(Param { name: pname, mode: mode, is_self: is_self, ty: ty })
+        }
+        let result = self.type_ref()
+        let can_fail = self.flag_piece()
+        let error = self.type_ref()
+        return FnDecl {
+            name: name, is_pub: is_pub, is_unsafe: is_unsafe, generics: generics, params: params,
+            result: result, error: error, can_fail: can_fail, doc: doc,
+        }
+    }
+
+    // A piece of the request: its length in bytes, `:`, and the bytes.
+    fn piece(mut self) -> String {
+        var n: usize = 0
+        while self.input.byte_at(self.at) != 58 {
+            n = n * 10 + usize(self.input.byte_at(self.at) - 48)
+            self.at += 1
+        }
+        let start = self.at + 1
+        self.at = start + n
+        return self.input[start..start + n]
+    }
+
+    fn count(mut self) -> usize {
+        let s = self.piece()
+        var n: usize = 0
+        for i in 0..s.len() {
+            n = n * 10 + usize(s.byte_at(i) - 48)
+        }
+        return n
+    }
+
+    fn flag_piece(mut self) -> bool {
+        return self.piece() == "1"
+    }
+
+    fn names(mut self) -> List<String> {
+        var out = List<String>()
+        let n = self.count()
+        for _ in 0..n {
+            let s = self.piece()
+            out.push(s)
+        }
+        return out
+    }
+
+    fn type_ref(mut self) -> TypeRef {
+        let kind = match self.count() {
+            1 => TypeKind.Optional,
+            2 => TypeKind.Array,
+            3 => TypeKind.Tuple,
+            4 => TypeKind.Function,
+            5 => TypeKind.Pointer,
+            6 => TypeKind.Dyn,
+            7 => TypeKind.SelfType,
+            _ => TypeKind.Named,
+        }
+        let text = self.piece()
+        let name = self.piece()
+        let len = self.piece()
+        var args = List<TypeRef>()
+        let n = self.count()
+        for _ in 0..n {
+            let t = self.type_ref()
+            args.push(t)
+        }
+        return TypeRef { kind: kind, text: text, name: name, args: args, len: len }
+    }
+
+    fn fields(mut self) -> List<Field> {
+        var out = List<Field>()
+        let n = self.count()
+        for _ in 0..n {
+            let name = self.piece()
+            let is_pub = self.flag_piece()
+            let doc = self.piece()
+            let ty = self.type_ref()
+            let default = self.piece()
+            var attributes = List<AttributeUse>()
+            let k = self.count()
+            for _ in 0..k {
+                let aname = self.piece()
+                let args = self.names()
+                attributes.push(AttributeUse { name: aname, args: args })
+            }
+            out.push(Field { name: name, ty: ty, is_pub: is_pub, default: default, attributes: attributes, doc: doc })
+        }
+        return out
+    }
+}
+
+/// Answers the use the program is on with the code the attribute generated.
+pub fn answer(g: own Generated) {
+    mark()
+    print("2:ok")
+    put("{g.items.len()}")
+    for item in g.items {
+        put(item)
+    }
+    flush()
+}
+
+/// Answers the use the program is on with the reason the attribute refused it.
+pub fn refuse(message: own String) {
+    mark()
+    print("3:err")
+    put(message)
+    flush()
+}
+
+// Starts an answer, so the compiler can tell it from what an attribute printed.
+fn mark() {
+    print("\0calx answer\0")
+}
+
+// Writes a piece of the answer.
+fn put(s: String) {
+    print("{s.len()}:{s}")
+}

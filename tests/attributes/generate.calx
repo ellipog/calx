@@ -1,0 +1,134 @@
+// Attributes from a library (D57, D124): functions the compiler runs on a struct, an enum and a
+// function, with each kind of argument, and the attributes on fields that they read.
+// file: main.calx
+import gen.{describe, variants, logged, Style}
+
+@describe("p.", Style.Long, 2, true)
+struct Point {
+    x: i32
+    @label(why)
+    y: i32
+}
+
+@variants
+enum Shape {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+    Dot
+}
+
+@logged(prefix: "call")
+fn twice(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() {
+    let p = Point { x: 3, y: -4 }
+    p.describe()
+    // out: P.X: i32 = 3
+    // out: P.X: i32 = 3
+    // out: P.WHY: i32 = -4
+    // out: P.WHY: i32 = -4
+    println(shape_variants())    // out: Circle(f64), Rect { w: f64, h: f64 }, Dot
+    println("{twice_logged(21)}")
+    // out: call twice(n: i32) -> i32
+    // out: 42
+}
+
+// file: gen.calx
+import std.meta.{StructDecl, EnumDecl, FnDecl, Generated, TypeKind}
+
+pub enum Style {
+    Short
+    Long
+}
+
+/// Prints each field, `times` times over.
+@attribute("label")
+pub fn describe(decl: StructDecl, prefix: String, style: Style, times: u8, loud: bool) -> Generated {
+    var body = String()
+    for f in decl.fields {
+        var label = f.name.copy()
+        for a in f.attributes {
+            if a.name == "label" {
+                label = a.args[0].copy()
+            }
+        }
+        var shown = "{prefix}{label}"
+        if loud {
+            shown = shown.to_upper_root()
+        }
+        if style == Style.Long {
+            shown.push_str(": {f.ty.text}")
+        }
+        for _ in 0..times {
+            body.push_str(#"        println("#{shown} = {self.#{f.name}}")"#)
+            body.push('\n')
+        }
+    }
+    var g = Generated.new()
+    g.add(#"
+        impl #{decl.name} {
+            pub fn describe(self) {
+        #{body}    }
+        }
+        "#)
+    return g
+}
+
+/// Lists the variants, as they're written.
+@attribute
+pub fn variants(decl: EnumDecl) -> Generated {
+    var names = String()
+    for v in decl.variants {
+        if not names.is_empty() {
+            names.push_str(", ")
+        }
+        names.push_str(v.name)
+        if v.payload.len() > 0 {
+            names.push_str("({v.payload[0].text})")
+        }
+        if v.fields.len() > 0 {
+            names.push_str(#" { "#)
+            for i in 0..v.fields.len() {
+                if i > 0 {
+                    names.push_str(", ")
+                }
+                names.push_str("{v.fields[i].name}: {v.fields[i].ty.text}")
+            }
+            names.push_str(#" }"#)
+        }
+    }
+    var g = Generated.new()
+    // The code holds a raw string itself, so this one takes two `#`s.
+    g.add(##"
+        fn ##{decl.name.to_lower_root()}_variants() -> String {
+            return #"##{names}"#
+        }
+        "##)
+    return g
+}
+
+/// A version of the function that says it's called.
+@attribute
+pub fn logged(decl: FnDecl, prefix: String) -> Generated {
+    var params = String()
+    var args = String()
+    for p in decl.params {
+        if not params.is_empty() {
+            params.push_str(", ")
+            args.push_str(", ")
+        }
+        params.push_str("{p.name}: {p.ty.text}")
+        args.push_str(p.name)
+    }
+    let result = if decl.result.kind == TypeKind.Tuple { String() } else { " -> {decl.result.text}" }
+    var g = Generated.new()
+    g.add(#"
+        fn #{decl.name}_logged(#{params})#{result} {
+            println("#{prefix} #{decl.name}(#{params})#{result}")
+            return #{decl.name}(#{args})
+        }
+        "#)
+    return g
+}

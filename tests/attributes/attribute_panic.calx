@@ -1,0 +1,23 @@
+// An attribute that panics stops the build, with its message and trace at the use (D124).
+// file: main.calx
+import gen.{first_field}
+
+@first_field
+struct Named {
+    name: String
+}
+
+@first_field    // error: `@first_field` stopped while it generated code for `Empty`
+struct Empty {}
+
+fn main() {}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute
+pub fn first_field(decl: StructDecl) -> Generated {
+    var g = Generated.new()
+    g.add("const {decl.name.to_upper_root()}_FIRST: usize = {decl.fields[0].name.len()}")
+    return g
+}

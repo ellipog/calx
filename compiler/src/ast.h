@@ -456,6 +456,8 @@ struct Item {
     bool is_unsafe = false;      // `unsafe fn`: calling it needs `unsafe`
     bool track_caller = false;   // `@track_caller`: its panics name the place that called it
     bool exported = false;       // `@export`: a library exports it under its own name (D123)
+    bool generated = false;      // an attribute generated it (D124), so "never used" isn't the program's mistake
+    bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
     std::string_view abi;
     // struct, enum
     Slice<FieldDecl> fields;

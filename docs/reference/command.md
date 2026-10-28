@@ -13,10 +13,13 @@ calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx emit-c hello.calx         # print the C it compiles to
+calx expand hello.calx         # print the code its attributes generate
 calx version
 ```
 
 A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
+
+Before it checks a program, each command runs the [attributes](attributes.md) the program's libraries define, and adds the code they generate. Their answers are cached, so they run again only when a declaration with an attribute on it, or an attribute's code, changes. `calx expand` prints that code, without checking the program.
 
 ## Options
 
@@ -91,7 +94,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the source tree the compiler was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
-The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
+The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
 `calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself.
 

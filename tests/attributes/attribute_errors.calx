@@ -1,14 +1,14 @@
-// The compiler knows one attribute, `@track_caller`, on functions written in Calx. The rest are
-// for libraries to define, which isn't built yet (D57).
+// The compiler knows `@track_caller`, `@export` and `@attribute`. The rest are functions a library
+// marks `@attribute`, imported as any function is (D57, D124).
 
 @track_caller    // error: `@track_caller` is only for a function written in Calx
 struct Pos {
     x: i32
 }
 
-@message    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
+@message    // error: there's no attribute `@message` here
 struct Msg {
-    @save    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
+    @save    // error: an attribute on a field is for the attribute on its struct to read, and `Msg` has none
     n: i32
 }
 
@@ -33,7 +33,7 @@ impl Pos {
     fn half(self) -> i32 {
         return self.x / 2
     }
-    @whatever    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
+    @whatever    // error: an attribute from a library goes on a struct, an enum or a function on its own, not one in an `impl`
     fn same(self) -> i32 {
         return self.x
     }

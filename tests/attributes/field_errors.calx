@@ -1,0 +1,37 @@
+// An attribute on a field is for the declaration's attribute to read, which lists the ones it
+// reads (D124).
+// file: main.calx
+import gen.{packet, plain}
+
+@packet
+struct Handshake {
+    @varint
+    protocol: i32
+    @max(255)    // error: `@packet` doesn't read `@max`; the attributes it reads on fields are `@varint`
+    host: String
+}
+
+@plain
+struct Loose {
+    @varint    // error: `@plain` doesn't read `@varint`, or any attribute on a field
+    n: i32
+}
+
+fn main() {
+    let h = Handshake { protocol: 1, host: "x" }
+    let l = Loose { n: 2 }
+    println("{h.protocol} {h.host} {l.n}")
+}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute("varint")
+pub fn packet(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}
+
+@attribute
+pub fn plain(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}

@@ -1,0 +1,28 @@
+// Code an attribute generates is checked like the rest. Its errors are in the generated code,
+// with a note at the attribute, and an editor is shown them on the attribute (D124).
+// file: main.calx
+import gen.{sized}
+
+@sized    // error: expected `usize`, found `str`
+struct Point {
+    x: i32
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    println("{p.x} {point_size()}")
+}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute
+pub fn sized(decl: StructDecl) -> Generated {
+    var g = Generated.new()
+    g.add(#"
+        fn #{decl.name.to_lower_root()}_size() -> usize {
+            return "#{decl.fields.len()}"
+        }
+        "#)
+    return g
+}

@@ -1,0 +1,39 @@
+// An attribute can print while it runs, to help whoever writes it: the text goes to standard
+// error, apart from the code it generates (D124).
+// file: main.calx
+import gen.{noisy}
+
+@noisy
+struct Quiet {
+    x: i32
+}
+
+@noisy
+struct Loud {
+    y: i32
+}
+
+fn main() {
+    println("{quiet_fields()} {loud_fields()}")    // out: 1 1
+}
+
+// The attributes run again for each run of the test, since its files are in a new folder each
+// time, so this is what they print:
+// stderr: `@noisy`, for `Quiet` at main.calx:6, printed:
+// stderr: looking at Quiet
+// stderr: no newline
+// stderr: `@noisy`, for `Loud` at main.calx:11, printed:
+// stderr: looking at Loud
+// stderr: no newline
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute
+pub fn noisy(decl: StructDecl) -> Generated {
+    println("looking at {decl.name}")
+    print("no newline")
+    var g = Generated.new()
+    g.add("fn {decl.name.to_lower_root()}_fields() -> usize \{ return {decl.fields.len()} \}")
+    return g
+}

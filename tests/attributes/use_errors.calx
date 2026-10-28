@@ -1,0 +1,84 @@
+// What a use of an attribute gives it (D124): its arguments are literals of its parameters'
+// types, and it goes on the kind of declaration it reads.
+// file: main.calx
+import gen.{tag, Color}
+
+@tag("a", 1, true, Color.Red)    // error: `@tag` is for a struct, since its first parameter is a `StructDecl`
+enum NotAStruct {
+    A
+}
+
+@tag(1, 1, true, Color.Red)    // error: `@tag`'s `name` is a `String`, so it takes a string literal
+struct A {
+    x: i32
+}
+
+@tag("b", 300, true, Color.Red)    // error: 300 doesn't fit in a `u8`
+struct B {
+    x: i32
+}
+
+@tag("c", -1, true, Color.Red)    // error: -1 doesn't fit in a `u8`
+struct C {
+    x: i32
+}
+
+@tag("d", 1, 0, Color.Red)    // error: `@tag`'s `loud` is a `bool`, so it takes `true` or `false`
+struct D {
+    x: i32
+}
+
+@tag("e", 1, true, Color.Pink)    // error: `Color` has no variant `Pink`
+struct E {
+    x: i32
+}
+
+@tag("f", 1, true, 2)    // error: `@tag`'s `color` is a `Color`, so it takes one of its variants, such as `Color.Red`
+struct F {
+    x: i32
+}
+
+@tag("g", 1, true)    // error: `@tag` needs its `color` argument
+struct G {
+    x: i32
+}
+
+@tag("h", 1, true, Color.Red, 5)    // error: `@tag` takes 4 arguments
+struct H {
+    x: i32
+}
+
+@tag("i", 1, true, color: Color.Red, size: 2)    // error: `@tag` has no parameter `size`
+struct I {
+    x: i32
+}
+
+@tag("j", 1, true, Color.Red, color: Color.Blue)    // error: `color` is given twice
+struct J {
+    x: i32
+}
+
+@tag(name: "k", times: 2u16, loud: true, color: Color.Red)    // error: `@tag`'s `times` is a `u8`, not `u16`
+struct K {
+    x: i32
+}
+
+fn main() {}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+pub enum Color {
+    Red
+    Blue
+}
+
+@attribute
+pub fn tag(decl: StructDecl, name: String, times: u8, loud: bool, color: Color) -> Generated {
+    _ = name
+    _ = times
+    _ = loud
+    _ = color
+    _ = decl
+    return Generated.new()
+}

@@ -17,7 +17,7 @@ What's built, one page per feature:
 
 1. [The calx command](reference/command.md): check, build, run, emit-c, how builds stay fast, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
-3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals and operators
+3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals, raw strings and operators
 4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are
 5. [Variables](reference/variables.md): let, var, constants, assignment, unused names, no shadowing
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
@@ -49,8 +49,9 @@ What's built, one page per feature:
 32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
 33. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
 34. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
-35. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
-36. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+35. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
+36. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
+37. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 
@@ -72,6 +73,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, and the typed queues they talk through
+17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
 
 ### Design
 

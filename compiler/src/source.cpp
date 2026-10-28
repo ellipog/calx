@@ -52,9 +52,23 @@ std::uint32_t Sources::add(std::string path, std::string text) {
     return static_cast<std::uint32_t>(files_.size());
 }
 
+std::uint32_t Sources::add_generated(std::string path, std::string text, Span at, std::string why) {
+    std::uint32_t id = add(std::move(path), std::move(text));
+    files_.back()->generated_at = at;
+    files_.back()->generated_by = std::move(why);
+    return id;
+}
+
 void Diagnostics::add(Severity severity, Span span, std::string message) {
     if (severity == Severity::error) errors_++;
     list_.push_back(Diagnostic{severity, span, std::move(message), {}});
+    // Code an attribute generated says where it came from, back to code someone wrote.
+    for (std::uint32_t file = span.file; file != 0;) {
+        const SourceFile& f = sources_.file(file);
+        if (f.generated_at.file == 0) break;
+        list_.back().notes.emplace_back(f.generated_at, f.generated_by);
+        file = f.generated_at.file;
+    }
 }
 
 void Diagnostics::note(Span span, std::string message) {
@@ -176,8 +190,19 @@ std::string Diagnostics::json_location(Span span) const {
 
 void Diagnostics::print_json(std::FILE* out) const {
     for (const Diagnostic* d : sorted()) {
-        std::string s = "{\"severity\":\"" + std::string(label(d->severity)) + "\"," + json_location(d->span) +
-                        ",\"message\":" + json_string(d->message) + ",\"notes\":[";
+        // An editor shows a diagnostic in a file someone wrote, so one in code an attribute
+        // generated is put on the attribute, with the place in the generated code in its message.
+        Span at = d->span;
+        std::string message = d->message;
+        if (at.file != 0 && sources_.file(at.file).generated_at.file != 0) {
+            const SourceFile& g = sources_.file(at.file);
+            auto [line, col] = g.position(at.begin);
+            message = g.generated_by + ", at " + g.path + ":" + std::to_string(line) + ":" + std::to_string(col) + ": " +
+                      message;
+            while (sources_.file(at.file).generated_at.file != 0) at = sources_.file(at.file).generated_at;
+        }
+        std::string s = "{\"severity\":\"" + std::string(label(d->severity)) + "\"," + json_location(at) +
+                        ",\"message\":" + json_string(message) + ",\"notes\":[";
         for (std::size_t i = 0; i < d->notes.size(); i++) {
             if (i) s += ',';
             s += "{" + json_location(d->notes[i].first) + ",\"message\":" + json_string(d->notes[i].second) + "}";

@@ -107,8 +107,23 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
-// Starts a program. With `output`, its standard output and error go to that file.
-HANDLE start(const std::vector<std::string>& argv, const std::string* output = nullptr) {
+// Where a program's standard streams go: files, or the compiler's own when null. Errors go with
+// the output when `errors` is null and `output` isn't.
+struct Redirect {
+    const std::string* input = nullptr;
+    const std::string* output = nullptr;
+    const std::string* errors = nullptr;
+};
+
+HANDLE open_for(const std::string& path, bool write) {
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    return CreateFileW(widen(path).c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, &sa,
+                       write ? CREATE_ALWAYS : OPEN_EXISTING, write ? FILE_ATTRIBUTE_TEMPORARY : FILE_ATTRIBUTE_NORMAL,
+                       nullptr);
+}
+
+// Starts a program, with its streams where `r` says.
+HANDLE start(const std::vector<std::string>& argv, Redirect r = {}) {
     std::wstring cmd;
     for (std::size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += L' ';
@@ -116,21 +131,42 @@ HANDLE start(const std::vector<std::string>& argv, const std::string* output = n
     }
     STARTUPINFOW si{};
     si.cb = sizeof si;
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (output) {
-        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-        file = CreateFileW(widen(*output).c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_TEMPORARY, nullptr);
-        if (file == INVALID_HANDLE_VALUE) return nullptr;
+    HANDLE files[3] = {INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE};
+    auto close_all = [&] {
+        for (HANDLE f : files) if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    };
+    if (r.input || r.output) {
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = file;
-        si.hStdError = file;
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        if (r.input) {
+            files[0] = open_for(*r.input, false);
+            if (files[0] == INVALID_HANDLE_VALUE) return nullptr;
+            si.hStdInput = files[0];
+        }
+        if (r.output) {
+            files[1] = open_for(*r.output, true);
+            if (files[1] == INVALID_HANDLE_VALUE) {
+                close_all();
+                return nullptr;
+            }
+            si.hStdOutput = files[1];
+            si.hStdError = files[1];
+        }
+        if (r.errors) {
+            files[2] = open_for(*r.errors, true);
+            if (files[2] == INVALID_HANDLE_VALUE) {
+                close_all();
+                return nullptr;
+            }
+            si.hStdError = files[2];
+        }
     }
     PROCESS_INFORMATION pi{};
     std::wstring app = widen(argv[0]);
     BOOL ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    close_all();
     if (!ok) return nullptr;
     CloseHandle(pi.hThread);
     return pi.hProcess;
@@ -144,16 +180,29 @@ int finish(HANDLE h) {
     return static_cast<int>(code);
 }
 #else
-// Starts a program. With `output`, its standard output and error go to that file.
-pid_t start(const std::vector<std::string>& argv, const std::string* output = nullptr) {
+// Where a program's standard streams go: files, or the compiler's own when null. Errors go with
+// the output when `errors` is null and `output` isn't.
+struct Redirect {
+    const std::string* input = nullptr;
+    const std::string* output = nullptr;
+    const std::string* errors = nullptr;
+};
+
+// Starts a program, with its streams where `r` says.
+pid_t start(const std::vector<std::string>& argv, Redirect r = {}) {
     std::vector<char*> args;
     for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
     args.push_back(nullptr);
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-    if (output) {
-        posix_spawn_file_actions_addopen(&actions, 1, output->c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        posix_spawn_file_actions_adddup2(&actions, 1, 2);
+    if (r.input) posix_spawn_file_actions_addopen(&actions, 0, r.input->c_str(), O_RDONLY, 0);
+    if (r.output) {
+        posix_spawn_file_actions_addopen(&actions, 1, r.output->c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (r.errors) {
+            posix_spawn_file_actions_addopen(&actions, 2, r.errors->c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        } else {
+            posix_spawn_file_actions_adddup2(&actions, 1, 2);
+        }
     }
     pid_t pid;
     int rc = posix_spawnp(&pid, args[0], &actions, nullptr, args.data(), environ);
@@ -258,7 +307,21 @@ int run_process(const std::vector<std::string>& argv) {
 }
 
 int run_to_file(const std::vector<std::string>& argv, const std::string& output) {
-    auto h = start(argv, &output);
+    Redirect r;
+    r.output = &output;
+    auto h = start(argv, r);
+#ifdef _WIN32
+    if (!h) return -1;
+#else
+    if (h < 0) return -1;
+#endif
+    return finish(h);
+}
+
+int run_redirected(const std::vector<std::string>& argv, const std::string& input, const std::string& output,
+                   const std::string& errors) {
+    Redirect r{&input, &output, &errors};
+    auto h = start(argv, r);
 #ifdef _WIN32
     if (!h) return -1;
 #else
@@ -498,6 +561,11 @@ constexpr std::size_t kKeepPrograms = 64;
 constexpr std::uintmax_t kProgramBytes = 256u << 20;
 constexpr std::size_t kKeepObjects = 1024;
 constexpr std::uintmax_t kObjectBytes = 256u << 20;
+}  // namespace
+
+const std::chrono::minutes kCacheGrace{10};
+
+namespace {
 
 // Marks a cached file as just used, for trim.
 void touch(const std::string& path) {
@@ -536,9 +604,12 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
               [](const auto& a, const auto& b) { return a.second.newest > b.second.newest; });
     std::vector<std::string> old;
     std::uintmax_t kept = 0;
+    // Another build may have just reused an entry it's about to link, so nothing used in the last
+    // few minutes goes, even past the limits: a test suite's builds side by side use more.
+    fs::file_time_type recent = fs::file_time_type::clock::now() - kCacheGrace;
     for (std::size_t i = 0; i < entries.size(); i++) {
         kept += entries[i].second.bytes;
-        if (i > 0 && (i >= keep || kept > budget)) old.push_back(entries[i].first);
+        if (i > 0 && (i >= keep || kept > budget) && entries[i].second.newest < recent) old.push_back(entries[i].first);
     }
     if (old.empty()) return;
     std::sort(old.begin(), old.end());
@@ -565,6 +636,30 @@ fs::path self_exe() {
     return fs::read_symlink("/proc/self/exe", ec);
 #endif
 }
+
+}  // namespace
+
+std::string compiler_hash(const Toolchain& tc) {
+    fs::path exe = self_exe();
+    std::error_code ec;
+    auto size = fs::file_size(exe, ec);
+    if (ec) return {};
+    auto time = fs::last_write_time(exe, ec).time_since_epoch().count();
+    if (ec) return {};
+    std::string id = exe.string() + "|" + std::to_string(size) + "|" + std::to_string(time);
+    fs::path saved = fs::path(tc.cache) / "abi" / (hash_hex({"compiler", id}) + ".txt");
+    std::string self;
+    if (!read_file(saved.string(), self) || self.size() != 32) {
+        std::string bytes;
+        if (!read_file(exe.string(), bytes)) return {};
+        self = hash_hex({"compiler-bytes", bytes});
+        fs::create_directories(saved.parent_path(), ec);
+        write_file_atomic(saved.string(), self);
+    }
+    return self;
+}
+
+namespace {
 
 // The runtime as a library sees it (D123): every function calx_rt.h declares with `CX_FN`, in
 // order, and a hash of the compiler and the header, which a library and the program that opens it
@@ -593,22 +688,8 @@ bool runtime_api(const Toolchain& tc, const std::string& header, RuntimeApi& api
         if (e == b) return false;
         api.fns.push_back(header.substr(b, e - b));
     }
-    fs::path exe = self_exe();
-    std::error_code ec;
-    auto size = fs::file_size(exe, ec);
-    if (ec) return false;
-    auto time = fs::last_write_time(exe, ec).time_since_epoch().count();
-    if (ec) return false;
-    std::string id = exe.string() + "|" + std::to_string(size) + "|" + std::to_string(time);
-    fs::path saved = fs::path(tc.cache) / "abi" / (hash_hex({"compiler", id}) + ".txt");
-    std::string self;
-    if (!read_file(saved.string(), self) || self.size() != 32) {
-        std::string bytes;
-        if (!read_file(exe.string(), bytes)) return false;
-        self = hash_hex({"compiler-bytes", bytes});
-        fs::create_directories(saved.parent_path(), ec);
-        write_file_atomic(saved.string(), self);
-    }
+    std::string self = compiler_hash(tc);
+    if (self.empty()) return false;
     std::string h = hash_hex({"abi", self, header});
     api.abi = std::stoull(h.substr(0, 16), nullptr, 16);
     return true;

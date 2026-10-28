@@ -55,7 +55,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - Comments are `//`. Doc comments are `///` and are required on every `pub` item of the Calcite host API (D41).
 - `pub` makes an item visible outside its module. Everything else is private to the module.
 - Attributes are `@name` or `@name(args)` before a declaration ([codegen hooks](#codegen-hooks)).
-- Strings interpolate with `{expr}`: `"moved {d} blocks"`.
+- Strings interpolate with `{expr}`: `"moved {d} blocks"`. A raw string, `#"..."#`, has no escapes and interpolates with `#{expr}`, and one that ends its line is a block. Built: [raw strings](reference/syntax.md#raw-strings) (D125)
 - Loops are `while cond { }`, `while let pattern = value { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`. Built: [control flow](reference/control-flow.md#while-let) (D111)
 - Logic uses words: `and`, `or`, `not`. Comparison and arithmetic use the usual symbols.
 - `match v { Pattern => expr, ... }` matches enum variants, `none` and `some(x)`, `ok(v)` and `err(e)`, literals, tuples and `_`.
@@ -346,22 +346,22 @@ Three kinds of generated code:
 
 ### Library-defined attributes
 
-Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57). Built: the two attributes the compiler knows, `@track_caller`, whose function reports panics at its caller ([Panics that name the caller](reference/printing.md#panics-that-name-the-caller), D115), and `@export`, which exports a function from a [library](reference/libraries.md) (D123). Any other attribute is an error until libraries can define them.
+Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57). Built ([attributes](reference/attributes.md), D124): an attribute is a Calx function marked `@attribute`, which the compiler runs while it compiles. It reads the declaration it's on, as a `StructDecl`, `EnumDecl` or `FnDecl` from [std.meta](std/meta.md), with literal arguments and the attributes on its fields, and returns the code to add as text, which is checked like the rest and shown by `calx expand`. The compiler builds the attributes into a native program of their own and caches their answers. The compiler itself knows `@track_caller` (D115), `@export` (D123) and `@attribute`.
 
 ```calx
 /// Declares a packet. Generates its reader, its writer and its ID lookup.
-@attribute
-pub fn packet(decl: StructDecl, state: State, direction: Direction, name: str) -> Generated {
-    var g = Generated()
-    g.add_impl(decl, "PacketRead", read_body(decl))
-    g.add_impl(decl, "PacketWrite", write_body(decl))
+@attribute("varint", "max")
+pub fn packet(decl: StructDecl, id: i32, state: State, bound: Bound) -> Generated ! String {
+    var g = Generated.new()
+    g.add(try read_impl(decl, id, state, bound))
+    g.add(try write_impl(decl, id, state, bound))
     return g
 }
 ```
 
-- An attribute is a Calx function marked `@attribute`, which the compiler runs while compiling. It gets a typed description of the declaration it's on, and returns new declarations as data.
-- These functions run in the compiler's interpreter. They're deterministic and can't do I/O, except reading files their package lists as build inputs, such as the protocol report that gives packet IDs.
-- Their output is ordinary Calx, type-checked like the rest, and shown by `calx expand` for debugging.
+Still to build:
+
+- **Build inputs.** An attribute may read files its package lists, such as the protocol report that gives packet IDs, and the cache key includes their text. Until then an attribute is expected to depend only on what it's given, which the compiler doesn't enforce.
 - **Attribute blocks.** `name { declarations }` at the top level of a module applies the attribute `@name` to every declaration inside it. Calcite's plugin library defines `region` and `global` this way, so the plugin structure in the samples isn't built into the language.
 - **Hidden parameters.** An attribute on a function may add parameters the caller supplies and bind names in the body. That's how a plugin handler sees `region`, `config` and `server` without declaring them: the host passes them in.
 - **String prefixes** like `t"..."` work the same way: a function marked `@prefix("t")` gets the literal and its interpolations at compile time and returns an expression. The Calcite text library checks the tags this way.

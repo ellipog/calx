@@ -1,0 +1,89 @@
+// What an attribute function must be (D124): a function on its own, taking the declaration from
+// std.meta and literals, and returning the code it generates.
+import std.meta.{StructDecl, Generated, TypeRef}
+
+pub struct Point {
+    x: i32
+}
+
+@attribute
+pub fn generic<T>(    // error: an attribute can't be generic
+    _decl: StructDecl,
+    t: T,    // error: `String`, integers, `bool` and enums without data
+) -> Generated {
+    _ = t
+    return Generated.new()
+}
+
+@attribute
+pub fn first(name: String) -> Generated {    // error: an attribute's first parameter is the declaration it's on
+    _ = name
+    return Generated.new()
+}
+
+@attribute
+pub fn params(
+    _decl: StructDecl,
+    p: Point,    // error: `String`, integers, `bool` and enums without data
+    t: TypeRef,    // error: `String`, integers, `bool` and enums without data
+    f: f64,    // error: `String`, integers, `bool` and enums without data
+    xs: List<i32>,    // error: `String`, integers, `bool` and enums without data
+) -> Generated {
+    _ = p
+    _ = t
+    _ = f
+    _ = xs
+    return Generated.new()
+}
+
+@attribute
+pub fn modes(
+    decl: own StructDecl,    // error: its first parameter isn't `mut` or `own`
+    n: own String,    // error: an attribute's parameters are looked at, not `mut` or `own`
+) -> Generated {
+    _ = decl
+    _ = n
+    return Generated.new()
+}
+
+@attribute
+pub fn result(decl: StructDecl) -> String {    // error: an attribute returns a `Generated`
+    return decl.name.copy()
+}
+
+@attribute
+pub fn reason(decl: StructDecl) -> Generated ! i32 {    // error: fails with a `String`: the reason
+    if decl.fields.len() > 9 {
+        fail 9
+    }
+    return Generated.new()
+}
+
+@attribute("varint", 3)    // error: `@attribute` takes the names of the attributes it reads on fields
+pub fn reads(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}
+
+@attribute    // error: `@attribute` is for a function written in Calx
+struct NotOne {
+    x: i32
+}
+
+impl Point {
+    @attribute    // error: `@attribute` is for a function on its own, not one in an `impl`
+    fn inner(self) -> i32 {
+        return self.x
+    }
+}
+
+@attribute
+@attribute    // error: `@attribute` is already on `twice`
+pub fn twice(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    let n = NotOne { x: 2 }
+    println("{p.inner()} {n.x}")
+}

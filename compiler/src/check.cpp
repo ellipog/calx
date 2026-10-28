@@ -174,6 +174,10 @@ public:
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
         collect_exports();
+        for (Item* f : all_fns_) {
+            if (f->is_attribute) check_attribute_fn(f);
+        }
+        check_attribute_uses();
         for (Item* f : externs_) check_extern(f);
         for (Item* c : consts_) check_const(c);
         for (Item* f : all_fns_) {
@@ -442,7 +446,7 @@ private:
                     break;
                 }
                 if (twice) continue;
-                here->imports.emplace(local, Scope::Import{target, local_span, false});
+                here->imports.emplace(local, Scope::Import{target, local_span, it->generated});
             }
         }
     }
@@ -531,16 +535,49 @@ private:
     }
 
     // The attributes the compiler knows: `@track_caller` on a function, whose panics then name
-    // the place that called it, as a library's checks should (D115), and `@export`, which puts a
-    // function in the list a library gives the program that opens it (D123). The others, which
-    // libraries will define (D57), aren't built yet.
+    // the place that called it, as a library's checks should (D115), `@export`, which puts a
+    // function in the list a library gives the program that opens it (D123), and `@attribute`,
+    // which makes a function an attribute itself. Any other is a library's: a function marked
+    // `@attribute`, which the compiler ran before checking, adding the code it generated (D57,
+    // D124). Those are found once imports are, as are the attributes on fields, which a
+    // declaration's own attributes read.
     void check_attributes(Item* it, const Item* owner) {
-        const char* known = "attributes aren't implemented yet, except `@track_caller` and `@export` on a function";
         for (const FieldDecl& f : it->fields) {
-            if (!f.attributes.empty()) error(f.attributes[0].span, known);
+            for (const Attribute& a : f.attributes) field_attributes_.push_back(FieldAttribute{it, &a});
+        }
+        for (const VariantDecl& v : it->variants) {
+            for (const FieldDecl& f : v.fields) {
+                for (const Attribute& a : f.attributes) field_attributes_.push_back(FieldAttribute{it, &a});
+            }
         }
         for (const Attribute& a : it->attributes) {
             std::string_view name = a.name.parts.size() == 1 ? text(a.name.parts[0]) : std::string_view();
+            if (name == "attribute") {
+                it->used = true;  // the programs that use it are elsewhere
+                if (it->kind != ItemKind::fn || it->is_extern) {
+                    error(a.span, "`@attribute` is for a function written in Calx, which the compiler runs while compiling");
+                } else if (owner) {
+                    error(a.span, "`@attribute` is for a function on its own, not one in " +
+                                      std::string(owner->kind == ItemKind::impl ? "an `impl`" : "an interface"));
+                } else if (it->is_attribute) {
+                    error(a.span, "`@attribute` is already on " + q(text(it->name)));
+                } else {
+                    it->is_attribute = true;
+                    std::vector<std::string_view>& reads = attribute_reads_[it];
+                    for (const Arg& arg : a.args) {
+                        const Expr* e = arg.value;
+                        bool plain = !arg.name && e->kind == ExprKind::string_lit && e->interpolations.empty() &&
+                                     e->literal.parts.size() == 1;
+                        if (!plain) {
+                            error(arg.span, "`@attribute` takes the names of the attributes it reads on fields, as "
+                                            "string literals, such as `@attribute(\"varint\")`");
+                            continue;
+                        }
+                        reads.push_back(e->literal.parts[0].text);
+                    }
+                }
+                continue;
+            }
             if (name == "export") {
                 it->used = true;  // what it's on is meant to be exported, even when it can't be
                 if (!a.args.empty()) {
@@ -559,7 +596,15 @@ private:
                 continue;
             }
             if (name != "track_caller") {
-                error(a.span, known);
+                if (owner) {
+                    error(a.span, "an attribute from a library goes on a struct, an enum or a function on its own, not one in " +
+                                      std::string(owner->kind == ItemKind::impl ? "an `impl`" : "an interface"));
+                } else if (it->kind != ItemKind::struct_ && it->kind != ItemKind::enum_ &&
+                           !(it->kind == ItemKind::fn && !it->is_extern)) {
+                    error(a.span, "an attribute from a library goes on a struct, an enum or a function");
+                } else {
+                    attribute_uses_.push_back(AttributeUse{it, &a});
+                }
             } else if (!a.args.empty()) {
                 error(a.span, "`@track_caller` takes no arguments");
             } else if (it->kind != ItemKind::fn || it->is_extern) {
@@ -578,6 +623,10 @@ private:
         for (Item* it : m->items) {
             it->module = m;
             for (Item* member : it->members) member->module = m;
+            if (it->generated) {
+                it->used = true;
+                for (Item* member : it->members) member->used = true;
+            }
             check_attributes(it, nullptr);
             for (Item* member : it->members) check_attributes(member, it);
             switch (it->kind) {
@@ -8402,6 +8451,123 @@ private:
         }
     }
 
+    // --- attributes from libraries (D57, D124) ------------------------------------------------
+
+    bool meta_type(const Type* t, std::string_view name) const {
+        return t && t->kind == TypeKind::struct_ && t->item && t->item->module && module_name(t->item->module) == "std.meta" &&
+               text(t->item->name) == name;
+    }
+
+    // What an attribute's parameter after the declaration can be: what a use can give as a
+    // literal, and the driver can pass.
+    static bool attribute_param_type(const Type* t) {
+        if (t->kind == TypeKind::string || t->kind == TypeKind::bool_ || t->kind == TypeKind::int_) return true;
+        if (t->kind != TypeKind::enum_ || t->generic || t->has_data || !t->item) return false;
+        return !t->item->variants.empty();
+    }
+
+    void check_attribute_fn(Item* f) {
+        if (!f->generics.empty()) error(f->generics[0].span, "an attribute can't be generic");
+        if (f->is_unsafe) error(f->name_span, "an attribute can't be `unsafe`: it runs while the compiler compiles");
+        if (f->track_caller || f->exported) error(f->name_span, "an attribute runs while compiling, so it can't also be `@track_caller` or `@export`");
+        const char* first = "an attribute's first parameter is the declaration it's on: a `StructDecl`, an `EnumDecl` or an `FnDecl`, from `std.meta`";
+        if (f->params.empty() || !f->params[0].local) {
+            error(f->name_span, first);
+        } else {
+            const Param& p = f->params[0];
+            Type* t = p.local->type;
+            if (!is_bad(t) && !(meta_type(t, "StructDecl") || meta_type(t, "EnumDecl") || meta_type(t, "FnDecl"))) {
+                error(p.type ? p.type->span : p.span, first);
+            } else if (p.mode != ParamMode::read) {
+                error(p.span, "an attribute looks at the declaration, so its first parameter isn't `mut` or `own`");
+            }
+        }
+        for (std::size_t i = 1; i < f->params.size(); i++) {
+            const Param& p = f->params[i];
+            if (!p.local || is_bad(p.local->type)) continue;
+            if (p.mode != ParamMode::read) {
+                error(p.span, "an attribute's parameters are looked at, not `mut` or `own`");
+            } else if (!attribute_param_type(p.local->type)) {
+                error(p.type->span, "an attribute's parameters after the declaration are `String`, integers, `bool` and "
+                                    "enums without data, which a use gives as literals");
+            }
+        }
+        Type* r = f->result_type;
+        if (is_bad(r)) return;
+        Type* ok = r->is_result ? ok_type(r) : r;
+        if (!meta_type(ok, "Generated")) {
+            error(f->result ? f->result->span : f->name_span, "an attribute returns a `Generated`, from `std.meta`: the code it adds");
+        }
+        if (r->is_result && err_type(r)->kind != TypeKind::string) {
+            error(f->error->span, "an attribute that can refuse a declaration fails with a `String`: the reason");
+        }
+    }
+
+    // Each use of a library's attribute names a function marked `@attribute`, which the compiler
+    // ran already. What's left is to find it as the module sees it, so its import counts as used,
+    // and the names its arguments give, and to check what's on the fields.
+    void check_attribute_uses() {
+        std::unordered_map<const Item*, std::vector<const Item*>> on;
+        for (const AttributeUse& u : attribute_uses_) {
+            InModule in(*this, u.item);
+            Name n = u.attr->name.parts.size() == 1 ? u.attr->name.parts[0] : Name{};
+            Item* f = n ? find_item(n) : nullptr;
+            std::string shown = "@" + dotted(u.attr->name.parts);
+            if (!f) {
+                error(u.attr->span, "there's no attribute " + q(shown) + " here: the compiler knows `@track_caller`, `@export` "
+                                    "and `@attribute`, and the others are functions marked `@attribute`, imported as any function is");
+                continue;
+            }
+            if (!f->is_attribute) {
+                error(u.attr->span, q(text(n)) + " isn't an attribute: an attribute is a function marked `@attribute`");
+                note(f->name_span, "it's declared here");
+                continue;
+            }
+            on[u.item].push_back(f);
+            u.item->used = true;  // the attribute read it
+            for (const Arg& arg : u.attr->args) {
+                const Expr* e = arg.value;
+                if (e->kind == ExprKind::field && e->lhs && e->lhs->kind == ExprKind::name && e->lhs->path.parts.size() == 1) {
+                    find_item(e->lhs->path.parts[0]);
+                }
+            }
+        }
+        for (const FieldAttribute& fa : field_attributes_) {
+            std::string_view name = fa.attr->name.parts.size() == 1 ? text(fa.attr->name.parts[0]) : std::string_view();
+            auto found = on.find(fa.item);
+            if (found == on.end()) {
+                error(fa.attr->span, "an attribute on a field is for the attribute on its " +
+                                         std::string(fa.item->kind == ItemKind::enum_ ? "enum" : "struct") + " to read, and " +
+                                         q(text(fa.item->name)) + " has none");
+                continue;
+            }
+            bool read = false;
+            std::string readers, names;
+            for (const Item* f : found->second) {
+                if (!readers.empty()) readers += " or ";
+                readers += q("@" + std::string(text(f->name)));
+                for (std::string_view r : attribute_reads_[f]) {
+                    if (r == name) read = true;
+                    names += (names.empty() ? "" : ", ") + q("@" + std::string(r));
+                }
+            }
+            if (!read) {
+                error(fa.attr->span, readers + " doesn't read " + q("@" + dotted(fa.attr->name.parts)) +
+                                         (names.empty() ? std::string(", or any attribute on a field")
+                                                        : "; the attributes it reads on fields are " + names));
+            }
+        }
+    }
+
+    std::string dotted(const Slice<Name>& parts) const {
+        std::string s;
+        for (std::size_t i = 0; i < parts.size(); i++) {
+            if (i) s += '.';
+            s += text(parts[i]);
+        }
+        return s;
+    }
+
     // D123: the functions marked `@export`, which a library lists under their own names for the
     // program that opens it, with their types as function values, so the program can check it
     // asked for the type each has.
@@ -8515,6 +8681,18 @@ private:
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
     Scope* scope_ = nullptr;  // the module being worked on
     std::vector<Item*> structs_, enums_, consts_, impls_, all_fns_, externs_;
+    // Attributes from libraries (D124), checked once imports are found.
+    struct AttributeUse {
+        Item* item;
+        const Attribute* attr;
+    };
+    struct FieldAttribute {
+        Item* item;  // the struct or enum the field is in
+        const Attribute* attr;
+    };
+    std::vector<AttributeUse> attribute_uses_;
+    std::vector<FieldAttribute> field_attributes_;
+    std::unordered_map<const Item*, std::vector<std::string_view>> attribute_reads_;
     std::unordered_map<std::string_view, Item*> c_functions_;  // C functions by their C name
     int unsafe_depth_ = 0;
     bool unsafe_used_ = false;  // the `unsafe` block being checked has done something unsafe

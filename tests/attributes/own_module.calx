@@ -1,0 +1,44 @@
+// An attribute is built and run before the modules that use it, so it can't be used in its own
+// module, nor in one the attributes' own code needs (D124).
+// file: main.calx
+import gen.{mark}
+
+@mark
+struct Used {
+    x: i32
+}
+
+fn main() {
+    let u = Used { x: 1 }
+    println("{u.x}")
+}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+import helper.{Helper}
+
+@attribute
+pub fn mark(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}
+
+@mark    // error: `@mark` is defined in this module, so it can't be used here
+pub struct Inside {
+    pub h: Helper
+}
+
+// file: helper.calx
+import other.{tidy}
+
+@tidy    // error: `@tidy` can't be used in `helper`, since the attributes need that module themselves
+pub struct Helper {
+    pub x: i32
+}
+
+// file: other.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute
+pub fn tidy(_decl: StructDecl) -> Generated {
+    return Generated.new()
+}

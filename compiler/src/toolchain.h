@@ -1,6 +1,7 @@
 // Building programs: finding clang, the object cache (D64), and running processes.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -38,6 +39,11 @@ int run_process(const std::vector<std::string>& argv);
 // Runs a program with its standard output and error going to the file `output`.
 int run_to_file(const std::vector<std::string>& argv, const std::string& output);
 
+// Runs a program with its standard input read from the file `input`, and its standard output and
+// error written to the files `output` and `errors`.
+int run_redirected(const std::vector<std::string>& argv, const std::string& input, const std::string& output,
+                   const std::string& errors);
+
 // Starts several programs at once and waits for all of them. Returns the first nonzero status.
 int run_parallel(const std::vector<std::vector<std::string>>& commands);
 
@@ -59,6 +65,14 @@ struct BuildResult {
 // takes the program's when the program opens it (D123).
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, BuildKind kind,
                           bool verbose);
+
+// A hash of the compiler's own bytes, as 32 hex digits, kept in the cache under its size and time
+// so it's worked out once per build of the compiler.
+std::string compiler_hash(const Toolchain& tc);
+
+// How long the cache keeps what a build used, whatever its limits, since another build that's
+// running side by side may need it still.
+extern const std::chrono::minutes kCacheGrace;
 
 // What a built library's file name ends with: `.dll` or `.so`.
 const char* library_suffix();

@@ -1,0 +1,28 @@
+// An attribute that can fail refuses a declaration with the reason, which is the error at the
+// use (D124).
+// file: main.calx
+import gen.{at_most}
+
+@at_most(1)    // error: `Pair` has 2 fields, and `@at_most` takes at most 1
+struct Pair {
+    a: i32
+    b: i32
+}
+
+@at_most(1)
+struct One {
+    a: i32
+}
+
+fn main() {}
+
+// file: gen.calx
+import std.meta.{StructDecl, Generated}
+
+@attribute
+pub fn at_most(decl: StructDecl, n: usize) -> Generated ! String {
+    if decl.fields.len() > n {
+        fail "`{decl.name}` has {decl.fields.len()} fields, and `@at_most` takes at most {n}"
+    }
+    return Generated.new()
+}

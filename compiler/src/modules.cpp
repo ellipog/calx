@@ -48,6 +48,8 @@ pub interface JavaHash {
 }
 )";
 
+}  // namespace
+
 class Loader {
 public:
     Loader(ParseContext ctx, Sources& sources, const std::string& home, const std::string& home_error)
@@ -93,9 +95,27 @@ public:
                              "`std` is the standard library's name, so a program's modules can't use it");
         }
         by_name_[dotted(m->name.parts)] = m;
+        main_ = m;
         visit(m);
         return order_;
     }
+
+    void add_items(Module* m, const std::vector<Item*>& items) {
+        std::vector<Item*> all(m->items.begin(), m->items.end());
+        all.insert(all.end(), items.begin(), items.end());
+        m->items = ctx_.arena.copy(all);
+        // Put every module in order again, from the main one. Their imports are found already,
+        // and new ones are found as the walk meets them.
+        Module* core = order_.front();
+        order_.clear();
+        state_.clear();
+        stack_.clear();
+        order_.push_back(core);
+        visit(main_);
+    }
+
+    const std::vector<Module*>& modules() const { return order_; }
+    std::string root() const { return root_.generic_string(); }
 
 private:
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -125,7 +145,7 @@ private:
         stack_.push_back(m);
         for (Item* it : m->items) {
             if (it->kind != ItemKind::import) continue;
-            Module* target = find(it);
+            Module* target = it->imported ? it->imported : find(it);
             if (!target) continue;
             it->imported = target;
             int st = state_[target];
@@ -237,9 +257,24 @@ private:
     std::unordered_map<Module*, int> state_;  // 1 while visiting, 2 once done
     std::vector<Module*> stack_;
     std::vector<Module*> order_;
+    Module* main_ = nullptr;
 };
 
-}  // namespace
+ModuleLoader::ModuleLoader(ParseContext ctx, Sources& sources, const std::string& home, const std::string& home_error)
+    : impl_(std::make_unique<Loader>(ctx, sources, home, home_error)) {}
+
+ModuleLoader::~ModuleLoader() = default;
+
+const std::vector<Module*>& ModuleLoader::load(std::uint32_t main_file) {
+    impl_->run(main_file);
+    return impl_->modules();
+}
+
+void ModuleLoader::add_items(Module* m, const std::vector<Item*>& items) { impl_->add_items(m, items); }
+
+const std::vector<Module*>& ModuleLoader::modules() const { return impl_->modules(); }
+
+std::string ModuleLoader::root() const { return impl_->root(); }
 
 std::vector<Module*> load_program(ParseContext ctx, Sources& sources, std::uint32_t main_file, const std::string& home,
                                   const std::string& home_error) {

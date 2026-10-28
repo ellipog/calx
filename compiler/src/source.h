@@ -15,6 +15,9 @@ struct SourceFile {
     std::string path;       // as given on the command line or found by the module loader
     std::string text;       // the whole file, with a NUL after it
     std::vector<std::uint32_t> line_starts;
+    // Code an attribute generated (D124): the attribute it came from, and what to say about it.
+    Span generated_at;
+    std::string generated_by;
 
     SourceFile(std::string path, std::string text);
 
@@ -30,6 +33,8 @@ public:
     // Reads a file. Returns its id, or 0 if it can't be read.
     std::uint32_t load(const std::string& path);
     std::uint32_t add(std::string path, std::string text);
+    // Code an attribute generated, which errors in it say came from `at`.
+    std::uint32_t add_generated(std::string path, std::string text, Span at, std::string why);
     const SourceFile& file(std::uint32_t id) const { return *files_[id - 1]; }
 
 private:
