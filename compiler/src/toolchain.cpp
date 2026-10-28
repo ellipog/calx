@@ -863,7 +863,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // linked only into those: networking, so the others don't load the socket libraries when they
     // start, the sorts of integers (D96), which take clang a second to optimize, Java's tables (D105),
     // the tables that change the case of text (D117), the hashes, crypto, zlib, lz4 and HTTP (D118),
-    // and threads and their queues (D121).
+    // threads and their queues (D121), and files.
     auto calls = [&](std::initializer_list<const char*> names) {
         if (opens) return true;
         for (const std::string& c : c_sources) {
@@ -895,6 +895,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_lz4_"})) parts_ok = part("calx_lz4.c");
+    if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
     if (parts_ok && calls({"cx_queue_", "cx_thread_", "cx_Sender", "cx_Receiver", "cx_Thread"})) parts_ok = part("calx_thread.c");
     if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool("})) {

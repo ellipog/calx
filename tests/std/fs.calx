@@ -1,0 +1,119 @@
+// std.fs: files written, read, renamed and removed, directories made, listed and removed, and
+// the errors, in a temporary directory of the test's own.
+import std.fs.{FsError, Kind, read, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, temp_dir}
+
+fn describe(e: FsError) -> String {
+    return match e {
+        NotFound => String("not found"),
+        Denied => String("denied"),
+        Exists => String("exists"),
+        BadPath => String("bad path"),
+        IsDirectory => String("is a directory"),
+        NotEmpty => String("not empty"),
+        Os(code) => "system error {code}",
+    }
+}
+
+fn kind_name(path: String) -> String {
+    return match kind(path) {
+        ok(some(Kind.File)) => String("file"),
+        ok(some(Kind.Dir)) => String("dir"),
+        ok(some(Kind.Link)) => String("link"),
+        ok(some(Kind.Other)) => String("other"),
+        ok(none) => String("none"),
+        err(e) => describe(e),
+    }
+}
+
+fn names(path: String) -> String {
+    return match list(path) {
+        ok(all) => {
+            var out = String()
+            for n in all {
+                if not out.is_empty() {
+                    out.push(' ')
+                }
+                out.push_str(n)
+            }
+            "[{out}]"
+        },
+        err(e) => describe(e),
+    }
+}
+
+fn read_error(path: String) -> String {
+    return match read(path) {
+        ok(b) => "{b.len()} bytes",
+        err(e) => describe(e),
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    println("{is_dir(dir)} {names(dir)}")    // out: true []
+
+    // Write, read back, and replace.
+    let a = "{dir}/a.txt"
+    let hello: List<u8> = [104, 101, 108, 108, 111]
+    write(a, hello)!
+    println("{read_text(a)! ?? String("?")} {is_file(a)} {kind_name(a)}")    // out: hello true file
+    write(a, [])!
+    println("{read(a)!.len()}")    // out: 0
+
+    // A file bigger than one read, and text that isn't ASCII in names and contents.
+    var big = List<u8>()
+    for i in 0..200000 {
+        big.push(u8.wrap(i * 7))
+    }
+    let b = "{dir}/größe é.bin"
+    write(b, big)!
+    let back = read(b)!
+    var same = back.len() == big.len()
+    for i in 0..big.len() {
+        same = same and back[i] == big[i]
+    }
+    println("{same}")    // out: true
+
+    // Rename, replacing a file that's there.
+    write(a, hello)!
+    rename(a, b)!
+    println("{read(b)!.len()} {kind_name(a)}")    // out: 5 none
+
+    // Directories, sorted however the system lists them.
+    make_dir_all("{dir}/x/y/z")!
+    make_dir_all("{dir}/x/y")!
+    write("{dir}/x/y/z/deep", hello)!
+    write("{dir}/B", hello)!
+    write("{dir}/a", hello)!
+    println(names(dir))    // out: [B a größe é.bin x]
+    println("{kind_name("{dir}/x")} {is_file("{dir}/x")} {is_dir("{dir}/x/y/z")}")    // out: dir false true
+
+    // Errors.
+    println(read_error("{dir}/missing"))    // out: not found
+    println(read_error("{dir}/missing/a"))    // out: not found
+    println(read_error("{dir}/x"))    // out: is a directory
+    println(read_error("{dir}/a\0b"))    // out: bad path
+    println(kind_name("{dir}/missing"))    // out: none
+    println(names("{dir}/missing"))    // out: not found
+    println(names("{dir}/a"))    // out: not found
+    match make_dir("{dir}/x") {
+        ok => println("made"),
+        err(e) => println(describe(e)),    // out: exists
+    }
+    match remove_dir("{dir}/x") {
+        ok => println("removed"),
+        err(e) => println(describe(e)),    // out: not empty
+    }
+    match remove_file("{dir}/missing") {
+        ok => println("removed"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+    match make_dir_all("{dir}/a/b") {
+        ok => println("made"),
+        err(e) => println(describe(e)),    // out: exists
+    }
+
+    // Everything goes.
+    remove_dir_all(dir)!
+    println("{kind_name(dir)} {is_dir(dir)}")    // out: none false
+}

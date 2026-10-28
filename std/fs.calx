@@ -1,0 +1,272 @@
+/// Files and directories: whole files read and written, renames, directories made, listed and
+/// removed, and temporary directories.
+module std.fs
+
+extern "C" {
+    fn cx_fs_open(path: *const u8, len: usize, write: u32) -> i64
+    fn cx_fs_size(h: i64) -> i64
+    fn cx_fs_read(h: i64, to: *u8, n: usize) -> i64
+    fn cx_fs_write(h: i64, from: *const u8, n: usize) -> i32
+    fn cx_fs_close(h: i64) -> i32
+    fn cx_fs_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i32
+    fn cx_fs_remove_file(path: *const u8, len: usize) -> i32
+    fn cx_fs_remove_dir(path: *const u8, len: usize) -> i32
+    fn cx_fs_make_dir(path: *const u8, len: usize) -> i32
+    fn cx_fs_kind(path: *const u8, len: usize, follow: u32) -> u32
+    fn cx_fs_list(path: *const u8, len: usize) -> i32
+    fn cx_fs_temp_dir() -> i32
+    fn cx_fs_result_len() -> usize
+    fn cx_fs_result_copy(to: *u8)
+    fn cx_fs_error_kind() -> u32
+    fn cx_fs_error_code() -> i32
+}
+
+/// Why something with a file or directory failed.
+pub enum FsError {
+    /// Nothing is at the path, or a directory on the way to it is missing.
+    NotFound
+    /// The system doesn't allow it, such as writing a read-only file.
+    Denied
+    /// Something is already at the path.
+    Exists
+    /// The path can't name anything, such as one with a NUL byte in it.
+    BadPath
+    /// It's a directory, where a file was wanted.
+    IsDirectory
+    /// The directory isn't empty.
+    NotEmpty
+    /// Something else, with the system's error code.
+    Os(i32)
+}
+
+/// What's at a path.
+pub enum Kind {
+    File
+    Dir
+    /// A symbolic link, or on Windows a junction, which `kind` doesn't follow.
+    Link
+    /// Something else, such as a device or a socket.
+    Other
+}
+
+fn last_error() -> FsError {
+    let code = unsafe { cx_fs_error_kind() }
+    return match code {
+        1 => FsError.NotFound,
+        2 => FsError.Denied,
+        3 => FsError.Exists,
+        4 => FsError.BadPath,
+        5 => FsError.IsDirectory,
+        6 => FsError.NotEmpty,
+        _ => FsError.Os(unsafe { cx_fs_error_code() }),
+    }
+}
+
+// The runtime's result buffer, as text.
+fn result() -> String {
+    var bytes = List<u8>()
+    unsafe {
+        let n = cx_fs_result_len()
+        bytes.reserve(n)
+        cx_fs_result_copy(bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return String.from_utf8(bytes)!
+}
+
+/// The whole file at `path`.
+pub fn read(path: String) -> List<u8> ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 0) }
+    if h < 0 {
+        fail last_error()
+    }
+    var out = List<u8>()
+    // One byte past the size, so that reading a file whole sees its end without growing.
+    let size = unsafe { cx_fs_size(h) }
+    out.reserve(if size >= 0 { usize.wrap(size) + 1 } else { 16384 })
+    loop {
+        if out.len() == out.capacity() {
+            out.reserve(out.len())
+        }
+        let at = out.len()
+        let n = unsafe { cx_fs_read(h, out.as_mut_ptr().add(at), out.capacity() - at) }
+        if n < 0 {
+            let e = last_error()
+            _ = unsafe { cx_fs_close(h) }
+            fail e
+        }
+        if n == 0 {
+            break
+        }
+        unsafe {
+            out.set_len(at + usize.wrap(n))
+        }
+    }
+    _ = unsafe { cx_fs_close(h) }
+    return out
+}
+
+/// The whole file at `path` as text, which fails with `none` inside `ok` if it isn't UTF-8.
+pub fn read_text(path: String) -> String? ! FsError {
+    return String.from_utf8(try read(path))
+}
+
+/// Makes the file at `path` hold `bytes`, creating it or replacing what it held. A crash part
+/// way through can leave it half written: to replace a file safely, write another and `rename`
+/// it over this one.
+pub fn write(path: String, bytes: List<u8>) ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 1) }
+    if h < 0 {
+        fail last_error()
+    }
+    let wrote = unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) }
+    let e = if wrote == 0 { some(last_error()) } else { none }
+    let closed = unsafe { cx_fs_close(h) }
+    if let first = e {
+        fail first
+    }
+    if closed == 0 {
+        fail last_error()
+    }
+}
+
+/// Moves what's at `from` to `to`, replacing a file there. On one volume it's atomic: anything
+/// that opens `to` sees the old file or the new one, never part of either.
+pub fn rename(from: String, to: String) ! FsError {
+    if unsafe { cx_fs_rename(from.as_ptr(), from.len(), to.as_ptr(), to.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Removes the file at `path`, or the link, not what it leads to.
+pub fn remove_file(path: String) ! FsError {
+    if unsafe { cx_fs_remove_file(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Removes the directory at `path`, which must be empty.
+pub fn remove_dir(path: String) ! FsError {
+    if unsafe { cx_fs_remove_dir(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Removes the directory at `path` and everything in it. A link inside is removed, never
+/// followed, so nothing outside the directory is touched.
+pub fn remove_dir_all(path: String) ! FsError {
+    for name in try list(path) {
+        let inner = "{path}/{name}"
+        match try kind(inner) {
+            some(Kind.Dir) => try remove_dir_all(inner),
+            some(Kind.Link) => {
+                // A link to a directory on Windows is removed as a directory.
+                match remove_file(inner) {
+                    ok => {},
+                    err(FsError.IsDirectory) => try remove_dir(inner),
+                    err(e) => {
+                        fail e
+                    },
+                }
+            },
+            some(_) => try remove_file(inner),
+            none => {},
+        }
+    }
+    try remove_dir(path)
+}
+
+/// Makes a directory at `path`. Fails with `Exists` if something's there already.
+pub fn make_dir(path: String) ! FsError {
+    if unsafe { cx_fs_make_dir(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Makes the directory at `path`, and each one on the way to it that's missing. It's fine if
+/// it's there already.
+pub fn make_dir_all(path: String) ! FsError {
+    if is_dir(path) {
+        return
+    }
+    // The parent first: the part before the last separator, if that isn't the root.
+    var cut: usize? = none
+    for i in 0..path.len() {
+        let b = path.byte_at(i)
+        if (b == 47 or b == 92) and i > 0 and i + 1 < path.len() {
+            cut = some(i)
+        }
+    }
+    if let c = cut {
+        let parent = path[..c]
+        if not parent.ends_with(":") {
+            try make_dir_all(parent)
+        }
+    }
+    match make_dir(path) {
+        ok => {},
+        err(FsError.Exists) => {
+            if not is_dir(path) {
+                fail FsError.Exists
+            }
+        },
+        err(e) => {
+            fail e
+        },
+    }
+}
+
+/// What's at `path`, without following a link, or `none` if nothing is.
+pub fn kind(path: String) -> Kind? ! FsError {
+    return match unsafe { cx_fs_kind(path.as_ptr(), path.len(), 0) } {
+        0 => none,
+        1 => some(Kind.File),
+        2 => some(Kind.Dir),
+        3 => some(Kind.Link),
+        4 => some(Kind.Other),
+        _ => {
+            fail last_error()
+        },
+    }
+}
+
+/// Whether `path` is a file, following links, as Java's `Files.isRegularFile`. Any error is
+/// `false`.
+pub fn is_file(path: String) -> bool {
+    return unsafe { cx_fs_kind(path.as_ptr(), path.len(), 1) } == 1
+}
+
+/// Whether `path` is a directory, following links, as Java's `Files.isDirectory`. Any error is
+/// `false`.
+pub fn is_dir(path: String) -> bool {
+    return unsafe { cx_fs_kind(path.as_ptr(), path.len(), 1) } == 2
+}
+
+/// The names in the directory at `path`, without `.` and `..`, sorted by their bytes, so a
+/// program never depends on the order a system lists them in.
+pub fn list(path: String) -> List<String> ! FsError {
+    if unsafe { cx_fs_list(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+    let all = result()
+    var names = List<String>()
+    var start: usize = 0
+    for i in 0..all.len() {
+        if all.byte_at(i) == 0 {
+            names.push(all[start..i])
+            start = i + 1
+        }
+    }
+    names.sort()
+    return names
+}
+
+/// A new, empty directory of its own in the system's temporary folder, such as
+/// `/tmp/calx-a1B2c3` or `C:\Users\me\AppData\Local\Temp\calx-1f2c-1-5b3e9a`. It's the
+/// program's to remove, with `remove_dir_all`.
+pub fn temp_dir() -> String ! FsError {
+    if unsafe { cx_fs_temp_dir() } == 0 {
+        fail last_error()
+    }
+    return result()
+}
