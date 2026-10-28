@@ -155,6 +155,32 @@ void cx_service_enter(void) { par_service = 1; }
 
 void cx_service_leave(void) { __atomic_fetch_sub(&services_live, 1, __ATOMIC_ACQ_REL); }
 
+/* The stack each thread of a Calx program has (D135): 8 MiB, the main thread's on Linux and macOS,
+ * and on Windows too, where the driver links programs so. Windows would make it 1 MiB, glibc what
+ * `ulimit -s` says and macOS 512 KiB, so the same program could recurse deeply enough on one
+ * system and overflow on another. It's address space kept for the stack, not memory: pages are
+ * only taken as the stack grows into them. */
+#define CX_THREAD_STACK ((cx_usize)8 << 20)
+
+/* Starts a thread on `run(arg)` with that stack, giving it in `*thread`: 0, or the error,
+ * `GetLastError`'s or `pthread_create`'s. */
+#ifdef _WIN32
+int cx_os_thread(HANDLE* thread, LPTHREAD_START_ROUTINE run, void* arg) {
+    *thread = CreateThread(NULL, CX_THREAD_STACK, run, arg, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    return *thread ? 0 : (int)GetLastError();
+}
+#else
+int cx_os_thread(pthread_t* thread, void* (*run)(void*), void* arg) {
+    pthread_attr_t attr;
+    int e = pthread_attr_init(&attr);
+    if (e) return e;
+    e = pthread_attr_setstacksize(&attr, CX_THREAD_STACK);
+    if (!e) e = pthread_create(thread, &attr, run, arg);
+    pthread_attr_destroy(&attr);
+    return e;
+}
+#endif
+
 /* Text for a panic message, or anything else written the way `print` writes. */
 static void panic_text(const char* s) { write_bytes(s, strlen(s)); }
 
@@ -1618,12 +1644,12 @@ static void par_start_workers(cx_usize threads) {
     while (par_started + 1 < threads) {
         uintptr_t id = par_started;
 #ifdef _WIN32
-        HANDLE h = CreateThread(NULL, 0, par_thread, (LPVOID)id, 0, NULL);
-        if (!h) par_fail("panic at <parallel>: can't start a worker thread\n");
+        HANDLE h;
+        if (cx_os_thread(&h, par_thread, (LPVOID)id)) par_fail("panic at <parallel>: can't start a worker thread\n");
         CloseHandle(h);
 #else
         pthread_t t;
-        if (pthread_create(&t, NULL, par_thread, (void*)id)) par_fail("panic at <parallel>: can't start a worker thread\n");
+        if (cx_os_thread(&t, par_thread, (void*)id)) par_fail("panic at <parallel>: can't start a worker thread\n");
         pthread_detach(t);
 #endif
         par_started++;

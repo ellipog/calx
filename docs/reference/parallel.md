@@ -206,6 +206,8 @@ A `parallel for` over regions that send each other messages is how Calx runs act
 
 By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that. On a thread that [`Thread.spawn`](../std/thread.md) started, every `parallel for` runs on that thread alone.
 
+Each thread's stack is 8 MiB, as the main thread's is, so an iteration can recurse as deep as the code outside the loop can (D135).
+
 The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread, which the threads take in order, so a slow chunk doesn't hold the others up. A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
 
 Up to 64 inner loops can be open at once, each in a slot of its own that threads with nothing to do look at. A thread that has looked for a fifth of a millisecond and found nothing sleeps until an inner loop opens or the outer loop's last chunk finishes. With every slot taken, an inner loop runs on the thread that reaches it.

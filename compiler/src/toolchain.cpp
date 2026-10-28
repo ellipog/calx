@@ -932,6 +932,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 #endif
     }
 #ifdef _WIN32
+    // The main thread's stack is 8 MiB, as Linux and macOS give it and as the runtime gives every
+    // thread it starts, so a program recurses as deep on every system (D135). Windows' is 1 MiB
+    // unless the program says. It's address space, taken as memory only as the stack grows.
+    if (!library) link_flags.push_back("-Wl,/STACK:8388608");
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
     // The driver always names the static C runtime when linking; the objects name the DLL one.
     if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");

@@ -1,0 +1,47 @@
+// Every thread's stack is 8 MiB (D135): the main thread's, a `Thread.spawn` thread's and each of
+// `parallel for`'s workers'. The recursion here takes about 1.5 MiB in a release build and 5 MiB
+// in a debug one, more than Windows would give a thread (1 MiB) or macOS (512 KiB).
+
+import std.thread.{Task}
+
+const DEPTH: u32 = 5000
+
+// Recurses `n` deep, each frame holding an array the frame below changes and this one reads after,
+// so it's in memory in every frame, in debug and release builds alike.
+fn deep(n: u32, above: mut [u32; 64]) -> u32 {
+    above[usize(n % 64)] += 1
+    if n == 0 {
+        return above[0]
+    }
+    var mine = [n; 64]
+    let below = deep(n - 1, mut mine)
+    return below + mine[usize(n % 64)] % 7
+}
+
+fn run_deep() -> u32 {
+    var start = [1u32; 64]
+    return deep(DEPTH, mut start)
+}
+
+struct Deep {
+    out: Sender<u32>
+}
+
+impl Task for Deep {
+    fn run(own self) {
+        self.out.send(run_deep())
+    }
+}
+
+fn main() {
+    println("{run_deep()}")    // out: 14999
+    var results = Receiver<u32>()
+    let t = unsafe { Thread.spawn(Deep { out: results.sender() }) }
+    println("{results.wait() ?? 0}")    // out: 14999
+    t.join()
+    var each = [0u32; 8]
+    parallel for r in mut each {
+        r = run_deep()
+    }
+    println("{each[0]} {each[7]}")    // out: 14999 14999
+}

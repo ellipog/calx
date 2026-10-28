@@ -23,6 +23,11 @@
 int cx_in_parallel(void);
 CX_COLD void cx_panic_text(const char* at, const char* message);
 void cx_service_started(void);
+#ifdef _WIN32
+int cx_os_thread(HANDLE* thread, LPTHREAD_START_ROUTINE run, void* arg);
+#else
+int cx_os_thread(pthread_t* thread, void* (*run)(void*), void* arg);
+#endif
 void cx_service_enter(void);
 void cx_service_leave(void);
 
@@ -257,12 +262,12 @@ cx_Thread cx_thread_spawn(void (*run)(void*), void* task) {
     /* Counted before it starts, so a program that ends at once knows a thread is running. */
     cx_service_started();
 #ifdef _WIN32
-    HANDLE h = CreateThread(NULL, 0, thread_main, s, 0, NULL);
-    if (!h) cx_panic_text("std.thread", "can't start a thread");
+    HANDLE h;
+    if (cx_os_thread(&h, thread_main, s)) cx_panic_text("std.thread", "can't start a thread");
     return (cx_Thread){(cx_u64)(uintptr_t)h};
 #else
     pthread_t t;
-    if (pthread_create(&t, NULL, thread_main, s)) cx_panic_text("std.thread", "can't start a thread");
+    if (cx_os_thread(&t, thread_main, s)) cx_panic_text("std.thread", "can't start a thread");
     return (cx_Thread){(cx_u64)t};
 #endif
 }

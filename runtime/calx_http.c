@@ -30,6 +30,13 @@
 #include <signal.h>
 #endif
 
+/* In calx_rt.c: starts a thread with the stack every thread of a program has (D135). */
+#ifdef _WIN32
+int cx_os_thread(HANDLE* thread, LPTHREAD_START_ROUTINE run, void* arg);
+#else
+int cx_os_thread(pthread_t* thread, void* (*run)(void*), void* arg);
+#endif
+
 /* Runs `init` once, before anything that needs it. */
 static void once(cx_u32* state, void (*init)(void)) {
     if (__atomic_load_n(state, __ATOMIC_ACQUIRE) == 2) return;
@@ -612,14 +619,14 @@ cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_
         return table_add(r);
     }
 #ifdef _WIN32
-    r->thread = CreateThread(NULL, 0, thread_main, r, 0, NULL);
-    if (r->thread) {
+    int e = cx_os_thread(&r->thread, thread_main, r);
+    if (e == 0) {
         r->started = 1;
     } else {
-        r->error = E_OS, r->code = (cx_i32)GetLastError(), r->state = 1;
+        r->error = E_OS, r->code = (cx_i32)e, r->state = 1;
     }
 #else
-    int e = pthread_create(&r->thread, NULL, thread_main, r);
+    int e = cx_os_thread(&r->thread, thread_main, r);
     if (e == 0) {
         r->started = 1;
     } else {
