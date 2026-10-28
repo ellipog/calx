@@ -358,6 +358,20 @@ cx_bool cx_rsa_encrypt(const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* 
 cx_i64 cx_rsa_decrypt(const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out);
 cx_usize cx_rsa_size(const cx_u8* ctx);
 
+/* zlib, gzip and raw deflate (format 0, 1 and 2), in calx_zlib.c (D118). An inflate context is
+ * CX_INFLATE_CTX bytes, aligned as cx_alloc aligns. `cx_inflate` returns 0 at the stream's end, 1
+ * when it needs more room, 2 when it stopped at the end of the last room, and -1, -2, -3 or -4
+ * for a stream that's corrupt, cut off, fails its checksum, or needs a preset dictionary. */
+#define CX_INFLATE_CTX 31232
+cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n);
+cx_u32 cx_zlib_adler32(cx_u32 adler, const cx_u8* p, cx_usize n);
+void cx_inflate_start(cx_u8* ctx, cx_u32 format, cx_usize start);
+cx_i32 cx_inflate(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize end, cx_bool final);
+cx_usize cx_inflate_len(const cx_u8* ctx);
+cx_usize cx_inflate_used(const cx_u8* ctx);
+cx_usize cx_deflate_bound(cx_usize n, cx_u32 format);
+cx_usize cx_deflate(const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 level, cx_u8* out);
+
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
  * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */

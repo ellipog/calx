@@ -67,6 +67,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256 and HMAC-SHA256, as Java's `MessageDigest` and `Mac` give them
 12. [std.crypto](std/crypto.md): random bytes, AES-CFB8 and RSA, for vanilla's online-mode login
+13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
 
 ### Design
 

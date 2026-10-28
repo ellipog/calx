@@ -1,0 +1,132 @@
+// std.zlib reads what Java 25's Deflater and GZIPOutputStream write, and writes what its Inflater
+// and GZIPInputStream read. The hex below is Java's. build/scratch's wider checks inflated each
+// side's output with the other on 2414 records at every level, and inflated 240,000 broken
+// streams both ways, with the same outcome every time.
+
+import std.zlib.{Format, adler32, compress, compress_into, crc32, decompress, decompress_into}
+
+fn hex(bytes: List<u8>) -> String {
+    let digits = "0123456789abcdef"
+    var s = String()
+    for b in bytes {
+        let hi = usize(b / 16)
+        let lo = usize(b % 16)
+        s.push_str(digits[hi..hi + 1])
+        s.push_str(digits[lo..lo + 1])
+    }
+    return s
+}
+
+fn nibble(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn unhex(s: str) -> List<u8> {
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < s.len() {
+        out.push(nibble(s.byte_at(i)) * 16 + nibble(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn outcome(bytes: List<u8>, format: Format, limit: usize) -> String {
+    return match decompress(bytes, format, limit) {
+        ok(b) => "{b.len()} bytes, crc {crc32(b)}",
+        err(e) => "{e}",
+    }
+}
+
+// Bytes like a chunk's: runs, small numbers, and now and then something random.
+fn chunkish(n: usize) -> List<u8> {
+    var out: List<u8> = []
+    var x: u32 = 7
+    for i in 0..n {
+        x = x * 1103515245 + 12345
+        out.push(if (x >> 16) % 9 == 0 { u8.wrap(x >> 24) } else { u8.wrap(i / 64 % 5) })
+    }
+    return out
+}
+
+fn main() {
+    println("{crc32("123456789".to_bytes())} {adler32("Wikipedia".to_bytes())}")    // out: 3421780262 300286872
+    println("{crc32([])} {adler32([])}")    // out: 0 1
+
+    // Where there's only one way to write it, the bytes are Java's.
+    println(hex(compress([], Format.Zlib, 6)))    // out: 789c030000000001
+    println(hex(compress("a".to_bytes(), Format.Zlib, 1)))    // out: 78014b040000620062
+    println(hex(compress("Minecraft".to_bytes(), Format.Raw, 6)))    // out: f3cdcc4b4d2e4a4c2b0100
+    println(hex(compress("level.dat".to_bytes(), Format.Gzip, 6)))    // out: 1f8b08000000000000ffcb492d4bcdd14b492c0100477dab6b09000000
+
+    // Java's bytes inflate.
+    let hello = unhex("789ccb48cdc9c957c8402701680308b1")
+    println(String.from_utf8(decompress(hello.copy(), Format.Zlib, 100)!) ?? "bad")    // out: hello hello hello hello
+    let dynamic = unhex("789c7dca470e8020000551eca2d8401014bbdeff8a269afc95b09c9721592d1326a2a20bf246a5551f973ca42d7133dad076c0a63dfcb66562c43661fb67bd366a462fd8dcbca1776c07371efefa42dfd29ed87ef901b9f915a4")
+    let block = decompress(dynamic.copy(), Format.Zlib, 1000)!
+    var made = true
+    for i in 0..block.len() {
+        if block[i] != u8.wrap((i * 7) % 23 + (i / 50) * 3) {
+            made = false
+        }
+    }
+    println("{block.len()} {made}")    // out: 300 true
+
+    // Every level and format gives back what went in.
+    let data = chunkish(200000)
+    var sizes = String()
+    for level in 0..10 {
+        let lv = u32.wrap(level)
+        for format in [Format.Zlib, Format.Gzip, Format.Raw] {
+            let z = compress(data, format, lv)
+            let back = decompress(z.copy(), format, data.len())!
+            if back.len() != data.len() or crc32(back) != crc32(data) {
+                panic("level {level}, {format}: the data didn't come back")
+            }
+            if format == Format.Zlib {
+                sizes.push_str(if level == 0 { "{z.len()}" } else { " {z.len() < data.len() / 3}" })
+            }
+        }
+    }
+    // Level 0 is the bytes in four stored blocks of at most 65535, 5 bytes of header each.
+    println(sizes)    // out: 200026 true true true true true true true true true
+
+    // Broken streams.
+    let good = compress(data, Format.Zlib, 6)
+    var cut = good.copy()
+    cut.truncate(good.len() / 2)
+    var flipped = good.copy()
+    let last = flipped.len() - 1
+    flipped[last] = flipped[last] + 1
+    println(outcome(unhex("789d"), Format.Zlib, 10))    // out: Corrupt
+    println(outcome(unhex("789c07"), Format.Zlib, 10))    // out: Corrupt
+    println(outcome(cut, Format.Zlib, data.len()))    // out: Truncated
+    println(outcome(flipped, Format.Zlib, data.len()))    // out: Checksum
+    println(outcome(good.copy(), Format.Zlib, data.len() - 1))    // out: TooLong
+    println(outcome(unhex("78bb01020304"), Format.Zlib, 10))    // out: Dictionary
+    println(outcome([], Format.Raw, 10))    // out: Truncated
+
+    // Anything after the stream is ignored, and gzip reads on into a second member.
+    var trailing = compress("abc".to_bytes(), Format.Zlib, 6)
+    trailing.push(42)
+    println(outcome(trailing, Format.Zlib, 10))    // out: 3 bytes, crc 891568578
+    var two = compress("abc".to_bytes(), Format.Gzip, 6)
+    for b in compress("def".to_bytes(), Format.Gzip, 1) {
+        two.push(b)
+    }
+    println(String.from_utf8(decompress(two, Format.Gzip, 10)!) ?? "bad")    // out: abcdef
+
+    // Into a list that has bytes already, stopping at the limit as Java's Inflater does when its
+    // array is full.
+    var out = "> ".to_bytes()
+    let ended = decompress_into(hello, 0, hello.len(), Format.Zlib, 11, mut out)!
+    println("{ended} {String.from_utf8(out) ?? "bad"}")    // out: false > hello hello
+
+    // A part of a list, onto the end of another.
+    var packet: List<u8> = [0xFF]
+    let text = "xxhello hello hello helloxx".to_bytes()
+    compress_into(text, 2, text.len() - 2, Format.Zlib, 6, mut packet)
+    var inner: List<u8> = []
+    _ = decompress_into(packet, 1, packet.len(), Format.Zlib, 100, mut inner)!
+    println("{packet[0]} {String.from_utf8(inner) ?? "bad"}")    // out: 255 hello hello hello hello
+}

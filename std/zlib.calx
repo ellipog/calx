@@ -1,0 +1,174 @@
+/// zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read
+/// them (D118).
+///
+/// Vanilla compresses each packet over the server's threshold with zlib, region-file chunks with
+/// zlib, and NBT files such as level.dat with gzip, all at level 6, Java's default.
+module std.zlib
+
+extern "C" {
+    fn cx_zlib_crc32(crc: u32, p: *const u8, n: usize) -> u32
+    fn cx_zlib_adler32(adler: u32, p: *const u8, n: usize) -> u32
+    fn cx_inflate_start(ctx: *u8, format: u32, start: usize)
+    fn cx_inflate(ctx: *u8, input: *const u8, n: usize, out: *u8, end: usize, last: bool) -> i32
+    fn cx_inflate_len(ctx: *const u8) -> usize
+    fn cx_inflate_used(ctx: *const u8) -> usize
+    fn cx_deflate_bound(n: usize, format: u32) -> usize
+    fn cx_deflate(input: *const u8, n: usize, format: u32, level: u32, out: *u8) -> usize
+}
+
+/// What wraps the deflate data.
+pub enum Format {
+    /// RFC 1950: a 2-byte header, then an Adler-32 of the data. Java's `Deflater` and
+    /// `Inflater`, and what packets and region files use.
+    Zlib
+    /// RFC 1952: a 10-byte header, then a CRC-32 and the length. Java's GZIP streams, and what
+    /// NBT files use.
+    Gzip
+    /// The deflate data alone, as Java's `Deflater` and `Inflater` with `nowrap`.
+    Raw
+}
+
+/// Why bytes didn't inflate.
+pub enum Error {
+    /// They aren't a stream zlib accepts.
+    Corrupt
+    /// They end before the stream does.
+    Truncated
+    /// The checksum, or gzip's length, doesn't match what they inflate to.
+    Checksum
+    /// They inflate to more than the limit. Only `decompress` gives this.
+    TooLong
+    /// The zlib header asks for a preset dictionary, which neither vanilla nor `std.zlib` gives.
+    /// Java's `Inflater` stops there without an error, and `needsDictionary()` says why.
+    Dictionary
+}
+
+fn format_code(format: Format) -> u32 {
+    return match format {
+        Format.Zlib => 0,
+        Format.Gzip => 1,
+        Format.Raw => 2,
+    }
+}
+
+// The inflate context's size, CX_INFLATE_CTX in the runtime.
+const INFLATE_CTX: usize = 31232
+
+/// The bytes compressed at `level`: 0 stores them as they are, 1 is the fastest, and 9 the
+/// smallest. 6 is Java's default, and what vanilla uses. Panics for a level past 9.
+@track_caller
+pub fn compress(bytes: List<u8>, format: Format, level: u32) -> List<u8> {
+    var out: List<u8> = []
+    compress_into(bytes, 0, bytes.len(), format, level, mut out)
+    return out
+}
+
+/// Compresses the bytes from `from` up to `to` onto the end of `out`. Panics unless the range is
+/// in `bytes` and shorter than 4 GiB, or for a level past 9.
+@track_caller
+pub fn compress_into(bytes: List<u8>, from: usize, to: usize, format: Format, level: u32, out: mut List<u8>) {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    if level > 9 {
+        panic("zlib's levels are 0 to 9, not {level}")
+    }
+    let n = to - from
+    if u64(n) >= 4294967296 {
+        panic("zlib compresses less than 4 GiB at a time, not {n} bytes")
+    }
+    let f = format_code(format)
+    out.reserve(unsafe { cx_deflate_bound(n, f) })
+    unsafe {
+        let start = out.len()
+        let wrote = cx_deflate(bytes.as_ptr().add(from), n, f, level, out.as_mut_ptr().add(start))
+        out.set_len(start + wrote)
+    }
+}
+
+/// What the bytes inflate to, if they're one stream of the format, or for gzip, members one
+/// after another, and it's at most `limit` bytes. Anything after the stream is ignored, as Java
+/// ignores it.
+@track_caller
+pub fn decompress(bytes: List<u8>, format: Format, limit: usize) -> List<u8> ! Error {
+    var out: List<u8> = []
+    let ended = try decompress_into(bytes, 0, bytes.len(), format, limit, mut out)
+    if not ended {
+        fail Error.TooLong
+    }
+    return out
+}
+
+/// Inflates the bytes from `from` up to `to` onto the end of `out`, adding at most `limit`
+/// bytes. Gives `true` if the stream ended, and `false` if it stopped at the limit with more to
+/// come, as Java's `Inflater.inflate` stops when its array is full. On an error, `out` keeps what
+/// was inflated before it. Panics unless the range is in `bytes`.
+@track_caller
+pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> bool ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let n = to - from
+    // The context is written by the runtime before it's read, so it isn't cleared first.
+    var ctx = List<u8>()
+    ctx.reserve(INFLATE_CTX)
+    let start = out.len()
+    unsafe {
+        ctx.set_len(INFLATE_CTX)
+        cx_inflate_start(ctx.as_mut_ptr(), format_code(format), start)
+    }
+    // Room for a first try: gzip says how long it is at the end, and Minecraft's data inflates
+    // to about eight times its size. A guess that's short costs a copy and another call.
+    var room: usize = n * 8 + 4096
+    if format_code(format) == 1 and n >= 18 {
+        room = usize(u32(bytes[to - 4]) | u32(bytes[to - 3]) << 8 | u32(bytes[to - 2]) << 16 | u32(bytes[to - 1]) << 24)
+    }
+    loop {
+        let left = limit - (out.len() - start)
+        // Twice the guess is near enough to the limit to take it all.
+        if room > left / 2 {
+            room = left
+        }
+        out.reserve(room)
+        let status = unsafe { cx_inflate(ctx.as_mut_ptr(), bytes.as_ptr().add(from), n, out.as_mut_ptr(), out.len() + room, room == left) }
+        unsafe {
+            out.set_len(cx_inflate_len(ctx.as_ptr()))
+        }
+        if status == 0 {
+            return true
+        }
+        if status == 2 {
+            return false
+        }
+        if status == 1 {
+            // The rest will likely inflate as what's done did: guess from how much input that
+            // took, with an eighth more, and at least double.
+            let used = u64(unsafe { cx_inflate_used(ctx.as_ptr()) })
+            let made = u64(out.len() - start)
+            let rest = if used > 0 { made * (u64(n) - used) / used } else { made }
+            let want = rest + rest / 8 + 4096
+            room = if want > u64(room) * 2 { usize.wrap(want) } else { room * 2 }
+            continue
+        }
+        if status == -1 {
+            fail Error.Corrupt
+        }
+        if status == -2 {
+            fail Error.Truncated
+        }
+        if status == -4 {
+            fail Error.Dictionary
+        }
+        fail Error.Checksum
+    }
+}
+
+/// The CRC-32 of the bytes, as Java's `CRC32` gives it. gzip checks its data with it.
+pub fn crc32(bytes: List<u8>) -> u32 {
+    return unsafe { cx_zlib_crc32(0, bytes.as_ptr(), bytes.len()) }
+}
+
+/// The Adler-32 of the bytes, as Java's `Adler32` gives it. zlib checks its data with it.
+pub fn adler32(bytes: List<u8>) -> u32 {
+    return unsafe { cx_zlib_adler32(1, bytes.as_ptr(), bytes.len()) }
+}

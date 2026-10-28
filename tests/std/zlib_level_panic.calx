@@ -1,0 +1,7 @@
+// A level past 9 is a mistake in the program, so it panics at the call.
+
+import std.zlib.{Format, compress}
+
+fn main() {
+    _ = compress([1, 2, 3], Format.Zlib, 10)    // panic: zlib's levels are 0 to 9, not 10
+}

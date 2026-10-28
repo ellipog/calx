@@ -1,0 +1,9 @@
+// A range outside the bytes panics at the call.
+
+import std.zlib.{Format, decompress_into}
+
+fn main() {
+    let bytes: List<u8> = [1, 2, 3]
+    var out: List<u8> = []
+    _ = decompress_into(bytes, 2, 5, Format.Zlib, 100, mut out)!    // panic: the range 2..5 is out of bounds for 3 bytes
+}
