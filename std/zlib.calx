@@ -108,6 +108,30 @@ pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, 
     if from > to or to > bytes.len() {
         panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
     }
+    let (ended, _) = try inflate(bytes, from, to, format, limit, mut out)
+    return ended
+}
+
+/// Inflates the one stream that starts at `from` onto the end of `out`, adding at most `limit`
+/// bytes, and gives where it ends: the index just past its last byte, before `to`. What follows
+/// it, such as a zip entry's data descriptor or another stream, can be read from there. Fails
+/// with `TooLong` if it inflates to more than `limit` bytes. Panics unless the range is in
+/// `bytes`.
+@track_caller
+pub fn decompress_stream(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> usize ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let (ended, used) = try inflate(bytes, from, to, format, limit, mut out)
+    if not ended {
+        fail Error.TooLong
+    }
+    return from + used
+}
+
+// Inflates as `decompress_into` says, and gives whether the stream ended, and how many of the
+// bytes from `from` it took to: all of the stream's when it ended.
+fn inflate(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> (bool, usize) ! Error {
     let n = to - from
     // The context is written by the runtime before it's read, so it isn't cleared first.
     var ctx = List<u8>()
@@ -134,11 +158,8 @@ pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, 
         unsafe {
             out.set_len(cx_inflate_len(ctx.as_ptr()))
         }
-        if status == 0 {
-            return true
-        }
-        if status == 2 {
-            return false
+        if status == 0 or status == 2 {
+            return (status == 0, unsafe { cx_inflate_used(ctx.as_ptr()) })
         }
         if status == 1 {
             // The rest will likely inflate as what's done did: guess from how much input that

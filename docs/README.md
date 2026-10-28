@@ -76,6 +76,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, and the typed queues they talk through
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
 18. [std.fs](std/fs.md): files and directories, with atomic renames, real paths and temporary directories
+19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 
 ### Design
 

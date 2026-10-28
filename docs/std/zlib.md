@@ -14,7 +14,7 @@ Vanilla compresses three things, all at level 6, Java's default:
 `std.zlib` reads what Java's `Deflater` and `GZIPOutputStream` write, and writes what its `Inflater` and `GZIPInputStream` read. It accepts and refuses the same broken streams as they do.
 
 ```calx
-import std.zlib.{Format, compress, crc32, decompress, decompress_into}
+import std.zlib.{Format, compress, compress_into, crc32, decompress, decompress_into, decompress_stream}
 
 fn main() {
     let text = "hello hello hello hello".to_bytes()
@@ -33,6 +33,16 @@ fn main() {
     var out = "> ".to_bytes()
     let ended = decompress_into(packed, 0, packed.len(), Format.Zlib, 5, mut out)!
     println("{ended} {String.from_utf8(out) ?? "bad"}")    // out: false > hello
+
+    // Two streams back to back, as zip entries sit: the first's end is where the second starts.
+    var two: List<u8> = []
+    compress_into("one".to_bytes(), 0, 3, Format.Raw, 6, mut two)
+    compress_into("two".to_bytes(), 0, 3, Format.Raw, 6, mut two)
+    var first: List<u8> = []
+    let end = decompress_stream(two, 0, two.len(), Format.Raw, 100, mut first)!
+    var second: List<u8> = []
+    _ = decompress_stream(two, end, two.len(), Format.Raw, 100, mut second)!
+    println("{String.from_utf8(first) ?? "bad"} {String.from_utf8(second) ?? "bad"}")    // out: one two
 }
 ```
 
@@ -43,6 +53,7 @@ fn main() {
 | `compress_into(bytes: List<u8>, from: usize, to: usize, format: Format, level: u32, out: mut List<u8>)` | Compresses `bytes[from..to]` onto the end of `out`, as a packet goes after its length. Panics unless the range is in `bytes` and under 4 GiB |
 | `decompress(bytes: List<u8>, format: Format, limit: usize) -> List<u8> ! Error` | What the stream inflates to. Fails with `TooLong` if that's more than `limit` bytes |
 | `decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> bool ! Error` | Inflates `bytes[from..to]` onto the end of `out`, at most `limit` bytes. `true` if the stream ended, `false` if it stopped at the limit with more to come, as `Inflater.inflate` stops when its array is full |
+| `decompress_stream(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> usize ! Error` | Inflates the one stream that starts at `from` onto the end of `out`, and gives the index just past its last byte, where whatever follows it starts: a zip entry's data descriptor, or another stream. Fails with `TooLong` past `limit` bytes |
 | `crc32(bytes: List<u8>) -> u32` | The CRC-32, as Java's `CRC32` gives it |
 | `adler32(bytes: List<u8>) -> u32` | The Adler-32, as Java's `Adler32` gives it |
 

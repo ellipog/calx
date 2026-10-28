@@ -1,0 +1,21 @@
+/// The program's own build: an ID that changes when its code does.
+module std.build
+
+extern "C" {
+    fn cx_build_id() -> *const u8
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
+/// A hash of the program as it was built, as 32 lowercase hex digits: of its generated C and
+/// the runtime it links. Two builds of the same code by the same compiler have the same ID, in
+/// debug and in release, and any change to a module the program uses, std's included, gives a
+/// new one. It's for keying a cache on the code that wrote it.
+pub fn build_id() -> String {
+    var bytes = List<u8>()
+    unsafe {
+        bytes.reserve(32)
+        _ = memcpy(bytes.as_mut_ptr(), cx_build_id(), 32)
+        bytes.set_len(32)
+    }
+    return String.from_utf8(bytes)!
+}

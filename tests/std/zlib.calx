@@ -3,7 +3,7 @@
 // side's output with the other on 2414 records at every level, and inflated 240,000 broken
 // streams both ways, with the same outcome every time.
 
-import std.zlib.{Format, adler32, compress, compress_into, crc32, decompress, decompress_into}
+import std.zlib.{Format, adler32, compress, compress_into, crc32, decompress, decompress_into, decompress_stream}
 
 fn hex(bytes: List<u8>) -> String {
     let digits = "0123456789abcdef"
@@ -129,4 +129,29 @@ fn main() {
     var inner: List<u8> = []
     _ = decompress_into(packet, 1, packet.len(), Format.Zlib, 100, mut inner)!
     println("{packet[0]} {String.from_utf8(inner) ?? "bad"}")    // out: 255 hello hello hello hello
+
+    // Streams one after another, each with a byte after it: each ends just before its byte, as
+    // zip entries end before their data descriptors. Stored blocks too.
+    let kinds = [(Format.Raw, 0), (Format.Raw, 6), (Format.Zlib, 1), (Format.Gzip, 9)]
+    var joined: List<u8> = []
+    var mark: u8 = 1
+    for (format, level) in kinds {
+        compress_into(data, 0, 5000, format, u32.wrap(level), mut joined)
+        joined.push(mark)
+        mark += 1
+    }
+    var at: usize = 0
+    var found = List<String>()
+    for (format, _) in kinds {
+        var got: List<u8> = []
+        let end = decompress_stream(joined, at, joined.len(), format, 5000, mut got)!
+        found.push("{got.len()}:{joined[end]}")
+        at = end + 1
+    }
+    println("{found[0]} {found[1]} {found[2]} {found[3]} {at == joined.len()}")    // out: 5000:1 5000:2 5000:3 5000:4 true
+    var short: List<u8> = []
+    match decompress_stream(joined, 0, joined.len(), Format.Raw, 10, mut short) {
+        ok(end) => println("ended at {end}"),
+        err(e) => println("{e} {short.len()}"),    // out: TooLong 10
+    }
 }

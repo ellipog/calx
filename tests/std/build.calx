@@ -1,0 +1,16 @@
+// std.build's ID is 32 hex digits, the same each call. Which ID it is changes with the compiler
+// and the runtime, so it isn't printed. That it's the same in debug and release, and new after a
+// change to the code, was checked by building a program both ways and again after an edit.
+
+import std.build.{build_id}
+
+fn main() {
+    let id = build_id()
+    var hex = true
+    for b in id.to_bytes() {
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)) {
+            hex = false
+        }
+    }
+    println("{id.len()} {hex} {id == build_id()}")    // out: 32 true true
+}
