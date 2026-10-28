@@ -1,0 +1,22 @@
+// A frame that comes again and again, as a recursion's does, is written once, then how many more
+// times it came.
+
+fn count(n: i32) -> i32 {
+    if n == 0 {
+        panic("at the bottom")    // panic: at the bottom
+    }
+    let below = count(n - 1)
+    if below > 100 {
+        println("never")
+    }
+    return below + 1
+}
+
+fn main() {
+    println("{count(5)}")
+}
+
+// trace: trace_repeated.count:6
+// trace: trace_repeated.count:8
+// trace: repeated 4
+// trace: trace_repeated.main:16

@@ -16,10 +16,12 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   what the program prints. A program with no `out` lines must print nothing.
 - `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
   `error` lines must fail to compile, with exactly those errors and no others.
-- `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
+- `// panic: TEXT` expects the program to panic on that line, with TEXT in the message. A
+  panic that isn't at a line, as a stack overflow's, is `// panic: <stack>: TEXT`, anywhere.
 - `// trace: NAME:LINE` is one frame of the panic's stack trace, innermost first, like `out`:
   all of them together must be the trace's functions and lines, which leave out the file, since
-  a module from the standard library is shown by its whole path.
+  a module from the standard library is shown by its whole path. `// trace: repeated N` is the
+  line that says the frame before it came N more times.
 - `// stderr: TEXT` is one line of expected standard error, like `out`. A program that doesn't
   panic must write exactly those lines there, so one with none must write nothing. In a test of
   several files, their paths in it are just their names.
@@ -66,7 +68,10 @@ EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status|lib|k
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
+PANIC_AT = re.compile(r"^panic at (<[^>]+>): (.*)$")
+PLACE = re.compile(r"^(<[^>]+>):\s*(.*)$")
 FRAME = re.compile(r"^\tat (.*)\((.*):(\d+)\)$")
+REPEATED = re.compile(r"^\t\.\.\. repeated (\d+) more times$")
 GENERATED = re.compile(r"^(.*?):(\d+):(\d+): note: in the code ")
 GENERATED_JSON = re.compile(r"^in the code .*?, at .*?:\d+:\d+: (.*)$", re.S)
 RUN_SECONDS = 120
@@ -217,16 +222,29 @@ def run_test(test, mode):
         if test.panic:
             if p.returncode != 101:
                 problems.append(f"expected a panic (status 101), got status {p.returncode}")
-            m = next((PANIC.match(l) for l in p.stderr.splitlines() if PANIC.match(l)), None)
-            if not m:
-                problems.append("no panic message on stderr")
+            place = PLACE.match(test.panic[1])
+            if place:
+                m = next((PANIC_AT.match(l) for l in p.stderr.splitlines() if PANIC_AT.match(l)), None)
+                if not m or m.group(1) != place.group(1):
+                    problems.append(f"no panic at {place.group(1)} on stderr")
+                elif place.group(2) not in m.group(2):
+                    problems.append(f"panic message {m.group(2)!r} doesn't contain {place.group(2)!r}")
             else:
-                if int(m.group(2)) != test.panic[0]:
-                    problems.append(f"panicked on line {m.group(2)}, expected line {test.panic[0]}")
-                if test.panic[1] not in m.group(4):
-                    problems.append(f"panic message {m.group(4)!r} doesn't contain {test.panic[1]!r}")
+                m = next((PANIC.match(l) for l in p.stderr.splitlines() if PANIC.match(l)), None)
+                if not m:
+                    problems.append("no panic message on stderr")
+                else:
+                    if int(m.group(2)) != test.panic[0]:
+                        problems.append(f"panicked on line {m.group(2)}, expected line {test.panic[0]}")
+                    if test.panic[1] not in m.group(4):
+                        problems.append(f"panic message {m.group(4)!r} doesn't contain {test.panic[1]!r}")
             if test.trace:
-                frames = [f"{f.group(1)}:{f.group(3)}" for f in map(FRAME.match, p.stderr.splitlines()) if f]
+                frames = []
+                for line in p.stderr.splitlines():
+                    if f := FRAME.match(line):
+                        frames.append(f"{f.group(1)}:{f.group(3)}")
+                    elif r := REPEATED.match(line):
+                        frames.append(f"repeated {r.group(1)}")
                 if frames != test.trace:
                     problems.append("stack trace " + diff(test.trace, frames))
         elif p.returncode != test.status:

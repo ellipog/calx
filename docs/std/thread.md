@@ -56,7 +56,7 @@ A thread runs a task: a value whose type implements `Task`, which moves to the n
 | `Thread.spawn(task)` | Starts a thread that runs `task.run()`, and gives its `Thread`. Needs `unsafe`. The task's type must be `Send` |
 | `t.join()` | Waits for the thread to end, and uses `t` up |
 
-Every thread's stack is 8 MiB, the main thread's too, on every system, so a program recurses as deep on Windows, Linux and macOS, and on any of its threads (D135). It's address space: memory is taken only as the stack grows into it.
+Every thread's stack is 8 MiB, the main thread's too, on every system, so a program recurses as deep on Windows, Linux and macOS, and on any of its threads (D135). It's address space: memory is taken only as the stack grows into it. A call that would go past the end [panics](../reference/printing.md#panics), at `<stack>`, as any other bug does.
 
 A `Thread` that's dropped without `join()` carries on by itself, and ends with the program if it hasn't ended before. Memory such a thread still holds when the program ends isn't reported as a leak, since it's still in use.
 

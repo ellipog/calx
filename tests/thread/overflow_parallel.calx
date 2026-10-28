@@ -1,0 +1,33 @@
+// A stack overflow in a `parallel for` is the panic of the iteration it was in: the output of the
+// iterations before it, and its own, comes first, as if they ran in order, with any number of
+// threads.
+
+fn deep(n: u64, above: mut [u64; 64]) -> u64 {
+    above[usize.wrap(n % 64)] += 1
+    if n == 0 {
+        return above[0]
+    }
+    var mine = [n; 64]
+    let below = deep(n - 1, mut mine)
+    return below + mine[usize.wrap(n % 64)] % 7
+}
+
+fn main() {
+    var each = [0u64; 64]
+    parallel for i in 0usize..64 {
+        println("{i}")
+        if i == 5 {
+            var start = [1u64; 64]
+            each[i] = deep(100000000, mut start)
+        }
+    }
+    println("{each[5]}")
+}
+
+// out: 0
+// out: 1
+// out: 2
+// out: 3
+// out: 4
+// out: 5
+// panic: <stack>: the calls went deeper than the thread's 8 MiB stack holds

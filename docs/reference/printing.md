@@ -45,7 +45,16 @@ Standard error isn't buffered. `eprint` and `eprintln` first write out whatever 
 
 ## Panics
 
-A panic is an unrecoverable bug: an index out of bounds, a division by zero, `opt!` on `none`, a failed `assert`, or `panic(...)`. The program writes its output so far, then prints `panic at file:line:column: message` to standard error and exits with status 101.
+A panic is an unrecoverable bug: an index out of bounds, a division by zero, `opt!` on `none`, a failed `assert`, a call deeper than the stack holds, or `panic(...)`. The program writes its output so far, then prints `panic at file:line:column: message` to standard error and exits with status 101.
+
+Every thread's stack is 8 MiB ([std.thread](../std/thread.md), D135). A call that would go past its end panics like the rest, on any thread and in any build. That's no one line's fault, so the place is `<stack>`, and the [trace](#stack-traces) shows the calls that got there:
+
+```text
+panic at <stack>: the calls went deeper than the thread's 8 MiB stack holds
+	at example.walk(example.calx:4)
+	at example.walk(example.calx:9)
+	... repeated 126 more times
+```
 
 Inside a `parallel for`, what's printed and which panic is reported are the same as if the iterations ran one after another ([parallel loops](parallel.md#the-same-result-with-any-number-of-threads)).
 
@@ -98,6 +107,7 @@ panic at example.calx:2:5: assertion failed: 7 is odd
 
 - A frame is the function's module and name, with a method's type between them, such as `world.Chunk.block`. A generic function has one name, whatever it was called with.
 - A call the optimizer inlined is a frame of its own, so a trace is the same in debug and release builds, on Windows and on Linux.
+- A frame that comes again right after itself, as a recursion's does, is written once, then `... repeated N more times`. Once more is just written again.
 - Only Calx functions are written, the standard library's too, not the runtime's, the C library's or the system's.
 - A file inside the folder the program runs in is written relative to it, as in the message; any other in full.
 - A [`@track_caller`](#panics-that-name-the-caller) function's message names its caller, and its trace still starts in the function, at its own line.

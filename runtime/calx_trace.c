@@ -133,14 +133,36 @@ static int is_named(const char* c, const char* name) {
     return strncmp(c, name, n) == 0 && (c[n] == 0 || c[n] == '.');
 }
 
+/* After a frame, the same frame `n` more times, as a recursion makes: once more is written again,
+ * and more than that says how many. */
+static void repeated(void (*text)(const char*), const char* line, int n) {
+    if (n == 1) {
+        text(line);
+    } else if (n > 1) {
+        char out[64];
+        snprintf(out, sizeof out, "\t... repeated %d more times\n", n);
+        text(out);
+    }
+}
+
 static void show_range(void (*text)(const char*), const found* f, int from, int to) {
+    char last[1536] = "";
+    int same = 0;
     for (int i = from; i < to; i++) {
         const found_frame* x = &f->list[i];
         char name[512], out[1536];
         if (!ends_with(x->file, ".calx") || !calx_name(x->c_name, x->file, name, sizeof name)) continue;
         snprintf(out, sizeof out, "\tat %s(%s:%llu)\n", name, shorten(x->file, f->cwd), x->line);
+        if (strcmp(out, last) == 0) {
+            same++;
+            continue;
+        }
+        repeated(text, last, same);
+        same = 0;
         text(out);
+        memcpy(last, out, sizeof last);
     }
+    repeated(text, last, same);
 }
 
 static void found_frames(found* f);

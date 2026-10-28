@@ -1,0 +1,34 @@
+// A stack overflow on a thread `Thread.spawn` started panics as one on the main thread does.
+
+import std.thread.{Task}
+
+fn deep(n: u64, above: mut [u64; 64]) -> u64 {
+    above[usize.wrap(n % 64)] += 1
+    if n == 0 {
+        return above[0]
+    }
+    var mine = [n; 64]
+    let below = deep(n - 1, mut mine)
+    return below + mine[usize.wrap(n % 64)] % 7
+}
+
+struct Deep {
+    out: Sender<u64>
+}
+
+impl Task for Deep {
+    fn run(own self) {
+        var start = [1u64; 64]
+        self.out.send(deep(100000000, mut start))
+    }
+}
+
+fn main() {
+    println("before")    // out: before
+    var results = Receiver<u64>()
+    let t = unsafe { Thread.spawn(Deep { out: results.sender() }) }
+    println("{results.wait() ?? 0}")
+    t.join()
+}
+
+// panic: <stack>: the calls went deeper than the thread's 8 MiB stack holds

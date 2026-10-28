@@ -828,6 +828,12 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // They don't change the generated code.
     std::vector<std::string> flags = {"-std=gnu17", "-fwrapv", "-ffp-contract=off", "-fno-math-errno", "-w",
                                       "-gline-tables-only"};
+#ifndef _WIN32
+    // A function whose frame is bigger than a page touches each page of it in turn, so a stack
+    // that overflows always reaches the page kept below it and panics, never stepping over it
+    // into other memory. Windows' code does this already, through __chkstk.
+    flags.push_back("-fstack-clash-protection");
+#endif
     if (mode == BuildMode::debug) {
         flags.push_back("-O0");
         flags.push_back("-DCX_DEBUG");  // the runtime checks that everything allocated is freed

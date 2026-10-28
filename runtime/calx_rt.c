@@ -24,6 +24,8 @@
 #include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -162,21 +164,142 @@ void cx_service_leave(void) { __atomic_fetch_sub(&services_live, 1, __ATOMIC_ACQ
  * only taken as the stack grows into them. */
 #define CX_THREAD_STACK ((cx_usize)8 << 20)
 
+/* A call that goes past the end of the stack panics, as any other bug does, with the message and
+ * the trace. The panic runs on stack kept for it: on Windows the end of the thread's own, which
+ * `SetThreadStackGuarantee` holds back until the stack overflows, and elsewhere a stack of its
+ * own the signal is taken on. Both are this big, room for the trace to read the line tables. */
+#define CX_PANIC_STACK ((cx_usize)256 << 10)
+
+CX_COLD void cx_panic_text(const char* at, const char* message);
+
+static CX_COLD void overflow_panic(void) {
+    cx_panic_text("<stack>", "the calls went deeper than the thread's 8 MiB stack holds");
+}
+
+#ifdef _WIN32
+static LONG WINAPI overflow_handler(EXCEPTION_POINTERS* e) {
+    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) overflow_panic();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* On each thread as it starts. */
+static void overflow_thread_begin(void) {
+    ULONG keep = (ULONG)CX_PANIC_STACK;
+    SetThreadStackGuarantee(&keep);
+}
+
+static void overflow_thread_end(void) {}
+
+static void overflow_start(void) {
+    AddVectoredExceptionHandler(1, overflow_handler);
+    overflow_thread_begin();
+}
+#else
+/* The lowest address of this thread's stack, and the stack the signal is taken on. */
+static _Thread_local uintptr_t stack_low;
+static _Thread_local void* signal_stack;
+
+/* A fault just below the stack's end is the stack overflowing into the pages kept below it, which
+ * are a page for a thread and a megabyte for the main thread. Any other is left to the system,
+ * which ends the program as it would without the handler. */
+static void overflow_handler(int sig, siginfo_t* info, void* context) {
+    (void)context;
+    uintptr_t at = (uintptr_t)info->si_addr, low = stack_low;
+    if (info->si_code > 0 && low && at < low + 4096 && low - at <= ((uintptr_t)2 << 20)) overflow_panic();
+    signal(sig, SIG_DFL);
+    if (info->si_code <= 0) raise(sig);
+}
+
+static void overflow_thread_begin(void) {
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        void* low;
+        size_t size;
+        if (pthread_attr_getstack(&attr, &low, &size) == 0) stack_low = (uintptr_t)low;
+        pthread_attr_destroy(&attr);
+    }
+    void* p = mmap(NULL, CX_PANIC_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+    if (p == MAP_FAILED) return;
+    stack_t s = {.ss_sp = p, .ss_size = CX_PANIC_STACK, .ss_flags = 0};
+    if (sigaltstack(&s, NULL) == 0) signal_stack = p;
+    else munmap(p, CX_PANIC_STACK);
+}
+
+static void overflow_thread_end(void) {
+    if (!signal_stack) return;
+    stack_t off = {.ss_sp = NULL, .ss_size = 0, .ss_flags = SS_DISABLE};
+    sigaltstack(&off, NULL);
+    munmap(signal_stack, CX_PANIC_STACK);
+    signal_stack = NULL;
+}
+
+static void overflow_start(void) {
+    struct sigaction a;
+    memset(&a, 0, sizeof a);
+    a.sa_sigaction = overflow_handler;
+    a.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&a.sa_mask);
+    sigaction(SIGSEGV, &a, NULL);
+    sigaction(SIGBUS, &a, NULL);
+    overflow_thread_begin();
+}
+#endif
+
 /* Starts a thread on `run(arg)` with that stack, giving it in `*thread`: 0, or the error,
  * `GetLastError`'s or `pthread_create`'s. */
 #ifdef _WIN32
+typedef struct {
+    LPTHREAD_START_ROUTINE run;
+    void* arg;
+} os_start;
+
+static DWORD WINAPI os_thread_main(LPVOID p) {
+    os_start s = *(os_start*)p;
+    free(p);
+    overflow_thread_begin();
+    DWORD r = s.run(s.arg);
+    overflow_thread_end();
+    return r;
+}
+
 int cx_os_thread(HANDLE* thread, LPTHREAD_START_ROUTINE run, void* arg) {
-    *thread = CreateThread(NULL, CX_THREAD_STACK, run, arg, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
-    return *thread ? 0 : (int)GetLastError();
+    os_start* s = (os_start*)malloc(sizeof *s);
+    if (!s) return ERROR_NOT_ENOUGH_MEMORY;
+    s->run = run;
+    s->arg = arg;
+    *thread = CreateThread(NULL, CX_THREAD_STACK, os_thread_main, s, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (*thread) return 0;
+    free(s);
+    return (int)GetLastError();
 }
 #else
+typedef struct {
+    void* (*run)(void*);
+    void* arg;
+} os_start;
+
+static void* os_thread_main(void* p) {
+    os_start s = *(os_start*)p;
+    free(p);
+    overflow_thread_begin();
+    void* r = s.run(s.arg);
+    overflow_thread_end();
+    return r;
+}
+
 int cx_os_thread(pthread_t* thread, void* (*run)(void*), void* arg) {
+    os_start* s = (os_start*)malloc(sizeof *s);
+    if (!s) return ENOMEM;
+    s->run = run;
+    s->arg = arg;
     pthread_attr_t attr;
     int e = pthread_attr_init(&attr);
-    if (e) return e;
-    e = pthread_attr_setstacksize(&attr, CX_THREAD_STACK);
-    if (!e) e = pthread_create(thread, &attr, run, arg);
-    pthread_attr_destroy(&attr);
+    if (!e) {
+        e = pthread_attr_setstacksize(&attr, CX_THREAD_STACK);
+        if (!e) e = pthread_create(thread, &attr, os_thread_main, s);
+        pthread_attr_destroy(&attr);
+    }
+    if (e) free(s);
     return e;
 }
 #endif
@@ -365,6 +488,7 @@ void cx_start(int argc, char** argv) {
 #else
     read_args(argc, argv);
 #endif
+    overflow_start();
 }
 
 int cx_finish(void) {

@@ -1,0 +1,22 @@
+// A call that goes deeper than the stack holds panics, as any other bug does: the output so far,
+// then the message and the trace, and status 101. Its place is `<stack>`, since it's no one line's
+// fault.
+
+// Each frame holds an array the frame below changes, so a release build can't make it a loop.
+fn deep(n: u64, above: mut [u64; 64]) -> u64 {
+    above[usize.wrap(n % 64)] += 1
+    if n == 0 {
+        return above[0]
+    }
+    var mine = [n; 64]
+    let below = deep(n - 1, mut mine)
+    return below + mine[usize.wrap(n % 64)] % 7
+}
+
+fn main() {
+    println("before")    // out: before
+    var start = [1u64; 64]
+    println("{deep(100000000, mut start)}")
+}
+
+// panic: <stack>: the calls went deeper than the thread's 8 MiB stack holds
