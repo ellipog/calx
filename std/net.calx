@@ -17,6 +17,7 @@ extern "C" {
     fn cx_net_read(net: u64, conn: u32, to: *u8, n: usize) -> usize
     fn cx_net_send(net: u64, conn: u32, from: *const u8, n: usize)
     fn cx_net_close(net: u64, conn: u32)
+    fn cx_net_peer(net: u64, conn: u32, out: *u8) -> u32
     fn cx_net_error_kind() -> u32
     fn cx_net_error_code() -> i32
 }
@@ -45,6 +46,109 @@ impl Conn {
     pub fn slot(self) -> usize {
         return usize(self.id & 0xFFFFFF)
     }
+}
+
+/// An IP address.
+pub enum Ip {
+    /// An IPv4 address, such as `127.0.0.1`.
+    V4([u8; 4])
+    /// An IPv6 address, and its scope: the interface a link-local address is on, or 0.
+    V6([u8; 16], u32)
+}
+
+impl Ip {
+    /// The address as RFC 5952 writes it: `127.0.0.1`, `::1`, `2001:db8::8:800:200c:417a`,
+    /// `::ffff:192.0.2.1` for an IPv4-mapped address, and `fe80::1%3` with a scope.
+    pub fn to_string(self) -> String {
+        return match self {
+            Ip.V4(b) => "{b[0]}.{b[1]}.{b[2]}.{b[3]}",
+            Ip.V6(b, scope) => {
+                var out = v6_text(b)
+                if scope != 0 {
+                    out.push_str("%{scope}")
+                }
+                out
+            },
+        }
+    }
+}
+
+/// An IP address and a port.
+pub struct Address {
+    pub ip: Ip
+    pub port: u16
+}
+
+impl Address {
+    /// The address and port as RFC 5952 writes them: `127.0.0.1:25565`, or `[::1]:25565`.
+    pub fn to_string(self) -> String {
+        return match self.ip {
+            Ip.V4(_) => "{self.ip.to_string()}:{self.port}",
+            Ip.V6(_, _) => "[{self.ip.to_string()}]:{self.port}",
+        }
+    }
+}
+
+// An IPv6 address's text, without its scope: each 16-bit group in lowercase hex without leading
+// zeros, and the longest run of two or more zero groups, the first if there's a tie, as `::`.
+fn v6_text(b: [u8; 16]) -> String {
+    var mapped = b[10] == 0xFF and b[11] == 0xFF
+    let prefix: usize = 10
+    for i in 0..prefix {
+        mapped = mapped and b[i] == 0
+    }
+    if mapped {
+        return "::ffff:{b[12]}.{b[13]}.{b[14]}.{b[15]}"
+    }
+    var groups: [u32; 8] = [0; 8]
+    let count: usize = 8
+    for i in 0..count {
+        groups[i] = (u32(b[2 * i]) << 8) | u32(b[2 * i + 1])
+    }
+    var best_at: usize = 8
+    var best_len: usize = 1
+    var i: usize = 0
+    while i < 8 {
+        if groups[i] != 0 {
+            i += 1
+            continue
+        }
+        var end = i
+        while end < 8 and groups[end] == 0 {
+            end += 1
+        }
+        if end - i > best_len {
+            best_at = i
+            best_len = end - i
+        }
+        i = end
+    }
+    let digits = "0123456789abcdef"
+    var out = String()
+    var g: usize = 0
+    while g < 8 {
+        if g == best_at {
+            out.push_str("::")
+            g += best_len
+            continue
+        }
+        if g > 0 and g != best_at + best_len {
+            out.push(':')
+        }
+        let v = groups[g]
+        var started = false
+        var shift: i32 = 12
+        while shift >= 0 {
+            let d = usize((v >> shift) & 15)
+            if d != 0 or started or shift == 0 {
+                out.push_str(digits[d..d + 1])
+                started = true
+            }
+            shift -= 4
+        }
+        g += 1
+    }
+    return out
 }
 
 /// What a poll reports.
@@ -152,5 +256,32 @@ impl Net {
         unsafe {
             cx_net_close(self.handle, conn.id)
         }
+    }
+
+    /// The address at the connection's other end, as it was when the connection opened. It
+    /// stays until the poll after the connection's `Closed`, so the `Closed` can be logged with
+    /// it. None for a connection that never opened, and once it's gone.
+    pub fn peer(self, conn: Conn) -> Address? {
+        var out = List<u8>()
+        out.reserve(22)
+        // The runtime writes all 22 bytes.
+        let family = unsafe { cx_net_peer(self.handle, conn.id, out.as_mut_ptr()) }
+        unsafe {
+            out.set_len(22)
+        }
+        let port = u16.wrap((u32(out[16]) << 8) | u32(out[17]))
+        if family == 4 {
+            return some(Address { ip: Ip.V4([out[0], out[1], out[2], out[3]]), port: port })
+        }
+        if family != 6 {
+            return none
+        }
+        var b: [u8; 16] = [0; 16]
+        let size: usize = 16
+        for i in 0..size {
+            b[i] = out[i]
+        }
+        let scope = (u32(out[18]) << 24) | (u32(out[19]) << 16) | (u32(out[20]) << 8) | u32(out[21])
+        return some(Address { ip: Ip.V6(b, scope), port: port })
     }
 }

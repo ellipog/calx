@@ -56,16 +56,21 @@ fn main() {
 | --- | --- |
 | `Net` | Listening sockets, connections and their events. It's `Copy`: copies are the same `Net` |
 | `Net.new() -> Net ! NetError` | A new, empty `Net` |
-| `net.listen(host: String, port: u16) -> u16 ! NetError` | Listens on `host` and `port`, and returns the port, which the system picks when `port` is 0. An empty host listens on every address, IPv4 and IPv6 |
+| `net.listen(host: String, port: u16) -> u16 ! NetError` | Listens on `host` and `port`, and returns the port, which the system picks when `port` is 0. An empty host listens on every address, IPv4 and IPv6, with one IPv6 socket that takes IPv4 clients too; where the machine has no IPv6, on every IPv4 address |
 | `net.connect(host: String, port: u16) -> Conn ! NetError` | Starts opening a connection. A poll reports `Connected` once it's open, or `Closed` if it couldn't be |
 | `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened |
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go as soon as the socket takes them |
 | `net.close(conn: Conn)` | Closes the connection once what was queued is sent |
+| `net.peer(conn: Conn) -> Address?` | The address at the connection's other end, as it was when it opened. It stays until the poll after the connection's `Closed`, so the `Closed` can be logged with it, and is `none` for a connection that never opened |
 | `Conn` | A connection. It's `Copy` |
 | `conn.slot() -> usize` | A small number for the connection, counting from 0, for indexing what the program keeps per connection |
 | `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)` or `Closed(Conn)` |
 | `NetError` | `AddressInUse`, `BadAddress`, `Refused`, or `Os(i32)` with the system's error code |
+| `Ip` | `V4([u8; 4])`, or `V6([u8; 16], u32)` with its scope, the interface a link-local address is on, or 0 |
+| `ip.to_string() -> String` | The address as RFC 5952 writes it: `127.0.0.1`, `::1`, `2001:db8::8:800:200c:417a`, `fe80::1%3` |
+| `Address` | `ip: Ip` and `port: u16` |
+| `address.to_string() -> String` | `127.0.0.1:25565`, or `[::1]:25565` |
 
 ## Events
 
@@ -81,6 +86,36 @@ What arrived before a `Closed` can still be read until the next poll. After that
 Bytes written before `Connected` wait until the connection opens. Bytes written to a connection that has closed are dropped.
 
 A `close` is graceful: the other side gets every byte queued before it, then the end of the stream, not a reset. On Windows that means cancelling the receive the runtime keeps pending, and closing the socket once it comes back, since closing it with a receive pending resets the connection.
+
+## Addresses
+
+```calx
+import std.net.{Net, Event}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("", 0)!    // every address
+    _ = net.connect("127.0.0.1", port)!
+    var events = List<Event>()
+    var seen = false
+    while not seen {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => {
+                    if let a = net.peer(c) {
+                        println("from {a.ip.to_string()}")    // out: from 127.0.0.1
+                    }
+                    seen = true
+                }
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+An IPv4 client of a socket that listens on IPv6 too, as one on every address does, shows as IPv4, not as the IPv4-mapped `::ffff:127.0.0.1`, as Java shows it.
 
 ## Errors
 

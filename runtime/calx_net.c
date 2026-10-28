@@ -114,6 +114,8 @@ struct net_slot {
     int received;  /* a Received event is waiting in this poll */
     int reported;  /* a poll before this one returned its Closed event */
     net_buf in, out;
+    struct sockaddr_storage peer;  /* the other end, from when it opened */
+    int has_peer;
 #ifdef _WIN32
     SOCKET s;
     int pending;  /* operations the system still holds */
@@ -244,6 +246,17 @@ static struct addrinfo* resolve(const cx_u8* host, cx_usize len, cx_u16 port, in
         return NULL;
     }
     return res;
+}
+
+/* The address to listen on. For every address it's the IPv6 one, which takes IPv4 clients too with
+ * IPV6_V6ONLY off, since getaddrinfo lists 0.0.0.0 first on Linux and :: first on Windows. */
+static const struct addrinfo* listen_addr(const struct addrinfo* a, int every) {
+    if (every) {
+        for (const struct addrinfo* p = a; p; p = p->ai_next) {
+            if (p->ai_family == AF_INET6) return p;
+        }
+    }
+    return a;
 }
 
 static cx_u16 local_port(const struct sockaddr_storage* a) {
@@ -392,6 +405,8 @@ static void post_send(net* n, net_slot* s) {
 static void opened(net* n, net_slot* s) {
     BOOL yes = TRUE;
     setsockopt(s->s, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof yes);
+    int len = (int)sizeof s->peer;
+    s->has_peer = getpeername(s->s, (struct sockaddr*)&s->peer, &len) == 0;
     s->state = CONN_OPEN;
     post_recv(n, s);
     post_send(n, s);
@@ -519,7 +534,13 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     net* n = (net*)(uintptr_t)h;
     struct addrinfo* a = resolve(host, len, port, 1);
     if (!a) return -1;
-    SOCKET s = WSASocketW(a->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    const struct addrinfo* b = listen_addr(a, len == 0);
+    SOCKET s = WSASocketW(b->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (s == INVALID_SOCKET && b != a) {
+        /* No IPv6 on this machine: every IPv4 address, then. */
+        b = a;
+        s = WSASocketW(b->ai_family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    }
     if (s == INVALID_SOCKET) {
         fail_os();
         freeaddrinfo(a);
@@ -528,9 +549,9 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     BOOL yes = TRUE, no = FALSE;
     setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&yes, sizeof yes);
     /* An IPv6 listener takes IPv4 clients too, as it does on Linux. */
-    if (a->ai_family == AF_INET6) setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&no, sizeof no);
-    int family = a->ai_family;
-    if (bind(s, a->ai_addr, (int)a->ai_addrlen) != 0 || listen(s, SOMAXCONN) != 0 ||
+    if (b->ai_family == AF_INET6) setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&no, sizeof no);
+    int family = b->ai_family;
+    if (bind(s, b->ai_addr, (int)b->ai_addrlen) != 0 || listen(s, SOMAXCONN) != 0 ||
         !CreateIoCompletionPort((HANDLE)s, n->iocp, 0, 0)) {
         fail_os();
         closesocket(s);
@@ -661,6 +682,8 @@ static int watch(net* n, net_slot* s, int fd, cx_u32 events) {
 static void opened(net* n, net_slot* s) {
     int yes = 1;
     setsockopt(s->fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
+    socklen_t len = sizeof s->peer;
+    s->has_peer = getpeername(s->fd, (struct sockaddr*)&s->peer, &len) == 0;
     s->state = CONN_OPEN;
     s->writable = 1;
     flush(n, s);
@@ -770,11 +793,17 @@ cx_i32 cx_net_listen(cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port) {
     net* n = (net*)(uintptr_t)h;
     struct addrinfo* a = resolve(host, len, port, 1);
     if (!a) return -1;
-    int fd = socket(a->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    const struct addrinfo* b = listen_addr(a, len == 0);
+    int fd = socket(b->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (fd < 0 && b != a) {
+        /* No IPv6 on this machine: every IPv4 address, then. */
+        b = a;
+        fd = socket(b->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    }
     int yes = 1, no = 0;
     if (fd >= 0) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-    if (fd >= 0 && a->ai_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof no);
-    if (fd < 0 || bind(fd, a->ai_addr, a->ai_addrlen) != 0 || listen(fd, SOMAXCONN) != 0) {
+    if (fd >= 0 && b->ai_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof no);
+    if (fd < 0 || bind(fd, b->ai_addr, b->ai_addrlen) != 0 || listen(fd, SOMAXCONN) != 0) {
         fail_os();
         if (fd >= 0) close(fd);
         freeaddrinfo(a);
@@ -910,6 +939,39 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
     if (s->state == CONN_CONNECTING || !buf_live(&s->out)) lost(n, s);
     else s->state = CONN_CLOSING;
 #endif
+}
+
+/* The other end of the connection, as it was when the connection opened: 4 or 6 for its family,
+ * or 0 if there's no such connection or the system didn't say. The address goes in out[0..16),
+ * the port in out[16..18) and an IPv6 scope in out[18..22), both big-endian. An IPv4 client of
+ * a socket that listens on IPv6 too comes back as IPv4, not as an IPv4-mapped IPv6 address. */
+cx_u32 cx_net_peer(cx_u64 h, cx_u32 id, cx_u8* out) {
+    net_check_thread();
+    net_slot* s = conn_of((net*)(uintptr_t)h, id);
+    memset(out, 0, 22);
+    if (!s || !s->has_peer) return 0;
+    if (s->peer.ss_family == AF_INET) {
+        const struct sockaddr_in* a = (const struct sockaddr_in*)&s->peer;
+        memcpy(out, &a->sin_addr, 4);
+        memcpy(out + 16, &a->sin_port, 2);
+        return 4;
+    }
+    if (s->peer.ss_family != AF_INET6) return 0;
+    const struct sockaddr_in6* a = (const struct sockaddr_in6*)&s->peer;
+    const cx_u8* b = (const cx_u8*)&a->sin6_addr;
+    static const cx_u8 mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+    memcpy(out + 16, &a->sin6_port, 2);
+    if (memcmp(b, mapped, 12) == 0) {
+        memcpy(out, b + 12, 4);
+        return 4;
+    }
+    memcpy(out, b, 16);
+    cx_u32 scope = (cx_u32)a->sin6_scope_id;
+    out[18] = (cx_u8)(scope >> 24);
+    out[19] = (cx_u8)(scope >> 16);
+    out[20] = (cx_u8)(scope >> 8);
+    out[21] = (cx_u8)scope;
+    return 6;
 }
 
 cx_u32 cx_net_error_kind(void) { return net_err_kind; }

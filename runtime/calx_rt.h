@@ -501,6 +501,7 @@ CX_FN(cx_usize, cx_net_available, (cx_u64 h, cx_u32 id));
 CX_FN(cx_usize, cx_net_read, (cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max));
 CX_FN(void, cx_net_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len));
 CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
+CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));
 
