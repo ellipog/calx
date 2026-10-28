@@ -388,6 +388,16 @@ cx_usize cx_http_body_len(cx_u64 h);
 void cx_http_body(cx_u64 h, cx_u8* out);
 void cx_http_free(cx_u64 h);
 
+/* LZ4 as lz4-java's block streams write it, in calx_lz4.c (D118). `cx_lz4_decode` carries on from
+ * `state`, four numbers: where the next header is, the output's length, what the rest decompresses
+ * to, and the length lz4-java's buffer would have, 21 to start. It
+ * gives 0 at the stream's end, 1 when it needs more room, 2 when it stopped at the end of the last
+ * room, and -1, -2 or -3 for a stream that's corrupt, cut off, or fails a checksum. */
+cx_u32 cx_lz4_xxh32(const cx_u8* p, cx_usize n, cx_u32 seed);
+cx_usize cx_lz4_bound(cx_usize n);
+cx_usize cx_lz4_compress(const cx_u8* in, cx_usize n, cx_u8* out);
+cx_i32 cx_lz4_decode(const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last);
+
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
  * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */

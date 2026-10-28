@@ -1,0 +1,154 @@
+// std.lz4 writes the streams lz4-java 1.10.1's LZ4BlockOutputStream writes, the version vanilla
+// ships, and reads what its LZ4BlockInputStream reads. The hex below is Java's, and so is each outcome.
+
+import std.lz4.{Error, compress, compress_into, decompress, decompress_into, xxh32}
+
+fn hex(bytes: List<u8>) -> String {
+    let digits = "0123456789abcdef"
+    var s = String()
+    for b in bytes {
+        let hi = usize(b / 16)
+        let lo = usize(b % 16)
+        s.push_str(digits[hi..hi + 1])
+        s.push_str(digits[lo..lo + 1])
+    }
+    return s
+}
+
+fn nibble(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn unhex(s: str) -> List<u8> {
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < s.len() {
+        out.push(nibble(s.byte_at(i)) * 16 + nibble(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn outcome(bytes: List<u8>, limit: usize) -> String {
+    return match decompress(bytes, limit) {
+        ok(b) => "{b.len()} bytes",
+        err(e) => "{e}",
+    }
+}
+
+// Bytes like a chunk's: runs, small numbers, and now and then something random.
+fn chunkish(n: usize) -> List<u8> {
+    var out: List<u8> = []
+    var x: u32 = 7
+    for i in 0..n {
+        x = x * 1103515245 + 12345
+        out.push(if (x >> 16) % 9 == 0 { u8.wrap(x >> 24) } else { u8.wrap(i / 64 % 5) })
+    }
+    return out
+}
+
+// An LZ4 block by itself in a stream, with the header's lengths and checksum.
+fn one_block(block: List<u8>, len: u32, check: u32) -> List<u8> {
+    var s = "LZ4Block".to_bytes()
+    s.push(0x26)
+    for v in [u32.wrap(block.len()), len, check] {
+        for k in 0..4 {
+            s.push(u8.wrap(v >> u32.wrap(k * 8)))
+        }
+    }
+    for b in block {
+        s.push(b)
+    }
+    for b in unhex("4c5a34426c6f636b16000000000000000000000000") {
+        s.push(b)
+    }
+    return s
+}
+
+fn main() {
+    println("{xxh32("abc".to_bytes(), 0)} {xxh32([], 0)} {xxh32("a".to_bytes(), 0x9747B28C) & 0x0FFFFFFF}")    // out: 852579327 46947589 45605140
+
+    // The bytes are Java's.
+    println(hex(compress([])))    // out: 4c5a34426c6f636b16000000000000000000000000
+    println(hex(compress("a".to_bytes())))    // out: 4c5a34426c6f636b16010000000100000014e1b702614c5a34426c6f636b16000000000000000000000000
+    println(hex(compress("hello hello hello hello hello hello".to_bytes())))    // out: 4c5a34426c6f636b261000000023000000146621086f68656c6c6f200600055068656c6c6f4c5a34426c6f636b16000000000000000000000000
+
+    // Java's bytes decompress.
+    let java = unhex("4c5a34426c6f636b261000000023000000146621086f68656c6c6f200600055068656c6c6f4c5a34426c6f636b16000000000000000000000000")
+    println(String.from_utf8(decompress(java.copy(), 100)!) ?? "bad")    // out: hello hello hello hello hello hello
+
+    // Blocks of 64 KiB, the last one shorter, and what doesn't compress is stored.
+    let data = chunkish(200000)
+    let packed = compress(data)
+    let back = decompress(packed.copy(), data.len())!
+    println("{back == data} {packed.len() < data.len() / 2}")    // out: true true
+    var noise: List<u8> = []
+    var x: u32 = 1
+    for _ in 0..1000 {
+        x = x * 1103515245 + 12345
+        noise.push(u8.wrap(x >> 24))
+    }
+    let stored = compress(noise)
+    println("{stored.len()} {hex([stored[8]])}")    // out: 1042 16
+
+    // Broken streams.
+    var cut = packed.copy()
+    cut.truncate(packed.len() / 2)
+    var flipped = packed.copy()
+    flipped[8] = 0x36
+    var bad_check = packed.copy()
+    bad_check[17] = bad_check[17] + 1
+    println(outcome(cut, data.len()))    // out: Truncated
+    println(outcome(flipped, data.len()))    // out: Corrupt
+    println(outcome(bad_check, data.len()))    // out: Checksum
+    println(outcome(packed.copy(), data.len() - 1))    // out: TooLong
+    println(outcome("LZ4Blocx".to_bytes(), 10))    // out: Truncated
+    println(outcome(unhex("4c5a34426c6f636c16000000000000000000000000"), 10))    // out: Corrupt
+    println(outcome([], 10))    // out: Truncated
+
+    // Blocks that lz4-java takes and the LZ4 format says no compressor writes. 8 literals, a match
+    // of 4 one back, then 5 literals: the last match starts 9 bytes from the end, not 12.
+    let near_end = unhex("8061626364656667680100507677787979")
+    println(outcome(one_block(near_end.copy(), 17, 0), 100))    // out: Checksum
+    let right = decompress(one_block(near_end, 17, xxh32("abcdefghhhhhvwxyy".to_bytes(), 0x9747B28C) & 0x0FFFFFFF), 100)!
+    println(String.from_utf8(right) ?? "bad")    // out: abcdefghhhhhvwxyy
+    // A match 0 back is zeros.
+    let zeros = unhex("6162636465666768000000007677787979")
+    println(hex(decompress(one_block(unhex("8061626364656667680000507677787979"), 17, xxh32(zeros, 0x9747B28C) & 0x0FFFFFFF), 100)!))    // out: 6162636465666768000000007677787979
+
+    // lz4-java's decompressor reads to the end of its buffer, not the block's, and the buffer is
+    // 21 bytes at first and grows with the blocks; whether literals end a block turns on that. 13
+    // literals, a match of 8 one back, and a "z": by itself the literals would have to be the last.
+    let late = unhex("d46162636465666768696a6b6c6d0100107a")
+    let late_check = xxh32("abcdefghijklmmmmmmmmmz".to_bytes(), 0x9747B28C) & 0x0FFFFFFF
+    println(outcome(one_block(late.copy(), 22, late_check), 100))    // out: Corrupt
+    var after = compress(chunkish(1000))
+    after.truncate(after.len() - 21)
+    for b in one_block(late, 22, late_check) {
+        after.push(b)
+    }
+    println(outcome(after, 2000))    // out: 1022 bytes
+
+    // Anything after the stream's end is ignored.
+    var more = compress("abc".to_bytes())
+    more.push(42)
+    println(outcome(more, 10))    // out: 3 bytes
+
+    // Into a list that has bytes already, stopping at the limit inside a block.
+    var out = "> ".to_bytes()
+    let ended = decompress_into(java, 0, java.len(), 11, mut out)!
+    println("{ended} {String.from_utf8(out) ?? "bad"}")    // out: false > hello hello
+
+    // A part of a list, onto the end of another.
+    var region: List<u8> = [4]
+    let text = "xxhello hello hello helloxx".to_bytes()
+    compress_into(text, 2, text.len() - 2, mut region)
+    var inner: List<u8> = []
+    _ = decompress_into(region, 1, region.len(), 100, mut inner)!
+    println("{region[0]} {String.from_utf8(inner) ?? "bad"}")    // out: 4 hello hello hello hello
+    match decompress(region, 100) {
+        ok(_) => println("ok"),
+        err(Error.Corrupt) => println("the 4 isn't a header"),    // out: the 4 isn't a header
+        err(e) => println("{e}"),
+    }
+}

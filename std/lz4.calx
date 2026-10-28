@@ -1,0 +1,111 @@
+/// LZ4, as lz4-java's `LZ4BlockOutputStream` writes it and `LZ4BlockInputStream` reads it
+/// (D118).
+///
+/// Vanilla stores region-file chunks this way when server.properties says
+/// `region-file-compression=lz4`. It's much faster than zlib, and the files are bigger.
+module std.lz4
+
+extern "C" {
+    fn cx_lz4_xxh32(p: *const u8, n: usize, seed: u32) -> u32
+    fn cx_lz4_bound(n: usize) -> usize
+    fn cx_lz4_compress(input: *const u8, n: usize, out: *u8) -> usize
+    fn cx_lz4_decode(input: *const u8, n: usize, state: *usize, out: *u8, end: usize, last: bool) -> i32
+}
+
+/// Why bytes didn't decompress.
+pub enum Error {
+    /// They aren't an LZ4 block stream.
+    Corrupt
+    /// They end before the stream does.
+    Truncated
+    /// A block's checksum doesn't match what it decompresses to.
+    Checksum
+    /// They decompress to more than the limit. Only `decompress` gives this.
+    TooLong
+}
+
+/// The bytes compressed, in blocks of 64 KiB, as vanilla's `new LZ4BlockOutputStream(out)`
+/// writes them.
+pub fn compress(bytes: List<u8>) -> List<u8> {
+    var out: List<u8> = []
+    compress_into(bytes, 0, bytes.len(), mut out)
+    return out
+}
+
+/// Compresses the bytes from `from` up to `to` onto the end of `out`. Panics unless the range is
+/// in `bytes`.
+@track_caller
+pub fn compress_into(bytes: List<u8>, from: usize, to: usize, out: mut List<u8>) {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let n = to - from
+    out.reserve(unsafe { cx_lz4_bound(n) })
+    unsafe {
+        let start = out.len()
+        let wrote = cx_lz4_compress(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(start))
+        out.set_len(start + wrote)
+    }
+}
+
+/// What the stream decompresses to, if it's at most `limit` bytes. Anything after the block that
+/// ends the stream is ignored, as lz4-java ignores it.
+pub fn decompress(bytes: List<u8>, limit: usize) -> List<u8> ! Error {
+    var out: List<u8> = []
+    let ended = try decompress_into(bytes, 0, bytes.len(), limit, mut out)
+    if not ended {
+        fail Error.TooLong
+    }
+    return out
+}
+
+/// Decompresses the bytes from `from` up to `to` onto the end of `out`, adding at most `limit`
+/// bytes. Gives `true` if the stream ended, and `false` if it stopped at the limit with more to
+/// come. On an error, `out` keeps the blocks before it. Panics unless the range is in `bytes`.
+@track_caller
+pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, limit: usize, out: mut List<u8>) -> bool ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let n = to - from
+    let start = out.len()
+    // Where the next header is, the output's length, what the rest decompresses to, and the length
+    // lz4-java's buffer would have, which decides some blocks' ends. The first call has no room,
+    // and says how much the headers ask for.
+    var state: List<usize> = [0, start, 0, 21]
+    var room: usize = 0
+    loop {
+        let left = limit - (out.len() - start)
+        if room > left / 2 {
+            room = left
+        }
+        out.reserve(room)
+        let status = unsafe { cx_lz4_decode(bytes.as_ptr().add(from), n, state.as_mut_ptr(), out.as_mut_ptr(), out.len() + room, room == left) }
+        unsafe {
+            out.set_len(state[1])
+        }
+        if status == 0 {
+            return true
+        }
+        if status == 2 {
+            return false
+        }
+        if status == 1 {
+            room = state[2]
+            continue
+        }
+        if status == -1 {
+            fail Error.Corrupt
+        }
+        if status == -2 {
+            fail Error.Truncated
+        }
+        fail Error.Checksum
+    }
+}
+
+/// The XXH32 hash of the bytes with `seed`, as lz4-java's `XXHash32.hash` gives it. Each block's
+/// checksum is the low 28 bits of it, with the seed 0x9747B28C.
+pub fn xxh32(bytes: List<u8>, seed: u32) -> u32 {
+    return unsafe { cx_lz4_xxh32(bytes.as_ptr(), bytes.len(), seed) }
+}

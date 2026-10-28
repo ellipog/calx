@@ -1,0 +1,9 @@
+// A range outside the bytes panics at the call.
+
+import std.lz4.{compress_into}
+
+fn main() {
+    let bytes: List<u8> = [1, 2, 3]
+    var out: List<u8> = []
+    compress_into(bytes, 1, 4, mut out)    // panic: the range 1..4 is out of bounds for 3 bytes
+}
