@@ -214,12 +214,12 @@ Built: `Arena`, whose lists take memory from its chunks and are freed all at onc
 
 ## Panics
 
-What a panic does in a plain program is built: see [Printing and panics](reference/printing.md#panics). The rest of this section isn't.
+What a panic does in a plain program is built, its stack trace too: see [Printing and panics](reference/printing.md#panics). The rest of this section isn't.
 
 - A panic is an unrecoverable bug: a failed bounds check, a division by zero, `opt!` on `none`, `map[h]` on a stale handle, or `panic("message")`.
 - Calx can't catch a panic. Expected failures are errors (`! E`).
 - **In a plugin instance:** the panic unwinds to the host's dispatch point, which stops that instance and frees its heap. The region keeps ticking. A plugin that keeps panicking is disabled (D25). Native plugins unwind with a saved jump point at each dispatch, and no destructors are needed because all of the instance's memory is in its heap. WASM traps.
-- **In Calcite core:** the runtime writes a crash report with a Calx stack trace, then saves and stops, as vanilla does.
+- **In Calcite core:** the runtime writes a crash report with the Calx stack trace ([stack traces](reference/printing.md#stack-traces)), then saves and stops, as vanilla does.
 - **Tick budgets** for plugins use the same path: a handler over budget is stopped like a panic (`P7.3`).
 
 ## Strings (D28)
@@ -372,7 +372,7 @@ Phase 2's converter writes vanilla's data as neutral JSON tables: block states, 
 
 ### Debugging
 
-Built: the emitter writes `#line` directives and both build modes keep line tables, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C ([build modes](reference/command.md#build-modes)). Editors get errors as you type ([editor support](reference/editors.md)). Still to build: a Calx stack trace in panic messages, which Calcite's crash reports need ([Panics](#panics)).
+Built: the emitter writes `#line` directives and both build modes keep line tables, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C ([build modes](reference/command.md#build-modes)). Editors get errors as you type ([editor support](reference/editors.md)). A panic writes its Calx stack trace, inlined calls and `parallel for` bodies included ([stack traces](reference/printing.md#stack-traces)).
 
 ## Non-goals
 

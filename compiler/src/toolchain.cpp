@@ -613,8 +613,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         all_keys += " " + key;
         return true;
     };
-    bool parts_ok = true;
-    if (calls({"cx_net_"})) parts_ok = part("calx_net.c");
+    // Stack traces are in every program, since any can panic, in a file of their own since they
+    // read debug information, which the rest of the runtime never does.
+    bool parts_ok = part("calx_trace.c");
+    if (parts_ok && calls({"cx_net_"})) parts_ok = part("calx_net.c");
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");
     if (parts_ok && calls({"cx_case_"})) parts_ok = part("calx_case.c");

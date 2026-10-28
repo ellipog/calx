@@ -121,10 +121,15 @@ public:
             for (Item* f : p.defs) out_ += linkage(f, external) + fns_.at(f).sig + ";\n";
             out_ += "\n";
             // After the functions' declarations, as a type's glue can call what it writes for itself.
+            out_ += kNoDebugPush;
             emit_glue(order);
+            out_ += kNoDebugPop;
             for (Item* f : p.defs) {
                 const FnOut& o = fns_.at(f);
-                out_ += o.helpers + o.directive + linkage(f, external) + o.sig + o.body;
+                // `main` stays a function of its own, so a stack trace from a release build still
+                // shows it rather than C's `main`, which it's called from once.
+                const char* keep = f == prog_.main ? "__attribute__((noinline)) " : "";
+                out_ += o.helpers + o.directive + keep + linkage(f, external) + o.sig + o.body;
             }
             if (has_main) {
                 out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    ";
@@ -638,6 +643,12 @@ private:
     // it, all `static inline`, so the unused ones cost nothing. The types the file compares or
     // prints, and those they hold, get a function that does that: the derived `Equal` and
     // `Display`, which go through each value in turn.
+    // The glue and the runtime's templates have no debug information, so code inlined from them
+    // takes the Calx line it was called from, which is what debuggers and stack traces show.
+    static constexpr const char* kNoDebugPush = "#pragma clang attribute push (__attribute__((nodebug)), apply_to = hasType(functionType))\n";
+    static constexpr const char* kNoDebugPop = "#pragma clang attribute pop\n";
+    static std::string no_debug(const std::string& text) { return kNoDebugPush + text + kNoDebugPop; }
+
     void emit_glue(const std::vector<const Type*>& order) {
         std::vector<const Type*> owning, eqs, shows, hashes, cmps, tables, heaps;
         for (const Type* t : order) {
@@ -914,7 +925,7 @@ private:
         std::string stable = exact_order(t, seen) ? "" : "#define CX_SORT_STABLE\n";
         return stable + "#define CX_SORT_T " + ctype(t) + "\n#define CX_SORT_NAME cx_sort_" + part(t) +
                "\n#define CX_SORT_LESS(cx_sa, cx_sb) " + less(t, "(*cx_sa)", "(*cx_sb)") +
-               "\n#define CX_SORT_STATIC\n#include \"calx_sort.h\"\n";
+               "\n#define CX_SORT_STATIC\n" + no_debug("#include \"calx_sort.h\"\n");
     }
 
     // --- maps and sets (D94) -------------------------------------------------------------------
@@ -1150,7 +1161,7 @@ private:
                         "\n#define CX_HP_LESS(cx_ha, cx_hb) " + (packed.empty() ? less(el, "(cx_ha)", "(cx_hb)") : packed) + "\n";
         if (!is_copy(el)) s += "#define CX_HP_DROP(cx_p) " + drop_fn(el) + "(cx_p)\n";
         if (scalar_order(el) || !packed.empty()) s += "#define CX_HP_CHEAP\n";
-        return s + "#include \"calx_heap.h\"\n";
+        return s + no_debug("#include \"calx_heap.h\"\n");
     }
 
     // `q.push(x)` and the rest of what only a queue does; what it shares with a list, such as
@@ -1205,7 +1216,7 @@ private:
         if (map && !is_copy(t->elem)) {
             s += "#define CX_BT_DROP_V(cx_p) " + drop_fn(t->elem) + "(cx_p)\n#define CX_BT_COPY_V(cx_p) " + copy_fn(t->elem) + "(cx_p)\n";
         }
-        return s + "#include \"calx_btree.h\"\n";
+        return s + no_debug("#include \"calx_btree.h\"\n");
     }
     // A key, a place, as it's looked up: a `String` as a `str`.
     static std::string sorted_look(const Type* t, const std::string& k) { return str_key(t) ? "cx_sv(" + k + ")" : k; }
@@ -2554,6 +2565,9 @@ $dropall    m->len = 0;
         out_.append(static_cast<std::size_t>(indent_) * 4, ' ');
         out_ += s;
         out_ += '\n';
+        // `#line N` names only the line after it, so each C line is followed by it again, and a
+        // statement of several C lines, or one with a temporary declared before it, is all on N.
+        out_ += last_directive_;
     }
 
     // `#line`. A function's first one names its file, and the rest in that file give just the
@@ -2564,12 +2578,15 @@ $dropall    m->len = 0;
         auto [ln, col] = sources_.file(s.file).position(s.begin);
         (void)col;
         if (s.file == line_file_ && !line_files_mixed_) {
-            out_ += "#line " + std::to_string(ln) + "\n";
+            last_directive_ = "#line " + std::to_string(ln) + "\n";
+            out_ += last_directive_;
             return;
         }
         if (line_file_ != kNoFile && s.file != line_file_) line_files_mixed_ = true;
         line_file_ = s.file;
-        out_ += "#line " + std::to_string(ln) + " " + c_string_literal(abs_path(s.file)) + "\n";
+        std::string named = "#line " + std::to_string(ln) + " " + c_string_literal(abs_path(s.file)) + "\n";
+        last_directive_ = line_files_mixed_ ? named : "#line " + std::to_string(ln) + "\n";
+        out_ += named;
     }
 
     const std::string& abs_path(std::uint32_t file) {
@@ -2614,6 +2631,7 @@ $dropall    m->len = 0;
         out_.clear();
         line_file_ = kNoFile;
         line_files_mixed_ = false;
+        last_directive_.clear();
         directive(f->name_span);
         o.directive.swap(out_);
         uses_ = &o.sig_uses;
@@ -3115,8 +3133,10 @@ $dropall    m->len = 0;
         int outer_indent = indent_;
         std::uint32_t outer_file = line_file_;
         bool outer_mixed = line_files_mixed_;
+        std::string outer_directive = std::move(last_directive_);
         line_file_ = kNoFile;
         line_files_mixed_ = false;
+        last_directive_.clear();
         bool outer_par = in_par_body_;
         in_par_body_ = true;
         std::string fn_text = capture([&] {
@@ -3169,6 +3189,7 @@ $dropall    m->len = 0;
         indent_ = outer_indent;
         line_file_ = outer_file;
         line_files_mixed_ = outer_mixed;
+        last_directive_ = std::move(outer_directive);
 
         std::string inits;
         for (const Cap& cap : caps) {
@@ -5111,6 +5132,7 @@ $dropall    m->len = 0;
     std::unordered_set<const Local*> par_pointers_;  // locals a `parallel for` body reaches through a pointer
     std::uint32_t line_file_ = kNoFile;  // the file the function's `#line` directives are in
     bool line_files_mixed_ = false;
+    std::string last_directive_;  // the last `#line`, which `line` repeats after each C line
     std::vector<Frame> frames_;                                 // the statements being emitted, innermost last
     std::unordered_map<std::uint32_t, std::size_t> loop_frames_;  // a loop's id: how many frames are outside it
     mutable std::unordered_set<std::string> compound_used_;

@@ -1,0 +1,30 @@
+// A panic writes the Calx functions it happened in, innermost first, each at its line. In a
+// release build, calls inlined into others are frames of their own just the same.
+
+struct Grid {
+    cells: List<i32>
+}
+
+impl Grid {
+    fn at(self, i: usize) -> i32 {
+        return self.cells[i]    // panic: index 7 is out of bounds for length 3
+    }
+}
+
+fn first<T: Copy>(xs: List<T>, i: usize) -> T {
+    return xs[i]
+}
+
+fn sum(g: Grid, i: usize) -> i32 {
+    return first(g.cells, 0) + g.at(i)
+}
+
+fn main() {
+    let g = Grid { cells: [1, 2, 3] }
+    println("{sum(g, 1)}")    // out: 3
+    println("{sum(g, 7)}")
+}
+
+// trace: trace.Grid.at:10
+// trace: trace.sum:19
+// trace: trace.main:25

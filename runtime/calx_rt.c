@@ -883,6 +883,7 @@ void cx_panic_begin(const char* at) {
 
 void cx_panic_end(void) {
     panic_text("\n");
+    cx_trace_write(panic_text, par_buffered ? 1 : 0, 0);
     if (par_buffered) par_panicked();
     fflush(stderr);
     exit(101);
@@ -1151,6 +1152,7 @@ static _Thread_local par_job* par_cur; /* the job whose chunk this thread is run
 static _Thread_local cx_u64 par_chunk; /* that chunk */
 static _Thread_local int par_owner;    /* this thread owns `par_cur` */
 static _Thread_local int par_worker;   /* this is a worker thread */
+static _Thread_local int par_ending;   /* the inner jobs this thread is ending a panic in */
 
 static void par_pause(void) { __builtin_ia32_pause(); }
 
@@ -1256,8 +1258,9 @@ static void par_nudge(void) {
     if (__atomic_load_n(&par_help_sleepers, __ATOMIC_SEQ_CST)) par_wake(&par_help_word);
 }
 
-/* Claims chunks of `j` and runs them until none are left, as its owner or as a helper. */
-static void par_claim(par_job* j, int owner) {
+/* Claims chunks of `j` and runs them until none are left, as its owner or as a helper. Never
+ * inlined, so a stack trace tells a chunk's body from a loop that runs where it is. */
+static __attribute__((noinline)) void par_claim(par_job* j, int owner) {
     par_job* was = par_cur;
     cx_u64 was_chunk = par_chunk;
     int was_owner = par_owner;
@@ -1332,8 +1335,8 @@ static void par_drain(par_job* j) {
 }
 
 /* After a panic in the top job, on the main thread: once every chunk before the first one that
- * panicked has run, writes their output and that chunk's, which ends with the panic message,
- * and exits. */
+ * panicked has run, writes their output and that chunk's, which ends with the panic message and
+ * the frames inside the loop, then the frames outside it, and exits. */
 static CX_COLD void par_end_panic(void) {
     par_close(&par_top);
     cx_u64 first;
@@ -1350,6 +1353,9 @@ static CX_COLD void par_end_panic(void) {
     to_stderr = 0;
     par_replay(&par_top, first + 1);
     flush_out();
+    fmt_to = 0;
+    to_stderr = 1;
+    cx_trace_write(panic_text, 2, 0);
     fflush(stderr);
     _Exit(101);
 }
@@ -1368,6 +1374,10 @@ static CX_COLD void par_end_inner(par_job* j) {
     par_owner = j->up_owner;
     par_buffered = 1;
     par_replay(j, __atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) + 1);
+    /* None of these return, so each inner loop this thread has ended a panic in is on its stack. */
+    fmt_to = 0;
+    to_stderr = 1;
+    cx_trace_write(panic_text, 3, ++par_ending);
     __atomic_fetch_and(&par_taken, ~((cx_u64)1 << j->slot), __ATOMIC_RELEASE);
     par_panicked();
 }
@@ -1508,8 +1518,8 @@ static void par_setup(par_job* j, cx_u64 n, par_body body, void* ctx, cx_usize t
 }
 
 /* A loop inside a chunk, on a slot of its own that idle threads help with. Returns 0 if every
- * slot is taken. */
-static int par_inner(cx_u64 n, par_body body, void* ctx, cx_usize threads) {
+ * slot is taken. Never inlined, so a stack trace finds where the loop starts. */
+static __attribute__((noinline)) int par_inner(cx_u64 n, par_body body, void* ctx, cx_usize threads) {
     cx_u64 taken = __atomic_load_n(&par_taken, __ATOMIC_RELAXED);
     unsigned k;
     do {
@@ -1538,7 +1548,8 @@ static int par_inner(cx_u64 n, par_body body, void* ctx, cx_usize threads) {
     return 1;
 }
 
-void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
+/* Never inlined, so a stack trace finds where a loop starts. */
+__attribute__((noinline)) void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
     if (n == 0) return;
     cx_usize threads = par_threads();
     if (threads <= 1 || n == 1 || (par_cur && !par_inner(n, body, ctx, threads))) {

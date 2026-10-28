@@ -1,0 +1,17 @@
+// A panic in a `parallel for` body shows the body, at its line, then the loop and the frames
+// outside it, as one thread running the loop would, with any number of threads.
+
+fn scale(xs: mut List<i32>) {
+    parallel for k in 0..xs.len() {
+        xs[k] = xs[k] * 2 + i32.wrap(10 / (3 - k))    // panic: division by zero
+    }
+}
+
+fn main() {
+    var xs: List<i32> = [1, 2, 3, 4]
+    scale(mut xs)
+}
+
+// trace: trace_parallel.scale:6
+// trace: trace_parallel.scale:5
+// trace: trace_parallel.main:12

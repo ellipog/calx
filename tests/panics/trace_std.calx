@@ -1,0 +1,17 @@
+// A frame in the standard library is shown by its module's path.
+
+import std.lz4.{compress_into}
+
+fn pack(bytes: List<u8>, to: usize) -> List<u8> {
+    var out: List<u8> = []
+    compress_into(bytes, 0, to, mut out)    // panic: the range 0..9 is out of bounds for 3 bytes
+    return out
+}
+
+fn main() {
+    _ = pack([1, 2, 3], 9)
+}
+
+// trace: std.lz4.compress_into:40
+// trace: trace_std.pack:7
+// trace: trace_std.main:12

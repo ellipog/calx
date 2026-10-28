@@ -71,6 +71,39 @@ fn main() {
 }
 ```
 
+### Stack traces
+
+After the message, a panic writes the Calx functions it was in, innermost first, each at the line it had reached, as Java writes a stack trace (D120):
+
+```calx
+fn half(n: i32) -> i32 {
+    assert(n % 2 == 0, "{n} is odd")    // panic: assertion failed: 7 is odd
+    return n / 2
+}
+
+fn main() {
+    println("{half(8)}")    // out: 4
+    println("{half(7)}")
+}
+```
+
+Saved as `example.calx` and run, that writes:
+
+```text
+4
+panic at example.calx:2:5: assertion failed: 7 is odd
+	at example.half(example.calx:2)
+	at example.main(example.calx:8)
+```
+
+- A frame is the function's module and name, with a method's type between them, such as `world.Chunk.block`. A generic function has one name, whatever it was called with.
+- A call the optimizer inlined is a frame of its own, so a trace is the same in debug and release builds, on Windows and on Linux.
+- Only Calx functions are written, the standard library's too, not the runtime's, the C library's or the system's.
+- A file inside the folder the program runs in is written relative to it, as in the message; any other in full.
+- A [`@track_caller`](#panics-that-name-the-caller) function's message names its caller, and its trace still starts in the function, at its own line.
+- Inside a `parallel for`, the trace is the one a single thread running the loop would write: the body at its line, the loop at its line, then out to `main`, loops inside loops too, whichever threads ran what. Each thread writes the part of it that's on its stack.
+- The program reads them from its own line tables when it panics. Every build has those, and they don't change the generated code, so until a panic a trace costs nothing. It looks at the innermost 128 calls, not counting inlined ones, so the trace of a panic deep in a recursion stops before `main`.
+
 ### Panics that name the caller
 
 A function marked `@track_caller` reports its panics at the place that called it, not at its own lines (D115). That's for a library's checks, such as an index that's out of range for a grid, where the bug is in the code that called it:

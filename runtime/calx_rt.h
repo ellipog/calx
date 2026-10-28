@@ -26,7 +26,9 @@ typedef struct {
     cx_usize len;
 } cx_str;
 
-#define CX_INLINE static inline __attribute__((always_inline))
+/* The runtime's inline functions have no debug information of their own, so code inlined from
+ * them takes the Calx line it was called from, which is what debuggers and stack traces show. */
+#define CX_INLINE static inline __attribute__((always_inline, nodebug))
 #define CX_COLD __attribute__((cold, noreturn))
 
 /* Each function starts with this for every view parameter: a view points at a whole, live,
@@ -82,9 +84,13 @@ cx_out_to cx_err_begin(void);
 void cx_err_end(cx_out_to was);
 
 /* A panic: `cx_panic_begin` starts the message on standard error, the print functions add to
- * it, and `cx_panic_end` finishes it and exits with status 101. */
+ * it, and `cx_panic_end` finishes it, writes the stack trace and exits with status 101. */
 void cx_panic_begin(const char* at);
 CX_COLD void cx_panic_end(void);
+/* Writes Calx frames of the calling thread's stack through `text`, a line each, in calx_trace.c:
+ * all of them (`mode` 0), or for a panic in a `parallel for`, the part of them this thread has
+ * (1 to 3, which `cx_trace_write` explains). */
+__attribute__((cold)) void cx_trace_write(void (*text)(const char*), int mode, int ending);
 CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_div_zero(const char* at);
 CX_COLD void cx_panic_unwrap(const char* at);
@@ -93,8 +99,8 @@ CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
 CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at);
 
 /* `parallel for`: calls `body(ctx, begin, end)` for chunks covering 0..n, on the worker threads
- * and this one, and returns once every iteration has run. Inside another `parallel for`, it
- * runs them all on this thread. */
+ * and this one, and returns once every iteration has run. Inside another `parallel for`, its
+ * chunks go to the threads that are free, or all run on this one if none can take them. */
 void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx);
 
 /* Memory, in calx_alloc.c (D95). A block is freed, or reallocated, with the size it was last
@@ -732,25 +738,25 @@ CX_FLOOR(i32)
 CX_FLOOR(i64)
 
 /* Java's float-to-integer casts: clamp to the range, and NaN gives 0. */
-static inline cx_i32 cx_f64_to_i32_clamp(cx_f64 d) {
+static inline __attribute__((nodebug)) cx_i32 cx_f64_to_i32_clamp(cx_f64 d) {
     if (d != d) return 0;
     if (d >= 2147483647.0) return 2147483647;
     if (d <= -2147483648.0) return -2147483647 - 1;
     return (cx_i32)d;
 }
-static inline cx_i64 cx_f64_to_i64_clamp(cx_f64 d) {
+static inline __attribute__((nodebug)) cx_i64 cx_f64_to_i64_clamp(cx_f64 d) {
     if (d != d) return 0;
     if (d >= 9223372036854775807.0) return 9223372036854775807LL;
     if (d <= -9223372036854775808.0) return -9223372036854775807LL - 1;
     return (cx_i64)d;
 }
-static inline cx_i32 cx_f32_to_i32_clamp(cx_f32 f) {
+static inline __attribute__((nodebug)) cx_i32 cx_f32_to_i32_clamp(cx_f32 f) {
     if (f != f) return 0;
     if (f >= 2147483648.0f) return 2147483647;
     if (f <= -2147483648.0f) return -2147483647 - 1;
     return (cx_i32)f;
 }
-static inline cx_i64 cx_f32_to_i64_clamp(cx_f32 f) {
+static inline __attribute__((nodebug)) cx_i64 cx_f32_to_i64_clamp(cx_f32 f) {
     if (f != f) return 0;
     if (f >= 9223372036854775808.0f) return 9223372036854775807LL;
     if (f <= -9223372036854775808.0f) return -9223372036854775807LL - 1;

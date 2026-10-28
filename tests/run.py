@@ -17,6 +17,9 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
 - `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
   `error` lines must fail to compile, with exactly those errors and no others.
 - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message.
+- `// trace: NAME:LINE` is one frame of the panic's stack trace, innermost first, like `out`:
+  all of them together must be the trace's functions and lines, which leave out the file, since
+  a module from the standard library is shown by its whole path.
 - `// stderr: TEXT` is one line of expected standard error, like `out`. A program that doesn't
   panic must write exactly those lines there, so one with none must write nothing.
 - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
@@ -54,10 +57,11 @@ BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic|stderr|stdin|args|status):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
+FRAME = re.compile(r"^\tat (.*)\((.*):(\d+)\)$")
 RUN_SECONDS = 120
 
 
@@ -69,6 +73,7 @@ class Test:
         self.out = []
         self.errors = []  # (line, text)
         self.panic = None  # (line, text)
+        self.trace = []  # "name:line", innermost first
         self.stderr = []
         self.stdin = []
         self.args = []
@@ -96,6 +101,8 @@ class Test:
                 self.args.append(text)
             elif kind == "status":
                 self.status = int(text)
+            elif kind == "trace":
+                self.trace.append(text.strip())
             elif kind == "error":
                 self.errors.append((n, text.strip()))
             else:
@@ -190,6 +197,10 @@ def run_test(test, mode):
                     problems.append(f"panicked on line {m.group(2)}, expected line {test.panic[0]}")
                 if test.panic[1] not in m.group(4):
                     problems.append(f"panic message {m.group(4)!r} doesn't contain {test.panic[1]!r}")
+            if test.trace:
+                frames = [f"{f.group(1)}:{f.group(3)}" for f in map(FRAME.match, p.stderr.splitlines()) if f]
+                if frames != test.trace:
+                    problems.append("stack trace " + diff(test.trace, frames))
         elif p.returncode != test.status:
             problems.append(f"exit status {p.returncode}" + (f", expected {test.status}" if test.status else ""))
         got = p.stdout.splitlines()

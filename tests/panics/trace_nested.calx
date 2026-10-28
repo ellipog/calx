@@ -1,0 +1,35 @@
+// A panic in a `parallel for` inside another shows every frame from the panic out to `main`,
+// the two bodies and the two loops too, whichever threads ran what.
+
+import std.pool.{set_workers}
+
+fn cell(r: usize, c: usize) -> i32 {
+    return 1000 / (i32.wrap(r * 10 + c) - 35)    // panic: division by zero
+}
+
+fn fill(rows: mut List<List<i32>>) {
+    parallel for r in 0usize..rows.len() {
+        parallel for c in 0usize..rows[r].len() {
+            rows[r][c] = cell(r, c)
+        }
+    }
+}
+
+fn main() {
+    set_workers(8)
+    var rows: List<List<i32>> = []
+    for _ in 0..8 {
+        var row: List<i32> = []
+        for _ in 0..10 {
+            row.push(0)
+        }
+        rows.push(row)
+    }
+    fill(mut rows)
+}
+
+// trace: trace_nested.cell:7
+// trace: trace_nested.fill:13
+// trace: trace_nested.fill:12
+// trace: trace_nested.fill:11
+// trace: trace_nested.main:28

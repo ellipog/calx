@@ -182,7 +182,7 @@ Before inner loops could use the pool, one region took 2,079 ms with any number 
 Iterations can't see each other's changes, so what each computes doesn't depend on which thread ran it or when. Two more things make the whole program's behavior the same with one thread and with many:
 
 - **Output comes out in order.** What an iteration prints with `print`, `println`, `eprint` or `eprintln` is held until the loop ends, then written in the order of the iterations. A program prints exactly what it would print running the iterations one after another.
-- **A panic reports the first iteration that panicked.** If iterations panic, the program prints the output of every iteration before the first one that panicked, then that iteration's output and its panic, and exits with status 101, as running them in order would. Iterations after it may have run, but their output is dropped.
+- **A panic reports the first iteration that panicked.** If iterations panic, the program prints the output of every iteration before the first one that panicked, then that iteration's output and its panic, and exits with status 101, as running them in order would. Iterations after it may have run, but their output is dropped. Its [stack trace](printing.md#stack-traces) is the one running them in order would write too, from the body out through the loop to `main`.
 
 ```calx
 fn main() {
