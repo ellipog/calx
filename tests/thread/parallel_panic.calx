@@ -1,0 +1,28 @@
+// A queue reached inside a `parallel for`, through a function the loop calls, panics: which
+// iteration's message came first would depend on timing. It's the same panic with one thread as
+// with many, so it can't go unnoticed on a machine with one processor.
+
+struct Part {
+    n: u32
+    out: Sender<u32>
+}
+
+fn finish(p: mut Part) {
+    p.n *= 2
+    p.out.send(p.n)    // panic: a queue can't be used inside a `parallel for`
+}
+
+fn main() {
+    let r = Receiver<u32>()
+    var parts: List<Part> = []
+    for i in 0u32..4 {
+        parts.push(Part { n: i, out: r.sender() })
+    }
+    parallel for p in mut parts {
+        finish(mut p)
+    }
+    println("{parts.len()}")
+}
+// trace: parallel_panic.finish:12
+// trace: parallel_panic.main:22
+// trace: parallel_panic.main:21

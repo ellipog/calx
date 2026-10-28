@@ -1,0 +1,50 @@
+// A queue on one thread: what `next` and `wait` give, and what happens to messages that nobody
+// takes. The leak check at the end shows every one of them was dropped.
+
+fn drain(r: mut Receiver<String>) -> String {
+    var s = String("")
+    while let m = r.next() {
+        s.push_str(m)
+    }
+    return s
+}
+
+fn main() {
+    var r = Receiver<String>()
+    println("{r.next()}")                 // out: none
+    var s = r.sender()
+    s.send("a")
+    var s2 = s.share()
+    s2.send("b")
+    s.send("c")
+    println(drain(mut r))                 // out: abc
+    s.close()
+    s2.send("d")
+    println("{r.wait()}")                 // out: some(d)
+    s2.close()
+    // No sender is left, so waiting gives `none` at once.
+    println("{r.wait()}")                 // out: none
+
+    // Messages left in a queue are dropped with its last receiver; ones sent after it's gone,
+    // when they're sent.
+    let r2 = Receiver<List<String>>()
+    var s3 = r2.sender()
+    s3.send(["x", "y"])
+    let r3 = r2.share()
+    r2.close()
+    s3.send(["z"])
+    r3.close()
+    s3.send(["gone"])
+    println("done")                       // out: done
+
+    // A message can be anything that's `Send`, including another queue's end.
+    var inner = Receiver<i32>()
+    var outer = Receiver<Sender<i32>>()
+    var to_outer = outer.sender()
+    to_outer.send(inner.sender())
+    if let back = outer.next() {
+        var b = back
+        b.send(7)
+    }
+    println("{inner.next()}")             // out: some(7)
+}

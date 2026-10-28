@@ -1,0 +1,55 @@
+// Threads and queues in generic code: a task of any type that's `Task + Send`, and queues of any
+// `Send` type, instanced for each type they're used with.
+
+import std.thread.{Task}
+
+struct Echo<T: Send> {
+    from: Receiver<T>
+    to: Sender<T>
+}
+
+impl<T: Send> Task for Echo<T> {
+    fn run(own self) {
+        while let m = self.from.wait() {
+            self.to.send(m)
+        }
+    }
+}
+
+fn start<T: Task + Send>(task: own T) -> Thread {
+    return unsafe { Thread.spawn(task) }
+}
+
+// Sends each of `xs` through a thread and back, last first.
+fn round_trip<T: Send>(xs: own List<T>) -> List<T> {
+    let there = Receiver<T>()
+    var back = Receiver<T>()
+    var send = there.sender()
+    let t = start(Echo<T> { from: there, to: back.sender() })
+    while let x = xs.pop() {
+        send.send(x)
+    }
+    send.close()
+    var out: List<T> = []
+    while let x = back.wait() {
+        out.push(x)
+    }
+    t.join()
+    return out
+}
+
+enum Shape {
+    Circle(f64)
+    Square(f64)
+}
+
+fn main() {
+    let ints: List<i32> = [1, 2, 3]
+    let texts: List<String> = ["a", "b"]
+    let shapes: List<Shape> = [Shape.Circle(1.5), Shape.Square(2.0)]
+    let nested: List<List<u8>> = [[1], [2, 3]]
+    println("{round_trip(ints)}")      // out: [3, 2, 1]
+    println("{round_trip(texts)}")     // out: [b, a]
+    println("{round_trip(shapes)}")    // out: [Square(2.0), Circle(1.5)]
+    println("{round_trip(nested)}")    // out: [[2, 3], [1]]
+}

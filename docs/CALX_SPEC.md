@@ -266,7 +266,7 @@ Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the 
 
 ## Region actors and messages
 
-Actors are the only concurrency model **for game state**. Network I/O, chunk loading and worldgen workers are Calcite core services that talk to the tick loop through queues, written with `unsafe`, and plugins never see threads (D49).
+Actors are the only concurrency model **for game state**. Network I/O, chunk loading and worldgen workers are Calcite core services that talk to the tick loop through queues, written with `unsafe`, and plugins never see threads (D49). Built: [std.thread](std/thread.md) (D121). `Thread.spawn(task)` needs `unsafe` and starts a thread that runs a `Task`, and `Receiver<T>()` and its `Sender<T>` ends are typed queues whose messages move between threads. A queue can't be used inside a `parallel for`.
 
 ### Actors
 
@@ -382,7 +382,7 @@ What Calx leaves out, on purpose:
 - **No null and no exceptions.** Optionals and error values instead, and panics for bugs.
 - **No classes or inheritance.** Structs, enums and interfaces.
 - **No implicit conversions**, numeric or otherwise, and no implicit copies of anything that owns memory.
-- **No threads, locks or atomics in safe code.** Only `parallel for`, and actors that it runs.
+- **No threads, locks or atomics in safe code.** Only `parallel for`, and actors that it runs. Starting a thread takes `unsafe` ([std.thread](std/thread.md)), and threads share no memory, only queues.
 - **No global mutable state** outside `unsafe`. Constants are fine.
 - **No macros** beyond attributes and string prefixes, which are typed and run as Calx.
 - **No reflection at run time.** What plugins need from it, such as encoding saved data, is generated at compile time.

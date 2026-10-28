@@ -128,6 +128,52 @@ CX_INLINE void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, 
    list's is, then with the run that wrapped moved so the ring is whole again (D110). */
 void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
 
+/* Queues between threads, and the threads `Thread.spawn` starts, in calx_thread.c (D121). An end
+ * of a queue is a pointer to it, whatever its messages are; the queue counts its ends and goes
+ * with the last. A message moves in and out as `size` bytes, and `drop` frees what the ones left
+ * in a queue own. */
+typedef struct cx_queue cx_queue;
+typedef struct cx_Sender {
+    cx_queue* q;
+} cx_Sender;
+typedef struct cx_Receiver {
+    cx_queue* q;
+} cx_Receiver;
+typedef struct cx_Thread {
+    cx_u64 h; /* the thread's handle, or its pthread_t */
+} cx_Thread;
+cx_Receiver cx_queue_new(cx_usize size, void (*drop)(void*));
+cx_Sender cx_queue_sender(const cx_Receiver* r);
+cx_Sender cx_queue_share_sender(const cx_Sender* s);
+cx_Receiver cx_queue_share_receiver(const cx_Receiver* r);
+/* Moves the message at `message` into the queue, or drops it if no receiver is left. */
+void cx_queue_send(const cx_Sender* s, void* message, const char* at);
+/* Moves the first message into `out`: if there is one (`next`), or once there is, unless every
+ * sender has gone (`wait`). Returns whether it did. */
+cx_bool cx_queue_next(const cx_Receiver* r, void* out, const char* at);
+cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at);
+void cx_drop_Sender(cx_Sender* s);
+void cx_drop_Receiver(cx_Receiver* r);
+/* Runs `run(task)` on a new thread. `task` is the task, moved to memory from cx_alloc, which
+ * `run` frees. */
+cx_Thread cx_thread_spawn(void (*run)(void*), void* task);
+void cx_thread_join(cx_Thread* t, const char* at);
+void cx_drop_Thread(cx_Thread* t);
+/* Never called, since none of them can be copied (D121), but a type's copy glue names the copy
+ * of each of its fields. */
+static inline __attribute__((nodebug)) cx_Sender cx_copy_Sender(const cx_Sender* s) {
+    (void)s;
+    __builtin_trap();
+}
+static inline __attribute__((nodebug)) cx_Receiver cx_copy_Receiver(const cx_Receiver* r) {
+    (void)r;
+    __builtin_trap();
+}
+static inline __attribute__((nodebug)) cx_Thread cx_copy_Thread(const cx_Thread* t) {
+    (void)t;
+    __builtin_trap();
+}
+
 /* Arenas (D114). An arena hands out memory from the bottom of its newest chunk up, and frees it
  * all at once. The state is on the heap, so an `Arena` is one pointer, and the lists made from it
  * hold that pointer, never the `Arena` itself. The first chunk is made when it's first needed. */

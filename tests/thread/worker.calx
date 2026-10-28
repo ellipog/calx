@@ -1,0 +1,37 @@
+// A thread that takes jobs from one queue and sends results on another (D121). With one sender,
+// messages come out in the order they went in, and `wait` gives `none` once the senders are gone.
+
+import std.thread.{Task}
+
+struct Squarer {
+    jobs: Receiver<i32>
+    out: Sender<String>
+}
+
+impl Task for Squarer {
+    fn run(own self) {
+        while let n = self.jobs.wait() {
+            self.out.send("{n} squared is {n * n}")
+        }
+    }
+}
+
+fn main() {
+    let jobs = Receiver<i32>()
+    var results = Receiver<String>()
+    var to_worker = jobs.sender()
+    let t = unsafe { Thread.spawn(Squarer { jobs: jobs, out: results.sender() }) }
+    for i in 1..=4 {
+        to_worker.send(i)
+    }
+    to_worker.close()
+    // The worker's end goes when it does, so this sees every result, then `none`.
+    while let s = results.wait() {
+        println(s)
+    }
+    t.join()
+}
+// out: 1 squared is 1
+// out: 2 squared is 4
+// out: 3 squared is 9
+// out: 4 squared is 16

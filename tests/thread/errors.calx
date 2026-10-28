@@ -1,0 +1,55 @@
+// What the checker catches about threads and queues (D121).
+
+import std.thread.{Task}
+
+struct Job {
+    n: i32
+}
+
+impl Task for Job {
+    fn run(own self) {
+        println("{self.n}")
+    }
+}
+
+struct Holder {
+    s: Sender<i32>
+}
+
+fn queue_of<T>() -> Receiver<T> {    // error: `T` isn't `Send`, so it can't go to another thread in a queue; give `T` the bound `Send`
+    return Receiver<T>()             // error: `T` isn't `Send`
+}
+
+fn start<T: Task>(t: own T) -> Thread {
+    return unsafe { Thread.spawn(t) }    // error: `T` isn't `Send`, so it can't go to another thread; give `T` the bound `Send`
+}
+
+fn later(t: Thread<i32>) {    // error: `Thread` doesn't take generic arguments
+    t.join()
+}
+
+fn main() {
+    let t = Thread.spawn(Job { n: 1 })    // error: calling it needs `unsafe`
+    later(t)
+    let u = unsafe { Thread.spawn(5) }    // error: `i32` doesn't implement `Task`
+    u.join()
+    let r = Receiver()                    // error: can't tell what this queue carries
+    let s = Sender<i32>()                 // error: a `Sender` comes from the `Receiver` of its queue
+    let q = Receiver<i32>()
+    let c = q.copy()                      // error: `Receiver<i32>` can't be copied; make another end of the same queue with `share()`
+    let h = Holder { s: q.sender() }
+    let h2 = h.copy()                     // error: `Holder` can't be copied, since it holds `Sender<i32>`
+    let tx = q.sender()
+    tx.send(1)                            // error: `tx` can't be changed
+    tx.next()                             // error: `Sender<i32>` has no method `next`; the queue's `Receiver` takes its messages
+    q.recv()                              // error: take the next message with `next()`, or wait for one with `wait()`
+    q.send(2)                             // error: send with a `Sender`, which `sender()` makes
+    println("{q == q}")                   // error: an end of a queue is a handle
+    parallel for i in 0..4 {
+        _ = q.next()                      // error: a queue can't be used inside a `parallel for`
+        println("{i}")
+    }
+    println("{r} {s} {c} {h2}")
+    queue_of<i32>().close()
+    start(Job { n: 2 }).join()
+}

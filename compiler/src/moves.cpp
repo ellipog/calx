@@ -1050,6 +1050,21 @@ private:
                 expr(recv, Use::change);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 return;
+            // D121: a message moves into its queue; closing an end, or joining a thread, uses it up;
+            // a task moves to its thread.
+            case BMethod::queue_send:
+                expr(recv, Use::change);
+                expr(arg(0), Use::consume);
+                return;
+            case BMethod::queue_next: case BMethod::queue_wait:
+                expr(recv, Use::change);
+                return;
+            case BMethod::queue_close: case BMethod::thread_join:
+                expr(recv, Use::consume);
+                return;
+            case BMethod::thread_spawn:
+                expr(arg(0), Use::consume);
+                return;
             default:
                 expr(recv, Use::view);
                 for (const Arg& a : e->args) expr(a.value, Use::view);

@@ -1,0 +1,30 @@
+/// Threads that run alongside the rest of the program, and the queues they talk through (D121).
+///
+/// `parallel for` is how Calx does work faster: it gives the same result on any number of
+/// threads (D21). A thread here is for something else, such as a service that waits on the
+/// network or the disk while the program goes on. What it does when depends on timing, so
+/// starting one takes `unsafe`, as reading the clock does.
+///
+/// A thread runs a task: a value whose type implements `Task`, which moves to the thread. The
+/// thread calls the task's `run` and ends when `run` returns. `Thread.spawn(task)` starts it,
+/// and `join()` waits for it to end. A thread that's dropped without `join()` carries on by
+/// itself.
+///
+/// Threads share no memory: each value has one owner (D76). They talk through queues instead.
+/// `Receiver<T>()` makes a queue of messages of type `T`, which has to be `Send`, and is the end
+/// that takes them. `sender()` makes an end that sends. Each message moves into the queue, and
+/// comes out at the other end in the order it was sent.
+///
+/// - `s.send(m)` moves `m` into the queue. If every `Receiver` is gone, `m` is dropped.
+/// - `r.next()` takes the first message, or gives `none` at once if there isn't one.
+/// - `r.wait()` waits for a message, and gives `none` once the queue is empty and every
+///   `Sender` is gone.
+/// - `share()` makes another end of the same queue, and `close()` drops one now.
+///
+/// A queue can't be used, and a thread can't be joined, inside a `parallel for`.
+module std.thread
+
+/// What a thread does. `run` takes the task, which the thread owns from then on.
+pub interface Task {
+    fn run(own self)
+}

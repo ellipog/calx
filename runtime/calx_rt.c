@@ -30,8 +30,9 @@
 
 /* --- output ------------------------------------------------------------------------------- */
 
-/* Standard output's buffer belongs to the main thread. Inside a `parallel for`, every thread
- * writes to the buffer of the chunk it's running instead (see "parallel for" below). */
+/* Standard output's buffer belongs to the main thread, and to the threads `Thread.spawn` starts
+ * (D121), which take a lock once there are any. Inside a `parallel for`, every thread writes to
+ * the buffer of the chunk it's running instead (see "parallel for" below). */
 static unsigned char out_buf[1 << 16];
 static size_t out_len;
 static _Thread_local int to_stderr; /* while `eprint` or a panic message is being written */
@@ -41,7 +42,33 @@ static _Thread_local int par_buffered; /* output goes to the running chunk's buf
 static _Thread_local int par_depth;    /* inside a `parallel for`, even one run on this thread alone */
 static void par_write(int stream, const void* p, size_t n);
 
-static void flush_out(void) {
+static int out_shared; /* a thread has been spawned, so writing takes the lock */
+#ifdef _WIN32
+static SRWLOCK out_mutex = SRWLOCK_INIT;
+#else
+static pthread_mutex_t out_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+/* Read once, so a lock and its unlock agree. */
+static int out_lock(void) {
+    int shared = __atomic_load_n(&out_shared, __ATOMIC_ACQUIRE);
+#ifdef _WIN32
+    if (shared) AcquireSRWLockExclusive(&out_mutex);
+#else
+    if (shared) pthread_mutex_lock(&out_mutex);
+#endif
+    return shared;
+}
+
+static void out_unlock(int shared) {
+#ifdef _WIN32
+    if (shared) ReleaseSRWLockExclusive(&out_mutex);
+#else
+    if (shared) pthread_mutex_unlock(&out_mutex);
+#endif
+}
+
+static void flush_locked(void) {
     if (out_len) {
         fwrite(out_buf, 1, out_len, stdout);
         out_len = 0;
@@ -49,17 +76,33 @@ static void flush_out(void) {
     fflush(stdout);
 }
 
+static void flush_out(void) {
+    int l = out_lock();
+    flush_locked();
+    out_unlock(l);
+}
+
 static void out_bytes(const void* p, size_t n) {
     if (n == 0) return; /* an empty string's pointer can be null, which memcpy can't take */
+    int l = out_lock();
     if (n > sizeof out_buf - out_len) {
-        flush_out();
+        flush_locked();
         if (n > sizeof out_buf) {
             fwrite(p, 1, n, stdout);
+            out_unlock(l);
             return;
         }
     }
     memcpy(out_buf + out_len, p, n);
     out_len += n;
+    out_unlock(l);
+}
+
+/* Standard error, after whatever standard output has waiting. */
+static void err_bytes(const void* p, size_t n) {
+    int l = out_lock();
+    fwrite(p, 1, n, stderr);
+    out_unlock(l);
 }
 
 static void write_bytes(const void* p, size_t n) {
@@ -69,11 +112,48 @@ static void write_bytes(const void* p, size_t n) {
     } else if (par_buffered) {
         par_write(to_stderr, p, n);
     } else if (to_stderr) {
-        fwrite(p, 1, n, stderr);
+        err_bytes(p, n);
     } else {
         out_bytes(p, n);
     }
 }
+
+/* --- the end of the program ---------------------------------------------------------------
+ * With threads, two could end the program at once: one returning from `main` and one
+ * panicking, or two panicking. The first to get here does, and any other waits for it to. */
+
+static int exit_taken;
+static _Thread_local int exit_mine;
+
+static void park(void) {
+    for (;;) {
+#ifdef _WIN32
+        Sleep(INFINITE);
+#else
+        pause();
+#endif
+    }
+}
+
+static void take_exit(void) {
+    if (exit_mine) return;
+    if (__atomic_exchange_n(&exit_taken, 1, __ATOMIC_ACQ_REL)) park();
+    exit_mine = 1;
+}
+
+/* The threads `Thread.spawn` started that are still running, which own memory the leak check
+ * would count, and whether this is one of them. */
+static cx_usize services_live;
+static _Thread_local int par_service;
+
+void cx_service_started(void) {
+    __atomic_store_n(&out_shared, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&services_live, 1, __ATOMIC_ACQ_REL);
+}
+
+void cx_service_enter(void) { par_service = 1; }
+
+void cx_service_leave(void) { __atomic_fetch_sub(&services_live, 1, __ATOMIC_ACQ_REL); }
 
 /* Text for a panic message, or anything else written the way `print` writes. */
 static void panic_text(const char* s) { write_bytes(s, strlen(s)); }
@@ -227,12 +307,14 @@ void cx_start(int argc, char** argv) {
 }
 
 int cx_finish(void) {
+    take_exit();
     flush_out();
 #ifdef CX_DEBUG
     /* Debug builds count the blocks still allocated, and a program that ends with any left has
-     * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug. */
+     * leaked: the compiler drops every value that owns memory (D76), so that's a compiler bug.
+     * A thread still running owns what it holds, and stops where it is, so then there's no check. */
     cx_usize live = cx_alloc_live();
-    if (live) {
+    if (live && !__atomic_load_n(&services_live, __ATOMIC_ACQUIRE)) {
         fprintf(stderr, "calx: %llu allocations were never freed; this is a bug in calx, please report it\n",
                 (unsigned long long)live);
         return 102;
@@ -874,7 +956,11 @@ static CX_COLD void par_panicked(void);
 
 void cx_panic_begin(const char* at) {
     fmt_to = 0;
-    if (!par_buffered) flush_out();
+    /* Outside a chunk, this thread ends the program, unless another is already ending it. */
+    if (!par_buffered) {
+        take_exit();
+        flush_out();
+    }
     to_stderr = 1;
     panic_text("panic at ");
     panic_text(at);
@@ -1167,6 +1253,7 @@ static void par_yield(void) { sched_yield(); }
 #endif
 
 static CX_COLD void par_fail(const char* what) {
+    take_exit();
     fputs(what, stderr);
     fflush(stderr);
     _Exit(101);
@@ -1221,7 +1308,7 @@ static void par_replay(par_job* j, cx_u64 upto) {
                 par_write(stream, o->p + at, len);
             } else if (stream) {
                 flush_out();
-                fwrite(o->p + at, 1, len, stderr);
+                err_bytes(o->p + at, len);
             } else {
                 out_bytes(o->p + at, len);
             }
@@ -1338,6 +1425,7 @@ static void par_drain(par_job* j) {
  * panicked has run, writes their output and that chunk's, which ends with the panic message and
  * the frames inside the loop, then the frames outside it, and exits. */
 static CX_COLD void par_end_panic(void) {
+    take_exit();
     par_close(&par_top);
     cx_u64 first;
     for (unsigned spins = 0;; spins++) {
@@ -1483,6 +1571,11 @@ void cx_set_workers(cx_usize n) {
         panic_text("can't change the number of workers inside a `parallel for`");
         cx_panic_end();
     }
+    if (par_service) {
+        cx_panic_begin("std.pool.set_workers");
+        panic_text("can't change the number of workers on a thread `Thread.spawn` started, whose loops run on it alone");
+        cx_panic_end();
+    }
     par_target = n;
 }
 
@@ -1551,7 +1644,8 @@ static __attribute__((noinline)) int par_inner(cx_u64 n, par_body body, void* ct
 /* Never inlined, so a stack trace finds where a loop starts. */
 __attribute__((noinline)) void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
     if (n == 0) return;
-    cx_usize threads = par_threads();
+    /* The pool is the main thread's, so a thread `Thread.spawn` started runs its loops alone. */
+    cx_usize threads = par_service ? 1 : par_threads();
     if (threads <= 1 || n == 1 || (par_cur && !par_inner(n, body, ctx, threads))) {
         par_depth++;
         body(ctx, 0, n);

@@ -49,7 +49,7 @@ fn main() {
 
 The parts are compared in order, and the comparison stops at the first difference. Every field counts, private ones too.
 
-Every type has `Equal` except a generic parameter without the bound, and what holds one.
+Every type has `Equal` except a generic parameter without the bound, and what holds one, and a `Sender`, a `Receiver` or a `Thread` ([std.thread](../std/thread.md)), which are handles to what threads share, and what holds one.
 
 ```calx
 enum Item {

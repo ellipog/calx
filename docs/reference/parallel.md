@@ -196,7 +196,7 @@ fn main() {
 }
 ```
 
-Reading standard input inside a `parallel for` panics, since which iteration got which bytes would depend on timing.
+Reading standard input inside a `parallel for` panics, since which iteration got which bytes would depend on timing. So does using a queue from [std.thread](../std/thread.md), or joining a thread: using one directly in the body is an error, and reaching one from a function the body calls panics.
 
 ## Actors
 
@@ -204,7 +204,7 @@ A `parallel for` over regions that send each other messages is how Calx runs act
 
 ## The threads
 
-By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that.
+By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that. On a thread that [`Thread.spawn`](../std/thread.md) started, every `parallel for` runs on that thread alone.
 
 The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread, which the threads take in order, so a slow chunk doesn't hold the others up. A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
 

@@ -391,6 +391,9 @@ private:
             case TypeKind::str: return "cx_str";
             case TypeKind::string: return "cx_String";
             case TypeKind::arena: return "cx_Arena";
+            case TypeKind::sender: return "cx_Sender";
+            case TypeKind::receiver: return "cx_Receiver";
+            case TypeKind::thread: return "cx_Thread";
             case TypeKind::pointer: return ctype(t->elem) + (t->is_const ? " const*" : "*");
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::enum_: return std::string(t->item->c_name);
@@ -443,6 +446,9 @@ private:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
             case TypeKind::arena: return "Arena";
+            case TypeKind::sender: return "Sender";
+            case TypeKind::receiver: return "Receiver";
+            case TypeKind::thread: return "Thread";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
             case TypeKind::float_: return t->bits == 32 ? "f32" : "f64";
             case TypeKind::bool_: return "bool";
@@ -3781,7 +3787,7 @@ $dropall    m->len = 0;
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
             case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map:
-            case TypeKind::set:
+            case TypeKind::set: case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -4131,6 +4137,12 @@ $dropall    m->len = 0;
                 }
                 if (e->type->kind == TypeKind::arena) {
                     return "cx_arena_new(" + (e->args.empty() ? std::string("0") : value(e->args[0].value, e->args[0].value->type)) + ")";
+                }
+                // `Receiver<T>()`: the queue keeps its messages' size, and how to drop the ones nobody takes.
+                if (e->type->kind == TypeKind::receiver) {
+                    Type* m = e->type->elem;
+                    return "cx_queue_new(sizeof(" + ctype(m) + "), " +
+                           (is_copy(m) ? std::string("0") : "(void (*)(void*))" + drop_fn(m)) + ")";
                 }
                 return construct(e->type);
             case CallKind::prim_method: return prim_method(e);
@@ -4869,6 +4881,50 @@ $dropall    m->len = 0;
         return out + "cx_str_slice(" + b + ", " + lo + ", " + hi + ", " + (r->inclusive ? "1" : "0") + ", " + location(e->span) + "); })";
     }
 
+    // `Thread.spawn(task)`: the task moves to the heap, where the new thread finds it, and a
+    // function of its own moves it back out and calls its `run` (D121).
+    std::string spawn(Expr* e) {
+        Expr* a = e->args[0].value;
+        Type* at = a->type;
+        std::string c = ctype(at), name = "cx_task_" + std::string(fn_->c_name) + "_" + tmp().substr(4);
+        Item* run = e->item;
+        if (uses_) uses_->add_fn(run);
+        helpers_ += "static void " + name + "(void* p) {\n    " + c + " t = *(" + c + "*)p;\n    cx_free(p, sizeof(" + c +
+                    "));\n    " + std::string(run->c_name) + "(t);\n}\n\n";
+        std::string b = tmp();
+        return "({ " + c + "* " + b + " = (" + c + "*)cx_alloc(sizeof(" + c + ")); *" + b + " = " + value(a, at) +
+               "; cx_thread_spawn(" + name + ", " + b + "); })";
+    }
+
+    // The methods of the ends of a queue, and of a thread.
+    std::string handle_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        switch (e->bmethod) {
+            case BMethod::queue_send: {
+                std::string decls, m = tmp();
+                std::vector<std::string> v = sequence({{recv, t, Pass::address}, {e->args[0].value, t->elem}}, decls);
+                return wrap(decls, "({ " + ctype(t->elem) + " " + m + " = " + v[1] + "; cx_queue_send(" + v[0] + ", &" + m + ", " + location(e->span) + "); })");
+            }
+            case BMethod::queue_next: case BMethod::queue_wait: {
+                std::string o = tmp(), ot = ctype(e->type);
+                return "({ " + ot + " " + o + " = {0}; " + o + ".has = cx_queue_" + (e->bmethod == BMethod::queue_next ? "next" : "wait") +
+                       "(" + address(recv) + ", &" + o + ".v, " + location(e->span) + "); " + o + "; })";
+            }
+            case BMethod::queue_sender: return "cx_queue_sender(" + address(recv) + ")";
+            case BMethod::queue_share:
+                return std::string(t->kind == TypeKind::sender ? "cx_queue_share_sender(" : "cx_queue_share_receiver(") + address(recv) + ")";
+            case BMethod::queue_close: case BMethod::thread_join: {
+                std::string h = tmp();
+                if (e->bmethod == BMethod::thread_join) {
+                    return "({ cx_Thread " + h + " = " + value(recv, t) + "; cx_thread_join(&" + h + ", " + location(e->span) + "); })";
+                }
+                return "({ " + ctype(t) + " " + h + " = " + value(recv, t) + "; " + drop_fn(t) + "(&" + h + "); })";
+            }
+            default: return "0";
+        }
+    }
+
     // The methods of `String` and `List`, and `x.copy()`. Each finds the value it's called on,
     // then works out its arguments in order.
     std::string builtin_method(Expr* e) {
@@ -4879,6 +4935,10 @@ $dropall    m->len = 0;
         auto text_arg = [&](std::size_t i) {
             return text_view(e->args[i].value);
         };
+        if (e->bmethod == BMethod::thread_spawn) return spawn(e);
+        if (t->kind == TypeKind::sender || t->kind == TypeKind::receiver || t->kind == TypeKind::thread) {
+            return handle_method(e);
+        }
         if (e->bmethod == BMethod::copy) {
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
             return copy_fn(t) + "(" + address(recv) + ")";

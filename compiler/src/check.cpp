@@ -90,7 +90,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
@@ -100,6 +100,11 @@ public:
         n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
         n_Arena_ = ctx.names.intern("Arena");
         n_ArenaList_ = ctx.names.intern("ArenaList");
+        n_Sender_ = ctx.names.intern("Sender");
+        n_Receiver_ = ctx.names.intern("Receiver");
+        n_Thread_ = ctx.names.intern("Thread");
+        n_Task_ = ctx.names.intern("Task");
+        n_run_ = ctx.names.intern("run");
         n_SortedMap_ = ctx.names.intern("SortedMap");
         n_SortedSet_ = ctx.names.intern("SortedSet");
         n_Map_ = ctx.names.intern("Map");
@@ -354,7 +359,8 @@ private:
             case TypeKind::optional:
             case TypeKind::array:
             case TypeKind::pointer:
-            case TypeKind::list: case TypeKind::deque: case TypeKind::set: return private_part(t->elem);
+            case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::sender: case TypeKind::receiver: return private_part(t->elem);
             case TypeKind::map:
                 if (const Item* p = private_part(t->key)) return p;
                 return private_part(t->elem);
@@ -1350,6 +1356,7 @@ private:
         switch (t->kind) {
             case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::sender: case TypeKind::receiver:
                 return unresolved(t->elem, vars, s);
             case TypeKind::map: return unresolved(t->key, vars, s) || unresolved(t->elem, vars, s);
             case TypeKind::tuple:
@@ -1385,6 +1392,8 @@ private:
                        : t->arena_list ? T.arena_list_of(subst(t->elem, s))
                                        : T.list_of(subst(t->elem, s));
             case TypeKind::deque: return T.deque_of(subst(t->elem, s));
+            case TypeKind::sender: return T.sender_of(subst(t->elem, s));
+            case TypeKind::receiver: return T.receiver_of(subst(t->elem, s));
             case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
             case TypeKind::set: return T.set_of(subst(t->elem, s), t->table);
             case TypeKind::pointer: return T.pointer_of(subst(t->elem, s), t->is_const);
@@ -1421,6 +1430,7 @@ private:
         }
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::sender: case TypeKind::receiver:
                 return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::pointer:
@@ -1672,6 +1682,8 @@ private:
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->arena_list ? "_alist" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
+            case TypeKind::sender: return mangle(t->elem) + "_sender";
+            case TypeKind::receiver: return mangle(t->elem) + "_receiver";
             case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
             case TypeKind::set: return mangle(t->elem) + table_suffix(t) + "set";
             case TypeKind::tuple: {
@@ -2086,6 +2098,23 @@ private:
                     }
                     return T.arena;
                 }
+                if ((n == n_Sender_ || n == n_Receiver_) && !env_type(n)) {
+                    std::string w = n == n_Sender_ ? "Sender" : "Receiver";
+                    if (t->args.size() != 1) {
+                        error(t->span, q(w) + " takes one generic argument, the type of its messages: " + q(w + "<i32>"));
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !queue_elem(elem, t->args[0]->span)) return T.error;
+                    return n == n_Sender_ ? T.sender_of(elem) : T.receiver_of(elem);
+                }
+                if (n == n_Thread_ && !env_type(n)) {
+                    if (!t->args.empty()) {
+                        error(t->span, "`Thread` doesn't take generic arguments");
+                        return T.error;
+                    }
+                    return T.thread;
+                }
                 if (n == n_ArenaList_ && !env_type(n)) {
                     if (t->args.size() != 1) {
                         error(t->span, "`ArenaList` takes one generic argument, the type of its elements: `ArenaList<i32>`");
@@ -2295,7 +2324,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
             case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
-            case TypeKind::arena:
+            case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
                 return true;
             case TypeKind::enum_: return t->has_data;
             case TypeKind::optional: return is_view_type(t->elem);
@@ -3815,6 +3844,10 @@ private:
             } else if (leaf->kind != TypeKind::pointer) {
                 why = ", and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in";
             }
+        }
+        if (leaf->kind == TypeKind::sender || leaf->kind == TypeKind::receiver || leaf->kind == TypeKind::thread) {
+            why = std::string(", and ") + (leaf->kind == TypeKind::thread ? "a thread" : "an end of a queue") +
+                  " is a handle to something two threads share, which isn't compared, shown, hashed or ordered";
         }
         if (leaf == t) return why;
         return ", since it holds " + name_of(leaf) + why;
@@ -5755,6 +5788,13 @@ private:
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
             if (n == n_Arena_ && !find_local(n)) return arena_call(e);
+            if (n == n_Receiver_ && !find_local(n)) return receiver_call(e, expected);
+            if ((n == n_Sender_ || n == n_Thread_) && !find_local(n)) {
+                error(callee->span, n == n_Sender_ ? "a `Sender` comes from the `Receiver` of its queue: `r.sender()`"
+                                                   : "a `Thread` is started with `Thread.spawn(task)`");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
             if (n == n_ArenaList_ && !find_local(n)) {
                 error(callee->span, "an `ArenaList` is made by an arena, in a `let` of its own: `var xs = a.list<i32>()`");
                 for (Arg& a : e->args) check(a.value, nullptr);
@@ -5818,6 +5858,11 @@ private:
             return T.error;
         }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
+            callee->lhs->path.parts.size() == 1 && callee->lhs->path.parts[0] == n_Thread_ && !find_local(n_Thread_) &&
+            !env_type(n_Thread_)) {
+            return thread_static(e);
+        }
+        if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
             !e->only_interface) {
             Resolved r = resolve_name(callee->lhs->path.parts[0]);
             if (r.kind == NameKind::item && r.item->kind == ItemKind::interface) return interface_call(e, r.item);
@@ -5843,6 +5888,10 @@ private:
                 return T.error;
             }
             if (recv->kind == TypeKind::arena) return arena_method(e, recv, expected);
+            if ((recv->kind == TypeKind::sender || recv->kind == TypeKind::receiver || recv->kind == TypeKind::thread) &&
+                callee->member != n_copy_) {
+                return handle_method(e, recv);
+            }
             if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
                 error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
                 for (Arg& a : e->args) check(a.value, nullptr);
@@ -6955,6 +7004,208 @@ private:
         return result;
     }
 
+    // --- threads and queues (D121) ------------------------------------------------------------
+
+    // A queue's messages go to another thread, so they're `Send`.
+    bool queue_elem(Type* elem, Span at) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(at, "a queue can't carry " + name_of(elem));
+            return false;
+        }
+        if (!is_send(elem)) {
+            error(at, name_of(elem) + " isn't `Send`, so it can't go to another thread in a queue" +
+                          (elem->kind == TypeKind::param ? "; give " + q(elem->name) + " the bound `Send`" : std::string()));
+            return false;
+        }
+        return true;
+    }
+
+    // An end of a queue or a thread in `t`, which can't be copied, or null.
+    const Type* handle_inside(const Type* t, int depth) {
+        if (depth > 64) return nullptr;
+        switch (t->kind) {
+            case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: return t;
+            case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+                return handle_inside(t->elem, depth + 1);
+            case TypeKind::map:
+                if (const Type* h = handle_inside(t->key, depth + 1)) return h;
+                return handle_inside(t->elem, depth + 1);
+            case TypeKind::tuple:
+                for (const Type* e : t->elems) {
+                    if (const Type* h = handle_inside(e, depth + 1)) return h;
+                }
+                return nullptr;
+            case TypeKind::struct_:
+                for (const FieldDecl& f : t->item->fields) {
+                    if (!f.resolved) continue;
+                    if (const Type* h = handle_inside(f.resolved, depth + 1)) return h;
+                }
+                return nullptr;
+            case TypeKind::enum_:
+                for (const VariantDecl& v : t->item->variants) {
+                    for (const Type* x : v.types) {
+                        if (const Type* h = handle_inside(x, depth + 1)) return h;
+                    }
+                }
+                return nullptr;
+            default: return nullptr;
+        }
+    }
+
+    // `std.thread.Task`, or null when the program doesn't have `std.thread`, so nothing can
+    // implement it.
+    Item* task_iface() {
+        for (auto& [m, scope] : scopes_) {
+            if (module_name(m) != "std.thread") continue;
+            auto it = scope->items.find(n_Task_);
+            if (it != scope->items.end() && it->second->kind == ItemKind::interface) return it->second;
+        }
+        return nullptr;
+    }
+
+    // `Receiver<T>()`: a new queue, and the end that takes its messages.
+    Type* receiver_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* t = nullptr;
+        if (callee->type_args.size() == 1) {
+            Type* elem = resolve_type(callee->type_args[0]);
+            if (!is_bad(elem) && queue_elem(elem, callee->type_args[0]->span)) t = T.receiver_of(elem);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`Receiver` takes one generic argument, the type of its messages: `Receiver<i32>()`");
+        } else if (expected && expected->kind == TypeKind::receiver) {
+            t = expected;
+        } else if (!expected || !is_bad(expected)) {
+            error(e->span, "can't tell what this queue carries; give it, as in `Receiver<i32>()`, or give the variable a type");
+        }
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!t) return T.error;
+        if (!e->args.empty()) {
+            error(e->args[0].span, "`Receiver<T>()` takes no arguments; the queue grows as messages come");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        return t;
+    }
+
+    // `Thread.spawn(task)`: moves `task` to a new thread, which calls its `run`. It needs `unsafe`,
+    // as the clock does (D88): what a thread does when depends on timing, which nothing in safe
+    // Calx may (D49).
+    Type* thread_static(Expr* e) {
+        Expr* callee = e->callee;
+        callee->lhs->ref = Ref::type;
+        callee->lhs->named_type = T.thread;
+        std::string_view m = text(callee->member);
+        if (m != "spawn") {
+            error(callee->span, "`Thread` has no function " + q(m) + "; start a thread with `Thread.spawn(task)`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::thread_spawn;
+        if (unsafe_depth_ == 0) {
+            error(callee->span, "`Thread.spawn` starts a thread, whose timing nothing safe may depend on, so calling it needs `unsafe`");
+        }
+        unsafe_used_ = true;
+        if (!callee->type_args.empty()) error(callee->type_args[0]->span, "`spawn` doesn't take generic arguments");
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            error(e->span, "`Thread.spawn` takes one argument, the task the thread runs, which moves to it");
+            return T.error;
+        }
+        Expr* arg = e->args[0].value;
+        Type* a = check(arg, nullptr);
+        if (is_bad(a)) return T.error;
+        Item* task = task_iface();
+        if (!task || !satisfies(a, task)) {
+            error(arg->span, name_of(a) + " doesn't implement `Task` from `std.thread`, whose `run` is what the thread does" +
+                                 (a->kind == TypeKind::param ? "; give " + q(a->name) + " the bound `Task`" : std::string()));
+            return T.error;
+        }
+        if (!is_send(a)) {
+            error(arg->span, name_of(a) + " isn't `Send`, so it can't go to another thread" +
+                                 (a->kind == TypeKind::param ? "; give " + q(a->name) + " the bound `Send`" : std::string()));
+            return T.error;
+        }
+        if (!a->open) {
+            Item* run = impl_fn(interface_member(task, n_run_), {a}, e->span);
+            if (!run) return T.error;
+            e->item = run;
+        }
+        return T.thread;
+    }
+
+    // `s.send(m)`, `s.share()` and `s.close()`; `r.next()`, `r.wait()`, `r.sender()`, `r.share()`
+    // and `r.close()`; and `t.join()`.
+    Type* handle_method(Expr* e, Type* recv) {
+        Expr* callee = e->callee;
+        std::string_view m = text(callee->member);
+        e->call = CallKind::builtin_method;
+        BMethod b = BMethod::none;
+        Type* result = T.unit;
+        Type* arg = nullptr;  // the type of its one argument, if it takes one
+        std::string hint;
+        switch (recv->kind) {
+            case TypeKind::sender:
+                if (m == "send") b = BMethod::queue_send, arg = recv->elem;
+                else if (m == "share") b = BMethod::queue_share, result = recv;
+                else if (m == "close") b = BMethod::queue_close;
+                else if (m == "next" || m == "wait" || m == "recv" || m == "receive") hint = "; the queue's `Receiver` takes its messages";
+                else if (m == "clone") hint = "; make another end of the same queue with `share()`";
+                break;
+            case TypeKind::receiver:
+                if (m == "next") b = BMethod::queue_next, result = T.optional_of(recv->elem);
+                else if (m == "wait") b = BMethod::queue_wait, result = T.optional_of(recv->elem);
+                else if (m == "sender") b = BMethod::queue_sender, result = T.sender_of(recv->elem);
+                else if (m == "share") b = BMethod::queue_share, result = recv;
+                else if (m == "close") b = BMethod::queue_close;
+                else if (m == "send") hint = "; send with a `Sender`, which `sender()` makes";
+                else if (m == "recv" || m == "receive" || m == "try_recv" || m == "poll" || m == "take")
+                    hint = "; take the next message with `next()`, or wait for one with `wait()`";
+                break;
+            default:
+                if (m == "join") b = BMethod::thread_join;
+                else if (m == "detach") hint = "; a `Thread` that's dropped carries on by itself";
+                break;
+        }
+        if (b == BMethod::none) {
+            error(callee->span, name_of(recv) + " has no method " + q(m) + hint);
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->bmethod = b;
+        if (!callee->type_args.empty()) error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
+        if (arg) {
+            if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+                for (Arg& a : e->args) check(a.value, nullptr);
+                error(e->span, q(m) + " takes one argument, the message, which moves into the queue");
+                return T.error;
+            }
+            check(e->args[0].value, arg);
+        } else {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (!e->args.empty()) {
+                error(e->args[0].span, q(m) + " takes no arguments");
+                return T.error;
+            }
+        }
+        if (!par_.empty() && (b == BMethod::queue_send || b == BMethod::queue_next || b == BMethod::queue_wait ||
+                              b == BMethod::thread_join)) {
+            error(callee->span, b == BMethod::thread_join
+                                    ? "a thread can't be joined inside a `parallel for`, which would wait on timing"
+                                    : "a queue can't be used inside a `parallel for`, since the order of the iterations' "
+                                      "messages would depend on timing; send them after the loop");
+            return result;
+        }
+        // Sending and taking change the queue, so the end is a variable that can change.
+        if (b == BMethod::queue_send || b == BMethod::queue_next || b == BMethod::queue_wait) {
+            if (Local* root = place_root(callee->lhs)) require_writable(callee->lhs, root, false);
+            else error(callee->lhs->span, q(m) + " changes the queue, so call it on a variable");
+        }
+        return result;
+    }
+
     // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
     Type* heap_call(Expr* e, Type* expected) {
         Expr* callee = e->callee;
@@ -7279,6 +7530,12 @@ private:
         if (recv->arena_list) {
             error(e->callee->span, "an `ArenaList` can't be copied, since a copy couldn't hold the arena too; make a `List` "
                                    "of its elements with `to_list()`");
+            return T.error;
+        }
+        if (const Type* h = handle_inside(recv, 0)) {
+            error(e->callee->span, name_of(recv) + " can't be copied" + (h == recv ? "" : ", since it holds " + name_of(h)) +
+                                       (h->kind == TypeKind::thread ? "; a thread is joined once, by whatever holds it"
+                                                                    : "; make another end of the same queue with `share()`"));
             return T.error;
         }
         return recv;
@@ -7803,6 +8060,7 @@ private:
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
     Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
+    Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

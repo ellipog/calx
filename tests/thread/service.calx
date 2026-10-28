@@ -1,0 +1,40 @@
+// A thread that's still running when `main` returns, waiting for a message that never comes, ends
+// with the program. Its memory isn't counted as leaked, since it's still in use. A `parallel for`
+// on such a thread runs on it alone, and gives what it would anywhere.
+
+import std.thread.{Task}
+
+struct Summer {
+    jobs: Receiver<usize>
+    out: Sender<u64>
+}
+
+impl Task for Summer {
+    fn run(own self) {
+        while let n = self.jobs.wait() {
+            var squares: List<u64> = [0; n]
+            parallel for i in 0..squares.len() {
+                squares[i] = u64(i) * u64(i)
+            }
+            var total: u64 = 0
+            for x in squares {
+                total += x
+            }
+            self.out.send(total)
+        }
+    }
+}
+
+fn main() {
+    let jobs = Receiver<usize>()
+    var results = Receiver<u64>()
+    var send = jobs.sender()
+    let t = unsafe { Thread.spawn(Summer { jobs: jobs, out: results.sender() }) }
+    send.send(10)
+    send.send(1000)
+    println("{results.wait()}")    // out: some(285)
+    println("{results.wait()}")    // out: some(332833500)
+    // `send` is still here, so the thread waits on; dropping `t` leaves it running.
+    _ = t
+    println("done")                // out: done
+}

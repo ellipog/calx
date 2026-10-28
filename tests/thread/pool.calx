@@ -1,0 +1,58 @@
+// Several threads share one queue of jobs, each through its own end of it. Which thread takes
+// which job depends on timing, but every job is done once, so the sorted results are always the
+// same.
+
+import std.thread.{Task}
+
+struct Worker {
+    id: u32
+    jobs: Receiver<u64>
+    out: Sender<(u64, u64)>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        while let n = self.jobs.wait() {
+            var x = n
+            var steps: u64 = 0
+            while x != 1 {
+                x = if x % 2 == 0 { x / 2 } else { 3 * x + 1 }
+                steps += 1
+            }
+            self.out.send((n, steps))
+        }
+    }
+}
+
+fn main() {
+    let jobs = Receiver<u64>()
+    var results = Receiver<(u64, u64)>()
+    var threads: List<Thread> = []
+    for id in 0u32..4 {
+        let w = Worker { id: id, jobs: jobs.share(), out: results.sender() }
+        threads.push(unsafe { Thread.spawn(w) })
+    }
+    var send = jobs.sender()
+    jobs.close()
+    for n in 1u64..=1000 {
+        send.send(n)
+    }
+    send.close()
+    while let t = threads.pop() {
+        t.join()
+    }
+    var all: List<(u64, u64)> = []
+    while let r = results.next() {
+        all.push(r)
+    }
+    all.sort()
+    println("{all.len()} results")    // out: 1000 results
+    println("{all[0]} {all[26]}")     // out: (1, 0) (27, 111)
+    var most = all[0]
+    for r in all {
+        if r.1 > most.1 {
+            most = r
+        }
+    }
+    println("{most}")                 // out: (871, 178)
+}

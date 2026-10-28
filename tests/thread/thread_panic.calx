@@ -1,0 +1,24 @@
+// A panic on a thread ends the whole program, as one on the main thread does, with the trace of
+// the thread that panicked. Output printed before it is all there.
+
+import std.thread.{Task}
+
+struct Divide {
+    by: i32
+}
+
+impl Task for Divide {
+    fn run(own self) {
+        println("dividing")
+        println("{100 / self.by}")    // panic: division by zero
+    }
+}
+
+fn main() {
+    println("start")    // out: start
+    let t = unsafe { Thread.spawn(Divide { by: 0 }) }
+    t.join()
+    println("never")
+}
+// out: dividing
+// trace: thread_panic.Divide.Task.run:13

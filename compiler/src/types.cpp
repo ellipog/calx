@@ -30,6 +30,7 @@ Types::Types(Arena& arena) : arena_(arena) {
     str = make(TypeKind::str, "str");
     string = make(TypeKind::string, "String");
     this->arena = make(TypeKind::arena, "Arena");
+    thread = make(TypeKind::thread, "Thread");
     for (Type* t : {bool_, i8, i16, i32, i64, u8, u16, u32, u64, usize, char_, rune, f32, f64, str, string}) {
         primitives_.push_back({t->name, t});
     }
@@ -152,6 +153,28 @@ Type* Types::deque_of(Type* elem) {
     return t;
 }
 
+// A queue's ends are handles to the runtime's queue, the same C type whatever the messages are,
+// so they aren't compounds with glue of their own.
+Type* Types::sender_of(Type* elem) {
+    auto it = sender_map_.find(elem);
+    if (it != sender_map_.end()) return it->second;
+    Type* t = make(TypeKind::sender, arena_.copy("Sender<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    sender_map_.emplace(elem, t);
+    return t;
+}
+
+Type* Types::receiver_of(Type* elem) {
+    auto it = receiver_map_.find(elem);
+    if (it != receiver_map_.end()) return it->second;
+    Type* t = make(TypeKind::receiver, arena_.copy("Receiver<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    receiver_map_.emplace(elem, t);
+    return t;
+}
+
 Type* Types::map_of(Type* key, Type* value, TableKind table) {
     auto k = std::make_tuple(key, value, table);
     auto it = map_map_.find(k);
@@ -242,7 +265,7 @@ bool copy_walk(const Type* t, int depth) {
     if (depth > 64) return true;
     switch (t->kind) {
         case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-        case TypeKind::arena: return false;
+        case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
         case TypeKind::tuple:

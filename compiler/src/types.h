@@ -35,6 +35,11 @@ enum class TypeKind : std::uint8_t {
     param,     // a generic function's or type's parameter, such as `T` in `fn f<T: Shape>`
     pointer,   // `*T` and `*const T`, only in `unsafe` code and `extern` signatures
     arena,     // `Arena`: a bump allocator that frees everything at once (D114)
+    // A queue between threads (D121): `Sender<T>` adds messages and `Receiver<T>` takes them, and
+    // the queue lasts while either has an end of it. `Thread` is a thread `Thread.spawn` started.
+    sender,
+    receiver,
+    thread,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -100,6 +105,7 @@ public:
     Type* str;
     Type* string;
     Type* arena;
+    Type* thread;
 
     // The primitive named `name`, or null.
     Type* primitive(std::string_view name) const;
@@ -111,6 +117,8 @@ public:
     Type* deque_of(Type* elem);
     Type* heap_of(Type* elem);
     Type* arena_list_of(Type* elem);
+    Type* sender_of(Type* elem);
+    Type* receiver_of(Type* elem);
     // `JavaHashMap<K, V>` and `OpenHashMap<K, V>`, and their sets, with their kinds (D105, D107).
     Type* map_of(Type* key, Type* value, TableKind table = TableKind::native);
     Type* set_of(Type* elem, TableKind table = TableKind::native);
@@ -133,6 +141,8 @@ private:
     std::map<Type*, Type*> deque_map_;
     std::map<Type*, Type*> heap_map_;
     std::map<Type*, Type*> arena_list_map_;
+    std::map<Type*, Type*> sender_map_;
+    std::map<Type*, Type*> receiver_map_;
     std::map<std::tuple<Type*, Type*, TableKind>, Type*> map_map_;
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
