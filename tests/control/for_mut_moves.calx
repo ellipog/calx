@@ -1,0 +1,12 @@
+// A `for x in mut xs` loop's variable is a view of the element, so it can't move (D116).
+
+pub fn moves(names: mut List<String>) {
+    for n in mut names {
+        n.push_str("!")
+        let t = n    // error: `n` is a `mut` view of an element, so it can't be moved; move a copy with `n.copy()`, or take the element out of the list
+        println("{t}")
+    }
+}
+
+fn main() {
+}

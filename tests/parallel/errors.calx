@@ -43,8 +43,5 @@ fn main() {
         }
         xs[k] = 1
     }
-    parallel for x in xs {    // error: a `parallel for` goes over a range of indexes
-        println("{x}")
-    }
     println("{sum(mut xs)}")
 }

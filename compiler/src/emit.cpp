@@ -2916,7 +2916,11 @@ $dropall    m->len = 0;
             std::string arr = tmp(), i = tmp();
             // A variable is read in place, since the loop can't change it. Anything else is
             // evaluated once, into the ownership pass's local when it owns memory.
-            if (s->hidden) {
+            if (s->iter_mut) {
+                // `for x in mut xs`: the place, worked out once. Nothing but `x` reaches it in the
+                // body, so its length and memory stay as they are (D116).
+                line(ctype(at) + "* " + arr + " = &" + place(it) + ";");
+            } else if (s->hidden) {
                 line(ctype(at) + " " + local_name(s->hidden) + " = " + value(it, at) + ";");
                 line("const " + ctype(at) + "* " + arr + " = &" + local_name(s->hidden) + ";");
             } else if (is_place(it) && !effects(it)) {
@@ -3035,13 +3039,22 @@ $dropall    m->len = 0;
                 line("for (cx_usize " + i + " = " + g + "; " + i + " < " + end + "; " + i + "++) {");
                 indent_++;
                 bins = true;
+            } else if (list && s->iter_mut) {
+                std::string p = tmp(), n = tmp();
+                line(ctype(elem) + "* " + p + " = " + arr + "->ptr;");
+                line("cx_usize " + n + " = " + arr + "->len;");
+                elem_at = p + "[" + i + "]";
+                line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
+                indent_++;
             } else {
                 std::string n = list ? arr + "->len" : std::to_string(at->length);
                 elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
                 line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
                 indent_++;
             }
-            if (!var.empty()) {
+            if (!var.empty() && s->iter_mut) {
+                line(ctype(elem) + "* " + var + " = &" + elem_at + ";");
+            } else if (!var.empty()) {
                 line(ctype(elem) + " " + var + " = " + elem_at + ";");
             } else if (s->pattern->kind != PatternKind::wildcard) {
                 // `for (a, b) in pairs`: the checker made sure the pattern matches every element.
@@ -3072,6 +3085,7 @@ $dropall    m->len = 0;
     void parallel_loop(Stmt* s) {
         Type* elem = s->elem_type;
         Expr* it = s->value;
+        bool elements = it->kind != ExprKind::range;  // `parallel for x in xs`, or `in mut xs`
         std::string id = std::to_string(s->loop_id);
         std::string name = "cx_par_" + std::string(fn_->c_name) + "_" + id;
         std::string ctx_t = "struct " + name + "_c";
@@ -3109,6 +3123,7 @@ $dropall    m->len = 0;
             indent_ = 0;
             std::string fields;
             for (const Cap& c : caps) fields += " " + c.type + " " + local_name(c.l) + ";";
+            if (elements) fields += std::string(" ") + (s->iter_mut ? "" : "const ") + ctype(elem) + "* cx__at;";
             line(ctx_t + " {" + fields + " cx_u64 cx__lo; };");
             directive(s->span);
             line("static void " + name + "(void* cx__v, cx_u64 cx__begin, cx_u64 cx__end) {");
@@ -3125,10 +3140,19 @@ $dropall    m->len = 0;
                     if (!c.l->is_view && par_pointers_.insert(c.l).second) pointed.push_back(c.l);
                 }
             }
+            if (elements) line(std::string(s->iter_mut ? "" : "const ") + ctype(elem) + "* restrict cx__at = cx__c->cx__at;");
             line("for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {");
             indent_ = 2;
             loop_frames_[s->loop_id] = frames_.size();
-            if (s->local) {
+            if (elements && s->local && s->iter_mut) {
+                line(ctype(elem) + "* " + local_name(s->local) + " = &cx__at[cx__i];");
+            } else if (elements && s->local) {
+                line(ctype(elem) + " " + local_name(s->local) + " = cx__at[cx__i];");
+            } else if (elements && s->pattern->kind != PatternKind::wildcard) {
+                Match m;
+                walk(s->pattern, "cx__at[cx__i]", m);
+                bind(m);
+            } else if (s->local) {
                 line(ctype(elem) + " " + local_name(s->local) + " = (" + ctype(elem) + ")(cx__c->cx__lo + cx__i);");
             }
             stmts(s->body, false);
@@ -3145,6 +3169,33 @@ $dropall    m->len = 0;
         indent_ = outer_indent;
         line_file_ = outer_file;
         line_files_mixed_ = outer_mixed;
+
+        std::string inits;
+        for (const Cap& cap : caps) {
+            std::string v = local_name(cap.l);
+            bool pointer = cap.l->is_view || par_pointers_.count(cap.l);
+            inits += (cap.by_value || pointer ? v : "&" + v) + ", ";
+        }
+        if (elements) {
+            // The elements, from the list or array worked out once, by index. Nothing in the body
+            // changes it, so its length and memory stay as they are.
+            Type* at = it->type;
+            bool list = at->kind == TypeKind::list;
+            std::string arr = tmp(), c = tmp();
+            line("{");
+            indent_++;
+            line(std::string(s->iter_mut ? "" : "const ") + ctype(at) + "* " + arr + " = &" + place(it) + ";");
+            std::string n = list ? arr + "->len" : std::to_string(at->length);
+            line("if (" + n + ") {");
+            indent_++;
+            line(ctx_t + " " + c + " = {" + inits + arr + (list ? "->ptr" : "->v") + ", 0};");
+            line("cx_parallel((cx_u64)" + n + ", " + name + ", &" + c + ");");
+            indent_--;
+            line("}");
+            indent_--;
+            line("}");
+            return;
+        }
 
         // The loop itself: the range, worked out once, and the call.
         std::string lo = tmp(), hi = tmp(), c = tmp();
@@ -3163,12 +3214,6 @@ $dropall    m->len = 0;
             line("if (" + count + " == 0) { cx_panic_begin(" + location(it->span) +
                  "); cx_print_str((cx_str){(const cx_u8*)\"a `parallel for` can't run 2^64 iterations\", 42}); cx_panic_end(); }");
             n = count;
-        }
-        std::string inits;
-        for (const Cap& cap : caps) {
-            std::string v = local_name(cap.l);
-            bool pointer = cap.l->is_view || par_pointers_.count(cap.l);
-            inits += (cap.by_value || pointer ? v : "&" + v) + ", ";
         }
         line(ctx_t + " " + c + " = {" + inits + "(cx_u64)" + lo + "};");
         line("cx_parallel(" + n + ", " + name + ", &" + c + ");");

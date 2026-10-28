@@ -1,0 +1,82 @@
+// `parallel for x in mut xs` and `parallel for x in xs`: each iteration gets one element (D116).
+import std.pool.{set_workers}
+
+struct Region {
+    id: i32,
+    cells: List<i64>,
+    total: i64,
+}
+
+fn tick(r: mut Region, scale: i64) {
+    for c in mut r.cells {
+        c = c * scale + i64(r.id)
+    }
+    // A loop of its own inside, over the region's cells.
+    parallel for c in mut r.cells {
+        c += 1
+    }
+    r.total = 0
+    for c in r.cells {
+        r.total += c
+    }
+}
+
+fn run(workers: usize) -> String {
+    set_workers(workers)
+    var regions: List<Region> = []
+    for id in 0..6 {
+        var cells: List<i64> = []
+        for i in 0..1000 {
+            cells.push(i64(i * (id + 1)))
+        }
+        regions.push(Region { id: id, cells: cells, total: 0 })
+    }
+    let scale: i64 = 3
+    parallel for r in mut regions {
+        tick(mut r, scale)
+        if r.id == 2 {
+            println("region {r.id}: {r.total}")
+        }
+    }
+    // Reading the elements, in order of the list whatever thread ran them.
+    var sums = [0i64; 6]
+    parallel for k in 0usize..regions.len() {
+        sums[k] = regions[k].total
+    }
+    parallel for r in regions {
+        if r.id % 2 == 1 {
+            println("odd {r.id}")
+        }
+    }
+    // An array, and tuples taken apart.
+    var squares = [1i32, 2, 3, 4, 5, 6, 7, 8]
+    parallel for s in mut squares {
+        s *= s
+    }
+    let pairs: List<(i32, i32)> = [(1, 2), (3, 4)]
+    parallel for (a, b) in pairs {
+        println("pair {a + b}")
+    }
+    return "{sums} {squares}"
+}
+
+fn main() {
+    let one = run(1)
+    let many = run(8)
+    println("{one}")
+    println("{one == many}")
+    // out: region 2: 4498500
+    // out: odd 1
+    // out: odd 3
+    // out: odd 5
+    // out: pair 3
+    // out: pair 7
+    // out: region 2: 4498500
+    // out: odd 1
+    // out: odd 3
+    // out: odd 5
+    // out: pair 3
+    // out: pair 7
+    // out: [1499500, 2999000, 4498500, 5998000, 7497500, 8997000] [1, 4, 9, 16, 25, 36, 49, 64]
+    // out: true
+}

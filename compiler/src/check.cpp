@@ -73,7 +73,8 @@ struct LoopCtx {
 // A `parallel for` whose body is being checked (D21).
 struct ParLoop {
     Stmt* s = nullptr;
-    Local* index = nullptr;                   // the loop variable
+    Local* index = nullptr;                   // the loop variable, for a loop over a range
+    Local* element = nullptr;                 // the loop variable, for a loop over elements
     std::unordered_set<const Local*> outer;   // the locals visible before the loop
     std::unordered_set<const Expr*> writes;   // the places rooted at those that the body changes
 };
@@ -2506,8 +2507,10 @@ private:
             }
             return;
         }
-        if (!l->used && !starts_with_underscore(n)) {
+        if (!l->used && !(l->is_loop_var && l->mutated) && !starts_with_underscore(n)) {
             error(l->span, q(n) + " is never used");
+        } else if (l->is_loop_var && l->mode == ParamMode::mut && !l->mutated && !is_bad(l->type)) {
+            error(l->span, q(n) + " never changes an element, so go over them without `mut`");
         } else if (l->is_var && !l->reassigned && !l->mutated) {
             error(l->span, q(n) + " is declared with `var` but never changed; declare it with `let`");
         }
@@ -2830,12 +2833,20 @@ private:
 
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
+        const LoopBorrow* b = loop_conflict(place, l);
+        if (b && b->exclusive) {
+            // Not a write for a `parallel for` either: the one error is that it's used at all.
+            mut_loop_error(place, b);
+            l->used = l->mutated = true;
+            return;
+        }
+        // A change that a `for` loop doesn't allow isn't also an error for a `parallel for`.
         for (ParLoop& p : par_) {
-            if (p.outer.count(l)) p.writes.insert(place);
+            if (!b && p.outer.count(l)) p.writes.insert(place);
         }
         std::string_view n = text(l->name);
         // After an error, count the write anyway, so the same variable gets no second error.
-        if (const LoopBorrow* b = loop_conflict(place, l)) {
+        if (b) {
             std::string what = b->path.empty() ? std::string(n) : place_text(place);
             std::string over = b->path.empty() ? what : place_text(b->place);
             if (b->tie) {
@@ -2865,8 +2876,13 @@ private:
             l->mutated = true;
             return;
         }
+        if (l->is_loop_var && l->mode == ParamMode::mut) {
+            l->mutated = true;  // `for x in mut xs`: a view of each element
+            return;
+        }
         if (l->is_loop_var) {
-            error(place->span, "the loop variable " + q(n) + " can't be changed; copy it into a `var`");
+            error(place->span, "the loop variable " + q(n) + " can't be changed; copy it into a `var`, or change the "
+                                   "elements with " + q("for " + std::string(n) + " in mut ..."));
             l->used = true;
             return;
         }
@@ -2889,7 +2905,39 @@ private:
         const Expr* place;
         bool shown = false;
         const Local* tie = nullptr;  // an arena list made from `place`, which holds it until its block ends (D114)
+        bool exclusive = false;      // `for x in mut place`: nothing else reaches it, to read or change
+        const Local* by = nullptr;   // that loop's variable
     };
+
+    // Using a place that a `for ... in mut` loop changes: one error for each place, which a
+    // place both read and changed would otherwise get twice.
+    void mut_loop_error(const Expr* place, const LoopBorrow* b) {
+        std::uint64_t key = std::uint64_t(place->span.file) << 32 | place->span.begin;
+        if (!mut_loop_errors_.insert(key).second) return;
+        std::string over = place_text(b->place);
+        std::string what = place_text(place);
+        error(place->span, q(what) + " can't be used while a `for ... in mut` loop changes " +
+                               (what == over ? "its elements" : "the elements of " + q(over)) +
+                               (b->by ? "; reach them through " + q(text(b->by->name)) : std::string()));
+    }
+
+    // Reading a place inside a `for ... in mut` loop over it, or over a place it holds or that holds it.
+    void check_exclusive(const Expr* e) {
+        if (e->kind != ExprKind::name && e->kind != ExprKind::self && e->kind != ExprKind::field &&
+            e->kind != ExprKind::index) {
+            return;
+        }
+        Local* root = place_root(const_cast<Expr*>(e));
+        if (!root) return;
+        std::vector<std::uint32_t> path = field_path(e);
+        for (const LoopBorrow& b : loop_borrows_) {
+            if (!b.exclusive || b.root != root) continue;
+            std::size_t n = std::min(path.size(), b.path.size());
+            if (!std::equal(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(n), b.path.begin())) continue;
+            mut_loop_error(e, &b);
+            return;
+        }
+    }
 
     // The fields from a place's root to its first index: `p.a.b` is a then b, `p.a[i].b` is a. What
     // an index reaches can't be told apart from what another index reaches, so a path ends there.
@@ -3029,15 +3077,15 @@ private:
     }
 
     void check_for(Stmt* s) {
-        if (s->iter_mut) not_yet(s->span, "`for ... in mut` loops");
         if (s->pool) not_yet(s->pool->span, "pools for `parallel for`");
         Pattern* p = s->pattern;
         Expr* it = s->value;
-        bool par = s->is_parallel && !s->iter_mut;
-        if (par && it->kind != ExprKind::range) {
-            error(it->span, "a `parallel for` goes over a range of indexes, such as " + q("0..xs.len()") +
-                                "; each iteration reaches its own element with " + q("xs[k]"));
-            par = false;
+        bool par = s->is_parallel;
+        bool by_mut = s->iter_mut;
+        if (by_mut && it->kind == ExprKind::range) {
+            error(it->span, "a range's numbers can't be changed; `for x in mut` goes over the elements of a list, an array "
+                            "or a deque");
+            by_mut = false;
         }
         Type* elem = T.error;
         Local* borrowed = nullptr;
@@ -3080,21 +3128,50 @@ private:
                 elem = t->entry;
                 borrowed = place_root(it);
             } else if (!is_bad(t)) {
+                by_mut = false;
                 error(it->span, "a `for` loop goes over a range, an array, a list, a map or a set, not " + name_of(t) +
                                     (t->kind == TypeKind::string || t->kind == TypeKind::str
                                          ? "; go over its runes with " + q("s.runes()") + ", or its UTF-16 units with " + q("s.chars()")
                                          : std::string()));
             }
         }
+        if (by_mut && !is_bad(it->type)) by_mut = mut_loop_over(s, borrowed);
+        bool elements = par && it->kind != ExprKind::range;
+        if (elements && !is_bad(it->type)) {
+            TypeKind k = it->type->kind;
+            if (s->range_of || s->text_iter != BMethod::none || (k != TypeKind::list && k != TypeKind::array)) {
+                error(s->value->span, "a `parallel for` goes over a range of indexes, such as " + q("0..xs.len()") +
+                                          ", or the elements of a list or an array, not " +
+                                          (s->range_of ? std::string("a part of a sorted table")
+                                           : s->text_iter != BMethod::none ? std::string("the text's ") + (s->text_iter == BMethod::runes ? "runes" : "UTF-16 units")
+                                                                           : a_type(it->type)));
+                par = elements = false;
+            }
+        }
         s->elem_type = elem;
         std::size_t outer = visible_.size();
         push_scope();
         if (p->kind == PatternKind::binding) {
-            if (p->is_mut) error(p->span, "a `for` loop's variable can't be `mut`; copy it into a `var`");
+            if (p->is_mut) {
+                error(p->span, "a `for` loop's variable can't be `mut`; to change the elements, write " +
+                                   q("for " + std::string(text(p->name)) + " in mut ...") + ", or copy it into a `var`");
+            }
             Local* l = new_local(p->name, elem, p->span, false);
             l->is_loop_var = true;
+            if (s->iter_mut) {
+                // A view of each element, which the body changes it through (D116). It stays one
+                // when what the loop goes over is wrong, so changing it isn't a second error.
+                l->is_view = true;
+                l->mode = ParamMode::mut;
+                if (!by_mut) l->mutated = true;  // and isn't told to go without `mut`
+            }
             s->local = l;
             declare(l);
+        } else if (by_mut) {
+            error(p->span, p->kind == PatternKind::wildcard
+                               ? "`for _ in mut` changes nothing; go over the elements without `mut`"
+                               : "a `for ... in mut` loop's variable is one name, a view of each element; take it apart in the body");
+            if (p->kind != PatternKind::wildcard) check_pattern(p, T.error);  // its names, quietly
         } else if (p->kind != PatternKind::wildcard) {
             if (check_pattern(p, elem) && !is_bad(elem)) {
                 std::string missing;
@@ -3109,12 +3186,14 @@ private:
         if (par) {
             ParLoop pl;
             pl.s = s;
-            pl.index = s->local;
+            (elements ? pl.element : pl.index) = s->local;
             pl.outer.insert(visible_.begin(), visible_.begin() + static_cast<std::ptrdiff_t>(outer));
             par_.push_back(std::move(pl));
         }
-        if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over, false});
+        if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over, false, nullptr, by_mut, by_mut ? s->local : nullptr});
+        if (borrowed && by_mut) mut_loops_++;
         check_block(s->body, nullptr, BlockUse::stmt);
+        if (borrowed && by_mut) mut_loops_--;
         if (borrowed) loop_borrows_.pop_back();
         loops_.pop_back();
         if (par) {
@@ -3123,6 +3202,35 @@ private:
             par_check(pl);
         }
         pop_scope();
+    }
+
+    // `for x in mut xs`: whether it can go over `xs` changing its elements, with `root` the variable
+    // `xs` is in, if it's a place.
+    bool mut_loop_over(Stmt* s, Local* root) {
+        Expr* it = s->value;
+        Type* t = it->type;
+        if (s->range_of || s->text_iter != BMethod::none) {
+            error(it->span, std::string("`for x in mut` changes the elements of a list, an array or a deque, not ") +
+                                (s->range_of ? "a part of a sorted table"
+                                 : s->text_iter == BMethod::runes ? "a text's runes" : "a text's UTF-16 units"));
+            return false;
+        }
+        if (t->kind == TypeKind::set) {
+            error(it->span, "a set's elements can't be changed where they are, since a change could move one; remove it "
+                            "and insert the new value");
+            return false;
+        }
+        if (t->kind == TypeKind::map) {
+            error(it->span, "changing a map's values with `for ... in mut` isn't implemented yet; change one with " + q("m[k] = v"));
+            return false;
+        }
+        if (!root) {
+            error(it->span, "`for x in mut` changes the elements where they are, so it goes over a variable or a part of "
+                            "one, not a value made here");
+            return false;
+        }
+        require_writable(it, root, false);
+        return true;
     }
 
     void push_loop(bool is_loop, bool stmt, Type* expected) {
@@ -3140,7 +3248,9 @@ private:
 
     // Checks `e`, which should have type `expected` if that isn't null, and returns its type.
     Type* check(Expr* e, Type* expected) {
+        bool part = e == place_lhs_;  // a part of a place, checked when the whole place is
         Type* t = infer(e, expected);
+        if (mut_loops_ && !part && !is_bad(t)) check_exclusive(e);
         if (t->has_pointer) t = pointer_value(e, t);
         if (t->scoped && !t->arena_list) {
             error(e->span, name_of(t) + " holds an `ArenaList`, which can't be inside another type, since its memory goes "
@@ -3350,6 +3460,7 @@ private:
             case ExprKind::call: return call(e, expected);
             case ExprKind::field: return field(e, expected);
             case ExprKind::index: {
+                place_lhs_ = e->lhs;
                 Type* base = check(e->lhs, nullptr);
                 return index_type(e, base);
             }
@@ -4266,6 +4377,7 @@ private:
                 return associated(e, t, expected);
             }
         }
+        place_lhs_ = e->lhs;
         Type* base = check(e->lhs, nullptr);
         return field_type(e, base);
     }
@@ -6352,6 +6464,10 @@ private:
         std::vector<ParAccess> acc;
         par_walk(pl, pl.s->body, acc);
         std::string k = pl.index ? q(text(pl.index->name)) : std::string("the loop variable");
+        std::string own = !pl.element ? "its own elements, indexed with " + k + " itself"
+                          : pl.s->iter_mut ? "its own element, through " + q(text(pl.element->name))
+                                           : "its own locals; to change each element, go over them with " +
+                                                 q("parallel for " + std::string(text(pl.element->name)) + " in mut ...");
         // A write must go through `[k]`, reached through fields and indexes that are the same in
         // every iteration, so each iteration's is somewhere else.
         std::vector<bool> bad(acc.size(), false);
@@ -6374,8 +6490,7 @@ private:
             }
             error(acc[i].e->span, (indexed ? place + " can be reached by more than one iteration of the `parallel for`"
                                            : place + " is shared by every iteration of the `parallel for`") +
-                                      ", so it can't be changed here; an iteration can change only its own elements, "
-                                      "indexed with " + k + " itself");
+                                      ", so it can't be changed here; an iteration can change only " + own);
         }
         // A read can't reach what another iteration writes. One error for each place read.
         std::vector<std::pair<const Local*, std::vector<std::uint32_t>>> reported;
@@ -7621,6 +7736,9 @@ private:
     Name n_Hasher_, n_add_, n_From_;
     Item* from_iface_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
+    const Expr* place_lhs_ = nullptr;  // the base of the field or index being checked
+    int mut_loops_ = 0;                // `for ... in mut` loops around the code being checked
+    std::unordered_set<std::uint64_t> mut_loop_errors_;  // where a place was used inside one, reported
     Expr* let_value_ = nullptr;  // the value of the plain `let` being checked, the one place an arena list is made
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;

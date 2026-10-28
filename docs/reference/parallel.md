@@ -35,6 +35,45 @@ fn main() {
 
 The loop goes over a range of integers, as a `for` loop can. Each iteration gets its own value of the loop variable, here `k`, and the loop returns once every iteration has finished.
 
+## Over the elements
+
+A `parallel for` can also go over the elements of a list or an array. With `mut`, each iteration gets a view of its own element and changes it, as a [`for x in mut xs`](control-flow.md#changing-the-elements) loop does (D116):
+
+```calx
+struct Region {
+    blocks: List<i32>,
+    total: i64,
+}
+
+fn main() {
+    var regions: List<Region> = []
+    for k in 0..16 {
+        regions.push(Region { blocks: [k, k + 1, k + 2], total: 0 })
+    }
+    parallel for r in mut regions {
+        for b in mut r.blocks {
+            b = b * 3 + 1
+            r.total += i64(b)
+        }
+    }
+    parallel for r in regions {
+        if r.total > 130 {
+            println("region with {r.total}")    // in the order of the list
+        }
+    }
+    var sum: i64 = 0
+    for r in regions {
+        sum += r.total
+    }
+    println("{sum}")
+    // out: region with 138
+    // out: region with 147
+    // out: 1272
+}
+```
+
+Nothing in the body reaches the list except through the element, so no iteration can reach another's. Without `mut`, each iteration reads its element, and the body can read the list as well, since no iteration changes it. Elements go to the threads in chunks, as a range's numbers do. Deques, maps and sets go through a range of indexes, or a list made from them.
+
 ## What an iteration can touch
 
 An iteration changes only its own elements: places it reaches by indexing with the loop variable itself, such as `regions[k]` or `world.states[k].entities`. No other iteration has the same `k`, so no other iteration can reach them. It can read anything that no iteration changes.
@@ -42,6 +81,8 @@ An iteration changes only its own elements: places it reaches by indexing with t
 | In the body | Allowed? |
 | --- | --- |
 | Change `xs[k]`, or any part of it | Yes |
+| Change `x`, or any part of it, in `parallel for x in mut xs` | Yes |
+| Use `xs` itself in `parallel for x in mut xs` | No: only through `x` |
 | Change `w.blocks[k]` and `w.states[k]` in one iteration | Yes: separate fields are separate values |
 | Change `grid[i][k]` in a loop over `k`, where `i` is the same in every iteration | Yes |
 | Read `xs[k]`, or `ys[j]` for any `j`, when no iteration changes `ys` | Yes |
@@ -197,4 +238,14 @@ cx_parallel((cx_u64)cx_t9 - (cx_u64)cx_t8, cx_par_game__main_3, &cx_t10);
 
 The loop works out the range once, `cx_t8` to `cx_t9`, and if it isn't empty calls `cx_parallel(count, body, &context)` in the runtime, [runtime/calx_rt.c](../../runtime/calx_rt.c), which returns when every chunk has run.
 
-Still to build, in the [spec](../CALX_SPEC.md#parallel-loops): `parallel for x in mut xs`, which gives each iteration a view of its element, and choosing a pool with `parallel(pool) for`.
+A loop over elements passes the list's memory in the context instead, as `cx__at`, and the count is the list's length. Each iteration's view is a pointer to its element:
+
+```c
+cx_i64* restrict cx__at = cx__c->cx__at;
+for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {
+    cx_i64* x = &cx__at[cx__i];
+    (*x) = ((cx_i64)((cx_u64)(*x) + (cx_u64)((cx_i64)1LL)));
+}
+```
+
+Still to build, in the [spec](../CALX_SPEC.md#parallel-loops): choosing a pool with `parallel(pool) for`.

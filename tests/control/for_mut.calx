@@ -1,0 +1,93 @@
+// `for x in mut xs`: a view of each element, which the body changes it through (D116).
+
+struct Mob {
+    hp: i32,
+    tags: List<String>,
+}
+
+struct World {
+    mobs: List<Mob>,
+    tick: i64,
+}
+
+fn heal(m: mut Mob, by: i32) {
+    m.hp += by
+}
+
+// Generic code changes elements the same way.
+fn fill<T: Copy>(xs: mut List<T>, v: T) {
+    for x in mut xs {
+        x = v
+    }
+}
+
+fn main() {
+    var xs: List<i32> = [1, 2, 3, 4]
+    for x in mut xs {
+        x *= 10
+    }
+    println("{xs}")    // out: [10, 20, 30, 40]
+
+    var arr = [1i64, 2, 3]
+    for a in mut arr {
+        a = a * a + 1
+    }
+    println("{arr}")    // out: [2, 5, 10]
+
+    // A field, while the body reads and changes the struct's other fields.
+    var w = World { mobs: [Mob { hp: 5, tags: [] }, Mob { hp: 7, tags: ["a"] }], tick: 4 }
+    for m in mut w.mobs {
+        heal(mut m, 3)
+        m.tags.push("t{w.tick}")
+    }
+    w.tick += 1
+    println("{w.mobs[0].hp} {w.mobs[1].hp} {w.mobs[0].tags} {w.mobs[1].tags} {w.tick}")    // out: 8 10 [t4] [a, t4] 5
+
+    // A deque whose elements wrap around its buffer.
+    var d: Deque<i32> = [1, 2, 3]
+    d.push_first(0)
+    for x in mut d {
+        x += 100
+    }
+    println("{d}")    // out: [100, 101, 102, 103]
+
+    // Giving an element a new value drops the old one.
+    var names: List<String> = ["a", "b"]
+    for n in mut names {
+        n = "{n}!"
+    }
+    println("{names}")    // out: [a!, b!]
+
+    // Loops inside loops: each row, then each cell of it.
+    var grid: List<List<i32>> = [[1, 2], [3], []]
+    for row in mut grid {
+        row.push(0)
+        for c in mut row {
+            c = c * 2 + 1
+        }
+    }
+    println("{grid}")    // out: [[3, 5, 1], [7, 1], [1]]
+
+    // `continue` and `break`.
+    var ys: List<i32> = [1, 2, 3, 4, 5, 6]
+    for y in mut ys {
+        if y % 2 == 0 {
+            continue
+        }
+        if y > 4 {
+            break
+        }
+        y = -y
+    }
+    println("{ys}")    // out: [-1, 2, -3, 4, 5, 6]
+
+    fill(mut ys, 7)
+    println("{ys}")    // out: [7, 7, 7, 7, 7, 7]
+
+    // An empty list runs the body no times.
+    var empty: List<i32> = []
+    for x in mut empty {
+        x += 1
+    }
+    println("{empty.len()}")    // out: 0
+}

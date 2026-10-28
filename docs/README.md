@@ -23,7 +23,7 @@ What's built, one page per feature:
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
 7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
 8. [Conversions](reference/conversions.md): exact `T(x)`, the named lossy conversions, and `try_from`
-9. [Control flow](reference/control-flow.md): if, while, while let, for, loop, break and continue
+9. [Control flow](reference/control-flow.md): if, while, while let, for, `for x in mut xs`, loop, break and continue
 10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
 11. [Structs](reference/structs.md): fields, defaults, literals and methods
 12. [Enums](reference/enums.md): variants with and without data, representations, conversions
@@ -48,7 +48,7 @@ What's built, one page per feature:
 31. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
 32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
 33. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-34. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
+34. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
 35. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library

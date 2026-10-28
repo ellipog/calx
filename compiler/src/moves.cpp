@@ -19,7 +19,7 @@ bool copyable(const Type* t) { return !t || is_copy(t); }
 enum class Use : std::uint8_t { consume, view, change };
 
 // Why a local doesn't own its value.
-enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, part };
+enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, mut_element, part };
 
 bool is_local_name(const Expr* e) {
     return (e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::local && e->local;
@@ -342,6 +342,10 @@ private:
             case ViewOf::element:
                 error(e->span, q(n) + " is an element the loop looks at, so it can't be moved; move a copy with " +
                                    q(n + ".copy()") + hint);
+                break;
+            case ViewOf::mut_element:
+                error(e->span, q(n) + " is a `mut` view of an element, so it can't be moved; move a copy with " +
+                                   q(n + ".copy()") + ", or take the element out of the list" + hint);
                 break;
             default: {
                 auto d = part_of_.find(l);
@@ -699,7 +703,7 @@ private:
             expr(it->lhs, Use::view);
             expr(it->rhs, Use::view);
         } else if ((root = place_root(it))) {
-            expr(it, Use::view);
+            expr(it, s->iter_mut ? Use::change : Use::view);
         } else {
             expr(it, Use::consume);
             if (!copyable(it->type)) {
@@ -717,8 +721,9 @@ private:
             scopes_.emplace_back();
             if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it), false});
             if (s->local) {
-                s->local->owns = copyable(s->local->type);
-                if (!s->local->owns) view_of_[s->local] = ViewOf::element;
+                // `for x in mut xs`: a view, even of a number, since a change goes to the element.
+                s->local->owns = !s->iter_mut && copyable(s->local->type);
+                if (!s->local->owns) view_of_[s->local] = s->iter_mut ? ViewOf::mut_element : ViewOf::element;
                 if (!scan_) declare(s->local);
             } else {
                 bind(s->pattern, false, nullptr, "", ViewOf::element);

@@ -1,0 +1,96 @@
+// What `for x in mut xs` doesn't allow (D116).
+
+pub struct R {
+    pub a: List<i32>,
+    pub b: i32,
+}
+
+pub fn read_only(xs: List<i32>) {
+    for x in mut xs {    // error: parameter `xs` can't be changed; take it as `mut` to change it
+        x += 1
+    }
+}
+
+pub fn never(xs: mut List<i32>) {
+    for x in mut xs {    // error: `x` never changes an element, so go over them without `mut`
+        println("{x}")
+    }
+}
+
+pub fn reads(xs: mut List<i32>) {
+    for x in mut xs {
+        x += i32.wrap(xs.len())    // error: `xs` can't be used while a `for ... in mut` loop changes its elements; reach them through `x`
+    }
+}
+
+pub fn writes(xs: mut List<i32>) {
+    for x in mut xs {
+        xs[0] = x    // error: `xs[...]` can't be used while a `for ... in mut` loop changes the elements of `xs`; reach them through `x`
+        x = 1
+    }
+}
+
+pub fn fields(r: mut R) {
+    for x in mut r.a {
+        x += r.b
+        r.b += 1
+        println("{r.a}")    // error: `r.a` can't be used while a `for ... in mut` loop changes its elements; reach them through `x`
+    }
+}
+
+pub fn whole(r: mut R) {
+    for x in mut r.a {
+        x += 1
+        println("{r.b}")
+        let _s = r    // error: `r` can't be used while a `for ... in mut` loop changes the elements of `r.a`; reach them through `x`
+    }
+}
+
+pub fn twice(xs: mut List<i32>) {
+    for x in mut xs {
+        x += 1
+        for y in mut xs {    // error: `xs` can't be used while a `for ... in mut` loop changes its elements; reach them through `x`
+            y += x
+        }
+    }
+}
+
+pub fn kinds() {
+    let st = "abc"
+    for x in mut 0..3 {    // error: a range's numbers can't be changed; `for x in mut` goes over the elements of a list, an array or a deque
+        x += 1
+    }
+    var s = Set<i32>()
+    s.insert(1)
+    for x in mut s {    // error: a set's elements can't be changed where they are, since a change could move one; remove it and insert the new value
+        x += 1
+    }
+    var m = Map<i32, i32>()
+    m[1] = 2
+    for e in mut m {    // error: changing a map's values with `for ... in mut` isn't implemented yet; change one with `m[k] = v`
+        println("{e}")
+    }
+    for r in mut st.runes() {    // error: `for x in mut` changes the elements of a list, an array or a deque, not a text's runes
+        r = 'a'
+    }
+    for x in mut [1, 2] {    // error: `for x in mut` changes the elements where they are, so it goes over a variable or a part of one, not a value made here
+        x += 1
+    }
+}
+
+pub fn patterns(xs: mut List<i32>, ps: mut List<(i32, i32)>) {
+    for _ in mut xs {    // error: `for _ in mut` changes nothing; go over the elements without `mut`
+    }
+    for (a, b) in mut ps {    // error: a `for ... in mut` loop's variable is one name, a view of each element; take it apart in the body
+        println("{a} {b}")
+    }
+    for mut y in xs {    // error: a `for` loop's variable can't be `mut`; to change the elements, write `for y in mut ...`, or copy it into a `var`
+        println("{y}")
+    }
+    for y in xs {
+        y += 1    // error: the loop variable `y` can't be changed; copy it into a `var`, or change the elements with `for y in mut ...`
+    }
+}
+
+fn main() {
+}

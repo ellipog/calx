@@ -280,7 +280,7 @@ Built: [std.mail](std/mail.md) (D115). An actor is a plain struct that a `parall
 
 ### Parallel loops
 
-Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). A loop inside another gets the threads the outer one has no work for ([loops inside loops](reference/parallel.md#loops-inside-loops)). Still to build:
+Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). `parallel for x in mut xs { }` gives each iteration a mutable view of its own element, and nothing else in the body reaches `xs` ([over the elements](reference/parallel.md#over-the-elements), D116). A loop inside another gets the threads the outer one has no work for ([loops inside loops](reference/parallel.md#loops-inside-loops)). Still to build:
 
 ```calx
 fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
@@ -290,7 +290,7 @@ fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
 }
 ```
 
-- `parallel for x in mut xs { }` gives each iteration a mutable view of its own element, the same as indexing with the loop's variable.
+- Going over the values of a slot map or a map with `in mut`, as above.
 - `parallel(pool) for` picks a pool.
 - Reading values that are `Share` while something else changes the collection they came from, once shared values exist.
 

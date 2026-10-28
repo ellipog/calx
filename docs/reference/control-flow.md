@@ -86,8 +86,8 @@ fn main() {
 
 - `for i in a..b` counts from `a` up to but not including `b`, and `a..=b` includes `b`. Both ends are integers of the same type, and are evaluated once. `a..=MAX` stops at `MAX` without overflowing.
 - `for x in array` goes over an array's elements in order. The array can't be changed during the loop.
-- The loop variable can't be assigned. `for _ in 0..n` needs no variable.
-- `parallel for i in a..b` runs the iterations at once, on several threads: see [Parallel loops](parallel.md).
+- The loop variable can't be assigned. `for _ in 0..n` needs no variable. To change the elements, loop with `in mut` ([below](#changing-the-elements)).
+- `parallel for i in a..b` runs the iterations at once, on several threads, and so does `parallel for x in xs` over a list's or an array's elements: see [Parallel loops](parallel.md).
 
 ### Looping over a field
 
@@ -111,6 +111,39 @@ fn main() {
 ```
 
 Changing `r.scheduled`, or `r` as a whole, is still an error in the loop: `r.scheduled` can't be changed while a `for` loop goes over it, and `r` can't be changed while a `for` loop goes over `r.scheduled`. Past an index, the loop keeps the whole list: in a loop over `rs[i].scheduled`, `rs[j].due` could be the same region's, so no element of `rs` can change.
+
+### Changing the elements
+
+`for x in mut xs` goes over the elements of a list, an array or a deque, and `x` is a view of each one: changing `x` changes the element, as a [`mut` parameter](functions.md#parameter-modes) changes the caller's value (D116).
+
+```calx
+struct Mob {
+    hp: i32,
+    tags: List<String>,
+}
+
+fn main() {
+    var xs: List<i32> = [1, 2, 3]
+    for x in mut xs {
+        x *= 10
+    }
+    var mobs = [Mob { hp: 5, tags: [] }, Mob { hp: 9, tags: ["boss"] }]
+    for m in mut mobs {
+        m.hp += 1
+        m.tags.push("healed")
+    }
+    println("{xs} {mobs[0].hp} {mobs[1].tags}")    // out: [10, 20, 30] 6 [boss, healed]
+}
+```
+
+- What the loop goes over is a variable or a part of one that can be changed: a `var`, a `mut` parameter, or a field or element of one.
+- Nothing in the body reaches it except through `x`: reading it, as in `xs.len()` or `xs[0]`, is an error as well as changing it, so no element is read while it's half changed and the list never moves under the loop. As in [a loop over a field](#looping-over-a-field), the body can use the struct's other fields.
+- `x` can be passed on as `mut x`, given a new value, which drops the old one, or changed in part, as in `m.tags.push(...)`. It can't move, since the element stays in the list: move a copy with `x.copy()`.
+- It's an error if the body never changes `x`, as for a `mut` parameter: go over the elements without `mut`.
+- The variable is one name. Take an element apart in the body, as in `let (a, b) = p`, or change its parts with `p.0 += 1`.
+- A set's elements can't change where they are, since a change could move one, and a range's numbers can't change at all. Changing a map's values in place isn't built yet: change one with `m[k] = v`.
+
+In C, `x` is a pointer to the element, and the list's length and memory are read once before the loop, since nothing in the body can change them.
 
 ## `loop`
 

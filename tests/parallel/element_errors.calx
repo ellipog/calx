@@ -1,0 +1,42 @@
+// What a `parallel for` over elements doesn't allow (D116).
+
+pub fn shared(xs: mut List<i32>) {
+    var total = 0
+    parallel for x in mut xs {
+        x += 1
+        total += x    // error: `total` is shared by every iteration of the `parallel for`, so it can't be changed here; an iteration can change only its own element, through `x`
+    }
+    println("{total}")
+}
+
+pub fn by_value(idx: List<usize>, out: mut List<i32>) {
+    parallel for i in idx {
+        out[i] = 1    // error: `out[i]` can be reached by more than one iteration of the `parallel for`, so it can't be changed here; an iteration can change only its own locals; to change each element, go over them with `parallel for i in mut ...`
+    }
+}
+
+pub fn same_list(xs: mut List<i32>) {
+    parallel for x in mut xs {
+        x += 1
+        xs.push(x)    // error: `xs` can't be used while a `for ... in mut` loop changes its elements; reach them through `x`
+    }
+    parallel for x in xs {
+        println("{xs[0] + x}")
+        xs[1] = x    // error: `xs` can't be changed while a `for` loop goes over it
+    }
+}
+
+pub fn kinds(d: Deque<i32>, m: Map<i32, i32>, s: String) {
+    parallel for x in d {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not a `Deque<i32>`
+        println("{x}")
+    }
+    parallel for e in m {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not a `Map<i32, i32>`
+        println("{e}")
+    }
+    parallel for r in s.runes() {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not the text's runes
+        println("{r}")
+    }
+}
+
+fn main() {
+}
