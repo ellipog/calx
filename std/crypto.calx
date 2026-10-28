@@ -227,8 +227,9 @@ impl RsaPublicKey {
 
     /// Whether `signature` is the key's PKCS#1 v1.5 signature of `message` with its `hash`, as
     /// Java's `Signature.verify` decides for "SHA256withRSA" with `Sha256` or "SHA1withRSA" with
-    /// `Sha1`. A signature that isn't the key's length, or whose number isn't below the modulus,
-    /// isn't, where Java throws a `SignatureException` that vanilla takes as a no.
+    /// `Sha1`. One whose number isn't below the modulus isn't, as Java decides too. Nor is one
+    /// that isn't the key's length, where Java throws a `SignatureException`, `Bad signature
+    /// length: got 255 but was expecting 256`, that vanilla logs and takes as a no.
     pub fn verify(self, hash: Algorithm, message: List<u8>, signature: List<u8>) -> bool {
         let size = self.size()
         if signature.len() != size {
