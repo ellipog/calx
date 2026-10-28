@@ -1,0 +1,12 @@
+// What a raw string can't be (D125).
+fn main() {
+    let a = #"
+        fine
+      too little    // error: this line is indented less than the raw string's closing
+        "#
+    let b = #"
+        text "#    // error: a block's closing `"#` goes on a line of its own
+    let c = #"x #{}"#    // error: empty `#{}` in a raw string
+    println("{a} {b} {c}")
+    let d = #"no end    // error: unclosed raw string; one that spans lines starts its text on the line after `#"`
+}

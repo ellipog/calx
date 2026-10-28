@@ -124,6 +124,12 @@ const cases = [
     ['println("bad \\q")', '\\q', 'invalid.illegal.escape'],
     ['println("{if a { 1 } else { 2 }}")', 'else', 'keyword.control'],
     ['let s = t"hello"', 't', 'storage.type.string'],
+    ['let r = #"a {b} \\q"#', 'a {b} \\q', 'string.quoted.raw'],
+    ['let r = #"a #{x} b"#', '#{', 'punctuation.section.interpolation.begin'],
+    ['let r = #"a #{x} b"#', 'x', 'variable.other'],
+    ['let r = ##"say "# ##{x}"##', '##{', 'punctuation.section.interpolation.begin'],
+    ['let r = ##"say "# ##{x}"##', '"##', 'punctuation.definition.string.end'],
+    ['let r = #"f("#{x}")"#', '#{', 'punctuation.section.interpolation.begin'],
     ['let x = some(3)', 'some', 'support.function.builtin'],
     ['let y = i8.try_from(x)', 'i8', 'support.type.primitive'],
     ['let y = i8.try_from(x)', 'try_from', 'entity.name.function.call'],
@@ -161,6 +167,12 @@ test('grammar: a string ends at the end of its line', () => {
     const lines = tokenize('let s = "open\nlet t = 1');
     const scopes = lines[1].flatMap(([, s]) => s);
     assert.ok(!scopes.some((s) => s.startsWith('string')), scopes.join(' '));
+});
+
+test('grammar: a raw string block spans lines', () => {
+    const lines = tokenize('let s = #"\n    {not code}\n    "#\nlet t = 1');
+    assert.ok(lines[1].flatMap(([, s]) => s).some((s) => s.startsWith('string.quoted.raw')));
+    assert.ok(!lines[3].flatMap(([, s]) => s).some((s) => s.startsWith('string')));
 });
 
 // Every example in the repo tokenizes without an `invalid` scope, except on lines whose test

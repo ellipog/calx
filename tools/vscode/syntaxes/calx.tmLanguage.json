@@ -9,6 +9,7 @@
       "patterns": [
         { "include": "#comments" },
         { "include": "#attributes" },
+        { "include": "#raw-strings" },
         { "include": "#strings" },
         { "include": "#chars" },
         { "include": "#numbers" },
@@ -47,6 +48,125 @@
         "1": { "name": "punctuation.definition.annotation.calx" },
         "2": { "name": "entity.name.function.decorator.calx" }
       }
+    },
+    "raw-strings": {
+      "comment": "D125: `#\"...\"#` has no escapes and interpolates with `#{}`; more `#`s hold `\"#`. One that ends its line is a block, so it may span lines.",
+      "patterns": [
+        {
+          "begin": "(?<!#)(###\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.calx"
+            }
+          },
+          "end": "(\"###)(?!\\{)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.calx"
+            }
+          },
+          "name": "string.quoted.raw.calx",
+          "patterns": [
+            {
+              "name": "meta.interpolation.calx",
+              "begin": "###\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.calx"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.calx"
+                }
+              },
+              "contentName": "source.calx",
+              "patterns": [
+                {
+                  "include": "#interpolation"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(?<!#)(##\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.calx"
+            }
+          },
+          "end": "(\"##)(?!\\{)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.calx"
+            }
+          },
+          "name": "string.quoted.raw.calx",
+          "patterns": [
+            {
+              "name": "meta.interpolation.calx",
+              "begin": "##\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.calx"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.calx"
+                }
+              },
+              "contentName": "source.calx",
+              "patterns": [
+                {
+                  "include": "#interpolation"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(?<!#)(#\")",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.begin.calx"
+            }
+          },
+          "end": "(\"#)(?!\\{)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.string.end.calx"
+            }
+          },
+          "name": "string.quoted.raw.calx",
+          "patterns": [
+            {
+              "name": "meta.interpolation.calx",
+              "begin": "#\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.calx"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.calx"
+                }
+              },
+              "contentName": "source.calx",
+              "patterns": [
+                {
+                  "include": "#interpolation"
+                }
+              ]
+            }
+          ]
+        }
+      ]
     },
     "strings": {
       "comment": "A string ends at its line's end, as in the lexer. `t\"...\"` has a prefix.",

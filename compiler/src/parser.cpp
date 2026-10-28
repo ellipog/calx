@@ -1599,6 +1599,11 @@ private:
         std::vector<Expr*> parts;
         for (const StringPart& part : t.parts) {
             if (!part.is_expr) continue;
+            // An empty one is the lexer's error already.
+            if (part.span.begin == part.span.end) {
+                parts.push_back(new_expr(ExprKind::none_lit, part.span));
+                continue;
+            }
             const SourceFile& f = ctx_.sources.file(file_);
             std::vector<Token> toks = lex(f, file_, part.span.begin, part.span.end, ctx_.names, ctx_.arena, ctx_.diags);
             Parser sub(ctx_, file_, std::move(toks));

@@ -1,0 +1,39 @@
+// Raw strings (D125): no escapes, braces as they are, `#{expr}` interpolation, more `#`s to hold
+// `"#`, and blocks that lose their closing line's indentation.
+fn main() {
+    let name = "Point"
+    println(#"a {brace}, a \backslash, "quotes" and #{name}"#)    // out: a {brace}, a \backslash, "quotes" and Point
+    println(##"holds "# and ##{name.len()}, not #{name}"##)        // out: holds "# and 5, not #{name}
+    println(#"println("#{name}")"#)                                 // out: println("Point")
+    let empty = #""#
+    println("[{empty}] {empty.len()}")                              // out: [] 0
+    let code = #"
+        impl #{name} {
+            fn show(self) {}
+
+        	tab
+        }
+        "#
+    print(code)
+    println("|")
+    // out: impl Point {
+    // out:     fn show(self) {}
+    // out:
+    // out: 	tab
+    // out: }|
+    let one = #"
+        just one line
+        "#
+    println("[{one}]")    // out: [just one line]
+    let blank = #"
+        "#
+    println("[{blank}] {blank.len()}")    // out: [] 0
+    let nested = #"
+            deeper
+          less
+        "#
+    print(nested)    // out:     deeper
+    println("")      // out:   less
+    let parts = "{#"{"#}{name}{#"}"#}"
+    println(parts)    // out: {Point}
+}

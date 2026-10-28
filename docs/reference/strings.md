@@ -25,6 +25,7 @@ fn main() {
 - A literal used as a `String` costs nothing. The `String` points at the literal's bytes and owns no memory until it changes, when it copies them into memory of its own.
 - A literal with `{...}` parts is a `String`, built when it runs. As the message of `print`, `println`, `assert` and `panic`, its parts are printed directly instead, with no string built ([printing](printing.md)).
 - Escapes and the rest of the literal syntax are in [syntax](syntax.md#character-and-string-literals).
+- A raw string, `#"..."#`, has no escapes, keeps its braces and backslashes as text, and inserts values with `#{...}`. One that starts at the end of a line is a block that can span lines and loses its closing line's indentation ([raw strings](syntax.md#raw-strings)). It's a `str` or `String` like any other literal.
 
 ## Making one
 

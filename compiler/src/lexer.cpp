@@ -171,6 +171,14 @@ private:
             lex_string(start, Name{});
             return;
         }
+        if (c == '#') {
+            std::uint32_t p = pos_;
+            while (p < end_ && src_[p] == '#') p++;
+            if (p < end_ && src_[p] == '"') {
+                lex_raw_string(start);
+                return;
+            }
+        }
         if (c == '\'') {
             lex_char();
             return;
@@ -467,6 +475,147 @@ private:
         t.parts = arena_.copy(parts);
     }
 
+    // `#"..."#`, a raw string (D125), for text full of braces, quotes and backslashes, such as
+    // code an attribute generates. Nothing in it is an escape, `{` and `}` are themselves, and
+    // `#{expr}` interpolates, even straight after a quote. With more `#`s at both ends, such as
+    // `##"..."##`, the text can hold `"#`, and interpolation takes as many: `##{expr}`. One whose
+    // `#"` ends its line is a block:
+    // its text is the lines up to the closing line, less the closing line's indentation, so it can
+    // be indented with the code around it.
+    void lex_raw_string(std::uint32_t start) {
+        std::uint32_t hashes = 0;
+        while (src_[pos_] == '#') {
+            hashes++;
+            pos_++;
+        }
+        pos_++;  // the quote
+        auto closes_at = [&](std::uint32_t p) {
+            if (src_[p] != '"') return false;
+            for (std::uint32_t i = 1; i <= hashes; i++) {
+                if (p + i >= end_ || src_[p + i] != '#') return false;
+            }
+            // `"#{name}` is a quote and an interpolation, as generated code often wants, since
+            // nothing follows a string with `{`.
+            return !(p + hashes + 1 < end_ && src_[p + hashes + 1] == '{');
+        };
+        auto interpolates_at = [&](std::uint32_t p) {
+            for (std::uint32_t i = 0; i < hashes; i++) {
+                if (p + i >= end_ || src_[p + i] != '#') return false;
+            }
+            return p + hashes < end_ && src_[p + hashes] == '{';
+        };
+        std::uint32_t after = pos_;
+        if (after < end_ && src_[after] == '\r') after++;
+        bool block = after < end_ && src_[after] == '\n';
+        std::uint32_t first = block ? after + 1 : pos_;
+        // Find the end first: a block's closing line says how much indentation its lines lose.
+        std::uint32_t close = 0;
+        bool found = false;
+        for (std::uint32_t p = first; p < end_;) {
+            if (closes_at(p)) {
+                close = p;
+                found = true;
+                break;
+            }
+            if (!block && src_[p] == '\n') break;
+            if (interpolates_at(p)) {
+                pos_ = p + hashes + 1;
+                if (!skip_interpolation()) break;
+                p = pos_;
+                continue;
+            }
+            p++;
+        }
+        if (!found) {
+            pos_ = start + hashes + 1;
+            while (pos_ < end_ && src_[pos_] != '\n') pos_++;
+            diags_.error(span(start, pos_), block ? "unclosed raw string: it ends at `\"" + std::string(hashes, '#') + "`"
+                                                  : "unclosed raw string; one that spans lines starts its text on the line after `#\"`");
+            push(Tok::string_lit, start, pos_);
+            return;
+        }
+        std::uint32_t end = close;  // the text ends here
+        std::string_view indent;
+        if (block) {
+            std::uint32_t line = close;
+            while (line > first && src_[line - 1] != '\n') line--;
+            indent = std::string_view(src_).substr(line, close - line);
+            for (char ch : indent) {
+                if (ch != ' ' && ch != '\t') {
+                    diags_.error(span(close, close + 1 + hashes), "a block's closing `\"" + std::string(hashes, '#') +
+                                                                      "` goes on a line of its own");
+                    indent = {};
+                    break;
+                }
+            }
+            // The line break before the closing line isn't part of the text.
+            end = line > first ? line - 1 : first;
+            if (end > first && src_[end - 1] == '\r') end--;
+            if (line == first) end = first;
+        }
+        std::vector<StringPart> parts;
+        std::string text;
+        auto flush_text = [&] {
+            if (!text.empty()) {
+                StringPart part;
+                part.text = arena_.copy(text);
+                parts.push_back(part);
+                text.clear();
+            }
+        };
+        bool line_start = block;
+        for (std::uint32_t p = first; p < end;) {
+            if (line_start) {
+                line_start = false;
+                std::uint32_t q = p;
+                while (q < end && (src_[q] == ' ' || src_[q] == '\t')) q++;
+                bool blank = q >= end || src_[q] == '\n' || src_[q] == '\r';
+                if (std::string_view(src_).substr(p, indent.size()) == indent) {
+                    p += static_cast<std::uint32_t>(indent.size());
+                } else if (blank) {
+                    p = q;
+                } else {
+                    diags_.error(span(p, q), "this line is indented less than the raw string's closing `\"" +
+                                                 std::string(hashes, '#') + "`, whose indentation every line loses");
+                    p = q;
+                }
+                continue;
+            }
+            char ch = src_[p];
+            if (ch == '\r' && p + 1 < end && src_[p + 1] == '\n') {
+                p++;
+                continue;
+            }
+            if (ch == '\n') {
+                text += '\n';
+                p++;
+                line_start = true;
+                continue;
+            }
+            if (interpolates_at(p)) {
+                flush_text();
+                std::uint32_t expr_start = p + hashes + 1;
+                pos_ = expr_start;
+                skip_interpolation();
+                StringPart part;
+                part.is_expr = true;
+                part.span = span(expr_start, pos_ - 1);
+                if (part.span.begin == part.span.end) {
+                    diags_.error(span(p, pos_), "empty `" + std::string(hashes, '#') + "{}` in a raw string");
+                }
+                parts.push_back(part);
+                p = pos_;
+                continue;
+            }
+            text += ch;
+            p++;
+        }
+        flush_text();
+        pos_ = close + 1 + hashes;
+        Token& t = push(Tok::string_lit, start, pos_);
+        t.parts = arena_.copy(parts);
+    }
+
     // Skips an interpolated expression up to and past its closing brace, through nested braces
     // and strings. Returns false if the line ends first.
     bool skip_interpolation() {
@@ -474,6 +623,39 @@ private:
         while (pos_ < end_) {
             char c = src_[pos_];
             if (c == '\n') return false;
+            if (c == '#') {
+                // A raw string, on this line: to its closing quote and `#`s, through its own
+                // interpolations.
+                std::uint32_t p = pos_, hashes = 0;
+                while (p < end_ && src_[p] == '#') {
+                    p++;
+                    hashes++;
+                }
+                if (p < end_ && src_[p] == '"') {
+                    pos_ = p + 1;
+                    for (;;) {
+                        if (pos_ >= end_ || src_[pos_] == '\n') return false;
+                        std::uint32_t h = 0;
+                        while (h < hashes && pos_ + 1 + h < end_ && src_[pos_ + 1 + h] == '#') h++;
+                        bool after = pos_ + 1 + hashes < end_ && src_[pos_ + 1 + hashes] == '{';
+                        if (src_[pos_] == '"' && h == hashes && !after) {
+                            pos_ += 1 + hashes;
+                            break;
+                        }
+                        std::uint32_t k = 0;
+                        while (k < hashes && pos_ + k < end_ && src_[pos_ + k] == '#') k++;
+                        if (k == hashes && pos_ + k < end_ && src_[pos_ + k] == '{') {
+                            pos_ += k + 1;
+                            if (!skip_interpolation()) return false;
+                            continue;
+                        }
+                        pos_++;
+                    }
+                    continue;
+                }
+                pos_++;
+                continue;
+            }
             if (c == '"') {
                 pos_++;
                 while (pos_ < end_ && src_[pos_] != '"' && src_[pos_] != '\n') {

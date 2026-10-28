@@ -86,10 +86,51 @@ fn main() {
 
 - A character literal holds one character in single quotes. It's a `char` (one UTF-16 code unit, Java's `char`) where a `char` is expected, and otherwise a `rune` (a Unicode scalar value).
 - A string literal is in double quotes, on one line. It's a `str`.
-- `{expr}` inside a string inserts the value of `expr`. For now this works in the strings given to `print`, `println`, `panic` and `assert` ([printing](printing.md)).
+- `{expr}` inside a string inserts the value of `expr`, which makes the literal a `String` ([strings](strings.md#literals)). An empty `{}` is an error.
 - Escapes, in both: `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\{`, `\}`, and `\u{...}` with 1 to 6 hex digits naming a Unicode scalar value.
 
 `true` and `false` are the `bool` literals.
+
+### Raw strings
+
+A raw string is written `#"..."#`. It has no escapes, and its braces and backslashes are just text, so it suits code, JSON and paths. `#{expr}` inserts a value (D125).
+
+```calx
+fn main() {
+    let name = "Point"
+    println(#"C:\temp\{name}.json"#)                  // out: C:\temp\{name}.json
+    println(#"impl #{name} { fn show(self) {} }"#)    // out: impl Point { fn show(self) {} }
+    println(#"say "hi" to #{name.len()} people"#)    // out: say "hi" to 5 people
+    println(##"a raw string ends at "#, so this one has ##"##)    // out: a raw string ends at "#, so this one has ##
+}
+```
+
+- `#"` starts one and `"#` ends it, except a `"#` followed by `{`, which is a quote and then an insertion: `#"f("#{x}")"#` is `f("`, `x`, and `")`.
+- More `#`s hold `"#`. Between `##"` and `"##` the insertion is `##{expr}`, and `#{` is text. Any number of `#`s works.
+- A raw string that isn't a block stays on one line, like an ordinary string.
+- `{}` inside one is text. An empty `#{}` is an error.
+
+A raw string whose `#"` ends its line is a block. Its text is the lines that follow, up to a line holding only the closing `"#`, and that line's indentation comes off every line. So the text can be indented with the code around it:
+
+```calx
+fn main() {
+    let name = "Point"
+    let code = #"
+        impl #{name} {
+            fn show(self) {}
+        }
+        "#
+    print(code)
+    println("|")
+    // out: impl Point {
+    // out:     fn show(self) {}
+    // out: }|
+}
+```
+
+- The newline before the closing line isn't part of the text, so `code` above ends with `}`.
+- Every line with text must start with the closing line's indentation, character for character, so a tab doesn't stand in for spaces. One that doesn't is an error, as is text before the closing `"#` on its line. A blank line may be indented less.
+- The text is the same on every system: a `\r\n` in the file becomes `\n`.
 
 ## Operators
 
