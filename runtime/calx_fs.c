@@ -158,6 +158,17 @@ cx_i64 cx_fs_size(cx_i64 h) {
     return (cx_i64)size.QuadPart;
 }
 
+/* Moves the next read to `at` bytes from the start. */
+cx_i32 cx_fs_seek(cx_i64 h, cx_u64 at) {
+    LARGE_INTEGER to;
+    to.QuadPart = (LONGLONG)at;
+    if (!SetFilePointerEx((HANDLE)(intptr_t)h, to, NULL, FILE_BEGIN)) {
+        fail_win(GetLastError());
+        return 0;
+    }
+    return 1;
+}
+
 cx_i64 cx_fs_read(cx_i64 h, cx_u8* to, size_t n) {
     DWORD want = n > 0x40000000 ? 0x40000000 : (DWORD)n;
     DWORD got = 0;
@@ -466,6 +477,15 @@ cx_i64 cx_fs_size(cx_i64 h) {
     struct stat st;
     if (fstat((int)h, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
     return (cx_i64)st.st_size;
+}
+
+/* Moves the next read to `at` bytes from the start. */
+cx_i32 cx_fs_seek(cx_i64 h, cx_u64 at) {
+    if (lseek((int)h, (off_t)at, SEEK_SET) < 0) {
+        fail_errno(errno);
+        return 0;
+    }
+    return 1;
 }
 
 cx_i64 cx_fs_read(cx_i64 h, cx_u8* to, size_t n) {

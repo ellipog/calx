@@ -1,6 +1,6 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
-import std.fs.{FsError, Kind, read, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
+import std.fs.{FsError, Kind, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -73,6 +73,15 @@ fn main() {
         same = same and back[i] == big[i]
     }
     println("{same}")    // out: true
+
+    // A stretch from the middle, one that runs past the end, and one from past the end.
+    let part = read_part(b, 150000, 10)!
+    println("{part.len()} {part[0] == u8.wrap(150000 * 7)} {part[9] == u8.wrap(150009 * 7)}")    // out: 10 true true
+    println("{read_part(b, 199995, 10)!.len()} {read_part(b, 300000, 10)!.len()}")    // out: 5 0
+    match read_part("{dir}/missing", 0, 1) {
+        ok(x) => println("{x.len()}"),
+        err(e) => println(describe(e)),    // out: not found
+    }
 
     // Rename, replacing a file that's there.
     write(a, hello)!

@@ -31,6 +31,7 @@ fn main() {
 | Item | Gives |
 | --- | --- |
 | `read(path: String) -> List<u8> ! FsError` | The whole file |
+| `read_part(path: String, from: u64, n: usize) -> List<u8> ! FsError` | The `n` bytes from byte `from`, or fewer where the file ends first, without reading the rest of the file |
 | `read_text(path: String) -> String? ! FsError` | The whole file as text, or `none` if it isn't UTF-8 |
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
 | `rename(from: String, to: String) ! FsError` | Moves what's at `from` to `to`, replacing a file there. Atomic on one volume |

@@ -417,6 +417,67 @@ cx_usize cx_arg_count(void) { return arg_count; }
 const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }
 cx_usize cx_arg_len(cx_usize i) { return args[i].len; }
 
+/* Declared by std/env.calx. The value of the environment variable named by the `n` bytes of
+ * UTF-8 at `name`, written to `out` if its UTF-8 fits in `cap` bytes: its length in bytes, which
+ * is more than `cap` if it didn't fit, or -1 if it isn't set or the name can't be one. Windows
+ * holds the environment as UTF-16, whose unpaired surrogates become U+FFFD; Linux holds bytes,
+ * and each that doesn't start a valid UTF-8 sequence becomes U+FFFD, as in the arguments. */
+cx_i64 cx_env_get(const cx_u8* name, cx_usize n, cx_u8* out, cx_usize cap) {
+    if (n == 0 || n > 32767 || memchr(name, 0, n) || memchr(name, '=', n)) return -1;
+#ifdef _WIN32
+    int wn = MultiByteToWideChar(CP_UTF8, 0, (const char*)name, (int)n, NULL, 0);
+    wchar_t* wname = must_alloc(((size_t)wn + 1) * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, (const char*)name, (int)n, wname, wn);
+    wname[wn] = 0;
+    /* With no room, Windows gives the size the value needs with its terminator, 1 for an empty
+     * value, and 0 for one that isn't set. Another thread can change it between the two calls. */
+    wchar_t* value = NULL;
+    DWORD len = 0;
+    DWORD size = GetEnvironmentVariableW(wname, NULL, 0);
+    while (size != 0) {
+        free(value);
+        value = must_alloc((size_t)size * sizeof(wchar_t));
+        SetLastError(0);
+        len = GetEnvironmentVariableW(wname, value, size);
+        if (len == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) size = 0;
+        else if (len < size) break;
+        else size = len;
+    }
+    free(wname);
+    if (size == 0) {
+        free(value);
+        return -1;
+    }
+    int bytes = len ? WideCharToMultiByte(CP_UTF8, 0, value, (int)len, NULL, 0, NULL, NULL) : 0;
+    if (bytes > 0 && (cx_usize)bytes <= cap) WideCharToMultiByte(CP_UTF8, 0, value, (int)len, (char*)out, bytes, NULL, NULL);
+    free(value);
+    return bytes;
+#else
+    char* cname = must_alloc(n + 1);
+    memcpy(cname, name, n);
+    cname[n] = 0;
+    const cx_u8* s = (const cx_u8*)getenv(cname);
+    free(cname);
+    if (!s) return -1;
+    size_t len = 0;
+    size_t sn = strlen((const char*)s);
+    for (size_t at = 0; at < sn;) {
+        cx_u8 b = s[at];
+        size_t w = b < 0x80 ? 1 : b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+        if (w && at + w <= sn && cx_utf8_valid(s + at, w)) {
+            if (len + w <= cap) memcpy(out + len, s + at, w);
+            len += w;
+            at += w;
+        } else {
+            if (len + 3 <= cap) memcpy(out + len, "\xEF\xBF\xBD", 3);
+            len += 3;
+            at++;
+        }
+    }
+    return (cx_i64)len;
+#endif
+}
+
 /* --- std.time ------------------------------------------------------------------------------ */
 
 #ifdef _WIN32
