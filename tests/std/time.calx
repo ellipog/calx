@@ -1,5 +1,5 @@
-// std.time: the monotonic clock.
-import std.time.{Instant}
+// std.time: the monotonic clock, and the wall clock with its dates.
+import std.time.{Instant, Timestamp}
 
 fn spin(n: i64) -> i64 {
     var x: i64 = 1
@@ -7,6 +7,11 @@ fn spin(n: i64) -> i64 {
         x = x * 6364136223846793005 + i
     }
     return x
+}
+
+fn show(ms: i64, offset: i32) -> String {
+    let d = Timestamp { unix_ms: ms }.date_time(offset)
+    return "{d.year}-{d.month}-{d.day} {d.hour}:{d.minute}:{d.second}.{d.milli}"
 }
 
 fn main() {
@@ -18,4 +23,25 @@ fn main() {
     println("{start.nanos_since(end)}")                    // out: 0
     println("{end.secs_since(start) * 1.0e9 >= 0.0}")      // out: true
     println("{x != 0}")                                    // out: true
+
+    // The wall clock reads after 2026, and the local zone is within a day of UTC.
+    let now = unsafe { Timestamp.now() }
+    let offset = unsafe { now.local_offset() }
+    println("{now.unix_ms > 1767225600000} {offset > -86400 and offset < 86400}")    // out: true true
+    let today = now.date_time(offset)
+    println("{today.month >= 1 and today.month <= 12 and today.day >= 1 and today.day <= 31}")    // out: true
+
+    // Dates, as java.time's Instant.ofEpochMilli(ms).atOffset(ZoneOffset.ofTotalSeconds(offset))
+    // gives them.
+    println(show(0, 0))                        // out: 1970-1-1 0:0:0.0
+    println(show(-1, 0))                       // out: 1969-12-31 23:59:59.999
+    println(show(951782400000, 0))             // out: 2000-2-29 0:0:0.0
+    println(show(951868799999, 0))             // out: 2000-2-29 23:59:59.999
+    println(show(4107542400000, 0))            // out: 2100-3-1 0:0:0.0
+    println(show(1792540800000, 7200))         // out: 2026-10-21 2:0:0.0
+    println(show(1792540800000, -18000))       // out: 2026-10-20 19:0:0.0
+    println(show(-12219292800000, 0))          // out: 1582-10-15 0:0:0.0
+    println(show(-62135596800000, 0))          // out: 1-1-1 0:0:0.0
+    println(show(-62167219200001, 0))          // out: -1-12-31 23:59:59.999
+    println(show(253402300799999, 0))          // out: 9999-12-31 23:59:59.999
 }

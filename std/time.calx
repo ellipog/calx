@@ -31,3 +31,75 @@ impl Instant {
         return f64.nearest(self.nanos_since(earlier)) / 1.0e9
     }
 }
+
+extern "C" fn cx_clock_unix_ms() -> i64
+extern "C" fn cx_clock_local_offset(unix_ms: i64) -> i32
+
+/// A moment on the wall clock: the milliseconds since the start of 1970 in UTC, leap seconds
+/// aside, as Java's `System.currentTimeMillis()` counts them. Unlike an `Instant`, it jumps when
+/// the system's clock is set, so it's for showing the time, not for measuring.
+pub struct Timestamp {
+    pub unix_ms: i64,
+}
+
+impl Timestamp {
+    /// The wall clock's time now.
+    pub unsafe fn now() -> Timestamp {
+        return Timestamp { unix_ms: unsafe { cx_clock_unix_ms() } }
+    }
+
+    /// The seconds the system's local time zone is ahead of UTC at this moment, by its rules, so
+    /// summer time counts: 3600 in Paris in winter, -14400 in New York in summer. 0 where the
+    /// system can't say.
+    pub unsafe fn local_offset(self) -> i32 {
+        return unsafe { cx_clock_local_offset(self.unix_ms) }
+    }
+
+    /// The date and time at this moment, `offset` seconds ahead of UTC, on the Gregorian
+    /// calendar, which `java.time` also uses for days before it began in 1582.
+    pub fn date_time(self, offset: i32) -> DateTime {
+        let ms = self.unix_ms + i64(offset) * 1000
+        let days = floor_div(ms, 86400000)
+        let in_day = ms - days * 86400000
+        // Days since 1 March of year 0, in 400-year eras of 146097 days, so leap days fall at the
+        // end of each year counted from March.
+        let z = days + 719468
+        let era = floor_div(z, 146097)
+        let day_of_era = z - era * 146097
+        let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100)
+        let m = (5 * day_of_year + 2) / 153
+        let month = if m < 10 { m + 3 } else { m - 9 }
+        let year = year_of_era + era * 400 + (if month <= 2 { 1 } else { 0 })
+        return DateTime {
+            year: i32.wrap(year),
+            month: i32.wrap(month),
+            day: i32.wrap(day_of_year - (153 * m + 2) / 5 + 1),
+            hour: i32.wrap(in_day / 3600000),
+            minute: i32.wrap(in_day / 60000 % 60),
+            second: i32.wrap(in_day / 1000 % 60),
+            milli: i32.wrap(in_day % 1000),
+        }
+    }
+}
+
+/// A date and time of day, as a wall clock and calendar show it.
+pub struct DateTime {
+    pub year: i32,
+    /// 1 to 12.
+    pub month: i32,
+    /// 1 to 31.
+    pub day: i32,
+    /// 0 to 23.
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+    /// 0 to 999.
+    pub milli: i32,
+}
+
+// `a / b` rounded down, for a positive `b`.
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b
+    return if a % b < 0 { q - 1 } else { q }
+}

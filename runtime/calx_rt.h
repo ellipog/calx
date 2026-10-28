@@ -78,6 +78,10 @@ CX_FN(cx_usize, cx_arg_len, (cx_usize i));
 
 /* Nanoseconds from a clock that only goes forward, behind std.time (D88). */
 CX_FN(cx_u64, cx_clock_ns, (void));
+/* The wall clock, in milliseconds since 1970 in UTC, and the local time zone's offset from UTC
+ * at a moment, in seconds, behind std.time's `Timestamp`. */
+CX_FN(cx_i64, cx_clock_unix_ms, (void));
+CX_FN(cx_i32, cx_clock_local_offset, (cx_i64 unix_ms));
 
 /* Output. Standard output is buffered, and flushed at exit and before a panic. */
 CX_FN(void, cx_print_str, (cx_str s));

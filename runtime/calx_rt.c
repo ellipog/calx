@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -24,7 +25,6 @@
 #include <pthread.h>
 #include <sched.h>
 #include <sys/syscall.h>
-#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -285,6 +285,41 @@ cx_u64 cx_clock_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (cx_u64)ts.tv_sec * 1000000000u + (cx_u64)ts.tv_nsec;
+#endif
+}
+
+/* Declared by std/time.calx: the wall clock, as Java's `System.currentTimeMillis`. */
+cx_i64 cx_clock_unix_ms(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULARGE_INTEGER t;
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    /* 100-nanosecond ticks since 1601, which is 11644473600 seconds before 1970. */
+    return (cx_i64)(t.QuadPart / 10000u) - 11644473600000;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (cx_i64)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+/* Declared by std/time.calx: the seconds the local time zone is ahead of UTC at `unix_ms`, by
+ * the system's rules, so summer time counts. 0 where the system can't say. */
+cx_i32 cx_clock_local_offset(cx_i64 unix_ms) {
+    cx_i64 secs = unix_ms / 1000 - (unix_ms % 1000 < 0);
+    time_t t = (time_t)secs;
+    struct tm local;
+#ifdef _WIN32
+    if (localtime_s(&local, &t) != 0) return 0;
+    /* The local fields read as if they were UTC, less the moment itself. */
+    __time64_t as_utc = _mkgmtime64(&local);
+    if (as_utc == -1) return 0;
+    return (cx_i32)(as_utc - (__time64_t)t);
+#else
+    if (!localtime_r(&t, &local)) return 0;
+    return (cx_i32)local.tm_gmtoff;
 #endif
 }
 
