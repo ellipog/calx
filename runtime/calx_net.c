@@ -118,6 +118,7 @@ struct net_slot {
     SOCKET s;
     int pending;  /* operations the system still holds */
     int sending;
+    int receiving;  /* a receive is pending */
     net_op rop, sop, cop;
     net_buf fly;  /* what the send in flight is sending */
     SOCKET accept_s;
@@ -344,6 +345,19 @@ static void lost(net* n, net_slot* s) {
     emit(n, EV_CLOSED, s);
 }
 
+/* Closes a connection the program closed, once what it queued is sent. Closing a socket while a
+ * receive is pending resets the connection, which can throw away what was sent before the peer
+ * read it, so the receive is cancelled first, and the socket closes when it comes back. */
+static void finish(net* n, net_slot* s) {
+    if (!s->receiving) {
+        lost(n, s);
+        return;
+    }
+    s->state = CONN_CLOSED;
+    CancelIoEx((HANDLE)s->s, &s->rop.ov);
+    emit(n, EV_CLOSED, s);
+}
+
 static void post_recv(net* n, net_slot* s) {
     WSABUF b = {NET_RECV, (char*)s->rbuf};
     DWORD flags = 0;
@@ -353,6 +367,7 @@ static void post_recv(net* n, net_slot* s) {
         return;
     }
     s->pending++;
+    s->receiving = 1;
 }
 
 static void post_send(net* n, net_slot* s) {
@@ -434,7 +449,16 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             opened(n, s);
             break;
         case OP_RECV:
-            if (s->state == CONN_CLOSED) break;
+            s->receiving = 0;
+            if (s->state == CONN_CLOSED) {
+                /* The receive `finish` cancelled: now the socket closes gracefully. */
+                if (s->s != INVALID_SOCKET) {
+                    shutdown(s->s, SD_SEND);
+                    closesocket(s->s);
+                    s->s = INVALID_SOCKET;
+                }
+                break;
+            }
             if (!ok || bytes == 0) {
                 lost(n, s);
                 break;
@@ -456,7 +480,7 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             s->fly.at += bytes;
             if (s->fly.at >= s->fly.len) s->fly.at = s->fly.len = 0;
             post_send(n, s);
-            if (s->state == CONN_CLOSING && !s->sending) lost(n, s);
+            if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
             break;
     }
 }
@@ -879,7 +903,8 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
     net_slot* s = conn_of(n, id);
     if (!s || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
 #ifdef _WIN32
-    if (s->state == CONN_CONNECTING || (!s->sending && !buf_live(&s->out))) lost(n, s);
+    if (s->state == CONN_CONNECTING) lost(n, s);
+    else if (!s->sending && !buf_live(&s->out)) finish(n, s);
     else s->state = CONN_CLOSING;
 #else
     if (s->state == CONN_CONNECTING || !buf_live(&s->out)) lost(n, s);
