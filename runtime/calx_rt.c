@@ -829,13 +829,33 @@ cx_bool cx_parse_f32(cx_str s, cx_f32* out) {
     return 1;
 }
 
-cx_bool cx_str_contains(cx_str hay, cx_str needle) {
-    if (needle.len == 0) return 1;
-    if (needle.len > hay.len) return 0;
-    for (cx_usize i = 0; i + needle.len <= hay.len; i++) {
-        if (hay.ptr[i] == needle.ptr[0] && memcmp(hay.ptr + i, needle.ptr, needle.len) == 0) return 1;
+cx_bool cx_str_contains(cx_str hay, cx_str needle) { return cx_str_find(hay, needle) != CX_NOT_FOUND; }
+
+/* `memchr` finds each place the needle's first byte is, which it does many bytes a step, and only
+ * there are the rest compared. */
+cx_usize cx_str_find(cx_str hay, cx_str needle) {
+    if (needle.len == 0) return 0;
+    if (needle.len > hay.len) return CX_NOT_FOUND;
+    const cx_u8* p = hay.ptr;
+    const cx_u8* stop = hay.ptr + (hay.len - needle.len) + 1;  // past the last place it can start
+    cx_u8 first = needle.ptr[0];
+    while (p < stop) {
+        p = (const cx_u8*)memchr(p, first, (size_t)(stop - p));
+        if (!p) return CX_NOT_FOUND;
+        if (memcmp(p + 1, needle.ptr + 1, needle.len - 1) == 0) return (cx_usize)(p - hay.ptr);
+        p++;
     }
-    return 0;
+    return CX_NOT_FOUND;
+}
+
+cx_usize cx_str_find_last(cx_str hay, cx_str needle) {
+    if (needle.len > hay.len) return CX_NOT_FOUND;
+    if (needle.len == 0) return hay.len;
+    cx_u8 first = needle.ptr[0];
+    for (cx_usize i = hay.len - needle.len + 1; i-- > 0;) {
+        if (hay.ptr[i] == first && memcmp(hay.ptr + i + 1, needle.ptr + 1, needle.len - 1) == 0) return i;
+    }
+    return CX_NOT_FOUND;
 }
 
 cx_String* cx_fmt_begin(cx_String* s) {
@@ -873,6 +893,25 @@ void cx_panic_index(cx_usize index, cx_usize length, const char* at) {
     cx_panic_begin(at);
     snprintf(text, sizeof text, "index %llu is out of bounds for length %llu", (unsigned long long)index,
              (unsigned long long)length);
+    panic_text(text);
+    cx_panic_end();
+}
+
+void cx_panic_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at) {
+    char text[160];
+    cx_usize end = hi + (inclusive ? 1 : 0);
+    const char* dots = inclusive ? "..=" : "..";
+    unsigned long long a = (unsigned long long)lo, b = (unsigned long long)hi, n = (unsigned long long)s.len;
+    cx_panic_begin(at);
+    if (end > s.len || end < hi) {
+        snprintf(text, sizeof text, "the range %llu%s%llu is out of bounds for text of length %llu", a, dots, b, n);
+    } else if (lo > end) {
+        snprintf(text, sizeof text, "the range %llu%s%llu starts after it ends", a, dots, b);
+    } else {
+        cx_usize inside = cx_utf8_starts_at(s, lo) ? end : lo;
+        snprintf(text, sizeof text, "the range %llu%s%llu cuts a rune apart: byte %llu is inside one, in text of length %llu", a,
+                 dots, b, (unsigned long long)inside, n);
+    }
     panic_text(text);
     cx_panic_end();
 }

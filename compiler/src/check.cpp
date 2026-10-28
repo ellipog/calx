@@ -2825,6 +2825,11 @@ private:
                 Type* base = check_place(e->lhs, root);
                 return e->type = index_type(e, base);
             }
+            case ExprKind::slice:
+                if (!is_bad(check(e, nullptr))) {
+                    error(e->span, "a part of a text can't be changed where it is; build a new `String` from the parts");
+                }
+                return T.error;
             default:
                 if (!is_bad(check(e, nullptr))) error(e->span, "can't assign to this expression");
                 return T.error;
@@ -3464,6 +3469,7 @@ private:
                 Type* base = check(e->lhs, nullptr);
                 return index_type(e, base);
             }
+            case ExprKind::slice: return slice_type(e);
             case ExprKind::struct_lit: return struct_literal(e, expected);
             case ExprKind::array_lit: return array_literal(e, expected);
             case ExprKind::tuple: return tuple_literal(e, expected);
@@ -4537,6 +4543,54 @@ private:
             error(e->rhs->span, "index " + std::to_string(e->rhs->const_bits) + " is out of bounds for " + name_of(base));
         }
         return base->elem;
+    }
+
+    // `s[a..b]`, `s[a..=b]`, `s[a..]`, `s[..b]` and `s[..]`: the text from byte `a` up to byte `b`,
+    // which must be in order, in the text, and where runes start (D117). A `str`'s part is a
+    // `str`, and a `String`'s is a `String`, which the emitter only copies where it's kept.
+    Type* slice_type(Expr* e) {
+        Type* base = check(e->lhs, nullptr);
+        Expr* r = e->rhs;
+        bool bad = is_bad(base);
+        if (r->lhs) bad = is_bad(check(r->lhs, T.usize)) || bad;
+        if (r->rhs) bad = is_bad(check(r->rhs, T.usize)) || bad;
+        r->type = T.usize;
+        if (!r->rhs && r->inclusive) {
+            error(r->span, "`..=` needs the byte it goes up to");
+            bad = true;
+        }
+        if (bad) return T.error;
+        if (base->kind != TypeKind::str && base->kind != TypeKind::string) {
+            error(e->span, name_of(base) + " can't be sliced; only text can be, by byte offsets, for now");
+            return T.error;
+        }
+        bool lo_known = !r->lhs || r->lhs->has_bits, hi_known = r->rhs && r->rhs->has_bits;
+        std::uint64_t lo = r->lhs ? r->lhs->const_bits : 0;
+        std::uint64_t hi = hi_known ? r->rhs->const_bits + (r->inclusive ? 1 : 0) : 0;
+        if (lo_known && hi_known && lo > hi) {
+            error(r->span, "the range starts after it ends");
+            return T.error;
+        }
+        // In a literal, the offsets are checked here.
+        if (e->lhs->kind == ExprKind::string_lit && e->lhs->interpolations.empty()) {
+            std::string s;
+            for (const StringPart& p : e->lhs->literal.parts) s += p.text;
+            auto check_at = [&](std::uint64_t at, Expr* where) {
+                if (at > s.size()) {
+                    error(where->span, "byte " + std::to_string(at) + " is past the end of the text, which is " +
+                                           std::to_string(s.size()) + " bytes long");
+                    return false;
+                }
+                if (at < s.size() && (static_cast<unsigned char>(s[at]) & 0xC0) == 0x80) {
+                    error(where->span, "byte " + std::to_string(at) + " is inside a rune, not where one starts");
+                    return false;
+                }
+                return true;
+            };
+            if (r->lhs && lo_known && !check_at(lo, r->lhs)) return T.error;
+            if (hi_known && !check_at(hi, r->rhs)) return T.error;
+        }
+        return base;
     }
 
     // --- optionals and tuples -------------------------------------------------------------------
@@ -7256,6 +7310,10 @@ private:
             else if (m == "starts_with") b = BMethod::starts_with, params = {nullptr}, result = T.bool_;
             else if (m == "ends_with") b = BMethod::ends_with, params = {nullptr}, result = T.bool_;
             else if (m == "utf16_len") b = BMethod::utf16_len, result = T.usize;
+            else if (m == "to_lower_root") b = BMethod::to_lower_root, result = T.string;
+            else if (m == "to_upper_root") b = BMethod::to_upper_root, result = T.string;
+            else if (m == "find") b = BMethod::find, params = {nullptr}, result = T.optional_of(T.usize);
+            else if (m == "find_last") b = BMethod::find_last, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "runes" || m == "chars") {
                 // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
                 if (e != for_iter_) {

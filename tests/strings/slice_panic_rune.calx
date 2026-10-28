@@ -1,0 +1,8 @@
+// A part of a text can't cut a rune apart.
+
+fn main() {
+    let s = String("née")
+    let at = s.find("e") ?? 0
+    println("{s[..at]}")    // out: né
+    println("{s[..at - 1]}")    // panic: the range 0..2 cuts a rune apart: byte 2 is inside one, in text of length 4
+}

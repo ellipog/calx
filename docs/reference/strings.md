@@ -1,6 +1,6 @@
 ---
 title: Strings
-description: str and String, literals that cost nothing, building strings, their methods, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
+description: str and String, literals that cost nothing, building strings, their methods, slicing by byte offset, Java's root-locale case mapping, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
 ---
 
 # Strings
@@ -61,12 +61,14 @@ fn main() {
 | `s.clear()` | Removes all the text, keeping the memory |
 | `s.reserve(n)` | Makes room for `n` more bytes, so the next pushes don't allocate |
 | `s.contains(t)` | Whether `t` appears in `s`. Every string contains `""` |
+| `s.find(t)`, `s.find_last(t)` | The byte offset where `t` first or last starts in `s`, a `usize?`. `""` is found at 0, or last at the end |
 | `s.starts_with(t)`, `s.ends_with(t)` | Whether `s` begins or ends with `t` |
+| `s.to_lower_root()`, `s.to_upper_root()` | A new `String`, as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` give ([case](#changing-the-case)) |
 | `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match vanilla's hashes ([Java's view](#javas-view-of-a-string)) |
 | `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
-- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `starts_with`, `ends_with`, `java_hash` and `utf16_len`.
+- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
 - `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).
 - `s.push_str(s)` is an error, since `s` would change while being read. Push a copy.
@@ -84,6 +86,57 @@ fn main() {
     println("[{out}] {out.is_empty()}")    // out: [] true
 }
 ```
+
+## Slicing
+
+`s[a..b]` is the text from byte `a` up to byte `b`, as `len()` and `byte_at` count. Every form of range works (D117):
+
+| Written | Gives |
+| --- | --- |
+| `s[a..b]` | Bytes `a` up to `b` |
+| `s[a..=b]` | Bytes `a` up to and including `b` |
+| `s[a..]` | From byte `a` to the end |
+| `s[..b]` | From the start up to byte `b` |
+| `s[..]` | All of it |
+
+```calx
+fn main() {
+    let id = "minecraft:stone"
+    let colon = id.find(":") ?? 0
+    println("{id[..colon]} {id[colon + 1..]}")    // out: minecraft stone
+    let line = String("/give @p diamond 64")
+    let space = line.find(" ") ?? line.len()
+    let command = line[1..space]
+    println("{command} {line[space + 1..].find(" ") ?? 0} {line[line.len() - 2..] == "64"}")    // out: give 2 true
+}
+```
+
+- A part of a `str` is a `str`, the same bytes. A part of a `String` is a `String`.
+- A `String`'s part is copied only where it's kept: in a variable, a field, a list, or a `return`. Where it's only looked at, it's a view of the same bytes, with nothing copied: printed, compared, passed as text to a method, looked up in a map, parsed, or sliced again.
+- It panics unless `a <= b`, `b` is at most the length, and both are where runes start, so a part is always UTF-8. With a literal and constant offsets, the checker says so instead.
+- Offsets are `usize`. `find` gives offsets that are always where runes start, since a match in UTF-8 can't start inside a rune.
+- A part can't be assigned to or changed, as in `s[0..2] = "x"` or `s[1..].push('x')`. Build a new `String` from the parts.
+- Only text can be sliced for now.
+
+## Changing the case
+
+`s.to_lower_root()` and `s.to_upper_root()` give the text in lowercase and uppercase exactly as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` do, which is what vanilla uses for names, identifiers and commands (D117):
+
+```calx
+fn main() {
+    println("{"Stone_Bricks".to_lower_root()} {"straße".to_upper_root()}")    // out: stone_bricks STRASSE
+    println("{"\u{130}".to_lower_root().len()} {"ΟΔΟΣ ΣΑΣ".to_lower_root()}")    // out: 3 οδος σας
+}
+```
+
+- Each code point changes by itself, by Unicode 16's tables, as Java 25 has them, except in three ways Java has too:
+  - A code point can become several. `ß` uppercases to `SS`, and `ﬃ` to `FFI`, which is why the length can change.
+  - `İ`, U+0130, lowercases to an `i` and a combining dot above.
+  - A capital sigma, `Σ`, lowercases to the final form `ς` when the word it's in has a cased letter before it and none after it, and to `σ` otherwise. Java finds that word with its word `BreakIterator`, so Calx splits the text into words by the same rules.
+- Text that doesn't change comes back without a copy when it's a literal's: a `str`, or a `String` that owns no memory.
+- ASCII goes eight bytes at a time. Each other code point is a lookup in a table of 30 KB, linked only into programs that change case.
+- The tables come from Java itself: [`tools/unicode/CaseDump.java`](../../tools/unicode/CaseDump.java) asks Java 25 about every code point, and [`gen_case.py`](../../tools/unicode/gen_case.py) writes them into [runtime/calx_case.c](../../runtime/calx_case.c). The result matched Java on 2.4 million random strings, weighted to sigmas, cased letters and every kind of code point the word rules treat differently.
+- Calx doesn't have the other locales' rules, such as Turkish's dotless `ı`, since vanilla only uses the root locale.
 
 ## Going over the text
 
@@ -151,13 +204,18 @@ fn main() {
 
 `{s}` in a string shows the text. `println(s)` takes a `str` or a `String`.
 
-## Not built yet
-
-Slicing by byte offset and case mapping are designed ([spec](../CALX_SPEC.md#strings-d28)).
-
 ## In C
 
 - A `str` is `cx_str`, a pointer and a length.
 - A `String` is `cx_String`, a pointer, a length and a capacity. A capacity of 0 means it doesn't own its bytes: it's a literal, or empty. Freeing it frees the bytes only when it owns them.
 - A string grows by doubling, and starts at 16 bytes.
 - Building `"n = {n}"` sends the printing functions' output into the new string, so building a string and printing one share the same code, and floats appear exactly as Java prints them ([floats](floats.md#printing)).
+- A part, `s[a..b]`, is `cx_str_slice(s, a, b, inclusive, at)`, which checks the offsets and gives a `cx_str` of the same bytes. Where the part is kept as a `String`, `cx_string_from` copies it. A `String` that's a variable is viewed after the offsets are worked out, through a pointer, so the offsets run first even when they change it:
+
+```c
+// let command = line[1..space], from the example above
+cx_String command = cx_string_from(({ const cx_String* cx_t19 = &line; cx_usize cx_t17 = ((cx_usize)1ULL);
+    cx_usize cx_t18 = space; cx_str cx_t16 = cx_sv(*cx_t19); cx_str_slice(cx_t16, cx_t17, cx_t18, 0, "main.calx:7:19"); }));
+```
+
+- `find` takes each place the first byte of what it looks for is, with `memchr`, which goes many bytes a step, and compares the rest only there. `contains` is `find`.

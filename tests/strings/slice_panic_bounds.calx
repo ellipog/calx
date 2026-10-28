@@ -1,0 +1,12 @@
+// A part of a text must be in it, in order.
+
+fn last(s: str, n: usize) -> str {
+    return s[s.len() - n..]
+}
+
+fn main() {
+    println(last("stone", 3))    // out: one
+    let name = String("Alex")
+    let to: usize = 2
+    println("[{name[3..to]}]")    // panic: the range 3..2 starts after it ends
+}

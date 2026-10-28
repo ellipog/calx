@@ -1,0 +1,43 @@
+// Changing the case of text as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`
+// do (D117). Each expected line is what Java 25 prints for the same text: ASCII, one code point
+// to several, the dotted capital I, final sigmas by the words around them, and code points past
+// U+FFFF. runtime/calx_case.c matched Java on 2.4 million random strings as well.
+
+fn show(s: str) {
+    println("{s.to_lower_root()}|{s.to_upper_root()}")
+}
+
+fn main() {
+    show("Minecraft:Stone_Bricks")    // out: minecraft:stone_bricks|MINECRAFT:STONE_BRICKS
+    show("ALREADY lower? no")    // out: already lower? no|ALREADY LOWER? NO
+    show("already lower")    // out: already lower|ALREADY LOWER
+    show("")    // out: |
+    show("\u{DF} \u{FB03} \u{149} \u{1F0} \u{1E96}")    // out: ß ﬃ ŉ ǰ ẖ|SS FFI ʼN J̌ H̱
+    show("\u{130}stanbul \u{131}i")    // out: i̇stanbul ıi|İSTANBUL II
+    show("\u{3A3}\u{391}\u{3A3} \u{39F}\u{394}\u{39F}\u{3A3}")    // out: σας οδος|ΣΑΣ ΟΔΟΣ
+    show("A\u{3A3}")    // out: aς|AΣ
+    show("\u{3A3}")    // out: σ|Σ
+    show("A\u{3A3}B")    // out: aσb|AΣB
+    show("A\u{3A3}.")    // out: aς.|AΣ.
+    show("A\u{3A3}'B")    // out: aσ'b|AΣ'B
+    show("A\u{3A3}\u{301}")    // out: aς́|AΣ́
+    show("\u{2160}\u{3A3}")    // out: ⅰς|ⅠΣ
+    show("1\u{3A3}")    // out: 1σ|1Σ
+    show("\u{391}\u{3A3}\u{AD}")    // out: ας­|ΑΣ­
+    show("\u{391}\u{3A3}\u{2161}")    // out: ασⅱ|ΑΣⅡ
+    show("\u{391}\u{3A3} \u{391}\u{3A3}")    // out: ας ας|ΑΣ ΑΣ
+    show("Caf\u{E9} \u{C9}T\u{C9}")    // out: café été|CAFÉ ÉTÉ
+    show("\u{10400}\u{10428}")    // out: 𐐨𐐨|𐐀𐐀
+    show("\u{1F80}\u{1FB3}\u{1FFC}")    // out: ᾀᾳῳ|ἈΙΑΙΩΙ
+    show("\u{24B6}\u{24D0}")    // out: ⓐⓐ|ⒶⒶ
+    show("\u{10D0}\u{1C90}")    // out: აა|ᲐᲐ
+    // A `String`, its parts, and text that doesn't change.
+    var name = String("Steve")
+    name.push_str("_ALEX")
+    let lower = name.to_lower_root()
+    let same = lower.to_lower_root()
+    println("{lower} {same} {name[6..].to_lower_root()} {name[..5].to_upper_root()} {lower == same}")
+    // out: steve_alex steve_alex alex STEVE true
+    println("{"\u{130}".to_lower_root().len()} {"\u{DF}".to_upper_root().len()} {"\u{1F80}".to_upper_root().utf16_len()}")
+    // out: 3 2 2
+}

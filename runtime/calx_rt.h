@@ -315,6 +315,26 @@ CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {
     return a.len == b.len && (a.len == 0 || __builtin_memcmp(a.ptr, b.ptr, a.len) == 0);
 }
 
+/* `s[lo..hi]`, or `s[lo..=hi]` with `inclusive`: the bytes from `lo` up to `hi`, which must be in
+ * order, in the text, and where runes start (D117). */
+CX_COLD void cx_panic_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at);
+CX_INLINE cx_bool cx_utf8_starts_at(cx_str s, cx_usize k) { return k == s.len || (s.ptr[k] & 0xC0) != 0x80; }
+CX_INLINE cx_str cx_str_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at) {
+    cx_usize end = hi + (inclusive ? 1 : 0);
+    if (__builtin_expect(lo > end || end > s.len || end < hi || !cx_utf8_starts_at(s, lo) || !cx_utf8_starts_at(s, end), 0)) {
+        cx_panic_slice(s, lo, hi, inclusive, at);
+    }
+    return (cx_str){s.ptr + lo, end - lo};
+}
+/* Where `needle` first or last starts in `hay`, a byte offset, or CX_NOT_FOUND. Both are UTF-8,
+ * so a match starts where a rune does. `""` is found at 0, or last at the end. */
+cx_usize cx_str_find(cx_str hay, cx_str needle);
+cx_usize cx_str_find_last(cx_str hay, cx_str needle);
+/* Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, in calx_case.c (D117). Text
+ * that doesn't change comes back without a copy when `keep` says its bytes are a literal's. */
+cx_String cx_case_lower(cx_str s, cx_bool keep);
+cx_String cx_case_upper(cx_str s, cx_bool keep);
+
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
  * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */

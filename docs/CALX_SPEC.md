@@ -224,11 +224,9 @@ What a panic does in a plain program is built: see [Printing and panics](referen
 
 ## Strings (D28)
 
-Built: `str` and `String`, literals as either, interpolation into a `String`, the basic methods, `==` and string patterns ([Strings](reference/strings.md)). `for r in s.runes()` goes over Unicode scalar values and `for c in s.chars()` over UTF-16 code units, as Java sees the string. `s.java_hash()` is Java's `String.hashCode` and `s.utf16_len()` is its `length()`, both over UTF-16 code units ([Java's view](reference/strings.md#javas-view-of-a-string)), and [`std.text.mutf8`](std/text-mutf8.md) encodes and decodes Java's Modified UTF-8, which NBT uses. Still to build:
+Built: `str` and `String`, literals as either, interpolation into a `String`, the basic methods, `==` and string patterns ([Strings](reference/strings.md)). `for r in s.runes()` goes over Unicode scalar values and `for c in s.chars()` over UTF-16 code units, as Java sees the string. `s.java_hash()` is Java's `String.hashCode` and `s.utf16_len()` is its `length()`, both over UTF-16 code units ([Java's view](reference/strings.md#javas-view-of-a-string)), and [`std.text.mutf8`](std/text-mutf8.md) encodes and decodes Java's Modified UTF-8, which NBT uses. **Slicing is by byte offset**: `s[a..b]` panics unless the offsets are in order, in the text, and where runes start, and a `String`'s part is copied only where it's kept ([Slicing](reference/strings.md#slicing)). `to_lower_root` and `to_upper_root` match Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, final sigma included ([Changing the case](reference/strings.md#changing-the-case), D117). Still to build:
 
-- `String` is always valid UTF-8, and `str` will be able to view part of a `String`.
-- **Indexing is by byte offset.** `s[a..b]` panics if `a` or `b` isn't on a character boundary.
-- `to_lower_root` and `to_upper_root` match Java's `toLowerCase(Locale.ROOT)`.
+- `String` is always valid UTF-8, and `str` will be able to view part of a `String` past the statement, once a view parameter can hold one.
 - **Interpolation** of a type with a `Display` of its own calls it ([Derived properties](#derived-properties)). Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
 
 ## Collections (D27)

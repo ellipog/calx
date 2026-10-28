@@ -31,7 +31,7 @@ What's built, one page per feature:
 14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
 15. [Errors](reference/errors.md): functions that can fail, `fail`, `try`, matching `ok` and `err`, `!`, a failing `main`, and their C
 16. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
-17. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods and matching
+17. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods, slicing, Java's case mapping and matching
 18. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
 19. [Deques](reference/deques.md): `Deque<T>`, added to and taken from at both ends, its methods, indexing, Java's and Rust's names for them, and its C
 20. [Priority queues](reference/priority-queues.md): `PriorityQueue<T>`, least first, its elements in Java's places, its methods, taking out marked elements, Java's names for them, and its C

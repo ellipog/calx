@@ -1,0 +1,108 @@
+// Slicing text by byte offsets (D117): every range form, on literals, `str`s, `String`s and their
+// parts, the order operands run in, and parts used as views without a copy.
+
+struct Player {
+    name: String,
+    id: i32,
+}
+
+fn make(s: str) -> String {
+    println("make {s}")
+    return String(s)
+}
+
+fn step(i: mut usize, by: usize) -> usize {
+    println("step {i}")
+    i += by
+    return i
+}
+
+fn first_word(s: str) -> str {
+    let end = s.find(" ") ?? s.len()
+    return s[..end]
+}
+
+fn tail(s: own String) -> String {
+    var t = s
+    t.push_str("!")
+    return t[1..]
+}
+
+fn main() {
+    // Every range form.
+    let lit = "minecraft:stone"
+    println("[{lit[0..9]}] [{lit[10..]}] [{lit[..9]}] [{lit[..]}] [{lit[0..=8]}] [{lit[15..]}] [{lit[3..3]}]")
+    // out: [minecraft] [stone] [minecraft] [minecraft:stone] [minecraft] [] []
+    var s = String("Hello, World")
+    println("[{s[0..5]}] [{s[7..]}] [{s[..5]}] [{s[..]}] [{s[2..=3]}]")    // out: [Hello] [World] [Hello] [Hello, World] [ll]
+
+    // A `str`'s part is a `str`; a `String`'s is a `String`, a copy when it's kept.
+    let w: str = first_word("hello there")
+    let kept: String = s[7..]
+    s.clear()
+    s.push_str("changed")
+    println("{w} {kept} {s}")    // out: hello World changed
+
+    // Offsets on rune starts, in text with every length of UTF-8.
+    let u = "aé€😀b"
+    println("{u.len()} [{u[0..1]}] [{u[1..3]}] [{u[3..6]}] [{u[6..10]}] [{u[10..]}]")    // out: 11 [a] [é] [€] [😀] [b]
+
+    // Parts as views: methods, comparisons, lookups, parsing and printing.
+    let t = String("key=value=more")
+    let eq = t.find("=") ?? 0
+    println("{t[..eq].len()} {t[eq + 1..].starts_with("value")} {t[eq + 1..].find("=") ?? 99} {t[eq..].contains("more")}")
+    // out: 3 true 5 true
+    println("{t[..3] == "key"} {t[..3] != "kez"} {t[..3] < "kez"} {t[4..9] >= "value"}")
+    // out: true true true true
+    var ids = Map<String, i32>()
+    ids.insert("key", 7)
+    println("{ids[t[..3]]} {ids.contains(t[..3])} {ids.get(t[4..9]) ?? -1}")    // out: 7 true -1
+    let num = String("id:1234;")
+    println("{i32.parse(num[3..7]) ?? -1} {i32.parse(num[3..]) ?? -1}")    // out: 1234 -1
+    println(t[4..9])    // out: value
+    let v = t[4..9]
+    println("{v.to_upper_root()} {t[4..9].to_upper_root()} {t[..3].copy()}")    // out: VALUE VALUE key
+
+    // A part of a part.
+    println("{lit[10..][1..3]} {t[4..][..5][1..]} {s[1..][1..][1..]}")    // out: to alue nged
+
+    // The text first, then the offsets, left to right.
+    var i: usize = 0
+    let word = String("abcdefgh")
+    println("[{word[step(mut i, 2)..step(mut i, 3)]}] {i}")
+    // out: step 0
+    // out: step 2
+    // out: [cde] 5
+    println("[{make("xyz")[1..step(mut i, 0) - 2]}]")
+    // out: make xyz
+    // out: step 5
+    // out: [yz]
+    println("[{word[1..][step(mut i, 0) - 4..]}]")
+    // out: step 5
+    // out: [cdefgh]
+
+    // Parts of fields, elements, `mut` parameters and new values.
+    let players = [Player { name: "Steve", id: 1 }, Player { name: String("Alex"), id: 2 }]
+    println("{players[0].name[..3]} {players[1].name[1..]} {players[0].id}")    // out: Ste lex 1
+    var names: List<String> = ["alpha", "beta"]
+    names.push(names[0][..2])
+    names.push(make("gamma")[1..3])    // out: make gamma
+    println("{names} {tail(String("abc"))} {make("hi")[..1] == "h"}")
+    // out: make hi
+    // out: [alpha, beta, al, am] bc! true
+
+    // `match` on a part.
+    let cmd = String("/tp 1 2")
+    let what = match cmd[1..3] {
+        "tp" => 1,
+        "gm" => 2,
+        _ => 0,
+    }
+    var runes = 0
+    for r in cmd[4..].runes() {
+        if r != ' ' {
+            runes += 1
+        }
+    }
+    println("{what} {runes}")    // out: 1 2
+}

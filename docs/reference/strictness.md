@@ -32,6 +32,7 @@ Each rule is on the page of the feature it's about:
 | A value can't change or move while a pattern's names are views into it | [Ownership](ownership.md#patterns) |
 | What a `for` loop goes over can't change or move during the loop, nor can what holds it or what's in it | [Control flow](control-flow.md#looping-over-a-field) |
 | In `for x in mut xs`, nothing reaches `xs` but `x`, to read or to change, and the loop must change `x` | [Control flow](control-flow.md#changing-the-elements) |
+| A part of a text is a byte range that's in order, in the text, and where runes start, checked when it runs or, for a literal, by the checker | [Strings](strings.md#slicing) |
 | `.copy()` is only for values that own memory, and `[x; n]` copies only a `Copy` `x` | [Ownership](ownership.md#moves) |
 | An arena list is only a variable or a view parameter, holds only `Copy` elements, is made only in a `let` of its own, and keeps its arena from changing or moving until its block ends | [Arenas](arenas.md#the-rules) |
 | Generic code is checked where it's written and uses only what its bounds give. A call whose types can't be worked out is an error, never a guess. Unused generic parameters are errors | [Generics](generics.md#errors) |

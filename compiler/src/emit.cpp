@@ -1042,7 +1042,7 @@ private:
     }
     // A key argument, as `lookup_ctype` has it: a `String` key's can be a `str` or a `String`.
     std::string lookup_value(Expr* a, const Type* t) {
-        if (str_key(t)) return a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+        if (str_key(t)) return text_view(a);
         return value(a, table_key(t));
     }
     std::string table_fn(const char* what, const Type* t) const {
@@ -3589,7 +3589,7 @@ $dropall    m->len = 0;
                 if (e->ref == Ref::variant) return false;
                 return effects(e->lhs);
             case ExprKind::optional_field: return effects(e->lhs);
-            case ExprKind::index: return true;
+            case ExprKind::index: case ExprKind::slice: return true;
             case ExprKind::tuple:
                 for (const Expr* x : e->elems) if (effects(x)) return true;
                 return false;
@@ -3643,7 +3643,9 @@ $dropall    m->len = 0;
         return false;
     }
 
-    enum class Pass { value, address };
+    // `text`: a `str` or a `String` that's only looked at, as a `cx_str`, so a part of a `String`
+    // isn't copied.
+    enum class Pass { value, address, text };
 
     struct Operand {
         Expr* e;
@@ -3687,10 +3689,14 @@ $dropall    m->len = 0;
                 }
                 continue;
             }
-            std::string v = value(o.e, o.want);
+            bool text = o.pass == Pass::text;
+            std::string v = text ? text_view(o.e) : value(o.e, o.want);
             if (in_order && !is_constant(o.e)) {
                 std::string t = tmp();
-                if (i < last && !is_copy(o.want) && exits_after(ops, i)) {
+                if (text) {
+                    decls += "cx_str " + t + " = " + v + "; ";
+                    v = t;
+                } else if (i < last && !is_copy(o.want) && exits_after(ops, i)) {
                     // A later operand can leave the statement, and this value must be dropped
                     // then: it waits in one of the statement's temporaries, zeroed as it moves on.
                     held = true;
@@ -3857,6 +3863,8 @@ $dropall    m->len = 0;
                 if (e->ref == Ref::variant) return variant_value(e->type, e->field_index, {});  // `Shape.Empty`
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
+            // A `String`'s part is kept, so it's copied; a `str`'s is a view of the same bytes.
+            case ExprKind::slice: return e->type->kind == TypeKind::string ? "cx_string_from(" + slice_view(e) + ")" : slice_view(e);
             case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
             case ExprKind::array_lit:
                 return e->type->kind == TypeKind::list || e->type->kind == TypeKind::deque ? list_literal(e) : array_literal(e);
@@ -3993,12 +4001,18 @@ $dropall    m->len = 0;
         Type* rt = e->rhs->type;
         if ((op == Op::eq || op == Op::ne) && lt->kind == TypeKind::optional) return optional_equal(e);
         std::string decls;
+        bool ordered = op == Op::lt || op == Op::le || op == Op::gt || op == Op::ge;
+        if ((op == Op::eq || op == Op::ne || ordered) && (lt->kind == TypeKind::str || lt->kind == TypeKind::string)) {
+            // Text is compared as views, so a part of a `String` isn't copied to be compared.
+            std::vector<std::string> v = sequence({{e->lhs, lt, Pass::text}, {e->rhs, rt, Pass::text}}, decls);
+            if (!ordered) return wrap(decls, (op == Op::ne ? "(!" : "(") + std::string("cx_str_eq(") + v[0] + ", " + v[1] + "))");
+            return wrap(decls, "(cx_str_cmp(" + v[0] + ", " + v[1] + ")" + (op == Op::lt ? " < 0)" : op == Op::le ? " <= 0)" : op == Op::gt ? " > 0)" : " >= 0)"));
+        }
         std::vector<std::string> v = sequence({{e->lhs, lt}, {e->rhs, rt}}, decls);
-        if ((op == Op::eq || op == Op::ne) && (lt->kind == TypeKind::str || lt->kind == TypeKind::string || eq_glue(lt))) {
+        if ((op == Op::eq || op == Op::ne) && eq_glue(lt)) {
             return wrap(decls, (op == Op::ne ? "(!" : "(") + equal(lt, v[0], v[1]) + ")");
         }
-        bool ordered = op == Op::lt || op == Op::le || op == Op::gt || op == Op::ge;
-        if (ordered && (lt->kind == TypeKind::str || lt->kind == TypeKind::string || has_cmp_glue(lt))) {
+        if (ordered && has_cmp_glue(lt)) {
             return wrap(decls, "(" + compare(lt, v[0], v[1]) + (op == Op::lt ? " < 0)" : op == Op::le ? " <= 0)" : op == Op::gt ? " > 0)" : " >= 0)"));
         }
         return wrap(decls, operate(op, lt, rt, v[0], v[1], e->rhs, e->span));
@@ -4646,7 +4660,7 @@ $dropall    m->len = 0;
         std::string o = ctype(e->type), v = tmp(), r = tmp();
         switch (e->prim) {
             case PrimMethod::parse: {
-                std::string text = a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+                std::string text = text_view(a);
                 std::string call;
                 if (is_float(t)) {
                     call = std::string(t->bits == 32 ? "cx_parse_f32(" : "cx_parse_f64(") + text + ", &" + v + ")";
@@ -4685,17 +4699,17 @@ $dropall    m->len = 0;
     // out first, left to right, into `decls`, and only then is anything printed.
     void print_parts(Expr* m, std::string& decls, std::string& out) {
         if (m->kind != ExprKind::string_lit) {
-            out += show_value(m->type, expr(m)) + " ";
+            out += (m->kind == ExprKind::slice ? "cx_print_str(" + slice_view(m) + ");" : show_value(m->type, expr(m))) + " ";
             return;
         }
         std::vector<Operand> ops;
-        for (Expr* x : m->interpolations) ops.push_back({x, x->type});
+        for (Expr* x : m->interpolations) ops.push_back({x, x->type, x->kind == ExprKind::slice ? Pass::text : Pass::value});
         std::vector<std::string> values = sequence(ops, decls);
         // `sequence` leaves only the last operand with an effect in place; it runs first too.
         for (std::size_t i = ops.size(); i-- > 0;) {
             if (!effects(ops[i].e)) continue;
             std::string t = tmp();
-            decls += ctype(ops[i].want) + " " + t + " = " + values[i] + "; ";
+            decls += (ops[i].pass == Pass::text ? std::string("cx_str") : ctype(ops[i].want)) + " " + t + " = " + values[i] + "; ";
             values[i] = t;
             break;
         }
@@ -4706,7 +4720,7 @@ $dropall    m->len = 0;
                 continue;
             }
             Expr* x = m->interpolations[next];
-            out += show_value(x->type, values[next++]) + " ";
+            out += (x->kind == ExprKind::slice ? "cx_print_str(" + values[next++] + ");" : show_value(x->type, values[next++])) + " ";
         }
     }
 
@@ -4802,6 +4816,38 @@ $dropall    m->len = 0;
         }
     }
 
+    // Text that's only looked at, as a `cx_str`: a part of a `String` isn't copied.
+    std::string text_view(Expr* e) {
+        if (e->kind == ExprKind::slice) return slice_view(e);
+        return e->type->kind == TypeKind::string ? "cx_sv(" + expr(e) + ")" : expr(e);
+    }
+
+    // `s[a..b]` as a `cx_str` of the same bytes. The text is found first and then the offsets, in
+    // Java's order. A `String` that's a place is reached through a pointer and viewed after the
+    // offsets are worked out, so it's viewed as they leave it.
+    std::string slice_view(Expr* e) {
+        Expr* base = e->lhs;
+        Expr* r = e->rhs;
+        std::string b = tmp(), lo = tmp(), hi = tmp(), out = "({ ";
+        bool owned_place = base->type->kind == TypeKind::string && is_place(base);
+        std::string p;
+        if (owned_place) {
+            p = tmp();
+            out += "const cx_String* " + p + " = &" + place(base) + "; ";
+        } else {
+            // A part of a part is a view of the first text, unless the offsets can change that:
+            // then the first part is copied.
+            bool later = (r->lhs && effects(r->lhs)) || (r->rhs && effects(r->rhs));
+            bool copy = later && base->kind == ExprKind::slice && base->type->kind == TypeKind::string;
+            out += "cx_str " + b + " = " + (copy ? "cx_sv(" + expr(base) + ")" : text_view(base)) + "; ";
+        }
+        out += "cx_usize " + lo + " = " + (r->lhs ? value(r->lhs, r->lhs->type) : std::string("0")) + "; ";
+        if (r->rhs) out += "cx_usize " + hi + " = " + value(r->rhs, r->rhs->type) + "; ";
+        if (owned_place) out += "cx_str " + b + " = cx_sv(*" + p + "); ";
+        if (!r->rhs) out += "cx_usize " + hi + " = " + b + ".len; ";
+        return out + "cx_str_slice(" + b + ", " + lo + ", " + hi + ", " + (r->inclusive ? "1" : "0") + ", " + location(e->span) + "); })";
+    }
+
     // The methods of `String` and `List`, and `x.copy()`. Each finds the value it's called on,
     // then works out its arguments in order.
     std::string builtin_method(Expr* e) {
@@ -4810,8 +4856,7 @@ $dropall    m->len = 0;
         auto arg = [&](std::size_t i, Type* want) { return value(e->args[i].value, want); };
         // A `str` or a `String` argument, as a `str`.
         auto text_arg = [&](std::size_t i) {
-            Expr* a = e->args[i].value;
-            return a->type->kind == TypeKind::string ? "cx_sv(" + expr(a) + ")" : expr(a);
+            return text_view(e->args[i].value);
         };
         if (e->bmethod == BMethod::copy) {
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
@@ -4874,7 +4919,7 @@ $dropall    m->len = 0;
         if (t->kind == TypeKind::string || t->kind == TypeKind::str) {
             bool owned = t->kind == TypeKind::string;
             std::string head = "({ cx_String* " + p + " = " + address(recv) + "; ";
-            std::string view = "({ cx_str " + p + " = " + (owned ? "cx_sv(" + expr(recv) + ")" : expr(recv)) + "; ";
+            std::string view = "({ cx_str " + p + " = " + text_view(recv) + "; ";
             switch (e->bmethod) {
                 case BMethod::len: return "(" + expr(recv) + ").len";
                 case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
@@ -4892,6 +4937,20 @@ $dropall    m->len = 0;
                 case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::utf16_len: return view + "cx_str_utf16_len(" + p + "); })";
+                case BMethod::to_lower_root: case BMethod::to_upper_root: {
+                    // Text that doesn't change comes back as it is, without a copy, when it's a
+                    // literal's: a `str`, or a `String` that owns no memory.
+                    std::string fn = e->bmethod == BMethod::to_lower_root ? "cx_case_lower(" : "cx_case_upper(";
+                    if (!owned) return view + fn + p + ", 1); })";
+                    if (recv->kind == ExprKind::slice) return view + fn + p + ", 0); })";
+                    return "({ cx_String " + p + " = " + expr(recv) + "; " + fn + "cx_sv(" + p + "), " + p + ".cap == 0); })";
+                }
+                case BMethod::find: case BMethod::find_last: {
+                    std::string o = ctype(e->type), r = tmp();
+                    std::string fn = e->bmethod == BMethod::find ? "cx_str_find(" : "cx_str_find_last(";
+                    return view + "cx_usize " + r + " = " + fn + p + ", " + text_arg(0) + "); (" + o + "){ .v = " + r + ", .has = " + r +
+                           " != CX_NOT_FOUND }; })";
+                }
                 default: return "0";
             }
         }

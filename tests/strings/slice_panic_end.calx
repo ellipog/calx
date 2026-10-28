@@ -1,0 +1,8 @@
+// `..=` reaches the byte it names, which must be in the text.
+
+fn main() {
+    let name = String("Alex")
+    let to = name.len() - 1
+    println("{name[1..=to]}")    // out: lex
+    println("{name[1..=to + 1]}")    // panic: the range 1..=4 is out of bounds for text of length 4
+}

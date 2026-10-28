@@ -1410,6 +1410,7 @@ private:
                     no_struct_ = false;
                     i->rhs = expr();
                     no_struct_ = saved;
+                    if (i->rhs->kind == ExprKind::range) i->kind = ExprKind::slice;  // `s[a..b]`
                     expect(Tok::rbracket, "to end the index");
                     i->span = Span::join(start, prev_span());
                     e = i;

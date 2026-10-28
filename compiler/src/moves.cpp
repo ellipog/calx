@@ -808,6 +808,13 @@ private:
                 return;
             case ExprKind::index:
             case ExprKind::unwrap: project(e, u); return;
+            case ExprKind::slice:
+                // The text is only looked at; a `String`'s part is a new one.
+                expr(e->lhs, Use::view);
+                expr(e->rhs->lhs, Use::view);
+                expr(e->rhs->rhs, Use::view);
+                rvalue(e, u);
+                return;
             case ExprKind::try_:
                 // The error path leaves the function, dropping what a `return` here would.
                 expr(e->lhs, Use::consume);
