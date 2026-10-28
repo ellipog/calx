@@ -80,6 +80,8 @@ What arrived before a `Closed` can still be read until the next poll. After that
 
 Bytes written before `Connected` wait until the connection opens. Bytes written to a connection that has closed are dropped.
 
+A `close` is graceful: the other side gets every byte queued before it, then the end of the stream, not a reset. On Windows that means cancelling the receive the runtime keeps pending, and closing the socket once it comes back, since closing it with a receive pending resets the connection.
+
 ## Errors
 
 `Net.new`, `listen` and `connect` fail with a `NetError` ([errors](../reference/errors.md)):
