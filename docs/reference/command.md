@@ -26,7 +26,7 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | Option | Meaning |
 | --- | --- |
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
-| `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. `build` defaults to the file's name in the current folder |
+| `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. Folders on the way are made if they aren't there. `build` defaults to the file's name in the current folder |
 | `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took |
 | `--verbose` | Print the clang and linker commands |

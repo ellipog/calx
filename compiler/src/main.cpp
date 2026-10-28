@@ -215,6 +215,9 @@ int main(int argc, char** argv) {
                 std::fwrite(f.text.data(), 1, f.text.size(), stdout);
             }
         } else if (files.size() == 1) {
+            std::error_code ec;
+            std::filesystem::path parent = std::filesystem::path(opt.output).parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent, ec);
             if (!write_file_atomic(opt.output, files[0].text)) {
                 std::fprintf(stderr, "calx: can't write %s\n", opt.output.c_str());
                 return 1;

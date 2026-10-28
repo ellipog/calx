@@ -189,7 +189,8 @@ def run_test(test, mode):
         lib_paths = []
         for name in test.libs:
             source = path.parent / name
-            out = pathlib.Path(tmp) / (pathlib.Path(name).stem + (".dll" if os.name == "nt" else ".so"))
+            # Into a folder that isn't there yet, which `-o` makes.
+            out = pathlib.Path(tmp) / "libs" / (pathlib.Path(name).stem + (".dll" if os.name == "nt" else ".so"))
             build = [str(CALX), "build", "--lib", str(source), "-o", str(out)]
             if mode == "release":
                 build.insert(2, "--release")

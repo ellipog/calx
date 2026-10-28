@@ -735,6 +735,9 @@ const char* library_suffix() { return kLib; }
 
 bool place_build(const std::string& built, const std::string& out, std::string& error) {
     std::error_code ec;
+    // The output's folder is made if it isn't there, as `-o build/app` expects.
+    fs::path parent = fs::path(out).parent_path();
+    if (!parent.empty()) fs::create_directories(parent, ec);
     fs::copy_file(built, out, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         error = "can't write " + out + ": " + ec.message();
