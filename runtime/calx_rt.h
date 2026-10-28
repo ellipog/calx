@@ -463,9 +463,10 @@ CX_FN(cx_usize, cx_digest_finish, (cx_u8* ctx, cx_u8* out));
 CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out));
 
 /* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
- * CX_CFB8_CTX and CX_RSA_CTX bytes, with no alignment needed. */
+ * CX_CFB8_CTX, CX_RSA_CTX and CX_RSA_PUBLIC_CTX bytes, with no alignment needed. */
 #define CX_CFB8_CTX 208
 #define CX_RSA_CTX 912
+#define CX_RSA_PUBLIC_CTX 1568
 CX_FN(void, cx_crypto_random, (cx_u8* p, cx_usize n));
 CX_FN(void, cx_cfb8_start, (cx_u8* ctx, const cx_u8* key, const cx_u8* iv));
 CX_FN(void, cx_cfb8_encrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
@@ -473,6 +474,9 @@ CX_FN(void, cx_cfb8_decrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
 CX_FN(cx_bool, cx_rsa_generate, (cx_u8* ctx, cx_u32 bits));
 CX_FN(cx_usize, cx_rsa_public_der, (const cx_u8* ctx, cx_u8* out));
 CX_FN(cx_bool, cx_rsa_encrypt, (const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_rsa_private_op, (const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out));
+CX_FN(cx_bool, cx_rsa_public_setup, (cx_u8* ctx, const cx_u8* mod, cx_usize len, const cx_u8* e, cx_usize elen));
+CX_FN(cx_bool, cx_rsa_public_op, (const cx_u8* ctx, const cx_u8* in, cx_u8* out));
 CX_FN(cx_i64, cx_rsa_decrypt, (const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out));
 CX_FN(cx_usize, cx_rsa_size, (const cx_u8* ctx));
 

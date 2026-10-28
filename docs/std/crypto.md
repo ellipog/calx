@@ -1,6 +1,6 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding - what vanilla's online-mode login uses.
+description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding and signatures - what vanilla's online-mode login and signed chat use.
 ---
 
 # `std.crypto`
@@ -12,6 +12,8 @@ What vanilla's online-mode login is made of:
 3. The server decrypts the secret, and from then on both sides encrypt every byte with AES-128 in CFB8 mode, using the secret as the key and the IV.
 
 Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for the same inputs, so a vanilla client talks to a Calx server as to a Java one.
+
+Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
 
 ```calx
 import std.crypto.{Cfb8, RsaKey, random_bytes}
@@ -37,6 +39,21 @@ fn main() {
 }
 ```
 
+```calx
+import std.crypto.{RsaKey, RsaPublicKey}
+import std.hash.{Algorithm}
+
+fn main() {
+    // A player's key signs a message, and the server checks it with the public key it was sent.
+    let player = RsaKey.generate(2048)
+    let message = "hello".to_bytes()
+    let signature = player.sign(Algorithm.Sha256, message.copy())
+    let key = RsaPublicKey.from_der(player.public_der())!
+    println("{signature.len()} {key.verify(Algorithm.Sha256, message.copy(), signature.copy())}")    // out: 256 true
+    println("{key.verify(Algorithm.Sha256, "hellO".to_bytes(), signature)}")    // out: false
+}
+```
+
 | Item | Gives |
 | --- | --- |
 | `random_bytes(n: usize) -> List<u8>` | `n` bytes from the system's generator, good for keys, secrets and tokens |
@@ -48,16 +65,23 @@ fn main() {
 | `k.encrypt(message: List<u8>) -> List<u8>?` | The message encrypted with the public key and random padding, as Java's `"RSA/ECB/PKCS1Padding"`: `k.size()` bytes. `none` if the message is longer than `k.size() - 11` |
 | `k.decrypt(bytes: List<u8>) -> List<u8>?` | The message inside, or `none` if the bytes aren't `k.size()` long or their padding is wrong |
 | `k.size() -> usize` | The modulus's length in bytes: 128 for 1024 bits |
+| `k.sign(hash: Algorithm, message: List<u8>) -> List<u8>` | The PKCS#1 v1.5 signature of the message with its `hash`, as Java's `Signature` signs with `"SHA256withRSA"` for `Algorithm.Sha256`, `"SHA1withRSA"` for `Sha1` and `"MD5withRSA"` for `Md5`: `k.size()` bytes, the same each time |
+| `k.public_key() -> RsaPublicKey` | The public key, which checks what `k` signs |
+| `RsaPublicKey.from_der(der: List<u8>) -> RsaPublicKey?` | The key in X.509 DER, as Java's `getEncoded()` writes one, or `none` if it isn't one: every length and number in its shortest form, nothing after it, `rsaEncryption` with no parameters, an odd modulus of 512 to 4096 bits, and an exponent from 3 to below the modulus |
+| `p.verify(hash: Algorithm, message: List<u8>, signature: List<u8>) -> bool` | Whether the signature is the key's PKCS#1 v1.5 signature of the message with its `hash`, as Java's `Signature.verify` decides. A signature that isn't `p.size()` bytes, or is the modulus or more, is no signature, where Java throws a `SignatureException` |
+| `p.der() -> List<u8>`, `p.size() -> usize` | The key's DER, as it was read, which is what `getEncoded()` gives, and its modulus's length in bytes |
 
 - CFB8 is a stream cipher: each byte encrypts to one byte, and how a stream is split into calls doesn't change what comes out. A connection keeps one `Cfb8` for each direction for as long as it lasts.
 - `decrypt` says nothing about why bytes were refused, and takes the same time either way, so a client sending made-up bytes learns nothing about the key from the answers (Bleichenbacher's attack).
-- The padding is random, so the same message encrypts to different bytes each time.
+- The padding is random, so the same message encrypts to different bytes each time. A signature's isn't, so the same message signs the same.
+- `from_der` takes keys of up to 4096 bits, Mojang's size; Java's `KeyFactory` takes up to 16384.
 
 ## Checked against Java
 
 - AES-CFB8: 300 random streams of up to 699 bytes, encrypted in random pieces, gave the same bytes as Java 25's `Cipher` gave for each whole stream, and decrypting them in other random pieces gave them back. The portable version gave the same as AES-NI on 2000 more.
 - RSA: Java decoded `public_der` with `KeyFactory`, encrypted 200 random messages of 0 to 117 bytes with `Cipher`, and `decrypt` opened every one, for 1024 and 2048 bits. Java encoded the key it decoded to the same bytes. Bytes with broken padding gave `none`.
-- The [tests](../../tests/std/crypto.calx) hold Java's bytes for one AES stream, and check the rest by round trips and shapes.
+- Signatures: Java 25 made 1024-, 2048- and 4096-bit keys and signed a message with `SHA1withRSA` and `SHA256withRSA`; `verify` takes each, and not with the other hash, another message, or a bit flipped. Java verified what `sign` signed with both, for 1024 and 2048 bits.
+- The [tests](../../tests/std/crypto.calx) hold Java's bytes for one AES stream, and check the rest by round trips and shapes. [Those of signatures](../../tests/std/signatures.calx) hold Java's keys and signatures.
 
 ## How it's built
 
@@ -70,7 +94,8 @@ fn main() {
 | CFB8 encrypting | One AES block for each byte, since each byte's input is the one before it. That's 16 times the work of the block modes, and it's why this mode is slow everywhere |
 | CFB8 decrypting | The inputs are the ciphertext, which is all there already, so it runs 16 blocks at once through AES-NI's pipeline |
 | RSA numbers | 64-bit limbs, and Montgomery multiplication with a final subtraction that takes the same time whether it's needed or not |
-| RSA private key | Decrypting uses the Chinese remainder theorem: two exponents of half the length. Exponents go four bits a step from a table that's read whole each time, so neither the time nor the memory touched depends on the key's bits |
+| RSA private key | Decrypting and signing use the Chinese remainder theorem: two exponents of half the length. Exponents go four bits a step from a table that's read whole each time, so neither the time nor the memory touched depends on the key's bits |
+| RSA public key | Read once, with what Montgomery multiplication needs worked out then: R^2 mod n, as 2^k R doubled up from the top power of 2 below n and squared 6 times, so about 64 doublings where 1 doubled 128 times a limb takes 4096 for 2048 bits. The exponent isn't secret, so it goes a bit at a time, a squaring each and a multiply for each that's set: 65537 takes 17 |
 | Primes | 300 small primes, then 16 rounds of Miller-Rabin, which a composite passes with odds below 2^-32 |
 
 On an i9-13900K, one run each:
@@ -80,8 +105,9 @@ On an i9-13900K, one run each:
 | CFB8 encrypting | 135 MB/s | 77 MB/s |
 | CFB8 decrypting | 659 MB/s | 79 MB/s |
 | A 1024-bit key pair | 8.4 ms | 7 to 16 ms |
-| A 1024-bit decrypt | 106 µs | 108 µs |
+| A 1024-bit decrypt | 97 µs | 108 µs |
+| A 2048-bit `SHA256withRSA` verify | 19 µs | 22 µs |
 
-The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login.
+The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login, and a verify once for each signed chat message. Java's verify is its best of three runs of 2000, after its JIT has warmed up. Interleaving the multiply's two carry chains with ADX would make RSA about twice as fast again.
 
 `std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).

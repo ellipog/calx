@@ -1,0 +1,200 @@
+// RSA signatures, PKCS#1 v1.5: checked against signatures and keys from Java's `Signature` and
+// `KeyPairGenerator` (JDK 25), and made by `RsaKey.sign`, which signs as they do.
+import std.crypto.{RsaKey, RsaPublicKey}
+import std.hash.{Algorithm}
+
+fn unhex(text: String) -> List<u8> {
+    var out = List<u8>()
+    var high = -1
+    for i in 0..text.len() {
+        let c = text.byte_at(i)
+        // The digits come in lines, with the text's line breaks between them.
+        if c == 10 or c == 13 or c == 32 {
+            continue
+        }
+        if high < 0 {
+            high = digit(c)
+        } else {
+            out.push(u8.wrap(high * 16 + digit(c)))
+            high = -1
+        }
+    }
+    return out
+}
+
+fn digit(c: u8) -> i32 {
+    return if c >= 97 { i32(c) - 87 } else { i32(c) - 48 }
+}
+
+fn reads(der: List<u8>) -> bool {
+    return match RsaPublicKey.from_der(der) {
+        some(_) => true,
+        none => false,
+    }
+}
+
+fn flip(bytes: List<u8>, at: usize) -> List<u8> {
+    var out = bytes.copy()
+    out[at] = out[at] ^ 1
+    return out
+}
+
+// The JDK's 1024-bit key, as `getEncoded()` gives it, and its signatures of `Calx signs this`.
+fn key_1024() -> String {
+    return #"
+        30819f300d06092a864886f70d010101050003818d0030818902818100803f9bd2de8e7bc1db040e366bb526fca6bdf8
+        ba135ae4588561ed52545c86b003831828435b35c3932d830f9e5664962dacc31bf1ec5f3aedb544fa473624d1e509aa
+        75c74a05930dfe9910b356b34365a044df719507350c44e10b740717fef5a189199dc6f992a0174f475d388c5937a822
+        a7416d6e55e9172458f6b74f290203010001
+        "#
+}
+
+fn sig_1024_sha1() -> String {
+    return #"
+        6a7dd7de5322098175c229da81f87e8f81d1daa9a69a0f0b753a205ef7a0a1727a23c7b2b8230159aed2ebc7c4de0f7b
+        804bfd5e88b521e1057abdcef95e832a051ff60bced0b0c94a0379691efaa65138645ab098af92d4654c98d9b22222c2
+        3ae3dfbd360b37bf965550cebaa92ef6176d87412e5c7c4219d885827bb24f22
+        "#
+}
+
+fn sig_1024_sha256() -> String {
+    return #"
+        73cca95ed4b0a59cf4b4a7561541f9d2a2a928413937fd8c4785db920247f558a4f2494785dd5671e4cce054a2b49cd1
+        31bf20f3b9f505c016532e26b533b1fdcbe3df974fbfda8312efd1520cffa9f5b0fcadc07969d5c4028a1f3b04c45f68
+        de8f823645cebdcf9f5d9e6798878f490b9e0b409339694987e478c0d931234c
+        "#
+}
+
+// The JDK's 2048-bit key, as `getEncoded()` gives it, and its signatures of `Calx signs this`.
+fn key_2048() -> String {
+    return #"
+        30820122300d06092a864886f70d01010105000382010f003082010a0282010100a79c1bd56cf5c1f9d351d96f2171e4
+        d3beed31540e6738e7bdf97ccb6e466d567548a693876d78cef09861d2c482b4b8a216ebf400f67c1bb9963222ac43ae
+        0b778f49d772f570f35c62447a35b310915e2cd0af3302932c17fd192e4d2de801013d07a6cbd9428daf52eb1a2cc9a2
+        bb57209b35504a300efa72349b3d48c86c6eba5da6ead8a841ffb546396f93872d8a3644420d8accbdc4bd8f861029b9
+        c0e9c0eef72dcecd4c850b6cbf31c19263a0c2acaae4f19c85371e3c63d2851863f56f20a70db354a6a378ec1a84269c
+        ee06944128782f8c014a775d64f7319e5d61635e9d23b282da7d076f9a79483be3711d4177d9e7696fdbb6dc5f7f419d
+        850203010001
+        "#
+}
+
+fn sig_2048_sha1() -> String {
+    return #"
+        8b400ecf2cadb2ce2aa16ba83a8886667cc1e4cb077b6ddd97af122a2ac1a5ac7b4fdc058db8a8165da444d4f294b6aa
+        931643c0f3b76f02e792e1355f8d276931aa9972c605a1c947bf42f86dea193b9f5bfe5ee9039d1defe454de35ebe96d
+        4c626e1c3f979249f97fcd62cab59ec4ee8aefb2bebedbef192f618483657b80864ad6d4bc3ab6117090ff7956f76ac6
+        af4a437c5943cb81ec615684dd8079461ee1415079505b7418be9ef3ac5477a52ad6b8c5bedfb035a2a322af7ab32e82
+        d2969db2969a2e0268041cbec308362ba28f2b182585ddf370cc663fcfac9184ce31e56e9cfa5ac4a33ceb47bdca8521
+        acfee3b823a2ea82c782d9caad8c66e7
+        "#
+}
+
+fn sig_2048_sha256() -> String {
+    return #"
+        36e73f57c07e5882de9823a9ed434d172a2a9ffd18bf28fbe81328151216e10ceed66ed1a85251e565a8bd71c8ec2646
+        b4fc7628a161292078529e7919fc40673b66cb9ae9472f85a1474a0c74ad09d82c3d32efcc8baf007928be2ec28f4063
+        54751d3b4891cbbc01e6b1488a14e6a07cab49c010fe616d356b41f66b830ad0b8d7b1f0896a1fb345f785d474b42ecf
+        02c12467c0003a0ff6443f2b1627056ae3d69bf8d2f716cff64fccc07d2c212c0d5d70026197ed61a15408b601a0a754
+        ad5537478cfd22ba2f39eb854e5cb41e8ed42dcfedeeea8001ced19bbacdf92a14a1caa3de000a373c9861ddd1edbcda
+        75710dd170928e3334870a0bc3140248
+        "#
+}
+
+// The JDK's 4096-bit key, as `getEncoded()` gives it, and its signatures of `Calx signs this`.
+fn key_4096() -> String {
+    return #"
+        30820222300d06092a864886f70d01010105000382020f003082020a0282020100a62e4ed89ad1eb695d213c8fe467ab
+        fb3157883bc0e3775022bf3ce6bbc0eff5d131b0ecba0f51514f1662f3bfdcf9a9491109ff92a4940222c12d8a810dd3
+        eacf5640559ab64ee6b58b4a3b22bd415c9627ef5e8caff65b351473c996e37cfe6f81b6db495a0867e397dad73bf2a3
+        21d80b9c2207e49886ef8017b06bcf07dab6b6767ebb9afe02b70fc519839ca1b290a59ce2db56d9eb1d8d25b6750e72
+        ee9c1ac7b752a956bcbe5afc21d8aa199e63769e125f9026083fd4bb2e0316ba333c84624315f286df77fd56281223d3
+        89c503554f6d4e1f27290bb976757769fa71fa5fc02a84155285ccbb314bf265a6c93640a18f59d4b5718e23d65e5609
+        a36dea896eb004103f2971b81454653ec00e7c8168d97274a890322d454177b50788117eaadecdcbe3ebdc05255d35bd
+        62155614fcc266b6fe495d37dd4819de7f1b7186ae013c9dd02139e18e2ac7bae869a819783447a7ebae6e4599edf345
+        27d7c6d8ed173c46252a77f1033880bc60ddd69d95020103500b9db43a08f28486c30521911d7edcf517285123eccb82
+        3dd1a567f298471db51781df5c90f18cb5bc0067756b7607960c39a7980da0aff2c08d195fc8f8cd4e9411616e73d72a
+        ac465e2e83a139ae3dd148b9fad2b96e9b410ce5a864960f7b058ed1c3a5d59a95868117011a62f99ad781658673b19f
+        ef806b40480c8a26a23e2fac531a59fbd70203010001
+        "#
+}
+
+fn sig_4096_sha1() -> String {
+    return #"
+        81810ce4eaa9bfa51efc37c4ee8da045614b27e126db547554dd0edf9ba9d16b94e72a52a5409cea26453f2d52496660
+        4ef07fe888f2e4b9ba5f508ff709c6872336fc8efa7e64e2a9455aef57f0eea651189895d6f38a61e21bf1d5fb0053ad
+        afa8e6a8ec55908059e551272f8b1ebb00c043ba60e98de953f149274f8ef65b4749ca4ccda61cda0e41e741c9ff8586
+        d08be98626eb983b74886ad6ca6faa5ba768f01d2b784fcdfe665f7f3e53dca5e2c99c89d47cb28a439c4dc208347092
+        c8eecb2e02ddde487bf34b42abb2e68d178f3cc49795e14b5778ffba0202cfae22b975e79175e1965cf1528624bb5d2a
+        05b9c54e1ad83f1fd94e8d6cb6b22c923b443d003db9f30f21d89a655aea92a84324cd21601d27fc6acf73cee342d26a
+        bc42d5b8f3af9d9d4353c4c24563efcc4688effee541b5b0367109d29260a0f24aa7b4866f3bc53e0afaaea23642fe46
+        276eb10222f898f1f785688b9b30d2d3f241cd04f71d972409b9fe0a8101f0f807165c8e9c8484705e7757e0f99ff197
+        99ac7a9ce29780f8902887d38a8cf43621f3edae66da2611cf2356133f239d44961d4126b001901969938f0da420fe1c
+        06bb9bac720d65f6023b2470aae15573443d8d7ac2a7a54b3b994d02419207c7e4315a9c9cf7fff8e274acf2c99372f6
+        5d750b55fe770d1a8cd72de288f303da8a40872543b505b871ecad3ce79cc9c4
+        "#
+}
+
+fn sig_4096_sha256() -> String {
+    return #"
+        863b89c1d9668511dee9fa53a47e3bc0bba9e0e9f7e6105df84871071d502a0f510026ff0031cf2b035c1eca4b256975
+        57e0691e6f9a122685e36efca11eecd842718672bb44db07d3067dc74a11a3659fc42b2ec091b61255bb8d05cc859dfe
+        467372320aa0b6590343f5bee31ef4bea0a09c7fef369b135d17fe6976955d619e422dafad8c45a950b2aff7f53a1de6
+        2570637c1d120e34bee21b17d9cc01d414dfbf690da02f837c018e093f7fe1ee5ae444163184c7b5914aeca1ab8430d7
+        0c108452ea55c75809ec5b79a3194be9bf75c17d04fcbac2699325a8e3abc86f146db659e185e64d5dc31c8775aca299
+        a769d7918b7ca7bed8bd8a77756ee61a65e6521d3466fcfa232c494206c64fc04e53396ed673d2efafe03fe4e130d672
+        416adbee614fba218a0da3fb2445ba9d68a3c0ecbd8c703f7dbe708b5c2eab0398d78e87a7dbdda9812aef7f53d07718
+        65ec6ca81337310cffabc2786f4c50370ef0a11375f591604c94f0d522ed96634ad7a8aefd0d58a5946454baffa5fc5a
+        78df1ac2d36c00e89b9407e8b35bfba04ee1fff97aa46c10758d80454016d7e48bc24e5596f3e7de158a94c721709a1c
+        bc12fa1652b8af89ec9ee23ad81f3c6dc779ebacf7bfaab91bc74f40e367d939fb3b8e1502cbf8e889a04c6ea77049df
+        fb8fbc3257c6f387a5b0daeaf060a8997297786091843ad78a3e43604041909a
+        "#
+}
+
+fn check(bits: String, der: String, sha1: String, sha256: String) {
+    let message = "Calx signs this".to_bytes()
+    let key = RsaPublicKey.from_der(unhex(der)) ?? panic("the JDK's {bits}-bit key doesn't read")
+    let s1 = unhex(sha1)
+    let s256 = unhex(sha256)
+    let good = key.verify(Algorithm.Sha1, message.copy(), s1.copy()) and key.verify(Algorithm.Sha256, message.copy(), s256.copy())
+    // The wrong hash, another message, or a flipped bit isn't the signature.
+    let swapped = key.verify(Algorithm.Sha256, message.copy(), s1.copy()) or key.verify(Algorithm.Sha1, message.copy(), s256.copy())
+    let other = key.verify(Algorithm.Sha256, "Calx signs that".to_bytes(), s256.copy())
+    let flipped = key.verify(Algorithm.Sha256, message.copy(), flip(s256, key.size() - 1))
+    println("{bits} {key.size()} {good} {swapped} {other} {flipped} {key.der() == unhex(der)}")
+}
+
+fn main() {
+    check("1024", key_1024(), sig_1024_sha1(), sig_1024_sha256())     // out: 1024 128 true false false false true
+    check("2048", key_2048(), sig_2048_sha1(), sig_2048_sha256())     // out: 2048 256 true false false false true
+    check("4096", key_4096(), sig_4096_sha1(), sig_4096_sha256())     // out: 4096 512 true false false false true
+
+    // A signature of the wrong length, or one that's the modulus or more, is no signature.
+    let k = RsaPublicKey.from_der(unhex(key_2048()))!
+    let message = "Calx signs this".to_bytes()
+    var short = unhex(sig_2048_sha256())
+    _ = short.pop()
+    let all_ones: List<u8> = [0xFF; 256]
+    println("{k.verify(Algorithm.Sha256, message.copy(), short)} {k.verify(Algorithm.Sha256, message.copy(), all_ones)} {k.verify(Algorithm.Sha256, message.copy(), [])}")    // out: false false false
+
+    // What a key pair signs, its public key checks, and the same message signs the same, as
+    // PKCS#1 v1.5 has no randomness.
+    let pair = RsaKey.generate(2048)
+    let public = pair.public_key()
+    let signed = pair.sign(Algorithm.Sha256, message.copy())
+    let again = pair.sign(Algorithm.Sha256, message.copy())
+    println("{signed.len()} {public.verify(Algorithm.Sha256, message.copy(), signed.copy())} {signed == again} {public.der() == pair.public_der()}")    // out: 256 true true true
+    let small = RsaKey.generate(1024)
+    let s1 = small.sign(Algorithm.Sha1, message.copy())
+    println("{s1.len()} {small.public_key().verify(Algorithm.Sha1, message.copy(), s1.copy())} {public.verify(Algorithm.Sha1, message.copy(), s1)}")    // out: 128 true false
+
+    // DER that isn't a key as `getEncoded()` writes one doesn't read: cut short, with a byte
+    // after it, or with another algorithm.
+    let der = unhex(key_2048())
+    var cut = der.copy()
+    _ = cut.pop()
+    var longer = der.copy()
+    longer.push(0)
+    var bad_oid = der.copy()
+    bad_oid[16] = 2
+    println("{reads(der)} {reads(cut)} {reads(longer)} {reads(bad_oid)} {reads([])}")    // out: true false false false false
+}

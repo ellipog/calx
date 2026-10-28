@@ -233,7 +233,8 @@ void cx_cfb8_decrypt(cx_u8* ctx, cx_u8* p, cx_usize n) {
 /* --- numbers for RSA ----------------------------------------------------------------------- */
 
 typedef unsigned __int128 u128;
-#define MAXL 32  // limbs in the largest modulus, 2048 bits
+#define MAXL 64  // limbs in the largest modulus, 4096 bits, which public keys may have
+#define KEYL 32  // limbs in the modulus of the largest key pair made, 2048 bits
 
 /* r = a - b over n limbs; the borrow out. */
 static cx_u64 sub_n(cx_u64* r, const cx_u64* a, const cx_u64* b, int n) {
@@ -305,7 +306,8 @@ typedef struct {
  * by a mask, so the time is the same for every value. */
 static void mont_mul(const mont* M, cx_u64* r, const cx_u64* a, const cx_u64* b) {
     int n = M->n;
-    cx_u64 t[MAXL + 2] = {0};
+    cx_u64 t[MAXL + 2];
+    memset(t, 0, sizeof(cx_u64) * (size_t)(n + 2));
     for (int i = 0; i < n; i++) {
         cx_u64 carry = 0;
         for (int j = 0; j < n; j++) {
@@ -335,15 +337,22 @@ static void mont_mul(const mont* M, cx_u64* r, const cx_u64* a, const cx_u64* b)
     select_n(r, s, take, n);
 }
 
+/* Sets up an odd modulus of n limbs whose top limb isn't 0. */
 static void mont_setup(mont* M, const cx_u64* m, int n) {
     M->n = n;
     memcpy(M->m, m, sizeof(cx_u64) * (size_t)n);
     cx_u64 x = m[0];  // Newton's iteration for m^-1 mod 2^64: each step doubles the bits right
     for (int i = 0; i < 6; i++) x *= 2 - m[0] * x;
     M->inv = (cx_u64)0 - x;
-    // R^2 mod m: 1 doubled 128n times, less m each time it reaches m.
-    cx_u64 r[MAXL + 1] = {1};
-    for (int i = 0; i < 128 * n; i++) {
+    // R^2 mod m, which is 2^n in Montgomery form, 2^n R, squared 6 times in Montgomery form, as
+    // (2^n)^64 = R. 2^n R mod m is the highest power of 2 below m, 2^(b-1), doubled 64n + n - b + 1
+    // times, less m each time it reaches m: about n doublings, where 1 doubled 128n times takes
+    // 128n.
+    int b = 64 * n - __builtin_clzll(m[n - 1]);
+    cx_u64 r[MAXL];
+    memset(r, 0, sizeof(cx_u64) * (size_t)n);
+    r[(b - 1) / 64] = (cx_u64)1 << ((b - 1) % 64);
+    for (int i = 0; i < 64 * n + n - b + 1; i++) {
         cx_u64 top = r[n - 1] >> 63;
         for (int j = n - 1; j > 0; j--) r[j] = (r[j] << 1) | (r[j - 1] >> 63);
         r[0] <<= 1;
@@ -351,14 +360,16 @@ static void mont_setup(mont* M, const cx_u64* m, int n) {
         cx_u64 borrow = sub_n(s, r, m, n);
         select_n(r, s, (cx_u64)0 - (top | (borrow ^ 1)), n);
     }
+    for (int i = 0; i < 6; i++) mont_mul(M, r, r, r);
     memcpy(M->rr, r, sizeof(cx_u64) * (size_t)n);
 }
 
 /* r = t / R mod m, for t (2n limbs) below m * R. */
 static void mont_reduce(const mont* M, cx_u64* r, const cx_u64* wide) {
     int n = M->n;
-    cx_u64 t[2 * MAXL + 1] = {0};
+    cx_u64 t[2 * MAXL + 1];
     memcpy(t, wide, sizeof(cx_u64) * 2 * (size_t)n);
+    t[2 * n] = 0;
     for (int i = 0; i < n; i++) {
         cx_u64 u = t[i] * M->inv, carry = 0;
         for (int j = 0; j < n; j++) {
@@ -394,9 +405,33 @@ static void mont_pow(const mont* M, cx_u64* r, const cx_u64* a, const cx_u64* e,
         for (int k = 0; k < 4; k++) mont_mul(M, x, x, x);
         int at = 4 * s;
         unsigned w = (unsigned)((e[at / 64] >> (at % 64)) & 15);
-        cx_u64 pick[MAXL] = {0};
+        cx_u64 pick[MAXL];
+        memset(pick, 0, sizeof(cx_u64) * (size_t)n);
         for (unsigned i = 0; i < 16; i++) select_n(pick, table[i], (cx_u64)0 - (cx_u64)(i == w), n);
         mont_mul(M, x, x, pick);
+    }
+    mont_mul(M, r, x, one_limb);
+}
+
+/* r = a^e mod m, for a below m, with `bits` bits of e, a bit at a time from the top: a squaring
+ * for each, and a multiply for each that's set. Its time depends on e, so it's for exponents that
+ * aren't secret: a public key's 65537 takes 16 squarings and a multiply, where mont_pow's table
+ * takes 46 multiplies in all. A squaring is a multiply: one made apart, with each cross product
+ * once and the reduction after, was slower than the multiply's interleaved reduction. */
+static void mont_pow_public(const mont* M, cx_u64* r, const cx_u64* a, const cx_u64* e, int bits) {
+    static const cx_u64 one_limb[MAXL] = {1};
+    int top = bits;
+    while (top > 0 && !((e[(top - 1) / 64] >> ((top - 1) % 64)) & 1)) top--;
+    cx_u64 base[MAXL], x[MAXL];
+    mont_mul(M, base, a, M->rr);  // a * R
+    if (top == 0) {
+        mont_mul(M, r, M->rr, one_limb);  // a^0 is 1: R, out of Montgomery form
+        return;
+    }
+    memcpy(x, base, sizeof(cx_u64) * (size_t)M->n);
+    for (int i = top - 1; i-- > 0;) {
+        mont_mul(M, x, x, x);
+        if ((e[i / 64] >> (i % 64)) & 1) mont_mul(M, x, x, base);
     }
     mont_mul(M, r, x, one_limb);
 }
@@ -406,8 +441,8 @@ static void mont_pow(const mont* M, cx_u64* r, const cx_u64* a, const cx_u64* e,
 typedef struct {
     cx_u32 bits;  // of the modulus, 1024 or 2048
     cx_u32 half;  // limbs in p and q
-    cx_u64 n[MAXL];
-    cx_u64 p[MAXL / 2], q[MAXL / 2], dp[MAXL / 2], dq[MAXL / 2], qinv[MAXL / 2];
+    cx_u64 n[KEYL];
+    cx_u64 p[KEYL / 2], q[KEYL / 2], dp[KEYL / 2], dq[KEYL / 2], qinv[KEYL / 2];
 } rsa;
 
 _Static_assert(sizeof(rsa) <= CX_RSA_CTX, "the context fits what std.crypto makes room for");
@@ -701,4 +736,69 @@ cx_i64 cx_rsa_decrypt(const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* ou
     cx_usize mlen = nb - at - 1;
     memcpy(out, em + at + 1, mlen);
     return (cx_i64)mlen;
+}
+
+/* The private operation alone, c^d mod n, with no padding: `in` is the key's bytes long, and is
+ * read as a number below the modulus. Writes the key's bytes to `out` and returns 1, or returns 0
+ * if the length is wrong or the number isn't below the modulus. It's what a PKCS#1 v1.5 signature
+ * is, of the padded digest. */
+cx_bool cx_rsa_private_op(const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out) {
+    rsa k;
+    memcpy(&k, ctx, sizeof k);
+    cx_usize nb = k.bits / 8;
+    int n = (int)(nb / 8);
+    if (len != nb) return 0;
+    cx_u64 c[MAXL], m[MAXL];
+    from_bytes(c, n, in, nb);
+    if (cmp_n(c, k.n, n) >= 0) return 0;
+    private_op(&k, m, c);
+    to_bytes(out, nb, m);
+    return 1;
+}
+
+/* A public key, set up once for its operations. */
+typedef struct {
+    cx_u32 len;  // the modulus's bytes
+    cx_u32 ebits;
+    cx_u64 e[MAXL];
+    mont M;
+} rsa_public;
+
+_Static_assert(sizeof(rsa_public) <= CX_RSA_PUBLIC_CTX, "the context fits what std.crypto makes room for");
+
+/* Sets up a public key in `ctx`: `mod` is the modulus's `len` big-endian bytes, at most 512, the
+ * first not 0, and the modulus is odd; `e` is the exponent's `elen` bytes, at most `len`. Returns
+ * 0 if any of that doesn't hold. */
+cx_bool cx_rsa_public_setup(cx_u8* ctx, const cx_u8* mod, cx_usize len, const cx_u8* e, cx_usize elen) {
+    if (len == 0 || len > 8 * MAXL || elen == 0 || elen > len || mod[0] == 0 || !(mod[len - 1] & 1)) return 0;
+    rsa_public k;
+    memset(&k, 0, sizeof k);
+    int n = (int)((len + 7) / 8);
+    k.len = (cx_u32)len;
+    k.ebits = (cx_u32)(8 * elen);
+    cx_u64 m[MAXL];
+    from_bytes(m, n, mod, len);
+    from_bytes(k.e, n, e, elen);
+    mont_setup(&k.M, m, n);
+    memcpy(ctx, &k, sizeof k);
+    return 1;
+}
+
+/* The key's operation, s^e mod n, as a signature is checked: `in` is the modulus's bytes long.
+ * Writes as many to `out` and returns 1, or returns 0 if `in` isn't below the modulus. Nothing in
+ * it is secret, so its time may depend on the values. */
+cx_bool cx_rsa_public_op(const cx_u8* ctx, const cx_u8* in, cx_u8* out) {
+    const rsa_public* k = (const rsa_public*)(const void*)ctx;
+    rsa_public copy;
+    if ((cx_usize)ctx % _Alignof(rsa_public) != 0) {
+        memcpy(&copy, ctx, sizeof copy);
+        k = &copy;
+    }
+    int n = k->M.n;
+    cx_u64 x[MAXL], r[MAXL];
+    from_bytes(x, n, in, k->len);
+    if (cmp_n(x, k->M.m, n) >= 0) return 0;
+    mont_pow_public(&k->M, r, x, k->e, (int)k->ebits);
+    to_bytes(out, k->len, r);
+    return 1;
 }
