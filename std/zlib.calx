@@ -108,7 +108,7 @@ pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, 
     if from > to or to > bytes.len() {
         panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
     }
-    let (ended, _) = try inflate(bytes, from, to, format, limit, mut out)
+    let (ended, _) = try inflate(bytes, from, to, format, limit, false, mut out)
     return ended
 }
 
@@ -122,7 +122,7 @@ pub fn decompress_stream(bytes: List<u8>, from: usize, to: usize, format: Format
     if from > to or to > bytes.len() {
         panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
     }
-    let (ended, used) = try inflate(bytes, from, to, format, limit, mut out)
+    let (ended, used) = try inflate(bytes, from, to, format, limit, true, mut out)
     if not ended {
         fail Error.TooLong
     }
@@ -130,8 +130,9 @@ pub fn decompress_stream(bytes: List<u8>, from: usize, to: usize, format: Format
 }
 
 // Inflates as `decompress_into` says, and gives whether the stream ended, and how many of the
-// bytes from `from` it took to: all of the stream's when it ended.
-fn inflate(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> (bool, usize) ! Error {
+// bytes from `from` it took to: all of the stream's when it ended. With `stream`, the bytes may
+// go on past the stream, so their length says nothing of what it inflates to.
+fn inflate(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, stream: bool, out: mut List<u8>) -> (bool, usize) ! Error {
     let n = to - from
     // The context is written by the runtime before it's read, so it isn't cleared first.
     var ctx = List<u8>()
@@ -144,7 +145,11 @@ fn inflate(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize
     // Room for a first try: gzip says how long it is at the end, and Minecraft's data inflates
     // to about eight times its size. A guess that's short costs a copy and another call.
     var room: usize = n * 8 + 4096
-    if format_code(format) == 1 and n >= 18 {
+    if stream {
+        // A stream that may be one of many starts small and doubles, so each costs about what
+        // it makes.
+        room = 16384
+    } else if format_code(format) == 1 and n >= 18 {
         room = usize(u32(bytes[to - 4]) | u32(bytes[to - 3]) << 8 | u32(bytes[to - 2]) << 16 | u32(bytes[to - 1]) << 24)
     }
     loop {
@@ -160,6 +165,10 @@ fn inflate(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize
         }
         if status == 0 or status == 2 {
             return (status == 0, unsafe { cx_inflate_used(ctx.as_ptr()) })
+        }
+        if status == 1 and stream {
+            room *= 2
+            continue
         }
         if status == 1 {
             // The rest will likely inflate as what's done did: guess from how much input that
