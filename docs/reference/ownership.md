@@ -202,4 +202,4 @@ Every free gives the size of the block, which the compiler always knows: a list 
 
 Debug builds use `malloc` instead, with each block's size in front of it. A block freed twice, or with a size it wasn't allocated with, stops the program with status 102, and so does a program that ends with blocks still allocated, reported on standard error. Since the compiler frees every value exactly once, each of these is a bug in Calx, and the test suite runs every test this way. Builds with AddressSanitizer use `malloc` too, so it sees every block.
 
-Arenas, `Box<T>` for recursive types and `Shared<T>` for data many regions read are designed but not built yet ([spec](../CALX_SPEC.md#memory-model-d48)).
+For temporary lists that are all freed at once, such as a tick's, an [arena](arenas.md) is faster still: a list takes its memory from the arena's chunk, and resetting the arena frees them all. `Box<T>` for recursive types and `Shared<T>` for data many regions read are designed but not built yet ([spec](../CALX_SPEC.md#memory-model-d48)).

@@ -1,0 +1,25 @@
+// What a method's generic arguments are checked against.
+
+struct Pair {
+    a: i32
+}
+
+impl Pair {
+    fn with<T>(self, x: own T) -> T {
+        _ = self.a
+        return x
+    }
+    fn get(self) -> i32 {
+        return self.a
+    }
+}
+
+fn main() {
+    let p = Pair { a: 1 }
+    let v = p.with<f64, i32>(2.5)    // error: `with` takes 1 type, but 2 were given
+    let w = p.with<i64>(2.5)    // error: a float literal isn't an `i64`
+    let g = p.get<i32>()    // error: `get` isn't generic
+    let n = [1, 2].len<i32>()    // error: `len` doesn't take generic arguments
+    let f = p.a<i32>    // error: generic arguments after a name with a `.` are for calling a method
+    println("{v} {w} {g} {n} {f}")
+}

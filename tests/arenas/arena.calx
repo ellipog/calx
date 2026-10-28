@@ -1,0 +1,108 @@
+// `Arena` and `ArenaList<T>` (D114): lists made from an arena, which grow from its chunks and are
+// freed all at once by `reset`. A region keeps one and resets it each tick; a `parallel for`
+// gives each iteration its own. Debug builds also check that the arena frees its chunks.
+
+struct Pos {
+    x: i32
+    y: i32
+}
+
+struct Region {
+    scratch: Arena
+    counts: List<i32>
+}
+
+fn fill(xs: mut ArenaList<Pos>, n: i32) {
+    for i in 0..n {
+        xs.push(Pos { x: i, y: i * 2 })
+    }
+}
+
+fn total(xs: ArenaList<Pos>) -> i32 {
+    var t = 0
+    for p in xs {
+        t += p.x + p.y
+    }
+    return t
+}
+
+fn tick(r: mut Region, n: i32) -> i32 {
+    r.scratch.reset()
+    var todo = r.scratch.list<Pos>()
+    var keys: ArenaList<i64> = r.scratch.list(16)
+    fill(mut todo, n)
+    for p in todo {
+        keys.push(i64(p.x) * 1000 + i64(p.y))
+    }
+    r.counts.push(i32.wrap(todo.len()))    // the region's other fields can change
+    keys.sort()
+    let kept = keys.to_list()
+    let last = if kept.is_empty() { -1i64 } else { kept[kept.len() - 1] }
+    println("{todo.len()} {keys.capacity() >= 16} {last}")
+    return total(todo)
+}
+
+struct Holder {
+    name: String
+    arena: Arena
+}
+
+fn main() {
+    var r = Region { scratch: Arena(), counts: [] }
+    var sum = 0
+    for k in 0..4 {
+        sum += tick(mut r, k * 1000)
+    }
+    // out: 0 true -1
+    // out: 1000 true 1000998
+    // out: 2000 true 2002998
+    // out: 3000 true 3004998
+    println("{sum} {r.counts}")    // out: 20991000 [0, 1000, 2000, 3000]
+
+    // A list starts with 64 bytes, and the newest grows where it is, so 100 bytes take 128, not
+    // 64 + 128.
+    let a = Arena(1024)
+    var xs = a.list<u8>()
+    for i in 0..100 {
+        xs.push(u8.wrap(i))
+    }
+    println("{xs.capacity()} {a.used()}")    // out: 128 128
+    xs.truncate(10)
+    println("{xs}")    // out: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    xs.insert(0, 99)
+    _ = xs.pop()
+    xs.swap(1, 2)
+    xs.truncate(5)
+    println("{xs} {xs == xs} {xs.contains(99)} {xs[1]}")    // out: [99, 1, 0, 2, 3] true true 1
+
+    // Each iteration takes memory only from its own arena.
+    var arenas: List<Arena> = []
+    for _ in 0..4 {
+        arenas.push(Arena(256))
+    }
+    var sums: List<i64> = [0, 0, 0, 0]
+    parallel for k in 0usize..4 {
+        var ys = arenas[k].list<i64>()
+        for i in 0..1000 {
+            ys.push(i64(i) * i64.wrap(k + 1))
+        }
+        var s = 0i64
+        for y in ys {
+            s += y
+        }
+        sums[k] = s
+    }
+    println("{sums}")    // out: [499500, 999000, 1498500, 1998000]
+    for k in 0usize..4 {
+        arenas[k].reset()
+    }
+    println("{arenas[0].used()} {arenas[3].used()}")    // out: 0 0
+
+    // A copy of an arena is a new, empty one.
+    let h = Holder { name: "h", arena: Arena() }
+    var hs: List<Holder> = [h.copy(), h.copy()]
+    hs.push(h)
+    var zs = hs[2].arena.list<u16>(3)
+    zs.push(7)
+    println("{hs.len()} {zs} {zs.capacity()} {hs[0].arena.used()} {hs[2].arena.used()}")    // out: 3 [7] 32 0 64
+}

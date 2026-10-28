@@ -443,12 +443,7 @@ void cx_print_f32(cx_f32 v) { print_float(v, 1); }
 
 /* --- memory and strings ------------------------------------------------------------------ */
 
-void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
-    /* No buffer can be bigger than half the address space. */
-    cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
-    if (extra > max - len) cx_panic_capacity();
-    cx_usize need = len + extra;
-    if (need <= *cap) return ptr;
+void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size) {
     cx_usize n = *cap <= max / 2 ? *cap * 2 : max;
     if (n < need) n = need;
     if (n < 4 && max >= 4) n = 4;
@@ -473,6 +468,86 @@ void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_u
         *head = n - a;
     }
     return ptr;
+}
+
+/* --- arenas (D114) --------------------------------------------------------------------------- */
+
+#define CX_ARENA_FIRST ((cx_usize)8192)
+
+cx_Arena cx_arena_new(cx_usize first) {
+    cx_Arena a;
+    a.s = (cx_arena_state*)cx_alloc(sizeof(cx_arena_state));
+    memset(a.s, 0, sizeof(cx_arena_state));
+    if (first > (cx_usize)-1 / 4) cx_panic_capacity();
+    a.s->first = (first ? first : CX_ARENA_FIRST) + sizeof(cx_arena_chunk);
+    return a;
+}
+
+static cx_u8* cx_arena_data(cx_arena_chunk* c) { return (cx_u8*)(c + 1); }
+
+static void cx_arena_free_chunks(cx_arena_chunk* c) {
+    while (c) {
+        cx_arena_chunk* prev = c->prev;
+        cx_free(c, c->size);
+        c = prev;
+    }
+}
+
+static void cx_arena_start(cx_arena_state* s, cx_arena_chunk* c) {
+    s->chunk = c;
+    s->top = cx_arena_data(c);
+    s->end = (cx_u8*)c + c->size;
+}
+
+void cx_drop_Arena(cx_Arena* a) {
+    if (!a->s) return;
+    cx_arena_free_chunks(a->s->chunk);
+    cx_free(a->s, sizeof(cx_arena_state));
+}
+
+cx_Arena cx_copy_Arena(const cx_Arena* a) { return cx_arena_new(a->s->first - sizeof(cx_arena_chunk)); }
+
+void cx_arena_reset(cx_Arena* a) {
+    cx_arena_state* s = a->s;
+    cx_arena_chunk* c = s->chunk;
+    if (!c) return;
+    if (c->prev) {
+        cx_usize total = 0;
+        for (cx_arena_chunk* x = c; x; x = x->prev) total += x->size;
+        cx_arena_free_chunks(c);
+        c = (cx_arena_chunk*)cx_alloc(total);
+        c->prev = NULL;
+        c->size = total;
+    }
+    cx_arena_start(s, c);
+    s->full = 0;
+#ifdef CX_DEBUG
+    /* Nothing can see the memory now, so a compiler bug that let something keep it shows up. */
+    memset(s->top, 0xA5, (cx_usize)(s->end - s->top));
+#endif
+}
+
+cx_usize cx_arena_used(const cx_Arena* a) {
+    const cx_arena_state* s = a->s;
+    return s->chunk ? s->full + (cx_usize)(s->top - cx_arena_data(s->chunk)) : 0;
+}
+
+/* `bytes` from a new chunk, at least twice the size of the last: the newest has no room. */
+void* cx_arena_more(cx_arena_state* s, void* ptr, cx_usize len, cx_usize bytes, cx_usize size, cx_usize align) {
+    cx_usize want = s->chunk ? s->chunk->size * 2 : s->first;
+    if (bytes > (cx_usize)-1 / 4) cx_panic_capacity();
+    cx_usize need = sizeof(cx_arena_chunk) + bytes + align;
+    if (want < need) want = need;
+    cx_arena_chunk* c = (cx_arena_chunk*)cx_alloc(want);
+    c->prev = s->chunk;
+    c->size = want;
+    if (s->chunk) s->full += (cx_usize)(s->top - cx_arena_data(s->chunk));
+    cx_arena_start(s, c);
+    cx_usize pad = (cx_usize)(-(uintptr_t)s->top & (align - 1));
+    cx_u8* q = s->top + pad;
+    s->top = q + bytes;
+    if (len) memcpy(q, ptr, len * size);
+    return q;
 }
 
 void cx_string_reserve(cx_String* s, cx_usize extra) {

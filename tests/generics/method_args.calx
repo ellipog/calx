@@ -1,0 +1,28 @@
+// A generic method, like a generic function, can be given its types: `p.with<f64>(2.5)`.
+
+struct Pair {
+    a: i32
+}
+
+impl Pair {
+    fn with<T>(self, x: own T) -> T {
+        _ = self.a
+        return x
+    }
+    fn twice<T: Copy>(x: T, y: T) -> List<T> {
+        return [x, y]
+    }
+}
+
+fn pick<T: Copy>(x: T) -> T {
+    return x
+}
+
+fn main() {
+    let p = Pair { a: 1 }
+    let v = p.with<f64>(2.5)
+    let w = p.with<i64>(3)
+    let d = Pair.twice<i16>(4, 5)
+    let e = pick<u8>(7)
+    println("{v} {w} {d} {e}")    // out: 2.5 3 [4, 5] 7
+}

@@ -90,6 +90,8 @@ private:
         std::vector<std::uint32_t> path;
         // A string's `{...}` part, which holds `over` until the string is made, instead of a loop.
         bool shown = false;
+        // `by` is an arena list made from the arena `root` holds, rather than a view (D114).
+        bool arena = false;
     };
 
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -274,12 +276,20 @@ private:
     }
 
     void move(Expr* e, Local* l) {
+        if (l->type->arena_list) {
+            error(e->span, name_of(l) + " is an `ArenaList`, which can't move, since it stays with the arena it was made "
+                                        "from; pass it on as a view or `mut`, or make a `List` of it with `to_list()`");
+            return;
+        }
         if (!l->owns) {
             cant_move(e, l);
             return;
         }
         if (const Borrow* b = borrowed(l)) {
-            if (b->by) {
+            if (b->by && b->arena) {
+                error(e->span, "can't move " + name_of(l) + " while " + name_of(b->by) + " holds memory from it");
+                note(b->at, name_of(b->by) + " is made from " + (b->over ? q(place_text(b->over)) : name_of(l)) + " here");
+            } else if (b->by) {
                 error(e->span, "can't move " + name_of(l) + " while " + name_of(b->by) + " is a view into it");
                 note(b->at, name_of(b->by) + " is a view into " + name_of(l) + " here");
             } else if (b->shown) {
@@ -298,7 +308,8 @@ private:
     void take(Local* l, Span at) {
         if (const Borrow* b = borrowed(l)) {
             error(at, "can't take " + name_of(l) + " apart" +
-                          (b->by      ? " while " + name_of(b->by) + " is a view into it"
+                          (b->by && b->arena ? " while " + name_of(b->by) + " holds memory from it"
+                           : b->by           ? " while " + name_of(b->by) + " is a view into it"
                            : b->shown ? shown_after(b)
                                       : " while a `for` loop goes over " + looped(b)));
             return;
@@ -347,7 +358,7 @@ private:
     const Borrow* borrowed(const Local* l, const std::vector<std::uint32_t>* path = nullptr) const {
         for (const Borrow& b : borrows_) {
             if (b.root != l) continue;
-            if (path && !b.by) {
+            if (path && (!b.by || b.arena)) {
                 std::size_t n = std::min(path->size(), b.path.size());
                 if (!std::equal(path->begin(), path->begin() + static_cast<std::ptrdiff_t>(n), b.path.begin())) continue;
             }
@@ -378,7 +389,7 @@ private:
     // A change to the place rooted at `l`. A `for` loop's own rule is the checker's.
     void check_change(Local* l, Span at) {
         for (const Borrow& b : borrows_) {
-            if (b.root != l || !b.by) continue;
+            if (b.root != l || !b.by || b.arena) continue;
             error(at, name_of(l) + " can't be changed while " + name_of(b.by) + " is a view into it");
             note(b.at, name_of(b.by) + " is a view into " + name_of(l) + " here");
             return;
@@ -489,6 +500,14 @@ private:
             if (s->local) {
                 s->local->owns = true;
                 declare(s->local);
+                // An arena list holds its arena until its scope ends (D114).
+                Expr* v = s->value;
+                if (s->local->type->arena_list && v->kind == ExprKind::call && v->bmethod == BMethod::arena_list && !scan_) {
+                    if (Local* root = place_root(v->callee->lhs)) {
+                        borrows_.push_back({root, s->local, s->span, v->callee->lhs, field_path(v->callee->lhs), false, true});
+                        borrow_scopes_.push_back(scopes_.size());
+                    }
+                }
             }
             return;
         }
@@ -918,7 +937,7 @@ private:
                 return;
             }
             error(e->span, "can't move " + q(place_text(e)) + " while " +
-                               (b->by ? name_of(b->by) + " is a view into " + q(r)
+                               (b->by ? name_of(b->by) + (b->arena ? " holds memory from " + q(place_text(b->over)) : " is a view into " + q(r))
                                       : "a `for` loop goes over " + (over == place_text(e) ? std::string("it") : q(over))));
         } else {
             // A field of a local that owns its value moves out, and is zeroed.

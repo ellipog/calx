@@ -89,7 +89,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
@@ -97,6 +97,8 @@ public:
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
         n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
+        n_Arena_ = ctx.names.intern("Arena");
+        n_ArenaList_ = ctx.names.intern("ArenaList");
         n_SortedMap_ = ctx.names.intern("SortedMap");
         n_SortedSet_ = ctx.names.intern("SortedSet");
         n_Map_ = ctx.names.intern("Map");
@@ -1353,7 +1355,10 @@ private:
             }
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
-            case TypeKind::list: return t->heap ? T.heap_of(subst(t->elem, s)) : T.list_of(subst(t->elem, s));
+            case TypeKind::list:
+                return t->heap         ? T.heap_of(subst(t->elem, s))
+                       : t->arena_list ? T.arena_list_of(subst(t->elem, s))
+                                       : T.list_of(subst(t->elem, s));
             case TypeKind::deque: return T.deque_of(subst(t->elem, s));
             case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
             case TypeKind::set: return T.set_of(subst(t->elem, s), t->table);
@@ -1385,7 +1390,10 @@ private:
             return it->second == actual;
         }
         if (!pattern->open) return pattern == actual;
-        if (pattern->kind != actual->kind || pattern->table != actual->table || pattern->heap != actual->heap) return false;
+        if (pattern->kind != actual->kind || pattern->table != actual->table || pattern->heap != actual->heap ||
+            pattern->arena_list != actual->arena_list) {
+            return false;
+        }
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
                 return unify(pattern->elem, actual->elem, s, vars);
@@ -1631,7 +1639,7 @@ private:
             case TypeKind::unit: return "unit";
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
-            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : "_list");
+            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->arena_list ? "_alist" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
             case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
             case TypeKind::set: return mangle(t->elem) + table_suffix(t) + "set";
@@ -1730,6 +1738,7 @@ private:
         for (Type* a : args) {
             t->open = t->open || a->open;
             t->has_pointer = t->has_pointer || a->has_pointer;
+            t->scoped = t->scoped || a->scoped;
         }
         it->c_name = g->module ? c_name_in(g->module, {mangle(t)}) : unique_c_name("cx_" + mangle(t));
         type_instances_.emplace(key, t);
@@ -1802,6 +1811,11 @@ private:
         for (Type* a : args) {
             if (a->has_pointer) {
                 error(site, q(text(f->name)) + " is generic, and a generic parameter can't be a pointer yet");
+                return nullptr;
+            }
+            if (a->scoped) {
+                error(site, q(text(f->name)) + " is generic, and a generic parameter can't be " + name_of(a) +
+                                ", since generic code could keep or copy it past its arena's reset");
                 return nullptr;
             }
         }
@@ -2024,7 +2038,9 @@ private:
 
     // `pointer_ok` is for the places a pointer type can be written: a variable in `unsafe` code,
     // and a C function's parameters and result. Anything that holds one can't be written yet.
-    Type* resolve_type(TypeExpr* t, bool pointer_ok = false) {
+    // `scoped_ok` is for the places an `ArenaList` can be written: a variable, and a parameter
+    // that's a view (D114).
+    Type* resolve_type(TypeExpr* t, bool pointer_ok = false, bool scoped_ok = false) {
         switch (t->kind) {
             case TypeExprKind::named: {
                 if (t->path.parts.size() != 1) {
@@ -2032,6 +2048,27 @@ private:
                     return T.error;
                 }
                 Name n = t->path.parts[0];
+                if (n == n_Arena_ && !env_type(n)) {
+                    if (!t->args.empty()) {
+                        error(t->span, "`Arena` doesn't take generic arguments; the lists made from it do: `ArenaList<i32>`");
+                        return T.error;
+                    }
+                    return T.arena;
+                }
+                if (n == n_ArenaList_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`ArenaList` takes one generic argument, the type of its elements: `ArenaList<i32>`");
+                        return T.error;
+                    }
+                    if (!scoped_ok) {
+                        error(t->span, "an `ArenaList` can only be the type of a variable or of a parameter that isn't `own`, "
+                                       "since its memory is the arena's and goes when the arena is reset");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !arena_elem(elem, t->args[0]->span)) return T.error;
+                    return T.arena_list_of(elem);
+                }
                 if (n == n_List_ && !env_type(n)) {
                     if (t->args.size() != 1) {
                         error(t->span, "`List` takes one generic argument, the type of its elements: `List<i32>`");
@@ -2227,6 +2264,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
             case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
+            case TypeKind::arena:
                 return true;
             case TypeKind::enum_: return t->has_data;
             case TypeKind::optional: return is_view_type(t->elem);
@@ -2259,7 +2297,7 @@ private:
                     }
                 }
             } else {
-                t = resolve_type(p.type, f->is_extern);
+                t = resolve_type(p.type, f->is_extern, !f->is_extern && p.mode != ParamMode::own);
             }
             if (t->kind == TypeKind::unit) error(p.type->span, "a parameter can't be `()`");
             if (i == 0 && f->impl_type && t == f->impl_type) f->is_method = true;
@@ -2494,6 +2532,7 @@ private:
 
     Type* check_block(Block* b, Type* expected, BlockUse use) {
         push_scope();
+        std::size_t ties = loop_borrows_.size();  // the arena lists declared here hold their arenas until it ends
         bool diverged = false;
         bool reported = false;
         auto unreachable = [&](Span s) {
@@ -2517,6 +2556,7 @@ private:
             }
         }
         if (diverged) result = T.never;
+        loop_borrows_.resize(ties);
         pop_scope();
         return result;
     }
@@ -2581,7 +2621,7 @@ private:
         bool plain = p->kind == PatternKind::binding && (!std::isupper(static_cast<unsigned char>(text(p->name)[0])) ||
                                                          resolve_name(p->name).kind != NameKind::none);
         if (has_else || !plain) return check_let_pattern(s);
-        Type* declared = s->type ? resolve_type(s->type, unsafe_depth_ > 0) : nullptr;
+        Type* declared = s->type ? resolve_type(s->type, unsafe_depth_ > 0, true) : nullptr;
         if (!s->value) {
             error(p->span, "give " + q(text(p->name)) + " a value; Calx has no uninitialized variables");
             Local* l = new_local(p->name, declared ? declared : T.error, p->span, s->is_var);
@@ -2590,7 +2630,10 @@ private:
             declare(l);
             return false;
         }
+        Expr* saved_let = let_value_;
+        let_value_ = s->value;
         Type* t = check(s->value, declared);
+        let_value_ = saved_let;
         Type* local_t = declared ? declared : t;
         if (t->kind == TypeKind::unit) {
             error(s->value->span, "this has no value to bind");
@@ -2600,7 +2643,28 @@ private:
         Local* l = new_local(p->name, local_t, p->span, s->is_var);
         s->local = l;
         declare(l);
+        if (local_t->arena_list) tie(s, l);
         return t->kind == TypeKind::never;
+    }
+
+    // D114: an arena list is made in a `let` of its own, from an arena that's a place, and holds
+    // that place until the block ends, so the arena can't be reset, changed or moved under it.
+    void tie(Stmt* s, Local* l) {
+        Expr* v = s->value;
+        if (v->kind == ExprKind::array_lit) {
+            error(v->span, "an `ArenaList` starts empty: make it with an arena's `list()`, as in `var xs = a.list<i32>()`, "
+                           "then push");
+            return;
+        }
+        if (v->kind != ExprKind::call || v->bmethod != BMethod::arena_list) {
+            if (!is_bad(v->type)) {
+                error(v->span, "an `ArenaList` is made by an arena's `list()`, in a `let` of its own; it can't move from "
+                               "anywhere else, so pass it on as a view or `mut`");
+            }
+            return;
+        }
+        Expr* arena = v->callee->lhs;
+        if (Local* root = place_root(arena)) loop_borrows_.push_back({root, field_path(arena), arena, false, l});
     }
 
     // `let p = e`, where `p` is more than a name, and `let p = e else <leave>`.
@@ -2679,6 +2743,12 @@ private:
         Local* root = nullptr;
         Type* tt = check_place(target, &root);
         bool whole = target->kind == ExprKind::name || target->kind == ExprKind::self;
+        if (tt->arena_list) {
+            error(target->span, "an `ArenaList` can't be assigned to, since it stays with the arena it was made from; "
+                                "empty it with `clear()`, or make another in a `let`");
+            check(s->value, nullptr);
+            return;
+        }
         if (root) require_writable(target, root, whole);
         if (!s->compound) {
             check(s->value, is_bad(tt) ? nullptr : tt);
@@ -2738,7 +2808,11 @@ private:
         if (const LoopBorrow* b = loop_conflict(place, l)) {
             std::string what = b->path.empty() ? std::string(n) : place_text(place);
             std::string over = b->path.empty() ? what : place_text(b->place);
-            if (b->shown) {
+            if (b->tie) {
+                error(place->span, q(place_text(place)) + " can't be changed while " + q(text(b->tie->name)) +
+                                       " holds memory from " + (over == what ? "it" : q(over)) +
+                                       "; reset or change the arena after the block that declares " + q(text(b->tie->name)));
+            } else if (b->shown) {
                 error(place->span, q(place_text(place)) + " can't be changed after " + q("{" + place_text(b->place) + "}") +
                                        " in the same string, which shows it as it is once every part is worked out; work this part out first, into a variable");
             } else {
@@ -2784,6 +2858,7 @@ private:
         std::vector<std::uint32_t> path;
         const Expr* place;
         bool shown = false;
+        const Local* tie = nullptr;  // an arena list made from `place`, which holds it until its block ends (D114)
     };
 
     // The fields from a place's root to its first index: `p.a.b` is a then b, `p.a[i].b` is a. What
@@ -3037,6 +3112,11 @@ private:
     Type* check(Expr* e, Type* expected) {
         Type* t = infer(e, expected);
         if (t->has_pointer) t = pointer_value(e, t);
+        if (t->scoped && !t->arena_list) {
+            error(e->span, name_of(t) + " holds an `ArenaList`, which can't be inside another type, since its memory goes "
+                                        "when its arena is reset");
+            t = T.error;
+        }
         if (t->is_result && e != result_ok_) t = result_value(e);
         e->type = t;
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
@@ -4141,6 +4221,10 @@ private:
     // --- fields and indexes ----------------------------------------------------------------
 
     Type* field(Expr* e, Type* expected) {
+        if (!e->type_args.empty()) {
+            error(e->type_args[0]->span, "generic arguments after a name with a `.` are for calling a method: `x.f<i32>()`");
+            return T.error;
+        }
         // `i32.MAX` and other names inside a type.
         if (e->lhs->kind == ExprKind::name) {
             Resolved r = resolve_name(e->lhs->path.parts[0]);
@@ -5474,6 +5558,12 @@ private:
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
+            if (n == n_Arena_ && !find_local(n)) return arena_call(e);
+            if (n == n_ArenaList_ && !find_local(n)) {
+                error(callee->span, "an `ArenaList` is made by an arena, in a `let` of its own: `var xs = a.list<i32>()`");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
             if (is_table_name(n) && !find_local(n)) {
                 return table_call(e, expected, is_map_name(n), table_kind(n));
             }
@@ -5556,6 +5646,12 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
+            if (recv->kind == TypeKind::arena) return arena_method(e, recv, expected);
+            if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
+                error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
             if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
             if (callee->member == n_cmp_ && !e->only_interface) return cmp_call(e, recv);
             if (callee->member == n_java_hash_ && !e->only_interface) return java_hash_call(e, recv);
@@ -5589,7 +5685,7 @@ private:
                     return T.error;
                 }
                 use_item(mem.fn);
-                return fn_call(e, mem.fn, callee->lhs, expected, std::move(mem.s));
+                return fn_call(e, mem.fn, callee->lhs, expected, std::move(mem.s), callee->type_args);
             }
             if (recv->kind == TypeKind::param) {
                 error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)) +
@@ -5754,7 +5850,7 @@ private:
                 return T.error;
             }
             use_item(mem.fn);
-            return fn_call(e, mem.fn, nullptr, expected, std::move(mem.s));
+            return fn_call(e, mem.fn, nullptr, expected, std::move(mem.s), e->callee->type_args);
         }
         error(e->callee->span, name_of(t) + " has no function " + q(m));
         for (Arg& a : e->args) check(a.value, nullptr);
@@ -6238,6 +6334,14 @@ private:
             bad[i] = true;
             std::string place = q(literal_source(acc[i].e));
             bool indexed = std::any_of(path.begin(), path.end(), index_step);
+            if (acc[i].e->type && acc[i].e->type->kind == TypeKind::arena) {
+                error(acc[i].e->span, "taking memory from " + place + " changes it, and " +
+                                          (indexed ? "more than one iteration of the `parallel for` can reach it"
+                                                   : "every iteration of the `parallel for` shares it") +
+                                          "; give each iteration an arena of its own, as in " +
+                                          q("arenas[" + std::string(text(pl.index ? pl.index->name : n_underscore_)) + "].list<T>()"));
+                continue;
+            }
             error(acc[i].e->span, (indexed ? place + " can be reached by more than one iteration of the `parallel for`"
                                            : place + " is shared by every iteration of the `parallel for`") +
                                       ", so it can't be changed here; an iteration can change only its own elements, "
@@ -6553,6 +6657,105 @@ private:
         return t;
     }
 
+    // `Arena()` and `Arena(n)`: an arena whose first chunk holds at least `n` bytes (D114).
+    Type* arena_call(Expr* e) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        if (!callee->type_args.empty()) {
+            error(callee->type_args[0]->span, "`Arena` doesn't take generic arguments; the lists made from it do: `a.list<i32>()`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (e->args.size() > 1) {
+            error(e->span, "`Arena` takes no arguments, or one: how many bytes its first chunk holds");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        for (Arg& a : e->args) {
+            if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+            check(a.value, T.usize);
+        }
+        callee->named_type = T.arena;
+        e->call = CallKind::construct;
+        return T.arena;
+    }
+
+    // `a.list<T>()`, `a.reset()` and `a.used()` (D114).
+    Type* arena_method(Expr* e, Type* recv, Type* expected) {
+        (void)recv;
+        Expr* callee = e->callee;
+        std::string_view m = text(callee->member);
+        e->call = CallKind::builtin_method;
+        if (m == "list") {
+            Type* elem = nullptr;
+            if (callee->type_args.size() == 1) {
+                elem = resolve_type(callee->type_args[0]);
+                if (is_bad(elem) || !arena_elem(elem, callee->type_args[0]->span)) elem = T.error;
+            } else if (!callee->type_args.empty()) {
+                error(callee->type_args[0]->span, "`list` takes one generic argument, the type of its elements: `a.list<i32>()`");
+                elem = T.error;
+            } else if (expected && expected->arena_list) {
+                elem = expected->elem;
+            } else if (!expected || !is_bad(expected)) {
+                error(e->span, "can't tell what this list holds; give it, as in `a.list<i32>()`, or give the variable a type");
+                elem = T.error;
+            } else {
+                elem = T.error;
+            }
+            if (e->args.size() > 1) {
+                error(e->span, "`list` takes no arguments, or one: how many elements to make room for");
+                elem = T.error;
+            }
+            for (Arg& a : e->args) {
+                if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+                check(a.value, T.usize);
+            }
+            e->bmethod = BMethod::arena_list;
+            if (e != let_value_) {
+                error(e->span, "an arena list is made in a `let` of its own, as in `var xs = a.list<i32>()`, which holds "
+                               "the arena until its block ends");
+                return T.error;
+            }
+            Local* root = place_root(callee->lhs);
+            if (!root) {
+                error(callee->lhs->span, "an arena list is made from an arena in a variable or a field, which the list holds "
+                                         "until its block ends");
+                return T.error;
+            }
+            // Taking memory changes the arena, so a `parallel for` can only take it from one of its
+            // own arenas: one indexed by its variable.
+            for (ParLoop& p : par_) {
+                if (p.outer.count(root)) p.writes.insert(callee->lhs);
+            }
+            if (is_bad(elem)) return T.error;
+            return T.arena_list_of(elem);
+        }
+        BMethod b = BMethod::none;
+        Type* result = T.unit;
+        if (m == "reset") b = BMethod::arena_reset;
+        else if (m == "used") b = BMethod::arena_used, result = T.usize;
+        if (b == BMethod::none) {
+            std::string hint = m == "alloc" || m == "alloc_slice" || m == "vec" ? "; make a list from it with `list<T>()`"
+                               : m == "clear" || m == "free"                  ? "; free everything in it with `reset()`"
+                                                                              : "";
+            error(callee->span, "`Arena` has no method " + q(m) + hint);
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->bmethod = b;
+        if (!callee->type_args.empty()) error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!e->args.empty()) {
+            error(e->span, q(m) + " takes no arguments");
+            return T.error;
+        }
+        if (b == BMethod::arena_reset) {
+            if (Local* root = place_root(callee->lhs)) require_writable(callee->lhs, root, false);
+            else error(callee->lhs->span, "`reset` changes the arena, so call it on a variable");
+        }
+        return result;
+    }
+
     // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
     Type* heap_call(Expr* e, Type* expected) {
         Expr* callee = e->callee;
@@ -6584,6 +6787,20 @@ private:
         e->call = CallKind::construct;
         e->is_const = true;
         return t;
+    }
+
+    // D114: what's in an arena is freed with it, all at once, so it must own no memory of its own.
+    bool arena_elem(Type* elem, Span span) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(span, "an arena list can't hold " + name_of(elem));
+            return false;
+        }
+        if (!is_copy(elem) && !is_bad(elem)) {
+            error(span, "an arena list holds only `Copy` elements, since an arena frees everything at once without "
+                        "dropping anything, and " + name_of(elem) + " owns memory; use a `List`");
+            return false;
+        }
+        return true;
     }
 
     // Whether a queue can hold `elem`. One without `Order` is reported, but the queue is still
@@ -6860,6 +7077,11 @@ private:
             error(e->callee->span, name_of(recv) + " is `Copy`, so use it as it is; `.copy()` is for values that own memory");
             return T.error;
         }
+        if (recv->arena_list) {
+            error(e->callee->span, "an `ArenaList` can't be copied, since a copy couldn't hold the arena too; make a `List` "
+                                   "of its elements with `to_list()`");
+            return T.error;
+        }
         return recv;
     }
 
@@ -7038,6 +7260,7 @@ private:
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
+            else if (m == "to_list" && recv->arena_list) b = BMethod::to_list, result = T.list_of(el);
         }
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +
@@ -7367,10 +7590,11 @@ private:
     Name n_Hasher_, n_add_, n_From_;
     Item* from_iface_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
+    Expr* let_value_ = nullptr;  // the value of the plain `let` being checked, the one place an arena list is made
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
-    Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_;
+    Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

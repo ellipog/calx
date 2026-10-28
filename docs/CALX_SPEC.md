@@ -207,7 +207,9 @@ Built: `unsafe` blocks, `unsafe fn`, raw pointers and their methods, and calling
 
 ### Arenas and plugin memory
 
-- `std.arena.Arena` is a bump allocator that frees everything at once. Calcite uses one per region per tick for temporary data.
+Built: `Arena`, whose lists take memory from its chunks and are freed all at once by `reset()`, and `ArenaList<T>`, which can only be a variable or a view parameter, so the checker keeps it from outliving its memory without lifetimes ([Arenas](reference/arenas.md)). Calcite uses one per region per tick for temporary data. Still to build:
+
+- Other values from an arena, such as maps and strings, once there's a use that a list doesn't cover.
 - **Every plugin instance allocates from its own heap**, which the host supplies. A region instance's heap is reset after each handler, since region code keeps no state (D42) and anything lasting is encoded into host-owned bytes. The global instance's heap lives as long as the instance. Stopping an instance frees its whole heap at once, so a panicking plugin can't leak memory.
 
 ## Panics

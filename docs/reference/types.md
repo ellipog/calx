@@ -58,6 +58,7 @@ fn main() {
 - `List<T>` is a growable array that owns its elements ([lists](lists.md)).
 - `Deque<T>` is a growable ring, added to and taken from at both ends ([deques](deques.md)).
 - `PriorityQueue<T>` is a binary heap that gives its least element first ([priority queues](priority-queues.md)).
+- `ArenaList<T>` is a list whose memory is an `Arena`'s, freed all at once with the arena's other lists ([arenas](arenas.md)).
 - `Map<K, V>` and `Set<T>` are hash tables ([maps and sets](maps.md)), and `SortedMap<K, V>` and `SortedSet<T>` keep their keys in order ([sorted maps](sorted-maps.md)).
 
 ## Structs, enums and tuples

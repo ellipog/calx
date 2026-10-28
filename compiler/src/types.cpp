@@ -29,6 +29,7 @@ Types::Types(Arena& arena) : arena_(arena) {
     f64->bits = 64;
     str = make(TypeKind::str, "str");
     string = make(TypeKind::string, "String");
+    this->arena = make(TypeKind::arena, "Arena");
     for (Type* t : {bool_, i8, i16, i32, i64, u8, u16, u32, u64, usize, char_, rune, f32, f64, str, string}) {
         primitives_.push_back({t->name, t});
     }
@@ -72,6 +73,7 @@ Type* Types::array_of(Type* elem, std::uint64_t length) {
     t->length = length;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     array_map_.emplace(key, t);
     compounds_.push_back(t);
     return t;
@@ -90,6 +92,7 @@ Type* Types::optional_of(Type* elem) {
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     optional_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -102,6 +105,7 @@ Type* Types::list_of(Type* elem) {
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     list_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -115,7 +119,22 @@ Type* Types::heap_of(Type* elem) {
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     heap_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
+Type* Types::arena_list_of(Type* elem) {
+    auto it = arena_list_map_.find(elem);
+    if (it != arena_list_map_.end()) return it->second;
+    Type* t = make(TypeKind::list, arena_.copy("ArenaList<" + std::string(elem->name) + ">"));
+    t->arena_list = true;
+    t->scoped = true;
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    arena_list_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
 }
@@ -127,6 +146,7 @@ Type* Types::deque_of(Type* elem) {
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     deque_map_.emplace(elem, t);
     compounds_.push_back(t);
     return t;
@@ -149,6 +169,7 @@ Type* Types::map_of(Type* key, Type* value, TableKind table) {
     t->entry = entry;
     t->open = key->open || value->open;
     t->has_pointer = key->has_pointer || value->has_pointer;
+    t->scoped = key->scoped || value->scoped;
     map_map_.emplace(k, t);
     compounds_.push_back(t);
     return t;
@@ -168,6 +189,7 @@ Type* Types::set_of(Type* elem, TableKind table) {
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
     set_map_.emplace(k, t);
     compounds_.push_back(t);
     return t;
@@ -187,6 +209,7 @@ Type* Types::tuple_of(const std::vector<Type*>& elems) {
     for (Type* e : elems) {
         t->open = t->open || e->open;
         t->has_pointer = t->has_pointer || e->has_pointer;
+        t->scoped = t->scoped || e->scoped;
     }
     tuple_map_.emplace(elems, t);
     compounds_.push_back(t);
@@ -218,7 +241,8 @@ namespace {
 bool copy_walk(const Type* t, int depth) {
     if (depth > 64) return true;
     switch (t->kind) {
-        case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return false;
+        case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+        case TypeKind::arena: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
         case TypeKind::tuple:

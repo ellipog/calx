@@ -169,6 +169,9 @@ enum class BMethod : std::uint8_t {
     peek, remove_marked,
     runes, chars,  // on text, only as what a `for` loop goes over
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
+    // On an `Arena`: a list from it, freeing everything at once, and the bytes taken since; and
+    // on an `ArenaList`, a `List` with its elements (D114).
+    arena_list, arena_reset, arena_used, to_list,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };

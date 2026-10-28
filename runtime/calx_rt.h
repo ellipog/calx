@@ -106,12 +106,87 @@ void cx_free(void* p, cx_usize size);
 /* How many blocks are allocated, in debug builds; 0 in others. */
 cx_usize cx_alloc_live(void);
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
- * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. */
-void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
+ * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. The
+ * check is inline, so with `size` a constant it has no division. */
+void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size);
+CX_COLD void cx_panic_capacity(void);
+CX_INLINE void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    /* No buffer can be bigger than half the address space. */
+    cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
+    if (__builtin_expect(extra > max - len, 0)) cx_panic_capacity();
+    cx_usize need = len + extra;
+    if (need <= *cap) return ptr;
+    return cx_grow_to(ptr, cap, need, max, size);
+}
 /* Room for `extra` more in a deque's ring, which runs from `*head` round its buffer: grown as a
    list's is, then with the run that wrapped moved so the ring is whole again (D110). */
 void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
-CX_COLD void cx_panic_capacity(void);
+
+/* Arenas (D114). An arena hands out memory from the bottom of its newest chunk up, and frees it
+ * all at once. The state is on the heap, so an `Arena` is one pointer, and the lists made from it
+ * hold that pointer, never the `Arena` itself. The first chunk is made when it's first needed. */
+typedef struct cx_arena_chunk cx_arena_chunk;
+struct cx_arena_chunk {
+    cx_arena_chunk* prev; /* the chunk before it, which is full */
+    cx_usize size;        /* its size in bytes, this header included */
+};
+typedef struct cx_arena_state {
+    cx_u8* top;            /* the first free byte in the newest chunk, or null before the first */
+    cx_u8* end;            /* the end of the newest chunk */
+    cx_arena_chunk* chunk; /* the newest chunk */
+    cx_usize first;        /* the size of the first chunk */
+    cx_usize full;         /* the bytes taken from the chunks before the newest */
+} cx_arena_state;
+typedef struct cx_Arena {
+    cx_arena_state* s;
+} cx_Arena;
+/* An arena whose first chunk holds at least `first` bytes, 8 KiB if it's 0. */
+cx_Arena cx_arena_new(cx_usize first);
+void cx_drop_Arena(cx_Arena* a);
+/* A new, empty arena with the same first chunk: nothing in an arena belongs to its value. */
+cx_Arena cx_copy_Arena(const cx_Arena* a);
+/* Frees everything taken from the arena. One that needed more than one chunk keeps a single
+ * chunk as big as all of them, so the next round of the same work takes no new chunk. */
+void cx_arena_reset(cx_Arena* a);
+/* The bytes taken since the arena was made or reset, alignment included. */
+cx_usize cx_arena_used(const cx_Arena* a);
+/* Moves an arena list's buffer of `len` elements of `size` bytes to `bytes` from a new chunk. */
+void* cx_arena_more(cx_arena_state* s, void* ptr, cx_usize len, cx_usize bytes, cx_usize size, cx_usize align);
+/* Room for `extra` more elements of `size` bytes, aligned to `align`, in an arena list's buffer
+ * of `*cap` holding `len`: grown in place if it's the newest block and its chunk has room, or
+ * moved to new memory at least twice its size, and at least 64 bytes. Returns the buffer. All
+ * but a new chunk is inline, so with `size` and `align` constants it's a few instructions. */
+CX_INLINE void* cx_arena_grow(cx_arena_state* s, void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size,
+                              cx_usize align) {
+    cx_usize unit = size ? size : 1;
+    cx_usize max = ((cx_usize)-1 / 4) / unit;
+    if (__builtin_expect(extra > max - len, 0)) cx_panic_capacity();
+    cx_usize need = len + extra;
+    if (need <= *cap) return ptr;
+    cx_usize n = *cap <= max / 2 ? *cap * 2 : max;
+    if (n < need) n = need;
+    if (n < 64 / unit) n = 64 / unit;
+    if (n < 4) n = 4;
+    cx_u8* p = (cx_u8*)ptr;
+    cx_usize old = *cap * size, bytes = n * size;
+    *cap = n;
+    /* The newest block grows where it is, while its chunk has room. */
+    if (p && p + old == s->top && bytes - old <= (cx_usize)(s->end - s->top)) {
+        s->top = p + bytes;
+        return p;
+    }
+    if (s->top) {
+        cx_usize pad = (cx_usize)(-(__UINTPTR_TYPE__)s->top & (align - 1));
+        cx_usize room = (cx_usize)(s->end - s->top);
+        if (pad <= room && bytes <= room - pad) {
+            cx_u8* q = s->top + pad;
+            s->top = q + bytes;
+            if (len) __builtin_memcpy(q, p, len * size);
+            return q;
+        }
+    }
+    return cx_arena_more(s, p, len, bytes, size, align);
+}
 /* `sort` found that a hand-written `Order` contradicts itself (D102). */
 CX_COLD void cx_panic_order(const char* at);
 

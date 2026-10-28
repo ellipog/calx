@@ -52,6 +52,7 @@ fn main() {
 - In an expression, `<` right after a name, with no space, starts its types. With a space it's less-than ([syntax](syntax.md#generic-types-in-expressions)).
 - Every parameter must be used. A parameter can't take the name of a type or of anything else in the module, since there's no shadowing.
 - A generic function can call itself and other generic functions.
+- A generic method is given its types the same way, after its name: `p.with<f64>(2.5)`, or `Pair.twice<i16>(4, 5)` for one without `self`. Only a generic method takes them; `p.get<i32>()` and `xs.len<i32>()` are errors.
 - `T` might own memory, so its values move rather than copy, and parameters that keep one are `own` ([below](#values-of-type-t)).
 
 ## Generic structs and enums
@@ -315,7 +316,7 @@ On an optional holding an optional, `none` on the right of `??` is the inner opt
 Besides the type errors any code can have, these are errors (D70, D71):
 
 - A parameter that's never used, as in `fn f<T>() -> i32`, or an impl parameter missing from the impl's type, as in `impl<T> Square`.
-- The wrong number of types, as in `Pair<i32>`, or types given to something that isn't generic.
+- The wrong number of types, as in `Pair<i32>`, or types given to something that isn't generic, as in `p.get<i32>()`.
 - A generic type written without its types where nothing works them out, as in `let p: Pair = ...`.
 - Copies that never end. A function that calls itself with a bigger type, as in `grow(some(x), n - 1)` inside `grow<T>`, would need endless copies.
 

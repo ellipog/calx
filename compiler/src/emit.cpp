@@ -385,6 +385,7 @@ private:
             case TypeKind::float_: return t->bits == 32 ? "cx_f32" : "cx_f64";
             case TypeKind::str: return "cx_str";
             case TypeKind::string: return "cx_String";
+            case TypeKind::arena: return "cx_Arena";
             case TypeKind::pointer: return ctype(t->elem) + (t->is_const ? " const*" : "*");
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::enum_: return std::string(t->item->c_name);
@@ -408,7 +409,7 @@ private:
         switch (t->kind) {
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
-            case TypeKind::list: s = (t->heap ? "cx_heap_" : "cx_list_") + part(t->elem); break;
+            case TypeKind::list: s = (t->heap ? "cx_heap_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
@@ -436,6 +437,7 @@ private:
             case TypeKind::deque: case TypeKind::map: case TypeKind::set:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
+            case TypeKind::arena: return "Arena";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
             case TypeKind::float_: return t->bits == 32 ? "f32" : "f64";
             case TypeKind::bool_: return "bool";
@@ -546,7 +548,9 @@ private:
                     out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + " v; cx_bool has; };\n";
                     break;
                 case TypeKind::list:
-                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; };\n";
+                    // An arena list holds its arena's state, which it grows from (D114).
+                    out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap;" +
+                            (t->arena_list ? " cx_arena_state* arena;" : "") + " };\n";
                     break;
                 case TypeKind::deque:
                     // A list's buffer as a ring, from `head` round to just before it, so a list's
@@ -2302,6 +2306,10 @@ $dropall    m->len = 0;
         };
         switch (t->kind) {
             case TypeKind::list:
+                if (t->arena_list) {
+                    s += "    (void)p;\n";
+                    break;
+                }
                 if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
                 s += "    cx_free(p->ptr, p->cap * sizeof(*p->ptr));\n";
                 break;
@@ -2420,6 +2428,7 @@ $dropall    m->len = 0;
                 break;
             }
             case TypeKind::list: {
+                if (t->arena_list) break;
                 std::string e = ctype(t->elem);
                 s = "    " + c + " r = {0};\n    if (!p->len) return r;\n    r.ptr = (" + e + "*)cx_alloc(p->len * sizeof(" + e +
                     "));\n    r.len = r.cap = p->len;\n";
@@ -4030,6 +4039,9 @@ $dropall    m->len = 0;
                 if (!e->args.empty() && is_table(e->type) && e->type->table == TableKind::java) {
                     return "((" + ctype(e->type) + "){ .thr = cx_jt_size_for(" + value(e->args[0].value, e->args[0].value->type) + ") })";
                 }
+                if (e->type->kind == TypeKind::arena) {
+                    return "cx_arena_new(" + (e->args.empty() ? std::string("0") : value(e->args[0].value, e->args[0].value->type)) + ")";
+                }
                 return construct(e->type);
             case CallKind::prim_method: return prim_method(e);
             case CallKind::prim_static: return prim_static(e);
@@ -4766,6 +4778,23 @@ $dropall    m->len = 0;
             return wrap(decls, "((" + ctype(e->type) + ")(" + compare(t, v[0], v[1]) + " + 1))");
         }
         std::string p = tmp();
+        if (t->kind == TypeKind::arena) {
+            switch (e->bmethod) {
+                case BMethod::arena_list: {
+                    Type* lt = e->type;
+                    std::string l = ctype(lt), el = ctype(lt->elem);
+                    std::string head = "((" + l + "){ .arena = (" + expr(recv) + ").s })";
+                    if (e->args.empty()) return head;
+                    std::string r = tmp(), n = tmp();
+                    return "({ " + l + " " + r + " = " + head + "; cx_usize " + n + " = " + arg(0, e->args[0].value->type) + "; if (" + n +
+                           ") " + r + ".ptr = (" + el + "*)cx_arena_grow(" + r + ".arena, 0, &" + r + ".cap, 0, " + n + ", sizeof(" + el +
+                           "), _Alignof(" + el + ")); " + r + "; })";
+                }
+                case BMethod::arena_reset: return "cx_arena_reset(" + address(recv) + ")";
+                case BMethod::arena_used: return "cx_arena_used(" + address(recv) + ")";
+                default: return "0";
+            }
+        }
         if (t->kind == TypeKind::pointer) {
             std::string pt = ctype(t);
             switch (e->bmethod) {
@@ -4820,7 +4849,14 @@ $dropall    m->len = 0;
         Type* et = t->elem;
         std::string l = ctype(t), el = ctype(et);
         std::string head = "({ " + l + "* " + p + " = " + address(recv) + "; ";
-        std::string grow = p + "->ptr = (" + el + "*)cx_grow(" + p + "->ptr, &" + p + "->cap, " + p + "->len, ";
+        auto grow = [&](const std::string& extra) {
+            if (t->arena_list) {
+                return p + "->ptr = (" + el + "*)cx_arena_grow(" + p + "->arena, " + p + "->ptr, &" + p + "->cap, " + p + "->len, " +
+                       extra + ", sizeof(" + el + "), _Alignof(" + el + "));";
+            }
+            return p + "->ptr = (" + el + "*)cx_grow(" + p + "->ptr, &" + p + "->cap, " + p + "->len, " + extra + ", sizeof(" + el +
+                   "));";
+        };
         auto drop_from = [&](const std::string& from) {
             if (is_copy(et)) return std::string();
             std::string i = tmp();
@@ -4839,8 +4875,8 @@ $dropall    m->len = 0;
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (__builtin_expect(" + i + " > " + p +
                        "->cap, 0)) cx_panic_set_len(" + i + ", " + p + "->cap, " + index_at(0) + "); " + p + "->len = " + i + "; })";
             case BMethod::push:
-                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow + "1, sizeof(" +
-                       el + ")); " + p + "->ptr[" + p + "->len++] = " + v + "; })";
+                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + " " + p +
+                       "->ptr[" + p + "->len++] = " + v + "; })";
             case BMethod::pop: {
                 std::string o = ctype(e->type);
                 return head + p + "->len ? (" + o + "){ .v = " + p + "->ptr[--" + p + "->len], .has = 1 } : (" + o + "){0}; })";
@@ -4851,12 +4887,12 @@ $dropall    m->len = 0;
                        drop_from(i) + p + "->len = " + i + "; } })";
             case BMethod::reserve:
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (" + i + " > " + p + "->cap - " + p +
-                       "->len) " + grow + i + ", sizeof(" + el + ")); })";
+                       "->len) " + grow(i) + " })";
             case BMethod::insert:
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; " + el + " " + v + " = " + arg(1, et) +
                        "; if (__builtin_expect(" + i + " > " + p + "->len, 0)) cx_panic_insert(" + i + ", " + p + "->len, " +
-                       index_at(0) + "); if (" + p + "->len == " + p + "->cap) " + grow + "1, sizeof(" + el +
-                       ")); __builtin_memmove(" + p + "->ptr + " + i + " + 1, " + p + "->ptr + " + i + ", (" + p + "->len - " + i +
+                       index_at(0) + "); if (" + p + "->len == " + p + "->cap) " + grow("1") + " __builtin_memmove(" + p + "->ptr + " +
+                       i + " + 1, " + p + "->ptr + " + i + ", (" + p + "->len - " + i +
                        ") * sizeof(" + el + ")); " + p + "->ptr[" + i + "] = " + v + "; " + p + "->len++; })";
             case BMethod::remove:
                 return head + "cx_usize " + i + " = cx_index(" + arg(0, e->args[0].value->type) + ", " + p + "->len, " +
@@ -4875,6 +4911,12 @@ $dropall    m->len = 0;
                        "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p + "->ptr[" + j + "]; " + p + "->ptr[" + j + "] = " +
                        v + "; })";
             case BMethod::sort: return head + sort_call(et, p, location(e->span)) + "; })";
+            case BMethod::to_list: {
+                std::string r = tmp(), lt = ctype(e->type);
+                return "({ const " + l + "* " + p + " = " + address(recv) + "; " + lt + " " + r + " = {0}; if (" + p + "->len) { " + r +
+                       ".ptr = (" + el + "*)cx_alloc(" + p + "->len * sizeof(" + el + ")); " + r + ".len = " + r + ".cap = " + p +
+                       "->len; __builtin_memcpy(" + r + ".ptr, " + p + "->ptr, " + p + "->len * sizeof(" + el + ")); } " + r + "; })";
+            }
             case BMethod::contains: {
                 std::string r = tmp();
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " + el + " " + v + " = " + arg(0, et) +

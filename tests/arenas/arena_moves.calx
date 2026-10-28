@@ -1,0 +1,23 @@
+// An arena can't move while a list made from it is in scope, nor can what holds it.
+
+struct Region {
+    scratch: Arena
+    n: i32
+}
+
+fn keep(a: own Arena) -> usize {
+    return a.used()
+}
+
+fn main() {
+    let a = Arena()
+    var xs = a.list<i32>()
+    xs.push(1)
+    let b = a    // error: can't move `a` while `xs` holds memory from it
+    let r = Region { scratch: Arena(), n: 1 }
+    var ys = r.scratch.list<i64>()
+    ys.push(2)
+    let s = r    // error: can't move `r` while `ys` holds memory from it
+    let n = r.n
+    println("{keep(b)} {s.n} {n} {xs.len()} {ys.len()}")
+}

@@ -1,0 +1,71 @@
+// What an arena list can't do (D114): be anywhere but a variable or a view parameter, hold what
+// owns memory, be made anywhere but its own `let`, be assigned to or copied, or let its arena be
+// reset or changed while it's in scope. A `parallel for` can't share an arena.
+
+pub struct S {
+    xs: ArenaList<i32>    // error: an `ArenaList` can only be the type of a variable or of a parameter that isn't `own`
+}
+
+pub fn make(a: Arena) -> ArenaList<i32> {    // error: an `ArenaList` can only be the type of a variable or of a parameter that isn't `own`
+    return a.list<i32>()    // error: an arena list is made in a `let` of its own
+}
+
+pub fn take(xs: own ArenaList<i32>) {    // error: an `ArenaList` can only be the type of a variable or of a parameter that isn't `own`
+    _ = xs
+}
+
+fn wipe(a: mut Arena, xs: mut ArenaList<i32>) {
+    a.reset()
+    xs.push(1)
+}
+
+fn size(xs: ArenaList<i32>) -> usize {
+    return xs.len()
+}
+
+fn id<T>(x: T) -> usize {
+    _ = x
+    return 0
+}
+
+struct Region {
+    scratch: Arena
+    n: i32
+}
+
+fn main() {
+    var a = Arena()
+    var xs = a.list<i32>()
+    a.reset()    // error: `a` can't be changed while `xs` holds memory from it
+    wipe(mut a, mut xs)    // error: `a` can't be changed while `xs` holds memory from it
+    a = Arena()    // error: `a` can't be changed while `xs` holds memory from it
+    xs =    // error: an `ArenaList` can't be assigned to
+        a.list<i32>()    // error: an arena list is made in a `let` of its own
+    _ = size(a.list<i32>())    // error: an arena list is made in a `let` of its own
+    let ws = a.list<String>()    // error: an arena list holds only `Copy` elements, since an arena frees everything at once without dropping anything, and `String` owns memory
+    let us = a.list<()>()    // error: an arena list can't hold `()`
+    let vs = a.list()    // error: can't tell what this list holds; give it, as in `a.list<i32>()`
+    let lit: ArenaList<i32> = [1, 2]    // error: an `ArenaList` starts empty
+    let made = ArenaList<i32>()    // error: an `ArenaList` is made by an arena, in a `let` of its own
+    let c = xs.copy()    // error: an `ArenaList` can't be copied, since a copy couldn't hold the arena too; make a `List` of its elements with `to_list()`
+    let both = [xs.len()]
+    let held = some(xs)    // error: `ArenaList<i32>?` holds an `ArenaList`, which can't be inside another type
+    _ = id(xs)    // error: `id` is generic, and a generic parameter can't be `ArenaList<i32>`
+    let from = Arena().list<i32>()    // error: an arena list is made from an arena in a variable or a field
+    _ = a.alloc()    // error: `Arena` has no method `alloc`; make a list from it with `list<T>()`
+    a.clear()    // error: `Arena` has no method `clear`; free everything in it with `reset()`
+    _ = a.used(1)    // error: `used` takes no arguments
+    let g = Arena<i32>()    // error: `Arena` doesn't take generic arguments
+    var r = Region { scratch: Arena(), n: 0 }
+    var ys = r.scratch.list<i64>()
+    r.n += 1
+    ys.push(2)
+    r.scratch.reset()    // error: `r.scratch` can't be changed while `ys` holds memory from it
+    let shared = Arena()
+    var lens: List<usize> = [0, 0]
+    parallel for k in 0usize..2 {
+        let zs = shared.list<i32>()    // error: taking memory from `shared` changes it, and every iteration of the `parallel for` shares it; give each iteration an arena of its own, as in `arenas[k].list<T>()`
+        lens[k] = zs.len()
+    }
+    println("{lens} {ws.len()} {us.len()} {vs.len()} {lit.len()} {made.len()} {c.len()} {both} {held} {from.len()} {g.used()}")
+}

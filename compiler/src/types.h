@@ -34,6 +34,7 @@ enum class TypeKind : std::uint8_t {
     tuple,     // `(A, B)`, with at least two elements
     param,     // a generic function's or type's parameter, such as `T` in `fn f<T: Shape>`
     pointer,   // `*T` and `*const T`, only in `unsafe` code and `extern` signatures
+    arena,     // `Arena`: a bump allocator that frees everything at once (D114)
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -74,6 +75,11 @@ struct Type {
     // the heap's methods change it.
     bool heap = false;
     bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
+    // list: an `ArenaList<T>`, whose memory comes from an `Arena` (D114). It's a list in memory,
+    // with the arena beside it, so it's gone over, indexed, compared and shown as one, but it
+    // grows from its arena, frees nothing itself, and can't move or be stored.
+    bool arena_list = false;
+    bool scoped = false;     // it is or holds an `ArenaList`, so it's only ever a variable or parameter of its own
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -92,6 +98,7 @@ public:
     Type* f32, *f64;
     Type* str;
     Type* string;
+    Type* arena;
 
     // The primitive named `name`, or null.
     Type* primitive(std::string_view name) const;
@@ -102,6 +109,7 @@ public:
     Type* list_of(Type* elem);
     Type* deque_of(Type* elem);
     Type* heap_of(Type* elem);
+    Type* arena_list_of(Type* elem);
     // `JavaHashMap<K, V>` and `OpenHashMap<K, V>`, and their sets, with their kinds (D105, D107).
     Type* map_of(Type* key, Type* value, TableKind table = TableKind::native);
     Type* set_of(Type* elem, TableKind table = TableKind::native);
@@ -123,6 +131,7 @@ private:
     std::map<Type*, Type*> list_map_;
     std::map<Type*, Type*> deque_map_;
     std::map<Type*, Type*> heap_map_;
+    std::map<Type*, Type*> arena_list_map_;
     std::map<std::tuple<Type*, Type*, TableKind>, Type*> map_map_;
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;

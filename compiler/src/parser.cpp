@@ -1388,6 +1388,8 @@ private:
                         f->tuple_index = static_cast<std::uint32_t>(next().int_value);
                     } else {
                         f->member = ident("after `.`");
+                        // A method's own generic arguments: `a.list<i32>()`.
+                        if (generic_args_ahead()) f->type_args = slice(type_args());
                     }
                     f->span = Span::join(start, prev_span());
                     e = f;
