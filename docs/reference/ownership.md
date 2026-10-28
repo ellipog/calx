@@ -111,8 +111,8 @@ fn main() {
 }
 ```
 
-- A field of a view can't be moved, since the caller still owns it. Move a copy: `p.name.copy()`.
-- An element of a list or array can't be moved out by indexing, since the list would be left with a hole. Take it out with `remove`, `swap_remove` or `pop` ([lists](lists.md)), or move a copy.
+- A field of a view can't be moved, since the caller still owns it. Move a copy: `p.name.copy()`, or, if it's optional, take it: `p.title.take()` ([optionals](optionals.md#taking-the-value-out)).
+- An element of a list or array can't be moved out by indexing, since the list would be left with a hole. Take it out with `remove`, `swap_remove` or `pop` ([lists](lists.md)), `take()` it if it's optional, or move a copy.
 - A field of a new value, as in `make_player().name`, moves out, and the rest of the value is freed at once.
 
 ## Patterns

@@ -1,0 +1,13 @@
+// `take` and `replace` change the optional, so it has to be one that can change.
+fn look(c: String?) -> String? {
+    return c.take()    // error: take it as `mut` to change it
+}
+
+fn main() {
+    let fixed: i32? = some(1)
+    _ = fixed.take()    // error: declare it with `var`
+    var x: i32? = some(1)
+    _ = x.replace("no")    // error: expected `i32`
+    _ = x.put(2)    // error: has no method `put`
+    _ = look(none)
+}

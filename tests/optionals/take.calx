@@ -1,0 +1,51 @@
+// Optionals: `take()` moves the value out and leaves `none`, and `replace(x)` leaves `x`, so a
+// value can leave a field of a `mut` view, or an element of a list.
+struct Encoder {
+    key: List<u8>
+}
+
+struct Connection {
+    name: String
+    encoder: Encoder?
+}
+
+// Lends the encoder out and back, through a view of the connection.
+fn lend(c: mut Connection) -> usize {
+    let e = c.encoder.take() else return 0
+    let n = e.key.len()
+    c.encoder = some(e)
+    return n
+}
+
+fn main() {
+    var c = Connection { name: "a", encoder: some(Encoder { key: [1, 2, 3] }) }
+    println("{lend(mut c)} {c.encoder != none}")    // out: 3 true
+
+    // What `take` leaves.
+    let first = c.encoder.take()
+    let second = c.encoder.take()
+    println("{first != none} {second == none} {c.encoder == none}")    // out: true true true
+
+    // `replace` gives what was there.
+    var name: String? = some(String("old"))
+    let was = name.replace(String("new"))
+    println("{was ?? String("-")} {name ?? String("-")}")    // out: old new
+    var empty: String? = none
+    let nothing = empty.replace(String("x"))
+    println("{nothing == none} {empty ?? String("-")}")    // out: true x
+
+    // An element of a list, which indexing can't move out of.
+    var slots: List<String?> = [some(String("p")), none, some(String("q"))]
+    let p = slots[0].take()
+    let gone = slots[1].take()
+    println("{p ?? String("-")} {gone == none} {slots[0] == none} {slots.len()}")    // out: p true true 3
+
+    // A value taken and dropped is freed once.
+    _ = slots[2].take()
+    println("{slots[2] == none}")    // out: true
+
+    // Plain values too.
+    var n: i32? = some(5)
+    let five = n.take()
+    println("{five ?? 0} {n ?? 0}")    // out: 5 0
+}

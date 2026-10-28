@@ -87,6 +87,44 @@ fn main() {
 }
 ```
 
+## Taking the value out
+
+A value can't move out of a field of a `mut` view, since the caller still owns it, or out of a list by indexing, which would leave a hole ([ownership](ownership.md#moving-fields)). An optional can give its value up instead:
+
+| Written | Does |
+| --- | --- |
+| `opt.take()` | Moves the optional out whole, and leaves `none` |
+| `opt.replace(x)` | Moves the optional out whole, and leaves `some(x)` |
+
+Both change `opt`, so it has to be a `var`, a `mut` view or a part of one. The value moves rather than being copied, so nothing is freed twice: what was there is the result's to free, and the place holds something new.
+
+```calx
+struct Encoder {
+    key: List<u8>
+}
+
+struct Connection {
+    encoder: Encoder?
+}
+
+// Lends the encoder out and back, through a view of the connection.
+fn lend(c: mut Connection) -> usize {
+    let e = c.encoder.take() else return 0
+    let n = e.key.len()
+    c.encoder = some(e)
+    return n
+}
+
+fn main() {
+    var c = Connection { encoder: some(Encoder { key: [1, 2, 3] }) }
+    println("{lend(mut c)}")                       // out: 3
+    var slots: List<String?> = [some(String("p")), none]
+    let p = slots[0].take()
+    let was = slots[1].replace(String("q"))
+    println("{p ?? String("-")} {was == none} {slots[0] == none} {slots[1] == some(String("q"))}")    // out: p true true true
+}
+```
+
 ## Comparing
 
 `==` and `!=` compare two optionals: they're equal when both are `none`, or both hold equal values. In a string, an optional shows as `some(3)` or `none` ([comparing and printing](comparing.md)). An optional compares only with another optional, so it's `opt == some(3)`, not `opt == 3`. A float inside compares as floats do, so `some(NaN)` doesn't equal itself. `<` and the other orderings put `none` before any value ([comparing and printing](comparing.md#order)).

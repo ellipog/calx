@@ -5159,6 +5159,18 @@ $dropall    m->len = 0;
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
             return copy_fn(t) + "(" + address(recv) + ")";
         }
+        if (e->bmethod == BMethod::take || e->bmethod == BMethod::replace) {
+            // The value moves out whole, and the place holds `none` or the new value, so nothing
+            // is freed twice. A new value is made before the place is looked at.
+            std::string o = ctype(t), p = tmp(), r = tmp();
+            if (e->bmethod == BMethod::take) {
+                return "({ " + o + "* " + p + " = " + address(recv) + "; " + o + " " + r + " = *" + p + "; *" + p + " = (" + o +
+                       "){0}; " + r + "; })";
+            }
+            std::string v = tmp();
+            return "({ " + ctype(t->elem) + " " + v + " = " + arg(0, t->elem) + "; " + o + "* " + p + " = " + address(recv) + "; " + o +
+                   " " + r + " = *" + p + "; *" + p + " = (" + o + "){ .v = " + v + ", .has = 1 }; " + r + "; })";
+        }
         if (e->bmethod == BMethod::hash_add) {
             Type* at = e->args[0].value->type;
             std::string decls;

@@ -6323,7 +6323,8 @@ private:
                 }
             }
             if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list ||
-                recv->kind == TypeKind::deque || recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
+                recv->kind == TypeKind::deque || recv->kind == TypeKind::map || recv->kind == TypeKind::set ||
+                recv->kind == TypeKind::optional) {
                 return builtin_method(e, recv);
             }
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
@@ -8093,7 +8094,13 @@ private:
         std::vector<Type*> params;
         Type* result = T.unit;
         bool needs_unsafe = false;
-        if (recv->kind == TypeKind::string || recv->kind == TypeKind::str) {
+        if (recv->kind == TypeKind::optional) {
+            // How a value leaves a place it can't move out of, such as a field of a `mut` view or
+            // an element of a list: `take` gives it and leaves `none`, and `replace` gives it and
+            // leaves another.
+            if (m == "take") b = BMethod::take, changes = true, result = recv;
+            else if (m == "replace") b = BMethod::replace, changes = true, params = {recv->elem}, result = recv;
+        } else if (recv->kind == TypeKind::string || recv->kind == TypeKind::str) {
             bool owned = recv->kind == TypeKind::string;
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;

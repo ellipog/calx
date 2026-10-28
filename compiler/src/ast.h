@@ -165,6 +165,7 @@ enum class BMethod : std::uint8_t {
     // On a `LinkedMap` or a `LinkedSet`, at the ends of the order its keys are in (D109).
     first, last, pop_first, pop_last, move_to_first, move_to_last, insert_first, insert_last,
     push_first, push_last,  // on a `Deque`, which has `first`, `last`, `pop_first` and `pop_last` too
+    take, replace,  // on an optional: its value moved out, leaving `none` or another value
     // On a `SortedMap` or a `SortedSet`, which has the ends too: the nearest key on a side, and
     // the keys in a range, only as what a `for` loop goes over (D112).
     floor, ceiling, lower, higher, range,
