@@ -31,6 +31,16 @@ typedef struct {
 #define CX_INLINE static inline __attribute__((always_inline, nodebug))
 #define CX_COLD __attribute__((cold, noreturn))
 
+/* The runtime's functions (D123). In a program each is a function. In a library, built with
+ * `calx build --lib`, each is a pointer to the program's own, filled in when the program opens
+ * the library, so the two share one allocator, one output and one way to panic. The compiler
+ * reads the list from here: every function declared with `CX_FN`, in order. */
+#ifdef CX_LIBRARY
+#define CX_FN(ret, name, params) extern ret(*name) params
+#else
+#define CX_FN(ret, name, params) ret name params
+#endif
+
 /* Each function starts with this for every view parameter: a view points at a whole, live,
  * aligned value for the whole call, since views can't be stored or outlive what they view (D48).
  * Saying so lets clang read a view's fields once before a loop instead of on every pass, even
@@ -58,19 +68,32 @@ typedef struct {
 } cx_String;
 
 /* Startup and exit, called by the generated `main`. */
-void cx_start(int argc, char** argv);
-int cx_finish(void);
+CX_FN(void, cx_start, (int argc, char** argv));
+CX_FN(int, cx_finish, (void));
+
+/* The command line, in UTF-8, behind std.env. */
+CX_FN(cx_usize, cx_arg_count, (void));
+CX_FN(const cx_u8*, cx_arg, (cx_usize i));
+CX_FN(cx_usize, cx_arg_len, (cx_usize i));
+
+/* Nanoseconds from a clock that only goes forward, behind std.time (D88). */
+CX_FN(cx_u64, cx_clock_ns, (void));
 
 /* Output. Standard output is buffered, and flushed at exit and before a panic. */
-void cx_print_str(cx_str s);
-void cx_print_i64(cx_i64 v);
-void cx_print_u64(cx_u64 v);
-void cx_print_f64(cx_f64 v);
-void cx_print_f32(cx_f32 v);
-void cx_print_bool(cx_bool v);
-void cx_print_char(cx_char v);
-void cx_print_rune(cx_rune v);
-void cx_print_newline(void);
+CX_FN(void, cx_print_str, (cx_str s));
+CX_FN(void, cx_print_i64, (cx_i64 v));
+CX_FN(void, cx_print_u64, (cx_u64 v));
+CX_FN(void, cx_print_f64, (cx_f64 v));
+CX_FN(void, cx_print_f32, (cx_f32 v));
+CX_FN(void, cx_print_bool, (cx_bool v));
+CX_FN(void, cx_print_char, (cx_char v));
+CX_FN(void, cx_print_rune, (cx_rune v));
+CX_FN(void, cx_print_newline, (void));
+/* Bytes to and from the standard streams, behind std.io. `cx_in_read` gives how many it read,
+ * and 0 at the end. */
+CX_FN(cx_usize, cx_in_read, (cx_u8* p, cx_usize n));
+CX_FN(void, cx_out_write, (const cx_u8* p, cx_usize n));
+CX_FN(void, cx_out_flush, (void));
 
 /* `eprint` and `eprintln`: between these, the print functions write to standard error, which
  * isn't buffered. Output waiting for standard output goes first, so the two keep their order.
@@ -80,42 +103,44 @@ typedef struct {
     void* fmt;
     int err;
 } cx_out_to;
-cx_out_to cx_err_begin(void);
-void cx_err_end(cx_out_to was);
+CX_FN(cx_out_to, cx_err_begin, (void));
+CX_FN(void, cx_err_end, (cx_out_to was));
 
 /* A panic: `cx_panic_begin` starts the message on standard error, the print functions add to
  * it, and `cx_panic_end` finishes it, writes the stack trace and exits with status 101. */
-void cx_panic_begin(const char* at);
-CX_COLD void cx_panic_end(void);
+CX_FN(void, cx_panic_begin, (const char* at));
+CX_COLD CX_FN(void, cx_panic_end, (void));
 /* Writes Calx frames of the calling thread's stack through `text`, a line each, in calx_trace.c:
  * all of them (`mode` 0), or for a panic in a `parallel for`, the part of them this thread has
  * (1 to 3, which `cx_trace_write` explains). */
-__attribute__((cold)) void cx_trace_write(void (*text)(const char*), int mode, int ending);
-CX_COLD void cx_panic_index(cx_usize index, cx_usize length, const char* at);
-CX_COLD void cx_panic_div_zero(const char* at);
-CX_COLD void cx_panic_unwrap(const char* at);
-CX_COLD void cx_panic_unwrap_err(const char* at);
-CX_COLD void cx_panic_insert(cx_usize index, cx_usize length, const char* at);
-CX_COLD void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at);
+__attribute__((cold)) CX_FN(void, cx_trace_write, (void (*text)(const char*), int mode, int ending));
+CX_COLD CX_FN(void, cx_panic_index, (cx_usize index, cx_usize length, const char* at));
+CX_COLD CX_FN(void, cx_panic_div_zero, (const char* at));
+CX_COLD CX_FN(void, cx_panic_unwrap, (const char* at));
+CX_COLD CX_FN(void, cx_panic_unwrap_err, (const char* at));
+CX_COLD CX_FN(void, cx_panic_insert, (cx_usize index, cx_usize length, const char* at));
+CX_COLD CX_FN(void, cx_panic_set_len, (cx_usize length, cx_usize capacity, const char* at));
 
 /* `parallel for`: calls `body(ctx, begin, end)` for chunks covering 0..n, on the worker threads
  * and this one, and returns once every iteration has run. Inside another `parallel for`, its
  * chunks go to the threads that are free, or all run on this one if none can take them. */
-void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx);
+CX_FN(void, cx_parallel, (cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx));
+/* How many threads `parallel for` uses, behind std.pool. */
+CX_FN(void, cx_set_workers, (cx_usize n));
 
 /* Memory, in calx_alloc.c (D95). A block is freed, or reallocated, with the size it was last
  * given, which the compiler always knows, so blocks have no header. Freeing a null pointer does
  * nothing. Running out panics. */
-void* cx_alloc(cx_usize size);
-void* cx_realloc(void* p, cx_usize old, cx_usize size);
-void cx_free(void* p, cx_usize size);
+CX_FN(void*, cx_alloc, (cx_usize size));
+CX_FN(void*, cx_realloc, (void* p, cx_usize old, cx_usize size));
+CX_FN(void, cx_free, (void* p, cx_usize size));
 /* How many blocks are allocated, in debug builds; 0 in others. */
-cx_usize cx_alloc_live(void);
+CX_FN(cx_usize, cx_alloc_live, (void));
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
  * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. The
  * check is inline, so with `size` a constant it has no division. */
-void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size);
-CX_COLD void cx_panic_capacity(void);
+CX_FN(void*, cx_grow_to, (void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size));
+CX_COLD CX_FN(void, cx_panic_capacity, (void));
 CX_INLINE void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
     /* No buffer can be bigger than half the address space. */
     cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
@@ -126,7 +151,7 @@ CX_INLINE void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, 
 }
 /* Room for `extra` more in a deque's ring, which runs from `*head` round its buffer: grown as a
    list's is, then with the run that wrapped moved so the ring is whole again (D110). */
-void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size);
+CX_FN(void*, cx_deque_grow, (void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size));
 
 /* Queues between threads, and the threads `Thread.spawn` starts, in calx_thread.c (D121). An end
  * of a queue is a pointer to it, whatever its messages are; the queue counts its ends and goes
@@ -142,23 +167,23 @@ typedef struct cx_Receiver {
 typedef struct cx_Thread {
     cx_u64 h; /* the thread's handle, or its pthread_t */
 } cx_Thread;
-cx_Receiver cx_queue_new(cx_usize size, void (*drop)(void*));
-cx_Sender cx_queue_sender(const cx_Receiver* r);
-cx_Sender cx_queue_share_sender(const cx_Sender* s);
-cx_Receiver cx_queue_share_receiver(const cx_Receiver* r);
+CX_FN(cx_Receiver, cx_queue_new, (cx_usize size, void (*drop)(void*)));
+CX_FN(cx_Sender, cx_queue_sender, (const cx_Receiver* r));
+CX_FN(cx_Sender, cx_queue_share_sender, (const cx_Sender* s));
+CX_FN(cx_Receiver, cx_queue_share_receiver, (const cx_Receiver* r));
 /* Moves the message at `message` into the queue, or drops it if no receiver is left. */
-void cx_queue_send(const cx_Sender* s, void* message, const char* at);
+CX_FN(void, cx_queue_send, (const cx_Sender* s, void* message, const char* at));
 /* Moves the first message into `out`: if there is one (`next`), or once there is, unless every
  * sender has gone (`wait`). Returns whether it did. */
-cx_bool cx_queue_next(const cx_Receiver* r, void* out, const char* at);
-cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at);
-void cx_drop_Sender(cx_Sender* s);
-void cx_drop_Receiver(cx_Receiver* r);
+CX_FN(cx_bool, cx_queue_next, (const cx_Receiver* r, void* out, const char* at));
+CX_FN(cx_bool, cx_queue_wait, (const cx_Receiver* r, void* out, const char* at));
+CX_FN(void, cx_drop_Sender, (cx_Sender* s));
+CX_FN(void, cx_drop_Receiver, (cx_Receiver* r));
 /* Runs `run(task)` on a new thread. `task` is the task, moved to memory from cx_alloc, which
  * `run` frees. */
-cx_Thread cx_thread_spawn(void (*run)(void*), void* task);
-void cx_thread_join(cx_Thread* t, const char* at);
-void cx_drop_Thread(cx_Thread* t);
+CX_FN(cx_Thread, cx_thread_spawn, (void (*run)(void*), void* task));
+CX_FN(void, cx_thread_join, (cx_Thread* t, const char* at));
+CX_FN(void, cx_drop_Thread, (cx_Thread* t));
 /* Never called, since none of them can be copied (D121), but a type's copy glue names the copy
  * of each of its fields. */
 static inline __attribute__((nodebug)) cx_Sender cx_copy_Sender(const cx_Sender* s) {
@@ -171,6 +196,42 @@ static inline __attribute__((nodebug)) cx_Receiver cx_copy_Receiver(const cx_Rec
 }
 static inline __attribute__((nodebug)) cx_Thread cx_copy_Thread(const cx_Thread* t) {
     (void)t;
+    __builtin_trap();
+}
+
+/* Libraries (D123), in calx_lib.c. A library built with `calx build --lib` has one symbol the
+ * system can find, `cx_library`, which says what it was built with, fills in its pointers to the
+ * program's runtime functions, and lists the functions it exports. Each export has its type as
+ * Calx writes it, for messages, and a hash of its shape: its type with the fields and variants of
+ * every type in it, so a struct that changed between the two builds doesn't match. */
+typedef struct {
+    const char* name;
+    void* fn;
+    const char* type;
+    cx_u64 shape;
+} cx_lib_export;
+typedef struct {
+    cx_u64 abi;      /* the compiler and runtime it was built with */
+    cx_usize fns;    /* how many runtime functions it takes */
+    void (*attach)(void* const* fns);
+    const cx_lib_export* (*exports)(cx_usize* count);
+} cx_lib_info;
+/* A library that's open. Dropping one leaves the library loaded, since functions from it can
+ * still be anywhere; `cx_lib_close` unloads it. */
+typedef struct cx_Library {
+    void* p;
+} cx_Library;
+/* Opens the library at `path`, or puts why it can't in `error`. */
+CX_FN(cx_bool, cx_lib_open, (cx_str path, cx_Library* out, cx_String* error));
+/* The function the library exports as `name`, if its type is `type` with that shape, or null
+ * with why not in `error`. */
+CX_FN(void*, cx_lib_find, (const cx_Library* lib, cx_str name, const char* type, cx_u64 shape, cx_String* error));
+CX_FN(cx_bool, cx_lib_has, (const cx_Library* lib, cx_str name));
+CX_FN(cx_str, cx_lib_path, (const cx_Library* lib));
+CX_FN(void, cx_lib_close, (cx_Library* lib));
+CX_FN(void, cx_drop_Library, (cx_Library* lib));
+static inline __attribute__((nodebug)) cx_Library cx_copy_Library(const cx_Library* l) {
+    (void)l;
     __builtin_trap();
 }
 
@@ -193,17 +254,17 @@ typedef struct cx_Arena {
     cx_arena_state* s;
 } cx_Arena;
 /* An arena whose first chunk holds at least `first` bytes, 8 KiB if it's 0. */
-cx_Arena cx_arena_new(cx_usize first);
-void cx_drop_Arena(cx_Arena* a);
+CX_FN(cx_Arena, cx_arena_new, (cx_usize first));
+CX_FN(void, cx_drop_Arena, (cx_Arena* a));
 /* A new, empty arena with the same first chunk: nothing in an arena belongs to its value. */
-cx_Arena cx_copy_Arena(const cx_Arena* a);
+CX_FN(cx_Arena, cx_copy_Arena, (const cx_Arena* a));
 /* Frees everything taken from the arena. One that needed more than one chunk keeps a single
  * chunk as big as all of them, so the next round of the same work takes no new chunk. */
-void cx_arena_reset(cx_Arena* a);
+CX_FN(void, cx_arena_reset, (cx_Arena* a));
 /* The bytes taken since the arena was made or reset, alignment included. */
-cx_usize cx_arena_used(const cx_Arena* a);
+CX_FN(cx_usize, cx_arena_used, (const cx_Arena* a));
 /* Moves an arena list's buffer of `len` elements of `size` bytes to `bytes` from a new chunk. */
-void* cx_arena_more(cx_arena_state* s, void* ptr, cx_usize len, cx_usize bytes, cx_usize size, cx_usize align);
+CX_FN(void*, cx_arena_more, (cx_arena_state* s, void* ptr, cx_usize len, cx_usize bytes, cx_usize size, cx_usize align));
 /* Room for `extra` more elements of `size` bytes, aligned to `align`, in an arena list's buffer
  * of `*cap` holding `len`: grown in place if it's the newest block and its chunk has room, or
  * moved to new memory at least twice its size, and at least 64 bytes. Returns the buffer. All
@@ -240,7 +301,7 @@ CX_INLINE void* cx_arena_grow(cx_arena_state* s, void* ptr, cx_usize* cap, cx_us
     return cx_arena_more(s, p, len, bytes, size, align);
 }
 /* `sort` found that a hand-written `Order` contradicts itself (D102). */
-CX_COLD void cx_panic_order(const char* at);
+CX_COLD CX_FN(void, cx_panic_order, (const char* at));
 
 /* Strings. */
 CX_INLINE cx_String cx_string_lit(const char* p, cx_usize len) {
@@ -271,27 +332,27 @@ CX_INLINE int cx_str_cmp(cx_str a, cx_str b) {
     return (a.len > b.len) - (a.len < b.len);
 }
 /* `xs.sort()` on a list of integers, `char`s, `rune`s or `bool`s, from calx_sort.h (D96). */
-void cx_sort_i8(cx_i8* v, cx_usize n);
-void cx_sort_i16(cx_i16* v, cx_usize n);
-void cx_sort_i32(cx_i32* v, cx_usize n);
-void cx_sort_i64(cx_i64* v, cx_usize n);
-void cx_sort_u8(cx_u8* v, cx_usize n);
-void cx_sort_u16(cx_u16* v, cx_usize n);
-void cx_sort_u32(cx_u32* v, cx_usize n);
-void cx_sort_u64(cx_u64* v, cx_usize n);
-void cx_sort_usize(cx_usize* v, cx_usize n);
-void cx_sort_char(cx_char* v, cx_usize n);
-void cx_sort_rune(cx_rune* v, cx_usize n);
-void cx_sort_bool(cx_bool* v, cx_usize n);
+CX_FN(void, cx_sort_i8, (cx_i8* v, cx_usize n));
+CX_FN(void, cx_sort_i16, (cx_i16* v, cx_usize n));
+CX_FN(void, cx_sort_i32, (cx_i32* v, cx_usize n));
+CX_FN(void, cx_sort_i64, (cx_i64* v, cx_usize n));
+CX_FN(void, cx_sort_u8, (cx_u8* v, cx_usize n));
+CX_FN(void, cx_sort_u16, (cx_u16* v, cx_usize n));
+CX_FN(void, cx_sort_u32, (cx_u32* v, cx_usize n));
+CX_FN(void, cx_sort_u64, (cx_u64* v, cx_usize n));
+CX_FN(void, cx_sort_usize, (cx_usize* v, cx_usize n));
+CX_FN(void, cx_sort_char, (cx_char* v, cx_usize n));
+CX_FN(void, cx_sort_rune, (cx_rune* v, cx_usize n));
+CX_FN(void, cx_sort_bool, (cx_bool* v, cx_usize n));
 CX_INLINE void cx_drop_String(cx_String* s) {
     if (s->cap) cx_free(s->ptr, s->cap);
 }
-cx_String cx_copy_String(const cx_String* s);
+CX_FN(cx_String, cx_copy_String, (const cx_String* s));
 /* A `String` that owns a copy of the bytes. */
-cx_String cx_string_from(cx_str s);
-void cx_string_push_bytes(cx_String* s, const cx_u8* p, cx_usize n);
-void cx_string_push_rune(cx_String* s, cx_rune r);
-void cx_string_reserve(cx_String* s, cx_usize extra);
+CX_FN(cx_String, cx_string_from, (cx_str s));
+CX_FN(void, cx_string_push_bytes, (cx_String* s, const cx_u8* p, cx_usize n));
+CX_FN(void, cx_string_push_rune, (cx_String* s, cx_rune r));
+CX_FN(void, cx_string_reserve, (cx_String* s, cx_usize extra));
 CX_INLINE void cx_string_push_str(cx_String* s, cx_str v) { cx_string_push_bytes(s, v.ptr, v.len); }
 CX_INLINE void cx_string_clear(cx_String* s) {
     if (s->cap) {
@@ -301,12 +362,12 @@ CX_INLINE void cx_string_clear(cx_String* s) {
         s->len = 0;
     }
 }
-cx_bool cx_str_contains(cx_str hay, cx_str needle);
+CX_FN(cx_bool, cx_str_contains, (cx_str hay, cx_str needle));
 /* Whether the bytes are UTF-8: no overlong forms, surrogates, or values past U+10FFFF. */
-cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n);
+CX_FN(cx_bool, cx_utf8_valid, (const cx_u8* p, cx_usize n));
 /* Java's String.hashCode and length(), over the UTF-16 units the text stands for. */
-cx_i32 cx_str_java_hash(cx_str s);
-cx_usize cx_str_utf16_len(cx_str s);
+CX_FN(cx_i32, cx_str_java_hash, (cx_str s));
+CX_FN(cx_usize, cx_str_utf16_len, (cx_str s));
 /* The rune at `*i` in UTF-8 that's known to be valid, moving `*i` past it. */
 CX_INLINE cx_rune cx_utf8_next(const cx_u8* p, cx_usize* i) {
     cx_u32 b = p[*i];
@@ -346,10 +407,10 @@ CX_INLINE cx_char cx_utf16_next(const cx_u8* p, cx_usize* i, cx_char* low) {
 /* `T.parse(text)`. Integers follow Java's Integer.parseInt: an optional sign (no `-` for unsigned
  * types), then ASCII digits, in range. Floats follow Double.parseDouble's grammar, and round
  * correctly. On failure they set `*out` to 0 and return 0. */
-cx_bool cx_parse_i64(cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out);
-cx_bool cx_parse_u64(cx_str s, cx_u64 hi, cx_u64* out);
-cx_bool cx_parse_f64(cx_str s, cx_f64* out);
-cx_bool cx_parse_f32(cx_str s, cx_f32* out);
+CX_FN(cx_bool, cx_parse_i64, (cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out));
+CX_FN(cx_bool, cx_parse_u64, (cx_str s, cx_u64 hi, cx_u64* out));
+CX_FN(cx_bool, cx_parse_f64, (cx_str s, cx_f64* out));
+CX_FN(cx_bool, cx_parse_f32, (cx_str s, cx_f32* out));
 CX_INLINE cx_bool cx_str_starts_with(cx_str s, cx_str p) {
     return p.len <= s.len && (p.len == 0 || __builtin_memcmp(s.ptr, p.ptr, p.len) == 0);
 }
@@ -359,8 +420,8 @@ CX_INLINE cx_bool cx_str_ends_with(cx_str s, cx_str p) {
 
 /* Interpolation into a `String`: between `cx_fmt_begin` and `cx_fmt_end`, the print functions
  * add to the string instead of writing output. They nest. */
-cx_String* cx_fmt_begin(cx_String* s);
-void cx_fmt_end(cx_String* previous);
+CX_FN(cx_String*, cx_fmt_begin, (cx_String* s));
+CX_FN(void, cx_fmt_end, (cx_String* previous));
 
 /* Whether two strings hold the same bytes, for string patterns. */
 CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {
@@ -369,7 +430,7 @@ CX_INLINE cx_bool cx_str_eq(cx_str a, cx_str b) {
 
 /* `s[lo..hi]`, or `s[lo..=hi]` with `inclusive`: the bytes from `lo` up to `hi`, which must be in
  * order, in the text, and where runes start (D117). */
-CX_COLD void cx_panic_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at);
+CX_COLD CX_FN(void, cx_panic_slice, (cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at));
 CX_INLINE cx_bool cx_utf8_starts_at(cx_str s, cx_usize k) { return k == s.len || (s.ptr[k] & 0xC0) != 0x80; }
 CX_INLINE cx_str cx_str_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const char* at) {
     cx_usize end = hi + (inclusive ? 1 : 0);
@@ -380,75 +441,90 @@ CX_INLINE cx_str cx_str_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclus
 }
 /* Where `needle` first or last starts in `hay`, a byte offset, or CX_NOT_FOUND. Both are UTF-8,
  * so a match starts where a rune does. `""` is found at 0, or last at the end. */
-cx_usize cx_str_find(cx_str hay, cx_str needle);
-cx_usize cx_str_find_last(cx_str hay, cx_str needle);
+CX_FN(cx_usize, cx_str_find, (cx_str hay, cx_str needle));
+CX_FN(cx_usize, cx_str_find_last, (cx_str hay, cx_str needle));
 /* Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, in calx_case.c (D117). Text
  * that doesn't change comes back without a copy when `keep` says its bytes are a literal's. */
-cx_String cx_case_lower(cx_str s, cx_bool keep);
-cx_String cx_case_upper(cx_str s, cx_bool keep);
+CX_FN(cx_String, cx_case_lower, (cx_str s, cx_bool keep));
+CX_FN(cx_String, cx_case_upper, (cx_str s, cx_bool keep));
 
 /* MD5, SHA-1 and SHA-256 (kind 0, 1 and 2) and HMAC-SHA256, in calx_digest.c (D118). A context is
  * CX_DIGEST_CTX bytes, with no alignment needed. `cx_digest_finish` writes the digest, 16, 20 or
  * 32 bytes, and returns its length. */
 #define CX_DIGEST_CTX 112
-void cx_digest_start(cx_u8* ctx, cx_u32 kind);
-void cx_digest_add(cx_u8* ctx, const cx_u8* p, cx_usize n);
-cx_usize cx_digest_finish(cx_u8* ctx, cx_u8* out);
-void cx_digest_hmac_sha256(const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out);
+CX_FN(void, cx_digest_start, (cx_u8* ctx, cx_u32 kind));
+CX_FN(void, cx_digest_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_digest_finish, (cx_u8* ctx, cx_u8* out));
+CX_FN(void, cx_digest_hmac_sha256, (const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out));
 
 /* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
  * CX_CFB8_CTX and CX_RSA_CTX bytes, with no alignment needed. */
 #define CX_CFB8_CTX 208
 #define CX_RSA_CTX 912
-void cx_crypto_random(cx_u8* p, cx_usize n);
-void cx_cfb8_start(cx_u8* ctx, const cx_u8* key, const cx_u8* iv);
-void cx_cfb8_encrypt(cx_u8* ctx, cx_u8* p, cx_usize n);
-void cx_cfb8_decrypt(cx_u8* ctx, cx_u8* p, cx_usize n);
-cx_bool cx_rsa_generate(cx_u8* ctx, cx_u32 bits);
-cx_usize cx_rsa_public_der(const cx_u8* ctx, cx_u8* out);
-cx_bool cx_rsa_encrypt(const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* out);
-cx_i64 cx_rsa_decrypt(const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out);
-cx_usize cx_rsa_size(const cx_u8* ctx);
+CX_FN(void, cx_crypto_random, (cx_u8* p, cx_usize n));
+CX_FN(void, cx_cfb8_start, (cx_u8* ctx, const cx_u8* key, const cx_u8* iv));
+CX_FN(void, cx_cfb8_encrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
+CX_FN(void, cx_cfb8_decrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
+CX_FN(cx_bool, cx_rsa_generate, (cx_u8* ctx, cx_u32 bits));
+CX_FN(cx_usize, cx_rsa_public_der, (const cx_u8* ctx, cx_u8* out));
+CX_FN(cx_bool, cx_rsa_encrypt, (const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* out));
+CX_FN(cx_i64, cx_rsa_decrypt, (const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out));
+CX_FN(cx_usize, cx_rsa_size, (const cx_u8* ctx));
 
 /* zlib, gzip and raw deflate (format 0, 1 and 2), in calx_zlib.c (D118). An inflate context is
  * CX_INFLATE_CTX bytes, aligned as cx_alloc aligns. `cx_inflate` returns 0 at the stream's end, 1
  * when it needs more room, 2 when it stopped at the end of the last room, and -1, -2, -3 or -4
  * for a stream that's corrupt, cut off, fails its checksum, or needs a preset dictionary. */
 #define CX_INFLATE_CTX 31232
-cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n);
-cx_u32 cx_zlib_adler32(cx_u32 adler, const cx_u8* p, cx_usize n);
-void cx_inflate_start(cx_u8* ctx, cx_u32 format, cx_usize start);
-cx_i32 cx_inflate(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize end, cx_bool final);
-cx_usize cx_inflate_len(const cx_u8* ctx);
-cx_usize cx_inflate_used(const cx_u8* ctx);
-cx_usize cx_deflate_bound(cx_usize n, cx_u32 format);
-cx_usize cx_deflate(const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 level, cx_u8* out);
+CX_FN(cx_u32, cx_zlib_crc32, (cx_u32 crc, const cx_u8* p, cx_usize n));
+CX_FN(cx_u32, cx_zlib_adler32, (cx_u32 adler, const cx_u8* p, cx_usize n));
+CX_FN(void, cx_inflate_start, (cx_u8* ctx, cx_u32 format, cx_usize start));
+CX_FN(cx_i32, cx_inflate, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize end, cx_bool final));
+CX_FN(cx_usize, cx_inflate_len, (const cx_u8* ctx));
+CX_FN(cx_usize, cx_inflate_used, (const cx_u8* ctx));
+CX_FN(cx_usize, cx_deflate_bound, (cx_usize n, cx_u32 format));
+CX_FN(cx_usize, cx_deflate, (const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 level, cx_u8* out));
+
+/* TCP sockets driven by events, in calx_net.c, behind std.net (D92). A `Net` is a handle, and
+ * so is each connection in it. */
+CX_FN(cx_u64, cx_net_open, (void));
+CX_FN(cx_i32, cx_net_listen, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port));
+CX_FN(cx_u32, cx_net_connect, (cx_u64 h, const cx_u8* host, cx_usize len, cx_u16 port));
+CX_FN(cx_usize, cx_net_poll, (cx_u64 h, cx_i64 timeout_ms));
+CX_FN(cx_u32, cx_net_event_kind, (cx_u64 h, cx_usize i));
+CX_FN(cx_u32, cx_net_event_conn, (cx_u64 h, cx_usize i));
+CX_FN(cx_usize, cx_net_available, (cx_u64 h, cx_u32 id));
+CX_FN(cx_usize, cx_net_read, (cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max));
+CX_FN(void, cx_net_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len));
+CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
+CX_FN(cx_u32, cx_net_error_kind, (void));
+CX_FN(cx_i32, cx_net_error_code, (void));
 
 /* HTTP and HTTPS requests, each on a thread of its own, in calx_http.c (D118). A request is a
  * handle that's never 0. `cx_http_done` and `cx_http_wait` give -1 for one that was freed, and
  * `cx_http_wait` gives what went wrong as std.http's Error numbers it, or 0. The getters are for a
  * request that was waited for. */
-cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
-                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit);
-cx_i32 cx_http_done(cx_u64 h);
-cx_i32 cx_http_wait(cx_u64 h);
-cx_i32 cx_http_code(cx_u64 h);
-cx_u32 cx_http_status(cx_u64 h);
-cx_usize cx_http_head_len(cx_u64 h);
-void cx_http_head(cx_u64 h, cx_u8* out);
-cx_usize cx_http_body_len(cx_u64 h);
-void cx_http_body(cx_u64 h, cx_u8* out);
-void cx_http_free(cx_u64 h);
+CX_FN(cx_u64, cx_http_start, (cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
+                              cx_usize body_len, cx_u32 timeout_ms, cx_usize limit));
+CX_FN(cx_i32, cx_http_done, (cx_u64 h));
+CX_FN(cx_i32, cx_http_wait, (cx_u64 h));
+CX_FN(cx_i32, cx_http_code, (cx_u64 h));
+CX_FN(cx_u32, cx_http_status, (cx_u64 h));
+CX_FN(cx_usize, cx_http_head_len, (cx_u64 h));
+CX_FN(void, cx_http_head, (cx_u64 h, cx_u8* out));
+CX_FN(cx_usize, cx_http_body_len, (cx_u64 h));
+CX_FN(void, cx_http_body, (cx_u64 h, cx_u8* out));
+CX_FN(void, cx_http_free, (cx_u64 h));
 
 /* LZ4 as lz4-java's block streams write it, in calx_lz4.c (D118). `cx_lz4_decode` carries on from
  * `state`, four numbers: where the next header is, the output's length, what the rest decompresses
  * to, and the length lz4-java's buffer would have, 21 to start. It
  * gives 0 at the stream's end, 1 when it needs more room, 2 when it stopped at the end of the last
  * room, and -1, -2 or -3 for a stream that's corrupt, cut off, or fails a checksum. */
-cx_u32 cx_lz4_xxh32(const cx_u8* p, cx_usize n, cx_u32 seed);
-cx_usize cx_lz4_bound(cx_usize n);
-cx_usize cx_lz4_compress(const cx_u8* in, cx_usize n, cx_u8* out);
-cx_i32 cx_lz4_decode(const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last);
+CX_FN(cx_u32, cx_lz4_xxh32, (const cx_u8* p, cx_usize n, cx_u32 seed));
+CX_FN(cx_usize, cx_lz4_bound, (cx_usize n));
+CX_FN(cx_usize, cx_lz4_compress, (const cx_u8* in, cx_usize n, cx_u8* out));
+CX_FN(cx_i32, cx_lz4_decode, (const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
@@ -460,7 +536,7 @@ CX_INLINE cx_u64 cx_hash_mix(cx_u64 a, cx_u64 b) {
     return (cx_u64)r ^ (cx_u64)(r >> 64);
 }
 CX_INLINE cx_u64 cx_hash_word(cx_u64 h, cx_u64 w) { return cx_hash_mix(h ^ w, CX_HASH_MUL); }
-cx_u64 cx_hash_bytes(const cx_u8* p, cx_usize n);
+CX_FN(cx_u64, cx_hash_bytes, (const cx_u8* p, cx_usize n));
 CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
 
 /* The tables behind `Map` and `Set`: open addressing, with a control byte per slot that's EMPTY,
@@ -472,7 +548,13 @@ CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
 #define CX_CTRL_DELETED ((cx_u8)0xFE)
 #define CX_GROUP 16
 #define CX_NOT_FOUND ((cx_usize)-1)
+#ifdef CX_LIBRARY
+/* A library's tables start at the program's, so either can free the other's (D123). */
+extern const cx_u8* cx_table_empty_at;
+#define cx_table_empty cx_table_empty_at
+#else
 extern const cx_u8 cx_table_empty[CX_GROUP];
+#endif
 
 #if defined(__SSE2__)
 typedef char cx_group_v __attribute__((vector_size(16), aligned(1)));
@@ -550,12 +632,12 @@ CX_INLINE cx_usize cx_table_grown(cx_usize buckets, cx_usize len) {
     return len + 1 <= cx_table_capacity(buckets) / 2 ? buckets : buckets * 2;
 }
 /* The slot count with room for `n` values. */
-cx_usize cx_table_buckets_for(cx_usize n);
+CX_FN(cx_usize, cx_table_buckets_for, (cx_usize n));
 /* A table of `buckets` slots of `size` bytes, all EMPTY: gives the control bytes, and the slots
  * through `slots`. One allocation holds both, so freeing the slots frees the table. */
-cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots);
+CX_FN(cx_u8*, cx_table_alloc, (cx_usize buckets, cx_usize size, void** slots));
 /* Frees what cx_table_alloc gave for `buckets` slots of `size` bytes. */
-void cx_table_free(void* slots, cx_usize buckets, cx_usize size);
+CX_FN(void, cx_table_free, (void* slots, cx_usize buckets, cx_usize size));
 
 /* A `LinkedMap` or a `LinkedSet` is a table as above with a list through its full slots, in the
  * order their keys went in (D109). `link[2 * i]` is the slot before slot `i` and `link[2 * i + 1]`
@@ -598,17 +680,17 @@ CX_INLINE void cx_lk_move(cx_lhead* l, cx_usize i, cx_bool front) {
     else cx_lk_push_back(l, i);
 }
 /* The links for a table of `buckets` slots, which can't have more than a `cx_u32` counts. */
-cx_u32* cx_lk_alloc(cx_usize buckets);
-void cx_lk_free(cx_u32* link, cx_usize buckets);
-CX_COLD void cx_panic_key(const char* at);
+CX_FN(cx_u32*, cx_lk_alloc, (cx_usize buckets));
+CX_FN(void, cx_lk_free, (cx_u32* link, cx_usize buckets));
+CX_COLD CX_FN(void, cx_panic_key, (const char* at));
 /* `m.range(a..b)` on a `SortedMap` or a `SortedSet`, with `b` before `a` (D112). */
-CX_COLD void cx_panic_range(const char* at);
+CX_COLD CX_FN(void, cx_panic_range, (const char* at));
 /* `q.remove_marked(marks)` on a `PriorityQueue`, without one mark for each element (D113). */
-CX_COLD void cx_panic_marks(cx_usize marks, cx_usize length, const char* at);
+CX_COLD CX_FN(void, cx_panic_marks, (cx_usize marks, cx_usize length, const char* at));
 /* An `OpenHashMap`'s or an `OpenHashSet`'s load factor isn't between 0 and 1, or it's asked for
  * more keys than fastutil's tables hold. */
-CX_COLD void cx_panic_load_factor(const char* at);
-CX_COLD void cx_panic_table_size(const char* at);
+CX_COLD CX_FN(void, cx_panic_load_factor, (const char* at));
+CX_COLD CX_FN(void, cx_panic_table_size, (const char* at));
 
 /* The tables behind `JavaHashMap` and `JavaHashSet`, in calx_jtable.c (D105): Java's HashMap,
  * which iterates in Java's order. `heads` is a power of two bins, each 0 when empty, the first
@@ -653,27 +735,27 @@ CX_INLINE cx_i32 cx_java_double_hash(cx_f64 d) {
     return (cx_i32)(b ^ (b >> 32));
 }
 /* The bins Java's `new HashMap<>(n)` starts with: the power of two at least `n`. */
-cx_u32 cx_jt_size_for(cx_usize n);
+CX_FN(cx_u32, cx_jt_size_for, (cx_usize n));
 /* A node for a new key, with its hash and `next` still to set. The nodes can move. */
-cx_i32 cx_jt_new_node(cx_jtable* m, cx_usize size);
+CX_FN(cx_i32, cx_jt_new_node, (cx_jtable* m, cx_usize size));
 CX_INLINE void cx_jt_release(cx_jtable* m, cx_usize size, cx_i32 i) {
     CX_JT_NEXT(m->nodes, size, i) = (cx_i32)m->spare - 1;
     m->spare = (cx_u32)i + 1;
 }
 /* Java's resize: the first table, or twice the bins, each bin split in order. */
-void cx_jt_resize(cx_jtable* m, cx_usize size, cx_jt_order order);
+CX_FN(void, cx_jt_resize, (cx_jtable* m, cx_usize size, cx_jt_order order));
 /* A list bin that a key made too long: a tree, or a table twice the size if it's small. */
-void cx_jt_treeify_bin(cx_jtable* m, cx_usize size, cx_jt_order order, cx_i32 h);
+CX_FN(void, cx_jt_treeify_bin, (cx_jtable* m, cx_usize size, cx_jt_order order, cx_i32 h));
 /* Adds the node `x`, with its hash and key set, to the tree in bin `b`. */
-void cx_jt_tree_put(cx_jtable* m, cx_usize size, cx_jt_order order, cx_u32 b, cx_i32 x);
+CX_FN(void, cx_jt_tree_put, (cx_jtable* m, cx_usize size, cx_jt_order order, cx_u32 b, cx_i32 x));
 /* Takes the node `z` out of the tree in bin `b`, which may become a list. */
-void cx_jt_tree_remove(cx_jtable* m, cx_usize size, cx_u32 b, cx_i32 z);
-void cx_jt_reserve(cx_jtable* m, cx_usize size, cx_jt_order order, cx_usize n);
-void cx_jt_free(cx_jtable* m, cx_usize size);
-cx_jtable cx_jt_copy(const cx_jtable* m, cx_usize size);
-void cx_jt_clear(cx_jtable* m);
+CX_FN(void, cx_jt_tree_remove, (cx_jtable* m, cx_usize size, cx_u32 b, cx_i32 z));
+CX_FN(void, cx_jt_reserve, (cx_jtable* m, cx_usize size, cx_jt_order order, cx_usize n));
+CX_FN(void, cx_jt_free, (cx_jtable* m, cx_usize size));
+CX_FN(cx_jtable, cx_jt_copy, (const cx_jtable* m, cx_usize size));
+CX_FN(void, cx_jt_clear, (cx_jtable* m));
 /* Java's `String.compareTo`, by UTF-16 unit: -1, 0 or 1. */
-int cx_jt_str_order(cx_str a, cx_str b);
+CX_FN(int, cx_jt_str_order, (cx_str a, cx_str b));
 
 /* The tables behind `OpenHashMap` and `OpenHashSet` (D107): fastutil's open hash tables, which
  * iterate in fastutil's order. A table is `n` slots, a power of two, found by linear probing from
@@ -705,19 +787,19 @@ CX_INLINE cx_u32 cx_oh_mix64(cx_u64 x) {
  * in any table, with the top bit set, so no full slot's word is 0. */
 CX_INLINE cx_u32 cx_oh_tag(cx_u32 h) { return (h & 0x3FFFFFFFu) | 0x80000000u; }
 /* fastutil's constructor: the header for `expected` keys at the load factor `f`. */
-cx_ohead cx_oh_new(cx_usize expected, cx_f32 f, const char* at);
+CX_FN(cx_ohead, cx_oh_new, (cx_usize expected, cx_f32 f, const char* at));
 /* A table made without a size becomes fastutil's default one, for 16 keys at 0.75, when it's
  * first used. */
 CX_INLINE void cx_oh_ready(cx_ohead* h) {
     if (__builtin_expect(!h->n, 0)) *h = (cx_ohead){ 32, 31, 0, 24, 32, 0.75f, 0 };
 }
 /* `HashCommon.arraySize` and `maxFill`. */
-cx_u32 cx_oh_array_size(cx_u64 expected, cx_f32 f);
-cx_u32 cx_oh_max_fill(cx_u32 n, cx_f32 f);
+CX_FN(cx_u32, cx_oh_array_size, (cx_u64 expected, cx_f32 f));
+CX_FN(cx_u32, cx_oh_max_fill, (cx_u32 n, cx_f32 f));
 /* The slots `putAll` and `addAll` make room in before adding `c` keys. */
-cx_u32 cx_oh_reserve_size(const cx_ohead* h, cx_usize c);
+CX_FN(cx_u32, cx_oh_reserve_size, (const cx_ohead* h, cx_usize c));
 /* The slots `trim()` shrinks the table to, or 0 when it stays. */
-cx_u32 cx_oh_trim_size(const cx_ohead* h);
+CX_FN(cx_u32, cx_oh_trim_size, (const cx_ohead* h));
 
 /* Bounds checks. */
 CX_INLINE cx_usize cx_index(cx_usize i, cx_usize length, const char* at) {

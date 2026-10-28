@@ -40,6 +40,7 @@ enum class TypeKind : std::uint8_t {
     sender,
     receiver,
     thread,
+    library,   // `Library`: a library the program opened while it runs (D123)
     // `fn(A, mut B) -> R`: a plain function as a value (D122). `elems` are its parameters' types
     // and `modes` their modes, and `elem` is what it gives back, a result when it can fail.
     fn_,
@@ -111,6 +112,7 @@ public:
     Type* string;
     Type* arena;
     Type* thread;
+    Type* library;
 
     // The primitive named `name`, or null.
     Type* primitive(std::string_view name) const;

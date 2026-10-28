@@ -33,7 +33,7 @@ fn main() {
 ## `unsafe` blocks
 
 - `unsafe { }` is a block. Like any block, it can be a statement, or give a value: `let n = unsafe { abs(x) }`.
-- Inside it, and only there, code can use pointers, call C functions and [`unsafe` functions](#unsafe-functions), and call `set_len` on a list.
+- Inside it, and only there, code can use pointers, call C functions and [`unsafe` functions](#unsafe-functions), call `set_len` on a list, and open and close a [library](libraries.md).
 - A block that does none of these is an error, so every `unsafe` marks something unsafe. So is an `unsafe` inside another, which adds nothing.
 - Its variables end with the block, as any block's do. A pointer can't leave it: the block's value can't be a pointer.
 
@@ -45,7 +45,7 @@ fn main() {
 }
 ```
 
-Which modules may use `unsafe` and `extern` isn't enforced yet. The rule, that only Calcite core and trusted plugins may (D15, D23), comes with plugins.
+Which modules may use `unsafe` and `extern` isn't enforced yet. The rule, that only Calcite core and trusted plugins may (D15, D23), comes with Calcite's plugin loader.
 
 ## `unsafe` functions
 

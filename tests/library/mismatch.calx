@@ -1,0 +1,50 @@
+// `find` compares the whole type, not only its name (D123). The library was built with another
+// `shapes`, whose `Point` has a field more, so its `origin` doesn't match the program's, though
+// both say `fn() -> Point`.
+// lib: plugin/plugin.calx
+// file: main.calx
+import std.env.{args}
+import shapes.{Point}
+
+fn main() {
+    let given = args()
+    let path = given[0].copy()
+    let lib = unsafe { Library.open(path)! }
+    match lib.find<fn() -> Point>("origin") {
+        ok(f) => println("{f().x}")
+        err(e) => println("PATH{e[path.len()..]}")
+    }
+    // out: PATH's `origin` is `fn() -> Point` here too, but a type in it isn't the same in the two builds; build them from the same source
+    let count = lib.find<fn(i32) -> i32>("count")!
+    println("{count(3)}")  // out: 6
+}
+
+// file: shapes.calx
+pub struct Point {
+    pub x: i32
+    pub y: i32
+}
+
+// file: plugin/plugin.calx
+import shapes.{Point}
+
+@export
+fn origin() -> Point {
+    return Point { x: 0, y: 0, z: 0 }
+}
+
+@export
+fn count(n: i32) -> i32 {
+    var total = 0
+    for i in 1..=n {
+        total += i
+    }
+    return total
+}
+
+// file: plugin/shapes.calx
+pub struct Point {
+    pub x: i32
+    pub y: i32
+    pub z: i32
+}

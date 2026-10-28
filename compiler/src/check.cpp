@@ -91,7 +91,7 @@ public:
             builtin_names_.push_back(ctx.names.intern(b));
         }
         for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
-                              "Equal", "Display",
+                              "Library", "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
@@ -103,6 +103,7 @@ public:
         n_Sender_ = ctx.names.intern("Sender");
         n_Receiver_ = ctx.names.intern("Receiver");
         n_Thread_ = ctx.names.intern("Thread");
+        n_Library_ = ctx.names.intern("Library");
         n_Task_ = ctx.names.intern("Task");
         n_run_ = ctx.names.intern("run");
         n_SortedMap_ = ctx.names.intern("SortedMap");
@@ -133,7 +134,7 @@ public:
         n_err_ = ctx.names.intern("err");
     }
 
-    void run(const std::vector<Module*>& modules, bool need_main) {
+    void run(const std::vector<Module*>& modules, bool need_main, bool library) {
         prog_.modules = modules;
         for (Module* m : modules) {
             auto scope = std::make_unique<Scope>();
@@ -172,6 +173,7 @@ public:
         defaults_ready_ = true;
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
+        collect_exports();
         for (Item* f : externs_) check_extern(f);
         for (Item* c : consts_) check_const(c);
         for (Item* f : all_fns_) {
@@ -206,7 +208,16 @@ public:
             for (Item* f : all_fns_) check_moves(mc, f, true);
             for (Item* f : pending_fns_) check_moves(mc, f, false);
         }
-        find_main(modules.back(), need_main);
+        find_main(modules.back(), need_main && !library);
+        if (library) {
+            // D123: a library's code runs when the program that opened it calls what it exports.
+            if (prog_.main) {
+                error(prog_.main->name_span, "a library has no `main`: the program that opens it has one, and calls what "
+                                             "the library exports");
+            } else if (prog_.exports.empty()) {
+                error(Span{modules.back()->file, 0, 0}, "a library exports at least one function: mark it `@export`");
+            }
+        }
     }
 
 private:
@@ -519,16 +530,36 @@ private:
         }
     }
 
-    // The one attribute the compiler knows: `@track_caller` on a function, whose panics then name
-    // the place that called it, as a library's checks should (D115). The others, which libraries
-    // will define (D57), aren't built yet.
+    // The attributes the compiler knows: `@track_caller` on a function, whose panics then name
+    // the place that called it, as a library's checks should (D115), and `@export`, which puts a
+    // function in the list a library gives the program that opens it (D123). The others, which
+    // libraries will define (D57), aren't built yet.
     void check_attributes(Item* it, const Item* owner) {
+        const char* known = "attributes aren't implemented yet, except `@track_caller` and `@export` on a function";
         for (const FieldDecl& f : it->fields) {
-            if (!f.attributes.empty()) error(f.attributes[0].span, "attributes aren't implemented yet, except `@track_caller` on a function");
+            if (!f.attributes.empty()) error(f.attributes[0].span, known);
         }
         for (const Attribute& a : it->attributes) {
-            if (a.name.parts.size() != 1 || text(a.name.parts[0]) != "track_caller") {
-                error(a.span, "attributes aren't implemented yet, except `@track_caller` on a function");
+            std::string_view name = a.name.parts.size() == 1 ? text(a.name.parts[0]) : std::string_view();
+            if (name == "export") {
+                it->used = true;  // what it's on is meant to be exported, even when it can't be
+                if (!a.args.empty()) {
+                    error(a.span, "`@export` takes no arguments: a library exports a function under its own name");
+                } else if (it->kind != ItemKind::fn || it->is_extern) {
+                    error(a.span, "`@export` is for a function written in Calx");
+                } else if (owner && (owner->kind == ItemKind::interface || owner->kind == ItemKind::impl)) {
+                    error(a.span, "`@export` is for a function on its own, not one in " +
+                                      std::string(owner->kind == ItemKind::impl ? "an `impl`" : "an interface") +
+                                      "; export one that calls it");
+                } else if (it->exported) {
+                    error(a.span, "`@export` is already on " + q(text(it->name)));
+                } else {
+                    it->exported = true;
+                }
+                continue;
+            }
+            if (name != "track_caller") {
+                error(a.span, known);
             } else if (!a.args.empty()) {
                 error(a.span, "`@track_caller` takes no arguments");
             } else if (it->kind != ItemKind::fn || it->is_extern) {
@@ -2138,6 +2169,13 @@ private:
                     }
                     return T.thread;
                 }
+                if (n == n_Library_ && !env_type(n)) {
+                    if (!t->args.empty()) {
+                        error(t->span, "`Library` doesn't take generic arguments");
+                        return T.error;
+                    }
+                    return T.library;
+                }
                 if (n == n_ArenaList_ && !env_type(n)) {
                     if (t->args.size() != 1) {
                         error(t->span, "`ArenaList` takes one generic argument, the type of its elements: `ArenaList<i32>`");
@@ -3432,7 +3470,12 @@ private:
         std::size_t before = ctx_.diags.error_count();
         unsafe_used_ = false;
         unsafe_depth_++;
+        // A block that only wraps a call that can fail, as in `match unsafe { Library.open(p) }`,
+        // has its result handled where the call is (D91).
+        Expr* saved = result_ok_;
+        if (result_ok_ == e && e->block->stmts.empty() && e->block->tail) result_ok_ = e->block->tail;
         Type* t = check_block(e->block, expected, use);
+        result_ok_ = saved;
         unsafe_depth_--;
         if (!unsafe_used_ && ctx_.diags.error_count() == before) {
             error(kw, "nothing in this block needs `unsafe`; remove it");
@@ -3896,6 +3939,9 @@ private:
         if (leaf->kind == TypeKind::sender || leaf->kind == TypeKind::receiver || leaf->kind == TypeKind::thread) {
             why = std::string(", and ") + (leaf->kind == TypeKind::thread ? "a thread" : "an end of a queue") +
                   " is a handle to something two threads share, which isn't compared, shown, hashed or ordered";
+        }
+        if (leaf->kind == TypeKind::library) {
+            why = ", and a library is a handle to code the program loaded, which isn't compared, shown, hashed or ordered";
         }
         // Two functions with the same code can be one in the program, so their addresses can't
         // tell them apart (D122).
@@ -5996,9 +6042,10 @@ private:
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
             if (n == n_Arena_ && !find_local(n)) return arena_call(e);
             if (n == n_Receiver_ && !find_local(n)) return receiver_call(e, expected);
-            if ((n == n_Sender_ || n == n_Thread_) && !find_local(n)) {
-                error(callee->span, n == n_Sender_ ? "a `Sender` comes from the `Receiver` of its queue: `r.sender()`"
-                                                   : "a `Thread` is started with `Thread.spawn(task)`");
+            if ((n == n_Sender_ || n == n_Thread_ || n == n_Library_) && !find_local(n)) {
+                error(callee->span, n == n_Sender_   ? "a `Sender` comes from the `Receiver` of its queue: `r.sender()`"
+                                    : n == n_Thread_ ? "a `Thread` is started with `Thread.spawn(task)`"
+                                                     : "a `Library` is opened with `Library.open(path)`, in `unsafe`");
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
@@ -6073,6 +6120,11 @@ private:
             return thread_static(e);
         }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
+            callee->lhs->path.parts.size() == 1 && callee->lhs->path.parts[0] == n_Library_ && !find_local(n_Library_) &&
+            !env_type(n_Library_)) {
+            return library_static(e);
+        }
+        if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
             !e->only_interface) {
             Resolved r = resolve_name(callee->lhs->path.parts[0]);
             if (r.kind == NameKind::item && r.item->kind == ItemKind::interface) return interface_call(e, r.item);
@@ -6102,6 +6154,7 @@ private:
                 callee->member != n_copy_) {
                 return handle_method(e, recv);
             }
+            if (recv->kind == TypeKind::library && callee->member != n_copy_) return library_method(e, expected);
             if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
                 error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
                 for (Arg& a : e->args) check(a.value, nullptr);
@@ -7227,7 +7280,7 @@ private:
     const Type* handle_inside(const Type* t, int depth) {
         if (depth > 64) return nullptr;
         switch (t->kind) {
-            case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: return t;
+            case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: case TypeKind::library: return t;
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
                 return handle_inside(t->elem, depth + 1);
             case TypeKind::map:
@@ -7407,6 +7460,124 @@ private:
             else error(callee->lhs->span, q(m) + " changes the queue, so call it on a variable");
         }
         return result;
+    }
+
+    // `Library.open(path)` (D123): loads a library that `calx build --lib` built, which then
+    // shares the program's runtime. It needs `unsafe`, since loading the library runs its code,
+    // which nothing here has checked.
+    Type* library_static(Expr* e) {
+        Expr* callee = e->callee;
+        callee->lhs->ref = Ref::type;
+        callee->lhs->named_type = T.library;
+        std::string_view m = text(callee->member);
+        if (m != "open") {
+            error(callee->span, "`Library` has no function " + q(m) + "; open a library with `Library.open(path)`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::lib_open;
+        if (unsafe_depth_ == 0) {
+            error(callee->span, "`Library.open` runs code from outside the program, which Calx can't check, so calling it "
+                                "needs `unsafe`");
+        }
+        unsafe_used_ = true;
+        if (!callee->type_args.empty()) error(callee->type_args[0]->span, "`open` doesn't take generic arguments");
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            error(e->span, "`Library.open` takes one argument, the library's path");
+            return T.error;
+        }
+        Type* a = check(e->args[0].value, nullptr);
+        if (is_bad(a)) return T.error;
+        if (a->kind != TypeKind::str && a->kind != TypeKind::string) {
+            error(e->args[0].value->span, "`Library.open` takes the path as a `str` or a `String`, not " + a_type(a));
+            return T.error;
+        }
+        return result_of(T.library, T.string);
+    }
+
+    // `lib.find<F>(name)`, `lib.has(name)` and `lib.close()` (D123). `find` gives the function the
+    // library exports as `name` if it has the type `F`, all the way down: a struct in it must have
+    // the same fields in both builds. It's safe, since a library stays loaded while anything could
+    // hold a function from it: only `close`, which needs `unsafe`, unloads one.
+    Type* library_method(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        std::string_view m = text(callee->member);
+        e->call = CallKind::builtin_method;
+        BMethod b = BMethod::none;
+        std::string hint;
+        if (m == "find") b = BMethod::lib_find;
+        else if (m == "has") b = BMethod::lib_has;
+        else if (m == "close") b = BMethod::lib_close;
+        else if (m == "get" || m == "symbol" || m == "lookup" || m == "function") {
+            hint = "; find an exported function with `find<fn(...)>(name)`";
+        } else if (m == "unload" || m == "free") {
+            hint = "; unload it with `close()`";
+        }
+        if (b == BMethod::none) {
+            error(callee->span, "`Library` has no method " + q(m) + hint);
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        e->bmethod = b;
+        Type* f = nullptr;
+        if (b == BMethod::lib_find) {
+            if (callee->type_args.size() == 1) {
+                f = resolve_type(callee->type_args[0]);
+                if (!is_bad(f) && f->kind != TypeKind::fn_) {
+                    error(callee->type_args[0]->span, "`find` gives a function, so what it finds is a `fn(...)`, not " +
+                                                         a_type(f));
+                    f = T.error;
+                }
+            } else if (callee->type_args.size() > 1) {
+                error(callee->type_args[1]->span, "`find` takes one generic argument, the function's type: "
+                                                  "`find<fn(i32) -> i32>(name)`");
+                f = T.error;
+            } else if (expected && expected->kind == TypeKind::fn_) {
+                f = expected;
+            } else if (expected && expected->is_result && ok_type(expected)->kind == TypeKind::fn_) {
+                f = ok_type(expected);
+            } else {
+                error(callee->span, "can't tell what type of function to find; give it, as in "
+                                    "`find<fn(i32) -> i32>(name)`, or give the variable a type");
+                f = T.error;
+            }
+            if (!is_bad(f) && f->open) {
+                error(callee->span, "the type `find` looks for has to be known here, so it can't mention a generic "
+                                    "parameter");
+                f = T.error;
+            }
+        } else if (!callee->type_args.empty()) {
+            error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
+        }
+        if (b == BMethod::lib_close) {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (!e->args.empty()) {
+                error(e->args[0].span, "`close` takes no arguments");
+                return T.error;
+            }
+            if (unsafe_depth_ == 0) {
+                error(callee->span, "`close` unloads the library, after which a function found in it would call nothing, "
+                                    "so it needs `unsafe`");
+            }
+            unsafe_used_ = true;
+            return T.unit;
+        }
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            error(e->span, q(m) + " takes one argument, the name the library exports the function as");
+            return T.error;
+        }
+        Type* a = check(e->args[0].value, nullptr);
+        if (is_bad(a)) return T.error;
+        if (a->kind != TypeKind::str && a->kind != TypeKind::string) {
+            error(e->args[0].value->span, q(m) + " takes the name as a `str` or a `String`, not " + a_type(a));
+            return T.error;
+        }
+        if (b == BMethod::lib_has) return T.bool_;
+        if (is_bad(f)) return T.error;
+        return result_of(f, T.string);
     }
 
     // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
@@ -7737,8 +7908,9 @@ private:
         }
         if (const Type* h = handle_inside(recv, 0)) {
             error(e->callee->span, name_of(recv) + " can't be copied" + (h == recv ? "" : ", since it holds " + name_of(h)) +
-                                       (h->kind == TypeKind::thread ? "; a thread is joined once, by whatever holds it"
-                                                                    : "; make another end of the same queue with `share()`"));
+                                       (h->kind == TypeKind::thread    ? "; a thread is joined once, by whatever holds it"
+                                        : h->kind == TypeKind::library ? "; a library is closed once, by whatever holds it"
+                                                                       : "; make another end of the same queue with `share()`"));
             return T.error;
         }
         return recv;
@@ -8230,6 +8402,56 @@ private:
         }
     }
 
+    // D123: the functions marked `@export`, which a library lists under their own names for the
+    // program that opens it, with their types as function values, so the program can check it
+    // asked for the type each has.
+    void collect_exports() {
+        std::unordered_map<std::string_view, Item*> by_name;
+        for (Module* m : prog_.modules) {
+            for (Item* f : m->items) {
+                if (f->kind != ItemKind::fn || !f->exported) continue;
+                f->used = true;
+                std::string_view n = text(f->name);
+                if (!f->type_params.empty()) {
+                    error(f->name_span, "an `@export` function can't be generic: a program finds it by its name, which "
+                                        "has one type");
+                    continue;
+                }
+                if (f->track_caller) {
+                    error(f->name_span, "an `@export` function can't be `@track_caller`: the program calls it through a "
+                                        "function value, which can't say where it was called");
+                    continue;
+                }
+                if (n.substr(0, 3) == "cx_") {
+                    error(f->name_span, "names that start with `cx_` are the runtime's, so a library can't export one");
+                    continue;
+                }
+                auto [pos, fresh] = by_name.emplace(n, f);
+                if (!fresh) {
+                    // Two in one module are one name defined twice, already reported.
+                    if (pos->second->module != f->module) {
+                        error(f->name_span, "a library exports one function named " + q(n) + ", and another module exports one too");
+                        note(pos->second->name_span, "the other is here");
+                    }
+                    continue;
+                }
+                std::vector<Type*> params;
+                std::vector<std::uint8_t> modes;
+                bool bad = !f->result_type || is_bad(f->result_type);
+                for (const Param& p : f->params) {
+                    if (!p.local || is_bad(p.local->type)) {
+                        bad = true;
+                        break;
+                    }
+                    params.push_back(p.local->type);
+                    modes.push_back(static_cast<std::uint8_t>(p.mode));
+                }
+                if (bad) continue;
+                prog_.exports.push_back({f, T.fn_of(params, modes, f->result_type, f->is_unsafe)});
+            }
+        }
+    }
+
     // `calx check` takes a library too, so only a program must have a `main`. One that's there
     // is checked either way, so an editor shows what's wrong with it.
     void find_main(Module* m, bool need_main) {
@@ -8283,7 +8505,7 @@ private:
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
     Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
-    Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_;
+    Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_, n_Library_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
@@ -8337,9 +8559,9 @@ private:
 
 }  // namespace
 
-void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main) {
+void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main, bool library) {
     Checker c(ctx, program);
-    c.run(modules, need_main);
+    c.run(modules, need_main, library);
 }
 
 }  // namespace calx

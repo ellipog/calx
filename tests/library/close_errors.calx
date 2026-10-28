@@ -1,0 +1,7 @@
+// `close` uses a library up (D123).
+
+fn main() {
+    let lib = unsafe { Library.open("plugin.dll")! }
+    unsafe { lib.close() }
+    println("{lib.has("one")}")  // error: `lib` was moved
+}

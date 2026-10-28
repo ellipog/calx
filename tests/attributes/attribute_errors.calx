@@ -6,9 +6,9 @@ struct Pos {
     x: i32
 }
 
-@message    // error: attributes aren't implemented yet, except `@track_caller` on a function
+@message    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
 struct Msg {
-    @save    // error: attributes aren't implemented yet, except `@track_caller` on a function
+    @save    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
     n: i32
 }
 
@@ -33,7 +33,7 @@ impl Pos {
     fn half(self) -> i32 {
         return self.x / 2
     }
-    @whatever    // error: attributes aren't implemented yet, except `@track_caller` on a function
+    @whatever    // error: attributes aren't implemented yet, except `@track_caller` and `@export` on a function
     fn same(self) -> i32 {
         return self.x
     }

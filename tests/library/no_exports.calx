@@ -1,0 +1,6 @@
+// error: a library exports at least one function: mark it `@export`
+// kind: library
+
+pub fn helper() -> i32 {
+    return 1
+}

@@ -31,6 +31,7 @@ Types::Types(Arena& arena) : arena_(arena) {
     string = make(TypeKind::string, "String");
     this->arena = make(TypeKind::arena, "Arena");
     thread = make(TypeKind::thread, "Thread");
+    library = make(TypeKind::library, "Library");
     for (Type* t : {bool_, i8, i16, i32, i64, u8, u16, u32, u64, usize, char_, rune, f32, f64, str, string}) {
         primitives_.push_back({t->name, t});
     }
@@ -296,6 +297,7 @@ bool is_view_type(const Type* t) {
         case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
         case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
+        case TypeKind::library:
             return true;
         case TypeKind::enum_: return t->has_data;
         case TypeKind::optional: return is_view_type(t->elem);
@@ -310,7 +312,8 @@ bool copy_walk(const Type* t, int depth) {
     if (depth > 64) return true;
     switch (t->kind) {
         case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-        case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: return false;
+        case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
+        case TypeKind::library: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1);
         case TypeKind::tuple:

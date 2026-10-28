@@ -310,7 +310,7 @@ So nothing one region can name belongs to another. WASM plugins get the same rul
 
 ## Modules and builds
 
-Built: see [Modules](reference/modules.md) and [the calx command](reference/command.md). Still to build:
+Built: see [Modules](reference/modules.md) and [the calx command](reference/command.md). A [library](reference/libraries.md), built with `calx build --lib`, exports functions marked `@export`, which a program opens while it runs and finds by name and type: the type is checked down to every struct's fields, and the library uses the program's runtime, so its memory, output and panics are the program's (D123). That's what a native plugin is. Still to build:
 
 - **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
 - **Reaching items through a module's name:** `import std.math`, then `math.floor(x)`.
@@ -336,7 +336,7 @@ Build time is tracked like run time (D34): [`bench/build.py`](../bench/build.py)
 Built: `extern "C"` declarations and calls, with integers, floats, `bool` and pointers ([C functions](reference/unsafe.md#c-functions)). Still to build:
 
 - C's own type names are in `std.c`: `c.int`, `c.size_t`, and `CStr` for C strings.
-- `@export_c("name")` exports a Calx function with the C ABI. Plugin entry points use it, and the host calls them through it.
+- `@export_c("name")` exports a Calx function with the C ABI, for C code to call. A Calx plugin doesn't need it: [`@export`](reference/libraries.md) exports a function with Calx's own ABI, whose type the host checks when it finds it (D123).
 - `extern` is allowed only in trusted modules, the same rule as `unsafe`. A WASM build has no `extern` except the host's imports.
 - Struct layout follows C's rules for `@repr(c)` structs. Other structs' layout is the compiler's choice.
 
@@ -346,7 +346,7 @@ Three kinds of generated code:
 
 ### Library-defined attributes
 
-Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57). Built: the one attribute the compiler knows, `@track_caller`, whose function reports panics at its caller ([Panics that name the caller](reference/printing.md#panics-that-name-the-caller), D115). Any other attribute is an error until libraries can define them.
+Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57). Built: the two attributes the compiler knows, `@track_caller`, whose function reports panics at its caller ([Panics that name the caller](reference/printing.md#panics-that-name-the-caller), D115), and `@export`, which exports a function from a [library](reference/libraries.md) (D123). Any other attribute is an error until libraries can define them.
 
 ```calx
 /// Declares a packet. Generates its reader, its writer and its ID lookup.
@@ -372,7 +372,7 @@ Phase 2's converter writes vanilla's data as neutral JSON tables: block states, 
 
 ### Debugging
 
-Built: the emitter writes `#line` directives and both build modes keep line tables, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C ([build modes](reference/command.md#build-modes)). Editors get errors as you type ([editor support](reference/editors.md)). A panic writes its Calx stack trace, inlined calls and `parallel for` bodies included ([stack traces](reference/printing.md#stack-traces)).
+Built: the emitter writes `#line` directives and both build modes keep line tables, so debuggers and profilers on Windows and Linux show Calx source lines, not the generated C ([build modes](reference/command.md#build-modes)). Editors get errors as you type ([editor support](reference/editors.md)). A panic writes its Calx stack trace, inlined calls, `parallel for` bodies and the libraries the program opened included ([stack traces](reference/printing.md#stack-traces)).
 
 ## Non-goals
 

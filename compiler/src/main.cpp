@@ -43,6 +43,7 @@ int usage() {
         "\n"
         "options:\n"
         "  --release   optimize (the default is a debug build, which builds fastest)\n"
+        "  --lib       build a library, which a program opens while it runs\n"
         "  -o PATH     where build and emit-c write\n"
         "  --timings   print how long each step took\n"
         "  --verbose   print the clang commands\n"
@@ -59,6 +60,7 @@ struct Options {
     std::string output;
     std::vector<std::string> program_args;
     BuildMode mode = BuildMode::debug;
+    bool library = false;
     bool timings = false;
     bool verbose = false;
     bool line_directives = true;
@@ -91,6 +93,8 @@ int main(int argc, char** argv) {
             break;
         } else if (a == "--release") {
             opt.mode = BuildMode::release;
+        } else if (a == "--lib") {
+            opt.library = true;
         } else if (a == "--timings") {
             opt.timings = true;
         } else if (a == "--verbose") {
@@ -115,6 +119,10 @@ int main(int argc, char** argv) {
     }
     bool known = opt.command == "check" || opt.command == "build" || opt.command == "run" || opt.command == "emit-c";
     if (!known || opt.input.empty()) return usage();
+    if (opt.library && opt.command == "run") {
+        std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
+        return 2;
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     Sources sources;
@@ -142,7 +150,8 @@ int main(int argc, char** argv) {
     std::vector<Module*> modules = load_program(ParseContext{sources, names, arena, diags}, sources, file, home, home_error);
     Program program;
     if (!diags.has_errors()) {
-        check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check");
+        check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check",
+                      opt.library);
     }
     if (opt.json) {
         diags.print_json(stdout);
@@ -166,6 +175,7 @@ int main(int argc, char** argv) {
     auto t1 = std::chrono::steady_clock::now();
     EmitOptions eo;
     eo.line_directives = opt.line_directives;
+    eo.library = opt.library;
     std::vector<CFile> files = emit_c(program, sources, names, eo);
     double emit_ms = ms(t1);
     if (opt.command == "emit-c") {
@@ -203,7 +213,7 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> c_sources;
     for (CFile& f : files) c_sources.push_back(std::move(f.text));
-    BuildResult b = build_program(tc, c_sources, opt.mode, opt.verbose);
+    BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose);
     if (!b.ok) return 1;
     if (opt.timings) {
         std::fprintf(stderr, "front end: %.1f ms, emit: %.1f ms, clang: %.1f ms, link: %.1f ms%s\n", front_ms, emit_ms,
@@ -213,14 +223,17 @@ int main(int argc, char** argv) {
         std::string out = opt.output;
         if (out.empty()) {
             out = std::filesystem::path(opt.input).stem().string();
+            if (opt.library) {
+                out += library_suffix();
+            } else {
 #ifdef _WIN32
-            out += ".exe";
+                out += ".exe";
 #endif
+            }
         }
-        std::error_code ec;
-        std::filesystem::copy_file(b.exe, out, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            std::fprintf(stderr, "calx: can't write %s: %s\n", out.c_str(), ec.message().c_str());
+        std::string why;
+        if (!place_build(b.exe, out, why)) {
+            std::fprintf(stderr, "calx: %s\n", why.c_str());
             return 1;
         }
         return 0;

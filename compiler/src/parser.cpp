@@ -268,7 +268,9 @@ private:
                 case Tok::ushr: depth -= 3; break;
                 case Tok::ident: case Tok::dot: case Tok::comma: case Tok::question: case Tok::lparen:
                 case Tok::rparen: case Tok::lbracket: case Tok::rbracket: case Tok::semicolon: case Tok::int_lit:
-                case Tok::star: case Tok::kw_const: case Tok::kw_fn: case Tok::arrow: case Tok::kw_dyn: break;
+                case Tok::star: case Tok::kw_const: case Tok::kw_fn: case Tok::arrow: case Tok::kw_dyn:
+                // A function type's modes, `unsafe` and error: `find<unsafe fn(mut T) -> R ! E>`.
+                case Tok::kw_mut: case Tok::kw_own: case Tok::kw_unsafe: case Tok::bang: break;
                 default: return false;
             }
             if (depth == 0) return true;

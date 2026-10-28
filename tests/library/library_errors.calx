@@ -1,0 +1,25 @@
+// What a program can't do with a `Library` (D123).
+
+fn main() ! String {
+    _ = try Library.open("plugin.dll")  // error: `Library.open` runs code from outside the program
+    let lib = unsafe { try Library.open("plugin.dll") }
+    // A result passes through a block that only wraps its call, and no other.
+    _ = try unsafe { Library.open("other.dll") }
+    _ = try unsafe {
+        let path = "other.dll"
+        Library.open(path)  // error: this call can fail, so handle its error here
+    }
+    _ = Library()  // error: a `Library` is opened with `Library.open(path)`
+    _ = unsafe { Library.load("x") }  // error: `Library` has no function `load`
+    _ = lib.find("double")  // error: can't tell what type of function to find
+    _ = lib.find<i32>("double")  // error: `find` gives a function, so what it finds is a `fn(...)`, not an `i32`
+    _ = lib.find<fn(i32) -> i32, i32>("double")  // error: `find` takes one generic argument
+    _ = lib.get("double")  // error: `Library` has no method `get`; find an exported function with `find<fn(...)>(name)`
+    _ = lib.unload()  // error: `Library` has no method `unload`; unload it with `close()`
+    _ = lib.find<fn(i32) -> i32>(3)  // error: `find` takes the name as a `str` or a `String`, not an `i32`
+    _ = lib == lib  // error: a library is a handle to code the program loaded
+    _ = lib.copy()  // error: `Library` can't be copied; a library is closed once, by whatever holds it
+    _ = lib.has()  // error: `has` takes one argument
+    lib.close()  // error: `close` unloads the library
+    return
+}

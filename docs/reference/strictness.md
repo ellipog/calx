@@ -44,6 +44,7 @@ Each rule is on the page of the feature it's about:
 | An attribute the compiler doesn't know is an error, wherever it's written, rather than ignored | [Panics](printing.md#panics-that-name-the-caller) |
 | Every `unsafe` block does something unsafe, and none is inside another. A pointer is only a value of its own, inside `unsafe` | [Unsafe code](unsafe.md#unsafe-blocks) |
 | A C function takes and returns only C types, and has one signature wherever it's declared | [C functions](unsafe.md#c-functions) |
+| A function found in a library has the type asked for, down to every struct's fields in both builds, or isn't found. A library is from the same build of Calx as the program that opens it | [Libraries](libraries.md#types-match-all-the-way-down) |
 
 ## Nothing is dropped silently
 

@@ -102,7 +102,8 @@ panic at example.calx:2:5: assertion failed: 7 is odd
 - A file inside the folder the program runs in is written relative to it, as in the message; any other in full.
 - A [`@track_caller`](#panics-that-name-the-caller) function's message names its caller, and its trace still starts in the function, at its own line.
 - Inside a `parallel for`, the trace is the one a single thread running the loop would write: the body at its line, the loop at its line, then out to `main`, loops inside loops too, whichever threads ran what. Each thread writes the part of it that's on its stack.
-- The program reads them from its own line tables when it panics. Every build has those, and they don't change the generated code, so until a panic a trace costs nothing. It looks at the innermost 128 calls, not counting inlined ones, so the trace of a panic deep in a recursion stops before `main`.
+- A panic in a [library](libraries.md) is the program's, and its trace goes through both, the library's functions under their module's name.
+- The program reads them from its own line tables when it panics. Every build has those, and they don't change the generated code, so until a panic a trace costs nothing. On Windows they're in a PDB, which `calx build` puts beside the program ([command](command.md)). It looks at the innermost 128 calls, not counting inlined ones, so the trace of a panic deep in a recursion stops before `main`.
 
 ### Panics that name the caller
 
@@ -137,4 +138,4 @@ fn main() {
 - It's for functions and a type's own methods. A method of an interface's impl can't have it, since the interface's callers don't pass a place, and neither can `main`, since no Calx code calls it.
 - In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, and its panics use that string, so it costs one pointer per call.
 
-`@track_caller` is the only attribute the compiler knows. Any other is an error, until libraries can define their own ([spec](../CALX_SPEC.md#library-defined-attributes)).
+`@track_caller` and [`@export`](libraries.md#building-a-library) are the only attributes the compiler knows. Any other is an error, until libraries can define their own ([spec](../CALX_SPEC.md#library-defined-attributes)).

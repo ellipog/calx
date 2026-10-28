@@ -64,6 +64,7 @@ public:
             Plan p;
             p.module = m;
             p.has_main = m == main_module && prog_.main;
+            p.has_exports = m == main_module && opt_.library && !prog_.exports.empty();
             std::unordered_set<const Item*> seen;
             auto take = [&](Item* g) {
                 if (!seen.insert(g).second) return;
@@ -79,13 +80,16 @@ public:
             for (Item* f : prog_.fns) {
                 if (f->module == m && !f->origin && seen.insert(f).second) p.defs.push_back(f);
             }
+            if (p.has_exports) {
+                for (const Program::Export& x : prog_.exports) take(x.fn);
+            }
             // The glue calls what a type writes for itself (D102), which can need more functions
             // and more glue, until nothing new turns up.
             for (std::size_t done = 0;;) {
                 for (; done < p.defs.size(); done++) {
                     for (Item* g : fns_.at(p.defs[done]).uses.fns) take(g);
                 }
-                if (p.defs.empty() && !p.has_main) break;  // types and constants go where they're used
+                if (p.defs.empty() && !p.has_main && !p.has_exports) break;  // types and constants go where they're used
                 gather(p);
                 std::size_t defs = p.defs.size(), externs = p.externs.size();
                 for (int prop = 0; prop < kProps; prop++) {
@@ -101,7 +105,7 @@ public:
         std::vector<CFile> files;
         for (const Plan& p : plans) {
             bool has_main = p.has_main;
-            if (p.defs.empty() && !has_main) continue;
+            if (p.defs.empty() && !has_main && !p.has_exports) continue;
             const Uses& all = p.all;
             printed_ = std::unordered_set<const Type*>(all.names.begin(), all.names.end());
             equated_ = std::unordered_set<const Type*>(p.glue[prop_equal].begin(), p.glue[prop_equal].end());
@@ -149,6 +153,7 @@ public:
                 }
                 out_ += "return cx_finish();\n}\n";
             }
+            if (p.has_exports) out_ += exports();
             files.push_back({std::string(p.module->prefix) + ".c", std::move(out_)});
             out_.clear();
         }
@@ -210,6 +215,7 @@ private:
     struct Plan {
         Module* module = nullptr;
         bool has_main = false;
+        bool has_exports = false;    // a library's main module, which lists what it exports (D123)
         std::vector<Item*> defs;     // defined here: its own functions, then the instances they reach
         std::vector<Item*> externs;  // written in another module, and called from here
         std::vector<Item*> c_fns;    // C functions called from here
@@ -333,6 +339,11 @@ private:
     // A C function's prototype. Its C name goes to the linker through an asm label, so the Calx
     // name it's called by in C can't meet anything a header declares.
     std::string c_declaration(const Item* f) const {
+        // In a library, a runtime function is a pointer the header declares, filled in from the
+        // program's when the program opens the library (D123).
+        if (opt_.library && text(f->name).substr(0, 3) == "cx_") {
+            return "#define " + std::string(f->c_name) + " " + std::string(text(f->name)) + "\n";
+        }
         std::string s = "extern " + ctype(f->result_type) + " " + std::string(f->c_name) + "(";
         for (std::size_t i = 0; i < f->params.size(); i++) {
             if (i) s += ", ";
@@ -395,6 +406,7 @@ private:
             case TypeKind::sender: return "cx_Sender";
             case TypeKind::receiver: return "cx_Receiver";
             case TypeKind::thread: return "cx_Thread";
+            case TypeKind::library: return "cx_Library";
             case TypeKind::pointer: return ctype(t->elem) + (t->is_const ? " const*" : "*");
             case TypeKind::struct_: return std::string(t->item->c_name);
             case TypeKind::enum_: return std::string(t->item->c_name);
@@ -459,6 +471,7 @@ private:
             case TypeKind::sender: return "Sender";
             case TypeKind::receiver: return "Receiver";
             case TypeKind::thread: return "Thread";
+            case TypeKind::library: return "Library";
             case TypeKind::int_: return t->is_usize ? "usize" : std::string(t->name);
             case TypeKind::float_: return t->bits == 32 ? "f32" : "f64";
             case TypeKind::bool_: return "bool";
@@ -3823,6 +3836,7 @@ $dropall    m->len = 0;
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
             case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map:
             case TypeKind::set: case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
+            case TypeKind::library:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -4944,6 +4958,135 @@ $dropall    m->len = 0;
         return out + "cx_str_slice(" + b + ", " + lo + ", " + hi + ", " + (r->inclusive ? "1" : "0") + ", " + location(e->span) + "); })";
     }
 
+    // D123: a type's shape, which an export and the `find` that asks for it must agree on: what
+    // it is, with the C name, fields and variants of each struct and enum in it, all the way
+    // down. One that comes again is only named, so a type that holds itself ends.
+    void shape(const Type* t, std::string& s, std::unordered_set<const Type*>& seen) const {
+        auto inner = [&](const char* kind, const Type* e) {
+            s += kind;
+            s += "<";
+            shape(e, s, seen);
+            s += ">";
+        };
+        switch (t->kind) {
+            case TypeKind::struct_: case TypeKind::enum_: {
+                s += t->item->c_name;
+                if (!seen.insert(t).second) return;
+                if (t->kind == TypeKind::struct_) {
+                    s += "{";
+                    for (const FieldDecl& f : t->item->fields) {
+                        s += std::string(text(f.name)) + ":";
+                        shape(f.resolved, s, seen);
+                        s += ",";
+                    }
+                    s += "}";
+                    return;
+                }
+                s += ":" + std::string(t->repr->name) + "{";
+                for (const VariantDecl& v : t->item->variants) {
+                    s += std::string(text(v.name)) + "=" + std::to_string(v.tag) + "(";
+                    for (const Type* x : v.types) {
+                        shape(x, s, seen);
+                        s += ",";
+                    }
+                    s += ")";
+                }
+                s += "}";
+                return;
+            }
+            case TypeKind::optional: inner("optional", t->elem); return;
+            case TypeKind::array:
+                inner("array", t->elem);
+                s += std::to_string(t->length);
+                return;
+            case TypeKind::list: inner(t->heap ? "heap" : t->arena_list ? "arena_list" : "list", t->elem); return;
+            case TypeKind::deque: inner("deque", t->elem); return;
+            case TypeKind::set: inner(("set" + std::to_string(static_cast<int>(t->table))).c_str(), t->elem); return;
+            case TypeKind::map:
+                s += "map" + std::to_string(static_cast<int>(t->table));
+                inner("", t->key);
+                inner("", t->elem);
+                return;
+            case TypeKind::sender: inner("sender", t->elem); return;
+            case TypeKind::receiver: inner("receiver", t->elem); return;
+            case TypeKind::pointer: inner(t->is_const ? "const_ptr" : "ptr", t->elem); return;
+            case TypeKind::tuple:
+                s += "tuple(";
+                for (const Type* x : t->elems) {
+                    shape(x, s, seen);
+                    s += ",";
+                }
+                s += ")";
+                return;
+            case TypeKind::fn_:
+                s += t->unsafe_fn ? "unsafe_fn(" : "fn(";
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    s += std::to_string(t->modes[i]);
+                    shape(t->elems[i], s, seen);
+                    s += ",";
+                }
+                s += ")";
+                shape(t->elem, s, seen);
+                return;
+            default: s += t->name; return;  // the primitives, text, and the handles
+        }
+    }
+
+    std::string shape_hash(const Type* t) const {
+        std::string s;
+        std::unordered_set<const Type*> seen;
+        shape(t, s, seen);
+        std::uint64_t h = 0xcbf29ce484222325ull;
+        for (unsigned char c : s) h = (h ^ c) * 0x100000001b3ull;
+        char buf[24];
+        std::snprintf(buf, sizeof buf, "0x%016llxull", static_cast<unsigned long long>(h));
+        return buf;
+    }
+
+    // What a library exports, for `cx_library` (D123): each function under its own name, with
+    // its type for messages and its shape for `find`.
+    std::string exports() {
+        std::string s = "\nconst cx_lib_export* cx_lib_exports(cx_usize* count) {\n    static const cx_lib_export e[] = {\n";
+        for (const Program::Export& x : prog_.exports) {
+            s += "        {" + c_string_literal(text(x.fn->name)) + ", (void*)&" + std::string(x.fn->c_name) + ", " +
+                 c_string_literal(x.type->name) + ", " + shape_hash(x.type) + "},\n";
+        }
+        return s + "    };\n    *count = " + std::to_string(prog_.exports.size()) + ";\n    return e;\n}\n";
+    }
+
+    // `Library.open(path)`, `lib.find<F>(name)`, `lib.has(name)` and `lib.close()` (D123). Opening
+    // and finding give a result, with the reason in a `String` when they fail.
+    std::string library_method(Expr* e) {
+        Type* rt = e->type;
+        if (e->bmethod == BMethod::lib_open) {
+            std::string l = tmp(), m = tmp();
+            return "({ cx_Library " + l + "; cx_String " + m + "; cx_lib_open(" + text_view(e->args[0].value) + ", &" + l +
+                   ", &" + m + ") ? " + variant_value(rt, 0, {l}) + " : " + variant_value(rt, 1, {m}) + "; })";
+        }
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        switch (e->bmethod) {
+            case BMethod::lib_find: {
+                std::string r = tmp(), n = tmp(), m = tmp(), p = tmp();
+                const Type* f = rt->args[0];
+                return "({ const cx_Library* " + r + " = " + address(recv) + "; cx_str " + n + " = " +
+                       text_view(e->args[0].value) + "; cx_String " + m + "; void* " + p + " = cx_lib_find(" + r + ", " + n +
+                       ", " + c_string_literal(f->name) + ", " + shape_hash(f) + ", &" + m + "); " + p + " ? " +
+                       variant_value(rt, 0, {"(" + ctype(f) + ")" + p}) + " : " + variant_value(rt, 1, {m}) + "; })";
+            }
+            case BMethod::lib_has: {
+                std::string r = tmp();
+                return "({ const cx_Library* " + r + " = " + address(recv) + "; cx_lib_has(" + r + ", " +
+                       text_view(e->args[0].value) + "); })";
+            }
+            case BMethod::lib_close: {
+                std::string h = tmp();
+                return "({ cx_Library " + h + " = " + value(recv, t) + "; cx_lib_close(&" + h + "); })";
+            }
+            default: return "0";
+        }
+    }
+
     // `Thread.spawn(task)`: the task moves to the heap, where the new thread finds it, and a
     // function of its own moves it back out and calls its `run` (D121).
     std::string spawn(Expr* e) {
@@ -4999,9 +5142,11 @@ $dropall    m->len = 0;
             return text_view(e->args[i].value);
         };
         if (e->bmethod == BMethod::thread_spawn) return spawn(e);
+        if (e->bmethod == BMethod::lib_open) return library_method(e);
         if (t->kind == TypeKind::sender || t->kind == TypeKind::receiver || t->kind == TypeKind::thread) {
             return handle_method(e);
         }
+        if (t->kind == TypeKind::library) return library_method(e);
         if (e->bmethod == BMethod::copy) {
             if (is_copy(t)) return expr(recv);  // a generic instance's `T` that's `Copy`
             return copy_fn(t) + "(" + address(recv) + ")";

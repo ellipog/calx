@@ -1075,6 +1075,13 @@ private:
             case BMethod::thread_spawn:
                 expr(arg(0), Use::consume);
                 return;
+            // D123: closing a library uses it up.
+            case BMethod::lib_open:
+                expr(arg(0), Use::view);
+                return;
+            case BMethod::lib_close:
+                expr(recv, Use::consume);
+                return;
             default:
                 expr(recv, Use::view);
                 for (const Arg& a : e->args) expr(a.value, Use::view);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -34,9 +35,11 @@ std::string env(const char* name) {
 #ifdef _WIN32
 constexpr char kPathSep = ';';
 constexpr const char* kExe = ".exe";
+constexpr const char* kLib = ".dll";
 #else
 constexpr char kPathSep = ':';
 constexpr const char* kExe = "";
+constexpr const char* kLib = ".so";
 #endif
 
 // A name part no other build, in this process or another, uses at the same time: for the
@@ -544,10 +547,172 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
     }
 }
 
+// The compiler's own executable.
+fs::path self_exe() {
+#ifdef _WIN32
+    std::wstring w(1024, L'\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, w.data(), static_cast<DWORD>(w.size()));
+        if (n == 0) return {};
+        if (n < w.size()) {
+            w.resize(n);
+            return fs::path(w);
+        }
+        w.resize(w.size() * 2);
+    }
+#else
+    std::error_code ec;
+    return fs::read_symlink("/proc/self/exe", ec);
+#endif
+}
+
+// The runtime as a library sees it (D123): every function calx_rt.h declares with `CX_FN`, in
+// order, and a hash of the compiler and the header, which a library and the program that opens it
+// must share, since the compiler decides how Calx values are laid out and passed. The compiler's
+// part is a hash of its own bytes, kept in the cache under its size and time, so it's read once.
+struct RuntimeApi {
+    std::vector<std::string> fns;
+    std::uint64_t abi = 0;
+};
+
+bool runtime_api(const Toolchain& tc, const std::string& header, RuntimeApi& api) {
+    for (std::size_t at = header.find("CX_FN("); at != std::string::npos; at = header.find("CX_FN(", at + 1)) {
+        // A declaration starts its line, after at most an attribute: not the macro's own
+        // definition, nor a comment that names it.
+        std::size_t line = header.rfind('\n', at);
+        line = line == std::string::npos ? 0 : line + 1;
+        std::string_view before(header.data() + line, at - line);
+        if (!before.empty() && before != "CX_COLD " && before != "__attribute__((cold)) ") continue;
+        // `CX_FN(ret, name, (params))`: the name is after the first comma.
+        std::size_t comma = header.find(',', at);
+        if (comma == std::string::npos) return false;
+        std::size_t b = comma + 1;
+        while (b < header.size() && header[b] == ' ') b++;
+        std::size_t e = b;
+        while (e < header.size() && (std::isalnum(static_cast<unsigned char>(header[e])) || header[e] == '_')) e++;
+        if (e == b) return false;
+        api.fns.push_back(header.substr(b, e - b));
+    }
+    fs::path exe = self_exe();
+    std::error_code ec;
+    auto size = fs::file_size(exe, ec);
+    if (ec) return false;
+    auto time = fs::last_write_time(exe, ec).time_since_epoch().count();
+    if (ec) return false;
+    std::string id = exe.string() + "|" + std::to_string(size) + "|" + std::to_string(time);
+    fs::path saved = fs::path(tc.cache) / "abi" / (hash_hex({"compiler", id}) + ".txt");
+    std::string self;
+    if (!read_file(saved.string(), self) || self.size() != 32) {
+        std::string bytes;
+        if (!read_file(exe.string(), bytes)) return false;
+        self = hash_hex({"compiler-bytes", bytes});
+        fs::create_directories(saved.parent_path(), ec);
+        write_file_atomic(saved.string(), self);
+    }
+    std::string h = hash_hex({"abi", self, header});
+    api.abi = std::stoull(h.substr(0, 16), nullptr, 16);
+    return true;
+}
+
+std::string hex64(std::uint64_t v) {
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "0x%016llxull", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+// A program that opens libraries holds the address of each runtime function, in the header's
+// order, after the empty table every table starts at.
+std::string runtime_table_c(const RuntimeApi& api) {
+    std::string s = "/* The runtime functions a library takes from this program (D123). */\n#include \"calx_rt.h\"\n\n"
+                    "void* const cx_runtime_fns[] = {\n    (void*)cx_table_empty,\n";
+    for (const std::string& f : api.fns) s += "    (void*)&" + f + ",\n";
+    s += "};\nconst cx_usize cx_runtime_count = " + std::to_string(api.fns.size()) + ";\nconst cx_u64 cx_runtime_abi = " +
+         hex64(api.abi) + ";\n";
+    return s;
+}
+
+// A library's pointers to those functions, which `attach` fills in, and `cx_library`, the one
+// symbol it exports, which says what it was built with and lists what it exports.
+std::string library_attach_c(const RuntimeApi& api) {
+    std::string s = "/* This library's pointers to the runtime functions of the program that opens it (D123). */\n"
+                    "#include \"calx_rt.h\"\n\nconst cx_u8* cx_table_empty_at;\n";
+    for (const std::string& f : api.fns) s += "__typeof__(" + f + ") " + f + ";\n";
+    s += "\nstatic void attach(void* const* f) {\n    cx_table_empty_at = (const cx_u8*)f[0];\n";
+    for (std::size_t i = 0; i < api.fns.size(); i++) {
+        s += "    " + api.fns[i] + " = (__typeof__(" + api.fns[i] + "))f[" + std::to_string(i + 1) + "];\n";
+    }
+    s += "}\n\nconst cx_lib_export* cx_lib_exports(cx_usize* count);\n\n"
+         "#ifdef _WIN32\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n"
+         "const cx_lib_info cx_library = {" + hex64(api.abi) + ", " + std::to_string(api.fns.size()) +
+         ", attach, cx_lib_exports};\n";
+    return s;
+}
+
 }  // namespace
 
-BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose) {
+const char* library_suffix() { return kLib; }
+
+bool place_build(const std::string& built, const std::string& out, std::string& error) {
+    std::error_code ec;
+    fs::copy_file(built, out, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        error = "can't write " + out + ": " + ec.message();
+        return false;
+    }
+#ifdef _WIN32
+    // The image names its PDB by the path it was linked with, in the cache, which a later build
+    // can trim. So the PDB goes beside it as `out.pdb`, and the image names that instead: the
+    // name alone, which debuggers and dbghelp look for beside the image.
+    std::string image;
+    if (!read_file(out, image)) {
+        error = "can't read " + out;
+        return false;
+    }
+    auto u16 = [&](std::size_t at) -> std::uint32_t {
+        return at + 2 <= image.size() ? static_cast<unsigned char>(image[at]) | static_cast<unsigned char>(image[at + 1]) << 8 : 0;
+    };
+    auto u32 = [&](std::size_t at) -> std::uint32_t { return u16(at) | u16(at + 2) << 16; };
+    std::size_t pe = u32(0x3C);
+    if (image.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return true;
+    std::size_t opt = pe + 24;
+    std::size_t dirs = opt + (u16(opt) == 0x20B ? 112 : 96);
+    std::uint32_t debug_rva = u32(dirs + 6 * 8), debug_size = u32(dirs + 6 * 8 + 4);
+    std::size_t sections = opt + u16(pe + 20), count = u16(pe + 6);
+    std::size_t debug = 0;
+    for (std::size_t i = 0; i < count; i++) {
+        std::size_t s = sections + 40 * i;
+        std::uint32_t vsize = u32(s + 8), va = u32(s + 12), rsize = u32(s + 16), raw = u32(s + 20);
+        if (debug_rva >= va && debug_rva < va + std::max(vsize, rsize)) debug = debug_rva - va + raw;
+    }
+    if (!debug) return true;
+    for (std::size_t e = debug; e + 28 <= debug + debug_size && e + 28 <= image.size(); e += 28) {
+        std::uint32_t type = u32(e + 12), size = u32(e + 16), at = u32(e + 24);
+        if (type != 2 || at + size > image.size() || size < 25 || image.compare(at, 4, "RSDS") != 0) continue;
+        std::size_t name_at = at + 24, room = size - 24;
+        std::string pdb = image.substr(name_at, image.find('\0', name_at) - name_at);
+        fs::path to = fs::path(out).replace_extension(".pdb");
+        std::string name = to.filename().string();
+        if (name.size() + 1 > room || !file_exists(pdb)) return true;
+        fs::copy_file(pdb, to, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = "can't write " + to.string() + ": " + ec.message();
+            return false;
+        }
+        image.replace(name_at, room, name + std::string(room - name.size(), '\0'));
+        if (!write_file_atomic(out, image)) {
+            error = "can't write " + out;
+            return false;
+        }
+        return true;
+    }
+#endif
+    return true;
+}
+
+BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources_in, BuildMode mode, BuildKind kind,
+                          bool verbose) {
     BuildResult r;
+    bool library = kind == BuildKind::library;
     fs::path runtime = fs::path(tc.home) / "runtime";
     std::string rt_h, rt_c, sort_h, btree_h, heap_h;
     if (!read_file((runtime / "calx_rt.h").string(), rt_h) || !read_file((runtime / "calx_rt.c").string(), rt_c) ||
@@ -558,6 +723,19 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
     // Any file may include the sort's template, the sorted tables' (D112) or the queues' (D113), so
     // the keys cover them as they cover the header.
+    // A library takes the runtime's functions from the program that opens it, and a program that
+    // opens libraries has every one of them to give (D123).
+    std::vector<std::string> c_sources = c_sources_in;
+    bool opens = false;
+    for (const std::string& c : c_sources) opens = opens || (!library && c.find("cx_lib_") != std::string::npos);
+    if (library || opens) {
+        RuntimeApi api;
+        if (!runtime_api(tc, rt_h, api)) {
+            std::fprintf(stderr, "calx: can't read the runtime's functions in %s\n", runtime.string().c_str());
+            return r;
+        }
+        c_sources.push_back(library ? library_attach_c(api) : runtime_table_c(api));
+    }
     rt_h += sort_h;
     rt_h += btree_h;
     rt_h += heap_h;
@@ -584,6 +762,14 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // (D99).
     bool lto = mode == BuildMode::release && tc.lld;
     if (lto) flags.push_back("-flto=thin");
+    if (library) {
+        flags.push_back("-DCX_LIBRARY");
+#ifndef _WIN32
+        // Only `cx_library` is for the system to find.
+        flags.push_back("-fPIC");
+        flags.push_back("-fvisibility=hidden");
+#endif
+    }
     std::string flag_text;
     for (const std::string& f : flags) flag_text += f + " ";
 
@@ -598,6 +784,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // the tables that change the case of text (D117), the hashes, crypto, zlib, lz4 and HTTP (D118),
     // and threads and their queues (D121).
     auto calls = [&](std::initializer_list<const char*> names) {
+        if (opens) return true;
         for (const std::string& c : c_sources) {
             for (const char* n : names) {
                 if (c.find(n) != std::string::npos) return true;
@@ -617,6 +804,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Stack traces are in every program, since any can panic, in a file of their own since they
     // read debug information, which the rest of the runtime never does.
     bool parts_ok = part("calx_trace.c");
+    if (parts_ok && opens) parts_ok = part("calx_lib.c");
     if (parts_ok && calls({"cx_net_"})) parts_ok = part("calx_net.c");
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");
@@ -652,6 +840,12 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
 
     std::vector<std::string> link_flags;
     if (tc.lld) link_flags.push_back("-fuse-ld=lld");
+    if (library) {
+        link_flags.push_back("-shared");
+#ifdef _WIN32
+        link_flags.push_back("-Wl,/noimplib");  // nothing links against it: programs open it
+#endif
+    }
 #ifdef _WIN32
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
     // The driver always names the static C runtime when linking; the objects name the DLL one.
@@ -685,7 +879,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::string link_text;
     for (const std::string& f : link_flags) link_text += f + " ";
     std::string exe_key = hash_hex({"exe", all_keys, link_text, tc.identity});
-    r.exe = (fs::path(tc.cache) / "bin" / (exe_key + kExe)).string();
+    const char* suffix = library ? kLib : kExe;
+    r.exe = (fs::path(tc.cache) / "bin" / (exe_key + suffix)).string();
     if (file_exists(r.exe)) {
         touch(r.exe);
         r.ok = true;
@@ -708,16 +903,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         compiles.push_back(cmd);
         renames.push_back({temp, obj});
     };
-    if (file_exists(rt_obj)) {
-        touch(rt_obj);
-    } else {
-        compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-    }
-    if (file_exists(alloc_obj)) touch(alloc_obj);
-    else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-    for (const auto& [file, obj] : parts) {
-        if (file_exists(obj)) touch(obj);
-        else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+    if (!library) {  // a library links none of the runtime
+        if (file_exists(rt_obj)) touch(rt_obj);
+        else compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+        if (file_exists(alloc_obj)) touch(alloc_obj);
+        else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+        for (const auto& [file, obj] : parts) {
+            if (file_exists(obj)) touch(obj);
+            else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+        }
     }
     // Each build writes its C under a name of its own: two builds that need the same module, such
     // as a std one, would otherwise share the file, and one could delete it while the other's
@@ -766,11 +960,13 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Linked under a unique name, then renamed, so two builds of one program can't collide. On
     // Windows the PDB keeps the unique name, which the executable records, so debuggers find it.
     std::string stamp = unique_stamp();
-    std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + kExe)).string();
+    std::string temp_exe = (fs::path(tc.cache) / "bin" / (exe_key + "." + stamp + suffix)).string();
     std::vector<std::string> inputs = objs;
-    inputs.push_back(rt_obj);
-    inputs.push_back(alloc_obj);
-    for (const auto& [file, obj] : parts) inputs.push_back(obj);
+    if (!library) {
+        inputs.push_back(rt_obj);
+        inputs.push_back(alloc_obj);
+        for (const auto& [file, obj] : parts) inputs.push_back(obj);
+    }
     if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
         std::fprintf(stderr, "calx: linking failed\n");
         return r;

@@ -3,9 +3,10 @@
  * build inlined is a frame of its own, as it would be in a debug build.
  *
  * Windows asks dbghelp, which reads the program's PDB, and loads it only when a panic needs it,
- * so starting a program doesn't. Linux reads the running executable's ELF symbol table and its
- * DWARF itself, written from the DWARF 4 and 5 standards: the line tables, and for inlined calls,
- * the compile units' entries. Only frames whose line is in a .calx file are shown, so the
+ * so starting a program doesn't, and the PDB of each library the program opened (D123). Linux
+ * reads the ELF symbol table and the DWARF of the program, or of the library a frame is in,
+ * itself, written from the DWARF 4 and 5 standards: the line tables, and for inlined calls, the
+ * compile units' entries. Only frames whose line is in a .calx file are shown, so the
  * runtime's C and the C library's frames aren't. */
 #ifndef _WIN32
 #define _GNU_SOURCE
@@ -210,6 +211,7 @@ void cx_trace_write(void (*text)(const char*), int mode, int ending) {
 
 typedef DWORD(WINAPI* set_options_fn)(DWORD);
 typedef BOOL(WINAPI* initialize_fn)(HANDLE, PCWSTR, BOOL);
+typedef BOOL(WINAPI* search_fn)(HANDLE, PCWSTR);
 typedef BOOL(WINAPI* from_addr_fn)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFOW);
 typedef BOOL(WINAPI* line_fn)(HANDLE, DWORD64, PDWORD, PIMAGEHLP_LINEW64);
 typedef DWORD(WINAPI* inline_count_fn)(HANDLE, DWORD64);
@@ -239,6 +241,40 @@ static void clear_symbol(symbol* s) {
     s->info.MaxNameLen = 255;
 }
 
+/* The folders of the program and of each library the frames are in, for dbghelp to find their
+ * PDBs in: `calx build` puts a PDB beside what it built (D123). */
+static void module_folders(void* const* frames, USHORT n, wchar_t* out, size_t cap) {
+    size_t len = 0;
+    out[0] = 0;
+    for (USHORT i = 0; i < n; i++) {
+        HMODULE m;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCWSTR)frames[i], &m)) {
+            continue;
+        }
+        wchar_t path[MAX_PATH + 1];
+        DWORD k = GetModuleFileNameW(m, path, MAX_PATH);
+        if (k == 0 || k >= MAX_PATH) continue;
+        while (k > 0 && path[k - 1] != L'\\' && path[k - 1] != L'/') k--;
+        if (k == 0) continue;
+        path[k - 1] = 0;
+        /* Each folder once. */
+        size_t plen = wcslen(path);
+        int seen = 0;
+        for (const wchar_t* at = out; *at;) {
+            const wchar_t* end = wcschr(at, L';');
+            size_t alen = end ? (size_t)(end - at) : wcslen(at);
+            if (alen == plen && _wcsnicmp(at, path, plen) == 0) seen = 1;
+            at += alen + (end ? 1 : 0);
+        }
+        if (seen || len + plen + 2 > cap) continue;
+        if (len) out[len++] = L';';
+        memcpy(out + len, path, plen * sizeof(wchar_t));
+        len += plen;
+        out[len] = 0;
+    }
+}
+
 /* A frame with no line, such as one in the runtime, is kept for its name. */
 static void add(found* f, const symbol* s, const IMAGEHLP_LINEW64* line) {
     char name[768], file[3 * MAX_PATH];
@@ -256,6 +292,7 @@ static void found_frames(found* f) {
     if (!dbghelp) goto done;
     set_options_fn set_options = (set_options_fn)(void*)GetProcAddress(dbghelp, "SymSetOptions");
     initialize_fn initialize = (initialize_fn)(void*)GetProcAddress(dbghelp, "SymInitializeW");
+    search_fn set_search = (search_fn)(void*)GetProcAddress(dbghelp, "SymSetSearchPathW");
     from_addr_fn from_addr = (from_addr_fn)(void*)GetProcAddress(dbghelp, "SymFromAddrW");
     line_fn line_of = (line_fn)(void*)GetProcAddress(dbghelp, "SymGetLineFromAddrW64");
     /* Inlined calls, which dbghelp has had since Windows 8. */
@@ -270,6 +307,10 @@ static void found_frames(found* f) {
     static int ready;
     if (!ready && !initialize(process, NULL, TRUE)) goto done;
     ready = 1;
+    /* Set before any symbols load, which deferred loading leaves until a frame needs them. */
+    static wchar_t folders[8192];
+    module_folders(frames, n, folders, sizeof folders / sizeof folders[0]);
+    if (set_search && folders[0]) set_search(process, folders);
     wchar_t wcwd[MAX_PATH];
     if (GetCurrentDirectoryW(MAX_PATH, wcwd) == 0) wcwd[0] = 0;
     utf8_path(wcwd, f->cwd, sizeof f->cwd);
@@ -998,94 +1039,155 @@ static int inline_levels(const dwarf* d, cx_u64 at, level* levels, line_header* 
     return 0;
 }
 
-static int first_object(struct dl_phdr_info* info, size_t size, void* data) {
+/* A program, or a library it opened (D123), mapped to read its symbols and line tables. */
+typedef struct {
+    uintptr_t base; /* where the system loaded it */
+    const cx_u8* image;
+    size_t size;
+    span symtab, strtab;
+    dwarf d;
+} object;
+
+#define MAX_OBJECTS 8
+
+/* Maps the ELF file at `path`, and finds its symbols and line tables. */
+static int open_object(object* o, const char* path, uintptr_t base) {
+    memset(o, 0, sizeof *o);
+    o->base = base;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || (size_t)st.st_size < sizeof(Elf64_Ehdr)) {
+        close(fd);
+        return 0;
+    }
+    size_t size = (size_t)st.st_size;
+    const cx_u8* image = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (image == MAP_FAILED) return 0;
+    o->image = image;
+    o->size = size;
+    const Elf64_Ehdr* eh = (const Elf64_Ehdr*)image;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh->e_shentsize != sizeof(Elf64_Shdr) || eh->e_shoff > size ||
+        (size - eh->e_shoff) / sizeof(Elf64_Shdr) < eh->e_shnum || eh->e_shstrndx >= eh->e_shnum) {
+        return 0;
+    }
+    const Elf64_Shdr* sh = (const Elf64_Shdr*)(image + eh->e_shoff);
+    span names = {NULL, 0};
+    const Elf64_Shdr* sn = &sh[eh->e_shstrndx];
+    if (sn->sh_offset > size || sn->sh_size > size - sn->sh_offset) return 0;
+    names.p = image + sn->sh_offset;
+    names.n = sn->sh_size;
+    dwarf* d = &o->d;
+    for (unsigned i = 0; i < eh->e_shnum; i++) {
+        if (sh[i].sh_type == SHT_NOBITS || sh[i].sh_offset > size || sh[i].sh_size > size - sh[i].sh_offset) continue;
+        if (sh[i].sh_flags & SHF_COMPRESSED) continue;
+        span sec = {image + sh[i].sh_offset, sh[i].sh_size};
+        const char* name = string_at(names, sh[i].sh_name);
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            o->symtab = sec;
+            if (sh[i].sh_link < eh->e_shnum) {
+                const Elf64_Shdr* l = &sh[sh[i].sh_link];
+                if (l->sh_offset <= size && l->sh_size <= size - l->sh_offset) {
+                    o->strtab.p = image + l->sh_offset;
+                    o->strtab.n = l->sh_size;
+                }
+            }
+        } else if (strcmp(name, ".debug_line") == 0) {
+            d->line = sec;
+        } else if (strcmp(name, ".debug_line_str") == 0) {
+            d->line_str = sec;
+        } else if (strcmp(name, ".debug_str") == 0) {
+            d->str = sec;
+        } else if (strcmp(name, ".debug_info") == 0) {
+            d->info = sec;
+        } else if (strcmp(name, ".debug_abbrev") == 0) {
+            d->abbrev = sec;
+        } else if (strcmp(name, ".debug_addr") == 0) {
+            d->addr = sec;
+        } else if (strcmp(name, ".debug_str_offsets") == 0) {
+            d->str_offsets = sec;
+        } else if (strcmp(name, ".debug_rnglists") == 0) {
+            d->rnglists = sec;
+        }
+    }
+    return o->symtab.p && d->line.p;
+}
+
+/* Which loaded object an address is in: its base and its file. */
+typedef struct {
+    uintptr_t at;
+    uintptr_t base;
+    char path[4096];
+    int found;
+} containing;
+
+static int find_object(struct dl_phdr_info* info, size_t size, void* data) {
     (void)size;
-    *(uintptr_t*)data = (uintptr_t)info->dlpi_addr;
-    return 1; /* the first is the program itself */
+    containing* c = (containing*)data;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) continue;
+        uintptr_t lo = (uintptr_t)info->dlpi_addr + (uintptr_t)ph->p_vaddr;
+        if (c->at >= lo && c->at - lo < (uintptr_t)ph->p_memsz) {
+            c->base = (uintptr_t)info->dlpi_addr;
+            /* The program itself has no name here. */
+            const char* name = info->dlpi_name && *info->dlpi_name ? info->dlpi_name : "/proc/self/exe";
+            snprintf(c->path, sizeof c->path, "%s", name);
+            c->found = 1;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void found_frames(found* f) {
     void* frames[MAX_FRAMES];
     int n = backtrace(frames, MAX_FRAMES);
     pthread_mutex_lock(&trace_lock);
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    struct stat st;
-    if (fd < 0) goto done;
-    if (fstat(fd, &st) != 0 || (size_t)st.st_size < sizeof(Elf64_Ehdr)) {
-        close(fd);
-        goto done;
-    }
-    size_t size = (size_t)st.st_size;
-    const cx_u8* image = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (image == MAP_FAILED) goto done;
-    const Elf64_Ehdr* eh = (const Elf64_Ehdr*)image;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_ident[EI_CLASS] != ELFCLASS64 ||
-        eh->e_shentsize != sizeof(Elf64_Shdr) || eh->e_shoff > size ||
-        (size - eh->e_shoff) / sizeof(Elf64_Shdr) < eh->e_shnum || eh->e_shstrndx >= eh->e_shnum) {
-        goto unmap;
-    }
-    const Elf64_Shdr* sh = (const Elf64_Shdr*)(image + eh->e_shoff);
-    span names = {NULL, 0}, symtab = {NULL, 0}, strtab = {NULL, 0};
-    dwarf d;
-    memset(&d, 0, sizeof d);
-    const Elf64_Shdr* sn = &sh[eh->e_shstrndx];
-    if (sn->sh_offset > size || sn->sh_size > size - sn->sh_offset) goto unmap;
-    names.p = image + sn->sh_offset;
-    names.n = sn->sh_size;
-    for (unsigned i = 0; i < eh->e_shnum; i++) {
-        if (sh[i].sh_type == SHT_NOBITS || sh[i].sh_offset > size || sh[i].sh_size > size - sh[i].sh_offset) continue;
-        if (sh[i].sh_flags & SHF_COMPRESSED) continue;
-        span s = {image + sh[i].sh_offset, sh[i].sh_size};
-        const char* name = string_at(names, sh[i].sh_name);
-        if (sh[i].sh_type == SHT_SYMTAB) {
-            symtab = s;
-            if (sh[i].sh_link < eh->e_shnum) {
-                const Elf64_Shdr* l = &sh[sh[i].sh_link];
-                if (l->sh_offset <= size && l->sh_size <= size - l->sh_offset) {
-                    strtab.p = image + l->sh_offset;
-                    strtab.n = l->sh_size;
-                }
-            }
-        } else if (strcmp(name, ".debug_line") == 0) {
-            d.line = s;
-        } else if (strcmp(name, ".debug_line_str") == 0) {
-            d.line_str = s;
-        } else if (strcmp(name, ".debug_str") == 0) {
-            d.str = s;
-        } else if (strcmp(name, ".debug_info") == 0) {
-            d.info = s;
-        } else if (strcmp(name, ".debug_abbrev") == 0) {
-            d.abbrev = s;
-        } else if (strcmp(name, ".debug_addr") == 0) {
-            d.addr = s;
-        } else if (strcmp(name, ".debug_str_offsets") == 0) {
-            d.str_offsets = s;
-        } else if (strcmp(name, ".debug_rnglists") == 0) {
-            d.rnglists = s;
-        }
-    }
-    if (!symtab.p || !d.line.p) goto unmap;
-    uintptr_t bias = 0;
-    dl_iterate_phdr(first_object, &bias);
+    /* Each object is opened once, when a frame is first in it; one without line tables, such as
+     * the C library, is remembered so it isn't opened again. */
+    object objects[MAX_OBJECTS];
+    int usable[MAX_OBJECTS];
+    int count = 0;
     if (!getcwd(f->cwd, sizeof f->cwd)) f->cwd[0] = 0;
-    const Elf64_Sym* syms = (const Elf64_Sym*)symtab.p;
-    size_t sym_count = symtab.n / sizeof(Elf64_Sym);
     for (int i = 0; i < n; i++) {
         /* A return address is just past its call, which may end the call's line. */
-        cx_u64 at = (cx_u64)((uintptr_t)frames[i] - bias - 1);
+        uintptr_t ret = (uintptr_t)frames[i] - 1;
+        containing c;
+        c.at = ret;
+        c.found = 0;
+        dl_iterate_phdr(find_object, &c);
+        if (!c.found) continue;
+        object* o = NULL;
+        int k = 0;
+        for (; k < count; k++) {
+            if (objects[k].base == c.base) break;
+        }
+        if (k == count) {
+            if (count == MAX_OBJECTS) continue;
+            usable[count] = open_object(&objects[count], c.path, c.base);
+            count++;
+        }
+        if (!usable[k]) continue;
+        o = &objects[k];
+        cx_u64 at = (cx_u64)(ret - o->base);
+        const Elf64_Sym* syms = (const Elf64_Sym*)o->symtab.p;
+        size_t sym_count = o->symtab.n / sizeof(Elf64_Sym);
         const char* name = NULL;
-        for (size_t k = 0; k < sym_count; k++) {
-            if (ELF64_ST_TYPE(syms[k].st_info) != STT_FUNC || syms[k].st_shndx == SHN_UNDEF) continue;
-            if (syms[k].st_value <= at && at - syms[k].st_value < syms[k].st_size) {
-                name = string_at(strtab, syms[k].st_name);
+        for (size_t s = 0; s < sym_count; s++) {
+            if (ELF64_ST_TYPE(syms[s].st_info) != STT_FUNC || syms[s].st_shndx == SHN_UNDEF) continue;
+            if (syms[s].st_value <= at && at - syms[s].st_value < syms[s].st_size) {
+                name = string_at(o->strtab, syms[s].st_name);
                 break;
             }
         }
         if (!name || !*name) continue;
+        const dwarf* d = &o->d;
         char path[4096];
         cx_u64 line;
-        if (!find_line(&d, at, path, sizeof path, &line)) {
+        if (!find_line(d, at, path, sizeof path, &line)) {
             frame(f, name, "", 0); /* kept for its name, such as a frame in the runtime */
             continue;
         }
@@ -1093,23 +1195,23 @@ static void found_frames(found* f) {
          * at the line it was called from. */
         level levels[MAX_INLINED];
         line_header h;
-        int depth = d.info.p ? inline_levels(&d, at, levels, &h) : 0;
+        int depth = d->info.p ? inline_levels(d, at, levels, &h) : 0;
         if (depth <= 1) {
             frame(f, name, path, line);
         } else {
             frame(f, levels[depth - 1].name ? levels[depth - 1].name : "", path, line);
-            for (int k = depth - 1; k >= 1; k--) {
+            for (int j = depth - 1; j >= 1; j--) {
                 char call[4096];
-                file_path(&h, levels[k].call_file, call, sizeof call);
-                const char* outer = levels[k - 1].name ? levels[k - 1].name : (k == 1 ? name : "");
-                frame(f, outer, call, levels[k].call_line);
+                file_path(&h, levels[j].call_file, call, sizeof call);
+                const char* outer = levels[j - 1].name ? levels[j - 1].name : (j == 1 ? name : "");
+                frame(f, outer, call, levels[j].call_line);
             }
         }
         if (depth > 0) free_header(&h);
     }
-unmap:
-    munmap((void*)image, size);
-done:
+    for (int k = 0; k < count; k++) {
+        if (objects[k].image) munmap((void*)objects[k].image, objects[k].size);
+    }
     pthread_mutex_unlock(&trace_lock);
 }
 

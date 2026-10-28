@@ -26,6 +26,10 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   the input is empty.
 - `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces.
 - `// status: N` is the exit status the program must end with, which is 0 without one.
+- `// lib: NAME.calx` builds that file of the test, or that file next to it, with
+  `calx build --lib` in the same mode, before the program runs. The path of each library it built,
+  in order, goes to the program as its first arguments, before those `// args:` gives (D123).
+- `// kind: library` checks a test that expects errors as a library, with `calx check --lib`.
 
 A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -57,7 +61,7 @@ BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
@@ -78,6 +82,8 @@ class Test:
         self.stdin = []
         self.args = []
         self.status = 0
+        self.libs = []  # files to build as libraries first
+        self.library = False  # checked as a library
         self.files = []  # (name, text) for a test of several modules, the main one first
         lines = source.splitlines()
         starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
@@ -101,6 +107,10 @@ class Test:
                 self.args.append(text)
             elif kind == "status":
                 self.status = int(text)
+            elif kind == "lib":
+                self.libs.append(text.strip())
+            elif kind == "kind":
+                self.library = text.strip() == "library"
             elif kind == "trace":
                 self.trace.append(text.strip())
             elif kind == "error":
@@ -173,11 +183,22 @@ def run_test(test, mode):
             shown = str(path)
         if test.errors:
             return check_errors(test, path)
+        lib_paths = []
+        for name in test.libs:
+            source = path.parent / name
+            out = pathlib.Path(tmp) / (pathlib.Path(name).stem + (".dll" if os.name == "nt" else ".so"))
+            build = [str(CALX), "build", "--lib", str(source), "-o", str(out)]
+            if mode == "release":
+                build.insert(2, "--release")
+            b = subprocess.run(build, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT)
+            if b.returncode != 0:
+                return [f"building the library {name} failed:\n" + indent((b.stdout + b.stderr).rstrip())]
+            lib_paths.append(str(out))
         cmd = [str(CALX), "run", str(path)]
         if mode == "release":
             cmd.insert(2, "--release")
-        if test.args:
-            cmd += ["--", *test.args]
+        if test.args or lib_paths:
+            cmd += ["--", *lib_paths, *test.args]
         # Bytes, so no newline is translated on the way in or out.
         stdin = "".join(line + "\n" for line in test.stdin).encode("utf-8")
         p = run_limited(cmd, stdin)
@@ -232,7 +253,8 @@ def run_limited(cmd, stdin):
 
 
 def check_errors(test, path):
-    p = subprocess.run([str(CALX), "check", str(path)], capture_output=True, text=True, encoding="utf-8",
+    lib = ["--lib"] if test.library else []
+    p = subprocess.run([str(CALX), "check", *lib, str(path)], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=ROOT)
     problems = []
     if p.returncode == 0:
@@ -263,7 +285,8 @@ def check_json(test, path, expected):
     """`calx check --json --stdin` must report the errors the text output does, at the same places
     (docs/reference/command.md). `expected` holds (line, byte column, message), both from 1."""
     source = path.read_bytes()
-    p = subprocess.run([str(CALX), "check", "--json", "--stdin", str(path)], input=source, capture_output=True, cwd=ROOT)
+    lib = ["--lib"] if test.library else []
+    p = subprocess.run([str(CALX), "check", *lib, "--json", "--stdin", str(path)], input=source, capture_output=True, cwd=ROOT)
     problems = []
     if p.returncode != 1:
         problems.append(f"--json: exit status {p.returncode}, expected 1")

@@ -10,6 +10,7 @@ namespace calx {
 
 struct EmitOptions {
     bool line_directives = true;  // `#line`, so debuggers and profilers show Calx lines (P3.10)
+    bool library = false;         // a library, which takes the program's runtime and lists its exports (D123)
 };
 
 // One C file of a program: a module's functions and what they need (D75).

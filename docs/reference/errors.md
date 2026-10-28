@@ -78,6 +78,8 @@ The call to a function that can fail gives a result, `T ! E`: either `ok` with t
 | `let ok(v) = f() else { return }` | Binds the value, or runs the `else`, which must leave |
 | `f()!` | `f`'s value. Panics if `f` fails |
 
+An `unsafe` block that holds only the call passes its result through, so `try unsafe { f() }` and `match unsafe { f() } { ... }` handle it at the call too ([libraries](libraries.md#opening-a-library)).
+
 A result can't be put in a variable, passed to a function or returned. `_ =` can't discard it either. So an error never slips by unseen, and the code always says what happens to it ([Strictness](strictness.md#nothing-is-dropped-silently)).
 
 ```calx

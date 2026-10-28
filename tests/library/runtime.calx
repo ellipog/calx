@@ -1,0 +1,82 @@
+// A library uses the whole runtime through the program's (D123): `parallel for` on the program's
+// threads, tables and sorting, a std module, and the program's own functions, which it's given as
+// function values.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+
+fn shout(s: String) {
+    println("program: {s}")
+}
+
+fn main() {
+    let given = args()
+    let lib = unsafe { Library.open(given[0])! }
+    let squares = lib.find<fn(usize) -> u64>("sum_squares")!
+    println("{squares(1000)}")  // out: 333833500
+    let words = lib.find<fn(List<String>) -> String>("count_words")!
+    var ws = List<String>()
+    for w in ["b", "a", "b", "c", "b", "a"] {
+        ws.push(String(w))
+    }
+    println(words(ws))  // out: a=2 b=3 c=1
+    let digest = lib.find<fn(str) -> String>("digest")!
+    println(digest("abc"))  // out: 186 120 22 191
+    let each = lib.find<fn(fn(String), i32)>("each")!
+    each(shout, 2)
+    // out: program: 1 of 2
+    // out: program: 2 of 2
+}
+
+// file: plugin.calx
+import std.hash.{sha256}
+
+@export
+fn sum_squares(n: usize) -> u64 {
+    var parts = List<u64>()
+    for _ in 0..n {
+        parts.push(0)
+    }
+    parallel for i in 0..n {
+        parts[i] = u64(i + 1) * u64(i + 1)
+    }
+    var total: u64 = 0
+    for p in parts {
+        total += p
+    }
+    return total
+}
+
+@export
+fn count_words(words: List<String>) -> String {
+    var counts = Map<String, i32>()
+    for w in words {
+        counts.insert(w.copy(), (counts.get(w) ?? 0) + 1)
+    }
+    var keys = List<String>()
+    for (k, _) in counts {
+        keys.push(k.copy())
+    }
+    keys.sort()
+    var out = String("")
+    for k in keys {
+        if out.len() > 0 {
+            out.push_str(" ")
+        }
+        out.push_str("{k}={counts[k]}")
+    }
+    return out
+}
+
+@export
+fn digest(text: str) -> String {
+    let d = sha256(text.to_bytes())
+    return "{d[0]} {d[1]} {d[2]} {d[3]}"
+}
+
+@export
+fn each(f: fn(String), n: i32) {
+    for i in 1..=n {
+        f("{i} of {n}")
+    }
+}

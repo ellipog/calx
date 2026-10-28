@@ -182,6 +182,7 @@ enum class BMethod : std::uint8_t {
     // On a queue's ends: sending, taking a message that's there or waiting for one, another
     // end, and closing one; and starting and joining a thread (D121).
     queue_send, queue_next, queue_wait, queue_sender, queue_share, queue_close, thread_spawn, thread_join,
+    lib_open, lib_find, lib_has, lib_close,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };
@@ -454,6 +455,7 @@ struct Item {
     bool is_extern = false;      // `extern "C" fn`
     bool is_unsafe = false;      // `unsafe fn`: calling it needs `unsafe`
     bool track_caller = false;   // `@track_caller`: its panics name the place that called it
+    bool exported = false;       // `@export`: a library exports it under its own name (D123)
     std::string_view abi;
     // struct, enum
     Slice<FieldDecl> fields;

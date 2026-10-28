@@ -1,0 +1,70 @@
+// A program opens a library and calls what it exports (D123). The two share `shapes`, so a
+// `Point` made in one is the same type in the other, and memory one allocates the other frees.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+import shapes.{Point}
+
+fn main() ! String {
+    let given = args()
+    let path = given[0].copy()
+    let lib = unsafe { try Library.open(path) }
+    let double = try lib.find<fn(i32) -> i32>("double")
+    println("{double(21)}")                              // out: 42
+    let greet = try lib.find<fn(str) -> String>("greet")
+    var s = greet("calx")
+    s.push_str("!")
+    println(s)                                           // out: hello, calx!
+    let far = try lib.find<fn(Point, Point) -> Point>("farthest")
+    let p = far(Point { x: 1, y: 2 }, Point { x: -5, y: 1 })
+    println("{p.x} {p.y}")                               // out: -5 1
+    let names = try lib.find<fn(mut List<String>)>("add_names")
+    var list = List<String>()
+    list.push("first")
+    names(mut list)
+    println("{list}")                                    // out: [first, ada, grace]
+    println("{lib.has("double")}")                       // out: true
+    println("{lib.has("triple")}")                       // out: false
+    match lib.find<fn(i32) -> i32>("triple") {
+        ok(_) => println("found it")
+        err(e) => println("PATH{e[path.len()..]}")        // out: PATH exports no function `triple`
+    }
+    match lib.find<fn(i64) -> i32>("double") {
+        ok(_) => println("found it")
+        err(e) => println("PATH{e[path.len()..]}")        // out: PATH's `double` is `fn(i32) -> i32`, not `fn(i64) -> i32`
+    }
+}
+
+// file: shapes.calx
+pub struct Point {
+    pub x: i32
+    pub y: i32
+}
+
+// file: plugin.calx
+import shapes.{Point}
+
+@export
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+@export
+fn greet(name: str) -> String {
+    return "hello, {name}"
+}
+
+fn len2(p: Point) -> i32 {
+    return p.x * p.x + p.y * p.y
+}
+
+@export
+fn farthest(a: Point, b: Point) -> Point {
+    return if len2(a) >= len2(b) { a } else { b }
+}
+
+@export
+fn add_names(names: mut List<String>) {
+    names.push("ada")
+    names.push("grace")
+}

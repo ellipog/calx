@@ -37,10 +37,19 @@ struct Program {
     // The keys of `JavaHashMap` and `JavaHashSet` with `Order`, which a tree bin sorts by (D105).
     std::unordered_set<const Type*> java_ordered;
     Item* main = nullptr;
+    // D123: the functions marked `@export`, each with its type as a function value, which is what
+    // a library lists them with.
+    struct Export {
+        Item* fn;
+        Type* type;
+    };
+    std::vector<Export> exports;
 };
 
 // Checks a program: its modules, from `load_program`, as one. With `need_main`, the main module
-// must have `fn main()`. Errors go to `ctx.diags`.
-void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main);
+// must have `fn main()`. A `library` has none, and exports at least one function (D123). Errors go
+// to `ctx.diags`.
+void check_program(CheckContext ctx, const std::vector<Module*>& modules, Program& program, bool need_main,
+                   bool library = false);
 
 }  // namespace calx

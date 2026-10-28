@@ -1,0 +1,27 @@
+// Opening a library that isn't there fails with the reason, and `close` unloads one (D123). The
+// same library can be open twice: each `Library` is its own, and the system unloads it after the
+// last `close`.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    match unsafe { Library.open("no-such-library.dll") } {
+        ok(_) => println("opened it")
+        err(e) => println("{e.starts_with("can't open no-such-library.dll: ")}")  // out: true
+    }
+    let first = unsafe { Library.open(given[0])! }
+    let second = unsafe { Library.open(given[0])! }
+    let one = first.find<fn() -> i32>("one")!
+    unsafe { first.close() }
+    let again = second.find<fn() -> i32>("one")!
+    println("{one() + again()}")  // out: 2
+    unsafe { second.close() }
+}
+
+// file: plugin.calx
+@export
+fn one() -> i32 {
+    return 1
+}

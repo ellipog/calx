@@ -9,6 +9,9 @@ namespace calx {
 
 enum class BuildMode { debug, release };
 
+// A program, or a library a program opens while it runs (D123).
+enum class BuildKind { program, library };
+
 struct Toolchain {
     std::string clang;    // the clang executable
     bool lld = false;     // whether lld is next to it
@@ -44,7 +47,7 @@ bool file_exists(const std::string& path);
 
 struct BuildResult {
     bool ok = false;
-    std::string exe;        // the linked program, in the cache
+    std::string exe;        // the linked program or library, in the cache
     bool reused = false;    // nothing was compiled or linked
     double compile_ms = 0;  // clang, including the runtime when it wasn't cached
     double link_ms = 0;
@@ -52,7 +55,16 @@ struct BuildResult {
 
 // Compiles each of `c_sources`, one per module, and links them with the runtime. Each object is
 // cached under a hash of its C text, so only files whose text changed are compiled again, all at
-// once (D64), and an unchanged program is reused whole.
-BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, bool verbose);
+// once (D64), and an unchanged program is reused whole. A library has no runtime of its own: it
+// takes the program's when the program opens it (D123).
+BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, BuildKind kind,
+                          bool verbose);
+
+// What a built library's file name ends with: `.dll` or `.so`.
+const char* library_suffix();
+
+// Copies what `build_program` built to `out`, for `calx build`. On Windows its PDB goes beside it
+// as `out.pdb`, so stack traces and debuggers still find it once the cache has let it go.
+bool place_build(const std::string& built, const std::string& out, std::string& error);
 
 }  // namespace calx

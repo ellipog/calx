@@ -1,0 +1,51 @@
+// What `@export` can be on, checked as a library (D123).
+// kind: library
+
+@export
+fn fine(x: i32) -> i32 {
+    return x
+}
+
+@export
+fn fine(x: i64) -> i64 {  // error: `fine` is already defined
+    return x
+}
+
+@export
+fn pass_through<T>(x: T) -> T {  // error: an `@export` function can't be generic
+    return x
+}
+
+@export
+@track_caller
+fn checked(x: i32) -> i32 {  // error: an `@export` function can't be `@track_caller`
+    return x
+}
+
+@export
+fn cx_start() {}  // error: names that start with `cx_` are the runtime's
+
+@export(name: "other")  // error: `@export` takes no arguments
+fn named() {}
+
+@export  // error: `@export` is for a function written in Calx
+struct Point {
+    x: i32
+}
+
+struct Counter {
+    n: i32
+}
+
+impl Counter {
+    @export  // error: `@export` is for a function on its own, not one in an `impl`
+    pub fn get(self) -> i32 {
+        return self.n
+    }
+}
+
+@export
+@export  // error: `@export` is already on `twice`
+fn twice() {}
+
+fn main() {}  // error: a library has no `main`

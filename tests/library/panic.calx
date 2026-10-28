@@ -1,0 +1,27 @@
+// A panic in a library is the program's (D123): it has the program's message and stack trace,
+// and ends the program with status 101.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+
+fn run(pick: fn(List<i32>, usize) -> i32) {
+    var xs = List<i32>()
+    xs.push(7)
+    println("{pick(xs, 0)}")  // out: 7
+    println("{pick(xs, 3)}")
+}
+
+fn main() {
+    let given = args()
+    let lib = unsafe { Library.open(given[0])! }
+    run(lib.find<fn(List<i32>, usize) -> i32>("pick")!)
+}
+
+// file: plugin.calx
+@export
+fn pick(xs: List<i32>, i: usize) -> i32 {
+    return xs[i]  // panic: index 3 is out of bounds for length 1
+    // trace: plugin.pick:23
+    // trace: main.run:11
+    // trace: main.main:17
+}

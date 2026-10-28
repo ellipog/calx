@@ -11,11 +11,12 @@ calx run hello.calx            # build in debug mode and run
 calx run hello.calx -- a b     # arguments after -- go to the program
 calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
+calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx emit-c hello.calx         # print the C it compiles to
 calx version
 ```
 
-A program is its main file and the [modules](modules.md) it imports. The command takes the main file.
+A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
 
 ## Options
 
@@ -23,6 +24,7 @@ A program is its main file and the [modules](modules.md) it imports. The command
 | --- | --- |
 | `--release` | Optimize. Without it, programs build in debug mode, which builds fastest |
 | `-o PATH` | Where `build` writes the executable, or `emit-c` the C: a file for one module, a folder for several. `build` defaults to the file's name in the current folder |
+| `--lib` | Build or check a [library](libraries.md): a `.dll` or `.so` with the functions marked `@export`, which a program opens while it runs. `calx run` doesn't take it |
 | `--timings` | Print how long the front end, the C emitter, clang and the linker took |
 | `--verbose` | Print the clang and linker commands |
 | `--no-line` | Leave `#line` directives out of the C |
@@ -90,6 +92,8 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
+
+`calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself.
 
 ## Errors
 
