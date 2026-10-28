@@ -887,7 +887,7 @@ private:
             for (std::size_t i = 0; i < k; i++) {
                 std::string item;
                 r.piece(item);
-                if (!code.empty()) code += "\n\n";
+                if (!code.empty()) code += '\n';  // one blank line between items, which each end their line
                 code += item;
                 if (!code.empty() && code.back() != '\n') code += '\n';
             }
