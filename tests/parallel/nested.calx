@@ -1,0 +1,108 @@
+// A `parallel for` inside another: threads with nothing left of the outer loop help the inner
+// ones, and what the inner iterations print comes out in iteration order, as if every loop ran
+// one iteration after another. One region alone gets the pool for its own loops too.
+
+import std.pool.{set_workers}
+
+struct Region {
+    id: usize
+    cells: List<i64>
+    sum: i64
+}
+
+fn light(r: mut Region) {
+    parallel for i in 0usize..r.cells.len() {
+        r.cells[i] = r.cells[i] * 3 + 1
+        if i % 2500 == 0 {
+            println("region {r.id} cell {i}")
+        }
+    }
+    var s = 0i64
+    for c in r.cells {
+        s += c
+    }
+    r.sum = s
+}
+
+fn run(workers: usize, count: usize) -> i64 {
+    set_workers(workers)
+    var regions: List<Region> = []
+    for k in 0usize..count {
+        var cells: List<i64> = []
+        for i in 0..10000 {
+            cells.push(i64(i) + i64.wrap(k))
+        }
+        regions.push(Region { id: k, cells: cells, sum: 0 })
+    }
+    parallel for k in 0usize..regions.len() {
+        light(mut regions[k])
+    }
+    var t = 0i64
+    for r in regions {
+        t += r.sum
+    }
+    return t
+}
+
+// Three loops deep, each changing only its own part.
+fn deep(workers: usize) -> List<i64> {
+    set_workers(workers)
+    var grid: List<List<List<i64>>> = []
+    for a in 0..6 {
+        var plane: List<List<i64>> = []
+        for b in 0..5 {
+            var row: List<i64> = []
+            for c in 0..400 {
+                row.push(i64(a * 10000 + b * 1000 + c))
+            }
+            plane.push(row)
+        }
+        grid.push(plane)
+    }
+    parallel for a in 0usize..grid.len() {
+        parallel for b in 0usize..grid[a].len() {
+            parallel for c in 0usize..grid[a][b].len() {
+                grid[a][b][c] = grid[a][b][c] * 2 + i64.wrap(c % 7)
+            }
+        }
+    }
+    var sums: List<i64> = []
+    for plane in grid {
+        var s = 0i64
+        for row in plane {
+            for x in row {
+                s += x
+            }
+        }
+        sums.push(s)
+    }
+    return sums
+}
+
+fn main() {
+    // out: region 0 cell 0
+    // out: region 0 cell 2500
+    // out: region 0 cell 5000
+    // out: region 0 cell 7500
+    let one = run(8, 1)
+    // out: region 0 cell 0
+    // out: region 0 cell 2500
+    // out: region 0 cell 5000
+    // out: region 0 cell 7500
+    println("{one == run(1, 1)} {one}")    // out: true 149995000
+    // out: region 0 cell 0
+    // out: region 0 cell 2500
+    // out: region 0 cell 5000
+    // out: region 0 cell 7500
+    // out: region 1 cell 0
+    // out: region 1 cell 2500
+    // out: region 1 cell 5000
+    // out: region 1 cell 7500
+    // out: region 2 cell 0
+    // out: region 2 cell 2500
+    // out: region 2 cell 5000
+    // out: region 2 cell 7500
+    println("{run(8, 3)}")    // out: 450075000
+    let d = deep(8)
+    println("{d == deep(1)} {d == deep(3)} {d}")    // out: true true [8803985, 48803985, 88803985, 128803985, 168803985, 208803985]
+}

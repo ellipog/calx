@@ -101,7 +101,40 @@ fn main() {
 }
 ```
 
-A `parallel for` inside another runs on the thread that reaches it, one iteration after another. The outer loop already keeps every thread busy.
+## Loops inside loops
+
+A `parallel for` can run inside another, even through a function the outer one calls, as a region running a loop of its own. A thread that has nothing left of the outer loop to take helps the inner loops instead, so a world with one busy region still gets every thread:
+
+```calx
+struct Region {
+    cells: List<i64>
+}
+
+fn light(r: mut Region) {
+    parallel for i in 0usize..r.cells.len() {
+        r.cells[i] = r.cells[i] * 3 + 1
+    }
+}
+
+fn main() {
+    var regions: List<Region> = [Region { cells: [1, 2, 3] }, Region { cells: [4, 5] }]
+    parallel for k in 0usize..regions.len() {
+        light(mut regions[k])
+    }
+    println("{regions[0].cells} {regions[1].cells}")    // out: [4, 7, 10] [13, 16]
+}
+```
+
+What the inner iterations print goes into the outer iteration that ran them, in order, and a panic in one is a panic in that outer iteration. So the output is still the same as if every loop ran one iteration after another.
+
+One region whose loop runs a 200-step xorshift over 200,000 cells, 50 times, in ms:
+
+| | 1 thread | 24 threads |
+| --- | --- | --- |
+| 1 region | 2,079 | 118 |
+| 3 regions | 6,260 | 323 |
+
+Before inner loops could use the pool, one region took 2,079 ms with any number of threads, and three took about as long, on three threads.
 
 ## The same result with any number of threads
 
@@ -132,7 +165,9 @@ A `parallel for` over regions that send each other messages is how Calx runs act
 
 By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that.
 
-The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread, which the threads take in order, so a slow chunk doesn't hold the others up. A loop with one iteration, or with one thread to run it, runs on the thread that reaches it.
+The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread, which the threads take in order, so a slow chunk doesn't hold the others up. A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
+
+Up to 64 inner loops can be open at once, each in a slot of its own that threads with nothing to do look at. A thread that has looked for a fifth of a millisecond and found nothing sleeps until an inner loop opens or the outer loop's last chunk finishes. With every slot taken, an inner loop runs on the thread that reaches it.
 
 ## In C
 

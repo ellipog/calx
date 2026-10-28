@@ -1041,22 +1041,30 @@ void cx_lk_free(cx_u32* link, cx_usize buckets) { cx_free(link, buckets * 2 * si
 
 /* --- parallel for ---------------------------------------------------------------------------
  * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The
- * iterations are split into chunks, which threads claim in order from a shared counter. The
- * checker makes sure no two iterations touch the same memory (D21), so what they compute can't
- * depend on which thread ran what. What they print is kept per chunk and written in chunk order
- * when the loop ends, and a panic reports the first iteration that panicked, after the output of
+ * iterations are split into chunks, which threads claim in order from a counter. The checker
+ * makes sure no two iterations touch the same memory (D21), so what they compute can't depend
+ * on which thread ran what. What they print is kept per chunk and written in chunk order when
+ * the loop ends, and a panic reports the first iteration that panicked, after the output of
  * every iteration before it. So the output is the same with one thread and with many, too.
  *
- * Workers wait for a job on `par_word`, which is odd while a job is open: they spin for a while,
- * since loops often come one after another, then sleep on it. A worker joins a job by counting
- * itself in `par_active` and then checking that the word hasn't changed. The calling thread
- * closes the job once every chunk is claimed and waits for `par_active` to reach 0, so no worker
- * reads a job after that, and a sleeping worker is never waited for. Only the main thread starts
- * jobs: a `parallel for` inside another runs on the thread that reaches it. */
+ * The outermost loop is the top job, which the main thread opens. Workers wait for it on its
+ * word, which is odd while it's open: they spin for a while, since loops often come one after
+ * another, then sleep on it. A thread joins a job by counting itself in the job's `active` and
+ * then checking that the word hasn't changed. The job's owner closes it once every chunk is
+ * claimed and waits for `active` to reach 0, so no thread reads a job after that, and a
+ * sleeping thread is never waited for.
+ *
+ * A loop inside a chunk is an inner job, in one of `PAR_NESTED` slots. A thread with no chunks
+ * of the top job left to claim stays in it and helps inner jobs, until every chunk of the top
+ * job has finished, so a region that runs a loop of its own gets the threads the other regions
+ * aren't using. An inner job's output goes into the chunk that opened it, in chunk order, and a
+ * panic in it is a panic in that chunk, once the chunks before the one that panicked are done.
+ * With every slot taken, a loop runs on the thread that reaches it. */
 
 #define PAR_NONE (~(cx_u64)0)
-#define PAR_SPIN_NS 200000u /* how long a worker spins before it sleeps */
+#define PAR_SPIN_NS 200000u /* how long a thread spins before it sleeps */
 #define PAR_CHUNKS 8        /* chunks per thread, so a slow chunk doesn't hold the rest up */
+#define PAR_NESTED 64       /* inner jobs open at once, one bit each of `par_open` */
 #define PAR_SHARED __attribute__((aligned(128))) /* its own pair of cache lines */
 
 typedef void (*par_body)(void* ctx, cx_u64 begin, cx_u64 end);
@@ -1069,38 +1077,51 @@ typedef struct {
     size_t last; /* where the last segment starts, or SIZE_MAX */
 } par_out;
 
-/* The open job. The main thread writes it before opening the job, and nothing changes it then. */
-static struct {
+/* A loop's chunks. Its owner writes the first part before opening it, and nothing changes that
+ * while it's open. */
+typedef struct par_job {
     par_body body;
     void* ctx;
     cx_u64 n, chunk, chunks;
-    cx_usize threads; /* how many threads may take part, the main thread included */
-} job;
-static unsigned char* par_done; /* per chunk: whether it has run, for a panic */
-static par_out** par_outs;      /* per chunk: what it printed, once it prints */
-static cx_u64 par_cap;          /* the length of both */
-static cx_u32 par_jobs;         /* jobs started */
-static cx_usize par_target;     /* threads to use, the main thread included; 0 until set or read */
-static cx_usize par_started;    /* worker threads started */
+    unsigned char* done; /* per chunk: whether it has run, for a panic */
+    par_out** outs;      /* per chunk: what it printed, once it prints */
+    cx_u64 cap;          /* the length of both */
+    /* An inner job: the chunk its owner was running when it opened it, where its output goes. */
+    struct par_job* up;
+    cx_u64 up_chunk;
+    int up_owner;
+    unsigned slot;
+    PAR_SHARED cx_u32 word;   /* jobs opened * 2, plus 1 while one is open */
+    PAR_SHARED cx_u64 next;   /* the next chunk to claim */
+    PAR_SHARED cx_u32 active; /* threads in it besides its owner */
+    PAR_SHARED cx_u64 panic;  /* the first chunk that panicked */
+    PAR_SHARED cx_u64 left;   /* the top job: chunks that haven't finished */
+} par_job;
 
-static PAR_SHARED cx_u32 par_word;      /* jobs * 2, plus 1 while one is open */
-static PAR_SHARED cx_u64 par_next;      /* the next chunk to claim */
-static PAR_SHARED cx_u32 par_active;    /* workers in the open job */
-static PAR_SHARED cx_u32 par_sleepers;  /* workers asleep on par_word */
-static PAR_SHARED cx_u64 par_panic = PAR_NONE; /* the first chunk that panicked */
+static par_job par_top = {.panic = PAR_NONE};
+static par_job par_nest[PAR_NESTED];
+static PAR_SHARED cx_u64 par_taken;          /* bit k: a thread owns `par_nest[k]` */
+static PAR_SHARED cx_u64 par_open;           /* bit k: `par_nest[k]` is open */
+static PAR_SHARED cx_u32 par_sleepers;       /* workers asleep on the top job's word */
+static PAR_SHARED cx_u32 par_help_word;      /* changes when an inner job opens or the top job's chunks finish */
+static PAR_SHARED cx_u32 par_help_sleepers;  /* threads asleep on it */
+static cx_usize par_target;  /* threads to use, the main thread included; 0 until set or read */
+static cx_usize par_started; /* worker threads started */
 
-static _Thread_local cx_u64 par_chunk; /* the chunk this thread is running */
+static _Thread_local par_job* par_cur; /* the job whose chunk this thread is running */
+static _Thread_local cx_u64 par_chunk; /* that chunk */
+static _Thread_local int par_owner;    /* this thread owns `par_cur` */
 static _Thread_local int par_worker;   /* this is a worker thread */
 
 static void par_pause(void) { __builtin_ia32_pause(); }
 
 #ifdef _WIN32
-static void par_sleep(cx_u32 seen) { WaitOnAddress(&par_word, &seen, sizeof seen, INFINITE); }
-static void par_wake(void) { WakeByAddressAll(&par_word); }
+static void par_sleep(cx_u32* word, cx_u32 seen) { WaitOnAddress(word, &seen, sizeof seen, INFINITE); }
+static void par_wake(cx_u32* word) { WakeByAddressAll(word); }
 static void par_yield(void) { SwitchToThread(); }
 #else
-static void par_sleep(cx_u32 seen) { syscall(SYS_futex, &par_word, FUTEX_WAIT_PRIVATE, seen, NULL, NULL, 0); }
-static void par_wake(void) { syscall(SYS_futex, &par_word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0); }
+static void par_sleep(cx_u32* word, cx_u32 seen) { syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, seen, NULL, NULL, 0); }
+static void par_wake(cx_u32* word) { syscall(SYS_futex, word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0); }
 static void par_yield(void) { sched_yield(); }
 #endif
 
@@ -1111,12 +1132,13 @@ static CX_COLD void par_fail(const char* what) {
 }
 
 static void par_write(int stream, const void* p, size_t n) {
-    par_out* o = par_outs[par_chunk];
+    par_out** slot = &par_cur->outs[par_chunk];
+    par_out* o = *slot;
     if (!o) {
         o = calloc(1, sizeof *o);
         if (!o) par_fail("panic at <memory>: out of memory\n");
         o->last = SIZE_MAX;
-        par_outs[par_chunk] = o;
+        *slot = o;
     }
     size_t need = o->len + 1 + sizeof(size_t) + n;
     if (need > o->cap) {
@@ -1143,17 +1165,20 @@ static void par_write(int stream, const void* p, size_t n) {
     o->len += n;
 }
 
-/* Writes what chunks [0, upto) printed, in order, as if they'd printed it themselves. */
-static void par_replay(cx_u64 upto) {
+/* Writes what chunks [0, upto) of `j` printed, in order, as if they'd printed it themselves:
+ * into the chunk running on this thread, or out. */
+static void par_replay(par_job* j, cx_u64 upto) {
     for (cx_u64 c = 0; c < upto; c++) {
-        par_out* o = par_outs[c];
+        par_out* o = j->outs[c];
         if (!o) continue;
         for (size_t at = 0; at < o->len;) {
             int stream = o->p[at];
             size_t len;
             memcpy(&len, o->p + at + 1, sizeof len);
             at += 1 + sizeof len;
-            if (stream) {
+            if (par_cur) {
+                par_write(stream, o->p + at, len);
+            } else if (stream) {
                 flush_out();
                 fwrite(o->p + at, 1, len, stderr);
             } else {
@@ -1163,55 +1188,170 @@ static void par_replay(cx_u64 upto) {
         }
         free(o->p);
         free(o);
-        par_outs[c] = 0;
+        j->outs[c] = 0;
     }
 }
 
-/* Claims chunks of the open job and runs them until none are left. */
-static void par_run(void) {
+/* Room for `chunks` chunks in `j`, none run and none printed. Only its owner calls this. */
+static void par_size(par_job* j, cx_u64 chunks) {
+    if (chunks > j->cap) {
+        free(j->done);
+        free(j->outs);
+        j->done = malloc(chunks);
+        j->outs = calloc(chunks, sizeof *j->outs);
+        if (!j->done || !j->outs) par_fail("panic at <memory>: out of memory\n");
+        j->cap = chunks;
+    }
+    memset(j->done, 0, chunks);
+}
+
+/* Closes `j`, if it's open, so no thread joins it from now on. */
+static void par_close(par_job* j) {
+    cx_u32 w = __atomic_load_n(&j->word, __ATOMIC_RELAXED);
+    if (w & 1) __atomic_store_n(&j->word, w + 1, __ATOMIC_SEQ_CST);
+}
+
+/* Wakes the threads helping inner jobs: one has opened, or the top job's chunks have finished. */
+static void par_nudge(void) {
+    __atomic_fetch_add(&par_help_word, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&par_help_sleepers, __ATOMIC_SEQ_CST)) par_wake(&par_help_word);
+}
+
+/* Claims chunks of `j` and runs them until none are left, as its owner or as a helper. */
+static void par_claim(par_job* j, int owner) {
+    par_job* was = par_cur;
+    cx_u64 was_chunk = par_chunk;
+    int was_owner = par_owner;
+    par_cur = j;
+    par_owner = owner;
     par_buffered = 1;
     for (;;) {
-        if (__atomic_load_n(&par_panic, __ATOMIC_RELAXED) != PAR_NONE) break;
-        cx_u64 c = __atomic_fetch_add(&par_next, 1, __ATOMIC_RELAXED);
-        if (c >= job.chunks) break;
+        if (__atomic_load_n(&j->panic, __ATOMIC_RELAXED) != PAR_NONE) break;
+        cx_u64 c = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
+        if (c >= j->chunks) break;
         par_chunk = c;
-        cx_u64 begin = c * job.chunk;
-        cx_u64 end = job.n - begin < job.chunk ? job.n : begin + job.chunk;
-        job.body(job.ctx, begin, end);
-        __atomic_store_n(&par_done[c], 1, __ATOMIC_RELEASE);
+        cx_u64 begin = c * j->chunk;
+        cx_u64 end = j->n - begin < j->chunk ? j->n : begin + j->chunk;
+        j->body(j->ctx, begin, end);
+        __atomic_store_n(&j->done[c], 1, __ATOMIC_RELEASE);
+        if (j == &par_top && __atomic_sub_fetch(&j->left, 1, __ATOMIC_ACQ_REL) == 0) par_nudge();
     }
-    par_buffered = 0;
+    par_cur = was;
+    par_chunk = was_chunk;
+    par_owner = was_owner;
+    par_buffered = was != 0;
 }
 
-/* After a panic, on the main thread: once every chunk before the first one that panicked has
- * run, writes their output and that chunk's, which ends with the panic message, and exits. */
+/* Runs chunks of every open inner job once. Returns whether there were any. */
+static int par_help_once(void) {
+    cx_u64 open = __atomic_load_n(&par_open, __ATOMIC_ACQUIRE);
+    int helped = 0;
+    while (open) {
+        par_job* j = &par_nest[__builtin_ctzll(open)];
+        open &= open - 1;
+        cx_u32 w = __atomic_load_n(&j->word, __ATOMIC_SEQ_CST);
+        if (!(w & 1)) continue;
+        __atomic_fetch_add(&j->active, 1, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&j->word, __ATOMIC_SEQ_CST) == w) {
+            par_claim(j, 0);
+            helped = 1;
+        }
+        __atomic_fetch_sub(&j->active, 1, __ATOMIC_RELEASE);
+    }
+    return helped;
+}
+
+/* On a worker whose chunks of the top job are claimed: helps inner jobs until every chunk of
+ * the top job has finished, sleeping when there's been nothing to help for a while. */
+static void par_help(void) {
+    cx_u64 start = cx_clock_ns();
+    for (unsigned spins = 1;; spins++) {
+        if (!__atomic_load_n(&par_top.left, __ATOMIC_ACQUIRE)) return;
+        if (__atomic_load_n(&par_top.panic, __ATOMIC_RELAXED) != PAR_NONE) return;
+        cx_u32 seen = __atomic_load_n(&par_help_word, __ATOMIC_SEQ_CST);
+        if (par_help_once()) {
+            start = cx_clock_ns();
+            continue;
+        }
+        par_pause();
+        if (spins % 64 || cx_clock_ns() - start <= PAR_SPIN_NS) continue;
+        __atomic_fetch_add(&par_help_sleepers, 1, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&par_help_word, __ATOMIC_SEQ_CST) == seen && __atomic_load_n(&par_top.left, __ATOMIC_SEQ_CST)) {
+            par_sleep(&par_help_word, seen);
+        }
+        __atomic_fetch_sub(&par_help_sleepers, 1, __ATOMIC_RELAXED);
+        start = cx_clock_ns();
+    }
+}
+
+/* Waits until no thread but its owner is in `j`, which its owner has closed. */
+static void par_drain(par_job* j) {
+    for (unsigned spins = 0; __atomic_load_n(&j->active, __ATOMIC_SEQ_CST); spins++) {
+        if (spins < 4096) par_pause();
+        else par_yield();
+    }
+}
+
+/* After a panic in the top job, on the main thread: once every chunk before the first one that
+ * panicked has run, writes their output and that chunk's, which ends with the panic message,
+ * and exits. */
 static CX_COLD void par_end_panic(void) {
-    __atomic_store_n(&par_word, par_jobs * 2, __ATOMIC_SEQ_CST);
+    par_close(&par_top);
     cx_u64 first;
     for (unsigned spins = 0;; spins++) {
-        first = __atomic_load_n(&par_panic, __ATOMIC_ACQUIRE);
+        first = __atomic_load_n(&par_top.panic, __ATOMIC_ACQUIRE);
         cx_u64 c = 0;
-        while (c < first && __atomic_load_n(&par_done[c], __ATOMIC_ACQUIRE)) c++;
+        while (c < first && __atomic_load_n(&par_top.done[c], __ATOMIC_ACQUIRE)) c++;
         if (c == first) break;
         if (spins < 4096) par_pause();
         else par_yield();
     }
+    par_cur = 0;
     par_buffered = 0;
     to_stderr = 0;
-    par_replay(first + 1);
+    par_replay(&par_top, first + 1);
     flush_out();
     fflush(stderr);
     _Exit(101);
 }
 
+static CX_COLD void par_panicked(void);
+
+/* After a panic in the inner job `j`, on its owner: once its helpers have left, so every chunk
+ * before the one that panicked has run, writes their output and that chunk's into the chunk
+ * that opened `j`, and panics there. */
+static CX_COLD void par_end_inner(par_job* j) {
+    par_close(j);
+    __atomic_fetch_and(&par_open, ~((cx_u64)1 << j->slot), __ATOMIC_RELEASE);
+    par_drain(j);
+    par_cur = j->up;
+    par_chunk = j->up_chunk;
+    par_owner = j->up_owner;
+    par_buffered = 1;
+    par_replay(j, __atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) + 1);
+    __atomic_fetch_and(&par_taken, ~((cx_u64)1 << j->slot), __ATOMIC_RELEASE);
+    par_panicked();
+}
+
 static CX_COLD void par_panicked(void) {
+    par_job* j = par_cur;
     cx_u64 c = par_chunk;
-    cx_u64 first = __atomic_load_n(&par_panic, __ATOMIC_ACQUIRE);
-    while (c < first && !__atomic_compare_exchange_n(&par_panic, &first, c, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    cx_u64 first = __atomic_load_n(&j->panic, __ATOMIC_ACQUIRE);
+    while (c < first && !__atomic_compare_exchange_n(&j->panic, &first, c, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     }
-    if (!par_worker) par_end_panic();
-    /* A worker leaves the job and stops for good; the main thread ends the program. */
-    __atomic_fetch_sub(&par_active, 1, __ATOMIC_RELEASE);
+    if (par_owner) {
+        if (j == &par_top) par_end_panic();
+        par_end_inner(j);
+    }
+    /* A helper leaves the job, and its owner takes the panic from there. */
+    __atomic_fetch_sub(&j->active, 1, __ATOMIC_RELEASE);
+    if (!par_worker) {
+        /* The main thread, helping an inner job: the panic reaches the top job through the
+         * inner job's owner, and the main thread ends the program then. */
+        while (__atomic_load_n(&par_top.panic, __ATOMIC_ACQUIRE) == PAR_NONE) par_yield();
+        par_end_panic();
+    }
+    /* A worker stops for good; the main thread ends the program. */
     for (;;) {
 #ifdef _WIN32
         Sleep(INFINITE);
@@ -1221,16 +1361,16 @@ static CX_COLD void par_panicked(void) {
     }
 }
 
-/* Waits until `par_word` isn't `seen`. */
+/* Waits until the top job's word isn't `seen`. */
 static void par_wait(cx_u32 seen) {
     cx_u64 start = cx_clock_ns();
     for (unsigned spins = 1;; spins++) {
-        if (__atomic_load_n(&par_word, __ATOMIC_ACQUIRE) != seen) return;
+        if (__atomic_load_n(&par_top.word, __ATOMIC_ACQUIRE) != seen) return;
         par_pause();
         if (spins % 64 == 0 && cx_clock_ns() - start > PAR_SPIN_NS) break;
     }
     __atomic_fetch_add(&par_sleepers, 1, __ATOMIC_SEQ_CST);
-    while (__atomic_load_n(&par_word, __ATOMIC_SEQ_CST) == seen) par_sleep(seen);
+    while (__atomic_load_n(&par_top.word, __ATOMIC_SEQ_CST) == seen) par_sleep(&par_top.word, seen);
     __atomic_fetch_sub(&par_sleepers, 1, __ATOMIC_RELAXED);
 }
 
@@ -1239,16 +1379,17 @@ static void par_work(cx_usize id) {
     cx_u32 seen = 0;
     for (;;) {
         par_wait(seen);
-        cx_u32 w = __atomic_load_n(&par_word, __ATOMIC_SEQ_CST);
+        cx_u32 w = __atomic_load_n(&par_top.word, __ATOMIC_SEQ_CST);
         seen = w;
         if (!(w & 1)) continue; /* a job that closed before this worker saw it */
-        __atomic_fetch_add(&par_active, 1, __ATOMIC_SEQ_CST);
-        if (__atomic_load_n(&par_word, __ATOMIC_SEQ_CST) == w && id + 1 < job.threads) {
+        __atomic_fetch_add(&par_top.active, 1, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&par_top.word, __ATOMIC_SEQ_CST) == w && id + 1 < par_target) {
             par_depth = 1;
-            par_run();
+            par_claim(&par_top, 0);
+            par_help();
             par_depth = 0;
         }
-        __atomic_fetch_sub(&par_active, 1, __ATOMIC_RELEASE);
+        __atomic_fetch_sub(&par_top.active, 1, __ATOMIC_RELEASE);
     }
 }
 
@@ -1296,15 +1437,7 @@ void cx_set_workers(cx_usize n) {
     par_target = n;
 }
 
-void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
-    if (n == 0) return;
-    cx_usize threads = par_threads();
-    if (par_depth || threads <= 1 || n == 1) {
-        par_depth++;
-        body(ctx, 0, n);
-        par_depth--;
-        return;
-    }
+static void par_start_workers(cx_usize threads) {
     while (par_started + 1 < threads) {
         uintptr_t id = par_started;
 #ifdef _WIN32
@@ -1318,38 +1451,89 @@ void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), vo
 #endif
         par_started++;
     }
+}
+
+/* Sets up `j` for `n` iterations of `body`, as its owner, on `threads` threads. */
+static void par_setup(par_job* j, cx_u64 n, par_body body, void* ctx, cx_usize threads) {
     cx_u64 chunk = n / ((cx_u64)threads * PAR_CHUNKS);
     if (chunk == 0) chunk = 1;
     cx_u64 chunks = n / chunk + (n % chunk != 0);
-    if (chunks > par_cap) {
-        free(par_done);
-        free(par_outs);
-        par_done = malloc(chunks);
-        par_outs = calloc(chunks, sizeof *par_outs);
-        if (!par_done || !par_outs) par_fail("panic at <memory>: out of memory\n");
-        par_cap = chunks;
-    }
-    memset(par_done, 0, chunks);
-    job.body = body;
-    job.ctx = ctx;
-    job.n = n;
-    job.chunk = chunk;
-    job.chunks = chunks;
-    job.threads = threads;
-    __atomic_store_n(&par_next, 0, __ATOMIC_RELAXED);
-    par_jobs++;
-    __atomic_store_n(&par_word, par_jobs * 2 + 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&par_sleepers, __ATOMIC_SEQ_CST)) par_wake();
+    par_size(j, chunks);
+    j->body = body;
+    j->ctx = ctx;
+    j->n = n;
+    j->chunk = chunk;
+    j->chunks = chunks;
+    j->panic = PAR_NONE;
+    __atomic_store_n(&j->next, 0, __ATOMIC_RELAXED);
+}
 
-    par_depth = 1;
-    par_run();
-    __atomic_store_n(&par_word, par_jobs * 2, __ATOMIC_SEQ_CST);
-    for (unsigned spins = 0; __atomic_load_n(&par_active, __ATOMIC_SEQ_CST); spins++) {
-        if (__atomic_load_n(&par_panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
+/* A loop inside a chunk, on a slot of its own that idle threads help with. Returns 0 if every
+ * slot is taken. */
+static int par_inner(cx_u64 n, par_body body, void* ctx, cx_usize threads) {
+    cx_u64 taken = __atomic_load_n(&par_taken, __ATOMIC_RELAXED);
+    unsigned k;
+    do {
+        if (!~taken) return 0;
+        k = (unsigned)__builtin_ctzll(~taken);
+    } while (!__atomic_compare_exchange_n(&par_taken, &taken, taken | ((cx_u64)1 << k), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
+    par_job* j = &par_nest[k];
+    par_setup(j, n, body, ctx, threads);
+    j->slot = k;
+    j->up = par_cur;
+    j->up_chunk = par_chunk;
+    j->up_owner = par_owner;
+    __atomic_store_n(&j->word, j->word + 1, __ATOMIC_SEQ_CST);
+    __atomic_fetch_or(&par_open, (cx_u64)1 << k, __ATOMIC_RELEASE);
+    par_nudge();
+
+    par_claim(j, 1);
+    if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_inner(j);
+    par_close(j);
+    __atomic_fetch_and(&par_open, ~((cx_u64)1 << k), __ATOMIC_RELEASE);
+    par_drain(j);
+    /* A helper's chunk may have panicked after the owner's last check. */
+    if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_inner(j);
+    par_replay(j, j->chunks);
+    __atomic_fetch_and(&par_taken, ~((cx_u64)1 << k), __ATOMIC_RELEASE);
+    return 1;
+}
+
+void cx_parallel(cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx) {
+    if (n == 0) return;
+    cx_usize threads = par_threads();
+    if (threads <= 1 || n == 1 || (par_cur && !par_inner(n, body, ctx, threads))) {
+        par_depth++;
+        body(ctx, 0, n);
+        par_depth--;
+        return;
+    }
+    if (par_cur) return;
+    par_start_workers(threads);
+    par_job* j = &par_top;
+    par_setup(j, n, body, ctx, threads);
+    j->up = 0;
+    __atomic_store_n(&j->left, j->chunks, __ATOMIC_RELAXED);
+    __atomic_store_n(&j->word, j->word + 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&par_sleepers, __ATOMIC_SEQ_CST)) par_wake(&j->word);
+
+    int depth = par_depth;
+    par_depth = depth + 1;
+    par_claim(j, 1);
+    /* Helps the chunks still running with their inner loops, until they finish. */
+    for (unsigned spins = 0; __atomic_load_n(&j->left, __ATOMIC_ACQUIRE); spins++) {
+        if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
+        if (par_help_once()) spins = 0;
+        else if (spins < 4096) par_pause();
+        else par_yield();
+    }
+    par_close(j);
+    for (unsigned spins = 0; __atomic_load_n(&j->active, __ATOMIC_SEQ_CST); spins++) {
+        if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
         if (spins < 4096) par_pause();
         else par_yield();
     }
-    par_depth = 0;
-    if (__atomic_load_n(&par_panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
-    par_replay(chunks);
+    par_depth = depth;
+    if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic();
+    par_replay(j, j->chunks);
 }

@@ -234,7 +234,8 @@ static void share(heap* h, unsigned c) {
     *(void**)h->last[c] = s->head;
     if (!s->head) s->last = h->last[c];
     s->head = h->free[c];
-    s->count += h->count[c];
+    /* Atomic, since `take` reads it without the lock to see whether to take it. */
+    __atomic_store_n(&s->count, s->count + h->count[c], __ATOMIC_RELAXED);
     unlock(&s->lock);
     h->free[c] = NULL;
     h->last[c] = NULL;
@@ -337,7 +338,7 @@ static __attribute__((noinline)) void* refill(heap* h, unsigned c) {
             h->last[c] = h->free[c] ? s->last : NULL;
             h->count[c] = s->count - 1;
             s->head = s->last = NULL;
-            s->count = 0;
+            __atomic_store_n(&s->count, 0, __ATOMIC_RELAXED);
         }
         unlock(&s->lock);
         if (p) return p;
@@ -362,7 +363,7 @@ static void* large_alloc(cx_usize n) {
         lock(&large_lock);
         void* p = large_free[c];
         if (p) {
-            large_free[c] = *(void**)p;
+            __atomic_store_n(&large_free[c], *(void**)p, __ATOMIC_RELAXED);
             cached -= large_size(c);
         }
         unlock(&large_lock);
@@ -381,7 +382,7 @@ static void large_release(void* p, cx_usize n) {
     lock(&large_lock);
     if (cached + size <= CACHE_MAX) {
         *(void**)p = large_free[c];
-        large_free[c] = p;
+        __atomic_store_n(&large_free[c], p, __ATOMIC_RELAXED);
         cached += size;
         p = NULL;
     }

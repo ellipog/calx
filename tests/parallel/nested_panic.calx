@@ -1,0 +1,32 @@
+// A panic in an inner loop is a panic in the outer iteration that ran it: the program prints
+// what every iteration before it printed, in order, then the first panic, with any number of
+// threads.
+
+import std.pool.{set_workers}
+
+fn main() {
+    set_workers(8)
+    var rows: List<List<i32>> = []
+    for r in 0..8 {
+        var row: List<i32> = []
+        for c in 0..1000 {
+            row.push(r * 1000 + c)
+        }
+        rows.push(row)
+    }
+    parallel for r in 0usize..rows.len() {
+        parallel for c in 0usize..rows[r].len() {
+            if c == 999 {
+                println("row {r} done")
+            }
+            if r >= 3 and c == 500 {
+                panic("row {r} cell {c}")    // panic: row 3 cell 500
+            }
+            rows[r][c] += 1
+        }
+    }
+    // out: row 0 done
+    // out: row 1 done
+    // out: row 2 done
+    println("{rows[0][0]}")
+}

@@ -280,7 +280,7 @@ Built: [std.mail](std/mail.md) (D115). An actor is a plain struct that a `parall
 
 ### Parallel loops
 
-Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). Still to build:
+Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). A loop inside another gets the threads the outer one has no work for ([loops inside loops](reference/parallel.md#loops-inside-loops)). Still to build:
 
 ```calx
 fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
