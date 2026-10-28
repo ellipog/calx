@@ -374,7 +374,8 @@ private:
         if (uses_) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: uses_->add_type(t); break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+                case TypeKind::fn_: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -403,7 +404,8 @@ private:
             case TypeKind::list:
             case TypeKind::deque:
             case TypeKind::map:
-            case TypeKind::set: return compound_name(t);
+            case TypeKind::set:
+            case TypeKind::fn_: return compound_name(t);
         }
         return "void";
     }
@@ -421,6 +423,14 @@ private:
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
+            case TypeKind::fn_:
+                // `cx_fn_i32_mList_i32__bool`: each parameter with its mode, then the result.
+                s = t->unsafe_fn ? "cx_ufn" : "cx_fn";
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    s += std::string("_") + (t->modes[i] == 1 ? "m" : t->modes[i] == 2 ? "o" : "") + part(t->elems[i]);
+                }
+                s += "__" + (t->elem->kind == TypeKind::unit ? std::string("unit") : part(t->elem));
+                break;
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -442,7 +452,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
-            case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+            case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::fn_:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
             case TypeKind::arena: return "Arena";
@@ -518,7 +528,8 @@ private:
         std::function<void(const Type*)> close = [&](const Type* t) {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+                case TypeKind::fn_: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -533,6 +544,10 @@ private:
                     close(t->elem);
                     close(t->entry);
                     break;
+                case TypeKind::fn_:
+                    for (const Type* e : t->elems) close(e);
+                    close(t->elem);
+                    break;
                 default: for (const Type* e : t->elems) close(e); break;
             }
         };
@@ -543,12 +558,24 @@ private:
     void emit_type_defs(const std::vector<const Type*>& order) {
         // Each is declared first, so a list can point to any of them.
         for (const Type* t : order) {
+            if (t->kind == TypeKind::fn_) continue;
             if (t->kind == TypeKind::enum_ && !t->has_data) {
                 out_ += "typedef " + ctype(t->repr) + " " + ctype(t) + ";\n";
             } else {
                 out_ += "typedef struct " + ctype(t) + " " + ctype(t) + ";\n";
             }
             if (is_table(t) && t->table == TableKind::java) out_ += "typedef struct " + jnode(t) + " " + jnode(t) + ";\n";
+        }
+        // A function type needs only the names of what it takes and gives, and comes after the
+        // function types it mentions (D122).
+        for (const Type* t : order) {
+            if (t->kind != TypeKind::fn_) continue;
+            std::string ps;
+            for (std::size_t i = 0; i < t->elems.size(); i++) {
+                if (i) ps += ", ";
+                ps += param_ctype(t->elems[i], static_cast<ParamMode>(t->modes[i]));
+            }
+            out_ += "typedef " + ctype(t->elem) + " (*" + ctype(t) + ")(" + (ps.empty() ? std::string("void") : ps) + ");\n";
         }
         for (const Type* t : order) {
             switch (t->kind) {
@@ -2545,6 +2572,14 @@ $dropall    m->len = 0;
         return s + " }}";
     }
 
+    // How a parameter of type `t` in mode `m` is passed: by pointer if it's a view (D48), else by
+    // value. A function value's type passes them the same way, so it can point to the function.
+    std::string param_ctype(const Type* t, ParamMode m) const {
+        if (m == ParamMode::mut) return ctype(t) + "*";
+        if (m == ParamMode::read && is_view_type(t)) return "const " + ctype(t) + "*";
+        return ctype(t);
+    }
+
     std::string signature(const Item* f) {
         std::string s = ctype(f->result_type) + " " + std::string(f->c_name) + "(";
         if (f->params.empty()) s += "void";
@@ -3882,12 +3917,21 @@ $dropall    m->len = 0;
                     if (uses_) uses_->add_const(e->item);
                     return std::string(e->item->c_name);
                 }
+                if (e->ref == Ref::fn) {
+                    // A function as a value is its address (D122).
+                    if (uses_) uses_->add_fn(e->item);
+                    return std::string(e->item->c_name);
+                }
                 return place(e);
             case ExprKind::unary: return unary(e);
             case ExprKind::binary: return binary(e);
             case ExprKind::call: return call(e);
             case ExprKind::field:
                 if (e->ref == Ref::variant) return variant_value(e->type, e->field_index, {});  // `Shape.Empty`
+                if (e->ref == Ref::fn) {
+                    if (uses_) uses_->add_fn(e->item);
+                    return std::string(e->item->c_name);  // `Point.len` as a value (D122)
+                }
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
             // A `String`'s part is kept, so it's copied; a `str`'s is a view of the same bytes.
@@ -4154,6 +4198,7 @@ $dropall    m->len = 0;
             case CallKind::builtin_method: return builtin_method(e);
             case CallKind::fn:
             case CallKind::method: return fn_call(e);
+            case CallKind::value: return value_call(e);
             default: return "0";
         }
     }
@@ -4189,6 +4234,24 @@ $dropall    m->len = 0;
         // A function whose panics name its caller gets this call's place, or the place its own
         // caller gave it.
         if (f->track_caller) s += (by_param.empty() ? "" : ", ") + location(e->span);
+        return wrap(decls, s + ")");
+    }
+
+    // `f(x)` through a function value (D122): the value first, then the arguments, each passed
+    // as the type's mode says.
+    std::string value_call(Expr* e) {
+        Type* ft = e->callee->type;
+        std::vector<Operand> ops;
+        ops.push_back({e->callee, ft, Pass::value});
+        for (std::size_t i = 0; i < e->args.size(); i++) {
+            auto m = static_cast<ParamMode>(ft->modes[i]);
+            bool view = m == ParamMode::mut || (m == ParamMode::read && is_view_type(ft->elems[i]));
+            ops.push_back({e->args[i].value, ft->elems[i], view ? Pass::address : Pass::value});
+        }
+        std::string decls;
+        std::vector<std::string> v = sequence(ops, decls);
+        std::string s = "(" + v[0] + ")(";
+        for (std::size_t i = 1; i < v.size(); i++) s += (i > 1 ? ", " : "") + v[i];
         return wrap(decls, s + ")");
     }
 

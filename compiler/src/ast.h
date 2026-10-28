@@ -25,12 +25,14 @@ struct Path {
 // ---------------------------------------------------------------------------------------------
 // Types as written.
 
+enum class ParamMode : std::uint8_t { read, mut, own };
+
 enum class TypeExprKind : std::uint8_t {
     named,     // `i32`, `Point`, `List<T>`, `std.c.int`
     optional,  // `T?`
     array,     // `[T; N]`
     tuple,     // `(A, B)`; `()` is the unit type
-    fn,        // `fn(A, B) -> R`
+    fn,        // `fn(A, mut B) -> R ! E` and `unsafe fn(A)`
     pointer,   // `*T` and `*const T`, for `unsafe` code
     dyn,       // `dyn Shape`
     self,      // `Self`
@@ -41,10 +43,12 @@ struct TypeExpr {
     Span span;
     Path path;                    // named
     Slice<TypeExpr*> args;        // named: generic arguments; tuple: elements; fn: parameters
+    Slice<ParamMode> modes;       // fn: each parameter's mode
     TypeExpr* inner = nullptr;    // optional, array, pointer: the element; fn: the result; dyn: the interface
     TypeExpr* error = nullptr;    // fn: the error type after `!`
     Expr* length = nullptr;       // array
     bool is_const = false;        // pointer
+    bool is_unsafe = false;       // fn: `unsafe fn`, which only `unsafe` code can call
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -110,8 +114,6 @@ struct MatchArm {
 
 struct Param;
 
-enum class ParamMode : std::uint8_t { read, mut, own };
-
 // A local variable or parameter, made by the checker.
 struct Local {
     Name name;
@@ -149,6 +151,7 @@ enum class CallKind : std::uint8_t {
     try_from,    // `i8.try_from(x)`, `Flag.try_from(n)`: a checked conversion to an optional
     builtin_method,  // a method of `String`, `str`, `List` or a pointer, or `x.copy()`: `bmethod` says which
     prim_static, // `i32.parse(s)`, `f64.from_bits(b)`, `String.from_utf8(bytes)`: `prim` says which
+    value,       // `f(x)` where `f` is a function value (D122), `callee` of type `fn(...)`
 };
 
 enum class BMethod : std::uint8_t {

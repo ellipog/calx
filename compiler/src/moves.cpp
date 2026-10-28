@@ -1002,6 +1002,16 @@ private:
                 }
                 break;
             }
+            case CallKind::value: {
+                // D122: the function value is looked at, and each argument used as its type's mode says.
+                expr(e->callee, Use::view);
+                const Type* ft = e->callee->type;
+                for (std::size_t i = 0; i < e->args.size(); i++) {
+                    auto m = static_cast<ParamMode>(ft && i < ft->modes.size() ? ft->modes[i] : 0);
+                    expr(e->args[i].value, m == ParamMode::own ? Use::consume : m == ParamMode::mut ? Use::change : Use::view);
+                }
+                break;
+            }
             case CallKind::variant:
             case CallKind::some:
                 for (const Arg& a : e->args) expr(a.value, Use::consume);

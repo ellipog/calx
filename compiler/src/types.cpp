@@ -89,7 +89,9 @@ Type* Types::make_enum(Item* item, std::string_view name) {
 Type* Types::optional_of(Type* elem) {
     auto it = optional_map_.find(elem);
     if (it != optional_map_.end()) return it->second;
-    Type* t = make(TypeKind::optional, arena_.copy(std::string(elem->name) + "?"));
+    // `(fn() -> i32)?`, since `fn() -> i32?` gives back an optional.
+    std::string name = elem->kind == TypeKind::fn_ ? "(" + std::string(elem->name) + ")?" : std::string(elem->name) + "?";
+    Type* t = make(TypeKind::optional, arena_.copy(name));
     t->elem = elem;
     t->open = elem->open;
     t->has_pointer = elem->has_pointer;
@@ -256,6 +258,49 @@ Type* Types::pointer_of(Type* elem, bool is_const) {
     t->has_pointer = true;
     pointer_map_.emplace(key, t);
     return t;
+}
+
+// A function value is the function's address, whatever it takes, so only `open` comes from its
+// parts: it holds no pointer, nothing scoped and nothing to free.
+Type* Types::fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe) {
+    auto key = std::make_tuple(params, modes, result, is_unsafe);
+    auto it = fn_map_.find(key);
+    if (it != fn_map_.end()) return it->second;
+    std::string name = is_unsafe ? "unsafe fn(" : "fn(";
+    for (std::size_t i = 0; i < params.size(); i++) {
+        if (i) name += ", ";
+        if (modes[i] == 1) name += "mut ";
+        if (modes[i] == 2) name += "own ";
+        name += params[i]->name;
+    }
+    name += ")";
+    if (result->is_result && result->args.size() == 2 && result->args[0]->kind == TypeKind::unit) {
+        name += " ! " + std::string(result->args[1]->name);  // `fn() ! E`, as a function is declared
+    } else if (result->kind != TypeKind::unit) {
+        name += " -> " + std::string(result->name);
+    }
+    Type* t = make(TypeKind::fn_, arena_.copy(name));
+    t->elems = arena_.copy(params);
+    t->modes = arena_.copy(modes);
+    t->elem = result;
+    t->unsafe_fn = is_unsafe;
+    t->open = result->open;
+    for (Type* p : params) t->open = t->open || p->open;
+    fn_map_.emplace(std::move(key), t);
+    fns_.push_back(t);
+    return t;
+}
+
+bool is_view_type(const Type* t) {
+    switch (t->kind) {
+        case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
+        case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
+        case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
+            return true;
+        case TypeKind::enum_: return t->has_data;
+        case TypeKind::optional: return is_view_type(t->elem);
+        default: return false;
+    }
 }
 
 namespace {

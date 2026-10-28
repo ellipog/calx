@@ -1,0 +1,51 @@
+// Functions from impls as values (D122): a method takes what it's called on first, an
+// interface's method is the impl's for the type, and a generic type's come from where they go.
+
+interface Shape {
+    fn area(self) -> f64
+}
+
+struct Square {
+    side: f64
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+}
+
+struct Circle {
+    r: f64
+}
+
+impl Shape for Circle {
+    fn area(self) -> f64 {
+        return 3.0 * self.r * self.r
+    }
+}
+
+fn area_fn<T: Shape>() -> fn(T) -> f64 {
+    return T.area
+}
+
+struct Box<T> {
+    v: T
+}
+
+impl<T: Copy> Box<T> {
+    fn get(self) -> T {
+        return self.v
+    }
+}
+
+fn main() {
+    let f = Square.area
+    println("{f(Square { side: 3.0 })}")    // out: 9.0
+    let g = area_fn<Circle>()
+    println("{g(Circle { r: 1.0 })}")       // out: 3.0
+    let h = Box<i32>.get
+    println("{h(Box { v: 7 })}")            // out: 7
+    let k: fn(Box<u8>) -> u8 = Box.get
+    println("{k(Box { v: 9u8 })}")          // out: 9
+}

@@ -1,0 +1,28 @@
+// A function from another module, a C function and an `unsafe fn` as values (D122), and function
+// values sent between threads, since they're `Send`.
+
+import std.math.{exp, log}
+
+extern "C" {
+    fn labs(x: i64) -> i64
+}
+
+fn main() {
+    let ops: List<fn(f64) -> f64> = [exp, log]
+    for f in ops {
+        println("{f(1.0)}")
+    }
+    // out: 2.718281828459045
+    // out: 0.0
+
+    // A C function is called the way an `unsafe fn` is.
+    let a: unsafe fn(i64) -> i64 = labs
+    println("{unsafe { a(-5) }}")    // out: 5
+
+    var q = Receiver<fn(f64) -> f64>()
+    var s = q.sender()
+    s.send(exp)
+    if let g = q.next() {
+        println("{g(0.0)}")          // out: 1.0
+    }
+}

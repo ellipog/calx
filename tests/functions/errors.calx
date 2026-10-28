@@ -1,0 +1,49 @@
+// What the checker catches about function values (D122).
+
+@track_caller
+fn check_positive(x: i32) {
+    assert(x > 0)
+}
+
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+fn grow(xs: mut List<i32>) {
+    xs.push(1)
+}
+
+unsafe fn raw() -> i32 {
+    return 1
+}
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+struct Holder {
+    f: fn(i32) -> i32
+}
+
+fn main() {
+    let a = check_positive               // error: is `@track_caller`, so it can only be called
+    let b: fn(i64) -> i64 = double       // error: expected `fn(i64) -> i64`, found `fn(i32) -> i32`
+    let c: fn(mut List<i32>) = grow
+    var xs: List<i32> = []
+    c(xs)                                // error: so pass it as `mut ...` to show that
+    let d = double
+    println("{d(1, 2)}")                 // error: takes 1 argument, but 2 were given
+    println("{d(x: 1)}")                 // error: a function value's parameters have no names
+    let e = raw
+    println("{e()}")                     // error: so calling it needs `unsafe`
+    let g = id                           // error: can't tell what `T` is in `id` as a value
+    println("{d == d}")                  // error: a function isn't compared, shown, hashed or ordered
+    println("{d}")                       // error: a function isn't compared, shown, hashed or ordered
+    let h = Holder { f: double }
+    println("{h.f(2)}")                  // error: call the function it holds with `(h.f)(...)`
+    let n = 5
+    println("{n(1)}")                    // error: `n` is an `i32`, not a function
+    let p: fn(()) = double               // error: a parameter can't be `()`
+    let q: fn(*u8) = double              // error: a pointer can only be
+    _ = b
+}

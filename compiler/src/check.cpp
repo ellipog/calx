@@ -367,6 +367,9 @@ private:
             case TypeKind::tuple:
                 for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
                 return nullptr;
+            case TypeKind::fn_:
+                for (const Type* e : t->elems) if (const Item* p = private_part(e)) return p;
+                return private_part(t->elem);
             default: return nullptr;
         }
     }
@@ -1362,6 +1365,9 @@ private:
             case TypeKind::tuple:
                 for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
                 return false;
+            case TypeKind::fn_:
+                for (Type* e : t->elems) if (unresolved(e, vars, s)) return true;
+                return unresolved(t->elem, vars, s);
             case TypeKind::struct_: case TypeKind::enum_:
                 for (Type* a : t->args) if (unresolved(a, vars, s)) return true;
                 return false;
@@ -1401,6 +1407,11 @@ private:
                 std::vector<Type*> elems;
                 for (Type* e : t->elems) elems.push_back(subst(e, s));
                 return T.tuple_of(elems);
+            }
+            case TypeKind::fn_: {
+                std::vector<Type*> params;
+                for (Type* e : t->elems) params.push_back(subst(e, s));
+                return T.fn_of(params, std::vector<std::uint8_t>(t->modes.begin(), t->modes.end()), subst(t->elem, s), t->unsafe_fn);
             }
             case TypeKind::struct_: case TypeKind::enum_: {
                 std::vector<Type*> args;
@@ -1443,6 +1454,12 @@ private:
                     if (!unify(pattern->elems[i], actual->elems[i], s, vars)) return false;
                 }
                 return true;
+            case TypeKind::fn_:
+                if (pattern->elems.size() != actual->elems.size() || pattern->unsafe_fn != actual->unsafe_fn) return false;
+                for (std::size_t i = 0; i < pattern->elems.size(); i++) {
+                    if (pattern->modes[i] != actual->modes[i] || !unify(pattern->elems[i], actual->elems[i], s, vars)) return false;
+                }
+                return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::struct_: case TypeKind::enum_:
                 if (pattern->generic != actual->generic) return false;
                 for (std::size_t i = 0; i < pattern->args.size(); i++) {
@@ -1690,6 +1707,12 @@ private:
                 std::string s = "tup";
                 for (Type* e : t->elems) s += "_" + mangle(e);
                 return s;
+            }
+            case TypeKind::fn_: {
+                static const char* const mode[] = {"", "mut_", "own_"};
+                std::string s = t->unsafe_fn ? "ufn" : "fn";
+                for (std::size_t i = 0; i < t->elems.size(); i++) s += std::string("_") + mode[t->modes[i]] + mangle(t->elems[i]);
+                return s + "_to_" + mangle(t->elem);
             }
             default: return std::string(t->name);
         }
@@ -2277,7 +2300,43 @@ private:
                 }
                 return optional_type(inner, t->span);
             }
-            case TypeExprKind::fn: not_yet(t->span, "function types"); return T.error;
+            case TypeExprKind::fn: {
+                // D122: a plain function as a value. Its parameters are written as a function's are,
+                // with their modes, and pointers go only to and from an `unsafe fn`.
+                std::vector<Type*> params;
+                std::vector<std::uint8_t> modes;
+                bool bad = false;
+                for (std::size_t i = 0; i < t->args.size(); i++) {
+                    Type* p = resolve_type(t->args[i], t->is_unsafe, t->modes[i] != ParamMode::own);
+                    if (p->kind == TypeKind::unit) {
+                        error(t->args[i]->span, "a parameter can't be `()`");
+                        p = T.error;
+                    }
+                    bad = bad || is_bad(p);
+                    params.push_back(p);
+                    modes.push_back(static_cast<std::uint8_t>(t->modes[i]));
+                }
+                Type* result = t->inner ? resolve_type(t->inner, t->is_unsafe) : T.unit;
+                if (t->inner && result->kind == TypeKind::unit) {
+                    error(t->inner->span, "leave out `-> ()`: a function without `->` returns nothing");
+                }
+                if (is_bad(result)) return T.error;
+                if (t->error) {
+                    Type* e = resolve_type(t->error);
+                    if (is_bad(e)) return T.error;
+                    if (e->kind == TypeKind::unit || e->kind == TypeKind::never) {
+                        error(t->error->span, "a function can't fail with " + name_of(e) + "; give the error a type, such as an enum");
+                        return T.error;
+                    }
+                    if (result->kind == TypeKind::never) {
+                        error(t->inner->span, "a function that can fail can't return `never`");
+                        return T.error;
+                    }
+                    result = result_of(result, e);
+                }
+                if (bad) return T.error;
+                return T.fn_of(params, modes, result, t->is_unsafe);
+            }
             case TypeExprKind::pointer: {
                 if (!pointer_ok) {
                     error(t->span, "a pointer can only be the type of a variable in `unsafe` code, or of a C function's "
@@ -2319,18 +2378,6 @@ private:
         return s;
     }
 
-    // Read parameters of these types are passed as views, since copying them could be costly.
-    static bool is_view_type(const Type* t) {
-        switch (t->kind) {
-            case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
-            case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
-            case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-                return true;
-            case TypeKind::enum_: return t->has_data;
-            case TypeKind::optional: return is_view_type(t->elem);
-            default: return false;
-        }
-    }
 
     void check_signature(Item* f) {
         if (f->checked_signature) return;
@@ -2536,7 +2583,8 @@ private:
             }
             return;
         }
-        if (!l->used && !(l->is_loop_var && l->mutated) && !starts_with_underscore(n)) {
+        // A local whose type was an error already has an error, and its uses weren't all checked.
+        if (!l->used && !(l->is_loop_var && l->mutated) && !starts_with_underscore(n) && !is_bad(l->type)) {
             error(l->span, q(n) + " is never used");
         } else if (l->is_loop_var && l->mode == ParamMode::mut && !l->mutated && !is_bad(l->type)) {
             error(l->span, q(n) + " never changes an element, so go over them without `mut`");
@@ -3485,7 +3533,7 @@ private:
                 }
                 return T.error;
             case ExprKind::name:
-            case ExprKind::self: return name_value(e);
+            case ExprKind::self: return name_value(e, expected);
             case ExprKind::unary: return unary(e, expected);
             case ExprKind::binary: return binary(e, expected);
             case ExprKind::range:
@@ -3849,6 +3897,9 @@ private:
             why = std::string(", and ") + (leaf->kind == TypeKind::thread ? "a thread" : "an end of a queue") +
                   " is a handle to something two threads share, which isn't compared, shown, hashed or ordered";
         }
+        // Two functions with the same code can be one in the program, so their addresses can't
+        // tell them apart (D122).
+        if (leaf->kind == TypeKind::fn_) why = ", and a function isn't compared, shown, hashed or ordered";
         if (leaf == t) return why;
         return ", since it holds " + name_of(leaf) + why;
     }
@@ -4028,13 +4079,17 @@ private:
         return instance_type(g, args);
     }
 
-    Type* name_value(Expr* e) {
+    Type* name_value(Expr* e, Type* expected) {
         Name n = e->kind == ExprKind::self ? n_self_ : e->path.parts[0];
         if (n == n_underscore_) {
             error(e->span, "`_` can only be assigned to, to discard a value: `_ = ...`");
             return T.error;
         }
         Resolved r = resolve_name(n);
+        if (r.kind == NameKind::item && r.item->kind == ItemKind::fn) {
+            use_item(r.item);
+            return fn_value(e, r.item, expected);
+        }
         if (!e->type_args.empty() && r.kind != NameKind::type) {
             error(e->type_args[0]->span, q(text(n)) + " doesn't take generic arguments here");
             return T.error;
@@ -4048,11 +4103,7 @@ private:
             case NameKind::item:
                 use_item(r.item);
                 if (r.item->kind == ItemKind::const_) return const_ref(e, r.item);
-                if (r.item->kind == ItemKind::interface) {
-                    error(e->span, q(text(n)) + " is an interface, not a value");
-                    return T.error;
-                }
-                error(e->span, "function " + q(text(n)) + " can't be used as a value yet; call it");
+                error(e->span, q(text(n)) + " is an interface, not a value");
                 return T.error;
             case NameKind::type:
                 error(e->span, q(text(n)) + " is a type, not a value");
@@ -4066,6 +4117,148 @@ private:
                 return T.error;
         }
         return T.error;
+    }
+
+    // `double` as a value (D122): the function, as a `fn(...)` with its parameters' types and
+    // modes. A generic function's types come from `f<...>`, or from the type expected.
+    Type* fn_value(Expr* e, Item* f, Type* expected, Subst s = {}) {
+        check_signature(f);
+        std::string_view n = text(f->name);
+        if (f->track_caller) {
+            error(e->span, q(n) + " is `@track_caller`, so it can only be called, since its panics name the place that called it");
+            return T.error;
+        }
+        std::vector<Type*> params;
+        std::vector<std::uint8_t> modes;
+        for (const Param& p : f->params) {
+            if (!p.local || is_bad(p.local->type)) return T.error;
+            // A C function takes its values as C does, which a function value calls the way Calx does.
+            if (f->is_extern && is_view_type(p.local->type)) {
+                error(e->span, q(n) + " is a C function that takes " + a_type(p.local->type) +
+                                   ", which C passes in a way a function value can't; wrap it in a Calx function");
+                return T.error;
+            }
+            params.push_back(p.local->type);
+            modes.push_back(static_cast<std::uint8_t>(p.mode));
+        }
+        if (!f->result_type || is_bad(f->result_type)) return T.error;
+        Type* t = T.fn_of(params, modes, f->result_type, f->is_unsafe || f->is_extern);
+        e->ref = Ref::fn;
+        e->item = f;
+        const Slice<Type*>& vars = f->type_params;
+        if (vars.empty()) {
+            if (!e->type_args.empty()) error(e->type_args[0]->span, q(n) + " isn't generic");
+            return t;
+        }
+        std::size_t own = f->generics.size();
+        if (!e->type_args.empty()) {
+            if (e->type_args.size() != own) {
+                error(e->type_args[0]->span, q(n) + " takes " + std::to_string(own) + (own == 1 ? " type" : " types") + ", but " +
+                                                 std::to_string(e->type_args.size()) +
+                                                 (e->type_args.size() == 1 ? " was given" : " were given"));
+                return T.error;
+            }
+            for (std::size_t k = 0; k < own; k++) {
+                Type* a = resolve_type(e->type_args[k]);
+                if (is_bad(a)) return T.error;
+                s[vars[vars.size() - own + k]] = a;
+            }
+        }
+        if (expected && expected->kind == TypeKind::fn_) {
+            Subst trial = s;
+            if (unify(t, expected, trial, vars)) s = std::move(trial);
+        }
+        std::vector<Type*> args;
+        for (Type* p : vars) {
+            auto it = s.find(p);
+            if (it == s.end()) {
+                error(e->span, "can't tell what " + q(p->name) + " is in " + q(n) + " as a value; give it, as in " +
+                                   q(std::string(n) + "<...>") + ", or give the variable a type");
+                return T.error;
+            }
+            args.push_back(it->second);
+        }
+        if (!check_bounds(vars, args, e->span, q(n))) return T.error;
+        t = subst(t, s);
+        bool open = false;
+        for (Type* a : args) open = open || a->open;
+        if (!open) {
+            Item* inst = in_interface(f) ? impl_fn(f, args, e->span) : instance_fn(f, args, e->span);
+            if (!inst) return T.error;
+            e->item = inst;
+        }
+        return t;
+    }
+
+    // `f(x)`, where `f` is a function value (D122). The arguments follow the type's modes, as a
+    // direct call's follow the parameters', but a function value's parameters have no names, and
+    // none can be left out.
+    Type* value_call(Expr* e, Type* ft) {
+        Expr* callee = e->callee;
+        e->call = CallKind::value;
+        if (ft->unsafe_fn) {
+            if (unsafe_depth_ == 0) error(callee->span, "this is an `unsafe fn`, so calling it needs `unsafe`");
+            unsafe_used_ = true;
+        }
+        std::size_t n = ft->elems.size();
+        if (e->args.size() != n) {
+            for (Arg& a : e->args) check(a.value, nullptr);
+            error(e->span, "this " + name_of(ft) + " takes " + std::to_string(n) + " argument" + (n == 1 ? "" : "s") + ", but " +
+                               std::to_string(e->args.size()) + (e->args.size() == 1 ? " was given" : " were given"));
+            return T.error;
+        }
+        std::vector<Expr*> ordered(n, nullptr);
+        std::vector<bool> is_mut(n, false);
+        bool ok = true;
+        for (std::size_t i = 0; i < n; i++) {
+            Arg& a = e->args[i];
+            if (a.name) {
+                error(a.span, "a function value's parameters have no names, so its arguments go in order");
+                ok = false;
+            }
+            Type* got = check(a.value, ft->elems[i]);
+            if (is_bad(got)) ok = false;
+            if (ft->modes[i] == static_cast<std::uint8_t>(ParamMode::mut)) {
+                if (!a.is_mut) {
+                    error(a.value->span, "this function can change its argument " + std::to_string(i + 1) + ", so pass it as " +
+                                             q("mut ...") + " to show that");
+                    if (Local* root = place_root(a.value)) root->used = root->mutated = true;  // one error is enough
+                } else if (Local* root = place_root(a.value)) {
+                    require_writable(a.value, root, false);
+                } else {
+                    error(a.value->span, "only a variable can be passed as `mut`");
+                }
+                is_mut[i] = true;
+            } else if (a.is_mut) {
+                error(a.span, "this function doesn't change its argument " + std::to_string(i + 1) + "; remove `mut`");
+            }
+            ordered[i] = a.value;
+        }
+        distinct_muts(ordered, is_mut);
+        e->ordered_args = ctx_.arena.copy(ordered);
+        return ok ? ft->elem : T.error;
+    }
+
+    // D48: a value passed as `mut` can't be passed again in the same call, nor can any part of
+    // it. Separate fields are separate values, so `mut w.blocks[k]` and `mut w.states[k]` can
+    // go together; two elements of one list can't, since their indexes may be equal.
+    void distinct_muts(const std::vector<Expr*>& ordered, const std::vector<bool>& is_mut) {
+        std::size_t n = ordered.size();
+        for (std::size_t i = 0; i < n; i++) {
+            if (!is_mut[i] || !ordered[i]) continue;
+            const Local* root = nullptr;
+            std::vector<std::uint32_t> path;
+            if (!place_path(ordered[i], root, path)) continue;
+            for (std::size_t j = 0; j < n; j++) {
+                if (j == i || !ordered[j]) continue;
+                if (is_mut[j] && j < i) continue;  // the pair was checked from j's side
+                if (mentions(ordered[j], root, &path)) {
+                    error(ordered[j]->span, q(text(root->name)) + " is passed as `mut`, so it can't be used again in the same call");
+                    note(ordered[i]->span, "it's passed as `mut` here");
+                    break;
+                }
+            }
+        }
     }
 
     // --- operators ---------------------------------------------------------------------------
@@ -4537,8 +4730,14 @@ private:
             return const_ref(e, mem.konst);
         }
         if (mem.fn) {
-            error(e->span, q(std::string(t->name) + "." + std::string(m)) + " is a function; call it");
-            return T.error;
+            // `Point.len` as a value: a method takes what it's called on first (D122).
+            if (!member_visible(mem)) private_member(e->span, mem.fn);
+            if (mem.fn && prop_of(mem.iface) >= 0) {
+                error(e->span, called_by_name(mem.iface));
+                return T.error;
+            }
+            use_item(mem.fn);
+            return fn_value(e, mem.fn, expected, std::move(mem.s));
         }
         error(e->span, name_of(t) + (t->kind == TypeKind::enum_ ? " has no variant " : " has nothing named ") + q(m));
         return T.error;
@@ -5781,6 +5980,14 @@ private:
             not_yet(e->trailing->span, "closures");
             return T.error;
         }
+        // `(s.f)(x)`: what's in parentheses is a value, so this calls a function value (D122).
+        if (callee->parens) {
+            Type* t = check(callee, nullptr);
+            if (t->kind == TypeKind::fn_) return value_call(e, t);
+            for (Arg& a : e->args) check(a.value, nullptr);
+            if (!is_bad(t)) error(callee->span, name_of(t) + " can't be called");
+            return T.error;
+        }
         if (callee->kind == ExprKind::name) {
             Name n = callee->path.parts[0];
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
@@ -5841,10 +6048,13 @@ private:
                     }
                     return conversion(e, t, Conv::exact);
                 }
-                case NameKind::local:
-                    r.local->used = true;
-                    error(callee->span, q(text(n)) + " is " + a_type(r.local->type) + ", not a function");
+                case NameKind::local: {
+                    Type* t = check(callee, nullptr);
+                    if (t->kind == TypeKind::fn_) return value_call(e, t);
+                    for (Arg& a : e->args) check(a.value, nullptr);
+                    if (!is_bad(t)) error(callee->span, q(text(n)) + " is " + a_type(t) + ", not a function");
                     return T.error;
+                }
                 case NameKind::none:
                     error(callee->span, "unknown function " + q(text(n)));
                     for (Arg& a : e->args) check(a.value, nullptr);
@@ -5948,7 +6158,12 @@ private:
                     }
                     for (const FieldDecl& f : recv->item->fields) {
                         if (f.name == callee->member) {
-                            error(callee->span, q(text(f.name)) + " is a field of " + name_of(recv) + ", not a method");
+                            bool fn = f.resolved && f.resolved->kind == TypeKind::fn_;
+                            error(callee->span, q(text(f.name)) + " is a field of " + name_of(recv) + ", not a method" +
+                                                    (fn ? "; call the function it holds with " +
+                                                              q("(" + place_text(callee) + ")(...)")
+                                                        : std::string()));
+                            for (Arg& a : e->args) check(a.value, nullptr);
                             return T.error;
                         }
                     }
@@ -5963,8 +6178,10 @@ private:
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
             return prim_method(e, recv);
         }
-        check(callee, nullptr);
-        error(callee->span, "this can't be called");
+        Type* t = check(callee, nullptr);
+        if (t->kind == TypeKind::fn_) return value_call(e, t);
+        for (Arg& a : e->args) check(a.value, nullptr);
+        if (!is_bad(t)) error(callee->span, "this can't be called");
         return T.error;
     }
 
@@ -6292,6 +6509,7 @@ private:
                 if (!a.is_mut) {
                     error(a.value->span, q(text(f->name)) + " can change " + q(text(p.name)) + ", so pass it as " +
                                              q("mut ...") + " to show that");
+                    if (Local* root = place_root(a.value)) root->used = root->mutated = true;  // one error is enough
                 } else if (Local* root = place_root(a.value)) {
                     require_writable(a.value, root, false);
                 } else {
@@ -6311,24 +6529,7 @@ private:
         for (std::size_t i = first; i < n && ok; i++) {
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
         }
-        // D48: a value passed as `mut` can't be passed again in the same call, nor can any part of
-        // it. Separate fields are separate values, so `mut w.blocks[k]` and `mut w.states[k]` can
-        // go together; two elements of one list can't, since their indexes may be equal.
-        for (std::size_t i = 0; i < n; i++) {
-            if (!is_mut[i] || !ordered[i]) continue;
-            const Local* root = nullptr;
-            std::vector<std::uint32_t> path;
-            if (!place_path(ordered[i], root, path)) continue;
-            for (std::size_t j = 0; j < n; j++) {
-                if (j == i || !ordered[j]) continue;
-                if (is_mut[j] && j < i) continue;  // the pair was checked from j's side
-                if (mentions(ordered[j], root, &path)) {
-                    error(ordered[j]->span, q(text(root->name)) + " is passed as `mut`, so it can't be used again in the same call");
-                    note(ordered[i]->span, "it's passed as `mut` here");
-                    break;
-                }
-            }
-        }
+        distinct_muts(ordered, is_mut);
         e->ordered_args = ctx_.arena.copy(ordered);
         Type* result = f->result_type ? f->result_type : T.error;
         if (!generic) return result;
@@ -6507,8 +6708,10 @@ private:
                 return;
             case ExprKind::call:
                 // A method's receiver is a place. `len()` reads only a list's length, which an
-                // iteration changing an element doesn't change.
-                if (e->callee->kind == ExprKind::field) {
+                // iteration changing an element doesn't change. A function value is read (D122).
+                if (e->call == CallKind::value) {
+                    par_walk(pl, e->callee, out);
+                } else if (e->callee->kind == ExprKind::field) {
                     bool len = e->call == CallKind::builtin_method &&
                                (e->bmethod == BMethod::len || e->bmethod == BMethod::is_empty || e->bmethod == BMethod::capacity);
                     par_place(pl, e->callee->lhs, len, out);
@@ -7921,11 +8124,30 @@ private:
         auto visit = [&](auto& self, Type* t) -> void {
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
-                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: break;
+                case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+                case TypeKind::fn_: break;
                 default: return;
             }
             int& st = state[t];
             if (st == 2) return;
+            if (t->kind == TypeKind::fn_) {
+                // It needs only the declarations of what it takes and gives, but its C type names
+                // the function types among them, so those come first (D122).
+                st = 2;
+                auto fns = [&](auto& walk, Type* x) -> void {
+                    if (x->kind == TypeKind::fn_) {
+                        self(self, x);
+                    } else if (x->kind == TypeKind::optional || x->kind == TypeKind::array) {
+                        walk(walk, x->elem);
+                    } else if (x->kind == TypeKind::tuple) {
+                        for (Type* y : x->elems) walk(walk, y);
+                    }
+                };
+                for (Type* p : t->elems) fns(fns, p);
+                fns(fns, t->elem);
+                if (!t->open) prog_.type_order.push_back(t);
+                return;
+            }
             if (t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::map || t->kind == TypeKind::set) {
                 // Its elements are behind a pointer, so it needs only their declaration. A map's
                 // `(K, V)`, which its functions read, is ordered once everything else is.
@@ -7965,6 +8187,7 @@ private:
         if (ordering_item_) visit(visit, ordering_item_->declared);
         for (std::size_t i = 0; i < instances_.size(); i++) visit(visit, instances_[i]);
         for (Type* a : T.compounds()) visit(visit, a);
+        for (Type* f : T.fn_types()) visit(visit, f);
         for (std::size_t i = 0; i < later.size(); i++) visit(visit, later[i]);
     }
 

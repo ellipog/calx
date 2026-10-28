@@ -1,0 +1,104 @@
+// The kinds of function a value can hold (D122): one that can fail, an `unsafe fn`, a generic
+// one's instance, one that takes the struct that holds it, and ones a `parallel for` calls.
+
+enum ParseError {
+    Empty
+    NotDigit(u8)
+}
+
+fn digit(s: str) -> u32 ! ParseError {
+    if s.is_empty() {
+        fail ParseError.Empty
+    }
+    let b = s.byte_at(0)
+    if b < 48 or b > 57 {
+        fail ParseError.NotDigit(b)
+    }
+    return u32(b - 48)
+}
+
+fn sum_digits(parse: fn(str) -> u32 ! ParseError, parts: List<str>) -> u32 ! ParseError {
+    var total: u32 = 0
+    for p in parts {
+        total += try parse(p)
+    }
+    return total
+}
+
+unsafe fn risky(x: i64) -> i64 {
+    return x + 1
+}
+
+struct Machine {
+    state: i32
+    step: fn(Machine) -> i32
+}
+
+fn next_state(m: Machine) -> i32 {
+    return m.state * 3 + 1
+}
+
+struct Rule<T> {
+    name: str
+    test: fn(T) -> bool
+}
+
+fn even(x: i64) -> bool {
+    return x % 2 == 0
+}
+
+fn long(s: String) -> bool {
+    return s.len() > 3
+}
+
+fn count<T>(rule: Rule<T>, xs: List<T>) -> usize {
+    var n: usize = 0
+    for x in xs {
+        if (rule.test)(x) {
+            n += 1
+        }
+    }
+    return n
+}
+
+fn cube(x: u64) -> u64 {
+    return x * x * x
+}
+
+fn main() {
+    let parts: List<str> = ["1", "2", "9"]
+    match sum_digits(digit, parts) {
+        ok(n) => println("{n}"),        // out: 12
+        err(e) => println("{e}"),
+    }
+    let bad: List<str> = ["1", "x"]
+    match sum_digits(digit, bad) {
+        ok(n) => println("{n}"),
+        err(e) => println("{e}"),       // out: NotDigit(120)
+    }
+
+    let r: unsafe fn(i64) -> i64 = risky
+    let y = unsafe { r(41) }
+    println("{y}")                      // out: 42
+
+    var m = Machine { state: 1, step: next_state }
+    for _ in 0..3 {
+        m.state = (m.step)(m)
+    }
+    println("{m.state}")                // out: 40
+
+    let evens = Rule<i64> { name: "even", test: even }
+    let nums: List<i64> = [1, 2, 3, 4, 6]
+    println("{evens.name}: {count(evens, nums)}")    // out: even: 3
+    let longs = Rule<String> { name: "long", test: long }
+    let words: List<String> = ["ab", "abcd", "abcde"]
+    println("{longs.name}: {count(longs, words)}")   // out: long: 2
+
+    // A function value is `Copy` and `Send`, so every iteration can call it.
+    let f: fn(u64) -> u64 = cube
+    var out: List<u64> = [0; 6]
+    parallel for i in 0..out.len() {
+        out[i] = f(u64(i))
+    }
+    println("{out}")                    // out: [0, 1, 8, 27, 64, 125]
+}

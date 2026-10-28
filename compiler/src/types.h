@@ -40,6 +40,9 @@ enum class TypeKind : std::uint8_t {
     sender,
     receiver,
     thread,
+    // `fn(A, mut B) -> R`: a plain function as a value (D122). `elems` are its parameters' types
+    // and `modes` their modes, and `elem` is what it gives back, a result when it can fail.
+    fn_,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -56,7 +59,9 @@ struct Type {
     Type* key = nullptr;     // map: the keys
     Type* entry = nullptr;   // map: `(K, V)`, what the table holds and a `for` loop goes over
     std::uint64_t length = 0;
-    Slice<Type*> elems;      // tuple
+    Slice<Type*> elems;      // tuple; fn_: the parameters
+    Slice<std::uint8_t> modes; // fn_: each parameter's mode, a ParamMode
+    bool unsafe_fn = false;  // fn_: `unsafe fn`, which only `unsafe` code can call
     Item* item = nullptr;    // struct_, enum_
     Type* repr = nullptr;    // enum_: the integer type of its tag
     bool has_data = false;   // enum_: some variant holds data, so it's a tagged union in C
@@ -125,6 +130,9 @@ public:
     Type* tuple_of(const std::vector<Type*>& elems);
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
+    Type* fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe);
+    // The function types made so far, in the order they were made.
+    const std::vector<Type*>& fn_types() const { return fns_; }
     // The arrays, optionals, tuples, lists, maps and sets made so far, in the order they were made.
     const std::vector<Type*>& compounds() const { return compounds_; }
 
@@ -147,7 +155,9 @@ private:
     std::map<std::pair<Type*, TableKind>, Type*> set_map_;
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
+    std::map<std::tuple<std::vector<Type*>, std::vector<std::uint8_t>, Type*, bool>, Type*> fn_map_;
     std::vector<Type*> compounds_;
+    std::vector<Type*> fns_;
 };
 
 inline bool is_int(const Type* t) { return t->kind == TypeKind::int_; }
@@ -169,5 +179,7 @@ bool is_copy(const Type* t);
 // except one that is or holds a pointer or an arena list, and a generic parameter without the
 // bound.
 bool is_send(const Type* t);
+// Whether a read parameter of the type is passed as a pointer, since copying it could be costly.
+bool is_view_type(const Type* t);
 
 }  // namespace calx

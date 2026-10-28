@@ -1,0 +1,89 @@
+// Functions as values (D122): stored, passed, picked at run time and called, with the same
+// argument rules as a direct call.
+
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+fn square(x: i32) -> i32 {
+    return x * x
+}
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+fn twice(f: fn(i32) -> i32) -> fn(i32) -> i32 {
+    // No closures yet, so this gives back what it was given.
+    return f
+}
+
+fn add_all(xs: mut List<i32>, n: i32) {
+    for x in mut xs {
+        x += n
+    }
+}
+
+fn take(s: own String) -> usize {
+    return s.len()
+}
+
+struct Command {
+    name: str
+    run: fn(i32) -> i32
+}
+
+fn pick(name: str) -> (fn(i32) -> i32)? {
+    if name == "double" {
+        return some(double)
+    }
+    if name == "square" {
+        return some(square)
+    }
+    return none
+}
+
+fn first<T: Copy>(xs: List<T>) -> T {
+    return xs[0]
+}
+
+fn main() {
+    let f = double
+    println("{f(21)}")                    // out: 42
+    println("{apply(square, 7)}")         // out: 49
+    println("{twice(double)(5)}")         // out: 10
+
+    let commands = [Command { name: "double", run: double }, Command { name: "square", run: square }]
+    for c in commands {
+        println("{c.name} 6 = {(c.run)(6)}")
+    }
+    // out: double 6 = 12
+    // out: square 6 = 36
+
+    let table: List<fn(i32) -> i32> = [double, square, double]
+    var total = 0
+    for g in table {
+        total += g(3)
+    }
+    println("{total}")                    // out: 21
+
+    if let g = pick("square") {
+        println("{g(9)}")                 // out: 81
+    }
+    println("{(pick("cube") ?? double)(4)}")    // out: 8
+
+    // Modes are part of the type.
+    let change: fn(mut List<i32>, i32) = add_all
+    var xs: List<i32> = [1, 2, 3]
+    change(mut xs, 10)
+    println("{xs}")                       // out: [11, 12, 13]
+    let consume: fn(own String) -> usize = take
+    println("{consume(String("four"))}")  // out: 4
+
+    // A generic function's types come from the type it's given as, or from `f<...>`.
+    let firsts: fn(List<i32>) -> i32 = first
+    println("{firsts(xs)}")               // out: 11
+    let h = first<u8>
+    let bytes: List<u8> = [7, 8]
+    println("{h(bytes)}")                 // out: 7
+}

@@ -72,10 +72,10 @@ Built: see [Types](reference/types.md).
 
 ### Compound types
 
-Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)) and [Lists](reference/lists.md). Still to build:
+Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)), [Lists](reference/lists.md), and plain functions as values, `fn(A, mut B) -> R ! E` ([functions as values](reference/functions.md#functions-as-values), D122). Still to build:
 
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
-- **Functions and closures:** `fn(A) -> B` for a plain function. Closures are written `|a| expr` and have their own types, accepted through interfaces such as `Fn(A) -> B`.
+- **Closures:** written `|a| expr`, with types of their own, accepted through interfaces such as `Fn(A) -> B`. A plain `fn(A) -> B` holds no captures.
 
 ### Optionals, no null (D23)
 
@@ -89,7 +89,7 @@ Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns
 
 Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). `try` converts the call's error to the function's through the built-in `From<T>` when their types differ ([converting errors](reference/errors.md#converting-errors), D103). Still to build:
 
-- `! E` in function types, `fn(A) -> R ! E`, with closures.
+- `! E` in closures' types.
 
 ### Interfaces and generics (D26)
 

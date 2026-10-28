@@ -775,17 +775,26 @@ private:
                 t->span = Span::join(start, prev_span());
                 return t;
             }
+            case Tok::kw_unsafe:
             case Tok::kw_fn: {
+                bool is_unsafe = accept(Tok::kw_unsafe);
+                if (is_unsafe && !at(Tok::kw_fn)) fail(peek().span, "expected `fn` after `unsafe` in a type");
                 next();
                 TypeExpr* t = new_type(TypeExprKind::fn, start);
+                t->is_unsafe = is_unsafe;
                 expect(Tok::lparen, "to start the function type's parameters");
                 std::vector<TypeExpr*> params;
+                std::vector<ParamMode> modes;
                 while (!at(Tok::rparen)) {
+                    if (accept(Tok::kw_mut)) modes.push_back(ParamMode::mut);
+                    else if (accept(Tok::kw_own)) modes.push_back(ParamMode::own);
+                    else modes.push_back(ParamMode::read);
                     params.push_back(type());
                     if (!accept(Tok::comma)) break;
                 }
                 expect(Tok::rparen, "to end the function type's parameters");
                 t->args = slice(params);
+                t->modes = slice(modes);
                 if (accept(Tok::arrow)) t->inner = type();
                 if (accept(Tok::bang)) t->error = type();
                 t->span = Span::join(start, prev_span());
