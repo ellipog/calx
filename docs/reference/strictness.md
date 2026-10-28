@@ -39,6 +39,7 @@ Each rule is on the page of the feature it's about:
 | Unused imports are errors, and an import can't shadow a name | [Modules](modules.md#importing) |
 | Private fields and methods stay in their module, and a `pub` signature or field shows only `pub` types | [Modules](modules.md#pub) |
 | An impl goes in its type's module or its interface's | [Modules](modules.md#where-impls-go) |
+| An attribute the compiler doesn't know is an error, wherever it's written, rather than ignored | [Panics](printing.md#panics-that-name-the-caller) |
 | Every `unsafe` block does something unsafe, and none is inside another. A pointer is only a value of its own, inside `unsafe` | [Unsafe code](unsafe.md#unsafe-blocks) |
 | A C function takes and returns only C types, and has one signature wherever it's declared | [C functions](unsafe.md#c-functions) |
 

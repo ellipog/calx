@@ -10,14 +10,14 @@
 namespace calx {
 
 #define CALX_KEYWORDS(X)                                                                            \
-    X(kw_actor, "actor") X(kw_and, "and") X(kw_break, "break") X(kw_checkout, "checkout")           \
+    X(kw_and, "and") X(kw_break, "break") X(kw_checkout, "checkout")                                \
     X(kw_const, "const") X(kw_continue, "continue") X(kw_dyn, "dyn") X(kw_else, "else")             \
     X(kw_enum, "enum") X(kw_extern, "extern") X(kw_fail, "fail") X(kw_false, "false")               \
     X(kw_fn, "fn") X(kw_for, "for") X(kw_if, "if") X(kw_impl, "impl") X(kw_import, "import")        \
     X(kw_in, "in") X(kw_interface, "interface") X(kw_let, "let") X(kw_loop, "loop")                 \
     X(kw_match, "match") X(kw_module, "module") X(kw_mut, "mut") X(kw_none, "none")                 \
     X(kw_not, "not") X(kw_or, "or") X(kw_own, "own") X(kw_parallel, "parallel") X(kw_pub, "pub")    \
-    X(kw_return, "return") X(kw_self, "self") X(kw_send, "send") X(kw_struct, "struct")             \
+    X(kw_return, "return") X(kw_self, "self") X(kw_struct, "struct")                                \
     X(kw_true, "true") X(kw_try, "try") X(kw_type, "type") X(kw_unsafe, "unsafe") X(kw_var, "var")  \
     X(kw_while, "while")
 

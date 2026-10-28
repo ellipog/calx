@@ -41,9 +41,9 @@ A name that starts with `_` marks something unused on purpose ([variables](varia
 These keywords are reserved, including the ones whose features aren't built yet:
 
 ```text
-actor and break checkout const continue dyn else enum extern fail false fn for if impl import
-in interface let loop match module mut none not or own parallel pub return self send struct
-true try type unsafe var while
+and break checkout const continue dyn else enum extern fail false fn for if impl import in
+interface let loop match module mut none not or own parallel pub return self struct true try
+type unsafe var while
 ```
 
 The primitive type names (`i32`, `f64`, `bool` and the rest), and `print`, `println`, `eprint`, `eprintln`, `panic`, `assert`, `some`, `ok` and `err`, are built in. A declaration or variable can't take one of these names.

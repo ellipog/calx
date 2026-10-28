@@ -70,3 +70,38 @@ fn main() {
     println("{check(8)}")    // out: 4
 }
 ```
+
+### Panics that name the caller
+
+A function marked `@track_caller` reports its panics at the place that called it, not at its own lines (D115). That's for a library's checks, such as an index that's out of range for a grid, where the bug is in the code that called it:
+
+```calx
+struct Grid {
+    cells: List<i32>
+    width: usize
+}
+
+impl Grid {
+    @track_caller
+    fn at(self, x: usize, y: usize) -> i32 {
+        if x >= self.width {
+            panic("x is {x}, but the grid is {self.width} wide")
+        }
+        return self.cells[y * self.width + x]
+    }
+}
+
+fn main() {
+    let g = Grid { cells: [1, 2, 3, 4, 5, 6], width: 3 }
+    println("{g.at(2, 1)}")    // out: 6
+    println("{g.at(3, 0)}")    // panic: x is 3, but the grid is 3 wide
+}
+```
+
+- Every panic in the function names its caller: `panic`, a failed `assert`, an index out of bounds, `!` on `none`.
+- A `@track_caller` function that calls another passes its own caller on, so a check two calls deep still names the code outside them.
+- A `parallel for` inside one names its own places, since its body runs apart from the call.
+- It's for functions and a type's own methods. A method of an interface's impl can't have it, since the interface's callers don't pass a place, and neither can `main`, since no Calx code calls it.
+- In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, and its panics use that string, so it costs one pointer per call.
+
+`@track_caller` is the only attribute the compiler knows. Any other is an error, until libraries can define their own ([spec](../CALX_SPEC.md#library-defined-attributes)).

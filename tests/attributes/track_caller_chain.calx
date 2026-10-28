@@ -1,0 +1,19 @@
+// A `@track_caller` function that calls another passes its own caller on.
+
+@track_caller
+fn positive(x: i32) -> i32 {
+    if x <= 0 {
+        panic("{x} isn't positive")
+    }
+    return x
+}
+
+@track_caller
+fn both(a: i32, b: i32) -> i32 {
+    return positive(a) + positive(b)
+}
+
+fn main() {
+    println("{both(1, 2)}")    // out: 3
+    println("{both(3, -4)}")    // panic: -4 isn't positive
+}

@@ -1,0 +1,69 @@
+// Regions as actors (D115): each tick they run in a `parallel for`, handle what they were sent and
+// send more, and the barrier delivers every message in order of sender id, then of sending, so
+// the output is the same with any number of threads.
+
+import std.mail.{Outbox, Inbox, Mail}
+import std.pool.{set_workers}
+
+enum Msg {
+    Add(i64)
+    Note(String)
+}
+
+struct Region {
+    id: u32
+    total: i64
+    log: List<String>
+    inbox: Inbox<Msg>
+    outbox: Outbox<u32, Msg>
+}
+
+fn tick(r: mut Region, n: i64, count: u32) {
+    while let (from, m) = r.inbox.next() {
+        match m {
+            Msg.Add(x) => r.total += x,
+            Msg.Note(s) => r.log.push("{from}:{s}"),
+        }
+    }
+    // Every region sends to the next one, and two notes to region 0, which region 0 gets in order
+    // of sender, then of sending.
+    r.outbox.send((r.id + 1) % count, Msg.Add(i64(r.id) * 10 + n))
+    r.outbox.send(0, Msg.Note("{n}a"))
+    r.outbox.send(0, Msg.Note("{n}b"))
+}
+
+fn exchange(regions: mut List<Region>, mail: mut Mail<u32, Msg>) {
+    for k in 0usize..regions.len() {
+        mail.collect(regions[k].id, mut regions[k].outbox)
+    }
+    while let l = mail.next() {
+        regions[usize(l.to)].inbox.deliver(l.from, l.message)
+    }
+}
+
+fn run(workers: usize) -> String {
+    set_workers(workers)
+    var regions: List<Region> = []
+    for id in 0u32..4 {
+        regions.push(Region { id: id, total: 0, log: [], inbox: Inbox.new(), outbox: Outbox.new() })
+    }
+    var mail: Mail<u32, Msg> = Mail.new()
+    for n in 1i64..4 {
+        parallel for k in 0usize..regions.len() {
+            tick(mut regions[k], n, 4)
+        }
+        exchange(mut regions, mut mail)
+    }
+    var out: String = ""
+    for r in regions {
+        out.push_str("{r.id}={r.total}/{r.log.len()}/{r.inbox.len()} ")
+    }
+    out.push_str("{regions[0].log}")
+    return out
+}
+
+fn main() {
+    let one = run(1)
+    println(one)    // out: 0=63/16/9 1=3/0/1 2=23/0/1 3=43/0/1 [0:1a, 0:1b, 1:1a, 1:1b, 2:1a, 2:1b, 3:1a, 3:1b, 0:2a, 0:2b, 1:2a, 1:2b, 2:2a, 2:2b, 3:2a, 3:2b]
+    println("{run(8) == one}")    // out: true
+}

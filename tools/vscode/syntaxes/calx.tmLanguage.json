@@ -118,7 +118,7 @@
           }
         },
         {
-          "match": "\\b(struct|enum|interface|actor|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(struct|enum|interface|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.$1.calx" },
             "2": { "name": "entity.name.type.calx" }
@@ -142,9 +142,9 @@
       "patterns": [
         {
           "name": "keyword.control.calx",
-          "match": "\\b(?:if|else|match|while|for|in|loop|break|continue|return|try|fail|send|checkout|parallel)\\b"
+          "match": "\\b(?:if|else|match|while|for|in|loop|break|continue|return|try|fail|checkout|parallel)\\b"
         },
-        { "name": "storage.type.calx", "match": "\\b(?:fn|struct|enum|interface|actor|type|impl|let|var|const)\\b" },
+        { "name": "storage.type.calx", "match": "\\b(?:fn|struct|enum|interface|type|impl|let|var|const)\\b" },
         { "name": "keyword.other.calx", "match": "\\b(?:module|import)\\b" },
         { "name": "storage.modifier.calx", "match": "\\b(?:pub|mut|own|dyn|unsafe|extern)\\b" },
         { "name": "keyword.operator.wordlike.calx", "match": "\\b(?:and|or|not)\\b" },

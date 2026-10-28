@@ -89,7 +89,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy",
+        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send",
                               "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
@@ -110,6 +110,7 @@ public:
         n_LinkedMap_ = ctx.names.intern("LinkedMap");
         n_LinkedSet_ = ctx.names.intern("LinkedSet");
         n_JavaHash_ = ctx.names.intern("JavaHash");
+        n_Send_ = ctx.names.intern("Send");
         n_java_hash_ = ctx.names.intern("java_hash");
         n_Hash_ = ctx.names.intern("Hash");
         n_Order_ = ctx.names.intern("Order");
@@ -508,13 +509,36 @@ private:
         }
     }
 
+    // The one attribute the compiler knows: `@track_caller` on a function, whose panics then name
+    // the place that called it, as a library's checks should (D115). The others, which libraries
+    // will define (D57), aren't built yet.
+    void check_attributes(Item* it, const Item* owner) {
+        for (const FieldDecl& f : it->fields) {
+            if (!f.attributes.empty()) error(f.attributes[0].span, "attributes aren't implemented yet, except `@track_caller` on a function");
+        }
+        for (const Attribute& a : it->attributes) {
+            if (a.name.parts.size() != 1 || text(a.name.parts[0]) != "track_caller") {
+                error(a.span, "attributes aren't implemented yet, except `@track_caller` on a function");
+            } else if (!a.args.empty()) {
+                error(a.span, "`@track_caller` takes no arguments");
+            } else if (it->kind != ItemKind::fn || it->is_extern) {
+                error(a.span, "`@track_caller` is only for a function written in Calx");
+            } else if (owner && (owner->kind == ItemKind::interface || owner->interface)) {
+                error(a.span, "`@track_caller` is for a function or a type's own method, not an interface's");
+            } else if (it->track_caller) {
+                error(a.span, "`@track_caller` is already on " + q(text(it->name)));
+            } else {
+                it->track_caller = true;
+            }
+        }
+    }
+
     void collect(Module* m) {
         for (Item* it : m->items) {
             it->module = m;
             for (Item* member : it->members) member->module = m;
-            if (!it->attributes.empty()) {
-                error(it->attributes[0].span, "attributes aren't implemented yet");
-            }
+            check_attributes(it, nullptr);
+            for (Item* member : it->members) check_attributes(member, it);
             switch (it->kind) {
                 case ItemKind::fn:
                     if (it->is_extern) {
@@ -531,7 +555,6 @@ private:
                     all_fns_.push_back(it);
                     break;
                 case ItemKind::struct_:
-                    if (it->is_actor) not_yet(it->span, "actors");
                     if (it->is_tuple_struct) not_yet(it->span, "wrapper structs");
                     declare_item(it);
                     it->c_name = c_name({text(it->name)});
@@ -1160,7 +1183,8 @@ private:
                     Name n = b->path.parts[0];
                     flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
                          : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound
-                         : n == n_Order_ ? &p->order_bound : n == n_JavaHash_ ? &p->java_hash_bound : nullptr;
+                         : n == n_Order_ ? &p->order_bound : n == n_JavaHash_ ? &p->java_hash_bound
+                         : n == n_Send_ ? &p->send_bound : nullptr;
                 }
                 if (flag) {
                     if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
@@ -1484,6 +1508,11 @@ private:
                                 lacking(args[i], p_order));
                 ok = false;
             }
+            if (params[i]->send_bound && !is_bad(args[i]) && !is_send(args[i])) {
+                error(span, name_of(args[i]) + " isn't `Send`, which " + what + " needs for " + q(params[i]->name) +
+                                (args[i]->kind == TypeKind::param ? "; give " + q(args[i]->name) + " the bound `Send`" : ""));
+                ok = false;
+            }
             if (params[i]->display_bound && !is_bad(args[i]) && !printable(args[i])) {
                 error(span, name_of(args[i]) + " can't be shown in a string, which " + what + " needs for " +
                                 q(params[i]->name) + lacking(args[i], true));
@@ -1515,6 +1544,7 @@ private:
             if (p->hash_bound && !hashable(it->second)) return false;
             if (p->order_bound && !orderable(it->second)) return false;
             if (p->java_hash_bound && !java_hashable(it->second)) return false;
+            if (p->send_bound && !is_send(it->second)) return false;
             for (Item* b : p->bounds) {
                 if (!satisfies(it->second, subst_iface(b, s))) return false;
             }
@@ -2470,7 +2500,8 @@ private:
                     error(l->span, "parameter " + q(n) + " is never used; name it " + q("_" + std::string(n)) +
                                        " if that's intended");
                 }
-            } else if (l->mode == ParamMode::mut && !l->mutated) {
+            } else if (l->mode == ParamMode::mut && !l->mutated && !is_bad(l->type)) {
+                // With its type wrong, what changes it wasn't checked.
                 error(l->span, "parameter " + q(n) + " is `mut` but never changed; take it without `mut`");
             }
             return;
@@ -2599,7 +2630,6 @@ private:
             case StmtKind::for_: check_for(s); return false;
             case StmtKind::fail: check_fail(s); return true;
             case StmtKind::checkout: not_yet(s->span, "`checkout` statements"); return false;
-            case StmtKind::send: not_yet(s->span, "`send` statements"); return false;
             case StmtKind::item: not_yet(s->span, "nested declarations"); return false;
         }
         return false;
@@ -7561,6 +7591,7 @@ private:
             return;
         }
         if (f->is_unsafe) error(f->name_span, "`main` can't be `unsafe`");
+        if (f->track_caller) error(f->name_span, "`main` can't be `@track_caller`, since no Calx code calls it");
         Type* rt = f->result_type;
         if (!f->params.empty() || (rt && rt->kind != TypeKind::unit && !(rt->is_result && ok_type(rt) == T.unit))) {
             error(f->name_span, "`main` takes no parameters and returns nothing, though it can fail: `fn main() ! E`");
@@ -7593,7 +7624,7 @@ private:
     Expr* let_value_ = nullptr;  // the value of the plain `let` being checked, the one place an arena list is made
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
-    Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_;
+    Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
     Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;

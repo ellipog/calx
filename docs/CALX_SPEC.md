@@ -114,7 +114,7 @@ The compiler works these out for each type, without being asked:
 
 Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Comparing and printing](reference/comparing.md)), and `Hash` ([Maps and sets](reference/maps.md#hash)), with their bounds, which generic code compares, orders, prints and hashes through. `Order` gives `<`, `cmp` and [sorting](reference/lists.md#sorting). A struct or an enum can [write its own](reference/comparing.md#writing-your-own) `Equal`, `Display`, `Hash` or `Order` by implementing the built-in interface of that name (D102): to compare only some fields, to show a block position as `1, 64, -3`, or to keep a field out of logs. What holds it uses it too, a type with its own `Equal` writes its own `Hash` to be a key, and one with its own `Order` is sorted stably. [`JavaHash`](reference/java-maps.md#javahash) is the key of a `JavaHashMap` (D105). Still to build:
 
-- **`Send` and `Share`**, with actors.
+- **`Share`**, with shared values. `Send` is built: every type is `Send` except one that is or holds a pointer or an arena list, and a generic parameter is `Send` when it has the bound ([std.mail](std/mail.md#items)).
 
 ### Handles (D24)
 
@@ -272,27 +272,11 @@ Actors are the only concurrency model **for game state**. Network I/O, chunk loa
 
 ### Actors
 
-```calx
-actor struct Counter {
-    total: i64 = 0
-}
+Built: [std.mail](std/mail.md) (D115). An actor is a plain struct that a `parallel for` runs, holding an `Outbox<D, M>` for what it sends and an `Inbox<M>` for what it's sent. At the barrier, `Mail` collects the outboxes in ascending sender id and gives the letters back in delivery order. It panics if a sender comes out of order, so the order is checked, not just promised. A message is `Send`.
 
-@message
-struct Add {
-    amount: i64
-}
-
-impl Counter {
-    fn receive(c: mut Counter, m: Add) {
-        c.total += m.amount
-    }
-}
-```
-
-- An `actor struct` gets an inbox and an outbox from the runtime.
-- Actors are values that live in a collection, not threads.
-- `send dest msg` appends to the current actor's outbox. A message must be `Send`, and sending moves it.
-- The destination is any value whose type implements `Destination<M>`, so libraries decide what can be sent to: Calcite's `PlayerRef`, `global` and `region_at(world, pos, load: true)`. Options after a comma go to the destination: `send p Msg { }, offline: keep`.
+- Actors are values that live in a collection, not threads, and spawning one is adding it to the collection.
+- There's no `actor` keyword and no `send` statement. An earlier design had both, with `send dest msg` appending to the current actor's outbox. An outbox the actor holds as a field does the same work without hidden state, and the capture check already keeps each outbox to its own iteration (D49).
+- The destination type `D` is the library's: Calcite's is an enum of the global actor, a region, a chunk with `load`, and a player with `keep`. The library decides how a destination is routed at the barrier, as in the tick sketch.
 
 ### Parallel loops
 
@@ -364,7 +348,7 @@ Three kinds of generated code:
 
 ### Library-defined attributes
 
-Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57).
+Attributes like `@packet`, `@command`, `@save` and `@message` are defined by libraries, not built into the compiler (D57). Built: the one attribute the compiler knows, `@track_caller`, whose function reports panics at its caller ([Panics that name the caller](reference/printing.md#panics-that-name-the-caller), D115). Any other attribute is an error until libraries can define them.
 
 ```calx
 /// Declares a packet. Generates its reader, its writer and its ID lookup.
@@ -400,7 +384,7 @@ What Calx leaves out, on purpose:
 - **No null and no exceptions.** Optionals and error values instead, and panics for bugs.
 - **No classes or inheritance.** Structs, enums and interfaces.
 - **No implicit conversions**, numeric or otherwise, and no implicit copies of anything that owns memory.
-- **No threads, locks or atomics in safe code.** Only `parallel for` and actors.
+- **No threads, locks or atomics in safe code.** Only `parallel for`, and actors that it runs.
 - **No global mutable state** outside `unsafe`. Constants are fine.
 - **No macros** beyond attributes and string prefixes, which are typed and run as Calx.
 - **No reflection at run time.** What plugins need from it, such as encoding saved data, is generated at compile time.

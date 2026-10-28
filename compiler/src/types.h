@@ -75,6 +75,7 @@ struct Type {
     // the heap's methods change it.
     bool heap = false;
     bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
+    bool send_bound = false;      // param: it has the bound `Send`, so it can go in a message (D115)
     // list: an `ArenaList<T>`, whose memory comes from an `Arena` (D114). It's a list in memory,
     // with the arena beside it, so it's gone over, indexed, compared and shown as one, but it
     // grows from its arena, frees nothing itself, and can't move or be stored.
@@ -154,5 +155,9 @@ inline bool is_bad(const Type* t) { return t->kind == TypeKind::error; }
 // property `Copy`). A value of any other type moves when it's assigned or passed to `own`, and
 // is dropped at the end of its owner's scope. A generic parameter is `Copy` only with the bound.
 bool is_copy(const Type* t);
+// `Send` (D115): a value that can go from one region to another, in a message. Every type is,
+// except one that is or holds a pointer or an arena list, and a generic parameter without the
+// bound.
+bool is_send(const Type* t);
 
 }  // namespace calx

@@ -313,7 +313,6 @@ enum class StmtKind : std::uint8_t {
     while_,
     for_,      // `for x in e { }`, `parallel for x in mut xs { }`
     checkout,  // `checkout x = c[key] else continue`
-    send,      // `send dest msg`
     item,      // a nested `fn` or `const`
 };
 
@@ -331,7 +330,7 @@ struct Stmt {
     bool is_var = false;           // let: `var`
     TypeExpr* type = nullptr;      // let
     Expr* value = nullptr;         // let, assign (the right side), expr, return_, break_, fail, for_ (the iterable)
-    Expr* target = nullptr;        // assign; send: the destination
+    Expr* target = nullptr;        // assign
     Op op{};                       // assign: the compound operator
     bool compound = false;         // assign
     Expr* else_ = nullptr;         // let-else and checkout-else: the diverging expression or block
@@ -444,11 +443,11 @@ struct Item {
     Block* body = nullptr;       // null for a declaration without a body (interfaces, extern)
     bool is_extern = false;      // `extern "C" fn`
     bool is_unsafe = false;      // `unsafe fn`: calling it needs `unsafe`
+    bool track_caller = false;   // `@track_caller`: its panics name the place that called it
     std::string_view abi;
-    // struct, enum, actor
+    // struct, enum
     Slice<FieldDecl> fields;
     bool is_tuple_struct = false;  // `struct Name(String)`
-    bool is_actor = false;
     Slice<VariantDecl> variants;
     TypeExpr* repr = nullptr;    // `enum Flag: u8`
     // interface and impl

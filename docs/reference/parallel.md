@@ -124,6 +124,10 @@ fn main() {
 
 Reading standard input inside a `parallel for` panics, since which iteration got which bytes would depend on timing.
 
+## Actors
+
+A `parallel for` over regions that send each other messages is how Calx runs actors. Each region keeps an outbox, which only its own iteration can reach, and the barrier after the loop delivers every message in a fixed order ([std.mail](../std/mail.md)).
+
 ## The threads
 
 By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that.

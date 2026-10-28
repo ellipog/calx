@@ -1,0 +1,125 @@
+/// Messages between actors, delivered in a fixed order (D20, D115).
+///
+/// An actor is a struct that a `parallel for` runs, such as a region. It keeps an `Outbox` for
+/// what it sends and an `Inbox` for what it's sent. At the barrier between ticks, one thread
+/// collects every outbox into a `Mail`, in ascending sender id, and hands each letter to the
+/// inbox it's for. So every inbox gets its messages in order of sender id, then of sending, with
+/// any number of threads.
+module std.mail
+
+/// What an actor sends: messages of type `M` to destinations of type `D`, in the order sent.
+pub struct Outbox<D: Send, M: Send> {
+    sent: Deque<(D, M)>,
+}
+
+impl<D: Send, M: Send> Outbox<D, M> {
+    /// An empty outbox.
+    pub fn new() -> Outbox<D, M> {
+        return Outbox<D, M> { sent: [] }
+    }
+
+    /// Sends `message` to `to`. It moves into the outbox, and stays there until the barrier
+    /// collects it.
+    pub fn send(o: mut Outbox<D, M>, to: own D, message: own M) {
+        o.sent.push_last((to, message))
+    }
+
+    /// How many messages are waiting to be collected.
+    pub fn len(self) -> usize {
+        return self.sent.len()
+    }
+
+    /// Whether nothing is waiting to be collected.
+    pub fn is_empty(self) -> bool {
+        return self.sent.is_empty()
+    }
+}
+
+/// A message on its way: who sent it, where it's going, and the message.
+pub struct Letter<D, M> {
+    pub from: u32,
+    pub to: D,
+    pub message: M,
+}
+
+/// The letters of every outbox at a barrier, in ascending sender id, then in the order each
+/// sender sent them.
+pub struct Mail<D: Send, M: Send> {
+    letters: Deque<Letter<D, M>>,
+    // The sender collected last this round, or -1 before the first.
+    last: i64,
+}
+
+impl<D: Send, M: Send> Mail<D, M> {
+    /// Empty mail, ready for a round.
+    pub fn new() -> Mail<D, M> {
+        return Mail<D, M> { letters: [], last: -1 }
+    }
+
+    /// Takes every message in `outbox`, as sent by `from`, and leaves it empty. Each round
+    /// collects senders in ascending id, each at most once, so the order can't depend on
+    /// anything else. Panics if `from` isn't greater than the sender collected before it.
+    @track_caller
+    pub fn collect(mail: mut Mail<D, M>, from: u32, outbox: mut Outbox<D, M>) {
+        if i64(from) <= mail.last {
+            panic("mail from {from} is collected after mail from {mail.last}; collect outboxes in ascending sender id, once each a round")
+        }
+        mail.last = i64(from)
+        while let (to, message) = outbox.sent.pop_first() {
+            mail.letters.push_last(Letter { from: from, to: to, message: message })
+        }
+    }
+
+    /// The next letter in delivery order, or `none` once every letter is taken, which ends the
+    /// round: the next `collect` can start again from any sender.
+    pub fn next(mail: mut Mail<D, M>) -> Letter<D, M>? {
+        if mail.letters.is_empty() {
+            mail.last = -1
+            return none
+        }
+        return mail.letters.pop_first()
+    }
+
+    /// How many letters haven't been taken.
+    pub fn len(self) -> usize {
+        return self.letters.len()
+    }
+
+    /// Whether every letter has been taken.
+    pub fn is_empty(self) -> bool {
+        return self.letters.is_empty()
+    }
+}
+
+/// What an actor has been sent: messages of type `M` and their senders, in delivery order.
+pub struct Inbox<M: Send> {
+    letters: Deque<(u32, M)>,
+}
+
+impl<M: Send> Inbox<M> {
+    /// An empty inbox.
+    pub fn new() -> Inbox<M> {
+        return Inbox<M> { letters: [] }
+    }
+
+    /// Puts `message`, sent by `from`, after the others. The barrier does this, in the order
+    /// `Mail.next` gives.
+    pub fn deliver(i: mut Inbox<M>, from: u32, message: own M) {
+        i.letters.push_last((from, message))
+    }
+
+    /// The next message and its sender, or `none` when there are no more.
+    pub fn next(i: mut Inbox<M>) -> (u32, M)? {
+        return i.letters.pop_first()
+    }
+
+    /// How many messages haven't been taken.
+    pub fn len(self) -> usize {
+        return self.letters.len()
+    }
+
+    /// Whether every message has been taken.
+    pub fn is_empty(self) -> bool {
+        return self.letters.is_empty()
+    }
+}

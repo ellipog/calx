@@ -1,0 +1,19 @@
+// The barrier collects outboxes in ascending sender id, so a sender out of order is a bug.
+
+import std.mail.{Outbox, Mail}
+
+fn main() {
+    var a: Outbox<u32, i32> = Outbox.new()
+    var b: Outbox<u32, i32> = Outbox.new()
+    a.send(1, 10)
+    b.send(0, 20)
+    var mail: Mail<u32, i32> = Mail.new()
+    mail.collect(2, mut a)
+    // A round ends once every letter is taken, and the next can start from any sender.
+    while let l = mail.next() {
+        println("{l.from} {l.to} {l.message}")    // out: 2 1 10
+    }
+    mail.collect(1, mut b)
+    println("{mail.len()} {a.is_empty()} {b.is_empty()}")    // out: 1 true true
+    mail.collect(1, mut a)    // panic: mail from 1 is collected after mail from 1; collect outboxes in ascending sender id, once each a round
+}

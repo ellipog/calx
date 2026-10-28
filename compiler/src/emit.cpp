@@ -2541,6 +2541,10 @@ $dropall    m->len = 0;
                 s += ctype(l->type) + " " + local_name(l);
             }
         }
+        if (f->track_caller) {
+            if (f->params.empty()) s.resize(s.size() - 4);  // no `void`
+            s += std::string(f->params.empty() ? "" : ", ") + "const char* cx_caller";
+        }
         return s + ")";
     }
 
@@ -2579,6 +2583,9 @@ $dropall    m->len = 0;
 
     // `path:line:col`, for panic messages.
     std::string location(Span s) {
+        // In a function marked `@track_caller`, every panic names the place that called it. A
+        // `parallel for` body is a C function of its own, so its panics name their own places.
+        if (fn_ && fn_->track_caller && !in_par_body_) return "cx_caller";
         auto [ln, col] = sources_.file(s.file).position(s.begin);
         return c_string_literal(sources_.file(s.file).path + ":" + std::to_string(ln) + ":" + std::to_string(col));
     }
@@ -3096,6 +3103,8 @@ $dropall    m->len = 0;
         bool outer_mixed = line_files_mixed_;
         line_file_ = kNoFile;
         line_files_mixed_ = false;
+        bool outer_par = in_par_body_;
+        in_par_body_ = true;
         std::string fn_text = capture([&] {
             indent_ = 0;
             std::string fields;
@@ -3130,6 +3139,7 @@ $dropall    m->len = 0;
             line("}");
             for (const Local* l : pointed) par_pointers_.erase(l);
         });
+        in_par_body_ = outer_par;
         helpers_ += fn_text + "\n";
         frames_ = std::move(outer_frames);
         indent_ = outer_indent;
@@ -4084,6 +4094,9 @@ $dropall    m->len = 0;
             if (i) s += ", ";
             s += by_param[i];
         }
+        // A function whose panics name its caller gets this call's place, or the place its own
+        // caller gave it.
+        if (f->track_caller) s += (by_param.empty() ? "" : ", ") + location(e->span);
         return wrap(decls, s + ")");
     }
 
@@ -4970,6 +4983,7 @@ $dropall    m->len = 0;
     int indent_ = 0;
     std::uint32_t tmp_ = 0;
     Item* fn_ = nullptr;
+    bool in_par_body_ = false;  // emitting a `parallel for` body's own C function
     std::unordered_map<std::uint32_t, std::string> abs_paths_;
     std::unordered_map<const Item*, FnOut> fns_;
     std::unordered_map<const Item*, ConstOut> consts_;

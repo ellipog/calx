@@ -1,0 +1,51 @@
+// The compiler knows one attribute, `@track_caller`, on functions written in Calx. The rest are
+// for libraries to define, which isn't built yet (D57).
+
+@track_caller    // error: `@track_caller` is only for a function written in Calx
+struct Pos {
+    x: i32
+}
+
+@message    // error: attributes aren't implemented yet, except `@track_caller` on a function
+struct Msg {
+    @save    // error: attributes aren't implemented yet, except `@track_caller` on a function
+    n: i32
+}
+
+interface Shape {
+    fn area(self) -> i32
+}
+
+impl Shape for Pos {
+    @track_caller    // error: `@track_caller` is for a function or a type's own method, not an interface's
+    fn area(self) -> i32 {
+        return self.x
+    }
+}
+
+impl Pos {
+    @track_caller(1)    // error: `@track_caller` takes no arguments
+    fn twice(self) -> i32 {
+        return self.x * 2
+    }
+    @track_caller
+    @track_caller    // error: `@track_caller` is already on `half`
+    fn half(self) -> i32 {
+        return self.x / 2
+    }
+    @whatever    // error: attributes aren't implemented yet, except `@track_caller` on a function
+    fn same(self) -> i32 {
+        return self.x
+    }
+}
+
+fn area_of<T: Shape>(s: T) -> i32 {
+    return s.area()
+}
+
+@track_caller
+fn main() {    // error: `main` can't be `@track_caller`, since no Calx code calls it
+    let p = Pos { x: 4 }
+    let m = Msg { n: 1 }
+    println("{area_of(p)} {p.twice()} {p.half()} {p.same()} {m.n}")
+}

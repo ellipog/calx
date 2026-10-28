@@ -1,0 +1,17 @@
+// A message must be `Send`, and generic code says so with the bound.
+
+import std.mail.{Outbox}
+
+fn post<T>(o: mut Outbox<u32, T>, x: own T) {    // error: `T` isn't `Send`, which `Outbox` needs for `M`; give `T` the bound `Send`
+    o.send(0, x)
+}
+
+fn twice<T: Send + Send>(x: own T) -> T {    // error: `Send` is already a bound of `T`
+    return x
+}
+
+fn main() {
+    var o: Outbox<u32, String> = Outbox.new()
+    post(mut o, "a")
+    println("{twice(1)} {o.len()}")
+}

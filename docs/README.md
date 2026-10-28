@@ -46,7 +46,7 @@ What's built, one page per feature:
 29. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
 30. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
 31. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic
+32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
 33. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
 34. [Parallel loops](reference/parallel.md): `parallel for`, the capture check, and the same result with any number of threads
 35. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
@@ -64,6 +64,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, which NBT uses
+10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
 
 ### Design
 

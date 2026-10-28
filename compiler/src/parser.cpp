@@ -371,12 +371,7 @@ private:
                 it = fn_item(start);
                 it->is_unsafe = true;
                 break;
-            case Tok::kw_struct: it = struct_item(start, false); break;
-            case Tok::kw_actor:
-                next();
-                if (!at(Tok::kw_struct)) fail(peek().span, "expected `struct` after `actor`");
-                it = struct_item(start, true);
-                break;
+            case Tok::kw_struct: it = struct_item(start); break;
             case Tok::kw_enum: it = enum_item(start); break;
             case Tok::kw_interface: it = interface_item(start); break;
             case Tok::kw_impl: it = impl_item(start); break;
@@ -503,10 +498,9 @@ private:
         expect(Tok::rbrace, "to end the fields");
     }
 
-    Item* struct_item(Span start, bool actor) {
+    Item* struct_item(Span start) {
         expect(Tok::kw_struct, "");
         Item* it = new_item(ItemKind::struct_, start);
-        it->is_actor = actor;
         it->name_span = peek().span;
         it->name = ident("as the struct's name");
         it->generics = slice(generics());
@@ -1016,13 +1010,6 @@ private:
                 expect(Tok::eq, "after the name in `checkout`");
                 s->value = expr();
                 if (accept(Tok::kw_else)) diverge(s);
-                break;
-            }
-            case Tok::kw_send: {
-                next();
-                s = new_stmt(StmtKind::send, start);
-                s->target = postfix(primary(true));
-                s->value = expr();
                 break;
             }
             case Tok::kw_fn:

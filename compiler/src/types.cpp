@@ -266,8 +266,39 @@ bool copy_walk(const Type* t, int depth) {
     }
 }
 
+bool send_walk(const Type* t, int depth) {
+    if (depth > 64) return true;
+    if (t->has_pointer || t->scoped) return false;
+    switch (t->kind) {
+        case TypeKind::pointer: return false;
+        case TypeKind::param: return t->send_bound;
+        case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            return send_walk(t->elem, depth + 1);
+        case TypeKind::map: return send_walk(t->key, depth + 1) && send_walk(t->elem, depth + 1);
+        case TypeKind::tuple:
+            for (const Type* e : t->elems) {
+                if (!send_walk(e, depth + 1)) return false;
+            }
+            return true;
+        case TypeKind::struct_:
+            for (const FieldDecl& f : t->item->fields) {
+                if (f.resolved && !send_walk(f.resolved, depth + 1)) return false;
+            }
+            return true;
+        case TypeKind::enum_:
+            for (const VariantDecl& v : t->item->variants) {
+                for (const Type* x : v.types) {
+                    if (!send_walk(x, depth + 1)) return false;
+                }
+            }
+            return true;
+        default: return true;
+    }
+}
+
 }  // namespace
 
 bool is_copy(const Type* t) { return copy_walk(t, 0); }
+bool is_send(const Type* t) { return send_walk(t, 0); }
 
 }  // namespace calx
