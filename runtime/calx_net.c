@@ -29,6 +29,7 @@
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 #include <stdint.h>
@@ -500,15 +501,33 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
     }
 }
 
+/* Waits until something the program is told of happens, or the time is up. Some completions are
+ * the runtime's own, such as a send or a cancelled receive finishing, and give no event, so
+ * those don't end the wait. */
 static void wait_events(net* n, cx_i64 timeout_ms) {
+    ULONGLONG deadline = timeout_ms > 0 ? GetTickCount64() + (ULONGLONG)timeout_ms : 0;
     DWORD wait = timeout_ms < 0 ? INFINITE : timeout_ms > 0x7FFFFFFF ? 0x7FFFFFFF : (DWORD)timeout_ms;
     for (;;) {
         OVERLAPPED_ENTRY entries[64];
         ULONG got = 0;
-        if (!GetQueuedCompletionStatusEx(n->iocp, entries, 64, &got, wait, FALSE)) return;
-        for (ULONG i = 0; i < got; i++) completed(n, &entries[i]);
-        if (got < 64) return;
-        wait = 0;
+        if (GetQueuedCompletionStatusEx(n->iocp, entries, 64, &got, wait, FALSE)) {
+            for (ULONG i = 0; i < got; i++) completed(n, &entries[i]);
+            if (got == 64) {
+                /* There may be more already. */
+                wait = 0;
+                continue;
+            }
+        } else if (GetLastError() != WAIT_TIMEOUT) {
+            return;
+        }
+        if (n->nev || timeout_ms == 0) return;
+        if (timeout_ms > 0) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline) return;
+            wait = (DWORD)(deadline - now);
+        } else {
+            wait = INFINITE;
+        }
     }
 }
 
@@ -762,16 +781,38 @@ static void ready(net* n, net_slot* s, cx_u32 e) {
     }
 }
 
+static cx_i64 monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (cx_i64)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Waits until something the program is told of happens, or the time is up. Some readiness is the
+ * runtime's own, such as a socket taking more of what's queued, and gives no event, so that
+ * doesn't end the wait. */
 static void wait_events(net* n, cx_i64 timeout_ms) {
+    cx_i64 deadline = timeout_ms > 0 ? monotonic_ms() + timeout_ms : 0;
     int wait = timeout_ms < 0 ? -1 : timeout_ms > 0x7FFFFFFF ? 0x7FFFFFFF : (int)timeout_ms;
     for (;;) {
         struct epoll_event evs[64];
         int got = epoll_wait(n->ep, evs, 64, wait);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) return;
-        for (int i = 0; i < got; i++) ready(n, n->slots[evs[i].data.u32], evs[i].events);
-        if (got < 64) return;
-        wait = 0;
+        if (got < 0 && errno != EINTR) return;
+        if (got > 0) {
+            for (int i = 0; i < got; i++) ready(n, n->slots[evs[i].data.u32], evs[i].events);
+            if (got == 64) {
+                /* There may be more already. */
+                wait = 0;
+                continue;
+            }
+        }
+        if (n->nev || timeout_ms == 0) return;
+        if (timeout_ms > 0) {
+            cx_i64 left = deadline - monotonic_ms();
+            if (left <= 0) return;
+            wait = left > 0x7FFFFFFF ? 0x7FFFFFFF : (int)left;
+        } else {
+            wait = -1;
+        }
     }
 }
 

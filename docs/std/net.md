@@ -58,7 +58,7 @@ fn main() {
 | `Net.new() -> Net ! NetError` | A new, empty `Net` |
 | `net.listen(host: String, port: u16) -> u16 ! NetError` | Listens on `host` and `port`, and returns the port, which the system picks when `port` is 0. An empty host listens on every address, IPv4 and IPv6, with one IPv6 socket that takes IPv4 clients too; where the machine has no IPv6, on every IPv4 address |
 | `net.connect(host: String, port: u16) -> Conn ! NetError` | Starts opening a connection. A poll reports `Connected` once it's open, or `Closed` if it couldn't be |
-| `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened |
+| `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened. It returns as soon as there's an event, so `events` is empty only once the time is up: the runtime's own work, such as finishing a send or a close, doesn't end the wait |
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go as soon as the socket takes them |
 | `net.close(conn: Conn)` | Closes the connection once what was queued is sent |

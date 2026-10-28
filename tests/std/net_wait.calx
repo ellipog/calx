@@ -1,0 +1,48 @@
+// std.net: a poll returns as soon as there's an event, and is empty only once its time is up,
+// even while the runtime finishes sends and closes of its own that give no event.
+import std.net.{Net, Event}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let client = net.connect("127.0.0.1", port)!
+    var events = List<Event>()
+    var rounds = 0
+    var closed = false
+    var polls = 0
+    while not closed {
+        // Each poll has an event long before 10 seconds, so none may come back empty.
+        net.poll(10000, mut events)
+        polls += 1
+        assert(not events.is_empty(), "poll {polls} came back empty before its time was up")
+        for e in events {
+            match e {
+                Event.Connected(c) => net.write(c, [1]),
+                Event.Received(c) => {
+                    var got = List<u8>()
+                    _ = net.read(c, mut got)
+                    if c == client {
+                        rounds += 1
+                        net.write(c, [1])
+                    } else {
+                        // The server answers, and closes after its third answer: the client
+                        // learns of it once the send and the close have finished.
+                        net.write(c, [2])
+                        if rounds == 2 {
+                            net.close(c)
+                        }
+                    }
+                },
+                Event.Closed(c) => closed = c == client,
+                Event.Accepted(_) => {},
+            }
+        }
+    }
+    println("{rounds}")    // out: 3
+
+    // With nothing to happen, a poll waits for its time.
+    net.poll(0, mut events)
+    net.poll(0, mut events)
+    net.poll(30, mut events)
+    println("{events.len()}")    // out: 0
+}

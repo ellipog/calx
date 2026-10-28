@@ -212,8 +212,9 @@ impl Net {
     }
 
     /// Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's
-    /// negative, and puts what happened in `events`, replacing what was there. A connection gets
-    /// at most one `Received` per poll, however many times bytes arrived.
+    /// negative, and puts what happened in `events`, replacing what was there. It returns as soon
+    /// as there's an event, so `events` is empty only once the time is up. A connection gets at
+    /// most one `Received` per poll, however many times bytes arrived.
     pub fn poll(self, timeout_ms: i64, events: mut List<Event>) {
         events.clear()
         unsafe {
