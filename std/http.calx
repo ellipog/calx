@@ -1,0 +1,212 @@
+/// HTTP and HTTPS requests, on the system's own client, so certificates are checked as the system
+/// checks them: WinHTTP on Windows, and libcurl on Linux (D118).
+///
+/// A request runs on a thread of its own, and `done` says when it has finished, so a server's loop
+/// goes on while it waits, as vanilla's login waits for Mojang's session server on a thread of its
+/// own.
+module std.http
+
+extern "C" {
+    fn cx_http_start(post: bool, url: *const u8, url_len: usize, head: *const u8, head_len: usize, body: *const u8, body_len: usize, timeout_ms: u32, limit: usize) -> u64
+    fn cx_http_done(h: u64) -> i32
+    fn cx_http_wait(h: u64) -> i32
+    fn cx_http_code(h: u64) -> i32
+    fn cx_http_status(h: u64) -> u32
+    fn cx_http_head_len(h: u64) -> usize
+    fn cx_http_head(h: u64, out: *u8)
+    fn cx_http_body_len(h: u64) -> usize
+    fn cx_http_body(h: u64, out: *u8)
+    fn cx_http_free(h: u64)
+}
+
+/// A header line of a request or a response.
+pub struct Header {
+    pub name: String,
+    pub value: String,
+}
+
+/// Why a request got no response.
+pub enum Error {
+    /// The URL isn't `http://` or `https://`, a host, and an optional port and path, in printable
+    /// ASCII.
+    BadUrl
+    /// No name server knows the host.
+    Resolve
+    /// Nothing answered at the host and port.
+    Connect
+    /// The TLS handshake failed, or the system doesn't trust the server's certificate.
+    Tls
+    /// The response didn't come within the time.
+    Timeout
+    /// The server closed the connection early, or what it sent isn't HTTP.
+    Protocol
+    /// The body is longer than the limit.
+    TooLong
+    /// There's no HTTP client on the system: on Linux, libcurl isn't installed.
+    Unavailable
+    /// Something else, with the system's error code: libcurl's on Linux.
+    Os(i32)
+}
+
+/// What the server answered.
+pub struct Response {
+    /// The status code, such as 200, or 204 when Mojang's session server says a player hasn't
+    /// joined.
+    pub status: u32,
+    /// The header lines, in the order they came, their values trimmed.
+    pub headers: List<Header>,
+    pub body: List<u8>,
+}
+
+impl Response {
+    /// The value of the first header named `name`, compared without regard to case, as HTTP
+    /// compares header names.
+    pub fn header(self, name: String) -> String? {
+        let want = name.to_lower_root()
+        for h in self.headers {
+            if h.name.to_lower_root() == want {
+                return some(h.value.copy())
+            }
+        }
+        return none
+    }
+}
+
+/// A request that's running, or finished and waiting to be taken.
+pub struct Request {
+    handle: u64,
+}
+
+impl Request {
+    /// Whether it has finished, so that `wait` won't wait.
+    pub fn done(self) -> bool {
+        return self.handle == 0 or unsafe { cx_http_done(self.handle) } != 0
+    }
+
+    /// Waits for it to finish, and gives the response. Panics if the response was taken already,
+    /// by this request or a copy of it.
+    @track_caller
+    pub fn wait(mut self) -> Response ! Error {
+        let h = self.handle
+        let kind = if h == 0 { -1 } else { unsafe { cx_http_wait(h) } }
+        if kind < 0 {
+            panic("the request's response was taken already")
+        }
+        self.handle = 0
+        if kind != 0 {
+            let code = unsafe { cx_http_code(h) }
+            unsafe { cx_http_free(h) }
+            fail match kind {
+                1 => Error.BadUrl,
+                2 => Error.Resolve,
+                3 => Error.Connect,
+                4 => Error.Tls,
+                5 => Error.Timeout,
+                6 => Error.Protocol,
+                7 => Error.TooLong,
+                8 => Error.Unavailable,
+                _ => Error.Os(code),
+            }
+        }
+        var head = List<u8>()
+        var body = List<u8>()
+        var status: u32 = 0
+        unsafe {
+            let hn = cx_http_head_len(h)
+            head.reserve(hn)
+            cx_http_head(h, head.as_mut_ptr())
+            head.set_len(hn)
+            let bn = cx_http_body_len(h)
+            body.reserve(bn)
+            cx_http_body(h, body.as_mut_ptr())
+            body.set_len(bn)
+            status = cx_http_status(h)
+            cx_http_free(h)
+        }
+        return Response { status: status, headers: header_list(String.from_utf8(head) ?? String()), body: body }
+    }
+}
+
+// The runtime's header lines, each "name:value\r\n".
+fn header_list(text: String) -> List<Header> {
+    var out = List<Header>()
+    var at: usize = 0
+    while at < text.len() {
+        let rest = text[at..]
+        let end = rest.find("\r\n") ?? rest.len()
+        let line = rest[..end]
+        let colon = line.find(":") ?? 0
+        out.push(Header { name: line[..colon], value: line[colon + 1..] })
+        at += end + 2
+    }
+    return out
+}
+
+// Whether the byte can be in a header's name: RFC 9110's token.
+fn token_byte(b: u8) -> bool {
+    if (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) {
+        return true
+    }
+    let marks = "!#$%&'*+-.^_`|~"
+    for i in 0..marks.len() {
+        if marks.byte_at(i) == b {
+            return true
+        }
+    }
+    return false
+}
+
+@track_caller
+fn header_lines(headers: List<Header>) -> String {
+    var s = String()
+    for h in headers {
+        if h.name.is_empty() {
+            panic("a header's name is empty")
+        }
+        for i in 0..h.name.len() {
+            if not token_byte(h.name.byte_at(i)) {
+                panic("the header name {h.name} has a byte HTTP doesn't allow in names")
+            }
+        }
+        let lower = h.name.to_lower_root()
+        if lower == "host" or lower == "content-length" or lower == "transfer-encoding" or lower == "connection" {
+            panic("std.http sets the {h.name} header itself")
+        }
+        for i in 0..h.value.len() {
+            let b = h.value.byte_at(i)
+            if b == 13 or b == 10 or b == 0 {
+                panic("the value of the header {h.name} has a line break or a zero byte")
+            }
+        }
+        s.push_str(h.name)
+        s.push_str(": ")
+        s.push_str(h.value)
+        s.push_str("\r\n")
+    }
+    return s
+}
+
+@track_caller
+fn start(is_post: bool, url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
+    if timeout_ms == 0 {
+        panic("a request's timeout is at least 1 ms")
+    }
+    let head = header_lines(headers)
+    let h = unsafe { cx_http_start(is_post, url.as_ptr(), url.len(), head.as_ptr(), head.len(), body.as_ptr(), body.len(), timeout_ms, limit) }
+    return Request { handle: h }
+}
+
+/// Starts a GET of `url` with the header lines, which may take `timeout_ms` milliseconds in all
+/// and give a body of at most `limit` bytes. Panics if the timeout is 0, or a header's name isn't
+/// a token, its value has a line break, or it's one std.http sets itself: Host, Content-Length,
+/// Transfer-Encoding or Connection.
+@track_caller
+pub fn get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize) -> Request {
+    return start(false, url, headers, List<u8>(), timeout_ms, limit)
+}
+
+/// Starts a POST of `body` to `url`, as `get` does. Give a Content-Type header for the body.
+@track_caller
+pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
+    return start(true, url, headers, body, timeout_ms, limit)
+}

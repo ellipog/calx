@@ -1,0 +1,7 @@
+// A line break in a header's value would start a header of its own, so it panics at the call.
+
+import std.http.{Header, get}
+
+fn main() {
+    _ = get("http://127.0.0.1/", [Header { name: "X-Name", value: "a\r\nHost: elsewhere" }], 1000, 100)    // panic: the value of the header X-Name has a line break or a zero byte
+}

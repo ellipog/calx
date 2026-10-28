@@ -1,0 +1,181 @@
+// Requests to a server in the same program, on loopback: the server runs on std.net's events
+// while each request runs on its own thread, the way a Calcite server's loop goes on while a
+// login waits for Mojang.
+
+import std.http.{Header, Request, get, post}
+import std.net.{Event, Net}
+
+// The value of a header in a request the server got, or "none".
+fn asked(head: String, name: String) -> String {
+    let lower = head.to_lower_root()
+    let at = lower.find("\r\n{name}:") ?? lower.len()
+    if at == lower.len() {
+        return "none"
+    }
+    let rest = head[at + name.len() + 3..]
+    let end = rest.find("\r\n") ?? rest.len()
+    var value = rest[..end]
+    while value.starts_with(" ") {
+        value = value[1..]
+    }
+    return value
+}
+
+fn reply(status: String, headers: String, body: String) -> List<u8> {
+    return "HTTP/1.1 {status}\r\nContent-Length: {body.len()}\r\nConnection: close\r\n{headers}\r\n{body}".to_bytes()
+}
+
+// The answer to a whole request, or nothing to leave the client waiting.
+fn answer(text: String) -> List<u8> {
+    let line_end = text.find("\r\n") ?? 0
+    let line = text[..line_end]
+    let head_end = text.find("\r\n\r\n") ?? 0
+    let head = text[..head_end + 2]
+    if line.starts_with("GET /hello ") {
+        let body = "ua={asked(head, "user-agent")} accept={asked(head, "accept")} asked={asked(head, "x-asked")}"
+        var out = "HTTP/1.1 200 OK\r\nX-Thing:   seven  \r\nX-Latin: caf".to_bytes()
+        // A byte past ASCII in a header, which HTTP reads as Latin-1: é.
+        out.push(0xE9)
+        for b in "\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}".to_bytes() {
+            out.push(b)
+        }
+        return out
+    }
+    if line.starts_with("POST /post ") {
+        let body = text[head_end + 4..]
+        return reply("201 Created", "", "post {body.len()} bytes {body} type={asked(head, "content-type")}")
+    }
+    if line.starts_with("GET /gone ") {
+        return reply("302 Found", "Location: /hello\r\n", "")
+    }
+    if line.starts_with("GET /none ") {
+        return "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_bytes()
+    }
+    if line.starts_with("GET /big ") {
+        var big = String()
+        for _ in 0..5000 {
+            big.push_str("x")
+        }
+        return reply("200 OK", "", big)
+    }
+    return List<u8>()
+}
+
+// Whether the bytes are a whole request: the head, and as much body as it says.
+fn whole(text: String) -> bool {
+    let head_end = text.find("\r\n\r\n") ?? text.len()
+    if head_end == text.len() {
+        return false
+    }
+    let n = asked(text[..head_end + 2], "content-length")
+    var want: usize = 0
+    if n != "none" {
+        for i in 0..n.len() {
+            want = want * 10 + usize(n.byte_at(i) - 48)
+        }
+    }
+    return text.len() >= head_end + 4 + want
+}
+
+// Runs the server until the request finishes.
+fn serve(net: Net, bufs: mut List<List<u8>>, req: Request) {
+    var events = List<Event>()
+    while not req.done() {
+        net.poll(5, mut events)
+        for e in events {
+            match e {
+                Received(c) => {
+                    let s = c.slot()
+                    while bufs.len() <= s {
+                        bufs.push(List<u8>())
+                    }
+                    var got = List<u8>()
+                    _ = net.read(c, mut got)
+                    for b in got {
+                        bufs[s].push(b)
+                    }
+                    let text = String.from_utf8(bufs[s].copy()) ?? String()
+                    if whole(text) {
+                        bufs[s].clear()
+                        let out = answer(text)
+                        if out.len() > 0 {
+                            net.write(c, out)
+                            net.close(c)
+                        }
+                    }
+                }
+                Closed(c) => {
+                    if c.slot() < bufs.len() {
+                        bufs[c.slot()].clear()
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn main() {
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let base = "http://127.0.0.1:{port}"
+    var bufs = List<List<u8>>()
+
+    var r = get("{base}/hello", [Header { name: "X-Asked", value: "yes" }], 5000, 1000)
+    serve(net, mut bufs, r)
+    let hello = r.wait()!
+    println("{hello.status}")    // out: 200
+    println(String.from_utf8(hello.body.copy()) ?? "bad")    // out: ua=Calx accept=none asked=yes
+    println("{hello.header("x-thing") ?? "none"} {hello.header("X-LATIN") ?? "none"} {hello.header("nope") ?? "none"}")    // out: seven café none
+
+    // A POST, with and without a Content-Type.
+    var p = post("{base}/post", [Header { name: "Content-Type", value: "text/plain" }], "hello".to_bytes(), 5000, 1000)
+    serve(net, mut bufs, p)
+    let posted = p.wait()!
+    println("{posted.status} {String.from_utf8(posted.body.copy()) ?? "bad"}")    // out: 201 post 5 bytes hello type=text/plain
+    var bare = post("{base}/post", [], List<u8>(), 5000, 1000)
+    serve(net, mut bufs, bare)
+    let empty = bare.wait()!
+    println(String.from_utf8(empty.body.copy()) ?? "bad")    // out: post 0 bytes  type=none
+
+    // A redirect is followed.
+    var moved = get("{base}/gone", [], 5000, 1000)
+    serve(net, mut bufs, moved)
+    let after = moved.wait()!
+    println("{after.status} {String.from_utf8(after.body.copy()) ?? "bad"}")    // out: 200 ua=Calx accept=none asked=none
+
+    var blank = get("{base}/none", [], 5000, 1000)
+    serve(net, mut bufs, blank)
+    let nothing = blank.wait()!
+    println("{nothing.status} {nothing.body.len()}")    // out: 204 0
+
+    var big = get("{base}/big", [], 5000, 1000)
+    serve(net, mut bufs, big)
+    match big.wait() {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: TooLong
+    }
+
+    // The server never answers this one.
+    var slow = get("{base}/slow", [], 300, 1000)
+    serve(net, mut bufs, slow)
+    match slow.wait() {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: Timeout
+    }
+
+    // URLs that aren't HTTP fail without a thread.
+    var bad = String()
+    for url in ["ftp://example.com/", "http://", "http://a b/", "http://host:0/", "http://user@host/", "https://host:99999/", "http:/host/"] {
+        var q = get(String(url), [], 1000, 100)
+        let finished = q.done()
+        if not bad.is_empty() {
+            bad.push_str(" ")
+        }
+        match q.wait() {
+            ok(_) => bad.push_str("ok"),
+            err(e) => bad.push_str("{finished}:{e}"),
+        }
+    }
+    println(bad)    // out: true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl
+}

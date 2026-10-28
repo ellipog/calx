@@ -1,0 +1,7 @@
+// std.http writes the headers that frame a request itself, so giving one panics at the call.
+
+import std.http.{Header, get}
+
+fn main() {
+    _ = get("http://127.0.0.1/", [Header { name: "Content-Length", value: "5" }], 1000, 100)    // panic: std.http sets the Content-Length header itself
+}

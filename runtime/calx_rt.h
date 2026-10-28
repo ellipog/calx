@@ -372,6 +372,22 @@ cx_usize cx_inflate_used(const cx_u8* ctx);
 cx_usize cx_deflate_bound(cx_usize n, cx_u32 format);
 cx_usize cx_deflate(const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 level, cx_u8* out);
 
+/* HTTP and HTTPS requests, each on a thread of its own, in calx_http.c (D118). A request is a
+ * handle that's never 0. `cx_http_done` and `cx_http_wait` give -1 for one that was freed, and
+ * `cx_http_wait` gives what went wrong as std.http's Error numbers it, or 0. The getters are for a
+ * request that was waited for. */
+cx_u64 cx_http_start(cx_bool post, const cx_u8* url, cx_usize url_len, const cx_u8* head, cx_usize head_len, const cx_u8* body,
+                     cx_usize body_len, cx_u32 timeout_ms, cx_usize limit);
+cx_i32 cx_http_done(cx_u64 h);
+cx_i32 cx_http_wait(cx_u64 h);
+cx_i32 cx_http_code(cx_u64 h);
+cx_u32 cx_http_status(cx_u64 h);
+cx_usize cx_http_head_len(cx_u64 h);
+void cx_http_head(cx_u64 h, cx_u8* out);
+cx_usize cx_http_body_len(cx_u64 h);
+void cx_http_body(cx_u64 h, cx_u8* out);
+void cx_http_free(cx_u64 h);
+
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
  * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */

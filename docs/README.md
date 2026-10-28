@@ -68,6 +68,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256 and HMAC-SHA256, as Java's `MessageDigest` and `Mac` give them
 12. [std.crypto](std/crypto.md): random bytes, AES-CFB8 and RSA, for vanilla's online-mode login
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
+14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own
 
 ### Design
 

@@ -1,0 +1,15 @@
+// A response is taken once: waiting again is a mistake in the program, so it panics.
+
+import std.http.{get}
+
+fn main() {
+    var r = get("ftp://example.com/", [], 1000, 100)
+    match r.wait() {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: BadUrl
+    }
+    match r.wait() {    // panic: the request's response was taken already
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),
+    }
+}
