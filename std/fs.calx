@@ -1,5 +1,5 @@
 /// Files and directories: whole files read and written, renames, directories made, listed and
-/// removed, and temporary directories.
+/// removed, real paths, and temporary directories.
 module std.fs
 
 extern "C" {
@@ -15,6 +15,7 @@ extern "C" {
     fn cx_fs_kind(path: *const u8, len: usize, follow: u32) -> u32
     fn cx_fs_list(path: *const u8, len: usize) -> i32
     fn cx_fs_temp_dir() -> i32
+    fn cx_fs_real_path(path: *const u8, len: usize) -> i32
     fn cx_fs_result_len() -> usize
     fn cx_fs_result_copy(to: *u8)
     fn cx_fs_error_kind() -> u32
@@ -259,6 +260,16 @@ pub fn list(path: String) -> List<String> ! FsError {
     }
     names.sort()
     return names
+}
+
+/// The absolute path of what `path` names, with every link followed and each `.` and `..`
+/// resolved, as Java's `Path.toRealPath` gives it: such as `/srv/world` or `C:\srv\world`.
+/// What isn't there is `NotFound`.
+pub fn real_path(path: String) -> String ! FsError {
+    if unsafe { cx_fs_real_path(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+    return result()
 }
 
 /// A new, empty directory of its own in the system's temporary folder, such as

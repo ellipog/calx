@@ -1,6 +1,6 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
-import std.fs.{FsError, Kind, read, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, temp_dir}
+import std.fs.{FsError, Kind, read, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -111,6 +111,15 @@ fn main() {
     match make_dir_all("{dir}/a/b") {
         ok => println("made"),
         err(e) => println(describe(e)),    // out: exists
+    }
+
+    // Real paths: absolute, with `.` and `..` resolved, the same however the path is written.
+    let real = real_path(dir)!
+    let y = real_path("{dir}/x/./y/../y")!
+    println("{y.starts_with(real)} {y.len() == real.len() + 4} {y.ends_with("y")}")    // out: true true true
+    match real_path("{dir}/missing") {
+        ok(p) => println(p),
+        err(e) => println(describe(e)),    // out: not found
     }
 
     // Everything goes.

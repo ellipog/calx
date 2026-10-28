@@ -361,6 +361,48 @@ cx_i32 cx_fs_temp_dir(void) {
     return 0;
 }
 
+/* The path with every link followed, as the system names what it leads to, in the result
+ * buffer: `C:\...`, or `\\server\share\...` on a network, without the `\\?\` the system adds. */
+cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
+    fs_len = 0;
+    wchar_t* w = wide(path, len);
+    if (!w) return 0;
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) {
+        fail_win(GetLastError());
+        return 0;
+    }
+    wchar_t small[MAX_PATH + 1];
+    wchar_t* name = small;
+    DWORD n = GetFinalPathNameByHandleW(h, small, MAX_PATH + 1, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n > MAX_PATH) {
+        name = (wchar_t*)malloc(((size_t)n + 1) * sizeof(wchar_t));
+        if (!name) fs_out_of_memory();
+        n = GetFinalPathNameByHandleW(h, name, n + 1, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    DWORD e = GetLastError();
+    CloseHandle(h);
+    if (n == 0) {
+        if (name != small) free(name);
+        fail_win(e);
+        return 0;
+    }
+    const wchar_t* s = name;
+    if (n >= 8 && wcsncmp(s, L"\\\\?\\UNC\\", 8) == 0) {
+        buf_add("\\\\", 2);
+        s += 8;
+        n -= 8;
+    } else if (n >= 4 && wcsncmp(s, L"\\\\?\\", 4) == 0) {
+        s += 4;
+        n -= 4;
+    }
+    buf_add_wide(s, (int)n);
+    if (name != small) free(name);
+    return 1;
+}
+
 #else
 
 static void fail_errno(int e) {
@@ -609,6 +651,23 @@ cx_i32 cx_fs_temp_dir(void) {
     fs_len = 0;
     buf_add(t, strlen(t));
     free(t);
+    return 1;
+}
+
+/* The absolute path with every link, `.` and `..` resolved, in the result buffer. */
+cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
+    fs_len = 0;
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    char* r = realpath(s, NULL);
+    int e = errno;
+    free(s);
+    if (!r) {
+        fail_errno(e == ENOTDIR ? ENOENT : e);
+        return 0;
+    }
+    buf_add_name((const unsigned char*)r, strlen(r));
+    free(r);
     return 1;
 }
 

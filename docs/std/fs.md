@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, atomic renames, directories made, listed and removed, and temporary directories.
+description: Files and directories - whole files read and written, atomic renames, directories made, listed and removed, real paths, and temporary directories.
 ---
 
 # `std.fs`
@@ -42,6 +42,7 @@ fn main() {
 | `list(path: String) -> List<String> ! FsError` | The names in a directory, without `.` and `..`, sorted by their bytes |
 | `kind(path: String) -> Kind? ! FsError` | What's at the path, without following a link, or `none` if nothing is |
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
+| `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
@@ -106,8 +107,8 @@ fn main() {
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; `FindFirstFileExW`; `GetTempPathW` |
-| Linux | `open`, `read` and `write`; `rename`; `opendir`; `mkdtemp` in `TMPDIR` or `/tmp` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
+| Linux | `open`, `read` and `write`; `rename`; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 
