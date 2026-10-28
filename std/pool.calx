@@ -6,6 +6,7 @@
 module std.pool
 
 extern "C" fn cx_set_workers(n: usize)
+extern "C" fn cx_workers() -> usize
 
 /// Sets how many threads run each `parallel for`, counting the thread that reaches it. With 1,
 /// every `parallel for` runs on that thread alone. Panics if `n` is 0, or if called inside a
@@ -15,4 +16,12 @@ pub fn set_workers(n: usize) {
         panic("a `parallel for` needs at least one thread")
     }
     unsafe { cx_set_workers(n) }
+}
+
+/// How many threads each `parallel for` runs on, counting the thread that reaches it: the
+/// number of logical processors, unless `set_workers` changed it. It differs from machine to
+/// machine, so reading it takes `unsafe`, as reading the clock does: what a program does with it
+/// can't be the same everywhere.
+pub unsafe fn workers() -> usize {
+    return unsafe { cx_workers() }
 }

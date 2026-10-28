@@ -132,6 +132,7 @@ CX_COLD CX_FN(void, cx_panic_set_len, (cx_usize length, cx_usize capacity, const
 CX_FN(void, cx_parallel, (cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx));
 /* How many threads `parallel for` uses, behind std.pool. */
 CX_FN(void, cx_set_workers, (cx_usize n));
+CX_FN(cx_usize, cx_workers, (void));
 
 /* Memory, in calx_alloc.c (D95). A block is freed, or reallocated, with the size it was last
  * given, which the compiler always knows, so blocks have no header. Freeing a null pointer does
@@ -506,6 +507,9 @@ CX_FN(cx_usize, cx_net_available, (cx_u64 h, cx_u32 id));
 CX_FN(cx_usize, cx_net_read, (cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max));
 CX_FN(void, cx_net_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len));
 CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
+CX_FN(void, cx_net_flush, (cx_u64 h));
+CX_FN(cx_bool, cx_net_waker, (cx_u64 h));
+CX_FN(void, cx_net_wake, (cx_u64 h));
 CX_FN(cx_u32, cx_net_peer, (cx_u64 h, cx_u32 id, cx_u8* out));
 CX_FN(cx_u32, cx_net_error_kind, (void));
 CX_FN(cx_i32, cx_net_error_code, (void));

@@ -40,6 +40,7 @@ fn main() {
                     }
                 }
                 Closed(_) => closed += 1,
+                Woken => {},
             }
         }
     }

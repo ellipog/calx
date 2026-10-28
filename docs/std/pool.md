@@ -23,8 +23,19 @@ fn main() {
 | Item | Does |
 | --- | --- |
 | `set_workers(n: usize)` | Makes each `parallel for` run on `n` threads, counting the thread that reaches it. With 1, every `parallel for` runs on that thread alone. Panics if `n` is 0, or if called inside a `parallel for` |
+| `unsafe workers() -> usize` | How many threads each `parallel for` runs on: the default below, or what `set_workers` set. It's `unsafe`, as reading the clock is, since it differs from machine to machine: a program can size its own threads by it, as Calcite sizes its codec threads, but what it prints with it isn't the same everywhere |
 
 The default is the number of logical processors the program may run on: `GetActiveProcessorCount` on Windows, and the CPUs in the program's affinity mask on Linux, so a container limited to some CPUs gets that many.
+
+```calx
+import std.pool.{set_workers, workers}
+
+fn main() {
+    set_workers(3)
+    println("{unsafe { workers() }}")    // out: 3
+    println("{unsafe { workers() } > 0}")    // out: true
+}
+```
 
 Setting it doesn't start or stop threads. The next `parallel for` that needs more starts them, and threads beyond the number just don't take part.
 

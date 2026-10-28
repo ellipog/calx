@@ -1,0 +1,98 @@
+// std.net: a thread wakes a poll with a `Waker`, wakes before a poll come as one, and what's
+// written goes at the next poll or flush, in order.
+import std.net.{Net, Event, Waker}
+import std.thread.{Task}
+import std.time.{Instant}
+
+// Sends each number, waking the poll after each.
+struct Counter {
+    out: Sender<i32>
+    waker: Waker
+    upto: i32
+}
+
+impl Task for Counter {
+    fn run(own self) {
+        var out = self.out
+        for i in 1..self.upto + 1 {
+            out.send(i)
+            self.waker.wake()
+        }
+    }
+}
+
+fn main() {
+    let net = Net.new()!
+    let waker = net.waker()!
+    var numbers = Receiver<i32>()
+    let start = unsafe { Instant.now() }
+    let t = unsafe { Thread.spawn(Counter { out: numbers.sender(), waker: waker, upto: 1000 }) }
+    var events = List<Event>()
+    var got = 0
+    var polls = 0
+    while got < 1000 {
+        // Without the wakes, each poll would wait 10 seconds.
+        net.poll(10000, mut events)
+        polls += 1
+        var woken = 0
+        for e in events {
+            match e {
+                Event.Woken => woken += 1,
+                _ => panic("only wakes come"),
+            }
+        }
+        assert(woken == 1, "a poll reports one Woken, not {woken}")
+        while let n = numbers.next() {
+            got += 1
+            assert(n == got, "{n} came as number {got}")
+        }
+    }
+    t.join()
+    let ms = unsafe { Instant.now() }.nanos_since(start) / 1000000
+    assert(ms < 5000, "the wakes took {ms} ms")
+    println("{got} {polls <= 1000}")    // out: 1000 true
+
+    // A wake with no poll waiting wakes the next.
+    waker.wake()
+    waker.wake()
+    net.poll(10000, mut events)
+    println("{events.len()}")    // out: 1
+    net.poll(0, mut events)
+    println("{events.len()}")    // out: 0
+
+    // What's written goes in order, whether at a poll or a flush.
+    let port = net.listen("127.0.0.1", 0)!
+    let client = net.connect("127.0.0.1", port)!
+    var server_side: List<i32> = []
+    var received = List<u8>()
+    var closed = false
+    while not closed {
+        net.poll(10000, mut events)
+        for e in events {
+            match e {
+                Event.Accepted(c) => {
+                    server_side.push(i32.wrap(c.slot()))
+                    for b in 0u8..100 {
+                        net.write(c, [b])
+                        if b == 50 {
+                            net.flush()
+                        }
+                    }
+                    net.close(c)
+                },
+                Event.Received(c) => {
+                    if c == client {
+                        _ = net.read(c, mut received)
+                    }
+                },
+                Event.Closed(c) => closed = c == client,
+                _ => {},
+            }
+        }
+    }
+    var in_order = received.len() == 100
+    for i in 0..received.len() {
+        in_order = in_order and usize(received[i]) == i
+    }
+    println("{in_order}")    // out: true
+}

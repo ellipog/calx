@@ -1,9 +1,9 @@
 /// TCP connections, driven by events (D33, D92).
 ///
 /// A `Net` holds listening sockets and connections. `poll` waits until something happens and
-/// reports it as events: a connection accepted or opened, bytes received, a connection closed.
-/// The runtime keeps what arrived until `read` takes it, and what `write` queued until the socket
-/// takes it, so nothing here waits for the network except `poll`.
+/// reports it as events: a connection accepted or opened, bytes received, a connection closed,
+/// or another thread waking it. The runtime keeps what arrived until `read` takes it, and what
+/// `write` queued until the socket takes it, so nothing here waits for the network except `poll`.
 module std.net
 
 extern "C" {
@@ -17,6 +17,9 @@ extern "C" {
     fn cx_net_read(net: u64, conn: u32, to: *u8, n: usize) -> usize
     fn cx_net_send(net: u64, conn: u32, from: *const u8, n: usize)
     fn cx_net_close(net: u64, conn: u32)
+    fn cx_net_flush(net: u64)
+    fn cx_net_waker(net: u64) -> bool
+    fn cx_net_wake(net: u64)
     fn cx_net_peer(net: u64, conn: u32, out: *u8) -> u32
     fn cx_net_error_kind() -> u32
     fn cx_net_error_code() -> i32
@@ -163,6 +166,24 @@ pub enum Event {
     /// `close` finished. It's the last event for the connection, and what arrived before it can
     /// still be read until the next poll.
     Closed(Conn)
+    /// A `Waker` woke the poll. Wakes before the poll that reports them come as one.
+    Woken
+}
+
+/// Wakes a `Net`'s poll from another thread, so a thread that queued something for the one
+/// polling can say so: the poll reports `Woken`, or the next one does if none is waiting. It's
+/// `Copy` and `Send`, and every copy wakes the same `Net`.
+pub struct Waker {
+    handle: u64,
+}
+
+impl Waker {
+    /// Wakes the poll. Any thread can, except inside a `parallel for`.
+    pub fn wake(self) {
+        unsafe {
+            cx_net_wake(self.handle)
+        }
+    }
 }
 
 /// Listening sockets and connections, and the events about them. Only the thread that made it
@@ -225,7 +246,8 @@ impl Net {
                     1 => Event.Accepted(conn),
                     2 => Event.Connected(conn),
                     3 => Event.Received(conn),
-                    _ => Event.Closed(conn),
+                    4 => Event.Closed(conn),
+                    _ => Event.Woken,
                 })
             }
         }
@@ -244,15 +266,31 @@ impl Net {
         }
     }
 
-    /// Queues the bytes to send on the connection. They go as soon as the socket takes them. On
-    /// a connection that has closed, they're dropped.
+    /// Queues the bytes to send on the connection. They go to the system at the next poll or
+    /// `flush`, with everything else queued on the connection since the last, and then as soon
+    /// as the socket takes them. On a connection that has closed, they're dropped.
     pub fn write(self, conn: Conn, bytes: List<u8>) {
         unsafe {
             cx_net_send(self.handle, conn.id, bytes.as_ptr(), bytes.len())
         }
     }
 
-    /// Closes the connection once what was queued is sent. A poll reports `Closed` after.
+    /// Sends what was queued on every connection now, rather than at the next poll.
+    pub fn flush(self) {
+        unsafe {
+            cx_net_flush(self.handle)
+        }
+    }
+
+    /// A `Waker` for this `Net`'s polls, which another thread can wake them with.
+    pub fn waker(self) -> Waker ! NetError {
+        if not unsafe { cx_net_waker(self.handle) } {
+            fail NetError.Os(0)
+        }
+        return Waker { handle: self.handle }
+    }
+
+    /// Sends what was queued on the connection, then closes it. A poll reports `Closed` after.
     pub fn close(self, conn: Conn) {
         unsafe {
             cx_net_close(self.handle, conn.id)

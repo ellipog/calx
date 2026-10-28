@@ -1810,6 +1810,9 @@ void cx_panic_text(const char* at, const char* message) {
     cx_panic_end();
 }
 
+/* Declared by std/pool.calx. */
+cx_usize cx_workers(void) { return par_threads(); }
+
 /* Declared by std/pool.calx, which checks that `n` isn't 0. */
 void cx_set_workers(cx_usize n) {
     if (par_depth) {

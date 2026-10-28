@@ -3,9 +3,13 @@
  * A poller owns its connections, and only the thread that opened it uses it. The runtime keeps
  * each connection's buffers: what arrived, waiting for `read`, and what `send` queued, waiting
  * for the socket. `poll` reports what happened as events: a connection accepted, an outgoing one
- * open, bytes received, a connection closed. On Windows that's IOCP, whose operations complete
- * into the runtime's buffers. On Linux it's edge-triggered epoll, and the runtime reads and
- * writes when the socket is ready. Either way the program sees the same events.
+ * open, bytes received, a connection closed, or a waker woke it. On Windows that's IOCP, whose
+ * operations complete into the runtime's buffers. On Linux it's edge-triggered epoll, and the
+ * runtime reads and writes when the socket is ready. Either way the program sees the same events.
+ *
+ * What `send` queues waits for the next poll or flush, so everything a program writes to a
+ * connection between two polls goes to the system at once: one `WSASend` or `send` for many
+ * writes, which a server that writes many packets a tick needs.
  *
  * A connection's id is its slot in the poller and the slot's generation, so a stale id never
  * reaches a newer connection in the same slot. A slot is reused only after the poll that
@@ -28,6 +32,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,7 +46,7 @@
 int cx_in_parallel(void);
 CX_COLD void cx_panic_text(const char* at, const char* message);
 
-enum { EV_ACCEPTED = 1, EV_CONNECTED = 2, EV_RECEIVED = 3, EV_CLOSED = 4 };
+enum { EV_ACCEPTED = 1, EV_CONNECTED = 2, EV_RECEIVED = 3, EV_CLOSED = 4, EV_WOKEN = 5 };
 enum { ERR_IN_USE = 1, ERR_ADDRESS = 2, ERR_REFUSED = 3, ERR_OTHER = 4 };
 enum { SLOT_FREE, SLOT_LISTENER, SLOT_CONN };
 enum { CONN_CONNECTING, CONN_OPEN, CONN_CLOSING, CONN_CLOSED };
@@ -113,6 +118,7 @@ struct net_slot {
     cx_u32 index;
     cx_u8 gen;
     int received;  /* a Received event is waiting in this poll */
+    int dirty;     /* bytes were queued since the last flush */
     int reported;  /* a poll before this one returned its Closed event */
     net_buf in, out;
     struct sockaddr_storage peer;  /* the other end, from when it opened */
@@ -150,6 +156,14 @@ typedef struct {
     size_t nout, out_cap;
     cx_u32* retiring; /* slots whose Closed the last poll returned */
     size_t nretiring, retiring_cap;
+    cx_u32* dirty; /* connections with bytes queued since the last flush */
+    size_t ndirty, dirty_cap;
+    int woken;      /* a wake is on its way, set and cleared atomically, so wakes come as one */
+    int woke;       /* this poll's events have a Woken already */
+    int has_waker;  /* other threads may wake it */
+#ifndef _WIN32
+    int wake_fd;    /* the eventfd a wake writes to, once there's a waker */
+#endif
 } net;
 
 static cx_u32 slot_id(const net_slot* s) { return ((cx_u32)s->gen << NET_INDEX_BITS) | s->index; }
@@ -158,6 +172,18 @@ static void emit(net* n, cx_u32 kind, net_slot* s) {
     n->ev = net_grow(n->ev, &n->ev_cap, n->nev + 2, sizeof(cx_u32));
     n->ev[n->nev++] = kind;
     n->ev[n->nev++] = slot_id(s);
+}
+
+/* A wake arrived. Clearing the flag before the program sees the event means a wake after this
+ * one sends another, so none is lost: what a thread queued before waking is there to take once
+ * the poll returns. */
+static void woke(net* n) {
+    __atomic_store_n(&n->woken, 0, __ATOMIC_SEQ_CST);
+    if (n->woke) return;
+    n->woke = 1;
+    n->ev = net_grow(n->ev, &n->ev_cap, n->nev + 2, sizeof(cx_u32));
+    n->ev[n->nev++] = EV_WOKEN;
+    n->ev[n->nev++] = NET_NONE;
 }
 
 static net_slot* new_slot(net* n, int kind) {
@@ -305,9 +331,9 @@ static size_t deliver(net* n) {
     n->ev = t;
     n->ev_cap = tc;
     n->nev = 0;
+    n->woke = 0;
     for (size_t i = 0; i < n->nout; i += 2) {
-        net_slot* s = n->slots[n->out[i + 1] & (((cx_u32)1 << NET_INDEX_BITS) - 1)];
-        if (n->out[i] == EV_RECEIVED) s->received = 0;
+        if (n->out[i] == EV_RECEIVED) n->slots[n->out[i + 1] & (((cx_u32)1 << NET_INDEX_BITS) - 1)]->received = 0;
     }
     return n->nout / 2;
 }
@@ -511,7 +537,11 @@ static void wait_events(net* n, cx_i64 timeout_ms) {
         OVERLAPPED_ENTRY entries[64];
         ULONG got = 0;
         if (GetQueuedCompletionStatusEx(n->iocp, entries, 64, &got, wait, FALSE)) {
-            for (ULONG i = 0; i < got; i++) completed(n, &entries[i]);
+            /* A wake is posted with no operation. */
+            for (ULONG i = 0; i < got; i++) {
+                if (entries[i].lpOverlapped) completed(n, &entries[i]);
+                else woke(n);
+            }
             if (got == 64) {
                 /* There may be more already. */
                 wait = 0;
@@ -647,7 +677,9 @@ static void close_all(net* n) {
         OVERLAPPED_ENTRY entries[64];
         ULONG got = 0;
         if (!GetQueuedCompletionStatusEx(n->iocp, entries, 64, &got, 1000, FALSE)) break;
-        for (ULONG i = 0; i < got; i++) ((net_op*)entries[i].lpOverlapped)->slot->pending--;
+        for (ULONG i = 0; i < got; i++) {
+            if (entries[i].lpOverlapped) ((net_op*)entries[i].lpOverlapped)->slot->pending--;
+        }
     }
     CloseHandle(n->iocp);
 }
@@ -798,7 +830,17 @@ static void wait_events(net* n, cx_i64 timeout_ms) {
         int got = epoll_wait(n->ep, evs, 64, wait);
         if (got < 0 && errno != EINTR) return;
         if (got > 0) {
-            for (int i = 0; i < got; i++) ready(n, n->slots[evs[i].data.u32], evs[i].events);
+            for (int i = 0; i < got; i++) {
+                if (evs[i].data.u32 != NET_NONE) {
+                    ready(n, n->slots[evs[i].data.u32], evs[i].events);
+                    continue;
+                }
+                /* The eventfd: reading it sets it back to 0. */
+                cx_u64 count;
+                ssize_t r = read(n->wake_fd, &count, sizeof count);
+                (void)r;
+                woke(n);
+            }
             if (got == 64) {
                 /* There may be more already. */
                 wait = 0;
@@ -897,10 +939,26 @@ static void close_all(net* n) {
     for (size_t i = 0; i < n->nslots; i++) {
         if (n->slots[i]->fd >= 0) close(n->slots[i]->fd);
     }
+    if (n->has_waker) close(n->wake_fd);
     close(n->ep);
 }
 
 #endif
+
+/* Hands the system what was queued on each connection since the last flush. */
+static void send_dirty(net* n) {
+    for (size_t i = 0; i < n->ndirty; i++) {
+        net_slot* s = n->slots[n->dirty[i]];
+        s->dirty = 0;
+        if (s->kind != SLOT_CONN) continue;
+#ifdef _WIN32
+        post_send(n, s);
+#else
+        flush(n, s);
+#endif
+    }
+    n->ndirty = 0;
+}
 
 /* Closes every socket, and frees the poller. */
 void cx_net_free(cx_u64 h) {
@@ -921,12 +979,14 @@ void cx_net_free(cx_u64 h) {
     free(n->ev);
     free(n->out);
     free(n->retiring);
+    free(n->dirty);
     free(n);
 }
 
 cx_usize cx_net_poll(cx_u64 h, cx_i64 timeout_ms) {
     net_check_thread();
     net* n = (net*)(uintptr_t)h;
+    send_dirty(n);
     closed_seen(n);
     retire(n);
     wait_events(n, n->nev ? 0 : timeout_ms);
@@ -960,10 +1020,54 @@ void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
     net_slot* s = conn_of(n, id);
     if (!s || len == 0 || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
     buf_append(&s->out, p, len);
+    if (!s->dirty) {
+        s->dirty = 1;
+        n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
+        n->dirty[n->ndirty++] = s->index;
+    }
+}
+
+/* Sends what was queued on every connection, without waiting for the next poll. */
+void cx_net_flush(cx_u64 h) {
+    net_check_thread();
+    send_dirty((net*)(uintptr_t)h);
+}
+
+/* Lets other threads wake the poller's polls: 1 once they can. */
+cx_bool cx_net_waker(cx_u64 h) {
+    net_check_thread();
+    net* n = (net*)(uintptr_t)h;
+    if (n->has_waker) return 1;
+#ifndef _WIN32
+    /* On Windows a wake is a completion posted to the port, which needs nothing made first. */
+    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) return 0;
+    struct epoll_event e;
+    memset(&e, 0, sizeof e);
+    e.events = EPOLLIN | EPOLLET;
+    e.data.u32 = NET_NONE;
+    if (epoll_ctl(n->ep, EPOLL_CTL_ADD, fd, &e) != 0) {
+        close(fd);
+        return 0;
+    }
+    n->wake_fd = fd;
+#endif
+    n->has_waker = 1;
+    return 1;
+}
+
+/* Wakes the poller's poll, or its next, from any thread. A wake while one is on its way is
+ * part of it. */
+void cx_net_wake(cx_u64 h) {
+    net_check_thread();
+    net* n = (net*)(uintptr_t)h;
+    if (__atomic_exchange_n(&n->woken, 1, __ATOMIC_SEQ_CST)) return;
 #ifdef _WIN32
-    post_send(n, s);
+    PostQueuedCompletionStatus(n->iocp, 0, 0, NULL);
 #else
-    flush(n, s);
+    cx_u64 one = 1;
+    ssize_t r = write(n->wake_fd, &one, sizeof one);
+    (void)r;
 #endif
 }
 
@@ -972,12 +1076,20 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
     net* n = (net*)(uintptr_t)h;
     net_slot* s = conn_of(n, id);
     if (!s || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
+    if (s->state == CONN_CONNECTING) {
+        lost(n, s);
+        return;
+    }
+    /* What was queued goes first. */
 #ifdef _WIN32
-    if (s->state == CONN_CONNECTING) lost(n, s);
-    else if (!s->sending && !buf_live(&s->out)) finish(n, s);
+    post_send(n, s);
+    if (s->state == CONN_CLOSED) return;
+    if (!s->sending && !buf_live(&s->out)) finish(n, s);
     else s->state = CONN_CLOSING;
 #else
-    if (s->state == CONN_CONNECTING || !buf_live(&s->out)) lost(n, s);
+    flush(n, s);
+    if (s->state == CONN_CLOSED) return;
+    if (!buf_live(&s->out)) lost(n, s);
     else s->state = CONN_CLOSING;
 #endif
 }
