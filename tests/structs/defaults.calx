@@ -4,6 +4,17 @@ struct Settings {
     scale: f64 = 1.5
 }
 
+// A struct whose fields all have defaults is a constant made with `()`, so it can be a default.
+struct Look {
+    color: String? = none
+    bold: bool = false
+}
+
+struct Line {
+    text: String
+    look: Look = Look()
+}
+
 struct Pos {
     x: i32
     y: i32 = 64
@@ -19,4 +30,8 @@ fn main() {
     let z = -7
     let p = Pos { x, z }
     println("{p.x} {p.y} {p.z}")                      // out: 3 64 -7
+    var l = Line { text: String("hi") }
+    l.look.bold = true
+    let m = Line { text: String("there") }
+    println("{l.look.bold} {m.look.bold} {m.look.color == none}")    // out: true false true
 }

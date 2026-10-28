@@ -7005,6 +7005,9 @@ private:
                 return T.error;
             }
         }
+        // Every default is a constant, so the whole value is one, and can be another field's
+        // default: `style: Style = Style()`.
+        e->is_const = true;
         return t;
     }
 

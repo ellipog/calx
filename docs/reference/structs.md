@@ -42,7 +42,7 @@ fn main() {
 
 - `Name { field: value, ... }` gives every field without a default. Fields can be written in any order, and their values run in the order written.
 - `Name { x, y }` takes the variables named `x` and `y`.
-- `Name()` builds a value with every field at its default, and needs every field to have one.
+- `Name()` builds a value with every field at its default, and needs every field to have one. Since every default is a constant, so is `Name()`, which can be another struct's default: `look: Look = Look()`.
 
 ```calx
 struct Settings {
