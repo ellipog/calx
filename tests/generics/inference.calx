@@ -17,7 +17,7 @@ fn get<T>(o: own T?) -> T? {
     return o
 }
 
-struct Box<T> {
+struct Holder<T> {
     v: T
 }
 
@@ -29,7 +29,7 @@ fn main() {
 
     // The expected type gives `T`.
     let c: i8? = empty()
-    let d: Box<u16> = Box { v: 300 }
+    let d: Holder<u16> = Holder { v: 300 }
     let e: u64? = pick(true, some(1), none)
     println("{c ?? -1} {d.v} {e ?? 0}")          // out: -1 300 1
 

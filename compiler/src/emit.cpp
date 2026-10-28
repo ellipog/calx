@@ -431,7 +431,7 @@ private:
         switch (t->kind) {
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
-            case TypeKind::list: s = (t->heap ? "cx_heap_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
+            case TypeKind::list: s = (t->heap ? "cx_heap_" : t->boxed ? "cx_box_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
@@ -2257,6 +2257,7 @@ $dropall    m->len = 0;
             }
             case TypeKind::array:
             case TypeKind::list: {
+                if (t->boxed) return "    " + show_value(t->elem, "v.ptr[0]") + "\n";
                 std::string n = t->kind == TypeKind::array ? std::to_string(t->length) : "v.len";
                 std::string at = t->kind == TypeKind::array ? "v.v[i]" : "v.ptr[i]";
                 return print("[") + "    for (cx_usize i = 0; i < " + n + "; i++) {\n        if (i) cx_print_str(" +
@@ -3709,8 +3710,9 @@ $dropall    m->len = 0;
     static bool place_has_effects(const Expr* e) {
         while (e->kind == ExprKind::field || e->kind == ExprKind::index || e->kind == ExprKind::unwrap) {
             if (e->kind == ExprKind::unwrap) return true;
-            if (e->kind == ExprKind::index && (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
-                                               e->lhs->type->kind == TypeKind::map)) {
+            if (e->kind == ExprKind::index && !e->box_value &&
+                (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
+                 e->lhs->type->kind == TypeKind::map)) {
                 return true;
             }
             e = e->lhs;
@@ -4031,6 +4033,12 @@ $dropall    m->len = 0;
             return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; cx_usize " + i + " = " + b + "->head + cx_index(" +
                    value(e->rhs, e->rhs->type) + ", " + b + "->len, " + location(e->rhs->span) + "); &" + b + "->ptr[" + i + " >= " + b +
                    "->cap ? " + i + " - " + b + "->cap : " + i + "]; }))";
+        }
+        if (e->box_value) {
+            // A box's one value, which is always there.
+            if (is_place(e->lhs) && !place_has_effects(e->lhs)) return place(e->lhs) + ".ptr[0]";
+            std::string b = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; &" + b + "->ptr[0]; }))";
         }
         if (at->kind == TypeKind::list) {
             std::string loc = location(e->rhs->span);
@@ -4999,7 +5007,7 @@ $dropall    m->len = 0;
                 inner("array", t->elem);
                 s += std::to_string(t->length);
                 return;
-            case TypeKind::list: inner(t->heap ? "heap" : t->arena_list ? "arena_list" : "list", t->elem); return;
+            case TypeKind::list: inner(t->heap ? "heap" : t->boxed ? "box" : t->arena_list ? "arena_list" : "list", t->elem); return;
             case TypeKind::deque: inner("deque", t->elem); return;
             case TypeKind::set: inner(("set" + std::to_string(static_cast<int>(t->table))).c_str(), t->elem); return;
             case TypeKind::map:

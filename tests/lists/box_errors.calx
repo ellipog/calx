@@ -1,0 +1,35 @@
+// What a `Box` can't do: be indexed, written as a list, gone over in a loop, given list methods
+// or other fields, or be a key of a Java map. A type that holds itself without one is told to
+// use one.
+struct Node {    // error: `Node` holds itself, so it would have no end; hold it through a `Box`, which keeps it on the heap: `Box<Node>`
+    next: Node?,
+}
+
+struct Cell {
+    name: String,
+}
+
+fn main() {
+    var b = Box(5)
+    b.value += 1
+    println("{b[0]}")    // error: a `Box` holds one value, which isn't indexed; it's `b.value`
+    b.push(6)    // error: `Box<i32>` has no method `push`; its value is `b.value`, as in `b.value.push()`
+    println("{b.len()}")    // error: `Box<i32>` has no method `len`; its value is `b.value`, as in `b.value.len()`
+    let c: Box<i32> = [1]    // error: a `Box` isn't written as a list; make it with `Box(value)`
+    let d: Box<i32> = List<i32>()    // error: expected `Box<i32>`, found `List<i32>`
+    println("{c} {d}")
+    for x in b {    // error: a `for` loop doesn't go over a `Box`, which holds one value: `b.value`
+        println("{x}")
+    }
+    let cell = Box(Cell { name: String("a") })
+    println("{cell.name}")    // error: `Box<Cell>` has one field, `value`, the value it holds: `cell.value.name`
+    let e = Box()    // error: `Box` takes one value, the one it holds: `Box(n)`
+    let f = Box(1, 2)    // error: `Box` takes one value, the one it holds: `Box(n)`
+    let g = Box<i32, i32>(1)    // error: `Box` takes one generic argument, the type of the value it holds: `Box<Node>(n)`
+    let h = Box(())    // error: a box can't hold `()`
+    println("{e} {f} {g} {h}")
+    let m = JavaHashSet<Box<i32>>()    // error: `Box<i32>` can't be a key of a `JavaHashMap` or a `JavaHashSet`, since it has no `JavaHash`, and a `Box` has no `JavaHash`, since Java has no boxes to have one
+    println("{m.len()}")
+    let n: Node? = none
+    println("{n == none}")
+}

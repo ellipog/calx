@@ -113,7 +113,7 @@ fn main() {
 - `impl<A, B> Pair<A, B>` adds methods to every `Pair`, and `impl Pair<i32, i32>` adds them only to that one. An impl's parameters must all appear in its type.
 - A method can have its own parameters, as `with<C>` does. A static function is called on the type, with or without its types: `Pair.of(2, 3)` works them out.
 - A field's default can use the parameters, as in `best: T? = none`.
-- A type that holds itself has no end, generic or not, so `struct Node<T> { v: T, next: Node<T>? }` is an error.
+- A type that holds itself has no end, generic or not, so `struct Node<T> { v: T, next: Node<T>? }` is an error. It holds itself through a box, `next: Box<Node<T>>?`, or a list ([boxes](boxes.md)).
 
 ## How a call works out its types
 

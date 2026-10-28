@@ -1,15 +1,15 @@
 // Parameters are read-only views unless they're `mut`; `mut` ones change the caller's value.
-struct Box {
+struct Bin {
     items: [i32; 4]
     count: i32
 }
 
-fn add(b: mut Box, item: i32) {
+fn add(b: mut Bin, item: i32) {
     b.items[usize.wrap(b.count)] = item
     b.count += 1
 }
 
-fn total(b: Box) -> i32 {
+fn total(b: Bin) -> i32 {
     var sum = 0
     for x in b.items {
         sum += x
@@ -22,7 +22,7 @@ fn bump(n: mut i32) {
 }
 
 fn main() {
-    var b = Box { items: [0; 4], count: 0 }
+    var b = Bin { items: [0; 4], count: 0 }
     add(mut b, 5)
     add(mut b, 7)
     println("{b.count} {total(b)}")      // out: 2 12

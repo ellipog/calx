@@ -1,0 +1,98 @@
+// `Box<T>`: one value on the heap, so a type can hold itself through it. The value is the place
+// `b.value`, read, changed and matched as a field is, and the box is freed, copied, compared,
+// hashed and shown as its value.
+
+struct Node {
+    value: i32,
+    next: Box<Node>?,
+}
+
+enum Expr {
+    Num(i64)
+    Add(Box<Expr>, Box<Expr>)
+    Neg(Box<Expr>)
+}
+
+fn sum(n: Node) -> i32 {
+    var total = n.value
+    if let next = n.next {
+        total += sum(next.value)
+    }
+    return total
+}
+
+fn eval(e: Expr) -> i64 {
+    return match e {
+        Expr.Num(v) => v,
+        Expr.Add(a, b) => eval(a.value) + eval(b.value),
+        Expr.Neg(x) => -eval(x.value),
+    }
+}
+
+fn list(n: i32) -> Node {
+    var head = Node { value: 0, next: none }
+    for i in 1..n {
+        head = Node { value: i, next: some(Box(head)) }
+    }
+    return head
+}
+
+fn bump(n: mut Node) {
+    n.value += 100
+}
+
+struct Tree<T> {
+    item: T,
+    kids: List<Box<Tree<T>>>,
+}
+
+fn count<T>(t: Tree<T>) -> usize {
+    var n: usize = 1
+    for k in t.kids {
+        n += count(k.value)
+    }
+    return n
+}
+
+fn main() {
+    let n = list(5)
+    println("{sum(n)}")                       // out: 10
+    let e = Expr.Add(Box(Expr.Num(2)), Box(Expr.Neg(Box(Expr.Num(5)))))
+    println("{eval(e)}")                      // out: -3
+
+    // The value is a place: it's changed through the box, and a copy is its own.
+    var b = Box(Node { value: 1, next: none })
+    b.value.value = 7
+    b.value.value += 1
+    let c = b.copy()
+    b.value = Node { value: 9, next: some(Box(Node { value: 1, next: none })) }
+    println("{b.value.value} {c.value.value} {sum(b.value)}")  // out: 9 8 10
+    bump(mut b.value)
+    println("{b.value.value}")                // out: 109
+
+    // Compared and shown as the value.
+    let x = Box(3)
+    let y = Box<i32>(3)
+    println("{x == y} {x != Box(4)} {x}")     // out: true true 3
+    let s: Box<String> = Box(String("hi"))
+    println("{s} {s.value.len()}")            // out: hi 2
+
+    // In an optional, a list and a generic type.
+    var kids = List<Box<Tree<str>>>()
+    kids.push(Box(Tree { item: "a", kids: [] }))
+    kids.push(Box(Tree { item: "b", kids: [Box(Tree { item: "c", kids: [] })] }))
+    let t = Tree { item: "root", kids: kids }
+    println("{count(t)} {t.kids[1].value.kids[0].value.item}")  // out: 4 c
+    var maybe: Box<i32>? = none
+    maybe = some(Box(5))
+    if let m = maybe {
+        println("{m.value + 1}")              // out: 6
+    }
+
+    // Matched through its value.
+    let boxed = Box(Expr.Num(4))
+    match boxed.value {
+        Expr.Num(v) => println("num {v}"),    // out: num 4
+        _ => println("other"),
+    }
+}

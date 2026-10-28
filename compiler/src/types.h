@@ -85,6 +85,10 @@ struct Type {
     // it's freed, copied, compared, shown and gone over as one, but it's its own type, and only
     // the heap's methods change it.
     bool heap = false;
+    // list: a `Box<T>`, which owns one value on the heap, so a type can hold itself through it.
+    // It's a list of that one value in memory, so it's freed, copied, compared and hashed as one,
+    // but it's its own type: `b.value` is the value, and it has no list methods.
+    bool boxed = false;
     bool java_hash_bound = false; // param: it has the bound `JavaHash`, so it has Java's `hashCode`
     bool send_bound = false;      // param: it has the bound `Send`, so it can go in a message (D115)
     // list: an `ArenaList<T>`, whose memory comes from an `Arena` (D114). It's a list in memory,
@@ -123,6 +127,7 @@ public:
     Type* list_of(Type* elem);
     Type* deque_of(Type* elem);
     Type* heap_of(Type* elem);
+    Type* box_of(Type* elem);
     Type* arena_list_of(Type* elem);
     Type* sender_of(Type* elem);
     Type* receiver_of(Type* elem);
@@ -150,6 +155,7 @@ private:
     std::map<Type*, Type*> list_map_;
     std::map<Type*, Type*> deque_map_;
     std::map<Type*, Type*> heap_map_;
+    std::map<Type*, Type*> box_map_;
     std::map<Type*, Type*> arena_list_map_;
     std::map<Type*, Type*> sender_map_;
     std::map<Type*, Type*> receiver_map_;

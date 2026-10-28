@@ -407,7 +407,7 @@ private:
             case ExprKind::self: return "self";
             case ExprKind::field:
                 return place_text(e->lhs) + "." + (e->is_tuple_index ? std::to_string(e->tuple_index) : std::string(text(e->member)));
-            case ExprKind::index: return place_text(e->lhs) + "[...]";
+            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : "[...]");
             case ExprKind::unwrap: return place_text(e->lhs) + "!";
             default: return "...";
         }
@@ -932,6 +932,11 @@ private:
         std::string r(text(l->name));
         if (e->kind == ExprKind::index) {
             TypeKind k = base->type ? base->type->kind : TypeKind::error;
+            if (e->box_value) {
+                error(e->span, "can't move the value out of " + q(place_text(base)) + ", which keeps it; move a copy with `.copy()`" +
+                                   copy_hint(e->type));
+                return;
+            }
             const char* how = k == TypeKind::list  ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
                             : k == TypeKind::deque ? "; take it out with `pop_first` or `pop_last`, or move a copy with `.copy()`"
                             : k == TypeKind::map  ? "; take it out with `remove`, or move a copy with `.copy()`"

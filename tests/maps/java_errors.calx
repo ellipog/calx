@@ -5,11 +5,11 @@ struct Point {
     y: i32,
 }
 
-struct Box<T> {
+struct Holder<T> {
     v: T,
 }
 
-impl<T> JavaHash for Box<T> {    // error: `JavaHash` needs `Equal`, which `Box<T>` doesn't have; give `T` the bound `Equal`
+impl<T> JavaHash for Holder<T> {    // error: `JavaHash` needs `Equal`, which `Holder<T>` doesn't have; give `T` the bound `Equal`
     fn java_hash(self) -> i32 {
         return 0
     }
@@ -41,6 +41,6 @@ fn main() {
     println("{(1, 2).java_hash()}")    // error: `(i32, i32)` has no `java_hash`, since it has no `JavaHash`, and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in
     println("{JavaHash.java_hash(5)}")    // error: call `java_hash` on a value: `x.java_hash()`
     println("{5.java_hash(1)}")    // error: `java_hash` takes no arguments
-    let g = Box { v: Point { x: 1, y: 2 } }
+    let g = Holder { v: Point { x: 1, y: 2 } }
     println("{a.len()} {b.len()} {c.len()} {d.len()} {e.len()} {f.len()} {keyed(1).len()} {g.v.x}")
 }

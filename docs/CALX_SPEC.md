@@ -164,9 +164,9 @@ Calx's checker is stricter than Rust's: every rule is an error, no flag turns on
 
 ### Ownership
 
-Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take values apart, and freeing in reverse order of declaration ([Ownership](reference/ownership.md)). Still to build:
+Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take values apart, and freeing in reverse order of declaration ([Ownership](reference/ownership.md)), and `Box<T>`, which owns a value on the heap, for recursive types ([Boxes](reference/boxes.md)). Still to build:
 
-- `Box<T>` owns a value on the heap, for recursive types. `Shared<T>` is an immutable value with an atomic reference count, for data many regions read: registries, config and the tick snapshot. It's `Share`, and nothing can change it.
+- `Shared<T>` is an immutable value with an atomic reference count, for data many regions read: registries, config and the tick snapshot. It's `Share`, and nothing can change it.
 
 ### Views
 
@@ -260,6 +260,7 @@ Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the 
 | `SlotMap<T>` | Storage behind `Handle<T>` |
 | `Deque<T>` | A growable ring, added to and taken from at both ends. Built: [Deques](reference/deques.md) |
 | `PriorityQueue<T>` | A binary heap, least first, in Java's order. Built: [Priority queues](reference/priority-queues.md) |
+| `Box<T>` | One value on the heap, for recursive types. Built: [Boxes](reference/boxes.md) |
 | `BitSet` | |
 
 **Native maps are deterministic (D56).** There's no random hash seed per process, so the same operations always give the same iteration order. Code that iterates a native map by mistake where the order shows still gives the same answer with any thread count and in every replay, even if it doesn't match vanilla.

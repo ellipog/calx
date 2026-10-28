@@ -29,11 +29,11 @@ fn area_fn<T: Shape>() -> fn(T) -> f64 {
     return T.area
 }
 
-struct Box<T> {
+struct Holder<T> {
     v: T
 }
 
-impl<T: Copy> Box<T> {
+impl<T: Copy> Holder<T> {
     fn get(self) -> T {
         return self.v
     }
@@ -44,8 +44,8 @@ fn main() {
     println("{f(Square { side: 3.0 })}")    // out: 9.0
     let g = area_fn<Circle>()
     println("{g(Circle { r: 1.0 })}")       // out: 3.0
-    let h = Box<i32>.get
-    println("{h(Box { v: 7 })}")            // out: 7
-    let k: fn(Box<u8>) -> u8 = Box.get
-    println("{k(Box { v: 9u8 })}")          // out: 9
+    let h = Holder<i32>.get
+    println("{h(Holder { v: 7 })}")            // out: 7
+    let k: fn(Holder<u8>) -> u8 = Holder.get
+    println("{k(Holder { v: 9u8 })}")          // out: 9
 }

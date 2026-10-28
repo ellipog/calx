@@ -129,6 +129,20 @@ Type* Types::heap_of(Type* elem) {
     return t;
 }
 
+Type* Types::box_of(Type* elem) {
+    auto it = box_map_.find(elem);
+    if (it != box_map_.end()) return it->second;
+    Type* t = make(TypeKind::list, arena_.copy("Box<" + std::string(elem->name) + ">"));
+    t->boxed = true;
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
+    box_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 Type* Types::arena_list_of(Type* elem) {
     auto it = arena_list_map_.find(elem);
     if (it != arena_list_map_.end()) return it->second;

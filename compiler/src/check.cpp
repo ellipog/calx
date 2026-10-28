@@ -90,7 +90,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
+        for (const char* b : {"some", "ok", "err", "List", "Box", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Library", "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
@@ -98,6 +98,8 @@ public:
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
         n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
+        n_Box_ = ctx.names.intern("Box");
+        n_value_ = ctx.names.intern("value");
         n_Arena_ = ctx.names.intern("Arena");
         n_ArenaList_ = ctx.names.intern("ArenaList");
         n_Sender_ = ctx.names.intern("Sender");
@@ -1475,6 +1477,7 @@ private:
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list:
                 return t->heap         ? T.heap_of(subst(t->elem, s))
+                       : t->boxed      ? T.box_of(subst(t->elem, s))
                        : t->arena_list ? T.arena_list_of(subst(t->elem, s))
                                        : T.list_of(subst(t->elem, s));
             case TypeKind::deque: return T.deque_of(subst(t->elem, s));
@@ -1516,7 +1519,7 @@ private:
         }
         if (!pattern->open) return pattern == actual;
         if (pattern->kind != actual->kind || pattern->table != actual->table || pattern->heap != actual->heap ||
-            pattern->arena_list != actual->arena_list) {
+            pattern->boxed != actual->boxed || pattern->arena_list != actual->arena_list) {
             return false;
         }
         switch (pattern->kind) {
@@ -1777,7 +1780,7 @@ private:
             case TypeKind::unit: return "unit";
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
-            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->arena_list ? "_alist" : "_list");
+            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->boxed ? "_box" : t->arena_list ? "_alist" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
             case TypeKind::sender: return mangle(t->elem) + "_sender";
             case TypeKind::receiver: return mangle(t->elem) + "_receiver";
@@ -2251,6 +2254,15 @@ private:
                         return T.error;
                     }
                     return T.list_of(elem);
+                }
+                if (n == n_Box_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`Box` takes one generic argument, the type of the value it holds: `Box<Node>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !box_elem(elem, t->args[0]->span)) return T.error;
+                    return T.box_of(elem);
                 }
                 if (n == n_PriorityQueue_ && !env_type(n)) {
                     if (t->args.size() != 1) {
@@ -3145,7 +3157,7 @@ private:
             case ExprKind::self: return "self";
             case ExprKind::field:
                 return place_text(e->lhs) + "." + (e->is_tuple_index ? std::to_string(e->tuple_index) : std::string(text(e->member)));
-            case ExprKind::index: return place_text(e->lhs) + "[...]";
+            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : "[...]");
             default: return "...";
         }
     }
@@ -3289,6 +3301,9 @@ private:
                 s->value = it->callee->lhs;
                 over = s->value;
                 borrowed = place_root(s->value);
+            } else if (t->boxed) {
+                by_mut = false;
+                error(it->span, "a `for` loop doesn't go over a `Box`, which holds one value: " + q(place_text(it) + ".value"));
             } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::set) {
                 elem = t->elem;
                 borrowed = place_root(it);
@@ -3856,6 +3871,7 @@ private:
                 }
             case TypeKind::list:
                 if (t->heap && (prop == p_hash || prop == p_order || prop == p_java_hash)) return false;
+                if (t->boxed && prop == p_java_hash) return false;
                 return derived(t->elem, prop);
             // Java's `ArrayDeque` has neither `hashCode` nor `compareTo`.
             case TypeKind::deque: return prop != p_java_hash && prop != p_order && derived(t->elem, prop);
@@ -3981,6 +3997,8 @@ private:
                       q("impl JavaHash for " + std::string(leaf->name));
             } else if (leaf->heap) {
                 why = ", and a `PriorityQueue` has no `JavaHash`, as Java's has no `hashCode` of its own";
+            } else if (leaf->boxed) {
+                why = ", and a `Box` has no `JavaHash`, since Java has no boxes to have one";
             } else if (leaf->kind != TypeKind::pointer) {
                 why = ", and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in";
             }
@@ -4002,7 +4020,7 @@ private:
     const Type* lacking_part(const Type* t, int prop, std::unordered_set<const Type*>& seen) {
         if (derived(t, prop) || !seen.insert(t).second) return nullptr;
         // What Java's `hashCode` is built into goes only through a list.
-        if (prop == p_java_hash && (t->kind != TypeKind::list || t->heap)) return t;
+        if (prop == p_java_hash && (t->kind != TypeKind::list || t->heap || t->boxed)) return t;
         if (t->heap && (prop == p_hash || prop == p_order)) return t;
         switch (t->kind) {
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
@@ -4727,6 +4745,25 @@ private:
             error(e->span, name_of(base) + " is an optional; read its field with `?.`, or unwrap it first");
             return T.error;
         }
+        if (base->boxed) {
+            if (e->member != n_value_) {
+                error(e->span, name_of(base) + " has one field, " + q("value") + ", the value it holds: " +
+                                   q(place_text(e->lhs) + ".value." + std::string(text(e->member))));
+                return T.error;
+            }
+            // The box's one element, which is always there.
+            Expr* zero = ctx_.arena.make<Expr>();
+            zero->kind = ExprKind::int_lit;
+            zero->span = e->span;
+            zero->type = T.usize;
+            zero->has_bits = true;
+            zero->const_bits = 0;
+            zero->is_const = true;
+            e->kind = ExprKind::index;
+            e->rhs = zero;
+            e->box_value = true;
+            return base->elem;
+        }
         if (base->kind == TypeKind::struct_) {
             Item* s = base->item;
             for (std::uint32_t i = 0; i < s->fields.size(); i++) {
@@ -4851,6 +4888,11 @@ private:
         if (base->kind == TypeKind::set) {
             check(e->rhs, nullptr);
             error(e->span, "a set can't be indexed; ask whether it has a value with `contains`");
+            return T.error;
+        }
+        if (base->boxed && !e->box_value) {
+            check(e->rhs, nullptr);
+            error(e->span, "a `Box` holds one value, which isn't indexed; it's " + q(place_text(e->lhs) + ".value"));
             return T.error;
         }
         if (base->heap) {
@@ -5182,6 +5224,12 @@ private:
     }
 
     Type* array_literal(Expr* e, Type* expected) {
+        if (expected && expected->boxed) {
+            for (Expr* x : e->elems) check(x, expected->elem);
+            if (e->repeat) check(e->repeat, T.usize);
+            error(e->span, "a `Box` isn't written as a list; make it with `Box(value)`");
+            return T.error;
+        }
         if (expected && expected->heap) {
             for (Expr* x : e->elems) check(x, expected->elem);
             if (e->repeat) check(e->repeat, T.usize);
@@ -6089,6 +6137,7 @@ private:
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
+            if (n == n_Box_ && !find_local(n)) return box_call(e, expected);
             if (n == n_Arena_ && !find_local(n)) return arena_call(e);
             if (n == n_Receiver_ && !find_local(n)) return receiver_call(e, expected);
             if ((n == n_Sender_ || n == n_Thread_ || n == n_Library_) && !find_local(n)) {
@@ -7156,7 +7205,7 @@ private:
         } else if (!callee->type_args.empty()) {
             error(callee->span, "`List` takes one generic argument, the type of its elements: `List<i32>()`");
             return T.error;
-        } else if (expected && expected->kind == TypeKind::list && !expected->heap) {
+        } else if (expected && expected->kind == TypeKind::list && !expected->heap && !expected->boxed) {
             t = expected;
         } else {
             for (Arg& a : e->args) check(a.value, nullptr);
@@ -7640,6 +7689,55 @@ private:
         return result_of(f, T.string);
     }
 
+    // `Box(v)` and `Box<T>(v)`: a box holding `v`. It's a list of that one value in memory, so the
+    // call becomes the list `[v]` of the box's type.
+    Type* box_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* want = expected && expected->kind == TypeKind::list && expected->boxed ? expected->elem : nullptr;
+        if (callee->type_args.size() == 1) {
+            want = resolve_type(callee->type_args[0]);
+            if (is_bad(want)) {
+                for (Arg& a : e->args) check(a.value, nullptr);
+                return T.error;
+            }
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`Box` takes one generic argument, the type of the value it holds: `Box<Node>(n)`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            error(e->span, "`Box` takes one value, the one it holds: `Box(n)`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Expr* value = e->args[0].value;
+        Type* t = check(value, want);
+        if (is_bad(t)) return T.error;
+        if (t->kind == TypeKind::never) {
+            if (!want) return T.error;
+            t = want;
+        }
+        if (!box_elem(t, value->span)) return T.error;
+        Type* box = T.box_of(t);
+        callee->named_type = box;
+        std::vector<Expr*> one{value};
+        e->kind = ExprKind::array_lit;
+        e->elems = ctx_.arena.copy(one);
+        e->repeat = nullptr;
+        e->is_const = false;
+        return box;
+    }
+
+    // Whether a box can hold `elem`.
+    bool box_elem(Type* elem, Span span) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(span, "a box can't hold " + name_of(elem));
+            return false;
+        }
+        return true;
+    }
+
     // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
     Type* heap_call(Expr* e, Type* expected) {
         Expr* callee = e->callee;
@@ -8094,6 +8192,13 @@ private:
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
             }
+        } else if (recv->boxed) {
+            // A box has no methods of its own: what's called is its value's.
+            error(e->callee->span, name_of(recv) + " has no method " + q(m) + "; its value is " +
+                                       q(place_text(e->callee->lhs) + ".value") + ", as in " +
+                                       q(place_text(e->callee->lhs) + ".value." + std::string(m) + "()"));
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
         } else if (recv->heap) {
             // Java's `PriorityQueue`: the least element comes out first, and a loop goes in the
             // order of the heap's array (D113).
@@ -8392,7 +8497,8 @@ private:
                 if (t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_) {
                     const Item* owner = t->generic ? t->generic : t->item;
                     if (reported.insert(owner).second) {
-                        error(owner->name_span, q(text(owner->name)) + " holds itself, so it would have no end");
+                        error(owner->name_span, q(text(owner->name)) + " holds itself, so it would have no end; hold it "
+                                                "through a `Box`, which keeps it on the heap: " + q("Box<" + std::string(text(owner->name)) + ">"));
                     }
                 }
                 return;
@@ -8681,6 +8787,7 @@ private:
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
+    Name n_Box_, n_value_;
     Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
     Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_, n_Library_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,

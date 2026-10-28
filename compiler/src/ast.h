@@ -208,6 +208,7 @@ struct Expr {
     Name member;        // field, optional_field: the field name (empty for a tuple index)
     std::uint32_t tuple_index = 0;
     bool is_tuple_index = false;
+    bool box_value = false;  // index: `b.value` of a `Box`, which the checker makes an index of its one element
     // Operators.
     Op op{};
     Expr* lhs = nullptr;  // binary, range, index (the base), field (the base), unwrap, try_, unary

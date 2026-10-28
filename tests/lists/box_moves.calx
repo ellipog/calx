@@ -1,0 +1,10 @@
+// A value that owns memory can't be moved out of a box, which keeps it; it's copied out.
+struct Cell {
+    name: String,
+}
+
+fn main() {
+    let cell = Box(Cell { name: String("a") })
+    let taken = cell.value    // error: can't move the value out of `cell`, which keeps it; move a copy with `.copy()`
+    println(taken.name)
+}
