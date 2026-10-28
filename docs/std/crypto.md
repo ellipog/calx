@@ -1,0 +1,87 @@
+---
+title: std.crypto
+description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding - what vanilla's online-mode login uses.
+---
+
+# `std.crypto`
+
+What vanilla's online-mode login is made of:
+
+1. The server makes a 1024-bit RSA key pair, and sends the public key in its encryption request.
+2. The client makes a random 16-byte secret, encrypts it with the public key, and sends it back.
+3. The server decrypts the secret, and from then on both sides encrypt every byte with AES-128 in CFB8 mode, using the secret as the key and the IV.
+
+Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for the same inputs, so a vanilla client talks to a Calx server as to a Java one.
+
+```calx
+import std.crypto.{Cfb8, RsaKey, random_bytes}
+
+fn main() {
+    // The server's key, and the public half it sends.
+    let key = RsaKey.generate(1024)
+    println("{key.size()} {key.public_der().len()}")    // out: 128 162
+
+    // The client's secret, sealed with the public key, and opened by the server.
+    let secret = random_bytes(16)
+    let sealed = key.encrypt(secret.copy())!
+    let opened = key.decrypt(sealed)!
+    println("{opened.len()} {opened[0] == secret[0]}")    // out: 16 true
+
+    // Both sides make a cipher from the secret, one for each direction.
+    var out = Cfb8.new(secret.copy(), secret.copy())
+    var back = Cfb8.new(opened.copy(), opened.copy())
+    var packet = "Hello, Calcite!".to_bytes()
+    out.encrypt(mut packet)
+    back.decrypt(mut packet)
+    println(String.from_utf8(packet) ?? "bad")    // out: Hello, Calcite!
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `random_bytes(n: usize) -> List<u8>` | `n` bytes from the system's generator, good for keys, secrets and tokens |
+| `Cfb8.new(key: List<u8>, iv: List<u8>) -> Cfb8` | AES-128 in CFB8 mode, as Java's `Cipher.getInstance("AES/CFB8/NoPadding")`. Panics unless both are 16 bytes |
+| `c.encrypt(bytes: mut List<u8>)` | Encrypts the bytes where they are, carrying on the stream from the last call |
+| `c.decrypt(bytes: mut List<u8>)` | Decrypts the bytes where they are, carrying on the stream from the last call |
+| `RsaKey.generate(bits: u32) -> RsaKey` | A new key pair, `bits` 1024 or 2048, with 65537 as the public exponent, as Java's `KeyPairGenerator` makes. Panics for any other size |
+| `k.public_der() -> List<u8>` | The public key as Java's `getEncoded()` gives it, an X.509 SubjectPublicKeyInfo in DER: 162 bytes for 1024 bits, 294 for 2048 |
+| `k.encrypt(message: List<u8>) -> List<u8>?` | The message encrypted with the public key and random padding, as Java's `"RSA/ECB/PKCS1Padding"`: `k.size()` bytes. `none` if the message is longer than `k.size() - 11` |
+| `k.decrypt(bytes: List<u8>) -> List<u8>?` | The message inside, or `none` if the bytes aren't `k.size()` long or their padding is wrong |
+| `k.size() -> usize` | The modulus's length in bytes: 128 for 1024 bits |
+
+- CFB8 is a stream cipher: each byte encrypts to one byte, and how a stream is split into calls doesn't change what comes out. A connection keeps one `Cfb8` for each direction for as long as it lasts.
+- `decrypt` says nothing about why bytes were refused, and takes the same time either way, so a client sending made-up bytes learns nothing about the key from the answers (Bleichenbacher's attack).
+- The padding is random, so the same message encrypts to different bytes each time.
+
+## Checked against Java
+
+- AES-CFB8: 300 random streams of up to 699 bytes, encrypted in random pieces, gave the same bytes as Java 25's `Cipher` gave for each whole stream, and decrypting them in other random pieces gave them back. The portable version gave the same as AES-NI on 2000 more.
+- RSA: Java decoded `public_der` with `KeyFactory`, encrypted 200 random messages of 0 to 117 bytes with `Cipher`, and `decrypt` opened every one, for 1024 and 2048 bits. Java encoded the key it decoded to the same bytes. Bytes with broken padding gave `none`.
+- The [tests](../../tests/std/crypto.calx) hold Java's bytes for one AES stream, and check the rest by round trips and shapes.
+
+## How it's built
+
+[runtime/calx_crypto.c](../../runtime/calx_crypto.c), linked only into programs that call it, written from FIPS 197 (AES), NIST SP 800-38A (CFB8) and RFC 8017 (RSA and its padding).
+
+| Part | How |
+| --- | --- |
+| Random bytes | `BCryptGenRandom` on Windows, `getrandom` on Linux |
+| AES | AES-NI where the processor has it, which `cpuid` tells when a `Cfb8` is made. Otherwise a byte-at-a-time version, with the S-box worked out from its definition |
+| CFB8 encrypting | One AES block for each byte, since each byte's input is the one before it. That's 16 times the work of the block modes, and it's why this mode is slow everywhere |
+| CFB8 decrypting | The inputs are the ciphertext, which is all there already, so it runs 16 blocks at once through AES-NI's pipeline |
+| RSA numbers | 64-bit limbs, and Montgomery multiplication with a final subtraction that takes the same time whether it's needed or not |
+| RSA private key | Decrypting uses the Chinese remainder theorem: two exponents of half the length. Exponents go four bits a step from a table that's read whole each time, so neither the time nor the memory touched depends on the key's bits |
+| Primes | 300 small primes, then 16 rounds of Miller-Rabin, which a composite passes with odds below 2^-32 |
+
+On an i9-13900K, one run each:
+
+| | Calx | Java 25 |
+| --- | --- | --- |
+| CFB8 encrypting | 135 MB/s | 77 MB/s |
+| CFB8 decrypting | 659 MB/s | 79 MB/s |
+| A 1024-bit key pair | 8.4 ms | 7 to 16 ms |
+| A 1024-bit decrypt | 106 µs | 108 µs |
+
+The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login.
+
+`std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).

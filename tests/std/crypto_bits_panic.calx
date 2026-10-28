@@ -1,0 +1,7 @@
+// RSA keys are made with 1024 or 2048 bits, which are what Java and vanilla use.
+
+import std.crypto.{RsaKey}
+
+fn main() {
+    _ = RsaKey.generate(512)    // panic: RSA keys are 1024 or 2048 bits, not 512
+}

@@ -335,6 +335,29 @@ cx_usize cx_str_find_last(cx_str hay, cx_str needle);
 cx_String cx_case_lower(cx_str s, cx_bool keep);
 cx_String cx_case_upper(cx_str s, cx_bool keep);
 
+/* MD5, SHA-1 and SHA-256 (kind 0, 1 and 2) and HMAC-SHA256, in calx_digest.c (D118). A context is
+ * CX_DIGEST_CTX bytes, with no alignment needed. `cx_digest_finish` writes the digest, 16, 20 or
+ * 32 bytes, and returns its length. */
+#define CX_DIGEST_CTX 112
+void cx_digest_start(cx_u8* ctx, cx_u32 kind);
+void cx_digest_add(cx_u8* ctx, const cx_u8* p, cx_usize n);
+cx_usize cx_digest_finish(cx_u8* ctx, cx_u8* out);
+void cx_digest_hmac_sha256(const cx_u8* key, cx_usize key_len, const cx_u8* msg, cx_usize msg_len, cx_u8* out);
+
+/* Random bytes from the system, AES-128-CFB8 and RSA, in calx_crypto.c (D118). The contexts are
+ * CX_CFB8_CTX and CX_RSA_CTX bytes, with no alignment needed. */
+#define CX_CFB8_CTX 208
+#define CX_RSA_CTX 912
+void cx_crypto_random(cx_u8* p, cx_usize n);
+void cx_cfb8_start(cx_u8* ctx, const cx_u8* key, const cx_u8* iv);
+void cx_cfb8_encrypt(cx_u8* ctx, cx_u8* p, cx_usize n);
+void cx_cfb8_decrypt(cx_u8* ctx, cx_u8* p, cx_usize n);
+cx_bool cx_rsa_generate(cx_u8* ctx, cx_u32 bits);
+cx_usize cx_rsa_public_der(const cx_u8* ctx, cx_u8* out);
+cx_bool cx_rsa_encrypt(const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* out);
+cx_i64 cx_rsa_decrypt(const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out);
+cx_usize cx_rsa_size(const cx_u8* ctx);
+
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was
  * done to it. A word is mixed in with a folded multiply: the 128-bit product's halves, xored. */

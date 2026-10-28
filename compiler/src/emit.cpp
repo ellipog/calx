@@ -4951,6 +4951,12 @@ $dropall    m->len = 0;
                     return view + "cx_usize " + r + " = " + fn + p + ", " + text_arg(0) + "); (" + o + "){ .v = " + r + ", .has = " + r +
                            " != CX_NOT_FOUND }; })";
                 }
+                case BMethod::to_bytes: {
+                    // A copy, which has a list's layout.
+                    std::string r = tmp();
+                    return view + "cx_String " + r + " = cx_string_from(" + p + "); (" + ctype(e->type) + "){ .ptr = (cx_u8*)" + r +
+                           ".ptr, .len = " + r + ".len, .cap = " + r + ".cap }; })";
+                }
                 default: return "0";
             }
         }

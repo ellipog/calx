@@ -1,0 +1,130 @@
+/// Random bytes, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding (D118).
+///
+/// They're what vanilla's online-mode login uses. The server makes an RSA key pair and sends the
+/// public key. The client encrypts a random shared secret with it, and the server decrypts it.
+/// From then on both sides encrypt everything with AES-CFB8, using the secret as key and IV. Each
+/// gives what Java's `SecureRandom`, `Cipher` and `KeyPairGenerator` give, for the same inputs.
+module std.crypto
+
+extern "C" {
+    fn cx_crypto_random(p: *u8, n: usize)
+    fn cx_cfb8_start(ctx: *u8, key: *const u8, iv: *const u8)
+    fn cx_cfb8_encrypt(ctx: *u8, p: *u8, n: usize)
+    fn cx_cfb8_decrypt(ctx: *u8, p: *u8, n: usize)
+    fn cx_rsa_generate(ctx: *u8, bits: u32) -> bool
+    fn cx_rsa_public_der(ctx: *const u8, out: *u8) -> usize
+    fn cx_rsa_encrypt(ctx: *const u8, msg: *const u8, len: usize, out: *u8) -> bool
+    fn cx_rsa_decrypt(ctx: *const u8, bytes: *const u8, len: usize, out: *u8) -> i64
+    fn cx_rsa_size(ctx: *const u8) -> usize
+}
+
+/// `n` random bytes from the system's generator, which is good for keys, secrets and tokens.
+pub fn random_bytes(n: usize) -> List<u8> {
+    var out: List<u8> = [0; n]
+    unsafe {
+        cx_crypto_random(out.as_mut_ptr(), n)
+    }
+    return out
+}
+
+/// AES-128 in CFB8 mode, as Java's "AES/CFB8/NoPadding" is. A stream cipher: each byte encrypts
+/// to one byte, and how a stream is split into calls doesn't change it. Vanilla keeps one for
+/// each direction of a connection, both made from the shared secret.
+pub struct Cfb8 {
+    ctx: List<u8>,
+}
+
+impl Cfb8 {
+    /// A cipher with the key and the IV, 16 bytes each. Panics if either is another length.
+    @track_caller
+    pub fn new(key: List<u8>, iv: List<u8>) -> Cfb8 {
+        if key.len() != 16 or iv.len() != 16 {
+            panic("AES-128 takes a key and an IV of 16 bytes, not {key.len()} and {iv.len()}")
+        }
+        var ctx: List<u8> = [0; 208]
+        unsafe {
+            cx_cfb8_start(ctx.as_mut_ptr(), key.as_ptr(), iv.as_ptr())
+        }
+        return Cfb8 { ctx: ctx }
+    }
+
+    /// Encrypts the bytes where they are, carrying on from the last call.
+    pub fn encrypt(mut self, bytes: mut List<u8>) {
+        unsafe {
+            cx_cfb8_encrypt(self.ctx.as_mut_ptr(), bytes.as_mut_ptr(), bytes.len())
+        }
+    }
+
+    /// Decrypts the bytes where they are, carrying on from the last call. It goes 16 bytes at a
+    /// time with AES-NI, so it's several times as fast as encrypting.
+    pub fn decrypt(mut self, bytes: mut List<u8>) {
+        unsafe {
+            cx_cfb8_decrypt(self.ctx.as_mut_ptr(), bytes.as_mut_ptr(), bytes.len())
+        }
+    }
+}
+
+/// An RSA key pair, with 65537 as the public exponent, as Java's `KeyPairGenerator` makes.
+pub struct RsaKey {
+    ctx: List<u8>,
+}
+
+impl RsaKey {
+    /// A new key pair with a modulus of `bits` bits, 1024 or 2048. Vanilla uses 1024. Panics for
+    /// any other size.
+    @track_caller
+    pub fn generate(bits: u32) -> RsaKey {
+        var ctx: List<u8> = [0; 912]
+        let made = unsafe { cx_rsa_generate(ctx.as_mut_ptr(), bits) }
+        if not made {
+            panic("RSA keys are 1024 or 2048 bits, not {bits}")
+        }
+        return RsaKey { ctx: ctx }
+    }
+
+    /// The public key as Java's `PublicKey.getEncoded()` gives it, an X.509 SubjectPublicKeyInfo
+    /// in DER, which is what vanilla's encryption request sends: 162 bytes for 1024 bits.
+    pub fn public_der(self) -> List<u8> {
+        var out: List<u8> = [0; 300]
+        unsafe {
+            let n = cx_rsa_public_der(self.ctx.as_ptr(), out.as_mut_ptr())
+            out.truncate(n)
+        }
+        return out
+    }
+
+    /// The message encrypted with the public key and random padding, as Java's
+    /// "RSA/ECB/PKCS1Padding" does: the key's length in bytes. `none` if the message is longer
+    /// than that less 11.
+    pub fn encrypt(self, message: List<u8>) -> List<u8>? {
+        var out: List<u8> = [0; 256]
+        unsafe {
+            if not cx_rsa_encrypt(self.ctx.as_ptr(), message.as_ptr(), message.len(), out.as_mut_ptr()) {
+                return none
+            }
+        }
+        out.truncate(self.size())
+        return some(out)
+    }
+
+    /// The message that `encrypt`, or a client with the public key, encrypted. `none` if the bytes
+    /// aren't the key's length or the padding inside them is wrong. What's wrong isn't told, and
+    /// it takes the same time either way, so a client can't learn about the key from it.
+    pub fn decrypt(self, bytes: List<u8>) -> List<u8>? {
+        var out: List<u8> = [0; 256]
+        unsafe {
+            let n = cx_rsa_decrypt(self.ctx.as_ptr(), bytes.as_ptr(), bytes.len(), out.as_mut_ptr())
+            if n < 0 {
+                return none
+            }
+            out.truncate(usize.wrap(n))
+        }
+        return some(out)
+    }
+
+    /// The modulus's length in bytes, which is what `encrypt` gives and `decrypt` takes: 128 for
+    /// 1024 bits.
+    pub fn size(self) -> usize {
+        return unsafe { cx_rsa_size(self.ctx.as_ptr()) }
+    }
+}

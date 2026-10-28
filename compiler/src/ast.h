@@ -171,7 +171,7 @@ enum class BMethod : std::uint8_t {
     runes, chars,  // on text, only as what a `for` loop goes over
     // On text: Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, and where some
     // text is first or last found in it (D117).
-    to_lower_root, to_upper_root, find, find_last,
+    to_lower_root, to_upper_root, find, find_last, to_bytes,
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
     // On an `Arena`: a list from it, freeing everything at once, and the bytes taken since; and
     // on an `ArenaList`, a `List` with its elements (D114).

@@ -595,7 +595,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Parts of the runtime that only some programs call are files of their own, compiled and
     // linked only into those: networking, so the others don't load the socket libraries when they
     // start, the sorts of integers (D96), which take clang a second to optimize, Java's tables (D105),
-    // and the tables that change the case of text (D117).
+    // the tables that change the case of text (D117), and the hashes and crypto (D118).
     auto calls = [&](std::initializer_list<const char*> names) {
         for (const std::string& c : c_sources) {
             for (const char* n : names) {
@@ -618,6 +618,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");
     if (parts_ok && calls({"cx_case_"})) parts_ok = part("calx_case.c");
+    if (parts_ok && calls({"cx_digest_"})) parts_ok = part("calx_digest.c");
+    if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
     if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool("})) {
         parts_ok = part("calx_sort.c");

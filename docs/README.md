@@ -65,6 +65,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, which NBT uses
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
+11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256 and HMAC-SHA256, as Java's `MessageDigest` and `Mac` give them
+12. [std.crypto](std/crypto.md): random bytes, AES-CFB8 and RSA, for vanilla's online-mode login
 
 ### Design
 

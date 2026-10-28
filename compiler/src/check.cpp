@@ -7314,6 +7314,7 @@ private:
             else if (m == "to_upper_root") b = BMethod::to_upper_root, result = T.string;
             else if (m == "find") b = BMethod::find, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "find_last") b = BMethod::find_last, params = {nullptr}, result = T.optional_of(T.usize);
+            else if (m == "to_bytes") b = BMethod::to_bytes, result = T.list_of(T.u8);
             else if (m == "runes" || m == "chars") {
                 // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
                 if (e != for_iter_) {

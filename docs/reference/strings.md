@@ -66,6 +66,7 @@ fn main() {
 | `s.to_lower_root()`, `s.to_upper_root()` | A new `String`, as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` give ([case](#changing-the-case)) |
 | `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match vanilla's hashes ([Java's view](#javas-view-of-a-string)) |
 | `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
+| `s.to_bytes()` | A copy of the bytes, a `List<u8>`, which `String.from_utf8` turns back into text |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
 - A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`.

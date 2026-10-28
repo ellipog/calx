@@ -1,0 +1,99 @@
+/// MD5, SHA-1 and SHA-256, and HMAC-SHA256 (D118).
+///
+/// Vanilla uses MD5 for an offline player's UUID, SHA-1 for the server hash the session server
+/// checks a login by, and SHA-256 for the seed it sends a joining player. Velocity signs the
+/// player data it forwards with HMAC-SHA256. They give what Java's `MessageDigest` and `Mac` give.
+module std.hash
+
+extern "C" {
+    fn cx_digest_start(ctx: *u8, kind: u32)
+    fn cx_digest_add(ctx: *u8, p: *const u8, n: usize)
+    fn cx_digest_finish(ctx: *u8, out: *u8) -> usize
+    fn cx_digest_hmac_sha256(key: *const u8, key_len: usize, msg: *const u8, msg_len: usize, out: *u8)
+}
+
+/// Which hash a `Digest` works out.
+pub enum Algorithm {
+    /// 16 bytes. Broken for security, but what `UUID.nameUUIDFromBytes` uses.
+    Md5
+    /// 20 bytes.
+    Sha1
+    /// 32 bytes.
+    Sha256
+}
+
+/// A hash being worked out: add bytes and text in any number of pieces, then `finish`. The pieces
+/// give the same hash as all of them at once.
+pub struct Digest {
+    ctx: List<u8>,
+}
+
+impl Digest {
+    pub fn new(algorithm: Algorithm) -> Digest {
+        var ctx: List<u8> = [0; 112]
+        let kind: u32 = match algorithm {
+            Algorithm.Md5 => 0,
+            Algorithm.Sha1 => 1,
+            Algorithm.Sha256 => 2,
+        }
+        unsafe {
+            cx_digest_start(ctx.as_mut_ptr(), kind)
+        }
+        return Digest { ctx: ctx }
+    }
+
+    /// Adds the bytes.
+    pub fn add(mut self, bytes: List<u8>) {
+        unsafe {
+            cx_digest_add(self.ctx.as_mut_ptr(), bytes.as_ptr(), bytes.len())
+        }
+    }
+
+    /// Adds the text's UTF-8 bytes.
+    pub fn add_text(mut self, text: String) {
+        unsafe {
+            cx_digest_add(self.ctx.as_mut_ptr(), text.as_ptr(), text.len())
+        }
+    }
+
+    /// The hash of everything added.
+    pub fn finish(own self) -> List<u8> {
+        var ctx = self.ctx
+        var out: List<u8> = [0; 32]
+        unsafe {
+            let n = cx_digest_finish(ctx.as_mut_ptr(), out.as_mut_ptr())
+            out.truncate(n)
+        }
+        return out
+    }
+}
+
+fn digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8> {
+    var d = Digest.new(algorithm)
+    d.add(bytes)
+    return d.finish()
+}
+
+/// The MD5 of the bytes, 16 of them.
+pub fn md5(bytes: List<u8>) -> List<u8> {
+    return digest(Algorithm.Md5, bytes)
+}
+
+/// The SHA-1 of the bytes, 20 of them.
+pub fn sha1(bytes: List<u8>) -> List<u8> {
+    return digest(Algorithm.Sha1, bytes)
+}
+
+/// The SHA-256 of the bytes, 32 of them.
+pub fn sha256(bytes: List<u8>) -> List<u8> {
+    return digest(Algorithm.Sha256, bytes)
+}
+
+/// The HMAC-SHA256 of the message under the key, 32 bytes, as Java's `Mac` "HmacSHA256" gives.
+pub fn hmac_sha256(key: List<u8>, message: List<u8>) -> List<u8> {
+    var out: List<u8> = [0; 32]
+    unsafe {
+        cx_digest_hmac_sha256(key.as_ptr(), key.len(), message.as_ptr(), message.len(), out.as_mut_ptr())
+    }
+    return out
+}

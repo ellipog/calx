@@ -1,0 +1,131 @@
+// std.crypto gives what Java 25's Cipher gives. The AES-CFB8 bytes below are Java's
+// "AES/CFB8/NoPadding". RSA keys are random, so their checks are round trips and shapes.
+// build/scratch's wider check had Java encrypt for 201 keys and decode the public keys.
+
+import std.crypto.{Cfb8, RsaKey, random_bytes}
+
+fn hex(bytes: List<u8>) -> String {
+    let digits = "0123456789abcdef"
+    var s = String()
+    for b in bytes {
+        let hi = usize(b / 16)
+        let lo = usize(b % 16)
+        s.push_str(digits[hi..hi + 1])
+        s.push_str(digits[lo..lo + 1])
+    }
+    return s
+}
+
+// n bytes of i * mul + add, as the Java program made them.
+fn seq(n: usize, mul: u32, add: u32) -> List<u8> {
+    var out: List<u8> = []
+    for i in 0..n {
+        out.push(u8.wrap(u32.wrap(i) * mul + add))
+    }
+    return out
+}
+
+fn part(bytes: List<u8>, from: usize, to: usize) -> List<u8> {
+    var out: List<u8> = []
+    for i in from..to {
+        out.push(bytes[i])
+    }
+    return out
+}
+
+fn main() {
+    // One stream, three calls, as Java's `update` gives them.
+    var enc = Cfb8.new(seq(16, 17, 1), seq(16, 29, 7))
+    var a = seq(40, 3, 0)
+    var b = seq(5, 1, 100)
+    var c = "Hello, Calcite!".to_bytes()
+    enc.encrypt(mut a)
+    enc.encrypt(mut b)
+    enc.encrypt(mut c)
+    println(hex(a.copy()))    // out: 873e6e2dd0d02eeba9b59599c246c30714f3458d11bda70a6f957cfcc1c0febd4478d33fb5843063
+    println(hex(b.copy()))    // out: 22bb1fa43b
+    println(hex(c.copy()))    // out: 62a567d19877a429757687a8000c7e
+
+    // Decrypting splits the stream at other places and gets it back.
+    var dec = Cfb8.new(seq(16, 17, 1), seq(16, 29, 7))
+    var all: List<u8> = []
+    for x in a {
+        all.push(x)
+    }
+    for x in b {
+        all.push(x)
+    }
+    for x in c {
+        all.push(x)
+    }
+    var first = part(all.copy(), 0, 1)
+    var rest = part(all.copy(), 1, all.len())
+    dec.decrypt(mut first)
+    dec.decrypt(mut rest)
+    println("{first[0]} {rest[0]} {rest[38]} {rest[39]}")    // out: 0 3 117 100
+    println(String.from_utf8(part(rest.copy(), 44, 59)) ?? "bad")    // out: Hello, Calcite!
+
+    // A longer stream, cut into pieces around the 16 bytes decrypting takes at a time.
+    let plain = random_bytes(5000)
+    let key = random_bytes(16)
+    let iv = random_bytes(16)
+    var whole = plain.copy()
+    var e = Cfb8.new(key.copy(), iv.copy())
+    e.encrypt(mut whole)
+    let sizes: List<usize> = [1, 15, 16, 17, 31, 32, 33, 255, 256, 1000]
+    var d = Cfb8.new(key.copy(), iv.copy())
+    var at: usize = 0
+    var turn: usize = 0
+    var back: List<u8> = []
+    while at < whole.len() {
+        var n = sizes[turn % sizes.len()]
+        if at + n > whole.len() {
+            n = whole.len() - at
+        }
+        var piece = part(whole.copy(), at, at + n)
+        d.decrypt(mut piece)
+        for x in piece {
+            back.push(x)
+        }
+        at += n
+        turn += 1
+    }
+    var same = true
+    for i in 0..plain.len() {
+        if back[i] != plain[i] {
+            same = false
+        }
+    }
+    println("{back.len()} {same}")    // out: 5000 true
+
+    let r = random_bytes(32)
+    println("{r.len()} {random_bytes(0).len()}")    // out: 32 0
+
+    // A 1024-bit key, as vanilla makes, and the public key it sends.
+    let k = RsaKey.generate(1024)
+    let der = k.public_der()
+    println("{k.size()} {der.len()} {hex(part(der.copy(), 0, 29))}")    // out: 128 162 30819f300d06092a864886f70d010101050003818d0030818902818100
+    println(hex(part(der.copy(), 157, 162)))    // out: 0203010001
+
+    let secret = random_bytes(16)
+    let sealed = k.encrypt(secret.copy())!
+    let opened = k.decrypt(sealed.copy())!
+    println("{sealed.len()} {opened.len()} {hex(opened) == hex(secret.copy())}")    // out: 128 16 true
+
+    // Padding is random, so the same message encrypts differently each time.
+    let again = k.encrypt(secret.copy())!
+    println("{hex(again) == hex(sealed.copy())}")    // out: false
+
+    // The most a message can be is the key's length less 11.
+    println("{k.encrypt(seq(117, 1, 0)) != none} {k.encrypt(seq(118, 1, 0)) != none}")    // out: true false
+    println("{(k.decrypt(k.encrypt([])!)!).len()}")    // out: 0
+
+    // Bytes of the wrong length, or whose padding is wrong, give `none`.
+    println("{k.decrypt(seq(127, 1, 0)) != none} {k.decrypt([0; 128]) != none}")    // out: false false
+
+    let big = RsaKey.generate(2048)
+    let big_der = big.public_der()
+    println("{big.size()} {big_der.len()}")    // out: 256 294
+    let msg = "a shared secret".to_bytes()
+    println(String.from_utf8(big.decrypt(big.encrypt(msg)!)!) ?? "bad")    // out: a shared secret
+}

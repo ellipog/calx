@@ -1,0 +1,11 @@
+// AES-128's key and IV are 16 bytes each.
+
+import std.crypto.{Cfb8, random_bytes}
+
+fn main() {
+    var c = Cfb8.new(random_bytes(16), random_bytes(16))
+    var b = random_bytes(3)
+    c.encrypt(mut b)
+    println("{b.len()}")    // out: 3
+    _ = Cfb8.new(random_bytes(32), random_bytes(16))    // panic: AES-128 takes a key and an IV of 16 bytes, not 32 and 16
+}
