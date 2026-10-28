@@ -16,6 +16,8 @@ extern "C" {
     fn cx_cfb8_encrypt(ctx: *u8, p: *u8, n: usize)
     fn cx_cfb8_decrypt(ctx: *u8, p: *u8, n: usize)
     fn cx_rsa_generate(ctx: *u8, bits: u32) -> bool
+    fn cx_rsa_primes(ctx: *const u8, out: *u8) -> usize
+    fn cx_rsa_from_primes(ctx: *u8, bytes: *const u8, len: usize) -> bool
     fn cx_rsa_public_der(ctx: *const u8, out: *u8) -> usize
     fn cx_rsa_encrypt(ctx: *const u8, msg: *const u8, len: usize, out: *u8) -> bool
     fn cx_rsa_decrypt(ctx: *const u8, bytes: *const u8, len: usize, out: *u8) -> i64
@@ -87,6 +89,28 @@ impl RsaKey {
             panic("RSA keys are 1024 or 2048 bits, not {bits}")
         }
         return RsaKey { ctx: ctx }
+    }
+
+    /// The key pair's two primes, each half the modulus's bytes, big-endian, which `from_primes`
+    /// makes the same key pair from. Anyone with them has the private key.
+    pub fn primes(self) -> List<u8> {
+        var out: List<u8> = [0; 256]
+        unsafe {
+            let n = cx_rsa_primes(self.ctx.as_ptr(), out.as_mut_ptr())
+            out.truncate(n)
+        }
+        return out
+    }
+
+    /// The key pair whose `primes` these are, or `none` unless they're two different primes as
+    /// `generate` makes them, of 512 or 1024 bits each.
+    pub fn from_primes(primes: List<u8>) -> RsaKey? {
+        var ctx: List<u8> = [0; 912]
+        let made = unsafe { cx_rsa_from_primes(ctx.as_mut_ptr(), primes.as_ptr(), primes.len()) }
+        if not made {
+            return none
+        }
+        return some(RsaKey { ctx: ctx })
     }
 
     /// The public key as Java's `PublicKey.getEncoded()` gives it, an X.509 SubjectPublicKeyInfo

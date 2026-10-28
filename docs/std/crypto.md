@@ -61,6 +61,8 @@ fn main() {
 | `c.encrypt(bytes: mut List<u8>)` | Encrypts the bytes where they are, carrying on the stream from the last call |
 | `c.decrypt(bytes: mut List<u8>)` | Decrypts the bytes where they are, carrying on the stream from the last call |
 | `RsaKey.generate(bits: u32) -> RsaKey` | A new key pair, `bits` 1024 or 2048, with 65537 as the public exponent, as Java's `KeyPairGenerator` makes. Panics for any other size |
+| `k.primes() -> List<u8>` | The key pair's two primes, each half the modulus's bytes, big-endian: 128 bytes for 1024 bits. Anyone with them has the private key |
+| `RsaKey.from_primes(primes: List<u8>) -> RsaKey?` | The key pair whose `primes` these are, the same as the one that gave them, such as a server's key restored to replay a session. `none` unless they're two different primes as `generate` makes them, their top two bits set, 512 or 1024 bits each. Checking that they're prime takes 1.5 ms for a 1024-bit key and 11 ms for 2048 |
 | `k.public_der() -> List<u8>` | The public key as Java's `getEncoded()` gives it, an X.509 SubjectPublicKeyInfo in DER: 162 bytes for 1024 bits, 294 for 2048 |
 | `k.encrypt(message: List<u8>) -> List<u8>?` | The message encrypted with the public key and random padding, as Java's `"RSA/ECB/PKCS1Padding"`: `k.size()` bytes. `none` if the message is longer than `k.size() - 11` |
 | `k.decrypt(bytes: List<u8>) -> List<u8>?` | The message inside, or `none` if the bytes aren't `k.size()` long or their padding is wrong |

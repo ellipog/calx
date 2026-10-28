@@ -1,6 +1,6 @@
 // A server and a client in one program, over loopback: the client sends "ping", the server
 // answers "pong" and closes, and the client sees the bytes and then the close.
-import std.net.{Event, Net}
+import std.net.{Conn, Event, Net}
 
 fn text(bytes: List<u8>) -> String {
     return String.from_utf8(bytes.copy()) ?? String("<not UTF-8>")
@@ -48,4 +48,13 @@ fn main() {
     println("server got {text(at_server)}")    // out: server got ping
     println("client got {text(at_client)}")    // out: client got pong
     println("closed {closed}")                 // out: closed 2
+
+    // A connection's number makes it again, and one no connection has names none, even once
+    // it's closed: there's nothing to read, and writing and closing do nothing.
+    println("{Conn.from_id(client.id()) == client}")    // out: true
+    let made_up = Conn.from_id(client.id() ^ 0x5000000)
+    var nothing = List<u8>()
+    net.write(made_up, [1, 2, 3])
+    net.close(made_up)
+    println("{net.read(made_up, mut nothing)} {net.read(client, mut nothing)}")    // out: 0 0
 }

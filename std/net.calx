@@ -39,7 +39,7 @@ pub enum NetError {
 
 /// A connection, as `Event`s name it and `read`, `write` and `close` take it.
 pub struct Conn {
-    id: u32,
+    number: u32,
 }
 
 impl Conn {
@@ -47,7 +47,20 @@ impl Conn {
     /// program keeps per connection. A new connection can have the slot of one whose `Closed`
     /// event was reported by an earlier poll.
     pub fn slot(self) -> usize {
-        return usize(self.id & 0xFFFFFF)
+        return usize(self.number & 0xFFFFFF)
+    }
+
+    /// The connection's number: its slot, and how many connections had the slot before it. No
+    /// two connections a `Net` has at once have the same, and `Conn.from_id` makes it again, for
+    /// a log of connections that's replayed.
+    pub fn id(self) -> u32 {
+        return self.number
+    }
+
+    /// The connection whose `id` this is. One that no connection of a `Net` has names none: it
+    /// has nothing to read, and what's written to it or closes it does nothing.
+    pub fn from_id(id: u32) -> Conn {
+        return Conn { number: id }
     }
 }
 
@@ -229,7 +242,7 @@ impl Net {
         if id == 0xFFFFFFFF {
             fail last_error()
         }
-        return Conn { id: id }
+        return Conn { number: id }
     }
 
     /// Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's
@@ -241,7 +254,7 @@ impl Net {
         unsafe {
             let n = cx_net_poll(self.handle, timeout_ms)
             for i in 0usize..n {
-                let conn = Conn { id: cx_net_event_conn(self.handle, i) }
+                let conn = Conn { number: cx_net_event_conn(self.handle, i) }
                 events.push(match cx_net_event_kind(self.handle, i) {
                     1 => Event.Accepted(conn),
                     2 => Event.Connected(conn),
@@ -257,10 +270,10 @@ impl Net {
     /// how many there were.
     pub fn read(self, conn: Conn, buf: mut List<u8>) -> usize {
         unsafe {
-            let n = cx_net_available(self.handle, conn.id)
+            let n = cx_net_available(self.handle, conn.number)
             buf.reserve(n)
             let start = buf.len()
-            let got = cx_net_read(self.handle, conn.id, buf.as_mut_ptr().add(start), n)
+            let got = cx_net_read(self.handle, conn.number, buf.as_mut_ptr().add(start), n)
             buf.set_len(start + got)
             return got
         }
@@ -271,7 +284,7 @@ impl Net {
     /// as the socket takes them. On a connection that has closed, they're dropped.
     pub fn write(self, conn: Conn, bytes: List<u8>) {
         unsafe {
-            cx_net_send(self.handle, conn.id, bytes.as_ptr(), bytes.len())
+            cx_net_send(self.handle, conn.number, bytes.as_ptr(), bytes.len())
         }
     }
 
@@ -293,7 +306,7 @@ impl Net {
     /// Sends what was queued on the connection, then closes it. A poll reports `Closed` after.
     pub fn close(self, conn: Conn) {
         unsafe {
-            cx_net_close(self.handle, conn.id)
+            cx_net_close(self.handle, conn.number)
         }
     }
 
@@ -304,7 +317,7 @@ impl Net {
         var out = List<u8>()
         out.reserve(22)
         // The runtime writes all 22 bytes.
-        let family = unsafe { cx_net_peer(self.handle, conn.id, out.as_mut_ptr()) }
+        let family = unsafe { cx_net_peer(self.handle, conn.number, out.as_mut_ptr()) }
         unsafe {
             out.set_len(22)
         }

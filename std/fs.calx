@@ -165,6 +165,24 @@ pub fn write(path: String, bytes: List<u8>) ! FsError {
     }
 }
 
+/// Adds `bytes` to the end of the file at `path`, creating it if nothing is there. The
+/// bytes go after everything the file held, even what another program added since it opened it.
+pub fn append(path: String, bytes: List<u8>) ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 2) }
+    if h < 0 {
+        fail last_error()
+    }
+    let wrote = unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) }
+    let e = if wrote == 0 { some(last_error()) } else { none }
+    let closed = unsafe { cx_fs_close(h) }
+    if let first = e {
+        fail first
+    }
+    if closed == 0 {
+        fail last_error()
+    }
+}
+
 /// Moves what's at `from` to `to`, replacing a file there. On one volume it's atomic: anything
 /// that opens `to` sees the old file or the new one, never part of either.
 pub fn rename(from: String, to: String) ! FsError {

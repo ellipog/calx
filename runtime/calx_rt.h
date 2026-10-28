@@ -473,6 +473,8 @@ CX_FN(void, cx_cfb8_start, (cx_u8* ctx, const cx_u8* key, const cx_u8* iv));
 CX_FN(void, cx_cfb8_encrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
 CX_FN(void, cx_cfb8_decrypt, (cx_u8* ctx, cx_u8* p, cx_usize n));
 CX_FN(cx_bool, cx_rsa_generate, (cx_u8* ctx, cx_u32 bits));
+CX_FN(cx_usize, cx_rsa_primes, (const cx_u8* ctx, cx_u8* out));
+CX_FN(cx_bool, cx_rsa_from_primes, (cx_u8* ctx, const cx_u8* in, cx_usize len));
 CX_FN(cx_usize, cx_rsa_public_der, (const cx_u8* ctx, cx_u8* out));
 CX_FN(cx_bool, cx_rsa_encrypt, (const cx_u8* ctx, const cx_u8* msg, cx_usize len, cx_u8* out));
 CX_FN(cx_bool, cx_rsa_private_op, (const cx_u8* ctx, const cx_u8* in, cx_usize len, cx_u8* out));

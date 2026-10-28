@@ -1,6 +1,6 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
-import std.fs.{FsError, Kind, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
+import std.fs.{FsError, Kind, append, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -59,6 +59,19 @@ fn main() {
     println("{read_text(a)! ?? String("?")} {is_file(a)} {kind_name(a)}")    // out: hello true file
     write(a, [])!
     println("{read(a)!.len()}")    // out: 0
+
+    // Appending adds to the end, and makes the file if it isn't there.
+    append(a, hello)!
+    append(a, [33])!
+    println("{read_text(a)! ?? String("?")}")    // out: hello!
+    let c = "{dir}/c.log"
+    append(c, [104, 105])!
+    println("{read_text(c)! ?? String("?")}")    // out: hi
+    remove_file(c)!
+    match append("{dir}/no/c.log", hello) {
+        ok => println("appended"),
+        err(e) => println(describe(e)),    // out: not found
+    }
 
     // A file bigger than one read, and text that isn't ASCII in names and contents.
     var big = List<u8>()

@@ -558,18 +558,11 @@ static void to_bytes(cx_u8* b, cx_usize len, const cx_u64* r) {
     }
 }
 
-/* Makes a key pair of 1024 or 2048 bits, with E as the public exponent, as Java's
- * KeyPairGenerator does. Returns 0 for any other size. */
-cx_bool cx_rsa_generate(cx_u8* ctx, cx_u32 bits) {
-    if (bits != 1024 && bits != 2048) return 0;
-    rsa k;
-    memset(&k, 0, sizeof k);
-    k.bits = bits;
-    int h = (int)(bits / 128);
-    k.half = (cx_u32)h;
-    random_prime(k.p, h);
-    do random_prime(k.q, h);
-    while (cmp_n(k.p, k.q, h) == 0);
+/* The rest of a key pair whose bits, half and primes are set: the modulus and the CRT exponents
+ * and coefficient. */
+static void finish_key(rsa* kp) {
+    rsa k = *kp;
+    int h = (int)k.half;
     mul_n(k.n, k.p, k.q, h);
     cx_u64 one[MAXL / 2] = {1}, m[MAXL / 2];
     sub_n(m, k.p, one, h);
@@ -584,6 +577,57 @@ cx_bool cx_rsa_generate(cx_u8* ctx, cx_u32 bits) {
     if (cmp_n(qr, k.p, h) >= 0) sub_n(qr, qr, k.p, h);
     sub_n(s, k.p, two, h);
     mont_pow(&M, k.qinv, qr, s, 64 * h);
+    *kp = k;
+}
+
+/* Makes a key pair of 1024 or 2048 bits, with E as the public exponent, as Java's
+ * KeyPairGenerator does. Returns 0 for any other size. */
+cx_bool cx_rsa_generate(cx_u8* ctx, cx_u32 bits) {
+    if (bits != 1024 && bits != 2048) return 0;
+    rsa k;
+    memset(&k, 0, sizeof k);
+    k.bits = bits;
+    int h = (int)(bits / 128);
+    k.half = (cx_u32)h;
+    random_prime(k.p, h);
+    do random_prime(k.q, h);
+    while (cmp_n(k.p, k.q, h) == 0);
+    finish_key(&k);
+    memcpy(ctx, &k, sizeof k);
+    return 1;
+}
+
+/* The key pair's primes, p then q, each half the modulus's bytes, big-endian, which is all
+ * `cx_rsa_from_primes` needs to make it again. Writes them to `out`, which has room for 256
+ * bytes, and returns their length: the modulus's. */
+cx_usize cx_rsa_primes(const cx_u8* ctx, cx_u8* out) {
+    rsa k;
+    memcpy(&k, ctx, sizeof k);
+    cx_usize hb = k.bits / 16;
+    to_bytes(out, hb, k.p);
+    to_bytes(out + hb, hb, k.q);
+    return 2 * hb;
+}
+
+/* The key pair whose primes `cx_rsa_primes` gave: `len` is 128 or 256 bytes, p then q. Returns 0
+ * unless they're two different primes as `cx_rsa_generate` makes them: their top two bits set,
+ * and neither one more than a multiple of E. */
+cx_bool cx_rsa_from_primes(cx_u8* ctx, const cx_u8* in, cx_usize len) {
+    if (len != 128 && len != 256) return 0;
+    rsa k;
+    memset(&k, 0, sizeof k);
+    k.bits = (cx_u32)(8 * len);
+    int h = (int)(len / 16);
+    k.half = (cx_u32)h;
+    from_bytes(k.p, h, in, len / 2);
+    from_bytes(k.q, h, in + len / 2, len / 2);
+    cx_u64* both[2] = {k.p, k.q};
+    for (int i = 0; i < 2; i++) {
+        cx_u64* p = both[i];
+        if ((p[h - 1] >> 62) != 3 || !(p[0] & 1) || mod_small(p, h, E) == 1 || !probably_prime(p, h)) return 0;
+    }
+    if (cmp_n(k.p, k.q, h) == 0) return 0;
+    finish_key(&k);
     memcpy(ctx, &k, sizeof k);
     return 1;
 }

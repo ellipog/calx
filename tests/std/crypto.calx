@@ -3,6 +3,7 @@
 // build/scratch's wider check had Java encrypt for 201 keys and decode the public keys.
 
 import std.crypto.{Cfb8, RsaKey, random_bytes}
+import std.hash.{Algorithm}
 
 fn hex(bytes: List<u8>) -> String {
     let digits = "0123456789abcdef"
@@ -128,4 +129,28 @@ fn main() {
     println("{big.size()} {big_der.len()}")    // out: 256 294
     let msg = "a shared secret".to_bytes()
     println(String.from_utf8(big.decrypt(big.encrypt(msg)!)!) ?? "bad")    // out: a shared secret
+
+    // A key pair made again from its primes is the same key pair: the same public key, and it
+    // opens what the first sealed and signs the same.
+    let primes = k.primes()
+    let again_k = RsaKey.from_primes(primes.copy())!
+    println("{primes.len()} {hex(again_k.public_der()) == hex(der.copy())}")    // out: 128 true
+    println("{hex(again_k.decrypt(sealed.copy())!) == hex(secret.copy())}")    // out: true
+    println("{hex(again_k.sign(Algorithm.Sha256, msg.copy())) == hex(k.sign(Algorithm.Sha256, msg.copy()))}")    // out: true
+    let big_again = RsaKey.from_primes(big.primes())!
+    println("{big.primes().len()} {hex(big_again.public_der()) == hex(big_der.copy())}")    // out: 256 true
+
+    // What isn't two such primes gives `none`: the wrong length, the halves the same, a number
+    // that isn't prime, or one without its top two bits set.
+    println("{RsaKey.from_primes(seq(64, 1, 0)) != none} {RsaKey.from_primes([0; 128]) != none}")    // out: false false
+    var twice = part(primes.copy(), 0, 64)
+    for byte in part(primes.copy(), 0, 64) {
+        twice.push(byte)
+    }
+    println("{RsaKey.from_primes(twice) != none}")    // out: false
+    var composite = primes.copy()
+    composite[63] = composite[63] ^ 2
+    var low = primes.copy()
+    low[0] = low[0] & 0x7F
+    println("{RsaKey.from_primes(composite) != none} {RsaKey.from_primes(low) != none}")    // out: false false
 }

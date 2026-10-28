@@ -6,6 +6,7 @@
  *
  * A file is opened, read or written, and closed through a handle, a HANDLE or a descriptor as an
  * i64, so std.fs reads a whole file in a few large reads without a size the file could outgrow.
+ * `cx_fs_open`'s `write` is 0 to read, 1 to replace what the file holds, and 2 to add to its end.
  * Results with no fixed size, a directory's names or a new temporary directory's path, go to a
  * per-thread buffer that std.fs copies out.
  *
@@ -134,7 +135,8 @@ static void buf_add_wide(const wchar_t* w, int units) {
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     wchar_t* w = wide(path, len);
     if (!w) return -1;
-    HANDLE h = write ? CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    HANDLE h = write == 2 ? CreateFileW(w, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+             : write ? CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
                      : CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
@@ -454,7 +456,8 @@ static char* cpath(const cx_u8* p, size_t n) {
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     char* s = cpath(path, len);
     if (!s) return -1;
-    int fd = write ? open(s, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666) : open(s, O_RDONLY | O_CLOEXEC);
+    int fd = write == 2 ? open(s, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666)
+             : write ? open(s, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666) : open(s, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         fail_errno(errno);
         free(s);

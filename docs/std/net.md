@@ -70,6 +70,7 @@ fn main() {
 | `net.peer(conn: Conn) -> Address?` | The address at the connection's other end, as it was when it opened. It stays until the poll after the connection's `Closed`, so the `Closed` can be logged with it, and is `none` for a connection that never opened |
 | `Conn` | A connection. It's `Copy` |
 | `conn.slot() -> usize` | A small number for the connection, counting from 0, for indexing what the program keeps per connection |
+| `conn.id() -> u32`, `Conn.from_id(id: u32) -> Conn` | The connection's number, its slot and how many connections had the slot before, which no two of a `Net`'s connections share at once, and the connection with a number, for a log of connections that's replayed. A number no connection has names none: reading it gives nothing, and writing to it or closing it does nothing |
 | `Event` | `Accepted(Conn)`, `Connected(Conn)`, `Received(Conn)`, `Closed(Conn)` or `Woken` |
 | `NetError` | `AddressInUse`, `BadAddress`, `Refused`, or `Os(i32)` with the system's error code |
 | `Ip` | `V4([u8; 4])`, or `V6([u8; 16], u32)` with its scope, the interface a link-local address is on, or 0 |

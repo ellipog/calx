@@ -34,6 +34,7 @@ fn main() {
 | `read_part(path: String, from: u64, n: usize) -> List<u8> ! FsError` | The `n` bytes from byte `from`, or fewer where the file ends first, without reading the rest of the file |
 | `read_text(path: String) -> String? ! FsError` | The whole file as text, or `none` if it isn't UTF-8 |
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
+| `append(path: String, bytes: List<u8>) ! FsError` | Adds `bytes` to the end of the file, creating it if nothing's there, after everything it held, even what another program added |
 | `rename(from: String, to: String) ! FsError` | Moves what's at `from` to `to`, replacing a file there. Atomic on one volume |
 | `remove_file(path: String) ! FsError` | Removes a file, or a link but not what it leads to |
 | `make_dir(path: String) ! FsError` | Makes a directory. `Exists` if something's there |
