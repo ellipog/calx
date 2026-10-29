@@ -89,6 +89,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
+23. [std.palette](std/palette.md): vanilla's paletted containers, a chunk section's block states and biomes grown, sent, saved and loaded as 26.3 does them
 
 ### Design
 

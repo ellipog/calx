@@ -1,0 +1,649 @@
+/// Vanilla's paletted containers: a chunk section's 4,096 block states and its 64 biomes, each
+/// kept as indices into a palette, packed into longs, and written to the network and to disk as
+/// vanilla 26.3 writes them (D163).
+///
+/// A container starts with one value and grows its palette as values are set. The palette's
+/// kinds, when it grows, which entries it keeps and in what order are vanilla's, so the bytes a
+/// client is sent and the NBT a region file holds are vanilla's.
+module std.palette
+
+/// Why a packed container didn't unpack.
+pub enum Error {
+    /// The palette has no entries.
+    Empty
+    /// The palette has more than one entry, so its values take bits, but there's no data:
+    /// vanilla's "Missing values for non-zero storage".
+    MissingData
+    /// The data isn't as many longs as the values take: vanilla's "Invalid length given for
+    /// storage, got: X but expected: Y".
+    Length { got: usize, expected: usize }
+    /// The value at `at` is an index past the end of the palette.
+    Index { at: usize, index: u32 }
+}
+
+// The most values a `BitStorage` holds. Up to this, `i * divide_mul >> 32` is `i / per_long`.
+const MAX_SIZE: usize = 67108864
+
+/// Values of up to 32 bits each, packed into longs as vanilla's `SimpleBitStorage` packs them:
+/// from each long's low bits up, as many whole values as fit, so none spans two longs. With 0
+/// bits, every value is 0 and there are no longs, as in vanilla's `ZeroBitStorage`.
+pub struct BitStorage {
+    width: i32
+    count: usize
+    per_long: usize
+    // floor(2^32 / per_long) + 1
+    divide_mul: u64
+    mask: i64
+    data: List<i64>
+}
+
+impl BitStorage {
+    /// `size` values of `bits` bits each, all 0. Panics unless `bits` is from 0 to 32 and `size`
+    /// is at most 2^26.
+    @track_caller
+    pub fn new(bits: i32, size: usize) -> BitStorage {
+        if bits < 0 or bits > 32 {
+            panic("a value can't take {bits} bits; it takes 0 to 32")
+        }
+        if size > MAX_SIZE {
+            panic("{size} values are more than a BitStorage holds, {MAX_SIZE}")
+        }
+        if bits == 0 {
+            return BitStorage { width: 0, count: size, per_long: 0, divide_mul: 0, mask: 0, data: [] }
+        }
+        let per_long = usize.wrap(64 / bits)
+        return BitStorage {
+            width: bits,
+            count: size,
+            per_long: per_long,
+            divide_mul: (1u64 << 32) / u64(per_long) + 1,
+            mask: (1i64 << bits) - 1,
+            data: [0i64; (size + per_long - 1) / per_long],
+        }
+    }
+
+    /// `size` values of `bits` bits each, packed in `longs`, which are kept as they are, the bits
+    /// above the last value in each long too. Fails with `Length` unless there are as many longs
+    /// as the values take. Panics as `new` does.
+    @track_caller
+    pub fn from_longs(bits: i32, size: usize, longs: own List<i64>) -> BitStorage ! Error {
+        var storage = BitStorage.new(bits, size)
+        if longs.len() != storage.data.len() {
+            fail Error.Length { got: longs.len(), expected: storage.data.len() }
+        }
+        storage.data = longs
+        return storage
+    }
+
+    /// How many bits each value takes.
+    pub fn bits(self) -> i32 {
+        return self.width
+    }
+
+    /// How many values there are.
+    pub fn len(self) -> usize {
+        return self.count
+    }
+
+    /// The value at `i`. Panics unless `i` is less than `len()`.
+    @track_caller
+    pub fn get(self, i: usize) -> u32 {
+        if i >= self.count {
+            panic("index {i} is out of bounds for {self.count} values")
+        }
+        if self.width == 0 {
+            return 0
+        }
+        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
+        let shift = i32.wrap(i - cell * self.per_long) * self.width
+        return u32.wrap((self.data[cell] >> shift) & self.mask)
+    }
+
+    /// Sets the value at `i` to `v`. Panics unless `i` is less than `len()` and `v` fits in
+    /// `bits()`.
+    @track_caller
+    pub fn set(mut self, i: usize, v: u32) {
+        if i >= self.count {
+            panic("index {i} is out of bounds for {self.count} values")
+        }
+        if i64(v) > self.mask {
+            panic("{v} doesn't fit in {self.width} bits")
+        }
+        if self.width == 0 {
+            return
+        }
+        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
+        let shift = i32.wrap(i - cell * self.per_long) * self.width
+        let w = self.data[cell]
+        self.data[cell] = (w & ~(self.mask << shift)) | (i64(v) << shift)
+    }
+
+    /// Sets the value at `i` to `v`, and gives the value it had. Panics as `set` does.
+    @track_caller
+    pub fn get_and_set(mut self, i: usize, v: u32) -> u32 {
+        if i >= self.count {
+            panic("index {i} is out of bounds for {self.count} values")
+        }
+        if i64(v) > self.mask {
+            panic("{v} doesn't fit in {self.width} bits")
+        }
+        if self.width == 0 {
+            return 0
+        }
+        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
+        let shift = i32.wrap(i - cell * self.per_long) * self.width
+        let w = self.data[cell]
+        self.data[cell] = (w & ~(self.mask << shift)) | (i64(v) << shift)
+        return u32.wrap((w >> shift) & self.mask)
+    }
+
+    /// Sets every value to `v`, as vanilla's `fill` does: when the bits don't divide 64, the bits
+    /// above the last value in each long hold the low bits of one more `v`. Panics unless `v`
+    /// fits in `bits()`.
+    @track_caller
+    pub fn fill(mut self, v: u32) {
+        if i64(v) > self.mask {
+            panic("{v} doesn't fit in {self.width} bits")
+        }
+        if self.width == 0 {
+            return
+        }
+        var cell = i64(v)
+        var offset = self.width
+        while offset < 64 {
+            cell |= cell << offset
+            offset *= 2
+        }
+        for j in 0usize..self.data.len() {
+            self.data[j] = cell
+        }
+    }
+
+    /// Every value, in order.
+    pub fn values(self) -> List<u32> {
+        if self.width == 0 {
+            return [0u32; self.count]
+        }
+        var out = List<u32>()
+        out.reserve(self.count)
+        for w in self.data {
+            var x = w
+            for _ in 0usize..self.per_long {
+                if out.len() == self.count {
+                    return out
+                }
+                out.push(u32.wrap(x & self.mask))
+                x = x >>> self.width
+            }
+        }
+        return out
+    }
+
+    /// A copy of the longs the values are packed in.
+    pub fn longs(self) -> List<i64> {
+        return self.data.copy()
+    }
+
+    /// The longs the values are packed in.
+    pub fn into_longs(own self) -> List<i64> {
+        return self.data
+    }
+}
+
+// The fewest bits that give `n` values each a number of its own: vanilla's `Mth.ceillog2`.
+fn ceil_log2(n: usize) -> i32 {
+    var bits = 0
+    while (1u64 << bits) < u64(n) {
+        bits += 1
+    }
+    return bits
+}
+
+/// How a container stores its values, as vanilla's `Strategy` does for block states or biomes:
+/// how many there are, and what a palette of a given size becomes.
+pub struct Strategy {
+    axis_bits: i32
+    // The bits an indexed palette takes at the least and at the most. Past the most, the
+    // storage holds the registry's own IDs.
+    min_bits: i32
+    max_bits: i32
+    registry: u32
+    global_bits: i32
+}
+
+// What a palette of 2^bits entries becomes: vanilla's `Configuration`. `memory` is how many
+// bits each value takes in a container, and `stored` how many on disk.
+struct Config {
+    global: bool
+    memory: i32
+    stored: i32
+}
+
+impl Strategy {
+    /// A section's block states, 16 × 16 × 16, from a registry of `states` block states. Up to
+    /// 16 different ones take 4 bits each, up to 256 take 5 to 8, and more take the bits the
+    /// registry's IDs need. Panics if `states` is 0.
+    @track_caller
+    pub fn block_states(states: u32) -> Strategy {
+        if states == 0 {
+            panic("a registry needs at least one value")
+        }
+        return Strategy { axis_bits: 4, min_bits: 4, max_bits: 8, registry: states, global_bits: ceil_log2(usize(states)) }
+    }
+
+    /// A section's biomes, 4 × 4 × 4, from a registry of `biomes` biomes. Up to 8 different ones
+    /// take 1 to 3 bits each, and more take the bits the registry's IDs need. Panics if `biomes`
+    /// is 0.
+    @track_caller
+    pub fn biomes(biomes: u32) -> Strategy {
+        if biomes == 0 {
+            panic("a registry needs at least one value")
+        }
+        return Strategy { axis_bits: 2, min_bits: 1, max_bits: 3, registry: biomes, global_bits: ceil_log2(usize(biomes)) }
+    }
+
+    /// How many values a container holds: 4,096 block states or 64 biomes.
+    pub fn size(self) -> usize {
+        return usize.wrap(1 << (self.axis_bits * 3))
+    }
+
+    /// How many values the registry has, so every value is less than this.
+    pub fn registry_size(self) -> u32 {
+        return self.registry
+    }
+
+    /// Where `x`, `y`, `z` is among a container's values: `y`, then `z`, then `x`. Panics unless
+    /// each is from 0 to 15 for block states, or 0 to 3 for biomes.
+    @track_caller
+    pub fn index(self, x: i32, y: i32, z: i32) -> usize {
+        let side = 1 << self.axis_bits
+        if x < 0 or x >= side or y < 0 or y >= side or z < 0 or z >= side {
+            panic("({x}, {y}, {z}) is outside a container {side} wide")
+        }
+        return usize.wrap((((y << self.axis_bits) | z) << self.axis_bits) | x)
+    }
+
+    fn config(self, bits: i32) -> Config {
+        if bits == 0 {
+            return Config { global: false, memory: 0, stored: 0 }
+        }
+        if bits <= self.max_bits {
+            let b = bits.max(self.min_bits)
+            return Config { global: false, memory: b, stored: b }
+        }
+        return Config { global: true, memory: self.global_bits, stored: bits }
+    }
+}
+
+// A palette's entries in the order they were added. One of more than 16 entries has a hash of
+// them by value too: open addressing with linear probing, each slot an entry's index plus 1, or
+// 0 when it's empty, with twice as many slots as the palette has room for.
+struct Palette {
+    entries: List<u32>
+    slots: List<u16>
+    shift: i32
+}
+
+impl Palette {
+    // An empty palette with room for 2^bits entries.
+    fn new(bits: i32) -> Palette {
+        if bits <= 4 {
+            return Palette { entries: [], slots: [], shift: 0 }
+        }
+        return Palette { entries: [], slots: [0u16; usize.wrap(1 << (bits + 1))], shift: 31 - bits }
+    }
+
+    // The index of the first entry that's `v`.
+    fn find(self, v: u32) -> u32? {
+        if self.slots.len() == 0 {
+            for j in 0usize..self.entries.len() {
+                if self.entries[j] == v {
+                    return some(u32.wrap(j))
+                }
+            }
+            return none
+        }
+        let mask = self.slots.len() - 1
+        var h = usize((v * 0x9E3779B9) >> self.shift)
+        loop {
+            let e = self.slots[h]
+            if e == 0 {
+                return none
+            }
+            if self.entries[usize(e) - 1] == v {
+                return some(u32(e) - 1)
+            }
+            h = (h + 1) & mask
+        }
+    }
+
+    // Adds `v` at the end, and gives its index. A second `v` is found after the first, so the
+    // first is the one `find` gives.
+    fn add(mut self, v: u32) -> u32 {
+        let j = self.entries.len()
+        self.entries.push(v)
+        if self.slots.len() > 0 {
+            let mask = self.slots.len() - 1
+            var h = usize((v * 0x9E3779B9) >> self.shift)
+            while self.slots[h] != 0 {
+                h = (h + 1) & mask
+            }
+            self.slots[h] = u16.wrap(j) + 1
+        }
+        return u32.wrap(j)
+    }
+
+    fn find_or_add(mut self, v: u32) -> u32 {
+        if let j = self.find(v) {
+            return j
+        }
+        return self.add(v)
+    }
+}
+
+/// A container as vanilla saves it in a chunk section's NBT: the palette, in the order its
+/// values first appear, and the values as indices into it packed in longs, or no longs when the
+/// palette has one entry.
+pub struct Packed {
+    pub palette: List<u32>
+    pub data: List<i64>?
+}
+
+/// A section's block states or biomes, as vanilla's `PalettedContainer` keeps them.
+///
+/// Values are registry IDs. The palette starts as the first value alone, with no bits. A value
+/// it doesn't have is added at the end; when that needs more bits, the values are moved to a
+/// palette of the next kind, which lists them in the order they first appear in the container,
+/// from index 0 up, and drops entries no value refers to. Past the strategy's indexed palettes,
+/// the values are the registry's IDs themselves.
+pub struct PalettedContainer {
+    strategy: Strategy
+    global: bool
+    palette: Palette
+    storage: BitStorage
+}
+
+impl PalettedContainer {
+    /// A container of `strategy`'s size with every value `value`. Panics unless `value` is less
+    /// than the registry's size.
+    @track_caller
+    pub fn new(value: u32, strategy: Strategy) -> PalettedContainer {
+        if value >= strategy.registry {
+            panic("{value} is past the end of a registry of {strategy.registry}")
+        }
+        var palette = Palette.new(0)
+        _ = palette.add(value)
+        return PalettedContainer { strategy: strategy, global: false, palette: palette, storage: BitStorage.new(0, strategy.size()) }
+    }
+
+    /// The value at `x`, `y`, `z`. Panics as `Strategy.index` does.
+    @track_caller
+    pub fn get(self, x: i32, y: i32, z: i32) -> u32 {
+        return self.get_at(self.strategy.index(x, y, z))
+    }
+
+    /// The value at index `i`. Panics unless `i` is less than the strategy's size.
+    @track_caller
+    pub fn get_at(self, i: usize) -> u32 {
+        let id = self.storage.get(i)
+        if self.global {
+            return id
+        }
+        return self.palette.entries[usize(id)]
+    }
+
+    /// Sets the value at `x`, `y`, `z`. Panics as `Strategy.index` does, or unless `value` is
+    /// less than the registry's size.
+    @track_caller
+    pub fn set(mut self, x: i32, y: i32, z: i32, value: u32) {
+        let i = self.strategy.index(x, y, z)
+        self.set_at(i, value)
+    }
+
+    /// Sets the value at index `i`. Panics unless `i` is less than the strategy's size and
+    /// `value` less than the registry's.
+    @track_caller
+    pub fn set_at(mut self, i: usize, value: u32) {
+        self.check(i, value)
+        let id = self.id_for(value)
+        self.storage.set(i, id)
+    }
+
+    /// Sets the value at `x`, `y`, `z`, and gives the value it had. Panics as `set` does.
+    @track_caller
+    pub fn get_and_set(mut self, x: i32, y: i32, z: i32, value: u32) -> u32 {
+        let i = self.strategy.index(x, y, z)
+        return self.get_and_set_at(i, value)
+    }
+
+    /// Sets the value at index `i`, and gives the value it had. Panics as `set_at` does.
+    @track_caller
+    pub fn get_and_set_at(mut self, i: usize, value: u32) -> u32 {
+        self.check(i, value)
+        let id = self.id_for(value)
+        let old = self.storage.get_and_set(i, id)
+        return self.value_for(old)
+    }
+
+    /// How many bits each value takes: 0 for a palette of one entry, the bits of an indexed
+    /// palette, or the bits of the registry's IDs.
+    pub fn bits(self) -> i32 {
+        return self.storage.bits()
+    }
+
+    /// Each value in the container with how many times it's there, as vanilla's `count` gives
+    /// them: for a palette of one entry, that entry; for an indexed palette, its entries that are
+    /// there, in its order; with no palette, by ID.
+    pub fn counts(self) -> List<(u32, usize)> {
+        let n = self.storage.len()
+        var out = List<(u32, usize)>()
+        if not self.global and self.palette.entries.len() == 1 {
+            out.push((self.palette.entries[0], n))
+            return out
+        }
+        var values = self.storage.values()
+        if not self.global {
+            var per: List<usize> = [0usize; self.palette.entries.len()]
+            for id in values {
+                per[usize(id)] += 1
+            }
+            for j in 0usize..per.len() {
+                if per[j] > 0 {
+                    out.push((self.palette.entries[j], per[j]))
+                }
+            }
+            return out
+        }
+        values.sort()
+        var start: usize = 0
+        for i in 1usize..n + 1 {
+            if i == n or values[i] != values[start] {
+                out.push((values[start], i - start))
+                start = i
+            }
+        }
+        return out
+    }
+
+    /// Writes the container onto the end of `out` as vanilla's `write` sends it: a byte of its
+    /// bits, then the palette, which is the one entry's ID for a palette of one entry, the count
+    /// and the IDs for an indexed palette, and nothing without one, all as VarInts, then the
+    /// longs, 8 bytes each, big-endian, with no count before them.
+    pub fn write(self, out: mut List<u8>) {
+        out.push(u8.wrap(self.storage.bits()))
+        if not self.global {
+            if self.storage.bits() == 0 {
+                varint(mut out, self.palette.entries[0])
+            } else {
+                varint(mut out, u32.wrap(self.palette.entries.len()))
+                for v in self.palette.entries {
+                    varint(mut out, v)
+                }
+            }
+        }
+        out.reserve(self.storage.data.len() * 8)
+        for w in self.storage.data {
+            out.push(u8.wrap(w >>> 56))
+            out.push(u8.wrap(w >>> 48))
+            out.push(u8.wrap(w >>> 40))
+            out.push(u8.wrap(w >>> 32))
+            out.push(u8.wrap(w >>> 24))
+            out.push(u8.wrap(w >>> 16))
+            out.push(u8.wrap(w >>> 8))
+            out.push(u8.wrap(w))
+        }
+    }
+
+    /// The container as vanilla's `pack` saves it: a palette of the values that are there, in
+    /// the order they first appear, and the values as indices into it in the bits a palette of
+    /// that size takes on disk, which for more entries than an indexed palette holds are the
+    /// fewest that number them all.
+    pub fn pack(self) -> Packed {
+        let n = self.storage.len()
+        var palette = Palette.new(if self.global { ceil_log2(n) } else { self.storage.bits() })
+        var values = self.storage.values()
+        var last: i64 = -1
+        var id: u32 = 0
+        for i in 0usize..n {
+            let old = values[i]
+            if i64(old) != last {
+                last = i64(old)
+                id = palette.find_or_add(self.value_for(old))
+            }
+            values[i] = id
+        }
+        let stored = self.strategy.config(ceil_log2(palette.entries.len())).stored
+        if stored == 0 {
+            return Packed { palette: palette.entries, data: none }
+        }
+        var storage = BitStorage.new(stored, n)
+        for i in 0usize..n {
+            storage.set(i, values[i])
+        }
+        return Packed { palette: palette.entries, data: some(storage.into_longs()) }
+    }
+
+    /// The container `packed` holds, as vanilla's `unpack` reads it: the palette's size gives its
+    /// kind and bits, and the values are indices into it. With more entries than an indexed
+    /// palette holds, they're turned into the registry's IDs. Fails if the palette is empty, if
+    /// there's no data where its size needs bits, if the data isn't as long as the bits need, or
+    /// if a value is an index past the palette's end, where vanilla fails later, when it's read.
+    /// Panics unless every entry is less than the registry's size.
+    @track_caller
+    pub fn unpack(strategy: Strategy, packed: own Packed) -> PalettedContainer ! Error {
+        var p = packed
+        let count = p.palette.len()
+        if count == 0 {
+            fail Error.Empty
+        }
+        for j in 0usize..count {
+            if p.palette[j] >= strategy.registry {
+                panic("the palette's entry {p.palette[j]} is past the end of a registry of {strategy.registry}")
+            }
+        }
+        let n = strategy.size()
+        let config = strategy.config(ceil_log2(count))
+        if config.memory == 0 {
+            var single = Palette.new(0)
+            _ = single.add(p.palette[0])
+            return PalettedContainer { strategy: strategy, global: false, palette: single, storage: BitStorage.new(0, n) }
+        }
+        let data = p.data.take() else fail Error.MissingData
+        let stored = try BitStorage.from_longs(config.stored, n, data)
+        let values = stored.values()
+        for i in 0usize..n {
+            if usize(values[i]) >= count {
+                fail Error.Index { at: i, index: values[i] }
+            }
+        }
+        if not config.global {
+            var palette = Palette.new(config.memory)
+            for v in p.palette {
+                _ = palette.add(v)
+            }
+            return PalettedContainer { strategy: strategy, global: false, palette: palette, storage: stored }
+        }
+        var storage = BitStorage.new(config.memory, n)
+        for i in 0usize..n {
+            storage.set(i, p.palette[usize(values[i])])
+        }
+        return PalettedContainer { strategy: strategy, global: true, palette: Palette.new(0), storage: storage }
+    }
+
+    @track_caller
+    fn check(self, i: usize, value: u32) {
+        if i >= self.storage.len() {
+            panic("index {i} is out of bounds for {self.storage.len()} values")
+        }
+        if value >= self.strategy.registry {
+            panic("{value} is past the end of a registry of {self.strategy.registry}")
+        }
+    }
+
+    fn value_for(self, id: u32) -> u32 {
+        if self.global {
+            return id
+        }
+        return self.palette.entries[usize(id)]
+    }
+
+    // The ID `value` is stored as, which is its index in the palette, added if it isn't there,
+    // or the value itself with no palette. When the palette is full, it moves to the next size.
+    fn id_for(mut self, value: u32) -> u32 {
+        if self.global {
+            return value
+        }
+        if let j = self.palette.find(value) {
+            return j
+        }
+        let bits = self.storage.bits()
+        if u64(self.palette.entries.len()) < (1u64 << bits) {
+            return self.palette.add(value)
+        }
+        self.resize(bits + 1)
+        if self.global {
+            return value
+        }
+        return self.palette.add(value)
+    }
+
+    // Moves the values to the palette and storage `bits` asks for, as vanilla's `onResize` and
+    // `copyFrom` do: a palette of one entry gives the new one that entry, and otherwise the
+    // values are added in the order they're stored, so the new palette has only those that are
+    // there, in the order they first appear.
+    fn resize(mut self, bits: i32) {
+        let n = self.storage.len()
+        let config = self.strategy.config(bits)
+        var palette = Palette.new(if config.global { 0 } else { config.memory })
+        var storage = BitStorage.new(config.memory, n)
+        if not self.global and self.palette.entries.len() == 1 {
+            let v = self.palette.entries[0]
+            storage.fill(if config.global { v } else { palette.add(v) })
+        } else {
+            let values = self.storage.values()
+            var last: i64 = -1
+            var id: u32 = 0
+            for i in 0usize..n {
+                let old = values[i]
+                if i64(old) != last {
+                    last = i64(old)
+                    let v = self.value_for(old)
+                    id = if config.global { v } else { palette.find_or_add(v) }
+                }
+                storage.set(i, id)
+            }
+        }
+        self.global = config.global
+        self.palette = palette
+        self.storage = storage
+    }
+}
+
+fn varint(out: mut List<u8>, v: u32) {
+    var x = v
+    while x >= 0x80 {
+        out.push(u8.wrap(x) | 0x80)
+        x = x >> 7
+    }
+    out.push(u8.wrap(x))
+}

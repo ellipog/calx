@@ -1,0 +1,8 @@
+// A value past the end of the registry panics at the call.
+
+import std.palette.{PalettedContainer, Strategy}
+
+fn main() {
+    var c = PalettedContainer.new(0, Strategy.biomes(65))
+    c.set_at(63, 65)    // panic: 65 is past the end of a registry of 65
+}

@@ -1,0 +1,8 @@
+// A value that doesn't fit in the storage's bits panics at the call.
+
+import std.palette.{BitStorage}
+
+fn main() {
+    var s = BitStorage.new(5, 64)
+    s.set(0, 32)    // panic: 32 doesn't fit in 5 bits
+}

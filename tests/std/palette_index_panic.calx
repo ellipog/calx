@@ -1,0 +1,8 @@
+// A position outside the container panics at the call, as a value outside the registry does.
+
+import std.palette.{PalettedContainer, Strategy}
+
+fn main() {
+    var c = PalettedContainer.new(0, Strategy.block_states(35723))
+    c.set(3, 16, 0, 1)    // panic: (3, 16, 0) is outside a container 16 wide
+}
