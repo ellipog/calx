@@ -59,6 +59,7 @@ fn main() {
 | `Timestamp` | A moment on the wall clock: `unix_ms`, the milliseconds since the start of 1970 in UTC, leap seconds aside, as Java's `System.currentTimeMillis()` counts them. It's `Copy`, and can be made from any `i64` |
 | `unsafe Timestamp.now() -> Timestamp` | The wall clock's time now |
 | `unsafe t.local_offset() -> i32` | The seconds the system's local time zone is ahead of UTC at `t`, by the zone's rules, so summer time counts. 0 where the system can't say |
+| `unsafe t.zone_abbreviation() -> String?` | The local time zone's abbreviation at `t`, as the system's time zone database names it, so summer time counts: `CET` or `CEST` in Paris, `+03` in Istanbul, which has none in letters. `none` where the system has none, as on Windows, which names zones only in full |
 | `t.date_time(offset: i32) -> DateTime` | The date and time at `t`, `offset` seconds ahead of UTC |
 | `DateTime` | `year`, `month` (1 to 12), `day` (1 to 31), `hour` (0 to 23), `minute`, `second` and `milli` (0 to 999), all `i32` |
 

@@ -533,6 +533,27 @@ cx_i32 cx_clock_local_offset(cx_i64 unix_ms) {
 #endif
 }
 
+/* Declared by std/time.calx. The local time zone's abbreviation at a moment, as the system's
+ * time zone database names it, such as "CET" or "+03", written to `out` if it fits in `cap`
+ * bytes: its length in bytes, more than `cap` if it didn't fit, or -1 if there's none. Windows
+ * has none: it names zones only in full, such as "W. Europe Standard Time". */
+cx_i64 cx_clock_zone_abbreviation(cx_i64 unix_ms, cx_u8* out, cx_usize cap) {
+#ifdef _WIN32
+    (void)unix_ms;
+    (void)out;
+    (void)cap;
+    return -1;
+#else
+    cx_i64 secs = unix_ms / 1000 - (unix_ms % 1000 < 0);
+    time_t t = (time_t)secs;
+    struct tm local;
+    if (!localtime_r(&t, &local) || !local.tm_zone || !local.tm_zone[0]) return -1;
+    size_t len = strlen(local.tm_zone);
+    if (len <= cap) memcpy(out, local.tm_zone, len);
+    return (cx_i64)len;
+#endif
+}
+
 void cx_start(int argc, char** argv) {
 #ifdef _WIN32
     (void)argc;

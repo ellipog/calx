@@ -31,6 +31,13 @@ fn main() {
     let today = now.date_time(offset)
     println("{today.month >= 1 and today.month <= 12 and today.day >= 1 and today.day <= 31}")    // out: true
 
+    // The zone's abbreviation, where the system has one, is a short name such as CET or +03.
+    let short = match unsafe { now.zone_abbreviation() } {
+        some(a) => a.len() >= 1 and a.len() <= 16 and not a.contains(" "),
+        none => true,
+    }
+    println("{short}")    // out: true
+
     // Dates, as java.time's Instant.ofEpochMilli(ms).atOffset(ZoneOffset.ofTotalSeconds(offset))
     // gives them.
     println(show(0, 0))                        // out: 1970-1-1 0:0:0.0
