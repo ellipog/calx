@@ -4903,10 +4903,10 @@ $dropall    m->len = 0;
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::capacity: return "(" + expr(recv) + ").cap";
             case BMethod::push_last:
-                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + at(p + "->len") +
+                return head + el + " " + v + " = " + arg(0, et) + "; if (__builtin_expect(" + p + "->len >= " + p + "->cap, 0)) " + grow("1") + at(p + "->len") +
                        p + "->ptr[" + i + "] = " + v + "; " + p + "->len++; })";
             case BMethod::push_first:
-                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + p + "->head = (" +
+                return head + el + " " + v + " = " + arg(0, et) + "; if (__builtin_expect(" + p + "->len >= " + p + "->cap, 0)) " + grow("1") + p + "->head = (" +
                        p + "->head ? " + p + "->head : " + p + "->cap) - 1; " + p + "->ptr[" + p + "->head] = " + v + "; " + p + "->len++; })";
             case BMethod::pop_first:
                 return head + o + " " + r + " = {0}; if (" + p + "->len) { " + r + ".v = " + p + "->ptr[" + p + "->head]; " + r +
@@ -5307,7 +5307,7 @@ $dropall    m->len = 0;
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (__builtin_expect(" + i + " > " + p +
                        "->cap, 0)) cx_panic_set_len(" + i + ", " + p + "->cap, " + index_at(0) + "); " + p + "->len = " + i + "; })";
             case BMethod::push:
-                return head + el + " " + v + " = " + arg(0, et) + "; if (" + p + "->len == " + p + "->cap) " + grow("1") + " " + p +
+                return head + el + " " + v + " = " + arg(0, et) + "; if (__builtin_expect(" + p + "->len >= " + p + "->cap, 0)) " + grow("1") + " " + p +
                        "->ptr[" + p + "->len++] = " + v + "; })";
             case BMethod::pop: {
                 std::string o = ctype(e->type);
@@ -5323,7 +5323,7 @@ $dropall    m->len = 0;
             case BMethod::insert:
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; " + el + " " + v + " = " + arg(1, et) +
                        "; if (__builtin_expect(" + i + " > " + p + "->len, 0)) cx_panic_insert(" + i + ", " + p + "->len, " +
-                       index_at(0) + "); if (" + p + "->len == " + p + "->cap) " + grow("1") + " __builtin_memmove(" + p + "->ptr + " +
+                       index_at(0) + "); if (__builtin_expect(" + p + "->len >= " + p + "->cap, 0)) " + grow("1") + " __builtin_memmove(" + p + "->ptr + " +
                        i + " + 1, " + p + "->ptr + " + i + ", (" + p + "->len - " + i +
                        ") * sizeof(" + el + ")); " + p + "->ptr[" + i + "] = " + v + "; " + p + "->len++; })";
             case BMethod::remove:

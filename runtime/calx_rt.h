@@ -143,21 +143,34 @@ CX_FN(void, cx_free, (void* p, cx_usize size));
 /* How many blocks are allocated, in debug builds; 0 in others. */
 CX_FN(cx_usize, cx_alloc_live, (void));
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding
- * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. The
- * check is inline, so with `size` a constant it has no division. */
-CX_FN(void*, cx_grow_to, (void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size));
+ * `len`, growing it to at least twice its size. Returns the buffer, which may have moved. Only
+ * the check for room is inline. The growing is a cold call, out of line so a loop that pushes
+ * keeps its registers for the loop, and it's given a copy of the capacity, not the list's own: a
+ * call given the address of a field of a list in a local kept the list in memory, where a store
+ * to an element might change it, so its pointer, length and capacity were read back after each
+ * one (D158). A length is never past its capacity, so `*cap - len` doesn't wrap. */
+__attribute__((cold)) CX_FN(void*, cx_grow_to, (void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size));
 CX_COLD CX_FN(void, cx_panic_capacity, (void));
 CX_INLINE void* cx_grow(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
-    /* No buffer can be bigger than half the address space. */
-    cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
-    if (__builtin_expect(extra > max - len, 0)) cx_panic_capacity();
-    cx_usize need = len + extra;
-    if (need <= *cap) return ptr;
-    return cx_grow_to(ptr, cap, need, max, size);
+    if (__builtin_expect(extra <= *cap - len, 1)) return ptr;
+    cx_usize c = *cap;
+    ptr = cx_grow_to(ptr, &c, len, extra, size);
+    *cap = c;
+    return ptr;
 }
 /* Room for `extra` more in a deque's ring, which runs from `*head` round its buffer: grown as a
-   list's is, then with the run that wrapped moved so the ring is whole again (D110). */
-CX_FN(void*, cx_deque_grow, (void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size));
+ * list's is, then with the run that wrapped moved so the ring is whole again (D110). The growing
+ * is out of line and given copies, as `cx_grow`'s is (D158). */
+__attribute__((cold)) CX_FN(void*, cx_deque_grow_to, (void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra,
+                                                    cx_usize size));
+CX_INLINE void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    if (__builtin_expect(extra <= *cap - len, 1)) return ptr;
+    cx_usize h = *head, c = *cap;
+    ptr = cx_deque_grow_to(ptr, &h, &c, len, extra, size);
+    *head = h;
+    *cap = c;
+    return ptr;
+}
 
 /* Queues between threads, and the threads `Thread.spawn` starts, in calx_thread.c (D121). An end
  * of a queue is a pointer to it, whatever its messages are; the queue counts its ends and goes
@@ -279,7 +292,7 @@ CX_INLINE void* cx_arena_grow(cx_arena_state* s, void* ptr, cx_usize* cap, cx_us
                               cx_usize align) {
     cx_usize unit = size ? size : 1;
     cx_usize max = ((cx_usize)-1 / 4) / unit;
-    if (__builtin_expect(extra > max - len, 0)) cx_panic_capacity();
+    if (__builtin_expect(len > max || extra > max - len, 0)) cx_panic_capacity();
     cx_usize need = len + extra;
     if (need <= *cap) return ptr;
     cx_usize n = *cap <= max / 2 ? *cap * 2 : max;

@@ -99,3 +99,14 @@ clang -O3 -march=x86-64-v3 -fno-builtin -o libm bench/math/libm.c -lm
 ```
 
 Both print a sum of the results, which must agree to the last digit or two. Each Calx loop passes its sum through [`std.hint.black_box`](../docs/std/hint.md) before the clock is read again: release builds inline `std.math` into the loop (D99), and clang could otherwise move a loop with no side effects past the clock. `libm.c` has an empty `asm` in the same place, since clang otherwise sees that only the last of the 7 sums is used and drops the others' additions. The times, on the reference machine (i9-13900K, pinned to one P-core), are in [std.math](../docs/std/math.md#speed).
+
+## Pushing onto a list
+
+[`push/push.calx`](push/push.calx) pushes a million values onto a list three ways: 4 bytes each, big-endian, as a packet encoder writes an `int`; one byte each, as it writes a VarInt below 128; and an `i64` each, whose type is the list's length's. Each loop runs once onto a new list in a local, which it returns, and once onto a list it's given to change, which the caller keeps and clears, so no time goes to the allocator. Each time is the best of 50. [`push/push.rs`](push/push.rs) is the same loops with `Vec`, built as the tick benchmark's Rust reference is.
+
+```sh
+calx build --release -o push bench/push/push.calx
+rustc -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3 -o push_rs bench/push/push.rs
+```
+
+Both print the same total. The times are in [Lists](../docs/reference/lists.md#in-c).

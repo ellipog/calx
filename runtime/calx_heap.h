@@ -105,7 +105,8 @@ CX_INLINE cx_usize CX_HP_F(down)(CX_HP_E* es, cx_usize k, CX_HP_E x, cx_usize n)
 }
 
 static void CX_HP_F(push)(CX_HP_T* q, CX_HP_E x) {
-    if (q->len == q->cap) q->ptr = (CX_HP_E*)cx_grow(q->ptr, &q->cap, q->len, 1, sizeof(CX_HP_E));
+    if (__builtin_expect(q->len >= q->cap, 0))
+        q->ptr = (CX_HP_E*)cx_grow(q->ptr, &q->cap, q->len, 1, sizeof(CX_HP_E));
     cx_usize k = q->len++;
     (void)CX_HP_F(up)(q->ptr, k, x);
 }

@@ -1,0 +1,110 @@
+// Pushing onto a list, as a packet encoder does: bench/push/push.rs is the same loops in Rust.
+// Each loop goes over a million values, once into a new list in a local, which it returns, and
+// once into a list it's given to change, which the caller keeps and clears, so no time goes to
+// the allocator.
+import std.time.{Instant}
+
+// Each value as 4 bytes, big-endian, as an encoder writes an int.
+fn be32(xs: List<i32>) -> List<u8> {
+    var out = List<u8>()
+    for x in xs {
+        let v = u32.wrap(x)
+        out.push(u8.wrap(v >> 24))
+        out.push(u8.wrap(v >> 16))
+        out.push(u8.wrap(v >> 8))
+        out.push(u8.wrap(v))
+    }
+    return out
+}
+
+// VarInts of values below 128, so one byte each.
+fn varint(xs: List<i32>) -> List<u8> {
+    var out = List<u8>()
+    for x in xs {
+        var v = u32.wrap(x) & 127u32
+        while v >= 128u32 {
+            out.push(u8.wrap(v & 127u32) | 128u8)
+            v = v >> 7
+        }
+        out.push(u8.wrap(v))
+    }
+    return out
+}
+
+// Each value doubled, as an i64, whose type is the list's length's.
+fn widen(xs: List<i32>) -> List<i64> {
+    var out = List<i64>()
+    for x in xs {
+        out.push(i64(x) * 2)
+    }
+    return out
+}
+
+fn be32_into(out: mut List<u8>, xs: List<i32>) {
+    for x in xs {
+        let v = u32.wrap(x)
+        out.push(u8.wrap(v >> 24))
+        out.push(u8.wrap(v >> 16))
+        out.push(u8.wrap(v >> 8))
+        out.push(u8.wrap(v))
+    }
+}
+
+fn varint_into(out: mut List<u8>, xs: List<i32>) {
+    for x in xs {
+        var v = u32.wrap(x) & 127u32
+        while v >= 128u32 {
+            out.push(u8.wrap(v & 127u32) | 128u8)
+            v = v >> 7
+        }
+        out.push(u8.wrap(v))
+    }
+}
+
+fn widen_into(out: mut List<i64>, xs: List<i32>) {
+    for x in xs {
+        out.push(i64(x) * 2)
+    }
+}
+
+fn main() {
+    var xs = List<i32>()
+    var s = 1u64
+    for _ in 0..1000000 {
+        s = s * 6364136223846793005u64 + 1442695040888963407u64
+        xs.push(i32.wrap(s >> 32))
+    }
+    var best = [1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0]
+    var a = List<u8>()
+    var b = List<u8>()
+    var c = List<i64>()
+    var total = 0usize
+    for _ in 0..50 {
+        let t0 = unsafe { Instant.now() }
+        let na = be32(xs)
+        let t1 = unsafe { Instant.now() }
+        let nb = varint(xs)
+        let t2 = unsafe { Instant.now() }
+        let nc = widen(xs)
+        let t3 = unsafe { Instant.now() }
+        a.clear()
+        be32_into(mut a, xs)
+        let t4 = unsafe { Instant.now() }
+        b.clear()
+        varint_into(mut b, xs)
+        let t5 = unsafe { Instant.now() }
+        c.clear()
+        widen_into(mut c, xs)
+        let t6 = unsafe { Instant.now() }
+        best[0] = best[0].min(t1.secs_since(t0) * 1000.0)
+        best[1] = best[1].min(t2.secs_since(t1) * 1000.0)
+        best[2] = best[2].min(t3.secs_since(t2) * 1000.0)
+        best[3] = best[3].min(t4.secs_since(t3) * 1000.0)
+        best[4] = best[4].min(t5.secs_since(t4) * 1000.0)
+        best[5] = best[5].min(t6.secs_since(t5) * 1000.0)
+        total += na.len() + nb.len() + nc.len() + a.len() + b.len() + c.len()
+    }
+    println("local: be32 {best[0]} ms, varint {best[1]} ms, widen {best[2]} ms")
+    println("given: be32 {best[3]} ms, varint {best[4]} ms, widen {best[5]} ms")
+    println("{total}")
+}

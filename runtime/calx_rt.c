@@ -1195,20 +1195,24 @@ static void print_float(double v, int is_float) {
 void cx_print_f64(cx_f64 v) { print_float(v, 0); }
 void cx_print_f32(cx_f32 v) { print_float(v, 1); }
 
-/* --- memory and strings ------------------------------------------------------------------ */
+/* --- growing lists --------------------------------------------------------------------------- */
 
-void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize need, cx_usize max, cx_usize size) {
-    cx_usize n = *cap <= max / 2 ? *cap * 2 : max;
+__attribute__((noinline)) void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    /* No buffer can be bigger than half the address space. */
+    cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
+    if (len > max || extra > max - len) cx_panic_capacity();
+    cx_usize need = len + extra, old = *cap;
+    if (need <= old) return ptr;
+    cx_usize n = old <= max / 2 ? old * 2 : max;
     if (n < need) n = need;
     if (n < 4 && max >= 4) n = 4;
-    ptr = cx_realloc(ptr, *cap * size, n * size);
     *cap = n;
-    return ptr;
+    return cx_realloc(ptr, old * size, n * size);
 }
 
-void* cx_deque_grow(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+__attribute__((noinline)) void* cx_deque_grow_to(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
     cx_usize old = *cap;
-    ptr = cx_grow(ptr, cap, len, extra, size);
+    ptr = cx_grow_to(ptr, cap, len, extra, size);
     cx_usize n = *cap;
     if (n == old || *head + len <= old) return ptr;
     /* The ring wrapped: `a` elements from `head` to the old end, then `b` from the start. The

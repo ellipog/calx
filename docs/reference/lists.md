@@ -172,5 +172,19 @@ A list shows as `[1, 2, 3]`, the way Java's `ArrayList.toString` does, when its 
 - A `List<T>` is a struct of a pointer, a length and a capacity, named for its element type, such as `cx_list_i32`.
 - It grows by doubling, to at least 4 elements. Java's `ArrayList` grows by half instead, so code that must match Java's capacity uses the `java.ArrayList` that's designed but not built yet ([spec](../CALX_SPEC.md#collections-d27)).
 - The methods compile to inline C, so `push` is a length check and a store when there's room. Freeing a list frees each element, then the buffer.
+- Growing is a call to the runtime, out of line and marked cold, so a loop that pushes keeps its registers for itself. The call is given a copy of the capacity, not the list's own, so a list in a local keeps its pointer, length and capacity in registers, where no store to an element can change them. Given the capacity's address, the call would keep the list in memory, and since a byte, or an `i64` (the length's type), might be any of its fields as far as clang can tell, all three would be read back after every store (D158).
 - `xs.sort()` calls the runtime's sort for integers, `char`, `rune`, `bool`, and enums whose values go up as declared, which sort as their values. For any other element type, the file gets a sort of its own from the template `calx_sort.h`, with the type's comparison inlined.
 - The runtime's sorts are `calx_sort.c`, compiled and linked only into programs that sort integers. A debug build leaves their networks out and sorts short runs by insertion: unoptimized, the networks would be several times the code and no faster. `tools/sort_networks.py` writes the networks, Batcher's odd-even merge sorts, and checks them on lists of zeros and ones, as a network that sorts every one of those sorts every list: all of them up to 16 elements, and 200,000 at random of 32 (D157).
+
+A million values pushed onto a list, in ms, best of 50, from [`bench/push`](../../bench/push), on an i9-13900K pinned to one P-core:
+
+| | Calx | Calx before D158 | Rust |
+| --- | --- | --- | --- |
+| 4 bytes each, onto a new list in a local | 0.83 | 1.01 | 2.46 |
+| A byte each, onto a new list | 0.21 | 0.39 | 0.53 |
+| An `i64` each, onto a new list | 0.53 | 0.67 | 2.35 |
+| 4 bytes each, onto a list given to change | 0.73 | 0.73 | 1.71 |
+| A byte each, onto a list given | 0.18 | 0.18 | 0.44 |
+| An `i64` each, onto a list given | 0.25 | 0.25 | 0.58 |
+
+Rust's new lists lose most of their time to the Windows heap, which gives big blocks back to the system, so the next list's pages fault in again. Calx's allocator keeps them (D95). A list given to change is kept and cleared by the caller, which leaves the allocator out.
