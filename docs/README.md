@@ -11,6 +11,15 @@ These pages are the source for the Calx docs website. Until the site exists, rea
 
 In reading order:
 
+### Guide
+
+Learning Calx by building one small program, `stash`, which keeps count of items from commands it reads:
+
+1. [Getting started](guide/getting-started.md): the program, the `calx` command, values and variables, functions, loops, and the checker's errors
+2. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
+3. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
+4. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
+
 ### Reference
 
 What's built, one page per feature:
@@ -86,7 +95,6 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 1. [Calx spec](CALX_SPEC.md): every feature that is designed but not built yet
 2. [Tick-loop benchmark](benchmarks.md): the workload behind the Phase 3 performance gate
 
-The guide starts once enough of the language is built to write a real program.
 
 ## How the docs are organized
 

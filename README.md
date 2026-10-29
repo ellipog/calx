@@ -57,7 +57,7 @@ Acta board: aaen-studios/clx ([open](https://acta.aaenz.no/aaen-studios/clx)). T
 
 ## Docs
 
-Start at [docs/README.md](docs/README.md). The docs are written alongside the language, so they always describe what's actually built.
+Start at [docs/README.md](docs/README.md), or learn the language with the [guide](docs/guide/getting-started.md), which builds a small program step by step. The docs are written alongside the language, so they always describe what's actually built.
 
 ## License
 
