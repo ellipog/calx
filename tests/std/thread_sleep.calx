@@ -1,0 +1,16 @@
+// std.thread.sleep waits at least as long as it's asked.
+import std.thread.{sleep}
+import std.time.{Instant}
+
+fn main() {
+    let start = unsafe { Instant.now() }
+    unsafe {
+        sleep(30000000)
+    }
+    let waited = unsafe { Instant.now() }.nanos_since(start)
+    println("{waited >= 30000000} {waited < 2000000000}")    // out: true true
+    unsafe {
+        sleep(0)
+    }
+    println("done")    // out: done
+}

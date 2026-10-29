@@ -1,0 +1,11 @@
+// exit inside a `parallel for` panics: which iteration ended the program would depend on timing.
+import std.process.{exit}
+
+fn main() {
+    parallel for i in 0..4 {
+        if i == 2 {
+            exit(1)
+        }
+    }
+}
+// panic: <exit>: can't exit inside a `parallel for`

@@ -1014,6 +1014,39 @@ cx_u32 cx_process_processors(void) {
     return n > 0 ? (cx_u32)n : 1;
 }
 
+/* Ends the program now with `code`, as returning from `main` does but for the leak check: the
+ * terminal is put back, then what was printed is written. Inside a `parallel for`, which
+ * iteration got here first would depend on timing, so that's a panic. */
+void cx_process_exit(cx_u8 code) {
+    if (par_depth) {
+        cx_panic_begin("<exit>");
+        panic_text("can't exit inside a `parallel for`");
+        cx_panic_end();
+    }
+    take_exit();
+    flush_out();
+    fflush(stderr);
+    _Exit(code);
+}
+
+/* --- std.thread: sleeping ------------------------------------------------------------------ */
+
+/* Waits `ns` nanoseconds, or a little more: Windows rounds up to its timer's milliseconds. */
+void cx_thread_sleep(cx_u64 ns) {
+#ifdef _WIN32
+    cx_u64 ms = ns / 1000000 + (ns % 1000000 != 0);
+    while (ms) {
+        DWORD now = ms > 0xFFFFFFF0u ? 0xFFFFFFF0u : (DWORD)ms;
+        Sleep(now);
+        ms -= now;
+    }
+#else
+    struct timespec left = { (time_t)(ns / 1000000000u), (long)(ns % 1000000000u) };
+    while (nanosleep(&left, &left) != 0 && errno == EINTR) {
+    }
+#endif
+}
+
 void cx_print_u64(cx_u64 v) {
     char buf[24];
     int i = sizeof buf;

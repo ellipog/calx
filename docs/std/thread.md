@@ -55,6 +55,7 @@ A thread runs a task: a value whose type implements `Task`, which moves to the n
 | `interface Task { fn run(own self) }` | What a thread does. `run` owns the task, so the thread owns everything in it |
 | `Thread.spawn(task)` | Starts a thread that runs `task.run()`, and gives its `Thread`. Needs `unsafe`. The task's type must be `Send` |
 | `t.join()` | Waits for the thread to end, and uses `t` up |
+| `sleep(ns)` | Waits `ns` nanoseconds, or a little longer. Needs `unsafe` |
 
 Every thread's stack is 8 MiB, the main thread's too, on every system, so a program recurses as deep on Windows, Linux and macOS, and on any of its threads (D135). It's address space: memory is taken only as the stack grows into it. A call that would go past the end [panics](../reference/printing.md#panics), at `<stack>`, as any other bug does.
 
@@ -63,6 +64,8 @@ A `Thread` that's dropped without `join()` carries on by itself, and ends with t
 A panic on any thread ends the whole program, as one on the main thread does. Its message and [stack trace](../reference/printing.md#stack-traces) are the panicking thread's, and everything printed before it is written first. Lines printed from different threads never mix: each `println` is written whole.
 
 A `parallel for` on a thread that `Thread.spawn` started runs on that thread alone, so services don't compete with the program's own loops for the pool. It gives the same result anyway. `set_workers` panics on such a thread.
+
+`sleep` is for a thread that does something every so often, such as redrawing a status line each second. The system may run the thread late, and Windows rounds up to its timer's milliseconds, so it can wait longer than asked, never less. How long it waited depends on the clock, so it takes `unsafe`, as reading the clock does.
 
 ## Queues
 

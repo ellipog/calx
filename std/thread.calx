@@ -22,9 +22,24 @@
 /// - `share()` makes another end of the same queue, and `close()` drops one now.
 ///
 /// A queue can't be used, and a thread can't be joined, inside a `parallel for`.
+///
+/// `sleep(ns)` waits a while, as a thread that does something every second does.
 module std.thread
 
 /// What a thread does. `run` takes the task, which the thread owns from then on.
 pub interface Task {
     fn run(own self)
+}
+
+extern "C" {
+    fn cx_thread_sleep(ns: u64)
+}
+
+/// Waits `ns` nanoseconds, or a little longer, as a thread that does something every second
+/// does: the system may run it late, and Windows rounds up to its timer's milliseconds. How long
+/// it waited depends on the clock, so it's `unsafe` (D88).
+pub unsafe fn sleep(ns: u64) {
+    unsafe {
+        cx_thread_sleep(ns)
+    }
 }

@@ -1,0 +1,29 @@
+// std.process.exit ends the program at once with its status, from any thread: what was printed
+// is written, then what at_exit says, and nothing after the call runs.
+import std.process.{exit}
+import std.term.{at_exit}
+import std.thread.{Task}
+
+fn main() {
+    at_exit("put back\n")
+    println("started")    // out: started
+    var done = Receiver<i32>()
+    _ = unsafe { Thread.spawn(Ender { done: done.sender() }) }
+    _ = done.wait()
+    println("not reached")
+}
+
+struct Ender {
+    done: Sender<i32>
+}
+
+impl Task for Ender {
+    fn run(own self) {
+        println("ending")    // out: ending
+        exit(7)
+        var done = self.done
+        done.send(1)
+    }
+}
+// out: put back
+// status: 7

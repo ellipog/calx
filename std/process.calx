@@ -1,6 +1,6 @@
 /// This process: the memory it holds and may hold, the CPU time it has used, and the processors
 /// it may run on, for a program that shows how it's doing. Each changes as the program runs, or
-/// with the machine it runs on, so only `unsafe` code reads them (D88).
+/// with the machine it runs on, so only `unsafe` code reads them (D88). And `exit`, which ends it.
 module std.process
 
 extern "C" {
@@ -8,6 +8,7 @@ extern "C" {
     fn cx_process_memory_limit() -> u64
     fn cx_process_cpu_ns() -> u64
     fn cx_process_processors() -> u32
+    fn cx_process_exit(code: u8)
 }
 
 /// The bytes of this process's memory that are in RAM now: its working set on Windows, and its
@@ -33,4 +34,14 @@ pub unsafe fn cpu_time() -> u64 {
 /// affinity allows.
 pub unsafe fn processors() -> u32 {
     return unsafe { cx_process_processors() }
+}
+
+/// Ends the program now, with the status `code`, from any thread: the terminal is put back, as
+/// `std.term` says, and what was printed is written, as when `main` returns. Nothing else runs:
+/// other threads stop where they are, and no value is dropped. Inside a `parallel for` it panics,
+/// since which iteration got there first would depend on timing.
+pub fn exit(code: u8) {
+    unsafe {
+        cx_process_exit(code)
+    }
 }
