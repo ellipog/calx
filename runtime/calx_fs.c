@@ -6,7 +6,8 @@
  *
  * A file is opened, read or written, and closed through a handle, a HANDLE or a descriptor as an
  * i64, so std.fs reads a whole file in a few large reads without a size the file could outgrow.
- * `cx_fs_open`'s `write` is 0 to read, 1 to replace what the file holds, and 2 to add to its end.
+ * `cx_fs_open`'s `write` is 0 to read, 1 to replace what the file holds, 2 to add to its end, and 3
+ * to read and write in place, creating the file if it's missing and keeping what it holds.
  * Results with no fixed size, a directory's names or a new temporary directory's path, go to a
  * per-thread buffer that std.fs copies out.
  *
@@ -139,7 +140,8 @@ static void buf_add_wide(const wchar_t* w, int units) {
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     wchar_t* w = wide(path, len);
     if (!w) return -1;
-    HANDLE h = write == 2 ? CreateFileW(w, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    HANDLE h = write == 3 ? CreateFileW(w, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+             : write == 2 ? CreateFileW(w, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
              : write ? CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
                      : CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -164,7 +166,7 @@ cx_i64 cx_fs_size(cx_i64 h) {
     return (cx_i64)size.QuadPart;
 }
 
-/* Moves the next read to `at` bytes from the start. */
+/* Moves the next read or write to `at` bytes from the start. */
 cx_i32 cx_fs_seek(cx_i64 h, cx_u64 at) {
     LARGE_INTEGER to;
     to.QuadPart = (LONGLONG)at;
@@ -195,6 +197,15 @@ cx_i32 cx_fs_write(cx_i64 h, const cx_u8* from, size_t n) {
         }
         from += put;
         n -= put;
+    }
+    return 1;
+}
+
+/* Returns once what was written through the handle is on the disk, as Java's force(true). */
+cx_i32 cx_fs_sync(cx_i64 h) {
+    if (!FlushFileBuffers((HANDLE)(intptr_t)h)) {
+        fail_win(GetLastError());
+        return 0;
     }
     return 1;
 }
@@ -504,7 +515,8 @@ static char* cpath(const cx_u8* p, size_t n) {
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     char* s = cpath(path, len);
     if (!s) return -1;
-    int fd = write == 2 ? open(s, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666)
+    int fd = write == 3 ? open(s, O_RDWR | O_CREAT | O_CLOEXEC, 0666)
+             : write == 2 ? open(s, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666)
              : write ? open(s, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666) : open(s, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         fail_errno(errno);
@@ -530,7 +542,7 @@ cx_i64 cx_fs_size(cx_i64 h) {
     return (cx_i64)st.st_size;
 }
 
-/* Moves the next read to `at` bytes from the start. */
+/* Moves the next read or write to `at` bytes from the start. */
 cx_i32 cx_fs_seek(cx_i64 h, cx_u64 at) {
     if (lseek((int)h, (off_t)at, SEEK_SET) < 0) {
         fail_errno(errno);
@@ -560,6 +572,17 @@ cx_i32 cx_fs_write(cx_i64 h, const cx_u8* from, size_t n) {
         }
         from += put;
         n -= (size_t)put;
+    }
+    return 1;
+}
+
+/* Returns once what was written through the descriptor is on the disk, as Java's force(true). */
+cx_i32 cx_fs_sync(cx_i64 h) {
+    while (fsync((int)h) != 0) {
+        if (errno != EINTR) {
+            fail_errno(errno);
+            return 0;
+        }
     }
     return 1;
 }

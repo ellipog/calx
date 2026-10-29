@@ -1,11 +1,11 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, atomic renames, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
+description: Files and directories - whole files read and written, parts written in place, atomic renames, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
 ---
 
 # `std.fs`
 
-Files and directories. A file is read or written whole, and a program replaces one safely by writing another and renaming it over the first.
+Files and directories. A file is read or written whole, or in parts in place, and a program replaces one safely by writing another and renaming it over the first.
 
 ```calx
 import std.fs.{read_text, write, rename, make_dir_all, list, remove_dir_all, temp_dir}
@@ -32,8 +32,10 @@ fn main() {
 | --- | --- |
 | `read(path: String) -> List<u8> ! FsError` | The whole file |
 | `read_part(path: String, from: u64, n: usize) -> List<u8> ! FsError` | The `n` bytes from byte `from`, or fewer where the file ends first, without reading the rest of the file |
+| `read_parts(path: String, ranges: List<(u64, usize)>) -> List<List<u8>> ! FsError` | What `read_part` gives for each range, an offset and a length, in order, from one opening of the file |
 | `read_text(path: String) -> String? ! FsError` | The whole file as text, or `none` if it isn't UTF-8 |
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
+| `write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsError` | Writes each part's bytes at its offset, in order, creating the file if nothing's there and keeping the rest of what it holds. Past the end, the file grows, with zeros in a gap. With `sync`, it returns once the system says the bytes are on the disk, as Java's `FileChannel.force(true)` |
 | `append(path: String, bytes: List<u8>) ! FsError` | Adds `bytes` to the end of the file, creating it if nothing's there, after everything it held, even what another program added |
 | `metadata(path: String) -> Metadata ! FsError` | The size and modified time of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
 | `set_modified(path: String, at: Timestamp) ! FsError` | Sets when what's at the path was last modified, following links, as Java's `File.setLastModified` does, without changing what it holds |
@@ -51,6 +53,33 @@ fn main() {
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
+
+## Writing in place
+
+`write_parts` changes parts of a file without writing the rest, as a region file's chunks are saved: each chunk into sectors nothing else uses, then the header that points at them. Syncing between the two means a crash leaves either the old header, pointing at the old chunks, or the new one, pointing at chunks that are all on the disk.
+
+```calx
+import std.fs.{read, read_parts, write_parts, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    let path = "{dir}/r.0.0.mca"
+    let chunk: List<(u64, List<u8>)> = [(8, [0, 0, 0, 2, 2])]
+    write_parts(path, chunk, true)!
+    let header: List<(u64, List<u8>)> = [(0, [0, 0, 2, 1])]
+    write_parts(path, header, true)!
+    println("{read(path)!.len()}")    // out: 13
+    let ranges: List<(u64, usize)> = [(0, 4), (8, 5)]
+    for part in read_parts(path, ranges)! {
+        println("{part}")
+    }
+    // out: [0, 0, 2, 1]
+    // out: [0, 0, 0, 2, 2]
+    remove_dir_all(dir)!
+}
+```
+
+There's no handle to a file left open: each call opens the file, does all it was asked, and closes it, so nothing a program forgets can stay open. A batch of parts costs one opening, so a program writes a region's chunks together, not one call each.
 
 ## Paths
 

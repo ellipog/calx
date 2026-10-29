@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -115,6 +115,42 @@ fn main() {
         ok(x) => println("{x.len()}"),
         err(e) => println(describe(e)),    // out: not found
     }
+
+    // Several stretches from one opening, in the order asked, past the end too.
+    let ranges: List<(u64, usize)> = [(199995, 10), (0, 3), (150000, 2), (300000, 4)]
+    let parts = read_parts(b, ranges)!
+    println("{parts.len()} {parts[0].len()} {parts[1][2] == 14} {parts[2][1] == u8.wrap(150001 * 7)} {parts[3].len()}")    // out: 4 5 true true 0
+    match read_parts("{dir}/missing", ranges) {
+        ok(x) => println("{x.len()}"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+
+    // Parts written in place: a new file, then into the middle and past the end, keeping the
+    // rest, with zeros in the gap, and a later part over an earlier one.
+    let r = "{dir}/r.mca"
+    let first: List<(u64, List<u8>)> = [(2, [1, 2, 3]), (0, [9])]
+    write_parts(r, first, false)!
+    println("{read(r)!}")    // out: [9, 0, 1, 2, 3]
+    let second: List<(u64, List<u8>)> = [(3, [7, 7]), (8, [5]), (4, [6])]
+    write_parts(r, second, true)!
+    println("{read(r)!}")    // out: [9, 0, 1, 7, 6, 0, 0, 0, 5]
+    write_parts(r, [], true)!
+    println("{metadata(r)!.size}")    // out: 9
+    let big_parts: List<(u64, List<u8>)> = [(150000, [1, 2])]
+    write_parts(b, big_parts, true)!
+    let after = read_part(b, 149999, 4)!
+    println("{after[0] == u8.wrap(149999 * 7)} {after[1]} {after[2]} {after[3] == u8.wrap(150002 * 7)} {metadata(b)!.size}")    // out: true 1 2 true 200000
+    match write_parts("{dir}/no/r.mca", first, false) {
+        ok => println("written"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+    make_dir("{dir}/d")!
+    match write_parts("{dir}/d", first, false) {
+        ok => println("written"),
+        err(e) => println(describe(e)),    // out: is a directory
+    }
+    remove_dir("{dir}/d")!
+    remove_file(r)!
 
     // Rename, replacing a file that's there.
     write(a, hello)!

@@ -1,5 +1,6 @@
-/// Files and directories: whole files read and written, renames, sizes and modified times,
-/// directories made, listed and removed, real paths, and temporary directories.
+/// Files and directories: whole files read and written, parts of files read and written in
+/// place, renames, sizes and modified times, directories made, listed and removed, real paths,
+/// and temporary directories.
 module std.fs
 
 import std.time.{Timestamp}
@@ -10,6 +11,7 @@ extern "C" {
     fn cx_fs_read(h: i64, to: *u8, n: usize) -> i64
     fn cx_fs_seek(h: i64, at: u64) -> i32
     fn cx_fs_write(h: i64, from: *const u8, n: usize) -> i32
+    fn cx_fs_sync(h: i64) -> i32
     fn cx_fs_close(h: i64) -> i32
     fn cx_fs_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i32
     fn cx_fs_remove_file(path: *const u8, len: usize) -> i32
@@ -130,20 +132,51 @@ pub fn read_part(path: String, from: u64, n: usize) -> List<u8> ! FsError {
     if h < 0 {
         fail last_error()
     }
-    if unsafe { cx_fs_seek(h, from) } == 0 {
+    var out = List<u8>()
+    if not read_range(h, from, n, mut out) {
         let e = last_error()
         _ = unsafe { cx_fs_close(h) }
         fail e
     }
-    var out = List<u8>()
-    out.reserve(n)
-    while out.len() < n {
-        let at = out.len()
-        let got = unsafe { cx_fs_read(h, out.as_mut_ptr().add(at), n - at) }
-        if got < 0 {
+    _ = unsafe { cx_fs_close(h) }
+    return out
+}
+
+/// What `read_part` gives for each of `ranges`, a byte offset and a length, from one opening of
+/// the file at `path`: for reading many parts of one file, such as a region file's chunks.
+pub fn read_parts(path: String, ranges: List<(u64, usize)>) -> List<List<u8>> ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 0) }
+    if h < 0 {
+        fail last_error()
+    }
+    var parts = List<List<u8>>()
+    parts.reserve(ranges.len())
+    for (from, n) in ranges {
+        var out = List<u8>()
+        if not read_range(h, from, n, mut out) {
             let e = last_error()
             _ = unsafe { cx_fs_close(h) }
             fail e
+        }
+        parts.push(out)
+    }
+    _ = unsafe { cx_fs_close(h) }
+    return parts
+}
+
+// Reads up to `n` bytes from `from` onto `out`, stopping where the file ends. False if the
+// system failed, with why in `last_error`.
+fn read_range(h: i64, from: u64, n: usize, out: mut List<u8>) -> bool {
+    if unsafe { cx_fs_seek(h, from) } == 0 {
+        return false
+    }
+    out.reserve(n)
+    let start = out.len()
+    while out.len() - start < n {
+        let at = out.len()
+        let got = unsafe { cx_fs_read(h, out.as_mut_ptr().add(at), n - (at - start)) }
+        if got < 0 {
+            return false
         }
         if got == 0 {
             break
@@ -152,8 +185,7 @@ pub fn read_part(path: String, from: u64, n: usize) -> List<u8> ! FsError {
             out.set_len(at + usize.wrap(got))
         }
     }
-    _ = unsafe { cx_fs_close(h) }
-    return out
+    return true
 }
 
 /// The whole file at `path` as text, which fails with `none` inside `ok` if it isn't UTF-8.
@@ -189,6 +221,40 @@ pub fn append(path: String, bytes: List<u8>) ! FsError {
     }
     let wrote = unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) }
     let e = if wrote == 0 { some(last_error()) } else { none }
+    let closed = unsafe { cx_fs_close(h) }
+    if let first = e {
+        fail first
+    }
+    if closed == 0 {
+        fail last_error()
+    }
+}
+
+/// Writes each of `parts`, a byte offset and the bytes to put there, into the file at `path`, in
+/// order, creating the file if nothing is there and leaving the rest of what it holds as it was.
+/// A part that ends past the end makes the file longer, and one that starts past it leaves
+/// zeros between. A later part wins where two overlap.
+///
+/// With `sync`, it returns only once the system says the bytes are on the disk, as Java's
+/// `FileChannel.force(true)`, so nothing written after can reach the disk before them: a region
+/// file's chunks can be written, synced, and then the header that points at them. A crash part
+/// way through can leave any of the parts written or not.
+pub fn write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 3) }
+    if h < 0 {
+        fail last_error()
+    }
+    var wrote = true
+    for (at, bytes) in parts {
+        if unsafe { cx_fs_seek(h, at) } == 0 or unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) } == 0 {
+            wrote = false
+            break
+        }
+    }
+    if wrote and sync {
+        wrote = unsafe { cx_fs_sync(h) } != 0
+    }
+    let e = if not wrote { some(last_error()) } else { none }
     let closed = unsafe { cx_fs_close(h) }
     if let first = e {
         fail first
