@@ -1,11 +1,11 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, parts written in place, atomic renames, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
+description: Files and directories - whole files read and written, parts written in place, atomic renames, locks, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
 ---
 
 # `std.fs`
 
-Files and directories. A file is read or written whole, or in parts in place, and a program replaces one safely by writing another and renaming it over the first.
+Files and directories. A file is read or written whole, or in parts in place, and a program replaces one safely by writing another and renaming it over the first. A lock on a file marks something as in use, so two programs don't both change it.
 
 ```calx
 import std.fs.{read_text, write, rename, make_dir_all, list, remove_dir_all, temp_dir}
@@ -49,8 +49,10 @@ fn main() {
 | `kind(path: String) -> Kind? ! FsError` | What's at the path, without following a link, or `none` if nothing is |
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
 | `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
+| `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
+| `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
 
@@ -79,7 +81,32 @@ fn main() {
 }
 ```
 
-There's no handle to a file left open: each call opens the file, does all it was asked, and closes it, so nothing a program forgets can stay open. A batch of parts costs one opening, so a program writes a region's chunks together, not one call each.
+There's no handle to a file left open, apart from a lock's: each call opens the file, does all it was asked, and closes it, so nothing a program forgets can stay open. A batch of parts costs one opening, so a program writes a region's chunks together, not one call each.
+
+## Locking
+
+A program marks a folder as in use by locking a file in it, as a Minecraft server locks its world's `session.lock`, so a second server on the same world stops instead of both writing it. `try_lock` does just what vanilla's `DirectoryLock` does with Java's `FileChannel`: it writes `☃` at the start, syncs it, and takes the lock. So vanilla and a Calx program refuse each other's lock, on Windows and Linux.
+
+```calx
+import std.fs.{try_lock, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    let path = "{dir}/session.lock"
+    let snowman: List<u8> = [226, 152, 131]
+    let lock = try_lock(path, snowman)! else panic("in use")
+    match try_lock(path, snowman)! {
+        some(_) => println("locked twice"),
+        none => println("in use"),    // out: in use
+    }
+    lock.release()!
+    remove_dir_all(dir)!
+}
+```
+
+On Windows the lock is `LockFileEx`'s, which every program's reads and writes of the file respect, so another program can't even write the file while it's held, and `try_lock` gives `none` for that too. On Linux it's an open file description lock, which conflicts with the `fcntl` locks Java and most programs take, and which only programs that lock the file respect. Unlike an `fcntl` lock, it isn't let go when the program closes another handle to the file.
+
+A lock is held until `release`, and the system lets it go when the program ends, however it ends.
 
 ## Paths
 
@@ -141,13 +168,11 @@ fn main() {
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
-| Linux | `open`, `read` and `write`; `rename`; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
+| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 
 A program that doesn't import `std.fs` doesn't link it.
 
 `std.fs` is written in Calx: [std/fs.calx](../../std/fs.calx). The calls to the system are in the runtime, [runtime/calx_fs.c](../../runtime/calx_fs.c).
-
-Opening a file to read or write parts of it in place, as region files need, comes with Calcite's Phase 5.

@@ -13,6 +13,8 @@ extern "C" {
     fn cx_fs_write(h: i64, from: *const u8, n: usize) -> i32
     fn cx_fs_sync(h: i64) -> i32
     fn cx_fs_close(h: i64) -> i32
+    fn cx_fs_lock(path: *const u8, len: usize, bytes: *const u8, n: usize) -> i64
+    fn cx_fs_unlock(h: i64) -> i32
     fn cx_fs_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i32
     fn cx_fs_remove_file(path: *const u8, len: usize) -> i32
     fn cx_fs_remove_dir(path: *const u8, len: usize) -> i32
@@ -262,6 +264,43 @@ pub fn write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsE
     if closed == 0 {
         fail last_error()
     }
+}
+
+/// A lock on a file, which no other program, and no other `try_lock` in this one, can take while
+/// it's held, Java's `FileLock`. It's held until `release`, or until the program ends.
+pub struct FileLock {
+    handle: i64
+}
+
+impl FileLock {
+    /// Lets the lock go and closes the file.
+    pub fn release(own self) ! FsError {
+        if unsafe { cx_fs_unlock(self.handle) } == 0 {
+            fail last_error()
+        }
+    }
+}
+
+/// Locks the file at `path`, as a program marks a folder as in use: opens the file to write,
+/// creating it if nothing is there and keeping what it holds, writes `bytes` at its start and
+/// waits until they're on the disk, then takes an exclusive lock on the whole file without
+/// waiting. That's what Java's `FileChannel` does as vanilla takes a world's `session.lock`, so
+/// vanilla and a Calx program refuse each other's lock. `none` if another lock is held on the
+/// file, by this program or another.
+///
+/// On Windows it's `LockFileEx`'s lock, which every program's reads and writes of the file
+/// respect, so while another program holds one, even the write is refused, and that's `none`
+/// too. On Linux it's an open file description lock, which only programs that lock the file
+/// respect, and which conflicts with the `fcntl` locks Java and most programs take.
+pub fn try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError {
+    let h = unsafe { cx_fs_lock(path.as_ptr(), path.len(), bytes.as_ptr(), bytes.len()) }
+    if h == -2 {
+        return none
+    }
+    if h < 0 {
+        fail last_error()
+    }
+    return some(FileLock { handle: h })
 }
 
 /// Moves what's at `from` to `to`, replacing a file there. On one volume it's atomic: anything

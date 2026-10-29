@@ -84,7 +84,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, the typed queues they talk through, and sleeping
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
-18. [std.fs](std/fs.md): files and directories, read and written whole or in parts in place, with atomic renames, real paths and temporary directories
+18. [std.fs](std/fs.md): files and directories, read and written whole or in parts in place, with atomic renames, locks, real paths and temporary directories
 19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`

@@ -218,6 +218,59 @@ cx_i32 cx_fs_close(cx_i64 h) {
     return 1;
 }
 
+/* Opens the file to write, creating it if it's missing and keeping what it holds, writes `n` bytes
+ * at its start and syncs them, then locks all of it without waiting: Java's FileChannel.open with
+ * CREATE and WRITE, write, force(true) and tryLock, sharing the file as Java does. The range is
+ * Java's, 0 to Long.MAX_VALUE. The handle, -1 for an error, or -2 if another handle holds a lock
+ * on the file, which refuses the write too. */
+cx_i64 cx_fs_lock(const cx_u8* path, size_t len, const cx_u8* bytes, size_t n) {
+    wchar_t* w = wide(path, len);
+    if (!w) return -1;
+    HANDLE h = CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        DWORD attrs = GetFileAttributesW(w);
+        if (e == ERROR_ACCESS_DENIED && attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            fs_fail(FS_IS_DIR, (cx_i32)e);
+        } else {
+            fail_win(e);
+        }
+        free(w);
+        return -1;
+    }
+    free(w);
+    cx_i64 handle = (cx_i64)(intptr_t)h;
+    OVERLAPPED at;
+    memset(&at, 0, sizeof at);
+    DWORD e = 0;
+    if (!cx_fs_write(handle, bytes, n) || !cx_fs_sync(handle)) {
+        e = (DWORD)fs_err_code;
+    } else if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 0xFFFFFFFF, 0x7FFFFFFF, &at)) {
+        e = GetLastError();
+    }
+    if (e != 0) {
+        CloseHandle(h);
+        if (e == ERROR_LOCK_VIOLATION) return -2;
+        fail_win(e);
+        return -1;
+    }
+    return handle;
+}
+
+/* Lets the lock `cx_fs_lock` took go, and closes its handle. */
+cx_i32 cx_fs_unlock(cx_i64 h) {
+    OVERLAPPED at;
+    memset(&at, 0, sizeof at);
+    BOOL unlocked = UnlockFileEx((HANDLE)(intptr_t)h, 0, 0xFFFFFFFF, 0x7FFFFFFF, &at);
+    DWORD e = unlocked ? 0 : GetLastError();
+    if (!CloseHandle((HANDLE)(intptr_t)h) && unlocked) e = GetLastError();
+    if (e != 0) {
+        fail_win(e);
+        return 0;
+    }
+    return 1;
+}
+
 cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
     wchar_t* a = wide(from, from_len);
     if (!a) return 0;
@@ -593,6 +646,58 @@ cx_i32 cx_fs_close(cx_i64 h) {
         return 0;
     }
     return 1;
+}
+
+/* Opens the file to write, creating it if it's missing and keeping what it holds, writes `n` bytes
+ * at its start and syncs them, then locks all of it without waiting, as Java's FileChannel.open
+ * with CREATE and WRITE, write, force(true) and tryLock do. The lock is an open file description
+ * lock, which conflicts with the fcntl locks Java takes, as they do with each other, and which,
+ * unlike those, closing another descriptor of the file doesn't let go. The descriptor, -1 for an
+ * error, or -2 if another holds a lock on the file. */
+cx_i64 cx_fs_lock(const cx_u8* path, size_t len, const cx_u8* bytes, size_t n) {
+    char* s = cpath(path, len);
+    if (!s) return -1;
+    int fd = open(s, O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) {
+        fail_errno(errno);
+        free(s);
+        return -1;
+    }
+    free(s);
+    if (!cx_fs_write(fd, bytes, n) || !cx_fs_sync(fd)) {
+        close(fd);
+        return -1;
+    }
+    struct flock fl;
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+#ifdef F_OFD_SETLK
+    int cmd = F_OFD_SETLK;
+#else
+    int cmd = F_SETLK;
+#endif
+    while (fcntl(fd, cmd, &fl) != 0) {
+        int e = errno;
+        if (e == EINTR) continue;
+#ifdef F_OFD_SETLK
+        /* A kernel older than 3.15 has only the classic locks. */
+        if (e == EINVAL && cmd == F_OFD_SETLK) {
+            cmd = F_SETLK;
+            continue;
+        }
+#endif
+        close(fd);
+        if (e == EAGAIN || e == EACCES) return -2;
+        fail_errno(e);
+        return -1;
+    }
+    return fd;
+}
+
+/* Lets the lock `cx_fs_lock` took go, by closing its descriptor. */
+cx_i32 cx_fs_unlock(cx_i64 h) {
+    return cx_fs_close(h);
 }
 
 cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {

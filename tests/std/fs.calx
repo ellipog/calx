@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -198,6 +198,30 @@ fn main() {
     match real_path("{dir}/missing") {
         ok(p) => println(p),
         err(e) => println(describe(e)),    // out: not found
+    }
+
+    // A lock: refused while it's held, by this program too, and taken again once it's let go.
+    // What it writes goes at the start, and the rest of the file stays.
+    let l = "{dir}/session.lock"
+    write(l, [1, 2, 3, 4, 5])!
+    let snowman: List<u8> = [226, 152, 131]
+    let held = try_lock(l, snowman)! else panic("not locked")
+    match try_lock(l, snowman) {
+        ok(some(_)) => println("locked twice"),
+        ok(none) => println("refused"),    // out: refused
+        err(e) => println(describe(e)),
+    }
+    held.release()!
+    let again = try_lock(l, [])! else panic("not locked again")
+    again.release()!
+    let locked = read(l)!
+    println("{locked.len()} {locked[0]} {locked[2]} {locked[3]}")    // out: 5 226 131 4
+    let fresh = try_lock("{dir}/new.lock", snowman)! else panic("not locked new")
+    fresh.release()!
+    println("{read("{dir}/new.lock")!.len()}")    // out: 3
+    match try_lock("{dir}/x", snowman) {
+        ok(_) => println("locked a directory"),
+        err(e) => println(describe(e)),    // out: is a directory
     }
 
     // Everything goes.
