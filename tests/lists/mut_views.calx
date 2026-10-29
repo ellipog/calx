@@ -1,0 +1,271 @@
+// A function with a loop, given a list or a deque to change, or a struct that holds one, works
+// on a copy of it in a local, written back as it returns (D159). Every way out of a function
+// keeps what it changed: falling off its end, `return` with and without a value, a value that
+// changes the list, `fail`, `try`, and a call that's given the view again, by name, through a
+// function value or in a `parallel for`. Of a struct, only the fields the function names are
+// copied, unless it uses the struct whole.
+
+fn push_until(out: mut List<i32>, xs: List<i32>, stop: i32) {
+    for x in xs {
+        if x == stop {
+            return
+        }
+        out.push(x)
+    }
+    out.push(-1)
+}
+
+fn pop_after(out: mut List<i32>, n: i32) -> i32? {
+    for i in 0..n {
+        out.push(i)
+    }
+    return out.pop()
+}
+
+fn grown_len(out: mut List<i32>, n: i32) -> usize {
+    for i in 0..n {
+        out.push(i)
+    }
+    return out.len()
+}
+
+fn digits(out: mut List<u8>, s: str) ! String {
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b < 48 or b > 57 {
+            fail "not a digit at {i}"
+        }
+        out.push(b - 48)
+    }
+}
+
+fn two_numbers(out: mut List<u8>, a: str, b: str) -> usize ! String {
+    try digits(mut out, a)
+    for _ in 0..2 {
+        out.push(255)
+    }
+    try digits(mut out, b)
+    return out.len()
+}
+
+fn countdown(out: mut List<i32>, n: i32) {
+    if n == 0 {
+        return
+    }
+    for _ in 0..2 {
+        out.push(n)
+    }
+    countdown(mut out, n - 1)
+}
+
+fn push_one(out: mut List<i32>, v: i32) {
+    out.push(v)
+}
+
+fn through_value(out: mut List<i32>, f: fn(mut List<i32>, i32)) {
+    for v in 7..9 {
+        f(mut out, v)
+    }
+    out.push(i32.wrap(out.len()))
+}
+
+fn replace(out: mut List<i32>) {
+    out = [9, 9]
+    while out.len() < 3 {
+        out.push(9)
+    }
+}
+
+fn doubled(out: mut List<i64>) {
+    for i in 0..1000 {
+        out.push(i64(i))
+    }
+    parallel for i in 0..out.len() {
+        out[i] = out[i] * 2
+    }
+}
+
+fn first_even(out: mut List<i32>, xs: List<i32>) -> str {
+    for x in xs {
+        match x % 2 {
+            0 => {
+                out.push(x)
+                return "even"
+            }
+            _ => out.push(-x),
+        }
+    }
+    return "none"
+}
+
+fn twice<T: Copy>(out: mut List<T>, v: T) {
+    for _ in 0..2 {
+        out.push(v)
+    }
+}
+
+fn ends(d: mut Deque<i32>, n: i32) -> i32? {
+    for i in 0..n {
+        if i % 2 == 0 {
+            d.push_last(i)
+        } else {
+            d.push_first(i)
+        }
+    }
+    return d.pop_first()
+}
+
+fn feed(q: mut PriorityQueue<i32>, xs: List<i32>) -> i32? {
+    for x in xs {
+        q.push(x)
+    }
+    return q.pop()
+}
+
+struct Inner {
+    bytes: List<u8>
+    count: i32
+}
+
+struct Writer {
+    data: List<u8>
+    problem: String?
+    written: i32
+    inner: Inner
+}
+
+impl Writer {
+    // Names only `data`, so only it is copied.
+    fn bytes(mut self, xs: List<u8>) {
+        for x in xs {
+            self.data.push(x)
+        }
+    }
+
+    // Gives itself to another method, so it's copied whole.
+    fn many(mut self, xs: List<u32>) -> i32 {
+        for x in xs {
+            self.bytes([u8.wrap(x >> 8), u8.wrap(x)])
+            self.written += 1
+        }
+        if self.data.len() > 6 {
+            self.problem = some(String("long"))
+        }
+        return self.written
+    }
+
+    // A field of a field.
+    fn nested(mut self, n: i32) {
+        for i in 0..n {
+            self.inner.bytes.push(u8.wrap(i))
+        }
+        self.inner.count += n
+    }
+}
+
+fn encode(w: mut Writer, xs: List<u32>) ! String {
+    for x in xs {
+        if x > 0xFFFF {
+            fail "too big: {x}"
+        }
+        w.data.push(u8.wrap(x >> 8))
+        w.data.push(u8.wrap(x))
+    }
+}
+
+struct Tally {
+    seen: List<i32>
+    counts: Map<i32, i32>
+}
+
+// Holds a map, so it isn't copied, and works as it did.
+fn tally(t: mut Tally, xs: List<i32>) {
+    for x in xs {
+        t.seen.push(x)
+        if t.counts.contains(x) {
+            t.counts[x] += 1
+        } else {
+            t.counts.insert(x, 1)
+        }
+    }
+}
+
+fn main() {
+    var a = List<i32>()
+    push_until(mut a, [1, 2, 3, 4], 3)
+    println("{a}")                          // out: [1, 2]
+    push_until(mut a, [5, 6], 0)
+    println("{a}")                          // out: [1, 2, 5, 6, -1]
+
+    var p = List<i32>()
+    let last = pop_after(mut p, 4)
+    println("{last} {p}")                   // out: some(3) [0, 1, 2]
+
+    var g = List<i32>()
+    println("{grown_len(mut g, 100)} {g.len()} {g[99]}")   // out: 100 100 99
+
+    var d = List<u8>()
+    match digits(mut d, "12x4") {
+        ok => println("ok"),
+        err(e) => println("{e}: {d}"),     // out: not a digit at 2: [1, 2]
+    }
+    var e = List<u8>()
+    match two_numbers(mut e, "34", "5") {
+        ok(n) => println("{n}: {e}"),      // out: 5: [3, 4, 255, 255, 5]
+        err(m) => println("{m}"),
+    }
+    var f = List<u8>()
+    match two_numbers(mut f, "6", "7y") {
+        ok(n) => println("{n}"),
+        err(m) => println("{m}: {f}"),     // out: not a digit at 1: [6, 255, 255, 7]
+    }
+
+    var c = List<i32>()
+    countdown(mut c, 3)
+    println("{c}")                          // out: [3, 3, 2, 2, 1, 1]
+
+    var v = List<i32>()
+    through_value(mut v, push_one)
+    println("{v}")                          // out: [7, 8, 2]
+
+    var r: List<i32> = [1, 2, 3, 4]
+    replace(mut r)
+    println("{r}")                          // out: [9, 9, 9]
+
+    var big = List<i64>()
+    doubled(mut big)
+    println("{big.len()} {big[0]} {big[999]}")   // out: 1000 0 1998
+
+    var k = List<i32>()
+    let k1 = first_even(mut k, [3, 5, 4, 7])
+    let k2 = first_even(mut k, [1])
+    println("{k1} {k2} {k}")                // out: even none [-3, -5, 4, -1]
+
+    var t = List<rune>()
+    twice(mut t, 'x')
+    println("{t}")                          // out: [x, x]
+
+    var q = Deque<i32>()
+    let first = ends(mut q, 6)
+    println("{first} {q}")                  // out: some(5) [3, 1, 0, 2, 4]
+
+    var h = PriorityQueue<i32>()
+    let least = feed(mut h, [5, 3, 8, 1])
+    println("{least} {h.len()}")            // out: some(1) 3
+
+    var w = Writer { data: List<u8>(), problem: some(String("none yet")), written: 7, inner: Inner { bytes: [9u8], count: 1 } }
+    w.bytes([1u8, 2u8, 3u8])
+    println("{w.data} {w.problem} {w.written}")   // out: [1, 2, 3] some(none yet) 7
+    let n = w.many([0x0405u32, 0x0607u32])
+    println("{n} {w.data} {w.problem}")     // out: 9 [1, 2, 3, 4, 5, 6, 7] some(long)
+    w.nested(3)
+    println("{w.inner.bytes} {w.inner.count} {w.data.len()}")   // out: [9, 0, 1, 2] 4 7
+    match encode(mut w, [0x0809u32, 0x10000u32, 1u32]) {
+        ok => println("ok"),
+        err(m) => println("{m}: {w.data.len()} {w.written}"),   // out: too big: 65536: 9 9
+    }
+
+    var ty = Tally { seen: List<i32>(), counts: Map<i32, i32>() }
+    tally(mut ty, [2, 3, 2])
+    println("{ty.seen} {ty.counts[2]} {ty.counts.len()}")   // out: [2, 3, 2] 2 2
+}

@@ -1,7 +1,9 @@
 // Pushing onto a list, as a packet encoder does: bench/push/push.rs is the same loops in Rust.
 // Each loop goes over a million values, once into a new list in a local, which it returns, and
-// once into a list it's given to change, which the caller keeps and clears, so no time goes to
-// the allocator.
+// twice into a list it's given to change, which the caller keeps and clears, so no time goes to
+// the allocator: once called directly, so clang can put it inside the caller, and once through
+// a function value it can't see through, as a function called from many places is kept apart.
+import std.hint.{black_box}
 import std.time.{Instant}
 
 // Each value as 4 bytes, big-endian, as an encoder writes an int.
@@ -67,6 +69,38 @@ fn widen_into(out: mut List<i64>, xs: List<i32>) {
     }
 }
 
+// A writer as Calcite's packets use, a struct that holds the bytes, with a method for each kind
+// of value: each value as an int and then as a VarInt of its low 14 bits, so 5 or 6 bytes.
+struct Writer {
+    data: List<u8>
+    problem: String?
+}
+
+impl Writer {
+    fn i32(mut self, v: i32) {
+        self.data.push(u8.wrap(v >>> 24))
+        self.data.push(u8.wrap(v >>> 16))
+        self.data.push(u8.wrap(v >>> 8))
+        self.data.push(u8.wrap(v))
+    }
+
+    fn varint(mut self, v: i32) {
+        var x = v
+        while (x & -128) != 0 {
+            self.data.push(u8.wrap((x & 0x7F) | 0x80))
+            x >>>= 7
+        }
+        self.data.push(u8.wrap(x))
+    }
+}
+
+fn encode(w: mut Writer, xs: List<i32>) {
+    for x in xs {
+        w.i32(x)
+        w.varint(x & 0x3FFF)
+    }
+}
+
 fn main() {
     var xs = List<i32>()
     var s = 1u64
@@ -74,7 +108,12 @@ fn main() {
         s = s * 6364136223846793005u64 + 1442695040888963407u64
         xs.push(i32.wrap(s >> 32))
     }
-    var best = [1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0]
+    var best = [1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0]
+    let be32_far = black_box(be32_into)
+    let varint_far = black_box(varint_into)
+    let widen_far = black_box(widen_into)
+    let encode_far = black_box(encode)
+    var w = Writer { data: List<u8>(), problem: none }
     var a = List<u8>()
     var b = List<u8>()
     var c = List<i64>()
@@ -96,15 +135,33 @@ fn main() {
         c.clear()
         widen_into(mut c, xs)
         let t6 = unsafe { Instant.now() }
+        a.clear()
+        be32_far(mut a, xs)
+        let t7 = unsafe { Instant.now() }
+        b.clear()
+        varint_far(mut b, xs)
+        let t8 = unsafe { Instant.now() }
+        c.clear()
+        widen_far(mut c, xs)
+        let t9 = unsafe { Instant.now() }
+        w.data.clear()
+        encode_far(mut w, xs)
+        let t10 = unsafe { Instant.now() }
         best[0] = best[0].min(t1.secs_since(t0) * 1000.0)
         best[1] = best[1].min(t2.secs_since(t1) * 1000.0)
         best[2] = best[2].min(t3.secs_since(t2) * 1000.0)
         best[3] = best[3].min(t4.secs_since(t3) * 1000.0)
         best[4] = best[4].min(t5.secs_since(t4) * 1000.0)
         best[5] = best[5].min(t6.secs_since(t5) * 1000.0)
-        total += na.len() + nb.len() + nc.len() + a.len() + b.len() + c.len()
+        best[6] = best[6].min(t7.secs_since(t6) * 1000.0)
+        best[7] = best[7].min(t8.secs_since(t7) * 1000.0)
+        best[8] = best[8].min(t9.secs_since(t8) * 1000.0)
+        best[9] = best[9].min(t10.secs_since(t9) * 1000.0)
+        total += na.len() + nb.len() + nc.len() + a.len() + b.len() + c.len() + w.data.len()
     }
     println("local: be32 {best[0]} ms, varint {best[1]} ms, widen {best[2]} ms")
     println("given: be32 {best[3]} ms, varint {best[4]} ms, widen {best[5]} ms")
+    println("given, not inlined: be32 {best[6]} ms, varint {best[7]} ms, widen {best[8]} ms")
+    println("writer, not inlined: {best[9]} ms")
     println("{total}")
 }

@@ -2601,8 +2601,10 @@ $dropall    m->len = 0;
             const Local* l = f->params[i].local;
             if (i) s += ", ";
             if (l->is_view) {
-                // D48: views never overlap, so they can be `restrict`.
-                s += (l->mode == ParamMode::mut ? "" : "const ") + ctype(l->type) + "* restrict " + local_name(l);
+                // D48: views never overlap, so they can be `restrict`. A copied view's pointer has
+                // a name of its own, and its name is the copy's.
+                s += (l->mode == ParamMode::mut ? "" : "const ") + ctype(l->type) + "* restrict " +
+                     (copied(f, l).empty() ? "" : "cx_in_") + local_name(l);
             } else {
                 s += ctype(l->type) + " " + local_name(l);
             }
@@ -2694,8 +2696,21 @@ $dropall    m->len = 0;
         uses_ = &o.uses;
         out_ = " {\n";
         indent_ = 1;
+        copies_.clear();
         for (const Param& p : f->params) {
-            if (p.local->is_view) line("CX_VIEW(" + local_name(p.local) + ");");
+            if (!p.local->is_view) continue;
+            std::vector<std::string> paths = copied(f, p.local);
+            if (paths.empty()) {
+                line("CX_VIEW(" + local_name(p.local) + ");");
+                continue;
+            }
+            std::string v = local_name(p.local), t = ctype(p.local->type);
+            line("CX_VIEW(cx_in_" + v + ");");
+            std::string s = t + " cx_cp_" + v + ";";
+            for (const std::string& q : paths) s += " cx_cp_" + v + q + " = cx_in_" + v + "->" + q.substr(1) + ";";
+            line(s);
+            line(t + "* const " + v + " = &cx_cp_" + v + ";");
+            copies_.push_back({v, std::move(paths)});
         }
         if (is_black_box(f)) {
             // An empty instruction that clang must assume reads and writes the argument, and any
@@ -2703,6 +2718,7 @@ $dropall    m->len = 0;
             for (const Param& p : f->params) line("__asm__ volatile(\"\" : : \"r\"(&" + local_name(p.local) + ") : \"memory\");");
         }
         stmts(f->body, /*value=*/false);
+        write_back();
         if (f->result_type->is_result && f->result_type->item->variants[0].types.empty()) {
             line("return " + variant_value(f->result_type, 0, {}) + ";");
         }
@@ -2712,6 +2728,141 @@ $dropall    m->len = 0;
         o.helpers.swap(helpers_);
         uses_ = nullptr;
         return o;
+    }
+
+    // What `f` copies of its `mut` view `l` into a local, which it works on and writes back as it
+    // returns: the paths of the scalars it copies, or none. A function with a loop copies a view
+    // of a list or a deque, or the fields it names of a struct, up to 8 scalars, when they hold a
+    // list or a deque, so clang keeps the list's pointer, length and capacity in registers:
+    // through the view, it reads them back after every store of a byte or an `i64`, since either
+    // could be one of them, even though the view is `restrict` (D159). Nothing else sees the
+    // value until the function returns, since `mut` views never overlap (D48) and a panic ends
+    // the program.
+    //
+    // A function without a loop reads a field back at most once for each store, which costs
+    // about what writing the copy back does, so it isn't copied. The copy is made a scalar at a
+    // time, since clang keeps a part of a struct that's only ever copied whole, such as an
+    // optional the function doesn't look at, in memory, and copies it again at each call to a
+    // method it puts inline, which made a writer's loop twice as slow. And fields the function
+    // doesn't name aren't copied, since writing back one it didn't change still costs a store.
+    std::vector<std::string> copied(const Item* f, const Local* l) const {
+        std::vector<std::string> paths;
+        if (!l->is_view || l->mode != ParamMode::mut || is_black_box(f) || !f->body) return paths;
+        const Type* t = l->type;
+        if (t->kind != TypeKind::list && t->kind != TypeKind::deque && t->kind != TypeKind::struct_) return paths;
+        ViewUse u;
+        if (t->kind == TypeKind::struct_) u.fields.assign(t->item->fields.size(), false);
+        view_use(f->body, l, u);
+        if (!u.loop) return paths;
+        bool list = false, ok = true;
+        if (t->kind != TypeKind::struct_ || u.whole) {
+            ok = scalars(t, "", paths, list);
+        } else {
+            for (std::size_t i = 0; i < u.fields.size() && ok; i++) {
+                const FieldDecl& fd = t->item->fields[i];
+                if (u.fields[i]) ok = fd.resolved && scalars(fd.resolved, "." + ident(fd.name), paths, list);
+            }
+        }
+        if (!ok || !list || paths.size() > 8) paths.clear();
+        return paths;
+    }
+
+    // How a function's body uses one of its views: whether it names the view on its own, as when
+    // it gives the view to a call, or which of its fields it names, as `self.data`; and whether
+    // the body has a loop.
+    struct ViewUse {
+        bool whole = false;
+        bool loop = false;
+        std::vector<bool> fields;
+    };
+
+    void view_use(Expr* e, const Local* l, ViewUse& u) const {
+        auto is_l = [&](const Expr* x) { return (x->kind == ExprKind::name || x->kind == ExprKind::self) && x->local == l; };
+        switch (e->kind) {
+            case ExprKind::name: case ExprKind::self:
+                if (e->local == l) u.whole = true;
+                return;
+            case ExprKind::field:
+                if (e->lhs && is_l(e->lhs)) {
+                    if (!e->is_tuple_index && e->field_index < u.fields.size()) {
+                        u.fields[e->field_index] = true;
+                    } else {
+                        u.whole = true;
+                    }
+                    return;
+                }
+                break;
+            case ExprKind::call:
+                // A method's receiver, as `self` in `self.grow()`, is used whole, not as a field.
+                if (e->callee && e->callee->kind == ExprKind::field) {
+                    if (e->callee->lhs) view_use(e->callee->lhs, l, u);
+                    for (Arg& a : e->args) view_use(a.value, l, u);
+                    if (e->trailing) view_use(e->trailing, l, u);
+                    return;
+                }
+                break;
+            case ExprKind::loop: u.loop = true; break;
+            default: break;
+        }
+        each_child(e, [&](Expr* x) { view_use(x, l, u); }, [&](Block* b) { view_use(b, l, u); });
+    }
+
+    void view_use(Block* b, const Local* l, ViewUse& u) const {
+        for (Stmt* s : b->stmts) {
+            if (s->kind == StmtKind::while_ || s->kind == StmtKind::for_) u.loop = true;
+            if (s->range_of) view_use(s->range_of, l, u);  // `m.range(a..b)`, which `each_child` leaves out
+        }
+        each_child(b, [&](Expr* x) { view_use(x, l, u); }, [&](Block* c) { view_use(c, l, u); });
+    }
+
+    // Adds the paths from a value of `t` to the scalars it's made of in C, such as `.data.len`,
+    // and says whether it could: a map, for one, isn't broken down. `list` is set when the value
+    // holds a list or a deque.
+    bool scalars(const Type* t, const std::string& at, std::vector<std::string>& paths, bool& list) const {
+        auto add = [&](std::initializer_list<const char*> fields) {
+            for (const char* f : fields) paths.push_back(at + "." + f);
+            return true;
+        };
+        switch (t->kind) {
+            case TypeKind::bool_: case TypeKind::int_: case TypeKind::char_: case TypeKind::rune:
+            case TypeKind::float_: case TypeKind::pointer: case TypeKind::fn_:
+                paths.push_back(at);
+                return true;
+            case TypeKind::enum_:
+                if (t->has_data) return false;
+                paths.push_back(at);
+                return true;
+            case TypeKind::str: return add({"ptr", "len"});
+            case TypeKind::string: return add({"ptr", "len", "cap"});
+            case TypeKind::list:
+                list = true;
+                return t->arena_list ? add({"ptr", "len", "cap", "arena"}) : add({"ptr", "len", "cap"});
+            case TypeKind::deque:
+                list = true;
+                return add({"ptr", "len", "cap", "head"});
+            case TypeKind::optional: return scalars(t->elem, at + ".v", paths, list) && add({"has"});
+            case TypeKind::struct_:
+                for (const FieldDecl& fd : t->item->fields) {
+                    if (!fd.resolved || !scalars(fd.resolved, at + "." + ident(fd.name), paths, list)) return false;
+                }
+                return true;
+            case TypeKind::tuple:
+                for (std::size_t i = 0; i < t->elems.size(); i++) {
+                    if (!scalars(t->elems[i], at + ".f" + std::to_string(i), paths, list)) return false;
+                }
+                return true;
+            default: return false;
+        }
+    }
+
+    // Writes each copied view back, as the function returns.
+    void write_back() {
+        if (in_par_body_) return;
+        for (const Copy& c : copies_) {
+            std::string s;
+            for (const std::string& p : c.paths) s += (s.empty() ? "" : " ") + ("cx_in_" + c.name + "->" + p.substr(1)) + " = cx_cp_" + c.name + p + ";";
+            line(s);
+        }
     }
 
     // `std.hint.black_box`, or an instance of it. Its Calx body says what it gives back; the
@@ -2895,6 +3046,7 @@ $dropall    m->len = 0;
         std::string body = capture([&] {
             if (!s->value && !rt->is_result) {
                 exit_drops(0, s->drops);
+                write_back();
                 line("return;");
             } else {
                 // Worked out first, since it can need temporaries of its own. In a function that
@@ -2908,10 +3060,13 @@ $dropall    m->len = 0;
                 } else {
                     v = value(s->value, rt);
                 }
-                if (exit_needs_drops(0, s->drops)) {
+                // The value is worked out before a copied view is written back, since it can
+                // change the copy.
+                if (exit_needs_drops(0, s->drops) || !copies_.empty()) {
                     std::string r = tmp();
                     line(ctype(fn_->result_type) + " " + r + " = " + v + ";");
                     exit_drops(0, s->drops);
+                    write_back();
                     line("return " + r + ";");
                 } else {
                     line("return " + v + ";");
@@ -4397,6 +4552,7 @@ $dropall    m->len = 0;
             }
             line(ctype(fr) + " " + r + " = " + variant_value(fr, 1, {err}) + ";");
             exit_drops(0, e->exit_drops);
+            write_back();
             line("return " + r + ";");
         });
         indent_--;
@@ -5403,6 +5559,11 @@ $dropall    m->len = 0;
     std::uint32_t tmp_ = 0;
     Item* fn_ = nullptr;
     bool in_par_body_ = false;  // emitting a `parallel for` body's own C function
+    struct Copy {
+        std::string name;                // the view's, which is the copy's pointer's
+        std::vector<std::string> paths;  // its scalars, from `copied`
+    };
+    std::vector<Copy> copies_;  // the function's copied `mut` views, written back as it returns
     std::unordered_map<std::uint32_t, std::string> abs_paths_;
     std::unordered_map<const Item*, FnOut> fns_;
     std::unordered_map<const Item*, ConstOut> consts_;

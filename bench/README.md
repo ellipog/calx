@@ -102,7 +102,7 @@ Both print a sum of the results, which must agree to the last digit or two. Each
 
 ## Pushing onto a list
 
-[`push/push.calx`](push/push.calx) pushes a million values onto a list three ways: 4 bytes each, big-endian, as a packet encoder writes an `int`; one byte each, as it writes a VarInt below 128; and an `i64` each, whose type is the list's length's. Each loop runs once onto a new list in a local, which it returns, and once onto a list it's given to change, which the caller keeps and clears, so no time goes to the allocator. Each time is the best of 50. [`push/push.rs`](push/push.rs) is the same loops with `Vec`, built as the tick benchmark's Rust reference is.
+[`push/push.calx`](push/push.calx) pushes a million values onto a list three ways: 4 bytes each, big-endian, as a packet encoder writes an `int`; one byte each, as it writes a VarInt below 128; and an `i64` each, whose type is the list's length's. Each loop runs once onto a new list in a local, which it returns, and twice onto a list it's given to change, which the caller keeps and clears, so no time goes to the allocator: once called directly, so clang can put it inside the caller, and once through a function value it can't see through (`std.hint.black_box`), as a function called from many places is kept apart. A last loop writes each value as an int and then as a VarInt through a writer's methods, a struct that holds the list, as Calcite's packets do. Each time is the best of 50. [`push/push.rs`](push/push.rs) is the same loops with `Vec`, built as the tick benchmark's Rust reference is.
 
 ```sh
 calx build --release -o push bench/push/push.calx

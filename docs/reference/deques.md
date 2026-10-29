@@ -131,7 +131,7 @@ fn main() {
 
 - A `Deque<T>` is a struct of a pointer, a length, a capacity and the index of the first element, named for its element type, such as `cx_deque_i64`. The first three are a [list's](lists.md#in-c), so a literal is built the same way.
 - The element `k` after the first is at `head + k`, less the capacity when that's past the end: an add and a compare, never a division. The capacity needn't be a power of two, so a literal's buffer is exactly its length.
-- It grows by doubling, to at least 4 elements, as a list does. When the ring has wrapped, the shorter of its two runs moves, so the elements stay in one ring. Growing is a cold call given copies of the head and the capacity, as a list's is given a copy of its capacity, so a deque in a local keeps its fields in registers ([lists](lists.md#in-c), D158).
+- It grows by doubling, to at least 4 elements, as a list does. When the ring has wrapped, the shorter of its two runs moves, so the elements stay in one ring. Growing is a cold call given copies of the head and the capacity, as a list's is given a copy of its capacity, so a deque in a local keeps its fields in registers ([lists](lists.md#in-c), D158). A function with a loop that's given a deque to change works on a copy of it, as one given a list does (D159).
 - The methods compile to inline C, so `push_last` is a length check, an add, a compare and a store when there's room.
 - A loop goes over at most two runs, from the first element to the end of the buffer, then from its start, each a plain loop that clang can unroll and vectorize.
 - `copy()` gives a deque whose ring starts at 0, with exactly room for its elements.

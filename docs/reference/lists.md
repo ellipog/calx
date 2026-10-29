@@ -173,18 +173,23 @@ A list shows as `[1, 2, 3]`, the way Java's `ArrayList.toString` does, when its 
 - It grows by doubling, to at least 4 elements. Java's `ArrayList` grows by half instead, so code that must match Java's capacity uses the `java.ArrayList` that's designed but not built yet ([spec](../CALX_SPEC.md#collections-d27)).
 - The methods compile to inline C, so `push` is a length check and a store when there's room. Freeing a list frees each element, then the buffer.
 - Growing is a call to the runtime, out of line and marked cold, so a loop that pushes keeps its registers for itself. The call is given a copy of the capacity, not the list's own, so a list in a local keeps its pointer, length and capacity in registers, where no store to an element can change them. Given the capacity's address, the call would keep the list in memory, and since a byte, or an `i64` (the length's type), might be any of its fields as far as clang can tell, all three would be read back after every store (D158).
+- A function with a loop that's given a list to change works on a copy of it in a local, which it writes back as it returns. Through the view, clang reads the fields back after every store, `restrict` or not, since as far as it can tell the list's buffer might be where the list itself is. Calx knows nothing else touches the list until the function returns: views can't be stored or returned, `mut` views never overlap (D48), and a panic ends the program. Writing back is a store for each field, which only a loop wins back, so a function without one uses the view. A struct that holds a list is copied a scalar at a time: the fields the function names, or all of it if it's given whole to a call or is a method's receiver that calls another, and only up to 8 scalars. Copied as one value, a part that's only ever copied, such as an optional string, would stay in memory and be copied again by each method clang puts inside the loop (D159).
 - `xs.sort()` calls the runtime's sort for integers, `char`, `rune`, `bool`, and enums whose values go up as declared, which sort as their values. For any other element type, the file gets a sort of its own from the template `calx_sort.h`, with the type's comparison inlined.
 - The runtime's sorts are `calx_sort.c`, compiled and linked only into programs that sort integers. A debug build leaves their networks out and sorts short runs by insertion: unoptimized, the networks would be several times the code and no faster. `tools/sort_networks.py` writes the networks, Batcher's odd-even merge sorts, and checks them on lists of zeros and ones, as a network that sorts every one of those sorts every list: all of them up to 16 elements, and 200,000 at random of 32 (D157).
 
 A million values pushed onto a list, in ms, best of 50, from [`bench/push`](../../bench/push), on an i9-13900K pinned to one P-core:
 
-| | Calx | Calx before D158 | Rust |
+| | Calx | Calx before D159 | Rust |
 | --- | --- | --- | --- |
-| 4 bytes each, onto a new list in a local | 0.83 | 1.01 | 2.46 |
-| A byte each, onto a new list | 0.21 | 0.39 | 0.53 |
-| An `i64` each, onto a new list | 0.53 | 0.67 | 2.35 |
-| 4 bytes each, onto a list given to change | 0.73 | 0.73 | 1.71 |
-| A byte each, onto a list given | 0.18 | 0.18 | 0.44 |
-| An `i64` each, onto a list given | 0.25 | 0.25 | 0.58 |
+| 4 bytes each, onto a new list in a local | 0.92 | 0.92 | 2.52 |
+| A byte each, onto a new list | 0.22 | 0.22 | 0.55 |
+| An `i64` each, onto a new list | 0.84 | 0.84 | 2.45 |
+| 4 bytes each, onto a list given to change | 0.79 | 1.70 | 1.71 |
+| A byte each, onto a list given | 0.18 | 0.18 | 0.45 |
+| An `i64` each, onto a list given | 0.31 | 0.30 | 0.64 |
+| 4 bytes each, onto a list given, not inlined | 0.79 | 1.70 | 1.71 |
+| A byte each, not inlined | 0.22 | 0.44 | 0.45 |
+| An `i64` each, not inlined | 0.33 | 0.60 | 0.62 |
+| A writer's methods, an int and a VarInt each, not inlined | 1.15 | 1.67 | 2.57 |
 
-Rust's new lists lose most of their time to the Windows heap, which gives big blocks back to the system, so the next list's pages fault in again. Calx's allocator keeps them (D95). A list given to change is kept and cleared by the caller, which leaves the allocator out.
+D158 took the first three from 1.01, 0.39 and 0.67. Rust's new lists lose most of their time to the Windows heap, which gives big blocks back to the system, so the next list's pages fault in again. Calx's allocator keeps them (D95). A list given to change is kept and cleared by the caller, which leaves the allocator out. Called directly, the byte and `i64` loops go inside the caller, where the list is a local, so D159 doesn't change them; the 4-byte loop clang keeps apart, now that it's also called through a function value. The writer is a struct of a list and an optional string, with a method for each kind of value, as Calcite's packets use.
