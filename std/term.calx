@@ -1,0 +1,81 @@
+/// The terminal: its size, standard input a key at a time, and putting it back as the program
+/// ends.
+///
+/// A program that draws on the terminal, such as a status line that stays at the bottom while
+/// output scrolls above it, reads the terminal's size, puts standard input in raw mode to read
+/// each key as it's typed and draw it itself, and says with `at_exit` what undoes what it drew.
+/// However the program ends, returning from `main`, at a panic, or at a signal from outside such
+/// as SIGTERM on POSIX or Ctrl+Break on Windows, that text is written and standard input is put
+/// back as it was, so the terminal is never left broken.
+module std.term
+
+extern "C" {
+    fn cx_term_size() -> u64
+    fn cx_term_raw() -> u32
+    fn cx_term_cooked()
+    fn cx_term_at_exit(text: *const u8, n: usize)
+    fn cx_term_read(to: *u8, n: usize) -> usize
+}
+
+/// How big a terminal is, in character cells.
+pub struct Size {
+    pub columns: u32
+    pub rows: u32
+}
+
+/// The size of the terminal standard output is, or `none` if it isn't one. On Windows it's the
+/// console's window, not its buffer, which can be taller. It changes as the window does, so a
+/// program that draws asks again before it draws.
+pub unsafe fn size() -> Size? {
+    let packed = unsafe { cx_term_size() }
+    if packed == 0 {
+        return none
+    }
+    return some(Size { columns: u32.wrap(packed >> 32), rows: u32.wrap(packed & 0xffffffff) })
+}
+
+/// Puts standard input in raw mode: each key comes as it's typed, without the terminal echoing it,
+/// editing a line, or turning Ctrl+C into a signal, until `cooked()` or the end of the program.
+/// Keys come as a terminal sends them: text as UTF-8, Enter as 13, Ctrl+C as 3, and keys such as
+/// the arrows as escape sequences, `ESC [ A` for up. Gives `false`, changing nothing, if standard
+/// input isn't a terminal.
+pub fn raw() -> bool {
+    return unsafe { cx_term_raw() } == 1
+}
+
+/// Puts standard input back as it was before `raw()`.
+pub fn cooked() {
+    unsafe {
+        cx_term_cooked()
+    }
+}
+
+/// What's written to standard output as the program ends, however it ends, after everything it
+/// printed: the escape codes that undo what it drew, say. Each call replaces the last, and an
+/// empty text writes nothing. It's at most 1024 bytes.
+pub fn at_exit(text: String) {
+    let bytes = text.to_bytes()
+    if bytes.len() > 1024 {
+        panic("at_exit's text is {bytes.len()} bytes, over 1024")
+    }
+    unsafe {
+        cx_term_at_exit(bytes.as_ptr(), bytes.len())
+    }
+}
+
+/// Reads up to `n` bytes of what's typed onto the end of `buf`, as `std.io.read` reads standard
+/// input, and gives how many it read: 0 only at the end of the input. It's UTF-8 on Windows too,
+/// where a console's input is UTF-16, which `std.io.read` would give in the console's code page,
+/// and there a character is never split between two reads. `n` is at least 8.
+pub fn read(buf: mut List<u8>, n: usize) -> usize {
+    if n < 8 {
+        panic("std.term.read reads at least 8 bytes at a time, not {n}")
+    }
+    buf.reserve(n)
+    unsafe {
+        let start = buf.len()
+        let got = cx_term_read(buf.as_mut_ptr().add(start), n)
+        buf.set_len(start + got)
+        return got
+    }
+}

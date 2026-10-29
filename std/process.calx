@@ -1,0 +1,36 @@
+/// This process: the memory it holds and may hold, the CPU time it has used, and the processors
+/// it may run on, for a program that shows how it's doing. Each changes as the program runs, or
+/// with the machine it runs on, so only `unsafe` code reads them (D88).
+module std.process
+
+extern "C" {
+    fn cx_process_memory() -> u64
+    fn cx_process_memory_limit() -> u64
+    fn cx_process_cpu_ns() -> u64
+    fn cx_process_processors() -> u32
+}
+
+/// The bytes of this process's memory that are in RAM now: its working set on Windows, and its
+/// resident set on Linux, `top`'s `RES`. 0 where the system can't say.
+pub unsafe fn memory() -> u64 {
+    return unsafe { cx_process_memory() }
+}
+
+/// The bytes of RAM this process may use: the machine's, or less where a limit says, a job
+/// object's on Windows, or on Linux a cgroup's, as a container has. 0 where the system can't say.
+pub unsafe fn memory_limit() -> u64 {
+    return unsafe { cx_process_memory_limit() }
+}
+
+/// The CPU time every thread of this process has used since it started, in nanoseconds, in the
+/// kernel and out. Windows adds to it at each tick of its clock, about every 15.6 ms, so it's for
+/// rates over a second or so, not for timing code.
+pub unsafe fn cpu_time() -> u64 {
+    return unsafe { cx_process_cpu_ns() }
+}
+
+/// The processors this process may run on, as `parallel for` counts them: on Linux, those its
+/// affinity allows.
+pub unsafe fn processors() -> u32 {
+    return unsafe { cx_process_processors() }
+}

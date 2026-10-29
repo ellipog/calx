@@ -16,6 +16,7 @@
 #include <io.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
 /* WaitOnAddress and WakeByAddressAll, for the workers of `parallel for`. */
 #pragma comment(lib, "synchronization.lib")
 #else
@@ -25,8 +26,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -137,10 +140,15 @@ static void park(void) {
     }
 }
 
+static void term_end(int flush);
+
+/* The terminal is put back as the program found it first (see "std.term" below), so what the
+ * program writes as it ends, such as a panic's message, shows as it would have. */
 static void take_exit(void) {
     if (exit_mine) return;
     if (__atomic_exchange_n(&exit_taken, 1, __ATOMIC_ACQ_REL)) park();
     exit_mine = 1;
+    term_end(1);
 }
 
 /* The threads `Thread.spawn` started that are still running, which own memory the leak check
@@ -661,6 +669,346 @@ cx_usize cx_in_read(cx_u8* p, cx_usize n) {
         cx_panic_end();
     }
     return (cx_usize)r;
+}
+
+/* --- std.term: the terminal ----------------------------------------------------------------
+ * Declared by std/term.calx as C functions, not in calx_rt.h. A program that puts standard input
+ * in raw mode, or draws on the terminal, has it put back however it ends: `term_end` runs from
+ * `take_exit`, so as `main` returns, at a panic and at `exit`, and also at the signals that end a
+ * program from outside on POSIX, and at the console's Ctrl+C, Ctrl+Break and close on Windows. */
+
+/* What's written to standard output at the end, to undo what the program drew. It's in one of two
+ * buffers, so a new text can go in the other while a signal's handler writes the one in use. */
+#define TERM_TEXT 1024
+static char term_text[2][TERM_TEXT];
+static cx_usize term_text_len[2];
+static int term_text_in_use;
+static int term_text_lock;
+static int term_raw_on; /* standard input is in raw mode */
+static int term_armed;  /* the handlers that put the terminal back are set */
+static int term_ended;
+#ifdef _WIN32
+static DWORD term_mode;
+#else
+static struct termios term_mode;
+#endif
+
+static void term_cooked(void) {
+    if (!__atomic_exchange_n(&term_raw_on, 0, __ATOMIC_ACQ_REL)) return;
+#ifdef _WIN32
+    SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), term_mode);
+#else
+    tcsetattr(0, TCSANOW, &term_mode);
+#endif
+}
+
+/* Writes the text and puts standard input back, once. `flush` writes what standard output has
+ * waiting first, which a signal's handler can't, since it may have stopped a thread that holds the
+ * buffer's lock. */
+static void term_end(int flush) {
+    if (!__atomic_load_n(&term_armed, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&term_ended, 1, __ATOMIC_ACQ_REL)) return;
+    int which = __atomic_load_n(&term_text_in_use, __ATOMIC_ACQUIRE);
+    cx_usize n = term_text_len[which];
+    if (flush) {
+        int l = out_lock();
+        flush_locked();
+        if (n) {
+            fwrite(term_text[which], 1, n, stdout);
+            fflush(stdout);
+        }
+        out_unlock(l);
+    } else if (n) {
+#ifdef _WIN32
+        DWORD done;
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), term_text[which], (DWORD)n, &done, NULL);
+#else
+        ssize_t r = write(1, term_text[which], n);
+        (void)r;
+#endif
+    }
+    term_cooked();
+}
+
+#ifdef _WIN32
+/* Runs on a thread of its own, while the others carry on, so it doesn't touch the output buffer.
+ * Returning FALSE lets the next handler, in the end the system's, end the program. */
+static BOOL WINAPI term_control(DWORD event) {
+    (void)event;
+    term_end(0);
+    return FALSE;
+}
+#else
+/* The handler is reset to the system's as it's entered, and the signal is blocked until it
+ * returns, so raising it again ends the program as it would have. */
+static void term_signal(int sig) {
+    term_end(0);
+    raise(sig);
+}
+#endif
+
+static void term_arm(void) {
+    if (__atomic_exchange_n(&term_armed, 1, __ATOMIC_ACQ_REL)) return;
+#ifdef _WIN32
+    SetConsoleCtrlHandler(term_control, TRUE);
+#else
+    /* Only where the program, or what started it, hasn't set its own. */
+    static const int signals[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT};
+    for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++) {
+        struct sigaction was;
+        if (sigaction(signals[i], NULL, &was) != 0 || (was.sa_flags & SA_SIGINFO) || was.sa_handler != SIG_DFL) continue;
+        struct sigaction a;
+        memset(&a, 0, sizeof a);
+        a.sa_handler = term_signal;
+        a.sa_flags = SA_RESETHAND;
+        sigemptyset(&a.sa_mask);
+        sigaction(signals[i], &a, NULL);
+    }
+#endif
+}
+
+void cx_term_at_exit(const cx_u8* p, cx_usize n) {
+    if (n > TERM_TEXT) n = TERM_TEXT;
+    while (__atomic_exchange_n(&term_text_lock, 1, __ATOMIC_ACQUIRE)) {
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+    int next = 1 - __atomic_load_n(&term_text_in_use, __ATOMIC_ACQUIRE);
+    if (n) memcpy(term_text[next], p, n);
+    term_text_len[next] = n;
+    __atomic_store_n(&term_text_in_use, next, __ATOMIC_RELEASE);
+    __atomic_store_n(&term_text_lock, 0, __ATOMIC_RELEASE);
+    term_arm();
+}
+
+cx_u32 cx_term_raw(void) {
+    if (__atomic_load_n(&term_raw_on, __ATOMIC_ACQUIRE)) return 1;
+#ifdef _WIN32
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
+#endif
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) return 0;
+    term_mode = mode;
+    /* Keys come as the VT sequences a terminal sends, such as ESC [ A for the up arrow. */
+    DWORD off = ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
+    if (!SetConsoleMode(h, (mode & ~off) | ENABLE_VIRTUAL_TERMINAL_INPUT)) return 0;
+#else
+    struct termios t;
+    if (!isatty(0) || tcgetattr(0, &t) != 0) return 0;
+    term_mode = t;
+    t.c_iflag &= ~(tcflag_t)(BRKINT | ICRNL | INLCR | IGNCR | ISTRIP | IXON | PARMRK);
+    t.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ECHONL | ISIG | IEXTEN);
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
+    if (tcsetattr(0, TCSANOW, &t) != 0) return 0;
+#endif
+    term_arm();
+    __atomic_store_n(&term_raw_on, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+void cx_term_cooked(void) { term_cooked(); }
+
+/* The terminal's columns in the high 32 bits and rows in the low, or 0 if standard output isn't
+ * one. On Windows it's the console's window, not its buffer, which can be taller. */
+cx_u64 cx_term_size(void) {
+    cx_u64 columns, rows;
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO i;
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &i)) return 0;
+    columns = (cx_u64)(i.srWindow.Right - i.srWindow.Left + 1);
+    rows = (cx_u64)(i.srWindow.Bottom - i.srWindow.Top + 1);
+#else
+    struct winsize w;
+    if (ioctl(1, TIOCGWINSZ, &w) != 0) return 0;
+    columns = w.ws_col;
+    rows = w.ws_row;
+#endif
+    if (!columns || !rows) return 0;
+    return columns << 32 | rows;
+}
+
+#ifdef _WIN32
+static cx_usize term_utf8(cx_u8* p, cx_u32 c) {
+    if (c < 0x80) {
+        p[0] = (cx_u8)c;
+        return 1;
+    }
+    if (c < 0x800) {
+        p[0] = (cx_u8)(0xC0 | (c >> 6));
+        p[1] = (cx_u8)(0x80 | (c & 0x3F));
+        return 2;
+    }
+    if (c < 0x10000) {
+        p[0] = (cx_u8)(0xE0 | (c >> 12));
+        p[1] = (cx_u8)(0x80 | ((c >> 6) & 0x3F));
+        p[2] = (cx_u8)(0x80 | (c & 0x3F));
+        return 3;
+    }
+    p[0] = (cx_u8)(0xF0 | (c >> 18));
+    p[1] = (cx_u8)(0x80 | ((c >> 12) & 0x3F));
+    p[2] = (cx_u8)(0x80 | ((c >> 6) & 0x3F));
+    p[3] = (cx_u8)(0x80 | (c & 0x3F));
+    return 4;
+}
+#endif
+
+/* What's typed, as UTF-8. A Windows console's input is UTF-16, read with `ReadConsoleW`, since
+ * reading it as bytes loses what isn't ASCII; a surrogate whose pair hasn't come waits for the
+ * next read. Elsewhere, and from a pipe or a file, it's `cx_in_read`. `n` is at least 8. */
+cx_usize cx_term_read(cx_u8* p, cx_usize n) {
+#ifdef _WIN32
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (par_depth || h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) return cx_in_read(p, n);
+    if (out_len) flush_out();
+    static wchar_t high;
+    wchar_t units[256];
+    /* A unit gives at most 6 bytes: U+FFFD for a waiting surrogate it doesn't pair, and itself. */
+    DWORD want = (DWORD)(n / 6 < 256 ? n / 6 : 256);
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadConsoleW(h, units, want, &got, NULL)) {
+            cx_panic_begin("<stdin>");
+            panic_text("can't read standard input");
+            cx_panic_end();
+        }
+        cx_usize out = 0;
+        for (DWORD i = 0; i < got; i++) {
+            cx_u32 c = units[i];
+            if (high) {
+                if (c >= 0xDC00 && c <= 0xDFFF) {
+                    c = 0x10000 + (((cx_u32)high - 0xD800) << 10) + (c - 0xDC00);
+                    high = 0;
+                    out += term_utf8(p + out, c);
+                    continue;
+                }
+                high = 0;
+                out += term_utf8(p + out, 0xFFFD);
+            }
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                high = (wchar_t)c;
+                continue;
+            }
+            if (c >= 0xDC00 && c <= 0xDFFF) c = 0xFFFD;
+            out += term_utf8(p + out, c);
+        }
+        if (out) return out;
+    }
+#else
+    return cx_in_read(p, n);
+#endif
+}
+
+/* --- std.process: this process ------------------------------------------------------------- */
+
+/* The memory of this process that's in RAM: its working set on Windows, its resident set on Linux. */
+cx_u64 cx_process_memory(void) {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS c;
+    return K32GetProcessMemoryInfo(GetCurrentProcess(), &c, sizeof c) ? (cx_u64)c.WorkingSetSize : 0;
+#else
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long long size, resident;
+    int ok = fscanf(f, "%llu %llu", &size, &resident) == 2;
+    fclose(f);
+    long page = sysconf(_SC_PAGESIZE);
+    return ok && page > 0 ? (cx_u64)resident * (cx_u64)page : 0;
+#endif
+}
+
+#ifndef _WIN32
+/* A cgroup's memory limit, or 0 if it has none: `max`, or no such file. */
+static cx_u64 cgroup_limit(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long v;
+    int ok = fscanf(f, "%llu", &v) == 1;
+    fclose(f);
+    return ok ? (cx_u64)v : 0;
+}
+
+static cx_u64 lower(cx_u64 a, cx_u64 b) { return a && (!b || a < b) ? a : b; }
+#endif
+
+/* The memory this process may use: the machine's RAM, or less where a limit says, a job object's
+ * on Windows, or the cgroup's on Linux, as a container has, the lowest of its own and its
+ * parents'. 0 where it can't say. */
+cx_u64 cx_process_memory_limit(void) {
+#ifdef _WIN32
+    MEMORYSTATUSEX m;
+    m.dwLength = sizeof m;
+    cx_u64 limit = GlobalMemoryStatusEx(&m) ? (cx_u64)m.ullTotalPhys : 0;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job;
+    if (QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation, &job, sizeof job, NULL)) {
+        if ((job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY) && job.ProcessMemoryLimit < limit) limit = job.ProcessMemoryLimit;
+        if ((job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY) && job.JobMemoryLimit < limit) limit = job.JobMemoryLimit;
+    }
+    return limit;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGESIZE);
+    cx_u64 limit = pages > 0 && page > 0 ? (cx_u64)pages * (cx_u64)page : 0;
+    /* cgroup v2: the process's group is the line "0::/path" of /proc/self/cgroup. */
+    char group[512] = "";
+    FILE* f = fopen("/proc/self/cgroup", "r");
+    if (f) {
+        char line[600];
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "0::", 3) == 0) {
+                size_t len = strcspn(line + 3, "\n");
+                if (len < sizeof group) {
+                    memcpy(group, line + 3, len);
+                    group[len] = 0;
+                }
+                break;
+            }
+        }
+        fclose(f);
+    }
+    char path[600];
+    for (;;) {
+        snprintf(path, sizeof path, "/sys/fs/cgroup%s/memory.max", strcmp(group, "/") == 0 ? "" : group);
+        limit = lower(cgroup_limit(path), limit);
+        char* slash = strrchr(group, '/');
+        if (!slash || group[0] == 0 || strcmp(group, "/") == 0) break;
+        if (slash == group) strcpy(group, "/");
+        else *slash = 0;
+    }
+    /* cgroup v1, which says "no limit" with a very large number. */
+    return lower(cgroup_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes"), limit);
+#endif
+}
+
+/* The CPU time every thread of this process has used, in nanoseconds: in the kernel and out. */
+cx_u64 cx_process_cpu_ns(void) {
+#ifdef _WIN32
+    FILETIME made, ended, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &made, &ended, &kernel, &user)) return 0;
+    cx_u64 k = (cx_u64)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime;
+    cx_u64 u = (cx_u64)user.dwHighDateTime << 32 | user.dwLowDateTime;
+    return (k + u) * 100;
+#else
+    struct timespec t;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) != 0) return 0;
+    return (cx_u64)t.tv_sec * 1000000000u + (cx_u64)t.tv_nsec;
+#endif
+}
+
+/* The processors this process may run on, as `parallel for` counts them. */
+cx_u32 cx_process_processors(void) {
+#ifdef _WIN32
+    long n = (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#else
+    cpu_set_t set;
+    long n = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    return n > 0 ? (cx_u32)n : 1;
 }
 
 void cx_print_u64(cx_u64 v) {

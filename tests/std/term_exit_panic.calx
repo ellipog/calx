@@ -1,0 +1,9 @@
+// A program that panics still writes what at_exit says, after what it printed.
+import std.term.{at_exit}
+
+fn main() {
+    at_exit("put back\n")
+    println("drawn")    // out: drawn
+    panic("broke")      // panic: broke
+}
+// out: put back

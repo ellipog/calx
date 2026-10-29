@@ -1,0 +1,19 @@
+// std.term: the terminal. The test runs with standard input and output as pipes, so there's no
+// size and no raw mode, and what's typed is read as std.io reads it.
+import std.term.{at_exit, cooked, raw, read, size}
+
+fn main() {
+    println("{unsafe { size() } == none}")    // out: true
+    println("{raw()}")                        // out: false
+    cooked()
+    var buf = List<u8>()
+    let n = read(mut buf, 64)
+    let typed = String.from_utf8(buf)!
+    println("{n} {typed[..typed.len() - 1]}")    // out: 7 héllo
+    at_exit("put back")
+    at_exit("put back\n")
+    println("drawn")    // out: drawn
+}
+// The text at_exit says last comes after everything the program printed.
+// out: put back
+// stdin: héllo

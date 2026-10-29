@@ -1,0 +1,19 @@
+// std.process: this process's memory, CPU time and processors.
+import std.process.{cpu_time, memory, memory_limit, processors}
+import std.time.{Instant}
+
+fn main() {
+    let held = unsafe { memory() }
+    let limit = unsafe { memory_limit() }
+    println("{held > 0} {limit > held}")    // out: true true
+    println("{unsafe { processors() } >= 1}")    // out: true
+
+    // Busy until the CPU time moves, which on Windows is at the clock's next tick.
+    let before = unsafe { cpu_time() }
+    let start = unsafe { Instant.now() }
+    var moved = false
+    while not moved and unsafe { Instant.now() }.nanos_since(start) < 2000000000 {
+        moved = unsafe { cpu_time() } > before
+    }
+    println("{moved}")    // out: true
+}
