@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, atomic renames, directories made, listed and removed, real paths, and temporary directories.
+description: Files and directories - whole files read and written, atomic renames, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
 ---
 
 # `std.fs`
@@ -35,6 +35,8 @@ fn main() {
 | `read_text(path: String) -> String? ! FsError` | The whole file as text, or `none` if it isn't UTF-8 |
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
 | `append(path: String, bytes: List<u8>) ! FsError` | Adds `bytes` to the end of the file, creating it if nothing's there, after everything it held, even what another program added |
+| `metadata(path: String) -> Metadata ! FsError` | The size and modified time of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
+| `set_modified(path: String, at: Timestamp) ! FsError` | Sets when what's at the path was last modified, following links, as Java's `File.setLastModified` does, without changing what it holds |
 | `rename(from: String, to: String) ! FsError` | Moves what's at `from` to `to`, replacing a file there. Atomic on one volume |
 | `remove_file(path: String) ! FsError` | Removes a file, or a link but not what it leads to |
 | `make_dir(path: String) ! FsError` | Makes a directory. `Exists` if something's there |
@@ -46,6 +48,7 @@ fn main() {
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
 | `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
+| `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
 

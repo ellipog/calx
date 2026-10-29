@@ -41,6 +41,10 @@ static _Thread_local cx_i32 fs_err_code;
 static _Thread_local char* fs_buf;
 static _Thread_local size_t fs_len, fs_cap;
 
+/* What the last `cx_fs_stat` on this thread found: the size in bytes, and the modified time in
+ * milliseconds since 1970. */
+static _Thread_local cx_i64 stat_size, stat_modified;
+
 static CX_COLD void fs_out_of_memory(void) { cx_panic_text("<memory>", "out of memory"); }
 
 static void fs_fail(cx_u32 kind, cx_i32 code) {
@@ -302,6 +306,50 @@ cx_u32 cx_fs_kind(const cx_u8* path, size_t len, cx_u32 follow) {
     }
     free(w);
     return kind;
+}
+
+/* A FILETIME counts 100 ns from 1601. This many of them had passed by 1970. */
+#define TICKS_TO_1970 116444736000000000LL
+
+/* A handle to what's at the path, following links, with `access` alone, which may be 0 to read
+ * its attributes. A directory opens too. */
+static HANDLE open_attributes(const cx_u8* path, size_t len, DWORD access) {
+    wchar_t* w = wide(path, len);
+    if (!w) return INVALID_HANDLE_VALUE;
+    HANDLE h = CreateFileW(w, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) fail_win(GetLastError());
+    free(w);
+    return h;
+}
+
+cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
+    HANDLE h = open_attributes(path, len, 0);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    int ok = GetFileInformationByHandle(h, &info);
+    if (!ok) fail_win(GetLastError());
+    CloseHandle(h);
+    if (!ok) return 0;
+    stat_size = (cx_i64)(((cx_u64)info.nFileSizeHigh << 32) | info.nFileSizeLow);
+    cx_i64 ticks = (cx_i64)(((cx_u64)info.ftLastWriteTime.dwHighDateTime << 32) | info.ftLastWriteTime.dwLowDateTime);
+    ticks -= TICKS_TO_1970;
+    /* Rounded down, as Java's `lastModified` is, for times before 1970 too. */
+    stat_modified = ticks / 10000 - (ticks % 10000 < 0);
+    return 1;
+}
+
+cx_i32 cx_fs_set_modified(const cx_u8* path, size_t len, cx_i64 ms) {
+    HANDLE h = open_attributes(path, len, FILE_WRITE_ATTRIBUTES);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    cx_u64 ticks = (cx_u64)(ms * 10000 + TICKS_TO_1970);
+    FILETIME t;
+    t.dwLowDateTime = (DWORD)ticks;
+    t.dwHighDateTime = (DWORD)(ticks >> 32);
+    int ok = SetFileTime(h, NULL, NULL, &t);
+    if (!ok) fail_win(GetLastError());
+    CloseHandle(h);
+    return ok;
 }
 
 /* The names in a directory, each followed by a NUL, in the result buffer. */
@@ -584,6 +632,43 @@ cx_u32 cx_fs_kind(const cx_u8* path, size_t len, cx_u32 follow) {
     return KIND_OTHER;
 }
 
+cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    struct stat st;
+    int r = stat(s, &st);
+    int e = errno;
+    free(s);
+    if (r != 0) {
+        fail_errno(e);
+        return 0;
+    }
+    stat_size = (cx_i64)st.st_size;
+    /* tv_nsec is never negative, so this rounds down, as Java's `lastModified` does. */
+    stat_modified = (cx_i64)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
+    return 1;
+}
+
+cx_i32 cx_fs_set_modified(const cx_u8* path, size_t len, cx_i64 ms) {
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    cx_i64 sec = ms / 1000, rest = ms % 1000;
+    if (rest < 0) {
+        sec -= 1;
+        rest += 1000;
+    }
+    /* The access time stays as it is. */
+    struct timespec t[2];
+    t[0].tv_sec = 0;
+    t[0].tv_nsec = UTIME_OMIT;
+    t[1].tv_sec = (time_t)sec;
+    t[1].tv_nsec = (long)(rest * 1000000);
+    int ok = utimensat(AT_FDCWD, s, t, 0) == 0;
+    if (!ok) fail_errno(errno);
+    free(s);
+    return ok;
+}
+
 /* Adds a name to the result buffer as UTF-8, with U+FFFD for each maximal part of it that isn't
  * UTF-8, as the Unicode standard recommends. */
 static void buf_add_name(const unsigned char* s, size_t n) {
@@ -695,6 +780,9 @@ cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
 }
 
 #endif
+
+cx_i64 cx_fs_stat_size(void) { return stat_size; }
+cx_i64 cx_fs_stat_modified(void) { return stat_modified; }
 
 size_t cx_fs_result_len(void) { return fs_len; }
 void cx_fs_result_copy(cx_u8* to) {

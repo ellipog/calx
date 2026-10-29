@@ -1,6 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
-import std.fs.{FsError, Kind, append, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
+import std.time.{Timestamp}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_text, write, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -64,6 +65,25 @@ fn main() {
     append(a, hello)!
     append(a, [33])!
     println("{read_text(a)! ?? String("?")}")    // out: hello!
+
+    // Sizes and modified times: set to the millisecond, before 1970 too, and moved on by a write.
+    println("{metadata(a)!.size}")    // out: 6
+    set_modified(a, Timestamp { unix_ms: 1761609600123 })!
+    println("{metadata(a)!.modified.unix_ms}")    // out: 1761609600123
+    set_modified(a, Timestamp { unix_ms: -1500 })!
+    println("{metadata(a)!.modified.unix_ms}")    // out: -1500
+    append(a, [33])!
+    let m = metadata(a)!
+    println("{m.size} {m.modified.unix_ms > 1761609600123}")    // out: 7 true
+    match metadata("{dir}/missing") {
+        ok(_) => println("found"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+    match set_modified("{dir}/missing", Timestamp { unix_ms: 0 }) {
+        ok => println("set"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+    write(a, hello)!
     let c = "{dir}/c.log"
     append(c, [104, 105])!
     println("{read_text(c)! ?? String("?")}")    // out: hi

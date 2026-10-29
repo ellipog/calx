@@ -1,6 +1,8 @@
-/// Files and directories: whole files read and written, renames, directories made, listed and
-/// removed, real paths, and temporary directories.
+/// Files and directories: whole files read and written, renames, sizes and modified times,
+/// directories made, listed and removed, real paths, and temporary directories.
 module std.fs
+
+import std.time.{Timestamp}
 
 extern "C" {
     fn cx_fs_open(path: *const u8, len: usize, write: u32) -> i64
@@ -17,6 +19,10 @@ extern "C" {
     fn cx_fs_list(path: *const u8, len: usize) -> i32
     fn cx_fs_temp_dir() -> i32
     fn cx_fs_real_path(path: *const u8, len: usize) -> i32
+    fn cx_fs_stat(path: *const u8, len: usize) -> i32
+    fn cx_fs_stat_size() -> i64
+    fn cx_fs_stat_modified() -> i64
+    fn cx_fs_set_modified(path: *const u8, len: usize, ms: i64) -> i32
     fn cx_fs_result_len() -> usize
     fn cx_fs_result_copy(to: *u8)
     fn cx_fs_error_kind() -> u32
@@ -39,6 +45,15 @@ pub enum FsError {
     NotEmpty
     /// Something else, with the system's error code.
     Os(i32)
+}
+
+/// What `metadata` reads of a file or a directory.
+pub struct Metadata {
+    /// Its length in bytes. A directory's is whatever the system says, often 0.
+    pub size: u64
+    /// When what it holds last changed, to the millisecond, as Java's `File.lastModified` gives
+    /// it. Writing or appending to a file sets it.
+    pub modified: Timestamp
 }
 
 /// What's at a path.
@@ -293,6 +308,25 @@ pub fn is_file(path: String) -> bool {
 /// `false`.
 pub fn is_dir(path: String) -> bool {
     return unsafe { cx_fs_kind(path.as_ptr(), path.len(), 1) } == 2
+}
+
+/// The size and modified time of what's at `path`, following links, as Java's `Files.size` and
+/// `Files.getLastModifiedTime` read them.
+pub fn metadata(path: String) -> Metadata ! FsError {
+    if unsafe { cx_fs_stat(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+    let size = unsafe { cx_fs_stat_size() }
+    let modified = unsafe { cx_fs_stat_modified() }
+    return Metadata { size: u64.wrap(size), modified: Timestamp { unix_ms: modified } }
+}
+
+/// Sets when what's at `path` was last modified, following links, as Java's
+/// `File.setLastModified` does, without changing what it holds.
+pub fn set_modified(path: String, at: Timestamp) ! FsError {
+    if unsafe { cx_fs_set_modified(path.as_ptr(), path.len(), at.unix_ms) } == 0 {
+        fail last_error()
+    }
 }
 
 /// The names in the directory at `path`, without `.` and `..`, sorted by their bytes, so a
