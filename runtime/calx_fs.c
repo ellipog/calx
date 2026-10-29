@@ -75,6 +75,15 @@ static int path_ok(const cx_u8* p, size_t n) {
     return 1;
 }
 
+/* The system's separator between a path's names, as Java's `File.separatorChar`. */
+cx_u8 cx_fs_separator(void) {
+#ifdef _WIN32
+    return '\\';
+#else
+    return '/';
+#endif
+}
+
 #ifdef _WIN32
 
 static void fail_win(DWORD e) {

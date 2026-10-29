@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -195,6 +195,9 @@ fn main() {
     let real = real_path(dir)!
     let y = real_path("{dir}/x/./y/../y")!
     println("{y.starts_with(real)} {y.len() == real.len() + 4} {y.ends_with("y")}")    // out: true true true
+    // With the system's separator between the names.
+    let sep = separator()
+    println("{y == "{real}{sep}x{sep}y"} {sep == "/" or sep == "\\"}")    // out: true true
     match real_path("{dir}/missing") {
         ok(p) => println(p),
         err(e) => println(describe(e)),    // out: not found

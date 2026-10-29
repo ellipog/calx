@@ -50,6 +50,7 @@ fn main() {
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
 | `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
 | `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
+| `separator() -> String` | What the system puts between a path's names, as Java's `File.separator`: `\` on Windows and `/` elsewhere, as in the paths `real_path` and `temp_dir` give. Either works in the paths `std.fs` is given |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends |
