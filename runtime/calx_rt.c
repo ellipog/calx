@@ -12,6 +12,7 @@
 #include <time.h>
 
 #ifdef _WIN32
+#include <errno.h>
 #include <fcntl.h>
 #include <io.h>
 #define WIN32_LEAN_AND_MEAN
@@ -645,7 +646,8 @@ cx_u32 cx_out_is_terminal(void) {
 }
 
 /* Reads at most `n` bytes, returning 0 only at the end of the input. Output waiting in the
- * buffer is written first, since the program may be waiting for an answer to it. */
+ * buffer is written first, since the program may be waiting for an answer to it. Standard input
+ * that isn't open, as a service's or a detached process's may not be, reads as empty. */
 cx_usize cx_in_read(cx_u8* p, cx_usize n) {
     if (par_depth) {
         /* Which iteration got which bytes would depend on timing. One thread or many, it's the same panic. */
@@ -663,6 +665,7 @@ cx_usize cx_in_read(cx_u8* p, cx_usize n) {
         r = read(0, p, n > 0x40000000 ? 0x40000000 : n);
     } while (r < 0 && errno == EINTR);
 #endif
+    if (r < 0 && errno == EBADF) return 0;
     if (r < 0) {
         cx_panic_begin("<stdin>");
         panic_text("can't read standard input");

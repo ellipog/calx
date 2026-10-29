@@ -25,7 +25,7 @@ fn main() {
 
 | Function | Does |
 | --- | --- |
-| `read(buf: mut List<u8>, n: usize) -> usize` | Reads up to `n` bytes onto the end of `buf`, and returns how many. That's 0 only at the end of the input, or when `n` is 0 |
+| `read(buf: mut List<u8>, n: usize) -> usize` | Reads up to `n` bytes onto the end of `buf`, and returns how many. That's 0 only at the end of the input, or when `n` is 0. Standard input that isn't open, as a service's or a detached process's may not be, reads as empty |
 | `read_exact(buf: mut List<u8>, n: usize) -> bool` | Reads exactly `n` bytes onto the end of `buf`. Returns `false` if the input ended first, keeping the bytes that came |
 | `write(bytes: List<u8>)` | Writes the bytes to standard output |
 | `flush()` | Writes out what's waiting in the output buffer |
