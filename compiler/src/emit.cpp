@@ -2732,8 +2732,8 @@ $dropall    m->len = 0;
 
     // What `f` copies of its `mut` view `l` into a local, which it works on and writes back as it
     // returns: the paths of the scalars it copies, or none. A function with a loop copies a view
-    // of a list or a deque, or the fields it names of a struct, up to 8 scalars, when they hold a
-    // list or a deque, so clang keeps the list's pointer, length and capacity in registers:
+    // of a list, a deque or a `String`, or the fields it names of a struct, up to 8 scalars, when
+    // they hold one, so clang keeps the list's pointer, length and capacity in registers:
     // through the view, it reads them back after every store of a byte or an `i64`, since either
     // could be one of them, even though the view is `restrict` (D159). Nothing else sees the
     // value until the function returns, since `mut` views never overlap (D48) and a panic ends
@@ -2749,7 +2749,9 @@ $dropall    m->len = 0;
         std::vector<std::string> paths;
         if (!l->is_view || l->mode != ParamMode::mut || is_black_box(f) || !f->body) return paths;
         const Type* t = l->type;
-        if (t->kind != TypeKind::list && t->kind != TypeKind::deque && t->kind != TypeKind::struct_) return paths;
+        if (t->kind != TypeKind::list && t->kind != TypeKind::deque && t->kind != TypeKind::string &&
+            t->kind != TypeKind::struct_)
+            return paths;
         ViewUse u;
         if (t->kind == TypeKind::struct_) u.fields.assign(t->item->fields.size(), false);
         view_use(f->body, l, u);
@@ -2817,7 +2819,7 @@ $dropall    m->len = 0;
 
     // Adds the paths from a value of `t` to the scalars it's made of in C, such as `.data.len`,
     // and says whether it could: a map, for one, isn't broken down. `list` is set when the value
-    // holds a list or a deque.
+    // holds a list, a deque or a `String`, whose buffer a store might be to as far as clang knows.
     bool scalars(const Type* t, const std::string& at, std::vector<std::string>& paths, bool& list) const {
         auto add = [&](std::initializer_list<const char*> fields) {
             for (const char* f : fields) paths.push_back(at + "." + f);
@@ -2833,7 +2835,9 @@ $dropall    m->len = 0;
                 paths.push_back(at);
                 return true;
             case TypeKind::str: return add({"ptr", "len"});
-            case TypeKind::string: return add({"ptr", "len", "cap"});
+            case TypeKind::string:
+                list = true;
+                return add({"ptr", "len", "cap"});
             case TypeKind::list:
                 list = true;
                 return t->arena_list ? add({"ptr", "len", "cap", "arena"}) : add({"ptr", "len", "cap"});

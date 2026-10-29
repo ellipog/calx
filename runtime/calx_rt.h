@@ -369,8 +369,51 @@ CX_INLINE void cx_drop_String(cx_String* s) {
 CX_FN(cx_String, cx_copy_String, (const cx_String* s));
 /* A `String` that owns a copy of the bytes. */
 CX_FN(cx_String, cx_string_from, (cx_str s));
-CX_FN(void, cx_string_push_bytes, (cx_String* s, const cx_u8* p, cx_usize n));
-CX_FN(void, cx_string_push_rune, (cx_String* s, cx_rune r));
+/* Makes room for `extra` more bytes in a string's buffer of `*cap`, holding `len`, as `cx_grow_to`
+ * does a list's: twice the size, or 16 bytes to start. A literal's string has a capacity of 0 and
+ * doesn't own its bytes, so it comes here for any push, and they're copied into a buffer of its
+ * own. Only the check for room is inline, and the call is given copies, so a string in a local
+ * stays in registers (D160). */
+__attribute__((cold)) CX_FN(cx_u8*, cx_string_grow_to, (cx_u8* ptr, cx_usize* cap, cx_usize len, cx_usize extra));
+/* Adds a rune when there's no room for 4 bytes, given copies, as `cx_string_grow_to` is. */
+CX_FN(cx_u8*, cx_string_push_rune_to, (cx_u8* ptr, cx_usize* cap, cx_usize* len, cx_rune r));
+CX_INLINE void cx_string_push_bytes(cx_String* s, const cx_u8* p, cx_usize n) {
+    if (n == 0) return;
+    cx_u8* ptr = s->ptr;
+    cx_usize len = s->len, cap = s->cap;
+    /* Neither length is past half the address space, so the sum doesn't wrap. */
+    if (__builtin_expect(len + n > cap, 0)) {
+        ptr = cx_string_grow_to(ptr, &cap, len, n);
+        s->ptr = ptr;
+        s->cap = cap;
+    }
+    __builtin_memcpy(ptr + len, p, n);
+    s->len = len + n;
+}
+CX_INLINE void cx_string_push_rune(cx_String* s, cx_rune r) {
+    cx_u8* ptr = s->ptr;
+    cx_usize len = s->len, cap = s->cap;
+    if (__builtin_expect(len + 4 <= cap, 1)) {
+        if (r < 0x80) {
+            ptr[len] = (cx_u8)r;
+            s->len = len + 1;
+            return;
+        }
+        /* 2 to 4 bytes, with no branch on how many, since text that isn't ASCII mixes them and
+         * a branch would guess wrong. All 4 are written, and the length takes the ones that count:
+         * `n - 1` continuation bytes of 6 bits each after a lead byte that holds the rest. */
+        cx_u32 n = 2 + (r >= 0x800) + (r >= 0x10000), shift = 6 * (n - 1);
+        ptr[len] = (cx_u8)(((0xF0E0C000u >> (8 * (n - 1))) & 0xFF) | (r >> shift));
+        ptr[len + 1] = (cx_u8)(0x80 | ((r >> (shift - 6)) & 0x3F));
+        ptr[len + 2] = (cx_u8)(0x80 | ((r >> ((shift - 12) & 31)) & 0x3F));
+        ptr[len + 3] = (cx_u8)(0x80 | ((r >> ((shift - 18) & 31)) & 0x3F));
+        s->len = len + n;
+        return;
+    }
+    s->ptr = cx_string_push_rune_to(ptr, &cap, &len, r);
+    s->cap = cap;
+    s->len = len;
+}
 CX_FN(void, cx_string_reserve, (cx_String* s, cx_usize extra));
 CX_INLINE void cx_string_push_str(cx_String* s, cx_str v) { cx_string_push_bytes(s, v.ptr, v.len); }
 CX_INLINE void cx_string_clear(cx_String* s) {

@@ -110,3 +110,14 @@ rustc -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3 -
 ```
 
 Both print the same total. The times are in [Lists](../docs/reference/lists.md#in-c).
+
+## Building strings
+
+[`strings/strings.calx`](strings/strings.calx) builds strings as a server builds chat, JSON and log lines: a million ASCII runes, a million runes of 1 to 4 bytes mixed, and a million words of 3 to 7 bytes, each onto a new string in a local; then the ASCII runes again, and a text escaped as JSON a rune at a time, onto a string it's given to change, through a function value clang can't see through. Each time is the best of 50. [`strings/strings.rs`](strings/strings.rs) is the same loops with Rust's `String`.
+
+```sh
+calx build --release -o strings bench/strings/strings.calx
+rustc -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3 -o strings_rs bench/strings/strings.rs
+```
+
+Both print the same total. The times are in [Strings](../docs/reference/strings.md#in-c).

@@ -1,0 +1,102 @@
+// Building text, as a server builds chat, JSON and log lines: bench/strings/strings.rs is the same
+// loops in Rust. Each loop goes over a million values onto a new string in a local, which it
+// returns, or onto a string it's given to change, which the caller keeps and clears, through a
+// function value clang can't see through, as a function called from many places is kept apart.
+import std.hint.{black_box}
+import std.time.{Instant}
+
+// A rune each, all ASCII.
+fn letters(xs: List<i32>, abc: List<rune>) -> String {
+    var out = String()
+    for x in xs {
+        out.push(abc[usize.wrap(x & 3)])
+    }
+    return out
+}
+
+fn letters_into(out: mut String, xs: List<i32>, abc: List<rune>) {
+    for x in xs {
+        out.push(abc[usize.wrap(x & 3)])
+    }
+}
+
+// A rune each of 1, 2, 3 or 4 bytes.
+fn wide(xs: List<i32>, rs: List<rune>) -> String {
+    var out = String()
+    for x in xs {
+        out.push(rs[usize.wrap(x & 3)])
+    }
+    return out
+}
+
+// A word each, of 3 to 7 bytes, as block names are.
+fn words(xs: List<i32>, ws: List<String>) -> String {
+    var out = String()
+    for x in xs {
+        out.push_str(ws[usize.wrap(x & 3)])
+    }
+    return out
+}
+
+// A text as a JSON string's contents, a rune at a time.
+fn escape(out: mut String, text: String) {
+    for r in text.runes() {
+        if r == '"' {
+            out.push_str("\\\"")
+        } else if r == '\\' {
+            out.push_str("\\\\")
+        } else if r == '\n' {
+            out.push_str("\\n")
+        } else {
+            out.push(r)
+        }
+    }
+}
+
+fn main() {
+    var xs = List<i32>()
+    var s = 1u64
+    for _ in 0..1000000 {
+        s = s * 6364136223846793005u64 + 1442695040888963407u64
+        xs.push(i32.wrap(s >> 32))
+    }
+    let abc: List<rune> = ['a', 'b', 'c', 'd']
+    let rs: List<rune> = ['a', 'é', '€', '😀']
+    let ws: List<String> = ["air", "stone", "dirt", "oak_log"]
+    // A million runes, one in 8 a quote or a newline.
+    let marks: List<rune> = ['T', 'h', 'e', ' ', 'q', 'u', 'i', 'c', 'k', ' ', 'f', 'o', 'x', '"', '\n', 'é']
+    var text = String()
+    for x in xs {
+        text.push(marks[usize.wrap(x & 15)])
+    }
+    var best = [1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0]
+    let letters_far = black_box(letters_into)
+    let escape_far = black_box(escape)
+    var a = String()
+    var e = String()
+    var total = 0usize
+    for _ in 0..50 {
+        let t0 = unsafe { Instant.now() }
+        let na = letters(xs, abc)
+        let t1 = unsafe { Instant.now() }
+        let nb = wide(xs, rs)
+        let t2 = unsafe { Instant.now() }
+        let nc = words(xs, ws)
+        let t3 = unsafe { Instant.now() }
+        a.clear()
+        letters_far(mut a, xs, abc)
+        let t4 = unsafe { Instant.now() }
+        e.clear()
+        escape_far(mut e, text)
+        let t5 = unsafe { Instant.now() }
+        best[0] = best[0].min(t1.secs_since(t0) * 1000.0)
+        best[1] = best[1].min(t2.secs_since(t1) * 1000.0)
+        best[2] = best[2].min(t3.secs_since(t2) * 1000.0)
+        best[3] = best[3].min(t4.secs_since(t3) * 1000.0)
+        best[4] = best[4].min(t5.secs_since(t4) * 1000.0)
+        total += na.len() + nb.len() + nc.len() + a.len() + e.len()
+    }
+    println("new: letters {best[0]} ms, wide {best[1]} ms, words {best[2]} ms")
+    println("given, not inlined: letters {best[3]} ms, escape {best[4]} ms")
+    println("{total}")
+}

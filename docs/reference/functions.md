@@ -53,7 +53,7 @@ fn main() {
 - A read or `mut` parameter is a view of the caller's value, so it can't be moved, returned or stored. A function that keeps what it's given takes it as `own`.
 - A method takes its value the same three ways: `self`, `mut self` and `own self`.
 - `mut` at the call site shows which arguments can change. Only a variable, or a field or element of one, can be passed as `mut`.
-- Within one call, a value passed as `mut` can't appear in any other argument, nor can any part of it (D48), so the views never overlap. The emitted C marks them `restrict`, and a function with a loop that's given a `mut` list or deque, or a struct that holds one, works on a copy of it in a local that it writes back as it returns, so clang keeps the list's fields in registers ([lists](lists.md#in-c), D159).
+- Within one call, a value passed as `mut` can't appear in any other argument, nor can any part of it (D48), so the views never overlap. The emitted C marks them `restrict`, and a function with a loop that's given a `mut` list, deque or `String`, or a struct that holds one, works on a copy of it in a local that it writes back as it returns, so clang keeps the list's fields in registers ([lists](lists.md#in-c), D159).
 - Separate fields are separate values, so `mut w.blocks[k]` and `mut w.states[k]` can go in one call, and so can `mut s.due` and `s.scheduled`. Two elements of one list can't, as in `mut xs[i]` and `xs[j]`, since `i` and `j` may be equal.
 
 ```calx

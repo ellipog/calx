@@ -211,6 +211,21 @@ fn main() {
 - A `str` is `cx_str`, a pointer and a length.
 - A `String` is `cx_String`, a pointer, a length and a capacity. A capacity of 0 means it doesn't own its bytes: it's a literal, or empty. Freeing it frees the bytes only when it owns them.
 - A string grows by doubling, and starts at 16 bytes.
+- `push` and `push_str` compile to inline C, a check for room and then a store or a copy. Growing is a cold call to the runtime, `cx_string_grow_to`, given a copy of the capacity, as a list's is, so a string in a local keeps its pointer, length and capacity in registers ([lists](lists.md#in-c), D158). A literal's string has a capacity of 0, so its first push always takes the call, which copies the literal's bytes into a buffer of its own.
+- A rune that isn't ASCII is written with no branch on its length, when there are 4 bytes of room: all 4 are written, and the length counts the ones that belong to it. Text that isn't ASCII mixes lengths, so a branch on each would often guess wrong. A rune with less room than that goes through a call (D160).
+- A function with a loop that's given a `String` to change works on a copy of it, as one given a list does ([lists](lists.md#in-c), D159).
+
+A million values pushed onto a string, in ms, best of 50, from [`bench/strings`](../../bench/strings), on an i9-13900K pinned to one P-core:
+
+| | Calx | Calx before D160 | Rust |
+| --- | --- | --- | --- |
+| An ASCII rune each, onto a new string in a local | 0.54 | 1.69 | 0.67 |
+| A rune each of 1, 2, 3 or 4 bytes | 2.86 | 7.16 | 6.22 |
+| A word each, of 3 to 7 bytes | 6.51 | 7.28 | 8.23 |
+| An ASCII rune each, onto a string given to change, not inlined | 0.48 | 1.64 | 0.57 |
+| A text escaped as JSON, a rune at a time, onto a string given, not inlined | 1.94 | 2.94 | 2.06 |
+
+Rust's `push` branches on a rune's length, so it guesses wrong on the mixed runes as Calx did before. A word is copied by `memcpy`, a call when the length isn't known until it runs, in both.
 - Building `"n = {n}"` sends the printing functions' output into the new string, so building a string and printing one share the same code, and floats appear exactly as Java prints them ([floats](floats.md#printing)).
 - A part, `s[a..b]`, is `cx_str_slice(s, a, b, inclusive, at)`, which checks the offsets and gives a `cx_str` of the same bytes. Where the part is kept as a `String`, `cx_string_from` copies it. A `String` that's a variable is viewed after the offsets are worked out, through a pointer, so the offsets run first even when they change it:
 

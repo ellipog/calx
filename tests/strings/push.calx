@@ -1,0 +1,92 @@
+// Pushing onto a string: a rune of each length at every offset round where the buffer grows, so
+// each lands where there's room, in the last 4 bytes, or past the end (D160). Each string is
+// checked against the same text built through `{r}`, which goes the printing functions' way.
+
+// Escapes a text onto a string it's given, as JSON does, failing at a tab.
+fn escape(out: mut String, text: String) ! String {
+    for r in text.runes() {
+        if r == '"' {
+            out.push_str("\\\"")
+        } else if r == '\t' {
+            fail "a tab at {out.len()}"
+        } else {
+            out.push(r)
+        }
+    }
+}
+
+fn main() {
+    let rs: List<rune> = ['a', 'é', '€', '😀']
+    var bad = 0
+    for k in 0usize..4 {
+        for start in 0..40 {
+            var s = String()
+            var t = String()
+            for _ in 0..start {
+                s.push('x')
+                t.push_str("x")
+            }
+            for j in 0usize..9 {
+                let r = rs[(k + j) % 4]
+                s.push(r)
+                t.push_str("{r}")
+            }
+            if s != t {
+                bad += 1
+            }
+        }
+    }
+    println("{bad} wrong")                      // out: 0 wrong
+
+    var w = String()
+    for r in rs {
+        w.push(r)
+    }
+    println("{w} {w.len()}")                    // out: aé€😀 10
+
+    // A literal's string owns no bytes, so its first push copies them.
+    for r in rs {
+        var lit: String = "ab"
+        lit.push(r)
+        println("{lit} {lit.len()}")
+    }
+    // out: aba 3
+    // out: abé 4
+    // out: ab€ 5
+    // out: ab😀 6
+    let base: String = "lit"
+    var grown = base.copy()
+    grown.push_str("eral")
+    grown.push('!')
+    println("{base} {grown}")                   // out: lit literal!
+
+    var e = String()
+    e.push_str("")
+    var l: String = "keep"
+    l.push_str("")
+    println("[{e}] {l} {e.len()} {l.len()}")    // out: [] keep 0 4
+
+    var r = String()
+    r.reserve(3)
+    for _ in 0..5 {
+        r.push('€')
+    }
+    println("{r} {r.len()}")                    // out: €€€€€ 15
+
+    var big = String()
+    for i in 0usize..100000 {
+        big.push(rs[i % 4])
+    }
+    println("{big.len()}")                      // out: 250000
+
+    var out = String()
+    match escape(mut out, "say \"hi\"") {
+        ok => println(out),                     // out: say \"hi\"
+        err(m) => println(m),
+    }
+    var out2: String = "x: "
+    match escape(mut out2, "a\tb") {
+        ok => println("ok"),
+        err(m) => println("{m}, {out2}"),       // out: a tab at 4, x: a
+    }
+}
