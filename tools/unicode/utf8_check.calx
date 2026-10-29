@@ -1,0 +1,38 @@
+// Calx's side of utf8_check.py: what Utf8Check.java does, with std.text.utf8 and std.io.Lines.
+import std.env.{args}
+import std.io.{Lines}
+import std.text.utf8.{decode_lossy}
+
+fn digit(b: u8) -> u8 {
+    return if b <= 0x39 { b - 0x30 } else { b - 0x61 + 10 }
+}
+
+fn print_hex(s: String) {
+    let digits = "0123456789abcdef"
+    var out = String()
+    out.reserve(2 * s.len())
+    for i in 0usize..s.len() {
+        let b = usize(s.byte_at(i))
+        out.push_str(digits[b / 16..b / 16 + 1])
+        out.push_str(digits[b % 16..b % 16 + 1])
+    }
+    println(out)
+}
+
+fn main() {
+    let decode = args().len() > 0 and args()[0] == "decode"
+    var input = Lines()
+    while let line = input.next() {
+        if decode {
+            var bytes = List<u8>()
+            var i: usize = 0
+            while i + 1 < line.len() {
+                bytes.push(digit(line.byte_at(i)) * 16 + digit(line.byte_at(i + 1)))
+                i += 2
+            }
+            print_hex(decode_lossy(bytes, 0, bytes.len()))
+        } else {
+            print_hex(line)
+        }
+    }
+}

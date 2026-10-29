@@ -1,0 +1,20 @@
+// std.io.Lines: standard input a line at a time.
+import std.io.{Lines}
+
+fn main() {
+    var input = Lines()
+    var n = 0
+    while let line = input.next() {
+        n += 1
+        println("{n} [{line}] {line.len()}")
+    }
+    // out: 1 [give @p stone] 13
+    // out: 2 [] 0
+    // out: 3 [  spaces kept  ] 15
+    // out: 4 [€ and é] 10
+    println("{input.next() == none}")    // out: true
+}
+// stdin: give @p stone
+// stdin:
+// stdin:   spaces kept  
+// stdin: € and é

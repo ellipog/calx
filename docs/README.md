@@ -58,7 +58,7 @@ What's built, one page per feature:
 
 The `std` modules, one page each ([modules](reference/modules.md#the-standard-library)):
 
-1. [std.io](std/io.md): standard input and output as bytes
+1. [std.io](std/io.md): standard input and output as bytes, and standard input a line at a time
 2. [std.math](std/math.md): fast math functions, accurate to about half an ULP and the same on every platform
 3. [std.java.math](std/java-math.md): math functions with `StrictMath`'s results bit for bit
 4. [std.time](std/time.md): a monotonic clock, and the wall clock with its dates and local time zone, which only `unsafe` code can read
@@ -79,6 +79,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`
+22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
 
 ### Design
 

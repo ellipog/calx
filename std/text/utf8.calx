@@ -1,0 +1,96 @@
+/// UTF-8 that may not be valid, read as Java reads it: with U+FFFD, the replacement character,
+/// in place of each piece that isn't UTF-8.
+module std.text.utf8
+
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
+/// The bytes in `bytes` from offset `from` up to `to` as text, as Java's
+/// `new String(bytes, from, to - from, UTF_8)` gives it, and as an `InputStreamReader` in UTF-8
+/// reads it. Valid UTF-8 comes through as it is. Each piece that isn't becomes one U+FFFD:
+///
+/// - a byte that can't start a character, or a lead byte without the continuation it needs,
+///   counting the second byte's narrower range after `E0`, `F0` and `F4`, as one;
+/// - a three-byte character cut off by a byte that isn't a continuation, or by `to`, as one;
+/// - a surrogate, `ED A0 80` to `ED BF BF`, as one, which Java decodes before rejecting it;
+/// - a four-byte character cut off after two or three bytes, as one.
+///
+/// Panics at the call if `from..to` isn't inside `bytes`.
+@track_caller
+pub fn decode_lossy(bytes: List<u8>, from: usize, to: usize) -> String {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let n = to - from
+    var copy = List<u8>()
+    if n > 0 {
+        copy.reserve(n)
+        unsafe {
+            _ = memcpy(copy.as_mut_ptr(), bytes.as_ptr().add(from), n)
+            copy.set_len(n)
+        }
+    }
+    // Text is almost always valid, so that's checked first, where the copy is all it costs.
+    if let text = String.from_utf8(copy) {
+        return text
+    }
+    var out = List<u8>()
+    out.reserve(n + 8)
+    var i = from
+    while i < to {
+        let b = bytes[i]
+        var len: usize = 0    // the bytes of a valid character at `i`
+        var bad: usize = 1    // or how many bytes the U+FFFD in their place stands for
+        if b < 0x80 {
+            len = 1
+        } else if b >= 0xC2 and b <= 0xDF {
+            if i + 1 < to and continues(bytes[i + 1]) {
+                len = 2
+            }
+        } else if b >= 0xE0 and b <= 0xEF {
+            if i + 1 < to {
+                let b2 = bytes[i + 1]
+                if continues(b2) and not (b == 0xE0 and b2 < 0xA0) {
+                    bad = 2
+                    if i + 2 < to and continues(bytes[i + 2]) {
+                        if b == 0xED and b2 >= 0xA0 {
+                            bad = 3
+                        } else {
+                            len = 3
+                        }
+                    }
+                }
+            }
+        } else if b >= 0xF0 and b <= 0xF4 {
+            if i + 1 < to {
+                let b2 = bytes[i + 1]
+                if continues(b2) and not (b == 0xF0 and b2 < 0x90) and not (b == 0xF4 and b2 >= 0x90) {
+                    bad = 2
+                    if i + 2 < to and continues(bytes[i + 2]) {
+                        bad = 3
+                        if i + 3 < to and continues(bytes[i + 3]) {
+                            len = 4
+                        }
+                    }
+                }
+            }
+        }
+        if len > 0 {
+            for k in i..i + len {
+                out.push(bytes[k])
+            }
+            i += len
+        } else {
+            out.push(0xEF)
+            out.push(0xBF)
+            out.push(0xBD)
+            i += bad
+        }
+    }
+    return String.from_utf8(out)!
+}
+
+fn continues(b: u8) -> bool {
+    return (b & 0xC0) == 0x80
+}

@@ -38,7 +38,7 @@ fn main() {
 | `s.copy()` | A copy that owns its own memory ([ownership](ownership.md)) |
 | `String.from_utf8(bytes)` | The `List<u8>` as a `String`, or `none` if it isn't UTF-8. The string takes the list's memory, so nothing is copied |
 
-`String.from_utf8` accepts exactly the UTF-8 that encodes Unicode scalar values: no overlong forms, no surrogates, and nothing past U+10FFFF. Java's `new String(bytes, UTF_8)` puts U+FFFD in place of bad bytes instead; a lossy version is designed with the rest of `std.text`.
+`String.from_utf8` accepts exactly the UTF-8 that encodes Unicode scalar values: no overlong forms, no surrogates, and nothing past U+10FFFF. Java's `new String(bytes, UTF_8)` puts U+FFFD in place of bad bytes instead, which [`std.text.utf8.decode_lossy`](../std/text-utf8.md) does too.
 
 ```calx
 fn main() {
@@ -179,7 +179,7 @@ fn main() {
 - `utf16_len` is what the protocol's string limits count, such as 16 for a player name and 32767 for a chat message.
 - They matched Java 25 on 20,000 random strings, with U+0000, every length of UTF-8, and surrogate pairs.
 - `java_hash` takes eight ASCII bytes a step, `h * 31^8` plus each byte times its power, so the chain of multiplies is an eighth as long as Java's loop.
-- [Modified UTF-8](../std/text-mutf8.md), which NBT uses, is in `std.text.mutf8`.
+- [Modified UTF-8](../std/text-mutf8.md), which NBT uses, is in `std.text.mutf8`, and bytes that may not be UTF-8 are read as Java reads them by [`std.text.utf8`](../std/text-utf8.md).
 
 ## Comparing and matching
 

@@ -1,0 +1,38 @@
+// std.text.utf8.decode_lossy: each case's result is what Java 25's `new String(bytes, UTF_8)`
+// gives, written as its UTF-8 in hex.
+import std.text.utf8.{decode_lossy}
+
+fn hex(s: String) -> String {
+    let digits = "0123456789abcdef"
+    var out = String()
+    for i in 0usize..s.len() {
+        let b = usize(s.byte_at(i))
+        out.push_str(digits[b / 16..b / 16 + 1])
+        out.push_str(digits[b % 16..b % 16 + 1])
+    }
+    return out
+}
+
+fn show(bytes: List<u8>) {
+    println(hex(decode_lossy(bytes, 0, bytes.len())))
+}
+
+fn main() {
+    show([0x61, 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80])    // out: 61c3a9e282acf09f9880
+    show([0x80])                      // out: efbfbd
+    show([0xC0, 0xAF])                // out: efbfbdefbfbd
+    show([0xE0, 0x80])                // out: efbfbdefbfbd
+    show([0xE0, 0xA0, 0x80])          // out: e0a080
+    show([0xED, 0xA0, 0x80])          // out: efbfbd
+    show([0xED, 0xA0])                // out: efbfbd
+    show([0xED, 0xA0, 0xC0])          // out: efbfbdefbfbd
+    show([0xE2, 0x82, 0x61])          // out: efbfbd61
+    show([0xF0, 0x80, 0x80])          // out: efbfbdefbfbdefbfbd
+    show([0xF0, 0x9F, 0x98])          // out: efbfbd
+    show([0xF0, 0x9F, 0x98, 0xC0])    // out: efbfbdefbfbd
+    show([0xF4, 0x90, 0x80, 0x80])    // out: efbfbdefbfbdefbfbdefbfbd
+    show([0xF5, 0xFF, 0x61])          // out: efbfbdefbfbd61
+    let bytes: List<u8> = [0x5B, 0xE2, 0x82, 0xAC, 0x5D]
+    println("{decode_lossy(bytes, 1, 3)} {decode_lossy(bytes, 1, 4)} [{decode_lossy(bytes, 5, 5)}]")    // out: � € []
+    _ = decode_lossy(bytes, 4, 6)    // panic: the range 4..6 is out of bounds for 5 bytes
+}

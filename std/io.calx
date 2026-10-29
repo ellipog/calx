@@ -1,15 +1,106 @@
-/// Standard input and output as bytes, for programs that speak a binary protocol.
+/// Standard input and output as bytes, for programs that speak a binary protocol, and standard
+/// input as lines of text.
 ///
 /// What `write` writes and what `print` prints share one buffer, so they come out in the order
 /// they were written. The buffer is written out when it fills, at `flush()`, before `read` waits
 /// for input, and when the program ends.
 module std.io
 
+import std.text.utf8.{decode_lossy}
+
 extern "C" {
     fn cx_in_read(to: *u8, n: usize) -> usize
     fn cx_out_write(from: *const u8, n: usize)
     fn cx_out_flush()
     fn cx_out_is_terminal() -> u32
+    fn cx_term_read(to: *u8, n: usize) -> usize
+    fn memmove(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
+/// How many bytes `Lines` reads at a time.
+const CHUNK: usize = 65536
+
+/// Standard input a line at a time, split and decoded as Java's `BufferedReader.readLine` gives
+/// it over an `InputStreamReader` in UTF-8, which is how vanilla's console reads commands. A
+/// Windows console's input is read as UTF-16 and given as UTF-8, as `std.term.read` gives it,
+/// since reading it as bytes would give it in the console's code page.
+pub struct Lines {
+    buf: List<u8> = List()
+    /// Where the next line starts in `buf`.
+    start: usize = 0
+    /// From `start` up to here, `buf` holds no line end.
+    scanned: usize = 0
+    /// The last line ended at a `\r` that was the last byte read, so a `\n` next is part of its end.
+    after_cr: bool = false
+    /// The input has ended.
+    ended: bool = false
+}
+
+impl Lines {
+    /// The next line, without the `\n`, `\r` or `\r\n` that ends it, or `none` once the input
+    /// has ended. A last line without an end is still a line, and a line that ends at `\r` is
+    /// given at once, without waiting to see if a `\n` comes next. Bytes that aren't UTF-8 read
+    /// as U+FFFD, as `std.text.utf8.decode_lossy` gives them. Like `read`, it writes out the
+    /// output waiting in the buffer before it waits for input.
+    pub fn next(mut self) -> String? {
+        loop {
+            if self.after_cr and self.start < self.buf.len() {
+                if self.buf[self.start] == 0x0A {
+                    self.start += 1
+                }
+                self.after_cr = false
+                self.scanned = self.start
+            }
+            var end = self.scanned
+            while end < self.buf.len() and self.buf[end] != 0x0A and self.buf[end] != 0x0D {
+                end += 1
+            }
+            if end < self.buf.len() {
+                let line = decode_lossy(self.buf, self.start, end)
+                self.start = end + 1
+                if self.buf[end] == 0x0D {
+                    if end + 1 == self.buf.len() {
+                        self.after_cr = true
+                    } else if self.buf[end + 1] == 0x0A {
+                        self.start = end + 2
+                    }
+                }
+                self.scanned = self.start
+                return some(line)
+            }
+            self.scanned = end
+            if self.ended {
+                if self.start == self.buf.len() {
+                    return none
+                }
+                let line = decode_lossy(self.buf, self.start, self.buf.len())
+                self.start = self.buf.len()
+                self.scanned = self.start
+                return some(line)
+            }
+            // What's been given back isn't needed, so the part line left moves to the front.
+            if self.start > 0 {
+                let left = self.buf.len() - self.start
+                unsafe {
+                    if left > 0 {
+                        _ = memmove(self.buf.as_mut_ptr(), self.buf.as_ptr().add(self.start), left)
+                    }
+                    self.buf.set_len(left)
+                }
+                self.scanned -= self.start
+                self.start = 0
+            }
+            self.buf.reserve(CHUNK)
+            unsafe {
+                let at = self.buf.len()
+                let got = cx_term_read(self.buf.as_mut_ptr().add(at), CHUNK)
+                self.buf.set_len(at + got)
+                if got == 0 {
+                    self.ended = true
+                }
+            }
+        }
+    }
 }
 
 /// Reads up to `n` bytes from standard input onto the end of `buf`, and returns how many it
