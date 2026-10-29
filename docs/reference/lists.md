@@ -113,25 +113,33 @@ fn main() {
 
 Whether a sort is stable, keeping equal elements in the order they were in, can't matter here: a derived `Order` compares everything a value holds, so equal elements are the same value. That leaves `sort` free to use whatever is fastest, which Rust's `sort` isn't, as a type there can order by part of itself. A type that [writes its own `Order`](comparing.md#writing-your-own), or holds one that does, is sorted stably, as Java's `List.sort` is ([below](#stable-sorting)).
 
-- **Lists already in order**, or in reverse, are found in one pass, which compares 16 elements at a time with no branch between.
-- **Integers**, `char`, `rune` and `bool` in lists of a few hundred or more are radix sorted. A first pass finds which bytes differ between elements, and each of those takes one pass that moves every element by it, with no comparisons. When only one byte differs, as in a list of block IDs below 256, counting each value is enough, and the list is rewritten in place.
-- **Everything else** is quicksorted, with the median of 3 elements as the pivot, or of 3 medians of 3 in longer runs. The partition never branches on a comparison, as a mispredicted branch would cost more than the comparison. A pivot equal to the one before it means the run holds many copies of it, and they're set aside in one pass, so lists of few distinct values sort in linear time. Runs of 16 or fewer are sorted by insertion, or for integers by a sorting network, and a run split badly too often is heapsorted, so the worst case stays O(n log n).
+- **Lists already in order** are found in one pass, which compares 16 elements at a time with no branch between. A list strictly in reverse is reversed in that same pass, from both ends at once, each block of 16 checked before it's swapped, so every element is read and written once. If the order breaks partway, the list is sorted as any other, the blocks already swapped no harder to sort than before.
+- **Integers**, `char`, `rune` and `bool` in lists of a few hundred or more are radix sorted. A first pass finds which bits differ between elements. Values of 32 or 64 bits are then spread into buckets by the top of those bits, about one bucket for every element, so each bucket's elements come before the next one's, and an insertion pass that hardly moves anything finishes the list. A list of more than 65,536 is spread into buckets of about 4,096, each then sorted the same way while it's in cache. When few bytes differ in a long list, as in a million `i32`, a pass for each byte that differs is faster, moving every element by its byte with no comparisons. When only one byte differs, as in a list of block IDs below 256, counting each value is enough, and the list is rewritten in place.
+- **Everything else** is quicksorted, with the median of 3 elements as the pivot, or of 3 medians of 3 in longer runs. The partition never branches on a comparison, as a mispredicted branch would cost more than the comparison. A pivot equal to the one before it means the run holds many copies of it, and they're set aside in one pass, so lists of few distinct values sort in linear time. Runs of 16 or fewer are sorted by insertion, and a run split badly too often is heapsorted, so the worst case stays O(n log n). Integers that would mostly fall in one bucket, as values spread over many powers of two do, are quicksorted too: a sample of 32 finds them before anything is counted.
+- **Short runs of integers**, 32 or fewer, are sorted by a sorting network for 4, 8, 16 or 32 elements, the smallest that holds the run, with no branch on a comparison. A network wider than the run sorts some of its neighbors with it, which can't move them out of place: those before the run are no greater than anything in it, those after no less, and integers that are equal are the same value. A whole list of fewer than 32 integers is sorted by the network of its length, or of the next one up on a copy filled out with the type's greatest value.
 - **Structs and tuples of scalars** compare every field without a branch: `a.x < b.x | (a.x == b.x & a.y < b.y)`.
 
 Moving an element copies its bytes, as every move does ([ownership](ownership.md)), so nothing is copied deeply or freed. Radix sorting takes a buffer the size of the list, and so does a stable sort; nothing else allocates.
 
-On the reference machine, an i9-13900K, against Rust 1.91's `sort` and `sort_unstable` in a release build for `x86-64-v3`, each pinned to one core, the best of 15 to 2,000 runs, in milliseconds:
+On the reference machine, an i9-13900K, against Rust 1.91's `sort` and `sort_unstable` in a release build for `x86-64-v3`, each pinned to one core, the best of 15 to 3,000 runs, in milliseconds:
 
 | List | Calx `sort` | Rust `sort` | Rust `sort_unstable` |
 | --- | --- | --- | --- |
-| 1,000,000 random `i64` | 8.6 | 15.7 | 11.0 |
-| 10,000 random `i64` | 0.066 | 0.075 | 0.053 |
-| 1,000,000 `i64` of 16 values | 0.89 | 6.0 | 3.0 |
-| 1,000,000 `i64` in order | 0.41 | 0.64 | 0.61 |
-| 1,000,000 `i64` in reverse | 0.80 | 0.90 | 0.92 |
-| 1,000,000 random `i32` | 3.9 | 13.1 | 10.6 |
-| 200,000 structs of `i32`, `i32`, `i64` | 4.7 | 7.9 | 6.4 |
-| 200,000 strings of 4 to 9 bytes | 7.7 | 15.0 | 13.0 |
+| 1,000,000 random `i64` | 6.1 | 15.2 | 10.2 |
+| 1,000,000 random `i64` below 2^53 | 6.3 | 15.3 | 10.2 |
+| 100,000 random `i64` | 0.45 | 1.18 | 0.83 |
+| 10,000 random `i64` | 0.039 | 0.097 | 0.068 |
+| 1,000 random `i64` | 0.0026 | 0.0080 | 0.0053 |
+| 10,000 lists of 16 random `i64` | 0.13 | 0.99 | 1.03 |
+| 1,000,000 `i64` of 16 values | 0.97 | 4.7 | 2.4 |
+| 1,000,000 `i64` powers of two, plus 0 to 6 | 4.9 | 6.9 | 4.4 |
+| 1,000,000 `i64` in order | 0.38 | 0.46 | 0.47 |
+| 1,000,000 `i64` in reverse | 0.39 | 0.82 | 0.78 |
+| 1,000,000 random `i32` | 3.9 | 12.6 | 9.6 |
+| 200,000 structs of `i32`, `i32`, `i64` | 4.8 | 7.6 | 5.9 |
+| 200,000 strings of 4 to 9 bytes | 7.7 | 14.8 | 11.5 |
+
+Each round sorts a list it hasn't sorted before, a copy just made, so neither side's branches can learn one. The powers of two are the one list where Rust's `sort_unstable` is faster, by about a tenth: their bits differ everywhere, but most of them fall in the spread's lowest bucket, so they're quicksorted, as Rust's are, after a pass that found which bits differ.
 
 ### Stable sorting
 
@@ -165,3 +173,4 @@ A list shows as `[1, 2, 3]`, the way Java's `ArrayList.toString` does, when its 
 - It grows by doubling, to at least 4 elements. Java's `ArrayList` grows by half instead, so code that must match Java's capacity uses the `java.ArrayList` that's designed but not built yet ([spec](../CALX_SPEC.md#collections-d27)).
 - The methods compile to inline C, so `push` is a length check and a store when there's room. Freeing a list frees each element, then the buffer.
 - `xs.sort()` calls the runtime's sort for integers, `char`, `rune`, `bool`, and enums whose values go up as declared, which sort as their values. For any other element type, the file gets a sort of its own from the template `calx_sort.h`, with the type's comparison inlined.
+- The runtime's sorts are `calx_sort.c`, compiled and linked only into programs that sort integers. A debug build leaves their networks out and sorts short runs by insertion: unoptimized, the networks would be several times the code and no faster. `tools/sort_networks.py` writes the networks, Batcher's odd-even merge sorts, and checks them on lists of zeros and ones, as a network that sorts every one of those sorts every list: all of them up to 16 elements, and 200,000 at random of 32 (D157).

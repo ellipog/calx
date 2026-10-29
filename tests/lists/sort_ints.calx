@@ -1,0 +1,211 @@
+// The sorts of integers (D96, D157) against sorting the same values in a type with its own `Order`,
+// which is sorted stably (D102), by other code: no radix, no networks, no reversing. Lengths at
+// each size where the algorithm changes, and shapes that take each path: few values, powers of
+// two, the type's least and greatest, which pad a short list's network, and lists in reverse,
+// whole or broken.
+
+fn next(s: u64) -> u64 {
+    return s * 6364136223846793005u64 + 1442695040888963407u64
+}
+
+// Element i of n of a list of shape `shape`, as 64 bits each type keeps the low bits of; `top` and
+// `bottom` are the bits of the type's greatest and least values.
+fn value(shape: i32, i: usize, n: usize, s: u64, top: u64, bottom: u64) -> u64 {
+    let r = s >> 11
+    if shape == 0 {
+        return s ^ (s >> 29)
+    } else if shape == 1 {
+        return r % 5u64
+    } else if shape == 2 {
+        return (1u64 << (r % 62u64)) + (s >> 7) % 7u64
+    } else if shape == 3 {
+        return if r % 3u64 == 0u64 { top } else { s }
+    } else if shape == 4 {
+        return if r % 2u64 == 0u64 { top } else { bottom }
+    } else if shape == 5 {
+        return u64(n - i)
+    } else if shape == 6 {
+        return if i == n / 3 + 1 { u64(n - i + 1) } else { u64(n - i) }
+    } else if shape == 7 {
+        return if i < n / 2 { u64(n - i) } else { s }
+    } else if shape == 8 {
+        return u64(i)
+    }
+    return if i % 3 == 0 { r % 100u64 } else { s >> 3 }
+}
+const SHAPES: i32 = 10
+
+fn raw(shape: i32, n: usize, seed: u64, top: u64, bottom: u64) -> List<u64> {
+    var xs = List<u64>()
+    var s = seed
+    for i in 0usize..n {
+        s = next(s)
+        xs.push(value(shape, i, n, s, top, bottom))
+    }
+    return xs
+}
+
+struct Held<T> {
+    x: T,
+}
+
+impl<T: Order> Order for Held<T> {
+    fn cmp(self, other: Self) -> Ordering {
+        return self.x.cmp(other.x)
+    }
+}
+
+// Whether `xs.sort()` puts xs in order, as sorting its values held does.
+fn agrees<T: Order + Copy>(xs: List<T>) -> bool {
+    var held = List<Held<T>>()
+    for x in xs {
+        held.push(Held { x: x })
+    }
+    var ys = xs.copy()
+    ys.sort()
+    held.sort()
+    for i in 0usize..ys.len() {
+        if ys[i] != held[i].x or (i > 0 and ys[i - 1] > ys[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn lengths() -> List<usize> {
+    var ns = List<usize>()
+    for n in 0usize..70 {
+        ns.push(n)
+    }
+    for n in [127usize, 128usize, 129usize, 191usize, 192usize, 193usize, 1000usize, 4096usize, 16384usize, 16385usize,
+              32768usize, 32769usize, 65536usize, 65537usize] {
+        ns.push(n)
+    }
+    return ns
+}
+
+// How many lists of each type sorted wrong.
+fn check_i64() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<i64>()
+            for v in raw(shape, n, u64(n) + 1u64, 0x7FFFFFFFFFFFFFFFu64, 0x8000000000000000u64) {
+                xs.push(i64.wrap(v))
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_u64() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            let xs = raw(shape, n, u64(n) + 2u64, 0xFFFFFFFFFFFFFFFFu64, 0u64)
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_i32() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<i32>()
+            for v in raw(shape, n, u64(n) + 3u64, 0x7FFFFFFFu64, 0x80000000u64) {
+                xs.push(i32.wrap(v))
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_u32() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<u32>()
+            for v in raw(shape, n, u64(n) + 4u64, 0xFFFFFFFFu64, 0u64) {
+                xs.push(u32.wrap(v))
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_i16() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<i16>()
+            for v in raw(shape, n, u64(n) + 5u64, 0x7FFFu64, 0x8000u64) {
+                xs.push(i16.wrap(v))
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_u8() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<u8>()
+            for v in raw(shape, n, u64(n) + 6u64, 0xFFu64, 0u64) {
+                xs.push(u8.wrap(v))
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn check_bool() -> i32 {
+    var bad = 0
+    for shape in 0..SHAPES {
+        for n in lengths() {
+            var xs = List<bool>()
+            for v in raw(shape, n, u64(n) + 7u64, 1u64, 0u64) {
+                xs.push(v % 2u64 == 1u64)
+            }
+            if not agrees(xs) {
+                bad += 1
+            }
+        }
+    }
+    return bad
+}
+
+fn main() {
+    println("{check_i64()} {check_u64()} {check_i32()} {check_u32()}")    // out: 0 0 0 0
+    println("{check_i16()} {check_u8()} {check_bool()}")    // out: 0 0 0
+
+    // A list in reverse is reversed, and one that breaks off is still sorted.
+    var down = List<i64>()
+    var broken = List<i64>()
+    for i in 0..1000 {
+        down.push(i64(1000 - i))
+        broken.push(i64(if i == 600 { 7 } else { 1000 - i }))
+    }
+    down.sort()
+    broken.sort()
+    println("{down[0]} {down[999]} {broken[0]} {broken[1]} {broken[2]} {broken[999]}")    // out: 1 1000 1 2 3 1000
+}
