@@ -29,6 +29,7 @@ fn main() {
 | `read_exact(buf: mut List<u8>, n: usize) -> bool` | Reads exactly `n` bytes onto the end of `buf`. Returns `false` if the input ended first, keeping the bytes that came |
 | `write(bytes: List<u8>)` | Writes the bytes to standard output |
 | `flush()` | Writes out what's waiting in the output buffer |
+| `is_terminal() -> bool` | Whether standard output is a terminal, not a file or a pipe, so a program can color it with ANSI escape codes. A Windows console reads them only once a program turns that on, which this does, and one that can't, before Windows 10, counts as no terminal |
 
 - What `write` writes and what `print` prints share one buffer, so they come out in the order they were written.
 - The buffer is written out when it fills, at `flush()`, when `read` is about to wait for input, and when the program ends. So a program that answers requests doesn't need to flush before reading the next one, but one whose peer waits for a reply without sending more must flush.

@@ -9,6 +9,7 @@ extern "C" {
     fn cx_in_read(to: *u8, n: usize) -> usize
     fn cx_out_write(from: *const u8, n: usize)
     fn cx_out_flush()
+    fn cx_out_is_terminal() -> u32
 }
 
 /// Reads up to `n` bytes from standard input onto the end of `buf`, and returns how many it
@@ -49,4 +50,11 @@ pub fn flush() {
     unsafe {
         cx_out_flush()
     }
+}
+
+/// Whether standard output is a terminal, not a file or a pipe, so a program can color what it
+/// prints there with ANSI escape codes. A Windows console reads them only once a program turns
+/// that on, which this does, and one that can't counts as no terminal.
+pub fn is_terminal() -> bool {
+    return unsafe { cx_out_is_terminal() } == 1
 }

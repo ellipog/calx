@@ -597,6 +597,24 @@ void cx_out_flush(void) {
     if (!par_buffered) flush_out();
 }
 
+/* Whether standard output is a terminal. A Windows console reads ANSI escape codes only once a
+ * program turns that on, which this does, and a console that can't, before Windows 10, counts as
+ * no terminal, so a program that colors only a terminal's text never shows the codes raw. */
+cx_u32 cx_out_is_terminal(void) {
+#ifdef _WIN32
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode;
+    if (h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) return 0;
+    if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) return 1;
+    return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) ? 1 : 0;
+#else
+    return isatty(1) ? 1 : 0;
+#endif
+}
+
 /* Reads at most `n` bytes, returning 0 only at the end of the input. Output waiting in the
  * buffer is written first, since the program may be waiting for an answer to it. */
 cx_usize cx_in_read(cx_u8* p, cx_usize n) {
