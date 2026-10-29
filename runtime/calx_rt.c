@@ -863,7 +863,9 @@ static cx_usize term_utf8(cx_u8* p, cx_u32 c) {
 
 /* What's typed, as UTF-8. A Windows console's input is UTF-16, read with `ReadConsoleW`, since
  * reading it as bytes loses what isn't ASCII; a surrogate whose pair hasn't come waits for the
- * next read. Elsewhere, and from a pipe or a file, it's `cx_in_read`. `n` is at least 8. */
+ * next read. Outside raw mode, a read that starts with Ctrl+Z is the end of the input, as
+ * `ReadFile` makes it, which is what Java's `System.in` and C's `read` see. Elsewhere, and from a
+ * pipe or a file, it's `cx_in_read`. `n` is at least 8. */
 cx_usize cx_term_read(cx_u8* p, cx_usize n) {
 #ifdef _WIN32
     HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
@@ -881,6 +883,7 @@ cx_usize cx_term_read(cx_u8* p, cx_usize n) {
             panic_text("can't read standard input");
             cx_panic_end();
         }
+        if (got > 0 && units[0] == 0x1A && (mode & ENABLE_PROCESSED_INPUT)) return 0;
         cx_usize out = 0;
         for (DWORD i = 0; i < got; i++) {
             cx_u32 c = units[i];

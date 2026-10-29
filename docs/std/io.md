@@ -67,12 +67,14 @@ fn main() {
 Lines are split and decoded as Java's `BufferedReader.readLine` gives them over an `InputStreamReader` in UTF-8, which is how vanilla's console reads commands:
 
 - A line ends at `
-`, `` or `
+`, `
+` or `
 `, which isn't part of it. A last line without an end is still a line, and an input that ends with a line end has no empty line after it.
-- A line that ends at `` is given at once, without waiting to see whether a `
+- A line that ends at `
+` is given at once, without waiting to see whether a `
 ` comes next. One that does is skipped as part of the same end.
 - Bytes that aren't UTF-8 become U+FFFD, as [`decode_lossy`](text-utf8.md) gives them, so every line reads.
-- A Windows console's input is read as UTF-16 and given as UTF-8, as [`std.term.read`](term.md) gives it, since reading it as bytes would give it in the console's code page.
+- A Windows console's input is read as UTF-16 and given as UTF-8, as [`std.term.read`](term.md) gives it, since reading it as bytes would give it in the console's code page. Ctrl+Z then Enter ends the input there, as Ctrl+D does on Linux.
 - Like `read`, `next()` writes out what's waiting in the output buffer before it waits for input, so a prompt printed with `print` shows.
 - It reads 64 KiB at a time, and a line is the only copy made of its bytes. A line can be as long as memory allows.
 
