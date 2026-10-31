@@ -14,7 +14,8 @@
 
 :root {
 	--paper: #F7F3EC; --raised: #FCFAF6; --sunk: #EFE9DE; --code: #F3EEE5;
-	--ink: #1E1F24; --ink-2: #4A4B52; --ink-3: #6B6C73;
+	/* --ink-3, the faintest text, has 4.5:1 contrast on --sunk, the darkest paper it sits on. */
+	--ink: #1E1F24; --ink-2: #4A4B52; --ink-3: #66676E;
 	--line: #E3DCCF; --line-2: #D3CABA; --scroll: #C9BEAB;
 	--amber: #B9802F; --amber-ink: #8A5A17; --amber-wash: rgba(185, 128, 47, .13);
 	--calx: #B9802F; --rust: #3F6EA8;

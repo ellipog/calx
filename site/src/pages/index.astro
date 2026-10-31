@@ -118,7 +118,7 @@ const site = {
 				</div>
 				<div class="promise">
 					<h3>Fast to build</h3>
-					<p>CI times the compiler on every push, on the same machine as the benchmark below.</p>
+					<p>Measured on the same machine as the benchmark below.</p>
 					<table class="times">
 						<thead>
 							<tr><th></th><th>Windows</th><th>Linux</th></tr>
@@ -146,8 +146,8 @@ const site = {
 		<section class="section" id="perf">
 			<h2 class="h">Faster than Rust, on our benchmark</h2>
 			<p class="intro">
-				We wrote the same simulation in Calx and in Rust, with the same algorithms. Both must produce the same checksum, and
-				CI runs them on every push.
+				We wrote the same simulation in Calx and in Rust, with the same algorithms. Both must print the same checksum, and CI
+				checks Calx's on every push.
 			</p>
 			<PerfChart />
 		</section>

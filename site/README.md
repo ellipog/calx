@@ -56,7 +56,7 @@ It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build
   - the copy button copies the tab that's showing, as it shows it.
 - **Type.** Headings are in Source Serif 4, code in JetBrains Mono, and everything else in the system's own sans-serif, so a page loads two font files. Code has no ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
 - **Scrollbars.** Thin, in the theme's colors, without arrow buttons.
-- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests and links to the file to edit. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
+- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests and links to the file to edit, and on the benchmark page, where the header's Performance link goes, it's followed by the home page's results chart, so that page opens with the numbers and then says how they're made. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
 - **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview and the 404 page.
 
 The home page doesn't repeat anything the repo already says. It reads it at build time:

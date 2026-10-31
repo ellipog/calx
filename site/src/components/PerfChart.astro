@@ -1,7 +1,9 @@
 ---
 // Milliseconds per tick, Calx against Rust, in two panels, since 1 and 24 workers are an order of
 // magnitude apart. The numbers are the README's (src/numbers.mjs), and the same table is one
-// click away for anyone who'd rather read it.
+// click away for anyone who'd rather read it. It's on the home page and the benchmark's own page, so
+// its layout follows its own width rather than the screen's.
+import { GITHUB } from '../markdown.mjs';
 import { tickLoop } from '../numbers.mjs';
 
 const bench = tickLoop();
@@ -42,7 +44,7 @@ const panels = PANELS.map((p) => {
 			<span><i style="background:var(--rust)"></i>Rust, rustc {bench.rustc}</span>
 		</div>
 	</div>
-	<div class="panels">
+	<div class="cq"><div class="panels">
 		{
 			panels.map((p) => (
 				<div class="panel">
@@ -91,11 +93,13 @@ const panels = PANELS.map((p) => {
 				</div>
 			))
 		}
-	</div>
+	</div></div>
 	<div class="perf-foot">
 		<span>
 			Median of {bench.runs} runs of {bench.ticks} ticks on an {bench.machine}.{' '}
-			<a class="more" href="/benchmarks/">Method and raw results</a>
+			<a href="/benchmarks/#how-its-measured">How it's measured</a>
+			{' · '}
+			<a href={`${GITHUB}/tree/main/bench/results`}>Every recorded run</a>
 		</span>
 		<details class="tbl">
 			<summary>Show as a table</summary>
@@ -138,6 +142,10 @@ const panels = PANELS.map((p) => {
 </script>
 
 <style>
+	/* A container contains fixed elements too, so it's this, not .perf with the tooltip in it. */
+	.cq {
+		container: perf / inline-size;
+	}
 	.perf {
 		margin-top: 40px;
 		border: 1px solid var(--line);
@@ -290,6 +298,17 @@ const panels = PANELS.map((p) => {
 		font-size: 13.5px;
 		color: var(--ink-3);
 	}
+	/* The home page's link style, here so a docs page, whose links are colored, shows it too. */
+	.perf-foot a {
+		font-weight: 500;
+		color: var(--ink);
+		text-decoration: none;
+		border-bottom: 1.5px solid var(--amber);
+		padding-bottom: 1px;
+	}
+	.perf-foot a:hover {
+		border-bottom-width: 2.5px;
+	}
 	details summary {
 		cursor: pointer;
 		font: 500 13.5px var(--f-body);
@@ -325,7 +344,8 @@ const panels = PANELS.map((p) => {
 	.tip[hidden] {
 		display: none;
 	}
-	@media (max-width: 900px) {
+	/* The panels side by side need about 790px; under that they're one above the other. */
+	@container perf (max-width: 790px) {
 		.panels {
 			grid-template-columns: minmax(0, 1fr);
 			gap: 36px;
@@ -335,6 +355,9 @@ const panels = PANELS.map((p) => {
 		.perf {
 			padding: 22px 18px;
 		}
+	}
+	/* Too narrow for the platform beside its bars: it goes above them. */
+	@container perf (max-width: 520px) {
 		.plot {
 			padding-right: 112px;
 		}

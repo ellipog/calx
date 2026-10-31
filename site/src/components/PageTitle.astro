@@ -4,6 +4,7 @@
 // the title shows once.
 import { docsIndex } from '../docs-index.mjs';
 import { editUrl, testedExamples } from '../facts.mjs';
+import PerfChart from './PerfChart.astro';
 
 const route = Astro.locals.starlightRoute;
 const { title, description } = route.entry.data;
@@ -49,6 +50,16 @@ const crumbs = section && {
 		<svg class="i" aria-hidden="true"><use href="#i-edit" /></svg>Edit this page
 	</a>
 </div>
+{
+	// The header's Performance link comes here, so the page opens with the results, as the README's
+	// Performance section has them, and then says how they're made.
+	route.id === 'benchmarks' && (
+		<section class="results" aria-labelledby="results" data-pagefind-ignore>
+			<h2 id="results" class="sr-only">Results</h2>
+			<PerfChart />
+		</section>
+	)
+}
 
 <style>
 	.crumbs {
