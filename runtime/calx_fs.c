@@ -15,6 +15,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winioctl.h>
 #else
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -95,6 +96,7 @@ static void fail_win(DWORD e) {
         fs_fail(FS_NOT_FOUND, (cx_i32)e);
         break;
     case ERROR_ACCESS_DENIED:
+    case ERROR_PRIVILEGE_NOT_HELD:
         fs_fail(FS_DENIED, (cx_i32)e);
         break;
     case ERROR_FILE_EXISTS:
@@ -537,6 +539,145 @@ cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
     return 1;
 }
 
+/* A reparse point's data, as `FSCTL_GET_REPARSE_POINT` gives it, for the two kinds that are
+ * links: its tag, then where its names are in its path buffer, in bytes. */
+typedef struct {
+    ULONG tag;
+    USHORT data_length;
+    USHORT reserved;
+    USHORT substitute_offset;
+    USHORT substitute_length;
+    USHORT print_offset;
+    USHORT print_length;
+    /* A symbolic link has its flags here, then its names; a junction its names. */
+    ULONG flags;
+} reparse_head;
+
+/* Adds a link's name to the result buffer, without the `\??\` or `\\?\` the system may put on
+ * its front: `\??\C:\x` is `C:\x`, and `\??\UNC\server\x` is `\\server\x`. */
+static void buf_add_link_name(const wchar_t* s, int units) {
+    if (units >= 4 && (wcsncmp(s, L"\\??\\", 4) == 0 || wcsncmp(s, L"\\\\?\\", 4) == 0)) {
+        if (units >= 8 && wcsncmp(s + 4, L"UNC\\", 4) == 0) {
+            buf_add("\\", 1);
+            s += 7;
+            units -= 7;
+        } else {
+            s += 4;
+            units -= 4;
+        }
+    }
+    buf_add_wide(s, units);
+}
+
+/* What a link points to, in the result buffer, as it was made: the name the system shows for it,
+ * or if that's empty the name it follows. 2 for a symbolic link, 3 for a junction, 1 if what's at
+ * the path is neither, or 0 if it can't be read. */
+cx_i32 cx_fs_read_link(const cx_u8* path, size_t len) {
+    fs_len = 0;
+    wchar_t* w = wide(path, len);
+    if (!w) return 0;
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) {
+        fail_win(GetLastError());
+        return 0;
+    }
+    unsigned char* data = (unsigned char*)malloc(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    if (!data) fs_out_of_memory();
+    DWORD got = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, data, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &got, NULL);
+    DWORD e = GetLastError();
+    CloseHandle(h);
+    if (!ok) {
+        free(data);
+        if (e == ERROR_NOT_A_REPARSE_POINT) return 1;
+        fail_win(e);
+        return 0;
+    }
+    reparse_head head;
+    if (got < 16) {
+        free(data);
+        return 1;
+    }
+    memcpy(&head, data, got < sizeof head ? got : sizeof head);
+    size_t names;
+    cx_i32 kind;
+    if (head.tag == IO_REPARSE_TAG_SYMLINK) {
+        names = 20;
+        kind = 2;
+    } else if (head.tag == IO_REPARSE_TAG_MOUNT_POINT) {
+        names = 16;
+        kind = 3;
+    } else {
+        free(data);
+        return 1;
+    }
+    USHORT offset = head.print_offset, length = head.print_length;
+    if (length == 0) {
+        offset = head.substitute_offset;
+        length = head.substitute_length;
+    }
+    /* A name past the data, or an odd one, is a link that's broken; it reads as nothing. */
+    if ((offset | length) & 1 || names + offset + length > got) {
+        free(data);
+        return kind;
+    }
+    wchar_t* name = (wchar_t*)malloc((size_t)length + sizeof(wchar_t));
+    if (!name) fs_out_of_memory();
+    memcpy(name, data + names + offset, length);
+    name[length / 2] = 0;
+    free(data);
+    buf_add_link_name(name, length / 2);
+    free(name);
+    return kind;
+}
+
+/* A symbolic link at `path` to `target`, as given but with each `/` made `\`, which the system
+ * needs in a link. It's a link to a directory if the target is one now, a relative target taken
+ * from the link's directory, as Java's `Files.createSymbolicLink` decides. It's made without
+ * the privilege links once needed where the system allows that, as in developer mode. */
+cx_i32 cx_fs_make_link(const cx_u8* target, size_t target_len, const cx_u8* path, size_t len) {
+    wchar_t* to = wide(target, target_len);
+    if (!to) return 0;
+    wchar_t* w = wide(path, len);
+    if (!w) {
+        free(to);
+        return 0;
+    }
+    for (wchar_t* c = to; *c; c++) {
+        if (*c == L'/') *c = L'\\';
+    }
+    /* The target as seen from the link's directory. */
+    int absolute = to[0] == L'\\' || (to[0] && to[1] == L':');
+    size_t dir = 0;
+    for (size_t i = 0; w[i]; i++) {
+        if (w[i] == L'\\' || w[i] == L'/') dir = i + 1;
+    }
+    size_t to_units = wcslen(to);
+    wchar_t* seen = (wchar_t*)malloc((dir + to_units + 1) * sizeof(wchar_t));
+    if (!seen) fs_out_of_memory();
+    size_t n = 0;
+    if (!absolute) {
+        memcpy(seen, w, dir * sizeof(wchar_t));
+        n = dir;
+    }
+    memcpy(seen + n, to, (to_units + 1) * sizeof(wchar_t));
+    DWORD attrs = GetFileAttributesW(seen);
+    free(seen);
+    DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+    BOOLEAN ok = CreateSymbolicLinkW(w, to, flags);
+    DWORD e = GetLastError();
+    free(to);
+    free(w);
+    if (!ok) {
+        fail_win(e);
+        return 0;
+    }
+    return 1;
+}
+
 #else
 
 static void fail_errno(int e) {
@@ -914,6 +1055,53 @@ cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
     buf_add_name((const unsigned char*)r, strlen(r));
     free(r);
     return 1;
+}
+
+/* What a symbolic link points to, as it was made, in the result buffer: 2, or 1 if what's at the
+ * path isn't a link, or 0 if it can't be read. */
+cx_i32 cx_fs_read_link(const cx_u8* path, size_t len) {
+    fs_len = 0;
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    size_t cap = 256;
+    for (;;) {
+        char* b = (char*)malloc(cap);
+        if (!b) fs_out_of_memory();
+        ssize_t n = readlink(s, b, cap);
+        if (n < 0) {
+            int e = errno;
+            free(b);
+            free(s);
+            if (e == EINVAL) return 1;
+            fail_errno(e == ENOTDIR ? ENOENT : e);
+            return 0;
+        }
+        if ((size_t)n < cap) {
+            buf_add_name((const unsigned char*)b, (size_t)n);
+            free(b);
+            free(s);
+            return 2;
+        }
+        /* It may not have all fit. */
+        free(b);
+        cap *= 2;
+    }
+}
+
+/* A symbolic link at `path` to `target`, as given. */
+cx_i32 cx_fs_make_link(const cx_u8* target, size_t target_len, const cx_u8* path, size_t len) {
+    char* to = cpath(target, target_len);
+    if (!to) return 0;
+    char* s = cpath(path, len);
+    if (!s) {
+        free(to);
+        return 0;
+    }
+    int ok = symlink(to, s) == 0;
+    if (!ok) fail_errno(errno);
+    free(to);
+    free(s);
+    return ok;
 }
 
 #endif

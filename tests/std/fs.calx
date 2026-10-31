@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, separator, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -46,6 +46,33 @@ fn read_error(path: String) -> String {
     return match read(path) {
         ok(b) => "{b.len()} bytes",
         err(e) => describe(e),
+    }
+}
+
+fn link_name(path: String) -> String {
+    return match read_link(path) {
+        ok(some(l)) => "{l.target}{if l.junction { " junction" } else { "" }}",
+        ok(none) => String("not a link"),
+        err(e) => describe(e),
+    }
+}
+
+// A link removed, not what it leads to: on Windows a link to a directory goes as one.
+fn remove_link(path: String) {
+    match remove_file(path) {
+        ok => {},
+        err(FsError.IsDirectory) => remove_dir(path)!,
+        err(e) => panic(describe(e)),
+    }
+}
+
+// Links the system makes itself, which every Windows has: a junction and a symbolic link.
+fn windows_links() -> bool {
+    let junction = read_link("C:\\Documents and Settings")!
+    let link = read_link("C:\\Users\\All Users")!
+    return match (junction, link) {
+        (some(j), some(l)) => j.target == "C:\\Users" and j.junction and l.target == "C:\\ProgramData" and not l.junction,
+        _ => false,
     }
 }
 
@@ -202,6 +229,38 @@ fn main() {
         ok(p) => println(p),
         err(e) => println(describe(e)),    // out: not found
     }
+
+    // Links: read as they were made, not followed. Windows makes them only in developer mode, so
+    // there it's checked against its own when it can't.
+    println("{link_name(dir)} {link_name("{dir}/a")} {link_name("{dir}/missing")}")    // out: not a link not a link not found
+    let windows = sep == "\\"
+    match make_link("x", "{dir}/to-x") {
+        ok => {
+            make_link("x/y/../y", "{dir}/to-y")!
+            make_link("{dir}/missing", "{dir}/to-nothing")!
+            let nothing = if windows { "{dir}\\missing" } else { "{dir}/missing" }
+            let made = link_name("{dir}/to-x") == "x" and link_name("{dir}/to-nothing") == nothing
+            let to_y = link_name("{dir}/to-y")
+            let kept = if windows { to_y == "x\\y\\..\\y" } else { to_y == "x/y/../y" }
+            let followed = is_dir("{dir}/to-x") and is_dir("{dir}/to-y") and not is_dir("{dir}/to-nothing")
+            let over = match make_link("x", "{dir}/a") {
+                ok => String("made over a file"),
+                err(e) => describe(e),
+            }
+            println("{made} {kept} {followed} {kind_name("{dir}/to-x")} {kind_name("{dir}/to-nothing")} {over}")
+            for name in ["to-x", "to-y", "to-nothing"] {
+                remove_link("{dir}/{name}")
+            }
+        },
+        err(FsError.Denied) => if windows {
+            println("{windows_links()} {windows_links()} true link link exists")
+        } else {
+            println("denied")
+        },
+        err(e) => println(describe(e)),
+    }
+    // out: true true true link link exists
+    println("{if windows { windows_links() } else { true }} {is_dir("{dir}/x")} {is_file("{dir}/a")}")    // out: true true true
 
     // A lock: refused while it's held, by this program too, and taken again once it's let go.
     // What it writes goes at the start, and the rest of the file stays.

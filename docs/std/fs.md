@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, parts written in place, atomic renames, locks, sizes and modified times, directories made, listed and removed, real paths, and temporary directories.
+description: Files and directories - whole files read and written, parts written in place, atomic renames, locks, sizes and modified times, directories made, listed and removed, links read and made, real paths, and temporary directories.
 ---
 
 # `std.fs`
@@ -49,11 +49,14 @@ fn main() {
 | `kind(path: String) -> Kind? ! FsError` | What's at the path, without following a link, or `none` if nothing is |
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
 | `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
+| `read_link(path: String) -> Link? ! FsError` | What the link at `path` points to, without following it, or `none` if what's there isn't a link, as Java's `Files.readSymbolicLink` reads it. See [Links](#links) |
+| `make_link(target: String, path: String) ! FsError` | Makes a symbolic link at `path` to `target`, kept as it's given, as Java's `Files.createSymbolicLink` makes it. `Exists` if something's at `path`. See [Links](#links) |
 | `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
 | `separator() -> String` | What the system puts between a path's names, as Java's `File.separator`: `\` on Windows and `/` elsewhere, as in the paths `real_path` and `temp_dir` give. Either works in the paths `std.fs` is given |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends |
+| `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
 
@@ -116,6 +119,30 @@ A path is a `String`, relative to the directory the program runs in unless it st
 A path with a NUL byte fails with `BadPath`, since the system would read only the part before it. Windows paths are limited to 260 UTF-16 units for now.
 
 Names from `list` are UTF-8. On Linux, a name is bytes, and each part that isn't UTF-8 becomes U+FFFD. On Windows, an unpaired surrogate in a name becomes U+FFFD. `list` sorts the names, since each system lists them in its own order, and a program's output shouldn't depend on which it runs on.
+
+## Links
+
+A symbolic link is a name that leads to another path. `read_link` reads where it leads without going there, so a program can check a folder's links before it trusts them, as a Minecraft server checks its world's against `allowed_symlinks.txt`. `kind`, `rename`, `remove_file` and `remove_dir_all` see the link itself too, and every other call follows it.
+
+```calx
+import std.fs.{read_link, write, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    write("{dir}/level.dat", [])!
+    match read_link("{dir}/level.dat")! {
+        some(link) => println("a link to {link.target}"),
+        none => println("not a link"),    // out: not a link
+    }
+    remove_dir_all(dir)!
+}
+```
+
+A link's `target` is what it was made with, not resolved: relative to the link's directory or absolute, and maybe to nothing at all. A program resolves it if it needs to, as `real_path` does.
+
+On Windows, a link holds two names, the one it follows and the one the system shows, and `read_link` gives the one shown, without the `\??\` the system may put on the front of the other, as Java does. So `C:\Users\All Users`, a link every Windows has, reads as `C:\ProgramData`. A junction, an older kind of link to a directory, reads too, with `junction` set: `C:\Documents and Settings` reads as `C:\Users`. Java takes a junction for the directory it leads to, so a program matching Java treats one as a directory and looks inside it.
+
+`make_link` makes a symbolic link, never a junction. On Windows each `/` in the target becomes `\`, which the system needs in a link, and the link is to a directory if the target is one when it's made. Windows lets a program make links only in developer mode or with the privilege to, and `make_link` fails with `Denied` otherwise. Linux lets any program make one.
 
 ## Errors
 
