@@ -749,7 +749,8 @@ $$("[data-toggle-theme]").forEach(b => b.addEventListener("click", () => {
 }));
 
 // ---- the crystal: banner.py's dither, run live ----
-// TONES is the photo's darkness (top half) and warmth (bottom half), from tones.py. Each scene
+// TONES is assets/logo/calx-tones.jpg, which banner.py writes: the photo's darkness (top half)
+// and warmth (bottom half). It's a data URL so the page works from a file. Each scene
 // dithers its own crop of it, Atkinson for the ink and Bayer for the amber veins, as banner.py
 // does. Dots are a whole number of screen pixels, so they never shimmer. Each scene is quiet
 // around what it keeps clear, measured where that is on the page. Theme changes only repaint.

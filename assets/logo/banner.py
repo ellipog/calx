@@ -1,15 +1,24 @@
-"""Makes the README banner: the crystal photo, dithered, with the Calx logo on top.
+"""Makes the Calx art: the crystal photo, dithered, with the Calx logo on top.
 
     python assets/logo/banner.py
 
-Needs Pillow and numpy. Writes calx-banner.png, for light themes, and calx-banner-dark.png.
+Needs Pillow and numpy. Writes:
+
+- calx-banner.png and calx-banner-dark.png, the README's banner, for light and dark themes
+- calx-social.png, the card that link previews show (the website's og:image), 1200 by 630
+- calx-tones.jpg, the tone map the website dithers live (see below)
 
 The photo is reduced to a grid of 4-pixel cells and dithered with Atkinson's error diffusion,
 which keeps highlights clean, in ink on paper, with the photo's warm veins as a third color by
 ordered dithering. The dither fades out in an ellipse around the logo, which is drawn on top
 from calx-logo.svg, with a knockout of paper around it so no dot touches it.
+
+The website dithers the same crystal live, in the browser, with these steps and constants, so
+the art and the site match. It starts from calx-tones.jpg, which holds this script's darkness and
+warmth for the whole photo, so the site can take whatever crop and dot size each place needs.
 """
 
+import functools
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -22,19 +31,23 @@ HERE = Path(__file__).resolve().parent
 PHOTO = HERE / "banner-photo.jpg"
 LOGO = HERE / "calx-logo.svg"
 
-WIDTH, HEIGHT = 1600, 480
 CELL = 4             # pixels per dither cell
-LOGO_WIDTH = 640
 TOP = 0.30           # where the photo's band starts, as a share of its height
 GAMMA = 1.5          # above 1 lightens the midtones, so ink gathers on edges
 DETAIL = 1.2         # local contrast, so crystal facets carry the ink
-CORNER = 20          # rounded corners, transparent outside
 
 # (paper, ink, vein, logo)
-THEMES = {
-    "calx-banner.png": ((247, 243, 236), (30, 31, 36), (214, 172, 112), (30, 31, 36)),
-    "calx-banner-dark.png": ((13, 17, 23), (222, 216, 204), (196, 150, 88), (240, 246, 252)),
+LIGHT = ((247, 243, 236), (30, 31, 36), (214, 172, 112), (30, 31, 36))
+DARK = ((13, 17, 23), (222, 216, 204), (196, 150, 88), (240, 246, 252))
+
+# name: (width, height, logo width, rounded corners, colors). Corners are transparent outside.
+# The social card is opaque and square, since link previews crop and round cards themselves.
+OUTPUTS = {
+    "calx-banner.png": (1600, 480, 640, 20, LIGHT),
+    "calx-banner-dark.png": (1600, 480, 640, 20, DARK),
+    "calx-social.png": (1200, 630, 560, 0, LIGHT),
 }
+TONE_MAP = "calx-tones.jpg"
 
 BAYER = np.array([[0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
                   [12, 44, 4, 36, 14, 46, 6, 38], [60, 28, 52, 20, 62, 30, 54, 22],
@@ -163,6 +176,7 @@ def fill(polygons, evenodd, width, height, scale, ox, oy):
     return mask
 
 
+@functools.cache
 def logo_alpha(width, supersample=4):
     """The logo's coverage, 0 to 1, at `width` pixels wide."""
     root = ET.parse(LOGO).getroot()
@@ -194,21 +208,43 @@ def knockout(alpha, pad):
 
 # --- the photo, dithered -------------------------------------------------------------------------
 
-def tones():
-    """Each cell's darkness, for the ink, and warmth, for the veins, from 0 to 1."""
+@functools.cache
+def tones(width, height):
+    """Each cell's darkness, for the ink, and warmth, for the veins, from 0 to 1.
+
+    The image takes a band of the photo as wide as the photo, from TOP down, or as far down as
+    the band can start and still fit."""
     photo = Image.open(PHOTO).convert("RGB")
-    band = round(photo.width * HEIGHT / WIDTH)
+    band = round(photo.width * height / width)
+    assert band <= photo.height, "the image is taller, for its width, than the photo"
     y0 = min(round(photo.height * TOP), photo.height - band)
-    cells = (-(-WIDTH // CELL), -(-HEIGHT // CELL))
-    rgb = np.asarray(photo.crop((0, y0, photo.width, y0 + band)).resize(cells, Image.LANCZOS), float) / 255
+    cells = (-(-width // CELL), -(-height // CELL))
+    return measure(photo.crop((0, y0, photo.width, y0 + band)).resize(cells, Image.LANCZOS), 6)
+
+
+def measure(photo, blur):
+    """Darkness and warmth from 0 to 1, for each pixel of photo. blur is in pixels; the banner's
+    is 6 of its 400 cells across."""
+    rgb = np.asarray(photo, float) / 255
     lum = rgb @ np.array([0.2126, 0.7152, 0.0722])
-    blurred = Image.fromarray((lum * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(6))
+    blurred = Image.fromarray((lum * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(blur))
     detail = lum + DETAIL * (lum - np.asarray(blurred, float) / 255)
     lo, hi = np.percentile(detail, [0.5, 99.5])
     dark = (1 - np.clip((detail - lo) / (hi - lo), 0, 1)) ** GAMMA
     warm = rgb[..., 0] - rgb[..., 2]
     lo, hi = np.percentile(warm, [80, 99.7])
     return dark, np.clip((warm - lo) / (hi - lo), 0, 1)
+
+
+def tone_map(width=480, quality=75):
+    """The whole photo's darkness and warmth, for the website to dither live at any size: one
+    grayscale JPEG, darkness (0 paper to 255 full ink) on top and warmth below."""
+    photo = Image.open(PHOTO).convert("RGB")
+    height = round(width * photo.height / photo.width)
+    dark, warm = measure(photo.resize((width, height), Image.LANCZOS), 6 * width / 400)
+    both = Image.fromarray((np.vstack([dark, warm]) * 255).round().astype(np.uint8), "L")
+    both.save(HERE / TONE_MAP, quality=quality, optimize=True)
+    print(f"wrote {TONE_MAP}")
 
 
 def quiet(shape, logo_shape):
@@ -240,13 +276,15 @@ def atkinson(tone):
     return out
 
 
-def banner(alpha, dark, warm, paper, ink, vein, logo):
+def render(width, height, logo_width, corner, paper, ink, vein, logo):
+    alpha = logo_alpha(logo_width)
+    dark, warm = tones(width, height)
     calm = quiet(dark.shape, alpha.shape)
     inked = atkinson(dark * calm)
     h, w = warm.shape
     veins = ~inked & (warm * calm * 0.9 > np.tile(BAYER, (h // 8 + 1, w // 8 + 1))[:h, :w])
-    grow = lambda m: np.kron(m, np.ones((CELL, CELL), dtype=bool))[:HEIGHT, :WIDTH]
-    img = np.empty((HEIGHT, WIDTH, 3))
+    grow = lambda m: np.kron(m, np.ones((CELL, CELL), dtype=bool))[:height, :width]
+    img = np.empty((height, width, 3))
     img[:] = paper
     img[grow(veins)] = vein
     img[grow(inked)] = ink
@@ -254,28 +292,30 @@ def banner(alpha, dark, warm, paper, ink, vein, logo):
     pad = 10
     clear = knockout(alpha, pad)
     lh, lw = alpha.shape
-    oy, ox = (HEIGHT - lh) // 2, (WIDTH - lw) // 2
+    oy, ox = (height - lh) // 2, (width - lw) // 2
     ch, cw = clear.shape
     img[oy - 2 * pad:oy - 2 * pad + ch, ox - 2 * pad:ox - 2 * pad + cw][clear] = paper
     a = alpha[..., None]
     img[oy:oy + lh, ox:ox + lw] = img[oy:oy + lh, ox:ox + lw] * (1 - a) + np.array(logo, float) * a
 
+    image = Image.fromarray(img.round().astype(np.uint8))
+    if not corner:
+        return image
     # Rounded corners, antialiased 4x.
-    corners = Image.new("L", (WIDTH * 4, HEIGHT * 4), 0)
-    ImageDraw.Draw(corners).rounded_rectangle((0, 0, WIDTH * 4 - 1, HEIGHT * 4 - 1), CORNER * 4, fill=255)
-    rgba = Image.fromarray(img.round().astype(np.uint8)).convert("RGBA")
-    rgba.putalpha(corners.resize((WIDTH, HEIGHT), Image.LANCZOS))
+    corners = Image.new("L", (width * 4, height * 4), 0)
+    ImageDraw.Draw(corners).rounded_rectangle((0, 0, width * 4 - 1, height * 4 - 1), corner * 4, fill=255)
+    rgba = image.convert("RGBA")
+    rgba.putalpha(corners.resize((width, height), Image.LANCZOS))
     return rgba
 
 
 def main():
-    alpha = logo_alpha(LOGO_WIDTH)
-    dark, warm = tones()
-    for name, colors in THEMES.items():
-        image = banner(alpha, dark, warm, *colors)
+    for name, (width, height, logo_width, corner, colors) in OUTPUTS.items():
+        image = render(width, height, logo_width, corner, *colors)
         # Few colors, so a palette keeps the file small.
         image.quantize(64, method=Image.Quantize.FASTOCTREE).save(HERE / name, optimize=True)
         print(f"wrote {name}")
+    tone_map()
 
 
 if __name__ == "__main__":
