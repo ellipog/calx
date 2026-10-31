@@ -15,7 +15,7 @@ extern "C" {
     fn cx_fs_close(h: i64) -> i32
     fn cx_fs_lock(path: *const u8, len: usize, bytes: *const u8, n: usize) -> i64
     fn cx_fs_unlock(h: i64) -> i32
-    fn cx_fs_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i32
+    fn cx_fs_rename(from: *const u8, from_len: usize, to: *const u8, to_len: usize, sync: u32) -> i32
     fn cx_fs_remove_file(path: *const u8, len: usize) -> i32
     fn cx_fs_remove_dir(path: *const u8, len: usize) -> i32
     fn cx_fs_make_dir(path: *const u8, len: usize) -> i32
@@ -319,7 +319,17 @@ pub fn try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError {
 /// Moves what's at `from` to `to`, replacing a file there. On one volume it's atomic: anything
 /// that opens `to` sees the old file or the new one, never part of either.
 pub fn rename(from: String, to: String) ! FsError {
-    if unsafe { cx_fs_rename(from.as_ptr(), from.len(), to.as_ptr(), to.len()) } == 0 {
+    if unsafe { cx_fs_rename(from.as_ptr(), from.len(), to.as_ptr(), to.len(), 0) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Moves what's at `from` to `to` as `rename` does, and returns once the system says the move is on
+/// the disk, so a power cut after it can't undo it. With `write_parts` and its `sync` first, it
+/// replaces a file so that after a crash there's the old file or the new one, whole. If it fails
+/// after the move, the move may not be on the disk yet.
+pub fn rename_synced(from: String, to: String) ! FsError {
+    if unsafe { cx_fs_rename(from.as_ptr(), from.len(), to.as_ptr(), to.len(), 1) } == 0 {
         fail last_error()
     }
 }

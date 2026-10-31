@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, parts written in place, atomic renames, locks, sizes and modified times, directories made, listed and removed, links read and made, real paths, and temporary directories.
+description: Files and directories - whole files read and written, parts written in place, atomic renames, synced or not, locks, sizes and modified times, directories made, listed and removed, links read and made, real paths, and temporary directories.
 ---
 
 # `std.fs`
@@ -40,6 +40,7 @@ fn main() {
 | `metadata(path: String) -> Metadata ! FsError` | The size and modified time of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
 | `set_modified(path: String, at: Timestamp) ! FsError` | Sets when what's at the path was last modified, following links, as Java's `File.setLastModified` does, without changing what it holds |
 | `rename(from: String, to: String) ! FsError` | Moves what's at `from` to `to`, replacing a file there. Atomic on one volume |
+| `rename_synced(from: String, to: String) ! FsError` | Moves what's at `from` to `to` as `rename` does, and returns once the system says the move is on the disk. If it fails after the move, the move may not be on the disk yet |
 | `remove_file(path: String) ! FsError` | Removes a file, or a link but not what it leads to |
 | `make_dir(path: String) ! FsError` | Makes a directory. `Exists` if something's there |
 | `make_dir_all(path: String) ! FsError` | Makes a directory and each one missing on the way to it. Fine if it's there already |
@@ -190,14 +191,16 @@ fn main() {
 
 `write` replaces a file's bytes in place, so a crash part way through leaves it half written. To replace a file that must never be seen broken, such as a world's `level.dat`, write the new bytes to a file beside it and `rename` that over it. Readers then see the old file or the new one, whole.
 
-`write` doesn't wait for the bytes to reach the disk, as Java's `Files.write` doesn't. A power cut soon after can lose them, though not leave them half renamed.
+`write` doesn't wait for the bytes to reach the disk, as Java's `Files.write` doesn't, and `rename` doesn't wait for the move to. A crash of the program loses neither, since the system has them, but a power cut soon after can leave the old file, or on some file systems an empty or broken new one.
+
+To keep a file whole through a power cut, write the new bytes with `write_parts` and its `sync`, then `rename_synced` them over it. Each returns once the system says what it did is on the disk, so after a power cut there's the old file or the new one, whole, and once `rename_synced` has returned, the new one. That costs a wait for the disk, which `write` and `rename` don't, so it's for files that must survive one, such as a world's saves, not for every file.
 
 ## How it works
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
-| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
+| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 

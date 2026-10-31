@@ -282,7 +282,9 @@ cx_i32 cx_fs_unlock(cx_i64 h) {
     return 1;
 }
 
-cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
+/* Moves `from` to `to`, replacing a file there. With `sync`, MoveFileExW returns once the move is on
+ * the disk. */
+cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len, cx_u32 sync) {
     wchar_t* a = wide(from, from_len);
     if (!a) return 0;
     wchar_t* b = wide(to, to_len);
@@ -290,7 +292,7 @@ cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t 
         free(a);
         return 0;
     }
-    BOOL ok = MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING);
+    BOOL ok = MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING | (sync ? MOVEFILE_WRITE_THROUGH : 0));
     if (!ok) fail_win(GetLastError());
     free(a);
     free(b);
@@ -850,7 +852,52 @@ cx_i32 cx_fs_unlock(cx_i64 h) {
     return cx_fs_close(h);
 }
 
-cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
+/* The length of the folder part of `p`, NUL-terminated: up to its last '/', which is kept when it's
+ * the first, or 0 for a name with no folder, which is in ".". */
+static size_t folder_len(const char* p) {
+    const char* slash = strrchr(p, '/');
+    if (!slash) return 0;
+    return slash == p ? 1 : (size_t)(slash - p);
+}
+
+/* Syncs the folder `p`, with its first `n` bytes naming it, or "." for none, so that a name made or
+ * moved in it is on the disk. A file system that can't sync a folder, as fsync's EINVAL says, offers
+ * nothing more, and that's not an error. */
+static int sync_folder(const char* p, size_t n) {
+    char* s = (char*)malloc(n + 2);
+    if (!s) fs_out_of_memory();
+    if (n == 0) {
+        s[0] = '.';
+        s[1] = 0;
+    } else {
+        memcpy(s, p, n);
+        s[n] = 0;
+    }
+    int fd;
+    while ((fd = open(s, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0 && errno == EINTR) {
+    }
+    free(s);
+    if (fd < 0) {
+        fail_errno(errno);
+        return 0;
+    }
+    int ok = 1;
+    while (fsync(fd) != 0) {
+        if (errno == EINTR) continue;
+        if (errno != EINVAL) {
+            fail_errno(errno);
+            ok = 0;
+        }
+        break;
+    }
+    close(fd);
+    return ok;
+}
+
+/* Moves `from` to `to`, replacing a file there. With `sync`, it then syncs the folder `to` is in,
+ * and the one `from` was in if that's another, so the move is on the disk, as rename alone doesn't
+ * promise. */
+cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len, cx_u32 sync) {
     char* a = cpath(from, from_len);
     if (!a) return 0;
     char* b = cpath(to, to_len);
@@ -860,6 +907,12 @@ cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t 
     }
     int ok = rename(a, b) == 0;
     if (!ok) fail_errno(errno);
+    if (ok && sync) {
+        size_t na = folder_len(a);
+        size_t nb = folder_len(b);
+        ok = sync_folder(b, nb);
+        if (ok && (na != nb || memcmp(a, b, na) != 0)) ok = sync_folder(a, na);
+    }
     free(a);
     free(b);
     return ok;

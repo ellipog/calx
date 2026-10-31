@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -183,6 +183,19 @@ fn main() {
     write(a, hello)!
     rename(a, b)!
     println("{read(b)!.len()} {kind_name(a)}")    // out: 5 none
+
+    // A synced rename, in one folder and between two.
+    write(a, hello)!
+    rename_synced(a, b)!
+    make_dir("{dir}/m")!
+    rename_synced(b, "{dir}/m/moved")!
+    println("{read("{dir}/m/moved")!.len()} {kind_name(a)} {kind_name(b)}")    // out: 5 none none
+    rename_synced("{dir}/m/moved", b)!
+    match rename_synced("{dir}/missing", a) {
+        ok => println("renamed"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+    remove_dir("{dir}/m")!
 
     // Directories, sorted however the system lists them.
     make_dir_all("{dir}/x/y/z")!
