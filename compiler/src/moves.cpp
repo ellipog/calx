@@ -545,13 +545,25 @@ private:
             return;
         }
         bool whole = root && is_local_name(v) && root->owns;
+        if (s->consumes && s->is_var && !whole && !hidden) {
+            // A `var` changes, so it can't be a view, and this value can't be taken apart.
+            std::string at = place_text(v);
+            error(p->span, "a `var` owns its value, and " + q(at) + " can't be taken apart here; " +
+                               (s->let_unwraps ? "take the value out with " + q(at + ".take()") + ", or change a copy, from "
+                                               : "change a copy, from ") +
+                               q(at + ".copy()"));
+            bind(p, true, nullptr, at);
+            return;
+        }
         s->consumes = s->consumes && (whole || hidden);
         if (s->consumes) take(whole ? root : hidden, v->span);
         bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v));
     }
 
     // Decides whether a `let` with a pattern takes its value apart: it does when one of the names
-    // that isn't `Copy` is moved somewhere, or is `mut`.
+    // that isn't `Copy` is moved somewhere, or is `mut` or a `var`. A name that's a view is a copy
+    // of the value it's in, in C, so one that changes has to own its value, or the value would
+    // still hold what it was and free it again.
     void decide_let(Stmt* s) {
         s->consumes = binds_moved(s->pattern);
         if (s->consumes && is_local_name(s->value)) moved_any_.insert(s->value->local);
@@ -560,7 +572,7 @@ private:
     bool binds_moved(const Pattern* p) const {
         if (!p) return false;
         if (p->kind == PatternKind::binding) {
-            return p->local && !copyable(p->local->type) && (moved_any_.count(p->local) || p->is_mut);
+            return p->local && !copyable(p->local->type) && (moved_any_.count(p->local) || p->is_mut || p->local->is_var);
         }
         for (const Pattern* x : p->elems) {
             if (binds_moved(x)) return true;

@@ -150,7 +150,21 @@ fn main() {
 }
 ```
 
-A pattern can only take apart a value it owns. In `log`, `m` is a view, so moving `text` out would be an error.
+A pattern can only take apart a value it owns. In `log`, `m` is a view, so moving `text` out would be an error. A `let` takes apart a variable it's given whole, or a new value, but not a part of one, such as a field: a `var` it binds there would be a view that changes, so that's an error too. Take the value out, or change a copy:
+
+```calx
+struct Slot {
+    item: String?
+}
+
+fn main() {
+    var slot = Slot { item: some(String("pick")) }
+    var item = slot.item.take() else return    // `slot.item` alone is an error
+    item.push_str("axe")
+    println(item)                              // out: pickaxe
+    println("{slot.item == none}")             // out: true
+}
+```
 
 ## When values are freed
 
@@ -182,6 +196,7 @@ Ownership is checked after everything else, so these errors appear once a progra
 - Moving a view: a parameter that isn't `own`, a loop's element, or a name a pattern binds into a value it doesn't own.
 - Moving an element out of a list or array, or a field out of a view.
 - Using a variable whole while one of its fields is moved out.
+- Binding a `var` with a pattern from a part of a value, which a pattern can't take apart.
 - Changing or moving a value while a pattern's names are views into it, or while a `for` loop goes over it, what holds it or what's in it ([looping over a field](control-flow.md#looping-over-a-field)).
 
 Each error says what to write instead: `own`, `.copy()`, `remove`, or the bound `Copy`.

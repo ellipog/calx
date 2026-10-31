@@ -1,0 +1,68 @@
+// A `var` that `let ... else` binds owns its value: it's changed, so it can't be a view into the
+// optional it came from, which would still hold the value as it was and free it again.
+module var_let_else
+
+struct Part {
+    bytes: List<u8>
+    y: i32
+}
+
+struct Whole {
+    parts: List<Part>
+    name: String
+}
+
+fn whole() -> Whole? {
+    var w = Whole { parts: List<Part>(), name: String("whole") }
+    for i in 0..3 {
+        w.parts.push(Part { bytes: [1, 2, 3], y: i })
+    }
+    return some(w)
+}
+
+// Pops a part, then leaves early, with the popped part and the rest each freed once.
+fn first_popped() -> i32 {
+    let found = whole()
+    var w = found else return -1
+    while let popped = w.parts.pop() {
+        var part = popped
+        part.y += 10
+        return part.y
+    }
+    return 0
+}
+
+// Changes the value, then lets it go at the end of its scope.
+fn changed() -> usize {
+    let found = whole()
+    var w = found else return 0
+    w.name.push_str(" changed")
+    _ = w.parts.pop()
+    w.parts.push(Part { bytes: [4], y: 7 })
+    return w.parts.len() + w.name.len()
+}
+
+// Gives it a new value, which frees the old one once.
+fn replaced() -> String {
+    let found = whole()
+    var w = found else return String("none")
+    w = Whole { parts: List<Part>(), name: String("new") }
+    return w.name.copy()
+}
+
+// A pattern with a `var` in it, from a tuple.
+fn tuple_var() -> usize {
+    let pair = (whole(), 5)
+    var (w, n) = pair
+    n += 1
+    var got = w.take() else return 0
+    _ = got.parts.pop()
+    return got.parts.len() + usize.wrap(n)
+}
+
+fn main() {
+    println("{first_popped()}")  // out: 12
+    println("{changed()}")       // out: 16
+    println("{replaced()}")      // out: new
+    println("{tuple_var()}")     // out: 8
+}

@@ -1,0 +1,35 @@
+// A `var` that `let` binds from a part of a value, which a pattern can't take apart, would be a
+// view that changes: it has to be taken out, or copied.
+module var_let_else_errors
+
+struct Part {
+    bytes: List<u8>
+}
+
+struct Holder {
+    part: Part?
+    pair: (List<u8>, i32)
+}
+
+impl Holder {
+    fn grow(self) -> usize {
+        var p = self.part else return 0  // error: a `var` owns its value, and `self.part` can't be taken apart here; take the value out with `self.part.take()`, or change a copy, from `self.part.copy()`
+        p.bytes.push(9)
+        return p.bytes.len()
+    }
+}
+
+fn from_field() -> usize {
+    let h = Holder { part: some(Part { bytes: [1, 2] }), pair: ([1], 2) }
+    var p = h.part else return 0  // error: a `var` owns its value, and `h.part` can't be taken apart here; take the value out with `h.part.take()`, or change a copy, from `h.part.copy()`
+    p.bytes.push(4)
+    var (bytes, n) = h.pair  // error: a `var` owns its value, and `h.pair` can't be taken apart here; change a copy, from `h.pair.copy()`
+    bytes.push(1)
+    n += 1
+    return p.bytes.len() + bytes.len() + usize.wrap(n)
+}
+
+fn main() {
+    let h = Holder { part: none, pair: ([], 0) }
+    println("{h.grow()} {from_field()}")
+}
