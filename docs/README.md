@@ -5,7 +5,7 @@ description: Index of the Calx docs, the page order, and the rules for writing t
 
 # Calx documentation
 
-These pages are the source for the Calx docs website. Until the site exists, read them here.
+These pages are the source for the docs on the Calx website, [calxlang.com](https://calxlang.com/docs/), which is rebuilt from them on every push to main. They read the same here.
 
 ## Pages
 

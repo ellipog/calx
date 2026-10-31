@@ -5,6 +5,8 @@
 
 Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server that reproduces vanilla bit for bit.
 
+Website and docs: **[calxlang.com](https://calxlang.com)**
+
 What sets it apart:
 
 - **Faster than Rust.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
@@ -57,7 +59,7 @@ Acta board: aaen-studios/clx ([open](https://acta.aaenz.no/aaen-studios/clx)). T
 
 ## Docs
 
-Start at [docs/README.md](docs/README.md), or learn the language with the [guide](docs/guide/getting-started.md), which builds a small program step by step. The docs are written alongside the language, so they always describe what's actually built.
+Read them on [calxlang.com/docs](https://calxlang.com/docs/), or here, starting at [docs/README.md](docs/README.md). To learn the language, follow the [guide](docs/guide/getting-started.md), which builds a small program step by step. The docs are written alongside the language, so they always describe what's actually built, and the site is rebuilt from them on every push to main.
 
 ## License
 

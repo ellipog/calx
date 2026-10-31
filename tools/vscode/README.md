@@ -1,6 +1,6 @@
 # Calx for VS Code
 
-Support for the [Calx](https://github.com/ellipog/calx) language:
+Support for the [Calx](https://calxlang.com) language:
 
 - **Syntax highlighting** for `.calx` files, and for the ```` ```calx ```` blocks in Markdown, such as the examples in the Calx docs.
 - **Errors as you type.** The extension runs `calx check` on the open file a moment after each change, and underlines what the compiler reports. Notes, such as where something was first declared, show as related locations.

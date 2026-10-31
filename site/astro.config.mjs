@@ -8,12 +8,9 @@ import { calxAssets } from './src/assets.mjs';
 import { sidebar } from './src/docs-index.mjs';
 import { calxDocs, GITHUB } from './src/markdown.mjs';
 
-// The address the site is served from, for canonical links, link previews, the sitemap and
-// robots.txt. Vercel gives its build the project's production domain: a custom domain once one is
-// added, the vercel.app one until then. A build anywhere else is only ever served locally.
-const SITE = process.env.VERCEL_PROJECT_PRODUCTION_URL
-	? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-	: 'http://localhost:4321';
+// The site's one address, for canonical links, link previews, the sitemap and robots.txt. Every
+// build names it, previews and local ones too, so no page ever points search engines elsewhere.
+const SITE = 'https://calxlang.com';
 
 export default defineConfig({
 	// The build goes to dist/, Astro's own place for it, where Vercel looks.
