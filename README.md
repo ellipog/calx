@@ -3,15 +3,15 @@
   <img src="assets/logo/calx-banner.png" alt="Calx" width="100%">
 </picture>
 
-Calx is a compiled systems language built for [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux.
+Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server that reproduces vanilla bit for bit.
 
 What sets it apart:
 
-- **Faster than Rust.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
-- **Java-exact math.** Integers and floats behave exactly as they do in Java, so Calcite can reproduce vanilla Minecraft bit for bit.
-- **Memory-safe by default.** Ownership is checked at compile time and costs nothing at run time: no garbage collector, no reference counts. Unchecked code is opt-in and limited to the server core and plugins you trust.
+- **Faster than Rust on our benchmark.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
+- **Deterministic math.** Integers and floats give the same bits on every platform. The rules match Java's, so code ported from Java gives the same results.
+- **Memory-safe by default.** Ownership is checked at compile time and costs nothing at run time: no garbage collector, no reference counts. Unchecked code is opt-in, inside `unsafe`.
 - **Deterministic parallelism.** `parallel for` runs a loop's iterations across every core, and the compiler checks that no iteration touches what another one changes. A program prints the same output with one thread or many. Region actors come next.
-- **Stricter than Rust.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
+- **Strict by default.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
 - **Fast to build.** `calx run` on a small program takes about 0.3 s from an empty cache and under 25 ms when nothing changed.
 
 Status: Phases 3 and 4, the compiler's core and Calcite's protocol with a flat world, are done, and Phase 5, chunks, storage, regions and world generation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on Windows and Linux. The standard library has `std.io`, `std.env`, `std.time`, `std.math` and `std.java.math`, `std.pool`, `std.net` (TCP driven by events on IOCP and epoll), `std.mail` (messages between actors), `std.text.mutf8`, `std.hash`, `std.crypto`, `std.zlib`, `std.lz4`, `std.http`, `std.thread` (threads for services, and typed queues), `std.meta` (declarations for attributes), `std.fs` (files and directories), `std.build` (the program's build ID), `std.term` (the terminal), `std.process` (this process), `std.text.utf8` (bytes that may not be UTF-8, read as Java reads them) and `std.palette` (vanilla's paletted containers, for chunk sections), and the Java-compatible collections and strings are built. The [reference](docs/README.md#reference) lists what's built.

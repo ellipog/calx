@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calx · website mockup</title>
+<!-- Mockup for CLX-60. The real site self-hosts these fonts (all OFL); here they come from Google Fonts. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #F7F3EC; --raised: #FCFAF6; --sunk: #EFE9DE; --code: #F3EEE5;
+  --ink: #1E1F24; --ink-2: #4A4B52; --ink-3: #6B6C73;
+  --line: #E3DCCF; --line-2: #D3CABA;
+  --amber: #B9802F; --amber-ink: #8A5A17; --amber-wash: rgba(185, 128, 47, .13);
+  --calx: #B9802F; --rust: #3F6EA8;
+  --err: #B3261E; --err-wash: rgba(179, 38, 30, .07);
+  --dither-ink: #1E1F24; --dither-vein: #D6AC70;
+  --t-kw: #9A4F12; --t-type: #2F5E8C; --t-num: #8B3A62; --t-str: #47702F; --t-com: #84858B; --t-out: #8A6A3A; --t-fn: #1E1F24; --t-mac: #6B4FA0;
+  --header-bg: rgba(247, 243, 236, .86);
+  --shadow: 0 1px 0 rgba(30, 31, 36, .03), 0 12px 32px -18px rgba(30, 31, 36, .28);
+  --f-head: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --f-body: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --paper: #0E1218; --raised: #141A22; --sunk: #0A0E13; --code: #11171F;
+  --ink: #ECE6DA; --ink-2: #C2BCB0; --ink-3: #8E949D;
+  --line: #222A35; --line-2: #2F3947;
+  --amber: #BC8536; --amber-ink: #E2AF63; --amber-wash: rgba(226, 175, 99, .12);
+  --calx: #BC8536; --rust: #5F8FD0;
+  --err: #F2766B; --err-wash: rgba(242, 118, 107, .09);
+  --dither-ink: #DED8CC; --dither-vein: #C49658;
+  --t-kw: #E3A65C; --t-type: #8DB4E2; --t-num: #E09AC0; --t-str: #A8C987; --t-com: #6F7782; --t-out: #B59A6E; --t-fn: #ECE6DA; --t-mac: #B9A2E6;
+  --header-bg: rgba(14, 18, 24, .82);
+  --shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 14px 36px -18px rgba(0, 0, 0, .8);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-padding-top: 84px; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.65 var(--f-body); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+code { font-family: var(--f-mono); font-size: .86em; background: var(--sunk); border: 1px solid var(--line); padding: .08em .36em; border-radius: 5px; }
+[hidden] { display: none !important; }
+svg.i { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* ---------- header ---------- */
+.top { position: sticky; top: 0; z-index: 30; height: 60px; display: flex; align-items: center; gap: 26px; padding: 0 24px; background: var(--header-bg); backdrop-filter: saturate(1.3) blur(12px); -webkit-backdrop-filter: saturate(1.3) blur(12px); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; color: var(--ink); }
+.brand svg { height: 23px; width: auto; display: block; }
+.nav { display: flex; gap: 2px; }
+.nav a { font: 500 15px/1 var(--f-head); text-decoration: none; color: var(--ink-2); padding: 9px 12px; border-radius: 8px; }
+.nav a:hover { color: var(--ink); background: var(--sunk); }
+.nav a[aria-current] { color: var(--ink); box-shadow: inset 0 -2px 0 var(--amber); border-radius: 8px 8px 0 0; }
+.spacer { flex: 1; }
+.search { display: flex; align-items: center; gap: 10px; width: 270px; height: 36px; padding: 0 8px 0 11px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--raised); color: var(--ink-3); font: 14px var(--f-body); cursor: text; }
+.search kbd { margin-left: auto; font: 500 11px var(--f-mono); border: 1px solid var(--line-2); border-radius: 5px; padding: 2px 6px; color: var(--ink-3); background: var(--paper); }
+.toplink { font: 500 14.5px var(--f-head); color: var(--ink-2); text-decoration: none; }
+.toplink:hover { color: var(--ink); }
+.icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px; border: 1px solid var(--line-2); background: var(--raised); color: var(--ink-2); cursor: pointer; }
+.icon-btn:hover { color: var(--ink); }
+[data-theme="light"] .moon, [data-theme="dark"] .sun { display: none; }
+
+/* ---------- home: hero ---------- */
+.hero-art { --band: clamp(210px, 30vw, 440px); position: relative; height: var(--band); overflow: hidden; border-bottom: 1px solid var(--line); }
+.hero-art canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* The banner's proportions, whatever the band's width: the logo is 4/3 of the band's height wide
+   (640 of 480 pixels), and the dither's quiet zone is drawn at least that big. The svg is 1.05x
+   the logo, for the halo, which knocks the dots back from the letters as the banner's knockout does. */
+.hero-logo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(var(--band) * 1.4); color: var(--ink); }
+.hero-logo .halo { fill: var(--paper); stroke: var(--paper); stroke-width: 14; stroke-linejoin: round; }
+.hero-copy { max-width: 800px; margin: 0 auto; padding: 54px 24px 0; text-align: center; }
+.eyebrow { display: inline-flex; align-items: center; gap: 8px; font: 500 13px/1 var(--f-head); letter-spacing: .02em; color: var(--ink-2); border: 1px solid var(--line-2); border-radius: 999px; padding: 7px 13px; background: var(--raised); }
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+h1.display { font: 600 clamp(36px, 5vw, 60px)/1.05 var(--f-head); letter-spacing: -.028em; margin: 22px 0 20px; text-wrap: balance; }
+.lede { font-size: 19px; line-height: 1.6; color: var(--ink-2); margin: 0 auto; max-width: 660px; text-wrap: pretty; }
+.cta { display: flex; gap: 12px; justify-content: center; margin-top: 32px; flex-wrap: wrap; }
+.btn { font: 600 15px/1 var(--f-head); padding: 14px 20px; border-radius: 10px; text-decoration: none; border: 1px solid var(--line-2); background: var(--raised); color: var(--ink); display: inline-flex; gap: 9px; align-items: center; }
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.fineprint { margin-top: 18px; font-size: 13.5px; color: var(--ink-3); }
+
+.stats { max-width: 1080px; margin: 56px auto 0; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stat { padding: 28px 24px 26px; text-align: center; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat .v { font: 600 42px/1 var(--f-head); letter-spacing: -.025em; }
+.stat .l { margin-top: 10px; color: var(--ink-2); font-size: 14.5px; line-height: 1.45; }
+
+/* ---------- home: sections ---------- */
+.section { max-width: 1180px; margin: 0 auto; padding: 104px 24px 0; }
+.kicker { font: 600 12.5px/1 var(--f-head); letter-spacing: .13em; text-transform: uppercase; color: var(--amber-ink); }
+h2.h { font: 600 clamp(28px, 3.3vw, 40px)/1.12 var(--f-head); letter-spacing: -.022em; margin: 14px 0 16px; text-wrap: balance; }
+.section p.intro { font-size: 17.5px; color: var(--ink-2); max-width: 640px; margin: 0; }
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 60px; align-items: start; }
+.facts { list-style: none; padding: 0; margin: 26px 0 28px; display: grid; gap: 14px; }
+.facts li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; color: var(--ink-2); font-size: 15.5px; }
+.facts li svg { color: var(--amber); margin-top: 3px; }
+.more { font: 500 15px var(--f-head); text-decoration: none; color: var(--ink); border-bottom: 1.5px solid var(--amber); padding-bottom: 1px; }
+.more:hover { border-bottom-width: 2.5px; }
+.stack { display: grid; gap: 18px; }
+.note { font: 500 13.5px var(--f-head); color: var(--ink-3); margin: 6px 0 -6px 2px; }
+
+/* terminal-ish output */
+.term { font: 12.5px/1.65 var(--f-mono); background: var(--code); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px; white-space: pre-wrap; overflow: auto; color: var(--ink-2); }
+.term .path { color: var(--ink); font-weight: 600; }
+.term .e { color: var(--err); font-weight: 600; }
+.term .msg { color: var(--ink); font-weight: 600; }
+.term .caret { color: var(--err); font-weight: 600; }
+.term .dim { color: var(--ink-3); }
+
+/* claims */
+.claims { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-top: 40px; }
+.claim { background: var(--raised); padding: 28px 26px 26px; display: flex; flex-direction: column; }
+.claim .ic { width: 38px; height: 38px; border-radius: 10px; background: var(--amber-wash); color: var(--amber-ink); display: grid; place-items: center; }
+.claim h3 { font: 600 19.5px/1.25 var(--f-head); letter-spacing: -.01em; margin: 18px 0 8px; }
+.claim p { margin: 0 0 18px; color: var(--ink-2); font-size: 15px; line-height: 1.6; flex: 1; }
+.claim .proof { font: 500 13px var(--f-mono); color: var(--ink-3); margin-bottom: 14px; }
+.claim .proof b { color: var(--ink); font-weight: 600; }
+.claim .more { align-self: flex-start; font-size: 14px; }
+
+/* performance chart */
+.perf { margin-top: 40px; border: 1px solid var(--line); border-radius: 16px; background: var(--raised); padding: 30px 32px 26px; box-shadow: var(--shadow); }
+.perf-head { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; flex-wrap: wrap; }
+.perf-title { font: 600 17px var(--f-head); }
+.perf-title span { font: 400 14px var(--f-body); color: var(--ink-3); margin-left: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 14px; color: var(--ink-2); }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; margin-right: 8px; vertical-align: -1px; }
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 26px; }
+.panel h4 { font: 600 15px var(--f-head); margin: 0; }
+.panel .sub { font-size: 13px; color: var(--ink-3); margin: 2px 0 14px; }
+.plot { position: relative; padding-right: 118px; }
+.plot .area { position: relative; margin-left: 104px; }
+.gl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.grp { position: relative; display: grid; grid-template-columns: 104px 1fr; margin-left: -104px; padding: 7px 0; }
+.grp .lab { font-size: 13.5px; color: var(--ink-2); align-self: center; }
+.bars { display: grid; gap: 2px; }
+.brow { position: relative; height: 16px; cursor: default; }
+.brow::before { content: ""; position: absolute; inset: -1px -128px -1px -6px; border-radius: 6px; }
+.brow:hover::before { background: var(--amber-wash); }
+.bar { position: relative; height: 100%; border-radius: 0 4px 4px 0; }
+.bar.calx { background: var(--calx); }
+.bar.rust { background: var(--rust); }
+.val { position: absolute; left: calc(100% + 8px); top: 50%; transform: translateY(-50%); white-space: nowrap; font: 500 12.5px var(--f-mono); color: var(--ink); }
+.val small { color: var(--ink-3); font-size: 12.5px; }
+.ticks { position: relative; height: 22px; margin: 6px 0 0 104px; }
+.ticks span { position: absolute; transform: translateX(-50%); font: 12px var(--f-mono); color: var(--ink-3); white-space: nowrap; }
+.perf-foot { display: flex; justify-content: space-between; gap: 20px; align-items: baseline; flex-wrap: wrap; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--ink-3); }
+details.tbl summary { cursor: pointer; font: 500 13.5px var(--f-head); color: var(--ink-2); }
+details.tbl table { margin-top: 12px; }
+.tip { position: fixed; z-index: 50; pointer-events: none; background: var(--ink); color: var(--paper); font: 500 12.5px/1.45 var(--f-body); padding: 8px 11px; border-radius: 8px; box-shadow: var(--shadow); max-width: 260px; }
+.tip b { font-family: var(--f-mono); font-weight: 600; }
+
+/* guide teaser */
+.steps { list-style: none; padding: 0; margin: 28px 0 0; display: grid; gap: 4px; counter-reset: s; }
+.steps a { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; padding: 14px 16px; border-radius: 12px; text-decoration: none; }
+.steps a:hover { background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.steps a::before { counter-increment: s; content: counter(s); width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--line-2); display: grid; place-items: center; font: 600 14px var(--f-head); color: var(--ink-2); }
+.steps b { font: 600 16.5px var(--f-head); display: block; }
+.steps span { font-size: 14.5px; color: var(--ink-2); line-height: 1.5; }
+.io { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--code); box-shadow: var(--shadow); }
+.io > div + div { border-left: 1px solid var(--line); }
+.io .cap { font: 500 12px var(--f-head); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.io pre { margin: 0; padding: 16px 18px 20px; font: 13.5px/1.75 var(--f-mono); }
+
+/* calcite band */
+.band { margin-top: 112px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--raised); }
+.band .inner { max-width: 1180px; margin: 0 auto; padding: 64px 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center; }
+.band p { color: var(--ink-2); font-size: 16.5px; margin: 0 0 14px; }
+.band .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.band .pills span { font: 500 13.5px var(--f-head); border: 1px solid var(--line-2); border-radius: 999px; padding: 7px 13px; color: var(--ink-2); background: var(--paper); }
+
+/* footer */
+.foot { max-width: 1180px; margin: 0 auto; padding: 56px 24px 96px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 32px; font-size: 14.5px; }
+.foot .mark { width: 30px; color: var(--ink); }
+.foot p { color: var(--ink-3); margin: 12px 0 0; font-size: 13.5px; max-width: 320px; }
+.foot h6 { font: 600 12.5px var(--f-head); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); margin: 4px 0 12px; }
+.foot a { display: block; text-decoration: none; color: var(--ink-2); padding: 3px 0; }
+.foot a:hover { color: var(--ink); }
+
+/* ---------- code blocks ---------- */
+.code { border: 1px solid var(--line); border-radius: 12px; background: var(--code); overflow: hidden; }
+.home .code { box-shadow: var(--shadow); }
+.code-head { display: flex; align-items: center; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.tab { font: 500 13px/1 var(--f-head); padding: 8px 11px; border-radius: 7px; border: 0; background: none; color: var(--ink-3); cursor: pointer; }
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { background: var(--sunk); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.code-head .file { font: 12.5px var(--f-mono); color: var(--ink-3); margin-left: 10px; }
+.code-head .right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font: 500 12.5px/1 var(--f-head); color: var(--ink-3); padding: 6px 8px; }
+.badge svg { width: 15px; height: 15px; }
+.badge.fails { color: var(--err); }
+.copy { border: 0; background: none; color: var(--ink-3); cursor: pointer; width: 30px; height: 28px; border-radius: 7px; display: grid; place-items: center; }
+.copy:hover { background: var(--sunk); color: var(--ink); }
+.code pre { margin: 0; padding: 16px 0; overflow: auto; font: 13.5px/1.68 var(--f-mono); tab-size: 4; }
+.code pre .ln { display: block; padding: 0 20px; min-height: 1.68em; white-space: pre; }
+.code pre .ln.err { background: var(--err-wash); box-shadow: inset 2px 0 0 var(--err); }
+.callout { display: block; margin: 2px 20px 6px; padding: 7px 12px; border-radius: 8px; font: 500 12.5px/1.5 var(--f-body); color: var(--err); background: var(--err-wash); white-space: normal; }
+.callout code { font-size: .95em; color: var(--ink); }
+.callout b { font-family: var(--f-mono); font-weight: 600; }
+.t-kw { color: var(--t-kw); font-weight: 500; }
+.t-type { color: var(--t-type); }
+.t-num { color: var(--t-num); }
+.t-str { color: var(--t-str); }
+.t-int { color: var(--ink); }
+.t-com { color: var(--t-com); font-style: italic; }
+.t-out { color: var(--t-out); font-style: italic; }
+.t-fn { color: var(--t-fn); font-weight: 600; }
+.t-mac { color: var(--t-mac); }
+
+/* ---------- reference page ---------- */
+.docs { display: grid; grid-template-columns: 272px minmax(0, 1fr) 230px; max-width: 1480px; margin: 0 auto; }
+.side { position: sticky; top: 60px; height: calc(100vh - 60px); overflow: auto; padding: 22px 16px 48px 22px; border-right: 1px solid var(--line); font-size: 14.5px; scrollbar-width: thin; }
+.side h5 { font: 600 12px var(--f-head); letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3); margin: 22px 10px 6px 10px; display: flex; align-items: baseline; gap: 8px; }
+.side h5 em { font-style: normal; font-weight: 500; letter-spacing: 0; margin-left: auto; }
+.side a { display: block; padding: 5px 10px; border-radius: 7px; text-decoration: none; color: var(--ink-2); line-height: 1.4; }
+.side a:hover { background: var(--sunk); color: var(--ink); }
+.side a.on { background: var(--amber-wash); color: var(--ink); font-weight: 600; box-shadow: inset 2px 0 0 var(--amber); border-radius: 0 7px 7px 0; }
+.side details summary { list-style: none; cursor: pointer; }
+.side details summary::-webkit-details-marker { display: none; }
+.side details summary h5::after { content: "+"; font: 500 14px var(--f-mono); }
+.side details[open] summary h5::after { content: "–"; }
+.article { padding: 34px 60px 96px; max-width: 860px; width: 100%; }
+.crumbs { font: 500 13.5px var(--f-head); color: var(--ink-3); display: flex; gap: 8px; }
+.crumbs a { text-decoration: none; }
+.article h1 { font: 600 46px/1.08 var(--f-head); letter-spacing: -.028em; margin: 12px 0 14px; }
+.article .desc { font-size: 19px; color: var(--ink-2); line-height: 1.55; margin: 0 0 22px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; font-size: 13px; color: var(--ink-3); padding-bottom: 24px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
+.meta span, .meta a { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.meta svg { width: 15px; height: 15px; }
+.meta a:hover { color: var(--ink); }
+.article h2 { font: 600 27px/1.25 var(--f-head); letter-spacing: -.015em; margin: 56px 0 14px; }
+.article h2 a.anchor { text-decoration: none; color: var(--line-2); margin-left: 8px; opacity: 0; }
+.article h2:hover a.anchor { opacity: 1; }
+.article p, .article ul { margin: 0 0 18px; }
+.article li { margin-bottom: 8px; }
+.article p a, .article li a { text-decoration-color: var(--amber); text-underline-offset: 3px; text-decoration-thickness: 1.5px; }
+.article .code { margin: 22px 0 26px; }
+.dref { font: 500 .8em var(--f-mono); color: var(--ink-3); text-decoration: none !important; border-bottom: 1px dotted var(--ink-3); }
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; margin: 20px 0 26px; }
+th { text-align: left; font: 600 13px var(--f-head); letter-spacing: .02em; color: var(--ink-3); padding: 9px 12px; border-bottom: 1.5px solid var(--line-2); }
+td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.no { color: var(--ink-2); }
+td .yn { font-weight: 600; color: var(--ink); }
+.toc { position: sticky; top: 60px; align-self: start; padding: 38px 22px 40px 6px; font-size: 13.5px; }
+.toc h6 { font: 600 12px var(--f-head); letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 10px 12px; }
+.toc a { display: block; padding: 4px 12px; text-decoration: none; color: var(--ink-3); line-height: 1.4; border-left: 1.5px solid var(--line); }
+.toc a:hover { color: var(--ink); }
+.toc a.on { color: var(--ink); border-left-color: var(--amber); font-weight: 500; }
+.toc .aside { margin: 26px 0 0 12px; padding-top: 18px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.toc .aside a { border: 0; padding: 0; display: inline-flex; gap: 7px; align-items: center; }
+.toc .aside svg { width: 15px; height: 15px; }
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 64px; }
+.pager a { border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; text-decoration: none; background: var(--raised); display: grid; gap: 2px; }
+.pager a:hover { border-color: var(--ink-3); }
+.pager small { font: 500 12.5px var(--f-head); color: var(--ink-3); }
+.pager b { font: 600 16.5px var(--f-head); }
+.pager a + a { text-align: right; }
+.docs-foot { border-top: 1px solid var(--line); margin-top: 48px; padding-top: 18px; font-size: 13px; color: var(--ink-3); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+/* ---------- mockup switcher (not part of the site) ---------- */
+.mockbar { position: fixed; z-index: 60; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; background: var(--ink); color: var(--paper); font: 500 13px/1 var(--f-head); box-shadow: 0 10px 30px -10px rgba(0, 0, 0, .5); }
+.mockbar span { padding: 0 10px 0 12px; opacity: .65; }
+.mockbar a, .mockbar button { color: var(--paper); text-decoration: none; padding: 8px 13px; border-radius: 999px; border: 0; background: none; font: inherit; cursor: pointer; }
+.mockbar a.on { background: color-mix(in srgb, var(--paper) 18%, transparent); }
+.mockbar button:hover, .mockbar a:hover { background: color-mix(in srgb, var(--paper) 12%, transparent); }
+
+@media (max-width: 1180px) { .toc { display: none; } .docs { grid-template-columns: 250px minmax(0, 1fr); } }
+@media (max-width: 900px) {
+  .nav, .search, .toplink { display: none; }
+  .side { display: none; } .docs { grid-template-columns: minmax(0, 1fr); } .article { padding: 28px 22px 80px; }
+  .split, .band .inner, .panels { grid-template-columns: minmax(0, 1fr); gap: 36px; }
+  .claims { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr; } .stat + .stat { border-left: 0; border-top: 1px solid var(--line); }
+  .foot { grid-template-columns: 1fr 1fr; } .io { grid-template-columns: 1fr; } .io > div + div { border-left: 0; border-top: 1px solid var(--line); }
+}
+@media (max-width: 600px) {
+  .perf { padding: 22px 18px; } .plot { padding-right: 112px; }
+  .plot .area, .ticks { margin-left: 0; } .grp { grid-template-columns: 1fr; margin-left: 0; } .grp .lab { margin-bottom: 4px; }
+  .mockbar span { display: none; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 12 399.761 92"><use href="#logo-shapes"/></symbol>
+  <!-- The logo's shapes, unclipped, so the hero can draw them twice: once as a halo, once on top. -->
+  <defs><g id="logo-shapes">
+    <path d="M90.725 37.671 L78.527 25.473 A46 46 0 1 0 78.527 90.527 L137.422 31.632 A11.5 11.5 0 0 0 121.159 15.368 L62.263 74.263 A23 23 0 1 1 62.263 41.737 L74.461 53.934 Z M115.12 62.066 L137.422 84.368 A11.5 11.5 0 0 1 121.159 100.632 L98.856 78.329 Z"/>
+    <path d="M225.418 49.373 A32 32 0 1 0 225.418 94.627 A8 8 0 0 0 214.104 83.314 A16 16 0 1 1 214.104 60.686 A8 8 0 0 0 225.418 49.373 Z"/>
+    <path fill-rule="evenodd" d="M235.761 72 a32 32 0 1 0 64 0 a32 32 0 1 0 -64 0Z M251.761 72 a16 16 0 1 0 32 0 a16 16 0 1 0 -32 0Z"/>
+    <rect x="283.761" y="40" width="16" height="64" rx="8"/>
+    <rect x="311.761" y="12" width="16" height="92" rx="8"/>
+    <path d="M349.418 101.657 L397.418 53.657 A8 8 0 0 0 386.104 42.343 L338.104 90.343 A8 8 0 0 0 349.418 101.657 Z M364.933 57.858 L349.418 42.343 A8 8 0 0 0 338.104 53.657 L353.619 69.172 Z M381.903 74.828 L397.418 90.343 A8 8 0 0 1 386.104 101.657 L370.589 86.142 Z"/>
+  </g></defs>
+  <symbol id="mark" viewBox="0 0 128 128">
+    <path d="M78.142 49.858 L69.657 41.373 A32 32 0 1 0 69.657 86.627 L110.627 45.657 A8 8 0 0 0 99.314 34.343 L58.343 75.314 A16 16 0 1 1 58.343 52.686 L66.828 61.172 Z M95.113 66.828 L110.627 82.343 A8 8 0 0 1 99.314 93.657 L83.799 78.142 Z"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4.5 19.5h4l10-10a2.8 2.8 0 0 0-4-4l-10 10v4z"/><path d="m13.5 6.5 4 4"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 13.5h7l-1 8 8.5-11h-7l1-8z"/></symbol>
+  <symbol id="i-eq" viewBox="0 0 24 24"><path d="M5 9h14M5 15h14"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.4 3 7.6 7 9 4-1.4 7-4.6 7-9V6l-7-3z"/></symbol>
+  <symbol id="i-par" viewBox="0 0 24 24"><path d="M6 4v16M12 4v16M18 4v16"/></symbol>
+  <symbol id="i-strict" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
+</svg>
+
+<header class="top">
+  <a class="brand" href="#" aria-label="Calx home"><svg viewBox="0 0 399.761 92" fill="currentColor"><use href="#logo"/></svg></a>
+  <nav class="nav">
+    <a href="#ref" data-page="learn">Learn</a>
+    <a href="#ref" data-page="ref">Reference</a>
+    <a href="#ref" data-page="std">Std</a>
+    <a href="#perf" data-page="perf">Performance</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="search" role="button" aria-label="Search the docs"><svg class="i"><use href="#i-search"/></svg>Search the docs<kbd>Ctrl K</kbd></div>
+  <a class="toplink" href="https://github.com/ellipog/calx">GitHub</a>
+  <button class="icon-btn" data-toggle-theme aria-label="Switch light and dark"><svg class="i sun"><use href="#i-sun"/></svg><svg class="i moon"><use href="#i-moon"/></svg></button>
+</header>
+
+<!-- ======================================================= HOME ======================================================= -->
+<main id="home" class="home">
+  <div class="hero-art">
+    <canvas id="hero-canvas" aria-hidden="true"></canvas>
+    <svg class="hero-logo" viewBox="-10 2 419.761 112" fill="currentColor" role="img" aria-label="Calx"><use class="halo" href="#logo-shapes"/><use href="#logo-shapes"/></svg>
+  </div>
+
+  <div class="hero-copy">
+    <span class="eyebrow"><span class="dot"></span>Pre-release · build it from source</span>
+    <h1 class="display">Fast, safe code that gives the same answer every time</h1>
+    <p class="lede">Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math is defined to the bit on every machine, and its parallel loops give the same result on one core or twenty-four. On our benchmark it takes 0.7× the time Rust does.</p>
+    <div class="cta">
+      <a class="btn primary" href="#ref">Learn Calx <svg class="i"><use href="#i-arrow"/></svg></a>
+      <a class="btn" href="#ref">Read the reference</a>
+    </div>
+    <div class="fineprint">Compiles to C · Windows and Linux · MIT licensed</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="v">0.7×</div><div class="l">Rust's time per tick, with the same<br>algorithms and the same checksum</div></div>
+    <div class="stat"><div class="v">16 ms</div><div class="l"><code>calx run</code> on a program<br>that hasn't changed</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">warnings: everything the checker<br>objects to is an error</div></div>
+  </div>
+
+  <section class="section">
+    <div class="split">
+      <div>
+        <div class="kicker">Parallel loops</div>
+        <h2 class="h">Every core, and the same answer every time</h2>
+        <p class="intro"><code>parallel for</code> runs a loop's iterations across a pool of threads. The checker makes sure no iteration touches what another one changes, so the program prints the same thing on one thread or twenty-four.</p>
+        <ul class="facts">
+          <li><svg class="i"><use href="#i-check"/></svg><span>The check is the ownership check, applied between iterations. It costs nothing at run time.</span></li>
+          <li><svg class="i"><use href="#i-check"/></svg><span>What iterations print comes out in their order, and a panic reports the first iteration that panicked.</span></li>
+          <li><svg class="i"><use href="#i-check"/></svg><span>Calx compiles to C. The C tab shows what this loop becomes: a function per chunk, its pointers marked <code>restrict</code>.</span></li>
+        </ul>
+        <a class="more" href="#ref">Read about parallel loops</a>
+      </div>
+      <div class="stack">
+        <div class="code" data-calx="ex-par" data-c="c-par" data-file="game.calx"></div>
+        <div class="note">Reach too far, and it won't compile:</div>
+<div class="term"><span class="path">main.calx:6:9:</span> <span class="e">error:</span> <span class="msg">`total` is shared by every iteration of the `parallel for`</span>
+        total += xs[k]
+        <span class="caret">^~~~~</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="kicker">Why Calx</div>
+    <h2 class="h">Six promises, and where to check each one</h2>
+    <p class="intro">Every claim on this page links to the page that defines it, and the examples on those pages are compiled and run on every push.</p>
+    <div class="claims">
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-bolt"/></svg></div>
+        <h3>Faster than Rust on our benchmark</h3>
+        <p>On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time, with one thread or 24.</p>
+        <div class="proof"><b>18.06</b> vs 25.75 ms per tick</div>
+        <a class="more" href="#perf">The benchmark</a>
+      </div>
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-eq"/></svg></div>
+        <h3>Deterministic math</h3>
+        <p>Integers wrap, divide and shift, and floats compute and print, the same way on every platform. The rules match Java's, so code ported from Java gives the same bits.</p>
+        <div class="proof"><code>-16 >>> 28</code> is <b>15</b>, as in Java</div>
+        <a class="more" href="#ref">Integers and floats</a>
+      </div>
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-shield"/></svg></div>
+        <h3>Memory-safe by default</h3>
+        <p>Ownership is checked while the program compiles and costs nothing while it runs: no garbage collector, no reference counts. Unchecked code is opt-in, inside <code>unsafe</code>.</p>
+        <div class="proof">0 GC pauses, by construction</div>
+        <a class="more" href="#ref">Ownership</a>
+      </div>
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-par"/></svg></div>
+        <h3>Deterministic parallelism</h3>
+        <p><code>parallel for</code> runs a loop on every core, and the compiler checks that no iteration touches what another changes. Same output with one thread or many.</p>
+        <div class="proof"><b>2.25</b> ms per tick on 24 threads</div>
+        <a class="more" href="#ref">Parallel loops</a>
+      </div>
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-strict"/></svg></div>
+        <h3>Strict by default</h3>
+        <p>No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake is an error that says what to write instead.</p>
+        <div class="proof">every rule is an error, not a warning</div>
+        <a class="more" href="#ref">Strictness</a>
+      </div>
+      <div class="claim">
+        <div class="ic"><svg class="i"><use href="#i-clock"/></svg></div>
+        <h3>Fast to build</h3>
+        <p><code>calx check</code> reads 64 modules, 9,900 lines, in 32 ms. A small program runs in about 0.3 s from an empty cache, and in under 25 ms when nothing changed.</p>
+        <div class="proof"><b>123</b> ms to rebuild after one change</div>
+        <a class="more" href="#ref">The calx command</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="perf">
+    <div class="kicker">Performance</div>
+    <h2 class="h">Measured on every push</h2>
+    <p class="intro">The tick-loop benchmark is a synthetic simulation, a world of packed block storage, entity physics in doubles, hash maps and messages between regions, stepped one tick at a time. It runs the same algorithms in Calx and in Rust and checks that both give the same checksum. CI runs it on every push, on Windows and Linux, and the raw results are in the repo.</p>
+
+    <div class="perf">
+      <div class="perf-head">
+        <div class="perf-title">Milliseconds per tick<span>lower is better</span></div>
+        <div class="legend"><span><i style="background:var(--calx)"></i>Calx, clang 23</span><span><i style="background:var(--rust)"></i>Rust, rustc 1.91.1</span></div>
+      </div>
+      <div class="panels" id="chart"></div>
+      <div class="perf-foot">
+        <span>Median of 10 runs of 1,000 ticks on an i9-13900K. <a class="more" href="#ref">Method and raw results</a></span>
+        <details class="tbl">
+          <summary>Show as a table</summary>
+          <table>
+            <thead><tr><th>Platform</th><th>Calx, 1 worker</th><th>Rust, 1 worker</th><th>Calx, 24 workers</th><th>Rust, 24 workers</th></tr></thead>
+            <tbody>
+              <tr><td>Windows 11</td><td>18.06</td><td>25.75</td><td>2.25</td><td>3.41</td></tr>
+              <tr><td>Linux (WSL2)</td><td>18.01</td><td>26.04</td><td>2.46</td><td>3.52</td></tr>
+            </tbody>
+          </table>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="split">
+      <div>
+        <div class="kicker">Learn</div>
+        <h2 class="h">Learn it by building one program</h2>
+        <p class="intro">The guide builds <code>stash</code>, a small inventory program: it reads commands, keeps count of what's put away and taken out, and says what went wrong when a command doesn't make sense. Each page adds to it.</p>
+        <ol class="steps">
+          <li><a href="#ref"><div><b>Getting started</b><span>The <code>calx</code> command, values and variables, functions, loops, and the checker's errors</span></div></a></li>
+          <li><a href="#ref"><div><b>Reading the commands</b><span>Standard input a line at a time, optionals and <code>while let</code>, splitting a line into words</span></div></a></li>
+          <li><a href="#ref"><div><b>What the commands mean</b><span>Commands as an enum, parsing numbers, functions that fail, matching on text</span></div></a></li>
+          <li><a href="#ref"><div><b>The stash</b><span>A sorted map, parameters that own or change what they're given, <code>try</code>, and modules</span></div></a></li>
+        </ol>
+      </div>
+      <div class="io" style="margin-top:46px">
+        <div><div class="cap">It reads</div><pre>add stone 64
+add stone 66
+take stone 5
+take dirt 20
+show</pre></div>
+        <div><div class="cap">It answers</div><pre>line 4: there's no dirt
+stone: 1 stack and 61</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="band">
+    <div class="inner">
+      <div>
+        <div class="kicker">Built with Calx</div>
+        <h2 class="h">Calcite, a Minecraft server written in Calx</h2>
+      </div>
+      <div>
+        <p>Calcite is a Minecraft Java Edition server that matches vanilla bit for bit while running faster. It's the largest Calx program so far: bit-exact math keeps its worlds the same as vanilla's, parallel loops tick its regions on every core, and its plugins are written in Calx too.</p>
+        <div class="pills"><span>Bit-exact worldgen</span><span>Parallel regions</span><span>Plugins in Calx</span></div>
+        <p style="margin-top:22px"><a class="more" href="https://github.com/ellipog/calcite">Calcite on GitHub</a></p>
+      </div>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <div><svg class="mark" viewBox="0 0 128 128" fill="currentColor"><use href="#mark"/></svg><p>A general-purpose compiled language: fast, memory-safe and exact. Built from <code>calx/docs</code> at commit 35824ea. MIT licensed.</p></div>
+    <div><h6>Docs</h6><a href="#ref">Guide</a><a href="#ref">Reference</a><a href="#ref">Standard library</a><a href="#ref">What's coming</a></div>
+    <div><h6>Project</h6><a href="https://github.com/ellipog/calx">GitHub</a><a href="https://acta.aaenz.no/aaen-studios/clx">Roadmap</a><a href="#perf">Benchmarks</a></div>
+    <div><h6>Ecosystem</h6><a href="#">Stones on quarry <small>(coming)</small></a><a href="https://github.com/ellipog/calcite">Calcite</a></div>
+  </footer>
+</main>
+
+<!-- ================================================== REFERENCE PAGE ================================================== -->
+<main id="ref" hidden>
+  <div class="docs">
+    <aside class="side" aria-label="Docs">
+      <h5>Guide</h5>
+      <a href="#ref">Getting started</a><a href="#ref">Reading the commands</a><a href="#ref">What the commands mean</a><a href="#ref">The stash</a>
+      <h5>Reference</h5>
+      <a href="#ref">The calx command</a><a href="#ref">Editor support</a><a href="#ref">Syntax</a><a href="#ref">Types</a><a href="#ref">Variables</a><a href="#ref">Integers</a><a href="#ref">Floats</a><a href="#ref">Conversions</a><a href="#ref">Control flow</a><a href="#ref">Functions</a><a href="#ref">Structs</a><a href="#ref">Enums</a><a href="#ref">Tuples</a><a href="#ref">Optionals</a><a href="#ref">Errors</a><a href="#ref">Patterns and match</a><a href="#ref">Strings</a><a href="#ref">Lists</a><a href="#ref">Deques</a><a href="#ref">Priority queues</a><a href="#ref">Boxes</a><a href="#ref">Maps and sets</a><a href="#ref">Java's hash maps</a><a href="#ref">fastutil's hash maps</a><a href="#ref">Linked maps and sets</a><a href="#ref">Sorted maps and sets</a><a href="#ref">Ownership</a><a href="#ref">Arenas</a><a href="#ref">Generics</a><a href="#ref">Interfaces</a><a href="#ref">Comparing and printing</a><a href="#ref">Modules</a><a href="#ref">Printing and panics</a><a href="#ref">Unsafe code and C functions</a><a href="#ref">Libraries</a><a href="#ref">Attributes</a><a href="#ref" class="on" aria-current="page">Parallel loops</a><a href="#ref">Strictness</a>
+      <details>
+        <summary><h5>Standard library <em>23</em></h5></summary>
+        <a href="#ref">std.io</a><a href="#ref">std.math</a><a href="#ref">std.java.math</a><a href="#ref">std.time</a><a href="#ref">std.env</a><a href="#ref">std.pool</a><a href="#ref">std.net</a><a href="#ref">std.hint</a><a href="#ref">std.text.mutf8</a><a href="#ref">std.mail</a><a href="#ref">std.hash</a><a href="#ref">std.crypto</a><a href="#ref">std.zlib</a><a href="#ref">std.http</a><a href="#ref">std.lz4</a><a href="#ref">std.thread</a><a href="#ref">std.meta</a><a href="#ref">std.fs</a><a href="#ref">std.build</a><a href="#ref">std.term</a><a href="#ref">std.process</a><a href="#ref">std.text.utf8</a><a href="#ref">std.palette</a>
+      </details>
+      <details>
+        <summary><h5>Design <em>2</em></h5></summary>
+        <a href="#ref">Calx spec</a><a href="#ref">Tick-loop benchmark</a>
+      </details>
+    </aside>
+
+    <article class="article">
+      <div class="crumbs"><a href="#ref">Reference</a><span>/</span><span>Parallel loops</span></div>
+      <h1>Parallel loops</h1>
+      <p class="desc"><code>parallel for</code>, the capture check that keeps iterations apart, why results don't depend on the thread count, and its C.</p>
+      <div class="meta">
+        <span><svg class="i"><use href="#i-check"/></svg>All 6 examples compiled and run by CI at 35824ea</span>
+        <a href="https://github.com/ellipog/calx/blob/main/docs/reference/parallel.md"><svg class="i"><use href="#i-edit"/></svg>Edit this page</a>
+      </div>
+
+      <p><code>parallel for</code> runs a loop's iterations at once, on a pool of threads. It's the only parallelism in Calx <a class="dref" href="#ref">D21</a>, and the checker makes sure the iterations can't touch the same memory, so a program gives the same result with one thread or with many.</p>
+      <div class="code" data-calx="ex-par" data-c="c-par"></div>
+      <p>The loop goes over a range of integers, as a <code>for</code> loop can. Each iteration gets its own value of the loop variable, here <code>k</code>, and the loop returns once every iteration has finished.</p>
+
+      <h2 id="ref-elements">Over the elements<a class="anchor" href="#ref-elements">#</a></h2>
+      <p>A <code>parallel for</code> can also go over the elements of a list or an array. With <code>mut</code>, each iteration gets a view of its own element and changes it, as a <a href="#ref"><code>for x in mut xs</code></a> loop does <a class="dref" href="#ref">D116</a>:</p>
+      <div class="code" data-calx="ex-elems"></div>
+      <p>Nothing in the body reaches the list except through the element, so no iteration can reach another's. Without <code>mut</code>, each iteration reads its element, and the body can read the list as well, since no iteration changes it.</p>
+
+      <h2 id="ref-touch">What an iteration can touch<a class="anchor" href="#ref-touch">#</a></h2>
+      <p>An iteration changes only its own elements: places it reaches by indexing with the loop variable itself, such as <code>regions[k]</code> or <code>world.states[k].entities</code>. No other iteration has the same <code>k</code>, so no other iteration can reach them. It can read anything that no iteration changes.</p>
+      <table>
+        <thead><tr><th>In the body</th><th>Allowed?</th></tr></thead>
+        <tbody>
+          <tr><td>Change <code>xs[k]</code>, or any part of it</td><td><span class="yn">Yes</span></td></tr>
+          <tr><td>Change <code>x</code>, or any part of it, in <code>parallel for x in mut xs</code></td><td><span class="yn">Yes</span></td></tr>
+          <tr><td>Use <code>xs</code> itself in <code>parallel for x in mut xs</code></td><td class="no"><span class="yn">No:</span> only through <code>x</code></td></tr>
+          <tr><td>Change <code>w.blocks[k]</code> and <code>w.states[k]</code> in one iteration</td><td class="no"><span class="yn">Yes:</span> separate fields are separate values</td></tr>
+          <tr><td>Read <code>xs.len()</code> while iterations change elements of <code>xs</code></td><td class="no"><span class="yn">Yes:</span> changing an element doesn't change the length</td></tr>
+          <tr><td>Change a variable from outside, such as <code>total += 1</code></td><td class="no"><span class="yn">No:</span> every iteration would change it at once</td></tr>
+          <tr><td>Change <code>xs[k + 1]</code>, <code>xs[j]</code> or <code>xs[0]</code></td><td class="no"><span class="yn">No:</span> another iteration might reach the same element</td></tr>
+          <tr><td><code>xs.push(x)</code> on a list from outside</td><td class="no"><span class="yn">No:</span> that changes the list itself</td></tr>
+        </tbody>
+      </table>
+      <p>Calls count too. Passing <code>mut regions[k]</code> to a function lets it change that element and nothing else, and passing <code>w.blocks</code> lets it read them. The check is the same one that keeps a <code>mut</code> argument apart from the other arguments of a call, applied between iterations.</p>
+      <div class="code" data-calx="ex-err"></div>
+      <p>To combine what the iterations found, have each write its own element, then combine them after the loop:</p>
+      <div class="code" data-calx="ex-sum"></div>
+
+      <h2 id="ref-control">Control flow<a class="anchor" href="#ref-control">#</a></h2>
+      <p><code>continue</code> ends one iteration early. <code>break</code> and <code>return</code> aren't allowed in the body, since every iteration runs. A <code>break</code> or <code>return</code> inside a loop or function in the body is fine.</p>
+
+      <h2 id="ref-nested">Loops inside loops<a class="anchor" href="#ref-nested">#</a></h2>
+      <p>A <code>parallel for</code> can run inside another, even through a function the outer one calls, as a region running a loop of its own. A thread that has nothing left of the outer loop to take helps the inner loops instead, so a world with one busy region still gets every thread.</p>
+      <table>
+        <thead><tr><th>One xorshift region loop, in ms</th><th>1 thread</th><th>24 threads</th></tr></thead>
+        <tbody><tr><td>1 region</td><td>2,079</td><td>118</td></tr><tr><td>3 regions</td><td>6,260</td><td>323</td></tr></tbody>
+      </table>
+
+      <h2 id="ref-same">The same result with any number of threads<a class="anchor" href="#ref-same">#</a></h2>
+      <p>Iterations can't see each other's changes, so what each computes doesn't depend on which thread ran it or when. Two more things make the whole program's behavior the same with one thread and with many:</p>
+      <ul>
+        <li><b>Output comes out in order.</b> What an iteration prints is held until the loop ends, then written in the order of the iterations.</li>
+        <li><b>A panic reports the first iteration that panicked,</b> with the output of every iteration before it, and exits with status 101, as running them in order would.</li>
+      </ul>
+
+      <h2 id="ref-c">In C<a class="anchor" href="#ref-c">#</a></h2>
+      <p>The body becomes a C function of its own, which the runtime calls for each chunk of the range. Everything it reaches from outside is a pointer that the function declares <code>restrict</code>, since the checker made sure no iteration reaches what another changes, so clang optimizes the body as it would a function's. The <b>C</b> tab on the first example shows it.</p>
+
+      <div class="pager">
+        <a href="#ref"><small>Previous</small><b>← Attributes</b></a>
+        <a href="#ref"><small>Next</small><b>Strictness →</b></a>
+      </div>
+      <div class="docs-foot"><span>Built from <code>docs/reference/parallel.md</code> at 35824ea</span><span>MIT licensed</span></div>
+    </article>
+
+    <nav class="toc" aria-label="On this page">
+      <h6>On this page</h6>
+      <a href="#ref-top" data-top>Parallel loops</a>
+      <a href="#ref-elements">Over the elements</a>
+      <a href="#ref-touch">What an iteration can touch</a>
+      <a href="#ref-control">Control flow</a>
+      <a href="#ref-nested">Loops inside loops</a>
+      <a href="#ref-same">The same result with any number of threads</a>
+      <a href="#ref-c">In C</a>
+      <div class="aside">
+        <a href="https://github.com/ellipog/calx/blob/main/docs/reference/parallel.md"><svg class="i"><use href="#i-edit"/></svg>Edit this page</a>
+      </div>
+    </nav>
+  </div>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<div class="mockbar" aria-label="Mockup controls">
+  <span>Mockup</span>
+  <a href="#" data-mock="home">Home</a>
+  <a href="#ref" data-mock="ref">Reference page</a>
+  <button data-toggle-theme>Light / dark</button>
+</div>
+
+<!-- Examples, verbatim from docs/reference/parallel.md. The real site reads them from the Markdown. -->
+<script type="text/x-calx" id="ex-par">
+struct Region {
+    blocks: List<i32>,
+    total: i64,
+}
+
+fn tick(r: mut Region, scale: i32) {
+    for i in 0usize..r.blocks.len() {
+        r.blocks[i] = r.blocks[i] * scale + 1
+        r.total += i64(r.blocks[i])
+    }
+}
+
+fn main() {
+    var regions = List<Region>()
+    for k in 0..16 {
+        regions.push(Region { blocks: [k, k + 1, k + 2], total: 0 })
+    }
+    let scale = 3
+    parallel for k in 0usize..regions.len() {
+        tick(mut regions[k], scale)
+    }
+    println("{regions[0].total} {regions[15].total}")    // out: 12 147
+}
+</script>
+<script type="text/x-c" id="c-par">
+struct cx_par_game__main_3_c { cx_list_game__Region* regions; cx_i32 scale; cx_u64 cx__lo; };
+static void cx_par_game__main_3(void* cx__v, cx_u64 cx__begin, cx_u64 cx__end) {
+    struct cx_par_game__main_3_c* cx__c = (struct cx_par_game__main_3_c*)cx__v;
+    cx_list_game__Region* restrict regions = cx__c->regions;
+    CX_VIEW(regions);
+    const cx_i32 scale = cx__c->scale;
+    for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {
+        cx_usize k = (cx_usize)(cx__c->cx__lo + cx__i);
+        game__tick(&(*regions).ptr[cx_index(k, (*regions).len, "game.calx:20:26")], scale);
+        cx_cont3:;
+    }
+}
+
+// and in main, where the loop was:
+struct cx_par_game__main_3_c cx_t10 = {&regions, scale, (cx_u64)cx_t8};
+cx_parallel((cx_u64)cx_t9 - (cx_u64)cx_t8, cx_par_game__main_3, &cx_t10);
+</script>
+<script type="text/x-calx" id="ex-elems">
+struct Region {
+    blocks: List<i32>,
+    total: i64,
+}
+
+fn main() {
+    var regions: List<Region> = []
+    for k in 0..16 {
+        regions.push(Region { blocks: [k, k + 1, k + 2], total: 0 })
+    }
+    parallel for r in mut regions {
+        for b in mut r.blocks {
+            b = b * 3 + 1
+            r.total += i64(b)
+        }
+    }
+    parallel for r in regions {
+        if r.total > 130 {
+            println("region with {r.total}")    // in the order of the list
+        }
+    }
+    var sum: i64 = 0
+    for r in regions {
+        sum += r.total
+    }
+    println("{sum}")
+    // out: region with 138
+    // out: region with 147
+    // out: 1272
+}
+</script>
+<script type="text/x-calx" id="ex-err">
+fn main() {
+    var xs: List<i32> = [1, 2, 3, 4]
+    var total = 0
+    parallel for k in 0usize..xs.len() {
+        xs[k] *= 2
+        total += xs[k]    // error: `total` is shared by every iteration of the `parallel for`
+    }
+    println("{total}")
+}
+</script>
+<script type="text/x-calx" id="ex-sum">
+fn main() {
+    let xs: List<i64> = [1, 2, 3, 4]
+    var squares = [0i64; 4]
+    parallel for k in 0usize..xs.len() {
+        squares[k] = xs[k] * xs[k]
+    }
+    var total: i64 = 0
+    for s in squares {
+        total += s
+    }
+    println("{total}")    // out: 30
+}
+</script>
+
+<script>
+const DITHER = {"hero": {"w": 400, "h": 120, "ink": "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BICBAABJGG5gSAAgAAMgAAgAgOIACHISdv9gEmACSRAn/4kgAhRBxkgMEmJBIIARmkkAiJBAQEltKYQCRAkAAzgAAAAkOAIgOIM9/5BCxBIgAS//p4gABIGxkiIEiMjMIISKMgoiBgQQYEkyYQABAAAB2IAAIgmNmAAoI50/sgGQEYAAH/8wQADBASSRkmEgMJAECGSsIgJIgAASclwZJABEIABkAAEAgJyAgBhBn/9AjCAIEhIX+MBAABJBCWRMGCBkIJAhES2AkAAAAIycmYSABBEABmAABAQkM6IAHgCf+UAkgCJAABfy5DAAEITJCSSCBCAsAARaQAgEZQiAgZmi8pAxCQABGAAQBADmzAANKMf9hJICERBAG8clgACEALOzEKCBIwECQSIYImARAACWbmZuwgkIAAECQAAiQl58AScgR7chMgBAEBAfLZjgACUBhExCSAgawAgSLTIBEkyQASBjTRJASGJABEADIJkBP5gEA5Ajt4kIERCggQ+gyMgBAANEQQhIQESIgQIMMhGSBkAATRmRkSQQABAABQgCBwS58AAD0IJshsiUEiAID7ohoABMilExISBABAAgSEoQBMyRIABEuJJEICSAAAAkQAlskIhiYCPMY25gIABAQBALTZMgABA8iQSQAQgZBAJAMgQGJACAATJmTJKIiAgCAAABIR8DGAAAAeQRuxkFIkkCQEL0TMgBMXAiRICQAAMhABQMgBIlkgAAC1lJIiDJQCAIAgQGn0FhgQIR8RC8gEAIJJAABLMkgIFg4gRCYMAkAiyRhAAg", "vein": "AAAAAAAAAAKqqAAAiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwrgAAAAAAAAAAAAAQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABlEAAAAAAAAAAAAACIoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARFAAAAAAAAAAAAACKioAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACKOAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFFQAAAAAAAAAAAAAIqgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoogAAAAAAAAAAAAEAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEQAAAAAAAAAAAAAKiiiIAACAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAADCgAAAAAAAAAAAAEREQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFVAAAAAAAAAAAAAqqigIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIAAAAAAAAAAAABQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARAAAAAAAAAAAAACKKgKgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABqAAAAAAAAAAAAAQUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFQAAAAAAAAAAAAKqqoAiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAARAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAKKqooAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAFERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqqIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqqqogAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAACiiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgKqgAAAAAAAAAACAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqggAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIKqoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIiqogAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAAAAABRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIiKIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAiKqoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAAAAAQQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAuigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIiIIoooqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACooogoIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABEAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgKoqqKiIiICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVEAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKziCKiIiACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACO6qqKiooAiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVEAEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACCyKiqCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUUAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKiviqiqKIIogAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAFEAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqKSoqooICAiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAREAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAgr6KiCioAIiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIiICAqAAAAAAAAAAAAYUURFBEQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKioiKCIgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAFAQBEBEQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACooqoqIIgIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAACAAAAAAAAAAAAABARAVEQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAArIooIoiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACAAAAAAAAAAAAAAEBBQAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAiqooogigiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACggIAAAAAAAAAAAAAAAURRREQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACKoqigiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgIAAAAAAAAAAAAAAAEAFQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqiiqKiIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAigCKAAAAAAAAAAAAAAAQFFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASEAAAAAAAAAAAAAqKiqiIiAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACCAfAAAAAAAAAAAAAAQAEFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABUAAAAAAAAAAAAAqqCIyKoiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKio2KgAAAAAAAAAAAAEAFUUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABABEAAAAAAAAAAAAAKKiKoAiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAiiiKAAAAAAAAAAAAAAABAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFUAAAAAAAAAAAAAAiIoqoIiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKvaoAAAAAAAAAAAAAARAFUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFUAAAAAAAAAAAAAACCqKIogAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACuKIAAAAAAAAAAAAAAVAFQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABUAAAAAAAAAAAAAACKSopgiIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKIiqIAAAAAAAAAAAUVAARAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAACqKooiiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIKiIAAAAAAAAAAAEAUAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAooIIgiIiAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAACIiAIgAAAAAAAAAAAAUABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAIioioiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAAAAqIqIigAAAAAAAAAAAAAAAAAACIAAAAAAAAAAAAAAAAAAAAAAAAomiAgAAAAAAAAAAAAAAARAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIQAAAAAAAAAAAAAKiIAIiIIAAAAAAAAAAAAAAAAAAKgAAAAAAAAAAAAAAAAAAAAAAArKCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAABQAAAAAAAAAAAAAKiogAiIIIAAAAAAAAAAAAAAAAAIgAAAAAAAAAAAAAAAAAAAAAAAmoKgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABFRAAAAAAAAAAAAACAAAAAAgIgAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAmiKAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEBAAAAAAAAAAAAAIgAAIgCgiAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAju4oAIAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQEEAAAAAAAAAAAACgAAACACIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADKYgAAAAAAAAAAAAQAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQUAAAAAAAAAAAAAiAAACACAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADYJigAAAAAAAAAAABAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFRRAAAAAAAAAAAAAIAAAAICKoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACooigAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlFAAAAAAAAAAAAACAAAAAAKKIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAiDiCgAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABUUAAAAAAAAAAAAACAAAAAAqIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACJaKgAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEUQAAAAAAAAAAAAKAAAAACiooAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACOKKAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABEQAAAAAAAAAAAAKAAAAAACqIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtoiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdAAAAAAAAAAAAAAAAAAAACIiIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAAsyoogAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAURAAAAAAAAAAAAAAAAAAAAogIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAICeqIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAICAAAoqIoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIAAAABaqIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADVAAAAAAAAAAAAAAAAgAAAAgAogAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIgAAAo+IIgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFRAAAAAAAAAAAAAA"}};
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const root = document.documentElement;
+
+// ---- theme ----
+let saved = null;
+try { saved = localStorage.getItem("calx-theme"); } catch (e) {}
+root.dataset.theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+$$("[data-toggle-theme]").forEach(b => b.addEventListener("click", () => {
+  root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("calx-theme", root.dataset.theme); } catch (e) {}
+  drawAll();
+}));
+
+// ---- the dithered crystal, drawn in the theme's colors ----
+const unpack = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+const LAYERS = {};
+for (const k in DITHER) LAYERS[k] = { w: DITHER[k].w, h: DITHER[k].h, ink: unpack(DITHER[k].ink), vein: unpack(DITHER[k].vein) };
+
+function draw(canvas, L, fit) {
+  const r = canvas.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.width = Math.round(r.width * dpr), H = canvas.height = Math.round(r.height * dpr);
+  const c = fit === "width" ? W / L.w : Math.max(W / L.w, H / L.h);
+  const ox = (W - L.w * c) / 2, oy = fit === "width" ? 0 : (H - L.h * c) / 2;
+  const ctx = canvas.getContext("2d");
+  const cs = getComputedStyle(root);
+  ctx.clearRect(0, 0, W, H);
+  for (const [bits, color] of [[L.vein, "--dither-vein"], [L.ink, "--dither-ink"]]) {
+    ctx.fillStyle = cs.getPropertyValue(color).trim();
+    ctx.beginPath();
+    for (let y = 0; y < L.h; y++) {
+      const y0 = Math.round(oy + y * c), y1 = Math.round(oy + (y + 1) * c);
+      if (y1 < 0 || y0 > H) continue;
+      for (let x = 0; x < L.w; x++) {
+        const i = y * L.w + x;
+        if (bits[i >> 3] & (128 >> (i & 7))) {
+          const x0 = Math.round(ox + x * c), x1 = Math.round(ox + (x + 1) * c);
+          ctx.rect(x0, y0, x1 - x0, y1 - y0);
+        }
+      }
+    }
+    ctx.fill();
+  }
+}
+function drawAll() {
+  draw($("#hero-canvas"), LAYERS.hero, "cover");
+}
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawAll, 60); });
+
+// ---- highlighting (the real site uses Shiki with the VS Code extension's TextMate grammar) ----
+const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const CALX_KW = new Set("fn let var for in mut parallel struct enum impl interface if else while loop break continue return match pub import try fail unsafe and or not as".split(" "));
+const C_KW = new Set("struct static void const for return if else while typedef restrict".split(" "));
+const PRIM = /^(i8|i16|i32|i64|u8|u16|u32|u64|usize|isize|f32|f64|bool|str|char|Self)$/;
+function hl(line, lang) {
+  const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(\b\d[\d_]*(?:\.\d+)?(?:[iu](?:8|16|32|64|size)|f32|f64|LL)?\b)|([A-Za-z_]\w*)|([^\w"\/]+|.)/g;
+  let out = "", m;
+  while ((m = re.exec(line))) {
+    const [t, com, str, num, id] = m;
+    if (com) out += `<span class="${/^\/\/ out:/.test(com) ? "t-out" : "t-com"}">${esc(com)}</span>`;
+    else if (str) out += `<span class="t-str">${esc(str).replace(/\{([^}]*)\}/g, '<span class="t-int">{$1}</span>')}</span>`;
+    else if (num) out += `<span class="t-num">${num}</span>`;
+    else if (id) {
+      const next = (line.slice(re.lastIndex).match(/^\s*(.)/) || [])[1];
+      let cls = "";
+      if (lang === "calx") {
+        if (CALX_KW.has(id)) cls = "t-kw";
+        else if (id === "true" || id === "false") cls = "t-num";
+        else if (PRIM.test(id) || /^[A-Z]/.test(id)) cls = "t-type";
+        else if (next === "(") cls = "t-fn";
+      } else {
+        if (C_KW.has(id)) cls = "t-kw";
+        else if (/^[A-Z][A-Z0-9_]+$/.test(id)) cls = "t-mac";
+        else if (/^cx_(?:[iu](?:8|16|32|64)|usize|list_\w+|par_\w+_c)$/.test(id)) cls = "t-type";
+        else if (next === "(") cls = "t-fn";
+      }
+      out += cls ? `<span class="${cls}">${id}</span>` : id;
+    } else out += esc(t);
+  }
+  return out;
+}
+const inlineCode = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const srcOf = id => document.getElementById(id).textContent.replace(/^\n+/, "").replace(/\s+$/, "");
+
+function codeCard(el) {
+  const src = srcOf(el.dataset.calx);
+  let calx = "", outs = [], fails = false;
+  for (const line of src.split("\n")) {
+    const e = line.match(/^(.*?)\s*\/\/ error: (.*)$/);
+    if (e) {
+      fails = true;
+      calx += `<span class="ln err">${hl(e[1], "calx")}</span><span class="callout"><b>error:</b> ${inlineCode(e[2])}</span>`;
+    } else {
+      calx += `<span class="ln">${hl(line, "calx")}</span>`;
+      const o = line.match(/\/\/ out: (.*)$/);
+      if (o) outs.push(o[1]);
+    }
+  }
+  const panes = [["Calx", calx]];
+  if (el.dataset.c) panes.push(["C", srcOf(el.dataset.c).split("\n").map(l => `<span class="ln">${hl(l, "c")}</span>`).join("")]);
+  if (outs.length) panes.push(["Output", outs.map(o => `<span class="ln">${esc(o)}</span>`).join("")]);
+  const badge = fails
+    ? `<span class="badge fails"><svg class="i"><use href="#i-x"/></svg>Doesn't compile, on purpose</span>`
+    : `<span class="badge"><svg class="i"><use href="#i-check"/></svg>Tested</span>`;
+  el.innerHTML =
+    `<div class="code-head" role="tablist">${panes.map(([n], i) => `<button class="tab" role="tab" aria-selected="${i === 0}">${n}</button>`).join("")}` +
+    (el.dataset.file ? `<span class="file">${el.dataset.file}</span>` : "") +
+    `<div class="right">${badge}<button class="copy" aria-label="Copy"><svg class="i"><use href="#i-copy"/></svg></button></div></div>` +
+    panes.map(([, html], i) => `<pre ${i ? "hidden" : ""}>${html}</pre>`).join("");
+  const tabs = $$(".tab", el), pres = $$("pre", el);
+  tabs.forEach((t, i) => t.addEventListener("click", () => {
+    tabs.forEach((u, j) => u.setAttribute("aria-selected", i === j));
+    pres.forEach((p, j) => p.hidden = i !== j);
+  }));
+  $(".copy", el).addEventListener("click", () => { navigator.clipboard?.writeText(src).catch(() => {}); });
+}
+$$(".code[data-calx]").forEach(codeCard);
+
+// ---- the benchmark chart: two panels, since 1 and 24 workers are an order of magnitude apart ----
+const BENCH = [
+  { title: "1 worker", sub: "One thread runs the whole tick", max: 30, ticks: [0, 10, 20, 30],
+    rows: [["Windows 11", 18.06, 25.75], ["Linux (WSL2)", 18.01, 26.04]] },
+  { title: "24 workers", sub: "Regions spread across every core", max: 4, ticks: [0, 1, 2, 3, 4],
+    rows: [["Windows 11", 2.25, 3.41], ["Linux (WSL2)", 2.46, 3.52]] },
+];
+$("#chart").innerHTML = BENCH.map(p => {
+  const pct = v => (v / p.max * 100).toFixed(2) + "%";
+  return `<div class="panel"><h4>${p.title}</h4><div class="sub">${p.sub}</div><div class="plot"><div class="area">` +
+    p.ticks.map(t => `<div class="gl" style="left:${pct(t)}"></div>`).join("") +
+    p.rows.map(([os, calx, rust]) => {
+      const ratio = (calx / rust).toFixed(2);
+      return `<div class="grp"><div class="lab">${os}</div><div class="bars">` +
+        `<div class="brow" data-tip="<b>Calx</b> · ${os} · ${p.title}<br><b>${calx.toFixed(2)} ms</b> per tick, ${ratio}× Rust's time"><div class="bar calx" style="width:${pct(calx)}"><span class="val">${calx.toFixed(2)} ms <small>· ${ratio}×</small></span></div></div>` +
+        `<div class="brow" data-tip="<b>Rust</b> · ${os} · ${p.title}<br><b>${rust.toFixed(2)} ms</b> per tick"><div class="bar rust" style="width:${pct(rust)}"></div></div>` +
+        `</div></div>`;
+    }).join("") +
+    `</div><div class="ticks">${p.ticks.map(t => `<span style="left:${pct(t)}">${t}${t === p.max ? " ms" : ""}</span>`).join("")}</div></div></div>`;
+}).join("");
+const tip = $("#tip");
+$$(".brow").forEach(b => {
+  b.addEventListener("mousemove", e => {
+    tip.innerHTML = b.dataset.tip; tip.hidden = false;
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+    tip.style.top = e.clientY + 16 + "px";
+  });
+  b.addEventListener("mouseleave", () => { tip.hidden = true; });
+});
+
+// ---- pages: #ref... shows the reference page, anything else the home page ----
+function route() {
+  const h = location.hash.slice(1);
+  const ref = h.startsWith("ref");
+  $("#home").hidden = ref; $("#ref").hidden = !ref;
+  $$(".mockbar a").forEach(a => a.classList.toggle("on", (a.dataset.mock === "ref") === ref));
+  $$(".nav a").forEach(a => a.toggleAttribute("aria-current", ref && a.dataset.page === "ref"));
+  drawAll();
+  const target = h && h !== "ref" && h !== "ref-top" && document.getElementById(h);
+  if (target) target.scrollIntoView(); else scrollTo(0, 0);
+}
+addEventListener("hashchange", route);
+route();
+
+// ---- "On this page" follows the reader ----
+const tocLinks = $$(".toc a[href^='#ref-']");
+const heads = tocLinks.map(a => document.getElementById(a.getAttribute("href").slice(1))).filter(Boolean);
+addEventListener("scroll", () => {
+  if ($("#ref").hidden) return;
+  let current = "ref-top";
+  for (const h of heads) if (h.getBoundingClientRect().top < 140) current = h.id;
+  tocLinks.forEach(a => a.classList.toggle("on", a.getAttribute("href") === "#" + current));
+}, { passive: true });
+tocLinks[0].classList.add("on");
+document.fonts && document.fonts.ready.then(drawAll);
+</script>
+</body>
+</html>
