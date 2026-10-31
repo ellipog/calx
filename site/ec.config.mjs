@@ -15,15 +15,17 @@ grammar.repository.comments.patterns.unshift(
 	{ name: 'comment.line.error.calx', match: '//\\s*error:.*$' },
 );
 
-// The site's token colors, light and dark.
+// The site's token colors, light and dark. On the light paper a color dark enough to read is close
+// to the ink, so the light ones are as saturated as they can be and still have 4.5:1 contrast, or
+// the code looks black and white.
 const PALETTE = {
 	light: {
-		bg: '#F3EEE5', fg: '#1E1F24', kw: '#9A4F12', type: '#2F5E8C', num: '#8B3A62', str: '#47702F',
-		com: '#84858B', out: '#8A6A3A', err: '#B3261E', mac: '#6B4FA0', sel: '#E3DCCF',
+		bg: '#F3EEE5', fg: '#1E1F24', kw: '#A85200', type: '#1D63A8', num: '#A8306E', str: '#3C7A12',
+		com: '#6B6C73', out: '#8A5A14', err: '#B3261E', mac: '#7A3FC4', sel: '#E3DCCF',
 	},
 	dark: {
 		bg: '#11171F', fg: '#ECE6DA', kw: '#E3A65C', type: '#8DB4E2', num: '#E09AC0', str: '#A8C987',
-		com: '#6F7782', out: '#B59A6E', err: '#F2766B', mac: '#B9A2E6', sel: '#2F3947',
+		com: '#898F98', out: '#B59A6E', err: '#F2766B', mac: '#B9A2E6', sel: '#2F3947',
 	},
 };
 
@@ -60,6 +62,9 @@ export default defineEcConfig({
 	themes: [theme('dark'), theme('light')],
 	shiki: { langs: [{ ...grammar, name: 'calx' }] },
 	plugins: [calxBlocks()],
+	// Expressive Code darkens any color with less than 5.5:1 contrast, which takes the light colors
+	// back toward the ink. 4.5:1 is what WCAG asks of text.
+	minSyntaxHighlightingColorContrast: 4.5,
 	// A "// file: main.calx" line is part of a test of several modules (tests/run.py). Expressive
 	// Code would take it out of the code and make it the block's title.
 	frames: { extractFileNameFromCode: false },

@@ -13,6 +13,7 @@ const BAYER = [0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 
 	60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
 	15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21].map((v) => v / 64 + 1 / 128);
 const DOT = 3.5; // CSS pixels per dot, before rounding to whole screen pixels
+const KNEE = 0.6; // tones darker than this are eased off by half
 
 // Crops are fractions of the photo: x0, y0, x1, y1. A quiet zone is kept clear: the logo's is
 // banner.py's ellipse, and a box's is a margin of pad and then soft to fade in over. The hero, like
@@ -24,7 +25,7 @@ const KINDS = {
 		knock: '.hero-logo svg',
 		fade: { bottom: 90 },
 	},
-	band: { crop: [0, 0, 1, 0.54], quiet: [{ el: '.band .text', pad: 28, soft: 190 }], fade: { top: 130, bottom: 130 } },
+	band: { crop: [0, 0.46, 1, 1], quiet: [{ el: '.band .text', pad: 28, soft: 190 }], fade: { top: 130, bottom: 130 } },
 	404: { crop: [0, 0, 1, 1], quiet: [{ el: '.nf-copy', pad: 30, soft: 220 }], glyph: '.nf-glyph', fade: { top: 40 } },
 };
 
@@ -79,9 +80,13 @@ function layout(S) {
 	cv.height = Math.round(R.height * dpr);
 	const cols = Math.ceil(cv.width / cd), rows = Math.ceil(cv.height / cd), n = cols * rows;
 
-	// The crop, scaled to cover the canvas.
+	// The crop, scaled to cover the canvas. A canvas taller than it's wide, as on a phone, takes the
+	// photo turned a quarter turn: the crop is wide, so covering a tall canvas with it upright would
+	// show only a sliver of its middle, magnified, where its largest dark faces are.
 	const [x0, y0, x1, y1] = S.crop;
-	const s = Math.min(((x1 - x0) * T.w) / cols, ((y1 - y0) * T.h) / rows); // tone pixels per dot
+	const turn = rows > cols;
+	const across = turn ? (y1 - y0) * T.h : (x1 - x0) * T.w, down = turn ? (x1 - x0) * T.w : (y1 - y0) * T.h;
+	const s = Math.min(across / cols, down / rows); // tone pixels per dot
 	const uc = ((x0 + x1) / 2) * T.w, vc = ((y0 + y1) / 2) * T.h;
 	const k = Math.min(3, Math.max(1, Math.round(s))); // samples per axis when dots are big
 
@@ -96,6 +101,9 @@ function layout(S) {
 	const ox = quiet.length ? quiet[0].x + quiet[0].w / 2 : R.width / 2;
 	const oy = quiet.length ? quiet[0].y + quiet[0].h / 2 : R.height / 2;
 	const far = Math.hypot(Math.max(ox, R.width - ox), Math.max(oy, R.height - oy));
+	// On a narrow screen there's no room beside the text, so the crystal is above and below it, and
+	// fades in over less at the canvas's edges.
+	const fz = Math.min(1, R.width / 1100);
 
 	// Text drawn as dots (the 404): its glyphs, at dot resolution.
 	let glyph = null;
@@ -127,22 +135,26 @@ function layout(S) {
 				}
 			}
 			if (S.fade) {
-				if (S.fade.top) c *= smooth(py / S.fade.top);
-				if (S.fade.bottom) c *= smooth((R.height - py) / S.fade.bottom);
+				if (S.fade.top) c *= smooth(py / (S.fade.top * fz));
+				if (S.fade.bottom) c *= smooth((R.height - py) / (S.fade.bottom * fz));
 			}
 			let d = 0, w = 0;
 			for (let b = 0; b < k; b++)
 				for (let a = 0; a < k; a++) {
-					const u = uc + (x - cols / 2 + (a + 0.5) / k) * s, v = vc + (j - rows / 2 + (b + 0.5) / k) * s;
+					const dx = (x - cols / 2 + (a + 0.5) / k) * s, dy = (j - rows / 2 + (b + 0.5) / k) * s;
+					const u = uc + (turn ? dy : dx), v = vc + (turn ? -dx : dy);
 					d += sample(T.dark, u, v);
 					w += sample(T.warm, u, v);
 				}
 			d /= k * k;
 			w /= k * k;
+			// The photo's largest faces are its darkest. The banner hides them behind the logo, but a
+			// narrower screen shows them, so the darkest tones are eased off and dither rather than go solid.
+			if (d > KNEE) d = KNEE + (d - KNEE) * 0.5;
 			const hash = ((i * 2654435761) >>> 0) / 4294967296;
 			if (glyph && glyph[i] > 0.5) {
-				// inside the glyphs, the crystal at full strength, and a little denser
-				tone[i] = 0.45 + 0.55 * d;
+				// inside the glyphs, the crystal at full strength, and a little denser, but never solid
+				tone[i] = 0.4 + 0.5 * d;
 				warmth[i] = w;
 				t[i] = 0.3 * hash;
 			} else {

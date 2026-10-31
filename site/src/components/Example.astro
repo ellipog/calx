@@ -33,6 +33,8 @@ const errorLine = error ? shown.split('\n').findIndex((l) => l === error.text) +
 
 <style>
 	.ex {
+		display: flex;
+		flex-direction: column;
 		margin: 0;
 		border: 1px solid var(--line);
 		border-radius: 12px;
@@ -41,6 +43,7 @@ const errorLine = error ? shown.split('\n').findIndex((l) => l === error.text) +
 	}
 	.ex :global(.expressive-code) {
 		margin: 0;
+		flex-grow: 1;
 	}
 	.ex :global(.expressive-code pre) {
 		border: 0;

@@ -57,6 +57,10 @@ body {
 a {
 	color: inherit;
 }
+/* No line ends on a word alone. */
+p {
+	text-wrap: pretty;
+}
 /* Code in a sentence. A code block's code is Expressive Code's, which keeps its rules in a cascade
    layer, so this one would beat them if it reached that far. */
 :not(pre) > code {
@@ -227,35 +231,7 @@ h2.h {
 	font: 500 14px var(--f-body);
 	color: var(--ink-3);
 	margin: 32px 0 10px 2px;
-}
-
-/* compiler output */
-.term {
-	font: 12.5px/1.65 var(--f-mono);
-	background: var(--code);
-	border: 1px solid var(--line);
-	border-radius: 12px;
-	padding: 16px 20px;
-	white-space: pre-wrap;
-	overflow: auto;
-	color: var(--ink-2);
-	margin: 0;
-}
-.term .path {
-	color: var(--ink);
-	font-weight: 600;
-}
-.term .e,
-.term .caret {
-	color: var(--err);
-	font-weight: 600;
-}
-.term .msg {
-	color: var(--ink);
-	font-weight: 600;
-}
-.term .dim {
-	color: var(--ink-3);
+	text-wrap: pretty;
 }
 
 /* the other promises: two by two, each with an example from its docs page, or the build times */
@@ -286,9 +262,13 @@ h2.h {
 	text-wrap: pretty;
 	max-width: 640px;
 }
+/* Side by side, a row's examples are as tall as each other, so its links line up. */
+.promise > .ex,
+.promise > .times {
+	flex-grow: 1;
+}
 .promise .more {
 	align-self: flex-start;
-	margin-top: auto;
 }
 .times {
 	border: 1px solid var(--line);
@@ -403,6 +383,7 @@ h2.h {
 	font-size: 16.5px;
 	margin: 0 0 14px;
 	max-width: 600px;
+	text-wrap: balance;
 }
 .band .link {
 	margin: 12px 0 0;
@@ -469,7 +450,7 @@ h2.h {
 		margin-top: 32px;
 	}
 	.par-copy > .note,
-	.par-copy > .term,
+	.par-copy > .ex,
 	.par-copy > .link {
 		order: 2;
 	}
@@ -482,6 +463,13 @@ h2.h {
 	}
 }
 @media (max-width: 560px) {
+	/* The text is as wide as the screen, so the crystal goes above and below it. */
+	.band {
+		margin-top: 56px;
+	}
+	.band .inner {
+		padding: 220px 24px;
+	}
 	.io {
 		grid-template-columns: 1fr;
 	}

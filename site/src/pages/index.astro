@@ -11,13 +11,13 @@ import { errorOf, fences } from '../examples.mjs';
 import { buildTimes } from '../numbers.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
-// and the example that must fail to compile.
+// and the first example written not to compile.
 const parallel = fences('reference/parallel.md');
 const calx = parallel.filter((f) => f.lang === 'calx');
 const c = parallel.filter((f) => f.lang === 'c');
 const example = calx[0].code;
 const exampleC = `${c[0].code}\n\n// and in main, where the loop was:\n${c[1].code}`;
-const failing = calx.map((f) => errorOf(f.code)).find((e) => e !== null);
+const failing = calx.find((f) => errorOf(f.code) !== null)?.code;
 if (!failing) throw new Error('docs/reference/parallel.md has no example marked // error:');
 
 // What stash reads and answers: the first two text blocks of the guide's first page.
@@ -47,7 +47,7 @@ const site = {
 ---
 
 <Base
-	title="Calx: a fast, memory-safe, deterministic programming language"
+	title="The Calx programming language"
 	description="Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math gives the same bits on every platform, and its parallel loops are checked when it compiles."
 	jsonLd={site}
 >
@@ -74,16 +74,13 @@ const site = {
 		<section class="section">
 			<div class="split par">
 				<div class="par-copy">
-					<h2 class="h">Parallel loops are checked when you compile</h2>
+					<h2 class="h">Parallel loops without data races</h2>
 					<p class="intro">
 						<code>parallel for</code> runs a loop's iterations on a pool of threads. The compiler rejects a loop in which one
 						iteration changes data that another one uses, so the output doesn't depend on the number of threads.
 					</p>
 					<div class="note">Changing a variable that every iteration shares is an error:</div>
-					<pre class="term"><span class="path">main.calx:{failing.line}:{failing.column}:</span> <span class="e">error:</span> <span class="msg">{failing.message}</span>
-{'  ' + failing.text}
-{'  ' + ' '.repeat(failing.column - 1)}<span class="caret">{'^' + '~'.repeat(failing.token.length - 1)}</span>
-<span class="dim">1 error</span></pre>
+					<Example code={failing} />
 					<p class="link"><a class="more" href="/reference/parallel/">Parallel loops in the reference</a></p>
 				</div>
 				<div class="par-code"><CodeCard calx={example} c={exampleC} file="game.calx" /></div>

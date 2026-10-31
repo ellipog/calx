@@ -236,6 +236,9 @@ const panels = PANELS.map((p) => {
 	.brow:hover::before {
 		background: var(--amber-wash);
 	}
+	.brow:hover .val {
+		background: linear-gradient(var(--amber-wash) 0 0), var(--raised);
+	}
 	.bar {
 		position: relative;
 		height: 100%;
@@ -249,7 +252,9 @@ const panels = PANELS.map((p) => {
 	}
 	.val {
 		position: absolute;
-		left: calc(100% + 8px);
+		left: calc(100% + 4px);
+		padding: 0 4px;
+		background: var(--raised);
 		top: 50%;
 		transform: translateY(-50%);
 		white-space: nowrap;
