@@ -15,7 +15,7 @@ const PAGE_TITLE_ID = '_top';
 
 {
 	section && (
-		<div class="crumbs">
+		<div class="crumbs" data-pagefind-ignore>
 			<a href={`/docs/#${section.id}`}>{section.title}</a>
 			<span aria-hidden="true">/</span>
 			<span>{title}</span>
@@ -24,7 +24,8 @@ const PAGE_TITLE_ID = '_top';
 }
 <h1 id={PAGE_TITLE_ID}>{title}</h1>
 {description && <p class="desc">{description}</p>}
-<div class="meta">
+<!-- Search shows the page's own words: the crumbs and this line would start every excerpt. -->
+<div class="meta" data-pagefind-ignore>
 	{
 		examples > 0 && (
 			<span>

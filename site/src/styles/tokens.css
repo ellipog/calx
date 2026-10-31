@@ -1,6 +1,13 @@
 /* The site's colors and type, from the mockup (site/mockup.html), shared by the home page, the
    404 page and the docs. Starlight's own variables are set from them at the end, so its pages,
    its search box and its code blocks use the same paper, ink and amber. */
+
+/* Starlight's cascade layers, in its order. A layer's place is where it first appears, and this
+   file comes first on every page, ahead of the header's styles, which use Starlight's core and
+   components layers. Starlight declares the order too, but the build drops that line from its own
+   stylesheet, which comes later; without this, its reset would beat its core styles. */
+@layer starlight.base, starlight.reset, starlight.core, starlight.content, starlight.components, starlight.utils;
+
 @import '@fontsource-variable/inter';
 @import '@fontsource-variable/outfit';
 @import '@fontsource-variable/jetbrains-mono';
