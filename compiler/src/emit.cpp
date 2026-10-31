@@ -1730,7 +1730,7 @@ $dropall    cx_jt_clear(&m->t);
             {"$find", table_fn("find", t)}, {"$alloc", table_fn("alloc", t)}, {"$rehash", table_fn("rehash", t)},
             {"$put", table_fn("put", t)}, {"$shift", table_fn("shift", t)}, {"$take", table_fn("take", t)},
             {"$clear", table_fn("clear", t)}, {"$reserve", table_fn("reserve", t)}, {"$trim", table_fn("trim", t)},
-            {"$T", ctype(t)}, {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
+            {"$rmark", table_fn("rmark", t)}, {"$T", ctype(t)}, {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
             {"$V", map ? ctype(t->elem) : std::string()},
         };
     }
@@ -1741,7 +1741,8 @@ $dropall    cx_jt_clear(&m->t);
                                 "static void $alloc($T* m);\nstatic void $rehash($T* m, cx_u32 nn);\n") +
                         (map ? "static inline void $put($T* m, $K k, $V v);\n" : "static inline void $put($T* m, $K k);\n") +
                         "static void $shift($T* m, cx_u32 pos);\nstatic inline cx_bool $take($T* m, $KL k, cx_u32 h, $S* out);\n"
-                        "static void $clear($T* m);\nstatic void $reserve($T* m, cx_usize c);\nstatic void $trim($T* m);\n",
+                        "static void $clear($T* m);\nstatic void $reserve($T* m, cx_usize c);\nstatic void $trim($T* m);\n"
+                        "static cx_usize* $rmark($T* m, const cx_bool* marks, cx_usize count, const char* at);\n",
                     otable_names(t));
     }
 
@@ -1776,12 +1777,18 @@ $dropall    cx_jt_clear(&m->t);
         };
         const Type* slot = slot_type(t);
         std::string drop_all = is_copy(slot) ? std::string() : each_slot(t, "m->", "    ", "        " + drop_fn(slot) + "(&m->slots[i]);\n");
+        auto drop_at = [&](const std::string& s, const std::string& indent) {
+            return is_copy(slot) ? std::string() : indent + drop_fn(slot) + "(&" + s + ");\n";
+        };
         auto names = otable_names(t);
         names.insert(names.begin(), {
             {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"}, {"$dropall", drop_all},
             {"$kpos", key("m->slots[pos]")}, {"$klast", key("m->slots[last]")}, {"$kold", key("old[i]")}, {"$knew", key("slots[pos]")},
             {"$mixk", mix("k")}, {"$mixc", mix("c")}, {"$mixold", mix(key("old[i]"))}, {"$replace12", replace("            ")},
             {"$replace16", replace("                ")}, {"$eqlook", eq_look("m->slots[pos]")}, {"$eqkey", eq_key("m->slots[pos]")},
+            {"$ki", key("m->slots[i]")}, {"$mixw", mix("wkey[w]")}, {"$dropi", drop_at("m->slots[i]", "        ")},
+            {"$dropn", drop_at("m->slots[m->n]", "            ")}, {"$dropout", drop_at("out", "        ")},
+            {"$droppos", drop_at("m->slots[pos]", "        ")},
         });
         std::string tail = R"(static void $reserve($T* m, cx_usize c) {
     cx_oh_ready(&m->h);
@@ -1792,6 +1799,135 @@ static void $trim($T* m) {
     cx_oh_ready(&m->h);
     cx_u32 l = cx_oh_trim_size(&m->h);
     if (l) $rehash(m, l);
+}
+)";
+        // Taking out marked keys as a loop over fastutil's table that calls its iterator's
+        // `remove` does, giving the order that loop goes over the keys in (D173). Each slot is
+        // tagged with its key's place in a loop over the table, which is what a mark is for. The
+        // loop goes from the last slot to the first; taking a key out moves the keys after it in
+        // its run back, as `$shift` does, without halving the table, and a key that comes back
+        // past the end, from the first slots to the last, is one the loop has gone past, so it
+        // goes on a list the loop goes over at the end, finding each by its hash, as fastutil's
+        // iterator does. One taken out from there is taken out as `remove` does, halving the
+        // table when it's a quarter full.
+        std::string wrap_alloc = "                if (!wtag) {\n                    wtag = (cx_u32*)cx_alloc(count * sizeof(cx_u32));\n"
+                                 "                    wkey = ($K*)cx_alloc(count * sizeof($K));\n";
+        std::string wrap_free = "    if (wtag) {\n        cx_free(wtag, count * sizeof(cx_u32));\n        cx_free(wkey, count * sizeof($K));\n";
+        std::string rmark_int = R"(static cx_usize* $rmark($T* m, const cx_bool* marks, cx_usize count, const char* at) {
+    if (__builtin_expect(count != m->len, 0)) cx_panic_key_marks(count, m->len, at);
+    if (!count) return 0;
+    cx_usize* order = (cx_usize*)cx_alloc(count * sizeof(cx_usize));
+    cx_u32* tags = (cx_u32*)cx_alloc((cx_usize)m->n * sizeof(cx_u32));
+    cx_u32* wtag = 0;
+    $K* wkey = 0;
+    cx_usize seen = 0, next = m->zero, nw = 0;
+    for (cx_u32 i = m->n; i-- > 0;)
+        if ($ki != 0) tags[i] = (cx_u32)next++;
+    if (m->zero) {
+        order[seen++] = 0;
+        if (marks[0]) {
+$dropn            m->zero = 0;
+            m->len--;
+        }
+    }
+    for (cx_u32 i = m->n; i-- > 0 && seen < count;) {
+        if ($ki == 0) continue;
+        cx_u32 t = tags[i];
+        order[seen++] = t;
+        if (!marks[t]) continue;
+$dropi        m->len--;
+        for (cx_u32 pos = i;;) {
+            cx_u32 last = pos;
+            $K c;
+            pos = (last + 1) & m->mask;
+            for (;;) {
+                c = $kpos;
+                if (c == 0) break;
+                cx_u32 slot = $mixc & m->mask;
+                if (last <= pos ? last >= slot || slot > pos : last >= slot && slot > pos) break;
+                pos = (pos + 1) & m->mask;
+            }
+            if (c == 0) {
+                $klast = 0;
+                break;
+            }
+            if (pos < last) {
+)" + wrap_alloc + R"(                }
+                wtag[nw] = tags[pos];
+                wkey[nw++] = c;
+            }
+            m->slots[last] = m->slots[pos];
+            tags[last] = tags[pos];
+        }
+    }
+    cx_free(tags, (cx_usize)m->n * sizeof(cx_u32));
+    for (cx_usize w = 0; w < nw; w++) {
+        order[seen++] = wtag[w];
+        if (!marks[wtag[w]]) continue;
+        $S out;
+        if (!$take(m, wkey[w], $mixw, &out)) continue;
+$dropout    }
+)" + wrap_free + R"(    }
+    return order;
+}
+)";
+        std::string rmark_other = R"(static cx_usize* $rmark($T* m, const cx_bool* marks, cx_usize count, const char* at) {
+    if (__builtin_expect(count != m->len, 0)) cx_panic_key_marks(count, m->len, at);
+    if (!count) return 0;
+    cx_usize* order = (cx_usize*)cx_alloc(count * sizeof(cx_usize));
+    cx_u32* tags = (cx_u32*)cx_alloc((cx_usize)m->n * sizeof(cx_u32));
+    cx_u32* wtag = 0;
+    cx_u32* whash = 0;
+    $K* wkey = 0;
+    cx_usize seen = 0, next = 0, nw = 0;
+    for (cx_u32 i = m->n; i-- > 0;)
+        if (m->hash[i]) tags[i] = (cx_u32)next++;
+    for (cx_u32 i = m->n; i-- > 0 && seen < count;) {
+        if (!m->hash[i]) continue;
+        cx_u32 t = tags[i];
+        order[seen++] = t;
+        if (!marks[t]) continue;
+$dropi        m->len--;
+        for (cx_u32 pos = i;;) {
+            cx_u32 last = pos, c;
+            pos = (last + 1) & m->mask;
+            for (;;) {
+                c = m->hash[pos];
+                if (c == 0) break;
+                cx_u32 slot = c & m->mask;
+                if (last <= pos ? last >= slot || slot > pos : last >= slot && slot > pos) break;
+                pos = (pos + 1) & m->mask;
+            }
+            if (c == 0) {
+                m->hash[last] = 0;
+                break;
+            }
+            if (pos < last) {
+)" + wrap_alloc + R"(                    whash = (cx_u32*)cx_alloc(count * sizeof(cx_u32));
+                }
+                wtag[nw] = tags[pos];
+                whash[nw] = c;
+                wkey[nw++] = $kpos;
+            }
+            m->hash[last] = c;
+            m->slots[last] = m->slots[pos];
+            tags[last] = tags[pos];
+        }
+    }
+    cx_free(tags, (cx_usize)m->n * sizeof(cx_u32));
+    for (cx_usize w = 0; w < nw; w++) {
+        order[seen++] = wtag[w];
+        if (!marks[wtag[w]]) continue;
+        $K k = wkey[w];
+        cx_u32 tag = whash[w], pos = tag & m->mask;
+        while (!(m->hash[pos] == tag && $eqkey)) pos = (pos + 1) & m->mask;
+$droppos        m->len--;
+        $shift(m, pos);
+        if (m->n > m->min_n && m->len < m->max_fill / 4 && m->n > 16) $rehash(m, m->n / 2);
+    }
+)" + wrap_free + R"(        cx_free(whash, count * sizeof(cx_u32));
+    }
+    return order;
 }
 )";
         // Taking a key out, then halving a table that's a quarter full.
@@ -1886,7 +2022,7 @@ $dropall    m->len = 0;
     m->zero = 0;
     __builtin_memset(m->slots, 0, ((cx_usize)m->n + 1) * sizeof($S));
 }
-)" + tail, names);
+)" + rmark_int + tail, names);
         }
         return fill(R"(CX_INLINE cx_i64 $find(const $T* m, $KL k, cx_u32 h) {
     if (__builtin_expect(!m->slots, 0)) return -1;
@@ -1976,7 +2112,7 @@ static inline cx_bool $take($T* m, $KL k, cx_u32 h, $S* out) {
 $dropall    m->len = 0;
     __builtin_memset(m->hash, 0, (cx_usize)m->n * sizeof(cx_u32));
 }
-)" + tail, names);
+)" + rmark_other + tail, names);
     }
 
     // `m.insert(k, v)` and the rest, on a fastutil table.
@@ -2024,6 +2160,14 @@ $dropall    m->len = 0;
                 return head + "cx_usize " + key + " = " + value(e->args[0].value, e->args[0].value->type) + "; " + table_fn("reserve", t) +
                        "(" + p + ", " + key + "); })";
             case BMethod::trim: return table_fn("trim", t) + "(" + address(recv) + ")";
+            case BMethod::remove_marked: {
+                // The order the loop went over the keys in, as their places in a loop over the table.
+                Type* mt = e->args[0].value->type;
+                std::string v = tmp(), r = tmp();
+                return head + ctype(mt) + " " + v + " = " + value(e->args[0].value, mt) + "; " + ctype(e->type) + " " + r + " = {0}; " +
+                       r + ".ptr = " + table_fn("rmark", t) + "(" + p + ", " + v + ".ptr, " + v + ".len, " + location(e->span) + "); " + r +
+                       ".len = " + r + ".cap = " + v + ".len; " + r + "; })";
+            }
             default: return "0";
         }
     }

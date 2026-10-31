@@ -1,0 +1,111 @@
+// `remove_marked` on `OpenHashMap` and `OpenHashSet` (D173): the keys a loop over the table marked
+// come out as they do from a loop over fastutil 8.5.18's table that calls its iterator's `remove`
+// on them, and it gives the order that loop goes over the keys in, as their places in the marking
+// loop. The expected output is what fastutil gives.
+
+// The keys at the places `order` gives, between spaces.
+fn went(keys: List<String>, order: List<usize>) -> String {
+    var s = String()
+    for i in order {
+        if not s.is_empty() {
+            s.push_str(" ")
+        }
+        s.push_str(keys[i])
+    }
+    return s
+}
+
+fn main() {
+    // `Int2IntOpenHashMap`: the key 0 is first.
+    var ints = OpenHashMap<i32, i32>()
+    for i in -6..10 {
+        ints.insert(i * 37, i)
+    }
+    var keys = List<String>()
+    var marks = List<bool>()
+    for (k, _) in ints {
+        marks.push(keys.len() % 3 != 2)
+        keys.push("{k}")
+    }
+    let order = ints.remove_marked(marks)
+    println(went(keys, order))    // out: 0 -111 111 37 -37 -222 222 74 -74 333 296 259 185 148 -185 -148
+    println("{ints}")    // out: {111: 3, -222: -6, -74: -2, 259: 7, -185: -5}
+
+    // `Int2ObjectOpenHashMap<String>`, with keys whose run in a table of 16 goes past its end, so
+    // taking a key out moves keys from the first slots to the last.
+    var wrap = OpenHashMap<i32, String>()
+    for k in [1, 3, 28, 29, 30, 32, 33, 35, 61, 64] {
+        wrap.insert(k, "v{k}")
+    }
+    println("{wrap}")    // out: {33: v33, 35: v35, 29: v29, 61: v61, 32: v32, 30: v30, 28: v28, 1: v1, 3: v3, 64: v64}
+    keys.clear()
+    marks.clear()
+    for (k, _) in wrap {
+        marks.push(keys.len() % 2 == 0)
+        keys.push("{k}")
+    }
+    let moved = wrap.remove_marked(marks)
+    println(went(keys, moved))    // out: 33 35 29 61 32 30 28 1 3 64
+    println("{wrap}")    // out: {64: v64, 35: v35, 30: v30, 1: v1, 61: v61}
+
+    // `ObjectOpenHashSet<String>` likewise: a key that came back past the end is gone over last.
+    var words = OpenHashSet<String>()
+    for w in ["w0", "w1", "w2", "w11", "w20", "w21", "w22", "w25", "w26", "w30"] {
+        words.insert(String(w))
+    }
+    println("{words}")    // out: {w11, w0, w2, w30, w26, w20, w22, w1, w25, w21}
+    keys.clear()
+    marks.clear()
+    for w in words {
+        marks.push(keys.len() % 3 != 0)
+        keys.push(w.copy())
+    }
+    let late = words.remove_marked(marks)
+    println(went(keys, late))    // out: w11 w0 w2 w30 w26 w20 w22 w1 w21 w25
+    println("{words}")    // out: {w21, w11, w22, w30}
+
+    // `Object2IntOpenHashMap<String>`.
+    var counts = OpenHashMap<String, i32>()
+    for w in ["stone", "dirt", "grass", "sand", "gravel", "oak_log", "water", "lava", "Aa", "BB"] {
+        counts.insert(String(w), i32.wrap(w.len()))
+    }
+    keys.clear()
+    marks.clear()
+    for (k, _) in counts {
+        marks.push(keys.len() % 2 == 0)
+        keys.push(k.copy())
+    }
+    println(went(keys, counts.remove_marked(marks)))    // out: lava sand stone grass oak_log water BB Aa gravel dirt
+    println("{counts}")    // out: {sand: 4, grass: 5, water: 5, Aa: 2, dirt: 4}
+
+    // Taking keys out in the loop never halves the table, so keys put back after go where they
+    // would in the big table.
+    var many = OpenHashSet<i64>()
+    for i in 0i64..200 {
+        many.insert(i * 1000003)
+    }
+    var all = List<bool>()
+    var kept = List<bool>()
+    for i in 0..200 {
+        all.push(true)
+        kept.push(i % 20 != 0)
+    }
+    var other = many.copy()
+    _ = many.remove_marked(all)
+    println("{many}")    // out: {}
+    for i in 0i64..10 {
+        many.insert(i * 1000003)
+    }
+    println("{many}")    // out: {0, 8000024, 5000015, 2000006, 3000009, 4000012, 1000003, 9000027, 6000018, 7000021}
+    _ = other.remove_marked(kept)
+    println("{other}")    // out: {0, 142000426, 149000447, 80000240, 183000549, 110000330, 32000096, 168000504, 161000483, 93000279}
+    for i in 0i64..10 {
+        other.insert(i * 1000003 + 7)
+    }
+    println("{other}")    // out: {0, 142000426, 7000028, 149000447, 5000022, 2000013, 80000240, 183000549, 4000019, 110000330, 32000096, 3000016, 9000034, 168000504, 6000025, 161000483, 1000010, 93000279, 8000031, 7}
+
+    // An empty table has no keys to mark.
+    var empty = OpenHashMap<i64, i64>()
+    let nothing: List<bool> = []
+    println("{empty.remove_marked(nothing).len()}")    // out: 0
+}

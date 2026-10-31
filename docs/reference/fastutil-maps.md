@@ -62,6 +62,7 @@ An integer key is placed by fastutil's `mix` of the number itself, as the primit
 | `new …(m2)`, `new …(c)` | `OpenHashMap<K, V>(m2.len())`, `reserve(m2.len())`, then the inserts |
 | `clone()` | `m.copy()` |
 | Going over `keySet()`, `values()`, `long2ObjectEntrySet()` or `forEach` | `for (k, v) in m` |
+| A loop that calls the iterator's `remove()` | a loop that marks the keys, then `m.remove_marked(marks)` ([below](#taking-out-marked-keys)) |
 
 - **Every way of adding a key puts it in the same slot**, the first empty one from where its hash points, so `addTo`, `putIfAbsent`, `computeIfAbsent` and `merge` are written as `contains` and `insert`.
 - **`OpenHashMap(n, f)` sizes the table as fastutil does**: the power of two at least `n / f`, and at least 2. Without them it's fastutil's default, room for 16 keys at a load factor of 0.75, which is 32 slots. A load factor that isn't between 0 and 1 panics, as fastutil throws.
@@ -92,6 +93,45 @@ fn main() {
 }
 ```
 
+## Taking out marked keys
+
+`m.remove_marked(marks)` takes out each key whose mark is set, `marks` being a `List<bool>` with one mark for each key, in the order a loop over the table goes. It moves the keys as a loop over fastutil's table that calls its iterator's `remove` on those keys does, so the keys left are in fastutil's places, and it gives the order that loop goes over the keys in, as each key's place in the marking loop (D173).
+
+That isn't always the table's order. Taking a key out moves the keys after it in its run back, and one that moves from the first slots to the last, past the end of the table, is one the loop has gone past, so fastutil's iterator goes over it at the end. Vanilla takes keys out with the iterator where it does something for each key as it goes: `TicketStorage` does when tickets run out, telling the chunk trackers about each chunk, and `ChunkMap` does with the chunks it unloads. The order `remove_marked` gives is the order to do those things in:
+
+```calx
+fn main() {
+    // Each chunk's ticket, with the ticks it has left.
+    var left = OpenHashMap<String, i32>()
+    let chunks = ["w0", "w1", "w2", "w11", "w20", "w21", "w22", "w25", "w26", "w30"]
+    let ticks = [0, 0, 0, 1, 0, 1, 1, 0, 0, 1]
+    for i in 0usize..10 {
+        left.insert(String(chunks[i]), ticks[i])
+    }
+    // Those with none left come out, as vanilla's `purgeStaleTickets` takes them out with the
+    // iterator, and each chunk is told about in the order that loop gets to it.
+    var keys = List<String>()
+    var marks = List<bool>()
+    for (k, v) in left {
+        keys.push(k.copy())
+        marks.push(v == 0)
+    }
+    println("{keys}")    // out: [w11, w0, w2, w30, w26, w20, w22, w1, w25, w21]
+    var told = List<String>()
+    for i in left.remove_marked(marks) {
+        told.push(keys[i].copy())
+    }
+    println("{told}")    // out: [w11, w0, w2, w30, w26, w20, w22, w1, w21, w25]
+    println("{left}")    // out: {w21: 1, w11: 1, w22: 1, w30: 1}
+}
+```
+
+Taking `w1` out moved `w21` from the first slot to the last, which the loop had gone past, so the loop gets to it after `w25`.
+
+- **There's a mark for each key**, and a different number of marks panics: `` `remove_marked` needs a mark for each key: 3 marks for 2 keys ``.
+- **The loop doesn't halve the table as it goes**, as fastutil's iterator doesn't, so a table that lost most of its keys keeps its size. A key the loop gets to at the end is taken out as `remove` takes one out, which halves a table that's left a quarter full.
+- **The marks are all made before any key comes out**, so a key's mark can't depend on what the loop did before it got there. Vanilla's loops decide each key by the key and its value alone.
+
 ## Order
 
 The order is fastutil's, worked out from rules its tables keep:
@@ -103,9 +143,11 @@ The order is fastutil's, worked out from rules its tables keep:
 
 `OpenHashMap` and `OpenHashSet` were checked against fastutil 8.5.18, the version vanilla 26.3 ships, by running the same random operations on both: inserts, removes, lookups and `addTo`, `putAll` and `addAll` as `reserve` and inserts, `trim`, `clear`, and new tables of random sizes and load factors from 0.25 to 0.99. The keys were `int`s, including 0 and dense runs of small numbers, `long`s, strings and a record whose many keys share each hash, in long phases of adding and of removing, so tables grew to 4,096 slots and shrank about 450 times in each run. 60 runs of 50,000 operations, 3 million in all, went over the same keys in the same order at every one of 375,060 checks.
 
+`remove_marked` was checked against fastutil 8.5.18's iterators in Calcite's `collections` probe, whose open tables run loops that remove the keys a modulus picks, and compare the order each loop goes in and the table after it. Of 7,698 such loops in 420 cases, 183 went out of the table's order and 17 halved the table at the end, and every one matched, on Windows and Linux.
+
 ## What's different
 
-- A table can't change during a loop over it, which is a compile error. fastutil lets an iterator remove the key it's on, which moves other keys and changes the order the rest of the loop goes in; there's no way to write that yet, and code that does it waits for it.
+- A table can't change during a loop over it, which is a compile error. fastutil lets an iterator remove the key it's on, which moves other keys and changes the order the rest of the loop goes in; in Calx, a loop marks the keys and [`remove_marked`](#taking-out-marked-keys) takes them out, giving the order fastutil's loop would have gone in.
 - Keys and values can't be null. An `Object2…` table's null key, which fastutil keeps apart like an integer table's 0, isn't there.
 - fastutil's `Reference2…` tables, and its `Custom` ones with a hash strategy, aren't built. A `Reference2…` table places keys by their addresses, so vanilla's own order changes from run to run, and where it shows, Calcite picks a fixed one (D27).
 - fastutil's linked tables, `Long2ObjectLinkedOpenHashMap` and the rest, go in the order keys were added, which doesn't come from fastutil's hashing, so they're [`LinkedMap` and `LinkedSet`](linked-maps.md).
@@ -115,4 +157,5 @@ The order is fastutil's, worked out from rules its tables keep:
 - The table is named for its types, such as `cx_omap_i64_String` and `cx_oset_i32`. It's an array of slots, each the key, or the key and value, in place; for keys that aren't integers, an array of words beside it; and the runtime's `cx_ohead`, the size, the keys and the load factor. A table that's made empty allocates nothing until its first key.
 - An integer table's slots have room for one more, slot `n`, where the key 0 goes, and a 0 key in another slot means it's empty. A table of other keys keeps, for each slot, the 30 bits of the key's mixed hash that place it in any table, with the top bit set, and 0 for an empty slot, so finding a key compares words before keys, and rehashing never hashes a key again.
 - A key and its value are in one slot, where fastutil keeps them in two arrays, so a lookup that finds a key reads one place.
+- `remove_marked` tags each slot with its key's place in a loop, moves the tags with the keys as it takes keys out from the last slot to the first, and keeps a list of the keys that move past the end, which it takes out last by their hashes, as fastutil's iterator keeps one. The tags are one 32-bit word a slot, for the length of the call.
 - Finding, inserting, removing and rehashing compile to C specialized for the key and value types, as `Map`'s do. The sizes fastutil picks, which don't depend on the types, are the runtime's, in `calx_ohtable.c`, linked into a program only when it uses these tables.

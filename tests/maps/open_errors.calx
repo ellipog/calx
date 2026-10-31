@@ -19,6 +19,10 @@ fn main() {
     _ = m.compute_if_absent(1, 2)    // error: `OpenHashMap<i32, i32>` has no method `compute_if_absent`
     let j = JavaHashMap<i32, i32>()
     j.trim()    // error: `JavaHashMap<i32, i32>` has no method `trim`
+    let marks: List<bool> = []
+    _ = j.remove_marked(marks)    // error: `JavaHashMap<i32, i32>` has no method `remove_marked`
+    var o = OpenHashSet<i32>()
+    o.remove_marked(marks)    // error: this `List<usize>` value is unused; discard it with `_ = ...` if that's intended
     let e = OpenHashMap<i32, i32>(1, 0.5, 3)    // error: `OpenHashMap<...>()` takes at most two arguments, the expected size and the load factor, as fastutil's constructor does
     let wide: f64 = 0.5
     let g = OpenHashSet<i32>(4, wide)    // error: expected `f32`, found `f64`

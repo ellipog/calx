@@ -8157,6 +8157,12 @@ private:
             else if (m == "reserve" && recv->table != TableKind::sorted) b = BMethod::reserve, changes = true, params = {T.usize};
             // fastutil's `trim()`, which shrinks the table to the smallest that holds its keys.
             else if (m == "trim" && recv->table == TableKind::fastutil) b = BMethod::trim, changes = true;
+            // Taking out the keys a loop over the table marked, as a loop that calls the iterator's
+            // `remove` on them does in fastutil, which goes over some keys later than a loop that
+            // takes none out; it gives that order, as each key's place in the marking loop (D173).
+            else if (m == "remove_marked" && recv->table == TableKind::fastutil) {
+                b = BMethod::remove_marked, changes = true, params = {T.list_of(T.bool_)}, result = T.list_of(T.usize);
+            }
             // A linked table's two ends, as fastutil's linked tables and Java's `SequencedMap` and
             // `SequencedSet` have them: a key at an end, taking one out, moving a key to one, and
             // putting a key at one, where it moves if it's there already (D109).

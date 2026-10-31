@@ -1703,6 +1703,15 @@ void cx_panic_marks(cx_usize marks, cx_usize length, const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_key_marks(cx_usize marks, cx_usize keys, const char* at) {
+    char text[112];
+    cx_panic_begin(at);
+    snprintf(text, sizeof text, "`remove_marked` needs a mark for each key: %llu marks for %llu keys", (unsigned long long)marks,
+             (unsigned long long)keys);
+    panic_text(text);
+    cx_panic_end();
+}
+
 void cx_panic_range(const char* at) {
     cx_panic_begin(at);
     panic_text("the range ends before it starts");

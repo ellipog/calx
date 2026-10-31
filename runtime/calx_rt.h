@@ -759,6 +759,9 @@ CX_COLD CX_FN(void, cx_panic_key, (const char* at));
 CX_COLD CX_FN(void, cx_panic_range, (const char* at));
 /* `q.remove_marked(marks)` on a `PriorityQueue`, without one mark for each element (D113). */
 CX_COLD CX_FN(void, cx_panic_marks, (cx_usize marks, cx_usize length, const char* at));
+/* `m.remove_marked(marks)` on an `OpenHashMap` or an `OpenHashSet`, without one mark for each key
+ * (D173). */
+CX_COLD CX_FN(void, cx_panic_key_marks, (cx_usize marks, cx_usize keys, const char* at));
 /* An `OpenHashMap`'s or an `OpenHashSet`'s load factor isn't between 0 and 1, or it's asked for
  * more keys than fastutil's tables hold. */
 CX_COLD CX_FN(void, cx_panic_load_factor, (const char* at));
