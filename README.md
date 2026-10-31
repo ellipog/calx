@@ -7,7 +7,7 @@ Calx is a general-purpose compiled language. Its compiler is written in C++ and 
 
 What sets it apart:
 
-- **Faster than Rust on our benchmark.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
+- **Faster than Rust.** On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference, Calx takes about 0.7× Rust's time per tick, with one thread or 24, on Windows and Linux.
 - **Deterministic math.** Integers and floats give the same bits on every platform. The rules match Java's, so code ported from Java gives the same results.
 - **Memory-safe by default.** Ownership is checked at compile time and costs nothing at run time: no garbage collector, no reference counts. Unchecked code is opt-in, inside `unsafe`.
 - **Deterministic parallelism.** `parallel for` runs a loop's iterations across every core, and the compiler checks that no iteration touches what another one changes. A program prints the same output with one thread or many. Region actors come next.
