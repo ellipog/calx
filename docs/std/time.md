@@ -67,7 +67,7 @@ The wall clock jumps when the system's clock is set, so measure with an `Instant
 
 ## Why they need `unsafe`
 
-Safe Calx can't see time ([spec](../CALX_SPEC.md#lockstep-ticks)). A program whose results depended on how fast it ran would give different answers on different machines, or from one run to the next, and Calcite's ticks must replay exactly. So the only way to read the clock is an `unsafe fn`, and code that calls it says so. Calcite's tick loop reads it once per tick and records the time with the tick's inputs, and everything else sees that recorded time (D44, D54). A benchmark reads it to time itself.
+Safe Calx can't see time ([spec](../CALX_SPEC.md#lockstep-ticks)). A program whose results depended on how fast it ran would give different answers on different machines, or from one run to the next, and a program that replays its inputs couldn't replay its results. So the only way to read the clock is an `unsafe fn`, and code that calls it says so. A program that must replay, such as a game server's tick loop, reads it once per step and records the time with that step's inputs, and everything else sees that recorded time (D44, D54). A benchmark reads it to time itself.
 
 An `Instant` or a `Timestamp` on its own is harmless: comparing two says nothing new once both are read, and `date_time` is plain arithmetic. The local time zone needs `unsafe` too, since it differs from one machine to the next.
 

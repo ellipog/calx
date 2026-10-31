@@ -1,6 +1,6 @@
 ---
 title: Floats
-description: f32 and f64 arithmetic, printing and methods, matching Java's float and double.
+description: The f32 and f64 types - arithmetic, printing and methods - which match Java's float and double.
 ---
 
 # Floats

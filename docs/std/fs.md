@@ -86,7 +86,7 @@ There's no handle to a file left open, apart from a lock's: each call opens the 
 
 ## Locking
 
-A program marks a folder as in use by locking a file in it, as a Minecraft server locks its world's `session.lock`, so a second server on the same world stops instead of both writing it. `try_lock` does just what vanilla's `DirectoryLock` does with Java's `FileChannel`: it writes `☃` at the start, syncs it, and takes the lock. So vanilla and a Calx program refuse each other's lock, on Windows and Linux.
+A program marks a folder as in use by locking a file in it, as a Minecraft server locks its world's `session.lock`, so a second server on the same world stops instead of both writing it. `try_lock` does just what Minecraft's `DirectoryLock` does with Java's `FileChannel`: it writes `☃` at the start, syncs it, and takes the lock. So Minecraft and a Calx program refuse each other's lock, on Windows and Linux.
 
 ```calx
 import std.fs.{try_lock, remove_dir_all, temp_dir}

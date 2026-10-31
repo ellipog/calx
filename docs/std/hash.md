@@ -5,7 +5,7 @@ description: MD5, SHA-1 and SHA-256, at once or in pieces, and HMAC-SHA256, givi
 
 # `std.hash`
 
-The hashes vanilla and its proxies use, giving the bytes Java's `MessageDigest` and `Mac` give:
+Common hashes, giving the bytes Java's `MessageDigest` and `Mac` give:
 
 - MD5, for an offline player's UUID, which `UUID.nameUUIDFromBytes` makes from `OfflinePlayer:<name>`.
 - SHA-1, for the server hash a login sends the session server.
@@ -54,9 +54,9 @@ fn main() {
 | `d.add_text(text: String)` | Adds the text's UTF-8 bytes, which is what Java's `getBytes(UTF_8)` gives |
 | `d.finish() -> List<u8>` | The hash of everything added. It takes the `Digest`, which can't be used after |
 
-- MD5 and SHA-1 are broken as protection against someone choosing what's hashed. Vanilla uses them where that doesn't matter, so `std.hash` has them for matching it, not for keeping anything safe.
+- MD5 and SHA-1 are broken as protection against someone choosing what's hashed. `std.hash` has them for matching programs and protocols that use them where that doesn't matter, not for keeping anything safe.
 - They gave the same bytes as Java 25's `MessageDigest` and `Mac` for 3000 random inputs of up to 300 bytes, with keys of 1 to 200 bytes, and with each input also added in two pieces cut at a random place. The [tests](../../tests/std/hash.calx) hold Java's hashes for the lengths around where the padding takes another block.
-- To turn a hash into the hex Mojang's session server takes, which is the hash as a signed number, Calcite does what Java's `new BigInteger(hash).toString(16)` does: the bytes are two's complement, so a hash whose first byte is 0x80 or more is written as `-` and its negation.
+- To turn a hash into the hex Mojang's session server takes, which is the hash as a signed number, a program does what Java's `new BigInteger(hash).toString(16)` does: the bytes are two's complement, so a hash whose first byte is 0x80 or more is written as `-` and its negation.
 
 ## How it's built
 

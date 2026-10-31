@@ -1,6 +1,6 @@
 ---
 title: Variables
-description: let and var, constants, and the rules against unused, unchanged and shadowed names.
+description: Naming values with let and var, constants, and the rules against unused, unchanged and shadowed names.
 ---
 
 # Variables

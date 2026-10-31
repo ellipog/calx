@@ -6,8 +6,9 @@
 // - Links to the rest of the repo, such as "../../std/io.calx", go to the file on GitHub.
 // - Each page starts with its title as a "# " heading, for GitHub. The site shows the title from
 //   the front matter, so that first heading goes.
-// - A decision the docs cite, "(D21)", links to its row in the decision log, as the mockup draws
-//   it: the number alone, small and quiet. Headings and the text of links keep theirs as written.
+// - A decision the docs cite, "(D21)", is for the people working on Calx, who read the docs on
+//   GitHub beside the decision log. The site leaves it out, so its readers don't meet ids that
+//   mean nothing to them. The text of links keeps its words as written.
 import { statSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,29 +59,20 @@ export function lineHtml(text, { links = true } = {}) {
 		);
 }
 
-/** The decision log the docs cite. Its rows have no anchors, so a link finds the row by its text. */
-export const DECISIONS = 'https://github.com/ellipog/calcite/blob/main/docs/decisions.md';
-// "(D21)" or "(D59, D60)", whose parentheses go, or a number on its own, as in "until D89".
-const DREF = /\((D\d+(?:,\s*D\d+)*)\)|\bD\d+\b/g;
+// The ways the docs cite decisions, and what each leaves on the site:
+// "(D21)" or "(D59, D60)" goes with the space before it; "(ThinLTO, D99)" keeps "(ThinLTO)",
+// which "([lists](lists.md), D159)" is too, its ", D159)" being a text node of its own after the
+// link; and "(D41, run.py)" keeps "(run.py)". A decision named in a sentence, as in "until D89",
+// is reworded in the docs instead, so nothing here guesses at the words around it.
+const CITES = [
+	[/\s*\(D\d+(?:,\s*D\d+)*\)/g, ''],
+	[/,\s*D\d+(?:,\s*D\d+)*\)/g, ')'],
+	[/\(D\d+(?:,\s*D\d+)*,\s*/g, '('],
+];
 
-/** The text with each decision it cites as a link, as Markdown nodes, or null if it cites none. */
-export function decisionNodes(value) {
-	const out = [];
-	let last = 0;
-	for (const m of value.matchAll(DREF)) {
-		if (m.index > last) out.push({ type: 'text', value: value.slice(last, m.index) });
-		(m[1] ?? m[0]).split(/,\s*/).forEach((id, i) => {
-			if (i) out.push({ type: 'text', value: ', ' });
-			out.push({
-				type: 'html',
-				value: `<a class="dref" href="${DECISIONS}#:~:text=${id}" title="Decision ${id} in the decision log">${id}</a>`,
-			});
-		});
-		last = m.index + m[0].length;
-	}
-	if (!out.length) return null;
-	if (last < value.length) out.push({ type: 'text', value: value.slice(last) });
-	return out;
+/** The text without the decisions it cites. */
+export function withoutDecisions(value) {
+	return CITES.reduce((text, [re, by]) => text.replace(re, by), value);
 }
 
 /** The satteri plugin. It only touches files under docs/. */
@@ -108,10 +100,10 @@ export function calxDocs() {
 			text(node, ctx) {
 				if (!/\bD\d+\b/.test(node.value)) return;
 				for (let p = ctx.parent(node); p; p = ctx.parent(p)) {
-					if (p.type === 'heading' || p.type === 'link' || p.type === 'linkReference') return;
+					if (p.type === 'link' || p.type === 'linkReference') return;
 				}
-				const nodes = decisionNodes(node.value);
-				if (nodes) ctx.replaceNode(node, nodes);
+				const value = withoutDecisions(node.value);
+				if (value !== node.value) ctx.setProperty(node, 'value', value);
 			},
 		};
 	};

@@ -7,7 +7,7 @@ description: Threads that run alongside the program, the Task they run, and the 
 
 Threads that run alongside the rest of a program, and the queues they talk through (D121).
 
-[`parallel for`](../reference/parallel.md) is how Calx makes work faster, and it gives the same result on any number of threads (D21). A thread from `std.thread` is for something else: a service that waits on the network or the disk while the program goes on, as Calcite's network and disk threads do. What a thread does when depends on timing, so starting one takes [`unsafe`](../reference/unsafe.md), as reading the clock does (D88).
+[`parallel for`](../reference/parallel.md) is how Calx makes work faster, and it gives the same result on any number of threads (D21). A thread from `std.thread` is for something else: a service that waits on the network or the disk while the program goes on, such as a server's network and disk threads. What a thread does when depends on timing, so starting one takes [`unsafe`](../reference/unsafe.md), as reading the clock does (D88).
 
 ```calx
 import std.thread.{Task}

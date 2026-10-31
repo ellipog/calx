@@ -25,7 +25,7 @@ fn main() {
 }
 ```
 
-They're the native tables for code where the order of the keys can't be seen. Code that must iterate in the order vanilla's `HashMap` does uses [`JavaHashMap` and `JavaHashSet`](java-maps.md), which go in Java's order, code that must go in the order of vanilla's fastutil tables, such as `Long2ObjectOpenHashMap`, uses [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), code that must go in the order keys went in, as Java's `LinkedHashMap` and fastutil's linked tables do, uses [`LinkedMap` and `LinkedSet`](linked-maps.md), and code that keeps its keys in order, as Java's `TreeMap` and fastutil's tree tables do, uses [`SortedMap` and `SortedSet`](sorted-maps.md).
+They're the native tables for code where the order of the keys can't be seen. Code ported from Java that must iterate in the order a `HashMap` does uses [`JavaHashMap` and `JavaHashSet`](java-maps.md), which go in Java's order, code that must go in the order of fastutil's tables, such as `Long2ObjectOpenHashMap`, uses [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), code that must go in the order keys went in, as Java's `LinkedHashMap` and fastutil's linked tables do, uses [`LinkedMap` and `LinkedSet`](linked-maps.md), and code that keeps its keys in order, as Java's `TreeMap` and fastutil's tree tables do, uses [`SortedMap` and `SortedSet`](sorted-maps.md).
 
 ## Making one
 
@@ -110,9 +110,9 @@ fn main() {
 
 ## Order
 
-A loop goes over the keys in an order that depends only on the keys and on what was done to the table, in what order. There's no random seed, so it's the same in every run, on every platform and with any number of threads ([spec](../CALX_SPEC.md#native), D56). Code that leans on the order by mistake gives the same answer every time, even if it isn't vanilla's.
+A loop goes over the keys in an order that depends only on the keys and on what was done to the table, in what order. There's no random seed, so it's the same in every run, on every platform and with any number of threads ([spec](../CALX_SPEC.md#native), D56). Code that leans on the order by mistake gives the same answer every time, even if it isn't the one Java would give.
 
-The order isn't the order the keys went in, though, and any `insert` or `remove` can change it. Code where the order shows, such as what's sent to a client, uses a [`JavaHashMap`](java-maps.md), an [`OpenHashMap`](fastutil-maps.md), a [`LinkedMap`](linked-maps.md) or a [`SortedMap`](sorted-maps.md), whichever vanilla's table is, or sorts.
+The order isn't the order the keys went in, though, and any `insert` or `remove` can change it. Code where the order shows, such as what's sent to a client, uses a [`JavaHashMap`](java-maps.md), an [`OpenHashMap`](fastutil-maps.md), a [`LinkedMap`](linked-maps.md) or a [`SortedMap`](sorted-maps.md), whichever the original's table is, or sorts.
 
 ```calx
 fn main() {
@@ -183,5 +183,5 @@ Two maps are equal when they have the same keys, with equal values; two sets whe
 - A table is a struct of a pointer to its control bytes, a pointer to its slots, a mask, a length and how many more keys fit, named for its types, such as `cx_map_i32_String` and `cx_set_i32`. Its slots and control bytes are one allocation; an empty table points at a shared group of empty bytes and allocates nothing.
 - It's a SwissTable, the layout of Rust's `hashbrown` and Abseil's `flat_hash_map`. Each slot has a control byte: empty, deleted, or 7 bits of the key's hash. A lookup starts at the slot the hash points to, compares 16 control bytes with the hash's 7 bits in one SSE2 instruction, and compares keys only where they match. An empty byte among the 16 means the key isn't there. Machines without SSE2 compare the 16 bytes in plain C, with the same layout and the same order.
 - The table has a power-of-two number of slots, at least 4, and is at most 7/8 full. Removing a key leaves a deleted byte only when a lookup might have passed the slot; growing rebuilds without them.
-- The hash is a folded multiply: the key, xored with a fixed seed, multiplied by a 64-bit constant into 128 bits, the halves xored together. Every bit of the result depends on every bit of the key, so keys that differ only in their top bits, like the packed positions vanilla uses, spread over the table. Strings are hashed 8 bytes at a time, and structs and tuples part by part.
+- The hash is a folded multiply: the key, xored with a fixed seed, multiplied by a 64-bit constant into 128 bits, the halves xored together. Every bit of the result depends on every bit of the key, so keys that differ only in their top bits, like packed coordinates, spread over the table. Strings are hashed 8 bytes at a time, and structs and tuples part by part.
 - `insert`, lookups and `remove` compile to inline C, specialized for the key and value types, so comparing two integer keys is one instruction and nothing is called through a pointer. Growing is a function of its own, since it's rare. Walking a table, to loop, free, copy, compare or print it, goes 16 control bytes at a time.

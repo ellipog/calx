@@ -5,7 +5,7 @@ description: JavaHashMap<K, V> and JavaHashSet<T>, which go over their keys in t
 
 # Java's hash maps
 
-`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code where vanilla's order shows, such as the order it ticks things in or sends them to a client. Vanilla's fastutil tables are [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), Java's `LinkedHashMap` and `LinkedHashSet` are [`LinkedMap` and `LinkedSet`](linked-maps.md), and everywhere else, [`Map` and `Set`](maps.md) are faster.
+`JavaHashMap<K, V>` and `JavaHashSet<T>` are Java's `HashMap` and `HashSet`. After the same operations, a loop goes over their keys in the order Java's would. They're for code ported from Java where the order shows, such as the order it handles things in or sends them out. fastutil's tables are [`OpenHashMap` and `OpenHashSet`](fastutil-maps.md), Java's `LinkedHashMap` and `LinkedHashSet` are [`LinkedMap` and `LinkedSet`](linked-maps.md), and everywhere else, [`Map` and `Set`](maps.md) are faster.
 
 ```calx
 fn main() {
@@ -42,7 +42,7 @@ Both are built in, like `Map` and `Set`. Indexing, loops, `==`, printing, `copy(
 | `new HashSet<>(c)` | An empty set, `reserve(max(c.len(), 12))`, then the inserts |
 | Going over `keySet()`, `values()` or `entrySet()` | `for (k, v) in m` |
 
-- **`insert` adds a new key at the end of its bin, and `compute_if_absent` at the front,** as Java's `put` and `computeIfAbsent` do, and they grow the table at different moments. Porting vanilla, each call becomes the one that adds keys the way the original does. `putIfAbsent` adds the way `put` does: `if not m.contains(k) { m.insert(k, v) }`.
+- **`insert` adds a new key at the end of its bin, and `compute_if_absent` at the front,** as Java's `put` and `computeIfAbsent` do, and they grow the table at different moments. Porting Java code, each call becomes the one that adds keys the way the original does. `putIfAbsent` adds the way `put` does: `if not m.contains(k) { m.insert(k, v) }`.
 - **`reserve(n)` is the room Java makes before `putAll` adds `n` keys.** A table that doesn't exist yet gets the bins for `n / 0.75`, rounded up, which is also what Java's copy constructors and `newHashMap` give it. One that exists doubles until its threshold reaches `n`.
 - **`JavaHashMap(n)` asks for the first table**, of the power of two at least `n`. Without `n` it's 16 bins. Either way, the table is made with the first key.
 - **`clear` keeps the table's size**, as Java's does, so keys added after it go where they would in Java.
@@ -94,7 +94,7 @@ struct BlockPos {
     z: i32,
 }
 
-// Vanilla's `Vec3i.hashCode`.
+// Minecraft's `Vec3i.hashCode`.
 impl JavaHash for BlockPos {
     fn java_hash(self) -> i32 {
         return (self.y + self.z * 31) * 31 + self.x
@@ -134,14 +134,14 @@ The order is Java's, worked out from rules Java's `HashMap` keeps:
 - The table doubles when it holds more than three quarters of its bins. Each bin splits into the keys that stay and those that move up by the old size, each in the order they were in.
 - A bin that `insert` makes longer than 8 keys, or `compute_if_absent` 8 long, becomes a red-black tree if the table has at least 64 bins; a smaller table doubles instead. A tree is ordered by hash, then, for keys with equal hashes, by `Order` where the key has it, which is Java's `compareTo` for signed numbers and for strings, by UTF-16 unit. Its root goes to the front of the bin, and a new key goes after its parent in the tree. A tree that doubling splits into 6 keys or fewer is a list again, and so is one that a remove leaves too shallow.
 
-Where Java orders two keys by their addresses, which change from run to run, which happens when their hashes are equal and they can't be compared, these use a fixed order. That's one of Calcite's deliberate differences (D27): the same in every run, where vanilla's isn't.
+Where Java orders two keys by their addresses, which change from run to run, which happens when their hashes are equal and they can't be compared, these use a fixed order. That's a deliberate difference from Java (D27): the order is the same in every run, where Java's isn't.
 
 `JavaHashMap` and `JavaHashSet` were checked against Java 25 by running the same random operations on both: inserts, `compute_if_absent`, removes, lookups, `reserve` and inserts as `putAll`, new tables with and without a capacity, and `clear`. The keys were numbers, `Long`s, strings and a struct of its own, many of them built to share bins, which made trees, split them and took them apart. 60 runs of 20,000 or 50,000 operations, about 1.9 million in all, went over the same keys in the same order at every one of 240,060 checks.
 
 ## What's different
 
 - A table can't change during a loop over it, which is a compile error where Java throws `ConcurrentModificationException`. So there's no removing through an iterator, or `removeIf`.
-- Keys and values can't be null. Code that stores null in a vanilla map writes an [optional](optionals.md) value.
+- Keys and values can't be null. Java code that stores null in a map becomes code that writes an [optional](optionals.md) value.
 - `==` compares the keys and values, and printing shows `{k: v}` as `Map` does, in Java's order.
 
 ## In C

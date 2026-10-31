@@ -1,4 +1,4 @@
-/* Starlight's docs pages in the mockup's look: the sidebar, the article, tables and the table of
+/* Starlight's docs pages in the site's look: the sidebar, the article, tables and the table of
    contents. Starlight keeps its own styles in cascade layers, so these plain rules win without
    !important. */
 
@@ -14,9 +14,6 @@ html {
 /* ---------- header ---------- */
 .header {
 	background: var(--header-bg);
-	/* The build keeps only the last of these two, so the one every browser reads goes last. */
-	-webkit-backdrop-filter: saturate(1.3) blur(12px);
-	backdrop-filter: saturate(1.3) blur(12px);
 	border-bottom: 1px solid var(--line);
 }
 
@@ -38,7 +35,7 @@ html {
 	padding-top: 12px;
 }
 .sidebar-content .group-label .large {
-	font: 600 12px var(--f-head);
+	font: 600 12px var(--f-body);
 	letter-spacing: 0.11em;
 	text-transform: uppercase;
 	color: var(--ink-3);
@@ -106,7 +103,7 @@ html {
 	font: 600 17px/1.35 var(--f-head);
 	margin-top: 28px;
 }
-/* Starlight's heading links: quiet until the heading is pointed at, as in the mockup. */
+/* Starlight's heading links: quiet until the heading is pointed at. */
 .sl-markdown-content .sl-anchor-link {
 	color: var(--line-2);
 }
@@ -121,17 +118,6 @@ html {
 }
 .sl-markdown-content a:not(.sl-anchor-link):hover {
 	color: var(--amber-ink);
-}
-/* A decision the docs cite (src/markdown.mjs): its number, small, with a dotted line. */
-.sl-markdown-content a.dref {
-	font: 500 0.8em var(--f-mono);
-	color: var(--ink-3);
-	text-decoration: none;
-	border-bottom: 1px dotted var(--ink-3);
-}
-.sl-markdown-content a.dref:hover {
-	color: var(--amber-ink);
-	border-bottom-color: var(--amber);
 }
 .sl-markdown-content :not(pre) > code {
 	font-size: 0.86em;
@@ -175,7 +161,7 @@ html {
 	gap: 2px;
 }
 .calx-tab {
-	font: 500 13px/1 var(--f-head);
+	font: 500 13px/1 var(--f-body);
 	padding: 8px 11px;
 	border-radius: 7px;
 	border: 0;
@@ -192,7 +178,7 @@ html {
 	box-shadow: inset 0 0 0 1px var(--line);
 }
 .calx-lang {
-	font: 500 13px/1 var(--f-head);
+	font: 500 13px/1 var(--f-body);
 	color: var(--ink-3);
 	padding: 0 11px;
 }
@@ -206,7 +192,7 @@ html {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	font: 500 12.5px/1 var(--f-head);
+	font: 500 12.5px/1 var(--f-body);
 	color: var(--ink-3);
 	padding: 6px 8px;
 	white-space: nowrap;
@@ -306,7 +292,7 @@ html {
 }
 .sl-markdown-content th {
 	text-align: left;
-	font: 600 13px var(--f-head);
+	font: 600 13px var(--f-body);
 	letter-spacing: 0.02em;
 	color: var(--ink-3);
 	border-bottom: 1.5px solid var(--line-2);
@@ -334,7 +320,7 @@ html {
 	padding: 38px 22px 40px 6px;
 }
 .right-sidebar-panel h2 {
-	font: 600 12px var(--f-head);
+	font: 600 12px var(--f-body);
 	letter-spacing: 0.11em;
 	text-transform: uppercase;
 	color: var(--ink-3);

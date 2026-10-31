@@ -5,7 +5,7 @@ description: Deque<T>, a growable ring added to and taken from at both ends, whi
 
 # Deques
 
-`Deque<T>` is a growable ring of elements, added to and taken from at both ends. It's Java's `ArrayDeque`, the queues vanilla keeps as `Queue` or `Deque`, and fastutil's `LongArrayFIFOQueue`. It owns its elements, and frees them when it's freed ([ownership](ownership.md)).
+`Deque<T>` is a growable ring of elements, added to and taken from at both ends. It's Java's `ArrayDeque`, and fastutil's `LongArrayFIFOQueue`. It owns its elements, and frees them when it's freed ([ownership](ownership.md)).
 
 ```calx
 fn main() {
@@ -45,7 +45,7 @@ fn main() {
 - Methods that change the deque need a variable declared with `var`, or a `mut` parameter.
 - `push_first`, `push_last` and the literals move the elements in. `pop_first` and `pop_last` move them out.
 
-A flood fill takes from the front of its queue and adds at the back, so it reaches what's nearer first, as vanilla's light and fluid updates do:
+A flood fill takes from the front of its queue and adds at the back, so it reaches what's nearer first:
 
 ```calx
 fn main() {

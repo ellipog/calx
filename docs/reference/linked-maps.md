@@ -5,7 +5,7 @@ description: LinkedMap<K, V> and LinkedSet<T>, which go over their keys in the o
 
 # Linked maps and sets
 
-`LinkedMap<K, V>` and `LinkedSet<T>` go over their keys in the order they went in. That's the order of Java's `LinkedHashMap` and `LinkedHashSet`, and of fastutil's linked tables, such as `Long2ObjectLinkedOpenHashMap`, which vanilla keeps its chunk holders and its region file cache in. A key can be moved to either end, and taken from either end.
+`LinkedMap<K, V>` and `LinkedSet<T>` go over their keys in the order they went in. That's the order of Java's `LinkedHashMap` and `LinkedHashSet`, and of fastutil's linked tables, such as `Long2ObjectLinkedOpenHashMap`. A key can be moved to either end, and taken from either end.
 
 ```calx
 fn main() {
@@ -62,7 +62,7 @@ Both are built in. Indexing, `len`, `contains`, `get`, `remove`, `clear`, `reser
 - A key that isn't there leaves the table as it is: fastutil's `getAndMoveToFirst` gives the default value, and `move_to_first` gives `false`.
 - An empty table's `pop_first()` is `none`, where fastutil's `removeFirst` throws and Java's `pollFirstEntry` gives `null`.
 
-Vanilla's region file cache keeps the files used last, as a fastutil table that `getAndMoveToFirst` reads, `putAndMoveToFirst` fills and `removeLast` empties when it's full:
+A cache of open files keeps the ones used last, as a fastutil table that `getAndMoveToFirst` reads, `putAndMoveToFirst` fills and `removeLast` empties when it's full:
 
 ```calx
 fn main() {

@@ -5,14 +5,16 @@ description: The fixed simulation workload Calx's speed is measured on, how it's
 
 # Tick-loop benchmark
 
-This is the benchmark behind the Phase 3 gate (G3.2): Calx must run it within about 10% of Rust on Windows and on Linux. It's fixed here, before the compiler exists (`P0.6`), so the gate can't drift to suit the result. If Calx misses, D37 says what happens next.
+This is the workload behind every Calx-against-Rust number on the site and in the README. It's a small, synthetic simulation modeled on one tick of a Minecraft server: packed block storage, entity physics in doubles, hash maps, and messages between regions of the world. It isn't a server and loads no game data. It's one workload, of one kind, so it says how Calx does on work shaped like this, not on every program.
 
-The workload is a small, synthetic Minecraft tick: the four kinds of work Calcite spends its time on, in the shape Calcite will do them. It isn't a server and loads no game data. Both versions, the Calx one and the Rust reference (`P3.1`), implement exactly the algorithms on this page and must print the same checksum.
+There are two versions, one in Calx and one in Rust. Both implement exactly the algorithms on this page, and they must print the same checksum, or the run doesn't count. We wrote the Rust version ourselves, in [`bench/rust`](../bench/rust), as idiomatic, safe Rust that follows this page as closely as the Calx version does. If you can make it faster without changing what it computes, please send a pull request: the numbers will change with it.
+
+The workload was fixed here before the Calx compiler existed, so it couldn't be shaped to suit the result.
 
 ## The world
 
 - **Size:** 16 × 16 chunks, each 24 sections tall (y from -64 to 319), so 6,144 sections of 16 × 16 × 16 blocks.
-- **Block states:** IDs 0 to 29,999, with 0 as air. The global palette needs 15 bits, as vanilla's does.
+- **Block states:** IDs 0 to 29,999, with 0 as air. The global palette needs 15 bits, as Minecraft's does.
 - **Generation:** with the [random generator](#randomness) seeded with 20261027, each section picks how many distinct states it starts with: 1 (40% of sections), 2 to 16 (40%), 17 to 256 (15%) or 257 to 1,024 (5%). Its 4,096 blocks are then filled from that many random states. Sections are generated in order x, then z, then section y, all ascending.
 - **Regions:** the 16 × 16 chunks are split into 16 regions of 4 × 4 chunks, numbered in row order. Region *k* owns its chunks, their sections, and the entities in them.
 
@@ -20,39 +22,39 @@ The workload is a small, synthetic Minecraft tick: the four kinds of work Calcit
 
 ### 1. Palette containers
 
-Each section stores its blocks in vanilla's layout (`PalettedContainer` and `SimpleBitStorage` in 26.3):
+Each section stores its blocks in Minecraft's layout (`PalettedContainer` and `SimpleBitStorage` in Java Edition 26.3):
 
 - **0 bits** when the section holds one state. Reading it allocates nothing.
 - **Linear palette, 4 bits** for up to 16 states: an array searched in order.
 - **Hash palette, 5 to 8 bits** for up to 256 states: an ID-to-index hash map plus an index-to-ID array.
 - **Global, 15 bits**, storing state IDs directly, above 256.
-- Values are packed into 64-bit words and **never span two words**, so a word holds `64 / bits` values (rounded down). Finding the word divides by `values_per_word` with vanilla's multiply-and-shift trick, not a division instruction.
+- Values are packed into 64-bit words and **never span two words**, so a word holds `64 / bits` values (rounded down). Finding the word divides by `values_per_word` with Minecraft's multiply-and-shift trick, not a division instruction.
 - When a write adds a state that doesn't fit, the section **resizes** to the next size above, re-encoding all 4,096 values, as `PalettedContainer.onResize` does.
 
 Per tick, for every section, in region order and then section order:
 
-- **Random ticks:** 3 random positions (vanilla's default `randomTickSpeed`). For each, read the state and its 6 neighbors in the same section (clamped at the section edges). If the sum of the 7 IDs is divisible by 7, write `(id * 31 + 7) mod 30000` back to the position.
+- **Random ticks:** 3 random positions (Minecraft's default `randomTickSpeed`). For each, read the state and its 6 neighbors in the same section (clamped at the section edges). If the sum of the 7 IDs is divisible by 7, write `(id * 31 + 7) mod 30000` back to the position.
 - **One full read** of the section in index order, summing the IDs into the checksum (as chunk sending and saving do).
 
 ### 2. Entity physics in doubles
 
 - **Entities:** 4,096, each spawned at a random position above the world's surface, with a random velocity in each axis between -0.5 and 0.5.
 - **Each tick, each entity:**
-  - Move with collision against full-cube blocks (any non-air state is solid), one axis at a time in vanilla's order: y first, then x before z unless `|vx| < |vz|` (`Direction.axisStepOrder`). Clip each axis so the entity's 0.6 × 1.8 × 0.6 box stops at the first solid block, and zero that axis's velocity if it was clipped.
+  - Move with collision against full-cube blocks (any non-air state is solid), one axis at a time in Minecraft's order: y first, then x before z unless `|vx| < |vz|` (`Direction.axisStepOrder`). Clip each axis so the entity's 0.6 × 1.8 × 0.6 box stops at the first solid block, and zero that axis's velocity if it was clipped.
   - Then gravity and drag, as `LivingEntity.travel` applies them to an entity in the air: `vy = (vy - 0.08) * 0.98`, `vx *= 0.91`, `vz *= 0.91`. All three constants are `f64`.
   - An entity that moves into another region's chunk is handed to that region at the barrier (an actor message carrying the entity, see below).
 - Every value is an IEEE `f64`, with no fused multiply-add and no reassociation. The checksum includes every entity's final position bits, so any difference shows.
 
 ### 3. Hash-map work
 
-The two kinds of map Calcite uses, both doing real work:
+Two kinds of map, both doing real work:
 
-- **Java-compatible:** each region keeps a scheduled-tick set, a Java-compatible `HashMap<i64, i32>` from packed block position (vanilla's `BlockPos.asLong`) to the tick it's due. Every random tick that writes schedules the written position 2 ticks ahead. Each tick, the region removes due entries in the map's iteration order (Java's order: bucket order after Java's hash spreading, then insertion order within a bucket) and, for each, writes `(id + 1) mod 30000` at that position. The order is part of the checksum, so the map must iterate exactly as Java's `HashMap` does, resizes included.
+- **Java-compatible:** each region keeps a scheduled-tick set, a Java-compatible `HashMap<i64, i32>` from packed block position (Minecraft's `BlockPos.asLong`) to the tick it's due. Every random tick that writes schedules the written position 2 ticks ahead. Each tick, the region removes due entries in the map's iteration order (Java's order: bucket order after Java's hash spreading, then insertion order within a bucket) and, for each, writes `(id + 1) mod 30000` at that position. The order is part of the checksum, so the map must iterate exactly as Java's `HashMap` does, resizes included.
 - **Fast native:** a map from chunk position to the chunk, looked up for every block access that crosses into a neighboring chunk, and an open-addressing map used to count entities per chunk each tick. Order isn't observable, so this uses Calx's fastest map.
 
 ### 4. Actor messages
 
-- **Regions are actors** run by the runtime's work-stealing pool, with the lockstep barrier from D19 and D20.
+- **Regions are actors** run by the runtime's work-stealing pool, with a lockstep barrier: every region finishes a tick before any region starts the next (D19, D20).
 - **Each tick, each region** sends 64 small messages (16 bytes of payload: an `i64` position and an `i64` value) to regions chosen at random from its own stream, plus any entity handoffs from step 2.
 - **At the barrier**, messages are delivered in order of sender region ID, then send order. The receiver adds each value into a running hash in delivery order, so the order is part of the checksum.
 - A handoff moves the entity's ownership. The sending region must not touch it again.
@@ -65,7 +67,7 @@ The two kinds of map Calcite uses, both doing real work:
 
 ## Randomness
 
-Every random choice uses Java's `java.util.Random` algorithm (a 48-bit LCG, `nextInt(bound)` with its rejection loop, `nextDouble()` from two draws), the same one Calcite uses for vanilla parity.
+Every random choice uses Java's `java.util.Random` algorithm (a 48-bit LCG, `nextInt(bound)` with its rejection loop, `nextDouble()` from two draws), so both versions draw the same numbers in the same order.
 
 - **Generation:** one generator seeded with 20261027, used in the order the world section above gives.
 - **Ticking:** region *k* gets its own generator seeded with `20261027 + k`. It's drawn in the order of one tick above.
@@ -93,24 +95,24 @@ The Calx and Rust versions must print the same checksum, with any thread count. 
 | Configurations | 1 worker thread, and one worker per physical core |
 | Platforms | Windows 11 and Linux (Ubuntu under WSL2) on the same machine |
 | Machine | One fixed machine for every recorded number (D34), with its CPU, memory and OS build recorded beside the results. CI machines are too noisy |
-| Gate | Calx's result is at most 1.10 × Rust's in every configuration on both platforms. That's the floor: the target is Calx faster than Rust in every configuration (D89) |
+| Bar | At most 1.10 × Rust's time in every configuration on both platforms, which the compiler had to reach before work moved on from it. The aim is Calx faster than Rust in every configuration (D89) |
 
 ## Making the comparison fair
 
 - **Same algorithms.** The Rust version follows this page as closely as the Calx one does, including a hand-written Java-compatible `HashMap` (Rust's standard map iterates in a different order) and Java's `Random`. Calx's map is its built-in [`JavaHashMap`](reference/java-maps.md) (D105), which keeps the same rules.
 - **Idiomatic, safe Rust.** No `unsafe`, bounds checks left in, `std` threads or a small work-stealing pool equivalent to Calx's runtime, and wrapping arithmetic where Java wraps.
-- **Same optimization level.** Rust: `--release` with `lto = "thin"`, `codegen-units = 1` and `panic = "abort"`. Calx: its release mode, clang `-O3` on the emitted C, `-ffp-contract=off`. (This said `-O2` until D89. Rust's `--release` is `opt-level = 3`, so `-O3` is the same level, and `-O2` had held Calx a level below.) Both target `x86-64-v3`, so neither gets wider instructions than the other.
+- **Same optimization level.** Rust: `--release` with `lto = "thin"`, `codegen-units = 1` and `panic = "abort"`. Calx: its release mode, clang `-O3` on the emitted C, `-ffp-contract=off`. (This said `-O2` at first (D89). Rust's `--release` is `opt-level = 3`, so `-O3` is the same level, and `-O2` had held Calx a level below.) Both target `x86-64-v3`, so neither gets wider instructions than the other.
 - **Same toolchain generation.** The clang Calx uses and the LLVM inside rustc are both recorded. If they're far apart, that's noted with the result.
 
 ## Precise rules
 
-The sections above leave some details open. These rules settle them, so the two versions do exactly the same work. They were fixed with the Rust reference (`P3.1`), before any Calx code existed, and they don't change the size of the workload. The one structural change is the entity pass's own step in [one tick](#one-tick).
+The sections above leave some details open. These rules settle them, so the two versions do exactly the same work. They were fixed with the Rust reference, before any Calx code existed, and they don't change the size of the workload. The one structural change is the entity pass's own step in [one tick](#one-tick).
 
 ### Layout
 
 - Chunks are `(cx, cz)` with both from 0 to 15. Block `(x, y, z)` is in chunk `(x >> 4, z >> 4)` and section `(y + 64) >> 4`, at index `(ly << 8) | (lz << 4) | lx` within it, where `lx`, `ly` and `lz` are the low 4 bits.
 - Region *k* is `(cz / 4) * 4 + cx / 4`. A region lists its chunks in x-then-z order, so chunk `(cx, cz)` is its number `(cx % 4) * 4 + cz % 4`, and each chunk lists its sections from the bottom. "Region order, then section order" means that order.
-- Positions pack as vanilla's `BlockPos.asLong` does: x in bits 38 to 63, z in bits 12 to 37, y in bits 0 to 11. Chunk positions pack as `ChunkPos.asLong`: x in the low 32 bits, z in the high 32.
+- Positions pack as Minecraft's `BlockPos.asLong` does: x in bits 38 to 63, z in bits 12 to 37, y in bits 0 to 11. Chunk positions pack as `ChunkPos.asLong`: x in the low 32 bits, z in the high 32.
 
 ### Generation
 
@@ -174,12 +176,12 @@ Then the region clears its native per-chunk count map and counts its remaining e
 
 ## Files
 
-The benchmark lives in [`bench/`](../bench/README.md) (`P3.1`, `P3.11`):
+The benchmark lives in [`bench/`](../bench/README.md):
 
 | Path | What it is |
 | --- | --- |
 | `bench/rust/` | The Rust reference: idiomatic, safe Rust, standard library only |
-| `bench/calx/` | The Calx version (`P3.3`), the same algorithms in Calx |
+| `bench/calx/` | The Calx version, the same algorithms in Calx |
 | `bench/run.py` | Builds and runs a version, checks its checksum, and records the result |
 | `bench/expected.json` | The checksum every version must print |
 | `bench/results/` | Recorded results, one file per version and platform, naming the commit, the machine and the toolchain |

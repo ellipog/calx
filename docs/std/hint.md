@@ -1,6 +1,6 @@
 ---
 title: std.hint
-description: black_box, which hides a value from the optimizer so a benchmark measures what it means to.
+description: The black_box function, which hides a value from the optimizer so a benchmark measures what it means to.
 ---
 
 # `std.hint`

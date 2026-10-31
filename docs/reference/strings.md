@@ -1,6 +1,6 @@
 ---
 title: Strings
-description: str and String, literals that cost nothing, building strings, their methods, slicing by byte offset, Java's root-locale case mapping, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
+description: The str and String types, literals that cost nothing, building strings, their methods, slicing by byte offset, Java's root-locale case mapping, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
 ---
 
 # Strings
@@ -65,7 +65,7 @@ fn main() {
 | `s.find(t)`, `s.find_last(t)` | The byte offset where `t` first or last starts in `s`, a `usize?`. `""` is found at 0, or last at the end |
 | `s.starts_with(t)`, `s.ends_with(t)` | Whether `s` begins or ends with `t` |
 | `s.to_lower_root()`, `s.to_upper_root()` | A new `String`, as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` give ([case](#changing-the-case)) |
-| `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match vanilla's hashes ([Java's view](#javas-view-of-a-string)) |
+| `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match Java's hashes ([Java's view](#javas-view-of-a-string)) |
 | `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
 | `s.to_bytes()` | A copy of the bytes, a `List<u8>`, which `String.from_utf8` turns back into text |
 
@@ -122,7 +122,7 @@ fn main() {
 
 ## Changing the case
 
-`s.to_lower_root()` and `s.to_upper_root()` give the text in lowercase and uppercase exactly as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` do, which is what vanilla uses for names, identifiers and commands (D117):
+`s.to_lower_root()` and `s.to_upper_root()` give the text in lowercase and uppercase exactly as Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)` do, which is what Java code uses for identifiers and commands (D117):
 
 ```calx
 fn main() {
@@ -138,7 +138,7 @@ fn main() {
 - Text that doesn't change comes back without a copy when it's a literal's: a `str`, or a `String` that owns no memory.
 - ASCII goes eight bytes at a time. Each other code point is a lookup in a table of 30 KB, linked only into programs that change case.
 - The tables come from Java itself: [`tools/unicode/CaseDump.java`](../../tools/unicode/CaseDump.java) asks Java 25 about every code point, and [`gen_case.py`](../../tools/unicode/gen_case.py) writes them into [runtime/calx_case.c](../../runtime/calx_case.c). The result matched Java on 2.4 million random strings, weighted to sigmas, cased letters and every kind of code point the word rules treat differently.
-- Calx doesn't have the other locales' rules, such as Turkish's dotless `ı`, since vanilla only uses the root locale.
+- Calx doesn't have the other locales' rules, such as Turkish's dotless `ı`: programs that need the same text everywhere use the root locale.
 
 ## Going over the text
 
@@ -166,7 +166,7 @@ fn main() {
 
 ## Java's view of a string
 
-Java's strings are UTF-16, and vanilla hashes and measures them that way. `s.java_hash()` and `s.utf16_len()` give what Java's `hashCode()` and `length()` give for the same text, without converting it:
+Java's strings are UTF-16, and Java code hashes and measures them that way. `s.java_hash()` and `s.utf16_len()` give what Java's `hashCode()` and `length()` give for the same text, without converting it:
 
 ```calx
 fn main() {
@@ -175,7 +175,7 @@ fn main() {
 }
 ```
 
-- `java_hash` is what a [`JavaHashMap`](java-maps.md) and an [`OpenHashMap`](fastutil-maps.md) place a string key by, and what vanilla code that hashes names computes. Every type with Java's `hashCode` has it ([`JavaHash`](java-maps.md#javahash)).
+- `java_hash` is what a [`JavaHashMap`](java-maps.md) and an [`OpenHashMap`](fastutil-maps.md) place a string key by, and what Java code that hashes names computes. Every type with Java's `hashCode` has it ([`JavaHash`](java-maps.md#javahash)).
 - `utf16_len` is what the protocol's string limits count, such as 16 for a player name and 32767 for a chat message.
 - They matched Java 25 on 20,000 random strings, with U+0000, every length of UTF-8, and surrogate pairs.
 - `java_hash` takes eight ASCII bytes a step, `h * 31^8` plus each byte times its power, so the chain of multiplies is an eighth as long as Java's loop.
@@ -217,7 +217,7 @@ fn main() {
 
 A million values pushed onto a string, in ms, best of 50, from [`bench/strings`](../../bench/strings), on an i9-13900K pinned to one P-core:
 
-| | Calx | Calx before D160 | Rust |
+| | Calx | Calx, branching on length | Rust |
 | --- | --- | --- | --- |
 | An ASCII rune each, onto a new string in a local | 0.54 | 1.69 | 0.67 |
 | A rune each of 1, 2, 3 or 4 bytes | 2.86 | 7.16 | 6.22 |
@@ -225,7 +225,7 @@ A million values pushed onto a string, in ms, best of 50, from [`bench/strings`]
 | An ASCII rune each, onto a string given to change, not inlined | 0.48 | 1.64 | 0.57 |
 | A text escaped as JSON, a rune at a time, onto a string given, not inlined | 1.94 | 2.94 | 2.06 |
 
-Rust's `push` branches on a rune's length, so it guesses wrong on the mixed runes as Calx did before. A word is copied by `memcpy`, a call when the length isn't known until it runs, in both.
+The middle column is Calx as it was before it wrote runes without a branch and copied a `String` given to change (D160). Rust's `push` branches on a rune's length, so it guesses wrong on the mixed runes as Calx did before. A word is copied by `memcpy`, a call when the length isn't known until it runs, in both.
 - Building `"n = {n}"` sends the printing functions' output into the new string, so building a string and printing one share the same code, and floats appear exactly as Java prints them ([floats](floats.md#printing)).
 - A part, `s[a..b]`, is `cx_str_slice(s, a, b, inclusive, at)`, which checks the offsets and gives a `cx_str` of the same bytes. Where the part is kept as a `String`, `cx_string_from` copies it. A `String` that's a variable is viewed after the offsets are worked out, through a pointer, so the offsets run first even when they change it:
 

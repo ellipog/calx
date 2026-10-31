@@ -1,11 +1,11 @@
 ---
 title: Unsafe code and C functions
-description: unsafe blocks, raw pointers and their methods, declaring and calling C functions, and their C.
+description: Code the compiler can't check - unsafe blocks, raw pointers and their methods - and declaring and calling C functions, and their C.
 ---
 
 # Unsafe code and C functions
 
-Calx is memory-safe outside `unsafe` (D23). Inside an `unsafe { }` block, code can use raw pointers and call C functions, which the compiler can't check. Calcite's core uses it to reach the operating system, and `std` uses it underneath safe functions such as [`std.io`](../std/io.md).
+Calx is memory-safe outside `unsafe` (D23). Inside an `unsafe { }` block, code can use raw pointers and call C functions, which the compiler can't check. A program uses it to reach the operating system or a C library, and `std` uses it underneath safe functions such as [`std.io`](../std/io.md).
 
 ```calx
 extern "C" fn abs(x: i32) -> i32
@@ -45,7 +45,7 @@ fn main() {
 }
 ```
 
-Which modules may use `unsafe` and `extern` isn't enforced yet. The rule, that only Calcite core and trusted plugins may (D15, D23), comes with Calcite's plugin loader.
+Which modules may use `unsafe` and `extern` isn't enforced yet. The rule, that only a program's own code and the plugins it trusts may, comes with plugin loading (D15, D23).
 
 ## `unsafe` functions
 

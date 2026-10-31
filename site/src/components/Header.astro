@@ -26,8 +26,27 @@ const NAV = [
 	<div class="end">
 		<a class="toplink" href="https://github.com/ellipog/calx">GitHub</a>
 		<ThemeToggle />
+		<details class="menu">
+			<summary aria-label="Menu"><svg class="i" aria-hidden="true"><use href="#i-menu"></use></svg></summary>
+			<nav aria-label="Sections">
+				{NAV.map((n) => <a href={n.href} aria-current={path.startsWith(n.section) ? 'true' : undefined}>{n.label}</a>)}
+				<a href="https://github.com/ellipog/calx">GitHub</a>
+			</nav>
+		</details>
 	</div>
 </div>
+
+<script>
+	// The phone menu closes when a link in it is followed, on Escape, or on a click anywhere else.
+	const menu = document.querySelector<HTMLDetailsElement>('.top .menu');
+	if (menu) {
+		const close = () => (menu.open = false);
+		document.addEventListener('click', (e) => {
+			if (!menu.contains(e.target as Node) || (e.target as Element).closest('a')) close();
+		});
+		document.addEventListener('keydown', (e) => e.key === 'Escape' && close());
+	}
+</script>
 
 <style>
 	.top {
@@ -51,7 +70,7 @@ const NAV = [
 		gap: 2px;
 	}
 	.nav a {
-		font: 500 15px/1 var(--f-head);
+		font: 500 15px/1 var(--f-body);
 		text-decoration: none;
 		color: var(--ink-2);
 		padding: 9px 12px;
@@ -77,7 +96,7 @@ const NAV = [
 		gap: 22px;
 	}
 	.toplink {
-		font: 500 14.5px var(--f-head);
+		font: 500 14.5px var(--f-body);
 		color: var(--ink-2);
 		text-decoration: none;
 	}
@@ -85,7 +104,7 @@ const NAV = [
 		color: var(--ink);
 	}
 
-	/* Starlight's search button, in the mockup's shape. */
+	/* Starlight's search button, in the site's shape. */
 	.find :global(button[data-open-modal]) {
 		width: 270px;
 		max-width: 100%;
@@ -118,15 +137,73 @@ const NAV = [
 		padding: 0;
 	}
 
+	/* On narrow screens the sections and GitHub move into a menu. */
+	.menu {
+		display: none;
+		position: relative;
+	}
+	.menu summary {
+		list-style: none;
+		width: 36px;
+		height: 36px;
+		display: grid;
+		place-items: center;
+		border-radius: 9px;
+		color: var(--ink-2);
+		cursor: pointer;
+	}
+	.menu summary::-webkit-details-marker {
+		display: none;
+	}
+	.menu summary:hover,
+	.menu[open] summary {
+		color: var(--ink);
+		background: var(--sunk);
+	}
+	.menu nav {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 12px);
+		min-width: 200px;
+		display: grid;
+		padding: 6px;
+		border: 1px solid var(--line-2);
+		border-radius: 12px;
+		background: var(--raised);
+		box-shadow: var(--shadow);
+	}
+	.menu nav a {
+		font: 500 15px/1 var(--f-body);
+		text-decoration: none;
+		color: var(--ink-2);
+		padding: 12px 12px;
+		border-radius: 8px;
+	}
+	.menu nav a:hover,
+	.menu nav a[aria-current] {
+		color: var(--ink);
+		background: var(--sunk);
+	}
+
 	@media (max-width: 900px) {
 		.nav,
 		.toplink {
 			display: none;
 		}
+		.end {
+			gap: 10px;
+		}
+		.menu {
+			display: block;
+		}
 		.find :global(button[data-open-modal]) {
 			width: 36px;
 			padding: 0;
 			justify-content: center;
+		}
+		/* Starlight shows the label and the shortcut from 50rem; the button is an icon until 900px. */
+		.find :global(button[data-open-modal] > :not(svg)) {
+			display: none;
 		}
 	}
 	@media (max-width: 50rem) {

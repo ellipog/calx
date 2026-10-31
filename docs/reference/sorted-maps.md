@@ -24,7 +24,7 @@ fn main() {
 }
 ```
 
-Vanilla keeps the sections its entities are in as a `LongAVLTreeSet` of their packed positions, x first, then z, then y, so a chunk's sections are one range of keys, and it sorts resources and names with `TreeMap` and `TreeSet`.
+Minecraft, for example, keeps the sections its entities are in as a `LongAVLTreeSet` of their packed positions, x first, then z, then y, so a chunk's sections are one range of keys, and it sorts resources and names with `TreeMap` and `TreeSet`.
 
 Both are built in. Indexing, `len`, `is_empty`, `contains`, `get`, `remove`, `clear`, loops, printing, `copy()`, and moving and freeing work as [`Map`'s and `Set`'s](maps.md) do, and a loop goes in key order.
 

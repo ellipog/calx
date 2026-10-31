@@ -5,25 +5,20 @@ description: The design of every Calx feature that isn't built yet.
 
 # Calx spec v0
 
-Status: v0 (`P0.3`). It was written from what the five sample addons and the three Calcite sketches needed:
+This is the design of the Calx features that aren't built yet. What's built is in the [reference](README.md#reference), which is the normative text for it: when a feature ships, its section here moves to a reference page, and a link is left behind (D40). Each feature lives in exactly one place. The [roadmap](roadmap.md) sums up what's still here.
 
-- [Sample addons](https://github.com/ellipog/calcite/blob/main/plugins/samples/README.md)
-- [Calcite sketches](https://github.com/ellipog/calcite/blob/main/docs/sketches/README.md)
+The design was first written for Calx's first large program, [Calcite](https://github.com/ellipog/calcite), a Minecraft server with plugins, from its [sketches](https://github.com/ellipog/calcite/blob/main/docs/sketches/README.md) and five [sample plugins](https://github.com/ellipog/calcite/blob/main/plugins/samples/README.md), so many of the examples are about a game world. Each section settles the requirements that Calcite's build plan and [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) set for it, and a [checklist](#must-checklist) at the end says where.
 
-Every section settles the "Must" items the build plan and the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) set for it. A [checklist](#must-checklist) at the end maps each one to where it's settled.
-
-This file holds features that are designed but not built. When a feature ships, its section moves to a page in [`reference/`](reference/), which becomes the normative text, and a link is left here (D40). Each feature lives in exactly one place.
-
-The examples use the syntax as it stands now. From Phase 3 every example here is compiled by the test suite (D41), so the syntax will firm up as the compiler meets it.
+The examples use the syntax as it stands now. Unlike the reference's, they aren't compiled yet, since the features they use aren't built. Each is compiled from when its section moves to the reference (D41).
 
 ## Goals
 
-Calx exists to write Calcite and its plugins. In order:
+In order:
 
-1. **Java-exact where it matters.** Integer and float results, hash codes and collection orders match Java bit for bit, so Calcite can match vanilla.
-2. **Fast to run, and fast to build.** It compiles to C with no garbage collector and no hidden costs, and runs the [tick-loop benchmark](benchmarks.md) faster than Rust, which is the target, not just a tie (D89). Unlike Rust, building is quick too: a change rebuilds only what it touched, and `calx run` starts in moments ([Build speed](#build-speed-d64)). When the two conflict, run time wins in release builds and build time wins in debug builds.
-3. **Safe and strict by default.** No undefined behavior outside `unsafe`, so an untrusted plugin can't corrupt the server (D23). The type checker is stricter than Rust's ([Strictness](#strictness-d63)).
-4. **Simple to write plugins in.** No lifetimes, no locks, no null. Errors are values. The compiler checks region scoping.
+1. **Exact where it matters.** Integer and float results are defined to the bit on every platform, and the Java-compatible types match Java's results, hash codes and orders, so code ported from Java can give the same answers. Calcite needs this to match the official server.
+2. **Fast to run, and fast to build.** It compiles to C with no garbage collector and no hidden costs, and runs the [tick-loop benchmark](benchmarks.md) faster than Rust, which is the target, not just a tie (D89). Unlike Rust, building is quick too: a change rebuilds only what it touched, and `calx run` starts in moments ([Build speed](#build-speed)). When the two conflict, run time wins in release builds and build time wins in debug builds.
+3. **Safe and strict by default.** No undefined behavior outside `unsafe`, so an untrusted plugin can't corrupt the program that loads it (D23). The type checker is stricter than Rust's ([Strictness](#strictness)).
+4. **Simple to write.** No lifetimes, no locks, no null. Errors are values. The compiler checks that parallel work stays apart ([region scoping](#region-scoping)).
 
 ## Syntax overview
 
@@ -77,7 +72,7 @@ Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](re
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
 - **Closures:** written `|a| expr`, with types of their own, accepted through interfaces such as `Fn(A) -> B`. A plain `fn(A) -> B` holds no captures.
 
-### Optionals, no null (D23)
+### Optionals, no null
 
 Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns.md). Still to build:
 
@@ -91,7 +86,7 @@ Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`,
 
 - `! E` in closures' types.
 
-### Interfaces and generics (D26)
+### Interfaces and generics
 
 Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103). Still to build:
 
@@ -116,7 +111,7 @@ Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Co
 
 - **`Share`**, with shared values. `Send` is built: every type is `Send` except one that is or holds a pointer or an arena list, and a generic parameter is `Send` when it has the bound ([std.mail](std/mail.md#items)).
 
-### Handles (D24)
+### Handles
 
 `Handle<T>` is a generational reference into a slot map: a 32-bit index and a 32-bit generation. Using one gives `T?`-like access:
 
@@ -152,7 +147,7 @@ Calx matches Java exactly. It's all built, and in the reference: [Integers](refe
   `Mth`'s sine table is the same either way, since rounding to `f32` hides the difference.
 - Matching the intrinsics would mean copying HotSpot's stubs, which are GPL and can't go in an MIT project (D59). Instead, the rig's reference is vanilla with HotSpot's flags `-XX:+UnlockDiagnosticVMOptions -XX:-UseLibmIntrinsic`. With them, `Math` matched `StrictMath` bit for bit on all 22 million arguments, so Calx can match that configuration exactly. The rig also records vanilla with default flags, and reports every case where the two differ (D60).
 
-## Strictness (D63)
+## Strictness
 
 Calx's checker is stricter than Rust's: every rule is an error, no flag turns one off, and the only warnings are for deprecated APIs. The rules that are built are in [Strictness](reference/strictness.md), which links each to its feature's page. These apply to features that aren't built yet:
 
@@ -160,7 +155,7 @@ Calx's checker is stricter than Rust's: every rule is an error, no flag turns on
 - **Unreachable code** includes code after `fail`.
 - **Closures** end with their value, like blocks used as values. Only a function's body has to use `return`.
 
-## Memory model (D48)
+## Memory model
 
 ### Ownership
 
@@ -188,7 +183,7 @@ fn tick_all(r: mut Region) {
 
 `checkout x = c[key]` takes one element out of a collection until the end of the enclosing block, and puts it back at the same position in the collection's order. While it's out, `c[key]` gives `none`. `checkout x = s.field` does the same for an optional field, and the compiler stops `s.field` from being used inside the block.
 
-### Memory safety (D23)
+### Memory safety
 
 - **Bounds checks** on every index. The compiler removes the ones it can prove, such as `for i in 0..xs.len()`.
 - **No pointers in safe code.** No pointer arithmetic, no casts between unrelated types, no uninitialized values: every variable is assigned before use, and struct fields take their defaults.
@@ -223,14 +218,14 @@ What a panic does in a plain program is built, its stack trace too: see [Printin
 - **In Calcite core:** the runtime writes a crash report with the Calx stack trace ([stack traces](reference/printing.md#stack-traces)), then saves and stops, as vanilla does.
 - **Tick budgets** for plugins use the same path: a handler over budget is stopped like a panic (`P7.3`).
 
-## Strings (D28)
+## Strings
 
 Built: `str` and `String`, literals as either, interpolation into a `String`, the basic methods, `==` and string patterns ([Strings](reference/strings.md)). `for r in s.runes()` goes over Unicode scalar values and `for c in s.chars()` over UTF-16 code units, as Java sees the string. `s.java_hash()` is Java's `String.hashCode` and `s.utf16_len()` is its `length()`, both over UTF-16 code units ([Java's view](reference/strings.md#javas-view-of-a-string)), [`std.text.mutf8`](std/text-mutf8.md) encodes and decodes Java's Modified UTF-8, which NBT uses, and [`std.text.utf8`](std/text-utf8.md) reads bytes that may not be UTF-8 as Java does, with U+FFFD in place of what isn't. **Slicing is by byte offset**: `s[a..b]` panics unless the offsets are in order, in the text, and where runes start, and a `String`'s part is copied only where it's kept ([Slicing](reference/strings.md#slicing)). `to_lower_root` and `to_upper_root` match Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, final sigma included ([Changing the case](reference/strings.md#changing-the-case), D117). Still to build:
 
 - `String` is always valid UTF-8, and `str` will be able to view part of a `String` past the statement, once a view parameter can hold one.
 - **Interpolation** of a type with a `Display` of its own calls it ([Derived properties](#derived-properties)). Text with a prefix, such as `t"..."`, is handled by a library at compile time ([Codegen hooks](#codegen-hooks)).
 
-## Collections (D27)
+## Collections
 
 Two families: Java-compatible ones where vanilla's order can be seen, and fast native ones everywhere else.
 
@@ -319,7 +314,7 @@ Built: see [Modules](reference/modules.md) and [the calx command](reference/comm
 - **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
 - **Targets:** `x86_64-windows`, `x86_64-linux` and `wasm32` from Phase 3 and Phase 7. `aarch64-macos` comes later (D7).
 
-### Build speed (D64)
+### Build speed
 
 Building and running Calx code has to be fast. The design choices that make it so:
 
@@ -397,7 +392,7 @@ What Calx leaves out, on purpose:
 | --- | --- |
 | Generics and interfaces, monomorphized into C (D26) | [Generics](reference/generics.md), [Interfaces](reference/interfaces.md) |
 | No null: absence is an optional type (D23) | [Optionals](reference/optionals.md) |
-| Handle types for game objects, checked on use (D24) | [Handles](#handles-d24) |
+| Handle types for game objects, checked on use (D24) | [Handles](#handles) |
 | Signed overflow wraps | [Integers](reference/integers.md) |
 | Shift counts masked, `>>>` exists | [Integers](reference/integers.md) |
 | `MIN / -1` and `MIN % -1` | [Integers](reference/integers.md) |
@@ -406,17 +401,17 @@ What Calx leaves out, on purpose:
 | `char` unsigned 16-bit, `byte` signed | [Types](reference/types.md) |
 | IEEE floats, no contraction, no fast-math | [Floats](reference/floats.md) |
 | Transcendentals: `std.java.math` ported from fdlibm, matching `StrictMath` bit for bit, and a faster `std.math` | [Transcendental functions](#transcendental-functions) |
-| Memory-safe outside `unsafe` (D23) | [Memory safety](#memory-safety-d23) |
+| Memory-safe outside `unsafe` (D23) | [Memory safety](#memory-safety) |
 | `unsafe` and `extern` only for Calcite core and trusted plugins | [`unsafe`](#unsafe), [FFI](#ffi) |
-| The emitter proves non-aliasing and emits `restrict` (D26) | [Memory safety](#memory-safety-d23) |
+| The emitter proves non-aliasing and emits `restrict` (D26) | [Memory safety](#memory-safety) |
 | A plugin panic stops only that instance (D25) | [Panics](#panics) |
 | No leaked memory when an instance stops | [Arenas and plugin memory](#arenas-and-plugin-memory) |
-| UTF-8 strings, Java `hashCode`, UTF-16 length, Modified UTF-8 (D28) | [Strings](#strings-d28) |
+| UTF-8 strings, Java `hashCode`, UTF-16 length, Modified UTF-8 (D28) | [Strings](#strings) |
 | Java-compatible `HashMap`, `HashSet`, `LinkedHashMap` and fastutil maps (D27) | [Java-compatible](#java-compatible) |
 | Fast native collections where order isn't observable | [Native](#native) |
-| Actors are the only concurrency model | [Region actors](#region-actors-and-messages), refined by D49 |
+| Actors are the only concurrency model | [Region actors](#region-actors-and-messages) (D49) |
 | Lockstep ticks (D19) | [Lockstep ticks](#lockstep-ticks) |
-| Phases and delivery order (D20, now D50) | [Lockstep ticks](#lockstep-ticks) |
+| Phases and delivery order (D20, D50) | [Lockstep ticks](#lockstep-ticks) |
 | Same result with one thread and many (D21) | [Parallel loops](reference/parallel.md) |
 | Split and merge depend only on world state (D22) | [Lockstep ticks](#lockstep-ticks): no hidden timing |
 | Region scoping enforced at compile time | [Region scoping](#region-scoping) |
@@ -424,5 +419,5 @@ What Calx leaves out, on purpose:
 | FFI: `extern`, C ABI, what trusted plugins unlock | [FFI](#ffi) |
 | Codegen hooks: packets, data tables, `#line` | [Codegen hooks](#codegen-hooks) |
 | What Calx leaves out | [Non-goals](#non-goals) |
-| Stricter types than Rust (D63) | [Strictness](#strictness-d63) |
-| Fast builds and fast `calx run` (D64) | [Build speed](#build-speed-d64) |
+| Stricter types than Rust (D63) | [Strictness](#strictness) |
+| Fast builds and fast `calx run` (D64) | [Build speed](#build-speed) |

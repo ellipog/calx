@@ -1,6 +1,6 @@
 ---
 title: Priority queues
-description: PriorityQueue<T>, least first, with its elements in the places Java's PriorityQueue puts them, so a loop goes in the order Java's iterator does - its methods, taking out marked elements as vanilla's ticks do, Java's names, and its C.
+description: PriorityQueue<T>, least first, with its elements in the places Java's PriorityQueue puts them, so a loop goes in the order Java's iterator does - its methods, taking out marked elements as a Java iterator does, Java's names, and its C.
 ---
 
 # Priority queues
@@ -23,7 +23,7 @@ fn main() {
 }
 ```
 
-Vanilla keeps each chunk's scheduled block and fluid ticks in a `PriorityQueue`, drained by time, then priority, then the order they were scheduled in, and the chunks with ticks due in another. It takes ticks out with a loop over the queue that removes with its iterator, whose order is the array's, so the ticks that are left are where Java's would be.
+Minecraft, for example, keeps each chunk's scheduled block and fluid ticks in a `PriorityQueue`, drained by time, then priority, then the order they were scheduled in, and the chunks with ticks due in another. It takes ticks out with a loop over the queue that removes with its iterator, whose order is the array's, so the ticks that are left are where Java's would be.
 
 It's built in. `len`, `is_empty`, `contains`, `clear`, `reserve`, `capacity`, loops, printing, `copy()`, and moving and freeing work as [`List`'s](lists.md) do.
 
@@ -31,11 +31,11 @@ It's built in. `len`, `is_empty`, `contains`, `clear`, `reserve`, `capacity`, lo
 
 The element type needs `Order`, as `<` and `sort` do. Numbers, `bool`, `char`, `rune` and `String` have it, and structs, enums and tuples get it from what they hold ([comparing](comparing.md#order)). Floats don't, since `NaN` is neither less nor greater than anything.
 
-- **Elements that `Order` calls equal come out in no set order**, as in Java. Vanilla gives each tick the order it was scheduled in as its last field, so no two are equal.
+- **Elements that `Order` calls equal come out in no set order**, as in Java. Give each element a last field that no two share, such as the order it was added in, and no two are equal.
 - **There's no comparator.** Elements that go in another order are of a type with [an `Order` of its own](comparing.md#writing-your-own), as `new PriorityQueue<>(comparator)` becomes:
 
 ```calx
-// Vanilla's drain order for scheduled ticks: the time, then the priority, then the order they
+// Minecraft's drain order for scheduled ticks: the time, then the priority, then the order they
 // were scheduled in.
 struct Tick {
     at: i64,
@@ -83,7 +83,7 @@ fn main() {
 
 ## Taking out marked elements
 
-`q.remove_marked(marks)` takes out each element whose mark is set, `marks` being a `List<bool>` with one mark for each element, in the order a loop over the queue goes. It moves the elements as a Java loop over the queue that calls its iterator's `remove` on those elements does, so the ones left are in Java's places. Vanilla's `removeIf` on a chunk's ticks is a loop that marks them, then `remove_marked`:
+`q.remove_marked(marks)` takes out each element whose mark is set, `marks` being a `List<bool>` with one mark for each element, in the order a loop over the queue goes. It moves the elements as a Java loop over the queue that calls its iterator's `remove` on those elements does, so the ones left are in Java's places. Java's `removeIf` becomes a loop that marks the elements, then `remove_marked`:
 
 ```calx
 struct Tick {
@@ -99,7 +99,7 @@ fn main() {
         ticks.push(Tick { at: at, order: order, x: x })
         order += 1
     }
-    // The ticks at x 5, as vanilla's `removeIf(tick -> tick.pos().getX() == 5)`.
+    // The ticks at x 5, as Java's `removeIf(tick -> tick.pos().getX() == 5)`.
     var marks = List<bool>()
     for t in ticks {
         marks.push(t.x == 5)

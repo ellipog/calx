@@ -1,5 +1,4 @@
-/* The home page and the 404 page, from the mockup (site/mockup.html). The docs pages use Starlight's
-   styles and docs.css instead. */
+/* The home page and the 404 page. The docs pages use Starlight's styles and docs.css instead. */
 
 /* ---------- what Starlight's search box needs, outside Starlight's pages ---------- */
 :root {
@@ -78,8 +77,7 @@ table {
 }
 th {
 	text-align: left;
-	font: 600 13px var(--f-head);
-	letter-spacing: 0.02em;
+	font: 600 13px var(--f-body);
 	color: var(--ink-3);
 	padding: 9px 12px;
 	border-bottom: 1.5px solid var(--line-2);
@@ -98,9 +96,6 @@ td {
 	height: 60px;
 	padding: 0 24px;
 	background: var(--header-bg);
-	/* The build keeps only the last of these two, so the one every browser reads goes last. */
-	-webkit-backdrop-filter: saturate(1.3) blur(12px);
-	backdrop-filter: saturate(1.3) blur(12px);
 	border-bottom: 1px solid var(--line);
 }
 
@@ -113,7 +108,7 @@ td {
 	flex-wrap: wrap;
 }
 .btn {
-	font: 600 15px/1 var(--f-head);
+	font: 600 15px/1 var(--f-body);
 	padding: 14px 20px;
 	border-radius: 10px;
 	text-decoration: none;
@@ -133,7 +128,7 @@ td {
 	border-color: var(--ink);
 }
 .more {
-	font: 500 15px var(--f-head);
+	font: 500 15px var(--f-body);
 	text-decoration: none;
 	color: var(--ink);
 	border-bottom: 1.5px solid var(--amber);
@@ -153,107 +148,53 @@ canvas.crystal {
 }
 
 /* ---------- home: hero ---------- */
-/* The banner's proportions, whatever the band's width: the logo is 4/3 of the band's height wide,
-   640 of 480 pixels. The crystal measures the logo where it is, for its quiet zone and knockout. */
-.hero-art {
-	--band: clamp(210px, 30vw, 440px);
+/* The copy on the left. The crystal grows to its right and below it, but never behind it, above
+   it or to its left (crystal.js). On narrow screens there's no room beside the copy, so it sits above. */
+.hero {
 	position: relative;
-	height: var(--band);
 	overflow: hidden;
 }
-.hero-logo {
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	transform: translate(-50%, -50%);
-	width: calc(var(--band) * 4 / 3);
-	color: var(--ink);
-}
 .hero-copy {
-	max-width: 800px;
+	position: relative;
+	max-width: 1180px;
 	margin: 0 auto;
-	padding: 54px 24px 0;
-	text-align: center;
+	padding: 96px 24px 96px;
 }
-.eyebrow {
-	display: inline-flex;
-	align-items: center;
-	gap: 8px;
-	font: 500 13px/1 var(--f-head);
-	letter-spacing: 0.02em;
-	color: var(--ink-2);
-	border: 1px solid var(--line-2);
-	border-radius: 999px;
-	padding: 7px 13px;
-	background: var(--raised);
-}
-.eyebrow .dot {
-	width: 7px;
-	height: 7px;
-	border-radius: 50%;
-	background: var(--amber);
+.hero-text {
+	max-width: 620px;
 }
 h1.display {
-	font: 600 clamp(36px, 5vw, 60px)/1.05 var(--f-head);
-	letter-spacing: -0.028em;
-	margin: 22px 0 20px;
+	font: 600 clamp(40px, 5.4vw, 66px)/1.04 var(--f-head);
+	letter-spacing: -0.018em;
+	margin: 0 0 24px;
 	text-wrap: balance;
 }
 .lede {
 	font-size: 19px;
 	line-height: 1.6;
 	color: var(--ink-2);
-	margin: 0 auto;
-	max-width: 660px;
+	margin: 0;
 	text-wrap: pretty;
 }
+.hero .cta {
+	justify-content: flex-start;
+}
 .fineprint {
-	margin-top: 18px;
-	font-size: 13.5px;
+	margin: 18px 0 0;
+	font-size: 14px;
 	color: var(--ink-3);
-}
-.stats {
-	max-width: 1080px;
-	margin: 56px auto 0;
-	display: grid;
-	grid-template-columns: repeat(3, 1fr);
-	border-top: 1px solid var(--line);
-	border-bottom: 1px solid var(--line);
-}
-.stat {
-	padding: 28px 24px 26px;
-	text-align: center;
-}
-.stat + .stat {
-	border-left: 1px solid var(--line);
-}
-.stat .v {
-	font: 600 42px/1 var(--f-head);
-	letter-spacing: -0.025em;
-}
-.stat .l {
-	margin-top: 10px;
-	color: var(--ink-2);
-	font-size: 14.5px;
-	line-height: 1.45;
 }
 
 /* ---------- home: sections ---------- */
 .section {
 	max-width: 1180px;
 	margin: 0 auto;
-	padding: 104px 24px 0;
-}
-.kicker {
-	font: 600 12.5px/1 var(--f-head);
-	letter-spacing: 0.13em;
-	text-transform: uppercase;
-	color: var(--amber-ink);
+	padding: 112px 24px 0;
 }
 h2.h {
-	font: 600 clamp(28px, 3.3vw, 40px)/1.12 var(--f-head);
-	letter-spacing: -0.022em;
-	margin: 14px 0 16px;
+	font: 600 clamp(30px, 3.4vw, 42px)/1.12 var(--f-head);
+	letter-spacing: -0.012em;
+	margin: 0 0 16px;
 	text-wrap: balance;
 }
 .section p.intro {
@@ -272,26 +213,20 @@ h2.h {
 	list-style: none;
 	padding: 0;
 	margin: 26px 0 28px;
-	display: grid;
-	gap: 14px;
+	border-bottom: 1px solid var(--line);
 }
 .facts li {
-	display: grid;
-	grid-template-columns: 22px 1fr;
-	gap: 10px;
+	padding: 12px 0;
+	border-top: 1px solid var(--line);
 	color: var(--ink-2);
 	font-size: 15.5px;
-}
-.facts li svg {
-	color: var(--amber);
-	margin-top: 3px;
 }
 .stack {
 	display: grid;
 	gap: 18px;
 }
 .note {
-	font: 500 13.5px var(--f-head);
+	font: 500 14px var(--f-body);
 	color: var(--ink-3);
 	margin: 6px 0 -6px 2px;
 }
@@ -325,72 +260,64 @@ h2.h {
 	color: var(--ink-3);
 }
 
-/* claims */
+/* claims: one row each, what's promised, then how, then the evidence */
 .claims {
-	display: grid;
-	grid-template-columns: repeat(3, 1fr);
-	gap: 1px;
-	background: var(--line);
-	border: 1px solid var(--line);
-	border-radius: 16px;
-	overflow: hidden;
-	margin-top: 40px;
+	margin-top: 36px;
+	border-top: 1px solid var(--line-2);
 }
 .claim {
-	background: var(--raised);
-	padding: 28px 26px 26px;
-	display: flex;
-	flex-direction: column;
-}
-.claim .ic {
-	width: 38px;
-	height: 38px;
-	border-radius: 10px;
-	background: var(--amber-wash);
-	color: var(--amber-ink);
 	display: grid;
-	place-items: center;
+	grid-template-columns: minmax(0, 4fr) minmax(0, 6fr) minmax(0, 3fr);
+	gap: 32px;
+	align-items: baseline;
+	padding: 26px 0;
+	border-bottom: 1px solid var(--line);
 }
 .claim h3 {
-	font: 600 19.5px/1.25 var(--f-head);
-	letter-spacing: -0.01em;
-	margin: 18px 0 8px;
+	font: 600 22px/1.25 var(--f-head);
+	letter-spacing: -0.008em;
+	margin: 0;
 }
 .claim p {
-	margin: 0 0 18px;
+	margin: 0;
 	color: var(--ink-2);
-	font-size: 15px;
+	font-size: 15.5px;
 	line-height: 1.6;
-	flex: 1;
+}
+.claim .side {
+	display: grid;
+	gap: 10px;
+	justify-items: start;
 }
 .claim .proof {
 	font: 500 13px var(--f-mono);
 	color: var(--ink-3);
-	margin-bottom: 14px;
 }
 .claim .proof b {
 	color: var(--ink);
 	font-weight: 600;
 }
 .claim .more {
-	align-self: flex-start;
 	font-size: 14px;
 }
 
-/* the guide */
+/* the guide: what stash does beside the heading, the pages to read beside them */
+.split.learn {
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
 .steps {
 	list-style: none;
 	padding: 0;
-	margin: 28px 0 0;
+	margin: 0;
 	display: grid;
-	gap: 4px;
+	gap: 2px;
 	counter-reset: s;
 }
 .steps a {
 	display: grid;
-	grid-template-columns: 34px 1fr;
+	grid-template-columns: 28px 1fr;
 	gap: 14px;
-	align-items: start;
+	align-items: baseline;
 	padding: 14px 16px;
 	border-radius: 12px;
 	text-decoration: none;
@@ -402,18 +329,13 @@ h2.h {
 .steps a::before {
 	counter-increment: s;
 	content: counter(s);
-	width: 30px;
-	height: 30px;
-	border-radius: 50%;
-	border: 1.5px solid var(--line-2);
-	display: grid;
-	place-items: center;
-	font: 600 14px var(--f-head);
-	color: var(--ink-2);
+	font: 600 22px/1 var(--f-head);
+	color: var(--amber-ink);
 }
 .steps b {
-	font: 600 16.5px var(--f-head);
+	font: 600 19px/1.3 var(--f-head);
 	display: block;
+	margin-bottom: 3px;
 }
 .steps span {
 	font-size: 14.5px;
@@ -428,17 +350,15 @@ h2.h {
 	overflow: hidden;
 	background: var(--code);
 	box-shadow: var(--shadow);
-	margin-top: 46px;
+	margin-top: 32px;
 }
 .io > div + div {
 	border-left: 1px solid var(--line);
 }
 .io .cap {
-	font: 500 12px var(--f-head);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
+	font: 500 13px var(--f-body);
 	color: var(--ink-3);
-	padding: 12px 18px;
+	padding: 11px 18px;
 	border-bottom: 1px solid var(--line);
 	background: var(--raised);
 }
@@ -448,10 +368,10 @@ h2.h {
 	font: 13.5px/1.75 var(--f-mono);
 }
 
-/* "Built with Calx": the crystal comes back, a clearing in the middle for the text, as in the hero */
+/* "Built with Calx": the crystal comes back, a clearing in the middle for the text */
 .band {
 	position: relative;
-	margin-top: 88px;
+	margin-top: 112px;
 	overflow: hidden;
 }
 .band .inner {
@@ -468,25 +388,11 @@ h2.h {
 .band p {
 	color: var(--ink-2);
 	font-size: 16.5px;
-	margin: 0 0 18px;
+	margin: 0 0 14px;
 	max-width: 600px;
 }
-.band .pills {
-	display: flex;
-	flex-wrap: wrap;
-	justify-content: center;
-	gap: 8px;
-}
-.band .pills span {
-	font: 500 13.5px var(--f-head);
-	border: 1px solid var(--line-2);
-	border-radius: 999px;
-	padding: 7px 13px;
-	color: var(--ink-2);
-	background: var(--paper);
-}
 .band .link {
-	margin: 24px 0 0;
+	margin: 12px 0 0;
 }
 
 /* ---------- 404: the number is made of the crystal ---------- */
@@ -506,13 +412,13 @@ h2.h {
 }
 .nf-glyph {
 	font: 700 clamp(150px, 22vw, 260px)/0.9 var(--f-head);
-	letter-spacing: -0.04em;
+	letter-spacing: -0.02em;
 	color: transparent;
 	user-select: none;
 }
 .nf h1 {
 	font: 600 clamp(28px, 3.4vw, 40px)/1.15 var(--f-head);
-	letter-spacing: -0.02em;
+	letter-spacing: -0.012em;
 	margin: 26px 0 12px;
 }
 .nf p {
@@ -526,24 +432,30 @@ h2.h {
 }
 
 @media (max-width: 900px) {
-	.split {
+	/* The crystal above the copy. */
+	.hero-copy {
+		padding: 190px 24px 16px;
+	}
+	.section {
+		padding-top: 88px;
+	}
+	.split,
+	.split.learn {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 36px;
+	}
+	.claim {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 10px;
+		padding: 22px 0;
 	}
 	.band .inner {
 		padding: 96px 24px;
 	}
-	.claims,
-	.stats {
-		grid-template-columns: 1fr;
-	}
-	.stat + .stat {
-		border-left: 0;
-		border-top: 1px solid var(--line);
-	}
+}
+@media (max-width: 560px) {
 	.io {
 		grid-template-columns: 1fr;
-		margin-top: 0;
 	}
 	.io > div + div {
 		border-left: 0;

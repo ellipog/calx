@@ -202,7 +202,7 @@ fn main() {
 }
 ```
 
-Calcite polls on its tick thread and encodes what it sends, compressing and encrypting it, on threads of its own, which wake the poll with each batch they finish.
+A server can poll on its main thread and encode what it sends, compressing and encrypting it, on threads of its own, which wake the poll with each batch they finish.
 
 A `Net` lasts until the program ends. It has no `close` of its own until Calx has destructors, so that a copy can never name a `Net` that was freed.
 

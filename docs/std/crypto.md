@@ -1,17 +1,17 @@
 ---
 title: std.crypto
-description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding and signatures - what vanilla's online-mode login and signed chat use.
+description: Random bytes from the system, AES-128 in CFB8 mode, and RSA with PKCS#1 v1.5 padding and signatures - what Minecraft's online-mode login and signed chat use.
 ---
 
 # `std.crypto`
 
-What vanilla's online-mode login is made of:
+What Minecraft's online-mode login is made of:
 
 1. The server makes a 1024-bit RSA key pair, and sends the public key in its encryption request.
 2. The client makes a random 16-byte secret, encrypts it with the public key, and sends it back.
 3. The server decrypts the secret, and from then on both sides encrypt every byte with AES-128 in CFB8 mode, using the secret as the key and the IV.
 
-Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for the same inputs, so a vanilla client talks to a Calx server as to a Java one.
+Each gives what Java's `Cipher`, `KeyPairGenerator` and `SecureRandom` give for the same inputs, so a Java program on the other end of a connection gets what it expects.
 
 Signed chat uses RSA signatures. Mojang's key signs each player's key, and the player's key signs each of their messages. The server checks both as Java's `Signature` checks `SHA1withRSA` and `SHA256withRSA`.
 
@@ -32,10 +32,10 @@ fn main() {
     // Both sides make a cipher from the secret, one for each direction.
     var out = Cfb8.new(secret.copy(), secret.copy())
     var back = Cfb8.new(opened.copy(), opened.copy())
-    var packet = "Hello, Calcite!".to_bytes()
+    var packet = "Hello, Calx!".to_bytes()
     out.encrypt(mut packet)
     back.decrypt(mut packet)
-    println(String.from_utf8(packet) ?? "bad")    // out: Hello, Calcite!
+    println(String.from_utf8(packet) ?? "bad")    // out: Hello, Calx!
 }
 ```
 

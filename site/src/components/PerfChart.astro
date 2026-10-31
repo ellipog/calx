@@ -71,7 +71,9 @@ const panels = PANELS.map((p) => {
 											class="brow"
 											data-tip={`<b>Rust</b> · ${r.platform} · ${p.title}<br><b>${r.rust.toFixed(2)} ms</b> per tick`}
 										>
-											<div class="bar rust" style={`width:${r.rustAt}`} />
+											<div class="bar rust" style={`width:${r.rustAt}`}>
+												<span class="val">{r.rust.toFixed(2)} ms</span>
+											</div>
 										</div>
 									</div>
 								</div>
@@ -152,7 +154,7 @@ const panels = PANELS.map((p) => {
 		flex-wrap: wrap;
 	}
 	.perf-title {
-		font: 600 17px var(--f-head);
+		font: 600 17px var(--f-body);
 	}
 	.perf-title span {
 		font: 400 14px var(--f-body);
@@ -181,7 +183,7 @@ const panels = PANELS.map((p) => {
 		margin-top: 26px;
 	}
 	.panel h3 {
-		font: 600 15px var(--f-head);
+		font: 600 15px var(--f-body);
 		margin: 0;
 	}
 	.panel .sub {
@@ -254,7 +256,8 @@ const panels = PANELS.map((p) => {
 		font: 500 12.5px var(--f-mono);
 		color: var(--ink);
 	}
-	.val small {
+	.val small,
+	.rust .val {
 		color: var(--ink-3);
 		font-size: 12.5px;
 	}
@@ -284,7 +287,7 @@ const panels = PANELS.map((p) => {
 	}
 	details summary {
 		cursor: pointer;
-		font: 500 13.5px var(--f-head);
+		font: 500 13.5px var(--f-body);
 		color: var(--ink-2);
 	}
 	/* Five columns are wider than a phone, so the table scrolls on its own rather than the page. */

@@ -1,6 +1,6 @@
 ---
 title: Parallel loops
-description: parallel for, the capture check that keeps iterations apart, why results don't depend on the thread count, and its C.
+description: Loops whose iterations run at once with parallel for, the capture check that keeps them apart, why results don't depend on the thread count, and its C.
 ---
 
 # Parallel loops
@@ -102,7 +102,7 @@ fn main() {
     var total = 0
     parallel for k in 0usize..xs.len() {
         xs[k] *= 2
-        total += xs[k]    // error: `total` is shared by every iteration of the `parallel for`
+        total += xs[k]    // error: `total` is shared by every iteration of the `parallel for`, so it can't be changed here; an iteration can change only its own elements, indexed with `k` itself
     }
     println("{total}")
 }

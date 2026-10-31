@@ -62,12 +62,12 @@ Both modes have line tables, which don't change the generated code, so a debugge
 
 On Windows, debug builds use the C runtime DLL that comes with Visual Studio, since linking the static one puts its debug information into every PDB and doubles the link time. Release builds link the C runtime statically, so they run on any Windows machine.
 
-## Fast builds (D64)
+## Fast builds
 
 Building should take moments, so the command avoids every step it can:
 
 - The front end checks the whole program every time. It's fast enough that tracking what to skip would cost more.
-- **One C file per module.** Each holds exactly what its module uses, so its text changes only when that does ([modules](modules.md#in-c-d75)). The files that changed compile in parallel.
+- **One C file per module.** Each holds exactly what its module uses, so its text changes only when that does ([modules](modules.md#in-c)). The files that changed compile in parallel.
 - **The object cache.** clang's output is cached under a hash of the C text, the flags and the clang executable. When a file's C is unchanged, clang doesn't run for it.
 - **The runtime is compiled once** per build mode and clang version, then reused from the cache.
 - When nothing changed at all, `calx run` reuses the linked program and only starts it.

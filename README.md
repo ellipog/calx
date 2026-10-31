@@ -3,7 +3,7 @@
   <img src="assets/logo/calx-banner.png" alt="Calx" width="100%">
 </picture>
 
-Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server that reproduces vanilla bit for bit.
+Calx is a general-purpose compiled language. Its compiler is written in C++ and emits C, which clang builds on Windows and Linux. The largest Calx program so far is [Calcite](https://github.com/ellipog/calcite), a Minecraft Java Edition server in development, which aims to behave exactly as the official server does.
 
 Website and docs: **[calxlang.com](https://calxlang.com)**
 
@@ -41,7 +41,7 @@ CI runs the benchmark and checks its checksum on every push. It also times the b
 
 ## Building
 
-You need CMake, Ninja and clang (LLVM 18 or later, with lld).
+You need CMake, Ninja and clang (LLVM 18 or later, with lld). [Install Calx](docs/guide/install.md) has the steps for each platform.
 
 ```sh
 cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++

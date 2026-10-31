@@ -1,11 +1,11 @@
 ---
 title: Getting started
-description: The guide's first page - the program it builds, running Calx with the calx command, values and variables, functions, loops, and the checker's errors.
+description: The program the guide builds, running Calx with the calx command, values and variables, functions, loops, and the checker's errors.
 ---
 
 # Getting started
 
-This guide builds one small, real program: `stash`, which keeps count of the items a player puts away and takes out. It reads commands, one a line, and answers the way a Minecraft server's console would:
+This guide builds one small, real program: `stash`, which keeps count of the items a player puts away and takes out. It reads commands, one a line, and answers the way a game server's console might:
 
 ```text
 add stone 64
@@ -24,7 +24,7 @@ Each page adds to it, and the [last](stash.md) has the whole program. This page 
 
 ## The `calx` command
 
-Calx compiles to C, which clang compiles, so you need clang. Until Calx has releases, build the compiler from source, as the [README](../../README.md#building) says. That gives you `build/compiler/calx`, the one command for checking, building and running programs. This guide calls it `calx`.
+Calx compiles to C, which clang compiles, so you need clang. Until Calx has releases, you build the compiler from source, as [Install Calx](install.md) says. That gives you `calx`, the one command for checking, building and running programs.
 
 Here's a whole program:
 

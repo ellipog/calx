@@ -5,7 +5,7 @@ description: OpenHashMap<K, V> and OpenHashSet<T>, which go over their keys in t
 
 # fastutil's hash maps
 
-`OpenHashMap<K, V>` and `OpenHashSet<T>` are the open hash maps and sets of [fastutil](https://fastutil.di.unimi.it/), the library vanilla keeps most of its tables in: `Long2ObjectOpenHashMap`, `Object2IntOpenHashMap`, `LongOpenHashSet` and the rest. After the same operations, a loop goes over their keys in the order fastutil's would. They're for code where vanilla's order shows, such as the order it ticks chunks in or saves them. Everywhere else, [`Map` and `Set`](maps.md) are faster.
+`OpenHashMap<K, V>` and `OpenHashSet<T>` are the open hash maps and sets of [fastutil](https://fastutil.di.unimi.it/), the library many Java programs, Minecraft among them, keep their tables in: `Long2ObjectOpenHashMap`, `Object2IntOpenHashMap`, `LongOpenHashSet` and the rest. After the same operations, a loop goes over their keys in the order fastutil's would. They're for code ported from Java where the order shows. Everywhere else, [`Map` and `Set`](maps.md) are faster.
 
 ```calx
 fn main() {
@@ -97,7 +97,7 @@ fn main() {
 
 `m.remove_marked(marks)` takes out each key whose mark is set, `marks` being a `List<bool>` with one mark for each key, in the order a loop over the table goes. It moves the keys as a loop over fastutil's table that calls its iterator's `remove` on those keys does, so the keys left are in fastutil's places, and it gives the order that loop goes over the keys in, as each key's place in the marking loop (D173).
 
-That isn't always the table's order. Taking a key out moves the keys after it in its run back, and one that moves from the first slots to the last, past the end of the table, is one the loop has gone past, so fastutil's iterator goes over it at the end. Vanilla takes keys out with the iterator where it does something for each key as it goes: `TicketStorage` does when tickets run out, telling the chunk trackers about each chunk, and `ChunkMap` does with the chunks it unloads. The order `remove_marked` gives is the order to do those things in:
+That isn't always the table's order. Taking a key out moves the keys after it in its run back, and one that moves from the first slots to the last, past the end of the table, is one the loop has gone past, so fastutil's iterator goes over it at the end. Java code takes keys out with the iterator where it does something for each key as it goes, such as telling something else about each key it takes out. The order `remove_marked` gives is the order to do those things in:
 
 ```calx
 fn main() {
@@ -108,7 +108,7 @@ fn main() {
     for i in 0usize..10 {
         left.insert(String(chunks[i]), ticks[i])
     }
-    // Those with none left come out, as vanilla's `purgeStaleTickets` takes them out with the
+    // Those with none left come out, as a Java loop takes them out with the
     // iterator, and each chunk is told about in the order that loop gets to it.
     var keys = List<String>()
     var marks = List<bool>()
@@ -130,7 +130,7 @@ Taking `w1` out moved `w21` from the first slot to the last, which the loop had 
 
 - **There's a mark for each key**, and a different number of marks panics: `` `remove_marked` needs a mark for each key: 3 marks for 2 keys ``.
 - **The loop doesn't halve the table as it goes**, as fastutil's iterator doesn't, so a table that lost most of its keys keeps its size. A key the loop gets to at the end is taken out as `remove` takes one out, which halves a table that's left a quarter full.
-- **The marks are all made before any key comes out**, so a key's mark can't depend on what the loop did before it got there. Vanilla's loops decide each key by the key and its value alone.
+- **The marks are all made before any key comes out**, so a key's mark can't depend on what the loop did before it got there. Loops that decide each key by the key and its value alone, as most do, work this way.
 
 ## Order
 
@@ -141,15 +141,15 @@ The order is fastutil's, worked out from rules its tables keep:
 - An insert that finds the table holding its maximum, the slots times the load factor and less than all of them, rehashes it to the size for one more key than it then holds. Rehashing goes from the last slot down, putting each key in the new table the same way.
 - Removing a key moves each later key of its run that would be found from the gap back into it, as fastutil's `shiftKeys` does, so the table never needs a marker for a removed key.
 
-`OpenHashMap` and `OpenHashSet` were checked against fastutil 8.5.18, the version vanilla 26.3 ships, by running the same random operations on both: inserts, removes, lookups and `addTo`, `putAll` and `addAll` as `reserve` and inserts, `trim`, `clear`, and new tables of random sizes and load factors from 0.25 to 0.99. The keys were `int`s, including 0 and dense runs of small numbers, `long`s, strings and a record whose many keys share each hash, in long phases of adding and of removing, so tables grew to 4,096 slots and shrank about 450 times in each run. 60 runs of 50,000 operations, 3 million in all, went over the same keys in the same order at every one of 375,060 checks.
+`OpenHashMap` and `OpenHashSet` were checked against fastutil 8.5.18, the version Minecraft 26.3 ships, by running the same random operations on both: inserts, removes, lookups and `addTo`, `putAll` and `addAll` as `reserve` and inserts, `trim`, `clear`, and new tables of random sizes and load factors from 0.25 to 0.99. The keys were `int`s, including 0 and dense runs of small numbers, `long`s, strings and a record whose many keys share each hash, in long phases of adding and of removing, so tables grew to 4,096 slots and shrank about 450 times in each run. 60 runs of 50,000 operations, 3 million in all, went over the same keys in the same order at every one of 375,060 checks.
 
-`remove_marked` was checked against fastutil 8.5.18's iterators in Calcite's `collections` probe, whose open tables run loops that remove the keys a modulus picks, and compare the order each loop goes in and the table after it. Of 7,698 such loops in 420 cases, 183 went out of the table's order and 17 halved the table at the end, and every one matched, on Windows and Linux.
+`remove_marked` was checked against fastutil 8.5.18's iterators in a probe that runs fastutil itself, whose open tables run loops that remove the keys a modulus picks, and compare the order each loop goes in and the table after it. Of 7,698 such loops in 420 cases, 183 went out of the table's order and 17 halved the table at the end, and every one matched, on Windows and Linux.
 
 ## What's different
 
 - A table can't change during a loop over it, which is a compile error. fastutil lets an iterator remove the key it's on, which moves other keys and changes the order the rest of the loop goes in; in Calx, a loop marks the keys and [`remove_marked`](#taking-out-marked-keys) takes them out, giving the order fastutil's loop would have gone in.
 - Keys and values can't be null. An `Object2…` table's null key, which fastutil keeps apart like an integer table's 0, isn't there.
-- fastutil's `Reference2…` tables, and its `Custom` ones with a hash strategy, aren't built. A `Reference2…` table places keys by their addresses, so vanilla's own order changes from run to run, and where it shows, Calcite picks a fixed one (D27).
+- fastutil's `Reference2…` tables, and its `Custom` ones with a hash strategy, aren't built. A `Reference2…` table places keys by their addresses, so its order changes from run to run, and code ported from Java has to pick a fixed one where the order shows (D27).
 - fastutil's linked tables, `Long2ObjectLinkedOpenHashMap` and the rest, go in the order keys were added, which doesn't come from fastutil's hashing, so they're [`LinkedMap` and `LinkedSet`](linked-maps.md).
 
 ## In C

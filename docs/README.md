@@ -13,12 +13,13 @@ In reading order:
 
 ### Guide
 
-Learning Calx by building one small program, `stash`, which keeps count of items from commands it reads:
+Installing Calx, then learning it by building one small program, `stash`, which keeps count of items from commands it reads:
 
-1. [Getting started](guide/getting-started.md): the program, the `calx` command, values and variables, functions, loops, and the checker's errors
-2. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
-3. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
-4. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
+1. [Install Calx](guide/install.md): building the compiler from source on Windows or Linux, and checking that it runs a program
+2. [Getting started](guide/getting-started.md): the program, the `calx` command, values and variables, functions, loops, and the checker's errors
+3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
+4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
+5. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
 
 ### Reference
 
@@ -46,22 +47,20 @@ What's built, one page per feature:
 20. [Priority queues](reference/priority-queues.md): `PriorityQueue<T>`, least first, its elements in Java's places, its methods, taking out marked elements, Java's names for them, and its C
 21. [Boxes](reference/boxes.md): `Box<T>`, one value on the heap so a type can hold itself, its value as the place `b.value`, and its C
 22. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
-23. [Java's hash maps](reference/java-maps.md): `JavaHashMap<K, V>` and `JavaHashSet<T>`, in Java's order, `JavaHash`, Java's methods written in Calx, and their C
-24. [fastutil's hash maps](reference/fastutil-maps.md): `OpenHashMap<K, V>` and `OpenHashSet<T>`, in fastutil's order, which fastutil class each is, fastutil's methods written in Calx, and their C
-25. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
-26. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
-27. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
-28. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
-29. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
-30. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-31. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-32. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-33. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
-34. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-35. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
-36. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
-37. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
-38. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+23. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
+24. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
+25. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+26. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
+27. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
+28. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+29. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
+30. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+31. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
+32. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+33. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
+34. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
+35. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
+36. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 
@@ -75,10 +74,10 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
-9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, which NBT uses
+9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, as `DataOutputStream.writeUTF` writes it
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256 and HMAC-SHA256, as Java's `MessageDigest` and `Mac` give them
-12. [std.crypto](std/crypto.md): random bytes, AES-CFB8 and RSA, for vanilla's online-mode login
+12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
 14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
@@ -89,12 +88,20 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
-23. [std.palette](std/palette.md): vanilla's paletted containers, a chunk section's block states and biomes grown, sent, saved and loaded as 26.3 does them
+23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
+
+### Java compatibility
+
+Hash tables that iterate in exactly the order Java's or fastutil's do, for code ported from Java whose results depend on it. They're in the reference too, but most programs want [`Map` and `Set`](reference/maps.md):
+
+1. [Java's hash maps](reference/java-maps.md): `JavaHashMap<K, V>` and `JavaHashSet<T>`, in Java's order, `JavaHash`, Java's methods written in Calx, and their C
+2. [fastutil's hash maps](reference/fastutil-maps.md): `OpenHashMap<K, V>` and `OpenHashSet<T>`, in fastutil's order, which fastutil class each is, fastutil's methods written in Calx, and their C
 
 ### Design
 
-1. [Calx spec](CALX_SPEC.md): every feature that is designed but not built yet
-2. [Tick-loop benchmark](benchmarks.md): the workload behind the Phase 3 performance gate
+1. [Roadmap](roadmap.md): what's built, what's being built now, and what comes after
+2. [Calx spec](CALX_SPEC.md): the design of every feature that isn't built yet
+3. [Tick-loop benchmark](benchmarks.md): the workload Calx is timed against Rust on, how it's measured, and how the two versions are kept comparable
 
 
 ## How the docs are organized
@@ -114,4 +121,6 @@ A feature lives in exactly one normative place. When it ships, its spec section 
 - **Examples are tests.** From Phase 3, every Calx code block in these docs is compiled by the compiler test suite, and run if it shows output. A block that should fail to compile is marked with the error it must produce.
 - **One topic per page.** Each page starts with front matter giving its `title` and `description`, so a site generator can build the website from these files unchanged. The front matter is YAML, so a description with `: ` in it goes in double quotes.
 - **Relative links only.** Link to other pages by relative path, such as `reference/integers.md`, so the links work both here and on the site.
+- **Decisions in parentheses.** Cite a decision from the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) as `(D21)` at the end of the sentence it supports, never in a heading or as a word in the sentence. The site leaves these out, since its readers don't have the log beside them, so the sentence has to make sense without one (D180).
+- **Written for any program.** The guide, reference and std pages describe each feature for programs in general. Minecraft comes up where a module exists for it, such as `std.palette`, or as one example among others, and "vanilla" and Calcite's own needs stay in the spec (D180).
 - **Page order lives here.** When you add a page, add it to the list above.

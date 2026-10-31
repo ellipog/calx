@@ -15,7 +15,7 @@ grammar.repository.comments.patterns.unshift(
 	{ name: 'comment.line.error.calx', match: '//\\s*error:.*$' },
 );
 
-// The mockup's token colors (site/mockup.html, --t-*), light and dark.
+// The site's token colors, light and dark.
 const PALETTE = {
 	light: {
 		bg: '#F3EEE5', fg: '#1E1F24', kw: '#9A4F12', type: '#2F5E8C', num: '#8B3A62', str: '#47702F',
@@ -73,7 +73,7 @@ export default defineEcConfig({
 		codeLineHeight: '1.68',
 		codePaddingBlock: '16px',
 		codePaddingInline: '20px',
-		uiFontFamily: 'var(--f-head)',
+		uiFontFamily: 'var(--f-body)',
 		frames: {
 			shadowColor: 'transparent',
 			editorTabBarBackground: 'var(--raised)',

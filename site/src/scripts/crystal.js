@@ -15,10 +15,12 @@ const BAYER = [0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 
 const DOT = 3.5; // CSS pixels per dot, before rounding to whole screen pixels
 
 // Crops are fractions of the photo: x0, y0, x1, y1. The hero's is the banner's own (TOP 0.30, 10:3).
+// A quiet zone is a box kept clear, with a margin of pad and then soft to fade in over. One that's
+// open runs to the canvas's left and top edges too, so the crystal grows only beside and below the text.
 const KINDS = {
-	hero: { crop: [0, 0.3, 1, 0.8375], quiet: [{ el: '.hero-logo', shape: 'logo' }], knock: '.hero-logo', fade: { bottom: 80 } },
-	band: { crop: [0, 0, 1, 0.54], quiet: [{ el: '.band .text', shape: 'box', pad: 28, soft: 190 }], fade: { top: 130, bottom: 130 } },
-	404: { crop: [0, 0, 1, 1], quiet: [{ el: '.nf-copy', shape: 'box', pad: 30, soft: 220 }], glyph: '.nf-glyph', fade: { top: 40 } },
+	hero: { crop: [0, 0.3, 1, 0.8375], quiet: [{ el: '.hero-text', open: true, pad: 32, soft: 260 }], fade: { bottom: 80 } },
+	band: { crop: [0, 0, 1, 0.54], quiet: [{ el: '.band .text', pad: 28, soft: 190 }], fade: { top: 130, bottom: 130 } },
+	404: { crop: [0, 0, 1, 1], quiet: [{ el: '.nf-copy', pad: 30, soft: 220 }], glyph: '.nf-glyph', fade: { top: 40 } },
 };
 
 const $ = (s) => document.querySelector(s);
@@ -45,7 +47,7 @@ function sample(map, u, v) {
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const smooth = (x) => ((x = clamp01(x)), x * x * (3 - 2 * x));
 
-// A mask at dot resolution, from drawing on a small canvas: the logo (grown, for the knockout) or text.
+// A mask at dot resolution, from drawing on a small canvas: the 404's text.
 function mask(cols, rows, paint) {
 	const c = document.createElement('canvas');
 	c.width = cols;
@@ -56,7 +58,6 @@ function mask(cols, rows, paint) {
 	for (let i = 0; i < m.length; i++) m[i] = a[i * 4 + 3] / 255;
 	return m;
 }
-const logoShapes = () => $$('#logo-shapes > *');
 // Computed styles ignore CSS zoom and boxes don't, so text measured from styles is scaled by this.
 const zoomOf = (el) => el.getBoundingClientRect().height / el.offsetHeight || 1;
 
@@ -81,9 +82,11 @@ function layout(S) {
 	const quiet = S.quiet.flatMap((q) =>
 		$$(q.el).map((el) => {
 			const r = el.getBoundingClientRect(), x = r.left - R.left;
+			// An open box stays open only with room for the crystal to its right; without, the crystal goes above it.
+			const open = q.open && R.width - x - r.width > 240;
 			// Where there's little room beside the box, it fades in over less, so narrower screens still get some crystal.
-			const room = Math.min(x, R.width - x - r.width) - (q.pad || 0);
-			return { ...q, x, y: r.top - R.top, w: r.width, h: r.height, soft: Math.min(q.soft || 0, Math.max(60, room * 0.55)) };
+			const room = (open ? R.width - x - r.width : Math.min(x, R.width - x - r.width)) - (q.pad || 0);
+			return { ...q, open, x, y: r.top - R.top, w: r.width, h: r.height, soft: Math.min(q.soft || 0, Math.max(60, room * 0.55)) };
 		})
 	);
 	const ox = quiet.length ? quiet[0].x + quiet[0].w / 2 : R.width / 2;
@@ -109,15 +112,9 @@ function layout(S) {
 			const px = (x + 0.5) * cs, py = (j + 0.5) * cs;
 			let c = 1;
 			for (const q of quiet) {
-				if (q.shape === 'logo') {
-					// banner.py's quiet(): an ellipse around the logo
-					const r = Math.hypot((px - q.x - q.w / 2) / (q.w * 0.575), (py - q.y - q.h / 2) / (q.h * 0.92));
-					c *= clamp01((r - 0.55) / 0.75) ** 1.5;
-				} else {
-					// a soft margin around a box
-					const dx = Math.max(q.x - px, 0, px - q.x - q.w), dy = Math.max(q.y - py, 0, py - q.y - q.h);
-					c *= clamp01((Math.hypot(dx, dy) - q.pad) / q.soft) ** 1.5;
-				}
+				// a soft margin around the box
+				const dx = Math.max(q.open ? 0 : q.x - px, 0, px - q.x - q.w), dy = Math.max(q.open ? 0 : q.y - py, 0, py - q.y - q.h);
+				c *= clamp01((Math.hypot(dx, dy) - q.pad) / q.soft) ** 1.5;
 			}
 			if (S.fade) {
 				if (S.fade.top) c *= smooth(py / S.fade.top);
@@ -163,26 +160,6 @@ function layout(S) {
 	for (let j = 0, i = 0; j < rows; j++)
 		for (let x = 0; x < cols; x++, i++) vein[i] = !ink[i] && warmth[i] * 0.9 > BAYER[(j & 7) * 8 + (x & 7)];
 
-	// The knockout: the logo grown by about 1.6% of its width, as banner.py's knockout(), kept clear.
-	if (S.knock) {
-		const r = $(S.knock).getBoundingClientRect(), sc = r.width / cs / 399.761;
-		const m = mask(cols, rows, (g) => {
-			g.setTransform(sc, 0, 0, sc, (r.left - R.left) / cs, (r.top - R.top) / cs - 12 * sc);
-			g.lineWidth = 13;
-			g.lineJoin = 'round';
-			for (const el of logoShapes()) {
-				const at = (name) => +el.getAttribute(name);
-				let p;
-				if (el.tagName === 'rect') {
-					p = new Path2D();
-					p.roundRect(at('x'), at('y'), at('width'), at('height'), at('rx'));
-				} else p = new Path2D(el.getAttribute('d'));
-				g.fill(p, el.getAttribute('fill-rule') || 'nonzero');
-				g.stroke(p);
-			}
-		});
-		for (let i = 0; i < n; i++) if (m[i] > 0.15) ink[i] = vein[i] = 0;
-	}
 	S.g = { cols, rows, cd, ink, vein, t };
 	return true;
 }

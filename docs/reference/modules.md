@@ -162,7 +162,7 @@ A `pub` function's parameters and result, a `pub` struct's `pub` fields and a `p
 
 So there's one place to look for each impl, and two modules can't implement one interface for one type in different ways.
 
-## In C (D75)
+## In C
 
 Each module becomes one C file, named after it, such as `game_world.c`. It's compiled to its own object, and the objects are linked into the program. A module's file holds:
 
@@ -170,7 +170,7 @@ Each module becomes one C file, named after it, such as `game_world.c`. It's com
 - a `static` copy of each generic instance those functions use, so every file compiles by itself, in parallel with the others;
 - the type definitions, constants and declarations those name, and nothing else.
 
-Since a file holds exactly what it uses, its text changes only when something it uses changes, and the [object cache](command.md#fast-builds-d64) compiles only those files again. The front end still checks the whole program every time.
+Since a file holds exactly what it uses, its text changes only when something it uses changes, and the [object cache](command.md#fast-builds) compiles only those files again. The front end still checks the whole program every time.
 
 A function is `static` unless another module's file calls it, which lets clang inline it and drop it. Release builds inline across files too, when they link (ThinLTO, D99), so splitting code into modules costs nothing at run time. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
 

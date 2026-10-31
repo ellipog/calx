@@ -3,9 +3,9 @@ title: Strictness
 description: The rules that make Calx's checker stricter than Rust's, and why.
 ---
 
-# Strictness (D63)
+# Strictness
 
-Calx's checker is stricter than Rust's. Calcite ports Java, and silent conversions and precedence slips are exactly where bit-exactness breaks, so the compiler rejects them. Every rule is an error, and no flag turns one off. There are no warnings, except for deprecated APIs once there are any.
+Calx's checker is stricter than Rust's. Silent conversions and precedence slips are where exact results quietly break, in ported code most of all, so the compiler rejects them. Every rule is an error, and no flag turns one off. There are no warnings, except for deprecated APIs once there are any.
 
 Each rule is on the page of the feature it's about:
 
@@ -24,7 +24,7 @@ Each rule is on the page of the feature it's about:
 | A function returns with `return`, on every path | [Functions](functions.md#returning) |
 | A `T` never becomes a `T?` by itself: write `some(x)`. An optional compares only with another optional | [Optionals](optionals.md#making-one) |
 | `??` next to another operator needs parentheses | [Optionals](optionals.md#reading-one) |
-| A `match` covers every value, and every arm can match | [Patterns](patterns.md#every-case-every-arm-d63) |
+| A `match` covers every value, and every arm can match | [Patterns](patterns.md#every-case-every-arm) |
 | A capitalized name in a pattern is a variant or constant, never a binding. A record pattern names every field or ends in `..` | [Patterns](patterns.md#names-in-patterns) |
 | `let` without `else` needs a pattern that always matches, and `let ... else` and `if let` one that might not | [Patterns](patterns.md#let--else) |
 | A value can't be used after it moves, or after it might have moved, and a move in a loop needs a new value before the next pass | [Ownership](ownership.md#moves) |
@@ -88,4 +88,4 @@ fn main() {
 
 A literal `true` or `false` as a condition is an error, since one branch could never run, and `while true` is written `loop`.
 
-The rest of D63 applies to features that aren't built yet, and is in the [spec](../CALX_SPEC.md#strictness-d63).
+The rest of the strictness rules apply to features that aren't built yet, and are in the [spec](../CALX_SPEC.md#strictness) (D63).

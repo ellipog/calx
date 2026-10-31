@@ -1,6 +1,6 @@
 ---
 title: Patterns and match
-description: match, every kind of pattern, exhaustiveness, if let, let-else and destructuring.
+description: Matching values with match, every kind of pattern, exhaustiveness, if let, let-else and destructuring.
 ---
 
 # Patterns and `match`
@@ -53,7 +53,7 @@ fn main() {
 }
 ```
 
-## Every case, every arm (D63)
+## Every case, every arm
 
 A `match` must cover every value its input can have, and every arm must be able to match something the arms above it don't. Both are errors, and the error shows a value that's missing:
 

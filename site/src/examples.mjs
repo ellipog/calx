@@ -23,6 +23,18 @@ export function outputOf(code) {
 	return [...code.matchAll(/\/\/ out: (.*)$/gm)].map((m) => m[1]);
 }
 
+/** The example without its `// out:` comments: lines that are only one go, and one at a line's end comes off. */
+export function withoutOutput(code) {
+	return code
+		.split('\n')
+		.flatMap((line) => {
+			const m = line.match(/^(.*?)\s*\/\/ out: .*$/);
+			if (!m) return [line];
+			return m[1].trim() ? [m[1]] : [];
+		})
+		.join('\n');
+}
+
 /** The error a failing example is marked with: its line and column in the example, the line's
  *  code without the comment, and the message. Columns count from 1, at the line's first token,
  *  which is where the checker points for the examples the site shows. */

@@ -5,7 +5,7 @@ description: Fast math functions, accurate to about half an ULP and the same on 
 
 # `std.math`
 
-Math functions that are fast, accurate to about half an ULP, and the same on every platform, since they're written in Calx and call no system library (D97). For Java's `StrictMath` results bit for bit, which vanilla's behaviour depends on, use [`std.java.math`](java-math.md): it has the same functions under the same names.
+Math functions that are fast, accurate to about half an ULP, and the same on every platform, since they're written in Calx and call no system library (D97). For Java's `StrictMath` results bit for bit, use [`std.java.math`](java-math.md): it has the same functions under the same names.
 
 ```calx
 import std.math.{PI, cos, exp, log, pow, sin}

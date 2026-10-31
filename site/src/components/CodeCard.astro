@@ -3,7 +3,7 @@
 // prints, the file name, and a badge saying CI tests it. The code is highlighted by Expressive
 // Code with the Calx grammar, as on the docs pages.
 import { Code } from '@astrojs/starlight/components';
-import { outputOf } from '../examples.mjs';
+import { outputOf, withoutOutput } from '../examples.mjs';
 
 interface Props {
 	calx: string;
@@ -11,9 +11,10 @@ interface Props {
 	file?: string;
 }
 const { calx, c, file } = Astro.props;
+// What it prints is in the Output tab, so its `// out:` comments come out of the code.
 const output = outputOf(calx);
 const panes = [
-	{ name: 'Calx', lang: 'calx', code: calx },
+	{ name: 'Calx', lang: 'calx', code: withoutOutput(calx) },
 	...(c ? [{ name: 'C', lang: 'c', code: c }] : []),
 	...(output.length ? [{ name: 'Output', lang: '', code: output.join('\n') }] : []),
 ];
@@ -87,7 +88,7 @@ const panes = [
 		gap: 2px;
 	}
 	.tab {
-		font: 500 13px/1 var(--f-head);
+		font: 500 13px/1 var(--f-body);
 		padding: 8px 11px;
 		border-radius: 7px;
 		border: 0;
@@ -118,7 +119,7 @@ const panes = [
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		font: 500 12.5px/1 var(--f-head);
+		font: 500 12.5px/1 var(--f-body);
 		color: var(--ink-3);
 		padding: 6px 8px;
 	}

@@ -1,11 +1,11 @@
 ---
 title: std.lz4
-description: LZ4 block streams as lz4-java's LZ4BlockOutputStream writes them and LZ4BlockInputStream reads them - what vanilla's region files hold when region-file-compression is lz4.
+description: LZ4 block streams as lz4-java's LZ4BlockOutputStream writes them and LZ4BlockInputStream reads them - what Minecraft's region files hold when region-file-compression is lz4.
 ---
 
 # `std.lz4`
 
-When server.properties says `region-file-compression=lz4`, vanilla stores each chunk in a region file with lz4-java's `LZ4BlockOutputStream`, and reads it back with `LZ4BlockInputStream`. Vanilla ships lz4-java 1.10.1. LZ4 is much faster than zlib, and the files come out bigger.
+When server.properties says `region-file-compression=lz4`, Minecraft stores each chunk in a region file with lz4-java's `LZ4BlockOutputStream`, and reads it back with `LZ4BlockInputStream`. Minecraft ships lz4-java 1.10.1. LZ4 is much faster than zlib, and the files come out bigger.
 
 `std.lz4` writes the same stream format, and Java reads it. It reads what Java writes, and it accepts and refuses the same broken streams as `LZ4BlockInputStream` does.
 

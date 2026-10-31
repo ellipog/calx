@@ -1,11 +1,11 @@
 ---
 title: std.zlib
-description: zlib, gzip and raw deflate, compressing and inflating as Java's Deflater, Inflater and GZIP streams do - what vanilla's packets, region files and NBT files use.
+description: Compressing and inflating zlib, gzip and raw deflate streams, which read and write what Java's Deflater, Inflater and GZIP streams do.
 ---
 
 # `std.zlib`
 
-Vanilla compresses three things, all at level 6, Java's default:
+Minecraft's server compresses three things, all at level 6, Java's default:
 
 - Each packet longer than the server's compression threshold, with zlib.
 - Each chunk in a region file, with zlib.
@@ -65,16 +65,16 @@ Why bytes don't inflate, as `Error`:
 | `Truncated` | They end before the stream does |
 | `Checksum` | The Adler-32, the CRC-32, gzip's length or gzip's header CRC doesn't match |
 | `TooLong` | The data is more than `decompress`'s limit |
-| `Dictionary` | The zlib header asks for a preset dictionary. Java's `Inflater` stops there without an error, and `needsDictionary()` says why. Neither vanilla nor `std.zlib` uses one |
+| `Dictionary` | The zlib header asks for a preset dictionary. Java's `Inflater` stops there without an error, and `needsDictionary()` says why. Neither Minecraft nor `std.zlib` uses one |
 
 - Bytes after the end of the stream are ignored, as Java ignores them.
 - gzip reads on into the next member when one follows, as `GZIPInputStream` does, and ignores what follows if it isn't a whole gzip header.
-- Vanilla's packet decoder gives `Inflater` an array of the length the packet says, then checks that it was filled. `decompress_into` with that length as the limit does the same: if it gives `false`, or adds fewer bytes, the packet is bad.
+- Minecraft's packet decoder gives `Inflater` an array of the length the packet says, then checks that it was filled. `decompress_into` with that length as the limit does the same: if it gives `false`, or adds fewer bytes, the packet is bad.
 - The bytes aren't always Java's bytes. Deflate allows many ways to write the same data, and `std.zlib` picks its own matches, so its output is its own, though Java reads it. At levels 1 to 6 it comes out about 1% smaller than Java's.
 
 ## Checked against Java
 
-- A corpus of 2414 records, 49.8 MB: vanilla's structure files unpacked, 300 of its source files, random bytes, runs and repeats from 0 bytes to 1 MiB. Java 25's `Inflater` and `GZIPInputStream` inflated what `std.zlib` wrote, and `std.zlib` inflated what Java wrote, for levels 0, 1, 6 and 9 and all three formats. Every record came back.
+- A corpus of 2414 records, 49.8 MB: Minecraft's structure files unpacked, 300 of its source files, random bytes, runs and repeats from 0 bytes to 1 MiB. Java 25's `Inflater` and `GZIPInputStream` inflated what `std.zlib` wrote, and `std.zlib` inflated what Java wrote, for levels 0, 1, 6 and 9 and all three formats. Every record came back.
 - 240,000 broken streams: Java's output with bytes flipped, cut, added or made up, and blocks of random codes. `std.zlib` gave the same outcome as `Inflater` for every one: the same data, or an error where Java threw, or the same stop where Java wanted a dictionary.
 - 25 gzip cases, with header fields, FHCRC, reserved flags, a second member and bytes after the end, each gave what `GZIPInputStream` gave.
 - The [tests](../../tests/std/zlib.calx) hold Java's bytes and check the rest by round trips.

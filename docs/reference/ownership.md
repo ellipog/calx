@@ -3,7 +3,7 @@ title: Ownership
 description: Copy and owning values, moves, views, partial moves, patterns that take a value apart, when values are freed, and the C it all compiles to.
 ---
 
-# Ownership (D76)
+# Ownership
 
 Every value has one owner: a variable, a parameter taken with `own`, a field, or an element of a list. A value that owns memory, such as a `String` or a `List`, is freed when its owner ends. There's no garbage collector and no reference counting, and the compiler works out where each value is freed, so a program can't leak, free a value twice, or use one after it's freed.
 
@@ -217,4 +217,4 @@ Every free gives the size of the block, which the compiler always knows: a list 
 
 Debug builds use `malloc` instead, with each block's size in front of it. A block freed twice, or with a size it wasn't allocated with, stops the program with status 102, and so does a program that ends with blocks still allocated, reported on standard error. Since the compiler frees every value exactly once, each of these is a bug in Calx, and the test suite runs every test this way. Builds with AddressSanitizer use `malloc` too, so it sees every block.
 
-For temporary lists that are all freed at once, such as a tick's, an [arena](arenas.md) is faster still: a list takes its memory from the arena's chunk, and resetting the arena frees them all. A type that holds itself does it through a [`Box<T>`](boxes.md). `Shared<T>`, for data many regions read, is designed but not built yet ([spec](../CALX_SPEC.md#memory-model-d48)).
+For temporary lists that are all freed at once, such as a tick's, an [arena](arenas.md) is faster still: a list takes its memory from the arena's chunk, and resetting the arena frees them all. A type that holds itself does it through a [`Box<T>`](boxes.md). `Shared<T>`, for data many regions read, is designed but not built yet ([spec](../CALX_SPEC.md#memory-model)).

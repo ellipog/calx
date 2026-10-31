@@ -5,7 +5,7 @@ description: Bytes that may not be UTF-8 as text, with U+FFFD in their place, as
 
 # `std.text.utf8`
 
-Bytes that may not be UTF-8, read as text the way Java reads them: with U+FFFD, the replacement character `�`, in place of each piece that isn't UTF-8. [`String.from_utf8`](../reference/strings.md) gives `none` for such bytes instead, which is right where they mean the data is broken; this is for text that must read whatever comes, as a console's lines and vanilla's strings do.
+Bytes that may not be UTF-8, read as text the way Java reads them: with U+FFFD, the replacement character `�`, in place of each piece that isn't UTF-8. [`String.from_utf8`](../reference/strings.md) gives `none` for such bytes instead, which is right where they mean the data is broken; this is for text that must read whatever comes, as a console's lines and Java's strings do.
 
 ```calx
 import std.text.utf8.{decode_lossy}

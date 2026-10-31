@@ -3,7 +3,7 @@ title: Optionals
 description: T? instead of null - some and none, ??, !, ?., comparing, if let and let-else.
 ---
 
-# Optionals (D23)
+# Optionals
 
 There's no null. A value that may be absent is a `T?`, which is either `none` or `some(x)`:
 

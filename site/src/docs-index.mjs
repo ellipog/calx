@@ -31,12 +31,13 @@ export function docsIndex() {
 	return sections;
 }
 
-/** The Starlight sidebar: one group per section. The standard library and the design pages start
- *  closed, unless the page is in one, so the guide and the reference come first. */
+/** The Starlight sidebar: one group per section. Every section after the reference starts closed,
+ *  unless the page is in it, so the guide and the reference come first. */
+const CLOSED = ['standard-library', 'java-compatibility', 'design'];
 export function sidebar() {
 	return docsIndex().map((section) => ({
 		label: section.title,
-		collapsed: section.id === 'standard-library' || section.id === 'design',
+		collapsed: CLOSED.includes(section.id),
 		items: section.pages.map((page) => ({ label: page.title, slug: page.slug })),
 	}));
 }

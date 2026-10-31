@@ -1,5 +1,4 @@
-/* The site's colors and type, from the mockup (site/mockup.html), shared by the home page, the
-   404 page and the docs. Starlight's own variables are set from them at the end, so its pages,
+/* The site's colors and type, shared by the home page, the 404 page and the docs. Starlight's own variables are set from them at the end, so its pages,
    its search box and its code blocks use the same paper, ink and amber. */
 
 /* Starlight's cascade layers, in its order. A layer's place is where it first appears, and this
@@ -8,8 +7,9 @@
    stylesheet, which comes later; without this, its reset would beat its core styles. */
 @layer starlight.base, starlight.reset, starlight.core, starlight.content, starlight.components, starlight.utils;
 
-@import '@fontsource-variable/inter';
-@import '@fontsource-variable/outfit';
+/* Two font files: Source Serif 4 for headings and JetBrains Mono for code. The body is the
+   system's own sans-serif. */
+@import '@fontsource-variable/source-serif-4';
 @import '@fontsource-variable/jetbrains-mono';
 
 :root {
@@ -20,10 +20,10 @@
 	--calx: #B9802F; --rust: #3F6EA8;
 	--err: #B3261E; --err-wash: rgba(179, 38, 30, .07);
 	--dither-ink: #1E1F24; --dither-vein: #D6AC70;
-	--header-bg: rgba(247, 243, 236, .86);
+	--header-bg: #F7F3EC;
 	--shadow: 0 1px 0 rgba(30, 31, 36, .03), 0 12px 32px -18px rgba(30, 31, 36, .28);
-	--f-head: "Outfit Variable", ui-sans-serif, system-ui, sans-serif;
-	--f-body: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--f-head: "Source Serif 4 Variable", "Iowan Old Style", Georgia, serif;
+	--f-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 	--f-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace;
 	color-scheme: light;
 }
@@ -35,7 +35,7 @@
 	--calx: #BC8536; --rust: #5F8FD0;
 	--err: #F2766B; --err-wash: rgba(242, 118, 107, .09);
 	--dither-ink: #DED8CC; --dither-vein: #C49658;
-	--header-bg: rgba(14, 18, 24, .82);
+	--header-bg: #0E1218;
 	--shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 14px 36px -18px rgba(0, 0, 0, .8);
 	color-scheme: dark;
 }

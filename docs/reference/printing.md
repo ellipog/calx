@@ -1,6 +1,6 @@
 ---
 title: Printing and panics
-description: print and println with interpolation, assert, panic, and what a panic does.
+description: Writing output with print and println and their interpolation, checking with assert, and what panic does.
 ---
 
 # Printing and panics

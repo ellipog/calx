@@ -242,4 +242,4 @@ Besides mismatched and missing members (D72):
 
 Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`, and for a generic interface's arguments too, such as `Meters__Into_i64__into`. Constants are inlined. Nothing is looked up at run time, even when a call chooses between impls: the checker chooses.
 
-`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types and the operator interfaces ([spec](../CALX_SPEC.md#interfaces-and-generics-d26)).
+`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types and the operator interfaces ([spec](../CALX_SPEC.md#interfaces-and-generics)).

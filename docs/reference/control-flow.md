@@ -1,6 +1,6 @@
 ---
 title: Control flow
-description: if, while, while let, for, loop, break and continue, and which of them give values. match is in Patterns.
+description: Branches and loops - if, while, while let, for, loop, break and continue - and which of them give values. Patterns covers match.
 ---
 
 # Control flow

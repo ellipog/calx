@@ -64,7 +64,7 @@ fn main() {
 // out: total 8
 ```
 
-Lines are split and decoded as Java's `BufferedReader.readLine` gives them over an `InputStreamReader` in UTF-8, which is how vanilla's console reads commands:
+Lines are split and decoded as Java's `BufferedReader.readLine` gives them over an `InputStreamReader` in UTF-8, which is how a Java program's console reads commands:
 
 - A line ends at `
 `, `

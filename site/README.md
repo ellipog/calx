@@ -6,7 +6,7 @@ The docs stay in `docs/`, as plain Markdown that reads fine on GitHub. The site 
 
 A push that only changes this folder skips the compiler's CI. A change to `docs/` still runs it, because every example in the docs is a test (D41).
 
-The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), and moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62).
+The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62), and reworked after a critical read on [CLX-63](https://acta.aaenz.no/aaen-studios/clx#CLX-63).
 
 ## Running it
 
@@ -48,27 +48,24 @@ It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build
   - links to `.md` files become the pages' URLs;
   - links to the rest of the repo go to GitHub;
   - the `# Title` heading goes, since the page shows the front matter's title;
-  - a decision the text cites, "(D21)", becomes a small link to its row in the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md).
+  - a decision the text cites, "(D21)", is left out, since the site's readers don't have the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) beside them. The docs cite decisions only in parentheses, so each sentence reads the same without one (`docs/README.md` has the rule).
 - **Page order.** [`src/docs-index.mjs`](src/docs-index.mjs) reads the page list in `docs/README.md`, for the sidebar and for the `/docs/` overview. Adding a page to that list adds it to the site.
-- **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)). [`src/ec-calx.mjs`](src/ec-calx.mjs) gives each docs block the mockup's bar:
-  - a block `tests/run.py` tests has Calx and Output tabs, its `// out:` lines become the Output tab, and a "Tested" badge says CI runs it;
+- **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)). [`src/ec-calx.mjs`](src/ec-calx.mjs) gives each docs block a bar of its own:
+  - a block `tests/run.py` tests has Calx and Output tabs, its `// out:` comments come out of the code and become the Output tab, and a "Tested" badge says CI runs it;
   - a `// error:` line is marked, with the error under it, and the badge says the block doesn't compile, on purpose;
   - the copy button copies the tab that's showing, as it shows it.
-- **Scrollbars and type.** Thin scrollbars in the theme's colors, without arrow buttons, and code without ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
-- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. The title shows how many of the page's examples CI tests and links to the file to edit. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
+- **Type.** Headings are in Source Serif 4, code in JetBrains Mono, and everything else in the system's own sans-serif, so a page loads two font files. Code has no ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
+- **Scrollbars.** Thin, in the theme's colors, without arrow buttons.
+- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests and links to the file to edit. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
 - **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview and the 404 page.
 
 The home page doesn't repeat anything the repo already says. It reads it at build time:
 
-- its example, the C it compiles to and the error are the first ones in [`docs/reference/parallel.md`](../docs/reference/parallel.md) ([`src/examples.mjs`](src/examples.mjs));
+- its example, the C it compiles to and the error are the first ones in [`docs/reference/parallel.md`](../docs/reference/parallel.md) ([`src/examples.mjs`](src/examples.mjs)). The error is the whole message the compiler gives, which the example's `// error:` comment holds;
 - what `stash` reads and answers is the first two text blocks in [`docs/guide/getting-started.md`](../docs/guide/getting-started.md), and the guide's steps are its page list;
 - the benchmark chart and every number on the page come from the README's [Performance](../README.md#performance) section ([`src/numbers.mjs`](src/numbers.mjs)).
 
 So when a benchmark run updates the README, the next build shows the new numbers, and if the README's tables change shape the build fails rather than show something wrong.
-
-## The mockup
-
-[`mockup.html`](mockup.html) is the agreed look, in one file with no build: the home page, a reference page and the 404 page. Open it in a browser. The bar at the bottom switches between the pages and between light and dark. The real site is built to match it, and then it goes.
 
 ## The crystal
 
@@ -78,12 +75,12 @@ The site's art is the crystal from the README's banner, dithered: ink dots by At
 - `calx-social.png`, the card link previews show, 1200 by 630: the site's `og:image`
 - `calx-tones.jpg`, the photo's darkness and warmth, which the site dithers live in the browser with the script's own steps
 
-Dithering live means the dots are whole screen pixels at any size and screen density, so they stay sharp, and the crystal can grow in when it comes into view. The mockup carries `calx-tones.jpg` as a data URL, so it works when opened from a file. After running `banner.py`, replace `TONES` in the mockup with the new file's data URL.
+Dithering live means the dots are whole screen pixels at any size and screen density, so they stay sharp, and the crystal can grow in when it comes into view.
 
 How the site uses it:
 
 - **Accents only.** The crystal is in the home page's hero, the "Built with Calx" band and the 404 page. It never sits behind docs text, code or charts.
-- **Quiet around text.** The dither fades out where text or the logo sits, and the logo has a margin of paper so no dot touches it.
+- **Quiet around text.** The dither fades out around text. In the hero it grows only to the right of the copy and below it, and on a narrow screen, where there's no room beside the copy, above it.
 - **Whole pixels.** Dots are drawn at whole screen pixels, never as a scaled image.
 - **Two colors for anything else.** Other illustrations are dithers in ink and amber, on the same paper.
 - **Still when asked.** With reduced motion on, the crystal appears without growing in. Switching the theme only repaints it.

@@ -5,14 +5,14 @@ description: Integer arithmetic in Calx matches Java's bit for bit - overflow, d
 
 # Integers
 
-Calx integers behave exactly as Java's, so Calcite computes what vanilla Minecraft computes. Each rule here says what Calx does and how the emitted C does it, since every one of them is undefined or implementation-defined in C.
+Calx integers behave exactly as Java's, so code ported from Java computes what it computed there. Each rule here says what Calx does and how the emitted C does it, since every one of them is undefined or implementation-defined in C.
 
 | Rule | Calx | Emitted C |
 | --- | --- | --- |
 | Overflow | `+`, `-`, `*` and unary `-` wrap (two's complement) for every integer type, as in Java | Arithmetic on the unsigned type of the same width, then conversion back. Also built with `-fwrapv` |
 | Shifts | `<<`, `>>` and `>>>` work on `i32`, `i64`, `u32` and `u64`. A variable count is masked to 31 or 63, as in Java. `>>` is arithmetic on signed types, and `>>>` is logical | `x << (n & 31)` |
 | `MIN / -1` | Gives `MIN`. `MIN % -1` gives `0` | A branch on `-1` before dividing, which traps on x86 otherwise |
-| Division by zero | **Panics**, for `/` and `%` on every integer type (D55). Java throws `ArithmeticException`, which vanilla never catches, so the outcome is the same | A branch on zero, then the runtime's panic |
+| Division by zero | **Panics**, for `/` and `%` on every integer type (D55). Java throws `ArithmeticException`, which ends the program where nothing catches it, as a panic does | A branch on zero, then the runtime's panic |
 | Rounding | Division truncates toward zero, and the remainder takes the dividend's sign. `floor_div` and `floor_mod` are Java's `Math.floorDiv` and `Math.floorMod` | `/` and `%` after the checks |
 
 ```calx

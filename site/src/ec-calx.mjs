@@ -1,7 +1,8 @@
-// The docs' code blocks as the mockup has them: a bar over each one with what it is, a badge for
-// the examples CI tests, and a copy button. A tested Calx example gets a tab for what it prints,
-// from its "// out:" comments, and one that must fail to compile shows its error under the line
-// instead of as a comment at its end (tests/run.py, D41). The docs files stay as they are.
+// The docs' code blocks on the site: a bar over each one with what it is, a badge for the examples
+// CI tests, and a copy button. A tested Calx example gets a tab for what it prints, from its
+// "// out:" comments, which come out of the code, and one that must fail to compile shows its error
+// under the line instead of as a comment at its end (tests/run.py, D41). The docs files stay as
+// they are.
 import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { definePlugin } from '@astrojs/starlight/expressive-code';
@@ -44,15 +45,22 @@ export function calxBlocks() {
 				const errors = new Map();
 				const output = [];
 				if (tested) {
+					// What a line prints moves to the Output tab: a line that's only an `// out:` comment
+					// goes, and a comment at the end of a line comes off it.
+					const gone = [];
 					codeBlock.getLines().forEach((line, i) => {
 						const error = line.text.match(/^(.*?)\s*\/\/ error: ?(.*)$/);
 						if (error) {
-							errors.set(i, error[2]);
+							errors.set(i - gone.length, error[2]);
 							line.editText(error[1].length, undefined, '');
 						}
-						const out = line.text.match(/\/\/ out: ?(.*)$/);
-						if (out) output.push(out[1]);
+						const out = line.text.match(/^(.*?)\s*\/\/ out: ?(.*)$/);
+						if (!out) return;
+						output.push(out[2]);
+						if (out[1].trim()) line.editText(out[1].length, undefined, '');
+						else gone.push(i);
 					});
+					if (gone.length) codeBlock.deleteLines(gone);
 				}
 				facts.set(codeBlock, { tested, errors, output });
 			},

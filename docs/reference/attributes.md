@@ -5,7 +5,7 @@ description: Attributes a library defines, as Calx functions the compiler runs w
 
 # Attributes
 
-An attribute is `@name` or `@name(...)` before a declaration. The compiler knows three itself: [`@track_caller`](printing.md#panics-that-name-the-caller), [`@export`](libraries.md#building-a-library) and `@attribute`. Any other comes from a library, and is a Calx function that the compiler runs while it compiles (D124). The function reads the declaration it's on and gives back code to add beside it. For example, Calcite's `@packet` writes a packet's reader and writer from its fields.
+An attribute is `@name` or `@name(...)` before a declaration. The compiler knows three itself: [`@track_caller`](printing.md#panics-that-name-the-caller), [`@export`](libraries.md#building-a-library) and `@attribute`. Any other comes from a library, and is a Calx function that the compiler runs while it compiles (D124). The function reads the declaration it's on and gives back code to add beside it. For example, a network library's `@packet` can write a packet's reader and writer from its fields.
 
 ```calx
 // file: main.calx

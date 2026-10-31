@@ -61,7 +61,7 @@ fn main() {
 }
 ```
 
-Spawning an actor is putting it in the collection the `parallel for` goes over, and its id is whatever the program gives it. Calcite's global actor is 0 and its regions count up from 1, in an order that's a function of the world (D22).
+Spawning an actor is putting it in the collection the `parallel for` goes over, and its id is whatever the program gives it. A game server might make its global actor 0 and number its regions from 1, in an order that's a function of the world, so the delivery order is too (D22).
 
 ## Items
 
@@ -104,6 +104,6 @@ A round ends when `next` returns `none`, so the next tick's barrier can start ag
 
 ## Why there's no `actor` keyword
 
-Early designs had `actor struct` and a `send dest msg` statement that appended to the current actor's outbox. D49 made `parallel for` over owned values the only parallelism, and an outbox the actor holds as a field does the same work without hidden state. A function that sends takes what it sends from, and the capture check keeps every outbox to its own iteration. So `actor` and `send` are ordinary names (D115).
+Early designs had `actor struct` and a `send dest msg` statement that appended to the current actor's outbox. Once `parallel for` over owned values became the only parallelism (D49), an outbox the actor holds as a field did the same work without hidden state. A function that sends takes what it sends from, and the capture check keeps every outbox to its own iteration. So `actor` and `send` are ordinary names (D115).
 
 `std.mail` is written in Calx: [std/mail.calx](../../std/mail.calx). Each type is a [`Deque`](../reference/deques.md) inside, so sending, collecting, delivering and taking are each a push or a pop.

@@ -9,7 +9,7 @@ GET and POST over HTTP and HTTPS. An online-mode server uses it to ask Mojang's 
 
 Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, and libcurl on Linux.
 
-Each request runs on a thread of its own. `get` and `post` return at once, `done` says when the request has finished, and `wait` takes the response. A server's loop asks `done` each tick and goes on with its work until then, as vanilla's login waits on an authenticator thread.
+Each request runs on a thread of its own. `get` and `post` return at once, `done` says when the request has finished, and `wait` takes the response. A server's loop asks `done` each tick and goes on with its work until then, as a game server's login might wait on an authentication service.
 
 ```calx
 import std.env.{args}
@@ -67,7 +67,7 @@ Both clients are set up to send the same request:
 
 - HTTP/1.1, with a `User-Agent` of `Calx` unless a header gives another.
 - No `Accept` or `Accept-Encoding` header unless the caller gives one, so bodies come back as they are, not compressed.
-- No proxy. Vanilla's dedicated server uses none either.
+- No proxy.
 - Redirects are followed up to 10 times, but never from HTTPS to HTTP.
 - The fragment, after `#`, isn't sent, as Java and browsers don't send it.
 
