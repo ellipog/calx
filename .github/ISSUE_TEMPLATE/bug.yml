@@ -1,0 +1,29 @@
+# The roadmap page's issue form opens this with its fields filled in (site/src/pages/roadmap.astro).
+# Its field ids are the names of the form's fields there, so keep the two the same.
+name: Bug
+description: The compiler, the standard library or the calx command does something wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what it did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: code
+    attributes:
+      label: Code that shows it
+      description: The smallest program you can find that does it, and the compiler's output.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you built the compiler from, from `git rev-parse --short HEAD`.
+  - type: input
+    id: os
+    attributes:
+      label: System
+      placeholder: Windows 11, Ubuntu 24.04

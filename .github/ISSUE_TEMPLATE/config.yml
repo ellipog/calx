@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Suggest an idea
+    url: https://calxlang.com/roadmap/#add
+    about: Ideas go on the roadmap, where anyone can vote for them.

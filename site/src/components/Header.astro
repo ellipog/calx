@@ -11,6 +11,7 @@ const NAV = [
 	{ label: 'Reference', href: '/docs/#reference', section: '/reference/' },
 	{ label: 'Std', href: '/docs/#standard-library', section: '/std/' },
 	{ label: 'Performance', href: '/benchmarks/', section: '/benchmarks/' },
+	{ label: 'Roadmap', href: '/roadmap/', section: '/roadmap/' },
 ];
 ---
 
@@ -87,6 +88,7 @@ const NAV = [
 	}
 	.find {
 		flex: 1;
+		min-width: 0;
 		display: flex;
 		justify-content: flex-end;
 	}
@@ -185,6 +187,21 @@ const NAV = [
 		background: var(--sunk);
 	}
 
+	/* Just wider than the menu: the links close up, and the search box gives up its shortcut and
+	   whatever else it must to fit. */
+	@media (max-width: 1100px) {
+		.nav a {
+			padding: 9px 9px;
+		}
+		.find :global(button[data-open-modal] > kbd) {
+			display: none;
+		}
+		.find :global(button[data-open-modal] > span) {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+	}
 	@media (max-width: 900px) {
 		.nav,
 		.toplink {

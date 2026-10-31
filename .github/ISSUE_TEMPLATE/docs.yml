@@ -1,0 +1,20 @@
+# The roadmap page's issue form, and each docs page's "Report a problem", open this with its fields
+# filled in (site/src/pages/roadmap.astro). Keep its field ids the same as the names there.
+name: Docs
+description: A page is wrong, unclear or missing something.
+labels: [documentation]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      placeholder: https://calxlang.com/reference/...
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong
+      description: What it says, and what it should say.
+    validations:
+      required: true

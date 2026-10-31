@@ -49,6 +49,9 @@ const crumbs = section && {
 	<a href={editUrl(route.entry)}>
 		<svg class="i" aria-hidden="true"><use href="#i-edit" /></svg>Edit this page
 	</a>
+	<a href={`/roadmap/?report=docs&page=${encodeURIComponent(Astro.url.pathname)}#add`}>
+		<svg class="i" aria-hidden="true"><use href="#i-issue" /></svg>Report a problem
+	</a>
 </div>
 {
 	// The header's Performance link comes here, so the page opens with the results, as the README's

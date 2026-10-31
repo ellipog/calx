@@ -1,0 +1,18 @@
+# The roadmap page's issue form opens this with its fields filled in (site/src/pages/roadmap.astro).
+# Keep its field ids the same as the names there.
+name: Feature request
+description: Something Calx should do, to discuss in detail. To gather votes, suggest it as an idea on the roadmap.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to do
+      description: What you're writing, and what Calx makes hard about it.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Code it would let you write
+      render: text

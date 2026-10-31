@@ -6,7 +6,7 @@ The docs stay in `docs/`, as plain Markdown that reads fine on GitHub. The site 
 
 A push that only changes this folder skips the compiler's CI. A change to `docs/` still runs it, because every example in the docs is a test (D41).
 
-The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62), reworked after a critical read on [CLX-63](https://acta.aaenz.no/aaen-studios/clx#CLX-63), and polished on [CLX-67](https://acta.aaenz.no/aaen-studios/clx#CLX-67).
+The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62), reworked after a critical read on [CLX-63](https://acta.aaenz.no/aaen-studios/clx#CLX-63), polished on [CLX-67](https://acta.aaenz.no/aaen-studios/clx#CLX-67), and given its roadmap on [CLX-68](https://acta.aaenz.no/aaen-studios/clx#CLX-68).
 
 ## Running it
 
@@ -28,6 +28,8 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site at https://calxlang.com. The project's `vercel.app` address serves the same pages, and their canonical links send search engines to calxlang.com. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
 
 [`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, so each page has one address.
+
+The project has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap's key ([The roadmap](#the-roadmap)). Without it the site still builds, and the roadmap is read only.
 
 ## Search engines
 
@@ -56,8 +58,8 @@ It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build
   - the copy button copies the tab that's showing, as it shows it.
 - **Type.** Headings are in Source Serif 4, code in JetBrains Mono, and everything else in the system's own sans-serif, so a page loads two font files. Code has no ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
 - **Scrollbars.** Thin, in the theme's colors, without arrow buttons.
-- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests and links to the file to edit, and on the benchmark page, where the header's Performance link goes, it's followed by the home page's results chart, so that page opens with the numbers and then says how they're made. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
-- **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview and the 404 page.
+- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests, links to the file to edit, and links to the roadmap's issue form with the page filled in, and on the benchmark page, where the header's Performance link goes, it's followed by the home page's results chart, so that page opens with the numbers and then says how they're made. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
+- **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview, the roadmap and the 404 page. `docs/roadmap.md` is in the docs' page list but isn't a Starlight page: the roadmap page renders its summary under the board, and the sidebar links to it.
 
 The home page doesn't repeat anything the repo already says. It reads it at build time:
 
@@ -67,6 +69,26 @@ The home page doesn't repeat anything the repo already says. It reads it at buil
 - the benchmark chart and every number on the page come from the README's [Performance](../README.md#performance) section ([`src/numbers.mjs`](src/numbers.mjs)).
 
 So when a benchmark run updates the README, the next build shows the new numbers, and if the README's tables change shape the build fails rather than show something wrong.
+
+## The roadmap
+
+[`/roadmap/`](src/pages/roadmap.astro) is the Calx board on [Acta](https://acta.aaenz.no), as its public roadmap shows it: the tasks marked public, in three stages, Planned, In progress and Shipped. Under the board are the ideas people have sent, a form to send one or to report an issue, and `docs/roadmap.md`'s summary, by feature. Which tasks are public, the stages' names, and whether the board takes votes and ideas are set in Acta, on the board's public roadmap page.
+
+Where it reads the board ([`src/roadmap/acta.mjs`](src/roadmap/acta.mjs)):
+
+- **The build** reads Acta's keyless feed, `/api/public/aaen-studios/clx`, and renders the board as it is, so the page works without JavaScript and search engines read it. If Acta can't be reached, the build still finishes, and the page loads the board in the browser.
+- **The browser** ([`src/scripts/roadmap.js`](src/scripts/roadmap.js)) reads it again when the page opens, and every minute while it's in view. With a roadmap key it reads Acta's roadmap API, `/api/roadmap/v1`, as this visitor, so it knows what they voted for, and they can vote and send ideas. Without one, or if the key is refused, it reads the feed, and the board is read only.
+
+The key is `PUBLIC_ACTA_ROADMAP_KEY`, set in Vercel's project settings, or in `site/.env` to try it locally. It's made in Acta, under the board's public roadmap → Customize → API, and it's publishable: it reaches only what the public page shows, so it's in the page for anyone to read. Acta lets it work only from the sites listed with it, `https://calxlang.com` and, for `npm run dev`, `http://localhost:4321`. Votes and ideas are counted per visitor, a random id the browser keeps in localStorage (`calx-roadmap-visitor`); Acta keeps only a hash of it with the board's id. The ideas a visitor sent are kept there too (`calx-roadmap-mine`), to mark them.
+
+What it does:
+
+- **The board.** Each stage is a column, ten cards long until "Show all", and one at a time on a phone, picked with tabs. Search matches a task's id, title and description; sort is the board's order, most votes or newest; both stay in the address (`?q=`, `?sort=`). Press `/` to search.
+- **A task.** A card opens the task in a dialog with its description, rendered from Markdown by [`src/roadmap/render.mjs`](src/roadmap/render.mjs), which the build and the browser share, so a card looks the same either way. Everything from Acta is escaped, and only links to web pages and to this site are kept: a link to the docs on GitHub goes to the docs here, and a link to another task on the board opens it here if it's public. Each task has an address, `/roadmap/#CLX-12`, and Back closes it.
+- **Votes**, on any task not shipped and on ideas, show at once and are taken back if Acta turns them down.
+- **Ideas** go to Acta, and so does every vote. As someone types a title, the page lists tasks and ideas that look the same, so a vote can go to one that's already there.
+- **Issues** go to GitHub. The form is a GitHub issue form, [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE): the page opens `issues/new` with the template and its fields filled in from what was typed, and the reader checks it and submits it there. A field's `name` here is its `id` in the template, so the two must stay the same. An address that would be longer than GitHub takes leaves out its longest field and puts it on the clipboard. Each docs page's "Report a problem" opens this form as a docs issue with the page filled in (`?report=docs&page=/spec/`).
+- **Powered by Acta**, with Acta's mark, under the board.
 
 ## The crystal
 

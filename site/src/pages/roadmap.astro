@@ -1,0 +1,333 @@
+---
+// /roadmap/: the board Calx is built from, read from Acta, where anyone can vote, suggest ideas and
+// report issues. The build renders the board as it is then, so the page reads without JavaScript
+// and search engines see it; in the browser, src/scripts/roadmap.js keeps it live. Under the board
+// is docs/roadmap.md's summary, by feature, which Starlight doesn't render (src/content.config.ts).
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import Base from '../layouts/Base.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { siteUrl, withoutDecisions } from '../markdown.mjs';
+import { DOCS } from '../paths.mjs';
+import { ACTA, ACTA_PAGE, GITHUB_ISSUES, STAGES, readApi, readFeed } from '../roadmap/acta.mjs';
+import { card, day, esc, ideaItem, markdown } from '../roadmap/render.mjs';
+import '../styles/roadmap.css';
+
+// A roadmap key is publishable: it reaches only what the public page shows, so it sits in the page.
+const KEY = import.meta.env.PUBLIC_ACTA_ROADMAP_KEY || '';
+
+// The board as it is now. If Acta can't be reached, the page is still built, and loads the board in
+// the browser instead, so an outage there doesn't stop the docs from deploying.
+let data = null;
+try {
+	data = KEY ? await readApi(KEY).catch(() => readFeed()) : await readFeed();
+} catch (e) {
+	console.warn(`[roadmap] The board couldn't be read from Acta, so the page loads it in the browser: ${e.message}`);
+}
+const tasks = data?.tasks ?? [];
+const ideas = data?.ideas ?? [];
+const stages = data?.page.stages ?? { planned: 'Planned', progress: 'In progress', shipped: 'Shipped' };
+const SUB = {
+	planned: 'Decided or designed, and not started.',
+	progress: 'Being built, or built and waiting for review.',
+	shipped: 'Done, newest first.',
+};
+const ORDER = { in_progress: 0, review: 1 };
+const byStage = Object.fromEntries(
+	STAGES.map((s) => {
+		const list = tasks.map((t, i) => ({ t, i })).filter((x) => x.t.stage === s);
+		if (s === 'progress') list.sort((a, b) => (ORDER[a.t.status] ?? 2) - (ORDER[b.t.status] ?? 2) || a.i - b.i);
+		if (s === 'shipped') list.sort((a, b) => (b.t.shipped ?? '').localeCompare(a.t.shipped ?? '') || a.i - b.i);
+		return [s, list.map((x) => x.t)];
+	})
+);
+// Long columns show this many until "Show all" (the script does the same).
+const FIRST = 10;
+const ctx = { canVote: false, stages, ids: new Set(tasks.map((t) => t.id)) };
+const ideasSorted = [...ideas].sort((a, b) => (b.votes ?? 0) - (a.votes ?? 0));
+
+// docs/roadmap.md's sections, each a column. Its opening paragraphs are for readers on GitHub and
+// say what this page's own lead says.
+const file = fileURLToPath(new URL('roadmap.md', DOCS));
+const doc = withoutDecisions(readFileSync(file, 'utf8').replace(/\r\n/g, '\n'));
+const summary = doc
+	.split(/^## /m)
+	.slice(1)
+	.map((part) => {
+		const [title, ...rest] = part.split('\n');
+		return { title: title.trim(), html: markdown(rest.join('\n'), { href: (u) => siteUrl(u, file), shift: 2 }) };
+	});
+if (summary.length < 2) throw new Error('docs/roadmap.md has no "## " sections to sum the roadmap up with');
+
+const asOf = data ? day(data.at) : '';
+const json = JSON.stringify({ data, key: KEY ? true : false }).replace(/</g, '\\u003c');
+---
+
+<Base
+	title="Roadmap | Calx"
+	description="What's planned for Calx, what's being built and what's shipped, read live from the board it's built from. Vote for what you want sooner, suggest an idea or report an issue."
+>
+	<main class="rm" data-roadmap>
+		<section class="rm-hero" data-pagefind-body>
+			<div class="rm-wrap">
+				<h1>Roadmap</h1>
+				<p class="rm-lead">
+					Calx is pre-release, and this is the board it's built from, as it is now: what's planned, what's being built and
+					what's shipped. Vote for what you'd like sooner, suggest an idea, or report a problem.
+				</p>
+				<div class="rm-hero-row" data-pagefind-ignore>
+					<dl class="rm-stats">
+						{
+							STAGES.map((s) => (
+								<div>
+									<dt>{stages[s]}</dt>
+									<dd data-total={s}>{byStage[s].length}</dd>
+								</div>
+							))
+						}
+						<div>
+							<dt>Ideas</dt>
+							<dd data-total="ideas">{ideas.length}</dd>
+						</div>
+					</dl>
+					<div class="rm-actions">
+						<a class="btn primary" href="#add" data-go="idea">
+							<svg class="i" aria-hidden="true"><use href="#i-idea"></use></svg>Suggest an idea
+						</a>
+						<a class="btn" href="#add" data-go="issue">
+							<svg class="i" aria-hidden="true"><use href="#i-issue"></use></svg>Report an issue
+						</a>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="rm-board" aria-labelledby="rm-board-h" data-pagefind-ignore>
+			<div class="rm-wrap">
+				<h2 id="rm-board-h" class="sr-only">The board</h2>
+				<p class="rm-announce" hidden></p>
+				<div class="rm-toolbar">
+					<label class="rm-search">
+						<svg class="i" aria-hidden="true"><use href="#i-search"></use></svg>
+						<span class="sr-only">Search the roadmap</span>
+						<input type="search" placeholder={`Search ${tasks.length || ''} tasks`.replace('  ', ' ')} autocomplete="off" spellcheck="false" />
+						<kbd aria-hidden="true">/</kbd>
+					</label>
+					<label class="rm-sort">
+						<span>Sort</span>
+						<select>
+							<option value="position">Board order</option>
+							<option value="votes">Most votes</option>
+							<option value="newest">Newest</option>
+						</select>
+					</label>
+					<span class="rm-status" role="status" data-state={data ? 'built' : 'none'}>
+						<i aria-hidden="true"></i><span>{data ? `As of ${asOf}` : 'Loading the board'}</span>
+					</span>
+				</div>
+				<p class="rm-found" role="status" hidden></p>
+				<div class="rm-tabs" role="tablist" aria-label="Stages">
+					{
+						STAGES.map((s, i) => (
+							<button type="button" role="tab" id={`rm-tab-${s}`} aria-controls={`rm-col-${s}`} aria-selected={i === 1 ? 'true' : 'false'} data-stage={s}>
+								{stages[s]} <span data-count={s}>{byStage[s].length}</span>
+							</button>
+						))
+					}
+				</div>
+				<div class="rm-cols" data-active="progress">
+					{
+						STAGES.map((s) => (
+							<section class="rm-col" id={`rm-col-${s}`} data-stage={s} aria-labelledby={`rm-h-${s}`}>
+								<header>
+									<h3 id={`rm-h-${s}`}>{stages[s]}</h3>
+									<span class="rm-count" data-count={s}>{byStage[s].length}</span>
+								</header>
+								<p class="rm-sub">{SUB[s]}</p>
+								<ol class="rm-list" set:html={byStage[s].slice(0, FIRST).map((t) => card(t, ctx)).join('')} />
+								<button type="button" class="rm-more" hidden={byStage[s].length <= FIRST}>
+									Show all {byStage[s].length}
+								</button>
+								<p class="rm-none" hidden={byStage[s].length > 0}>{data ? 'Nothing here yet.' : ''}</p>
+							</section>
+						))
+					}
+				</div>
+				<div class="rm-foot">
+					<span>
+						Each card is a task on the Calx board. <a href={ACTA_PAGE} rel="noopener">The same board on Acta</a>
+					</span>
+					<a class="rm-acta" href={ACTA} rel="noopener">
+						Powered by <svg class="rm-acta-mark" aria-hidden="true"><use href="#acta-mark"></use></svg><b>Acta</b>
+					</a>
+				</div>
+			</div>
+		</section>
+
+		<section class="rm-add" id="add" aria-labelledby="rm-add-h" data-pagefind-ignore>
+			<div class="rm-wrap rm-add-grid">
+				<div class="rm-forms">
+					<h2 class="h" id="rm-add-h">Ideas and issues</h2>
+					<p class="intro">
+						An idea is something Calx should do, and anyone can vote for it. An issue is something that's wrong, in the
+						compiler, the standard library or the docs. Issues go to GitHub, where you can follow the replies.
+					</p>
+					<div class="rm-switch" role="tablist" aria-label="Ideas and issues">
+						<button type="button" role="tab" id="rm-tab-idea" aria-controls="rm-idea" aria-selected="true" data-tab="idea">
+							<svg class="i" aria-hidden="true"><use href="#i-idea"></use></svg>Suggest an idea
+						</button>
+						<button type="button" role="tab" id="rm-tab-issue" aria-controls="rm-issue" aria-selected="false" data-tab="issue">
+							<svg class="i" aria-hidden="true"><use href="#i-issue"></use></svg>Report an issue
+						</button>
+					</div>
+
+					<div class="rm-panel" id="rm-idea" role="tabpanel" aria-labelledby="rm-tab-idea">
+						<form class="rm-form" data-form="idea" hidden>
+							<label class="rm-field">
+								<span>Your idea</span>
+								<input name="title" maxlength="200" required autocomplete="off" placeholder="What should Calx do?" />
+							</label>
+							<div class="rm-similar" hidden aria-live="polite"></div>
+							<label class="rm-field">
+								<span>Details <small>optional</small></span>
+								<textarea name="details" maxlength="2000" rows="5" placeholder="What would it let you write, or what gets in your way now?"></textarea>
+							</label>
+							<div class="rm-form-foot">
+								<button class="btn primary" type="submit">Send idea</button>
+								<span class="rm-form-note">It's listed here straight away, with your vote on it.</span>
+							</div>
+							<p class="rm-form-msg" role="status" hidden></p>
+						</form>
+						<div class="rm-offline" data-offline="idea">
+							<p>For now, ideas go to the board's page on Acta, where anyone can vote for them too.</p>
+							<a class="more" href={ACTA_PAGE} rel="noopener">Suggest an idea on Acta</a>
+						</div>
+					</div>
+
+					<div class="rm-panel" id="rm-issue" role="tabpanel" aria-labelledby="rm-tab-issue">
+						<form class="rm-form rm-issue" data-form="issue" action={`${GITHUB_ISSUES}/new`} method="get" target="_blank">
+							<fieldset class="rm-kinds">
+								<legend>What kind of problem?</legend>
+								<label>
+									<input type="radio" name="template" value="bug.yml" checked />
+									<b>Bug</b><span>The compiler, the standard library or the calx command does something wrong.</span>
+								</label>
+								<label>
+									<input type="radio" name="template" value="docs.yml" />
+									<b>Docs</b><span>A page is wrong, unclear or missing something.</span>
+								</label>
+								<label>
+									<input type="radio" name="template" value="feature.yml" />
+									<b>Feature request</b><span>Something to discuss in detail. To gather votes, suggest an idea.</span>
+								</label>
+							</fieldset>
+							<label class="rm-field">
+								<span>Title</span>
+								<input name="title" maxlength="200" required autocomplete="off" placeholder="One line that says what's wrong" />
+							</label>
+							<div class="rm-similar" hidden aria-live="polite"></div>
+							<fieldset class="rm-kind" data-kind="bug.yml">
+								<legend class="sr-only">Bug</legend>
+								<label class="rm-field">
+									<span>What happened</span>
+									<textarea name="what" rows="4" maxlength="4000" placeholder="What you ran, what it did, and what you expected instead"></textarea>
+								</label>
+								<label class="rm-field">
+									<span>Code that shows it <small>optional</small></span>
+									<textarea class="mono" name="code" rows="6" maxlength="6000" spellcheck="false" placeholder="The smallest program you can find that does it"></textarea>
+								</label>
+								<div class="rm-pair">
+									<label class="rm-field">
+										<span>Commit <small>optional</small></span>
+										<input name="version" maxlength="120" autocomplete="off" spellcheck="false" placeholder="git rev-parse --short HEAD" />
+									</label>
+									<label class="rm-field">
+										<span>System <small>optional</small></span>
+										<input name="os" maxlength="120" placeholder="Windows 11, Ubuntu 24.04" />
+									</label>
+								</div>
+							</fieldset>
+							<fieldset class="rm-kind" data-kind="docs.yml">
+								<legend class="sr-only">Docs</legend>
+								<label class="rm-field">
+									<span>Page</span>
+									<input name="page" maxlength="300" autocomplete="off" placeholder="https://calxlang.com/reference/..." />
+								</label>
+								<label class="rm-field">
+									<span>What's wrong</span>
+									<textarea name="problem" rows="5" maxlength="4000" placeholder="What it says, and what it should say"></textarea>
+								</label>
+							</fieldset>
+							<fieldset class="rm-kind" data-kind="feature.yml">
+								<legend class="sr-only">Feature request</legend>
+								<label class="rm-field">
+									<span>What you want to do</span>
+									<textarea name="want" rows="4" maxlength="4000" placeholder="What you're writing, and what Calx makes hard about it"></textarea>
+								</label>
+								<label class="rm-field">
+									<span>Code it would let you write <small>optional</small></span>
+									<textarea class="mono" name="example" rows="5" maxlength="6000" spellcheck="false"></textarea>
+								</label>
+							</fieldset>
+							<div class="rm-form-foot">
+								<button class="btn primary" type="submit">
+									Continue on GitHub <svg class="i" aria-hidden="true"><use href="#i-out"></use></svg>
+								</button>
+								<span class="rm-form-note">
+									You check it and send it on GitHub, which needs an account. Without one, suggest it as an idea.
+									<a href={GITHUB_ISSUES} rel="noopener">Open issues</a>
+								</span>
+							</div>
+							<p class="rm-form-msg" role="status" hidden></p>
+						</form>
+					</div>
+				</div>
+
+				<aside class="rm-ideas" aria-labelledby="rm-ideas-h">
+					<header>
+						<h3 id="rm-ideas-h">Ideas <span class="rm-count" data-count="ideas">{ideas.length}</span></h3>
+						<div class="rm-seg" role="group" aria-label="Sort ideas">
+							<button type="button" aria-pressed="true" data-sort="top">Top</button>
+							<button type="button" aria-pressed="false" data-sort="new">New</button>
+						</div>
+					</header>
+					<ul class="rm-idea-list" set:html={ideasSorted.map((i) => ideaItem(i, ctx)).join('')} />
+					<p class="rm-none" hidden={ideas.length > 0}>No ideas yet.</p>
+					<p class="rm-private" hidden>Ideas are read before they're listed here.</p>
+				</aside>
+			</div>
+		</section>
+
+		<section class="rm-summary" aria-labelledby="rm-sum-h" data-pagefind-body>
+			<div class="rm-wrap">
+				<h2 class="h" id="rm-sum-h">Where Calx is</h2>
+				<p class="intro">The tasks above, summed up by feature.</p>
+				<div class="rm-sum-grid">
+					{
+						summary.map((s) => (
+							<div class="rm-sum">
+								<h3>{s.title}</h3>
+								<Fragment set:html={s.html} />
+							</div>
+						))
+					}
+				</div>
+			</div>
+		</section>
+
+		<dialog class="rm-dialog" aria-labelledby="rm-d-title">
+			<button type="button" class="rm-close" aria-label="Close">
+				<svg class="i" aria-hidden="true"><use href="#i-x"></use></svg>
+			</button>
+			<div class="rm-d-body"></div>
+		</dialog>
+		<div class="rm-toast" role="status" aria-live="polite" hidden></div>
+
+		<script type="application/json" id="rm-data" set:html={json} />
+		<SiteFooter />
+	</main>
+</Base>
+
+<script>
+	import '../scripts/roadmap.js';
+</script>

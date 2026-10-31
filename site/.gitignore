@@ -1,3 +1,5 @@
 # Astro's generated types, and the built site.
 .astro/
 dist/
+# The roadmap key, when it's set locally (README.md, The roadmap).
+.env
