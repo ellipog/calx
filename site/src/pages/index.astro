@@ -6,9 +6,8 @@ import CodeCard from '../components/CodeCard.astro';
 import PerfChart from '../components/PerfChart.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
-import { lineHtml } from '../markdown.mjs';
 import { errorOf, fences } from '../examples.mjs';
-import { buildTime, tickLoop } from '../numbers.mjs';
+import { buildTime } from '../numbers.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
 // and the example that must fail to compile.
@@ -24,15 +23,8 @@ if (!failing) throw new Error('docs/reference/parallel.md has no example marked 
 const [reads, answers] = fences('guide/getting-started.md').filter((f) => f.lang === 'text');
 const guide = docsIndex().find((s) => s.id === 'guide')!;
 
-const bench = tickLoop();
-const windows = bench.platforms[0];
-// Times on Windows, the first column.
-const check = buildTime('calx check');
-const size = check.label.match(/(\d+) modules \(([\d,]+) lines\)/);
-if (!size) throw new Error(`README.md's "${check.label}" row doesn't say how many modules and lines`);
+// Windows, the README's first column.
 const rebuild = buildTime('Debug rebuild').windows;
-const cold = buildTime('calx run of a small program').windows;
-const unchanged = buildTime('calx run of it again').windows;
 
 // For search engines: the title says what Calx is in the words people search with, and the site's
 // name is Calx rather than its domain (schema.org's WebSite, which Google reads for that name).
@@ -53,126 +45,67 @@ const site = {
 	<main class="home">
 		<section class="hero">
 			<canvas class="crystal" data-scene="hero" aria-hidden="true"></canvas>
-			<div class="hero-copy">
-				<div class="hero-text">
-					<h1 class="display">Fast, safe code that gives the same answer every time</h1>
-					<p class="lede">
-						Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math is
-						defined to the bit on every machine, and its parallel loops give the same result on one core or
-						twenty-four.
-					</p>
+			<div class="hero-in">
+				<h1 class="hero-logo">
+					<svg viewBox="0 12 399.761 92" fill="currentColor" role="img" aria-label="Calx"><use href="#logo-shapes"></use></svg>
+				</h1>
+				<div class="hero-under">
+					<p class="tagline">A fast, memory-safe language that gives the same answer every time.</p>
 					<div class="cta">
 						<a class="btn primary" href="/guide/install/">
 							Install Calx <svg class="i" aria-hidden="true"><use href="#i-arrow"></use></svg>
 						</a>
 						<a class="btn" href="/guide/getting-started/">Learn Calx</a>
 					</div>
-					<p class="fineprint">Pre-release: build it from source. Compiles to C, runs on Windows and Linux, MIT licensed.</p>
+					<p class="fineprint">Pre-release. Compiles to C, on Windows and Linux. MIT licensed.</p>
 				</div>
 			</div>
 		</section>
 
 		<section class="section">
-			<div class="split">
-				<div>
-					<h2 class="h">Parallel loops, checked while the program compiles</h2>
+			<div class="split par">
+				<div class="par-copy">
+					<h2 class="h">Parallel loops, checked while it compiles</h2>
 					<p class="intro">
-						<code>parallel for</code> runs a loop's iterations across a pool of threads. The checker makes sure no iteration
-						touches what another one changes, so the program prints the same thing on one thread or twenty-four.
+						<code>parallel for</code> spreads a loop over every core. No iteration may touch what another one changes, so the
+						result is the same on one thread or twenty-four.
 					</p>
-					<ul class="facts">
-						<li>The check is the ownership check, applied between iterations. It costs nothing at run time.</li>
-						<li>What iterations print comes out in their order, and a panic reports the first iteration that panicked.</li>
-						<li>
-							Calx compiles to C. The C tab shows what this loop becomes: a function per chunk, its pointers marked
-							<code>restrict</code>.
-						</li>
-					</ul>
-					<a class="more" href="/reference/parallel/">Read about parallel loops</a>
-				</div>
-				<div class="stack">
-					<CodeCard calx={example} c={exampleC} file="game.calx" />
 					<div class="note">Change something another iteration can see, and it won't compile:</div>
 					<pre class="term"><span class="path">main.calx:{failing.line}:{failing.column}:</span> <span class="e">error:</span> <span class="msg">{failing.message}</span>
 {'  ' + failing.text}
 {'  ' + ' '.repeat(failing.column - 1)}<span class="caret">{'^' + '~'.repeat(failing.token.length - 1)}</span>
 <span class="dim">1 error</span></pre>
+					<p class="link"><a class="more" href="/reference/parallel/">Parallel loops</a></p>
 				</div>
+				<div class="par-code"><CodeCard calx={example} c={exampleC} file="game.calx" /></div>
 			</div>
 		</section>
 
 		<section class="section">
-			<h2 class="h">What Calx promises, and where it's checked</h2>
-			<p class="intro">
-				Each of these links to the page that defines it, and the examples on those pages are compiled and run on every
-				push.
-			</p>
+			<h2 class="h">What else it promises</h2>
 			<div class="claims">
-				<div class="claim">
-					<h3>Faster than Rust, on our benchmark</h3>
-					<p>
-						The tick-loop benchmark runs the same algorithms in Calx and in Rust, and both must give the same checksum.
-						Calx takes about {bench.ratio}× Rust's time, with one thread or 24.
-					</p>
-					<div class="side">
-						<div class="proof"><b>{windows.calx1.toFixed(2)}</b> vs {windows.rust1.toFixed(2)} ms per tick</div>
-						<a class="more" href="#perf">The benchmark</a>
-					</div>
-				</div>
-				<div class="claim">
+				<a class="claim" href="/reference/integers/">
 					<h3>Deterministic math</h3>
-					<p>
-						Integers wrap, divide and shift, and floats compute and print, the same way on every platform. The rules match
-						Java's, so code ported from Java gives the same bits.
-					</p>
-					<div class="side">
-						<div class="proof"><code>-16 &gt;&gt;&gt; 28</code> is <b>15</b>, as in Java</div>
-						<a class="more" href="/reference/integers/">Integers and floats</a>
-					</div>
-				</div>
-				<div class="claim">
-					<h3>Memory-safe by default</h3>
-					<p>
-						Ownership is checked while the program compiles and costs nothing while it runs: no garbage collector, no
-						reference counts. Unchecked code is opt-in, inside <code>unsafe</code>.
-					</p>
-					<div class="side">
-						<div class="proof">0 GC pauses, by construction</div>
-						<a class="more" href="/reference/ownership/">Ownership</a>
-					</div>
-				</div>
-				<div class="claim">
+					<p><code>-16 &gt;&gt;&gt; 28</code> is 15 on every machine, as in Java.</p>
+				</a>
+				<a class="claim" href="/reference/ownership/">
+					<h3>Memory-safe, no GC</h3>
+					<p>Ownership is checked while it compiles, and costs nothing at run time.</p>
+				</a>
+				<a class="claim" href="/reference/strictness/">
 					<h3>Strict by default</h3>
-					<p>
-						No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake is an error that says
-						what to write instead.
-					</p>
-					<div class="side">
-						<div class="proof">every rule is an error, not a warning</div>
-						<a class="more" href="/reference/strictness/">Strictness</a>
-					</div>
-				</div>
-				<div class="claim">
+					<p>Every rule is an error that says what to write instead.</p>
+				</a>
+				<a class="claim" href="/reference/command/">
 					<h3>Fast to build</h3>
-					<p>
-						<code>calx check</code> reads {size[1]} modules, {size[2]} lines, in {check.windows}. A small program runs in {cold} from
-						an empty cache, and in {unchanged} when nothing changed.
-					</p>
-					<div class="side">
-						<div class="proof"><b>{rebuild.replace(/ ms$/, '')}</b> ms to rebuild after one change</div>
-						<a class="more" href="/reference/command/">The calx command</a>
-					</div>
-				</div>
+					<p>{rebuild} to rebuild after changing one module.</p>
+				</a>
 			</div>
 		</section>
 
 		<section class="section" id="perf">
-			<h2 class="h">Measured on every push</h2>
-			<p class="intro">
-				The tick-loop benchmark is a synthetic simulation, a world of packed block storage, entity physics in doubles, hash
-				maps and messages between regions, stepped one tick at a time. We wrote both versions, and CI runs them on every
-				push, on Windows and Linux. The raw results are in the repo.
-			</p>
+			<h2 class="h">Faster than Rust, on our benchmark</h2>
+			<p class="intro">The same simulation in both, with the same algorithms and the same checksum, run by CI on every push.</p>
 			<PerfChart />
 		</section>
 
@@ -180,10 +113,7 @@ const site = {
 			<div class="split learn">
 				<div>
 					<h2 class="h">Learn it by building one program</h2>
-					<p class="intro">
-						The guide builds <code>stash</code>, a small inventory program: it reads commands, keeps count of what's put away
-						and taken out, and says what went wrong when a command doesn't make sense. Each page adds to it.
-					</p>
+					<p class="intro">The guide builds <code>stash</code>, a small inventory program, a page at a time.</p>
 					<div class="io">
 						<div><div class="cap">It reads</div><pre>{reads.code}</pre></div>
 						<div><div class="cap">It answers</div><pre>{answers.code}</pre></div>
@@ -193,12 +123,7 @@ const site = {
 					{
 						guide.pages.map((p) => (
 							<li>
-								<a href={`/${p.slug}/`}>
-									<div>
-										<b>{p.title}</b>
-										<span set:html={lineHtml(p.about, { links: false })} />
-									</div>
-								</a>
+								<a href={`/${p.slug}/`}>{p.title}</a>
 							</li>
 						))
 					}
@@ -212,12 +137,9 @@ const site = {
 				<div class="text">
 					<h2 class="h">Built with Calx: Calcite</h2>
 					<p>
-						Calcite is a Minecraft Java Edition server in development, and the largest Calx program so far. Mojang's own
-						client joins it in online mode, walks around a flat world and chats, and its login matches the official
-						server's packet for packet. Chunk loading and saved worlds are being built now, and world generation, regions on
-						every core and plugins come after them.
+						A Minecraft Java Edition server in development, and the largest Calx program so far. Mojang's own client joins
+						it, walks around and chats.
 					</p>
-					<p>It aims to behave exactly as the official server does, and to run faster. Neither is measured yet.</p>
 					<p class="link"><a class="more" href="https://github.com/ellipog/calcite">Calcite on GitHub</a></p>
 				</div>
 			</div>

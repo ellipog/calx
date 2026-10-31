@@ -80,7 +80,8 @@ Dithering live means the dots are whole screen pixels at any size and screen den
 How the site uses it:
 
 - **Accents only.** The crystal is in the home page's hero, the "Built with Calx" band and the 404 page. It never sits behind docs text, code or charts.
-- **Quiet around text.** The dither fades out around text. In the hero it grows only to the right of the copy and below it, and on a narrow screen, where there's no room beside the copy, above it.
+- **The banner as the first screen.** The hero is the README's banner at the size of the screen: the logo in a clearing of the crystal, its own shape knocked out of the dots so they run up to its edges, and the page's one line and its two buttons under it. The home page keeps to a line or two per section, and the docs say the rest.
+- **Quiet around text.** The dither fades out around text, and around the logo in banner.py's ellipse.
 - **Whole pixels.** Dots are drawn at whole screen pixels, never as a scaled image.
 - **Two colors for anything else.** Other illustrations are dithers in ink and amber, on the same paper.
 - **Still when asked.** With reduced motion on, the crystal appears without growing in. Switching the theme only repaints it.
