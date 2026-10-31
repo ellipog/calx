@@ -11,8 +11,8 @@ import { calxDocs, GITHUB } from './src/markdown.mjs';
 const SITE = 'https://calxlang.com';
 
 export default defineConfig({
+	// The build goes to dist/, Astro's own place for it, where Vercel looks.
 	site: SITE,
-	outDir: '../build/site',
 	// The dev server shows the pages as they'll ship, without Astro's toolbar over them.
 	devToolbar: { enabled: false },
 	markdown: {

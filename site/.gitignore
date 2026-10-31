@@ -1,2 +1,3 @@
-# Astro's generated types; the build goes to build/site, which the repo already ignores.
+# Astro's generated types, and the built site.
 .astro/
+dist/

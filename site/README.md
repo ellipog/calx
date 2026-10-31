@@ -15,8 +15,8 @@ It needs Node 22.23 or later, as Astro does. From this folder:
 ```sh
 npm install
 npm run dev      # http://localhost:4321/, reloading as you edit the site or docs/
-npm run build    # the whole site, into build/site
-npm run preview  # serves build/site
+npm run build    # the whole site, into dist/
+npm run preview  # serves dist/
 ```
 
 Both start from an empty content cache (`--force`). Astro keeps the docs pages it rendered and renders a page again only when the page or the Astro config changes, so without it a change to how code blocks render, in `ec.config.mjs` or `src/ec-calx.mjs`, wouldn't show. Rendering every page again takes about a second.
@@ -25,7 +25,7 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 
 ## Publishing it
 
-[`.github/workflows/site.yml`](../.github/workflows/site.yml) builds the site on every push and pull request that touches something it's made from: this folder, `docs/`, the README, `assets/logo/` and the grammar. Deploying to GitHub Pages at calxlang.com is ready but off. It starts once Pages is set to deploy from GitHub Actions with calxlang.com as its domain, and the repository variable `SITE_DEPLOY` is `true`. Then every push to main that builds is published.
+Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
 
 ## How it's made
 
