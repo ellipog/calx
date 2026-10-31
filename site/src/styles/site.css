@@ -58,7 +58,9 @@ body {
 a {
 	color: inherit;
 }
-code {
+/* Code in a sentence. A code block's code is Expressive Code's, which keeps its rules in a cascade
+   layer, so this one would beat them if it reached that far. */
+:not(pre) > code {
 	font-family: var(--f-mono);
 	font-size: 0.86em;
 	background: var(--sunk);

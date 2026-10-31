@@ -2,6 +2,7 @@
 // extension's own TextMate grammar, in two themes made from the site's colors.
 import { readFileSync } from 'node:fs';
 import { defineEcConfig } from '@astrojs/starlight/expressive-code';
+import { calxBlocks } from './src/ec-calx.mjs';
 import { REPO } from './src/paths.mjs';
 
 const grammar = JSON.parse(readFileSync(new URL('tools/vscode/syntaxes/calx.tmLanguage.json', REPO), 'utf8'));
@@ -58,6 +59,12 @@ function theme(type) {
 export default defineEcConfig({
 	themes: [theme('dark'), theme('light')],
 	shiki: { langs: [{ ...grammar, name: 'calx' }] },
+	plugins: [calxBlocks()],
+	// A "// file: main.calx" line is part of a test of several modules (tests/run.py). Expressive
+	// Code would take it out of the code and make it the block's title.
+	frames: { extractFileNameFromCode: false },
+	// Code blocks scroll with the site's own scrollbars (src/styles/tokens.css).
+	useThemedScrollbars: false,
 	styleOverrides: {
 		borderRadius: '12px',
 		borderColor: 'var(--line)',

@@ -4,8 +4,8 @@
   "type": "module",
   "description": "The Calx website: the home page, and docs/ rendered with Starlight.",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
+    "dev": "astro dev --force",
+    "build": "astro build --force",
     "preview": "astro preview"
   },
   "dependencies": {

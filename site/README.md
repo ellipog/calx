@@ -19,15 +19,29 @@ npm run build    # the whole site, into build/site
 npm run preview  # serves build/site
 ```
 
+Both start from an empty content cache (`--force`). Astro keeps the docs pages it rendered and renders a page again only when the page or the Astro config changes, so without it a change to how code blocks render, in `ec.config.mjs` or `src/ec-calx.mjs`, wouldn't show. Rendering every page again takes about a second.
+
 Search works only in a build: Pagefind indexes the pages as `npm run build` writes them, so the dev server's search box finds nothing.
+
+## Publishing it
+
+[`.github/workflows/site.yml`](../.github/workflows/site.yml) builds the site on every push and pull request that touches something it's made from: this folder, `docs/`, the README, `assets/logo/` and the grammar. Deploying to GitHub Pages at calxlang.com is ready but off. It starts once Pages is set to deploy from GitHub Actions with calxlang.com as its domain, and the repository variable `SITE_DEPLOY` is `true`. Then every push to main that builds is published.
 
 ## How it's made
 
 It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build), the docs theme.
 
-- **Docs pages.** Starlight renders every page of `docs/` (`src/content.config.ts` points it there). [`src/markdown.mjs`](src/markdown.mjs) changes three things as it does: links to `.md` files become the pages' URLs, links to the rest of the repo go to GitHub, and the `# Title` heading goes, since the page shows the front matter's title.
+- **Docs pages.** Starlight renders every page of `docs/` (`src/content.config.ts` points it there). [`src/markdown.mjs`](src/markdown.mjs) changes four things as it does:
+  - links to `.md` files become the pages' URLs;
+  - links to the rest of the repo go to GitHub;
+  - the `# Title` heading goes, since the page shows the front matter's title;
+  - a decision the text cites, "(D21)", becomes a small link to its row in the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md).
 - **Page order.** [`src/docs-index.mjs`](src/docs-index.mjs) reads the page list in `docs/README.md`, for the sidebar and for the `/docs/` overview. Adding a page to that list adds it to the site.
-- **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)).
+- **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)). [`src/ec-calx.mjs`](src/ec-calx.mjs) gives each docs block the mockup's bar:
+  - a block `tests/run.py` tests has Calx and Output tabs, its `// out:` lines become the Output tab, and a "Tested" badge says CI runs it;
+  - a `// error:` line is marked, with the error under it, and the badge says the block doesn't compile, on purpose;
+  - the copy button copies the tab that's showing, as it shows it.
+- **Scrollbars and type.** Thin scrollbars in the theme's colors, without arrow buttons, and code without ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
 - **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. The title shows how many of the page's examples CI tests and links to the file to edit. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
 - **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview and the 404 page.
 

@@ -287,8 +287,16 @@ const panels = PANELS.map((p) => {
 		font: 500 13.5px var(--f-head);
 		color: var(--ink-2);
 	}
+	/* Five columns are wider than a phone, so the table scrolls on its own rather than the page. */
+	details {
+		min-width: 0;
+		max-width: 100%;
+	}
 	details table {
 		margin-top: 12px;
+		display: block;
+		max-width: 100%;
+		overflow-x: auto;
 	}
 	.tip {
 		position: fixed;

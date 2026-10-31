@@ -22,7 +22,6 @@ html {
 /* ---------- sidebar ---------- */
 .sidebar-pane {
 	border-inline-end: 1px solid var(--line);
-	scrollbar-width: thin;
 }
 .sidebar-content {
 	padding: 10px 16px 48px 22px;
@@ -122,6 +121,17 @@ html {
 .sl-markdown-content a:not(.sl-anchor-link):hover {
 	color: var(--amber-ink);
 }
+/* A decision the docs cite (src/markdown.mjs): its number, small, with a dotted line. */
+.sl-markdown-content a.dref {
+	font: 500 0.8em var(--f-mono);
+	color: var(--ink-3);
+	text-decoration: none;
+	border-bottom: 1px dotted var(--ink-3);
+}
+.sl-markdown-content a.dref:hover {
+	color: var(--amber-ink);
+	border-bottom-color: var(--amber);
+}
 .sl-markdown-content :not(pre) > code {
 	font-size: 0.86em;
 	background: var(--sunk);
@@ -131,6 +141,153 @@ html {
 }
 .sl-markdown-content :is(strong, b) {
 	color: var(--ink);
+}
+
+/* ---------- code blocks ----------
+   The bar src/ec-calx.mjs puts over each block: its tabs or language, the badge and the copy
+   button. The figure is the card, and the code inside it has no border of its own. */
+.expressive-code .frame.calx-frame {
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--code);
+	overflow: hidden;
+}
+.expressive-code .frame.calx-frame > pre {
+	border: 0;
+	border-radius: 0;
+	background: var(--code);
+}
+.expressive-code .frame.calx-frame > pre[hidden] {
+	display: none;
+}
+.calx-head {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	min-height: 41px;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--line);
+	background: var(--raised);
+}
+.calx-tabs {
+	display: flex;
+	gap: 2px;
+}
+.calx-tab {
+	font: 500 13px/1 var(--f-head);
+	padding: 8px 11px;
+	border-radius: 7px;
+	border: 0;
+	background: none;
+	color: var(--ink-3);
+	cursor: pointer;
+}
+.calx-tab:hover {
+	color: var(--ink);
+}
+.calx-tab[aria-selected='true'] {
+	background: var(--sunk);
+	color: var(--ink);
+	box-shadow: inset 0 0 0 1px var(--line);
+}
+.calx-lang {
+	font: 500 13px/1 var(--f-head);
+	color: var(--ink-3);
+	padding: 0 11px;
+}
+.calx-right {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.calx-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font: 500 12.5px/1 var(--f-head);
+	color: var(--ink-3);
+	padding: 6px 8px;
+	white-space: nowrap;
+}
+.calx-badge svg.i {
+	width: 15px;
+	height: 15px;
+}
+.calx-badge.fails {
+	color: var(--err);
+}
+.calx-copy {
+	border: 0;
+	background: none;
+	color: var(--ink-3);
+	cursor: pointer;
+	width: 30px;
+	height: 28px;
+	border-radius: 7px;
+	display: grid;
+	place-items: center;
+}
+.calx-copy:hover {
+	background: var(--sunk);
+	color: var(--ink);
+}
+.calx-copy svg.i {
+	grid-area: 1 / 1;
+	width: 17px;
+	height: 17px;
+}
+.calx-copy svg.i + svg.i,
+.calx-copy.done svg.i:first-child {
+	visibility: hidden;
+}
+.calx-copy.done svg.i + svg.i {
+	visibility: visible;
+	color: var(--amber-ink);
+}
+.expressive-code .ec-line.calx-err {
+	background: var(--err-wash);
+	box-shadow: inset 2px 0 0 var(--err);
+}
+.calx-callout {
+	margin: 2px 20px 6px;
+	padding: 7px 12px;
+	border-radius: 8px;
+	font: 500 12.5px/1.5 var(--f-body);
+	color: var(--err);
+	background: var(--err-wash);
+	white-space: normal;
+	width: fit-content;
+	max-width: calc(100% - 40px);
+}
+.sl-markdown-content .calx-callout code {
+	font: 0.95em var(--f-mono);
+	color: var(--ink);
+	background: none;
+	border: 0;
+	padding: 0;
+}
+.sl-markdown-content .calx-callout b {
+	font-family: var(--f-mono);
+	font-weight: 600;
+	color: inherit;
+}
+.expressive-code .calx-out {
+	margin: 0;
+	padding: 16px 20px;
+	border: 0;
+	font: 13.5px/1.68 var(--f-mono);
+	color: var(--ink);
+	background: var(--code);
+	white-space: pre;
+	overflow: auto;
+}
+@media (max-width: 600px) {
+	/* On a phone the badge keeps its icon and gives up its words. */
+	.calx-badge {
+		font-size: 0;
+		gap: 0;
+	}
 }
 
 /* ---------- tables ---------- */

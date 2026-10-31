@@ -6,6 +6,8 @@
 // - Links to the rest of the repo, such as "../../std/io.calx", go to the file on GitHub.
 // - Each page starts with its title as a "# " heading, for GitHub. The site shows the title from
 //   the front matter, so that first heading goes.
+// - A decision the docs cite, "(D21)", links to its row in the decision log, as the mockup draws
+//   it: the number alone, small and quiet. Headings and the text of links keep theirs as written.
 import { statSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +58,31 @@ export function lineHtml(text, { links = true } = {}) {
 		);
 }
 
+/** The decision log the docs cite. Its rows have no anchors, so a link finds the row by its text. */
+export const DECISIONS = 'https://github.com/ellipog/calcite/blob/main/docs/decisions.md';
+// "(D21)" or "(D59, D60)", whose parentheses go, or a number on its own, as in "until D89".
+const DREF = /\((D\d+(?:,\s*D\d+)*)\)|\bD\d+\b/g;
+
+/** The text with each decision it cites as a link, as Markdown nodes, or null if it cites none. */
+export function decisionNodes(value) {
+	const out = [];
+	let last = 0;
+	for (const m of value.matchAll(DREF)) {
+		if (m.index > last) out.push({ type: 'text', value: value.slice(last, m.index) });
+		(m[1] ?? m[0]).split(/,\s*/).forEach((id, i) => {
+			if (i) out.push({ type: 'text', value: ', ' });
+			out.push({
+				type: 'html',
+				value: `<a class="dref" href="${DECISIONS}#:~:text=${id}" title="Decision ${id} in the decision log">${id}</a>`,
+			});
+		});
+		last = m.index + m[0].length;
+	}
+	if (!out.length) return null;
+	if (last < value.length) out.push({ type: 'text', value: value.slice(last) });
+	return out;
+}
+
 /** The satteri plugin. It only touches files under docs/. */
 export function calxDocs() {
 	return ({ fileURL }) => {
@@ -77,6 +104,14 @@ export function calxDocs() {
 			definition(node, ctx) {
 				const url = siteUrl(node.url, file);
 				if (url !== node.url) ctx.setProperty(node, 'url', url);
+			},
+			text(node, ctx) {
+				if (!/\bD\d+\b/.test(node.value)) return;
+				for (let p = ctx.parent(node); p; p = ctx.parent(p)) {
+					if (p.type === 'heading' || p.type === 'link' || p.type === 'linkReference') return;
+				}
+				const nodes = decisionNodes(node.value);
+				if (nodes) ctx.replaceNode(node, nodes);
 			},
 		};
 	};

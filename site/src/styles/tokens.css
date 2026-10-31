@@ -15,7 +15,7 @@
 :root {
 	--paper: #F7F3EC; --raised: #FCFAF6; --sunk: #EFE9DE; --code: #F3EEE5;
 	--ink: #1E1F24; --ink-2: #4A4B52; --ink-3: #6B6C73;
-	--line: #E3DCCF; --line-2: #D3CABA;
+	--line: #E3DCCF; --line-2: #D3CABA; --scroll: #C9BEAB;
 	--amber: #B9802F; --amber-ink: #8A5A17; --amber-wash: rgba(185, 128, 47, .13);
 	--calx: #B9802F; --rust: #3F6EA8;
 	--err: #B3261E; --err-wash: rgba(179, 38, 30, .07);
@@ -30,7 +30,7 @@
 :root[data-theme='dark'] {
 	--paper: #0E1218; --raised: #141A22; --sunk: #0A0E13; --code: #11171F;
 	--ink: #ECE6DA; --ink-2: #C2BCB0; --ink-3: #8E949D;
-	--line: #222A35; --line-2: #2F3947;
+	--line: #222A35; --line-2: #2F3947; --scroll: #3A4554;
 	--amber: #BC8536; --amber-ink: #E2AF63; --amber-wash: rgba(226, 175, 99, .12);
 	--calx: #BC8536; --rust: #5F8FD0;
 	--err: #F2766B; --err-wash: rgba(242, 118, 107, .09);
@@ -72,6 +72,57 @@
 	--sl-nav-height: 60px;
 	--sl-sidebar-width: 272px;
 	--sl-content-width: 50rem;
+}
+
+/* Scrollbars: a thin thumb in the theme's colors on no track, darker while it's held, and no arrow
+   buttons. The page's own runs on paper. A code block that scrolls sideways shows its thumb all
+   the time, so it's plain that there's more to the right.
+
+   Chrome and Safari draw them from the ::-webkit-scrollbar parts, which can leave out the arrow
+   buttons Windows otherwise puts at each end. Chrome ignores those parts on an element with
+   scrollbar-width or scrollbar-color, so the standard properties are only for the browsers
+   without them, Firefox. */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+	background: transparent;
+}
+::-webkit-scrollbar-button {
+	display: none;
+}
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--scroll) content-box;
+	border: 3px solid transparent;
+	border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+	background-color: var(--ink-3);
+}
+html::-webkit-scrollbar {
+	background: var(--paper);
+}
+@supports not selector(::-webkit-scrollbar) {
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: var(--scroll) transparent;
+	}
+	html {
+		scrollbar-color: var(--scroll) var(--paper);
+	}
+}
+
+/* Code shows each character as it's typed. JetBrains Mono would join -> into an arrow and != into
+   a crossed equals sign, and a reader can't type what they see. */
+code,
+pre,
+kbd,
+samp,
+.expressive-code {
+	font-variant-ligatures: none;
 }
 
 /* The icons in Sprite.astro: strokes in the text's color. */
