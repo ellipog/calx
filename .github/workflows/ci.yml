@@ -1,10 +1,15 @@
 # Builds the compiler and runs the test suite, including every example in the reference docs
-# (D41), in debug and release builds on both platforms Calx targets.
+# (D41), in debug and release builds on both platforms Calx targets. A push that only changes
+# the website (site/) skips it; a change to docs/ still runs it, since the docs' examples are tests.
 name: ci
 
 on:
   push:
+    paths-ignore:
+      - 'site/**'
   pull_request:
+    paths-ignore:
+      - 'site/**'
 
 jobs:
   test:
