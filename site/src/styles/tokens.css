@@ -1,0 +1,80 @@
+/* The site's colors and type, from the mockup (site/mockup.html), shared by the home page, the
+   404 page and the docs. Starlight's own variables are set from them at the end, so its pages,
+   its search box and its code blocks use the same paper, ink and amber. */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/outfit';
+@import '@fontsource-variable/jetbrains-mono';
+
+:root {
+	--paper: #F7F3EC; --raised: #FCFAF6; --sunk: #EFE9DE; --code: #F3EEE5;
+	--ink: #1E1F24; --ink-2: #4A4B52; --ink-3: #6B6C73;
+	--line: #E3DCCF; --line-2: #D3CABA;
+	--amber: #B9802F; --amber-ink: #8A5A17; --amber-wash: rgba(185, 128, 47, .13);
+	--calx: #B9802F; --rust: #3F6EA8;
+	--err: #B3261E; --err-wash: rgba(179, 38, 30, .07);
+	--dither-ink: #1E1F24; --dither-vein: #D6AC70;
+	--header-bg: rgba(247, 243, 236, .86);
+	--shadow: 0 1px 0 rgba(30, 31, 36, .03), 0 12px 32px -18px rgba(30, 31, 36, .28);
+	--f-head: "Outfit Variable", ui-sans-serif, system-ui, sans-serif;
+	--f-body: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--f-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace;
+	color-scheme: light;
+}
+:root[data-theme='dark'] {
+	--paper: #0E1218; --raised: #141A22; --sunk: #0A0E13; --code: #11171F;
+	--ink: #ECE6DA; --ink-2: #C2BCB0; --ink-3: #8E949D;
+	--line: #222A35; --line-2: #2F3947;
+	--amber: #BC8536; --amber-ink: #E2AF63; --amber-wash: rgba(226, 175, 99, .12);
+	--calx: #BC8536; --rust: #5F8FD0;
+	--err: #F2766B; --err-wash: rgba(242, 118, 107, .09);
+	--dither-ink: #DED8CC; --dither-vein: #C49658;
+	--header-bg: rgba(14, 18, 24, .82);
+	--shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 14px 36px -18px rgba(0, 0, 0, .8);
+	color-scheme: dark;
+}
+
+/* Starlight's palette, in both themes. Its "white" is the strongest text and its "black" the page. */
+:root,
+::backdrop {
+	--sl-color-white: var(--ink);
+	--sl-color-gray-1: var(--ink);
+	--sl-color-gray-2: var(--ink-2);
+	--sl-color-gray-3: var(--ink-2);
+	--sl-color-gray-4: var(--ink-3);
+	--sl-color-gray-5: var(--line-2);
+	--sl-color-gray-6: var(--line);
+	--sl-color-gray-7: var(--raised);
+	--sl-color-black: var(--paper);
+	--sl-color-accent-low: var(--amber-wash);
+	--sl-color-accent: var(--amber);
+	--sl-color-accent-high: var(--amber-ink);
+	--sl-color-text: var(--ink);
+	--sl-color-text-accent: var(--amber-ink);
+	--sl-color-text-invert: var(--paper);
+	--sl-color-bg: var(--paper);
+	--sl-color-bg-nav: var(--header-bg);
+	--sl-color-bg-sidebar: var(--paper);
+	--sl-color-bg-inline-code: var(--sunk);
+	--sl-color-bg-accent: var(--amber);
+	--sl-color-hairline-light: var(--line);
+	--sl-color-hairline: var(--line);
+	--sl-color-hairline-shade: var(--line);
+	--sl-color-backdrop-overlay: rgba(14, 18, 24, .5);
+	--sl-font: var(--f-body);
+	--sl-font-mono: var(--f-mono);
+	--sl-nav-height: 60px;
+	--sl-sidebar-width: 272px;
+	--sl-content-width: 50rem;
+}
+
+/* The icons in Sprite.astro: strokes in the text's color. */
+svg.i {
+	width: 18px;
+	height: 18px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.8;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	flex: none;
+}

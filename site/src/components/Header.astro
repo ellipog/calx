@@ -1,0 +1,138 @@
+---
+// The bar along the top of every page: the logo, the sections, search, GitHub and the theme.
+// It replaces Starlight's header on the docs, and the home and 404 pages use it as it is.
+import Search from '@astrojs/starlight/components/Search.astro';
+import Sprite from './Sprite.astro';
+import ThemeToggle from './ThemeToggle.astro';
+
+const path = Astro.url.pathname;
+const NAV = [
+	{ label: 'Learn', href: '/guide/getting-started/', section: '/guide/' },
+	{ label: 'Reference', href: '/docs/#reference', section: '/reference/' },
+	{ label: 'Std', href: '/docs/#standard-library', section: '/std/' },
+	{ label: 'Performance', href: '/benchmarks/', section: '/benchmarks/' },
+];
+---
+
+<Sprite />
+<div class="top">
+	<a class="brand" href="/" aria-label="Calx home">
+		<svg viewBox="0 12 399.761 92" fill="currentColor" aria-hidden="true"><use href="#logo-shapes"></use></svg>
+	</a>
+	<nav class="nav" aria-label="Sections">
+		{NAV.map((n) => <a href={n.href} aria-current={path.startsWith(n.section) ? 'true' : undefined}>{n.label}</a>)}
+	</nav>
+	<div class="find"><Search /></div>
+	<div class="end">
+		<a class="toplink" href="https://github.com/ellipog/calx">GitHub</a>
+		<ThemeToggle />
+	</div>
+</div>
+
+<style>
+	.top {
+		height: 100%;
+		display: flex;
+		align-items: center;
+		gap: 26px;
+	}
+	.brand {
+		display: flex;
+		align-items: center;
+		color: var(--ink);
+	}
+	.brand svg {
+		height: 23px;
+		width: auto;
+		display: block;
+	}
+	.nav {
+		display: flex;
+		gap: 2px;
+	}
+	.nav a {
+		font: 500 15px/1 var(--f-head);
+		text-decoration: none;
+		color: var(--ink-2);
+		padding: 9px 12px;
+		border-radius: 8px;
+	}
+	.nav a:hover {
+		color: var(--ink);
+		background: var(--sunk);
+	}
+	.nav a[aria-current] {
+		color: var(--ink);
+		box-shadow: inset 0 -2px 0 var(--amber);
+		border-radius: 8px 8px 0 0;
+	}
+	.find {
+		flex: 1;
+		display: flex;
+		justify-content: flex-end;
+	}
+	.end {
+		display: flex;
+		align-items: center;
+		gap: 22px;
+	}
+	.toplink {
+		font: 500 14.5px var(--f-head);
+		color: var(--ink-2);
+		text-decoration: none;
+	}
+	.toplink:hover {
+		color: var(--ink);
+	}
+
+	/* Starlight's search button, in the mockup's shape. */
+	.find :global(button[data-open-modal]) {
+		width: 270px;
+		max-width: 100%;
+		height: 36px;
+		gap: 10px;
+		padding: 0 8px 0 11px;
+		border: 1px solid var(--line-2);
+		border-radius: 9px;
+		background: var(--raised);
+		color: var(--ink-3);
+		font: 14px var(--f-body);
+	}
+	.find :global(button[data-open-modal]:hover) {
+		border-color: var(--ink-3);
+		color: var(--ink-2);
+	}
+	.find :global(button[data-open-modal] > kbd) {
+		margin-left: auto;
+		font: 500 11px var(--f-mono);
+		border: 1px solid var(--line-2);
+		border-radius: 5px;
+		padding: 2px 6px;
+		background: var(--paper);
+		color: var(--ink-3);
+	}
+	.find :global(button[data-open-modal] > kbd kbd) {
+		font: inherit;
+		border: 0;
+		background: none;
+		padding: 0;
+	}
+
+	@media (max-width: 900px) {
+		.nav,
+		.toplink {
+			display: none;
+		}
+		.find :global(button[data-open-modal]) {
+			width: 36px;
+			padding: 0;
+			justify-content: center;
+		}
+	}
+	@media (max-width: 50rem) {
+		/* Starlight's menu button sits at the far right on narrow screens, with the theme switch in its menu. */
+		:global([data-has-sidebar]) .end {
+			display: none;
+		}
+	}
+</style>

@@ -6,7 +6,38 @@ The docs stay in `docs/`, as plain Markdown that reads fine on GitHub. The site 
 
 A push that only changes this folder skips the compiler's CI. A change to `docs/` still runs it, because every example in the docs is a test (D41).
 
-What the site has, how it looks, and what builds it are being decided on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60).
+The site is being built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60).
+
+## Running it
+
+It needs Node 22.23 or later, as Astro does. From this folder:
+
+```sh
+npm install
+npm run dev      # http://localhost:4321/, reloading as you edit the site or docs/
+npm run build    # the whole site, into build/site
+npm run preview  # serves build/site
+```
+
+Search works only in a build: Pagefind indexes the pages as `npm run build` writes them, so the dev server's search box finds nothing.
+
+## How it's made
+
+It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build), the docs theme.
+
+- **Docs pages.** Starlight renders every page of `docs/` (`src/content.config.ts` points it there). [`src/markdown.mjs`](src/markdown.mjs) changes three things as it does: links to `.md` files become the pages' URLs, links to the rest of the repo go to GitHub, and the `# Title` heading goes, since the page shows the front matter's title.
+- **Page order.** [`src/docs-index.mjs`](src/docs-index.mjs) reads the page list in `docs/README.md`, for the sidebar and for the `/docs/` overview. Adding a page to that list adds it to the site.
+- **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)).
+- **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. The title shows how many of the page's examples CI tests and links to the file to edit. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
+- **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview and the 404 page.
+
+The home page doesn't repeat anything the repo already says. It reads it at build time:
+
+- its example, the C it compiles to and the error are the first ones in [`docs/reference/parallel.md`](../docs/reference/parallel.md) ([`src/examples.mjs`](src/examples.mjs));
+- what `stash` reads and answers is the first two text blocks in [`docs/guide/getting-started.md`](../docs/guide/getting-started.md), and the guide's steps are its page list;
+- the benchmark chart and every number on the page come from the README's [Performance](../README.md#performance) section ([`src/numbers.mjs`](src/numbers.mjs)).
+
+So when a benchmark run updates the README, the next build shows the new numbers, and if the README's tables change shape the build fails rather than show something wrong.
 
 ## The mockup
 

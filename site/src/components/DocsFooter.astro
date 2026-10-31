@@ -1,0 +1,83 @@
+---
+// The bottom of a docs page: the previous and next pages in the sidebar's order, and the file and
+// commit the page was built from.
+import { COMMIT, repoPath } from '../facts.mjs';
+
+const { entry, pagination } = Astro.locals.starlightRoute;
+const { prev, next } = pagination;
+---
+
+<footer>
+	{
+		(prev || next) && (
+			<nav class="pager" aria-label="More pages">
+				{prev ? (
+					<a href={prev.href} rel="prev">
+						<small>Previous</small>
+						<b>← {prev.label}</b>
+					</a>
+				) : (
+					<span />
+				)}
+				{next && (
+					<a href={next.href} rel="next" class="next">
+						<small>Next</small>
+						<b>{next.label} →</b>
+					</a>
+				)}
+			</nav>
+		)
+	}
+	<div class="docs-foot">
+		<span>Built from <code>{repoPath(entry)}</code>{COMMIT && <> at {COMMIT}</>}</span>
+		<span>MIT licensed</span>
+	</div>
+</footer>
+
+<style>
+	.pager {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 16px;
+		margin-top: 64px;
+	}
+	.pager a {
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		padding: 14px 18px;
+		text-decoration: none;
+		background: var(--raised);
+		color: var(--ink);
+		display: grid;
+		gap: 2px;
+	}
+	.pager a:hover {
+		border-color: var(--ink-3);
+	}
+	.pager small {
+		font: 500 12.5px var(--f-head);
+		color: var(--ink-3);
+	}
+	.pager b {
+		font: 600 16.5px var(--f-head);
+	}
+	.pager .next {
+		text-align: right;
+	}
+	.docs-foot {
+		border-top: 1px solid var(--line);
+		margin-top: 48px;
+		padding-top: 18px;
+		font-size: 13px;
+		color: var(--ink-3);
+		display: flex;
+		justify-content: space-between;
+		gap: 16px;
+		flex-wrap: wrap;
+	}
+	@media (max-width: 600px) {
+		.pager {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

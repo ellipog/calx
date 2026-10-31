@@ -1,0 +1,337 @@
+---
+// Milliseconds per tick, Calx against Rust, in two panels, since 1 and 24 workers are an order of
+// magnitude apart. The numbers are the README's (src/numbers.mjs), and the same table is one
+// click away for anyone who'd rather read it.
+import { tickLoop } from '../numbers.mjs';
+
+const bench = tickLoop();
+const PANELS = [
+	{ title: '1 worker', sub: 'One thread runs the whole tick', calx: 'calx1', rust: 'rust1' },
+	{ title: '24 workers', sub: 'Regions spread across every core', calx: 'calx24', rust: 'rust24' },
+] as const;
+
+// A round top for each axis, with ticks at whole steps.
+function axis(max: number) {
+	const step = max > 10 ? 10 : 1;
+	const top = Math.ceil(max / step) * step;
+	return { top, ticks: Array.from({ length: top / step + 1 }, (_, i) => i * step) };
+}
+const panels = PANELS.map((p) => {
+	const { top, ticks } = axis(Math.max(...bench.platforms.map((r) => Math.max(r[p.calx], r[p.rust]))) * 1.08);
+	const pct = (v: number) => `${((v / top) * 100).toFixed(2)}%`;
+	return {
+		...p,
+		ticks: ticks.map((t) => ({ t, at: pct(t), last: t === top })),
+		rows: bench.platforms.map((r) => ({
+			platform: r.platform,
+			calx: r[p.calx],
+			rust: r[p.rust],
+			calxAt: pct(r[p.calx]),
+			rustAt: pct(r[p.rust]),
+			ratio: (r[p.calx] / r[p.rust]).toFixed(2),
+		})),
+	};
+});
+---
+
+<div class="perf">
+	<div class="perf-head">
+		<div class="perf-title">Milliseconds per tick<span>lower is better</span></div>
+		<div class="legend">
+			<span><i style="background:var(--calx)"></i>Calx, clang {bench.clang}</span>
+			<span><i style="background:var(--rust)"></i>Rust, rustc {bench.rustc}</span>
+		</div>
+	</div>
+	<div class="panels">
+		{
+			panels.map((p) => (
+				<div class="panel">
+					<h3>{p.title}</h3>
+					<div class="sub">{p.sub}</div>
+					<div class="plot">
+						<div class="area">
+							{p.ticks.map((t) => (
+								<div class="gl" style={`left:${t.at}`} />
+							))}
+							{p.rows.map((r) => (
+								<div class="grp">
+									<div class="lab">{r.platform}</div>
+									<div class="bars">
+										<div
+											class="brow"
+											data-tip={`<b>Calx</b> · ${r.platform} · ${p.title}<br><b>${r.calx.toFixed(2)} ms</b> per tick, ${r.ratio}× Rust's time`}
+										>
+											<div class="bar calx" style={`width:${r.calxAt}`}>
+												<span class="val">
+													{r.calx.toFixed(2)} ms <small>· {r.ratio}×</small>
+												</span>
+											</div>
+										</div>
+										<div
+											class="brow"
+											data-tip={`<b>Rust</b> · ${r.platform} · ${p.title}<br><b>${r.rust.toFixed(2)} ms</b> per tick`}
+										>
+											<div class="bar rust" style={`width:${r.rustAt}`} />
+										</div>
+									</div>
+								</div>
+							))}
+						</div>
+						<div class="ticks" aria-hidden="true">
+							{p.ticks.map((t) => (
+								<span style={`left:${t.at}`}>
+									{t.t}
+									{t.last ? ' ms' : ''}
+								</span>
+							))}
+						</div>
+					</div>
+				</div>
+			))
+		}
+	</div>
+	<div class="perf-foot">
+		<span>
+			Median of {bench.runs} runs of {bench.ticks} ticks on an {bench.machine}.{' '}
+			<a class="more" href="/benchmarks/">Method and raw results</a>
+		</span>
+		<details class="tbl">
+			<summary>Show as a table</summary>
+			<table>
+				<thead>
+					<tr><th>Platform</th><th>Calx, 1 worker</th><th>Rust, 1 worker</th><th>Calx, 24 workers</th><th>Rust, 24 workers</th></tr>
+				</thead>
+				<tbody>
+					{
+						bench.platforms.map((r) => (
+							<tr>
+								<td>{r.platform}</td>
+								<td>{r.calx1.toFixed(2)}</td>
+								<td>{r.rust1.toFixed(2)}</td>
+								<td>{r.calx24.toFixed(2)}</td>
+								<td>{r.rust24.toFixed(2)}</td>
+							</tr>
+						))
+					}
+				</tbody>
+			</table>
+		</details>
+	</div>
+	<div class="tip" hidden></div>
+</div>
+
+<script>
+	for (const chart of document.querySelectorAll<HTMLElement>('.perf')) {
+		const tip = chart.querySelector<HTMLElement>('.tip')!;
+		for (const row of chart.querySelectorAll<HTMLElement>('.brow')) {
+			row.addEventListener('mousemove', (e) => {
+				tip.innerHTML = row.dataset.tip ?? '';
+				tip.hidden = false;
+				tip.style.left = `${Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8)}px`;
+				tip.style.top = `${e.clientY + 16}px`;
+			});
+			row.addEventListener('mouseleave', () => (tip.hidden = true));
+		}
+	}
+</script>
+
+<style>
+	.perf {
+		margin-top: 40px;
+		border: 1px solid var(--line);
+		border-radius: 16px;
+		background: var(--raised);
+		padding: 30px 32px 26px;
+		box-shadow: var(--shadow);
+	}
+	.perf-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 20px;
+		flex-wrap: wrap;
+	}
+	.perf-title {
+		font: 600 17px var(--f-head);
+	}
+	.perf-title span {
+		font: 400 14px var(--f-body);
+		color: var(--ink-3);
+		margin-left: 8px;
+	}
+	.legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px 20px;
+		font-size: 14px;
+		color: var(--ink-2);
+	}
+	.legend i {
+		width: 12px;
+		height: 12px;
+		border-radius: 3px;
+		display: inline-block;
+		margin-right: 8px;
+		vertical-align: -1px;
+	}
+	.panels {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 48px;
+		margin-top: 26px;
+	}
+	.panel h3 {
+		font: 600 15px var(--f-head);
+		margin: 0;
+	}
+	.panel .sub {
+		font-size: 13px;
+		color: var(--ink-3);
+		margin: 2px 0 14px;
+	}
+	.plot {
+		position: relative;
+		padding-right: 118px;
+	}
+	.area {
+		position: relative;
+		margin-left: 104px;
+	}
+	.gl {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: var(--line);
+	}
+	.grp {
+		position: relative;
+		display: grid;
+		grid-template-columns: 104px 1fr;
+		margin-left: -104px;
+		padding: 7px 0;
+	}
+	.lab {
+		font-size: 13.5px;
+		color: var(--ink-2);
+		align-self: center;
+	}
+	.bars {
+		display: grid;
+		gap: 2px;
+	}
+	.brow {
+		position: relative;
+		height: 16px;
+		cursor: default;
+	}
+	.brow::before {
+		content: '';
+		position: absolute;
+		inset: -1px -128px -1px -6px;
+		border-radius: 6px;
+	}
+	.brow:hover::before {
+		background: var(--amber-wash);
+	}
+	.bar {
+		position: relative;
+		height: 100%;
+		border-radius: 0 4px 4px 0;
+	}
+	.bar.calx {
+		background: var(--calx);
+	}
+	.bar.rust {
+		background: var(--rust);
+	}
+	.val {
+		position: absolute;
+		left: calc(100% + 8px);
+		top: 50%;
+		transform: translateY(-50%);
+		white-space: nowrap;
+		font: 500 12.5px var(--f-mono);
+		color: var(--ink);
+	}
+	.val small {
+		color: var(--ink-3);
+		font-size: 12.5px;
+	}
+	.ticks {
+		position: relative;
+		height: 22px;
+		margin: 6px 0 0 104px;
+	}
+	.ticks span {
+		position: absolute;
+		transform: translateX(-50%);
+		font: 12px var(--f-mono);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.perf-foot {
+		display: flex;
+		justify-content: space-between;
+		gap: 20px;
+		align-items: baseline;
+		flex-wrap: wrap;
+		margin-top: 22px;
+		padding-top: 18px;
+		border-top: 1px solid var(--line);
+		font-size: 13.5px;
+		color: var(--ink-3);
+	}
+	details summary {
+		cursor: pointer;
+		font: 500 13.5px var(--f-head);
+		color: var(--ink-2);
+	}
+	details table {
+		margin-top: 12px;
+	}
+	.tip {
+		position: fixed;
+		z-index: 50;
+		pointer-events: none;
+		background: var(--ink);
+		color: var(--paper);
+		font: 500 12.5px/1.45 var(--f-body);
+		padding: 8px 11px;
+		border-radius: 8px;
+		box-shadow: var(--shadow);
+		max-width: 260px;
+	}
+	.tip :global(b) {
+		font-family: var(--f-mono);
+		font-weight: 600;
+	}
+	.tip[hidden] {
+		display: none;
+	}
+	@media (max-width: 900px) {
+		.panels {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 36px;
+		}
+	}
+	@media (max-width: 600px) {
+		.perf {
+			padding: 22px 18px;
+		}
+		.plot {
+			padding-right: 112px;
+		}
+		.area,
+		.ticks {
+			margin-left: 0;
+		}
+		.grp {
+			grid-template-columns: 1fr;
+			margin-left: 0;
+		}
+		.lab {
+			margin-bottom: 4px;
+		}
+	}
+</style>

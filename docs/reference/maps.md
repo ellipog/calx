@@ -1,6 +1,6 @@
 ---
 title: Maps and sets
-description: Map<K, V> and Set<T>, the native hash tables: methods, indexing, loops, their deterministic order, the Hash property, and their C.
+description: "Map<K, V> and Set<T>, the native hash tables: methods, indexing, loops, their deterministic order, the Hash property, and their C."
 ---
 
 # Maps and sets

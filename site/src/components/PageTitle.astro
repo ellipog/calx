@@ -1,0 +1,103 @@
+---
+// The top of a docs page: where it sits, its title and description, how many of its examples CI
+// tests, and a link to edit it. The page's own "# Title" line is dropped (src/markdown.mjs), so
+// the title shows once.
+import { docsIndex } from '../docs-index.mjs';
+import { editUrl, testedExamples } from '../facts.mjs';
+
+const route = Astro.locals.starlightRoute;
+const { title, description } = route.entry.data;
+const section = docsIndex().find((s) => s.pages.some((p) => p.slug === route.id));
+const examples = testedExamples(route.entry);
+// Starlight's table of contents links the title by this id; it doesn't export the constant.
+const PAGE_TITLE_ID = '_top';
+---
+
+{
+	section && (
+		<div class="crumbs">
+			<a href={`/docs/#${section.id}`}>{section.title}</a>
+			<span aria-hidden="true">/</span>
+			<span>{title}</span>
+		</div>
+	)
+}
+<h1 id={PAGE_TITLE_ID}>{title}</h1>
+{description && <p class="desc">{description}</p>}
+<div class="meta">
+	{
+		examples > 0 && (
+			<span>
+				<svg class="i" aria-hidden="true"><use href="#i-check" /></svg>
+				{examples === 1 ? 'Its example is tested by CI' : `All ${examples} examples tested by CI`}
+			</span>
+		)
+	}
+	<a href={editUrl(route.entry)}>
+		<svg class="i" aria-hidden="true"><use href="#i-edit" /></svg>Edit this page
+	</a>
+</div>
+
+<style>
+	.crumbs {
+		font: 500 13.5px var(--f-head);
+		color: var(--ink-3);
+		display: flex;
+		gap: 8px;
+		margin-top: 0.5rem;
+	}
+	.crumbs a {
+		text-decoration: none;
+		color: inherit;
+	}
+	.crumbs a:hover {
+		color: var(--ink);
+	}
+	h1 {
+		font: 600 46px/1.08 var(--f-head);
+		letter-spacing: -0.028em;
+		margin: 12px 0 14px;
+		color: var(--ink);
+		text-wrap: balance;
+	}
+	.desc {
+		font-size: 19px;
+		color: var(--ink-2);
+		line-height: 1.55;
+		margin: 0 0 22px;
+		text-wrap: pretty;
+	}
+	.meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px 20px;
+		align-items: center;
+		font-size: 13px;
+		color: var(--ink-3);
+		padding-bottom: 24px;
+		border-bottom: 1px solid var(--line);
+	}
+	.meta span,
+	.meta a {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		text-decoration: none;
+		color: inherit;
+	}
+	.meta a:hover {
+		color: var(--ink);
+	}
+	.meta svg {
+		width: 15px;
+		height: 15px;
+	}
+	@media (max-width: 50rem) {
+		h1 {
+			font-size: 36px;
+		}
+		.desc {
+			font-size: 17.5px;
+		}
+	}
+</style>

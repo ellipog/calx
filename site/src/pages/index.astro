@@ -1,0 +1,256 @@
+---
+// The home page, as the mockup (site/mockup.html) has it. Its examples come from the docs and its
+// numbers from the README, at build time, so the page says what the repo does at this commit.
+import Base from '../layouts/Base.astro';
+import CodeCard from '../components/CodeCard.astro';
+import PerfChart from '../components/PerfChart.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { docsIndex } from '../docs-index.mjs';
+import { lineHtml } from '../markdown.mjs';
+import { errorOf, fences } from '../examples.mjs';
+import { buildTime, tickLoop } from '../numbers.mjs';
+
+// parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
+// and the example that must fail to compile.
+const parallel = fences('reference/parallel.md');
+const calx = parallel.filter((f) => f.lang === 'calx');
+const c = parallel.filter((f) => f.lang === 'c');
+const example = calx[0].code;
+const exampleC = `${c[0].code}\n\n// and in main, where the loop was:\n${c[1].code}`;
+const failing = calx.map((f) => errorOf(f.code)).find((e) => e !== null);
+if (!failing) throw new Error('docs/reference/parallel.md has no example marked // error:');
+
+// What stash reads and answers: the first two text blocks of the guide's first page.
+const [reads, answers] = fences('guide/getting-started.md').filter((f) => f.lang === 'text');
+const guide = docsIndex().find((s) => s.id === 'guide')!;
+
+const bench = tickLoop();
+const windows = bench.platforms[0];
+// Times on Windows, the first column.
+const check = buildTime('calx check');
+const size = check.label.match(/(\d+) modules \(([\d,]+) lines\)/);
+if (!size) throw new Error(`README.md's "${check.label}" row doesn't say how many modules and lines`);
+const rebuild = buildTime('Debug rebuild').windows;
+const unchanged = buildTime('calx run of it again').windows;
+---
+
+<Base
+	title="Calx: fast, safe code that gives the same answer every time"
+	description="Calx is a general-purpose compiled language: memory-safe without a garbage collector, with math defined to the bit on every machine, and parallel loops that give the same result on any number of cores."
+>
+	<main class="home">
+		<div class="hero-art">
+			<canvas class="crystal" data-scene="hero" aria-hidden="true"></canvas>
+			<svg class="hero-logo" viewBox="0 12 399.761 92" fill="currentColor" role="img" aria-label="Calx">
+				<use href="#logo-shapes"></use>
+			</svg>
+		</div>
+
+		<div class="hero-copy">
+			<span class="eyebrow"><span class="dot"></span>Pre-release · build it from source</span>
+			<h1 class="display">Fast, safe code that gives the same answer every time</h1>
+			<p class="lede">
+				Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math is defined
+				to the bit on every machine, and its parallel loops give the same result on one core or twenty-four. On our
+				benchmark it takes {bench.ratio}× the time Rust does.
+			</p>
+			<div class="cta">
+				<a class="btn primary" href="/guide/getting-started/">
+					Learn Calx <svg class="i" aria-hidden="true"><use href="#i-arrow"></use></svg>
+				</a>
+				<a class="btn" href="/docs/#reference">Read the reference</a>
+			</div>
+			<div class="fineprint">Compiles to C · Windows and Linux · MIT licensed</div>
+		</div>
+
+		<div class="stats">
+			<div class="stat">
+				<div class="v">{bench.ratio}×</div>
+				<div class="l">Rust's time per tick, with the same<br />algorithms and the same checksum</div>
+			</div>
+			<div class="stat">
+				<div class="v">{unchanged}</div>
+				<div class="l"><code>calx run</code> on a program<br />that hasn't changed</div>
+			</div>
+			<div class="stat">
+				<div class="v">0</div>
+				<div class="l">warnings: everything the checker<br />objects to is an error</div>
+			</div>
+		</div>
+
+		<section class="section">
+			<div class="split">
+				<div>
+					<div class="kicker">Parallel loops</div>
+					<h2 class="h">Every core, and the same answer every time</h2>
+					<p class="intro">
+						<code>parallel for</code> runs a loop's iterations across a pool of threads. The checker makes sure no iteration
+						touches what another one changes, so the program prints the same thing on one thread or twenty-four.
+					</p>
+					<ul class="facts">
+						<li>
+							<svg class="i" aria-hidden="true"><use href="#i-check"></use></svg>
+							<span>The check is the ownership check, applied between iterations. It costs nothing at run time.</span>
+						</li>
+						<li>
+							<svg class="i" aria-hidden="true"><use href="#i-check"></use></svg>
+							<span>What iterations print comes out in their order, and a panic reports the first iteration that panicked.</span>
+						</li>
+						<li>
+							<svg class="i" aria-hidden="true"><use href="#i-check"></use></svg>
+							<span>
+								Calx compiles to C. The C tab shows what this loop becomes: a function per chunk, its pointers marked
+								<code>restrict</code>.
+							</span>
+						</li>
+					</ul>
+					<a class="more" href="/reference/parallel/">Read about parallel loops</a>
+				</div>
+				<div class="stack">
+					<CodeCard calx={example} c={exampleC} file="game.calx" />
+					<div class="note">Reach too far, and it won't compile:</div>
+					<pre class="term"><span class="path">main.calx:{failing.line}:{failing.column}:</span> <span class="e">error:</span> <span class="msg">{failing.message}…</span>
+{'  ' + failing.text}
+{'  ' + ' '.repeat(failing.column - 1)}<span class="caret">{'^' + '~'.repeat(failing.token.length - 1)}</span></pre>
+				</div>
+			</div>
+		</section>
+
+		<section class="section">
+			<div class="kicker">Why Calx</div>
+			<h2 class="h">Six promises, and where to check each one</h2>
+			<p class="intro">
+				Every claim on this page links to the page that defines it, and the examples on those pages are compiled and run
+				on every push.
+			</p>
+			<div class="claims">
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-bolt"></use></svg></div>
+					<h3>Faster than Rust</h3>
+					<p>
+						On the tick-loop benchmark, which uses the same algorithms and gives the same checksum as its Rust reference,
+						Calx takes about {bench.ratio}× Rust's time, with one thread or 24.
+					</p>
+					<div class="proof"><b>{windows.calx1.toFixed(2)}</b> vs {windows.rust1.toFixed(2)} ms per tick</div>
+					<a class="more" href="#perf">The benchmark</a>
+				</div>
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-eq"></use></svg></div>
+					<h3>Deterministic math</h3>
+					<p>
+						Integers wrap, divide and shift, and floats compute and print, the same way on every platform. The rules match
+						Java's, so code ported from Java gives the same bits.
+					</p>
+					<div class="proof"><code>-16 &gt;&gt;&gt; 28</code> is <b>15</b>, as in Java</div>
+					<a class="more" href="/reference/integers/">Integers and floats</a>
+				</div>
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-shield"></use></svg></div>
+					<h3>Memory-safe by default</h3>
+					<p>
+						Ownership is checked while the program compiles and costs nothing while it runs: no garbage collector, no
+						reference counts. Unchecked code is opt-in, inside <code>unsafe</code>.
+					</p>
+					<div class="proof">0 GC pauses, by construction</div>
+					<a class="more" href="/reference/ownership/">Ownership</a>
+				</div>
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-par"></use></svg></div>
+					<h3>Deterministic parallelism</h3>
+					<p>
+						<code>parallel for</code> runs a loop on every core, and the compiler checks that no iteration touches what another
+						changes. Same output with one thread or many.
+					</p>
+					<div class="proof"><b>{windows.calx24.toFixed(2)}</b> ms per tick on 24 threads</div>
+					<a class="more" href="/reference/parallel/">Parallel loops</a>
+				</div>
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-strict"></use></svg></div>
+					<h3>Strict by default</h3>
+					<p>
+						No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake is an error that says
+						what to write instead.
+					</p>
+					<div class="proof">every rule is an error, not a warning</div>
+					<a class="more" href="/reference/strictness/">Strictness</a>
+				</div>
+				<div class="claim">
+					<div class="ic"><svg class="i" aria-hidden="true"><use href="#i-clock"></use></svg></div>
+					<h3>Fast to build</h3>
+					<p>
+						<code>calx check</code> reads {size[1]} modules, {size[2]} lines, in {check.windows}. A small program runs in about
+						0.3 s from an empty cache, and in under 25 ms when nothing changed.
+					</p>
+					<div class="proof"><b>{rebuild.replace(/ ms$/, '')}</b> ms to rebuild after one change</div>
+					<a class="more" href="/reference/command/">The calx command</a>
+				</div>
+			</div>
+		</section>
+
+		<section class="section" id="perf">
+			<div class="kicker">Performance</div>
+			<h2 class="h">Measured on every push</h2>
+			<p class="intro">
+				The tick-loop benchmark is a synthetic simulation, a world of packed block storage, entity physics in doubles, hash
+				maps and messages between regions, stepped one tick at a time. It runs the same algorithms in Calx and in Rust and
+				checks that both give the same checksum. CI runs it on every push, on Windows and Linux, and the raw results are in
+				the repo.
+			</p>
+			<PerfChart />
+		</section>
+
+		<section class="section">
+			<div class="split">
+				<div>
+					<div class="kicker">Learn</div>
+					<h2 class="h">Learn it by building one program</h2>
+					<p class="intro">
+						The guide builds <code>stash</code>, a small inventory program: it reads commands, keeps count of what's put away
+						and taken out, and says what went wrong when a command doesn't make sense. Each page adds to it.
+					</p>
+					<ol class="steps">
+						{
+							guide.pages.map((p) => (
+								<li>
+									<a href={`/${p.slug}/`}>
+										<div>
+											<b>{p.title}</b>
+											<span set:html={lineHtml(p.about, { links: false })} />
+										</div>
+									</a>
+								</li>
+							))
+						}
+					</ol>
+				</div>
+				<div class="io">
+					<div><div class="cap">It reads</div><pre>{reads.code}</pre></div>
+					<div><div class="cap">It answers</div><pre>{answers.code}</pre></div>
+				</div>
+			</div>
+		</section>
+
+		<div class="band">
+			<canvas class="crystal" data-scene="band" aria-hidden="true"></canvas>
+			<div class="inner">
+				<div class="text">
+					<div class="kicker">Built with Calx</div>
+					<h2 class="h">Calcite, a Minecraft server written in Calx</h2>
+					<p>
+						Calcite is a Minecraft Java Edition server that matches vanilla bit for bit while running faster. It's the largest
+						Calx program so far: deterministic math keeps its worlds the same as vanilla's, parallel loops tick its regions on
+						every core, and its plugins are written in Calx too.
+					</p>
+					<div class="pills"><span>Bit-exact worldgen</span><span>Parallel regions</span><span>Plugins in Calx</span></div>
+					<p class="link"><a class="more" href="https://github.com/ellipog/calcite">Calcite on GitHub</a></p>
+				</div>
+			</div>
+		</div>
+
+		<SiteFooter />
+	</main>
+</Base>
+
+<script>
+	import '../scripts/crystal.js';
+</script>

@@ -1,6 +1,6 @@
 ---
 title: Lists
-description: List<T>, the growable array: literals, methods, indexing, loops, printing, and its C.
+description: "List<T>, the growable array: literals, methods, indexing, loops, printing, and its C."
 ---
 
 # Lists

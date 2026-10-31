@@ -1,0 +1,55 @@
+---
+// Light or dark, one button. It keeps Starlight's storage key, so the choice holds across the
+// home page and the docs, and Starlight's early script applies it before the page paints.
+---
+
+<button class="icon-btn theme-toggle" type="button" aria-label="Switch between light and dark">
+	<svg class="i sun" aria-hidden="true"><use href="#i-sun"></use></svg>
+	<svg class="i moon" aria-hidden="true"><use href="#i-moon"></use></svg>
+</button>
+
+<script>
+	for (const button of document.querySelectorAll('.theme-toggle')) {
+		button.addEventListener('click', () => {
+			const root = document.documentElement;
+			root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+			try {
+				localStorage.setItem('starlight-theme', root.dataset.theme);
+			} catch {
+				// Private windows may not store it; the switch still works for this page.
+			}
+			dispatchEvent(new CustomEvent('calx:theme'));
+		});
+	}
+</script>
+
+<style>
+	.icon-btn {
+		width: 36px;
+		height: 36px;
+		display: grid;
+		place-items: center;
+		border-radius: 9px;
+		border: 1px solid var(--line-2);
+		background: var(--raised);
+		color: var(--ink-2);
+		cursor: pointer;
+		padding: 0;
+	}
+	.icon-btn:hover {
+		color: var(--ink);
+	}
+	.i {
+		width: 18px;
+		height: 18px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	:global([data-theme='light']) .moon,
+	:global([data-theme='dark']) .sun {
+		display: none;
+	}
+</style>

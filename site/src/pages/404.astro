@@ -1,0 +1,23 @@
+---
+// The page for an address that isn't one: the number drawn in the crystal, and ways back.
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Page not found | Calx" description="There's no page at this address on the Calx site.">
+	<main class="nf">
+		<canvas class="crystal" data-scene="404" aria-hidden="true"></canvas>
+		<div class="nf-copy">
+			<div class="nf-glyph" role="img" aria-label="404">404</div>
+			<h1>This page isn't here</h1>
+			<p>It may have moved when the docs were reorganized. Search the docs, or start from one of these.</p>
+			<div class="cta">
+				<a class="btn primary" href="/">Home</a>
+				<a class="btn" href="/docs/#reference">Reference</a>
+			</div>
+		</div>
+	</main>
+</Base>
+
+<script>
+	import '../scripts/crystal.js';
+</script>

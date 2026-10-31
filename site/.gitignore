@@ -1,0 +1,2 @@
+# Astro's generated types; the build goes to build/site, which the repo already ignores.
+.astro/

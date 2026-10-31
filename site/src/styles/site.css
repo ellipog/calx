@@ -1,0 +1,549 @@
+/* The home page and the 404 page, from the mockup (site/mockup.html). The docs pages use Starlight's
+   styles and docs.css instead. */
+
+/* ---------- what Starlight's search box needs, outside Starlight's pages ---------- */
+:root {
+	--sl-text-2xs: 0.75rem;
+	--sl-text-sm: 0.875rem;
+	--sl-text-xl: 1.25rem;
+	--sl-shadow-lg: 0 25px 7px rgba(0, 0, 0, 0.03), 0 16px 6px rgba(0, 0, 0, 0.1), 0 9px 5px rgba(0, 0, 0, 0.1),
+		0 4px 4px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.sl-hidden {
+	display: none;
+}
+.sl-flex {
+	display: flex;
+}
+.sl-block {
+	display: block;
+}
+@media (min-width: 50rem) {
+	.md\:sl-hidden {
+		display: none;
+	}
+	.md\:sl-flex {
+		display: flex;
+	}
+	.md\:sl-block {
+		display: block;
+	}
+}
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border-width: 0;
+}
+
+/* ---------- base ---------- */
+* {
+	box-sizing: border-box;
+}
+html {
+	scroll-padding-top: 84px;
+}
+body {
+	margin: 0;
+	background: var(--paper);
+	color: var(--ink);
+	font: 16px/1.65 var(--f-body);
+	-webkit-font-smoothing: antialiased;
+}
+a {
+	color: inherit;
+}
+code {
+	font-family: var(--f-mono);
+	font-size: 0.86em;
+	background: var(--sunk);
+	border: 1px solid var(--line);
+	padding: 0.08em 0.36em;
+	border-radius: 5px;
+}
+[hidden] {
+	display: none !important;
+}
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 14.5px;
+}
+th {
+	text-align: left;
+	font: 600 13px var(--f-head);
+	letter-spacing: 0.02em;
+	color: var(--ink-3);
+	padding: 9px 12px;
+	border-bottom: 1.5px solid var(--line-2);
+}
+td {
+	padding: 9px 12px;
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+
+/* ---------- header ---------- */
+.site-head {
+	position: sticky;
+	top: 0;
+	z-index: 30;
+	height: 60px;
+	padding: 0 24px;
+	background: var(--header-bg);
+	backdrop-filter: saturate(1.3) blur(12px);
+	-webkit-backdrop-filter: saturate(1.3) blur(12px);
+	border-bottom: 1px solid var(--line);
+}
+
+/* ---------- buttons and links ---------- */
+.cta {
+	display: flex;
+	gap: 12px;
+	justify-content: center;
+	margin-top: 32px;
+	flex-wrap: wrap;
+}
+.btn {
+	font: 600 15px/1 var(--f-head);
+	padding: 14px 20px;
+	border-radius: 10px;
+	text-decoration: none;
+	border: 1px solid var(--line-2);
+	background: var(--raised);
+	color: var(--ink);
+	display: inline-flex;
+	gap: 9px;
+	align-items: center;
+}
+.btn:hover {
+	border-color: var(--ink-3);
+}
+.btn.primary {
+	background: var(--ink);
+	color: var(--paper);
+	border-color: var(--ink);
+}
+.more {
+	font: 500 15px var(--f-head);
+	text-decoration: none;
+	color: var(--ink);
+	border-bottom: 1.5px solid var(--amber);
+	padding-bottom: 1px;
+}
+.more:hover {
+	border-bottom-width: 2.5px;
+}
+
+/* ---------- the crystal: never behind docs text or charts ---------- */
+canvas.crystal {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
+
+/* ---------- home: hero ---------- */
+/* The banner's proportions, whatever the band's width: the logo is 4/3 of the band's height wide,
+   640 of 480 pixels. The crystal measures the logo where it is, for its quiet zone and knockout. */
+.hero-art {
+	--band: clamp(210px, 30vw, 440px);
+	position: relative;
+	height: var(--band);
+	overflow: hidden;
+}
+.hero-logo {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: calc(var(--band) * 4 / 3);
+	color: var(--ink);
+}
+.hero-copy {
+	max-width: 800px;
+	margin: 0 auto;
+	padding: 54px 24px 0;
+	text-align: center;
+}
+.eyebrow {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font: 500 13px/1 var(--f-head);
+	letter-spacing: 0.02em;
+	color: var(--ink-2);
+	border: 1px solid var(--line-2);
+	border-radius: 999px;
+	padding: 7px 13px;
+	background: var(--raised);
+}
+.eyebrow .dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--amber);
+}
+h1.display {
+	font: 600 clamp(36px, 5vw, 60px)/1.05 var(--f-head);
+	letter-spacing: -0.028em;
+	margin: 22px 0 20px;
+	text-wrap: balance;
+}
+.lede {
+	font-size: 19px;
+	line-height: 1.6;
+	color: var(--ink-2);
+	margin: 0 auto;
+	max-width: 660px;
+	text-wrap: pretty;
+}
+.fineprint {
+	margin-top: 18px;
+	font-size: 13.5px;
+	color: var(--ink-3);
+}
+.stats {
+	max-width: 1080px;
+	margin: 56px auto 0;
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	border-top: 1px solid var(--line);
+	border-bottom: 1px solid var(--line);
+}
+.stat {
+	padding: 28px 24px 26px;
+	text-align: center;
+}
+.stat + .stat {
+	border-left: 1px solid var(--line);
+}
+.stat .v {
+	font: 600 42px/1 var(--f-head);
+	letter-spacing: -0.025em;
+}
+.stat .l {
+	margin-top: 10px;
+	color: var(--ink-2);
+	font-size: 14.5px;
+	line-height: 1.45;
+}
+
+/* ---------- home: sections ---------- */
+.section {
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 104px 24px 0;
+}
+.kicker {
+	font: 600 12.5px/1 var(--f-head);
+	letter-spacing: 0.13em;
+	text-transform: uppercase;
+	color: var(--amber-ink);
+}
+h2.h {
+	font: 600 clamp(28px, 3.3vw, 40px)/1.12 var(--f-head);
+	letter-spacing: -0.022em;
+	margin: 14px 0 16px;
+	text-wrap: balance;
+}
+.section p.intro {
+	font-size: 17.5px;
+	color: var(--ink-2);
+	max-width: 640px;
+	margin: 0;
+}
+.split {
+	display: grid;
+	grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+	gap: 60px;
+	align-items: start;
+}
+.facts {
+	list-style: none;
+	padding: 0;
+	margin: 26px 0 28px;
+	display: grid;
+	gap: 14px;
+}
+.facts li {
+	display: grid;
+	grid-template-columns: 22px 1fr;
+	gap: 10px;
+	color: var(--ink-2);
+	font-size: 15.5px;
+}
+.facts li svg {
+	color: var(--amber);
+	margin-top: 3px;
+}
+.stack {
+	display: grid;
+	gap: 18px;
+}
+.note {
+	font: 500 13.5px var(--f-head);
+	color: var(--ink-3);
+	margin: 6px 0 -6px 2px;
+}
+
+/* compiler output */
+.term {
+	font: 12.5px/1.65 var(--f-mono);
+	background: var(--code);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	padding: 16px 20px;
+	white-space: pre-wrap;
+	overflow: auto;
+	color: var(--ink-2);
+	margin: 0;
+}
+.term .path {
+	color: var(--ink);
+	font-weight: 600;
+}
+.term .e,
+.term .caret {
+	color: var(--err);
+	font-weight: 600;
+}
+.term .msg {
+	color: var(--ink);
+	font-weight: 600;
+}
+.term .dim {
+	color: var(--ink-3);
+}
+
+/* claims */
+.claims {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 1px;
+	background: var(--line);
+	border: 1px solid var(--line);
+	border-radius: 16px;
+	overflow: hidden;
+	margin-top: 40px;
+}
+.claim {
+	background: var(--raised);
+	padding: 28px 26px 26px;
+	display: flex;
+	flex-direction: column;
+}
+.claim .ic {
+	width: 38px;
+	height: 38px;
+	border-radius: 10px;
+	background: var(--amber-wash);
+	color: var(--amber-ink);
+	display: grid;
+	place-items: center;
+}
+.claim h3 {
+	font: 600 19.5px/1.25 var(--f-head);
+	letter-spacing: -0.01em;
+	margin: 18px 0 8px;
+}
+.claim p {
+	margin: 0 0 18px;
+	color: var(--ink-2);
+	font-size: 15px;
+	line-height: 1.6;
+	flex: 1;
+}
+.claim .proof {
+	font: 500 13px var(--f-mono);
+	color: var(--ink-3);
+	margin-bottom: 14px;
+}
+.claim .proof b {
+	color: var(--ink);
+	font-weight: 600;
+}
+.claim .more {
+	align-self: flex-start;
+	font-size: 14px;
+}
+
+/* the guide */
+.steps {
+	list-style: none;
+	padding: 0;
+	margin: 28px 0 0;
+	display: grid;
+	gap: 4px;
+	counter-reset: s;
+}
+.steps a {
+	display: grid;
+	grid-template-columns: 34px 1fr;
+	gap: 14px;
+	align-items: start;
+	padding: 14px 16px;
+	border-radius: 12px;
+	text-decoration: none;
+}
+.steps a:hover {
+	background: var(--raised);
+	box-shadow: inset 0 0 0 1px var(--line);
+}
+.steps a::before {
+	counter-increment: s;
+	content: counter(s);
+	width: 30px;
+	height: 30px;
+	border-radius: 50%;
+	border: 1.5px solid var(--line-2);
+	display: grid;
+	place-items: center;
+	font: 600 14px var(--f-head);
+	color: var(--ink-2);
+}
+.steps b {
+	font: 600 16.5px var(--f-head);
+	display: block;
+}
+.steps span {
+	font-size: 14.5px;
+	color: var(--ink-2);
+	line-height: 1.5;
+}
+.io {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	overflow: hidden;
+	background: var(--code);
+	box-shadow: var(--shadow);
+	margin-top: 46px;
+}
+.io > div + div {
+	border-left: 1px solid var(--line);
+}
+.io .cap {
+	font: 500 12px var(--f-head);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+	padding: 12px 18px;
+	border-bottom: 1px solid var(--line);
+	background: var(--raised);
+}
+.io pre {
+	margin: 0;
+	padding: 16px 18px 20px;
+	font: 13.5px/1.75 var(--f-mono);
+}
+
+/* "Built with Calx": the crystal comes back, a clearing in the middle for the text, as in the hero */
+.band {
+	position: relative;
+	margin-top: 88px;
+	overflow: hidden;
+}
+.band .inner {
+	position: relative;
+	max-width: 700px;
+	margin: 0 auto;
+	padding: 128px 24px;
+	text-align: center;
+}
+.band .text {
+	display: grid;
+	justify-items: center;
+}
+.band p {
+	color: var(--ink-2);
+	font-size: 16.5px;
+	margin: 0 0 18px;
+	max-width: 600px;
+}
+.band .pills {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 8px;
+}
+.band .pills span {
+	font: 500 13.5px var(--f-head);
+	border: 1px solid var(--line-2);
+	border-radius: 999px;
+	padding: 7px 13px;
+	color: var(--ink-2);
+	background: var(--paper);
+}
+.band .link {
+	margin: 24px 0 0;
+}
+
+/* ---------- 404: the number is made of the crystal ---------- */
+.nf {
+	position: relative;
+	min-height: calc(100vh - 60px);
+	display: grid;
+	place-items: center;
+	overflow: hidden;
+	padding: 64px 24px;
+}
+.nf-copy {
+	position: relative;
+	text-align: center;
+	display: grid;
+	justify-items: center;
+}
+.nf-glyph {
+	font: 700 clamp(150px, 22vw, 260px)/0.9 var(--f-head);
+	letter-spacing: -0.04em;
+	color: transparent;
+	user-select: none;
+}
+.nf h1 {
+	font: 600 clamp(28px, 3.4vw, 40px)/1.15 var(--f-head);
+	letter-spacing: -0.02em;
+	margin: 26px 0 12px;
+}
+.nf p {
+	color: var(--ink-2);
+	font-size: 17px;
+	max-width: 460px;
+	margin: 0;
+}
+.nf .cta {
+	margin-top: 28px;
+}
+
+@media (max-width: 900px) {
+	.split {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 36px;
+	}
+	.band .inner {
+		padding: 96px 24px;
+	}
+	.claims,
+	.stats {
+		grid-template-columns: 1fr;
+	}
+	.stat + .stat {
+		border-left: 0;
+		border-top: 1px solid var(--line);
+	}
+	.io {
+		grid-template-columns: 1fr;
+		margin-top: 0;
+	}
+	.io > div + div {
+		border-left: 0;
+		border-top: 1px solid var(--line);
+	}
+}

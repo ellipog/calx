@@ -1,6 +1,6 @@
 ---
 title: Comparing and printing
-description: The derived Equal, Order and Display, which give ==, < and {x} to structs, enums, tuples, arrays, optionals, lists, maps and sets; Ordering and cmp; the bounds T: Equal, T: Order and T: Display; writing your own; and their C.
+description: "The derived Equal, Order and Display, which give ==, < and {x} to structs, enums, tuples, arrays, optionals, lists, maps and sets; Ordering and cmp; the bounds T: Equal, T: Order and T: Display; writing your own; and their C."
 ---
 
 # Comparing and printing

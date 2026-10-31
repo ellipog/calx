@@ -1,0 +1,167 @@
+---
+// A Calx example as the home page shows it: tabs for the Calx, the C it compiles to and what it
+// prints, the file name, and a badge saying CI tests it. The code is highlighted by Expressive
+// Code with the Calx grammar, as on the docs pages.
+import { Code } from '@astrojs/starlight/components';
+import { outputOf } from '../examples.mjs';
+
+interface Props {
+	calx: string;
+	c?: string;
+	file?: string;
+}
+const { calx, c, file } = Astro.props;
+const output = outputOf(calx);
+const panes = [
+	{ name: 'Calx', lang: 'calx', code: calx },
+	...(c ? [{ name: 'C', lang: 'c', code: c }] : []),
+	...(output.length ? [{ name: 'Output', lang: '', code: output.join('\n') }] : []),
+];
+---
+
+<div class="code-card">
+	<div class="code-head">
+		<div class="tabs" role="tablist" aria-label="Show">
+			{
+				panes.map((p, i) => (
+					<button class="tab" type="button" role="tab" aria-selected={i === 0 ? 'true' : 'false'}>
+						{p.name}
+					</button>
+				))
+			}
+		</div>
+		{file && <span class="file">{file}</span>}
+		<div class="right">
+			<span class="badge" title="CI compiles and runs this example on every push">
+				<svg class="i" aria-hidden="true"><use href="#i-check"></use></svg>Tested
+			</span>
+			<button class="copy" type="button" aria-label="Copy the code">
+				<svg class="i" aria-hidden="true"><use href="#i-copy"></use></svg>
+			</button>
+		</div>
+	</div>
+	{
+		panes.map((p, i) => (
+			<div class="pane" role="tabpanel" hidden={i !== 0} data-code={p.code}>
+				{p.lang ? <Code code={p.code} lang={p.lang} frame="none" /> : <pre class="out">{p.code}</pre>}
+			</div>
+		))
+	}
+</div>
+
+<script>
+	for (const card of document.querySelectorAll<HTMLElement>('.code-card')) {
+		const tabs = [...card.querySelectorAll<HTMLElement>('.tab')];
+		const panes = [...card.querySelectorAll<HTMLElement>('.pane')];
+		tabs.forEach((tab, i) =>
+			tab.addEventListener('click', () => {
+				tabs.forEach((t, j) => t.setAttribute('aria-selected', String(i === j)));
+				panes.forEach((p, j) => (p.hidden = i !== j));
+			})
+		);
+		card.querySelector('.copy')?.addEventListener('click', () => {
+			const shown = panes.find((p) => !p.hidden);
+			navigator.clipboard?.writeText(shown?.dataset.code ?? '').catch(() => {});
+		});
+	}
+</script>
+
+<style>
+	.code-card {
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--code);
+		overflow: hidden;
+		box-shadow: var(--shadow);
+	}
+	.code-head {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		padding: 6px 8px;
+		border-bottom: 1px solid var(--line);
+		background: var(--raised);
+	}
+	.tabs {
+		display: flex;
+		gap: 2px;
+	}
+	.tab {
+		font: 500 13px/1 var(--f-head);
+		padding: 8px 11px;
+		border-radius: 7px;
+		border: 0;
+		background: none;
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.tab:hover {
+		color: var(--ink);
+	}
+	.tab[aria-selected='true'] {
+		background: var(--sunk);
+		color: var(--ink);
+		box-shadow: inset 0 0 0 1px var(--line);
+	}
+	.file {
+		font: 12.5px var(--f-mono);
+		color: var(--ink-3);
+		margin-left: 10px;
+	}
+	.right {
+		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font: 500 12.5px/1 var(--f-head);
+		color: var(--ink-3);
+		padding: 6px 8px;
+	}
+	.badge svg {
+		width: 15px;
+		height: 15px;
+	}
+	.copy {
+		border: 0;
+		background: none;
+		color: var(--ink-3);
+		cursor: pointer;
+		width: 30px;
+		height: 28px;
+		border-radius: 7px;
+		display: grid;
+		place-items: center;
+	}
+	.copy:hover {
+		background: var(--sunk);
+		color: var(--ink);
+	}
+	.pane[hidden] {
+		display: none;
+	}
+	/* Expressive Code's block, without its own frame, border or copy button: the card has them. */
+	.pane :global(.expressive-code) {
+		margin: 0;
+	}
+	.pane :global(.expressive-code pre) {
+		border: 0;
+		border-radius: 0;
+		background: var(--code);
+	}
+	.pane :global(.expressive-code .copy) {
+		display: none;
+	}
+	.out {
+		margin: 0;
+		padding: 16px 20px;
+		font: 13.5px/1.68 var(--f-mono);
+		color: var(--ink);
+		white-space: pre;
+		overflow: auto;
+	}
+</style>

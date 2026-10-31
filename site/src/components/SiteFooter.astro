@@ -1,0 +1,82 @@
+---
+// The footer of the home page: what Calx is, the commit the site was built from, and where to go.
+import { COMMIT } from '../facts.mjs';
+import { GITHUB } from '../markdown.mjs';
+---
+
+<footer class="foot">
+	<div>
+		<svg class="mark" viewBox="0 0 128 128" fill="currentColor" aria-hidden="true"><use href="#mark"></use></svg>
+		<p>
+			A general-purpose compiled language: fast, memory-safe and exact. Built from <code>calx/docs</code>{
+				COMMIT && <> at commit {COMMIT}</>
+			}. MIT licensed.
+		</p>
+	</div>
+	<div>
+		<h2>Docs</h2>
+		<a href="/guide/getting-started/">Guide</a>
+		<a href="/docs/#reference">Reference</a>
+		<a href="/docs/#standard-library">Standard library</a>
+		<a href="/spec/">What's coming</a>
+	</div>
+	<div>
+		<h2>Project</h2>
+		<a href={GITHUB}>GitHub</a>
+		<a href="https://acta.aaenz.no/aaen-studios/clx">Roadmap</a>
+		<a href="/benchmarks/">Benchmarks</a>
+	</div>
+	<div>
+		<h2>Ecosystem</h2>
+		<span class="soon">Stones on Quarry <small>(coming)</small></span>
+		<a href="https://github.com/ellipog/calcite">Calcite</a>
+	</div>
+</footer>
+
+<style>
+	.foot {
+		max-width: 1180px;
+		margin: 0 auto;
+		padding: 56px 24px 96px;
+		display: grid;
+		grid-template-columns: 2fr 1fr 1fr 1fr;
+		gap: 32px;
+		font-size: 14.5px;
+	}
+	.mark {
+		width: 30px;
+		color: var(--ink);
+		display: block;
+	}
+	p {
+		color: var(--ink-3);
+		margin: 12px 0 0;
+		font-size: 13.5px;
+		max-width: 320px;
+	}
+	h2 {
+		font: 600 12.5px var(--f-head);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--ink-3);
+		margin: 4px 0 12px;
+	}
+	a,
+	.soon {
+		display: block;
+		text-decoration: none;
+		color: var(--ink-2);
+		padding: 3px 0;
+	}
+	.soon {
+		color: var(--ink-3);
+	}
+	a:hover {
+		color: var(--ink);
+	}
+	@media (max-width: 900px) {
+		.foot {
+			grid-template-columns: 1fr 1fr;
+		}
+	}
+</style>

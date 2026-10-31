@@ -1,0 +1,206 @@
+/* Starlight's docs pages in the mockup's look: the sidebar, the article, tables and the table of
+   contents. Starlight keeps its own styles in cascade layers, so these plain rules win without
+   !important. */
+
+body {
+	font-size: 16px;
+	line-height: 1.65;
+	-webkit-font-smoothing: antialiased;
+}
+html {
+	scroll-padding-top: 84px;
+}
+
+/* ---------- header ---------- */
+.header {
+	background: var(--header-bg);
+	backdrop-filter: saturate(1.3) blur(12px);
+	-webkit-backdrop-filter: saturate(1.3) blur(12px);
+	border-bottom: 1px solid var(--line);
+}
+
+/* ---------- sidebar ---------- */
+.sidebar-pane {
+	border-inline-end: 1px solid var(--line);
+	scrollbar-width: thin;
+}
+.sidebar-content {
+	padding: 10px 16px 48px 22px;
+	font-size: 14.5px;
+}
+.sidebar-content .top-level > li + li {
+	margin-top: 0;
+}
+.sidebar-content summary {
+	padding: 22px 10px 6px;
+}
+.sidebar-content .top-level > li:first-child summary {
+	padding-top: 12px;
+}
+.sidebar-content .group-label .large {
+	font: 600 12px var(--f-head);
+	letter-spacing: 0.11em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+}
+.sidebar-content summary .caret {
+	color: var(--ink-3);
+	width: 1rem;
+	height: 1rem;
+}
+.sidebar-content ul ul li {
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+.sidebar-content a {
+	padding: 5px 10px;
+	border-radius: 7px;
+	color: var(--ink-2);
+	font-size: 14.5px;
+	line-height: 1.4;
+}
+.sidebar-content a:hover,
+.sidebar-content a:focus-visible {
+	background: var(--sunk);
+	color: var(--ink);
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+	background: var(--amber-wash);
+	color: var(--ink);
+	font-weight: 600;
+	box-shadow: inset 2px 0 0 var(--amber);
+	border-radius: 0 7px 7px 0;
+}
+
+/* ---------- article ---------- */
+.content-panel {
+	border-top: 0;
+}
+.content-panel + .content-panel {
+	border-top: 0;
+	padding-top: 0;
+}
+.sl-markdown-content {
+	color: var(--ink);
+}
+.sl-markdown-content :is(h2, h3, h4) {
+	font-family: var(--f-head);
+	color: var(--ink);
+}
+.sl-markdown-content h2 {
+	font: 600 27px/1.25 var(--f-head);
+	letter-spacing: -0.015em;
+	margin-top: 56px;
+	margin-bottom: 14px;
+}
+.sl-markdown-content h3 {
+	font: 600 20px/1.3 var(--f-head);
+	letter-spacing: -0.01em;
+	margin-top: 36px;
+	margin-bottom: 10px;
+}
+.sl-markdown-content h4 {
+	font: 600 17px/1.35 var(--f-head);
+	margin-top: 28px;
+}
+/* Starlight's heading links: quiet until the heading is pointed at, as in the mockup. */
+.sl-markdown-content .sl-anchor-link {
+	color: var(--line-2);
+}
+.sl-markdown-content .sl-heading-wrapper:not(:hover) .sl-anchor-link:not(:focus-visible) {
+	opacity: 0;
+}
+.sl-markdown-content a:not(.sl-anchor-link) {
+	color: inherit;
+	text-decoration-color: var(--amber);
+	text-underline-offset: 3px;
+	text-decoration-thickness: 1.5px;
+}
+.sl-markdown-content a:not(.sl-anchor-link):hover {
+	color: var(--amber-ink);
+}
+.sl-markdown-content :not(pre) > code {
+	font-size: 0.86em;
+	background: var(--sunk);
+	border: 1px solid var(--line);
+	padding: 0.08em 0.36em;
+	border-radius: 5px;
+}
+.sl-markdown-content :is(strong, b) {
+	color: var(--ink);
+}
+
+/* ---------- tables ---------- */
+.sl-markdown-content table {
+	display: table;
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 14.5px;
+	margin: 20px 0 26px;
+}
+.sl-markdown-content :is(th, td) {
+	border: 0;
+	background: none;
+	padding: 9px 12px;
+}
+.sl-markdown-content th {
+	text-align: left;
+	font: 600 13px var(--f-head);
+	letter-spacing: 0.02em;
+	color: var(--ink-3);
+	border-bottom: 1.5px solid var(--line-2);
+}
+.sl-markdown-content td {
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+.sl-markdown-content tr:nth-child(2n) {
+	background: none;
+}
+@media (max-width: 50rem) {
+	/* A wide table scrolls on its own rather than the page. */
+	.sl-markdown-content table {
+		display: block;
+		overflow-x: auto;
+	}
+}
+
+/* ---------- table of contents ---------- */
+.right-sidebar {
+	border-inline-start: 0;
+}
+.right-sidebar-panel {
+	padding: 38px 22px 40px 6px;
+}
+.right-sidebar-panel h2 {
+	font: 600 12px var(--f-head);
+	letter-spacing: 0.11em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+	margin: 0 0 10px 12px;
+}
+.right-sidebar-panel starlight-toc ul ul {
+	margin: 0;
+}
+.right-sidebar-panel starlight-toc a {
+	font-size: 13.5px;
+	line-height: 1.4;
+	padding: 4px 12px;
+	color: var(--ink-3);
+	border-left: 1.5px solid var(--line);
+	border-radius: 0;
+}
+.right-sidebar-panel starlight-toc ul ul a {
+	padding-left: 24px;
+}
+.right-sidebar-panel starlight-toc a:hover {
+	color: var(--ink);
+}
+.right-sidebar-panel starlight-toc a[aria-current='true'] {
+	color: var(--ink);
+	border-left-color: var(--amber);
+	font-weight: 500;
+}

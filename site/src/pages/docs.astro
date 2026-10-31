@@ -1,0 +1,85 @@
+---
+// /docs/: every docs page, by section, from the page list in docs/README.md, which is also the
+// sidebar's. Links to the README, from the docs and from GitHub's #anchors, land here.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { docsIndex } from '../docs-index.mjs';
+import { lineHtml } from '../markdown.mjs';
+
+const sections = docsIndex();
+// An intro that leads into the list ends with a colon there; here it's a sentence of its own.
+const intro = (s: string) => lineHtml(s.replace(/:$/, '.'));
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'Documentation',
+		description: 'Learn Calx from the guide, look up what each feature does in the reference and the standard library, and see what is designed but not built yet.',
+	}}
+	headings={sections.map((s) => ({ depth: 2, slug: s.id, text: s.title }))}
+>
+	{
+		sections.map((s) => (
+			<section class="docs-section">
+				<h2 id={s.id}>{s.title}</h2>
+				{s.intro && <p class="intro" set:html={intro(s.intro)} />}
+				<ul class="page-list">
+					{s.pages.map((p) => (
+						<li>
+							<a href={`/${p.slug}/`}>
+								<b>{p.title}</b>
+								<span set:html={lineHtml(p.about, { links: false })} />
+							</a>
+						</li>
+					))}
+				</ul>
+			</section>
+		))
+	}
+</StarlightPage>
+
+<style>
+	.docs-section h2 {
+		scroll-margin-top: 84px;
+	}
+	.docs-section:first-child h2 {
+		margin-top: 0;
+	}
+	.intro {
+		color: var(--ink-2);
+	}
+	.page-list {
+		list-style: none;
+		padding: 0;
+		margin: 18px 0 0;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+		gap: 10px;
+	}
+	.page-list li {
+		margin: 0;
+	}
+	.page-list a {
+		display: grid;
+		align-content: start;
+		gap: 4px;
+		height: 100%;
+		padding: 14px 16px;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--raised);
+		text-decoration: none;
+		color: var(--ink);
+	}
+	.page-list a:hover {
+		border-color: var(--ink-3);
+		color: var(--ink);
+	}
+	.page-list b {
+		font: 600 16px/1.3 var(--f-head);
+	}
+	.page-list span {
+		font-size: 14px;
+		line-height: 1.5;
+		color: var(--ink-2);
+	}
+</style>

@@ -112,6 +112,6 @@ A feature lives in exactly one normative place. When it ships, its spec section 
 
 - **Docs ship with the feature.** A change to the language, the compiler's behavior, the standard library or the runtime updates its pages in the same change. A feature without a reference page isn't done.
 - **Examples are tests.** From Phase 3, every Calx code block in these docs is compiled by the compiler test suite, and run if it shows output. A block that should fail to compile is marked with the error it must produce.
-- **One topic per page.** Each page starts with front matter giving its `title` and `description`, so a site generator can build the website from these files unchanged.
+- **One topic per page.** Each page starts with front matter giving its `title` and `description`, so a site generator can build the website from these files unchanged. The front matter is YAML, so a description with `: ` in it goes in double quotes.
 - **Relative links only.** Link to other pages by relative path, such as `reference/integers.md`, so the links work both here and on the site.
 - **Page order lives here.** When you add a page, add it to the list above.
