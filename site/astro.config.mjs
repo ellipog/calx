@@ -8,7 +8,12 @@ import { calxAssets } from './src/assets.mjs';
 import { sidebar } from './src/docs-index.mjs';
 import { calxDocs, GITHUB } from './src/markdown.mjs';
 
-const SITE = 'https://calxlang.com';
+// The address the site is served from, for canonical links, link previews, the sitemap and
+// robots.txt. Vercel gives its build the project's production domain: a custom domain once one is
+// added, the vercel.app one until then. A build anywhere else is only ever served locally.
+const SITE = process.env.VERCEL_PROJECT_PRODUCTION_URL
+	? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+	: 'http://localhost:4321';
 
 export default defineConfig({
 	// The build goes to dist/, Astro's own place for it, where Vercel looks.
@@ -42,6 +47,7 @@ export default defineConfig({
 				{ tag: 'meta', attrs: { property: 'og:image', content: `${SITE}/social.png` } },
 				{ tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
 				{ tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+				{ tag: 'meta', attrs: { property: 'og:image:alt', content: 'The Calx logo beside a crystal drawn in dots' } },
 				{ tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
 			],
 		}),

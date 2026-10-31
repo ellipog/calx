@@ -11,8 +11,19 @@ const section = docsIndex().find((s) => s.pages.some((p) => p.slug === route.id)
 const examples = testedExamples(route.entry);
 // Starlight's table of contents links the title by this id; it doesn't export the constant.
 const PAGE_TITLE_ID = '_top';
+// The crumbs again, for search engines, which may show them in place of the page's address
+// (schema.org's BreadcrumbList).
+const crumbs = section && {
+	'@context': 'https://schema.org',
+	'@type': 'BreadcrumbList',
+	itemListElement: [
+		{ '@type': 'ListItem', position: 1, name: section.title, item: new URL(`/docs/#${section.id}`, Astro.site).href },
+		{ '@type': 'ListItem', position: 2, name: title, item: new URL(Astro.url.pathname, Astro.site).href },
+	],
+};
 ---
 
+{crumbs && <script type="application/ld+json" set:html={JSON.stringify(crumbs)} />}
 {
 	section && (
 		<div class="crumbs" data-pagefind-ignore>

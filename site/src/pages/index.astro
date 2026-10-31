@@ -32,11 +32,22 @@ const size = check.label.match(/(\d+) modules \(([\d,]+) lines\)/);
 if (!size) throw new Error(`README.md's "${check.label}" row doesn't say how many modules and lines`);
 const rebuild = buildTime('Debug rebuild').windows;
 const unchanged = buildTime('calx run of it again').windows;
+
+// For search engines: the title says what Calx is in the words people search with, and the site's
+// name is Calx rather than its domain (schema.org's WebSite, which Google reads for that name).
+const site = {
+	'@context': 'https://schema.org',
+	'@type': 'WebSite',
+	name: 'Calx',
+	alternateName: 'Calx programming language',
+	url: new URL('/', Astro.site).href,
+};
 ---
 
 <Base
-	title="Calx: fast, safe code that gives the same answer every time"
-	description="Calx is a general-purpose compiled language: memory-safe without a garbage collector, with math defined to the bit on every machine, and parallel loops that give the same result on any number of cores."
+	title="Calx: a fast, memory-safe, deterministic programming language"
+	description="Calx is a general-purpose compiled language: memory-safe without a garbage collector, math defined to the bit, and parallel loops that give the same result."
+	jsonLd={site}
 >
 	<main class="home">
 		<div class="hero-art">

@@ -1,6 +1,6 @@
 ---
 title: Tick-loop benchmark
-description: The fixed workload that decides the Phase 3 gate, how it's measured, and how Calx is compared with Rust.
+description: The fixed simulation workload Calx's speed is measured on, how it's timed, and how Calx is compared with Rust.
 ---
 
 # Tick-loop benchmark

@@ -6,7 +6,7 @@ The docs stay in `docs/`, as plain Markdown that reads fine on GitHub. The site 
 
 A push that only changes this folder skips the compiler's CI. A change to `docs/` still runs it, because every example in the docs is a test (D41).
 
-The site is being built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60).
+The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), and made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61).
 
 ## Running it
 
@@ -26,6 +26,19 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 ## Publishing it
 
 Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
+
+[`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, so each page has one address.
+
+## Search engines
+
+Every page's links for search engines and link previews use the address the site is served from. Vercel gives its build the project's production domain, `VERCEL_PROJECT_PRODUCTION_URL`: a custom domain once one is added to the project, and the `vercel.app` one until then. So adding a domain needs no change here, just a new build. A build anywhere else uses `http://localhost:4321`.
+
+- **Each page** has a title and description from its front matter, a canonical link to its own address, and the `og:` tags that link previews read, with `social.png` as the picture. A description longer than about 160 characters is cut short in search results, so a description should say what the page is first.
+- **The site** has `robots.txt` ([`src/pages/robots.txt.ts`](src/pages/robots.txt.ts)), which lets every page be crawled and points at the sitemap, and the sitemap, which Starlight writes with every page but the 404 one.
+- **The 404 page** asks not to be indexed and has no canonical link.
+- **Structured data.** The home page names the site as Calx (schema.org's `WebSite`), and each docs page gives its crumbs as a `BreadcrumbList`, so a search result can show "Reference › Parallel loops" in place of the address.
+
+Previews aren't indexed: Vercel serves them with `X-Robots-Tag: noindex`.
 
 ## How it's made
 
