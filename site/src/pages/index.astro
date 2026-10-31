@@ -3,11 +3,12 @@
 // so the page says what the repo does at this commit.
 import Base from '../layouts/Base.astro';
 import CodeCard from '../components/CodeCard.astro';
+import Example from '../components/Example.astro';
 import PerfChart from '../components/PerfChart.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
 import { errorOf, fences } from '../examples.mjs';
-import { buildTime } from '../numbers.mjs';
+import { buildTimes } from '../numbers.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
 // and the example that must fail to compile.
@@ -23,8 +24,16 @@ if (!failing) throw new Error('docs/reference/parallel.md has no example marked 
 const [reads, answers] = fences('guide/getting-started.md').filter((f) => f.lang === 'text');
 const guide = docsIndex().find((s) => s.id === 'guide')!;
 
-// Windows, the README's first column.
-const rebuild = buildTime('Debug rebuild').windows;
+// For each promise, an example from the page it links to, found by what it shows.
+function exampleIn(page: string, has: string) {
+	const found = fences(page).find((f) => f.lang === 'calx' && f.code.includes(has));
+	if (!found) throw new Error(`docs/${page} has no Calx example with "${has}" in it`);
+	return found.code;
+}
+const mathExample = exampleIn('reference/floats.md', '{0.1 + 0.2}');
+const ownershipExample = exampleIn('reference/ownership.md', 'was moved');
+const strictExample = exampleIn('reference/strictness.md', 'value is unused');
+const builds = buildTimes().map((r) => ({ ...r, command: r.label.match(/^calx \w+/)?.[0] ?? '' }));
 
 // For search engines: the title says what Calx is in the words people search with, and the site's
 // name is Calx rather than its domain (schema.org's WebSite, which Google reads for that name).
@@ -39,7 +48,7 @@ const site = {
 
 <Base
 	title="Calx: a fast, memory-safe, deterministic programming language"
-	description="Calx is a general-purpose compiled language: memory-safe without a garbage collector, math defined to the bit, and parallel loops that give the same result."
+	description="Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math gives the same bits on every platform, and its parallel loops are checked when it compiles."
 	jsonLd={site}
 >
 	<main class="home">
@@ -50,14 +59,14 @@ const site = {
 					<svg viewBox="0 12 399.761 92" fill="currentColor" role="img" aria-label="Calx"><use href="#logo-shapes"></use></svg>
 				</h1>
 				<div class="hero-under">
-					<p class="tagline">A fast, memory-safe language that gives the same answer every time.</p>
+					<p class="tagline">A memory-safe compiled language whose programs give the same results on every machine.</p>
 					<div class="cta">
 						<a class="btn primary" href="/guide/install/">
 							Install Calx <svg class="i" aria-hidden="true"><use href="#i-arrow"></use></svg>
 						</a>
 						<a class="btn" href="/guide/getting-started/">Learn Calx</a>
 					</div>
-					<p class="fineprint">Pre-release. Compiles to C, on Windows and Linux. MIT licensed.</p>
+					<p class="fineprint">Calx is pre-release, and you build it from source. It runs on Windows and Linux.</p>
 				</div>
 			</div>
 		</section>
@@ -65,17 +74,17 @@ const site = {
 		<section class="section">
 			<div class="split par">
 				<div class="par-copy">
-					<h2 class="h">Parallel loops, checked while it compiles</h2>
+					<h2 class="h">Parallel loops are checked when you compile</h2>
 					<p class="intro">
-						<code>parallel for</code> spreads a loop over every core. No iteration may touch what another one changes, so the
-						result is the same on one thread or twenty-four.
+						<code>parallel for</code> runs a loop's iterations on a pool of threads. The compiler rejects a loop in which one
+						iteration changes data that another one uses, so the output doesn't depend on the number of threads.
 					</p>
-					<div class="note">Change something another iteration can see, and it won't compile:</div>
+					<div class="note">Changing a variable that every iteration shares is an error:</div>
 					<pre class="term"><span class="path">main.calx:{failing.line}:{failing.column}:</span> <span class="e">error:</span> <span class="msg">{failing.message}</span>
 {'  ' + failing.text}
 {'  ' + ' '.repeat(failing.column - 1)}<span class="caret">{'^' + '~'.repeat(failing.token.length - 1)}</span>
 <span class="dim">1 error</span></pre>
-					<p class="link"><a class="more" href="/reference/parallel/">Parallel loops</a></p>
+					<p class="link"><a class="more" href="/reference/parallel/">Parallel loops in the reference</a></p>
 				</div>
 				<div class="par-code"><CodeCard calx={example} c={exampleC} file="game.calx" /></div>
 			</div>
@@ -83,29 +92,66 @@ const site = {
 
 		<section class="section">
 			<h2 class="h">What else it promises</h2>
-			<div class="claims">
-				<a class="claim" href="/reference/integers/">
+			<div class="promises">
+				<div class="promise">
 					<h3>Deterministic math</h3>
-					<p><code>-16 &gt;&gt;&gt; 28</code> is 15 on every machine, as in Java.</p>
-				</a>
-				<a class="claim" href="/reference/ownership/">
-					<h3>Memory-safe, no GC</h3>
-					<p>Ownership is checked while it compiles, and costs nothing at run time.</p>
-				</a>
-				<a class="claim" href="/reference/strictness/">
+					<p>
+						Integer and float arithmetic gives the same bits on every platform, and floats print the same way too. The rules
+						are Java's.
+					</p>
+					<Example code={mathExample} />
+					<a class="more" href="/reference/floats/">Floats</a>
+				</div>
+				<div class="promise">
+					<h3>Memory-safe without a garbage collector</h3>
+					<p>
+						Every value has one owner, and the compiler frees it where the owner ends. Using a value after it has moved is an
+						error.
+					</p>
+					<Example code={ownershipExample} />
+					<a class="more" href="/reference/ownership/">Ownership</a>
+				</div>
+				<div class="promise">
 					<h3>Strict by default</h3>
-					<p>Every rule is an error that says what to write instead.</p>
-				</a>
-				<a class="claim" href="/reference/command/">
+					<p>
+						There are no warnings. Unused values, shadowing and silent conversions are errors, and no flag turns one off.
+					</p>
+					<Example code={strictExample} />
+					<a class="more" href="/reference/strictness/">Strictness</a>
+				</div>
+				<div class="promise">
 					<h3>Fast to build</h3>
-					<p>{rebuild} to rebuild after changing one module.</p>
-				</a>
+					<p>CI times the compiler on every push, on the same machine as the benchmark below.</p>
+					<table class="times">
+						<thead>
+							<tr><th></th><th>Windows</th><th>Linux</th></tr>
+						</thead>
+						<tbody>
+							{
+								builds.map((r) => (
+									<tr>
+										<td>
+											{r.command && <code>{r.command}</code>}
+											{r.label.slice(r.command.length)}
+										</td>
+										<td>{r.windows}</td>
+										<td>{r.linux}</td>
+									</tr>
+								))
+							}
+						</tbody>
+					</table>
+					<a class="more" href="/reference/command/">The calx command</a>
+				</div>
 			</div>
 		</section>
 
 		<section class="section" id="perf">
 			<h2 class="h">Faster than Rust, on our benchmark</h2>
-			<p class="intro">The same simulation in both, with the same algorithms and the same checksum, run by CI on every push.</p>
+			<p class="intro">
+				We wrote the same simulation in Calx and in Rust, with the same algorithms. Both must produce the same checksum, and
+				CI runs them on every push.
+			</p>
 			<PerfChart />
 		</section>
 
@@ -113,10 +159,10 @@ const site = {
 			<div class="split learn">
 				<div>
 					<h2 class="h">Learn it by building one program</h2>
-					<p class="intro">The guide builds <code>stash</code>, a small inventory program, a page at a time.</p>
+					<p class="intro">The guide builds <code>stash</code>, a small program that keeps an inventory. Each page adds to it.</p>
 					<div class="io">
-						<div><div class="cap">It reads</div><pre>{reads.code}</pre></div>
-						<div><div class="cap">It answers</div><pre>{answers.code}</pre></div>
+						<div><div class="cap">Input</div><pre>{reads.code}</pre></div>
+						<div><div class="cap">Output</div><pre>{answers.code}</pre></div>
 					</div>
 				</div>
 				<ol class="steps">
@@ -137,8 +183,8 @@ const site = {
 				<div class="text">
 					<h2 class="h">Built with Calx: Calcite</h2>
 					<p>
-						A Minecraft Java Edition server in development, and the largest Calx program so far. Mojang's own client joins
-						it, walks around and chats.
+						Calcite is a Minecraft Java Edition server, and the largest program written in Calx so far. It's still in
+						development. The official client can log in, walk around a flat world and chat.
 					</p>
 					<p class="link"><a class="more" href="https://github.com/ellipog/calcite">Calcite on GitHub</a></p>
 				</div>

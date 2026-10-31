@@ -61,10 +61,17 @@ export function tickLoop() {
 /** The build-time table's row whose label starts with `label`: { label, windows, linux }, the
  *  times as written, such as "32 ms". */
 export function buildTime(label) {
+	const row = buildTimes().find((r) => r.label.startsWith(label));
+	if (!row) throw new Error(`README.md's build times have no row starting "${label}"`);
+	return row;
+}
+
+/** Every row of the build-time table, in order. */
+export function buildTimes() {
 	const tables = section()
 		.split(/\n\n+/)
 		.filter((b) => b.startsWith('|'));
-	const row = rows(tables[1]).find((r) => r[0].startsWith(label));
-	if (!row) throw new Error(`README.md's build times have no row starting "${label}"`);
-	return { label: row[0], windows: row[1], linux: row[2] };
+	const all = rows(tables[1]).map((r) => ({ label: r[0], windows: r[1], linux: r[2] }));
+	if (all.length < 3 || all.some((r) => !/\d m?s$/.test(r.windows))) throw new Error("README.md's build-time table isn't label, Windows, Linux");
+	return all;
 }

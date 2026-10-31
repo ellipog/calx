@@ -1,0 +1,80 @@
+---
+// A short docs example on the home page: its code, highlighted as on the docs pages, and under it
+// what it prints or, for one written not to compile, the compiler's error, with its line marked.
+// CI runs the example where it lives in the docs, so both are what the compiler does.
+import { Code } from '@astrojs/starlight/components';
+import { errorOf, outputOf, withoutOutput } from '../examples.mjs';
+
+interface Props {
+	code: string;
+}
+const { code } = Astro.props;
+const error = errorOf(code);
+const output = outputOf(code);
+const shown = withoutOutput(code).replace(/\s*\/\/ error: .*$/gm, '');
+// The error's line in the code as shown, which has lost only `// out:` lines above it, if any.
+const errorLine = error ? shown.split('\n').findIndex((l) => l === error.text) + 1 : 0;
+---
+
+<figure class="ex">
+	<Code code={shown} lang="calx" frame="none" mark={errorLine ? { range: String(errorLine) } : undefined} />
+	{
+		error ? (
+			<figcaption class="err">
+				<b>error:</b> {error.message}
+			</figcaption>
+		) : (
+			<figcaption class="out">
+				<pre>{output.join('\n')}</pre>
+			</figcaption>
+		)
+	}
+</figure>
+
+<style>
+	.ex {
+		margin: 0;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		overflow: hidden;
+		background: var(--code);
+	}
+	.ex :global(.expressive-code) {
+		margin: 0;
+	}
+	.ex :global(.expressive-code pre) {
+		border: 0;
+		border-radius: 0;
+		background: var(--code);
+	}
+	.ex :global(.expressive-code .copy) {
+		display: none;
+	}
+	/* The line the error is on, as the docs mark it. */
+	.ex :global(.expressive-code .ec-line.mark) {
+		--tmLineBgCol: var(--err-wash);
+	}
+	.ex :global(.expressive-code .ec-line.mark .code) {
+		--ecLineBrdCol: var(--err);
+	}
+	figcaption {
+		border-top: 1px solid var(--line);
+		background: var(--raised);
+		font: 12.5px/1.6 var(--f-mono);
+		padding: 11px 18px;
+	}
+	.out pre {
+		margin: 0;
+		font: inherit;
+		color: var(--ink);
+		white-space: pre;
+		overflow-x: auto;
+	}
+	.err {
+		color: var(--ink);
+	}
+	.err b {
+		color: var(--err);
+		font-weight: 600;
+	}
+</style>
