@@ -21,6 +21,8 @@ const std::unordered_set<std::string_view>& c_reserved() {
         "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
         "_Bool", "_Complex", "_Imaginary", "_Alignas", "_Alignof", "_Atomic", "_Generic", "_Noreturn",
         "_Static_assert", "_Thread_local", "asm", "typeof", "main",
+        // What clang and gcc predefine as `1` in GNU C, on Linux and on 32-bit x86.
+        "unix", "linux", "i386",
     };
     return words;
 }

@@ -48,6 +48,21 @@ type unsafe var while
 
 The primitive type names (`i32`, `f64`, `bool` and the rest), and `print`, `println`, `eprint`, `eprintln`, `panic`, `assert`, `some`, `ok` and `err`, are built in. A declaration or variable can't take one of these names.
 
+Any other name works, including ones that mean something to the C that Calx compiles to: C's keywords, such as `int` and `register`, and the names C compilers define for themselves on some systems, such as `unix` and `linux`. Calx renames them in the C it writes, so a program builds the same on every system:
+
+```calx
+struct Flags {
+    unix: bool
+    register: i32
+}
+
+fn main() {
+    let linux = 2
+    let f = Flags { unix: true, register: linux }
+    println("{f.unix} {f.register}")    // out: true 2
+}
+```
+
 ## Integer literals
 
 ```calx

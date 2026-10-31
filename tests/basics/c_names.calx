@@ -1,0 +1,26 @@
+// Names that mean something to C: its keywords, what its compilers predefine on Linux and
+// 32-bit x86, and names like the ones Calx gives its own, as locals, fields and parameters.
+
+struct Flags {
+    unix: bool
+    linux: i32
+    i386: i32
+    register: i32
+}
+
+fn sum(unix: i32, linux: i32, i386: i32) -> i32 {
+    return unix + linux + i386
+}
+
+fn main() {
+    let unix = true
+    let linux = 2
+    let i386 = 3
+    let register = 4
+    let cx_v_unix = 5
+    let a__b = 6
+    let int = 7
+    let f = Flags { unix: unix, linux: linux, i386: i386, register: register }
+    println("{f.unix} {f.linux} {f.i386} {f.register}")    // out: true 2 3 4
+    println("{sum(f.linux, f.i386, cx_v_unix)} {a__b} {int}")     // out: 10 6 7
+}
