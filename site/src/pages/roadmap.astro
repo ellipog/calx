@@ -11,6 +11,7 @@ import { siteUrl, withoutDecisions } from '../markdown.mjs';
 import { DOCS } from '../paths.mjs';
 import { ACTA, ACTA_PAGE, GITHUB_ISSUES, STAGES, readApi, readFeed } from '../roadmap/acta.mjs';
 import { card, day, esc, ideaItem, markdown } from '../roadmap/render.mjs';
+import '../styles/dropdown.css';
 import '../styles/roadmap.css';
 
 // A roadmap key is publishable: it reaches only what the public page shows, so it sits in the page.
@@ -113,14 +114,14 @@ const json = JSON.stringify({ data, key: KEY ? true : false }).replace(/</g, '\\
 						<input type="search" placeholder={`Search ${tasks.length || ''} tasks`.replace('  ', ' ')} autocomplete="off" spellcheck="false" />
 						<kbd aria-hidden="true">/</kbd>
 					</label>
-					<label class="rm-sort">
-						<span>Sort</span>
-						<select>
+					<div class="rm-sort">
+						<label for="rm-sort">Sort</label>
+						<select id="rm-sort">
 							<option value="position">Board order</option>
 							<option value="votes">Most votes</option>
 							<option value="newest">Newest</option>
 						</select>
-					</label>
+					</div>
 					<span class="rm-status" role="status" data-state={data ? 'built' : 'none'}>
 						<i aria-hidden="true"></i><span>{data ? `As of ${asOf}` : 'Loading the board'}</span>
 					</span>

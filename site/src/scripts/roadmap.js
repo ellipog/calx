@@ -11,6 +11,7 @@
 
 import { API, ActaError, STAGES, acta, readApi, readFeed } from '../roadmap/acta.mjs';
 import { card, detail, esc, ideaItem, matches, similar } from '../roadmap/render.mjs';
+import { dropdown } from './dropdown.js';
 
 const KEY = import.meta.env.PUBLIC_ACTA_ROADMAP_KEY || '';
 const FIRST = 10; // cards a long column shows until "Show all"
@@ -225,6 +226,7 @@ function start(root) {
 	const params = new URLSearchParams(location.search);
 	if (params.get('q')) search.value = view.query = params.get('q');
 	if (['votes', 'newest'].includes(params.get('sort'))) sortSel.value = view.sort = params.get('sort');
+	dropdown(sortSel);
 
 	function remember() {
 		const p = new URLSearchParams(location.search);

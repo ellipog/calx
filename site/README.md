@@ -6,7 +6,7 @@ The docs stay in `docs/`, as plain Markdown that reads fine on GitHub. The site 
 
 A push that only changes this folder skips the compiler's CI. A change to `docs/` still runs it, because every example in the docs is a test (D41).
 
-The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62), reworked after a critical read on [CLX-63](https://acta.aaenz.no/aaen-studios/clx#CLX-63), polished on [CLX-67](https://acta.aaenz.no/aaen-studios/clx#CLX-67), and given its roadmap on [CLX-68](https://acta.aaenz.no/aaen-studios/clx#CLX-68).
+The site was built on [CLX-60](https://acta.aaenz.no/aaen-studios/clx#CLX-60), made findable by search engines on [CLX-61](https://acta.aaenz.no/aaen-studios/clx#CLX-61), moved to calxlang.com on [CLX-62](https://acta.aaenz.no/aaen-studios/clx#CLX-62), reworked after a critical read on [CLX-63](https://acta.aaenz.no/aaen-studios/clx#CLX-63), polished on [CLX-67](https://acta.aaenz.no/aaen-studios/clx#CLX-67), given its roadmap on [CLX-68](https://acta.aaenz.no/aaen-studios/clx#CLX-68), and its own dropdowns on [CLX-78](https://acta.aaenz.no/aaen-studios/clx#CLX-78).
 
 ## Running it
 
@@ -58,6 +58,7 @@ It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build
   - the copy button copies the tab that's showing, as it shows it.
 - **Type.** Headings are in Source Serif 4, code in JetBrains Mono, and everything else in the system's own sans-serif, so a page loads two font files. Code has no ligatures, so `->` and `!=` look as they're typed ([`src/styles/tokens.css`](src/styles/tokens.css)).
 - **Scrollbars.** Thin, in the theme's colors, without arrow buttons.
+- **Selects.** A `<select>` is shown as the site's own dropdown: [`src/scripts/dropdown.js`](src/scripts/dropdown.js) puts a button and a list in its place, styled by [`src/styles/dropdown.css`](src/styles/dropdown.css), and keeps the select, hidden, as what holds the value, so the code around it reads `select.value` and hears `change` as before. It's read out and used from the keyboard as a select is (WAI-ARIA's select-only combobox): arrows, Home and End, typing to jump, Enter or Space to pick, Escape to close. A page calls `dropdown(select)` on the selects it has, and without JavaScript the native select stays.
 - **Page furniture.** [`src/components/`](src/components/) replaces Starlight's header, theme switch, page title and footer. On narrow screens the header puts the sections and GitHub in a menu. The title shows how many of the page's examples CI tests, links to the file to edit, and links to the roadmap's issue form with the page filled in, and on the benchmark page, where the header's Performance link goes, it's followed by the home page's results chart, so that page opens with the numbers and then says how they're made. The footer has the previous and next pages and the commit the page was built from ([`src/facts.mjs`](src/facts.mjs)).
 - **Pages of its own.** [`src/pages/`](src/pages/) has the home page, the `/docs/` overview, the roadmap and the 404 page. `docs/roadmap.md` is in the docs' page list but isn't a Starlight page: the roadmap page renders its summary under the board, and the sidebar links to it.
 
@@ -83,7 +84,7 @@ The key is `PUBLIC_ACTA_ROADMAP_KEY`, set in Vercel's project settings, or in `s
 
 What it does:
 
-- **The board.** Each stage is a column, ten cards long until "Show all", and one at a time on a phone, picked with tabs. Search matches a task's id, title and description; sort is the board's order, most votes or newest; both stay in the address (`?q=`, `?sort=`). Press `/` to search.
+- **The board.** Each stage is a column, ten cards long until "Show all", and one at a time on a phone, picked with tabs. Search matches a task's id, title and description; sort, one of the site's dropdowns, is the board's order, most votes or newest; both stay in the address (`?q=`, `?sort=`). Press `/` to search.
 - **A task.** A card opens the task in a dialog with its description, rendered from Markdown by [`src/roadmap/render.mjs`](src/roadmap/render.mjs), which the build and the browser share, so a card looks the same either way. Everything from Acta is escaped, and only links to web pages and to this site are kept: a link to the docs on GitHub goes to the docs here, and a link to another task on the board opens it here if it's public. Each task has an address, `/roadmap/#CLX-12`, and Back closes it.
 - **Votes**, on any task not shipped and on ideas, show at once and are taken back if Acta turns them down.
 - **Ideas** go to Acta, and so does every vote. As someone types a title, the page lists tasks and ideas that look the same, so a vote can go to one that's already there.

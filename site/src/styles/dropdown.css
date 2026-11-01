@@ -1,0 +1,138 @@
+/* The site's select, made by src/scripts/dropdown.js from a native <select>. It's shaped as the
+   site's fields are, and its list as its menus are. */
+
+.dd {
+	position: relative;
+	display: inline-block;
+	vertical-align: middle;
+}
+.dd-button {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	font: 15px/1.4 var(--f-body);
+	color: var(--ink);
+	background: var(--raised);
+	border: 1px solid var(--line-2);
+	border-radius: 9px;
+	padding: 9px 10px 9px 12px;
+	white-space: nowrap;
+	cursor: pointer;
+	user-select: none;
+	-webkit-tap-highlight-color: transparent;
+}
+.dd-value {
+	display: grid;
+}
+.dd-value > span {
+	grid-area: 1 / 1;
+}
+.dd-value > span:not(.on) {
+	visibility: hidden;
+}
+.dd-button:hover {
+	border-color: var(--ink-3);
+}
+.dd-button:focus-visible,
+.dd-button[aria-expanded='true'] {
+	outline: none;
+	border-color: var(--amber);
+	box-shadow: 0 0 0 3px var(--amber-wash);
+}
+.dd-button[aria-disabled='true'] {
+	opacity: 0.5;
+	cursor: default;
+}
+.dd-button svg.i {
+	width: 16px;
+	height: 16px;
+	color: var(--ink-3);
+	transition: transform 0.15s ease;
+}
+.dd-button[aria-expanded='true'] svg.i {
+	transform: rotate(180deg);
+}
+
+.dd-list {
+	position: absolute;
+	z-index: 30;
+	top: calc(100% + 6px);
+	left: 0;
+	min-width: 100%;
+	max-height: min(320px, 60vh);
+	overflow: auto;
+	margin: 0;
+	padding: 5px;
+	list-style: none;
+	background: var(--raised);
+	border: 1px solid var(--line-2);
+	border-radius: 11px;
+	box-shadow: var(--shadow);
+	outline: none;
+	animation: dd-in 0.12s ease-out;
+}
+.dd-up .dd-list {
+	top: auto;
+	bottom: calc(100% + 6px);
+	animation-name: dd-in-up;
+}
+.dd-end .dd-list {
+	left: auto;
+	right: 0;
+}
+.dd-list [role='option'] {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 20px;
+	margin: 0;
+	padding: 8px 9px 8px 10px;
+	border-radius: 7px;
+	font: 14.5px/1.3 var(--f-body);
+	color: var(--ink-2);
+	white-space: nowrap;
+	cursor: pointer;
+}
+.dd-list [role='option'].active {
+	background: var(--sunk);
+	color: var(--ink);
+}
+.dd-list [aria-selected='true'] {
+	color: var(--ink);
+	font-weight: 600;
+}
+.dd-list [role='option'] svg.i {
+	width: 16px;
+	height: 16px;
+	stroke-width: 2.2;
+	color: var(--amber-ink);
+	visibility: hidden;
+}
+.dd-list [aria-selected='true'] svg.i {
+	visibility: visible;
+}
+.dd-list [aria-disabled='true'] {
+	opacity: 0.45;
+	cursor: default;
+}
+
+@keyframes dd-in {
+	from {
+		opacity: 0;
+		transform: translateY(-4px);
+	}
+}
+@keyframes dd-in-up {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.dd-list {
+		animation: none;
+	}
+	.dd-button svg.i {
+		transition: none;
+	}
+}

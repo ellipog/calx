@@ -114,7 +114,6 @@
 	pointer-events: none;
 }
 .rm-search input,
-.rm-sort select,
 .rm-field input,
 .rm-field textarea {
 	font: 15px/1.4 var(--f-body);
@@ -153,7 +152,6 @@
 	opacity: 1;
 }
 .rm-search input:focus,
-.rm-sort select:focus,
 .rm-field input:focus,
 .rm-field textarea:focus {
 	outline: none;
@@ -167,15 +165,20 @@
 	font-size: 14px;
 	color: var(--ink-3);
 }
+/* The native select, until dropdown.js puts the site's one in its place: the same size, so the
+   toolbar doesn't move when it does. */
 .rm-sort select {
-	width: auto;
-	padding-right: 30px;
+	font: 15px/1.4 var(--f-body);
+	color: var(--ink);
+	background: var(--raised);
+	border: 1px solid var(--line-2);
+	border-radius: 9px;
+	padding: 9px 36px 9px 12px;
 	appearance: none;
 	background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
-	background-position: right 15px top 50%, right 10px top 50%;
+	background-position: right 19px top 50%, right 14px top 50%;
 	background-size: 5px 5px;
 	background-repeat: no-repeat;
-	cursor: pointer;
 }
 .rm-status {
 	margin-left: auto;
