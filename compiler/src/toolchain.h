@@ -17,6 +17,9 @@ enum class BuildKind { program, library };
 struct Toolchain {
     std::string clang;    // the clang executable
     bool lld = false;     // whether lld is next to it
+    // On Windows, whether clang targets mingw-w64 and the UCRT, as the toolchain a release carries
+    // does, rather than Visual Studio's C runtime and SDK.
+    bool mingw = false;
     std::string identity; // what changes when clang does: its path, size and modification time
     std::string home;     // the Calx installation: runtime/ and std/ are under it
     std::string cache;    // the object cache

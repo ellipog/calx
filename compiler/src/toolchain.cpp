@@ -290,10 +290,18 @@ std::string cache_dir() {
 std::string which(const std::string& name) { return find_on_path(name); }
 
 bool find_toolchain(Toolchain& tc, std::string& error) {
+    tc.home = find_home(error);
+    if (tc.home.empty()) return false;
+    // CALX_CC, then the toolchain an installation carries, then clang on PATH.
     tc.clang = env("CALX_CC");
+    if (tc.clang.empty()) {
+        fs::path bundled = fs::path(tc.home) / "toolchain" / "bin" / (std::string("clang") + kExe);
+        std::error_code ec;
+        if (fs::is_regular_file(bundled, ec)) tc.clang = bundled.string();
+    }
     if (tc.clang.empty()) tc.clang = find_on_path("clang");
     if (tc.clang.empty()) {
-        error = "can't find clang; put it on PATH or set CALX_CC";
+        error = "can't find clang; put it on PATH or set CALX_CC, or run `calx doctor`";
         return false;
     }
     std::error_code ec;
@@ -305,16 +313,19 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = clang_path.string();
     fs::path dir = clang_path.parent_path();
 #ifdef _WIN32
-    tc.lld = fs::is_regular_file(dir / "lld-link.exe", ec) || !find_on_path("lld-link").empty();
+    // llvm-mingw's layout: the target's libraries in a folder named for it, beside bin.
+    tc.mingw = fs::is_directory(dir.parent_path() / "x86_64-w64-mingw32", ec);
+    if (tc.mingw) {
+        tc.lld = fs::is_regular_file(dir / "ld.lld.exe", ec);
+    } else {
+        tc.lld = fs::is_regular_file(dir / "lld-link.exe", ec) || !find_on_path("lld-link").empty();
+    }
 #else
     tc.lld = fs::is_regular_file(dir / "ld.lld", ec) || !find_on_path("ld.lld").empty();
 #endif
     auto size = fs::file_size(clang_path, ec);
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
     tc.identity = tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
-
-    tc.home = find_home(error);
-    if (tc.home.empty()) return false;
 
     tc.cache = cache_dir();
     fs::create_directories(fs::path(tc.cache) / "obj", ec);
@@ -901,14 +912,19 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // that overflows always reaches the page kept below it and panics, never stepping over it
     // into other memory. Windows' code does this already, through __chkstk.
     flags.push_back("-fstack-clash-protection");
+#else
+    // mingw's clang writes DWARF unless asked for CodeView, which the PDB holds and dbghelp reads
+    // for stack traces, as it does with Visual Studio's.
+    if (tc.mingw) flags.push_back("-gcodeview");
 #endif
     if (mode == BuildMode::debug) {
         flags.push_back("-O0");
         flags.push_back("-DCX_DEBUG");  // the runtime checks that everything allocated is freed
 #ifdef _WIN32
         // The DLL C runtime. Linking the static one copies its debug info into every PDB, which
-        // doubles the link time. Release builds link it statically, so they run anywhere.
-        flags.push_back("-fms-runtime-lib=dll");
+        // doubles the link time. Release builds link it statically, so they run anywhere. With
+        // mingw, every build uses the UCRT's DLL, which Windows 10 and later have.
+        if (!tc.mingw) flags.push_back("-fms-runtime-lib=dll");
 #endif
     } else {
         flags.push_back("-O3");
@@ -1017,17 +1033,27 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (library) {
         link_flags.push_back("-shared");
 #ifdef _WIN32
-        link_flags.push_back("-Wl,/noimplib");  // nothing links against it: programs open it
+        // Nothing links against it: programs open it. mingw's lld writes no import library unless
+        // asked.
+        if (!tc.mingw) link_flags.push_back("-Wl,/noimplib");
 #endif
     }
 #ifdef _WIN32
     // The main thread's stack is 8 MiB, as Linux and macOS give it and as the runtime gives every
     // thread it starts, so a program recurses as deep on every system (D135). Windows' is 1 MiB
     // unless the program says. It's address space, taken as memory only as the stack grows.
-    if (!library) link_flags.push_back("-Wl,/STACK:8388608");
+    if (!library) link_flags.push_back(tc.mingw ? "-Wl,--stack,8388608" : "-Wl,/STACK:8388608");
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
-    // The driver always names the static C runtime when linking; the objects name the DLL one.
-    if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
+    if (tc.mingw) {
+        // A PDB beside the image, named for it, as Visual Studio's linker writes.
+        link_flags.push_back("-Wl,--pdb=");
+        // The system libraries the runtime's parts use. Visual Studio's linker takes them from
+        // the `#pragma comment(lib)` in each part.
+        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization"}) link_flags.push_back(lib);
+    } else if (mode == BuildMode::debug) {
+        // The driver always names the static C runtime when linking; the objects name the DLL one.
+        link_flags.push_back("-Wl,-nodefaultlib:libcmt");
+    }
 #else
     link_flags.push_back("-lm");
 #endif
@@ -1037,13 +1063,24 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         std::string lto_cache = (fs::path(tc.cache) / "lto").string();
         link_flags.push_back("-flto=thin");
 #ifdef _WIN32
-        // The driver doesn't pass the optimization level to lld-link, which would use -O2.
-        for (const char* f : {"/opt:lldlto=3", "/lldltocachepolicy:cache_size_bytes=512m"}) {
+        if (tc.mingw) {
+            // mingw's lld takes ld.lld's options, and from the driver, -O3 as the LTO level.
+            link_flags.push_back("-O3");
+            link_flags.push_back("-march=x86-64-v3");
+            for (const std::string& f : {std::string("--lto-O3"), std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
+                                         "--thinlto-cache-dir=" + lto_cache}) {
+                link_flags.push_back("-Xlinker");
+                link_flags.push_back(f);
+            }
+        } else {
+            // The driver doesn't pass the optimization level to lld-link, which would use -O2.
+            for (const char* f : {"/opt:lldlto=3", "/lldltocachepolicy:cache_size_bytes=512m"}) {
+                link_flags.push_back("-Xlinker");
+                link_flags.push_back(f);
+            }
             link_flags.push_back("-Xlinker");
-            link_flags.push_back(f);
+            link_flags.push_back("/lldltocache:" + lto_cache);
         }
-        link_flags.push_back("-Xlinker");
-        link_flags.push_back("/lldltocache:" + lto_cache);
 #else
         link_flags.push_back("-O3");
         link_flags.push_back("-march=x86-64-v3");
