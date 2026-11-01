@@ -35,6 +35,9 @@ std::string find_home(std::string& error);
 // `error`.
 bool find_toolchain(Toolchain& tc, std::string& error);
 
+// The program `name` (with `.exe` on Windows) in the first folder on PATH that has it, or "".
+std::string which(const std::string& name);
+
 // The cache folder: CALX_CACHE, or `%LOCALAPPDATA%\calx\cache` on Windows and
 // `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux.
 std::string cache_dir();

@@ -287,6 +287,8 @@ std::string cache_dir() {
 #endif
 }
 
+std::string which(const std::string& name) { return find_on_path(name); }
+
 bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = env("CALX_CC");
     if (tc.clang.empty()) tc.clang = find_on_path("clang");
@@ -1118,7 +1120,13 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         std::error_code ec;
         if (status != 0) {
             for (auto& [temp, obj] : renames) fs::remove(temp, ec);
-            std::fprintf(stderr, "calx: clang failed (status %d); this is a bug in the Calx compiler\n", status);
+            // The compiler checks everything it emits, so a failure is either clang not finding the
+            // system's headers and libraries, or a bug in Calx.
+            std::fprintf(stderr,
+                         "calx: clang failed (status %d). If it couldn't find a header or a library, `calx doctor`\n"
+                         "says what's missing. Otherwise it's a bug in the Calx compiler, worth reporting at\n"
+                         "https://github.com/ellipog/calx/issues\n",
+                         status);
             return r;
         }
         for (auto& [temp, obj] : renames) {
@@ -1144,7 +1152,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
     }
     if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
-        std::fprintf(stderr, "calx: linking failed\n");
+        std::fprintf(stderr, "calx: linking failed; `calx doctor` checks the linker and the system's libraries\n");
         return r;
     }
     std::error_code ec;

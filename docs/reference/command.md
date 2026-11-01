@@ -16,6 +16,7 @@ calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
 calx update                    # install the newest release
+calx doctor                    # check that programs build and run, and say how to fix what doesn't
 ```
 
 A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
@@ -100,6 +101,28 @@ Windows Defender scans every new executable the first time it starts, which cost
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
 `calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself.
+
+## Checking the toolchain
+
+`calx doctor` checks what building programs needs, and for each problem says how to fix it:
+
+```
+calx doctor
+
+  ok    calx 0.2.0 (3f9c2a1b7d4e, 2026-11-01) at C:\Users\you\.calx\bin\calx.exe
+  ok    runtime and standard library in C:\Users\you\.calx
+  ok    clang 20.1.8 at C:\Program Files\LLVM\bin\clang.exe
+  ok    lld, which links faster and optimizes across modules in release builds
+  ok    builds and runs a program in a debug build (143 ms)
+  ok    builds and runs a program in a release build (260 ms)
+  ok    calx on PATH is this one
+  ok    build cache in C:\Users\you\AppData\Local\calx\cache, 412 MB
+  ok    updates: `calx update` installs new releases, and a daily check says when there's one
+
+Everything works.
+```
+
+The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

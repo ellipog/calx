@@ -16,6 +16,7 @@
 #include "source.h"
 #include "toolchain.h"
 #include "update.h"
+#include "doctor.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -51,6 +52,7 @@ int usage() {
         "  emit-c    print the C a program compiles to (-o names a file)\n"
         "  expand    print the code a program's attributes generate\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
+        "  doctor    check that Calx can build and run programs, and say how to fix what's wrong\n"
         "  version   print the compiler's version\n"
         "\n"
         "options:\n"
@@ -99,6 +101,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (opt.command == "update") return run_update(std::vector<std::string>(argv + 2, argv + argc));
+    if (opt.command == "doctor") return run_doctor();
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--") {
