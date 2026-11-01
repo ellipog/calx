@@ -264,11 +264,14 @@ private:
                 all.add_cmp(table_key(x));
             }
         }
-        // Ordering a type orders what it holds, and sorting a list orders its elements.
+        // Ordering a type orders what it holds, and sorting a list orders its elements. A type
+        // whose `Order` is written by hand orders what it holds only as its `cmp` does, which the
+        // function's own uses gather: what it holds may have no order at all, such as a map.
         for (const Type* t : all.sorts) {
             if (has_cmp_glue(t)) all.add_cmp(t);
         }
         for (std::size_t i = 0; i < all.cmps.size(); i++) {
+            if (hand(all.cmps[i], prop_order)) continue;
             for (const Type* x : held(all.cmps[i])) {
                 if (has_cmp_glue(x)) all.add_cmp(x);
             }

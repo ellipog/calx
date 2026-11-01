@@ -125,6 +125,18 @@ struct Move {
     to: BlockPos,
 }
 
+// Ordered by hand around what has no order of its own: sorting it orders only the name.
+struct Indexed {
+    name: String,
+    counts: Map<String, i32>,
+}
+
+impl Order for Indexed {
+    fn cmp(self, other: Self) -> Ordering {
+        return self.name.cmp(other.name)
+    }
+}
+
 // Hashes only the key, and compares only the key, which agree.
 struct Cached {
     key: i64,
@@ -231,4 +243,9 @@ fn main() {
     cache.insert(Cached { key: 1, note: String("one") }, 1)
     cache.insert(Cached { key: 1, note: String("uno") }, 2)
     println("{cache.len()}")    // out: 1
+
+    var index: List<Indexed> = [Indexed { name: String("b"), counts: Map<String, i32>() }, Indexed { name: String("a"), counts: Map<String, i32>() }]
+    index[0].counts.insert(String("x"), 1)
+    index.sort()
+    println("{index[0].name} {index[1].name} {index[1].counts.len()}")    // out: a b 1
 }
