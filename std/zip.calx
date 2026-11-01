@@ -1,0 +1,683 @@
+/// Zip archives, read from memory as Java's `ZipFile` reads them and written as `zip` writes
+/// them: the central directory at the end, Zip64 where an archive needs it, entries stored or
+/// deflated, each checked against its CRC-32, and file modes kept for Unix. A stretch of an
+/// archive without its central directory is read file by file from its start, as Java's
+/// `ZipInputStream` reads.
+module std.zip
+
+import std.fs.{make_dir_all, set_mode, write}
+import std.time.{DateTime}
+import std.zlib.{Format, compress_into, crc32, decompress_into, decompress_stream}
+
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
+/// A file or a directory in an archive.
+pub struct Entry {
+    /// Its path in the archive, such as `data/minecraft/dimension_type/overworld.json`. A
+    /// directory's ends with `/`.
+    pub name: String
+    /// How many bytes it is.
+    pub size: usize
+    /// Its permission bits, such as `0o755`, when it was archived on Unix, or 0.
+    pub mode: u32
+    /// When it was last modified, to two seconds, in the time zone of whoever archived it, as
+    /// zip records it.
+    pub modified: DateTime
+    method: u16
+    crc: u32
+    compressed: usize
+    // Where its local header starts.
+    header: usize
+    // Where in the archive's `inflated` its bytes are, if they were inflated to find its end.
+    inflated: usize?
+}
+
+impl Entry {
+    /// Whether it's a directory: its name ends with `/`.
+    pub fn is_dir(self) -> bool {
+        return self.name.ends_with("/")
+    }
+}
+
+/// An archive, which holds its bytes.
+pub struct Zip {
+    bytes: List<u8>
+    files: List<Entry>
+    by_name: Map<String, usize>
+    // The files that were inflated as they were walked, one after another.
+    inflated: List<u8>
+}
+
+// The records' signatures.
+const END: u32 = 0x06054b50
+const END64: u32 = 0x06064b50
+const LOCATOR64: u32 = 0x07064b50
+const CENTRAL: u32 = 0x02014b50
+const LOCAL: u32 = 0x04034b50
+const DESCRIPTOR: u32 = 0x08074b50
+
+impl Zip {
+    /// The archive in `bytes`, or why it can't be read, in the words of Java's `ZipException`.
+    pub fn open(bytes: own List<u8>) -> Zip ! String {
+        let n = bytes.len()
+        if n == 0 {
+            fail String("zip file is empty")
+        }
+        if n < 22 {
+            fail String("zip END header not found")
+        }
+        // The end record is the last thing in the archive but a comment of up to 65,535 bytes.
+        var at: usize = n - 22
+        var found = false
+        let lowest: usize = if n - 22 > 65535 { n - 22 - 65535 } else { 0 }
+        loop {
+            if le32(bytes, at) == END and at + 22 + usize(le16(bytes, at + 20)) <= n {
+                found = true
+                break
+            }
+            if at == lowest {
+                break
+            }
+            at -= 1
+        }
+        if not found {
+            fail String("zip END header not found")
+        }
+        var count = usize(le16(bytes, at + 10))
+        var directory = usize(le32(bytes, at + 16))
+        var directory_size = usize(le32(bytes, at + 12))
+        if count == 0xFFFF or directory == 0xFFFFFFFF or directory_size == 0xFFFFFFFF {
+            if at < 20 or le32(bytes, at - 20) != LOCATOR64 {
+                fail String("invalid END header (bad central directory offset)")
+            }
+            let end64 = le64(bytes, at - 12)
+            if end64 + 56 > u64(n) or le32(bytes, usize.wrap(end64)) != END64 {
+                fail String("invalid zip64 END header")
+            }
+            let e = usize.wrap(end64)
+            let count64 = le64(bytes, e + 32)
+            let size64 = le64(bytes, e + 40)
+            let directory64 = le64(bytes, e + 48)
+            if directory64 > u64(n) or size64 > u64(n) or count64 > u64(n) {
+                fail String("invalid END header (bad central directory offset)")
+            }
+            count = usize.wrap(count64)
+            directory_size = usize.wrap(size64)
+            directory = usize.wrap(directory64)
+        }
+        if directory > n or directory_size > n - directory {
+            fail String("invalid END header (bad central directory offset)")
+        }
+        // Each entry takes at least 46 bytes of the directory.
+        if count > directory_size / 46 {
+            fail String("invalid END header (bad total entries)")
+        }
+        var files = List<Entry>()
+        files.reserve(count)
+        var by_name = Map<String, usize>()
+        by_name.reserve(count)
+        var p = directory
+        let end = directory + directory_size
+        for _ in 0..count {
+            if p + 46 > end or le32(bytes, p) != CENTRAL {
+                fail String("invalid CEN header (bad signature)")
+            }
+            let flags = le16(bytes, p + 8)
+            if flags & 1 != 0 {
+                fail String("invalid CEN header (encrypted entry)")
+            }
+            let method = le16(bytes, p + 10)
+            let name_len = usize(le16(bytes, p + 28))
+            let extra_len = usize(le16(bytes, p + 30))
+            let comment_len = usize(le16(bytes, p + 32))
+            let next = p + 46 + name_len + extra_len + comment_len
+            if next > end {
+                fail String("invalid CEN header (bad header size)")
+            }
+            var compressed = u64(le32(bytes, p + 20))
+            var size = u64(le32(bytes, p + 24))
+            var header = u64(le32(bytes, p + 42))
+            // Zip64's extra field holds the sizes and offset too big for 32 bits, in that order.
+            var x = p + 46 + name_len
+            let x_end = x + extra_len
+            while x + 4 <= x_end {
+                let id = le16(bytes, x)
+                let len = usize(le16(bytes, x + 2))
+                if x + 4 + len > x_end {
+                    break
+                }
+                if id == 1 {
+                    var f = x + 4
+                    if size == 0xFFFFFFFF and f + 8 <= x + 4 + len {
+                        size = le64(bytes, f)
+                        f += 8
+                    }
+                    if compressed == 0xFFFFFFFF and f + 8 <= x + 4 + len {
+                        compressed = le64(bytes, f)
+                        f += 8
+                    }
+                    if header == 0xFFFFFFFF and f + 8 <= x + 4 + len {
+                        header = le64(bytes, f)
+                    }
+                }
+                x += 4 + len
+            }
+            // Deflate makes at most about 1,032 bytes of each byte it reads.
+            if header >= u64(n) or compressed > u64(n) or size > compressed * 1032 + 1024 {
+                fail String("invalid CEN header (bad entry offset)")
+            }
+            let name = text(bytes, p + 46, name_len) else fail String("invalid CEN header (bad entry name)")
+            // The high byte of "made by" names the system: 3 is Unix, whose mode is in the top
+            // half of the external attributes.
+            let mode = if u32(le16(bytes, p + 4)) >> 8 == 3 { (le32(bytes, p + 38) >> 16) & 0o7777 } else { 0 }
+            let modified = dos_time(le16(bytes, p + 14), le16(bytes, p + 12))
+            by_name.insert(name.copy(), files.len())
+            files.push(Entry { name: name, size: usize.wrap(size), mode: mode, modified: modified, method: method, crc: le32(bytes, p + 16), compressed: usize.wrap(compressed), header: usize.wrap(header), inflated: none })
+            p = next
+        }
+        return Zip { bytes: bytes, files: files, by_name: by_name, inflated: [] }
+    }
+
+    /// The files in `bytes`, read from its start one after another until it ends, or why they
+    /// can't be: each a local header, its data, and the data descriptor after it if it has one,
+    /// as a stretch of an archive without its central directory holds them. A deflated file whose
+    /// sizes are only in its descriptor is inflated to find where it ends, and kept, so reading it
+    /// costs a copy, but no more inflating. Its CRC-32 is checked when it's read. A central
+    /// directory, as a whole archive has after its files, ends the walk. Local headers
+    /// don't record modes, so each `mode` is 0.
+    pub fn walk(bytes: own List<u8>) -> Zip ! String {
+        let n = bytes.len()
+        var files = List<Entry>()
+        var by_name = Map<String, usize>()
+        var inflated = List<u8>()
+        var at: usize = 0
+        while at < n {
+            // A whole archive's central directory ends the files, as it ends `ZipInputStream`.
+            let sig = le32(bytes, at)
+            if sig == CENTRAL or sig == END or sig == END64 {
+                break
+            }
+            if at + 30 > n or sig != LOCAL {
+                fail "invalid LOC header (bad signature) at {at}"
+            }
+            let flags = le16(bytes, at + 6)
+            if flags & 1 != 0 {
+                fail "invalid LOC header (encrypted entry) at {at}"
+            }
+            let method = le16(bytes, at + 8)
+            let modified = dos_time(le16(bytes, at + 12), le16(bytes, at + 10))
+            var crc = le32(bytes, at + 14)
+            var compressed = u64(le32(bytes, at + 18))
+            var size = u64(le32(bytes, at + 22))
+            let name_len = usize(le16(bytes, at + 26))
+            let extra_len = usize(le16(bytes, at + 28))
+            let start = at + 30 + name_len + extra_len
+            if start > n {
+                fail "invalid LOC header (bad header size) at {at}"
+            }
+            let name = text(bytes, at + 30, name_len) else fail "invalid LOC header (bad entry name) at {at}"
+            // A local header's Zip64 field holds both sizes, the whole size first.
+            var x = at + 30 + name_len
+            while x + 4 <= start {
+                let len = usize(le16(bytes, x + 2))
+                if x + 4 + len > start {
+                    break
+                }
+                if le16(bytes, x) == 1 and len >= 16 and (size == 0xFFFFFFFF or compressed == 0xFFFFFFFF) {
+                    size = le64(bytes, x + 4)
+                    compressed = le64(bytes, x + 12)
+                }
+                x += 4 + len
+            }
+            var kept: usize? = none
+            var next: usize = 0
+            if flags & 8 != 0 {
+                if method != 8 {
+                    fail "invalid LOC header (stored entry with a data descriptor) in {name}"
+                }
+                let from = inflated.len()
+                // Deflate makes at most about 1,032 bytes of each byte it reads.
+                let end = match decompress_stream(bytes, start, n, Format.Raw, (n - start) * 1032 + 1024, mut inflated) {
+                    ok(e) => e,
+                    err(_) => fail "invalid entry compressed data in {name}",
+                }
+                let used = u64(end - start)
+                let made = u64(inflated.len() - from)
+                // The descriptor's signature is optional, and Zip64 makes its sizes 8 bytes.
+                let d = if le32(bytes, end) == DESCRIPTOR { end + 4 } else { end }
+                if d + 12 <= n and u64(le32(bytes, d + 4)) == used and u64(le32(bytes, d + 8)) == made {
+                    next = d + 12
+                } else if d + 20 <= n and le64(bytes, d + 4) == used and le64(bytes, d + 12) == made {
+                    next = d + 20
+                } else {
+                    fail "invalid data descriptor in {name}"
+                }
+                crc = le32(bytes, d)
+                compressed = used
+                size = made
+                kept = some(from)
+            } else {
+                if compressed > u64(n - start) or size > compressed * 1032 + 1024 {
+                    fail "invalid LOC header (bad entry size) in {name}"
+                }
+                next = start + usize.wrap(compressed)
+            }
+            by_name.insert(name.copy(), files.len())
+            files.push(Entry { name: name, size: usize.wrap(size), mode: 0, modified: modified, method: method, crc: crc, compressed: usize.wrap(compressed), header: at, inflated: kept })
+            at = next
+        }
+        return Zip { bytes: bytes, files: files, by_name: by_name, inflated: inflated }
+    }
+
+    /// Its files, in the order the central directory lists them.
+    pub fn entries(self) -> List<Entry> {
+        return self.files.copy()
+    }
+
+    /// How many files it has.
+    pub fn len(self) -> usize {
+        return self.files.len()
+    }
+
+    /// The path of file `i`.
+    pub fn name(self, i: usize) -> String {
+        return self.files[i].name.copy()
+    }
+
+    /// The index of the file at `name`, or `none`. A later file of the same name wins.
+    pub fn find(self, name: String) -> usize? {
+        return self.by_name.get(name)
+    }
+
+    /// What file `i` holds, or why it can't be read.
+    pub fn read(self, i: usize) -> List<u8> ! String {
+        let header = self.files[i].header
+        let size = self.files[i].size
+        let compressed = self.files[i].compressed
+        let method = self.files[i].method
+        if let from = self.files[i].inflated {
+            let out = slice(self.inflated, from, size)
+            if crc32(out) != self.files[i].crc {
+                fail "invalid entry CRC in {self.files[i].name}"
+            }
+            return out
+        }
+        let n = self.bytes.len()
+        if header + 30 > n or le32(self.bytes, header) != LOCAL {
+            fail "invalid LOC header (bad signature) in {self.files[i].name}"
+        }
+        let start = header + 30 + usize(le16(self.bytes, header + 26)) + usize(le16(self.bytes, header + 28))
+        if start > n or compressed > n - start {
+            fail "invalid LOC header (bad entry size) in {self.files[i].name}"
+        }
+        var out = List<u8>()
+        if method == 0 {
+            if compressed != size {
+                fail "invalid LOC header (bad entry size) in {self.files[i].name}"
+            }
+            out = slice(self.bytes, start, size)
+        } else if method == 8 {
+            out.reserve(size)
+            let ended = match decompress_into(self.bytes, start, start + compressed, Format.Raw, size, mut out) {
+                ok(b) => b,
+                err(_) => fail "invalid entry compressed data in {self.files[i].name}",
+            }
+            if not ended or out.len() != size {
+                fail "invalid entry size in {self.files[i].name}: expected {size}"
+            }
+        } else {
+            fail "unsupported compression method {method} in {self.files[i].name}"
+        }
+        if crc32(out) != self.files[i].crc {
+            fail "invalid entry CRC in {self.files[i].name}"
+        }
+        return out
+    }
+
+    /// What the file at `name` holds, or why it can't be read.
+    pub fn read_named(self, name: String) -> List<u8> ! String {
+        let i = self.find(name) else fail "no entry {name}"
+        return try self.read(i)
+    }
+
+    /// Writes every file and directory into the folder `to`, making the folders on the way, and
+    /// gives each file its mode where the archive has one. Fails, before writing anything, if a
+    /// path would land outside `to`: an absolute path, a drive, or a `..` that climbs out.
+    pub fn extract(self, to: String) ! String {
+        var paths = List<String>()
+        paths.reserve(self.files.len())
+        for e in self.files {
+            let rel = safe_path(e.name) else fail "unsafe path {e.name} in the archive"
+            paths.push(rel)
+        }
+        for i in 0..self.files.len() {
+            let path = if paths[i].is_empty() { to.copy() } else { "{to}/{paths[i]}" }
+            if self.files[i].is_dir() {
+                if let err(e) = make_dir_all(path) {
+                    fail "can't make {path}: {e}"
+                }
+                continue
+            }
+            let parent = parent_of(path)
+            if not parent.is_empty() {
+                if let err(e) = make_dir_all(parent) {
+                    fail "can't make {parent}: {e}"
+                }
+            }
+            let bytes = try self.read(i)
+            if let err(e) = write(path, bytes) {
+                fail "can't write {path}: {e}"
+            }
+            if self.files[i].mode != 0 {
+                if let err(e) = set_mode(path, self.files[i].mode) {
+                    fail "can't set the mode of {path}: {e}"
+                }
+            }
+        }
+    }
+}
+
+/// Builds an archive in memory: add files and directories, then `finish` it. Names are UTF-8,
+/// and every entry is marked as made on Unix, so its mode survives. Sizes past 4 GiB and more
+/// than 65,535 entries use Zip64.
+pub struct Writer {
+    out: List<u8>
+    central: List<u8>
+    count: usize
+    time: u16
+    date: u16
+}
+
+impl Writer {
+    /// An empty archive, whose entries are dated 1980-01-01 00:00, the earliest zip can say, so
+    /// the same files always make the same bytes. `set_time` dates them.
+    pub fn new() -> Writer {
+        return Writer { out: [], central: [], count: 0, time: 0, date: 33 }    // month 1, day 1
+    }
+
+    /// Dates the entries added after this, as zip records times: local, to two seconds, between
+    /// 1980 and 2107.
+    pub fn set_time(mut self, at: DateTime) {
+        let year = if at.year < 1980 { 1980 } else if at.year > 2107 { 2107 } else { at.year }
+        self.date = u16.wrap(((year - 1980) << 9) | (at.month << 5) | at.day)
+        self.time = u16.wrap((at.hour << 11) | (at.minute << 5) | (at.second / 2))
+    }
+
+    /// Adds a file, deflated at zlib's level 6, with mode `0o644`.
+    pub fn add(mut self, name: String, bytes: List<u8>) {
+        self.add_with(name, bytes, 6, 0o644)
+    }
+
+    /// Adds a file deflated at `level`, from 1, fastest, to 9, smallest, or stored as it is
+    /// with 0, with the permission bits `mode`, such as `0o755` for a program. A file that
+    /// deflate can't make smaller is stored.
+    pub fn add_with(mut self, name: String, bytes: List<u8>, level: u32, mode: u32) {
+        self.entry(name, bytes, level, 0o100000 | (mode & 0o7777), false)
+    }
+
+    /// Adds a directory, with mode `0o755`. Its name gets the `/` that marks one, if it hasn't
+    /// got it.
+    pub fn add_dir(mut self, name: String) {
+        let dir = if name.ends_with("/") { name.copy() } else { "{name}/" }
+        self.entry(dir, [], 0, 0o040755, true)
+    }
+
+    // One entry: its local header, its data, and its central record for later.
+    fn entry(mut self, name: String, bytes: List<u8>, level: u32, mode: u32, dir: bool) {
+        let size = bytes.len()
+        let offset = self.out.len()
+        // Deflate is never kept when it's larger, so only the size decides Zip64.
+        let big = u64(size) >= 0xFFFFFFFF
+        let crc = crc32(bytes)
+        put32(mut self.out, LOCAL)
+        put16(mut self.out, if big { 45 } else { 20 })
+        put16(mut self.out, 0x0800)    // the name is UTF-8
+        put16(mut self.out, 0)         // the method, filled in below
+        put16(mut self.out, u32(self.time))
+        put16(mut self.out, u32(self.date))
+        put32(mut self.out, crc)
+        put32(mut self.out, 0)         // the compressed size, filled in below
+        put32(mut self.out, if big { 0xFFFFFFFF } else { u32.wrap(size) })
+        put16(mut self.out, u32.wrap(name.len()))
+        put16(mut self.out, if big { 20 } else { 0 })
+        append(mut self.out, name.to_bytes())
+        let extra = self.out.len()
+        if big {
+            put16(mut self.out, 1)
+            put16(mut self.out, 16)
+            put64(mut self.out, u64(size))
+            put64(mut self.out, 0)
+        }
+        let start = self.out.len()
+        var method: u32 = 0
+        if level > 0 and size > 0 {
+            compress_into(bytes, 0, size, Format.Raw, level, mut self.out)
+            if self.out.len() - start < size {
+                method = 8
+            } else {
+                self.out.truncate(start)
+            }
+        }
+        if method == 0 {
+            append(mut self.out, bytes)
+        }
+        let compressed = self.out.len() - start
+        set16(mut self.out, offset + 8, method)
+        if big {
+            set32(mut self.out, offset + 18, 0xFFFFFFFF)
+            set64(mut self.out, extra + 12, u64(compressed))
+        } else {
+            set32(mut self.out, offset + 18, u32.wrap(compressed))
+        }
+
+        // The central record: Zip64 holds whichever of the sizes and offset don't fit, in order.
+        let far = u64(offset) >= 0xFFFFFFFF
+        var extra_len: u32 = 0
+        if big {
+            extra_len += 16
+        }
+        if far {
+            extra_len += 8
+        }
+        put32(mut self.central, CENTRAL)
+        put16(mut self.central, (3 << 8) | (if big or far { 45 } else { 20 }))    // made by Unix
+        put16(mut self.central, if big or far { 45 } else { 20 })
+        put16(mut self.central, 0x0800)
+        put16(mut self.central, method)
+        put16(mut self.central, u32(self.time))
+        put16(mut self.central, u32(self.date))
+        put32(mut self.central, crc)
+        put32(mut self.central, if big { 0xFFFFFFFF } else { u32.wrap(compressed) })
+        put32(mut self.central, if big { 0xFFFFFFFF } else { u32.wrap(size) })
+        put16(mut self.central, u32.wrap(name.len()))
+        put16(mut self.central, if extra_len > 0 { extra_len + 4 } else { 0 })
+        put16(mut self.central, 0)    // no comment
+        put16(mut self.central, 0)    // disk
+        put16(mut self.central, 0)    // internal attributes
+        put32(mut self.central, (mode << 16) | (if dir { 0x10 } else { 0 }))    // and MS-DOS's directory flag
+        put32(mut self.central, if far { 0xFFFFFFFF } else { u32.wrap(offset) })
+        append(mut self.central, name.to_bytes())
+        if extra_len > 0 {
+            put16(mut self.central, 1)
+            put16(mut self.central, extra_len)
+            if big {
+                put64(mut self.central, u64(size))
+                put64(mut self.central, u64(compressed))
+            }
+            if far {
+                put64(mut self.central, u64(offset))
+            }
+        }
+        self.count += 1
+    }
+
+    /// The archive: what was added, then the central directory and the end records.
+    pub fn finish(own self) -> List<u8> {
+        var out = self.out
+        let directory = out.len()
+        append(mut out, self.central)
+        let directory_size = out.len() - directory
+        let count = self.count
+        if count >= 0xFFFF or u64(directory) >= 0xFFFFFFFF or u64(directory_size) >= 0xFFFFFFFF {
+            let end64 = out.len()
+            put32(mut out, END64)
+            put64(mut out, 44)    // the size of the rest of this record
+            put16(mut out, (3 << 8) | 45)
+            put16(mut out, 45)
+            put32(mut out, 0)
+            put32(mut out, 0)
+            put64(mut out, u64(count))
+            put64(mut out, u64(count))
+            put64(mut out, u64(directory_size))
+            put64(mut out, u64(directory))
+            put32(mut out, LOCATOR64)
+            put32(mut out, 0)
+            put64(mut out, u64(end64))
+            put32(mut out, 1)
+        }
+        put32(mut out, END)
+        put16(mut out, 0)
+        put16(mut out, 0)
+        put16(mut out, if count >= 0xFFFF { 0xFFFF } else { u32.wrap(count) })
+        put16(mut out, if count >= 0xFFFF { 0xFFFF } else { u32.wrap(count) })
+        put32(mut out, if u64(directory_size) >= 0xFFFFFFFF { 0xFFFFFFFF } else { u32.wrap(directory_size) })
+        put32(mut out, if u64(directory) >= 0xFFFFFFFF { 0xFFFFFFFF } else { u32.wrap(directory) })
+        put16(mut out, 0)    // no comment
+        return out
+    }
+}
+
+// Zip's MS-DOS date and time, as the parts of a date and time.
+fn dos_time(date: u16, time: u16) -> DateTime {
+    let d = i32(date)
+    let t = i32(time)
+    return DateTime { year: 1980 + (d >> 9), month: (d >> 5) & 15, day: d & 31, hour: t >> 11, minute: (t >> 5) & 63, second: (t & 31) * 2, milli: 0 }
+}
+
+// `name` as a path under the folder it's extracted to, with `/` between its parts, or `none` if
+// it would land outside: absolute, on a drive, or climbing out with `..`. Backslashes count as
+// separators, as some Windows tools wrote them.
+fn safe_path(name: String) -> String? {
+    if name.starts_with("/") or name.starts_with("\\") {
+        return none
+    }
+    if name.len() >= 2 and name.byte_at(1) == 58 {    // `C:`
+        return none
+    }
+    var out = String()
+    var start: usize = 0
+    for i in 0..name.len() + 1 {
+        if i < name.len() and name.byte_at(i) != 47 and name.byte_at(i) != 92 {
+            continue
+        }
+        let part = name[start..i]
+        start = i + 1
+        if part.is_empty() or part == "." {
+            continue
+        }
+        if part == ".." {
+            return none
+        }
+        if not out.is_empty() {
+            out.push_str("/")
+        }
+        out.push_str(part)
+    }
+    return some(out)
+}
+
+// The folder `path` is in, or "" if it has none.
+fn parent_of(path: String) -> String {
+    if let slash = path.find_last("/") {
+        return path[..slash]
+    }
+    return String()
+}
+
+fn le16(b: List<u8>, at: usize) -> u16 {
+    if at + 2 > b.len() {
+        return 0
+    }
+    return u16.wrap(u32(b[at]) | (u32(b[at + 1]) << 8))
+}
+
+fn le32(b: List<u8>, at: usize) -> u32 {
+    if at + 4 > b.len() {
+        return 0
+    }
+    return u32(b[at]) | (u32(b[at + 1]) << 8) | (u32(b[at + 2]) << 16) | (u32(b[at + 3]) << 24)
+}
+
+fn le64(b: List<u8>, at: usize) -> u64 {
+    return u64(le32(b, at)) | (u64(le32(b, at + 4)) << 32)
+}
+
+fn put16(out: mut List<u8>, v: u32) {
+    out.push(u8.wrap(v))
+    out.push(u8.wrap(v >> 8))
+}
+
+fn put32(out: mut List<u8>, v: u32) {
+    out.push(u8.wrap(v))
+    out.push(u8.wrap(v >> 8))
+    out.push(u8.wrap(v >> 16))
+    out.push(u8.wrap(v >> 24))
+}
+
+fn put64(out: mut List<u8>, v: u64) {
+    put32(mut out, u32.wrap(v))
+    put32(mut out, u32.wrap(v >> 32))
+}
+
+fn set16(out: mut List<u8>, at: usize, v: u32) {
+    out[at] = u8.wrap(v)
+    out[at + 1] = u8.wrap(v >> 8)
+}
+
+fn set32(out: mut List<u8>, at: usize, v: u32) {
+    set16(mut out, at, v & 0xFFFF)
+    set16(mut out, at + 2, v >> 16)
+}
+
+fn set64(out: mut List<u8>, at: usize, v: u64) {
+    set32(mut out, at, u32.wrap(v))
+    set32(mut out, at + 4, u32.wrap(v >> 32))
+}
+
+// Adds all of `bytes` to the end of `out`, in one copy.
+fn append(out: mut List<u8>, bytes: List<u8>) {
+    let n = bytes.len()
+    if n == 0 {
+        return
+    }
+    out.reserve(n)
+    unsafe {
+        let at = out.len()
+        _ = memcpy(out.as_mut_ptr().add(at), bytes.as_ptr(), n)
+        out.set_len(at + n)
+    }
+}
+
+// The `len` bytes of `b` from `at`, in one copy.
+fn slice(b: List<u8>, at: usize, len: usize) -> List<u8> {
+    if at > b.len() or len > b.len() - at {
+        panic("the range {at}..{at + len} is out of bounds for {b.len()} bytes")
+    }
+    var out = List<u8>()
+    if len == 0 {
+        return out
+    }
+    out.reserve(len)
+    unsafe {
+        _ = memcpy(out.as_mut_ptr(), b.as_ptr().add(at), len)
+        out.set_len(len)
+    }
+    return out
+}
+
+// `len` bytes at `at` as UTF-8, as Java's `ZipFile` reads names by default.
+fn text(b: List<u8>, at: usize, len: usize) -> String? {
+    return String.from_utf8(slice(b, at, len))
+}

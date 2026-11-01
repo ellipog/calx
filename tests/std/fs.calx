@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, set_mode, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -107,6 +107,17 @@ fn main() {
         err(e) => println(describe(e)),    // out: not found
     }
     match set_modified("{dir}/missing", Timestamp { unix_ms: 0 }) {
+        ok => println("set"),
+        err(e) => println(describe(e)),    // out: not found
+    }
+
+    // Modes: without the owner's write bit a file is read-only, on Windows too, which has only
+    // that flag; with it, writable again. A directory is searchable.
+    set_mode(a, 0o444)!
+    println("{metadata(a)!.mode & 0o222}")    // out: 0
+    set_mode(a, 0o644)!
+    println("{metadata(a)!.mode & 0o200} {metadata(dir)!.mode & 0o100}")    // out: 128 64
+    match set_mode("{dir}/missing", 0o644) {
         ok => println("set"),
         err(e) => println(describe(e)),    // out: not found
     }

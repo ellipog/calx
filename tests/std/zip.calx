@@ -1,0 +1,101 @@
+// std.zip: archives written and read back, stored and deflated, with modes, dates, UTF-8 names
+// and Zip64's entry count; extracting, and refusing paths that climb out; and broken archives.
+import std.fs.{is_dir, metadata, read_text, remove_dir_all, separator, temp_dir}
+import std.time.{DateTime}
+import std.zip.{Writer, Zip}
+
+fn main() {
+    var w = Writer.new()
+    w.set_time(DateTime { year: 2026, month: 11, day: 1, hour: 13, minute: 37, second: 43, milli: 0 })
+    w.add_dir("bin")
+    w.add_with("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), 9, 0o755)
+    var big = List<u8>()
+    for i in 0..100000 {
+        big.push(u8.wrap(i % 7))
+    }
+    w.add("data/big.bin", big.copy())
+    w.add("data/empty", [])
+    w.add_with("ünïcode/naïve.txt", "hé".to_bytes(), 0, 0o600)
+    let bytes = w.finish()
+    println("{bytes.len()}")    // out: 699
+
+    let z = Zip.open(bytes.copy())!
+    for e in z.entries() {
+        println("{e.name} {e.size} {e.mode} {e.is_dir()} {e.modified.year}-{e.modified.month}-{e.modified.day} {e.modified.hour}:{e.modified.minute}:{e.modified.second}")
+    }
+    // out: bin/ 0 493 true 2026-11-1 13:37:42
+    // out: bin/tool 18 493 false 2026-11-1 13:37:42
+    // out: data/big.bin 100000 420 false 2026-11-1 13:37:42
+    // out: data/empty 0 420 false 2026-11-1 13:37:42
+    // out: ünïcode/naïve.txt 3 384 false 2026-11-1 13:37:42
+    println("{z.read_named("data/big.bin")! == big} {z.read_named("data/empty")!.len()}")    // out: true 0
+    println(String.from_utf8(z.read_named("ünïcode/naïve.txt")!) ?? "?")    // out: hé
+    println("{z.find("bin/tool") ?? 99} {z.find("nope") == none} {z.len()}")    // out: 1 true 5
+
+    // The same files make the same bytes.
+    var again = Writer.new()
+    again.set_time(DateTime { year: 2026, month: 11, day: 1, hour: 13, minute: 37, second: 42, milli: 0 })
+    again.add_dir("bin/")
+    again.add_with("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), 9, 0o755)
+    again.add("data/big.bin", big.copy())
+    again.add("data/empty", [])
+    again.add_with("ünïcode/naïve.txt", "hé".to_bytes(), 0, 0o600)
+    println("{again.finish() == bytes}")    // out: true
+
+    // Walking the local headers finds the same files, without modes.
+    let walked = Zip.walk(bytes.copy())!
+    println("{walked.len()} {walked.entries()[1].mode} {walked.read(2)! == big}")    // out: 5 0 true
+
+    // More than 65,535 entries need Zip64's end records.
+    var many = Writer.new()
+    for i in 0..70000 {
+        many.add("m/{i}", [])
+    }
+    let m = Zip.open(many.finish())!
+    println("{m.len()} {m.name(69999)}")    // out: 70000 m/69999
+
+    // Extracting writes the files, with their modes where the system has them.
+    let dir = "{temp_dir()!}/calx-zip-test"
+    if let err(_) = remove_dir_all(dir) {
+    }
+    z.extract(dir)!
+    let tool = read_text("{dir}/bin/tool")!!
+    println("{tool == "#!/bin/sh\necho hi\n"}")    // out: true
+    let mode = metadata("{dir}/bin/tool")!.mode
+    println("{if separator() == "\\" { mode == 0o666 } else { mode == 0o755 }}")    // out: true
+    remove_dir_all(dir)!
+
+    // A path that would land outside the folder stops it before anything is written.
+    for name in ["../escape.txt", "/etc/passwd", "a/../../b", "C:/x", "..\\x"] {
+        var evil = Writer.new()
+        evil.add("fine.txt", [1u8])
+        evil.add(String(name), [2u8])
+        match Zip.open(evil.finish())!.extract(dir) {
+            ok => println("extracted {name}"),
+            err(e) => println(e),
+        }
+    }
+    // out: unsafe path ../escape.txt in the archive
+    // out: unsafe path /etc/passwd in the archive
+    // out: unsafe path a/../../b in the archive
+    // out: unsafe path C:/x in the archive
+    // out: unsafe path ..\x in the archive
+    println("{is_dir(dir)}")    // out: false
+
+    // Broken archives say why, as Java's ZipException does.
+    for broken in [List<u8>(), [1u8, 2, 3], [0x50u8, 0x4b, 5, 6]] {
+        match Zip.open(broken.copy()) {
+            ok(_) => println("opened"),
+            err(e) => println(e),
+        }
+    }
+    // out: zip file is empty
+    // out: zip END header not found
+    // out: zip END header not found
+    var flipped = bytes.copy()
+    flipped[75] = flipped[75] ^ 0xFF    // inside bin/tool's data, after 34 bytes of bin/ and its own 38 of header
+    match Zip.open(flipped)!.read(1) {
+        ok(_) => println("read"),
+        err(e) => println(e),    // out: invalid entry CRC in bin/tool
+    }
+}

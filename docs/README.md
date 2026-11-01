@@ -89,6 +89,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
+24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
+25. [std.tar](std/tar.md): tar archives, plain or gzipped, read and written in memory: ustar, GNU long names and pax headers, links and modes
 
 ### Java compatibility
 

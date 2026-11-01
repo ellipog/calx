@@ -46,6 +46,9 @@ static _Thread_local size_t fs_len, fs_cap;
 /* What the last `cx_fs_stat` on this thread found: the size in bytes, and the modified time in
  * milliseconds since 1970. */
 static _Thread_local cx_i64 stat_size, stat_modified;
+/* And its permission bits, as Unix gives them: read, write and run for the owner, the group and
+ * others. */
+static _Thread_local cx_u32 stat_mode;
 
 static CX_COLD void fs_out_of_memory(void) { cx_panic_text("<memory>", "out of memory"); }
 
@@ -413,7 +416,25 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
     ticks -= TICKS_TO_1970;
     /* Rounded down, as Java's `lastModified` is, for times before 1970 too. */
     stat_modified = ticks / 10000 - (ticks % 10000 < 0);
+    /* Windows has only a read-only flag, which these bits say as Python's `os.stat` does. */
+    stat_mode = (info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) stat_mode |= 0111;
     return 1;
+}
+
+cx_i32 cx_fs_set_mode(const cx_u8* path, size_t len, cx_u32 mode) {
+    wchar_t* w = wide(path, len);
+    if (!w) return 0;
+    /* Only the owner's write bit means anything here: without it the file is read-only. */
+    DWORD attrs = GetFileAttributesW(w);
+    BOOL ok = attrs != INVALID_FILE_ATTRIBUTES;
+    if (ok) {
+        DWORD want = (mode & 0200) ? (attrs & ~(DWORD)FILE_ATTRIBUTE_READONLY) : (attrs | FILE_ATTRIBUTE_READONLY);
+        if (want != attrs) ok = SetFileAttributesW(w, want);
+    }
+    if (!ok) fail_win(GetLastError());
+    free(w);
+    return ok ? 1 : 0;
 }
 
 cx_i32 cx_fs_set_modified(const cx_u8* path, size_t len, cx_i64 ms) {
@@ -977,7 +998,17 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
     stat_size = (cx_i64)st.st_size;
     /* tv_nsec is never negative, so this rounds down, as Java's `lastModified` does. */
     stat_modified = (cx_i64)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
+    stat_mode = (cx_u32)(st.st_mode & 07777);
     return 1;
+}
+
+cx_i32 cx_fs_set_mode(const cx_u8* path, size_t len, cx_u32 mode) {
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    int ok = chmod(s, (mode_t)(mode & 07777)) == 0;
+    if (!ok) fail_errno(errno);
+    free(s);
+    return ok;
 }
 
 cx_i32 cx_fs_set_modified(const cx_u8* path, size_t len, cx_i64 ms) {
@@ -1161,6 +1192,7 @@ cx_i32 cx_fs_make_link(const cx_u8* target, size_t target_len, const cx_u8* path
 
 cx_i64 cx_fs_stat_size(void) { return stat_size; }
 cx_i64 cx_fs_stat_modified(void) { return stat_modified; }
+cx_u32 cx_fs_stat_mode(void) { return stat_mode; }
 
 size_t cx_fs_result_len(void) { return fs_len; }
 void cx_fs_result_copy(cx_u8* to) {

@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, parts written in place, atomic renames, synced or not, locks, sizes and modified times, directories made, listed and removed, links read and made, real paths, and temporary directories.
+description: Files and directories - whole files read and written, parts written in place, atomic renames, synced or not, locks, sizes, modified times and modes, directories made, listed and removed, links read and made, real paths, and temporary directories.
 ---
 
 # `std.fs`
@@ -37,8 +37,9 @@ fn main() {
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
 | `write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsError` | Writes each part's bytes at its offset, in order, creating the file if nothing's there and keeping the rest of what it holds. Past the end, the file grows, with zeros in a gap. With `sync`, it returns once the system says the bytes are on the disk, as Java's `FileChannel.force(true)` |
 | `append(path: String, bytes: List<u8>) ! FsError` | Adds `bytes` to the end of the file, creating it if nothing's there, after everything it held, even what another program added |
-| `metadata(path: String) -> Metadata ! FsError` | The size and modified time of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
+| `metadata(path: String) -> Metadata ! FsError` | The size, modified time and permission bits of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
 | `set_modified(path: String, at: Timestamp) ! FsError` | Sets when what's at the path was last modified, following links, as Java's `File.setLastModified` does, without changing what it holds |
+| `set_mode(path: String, mode: u32) ! FsError` | Sets the permission bits of what's at the path, following links, as `chmod` does: `0o755` for a program anyone may run, `0o644` for a file only its owner may change. On Windows only the owner's write bit, `0o200`, counts: without it the file is read-only |
 | `rename(from: String, to: String) ! FsError` | Moves what's at `from` to `to`, replacing a file there. Atomic on one volume |
 | `rename_synced(from: String, to: String) ! FsError` | Moves what's at `from` to `to` as `rename` does, and returns once the system says the move is on the disk. If it fails after the move, the move may not be on the disk yet |
 | `remove_file(path: String) ! FsError` | Removes a file, or a link but not what it leads to |
@@ -55,7 +56,7 @@ fn main() {
 | `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
 | `separator() -> String` | What the system puts between a path's names, as Java's `File.separator`: `\` on Windows and `/` elsewhere, as in the paths `real_path` and `temp_dir` give. Either works in the paths `std.fs` is given |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
-| `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it |
+| `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it. And `mode: u32`, its permission bits, such as `0o644`. On Windows, which has only a read-only flag, they're `0o666`, or `0o444` when it's read-only, with `0o111` added for a directory |
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends |
 | `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |

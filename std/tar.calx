@@ -1,0 +1,654 @@
+/// Tar archives, plain or gzipped, read from memory and written to it: POSIX ustar, with the
+/// GNU long names and pax headers that GNU tar and bsdtar write for long paths and big files.
+module std.tar
+
+import std.fs.{make_dir_all, make_link, set_mode, write}
+import std.time.{Timestamp}
+import std.zlib.{Format, compress, decompress}
+
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
+// The type flags in a header, ASCII characters.
+const FILE: u8 = 48           // `0`
+const OLD_FILE: u8 = 0
+const CONTIGUOUS: u8 = 55     // `7`, a file to tar
+const HARDLINK: u8 = 49       // `1`
+const SYMLINK: u8 = 50        // `2`
+const DIR: u8 = 53            // `5`
+const GNU_NAME: u8 = 76       // `L`: the data is the next entry's name
+const GNU_LINK: u8 = 75       // `K`: the data is the next entry's link
+const PAX: u8 = 120           // `x`: the data is pax records for the next entry
+const PAX_GLOBAL: u8 = 103    // `g`: pax records for every entry after it
+const DIGIT_0: u8 = 48
+const DIGIT_7: u8 = 55
+
+/// What an entry is.
+pub enum Kind {
+    File
+    Dir
+    /// A symbolic link to `link`.
+    Symlink
+    /// Another name for the earlier entry `link`.
+    Hardlink
+    /// Something else, such as a device or a pipe, which `extract` skips.
+    Other
+}
+
+/// A file, a directory or a link in an archive.
+pub struct Entry {
+    /// Its path in the archive, such as `calx/bin/calx`, without the `/` a directory's may end
+    /// with.
+    pub name: String
+    pub kind: Kind
+    /// How many bytes it holds.
+    pub size: usize
+    /// Its permission bits, such as `0o755`.
+    pub mode: u32
+    /// What a link points to, or "".
+    pub link: String
+    /// When it was last modified, to the second.
+    pub modified: Timestamp
+    // Where its bytes start.
+    data: usize
+}
+
+/// An archive, which holds its bytes.
+pub struct Tar {
+    bytes: List<u8>
+    files: List<Entry>
+    by_name: Map<String, usize>
+}
+
+impl Tar {
+    /// The archive in `bytes`, inflated first if it's gzipped, or why it can't be read.
+    pub fn open(bytes: own List<u8>) -> Tar ! String {
+        if bytes.len() >= 2 and bytes[0] == 0x1f and bytes[1] == 0x8b {
+            // Deflate makes at most about 1,032 bytes of each byte it reads.
+            let limit = bytes.len() * 1032 + 1024
+            let inflated = match decompress(bytes, Format.Gzip, limit) {
+                ok(b) => b,
+                err(e) => fail "the gzip stream is broken: {e}",
+            }
+            return try parse(inflated)
+        }
+        return try parse(bytes)
+    }
+
+    /// Its entries, in the order they're in.
+    pub fn entries(self) -> List<Entry> {
+        return self.files.copy()
+    }
+
+    /// How many entries it has.
+    pub fn len(self) -> usize {
+        return self.files.len()
+    }
+
+    /// The path of entry `i`.
+    pub fn name(self, i: usize) -> String {
+        return self.files[i].name.copy()
+    }
+
+    /// The index of the entry at `name`, or `none`. A later entry of the same name wins, as it
+    /// does when tar extracts.
+    pub fn find(self, name: String) -> usize? {
+        return self.by_name.get(name)
+    }
+
+    /// What entry `i` holds. A hard link holds what the entry it names holds.
+    pub fn read(self, i: usize) -> List<u8> {
+        if self.files[i].kind == Kind.Hardlink {
+            if let target = self.by_name.get(self.files[i].link) {
+                if target != i {
+                    return slice(self.bytes, self.files[target].data, self.files[target].size)
+                }
+            }
+        }
+        return slice(self.bytes, self.files[i].data, self.files[i].size)
+    }
+
+    /// What the entry at `name` holds, or why it can't be read.
+    pub fn read_named(self, name: String) -> List<u8> ! String {
+        let i = self.find(name) else fail "no entry {name}"
+        return self.read(i)
+    }
+
+    /// Writes every entry into the folder `to`, making the folders on the way, with each file's
+    /// mode. A symbolic link is made as one, and a hard link as a copy. Fails, before writing
+    /// anything, if a path would land outside `to`: an absolute path, a drive, a `..` that climbs
+    /// out, or a link that points out.
+    pub fn extract(self, to: String) ! String {
+        var paths = List<String>()
+        paths.reserve(self.files.len())
+        for e in self.files {
+            let rel = safe_path(e.name) else fail "unsafe path {e.name} in the archive"
+            if e.kind == Kind.Symlink {
+                let dir = parent_of(rel)
+                let target = if dir.is_empty() { e.link.copy() } else { "{dir}/{e.link}" }
+                if e.link.starts_with("/") or safe_path(target) == none {
+                    fail "unsafe link {e.name} -> {e.link} in the archive"
+                }
+            }
+            if e.kind == Kind.Hardlink and safe_path(e.link) == none {
+                fail "unsafe link {e.name} -> {e.link} in the archive"
+            }
+            paths.push(rel)
+        }
+        for i in 0..self.files.len() {
+            let path = if paths[i].is_empty() { to.copy() } else { "{to}/{paths[i]}" }
+            let kind = self.files[i].kind
+            if kind == Kind.Dir {
+                if let err(e) = make_dir_all(path) {
+                    fail "can't make {path}: {e}"
+                }
+                continue
+            }
+            if kind == Kind.Other {
+                continue
+            }
+            let parent = parent_of(path)
+            if not parent.is_empty() {
+                if let err(e) = make_dir_all(parent) {
+                    fail "can't make {parent}: {e}"
+                }
+            }
+            if kind == Kind.Symlink {
+                if let err(e) = make_link(self.files[i].link, path) {
+                    // Windows makes links only in developer mode or for an administrator. As
+                    // Python's tarfile does then, write a copy of the file the link points to.
+                    let dir = parent_of(paths[i])
+                    let target = safe_path(if dir.is_empty() { self.files[i].link.copy() } else { "{dir}/{self.files[i].link}" }) ?? String()
+                    let found = self.find(target) else fail "can't link {path} to {self.files[i].link}: {e}"
+                    if self.files[found].kind != Kind.File {
+                        fail "can't link {path} to {self.files[i].link}: {e}"
+                    }
+                    if let err(e2) = write(path, self.read(found)) {
+                        fail "can't write {path}: {e2}"
+                    }
+                }
+                continue
+            }
+            if let err(e) = write(path, self.read(i)) {
+                fail "can't write {path}: {e}"
+            }
+            if let err(e) = set_mode(path, self.files[i].mode) {
+                fail "can't set the mode of {path}: {e}"
+            }
+        }
+    }
+}
+
+/// Builds an archive in memory: add entries, then `finish` it, or `finish_gz` for a `.tar.gz`.
+/// Paths too long for ustar's fields, and files of 8 GiB or more, get a pax header, as GNU tar
+/// and bsdtar write them.
+pub struct Writer {
+    out: List<u8>
+    time: i64
+}
+
+impl Writer {
+    /// An empty archive, whose entries are dated 1970-01-01, so the same files always make the
+    /// same bytes. `set_time` dates them.
+    pub fn new() -> Writer {
+        return Writer { out: [], time: 0 }
+    }
+
+    /// Dates the entries added after this.
+    pub fn set_time(mut self, at: Timestamp) {
+        self.time = if at.unix_ms < 0 { 0 } else { at.unix_ms / 1000 }
+    }
+
+    /// Adds a file, with mode `0o644`.
+    pub fn add(mut self, name: String, bytes: List<u8>) {
+        self.add_with(name, bytes, 0o644)
+    }
+
+    /// Adds a file with the permission bits `mode`, such as `0o755` for a program.
+    pub fn add_with(mut self, name: String, bytes: List<u8>, mode: u32) {
+        self.header(name, FILE, mode, bytes.len(), "")
+        append(mut self.out, bytes)
+        self.pad()
+    }
+
+    /// Adds a directory, with mode `0o755`.
+    pub fn add_dir(mut self, name: String) {
+        let dir = if name.ends_with("/") { name.copy() } else { "{name}/" }
+        self.header(dir, DIR, 0o755, 0, "")
+    }
+
+    /// Adds a symbolic link at `name` that points to `target`.
+    pub fn add_symlink(mut self, name: String, target: String) {
+        self.header(name, SYMLINK, 0o777, 0, target)
+    }
+
+    /// The archive: what was added, then the two empty blocks that end it.
+    pub fn finish(own self) -> List<u8> {
+        var out = self.out
+        out.reserve(1024)
+        for _ in 0..1024 {
+            out.push(0)
+        }
+        return out
+    }
+
+    /// The archive gzipped at `level`, from 1, fastest, to 9, smallest: a `.tar.gz`.
+    pub fn finish_gz(own self, level: u32) -> List<u8> {
+        let tar = self.finish()
+        return compress(tar, Format.Gzip, level)
+    }
+
+    // Pads the last entry's data to a whole block.
+    fn pad(mut self) {
+        while self.out.len() % 512 != 0 {
+            self.out.push(0)
+        }
+    }
+
+    // One header block, after a pax header if the entry needs one.
+    fn header(mut self, name: String, kind: u8, mode: u32, size: usize, link: String) {
+        // ustar splits a path of up to 255 bytes at a `/`: 155 before it, 100 after.
+        var prefix = String()
+        var short = name.copy()
+        var pax = String()
+        if not ascii(name) {
+            // Header fields have no encoding, and bsdtar on Windows reads them in the console's
+            // code page. A pax path is always UTF-8.
+            pax.push_str(pax_record("path", name))
+        } else if name.len() > 100 {
+            var split: usize? = none
+            for i in 0..name.len() {
+                if name.byte_at(i) == 47 and i <= 155 and name.len() - i - 1 <= 100 and i + 1 < name.len() {
+                    split = some(i)
+                    break
+                }
+            }
+            if let i = split {
+                prefix = name[..i]
+                short = name[i + 1..]
+            } else {
+                pax.push_str(pax_record("path", name))
+                short = cut(name, 100)
+            }
+        }
+        if link.len() > 100 or not ascii(link) {
+            pax.push_str(pax_record("linkpath", link))
+        }
+        if u64(size) >= 0o77777777777 {
+            pax.push_str(pax_record("size", "{size}"))
+        }
+        if not pax.is_empty() {
+            let body = pax.to_bytes()
+            self.block("PaxHeader", "", PAX, 0o644, body.len(), "")
+            append(mut self.out, body)
+            self.pad()
+        }
+        let link_field = cut(link, 100)
+        self.block(short, prefix, kind, mode, size, link_field)
+    }
+
+    // A ustar header block.
+    fn block(mut self, name: String, prefix: String, kind: u8, mode: u32, size: usize, link: String) {
+        let at = self.out.len()
+        for _ in 0..512 {
+            self.out.push(0)
+        }
+        put_text(mut self.out, at, name, 100)
+        put_octal(mut self.out, at + 100, 8, u64(mode & 0o7777))
+        put_octal(mut self.out, at + 108, 8, 0)    // the owner and group: root, as tar --owner=0 writes
+        put_octal(mut self.out, at + 116, 8, 0)
+        // A size too big for 11 octal digits is in the pax header; this field keeps what fits.
+        put_octal(mut self.out, at + 124, 12, if u64(size) >= 0o77777777777 { 0 } else { u64(size) })
+        put_octal(mut self.out, at + 136, 12, u64.wrap(self.time))
+        self.out[at + 156] = kind
+        put_text(mut self.out, at + 157, link, 100)
+        put_text(mut self.out, at + 257, "ustar", 6)
+        self.out[at + 263] = DIGIT_0    // version 00
+        self.out[at + 264] = DIGIT_0
+        put_text(mut self.out, at + 345, prefix, 155)
+        // The checksum counts its own field as spaces, and is six digits, a NUL and a space.
+        for k in at + 148..at + 156 {
+            self.out[k] = 32
+        }
+        var sum: u64 = 0
+        for k in at..at + 512 {
+            sum += u64(self.out[k])
+        }
+        put_octal(mut self.out, at + 148, 7, sum)
+        self.out[at + 155] = 32
+    }
+}
+
+// The entries in an uncompressed archive.
+fn parse(bytes: own List<u8>) -> Tar ! String {
+    var files = List<Entry>()
+    var by_name = Map<String, usize>()
+    var long_name: String? = none
+    var long_link: String? = none
+    var pax_path: String? = none
+    var pax_link: String? = none
+    var pax_size: u64? = none
+    var pax_time: i64? = none
+    var at: usize = 0
+    let n = bytes.len()
+    loop {
+        // An archive ends with empty blocks, or, as some tools write it, just ends.
+        if at == n or (at + 512 <= n and zero_block(bytes, at)) {
+            break
+        }
+        if at + 512 > n {
+            fail "the archive ends inside the header at {at}"
+        }
+        let stored = octal(bytes, at + 148, 8) else fail "bad header checksum at {at}"
+        var unsigned: u64 = 0
+        var signed: i64 = 0
+        for k in at..at + 512 {
+            let b = if k >= at + 148 and k < at + 156 { 32u8 } else { bytes[k] }
+            unsigned += u64(b)
+            signed += i64(i8.wrap(b))
+        }
+        if stored != unsigned and i64.wrap(stored) != signed {
+            fail "bad header checksum at {at}"
+        }
+        let size64 = number(bytes, at + 124, 12) else fail "bad size in the header at {at}"
+        let size_here = pax_size ?? size64
+        let data = at + 512
+        // Its data, padded to a whole block.
+        if size_here > u64(n - data) or (size_here + 511) / 512 * 512 > u64(n - data) {
+            fail "the archive ends inside the entry at {at}"
+        }
+        let size = usize.wrap(size_here)
+        let next = data + (size + 511) / 512 * 512
+        let kind = bytes[at + 156]
+        if kind == GNU_NAME or kind == GNU_LINK {
+            let text = cstr(bytes, data, size) else fail "bad long name at {at}"
+            if kind == GNU_NAME {
+                long_name = some(text)
+            } else {
+                long_link = some(text)
+            }
+            at = next
+            continue
+        }
+        if kind == PAX {
+            try read_pax(bytes, data, size, mut pax_path, mut pax_link, mut pax_size, mut pax_time)
+            at = next
+            continue
+        }
+        if kind == PAX_GLOBAL {
+            at = next
+            continue
+        }
+        let short = cstr(bytes, at, 100) else fail "bad name in the header at {at}"
+        // POSIX ustar's magic is `ustar` and a NUL. GNU's old format has `ustar  ` and no prefix.
+        let posix = bytes[at + 257] == 117 and bytes[at + 262] == 0    // `u`
+        var name = short.copy()
+        if posix {
+            let prefix = cstr(bytes, at + 345, 155) else fail "bad name in the header at {at}"
+            if not prefix.is_empty() {
+                name = "{prefix}/{short}"
+            }
+        }
+        if let p = pax_path.take() {
+            name = p
+        }
+        if let l = long_name.take() {
+            name = l
+        }
+        var link = cstr(bytes, at + 157, 100) ?? String()
+        if let l = pax_link.take() {
+            link = l
+        }
+        if let l = long_link.take() {
+            link = l
+        }
+        let mode64 = octal(bytes, at + 100, 8) ?? 0
+        let time = pax_time.take() ?? i64.wrap(number(bytes, at + 136, 12) ?? 0)
+        pax_size = none
+        let k = if kind == FILE or kind == OLD_FILE or kind == CONTIGUOUS {
+            Kind.File
+        } else if kind == DIR {
+            Kind.Dir
+        } else if kind == SYMLINK {
+            Kind.Symlink
+        } else if kind == HARDLINK {
+            Kind.Hardlink
+        } else {
+            Kind.Other
+        }
+        // An old archive marks a directory only by the `/` its name ends with.
+        let kind_here = if k == Kind.File and name.ends_with("/") { Kind.Dir } else { k }
+        while name.ends_with("/") and name.len() > 1 {
+            name = name[..name.len() - 1]
+        }
+        by_name.insert(name.copy(), files.len())
+        files.push(Entry { name: name, kind: kind_here, size: if kind_here == Kind.File { size } else { 0 }, mode: u32.wrap(mode64) & 0o7777, link: link, modified: Timestamp { unix_ms: time * 1000 }, data: data })
+        at = next
+    }
+    return Tar { bytes: bytes, files: files, by_name: by_name }
+}
+
+// The records of a pax header, `LENGTH KEY=VALUE` and a newline each, that matter here.
+fn read_pax(b: List<u8>, at: usize, n: usize, path: mut String?, link: mut String?, size: mut u64?, time: mut i64?) ! String {
+    let text = String.from_utf8(slice(b, at, n)) else fail "a pax header isn't UTF-8"
+    var i: usize = 0
+    while i < text.len() {
+        let space = text[i..].find(" ") else fail "bad pax record"
+        let len = usize.parse(text[i..i + space]) else fail "bad pax record length"
+        if len <= space + 1 or i + len > text.len() {
+            fail "bad pax record length"
+        }
+        let line = text[i + space + 1..i + len - 1]
+        let eq = line.find("=") else fail "bad pax record"
+        let key = line[..eq]
+        let value = line[eq + 1..]
+        if key == "path" {
+            path = some(value.copy())
+        } else if key == "linkpath" {
+            link = some(value.copy())
+        } else if key == "size" {
+            let bytes = u64.parse(value) else fail "bad pax size"
+            size = some(bytes)
+        } else if key == "mtime" {
+            // Seconds, maybe with a fraction, which tar's second-wide field drops.
+            let dot = value.find(".") ?? value.len()
+            let whole = i64.parse(value[..dot]) else fail "bad pax mtime"
+            time = some(whole)
+        }
+        i += len
+    }
+}
+
+// One pax record, with the length that counts its own digits.
+fn pax_record(key: str, value: String) -> String {
+    let n = key.len() + value.len() + 3
+    var len = n + digits(n)
+    if digits(len) > digits(n) {
+        len += 1
+    }
+    return "{len} {key}={value}\n"
+}
+
+fn digits(n: usize) -> usize {
+    var d: usize = 1
+    var v = n
+    while v >= 10 {
+        v /= 10
+        d += 1
+    }
+    return d
+}
+
+fn zero_block(b: List<u8>, at: usize) -> bool {
+    for k in at..at + 512 {
+        if b[k] != 0 {
+            return false
+        }
+    }
+    return true
+}
+
+// A field of octal digits, which spaces and NULs may pad on either side.
+fn octal(b: List<u8>, at: usize, width: usize) -> u64? {
+    var v: u64 = 0
+    var seen = false
+    for k in at..at + width {
+        let c = b[k]
+        if c >= DIGIT_0 and c <= DIGIT_7 {
+            v = v * 8 + u64(c - DIGIT_0)
+            seen = true
+        } else if c == 32 or c == 0 {
+            if seen {
+                break
+            }
+        } else {
+            return none
+        }
+    }
+    return some(v)
+}
+
+// A numeric field: octal, or GNU's base 256 when the top bit of its first byte is set.
+fn number(b: List<u8>, at: usize, width: usize) -> u64? {
+    if b[at] & 0x80 == 0 {
+        return octal(b, at, width)
+    }
+    if b[at] != 0x80 {
+        return none    // a negative number
+    }
+    var v: u64 = 0
+    for k in at + 1..at + width {
+        if v >> 56 != 0 {
+            return none
+        }
+        v = (v << 8) | u64(b[k])
+    }
+    return some(v)
+}
+
+// A field of text that ends at its first NUL, or at its end.
+fn cstr(b: List<u8>, at: usize, width: usize) -> String? {
+    var len: usize = 0
+    while len < width and b[at + len] != 0 {
+        len += 1
+    }
+    return String.from_utf8(slice(b, at, len))
+}
+
+fn put_text(out: mut List<u8>, at: usize, text: String, width: usize) {
+    let n = if text.len() < width { text.len() } else { width }
+    for k in 0..n {
+        out[at + k] = text.byte_at(k)
+    }
+}
+
+// `v` in octal, zero-padded to `width - 1` digits and ended with a NUL.
+fn put_octal(out: mut List<u8>, at: usize, width: usize, v: u64) {
+    var x = v
+    var k = width - 1
+    out[at + k] = 0
+    while k > 0 {
+        k -= 1
+        out[at + k] = DIGIT_0 + u8.wrap(x & 7)
+        x >>= 3
+    }
+}
+
+// `name` as a path under the folder it's extracted to, with `/` between its parts, or `none` if
+// it would land outside: absolute, on a drive, or climbing out with `..` past where it started.
+fn safe_path(name: String) -> String? {
+    if name.starts_with("/") or name.starts_with("\\") {
+        return none
+    }
+    if name.len() >= 2 and name.byte_at(1) == 58 {    // `C:`
+        return none
+    }
+    var parts = List<String>()
+    var start: usize = 0
+    for i in 0..name.len() + 1 {
+        if i < name.len() and name.byte_at(i) != 47 and name.byte_at(i) != 92 {
+            continue
+        }
+        let part = name[start..i]
+        start = i + 1
+        if part.is_empty() or part == "." {
+            continue
+        }
+        if part == ".." {
+            if parts.pop() == none {
+                return none
+            }
+            continue
+        }
+        parts.push(part)
+    }
+    var out = String()
+    for p in parts {
+        if not out.is_empty() {
+            out.push_str("/")
+        }
+        out.push_str(p)
+    }
+    return some(out)
+}
+
+fn ascii(s: String) -> bool {
+    for i in 0..s.len() {
+        if s.byte_at(i) >= 0x80 {
+            return false
+        }
+    }
+    return true
+}
+
+// The first `n` bytes of `s`, or fewer so as not to split a character.
+fn cut(s: String, n: usize) -> String {
+    if s.len() <= n {
+        return s.copy()
+    }
+    var end = n
+    while end > 0 and s.byte_at(end) & 0xC0 == 0x80 {
+        end -= 1
+    }
+    return s[..end]
+}
+
+// The folder `path` is in, or "" if it has none.
+fn parent_of(path: String) -> String {
+    if let slash = path.find_last("/") {
+        return path[..slash]
+    }
+    return String()
+}
+
+// Adds all of `bytes` to the end of `out`, in one copy.
+fn append(out: mut List<u8>, bytes: List<u8>) {
+    let n = bytes.len()
+    if n == 0 {
+        return
+    }
+    out.reserve(n)
+    unsafe {
+        let at = out.len()
+        _ = memcpy(out.as_mut_ptr().add(at), bytes.as_ptr(), n)
+        out.set_len(at + n)
+    }
+}
+
+// The `len` bytes of `b` from `at`, in one copy.
+fn slice(b: List<u8>, at: usize, len: usize) -> List<u8> {
+    if at > b.len() or len > b.len() - at {
+        panic("the range {at}..{at + len} is out of bounds for {b.len()} bytes")
+    }
+    var out = List<u8>()
+    if len == 0 {
+        return out
+    }
+    out.reserve(len)
+    unsafe {
+        _ = memcpy(out.as_mut_ptr(), b.as_ptr().add(at), len)
+        out.set_len(len)
+    }
+    return out
+}

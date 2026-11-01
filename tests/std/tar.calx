@@ -1,0 +1,151 @@
+// std.tar: archives written and read back, plain and gzipped, with long names split into ustar's
+// prefix or put in pax headers, links, modes and times; archives GNU tar wrote in its gnu and pax
+// formats; extracting, and refusing paths and links that climb out; and broken archives.
+import std.fs.{is_dir, read_text, remove_dir_all, temp_dir}
+import std.tar.{Tar, Writer}
+import std.time.{Timestamp}
+
+// GNU tar 1.35's `--format=gnu` and `--format=pax` archives of hi.txt and a 117-byte path, gzipped.
+fn gnu_tar() -> String {
+    return "1f8b08000000000002ffedd54b0e82401045d15e0a2ba01aa461ea02d8841f3e2d0413c5c4e5db615046278e400df74c2aa969e5d56b7d3cde47332b1be45936cde07d06a9495c5a24ceda6cda17362f4c64cd026ed771778922b352ad3758b15862d996e7a129fdd07d29ff69c8fff3174cf92f7267a292fccf6ea764afe4a0e4a8a452522b6994b44abc9293924e49edfb6afeeac10fdcff73ff67affdbfb1ce39fa7f097d78fda40000000000000000000000fedf0312fedfbc00280000"
+}
+
+fn pax_tar() -> String {
+    return "1f8b08000000000002ffedd53b0ac2401080e1ad3d85277076372f2c3c4cd4bc34a868841cdf4d8a01d3582520f9bf66609b69f667ea66d7f59d99950dd2381e67309d81372ef1994bac8dc7f7ccf9cc6cad59c0fbd5e5cfb0d2ac53dd18ac58aee4a8e4a4e4aca450522aa994d44a1a25975ffd7b177df71fd96ce8bfa7ffd9b968bf7de45d7d58e22328b92a299bb6186ed0861857da7fa87eda7fea12eeff12dafbada20200000000000000000000f87f1f9203fefb00280000"
+}
+
+fn unhex(s: String) -> List<u8> {
+    var out = List<u8>()
+    var i: usize = 0
+    while i < s.len() {
+        out.push(digit(s.byte_at(i)) * 16 + digit(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn digit(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn show(t: Tar) {
+    for e in t.entries() {
+        println("{e.name.len()} {e.kind} {e.size} {e.mode} {e.modified.unix_ms / 1000} link={e.link}")
+    }
+}
+
+fn main() {
+    var w = Writer.new()
+    w.set_time(Timestamp { unix_ms: 1793491200999 })
+    w.add_dir("app/bin")
+    w.add_with("app/bin/tool", "run me".to_bytes(), 0o755)
+    var deep = String("app/")
+    for _ in 0..30 {
+        deep.push_str("deep/")
+    }
+    deep.push_str("file.txt")
+    w.add(deep.copy(), "deep".to_bytes())
+    var flat = String()
+    for _ in 0..120 {
+        flat.push_str("x")
+    }
+    w.add(flat.copy(), "no slash to split at".to_bytes())
+    w.add_symlink("app/current", "bin/tool")
+    w.add("app/ünïcode.txt", "hé".to_bytes())
+    var large = List<u8>()
+    for i in 0..5000 {
+        large.push(u8.wrap(i * 31))
+    }
+    w.add("app/large.bin", large.copy())
+    let plain = w.finish()
+    println("{plain.len()} {plain.len() % 512}")    // out: 13824 0
+
+    let t = Tar.open(plain.copy())!
+    show(t)
+    // out: 7 Dir 0 493 1793491200 link=
+    // out: 12 File 6 493 1793491200 link=
+    // out: 162 File 4 420 1793491200 link=
+    // out: 120 File 20 420 1793491200 link=
+    // out: 11 Symlink 0 511 1793491200 link=bin/tool
+    // out: 17 File 3 420 1793491200 link=
+    // out: 13 File 5000 420 1793491200 link=
+    println("{t.read_named(deep)! == "deep".to_bytes()} {t.read_named(flat)!.len()} {t.read_named("app/large.bin")! == large}")    // out: true 20 true
+    println(String.from_utf8(t.read_named("app/ünïcode.txt")!) ?? "?")    // out: hé
+    println("{t.find("app/bin") ?? 99} {t.find("nope") == none} {t.len()}")    // out: 0 true 7
+
+    // Gzipped, it opens the same way.
+    var g = Writer.new()
+    g.add("a.txt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_bytes())
+    let gz = g.finish_gz(9)
+    println("{gz[0]} {gz[1]} {gz.len() < 200}")    // out: 31 139 true
+    println(String.from_utf8(Tar.open(gz)!.read_named("a.txt")!) ?? "?")    // out: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+    // What GNU tar wrote: its long-name entries, and pax headers.
+    show(Tar.open(unhex(gnu_tar()))!)
+    // out: 6 File 2 420 1793491200 link=
+    // out: 129 File 4 420 1793491200 link=
+    show(Tar.open(unhex(pax_tar()))!)
+    // out: 6 File 2 420 1793491200 link=
+    // out: 129 File 4 420 1793491200 link=
+
+    // Extracting writes the files, and a link as a link, or as a copy where the system won't.
+    let dir = "{temp_dir()!}/calx-tar-test"
+    if let err(_) = remove_dir_all(dir) {
+    }
+    t.extract(dir)!
+    let tool = read_text("{dir}/app/bin/tool")!!
+    let current = read_text("{dir}/app/current")!!
+    println("{tool} {current}")    // out: run me run me
+    remove_dir_all(dir)!
+
+    // A path or a link that would land outside the folder stops it before anything is written.
+    for name in ["../escape.txt", "/etc/passwd", "a/../../b", "C:/x"] {
+        var evil = Writer.new()
+        evil.add("fine.txt", [1u8])
+        evil.add(String(name), [2u8])
+        match Tar.open(evil.finish())!.extract(dir) {
+            ok => println("extracted {name}"),
+            err(e) => println(e),
+        }
+    }
+    // out: unsafe path ../escape.txt in the archive
+    // out: unsafe path /etc/passwd in the archive
+    // out: unsafe path a/../../b in the archive
+    // out: unsafe path C:/x in the archive
+    for target in ["../../outside", "/etc/passwd", "a/../../.."] {
+        var evil = Writer.new()
+        evil.add_symlink("app/link", String(target))
+        match Tar.open(evil.finish())!.extract(dir) {
+            ok => println("linked {target}"),
+            err(e) => println(e),
+        }
+    }
+    // out: unsafe link app/link -> ../../outside in the archive
+    // out: unsafe link app/link -> /etc/passwd in the archive
+    // out: unsafe link app/link -> a/../../.. in the archive
+    println("{is_dir(dir)}")    // out: false
+
+    // Broken archives say why.
+    var bad = plain.copy()
+    bad[0] = bad[0] ^ 1
+    match Tar.open(bad) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: bad header checksum at 0
+    }
+    var cut = plain.copy()
+    cut.truncate(2048 + 512 + 100)
+    match Tar.open(cut.copy()) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the archive ends inside the header at 2560
+    }
+    cut.truncate(2048 + 100)
+    match Tar.open(cut) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the archive ends inside the entry at 1536
+    }
+    match Tar.open([0x1fu8, 0x8b, 1, 2, 3]) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the gzip stream is broken: Corrupt
+    }
+    println("{Tar.open([])!.len()}")    // out: 0
+}
