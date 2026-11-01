@@ -14,7 +14,7 @@ calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
-calx version
+calx version                   # print the version, the commit and the date
 ```
 
 A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
@@ -91,7 +91,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | Variable | Meaning |
 | --- | --- |
 | `CALX_CC` | The clang to use. Otherwise `clang` is found on `PATH` |
-| `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the source tree the compiler was built from |
+| `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -21,13 +22,17 @@ struct Toolchain {
     std::string cache;    // the object cache
 };
 
-// The Calx home: CALX_HOME, or the source tree the compiler was built from. Returns it empty,
-// with the reason in `error`, if it has no runtime.
+// The compiler's own executable.
+std::filesystem::path self_exe();
+
+// The Calx home, which holds runtime/ and std/: CALX_HOME, or the installation the executable is
+// in (the folder above its bin/), or the source tree the compiler was built from. Returns it
+// empty, with the reason in `error`, if none has a runtime.
 std::string find_home(std::string& error);
 
-// Finds clang (CALX_CC, or `clang` on PATH), the Calx home (CALX_HOME, or the source tree the
-// compiler was built from) and the cache (CALX_CACHE, or the platform's cache folder). On failure
-// returns false and puts the reason in `error`.
+// Finds clang (CALX_CC, or `clang` on PATH), the Calx home (see find_home) and the cache
+// (CALX_CACHE, or the platform's cache folder). On failure returns false and puts the reason in
+// `error`.
 bool find_toolchain(Toolchain& tc, std::string& error);
 
 // A 128-bit hash as 32 hex digits, for cache keys.

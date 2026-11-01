@@ -28,9 +28,26 @@ add_executable(calx
 )
 
 # The runtime's sources, which the driver compiles (once, then from the cache) into every program.
-# CALX_HOME at run time overrides this, for an installed compiler.
+# An installed compiler finds them beside itself instead, and CALX_HOME overrides both.
 get_filename_component(CALX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 target_compile_definitions(calx PRIVATE CALX_DEFAULT_HOME="${CALX_ROOT}")
+
+# The version `calx version` reports and `calx update` compares. VERSION holds the next release's
+# number. CI builds a release from the tag that matches it, and a nightly with CALX_VERSION set to
+# a prerelease of it, each with its commit and date. A build from source is a dev build.
+file(STRINGS "${CALX_ROOT}/VERSION" CALX_BASE_VERSION LIMIT_COUNT 1)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CALX_ROOT}/VERSION")
+if(NOT DEFINED CALX_VERSION)
+    set(CALX_VERSION "${CALX_BASE_VERSION}-dev")
+endif()
+if(NOT DEFINED CALX_COMMIT)
+    set(CALX_COMMIT "")
+endif()
+if(NOT DEFINED CALX_DATE)
+    set(CALX_DATE "")
+endif()
+target_compile_definitions(calx PRIVATE CALX_VERSION="${CALX_VERSION}" CALX_COMMIT="${CALX_COMMIT}"
+                                        CALX_DATE="${CALX_DATE}")
 
 if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(calx PRIVATE /W4 /permissive-)

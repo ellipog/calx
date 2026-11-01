@@ -45,7 +45,7 @@ cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++
 ninja -C build/compiler
 ```
 
-That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place.
+That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place. `calx version` says `0.1.0-dev (built from source)`, where a release names its commit and date.
 
 Add the `build/compiler` folder to your PATH. The guide and the reference call the command `calx`.
 

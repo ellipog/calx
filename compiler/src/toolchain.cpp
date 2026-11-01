@@ -219,19 +219,60 @@ int finish(pid_t pid) {
 }
 #endif
 
+bool has_runtime(const fs::path& home) {
+    std::error_code ec;
+    return fs::is_regular_file(home / "runtime" / "calx_rt.h", ec);
+}
+
 }  // namespace
 
-std::string find_home(std::string& error) {
-    std::string home = env("CALX_HOME");
-#ifdef CALX_DEFAULT_HOME
-    if (home.empty()) home = CALX_DEFAULT_HOME;
-#endif
-    std::error_code ec;
-    if (!fs::is_regular_file(fs::path(home) / "runtime" / "calx_rt.h", ec)) {
-        error = "can't find the Calx runtime under " + (home.empty() ? std::string("CALX_HOME") : home) + "; set CALX_HOME";
-        return "";
+fs::path self_exe() {
+#ifdef _WIN32
+    std::wstring w(1024, L'\0');
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, w.data(), static_cast<DWORD>(w.size()));
+        if (n == 0) return {};
+        if (n < w.size()) {
+            w.resize(n);
+            return fs::path(w);
+        }
+        w.resize(w.size() * 2);
     }
-    return home;
+#else
+    std::error_code ec;
+    return fs::read_symlink("/proc/self/exe", ec);
+#endif
+}
+
+std::string find_home(std::string& error) {
+    // Worked out once: the driver asks for it for modules and again for the toolchain.
+    static const auto found = [] {
+        std::pair<std::string, std::string> r;  // the home, or the reason there's none
+        // CALX_HOME, then the installation the executable is in (`bin/calx` beside `runtime/`
+        // and `std/`), then the source tree it was built from.
+        std::string home = env("CALX_HOME");
+        if (!home.empty()) {
+            if (has_runtime(home)) r.first = home;
+            else r.second = "can't find the Calx runtime under " + home + ", where CALX_HOME points";
+            return r;
+        }
+        fs::path installed = self_exe().parent_path().parent_path();
+        if (!installed.empty() && has_runtime(installed)) {
+            r.first = installed.string();
+            return r;
+        }
+#ifdef CALX_DEFAULT_HOME
+        if (has_runtime(CALX_DEFAULT_HOME)) {
+            r.first = CALX_DEFAULT_HOME;
+            return r;
+        }
+#endif
+        r.second = "can't find the Calx runtime beside " + self_exe().string() +
+                   "; reinstall Calx, or set CALX_HOME to the folder that holds runtime/ and std/";
+        return r;
+    }();
+    if (found.first.empty()) error = found.second;
+    return found.first;
 }
 
 bool find_toolchain(Toolchain& tc, std::string& error) {
@@ -616,25 +657,6 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
     for (const auto& [hash, path] : files) {
         if (std::binary_search(old.begin(), old.end(), hash)) fs::remove(path, ec);
     }
-}
-
-// The compiler's own executable.
-fs::path self_exe() {
-#ifdef _WIN32
-    std::wstring w(1024, L'\0');
-    for (;;) {
-        DWORD n = GetModuleFileNameW(nullptr, w.data(), static_cast<DWORD>(w.size()));
-        if (n == 0) return {};
-        if (n < w.size()) {
-            w.resize(n);
-            return fs::path(w);
-        }
-        w.resize(w.size() * 2);
-    }
-#else
-    std::error_code ec;
-    return fs::read_symlink("/proc/self/exe", ec);
-#endif
 }
 
 }  // namespace

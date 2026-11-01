@@ -29,7 +29,15 @@ using namespace calx;
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+// `calx 0.2.0 (3f9c2a1b7d4e, 2026-11-01)` for a release or a nightly, which CI stamps with its
+// commit and date, and `calx 0.2.0-dev (built from source)` otherwise.
+void print_version() {
+    if (CALX_COMMIT[0]) {
+        std::printf("calx %s (%s, %s)\n", CALX_VERSION, CALX_COMMIT, CALX_DATE);
+    } else {
+        std::printf("calx %s (built from source)\n", CALX_VERSION);
+    }
+}
 
 int usage() {
     std::fputs(
@@ -81,7 +89,7 @@ int main(int argc, char** argv) {
     Options opt;
     opt.command = argv[1];
     if (opt.command == "version" || opt.command == "--version") {
-        std::printf("calx %s\n", kVersion);
+        print_version();
         return 0;
     }
     if (opt.command == "help" || opt.command == "--help" || opt.command == "-h") {
