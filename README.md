@@ -39,9 +39,25 @@ Build times on the same machine:
 
 CI runs the benchmark and checks its checksum on every push. It also times the builds. The raw results are in [bench/results](bench/results).
 
+## Installing
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://calxlang.com/install.ps1 | iex
+```
+
+On Linux:
+
+```sh
+curl -fsSL https://calxlang.com/install.sh | sh
+```
+
+Then `calx update` keeps it up to date. Programs need clang and lld, from LLVM 18 or later; [Install Calx](docs/guide/install.md) says how to get them.
+
 ## Building
 
-You need CMake, Ninja and clang (LLVM 18 or later, with lld). [Install Calx](docs/guide/install.md) has the steps for each platform.
+To build the compiler from source, you need CMake, Ninja and clang (LLVM 18 or later, with lld). [Install Calx](docs/guide/install.md#building-from-source) has the steps for each platform.
 
 ```sh
 cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++

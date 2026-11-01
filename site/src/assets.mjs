@@ -18,6 +18,10 @@ export const FILES = {
 	'/favicon.svg': { type: 'image/svg+xml', read: favicon },
 	'/social.png': { type: 'image/png', read: () => readFileSync(new URL('calx-social.png', LOGO)) },
 	'/crystal-tones.jpg': { type: 'image/jpeg', read: () => readFileSync(new URL('calx-tones.jpg', LOGO)) },
+	// The install scripts, from tools/install, for `irm calxlang.com/install.ps1 | iex` and
+	// `curl -fsSL calxlang.com/install.sh | sh`. vercel.json gives them a text type.
+	'/install.ps1': { type: 'text/plain; charset=utf-8', read: () => readFileSync(new URL('tools/install/install.ps1', REPO)) },
+	'/install.sh': { type: 'text/plain; charset=utf-8', read: () => readFileSync(new URL('tools/install/install.sh', REPO)) },
 };
 
 export function calxAssets() {
