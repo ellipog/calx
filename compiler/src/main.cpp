@@ -15,6 +15,7 @@
 #include "parser.h"
 #include "source.h"
 #include "toolchain.h"
+#include "update.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -49,6 +50,7 @@ int usage() {
         "  run       build a program and run it; arguments after -- go to the program\n"
         "  emit-c    print the C a program compiles to (-o names a file)\n"
         "  expand    print the code a program's attributes generate\n"
+        "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
         "  version   print the compiler's version\n"
         "\n"
         "options:\n"
@@ -96,6 +98,7 @@ int main(int argc, char** argv) {
         usage();
         return 0;
     }
+    if (opt.command == "update") return run_update(std::vector<std::string>(argv + 2, argv + argc));
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--") {
@@ -130,6 +133,7 @@ int main(int argc, char** argv) {
     bool known = opt.command == "check" || opt.command == "build" || opt.command == "run" || opt.command == "emit-c" ||
                  opt.command == "expand";
     if (!known || opt.input.empty()) return usage();
+    if (!opt.json) update_notice();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");
         return 2;

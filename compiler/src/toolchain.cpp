@@ -275,6 +275,18 @@ std::string find_home(std::string& error) {
     return found.first;
 }
 
+std::string cache_dir() {
+    std::string cache = env("CALX_CACHE");
+    if (!cache.empty()) return cache;
+#ifdef _WIN32
+    std::string base = env("LOCALAPPDATA");
+    return (fs::path(base.empty() ? env("TEMP") : base) / "calx" / "cache").string();
+#else
+    std::string base = env("XDG_CACHE_HOME");
+    return base.empty() ? (fs::path(env("HOME")) / ".cache" / "calx").string() : (fs::path(base) / "calx").string();
+#endif
+}
+
 bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = env("CALX_CC");
     if (tc.clang.empty()) tc.clang = find_on_path("clang");
@@ -302,17 +314,7 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.home = find_home(error);
     if (tc.home.empty()) return false;
 
-    tc.cache = env("CALX_CACHE");
-    if (tc.cache.empty()) {
-#ifdef _WIN32
-        std::string base = env("LOCALAPPDATA");
-        tc.cache = (fs::path(base.empty() ? env("TEMP") : base) / "calx" / "cache").string();
-#else
-        std::string base = env("XDG_CACHE_HOME");
-        tc.cache = base.empty() ? (fs::path(env("HOME")) / ".cache" / "calx").string()
-                                : (fs::path(base) / "calx").string();
-#endif
-    }
+    tc.cache = cache_dir();
     fs::create_directories(fs::path(tc.cache) / "obj", ec);
     fs::create_directories(fs::path(tc.cache) / "bin", ec);
     return true;
@@ -345,6 +347,48 @@ int run_process(const std::vector<std::string>& argv) {
     if (h < 0) return -1;
 #endif
     return finish(h);
+}
+
+bool start_detached(const std::vector<std::string>& argv) {
+#ifdef _WIN32
+    std::wstring cmd;
+    for (std::size_t i = 0; i < argv.size(); i++) {
+        if (i) cmd += L' ';
+        cmd += quote_arg(widen(argv[i]));
+    }
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    std::wstring app = widen(argv[0]);
+    // No handles are inherited, so a caller reading this process's output through a pipe sees it
+    // end when this process does, not when the child does. No console, and its own process group,
+    // so Ctrl+C in the terminal doesn't reach it. Out of the terminal's job where that's allowed.
+    DWORD flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    BOOL ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags | CREATE_BREAKAWAY_FROM_JOB,
+                             nullptr, nullptr, &si, &pi);
+    if (!ok) ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi);
+    if (!ok) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    std::vector<char*> args;
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    args.push_back(nullptr);
+    // Its own session, with its streams on /dev/null, so it outlives the terminal and a caller
+    // reading this process's output through a pipe sees it end when this process does.
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd ? O_WRONLY : O_RDONLY, 0);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+    pid_t pid;
+    int rc = posix_spawn(&pid, args[0], &actions, &attr, args.data(), environ);
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&actions);
+    return rc == 0;
+#endif
 }
 
 int run_to_file(const std::vector<std::string>& argv, const std::string& output) {

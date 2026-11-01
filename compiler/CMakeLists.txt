@@ -25,6 +25,7 @@ add_executable(calx
     src/check.cpp
     src/emit.cpp
     src/toolchain.cpp
+    src/update.cpp
 )
 
 # The runtime's sources, which the driver compiles (once, then from the cache) into every program.

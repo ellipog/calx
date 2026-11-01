@@ -35,6 +35,14 @@ std::string find_home(std::string& error);
 // `error`.
 bool find_toolchain(Toolchain& tc, std::string& error);
 
+// The cache folder: CALX_CACHE, or `%LOCALAPPDATA%\calx\cache` on Windows and
+// `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux.
+std::string cache_dir();
+
+// Starts a program that runs on after this one ends, with no console, no inherited handles and
+// its streams going nowhere. Returns whether it started.
+bool start_detached(const std::vector<std::string>& argv);
+
 // A 128-bit hash as 32 hex digits, for cache keys.
 std::string hash_hex(const std::vector<std::string_view>& parts);
 

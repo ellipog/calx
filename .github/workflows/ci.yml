@@ -39,12 +39,156 @@ jobs:
         run: clang --version
       - name: Tests
         run: python -I tests/run.py --modes debug,release
+      - name: Check the release tools
+        shell: bash
+        run: |
+          calx=build/compiler/linux/calx
+          [[ "$RUNNER_OS" == Windows ]] && calx=build/compiler/windows/calx.exe
+          for f in tools/update/update.calx tools/release/package.calx; do "$calx" check "$f"; done
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
         run: python -I bench/run.py calx --threads 1,4 --runs 1
       - name: Build times
         run: python -I bench/build.py --runs 3
+
+  # A release of every push to main that passes, as the nightly, and of every v* tag, which must
+  # match VERSION, as a stable release (CLX-81). Each platform builds the compiler with its
+  # version, commit and date stamped in, builds calx-update with it, and packages both with the
+  # runtime and std (tools/release/package.calx). Then it unpacks the archive and builds a
+  # program with what's in it, the way a user's installation will.
+  package:
+    name: package (${{ matrix.platform }})
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          # The oldest supported Ubuntu, so the release runs on glibc 2.35 and later.
+          - os: ubuntu-22.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 20 and Ninja
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y ninja-build
+          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: python -m pip install ninja
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          base=$(head -n1 VERSION)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$base" ]]; then
+              echo "the tag $GITHUB_REF_NAME doesn't match VERSION, which says $base"
+              exit 1
+            fi
+          else
+            version="$base-nightly.$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Build and package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ steps.version.outputs.commit }}
+          DATE: ${{ steps.version.outputs.date }}
+        run: |
+          exe=""
+          link=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            exe=".exe"
+          else
+            # libstdc++ inside, so the compiler needs only the C library.
+            link=("-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc")
+          fi
+          # The C runtime inside on Windows too, so no redistributable needs installing.
+          cmake -S compiler -B build/release -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "${link[@]}" \
+            "-DCALX_VERSION=$VERSION" "-DCALX_COMMIT=$COMMIT" "-DCALX_DATE=$DATE"
+          ninja -C build/release
+          build/release/calx$exe build --release tools/update/update.calx -o build/release/calx-update$exe
+          build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
+            build/release/calx$exe build/release/calx-update$exe build/dist
+      - name: Try the release
+        shell: bash
+        run: |
+          mkdir -p build/try
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            7z x -y -obuild/try build/dist/*.zip > /dev/null
+            calx=build/try/calx/bin/calx.exe
+          else
+            tar -xzf build/dist/*.tar.gz -C build/try
+            calx=build/try/calx/bin/calx
+          fi
+          "$calx" version
+          "$calx" run tests/basics/hello.calx
+          # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
+          "$calx" update --check || echo "(no release to compare with yet)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: build/dist/*
+
+  # Publishes what the package jobs made. A tag becomes a release of its own. A push to main
+  # replaces the nightly release's files: the archives first, then version.txt, which names the
+  # newest, so it never points at one that isn't there yet. The archives of all but the last two
+  # nightlies go, the one before staying for a download that started before this one.
+  publish:
+    name: publish
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ github.ref }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        working-directory: dist
+        run: |
+          version=$(head -n1 version.txt)
+          sha256sum calx-*.zip calx-*.tar.gz > SHA256SUMS
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release create "$GITHUB_REF_NAME" calx-* SHA256SUMS version.txt --verify-tag \
+              --title "Calx $version" --generate-notes
+            exit 0
+          fi
+          notes="The newest build of main that passed CI: Calx $version, from $GITHUB_SHA. \`calx update --nightly\` follows these."
+          if gh release view nightly > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+            gh release edit nightly --notes "$notes"
+          else
+            gh release create nightly --prerelease --target "$GITHUB_SHA" --title "Nightly" --notes "$notes"
+          fi
+          gh release upload nightly calx-*.zip calx-*.tar.gz calx-*.sha256 --clobber
+          gh release upload nightly SHA256SUMS version.txt --clobber
+          keep=$(gh release view nightly --json assets --jq '.assets[].name' | grep -oE 'calx-[0-9][^-]*-nightly\.[0-9]+' | sort -u -V | tail -n 2)
+          gh release view nightly --json assets --jq '.assets[].name' | grep '^calx-' | while read -r name; do
+            if ! grep -qF "${name%%-windows*}" <<< "$keep" && ! grep -qF "${name%%-linux*}" <<< "$keep"; then
+              gh release delete-asset nightly "$name" --yes
+            fi
+          done
 
   # The VS Code extension: its grammar on every example in the repo, and its helpers. The
   # packaged .vsix is kept as an artifact, so it can be installed without a checkout.

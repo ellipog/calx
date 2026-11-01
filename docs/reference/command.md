@@ -15,6 +15,7 @@ calx build --lib plugin.calx   # build a library, which a program opens while it
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
+calx update                    # install the newest release
 ```
 
 A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
@@ -93,10 +94,42 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_CC` | The clang to use. Otherwise `clang` is found on `PATH` |
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
+| `CALX_NO_UPDATE_CHECK` | Set to anything, turns off the [daily check](#updating) for a newer release |
+| `CALX_RELEASES` | Where `calx update` finds releases. Otherwise `https://github.com/ellipog/calx/releases`. For a mirror, or a test |
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
 `calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself.
+
+## Updating
+
+An installed Calx updates itself from the releases on [GitHub](https://github.com/ellipog/calx/releases):
+
+```sh
+calx update                # install the newest release on this one's channel
+calx update --check        # say whether there's a newer one, and change nothing
+calx update --nightly      # follow the nightly releases from now on
+calx update --stable       # follow the stable releases from now on
+calx update --to 0.2.0     # install a version, newer or older
+calx update --rollback     # put back what the last update replaced; again, to undo that
+```
+
+- **Channels.** Stable releases are tagged `vX.Y.Z`. A nightly is published for every push to `main` that passes CI, with a version such as `0.2.0-nightly.202611011530`, a prerelease of the next stable version. `calx update` stays on the channel of the version that's running. Until there's a first stable release, the stable channel follows the nightlies.
+- **Each download is checked** against the SHA-256 the release publishes beside it, and nothing changes if it doesn't match. Releases come only from github.com/ellipog/calx, over HTTPS, so the trust is in that account and TLS. They aren't signed.
+- **The swap is quick and can't leave half an installation.** The new release is unpacked beside the installation, then each part is renamed into place, with what it replaces renamed into `.update/old`. If a rename fails, the ones before it are put back. On Windows, the running `calx.exe` is renamed out of the way, which Windows allows, where overwriting it isn't.
+- **A build from source** says to update with `git pull` and a rebuild, and how to install a release instead.
+
+`calx update` runs `calx-update`, a Calx program that ships beside `calx` in each release: [tools/update/update.calx](../../tools/update/update.calx). It's built on [`std.http`](../std/http.md), [`std.hash`](../std/hash.md), [`std.zip`](../std/zip.md) and [`std.tar`](../std/tar.md).
+
+### The daily check
+
+At most once a day, a command starts `calx-update` in the background to look for a newer release, and goes on without waiting. Each command reads what the last check found from one small file in the cache. When a newer release is out, a command says so on standard error, at most once a day:
+
+```
+calx 0.2.0 is out; you have 0.1.0. `calx update` installs it.
+```
+
+Nothing is checked or said when standard error isn't a terminal, with `--json`, in CI (when `CI` is set), with `CALX_NO_UPDATE_CHECK` set, or in a build from source. A failed check, such as one offline, says nothing, and waits a day like any other.
 
 ## Errors
 

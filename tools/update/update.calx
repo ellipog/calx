@@ -1,0 +1,485 @@
+// calx-update: what `calx update` runs. Ships in every release's bin/, beside calx.
+//
+// It downloads a release from github.com/ellipog/calx, checks it against the SHA-256 published
+// beside it, and swaps it into the installation, keeping what it replaced in .update/old so
+// `calx update --rollback` can put it back. The swap renames rather than copies, so it's quick,
+// and on Windows it renames the running calx.exe out of the way, which Windows allows where it
+// wouldn't allow overwriting it.
+//
+//     calx-update --home DIR --current VERSION [--check] [--nightly | --stable] [--to VERSION]
+//                 [--force] [--rollback] [--background CACHE_FILE]
+//
+// A release is `version.txt`, holding its version, and for each platform
+// `calx-VERSION-OS-x64.zip` or `.tar.gz` with a `.sha256` beside it. Stable releases are tagged
+// `vVERSION` and are what `releases/latest` points to; nightlies replace the `nightly` release
+// on every push to main that passes CI, and upload version.txt last, so the archive it names is
+// already there.
+
+import std.env.{args, variable}
+import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
+import std.hash.{sha256}
+import std.http.{Header, get}
+import std.process.{exit}
+import std.tar.{Tar}
+import std.time.{Timestamp}
+import std.zip.{Zip}
+
+struct Options {
+    home: String
+    current: String
+    check: bool
+    nightly: bool
+    stable: bool
+    to: String
+    force: bool
+    rollback: bool
+    background: String
+}
+
+fn main() {
+    let o = options()
+    if let err(message) = run(o) {
+        eprintln("calx update: {message}")
+        exit(1)
+    }
+}
+
+fn run(o: Options) ! String {
+    if o.rollback {
+        try rollback(o.home)
+        return
+    }
+    if not o.background.is_empty() {
+        background(o)
+        return
+    }
+    let windows = separator() == "\\"
+    let nightly = channel_is_nightly(o)
+    var target = o.to.copy()
+    if target.is_empty() {
+        println("Looking for the newest {if nightly { "nightly" } else { "stable" }} release of Calx...")
+        target = try newest(nightly, false)
+    }
+    let newer = compare(target, o.current) > 0
+    if o.check {
+        if target == o.current {
+            println("calx {o.current} is the newest.")
+        } else if newer {
+            println("calx {target} is out; you have {o.current}. `calx update` installs it.")
+        } else {
+            println("calx {o.current} is newer than the newest release, {target}.")
+        }
+        return
+    }
+    if target == o.current and not o.force {
+        println("calx {o.current} is the newest; there's nothing to update.")
+        return
+    }
+    if not newer and o.to.is_empty() and not o.force {
+        println("calx {o.current} is newer than the newest release, {target}; `calx update --to {target}` goes back to it.")
+        return
+    }
+    let tag = if target.contains("-nightly.") { String("nightly") } else { "v{target}" }
+    let file = "calx-{target}-{if windows { "windows-x64.zip" } else { "linux-x64.tar.gz" }}"
+    let url = "{releases()}/download/{tag}/{file}"
+    println("Downloading {file}...")
+    let archive = try fetch(url, 300000, 1073741824)    // 1 GiB
+    let sums = try fetch("{url}.sha256", 30000, 4096)
+    let want = first_word(String.from_utf8(sums) ?? String())
+    let got = hex(sha256(archive))
+    if want != got {
+        fail "the download's SHA-256 is {got}, but the release says {want}; nothing was changed. Try again in a minute, in case the release was being replaced."
+    }
+    println("Checked its SHA-256 ({megabytes(archive.len())} MB).")
+
+    let work = "{o.home}/.update"
+    let fresh = "{work}/new"
+    try clear(fresh)
+    if let err(e) = make_dir_all(fresh) {
+        fail "can't make {fresh}: {why(e)}"
+    }
+    if windows {
+        let z = match Zip.open(archive) {
+            ok(z) => z,
+            err(e) => fail "the download isn't a zip archive Calx can read: {e}",
+        }
+        try z.extract(fresh)
+    } else {
+        let t = match Tar.open(archive) {
+            ok(t) => t,
+            err(e) => fail "the download isn't a tar archive Calx can read: {e}",
+        }
+        try t.extract(fresh)
+    }
+    let root = "{fresh}/calx"
+    let exe = if windows { "calx.exe" } else { "calx" }
+    if not is_file("{root}/bin/{exe}") or not is_file("{root}/runtime/calx_rt.h") {
+        fail "the download has no bin/{exe} or runtime/; nothing was changed"
+    }
+    try swap(o.home, root, "{work}/old")
+    try clear(fresh)
+    if let err(_) = write("{work}/previous", "{o.current}\n".to_bytes()) {
+    }
+    println("Installed calx {target}, in place of {o.current}. `calx update --rollback` puts {o.current} back.")
+}
+
+// The releases page of Calx's repository, or CALX_RELEASES, for a mirror or a test.
+fn releases() -> String {
+    return variable("CALX_RELEASES") ?? String("https://github.com/ellipog/calx/releases")
+}
+
+fn options() -> Options {
+    let a = args()
+    var o = Options { home: String(), current: String(), check: false, nightly: false, stable: false, to: String(), force: false, rollback: false, background: String() }
+    var i: usize = 0
+    while i < a.len() {
+        let x = a[i].copy()
+        if x == "--home" and i + 1 < a.len() {
+            o.home = a[i + 1].copy()
+            i += 1
+        } else if x == "--current" and i + 1 < a.len() {
+            o.current = a[i + 1].copy()
+            i += 1
+        } else if x == "--to" and i + 1 < a.len() {
+            o.to = trim_v(a[i + 1])
+            i += 1
+        } else if x == "--background" and i + 1 < a.len() {
+            o.background = a[i + 1].copy()
+            i += 1
+        } else if x == "--check" {
+            o.check = true
+        } else if x == "--nightly" {
+            o.nightly = true
+        } else if x == "--stable" {
+            o.stable = true
+        } else if x == "--force" {
+            o.force = true
+        } else if x == "--rollback" {
+            o.rollback = true
+        } else {
+            eprintln("calx update: unknown option {x}")
+            eprintln("usage: calx update [--check] [--nightly | --stable] [--to VERSION] [--force] [--rollback]")
+            exit(2)
+        }
+        i += 1
+    }
+    if o.home.is_empty() or o.current.is_empty() {
+        eprintln("calx-update is run by `calx update`, which says where Calx is installed")
+        exit(2)
+    }
+    if o.nightly and o.stable {
+        eprintln("calx update: --nightly and --stable each pick a channel; give one")
+        exit(2)
+    }
+    return o
+}
+
+// Whether to follow nightlies: as asked, or as the installed version does.
+fn channel_is_nightly(o: Options) -> bool {
+    if o.nightly {
+        return true
+    }
+    if o.stable {
+        return false
+    }
+    return o.current.contains("-nightly.")
+}
+
+// The newest release's version on a channel. Until there's a stable release, the stable
+// channel follows nightlies.
+fn newest(nightly: bool, quiet: bool) -> String ! String {
+    if not nightly {
+        match fetch("{releases()}/latest/download/version.txt", 15000, 65536) {
+            ok(b) => return try parse_version(b),
+            err(e) => {
+                if not e.contains("404") {
+                    fail e
+                }
+                if not quiet {
+                    println("There's no stable release yet, so this follows the nightly releases.")
+                }
+            },
+        }
+    }
+    let b = try fetch("{releases()}/download/nightly/version.txt", 15000, 65536)
+    return try parse_version(b)
+}
+
+fn parse_version(b: own List<u8>) -> String ! String {
+    let v = first_word(String.from_utf8(b) ?? String())
+    if v.is_empty() or not (v.byte_at(0) >= 48 and v.byte_at(0) <= 57) {
+        fail String("the release's version.txt doesn't hold a version")
+    }
+    return v
+}
+
+// The body of a GET, or why there's none, with a status other than 200 as an error.
+fn fetch(url: String, timeout_ms: u32, limit: usize) -> List<u8> ! String {
+    let agent = Header { name: "User-Agent", value: "calx-update" }
+    var r = get(url.copy(), [agent], timeout_ms, limit)
+    let resp = match r.wait() {
+        ok(resp) => resp,
+        err(e) => fail "can't reach {url}: {e}",
+    }
+    if resp.status != 200 {
+        fail "{url} answered {resp.status}"
+    }
+    return resp.body
+}
+
+// The daily check `calx` starts in the background. It writes to `file` three lines: the version
+// it checked for, the newer one or nothing, and when it checked, in seconds since 1970, which
+// `calx` reads so that one read of the file tells it everything. When it can't reach GitHub,
+// it keeps what the file said and moves the time on, so the next check is a day away too.
+fn background(o: Options) {
+    let file = o.background.copy()
+    let now = unsafe { Timestamp.now() }.unix_ms / 1000
+    let newer = match newest(channel_is_nightly(o), true) {
+        ok(v) => if compare(v, o.current) > 0 { v } else { String() },
+        err(_) => {
+            let before = match read(file) {
+                ok(b) => String.from_utf8(b) ?? String(),
+                err(_) => String(),
+            }
+            second_line(before, o.current)
+        },
+    }
+    if let err(_) = write(file, "{o.current}\n{newer}\n{now}\n".to_bytes()) {
+    }
+}
+
+// The second line of what an earlier check wrote, if it was about `current`, or nothing.
+fn second_line(text: String, current: String) -> String {
+    let a = text.find("\n") ?? text.len()
+    if text[..a] != current or a == text.len() {
+        return String()
+    }
+    let rest = text[a + 1..]
+    let b = rest.find("\n") ?? rest.len()
+    return rest[..b]
+}
+
+// Moves each part of the release at `root` into `home`, and what it replaces into `old`. bin's
+// files move one by one, since the running calx.exe can be renamed but not its folder.
+fn swap(home: String, root: String, old: String) ! String {
+    try clear(old)
+    if let err(e) = make_dir_all("{old}/bin") {
+        fail "can't make {old}: {why(e)}"
+    }
+    let parts = match list(root) {
+        ok(p) => p,
+        err(e) => fail "can't list {root}: {why(e)}",
+    }
+    // What has moved so far, as (from, to), to undo if a later move fails.
+    var moved = List<(String, String)>()
+    for part in parts {
+        if part == "bin" {
+            let files = match list("{root}/bin") {
+                ok(f) => f,
+                err(e) => fail undo(moved, "can't list {root}/bin: {why(e)}"),
+            }
+            if let err(e) = make_dir_all("{home}/bin") {
+                fail undo(moved, "can't make {home}/bin: {why(e)}")
+            }
+            for f in files {
+                try step(mut moved, "{home}/bin/{f}", "{old}/bin/{f}", "{root}/bin/{f}")
+            }
+        } else {
+            try step(mut moved, "{home}/{part}", "{old}/{part}", "{root}/{part}")
+        }
+    }
+}
+
+// Moves `current`, if it's there, to `backup`, then `incoming` to where `current` was.
+fn step(moved: mut List<(String, String)>, current: String, backup: String, incoming: String) ! String {
+    if is_file(current) or is_dir(current) {
+        if let err(e) = rename(current, backup) {
+            fail undo(moved, "can't move {current} aside: {why(e)}")
+        }
+        moved.push((current.copy(), backup.copy()))
+    }
+    if let err(e) = rename(incoming, current) {
+        fail undo(moved, "can't move {incoming} into place: {why(e)}")
+    }
+    moved.push((incoming.copy(), current.copy()))
+}
+
+// Puts back everything `swap` moved, newest first, and gives the message to fail with.
+fn undo(moved: List<(String, String)>, message: String) -> String {
+    var i = moved.len()
+    while i > 0 {
+        i -= 1
+        let (from, to) = moved[i].copy()
+        if let err(_) = rename(to, from) {
+        }
+    }
+    return "{message}. Nothing was changed."
+}
+
+// Swaps the installation with what the last update replaced, so running it twice goes back to
+// where it started.
+fn rollback(home: String) ! String {
+    let work = "{home}/.update"
+    let old = "{work}/old"
+    if not is_dir(old) {
+        fail String("there's no earlier version to go back to: no update has replaced one yet")
+    }
+    let previous = match read("{work}/previous") {
+        ok(b) => first_word(String.from_utf8(b) ?? String()),
+        err(_) => String("the earlier version"),
+    }
+    let current = match read("{home}/VERSION") {
+        ok(b) => first_word(String.from_utf8(b) ?? String()),
+        err(_) => String("this version"),
+    }
+    let back = "{work}/back"
+    try clear(back)
+    if let err(e) = rename(old, back) {
+        fail "can't move {old}: {why(e)}"
+    }
+    try swap(home, back, old)
+    try clear(back)
+    if let err(_) = write("{work}/previous", "{current}\n".to_bytes()) {
+    }
+    println("Went back to calx {previous}, from {current}. `calx update --rollback` again returns to {current}.")
+}
+
+// Removes a folder if it's there. On Windows a calx.exe that's still running can't be removed,
+// so a folder that won't go is renamed out of the way, to be removed by a later update.
+fn clear(dir: String) ! String {
+    if not is_dir(dir) {
+        return
+    }
+    if let err(_) = remove_dir_all(dir) {
+        let now = unsafe { Timestamp.now() }
+        if let err(e) = rename(dir, "{dir}-{now.unix_ms}.trash") {
+            fail "can't clear {dir}: {why(e)}"
+        }
+    }
+    // Earlier folders that wouldn't go may go now.
+    let parent = dir[..dir.find_last("/") ?? 0]
+    if let ok(names) = list(parent) {
+        for n in names {
+            if n.ends_with(".trash") {
+                if let err(_) = remove_dir_all("{parent}/{n}") {
+                }
+            }
+        }
+    }
+}
+
+fn why(e: FsError) -> String {
+    return match e {
+        NotFound => String("it isn't there"),
+        Denied => String("access is denied; is another calx running from this installation?"),
+        Exists => String("something is in the way"),
+        BadPath => String("the path is bad"),
+        IsDirectory => String("it's a directory"),
+        NotEmpty => String("the directory isn't empty"),
+        Os(code) => "system error {code}",
+    }
+}
+
+// -1, 0 or 1 as `a` is older than, the same as, or newer than `b`, by semantic versioning:
+// numbers first, then a version without a prerelease part after one with it, then the
+// prerelease parts, numbers by value and words by their bytes. Build metadata, after `+`,
+// doesn't count.
+fn compare(a: String, b: String) -> i32 {
+    let ap = a[..a.find("+") ?? a.len()]
+    let bp = b[..b.find("+") ?? b.len()]
+    let a_dash = ap.find("-") ?? ap.len()
+    let b_dash = bp.find("-") ?? bp.len()
+    let c = compare_parts(ap[..a_dash], bp[..b_dash])
+    if c != 0 {
+        return c
+    }
+    let a_pre = a_dash < ap.len()
+    let b_pre = b_dash < bp.len()
+    if not a_pre and not b_pre {
+        return 0
+    }
+    if not a_pre {
+        return 1
+    }
+    if not b_pre {
+        return -1
+    }
+    return compare_parts(ap[a_dash + 1..], bp[b_dash + 1..])
+}
+
+// Compares dot-separated parts, numbers as numbers and words as bytes; a number comes before a
+// word, and fewer parts before more.
+fn compare_parts(a: String, b: String) -> i32 {
+    let xs = split_dots(a)
+    let ys = split_dots(b)
+    var i: usize = 0
+    while i < xs.len() and i < ys.len() {
+        let xn = u64.parse(xs[i])
+        let yn = u64.parse(ys[i])
+        let c = match (xn, yn) {
+            (some(x), some(y)) => if x < y { -1 } else if x > y { 1 } else { 0 },
+            (some(_), none) => -1,
+            (none, some(_)) => 1,
+            (none, none) => if xs[i] < ys[i] { -1 } else if xs[i] > ys[i] { 1 } else { 0 },
+        }
+        if c != 0 {
+            return c
+        }
+        i += 1
+    }
+    return if xs.len() < ys.len() { -1 } else if xs.len() > ys.len() { 1 } else { 0 }
+}
+
+fn split_dots(s: String) -> List<String> {
+    var out = List<String>()
+    var start: usize = 0
+    for i in 0..s.len() {
+        if s.byte_at(i) == 46 {
+            out.push(s[start..i])
+            start = i + 1
+        }
+    }
+    out.push(s[start..])
+    return out
+}
+
+// The text up to the first space or line break.
+fn first_word(s: String) -> String {
+    var start: usize = 0
+    while start < s.len() and is_space(s.byte_at(start)) {
+        start += 1
+    }
+    var end = start
+    while end < s.len() and not is_space(s.byte_at(end)) {
+        end += 1
+    }
+    return s[start..end]
+}
+
+fn is_space(b: u8) -> bool {
+    return b == 32 or b == 9 or b == 10 or b == 13
+}
+
+fn trim_v(s: String) -> String {
+    let w = first_word(s)
+    return if w.starts_with("v") { w[1..] } else { w }
+}
+
+fn hex(bytes: List<u8>) -> String {
+    var out = String()
+    out.reserve(bytes.len() * 2)
+    for b in bytes {
+        out.push(hex_digit(u32(b) >> 4))
+        out.push(hex_digit(u32(b) & 15))
+    }
+    return out
+}
+
+fn hex_digit(v: u32) -> rune {
+    return rune(u8.wrap(if v < 10 { 48 + v } else { 87 + v }))
+}
+
+fn megabytes(n: usize) -> String {
+    let tenths = (n * 10 + 524288) / 1048576
+    return "{tenths / 10}.{tenths % 10}"
+}

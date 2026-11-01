@@ -1,0 +1,115 @@
+// Packages a release of Calx, run by CI from the repository's root:
+//
+//     calx run tools/release/package.calx -- VERSION OS CALX UPDATER OUT
+//
+// OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. It writes
+// to the folder OUT:
+//
+// - calx-VERSION-windows-x64.zip, or calx-VERSION-linux-x64.tar.gz, holding calx/ with bin/calx
+//   and bin/calx-update, runtime/, std/, LICENSE and VERSION;
+// - the archive's name with .sha256 added, holding its SHA-256 as `sha256sum` writes it;
+// - version.txt, holding VERSION.
+//
+// Files are added in sorted order with fixed dates, so the same inputs make the same archive.
+
+import std.env.{args}
+import std.fs.{is_dir, list, make_dir_all, read, write}
+import std.hash.{sha256}
+import std.process.{exit}
+import std.tar.{Writer as TarWriter}
+import std.zip.{Writer as ZipWriter}
+
+fn main() {
+    let a = args()
+    if a.len() != 5 or (a[1] != "windows" and a[1] != "linux") {
+        eprintln("usage: calx run tools/release/package.calx -- VERSION windows|linux CALX UPDATER OUT")
+        exit(2)
+    }
+    if let err(e) = package(a[0], a[1], a[2], a[3], a[4]) {
+        eprintln("package: {e}")
+        exit(1)
+    }
+}
+
+fn package(version: String, os: String, calx: String, updater: String, out: String) ! String {
+    let windows = os == "windows"
+    let exe = if windows { ".exe" } else { "" }
+    // (path in the archive, bytes, mode)
+    var files = List<(String, List<u8>, u32)>()
+    files.push(("calx/bin/calx{exe}", try load(calx), 0o755))
+    files.push(("calx/bin/calx-update{exe}", try load(updater), 0o755))
+    try add_tree(mut files, "runtime", "calx/runtime")
+    try add_tree(mut files, "std", "calx/std")
+    files.push((String("calx/LICENSE"), try load("LICENSE"), 0o644))
+    files.push((String("calx/VERSION"), "{version}\n".to_bytes(), 0o644))
+
+    let name = "calx-{version}-{os}-x64.{if windows { "zip" } else { "tar.gz" }}"
+    var bytes = List<u8>()
+    if windows {
+        var z = ZipWriter.new()
+        for f in files {
+            let (path, data, mode) = f.copy()
+            z.add_with(path, data, 9, mode)
+        }
+        bytes = z.finish()
+    } else {
+        var t = TarWriter.new()
+        for f in files {
+            let (path, data, mode) = f.copy()
+            t.add_with(path, data, mode)
+        }
+        bytes = t.finish_gz(9)
+    }
+    if let err(e) = make_dir_all(out) {
+        fail "can't make {out}: {e}"
+    }
+    let sum = hex(sha256(bytes))
+    try save("{out}/{name}", bytes)
+    try save("{out}/{name}.sha256", "{sum}  {name}\n".to_bytes())
+    try save("{out}/version.txt", "{version}\n".to_bytes())
+    println("{name}: {files.len()} files, {bytes.len()} bytes, sha256 {sum}")
+}
+
+// Every file under the folder `dir`, as `prefix/...`, in sorted order: the runtime's C and its
+// headers, and std's Calx.
+fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: String) ! String {
+    let names = match list(dir) {
+        ok(n) => n,
+        err(e) => fail "can't list {dir}: {e}",
+    }
+    for n in names {
+        let path = "{dir}/{n}"
+        if is_dir(path) {
+            try add_tree(mut files, path, "{prefix}/{n}")
+        } else if n.ends_with(".c") or n.ends_with(".h") or n.ends_with(".calx") {
+            files.push(("{prefix}/{n}", try load(path), 0o644))
+        }
+    }
+}
+
+fn load(path: String) -> List<u8> ! String {
+    return match read(path) {
+        ok(b) => b,
+        err(e) => fail "can't read {path}: {e}",
+    }
+}
+
+fn save(path: String, bytes: List<u8>) ! String {
+    if let err(e) = write(path, bytes) {
+        fail "can't write {path}: {e}"
+    }
+}
+
+fn hex(bytes: List<u8>) -> String {
+    var out = String()
+    out.reserve(bytes.len() * 2)
+    for b in bytes {
+        out.push(hex_digit(u32(b) >> 4))
+        out.push(hex_digit(u32(b) & 15))
+    }
+    return out
+}
+
+fn hex_digit(v: u32) -> rune {
+    return rune(u8.wrap(if v < 10 { 48 + v } else { 87 + v }))
+}
