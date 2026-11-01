@@ -1,0 +1,279 @@
+// std.process: the test runs itself as the program it starts, each child doing what its first
+// argument says, so it needs nothing installed and runs the same on every system.
+import std.env.{args, variable}
+import std.fs.{make_dir, real_path, remove_dir_all, separator, set_mode, temp_dir, write}
+import std.io.{Lines, flush, read, write as write_out}
+import std.process.{Command, ProcessError, Stdio, current_exe, exit, output_all, which}
+import std.thread.{sleep}
+
+fn child(a: List<String>) {
+    let what = a[0].copy()
+    if what == "echo" {
+        for i in 1..a.len() {
+            println("[{a[i]}]")
+        }
+    } else if what == "fail" {
+        println("some output")
+        eprintln("going wrong")
+        exit(3)
+    } else if what == "env" {
+        println(variable(a[1]) ?? String("(unset)"))
+    } else if what == "cwd" {
+        println(real_path(".")!)
+    } else if what == "cat" {
+        var all = List<u8>()
+        loop {
+            if read(mut all, 65536) == 0 {
+                break
+            }
+        }
+        write_out(all)
+    } else if what == "both" {
+        // A megabyte to each stream, in turns, which a parent reading one stream to its end
+        // before the other would never finish.
+        var chunk = List<u8>()
+        for _ in 0..1024 {
+            chunk.push(111)
+        }
+        for _ in 0..1024 {
+            write_out(chunk)
+            flush()
+            eprint("{"e"}")
+        }
+    } else if what == "sleep" {
+        println("started")
+        flush()
+        unsafe {
+            sleep(60000000000)
+        }
+    } else if what == "lines" {
+        println("one")
+        println("two\r")
+        print("three")
+    } else if what == "upper" {
+        var lines = Lines {}
+        loop {
+            match lines.next() {
+                some(l) => {
+                    if l == "quit" {
+                        break
+                    }
+                    println(l.to_upper_root())
+                    flush()
+                },
+                none => break,
+            }
+        }
+    } else if what == "name" {
+        println("child {a[1]}")
+    }
+}
+
+fn kind(e: ProcessError) -> String {
+    return match e {
+        NotFound(_) => String("not found"),
+        Denied(_) => String("denied"),
+        BadDirectory(_) => String("bad directory"),
+        BadArgument(why) => "bad argument: {why}",
+        Failed { command, status } => "failed: {command.ends_with(" fail")} {status}",
+        InputClosed => String("input closed"),
+        Os(code) => "os {code}",
+    }
+}
+
+fn main() {
+    let a = args()
+    if a.len() > 0 {
+        child(a)
+        return
+    }
+    let me = current_exe()
+    let found = which(me) ?? String()
+    println("which finds this program: {not found.is_empty()}")    // out: which finds this program: true
+    println("which of nothing: {which("no-such-program-calx-test") ?? String("none")}")    // out: which of nothing: none
+
+    // Arguments reach it as they are.
+    match Command.new(me).args(["echo", "two words", "", "quote\"in", "back\\", "%PATH%", "$HOME"]).read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),
+    }
+    // out: [two words]
+    // out: []
+    // out: [quote"in]
+    // out: [back\]
+    // out: [%PATH%]
+    // out: [$HOME]
+
+    // output keeps both streams, and how it ended.
+    match Command.new(me).arg("fail").output() {
+        ok(o) => {
+            println("{o.status} {o.status.success()} {o.status.code ?? 0}")    // out: exited with status 3 false 3
+            println("[{o.text()}] [{o.error_text()}]")    // out: [some output
+            // out: ] [going wrong
+            // out: ]
+        },
+        err(e) => println(kind(e)),
+    }
+    // run and read fail when it does.
+    if let err(e) = Command.new(me).arg("fail").stdout(Stdio.Null).stderr(Stdio.Null).run() {
+        println(kind(e))    // out: failed: true exited with status 3
+    }
+    match Command.new(me).arg("fail").stderr(Stdio.Null).read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),    // out: failed: true exited with status 3
+    }
+    match Command.new(me).arg("echo").status() {
+        ok(s) => println("status: {s.success()} {s}"),    // out: status: true exited with status 0
+        err(e) => println(kind(e)),
+    }
+
+    // The environment.
+    println(Command.new(me).args(["env", "CALX_PROCESS_TEST"]).env("CALX_PROCESS_TEST", "set").read()!)    // out: set
+    println(Command.new(me).args(["env", "CALX_PROCESS_TEST"]).env("CALX_PROCESS_TEST", "x").env_remove("CALX_PROCESS_TEST").read()!)    // out: (unset)
+    println(Command.new(me).args(["env", "PATH"]).env_clear().env("ONLY", "1").read()!)    // out: (unset)
+
+    // Input, three megabytes of it, comes back the same.
+    var input = List<u8>()
+    for i in 0..3000000 {
+        input.push(u8.wrap(i * 7))
+    }
+    let back = Command.new(me).arg("cat").input(input).output()!
+    println("cat: {back.stdout.len()} {back.stdout == input}")    // out: cat: 3000000 true
+    println(Command.new(me).arg("cat").input_text("héllo").read()!)    // out: héllo
+
+    // Both streams at once, and the two together.
+    let both = Command.new(me).arg("both").output()!
+    println("both: {both.stdout.len()} {both.stderr.len()}")    // out: both: 1048576 1024
+    let merged = Command.new(me).arg("both").stderr(Stdio.Stdout).output()!
+    println("merged: {merged.stdout.len()} {merged.stderr.len()}")    // out: merged: 1049600 0
+
+    // A timeout kills it.
+    let slow = Command.new(me).arg("sleep").timeout(200).output()!
+    println("timeout: {slow.status.timed_out} {slow.status.success()} [{slow.text()}]")    // out: timeout: true false [started
+    // out: ]
+    println("{slow.status}")    // out: ran out of time, and was killed
+
+    // A child read line by line as it writes.
+    var lines = Command.new(me).arg("lines").stdout(Stdio.Pipe).spawn()!
+    loop {
+        match lines.read_line(60000) {
+            some(l) => println("line [{l}]"),
+            none => break,
+        }
+    }
+    // out: line [one]
+    // out: line [two]
+    // out: line [three]
+    println("ended {lines.ended()}, {lines.wait().status}")    // out: ended true, exited with status 0
+
+    // Waiting for a line, then killing it.
+    var sleeper = Command.new(me).arg("sleep").stdout(Stdio.Pipe).spawn()!
+    println(sleeper.wait_for_line("start", 60000) ?? String("none"))    // out: started
+    println("running: {sleeper.try_wait() == none} {sleeper.id() != 0}")    // out: running: true true
+    sleeper.kill()
+    let killed = sleeper.wait()
+    println("killed: {killed.status.code == none} {killed.status.timed_out}")    // out: killed: true false
+
+    // Talking to a child while it runs.
+    var upper = Command.new(me).arg("upper").stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    for w in ["hello", "wörld"] {
+        upper.write_text("{w}\n")!
+        println(upper.read_line(60000) ?? String("none"))
+    }
+    // out: HELLO
+    // out: WÖRLD
+    upper.write_text("quit\n")!
+    println("upper: {upper.wait().status}")    // out: upper: exited with status 0
+    // Writing to one that has stopped reading fails.
+    var gone = Command.new(me).arg("echo").stdin(Stdio.Pipe).stdout(Stdio.Null).spawn()!
+    var lots = List<u8>()
+    for _ in 0..4000000 {
+        lots.push(1)
+    }
+    match gone.write(lots) {
+        ok => println("written"),
+        err(e) => println(kind(e)),    // out: input closed
+    }
+    println("gone: {gone.wait().status}")    // out: gone: exited with status 0
+    var piece = Command.new(me).args(["echo", "bytes"]).stdout(Stdio.Pipe).spawn()!
+    var got = List<u8>()
+    loop {
+        let more = piece.read(60000)
+        if more.is_empty() {
+            break
+        }
+        for b in more {
+            got.push(b)
+        }
+    }
+    println("read: {got.len()} {piece.wait().status.success()}")    // out: read: 8 true
+
+    // Many at once, in order.
+    var many = List<Command>()
+    for i in 0..12 {
+        many.push(Command.new(me).args(["name", "{i}"]))
+    }
+    let outs = output_all(many, 4)!
+    var said = String()
+    for o in outs {
+        said.push_str(o.text())
+    }
+    println("{outs.len()} {said.starts_with("child 0\nchild 1\n")} {said.ends_with("child 11\n")}")    // out: 12 true true
+
+    // Folders.
+    let tmp = temp_dir()!
+    let sep = separator()
+    let sub = "{tmp}{sep}sub"
+    make_dir(sub)!
+    println("dir: {Command.new(me).arg("cwd").dir(sub).read()! == real_path(sub)!}")    // out: dir: true
+    match Command.new(me).arg("cwd").dir("{tmp}{sep}nothing").read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),    // out: bad directory
+    }
+
+    // What can't start.
+    match Command.new("no-such-program-calx-test").read() {
+        ok(text) => println(text),
+        err(e) => println("{kind(e)}: {e}"),    // out: not found: can't find the program no-such-program-calx-test on PATH
+    }
+    match Command.new("{tmp}{sep}missing").read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),    // out: not found
+    }
+    match Command.new(me).arg("zero\u{0}byte").read() {
+        ok(text) => println(text),
+        err(e) => println("{kind(e).ends_with("has a zero byte in it, which no program can be given")}"),    // out: true
+    }
+    match Command.new(me).env("A=B", "x").read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),    // out: bad argument: A=B can't be the name of an environment variable
+    }
+    match Command.new("").read() {
+        ok(text) => println(text),
+        err(e) => println(kind(e)),    // out: bad argument: the program's name is empty
+    }
+
+    // A script, a batch file on Windows and a shell script on Linux, which is given the same
+    // arguments and starts this program with them.
+    let windows = sep == "\\"
+    let script = if windows { "{sub}{sep}echo-args.cmd" } else { "{sub}{sep}echo-args" }
+    let body = if windows { "@\"{me}\" echo %*\r\n" } else { "#!/bin/sh\nexec \"{me}\" echo \"$@\"\n" }
+    write(script, body.to_bytes())!
+    if not windows {
+        set_mode(script, 0o755)!
+    }
+    let tricky: List<String> = ["two words", "", "quote\"in", "%PATH%", "a&b|c<d>e^f", "trail\\", "100%", "!x!", "(paren)"]
+    println(Command.new(script).args(tricky).read()!)
+    // out: [two words]
+    // out: []
+    // out: [quote"in]
+    // out: [%PATH%]
+    // out: [a&b|c<d>e^f]
+    // out: [trail\]
+    // out: [100%]
+    // out: [!x!]
+    // out: [(paren)]
+    // Found by its name on the PATH the child is given.
+    println(Command.new("echo-args").arg("by name").env("PATH", sub).read()!)    // out: [by name]
+    remove_dir_all(tmp)!
+}

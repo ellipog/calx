@@ -36,6 +36,8 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `--json` | Print errors as JSON lines on standard output, [for editors](#errors-for-editors) |
 | `--stdin` | Read the file's text from standard input, with the path naming it |
 
+`calx run` stands for the program it runs. Its exit status is the program's, and on Windows, killing `calx run`, as a test runner stops one that ran too long, kills the program and every program it started, which `taskkill /T` can't reach once their parents have gone. A program that ends by itself leaves what it started running ([std.process](../std/process.md#when-this-program-ends)).
+
 ## Exit status
 
 | Status | When |

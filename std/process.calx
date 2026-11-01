@@ -1,7 +1,17 @@
-/// This process: the memory it holds and may hold, the CPU time it has used, and the processors
-/// it may run on, for a program that shows how it's doing. Each changes as the program runs, or
-/// with the machine it runs on, so only `unsafe` code reads them (D88). And `exit`, which ends it.
+/// Other programs, and this one.
+///
+/// `Command` starts another program: with its arguments, a folder to run in and changes to its
+/// environment, its input given and its output kept, each as asked, and a timeout. `run` and
+/// `read` are what a script wants most, `output` keeps everything, `spawn` gives a `Child` to talk
+/// to while it runs, and `output_all` runs many at once.
+///
+/// And this process: the memory it holds and may hold, the CPU time it has used, and the
+/// processors it may run on, for a program that shows how it's doing. Each changes as the program
+/// runs, or with the machine it runs on, so only `unsafe` code reads them (D88). And `exit`, which
+/// ends it.
 module std.process
+
+import std.text.utf8.{decode_lossy}
 
 extern "C" {
     fn cx_process_memory() -> u64
@@ -9,6 +19,804 @@ extern "C" {
     fn cx_process_cpu_ns() -> u64
     fn cx_process_processors() -> u32
     fn cx_process_exit(code: u8)
+    fn cx_clock_ns() -> u64
+    fn cx_proc_group() -> i64
+    fn cx_proc_group_free(g: i64)
+    fn cx_proc_spawn(spec: *const u8, spec_n: usize, input: *const u8, input_n: usize, group: i64) -> i64
+    fn cx_proc_error_kind() -> u32
+    fn cx_proc_error_code() -> i32
+    fn cx_proc_close_input(h: i64)
+    fn cx_proc_write(h: i64, from: *const u8, n: usize) -> i32
+    fn cx_proc_wait(h: i64)
+    fn cx_proc_wait_any(hs: *const i64, n: usize) -> usize
+    fn cx_proc_poll(h: i64) -> i32
+    fn cx_proc_line(h: i64, until: u64) -> i64
+    fn cx_proc_some(h: i64, until: u64) -> i64
+    fn cx_proc_available(h: i64, stream: u32) -> usize
+    fn cx_proc_take(h: i64, stream: u32, to: *u8, n: usize)
+    fn cx_proc_kill(h: i64)
+    fn cx_proc_id(h: i64) -> u32
+    fn cx_proc_state(h: i64) -> u32
+    fn cx_proc_code(h: i64) -> i32
+    fn cx_proc_signal(h: i64) -> i32
+    fn cx_proc_free(h: i64)
+    fn cx_proc_which(name: *const u8, n: usize) -> i32
+    fn cx_proc_exe() -> i32
+    fn cx_proc_result_len() -> usize
+    fn cx_proc_result_copy(to: *u8)
+}
+
+/// Where a program's input comes from, or where its output goes.
+pub enum Stdio {
+    /// This program's own: the terminal, or wherever this program's stream goes.
+    Inherit
+    /// A pipe to this program. Input is what `Command.input` and `Child.write` give, and output is
+    /// kept, for `Output` or for `Child.read_line` as it comes.
+    Pipe
+    /// Nothing: input that has ended already, and output that's thrown away.
+    Null
+    /// For standard error only: wherever standard output goes, as a shell's `2>&1`, so the two
+    /// arrive together in the order the program wrote them.
+    Stdout
+}
+
+/// Why a program didn't start, or, for `run` and `read`, didn't succeed.
+pub enum ProcessError {
+    /// Nothing by that name is on PATH, or nothing is at that path.
+    NotFound(String)
+    /// The system won't run it: it can't be run, or isn't a program.
+    Denied(String)
+    /// The folder to run it in isn't there.
+    BadDirectory(String)
+    /// The command can't be given to it as written: why.
+    BadArgument(String)
+    /// It ran, and failed: it exited with a status other than 0, or was killed. Only `run` and
+    /// `read` fail with it.
+    Failed { command: String, status: Status }
+    /// It stopped reading its input before all of it was written. Only `Child.write` fails with it.
+    InputClosed
+    /// Something else, with the system's error code.
+    Os(i32)
+}
+
+impl Display for ProcessError {
+    fn show(self) {
+        match self {
+            NotFound(program) => {
+                if has_separator(program) {
+                    print("nothing is at {program}")
+                } else {
+                    print("can't find the program {program} on PATH")
+                }
+            },
+            Denied(program) => print("the system won't run {program}"),
+            BadDirectory(dir) => print("can't run it in {dir}, which isn't a folder"),
+            BadArgument(why) => print(why),
+            Failed { command, status } => print("`{command}` {status}"),
+            InputClosed => print("the program stopped reading its input before all of it was written"),
+            Os(code) => print("the system couldn't start the program: error {code}"),
+        }
+    }
+}
+
+/// How a program ended.
+pub struct Status {
+    /// The status it exited with, or `none` if it was killed: by `Child.kill`, at its timeout, or
+    /// on Linux by a signal. On Windows it's the whole 32 bits, so an access violation is
+    /// `-1073741819`, `0xC0000005`.
+    pub code: i32?,
+    /// On Linux, the signal that ended it, such as 9 for `SIGKILL`.
+    pub signal: i32?,
+    /// Whether its timeout ran out, so it was killed.
+    pub timed_out: bool,
+}
+
+impl Status {
+    /// Whether it exited with status 0, which is how a program says it succeeded.
+    pub fn success(self) -> bool {
+        return match self.code {
+            some(c) => c == 0,
+            none => false,
+        }
+    }
+}
+
+impl Display for Status {
+    fn show(self) {
+        if self.timed_out {
+            print("ran out of time, and was killed")
+            return
+        }
+        match self.code {
+            some(c) => print("exited with status {c}"),
+            none => match self.signal {
+                some(s) => print("was killed by signal {s}"),
+                none => print("was killed"),
+            },
+        }
+    }
+}
+
+/// What a program wrote, and how it ended.
+pub struct Output {
+    pub status: Status,
+    /// Its standard output, if it was `Stdio.Pipe`.
+    pub stdout: List<u8>,
+    /// Its standard error, if it was `Stdio.Pipe`.
+    pub stderr: List<u8>,
+}
+
+impl Output {
+    /// Its standard output as text, each byte that doesn't start valid UTF-8 becoming U+FFFD.
+    pub fn text(self) -> String {
+        return decode_lossy(self.stdout, 0, self.stdout.len())
+    }
+
+    /// Its standard error as text, the same way.
+    pub fn error_text(self) -> String {
+        return decode_lossy(self.stderr, 0, self.stderr.len())
+    }
+}
+
+struct EnvChange {
+    name: String,
+    value: String?,
+}
+
+/// A program to start, and how. Each method gives the command back with one more thing said, so
+/// they chain: `Command.new("git").args(["log", "-1"]).dir("calx").read()`.
+pub struct Command {
+    program: String,
+    argv: List<String>,
+    folder: String?,
+    changes: List<EnvChange>,
+    clear_env: bool,
+    in_mode: Stdio?,
+    out_mode: Stdio?,
+    err_mode: Stdio?,
+    given: List<u8>,
+    limit_ms: u64,
+}
+
+impl Command {
+    /// The program `program`: a name, looked for in each folder on PATH and only there, or a path
+    /// with a `/` or `\` in it, relative to this program's current folder.
+    pub fn new(program: String) -> Command {
+        return Command {
+            program: program.copy(),
+            argv: List<String>(),
+            folder: none,
+            changes: List<EnvChange>(),
+            clear_env: false,
+            in_mode: none,
+            out_mode: none,
+            err_mode: none,
+            given: List<u8>(),
+            limit_ms: 0,
+        }
+    }
+
+    /// Adds an argument. It reaches the program as it is, spaces, quotes and all: no shell reads it.
+    pub fn arg(own self, a: String) -> Command {
+        var c = self
+        c.argv.push(a.copy())
+        return c
+    }
+
+    /// Adds the arguments, in order.
+    pub fn args(own self, list: List<String>) -> Command {
+        var c = self
+        for a in list {
+            c.argv.push(a.copy())
+        }
+        return c
+    }
+
+    /// Runs it in the folder `path`, relative to this program's current folder, rather than in
+    /// that folder.
+    pub fn dir(own self, path: String) -> Command {
+        var c = self
+        c.folder = some(path.copy())
+        return c
+    }
+
+    /// Sets the environment variable `name` to `value` for it. The rest of its environment is this
+    /// program's. On Windows names are matched without regard to case, as Windows matches them.
+    pub fn env(own self, name: String, value: String) -> Command {
+        var c = self
+        c.changes.push(EnvChange { name: name.copy(), value: some(value.copy()) })
+        return c
+    }
+
+    /// Takes the environment variable `name` out of its environment.
+    pub fn env_remove(own self, name: String) -> Command {
+        var c = self
+        c.changes.push(EnvChange { name: name.copy(), value: none })
+        return c
+    }
+
+    /// Starts its environment empty, so it has only the variables `env` sets, after this.
+    pub fn env_clear(own self) -> Command {
+        var c = self
+        c.clear_env = true
+        c.changes.clear()
+        return c
+    }
+
+    /// Where its standard input comes from. `Stdio.Stdout` is only for standard error, so it panics.
+    @track_caller
+    pub fn stdin(own self, mode: Stdio) -> Command {
+        if mode == Stdio.Stdout {
+            panic("standard input can't be Stdio.Stdout")
+        }
+        var c = self
+        c.in_mode = some(mode)
+        if mode != Stdio.Pipe {
+            c.given.clear()
+        }
+        return c
+    }
+
+    /// Where its standard output goes. `Stdio.Stdout` is only for standard error, so it panics.
+    @track_caller
+    pub fn stdout(own self, mode: Stdio) -> Command {
+        if mode == Stdio.Stdout {
+            panic("standard output can't be Stdio.Stdout")
+        }
+        var c = self
+        c.out_mode = some(mode)
+        return c
+    }
+
+    /// Where its standard error goes.
+    pub fn stderr(own self, mode: Stdio) -> Command {
+        var c = self
+        c.err_mode = some(mode)
+        return c
+    }
+
+    /// Gives it `bytes` as its standard input, which then ends, unless it's a `Child` that's
+    /// written more to.
+    pub fn input(own self, bytes: List<u8>) -> Command {
+        var c = self
+        c.in_mode = some(Stdio.Pipe)
+        c.given = bytes.copy()
+        return c
+    }
+
+    /// Gives it `text` as its standard input, as UTF-8.
+    pub fn input_text(own self, text: String) -> Command {
+        var c = self
+        c.in_mode = some(Stdio.Pipe)
+        c.given = text.to_bytes()
+        return c
+    }
+
+    /// Kills it if it's still running `ms` milliseconds after it started. Its `Status` then says
+    /// `timed_out`. 0 is no limit, which is how a command starts.
+    pub fn timeout(own self, ms: u64) -> Command {
+        var c = self
+        c.limit_ms = ms
+        return c
+    }
+
+    /// Runs it, with this program's input, output and error, and waits for it. Fails if it
+    /// doesn't start, or doesn't succeed: a script's `subprocess.run(..., check=True)`.
+    pub fn run(self) ! ProcessError {
+        let h = try start(self, Stdio.Inherit, Stdio.Inherit, Stdio.Inherit, 0)
+        let out = finish(h)
+        if not out.status.success() {
+            fail ProcessError.Failed { command: "{self}", status: out.status }
+        }
+    }
+
+    /// Runs it and gives what it wrote to standard output, as text without the line breaks at its
+    /// end, as a shell's `$(...)` gives it. Its errors go to this program's. Fails if it doesn't
+    /// start, or doesn't succeed.
+    pub fn read(self) -> String ! ProcessError {
+        let h = try start(self, Stdio.Inherit, Stdio.Pipe, Stdio.Inherit, 0)
+        let out = finish(h)
+        if not out.status.success() {
+            fail ProcessError.Failed { command: "{self}", status: out.status }
+        }
+        var end = out.stdout.len()
+        while end > 0 and (out.stdout[end - 1] == 10 or out.stdout[end - 1] == 13) {
+            end -= 1
+        }
+        return decode_lossy(out.stdout, 0, end)
+    }
+
+    /// Runs it, keeping what it writes to standard output and standard error, and waits for it.
+    /// Its input is empty unless `input` gives it some. Fails only if it doesn't start: how it
+    /// ended is in the `Output`.
+    pub fn output(self) -> Output ! ProcessError {
+        let h = try start(self, Stdio.Null, Stdio.Pipe, Stdio.Pipe, 0)
+        return finish(h)
+    }
+
+    /// Runs it, with this program's input, output and error, and says how it ended. Fails only if
+    /// it doesn't start.
+    pub fn status(self) -> Status ! ProcessError {
+        let h = try start(self, Stdio.Inherit, Stdio.Inherit, Stdio.Inherit, 0)
+        return finish(h).status
+    }
+
+    /// Starts it and goes on, with this program's input, output and error unless `stdin`,
+    /// `stdout` or `stderr` says otherwise.
+    pub fn spawn(self) -> Child ! ProcessError {
+        let h = try start(self, Stdio.Inherit, Stdio.Inherit, Stdio.Inherit, 0)
+        return Child {
+            handle: h,
+            input_piped: mode_of(self.in_mode, Stdio.Inherit) == Stdio.Pipe,
+            output_piped: mode_of(self.out_mode, Stdio.Inherit) == Stdio.Pipe,
+        }
+    }
+}
+
+/// The program and its arguments as a shell would take them, for messages: each that's empty or
+/// has a space, a tab or a quote in quotes.
+impl Display for Command {
+    fn show(self) {
+        show_word(self.program)
+        for a in self.argv {
+            print(" ")
+            show_word(a)
+        }
+    }
+}
+
+fn show_word(w: String) {
+    var plain = not w.is_empty()
+    for i in 0..w.len() {
+        let b = w.byte_at(i)
+        if b == 32 or b == 9 or b == 34 or b == 39 {
+            plain = false
+        }
+    }
+    if plain {
+        print(w)
+        return
+    }
+    print("\"")
+    for i in 0..w.len() {
+        let b = w.byte_at(i)
+        if b == 34 or b == 92 {
+            print("\\")
+        }
+        print(w[i..i + 1])
+    }
+    print("\"")
+}
+
+/// A program that's running, or has ended and not been waited for.
+pub struct Child {
+    handle: i64,
+    input_piped: bool,
+    output_piped: bool,
+}
+
+impl Child {
+    @track_caller
+    fn live(self) -> i64 {
+        if self.handle == 0 {
+            panic("the child was waited for already")
+        }
+        return self.handle
+    }
+
+    /// The system's number for it, its process ID.
+    @track_caller
+    pub fn id(self) -> u32 {
+        return unsafe { cx_proc_id(self.live()) }
+    }
+
+    /// Writes `bytes` to its standard input, which is `Stdio.Pipe`, waiting until it has taken
+    /// them, and reading what it writes meanwhile, so neither waits for the other. Fails if it
+    /// stops reading first, by closing its input or ending. Panics if its input isn't a pipe.
+    @track_caller
+    pub fn write(self, bytes: List<u8>) ! ProcessError {
+        let h = self.live()
+        if not self.input_piped {
+            panic("the child's standard input isn't Stdio.Pipe")
+        }
+        if unsafe { cx_proc_write(h, bytes.as_ptr(), bytes.len()) } != 0 {
+            fail ProcessError.InputClosed
+        }
+    }
+
+    /// Writes `text` to its standard input, as UTF-8, as `write` does.
+    @track_caller
+    pub fn write_text(self, text: String) ! ProcessError {
+        let h = self.live()
+        if not self.input_piped {
+            panic("the child's standard input isn't Stdio.Pipe")
+        }
+        if unsafe { cx_proc_write(h, text.as_ptr(), text.len()) } != 0 {
+            fail ProcessError.InputClosed
+        }
+    }
+
+    /// Ends its standard input, once what was written has gone, so a program that reads to the
+    /// end goes on. `wait` does this too.
+    @track_caller
+    pub fn close_input(self) {
+        unsafe {
+            cx_proc_close_input(self.live())
+        }
+    }
+
+    /// The next line it writes to standard output, which is `Stdio.Pipe`, without its `\n` or
+    /// `\r\n`, waiting at most `ms` milliseconds for it. `none` if it doesn't come in time, or the
+    /// output has ended, which `ended` tells apart. The last line needn't end with a line break.
+    /// Panics if its output isn't a pipe.
+    @track_caller
+    pub fn read_line(self, ms: u64) -> String? {
+        let h = self.live()
+        if not self.output_piped {
+            panic("the child's standard output isn't Stdio.Pipe")
+        }
+        let n = unsafe { cx_proc_line(h, deadline(ms)) }
+        if n < 0 {
+            return none
+        }
+        return some(take_line(h, usize.wrap(n)))
+    }
+
+    /// Reads lines from its standard output until one has `text` in it, and gives that line, as
+    /// `read_line` does, waiting at most `ms` milliseconds in all: a server's "Done" line, say.
+    /// The lines before it are dropped. `none` if none comes in time, or the output ends first.
+    @track_caller
+    pub fn wait_for_line(self, text: String, ms: u64) -> String? {
+        let h = self.live()
+        if not self.output_piped {
+            panic("the child's standard output isn't Stdio.Pipe")
+        }
+        let until = deadline(ms)
+        loop {
+            let n = unsafe { cx_proc_line(h, until) }
+            if n < 0 {
+                return none
+            }
+            let line = take_line(h, usize.wrap(n))
+            if line.contains(text) {
+                return some(line)
+            }
+        }
+    }
+
+    /// What has come from its standard output, which is `Stdio.Pipe`, since it was last read,
+    /// waiting at most `ms` milliseconds for something if nothing has. Empty if nothing comes in
+    /// time, or the output has ended.
+    @track_caller
+    pub fn read(self, ms: u64) -> List<u8> {
+        let h = self.live()
+        if not self.output_piped {
+            panic("the child's standard output isn't Stdio.Pipe")
+        }
+        let n = unsafe { cx_proc_some(h, deadline(ms)) }
+        if n < 0 {
+            return List<u8>()
+        }
+        return take(h, 1, usize.wrap(n))
+    }
+
+    /// Whether its standard output has ended and all of it has been read, so `read_line` and
+    /// `read` won't give anything more.
+    @track_caller
+    pub fn ended(self) -> bool {
+        let h = self.live()
+        return unsafe { cx_proc_some(h, 1) } == -2
+    }
+
+    /// How it ended, if it has, without waiting.
+    @track_caller
+    pub fn try_wait(self) -> Status? {
+        let h = self.live()
+        if unsafe { cx_proc_poll(h) } == 0 {
+            return none
+        }
+        return some(status_of(h))
+    }
+
+    /// Kills it, if it's still running: at once, without letting it clean up. `wait` then says
+    /// how it ended.
+    @track_caller
+    pub fn kill(self) {
+        unsafe {
+            cx_proc_kill(self.live())
+        }
+    }
+
+    /// Ends its input, waits for it to end, and gives how it ended with what it wrote to each
+    /// stream that's a pipe and hasn't been read. Panics if it was waited for already.
+    @track_caller
+    pub fn wait(mut self) -> Output {
+        let h = self.live()
+        self.handle = 0
+        return finish(h)
+    }
+}
+
+/// Runs each command as `Command.output` would, at most `at_once` of them at a time, and gives
+/// their outputs in the same order. As one ends the next starts, so a slow one doesn't hold up
+/// the rest. Fails if one doesn't start, after killing those that are running and waiting for
+/// them. Panics if `at_once` is 0.
+@track_caller
+pub fn output_all(commands: List<Command>, at_once: usize) -> List<Output> ! ProcessError {
+    if at_once == 0 {
+        panic("output_all runs at least one command at once")
+    }
+    var outputs = List<Output>()
+    for _ in commands {
+        outputs.push(Output { status: Status { code: none, signal: none, timed_out: false }, stdout: List<u8>(), stderr: List<u8>() })
+    }
+    let group = unsafe { cx_proc_group() }
+    var running = List<i64>()
+    var places = List<usize>()
+    var next: usize = 0
+    while next < commands.len() or running.len() > 0 {
+        while next < commands.len() and running.len() < at_once {
+            match start(commands[next], Stdio.Null, Stdio.Pipe, Stdio.Pipe, group) {
+                ok(h) => {
+                    running.push(h)
+                    places.push(next)
+                },
+                err(e) => {
+                    for h in running {
+                        unsafe {
+                            cx_proc_kill(h)
+                            cx_proc_wait(h)
+                            cx_proc_free(h)
+                        }
+                    }
+                    unsafe {
+                        cx_proc_group_free(group)
+                    }
+                    fail e
+                },
+            }
+            next += 1
+        }
+        let i = unsafe { cx_proc_wait_any(running.as_ptr(), running.len()) }
+        outputs[places[i]] = finish(running[i])
+        _ = running.swap_remove(i)
+        _ = places.swap_remove(i)
+    }
+    unsafe {
+        cx_proc_group_free(group)
+    }
+    return outputs
+}
+
+/// The path of the program `name` would start: a name looked for in each folder on PATH, and on
+/// Windows with `.exe`, `.com`, `.cmd` or `.bat` if it hasn't one of its own, or a path made
+/// whole. `none` if there's nothing to run.
+pub fn which(name: String) -> String? {
+    if name.is_empty() or has_zero(name) {
+        return none
+    }
+    if unsafe { cx_proc_which(name.as_ptr(), name.len()) } == 0 {
+        return none
+    }
+    return some(result())
+}
+
+/// The path of this program's own executable, made whole, to start it again, as a test that runs
+/// itself does.
+pub fn current_exe() -> String {
+    if unsafe { cx_proc_exe() } == 0 {
+        return String()
+    }
+    return result()
+}
+
+fn result() -> String {
+    var bytes = List<u8>()
+    unsafe {
+        let n = cx_proc_result_len()
+        bytes.reserve(n)
+        cx_proc_result_copy(bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return decode_lossy(bytes, 0, bytes.len())
+}
+
+fn has_zero(s: String) -> bool {
+    for i in 0..s.len() {
+        if s.byte_at(i) == 0 {
+            return true
+        }
+    }
+    return false
+}
+
+fn has_separator(s: String) -> bool {
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b == 47 or b == 92 {
+            return true
+        }
+    }
+    return false
+}
+
+fn mode_of(given: Stdio?, default: Stdio) -> Stdio {
+    return match given {
+        some(m) => m,
+        none => default,
+    }
+}
+
+fn mode_byte(m: Stdio) -> u8 {
+    return match m {
+        Inherit => 0,
+        Pipe => 1,
+        Null => 2,
+        Stdout => 3,
+    }
+}
+
+fn push_u32(out: mut List<u8>, v: u32) {
+    out.push(u8.wrap(v))
+    out.push(u8.wrap(v >> 8))
+    out.push(u8.wrap(v >> 16))
+    out.push(u8.wrap(v >> 24))
+}
+
+fn push_text(out: mut List<u8>, s: String) {
+    push_u32(mut out, u32.wrap(s.len()))
+    for i in 0..s.len() {
+        out.push(s.byte_at(i))
+    }
+}
+
+// What can't reach a program: an empty name, a zero byte, or a variable's name that's empty or
+// has `=` in it.
+fn check(c: Command) ! ProcessError {
+    if c.program.is_empty() {
+        fail ProcessError.BadArgument(String("the program's name is empty"))
+    }
+    if has_zero(c.program) {
+        fail ProcessError.BadArgument(String("the program's name has a zero byte in it"))
+    }
+    for a in c.argv {
+        if has_zero(a) {
+            fail ProcessError.BadArgument("an argument to {c.program} has a zero byte in it, which no program can be given")
+        }
+    }
+    if let d = c.folder {
+        if has_zero(d) {
+            fail ProcessError.BadArgument(String("the folder's name has a zero byte in it"))
+        }
+    }
+    for v in c.changes {
+        if v.name.is_empty() or v.name.contains("=") or has_zero(v.name) {
+            fail ProcessError.BadArgument("{v.name} can't be the name of an environment variable")
+        }
+        if let x = v.value {
+            if has_zero(x) {
+                fail ProcessError.BadArgument("the value of {v.name} has a zero byte in it")
+            }
+        }
+    }
+}
+
+// Starts `c`, each stream that it doesn't say where to send going where the method's default
+// says, and gives the runtime's handle.
+fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, group: i64) -> i64 ! ProcessError {
+    try check(c)
+    var spec = List<u8>()
+    spec.push(mode_byte(mode_of(c.in_mode, in_default)))
+    spec.push(mode_byte(mode_of(c.out_mode, out_default)))
+    spec.push(mode_byte(mode_of(c.err_mode, err_default)))
+    spec.push(if c.clear_env { 1 } else { 0 })
+    push_u32(mut spec, u32.wrap(c.limit_ms))
+    push_u32(mut spec, u32.wrap(c.limit_ms >> 32))
+    push_text(mut spec, c.program)
+    push_u32(mut spec, u32.wrap(c.argv.len()))
+    for a in c.argv {
+        push_text(mut spec, a)
+    }
+    match c.folder {
+        some(d) => {
+            spec.push(1)
+            push_text(mut spec, d)
+        },
+        none => spec.push(0),
+    }
+    push_u32(mut spec, u32.wrap(c.changes.len()))
+    for v in c.changes {
+        match v.value {
+            some(x) => {
+                spec.push(1)
+                push_text(mut spec, v.name)
+                push_text(mut spec, x)
+            },
+            none => {
+                spec.push(0)
+                push_text(mut spec, v.name)
+            },
+        }
+    }
+    let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
+    if h != 0 {
+        return h
+    }
+    let code = unsafe { cx_proc_error_code() }
+    fail match unsafe { cx_proc_error_kind() } {
+        1 => ProcessError.NotFound(c.program.copy()),
+        2 => ProcessError.Denied(c.program.copy()),
+        3 => ProcessError.BadDirectory(match c.folder {
+            some(d) => d.copy(),
+            none => String(),
+        }),
+        4 => ProcessError.BadArgument(if code == 2 {
+            "an argument to the batch file {c.program} has a line break in it, which cmd.exe can't be given"
+        } else {
+            "the batch file {c.program} has a name cmd.exe can't be given"
+        }),
+        _ => ProcessError.Os(code),
+    }
+}
+
+// Closes its input, waits for it, and takes what it wrote and how it ended, then lets it go.
+fn finish(h: i64) -> Output {
+    unsafe {
+        cx_proc_close_input(h)
+        cx_proc_wait(h)
+    }
+    let out = take(h, 1, unsafe { cx_proc_available(h, 1) })
+    let errors = take(h, 2, unsafe { cx_proc_available(h, 2) })
+    let status = status_of(h)
+    unsafe {
+        cx_proc_free(h)
+    }
+    return Output { status: status, stdout: out, stderr: errors }
+}
+
+fn take(h: i64, stream: u32, n: usize) -> List<u8> {
+    var bytes = List<u8>()
+    if n > 0 {
+        unsafe {
+            bytes.reserve(n)
+            cx_proc_take(h, stream, bytes.as_mut_ptr(), n)
+            bytes.set_len(n)
+        }
+    }
+    return bytes
+}
+
+// The `n` bytes of a line from standard output, as text without the line break.
+fn take_line(h: i64, n: usize) -> String {
+    let bytes = take(h, 1, n)
+    var end = bytes.len()
+    if end > 0 and bytes[end - 1] == 10 {
+        end -= 1
+        if end > 0 and bytes[end - 1] == 13 {
+            end -= 1
+        }
+    }
+    return decode_lossy(bytes, 0, end)
+}
+
+fn status_of(h: i64) -> Status {
+    let state = unsafe { cx_proc_state(h) }
+    let signal = unsafe { cx_proc_signal(h) }
+    return Status {
+        code: if state & 16 != 0 { some(unsafe { cx_proc_code(h) }) } else { none },
+        signal: if signal != 0 { some(signal) } else { none },
+        timed_out: state & 4 != 0,
+    }
+}
+
+// The moment `ms` milliseconds from now on cx_clock_ns's clock, or 0, no limit, if that's past
+// what it can count.
+fn deadline(ms: u64) -> u64 {
+    let now = unsafe { cx_clock_ns() }
+    if ms > (u64.MAX - now) / 1000000 {
+        return 0
+    }
+    return now + ms * 1000000
 }
 
 /// The bytes of this process's memory that are in RAM now: its working set on Windows, and its

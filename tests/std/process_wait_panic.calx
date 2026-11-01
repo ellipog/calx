@@ -1,0 +1,15 @@
+// A child is waited for once: waiting again is a mistake in the program, so it panics. The child
+// is this program again, given an argument, which makes it end at once.
+
+import std.env.{args}
+import std.process.{Command, Stdio, current_exe}
+
+fn main() {
+    if args().len() > 0 {
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdout(Stdio.Null).spawn()!
+    println("{c.wait().status.success()}")    // out: true
+    let again = c.wait()    // panic: the child was waited for already
+    println("{again.status}")
+}

@@ -86,7 +86,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 18. [std.fs](std/fs.md): files and directories, read and written whole or in parts in place, with atomic renames, locks, real paths and temporary directories
 19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
-21. [std.process](std/process.md): this process's memory, the memory it may use, its CPU time and its processors, and `exit`
+21. [std.process](std/process.md): starting other programs, with their arguments, folder, environment, input, output and timeouts, talking to one while it runs, several at once, and finding them; and this process's memory, CPU time and processors, and `exit`
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of

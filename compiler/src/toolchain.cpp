@@ -122,8 +122,8 @@ HANDLE open_for(const std::string& path, bool write) {
                        nullptr);
 }
 
-// Starts a program, with its streams where `r` says.
-HANDLE start(const std::vector<std::string>& argv, Redirect r = {}) {
+// Starts a program, with its streams where `r` says, in `job` if there's one.
+HANDLE start(const std::vector<std::string>& argv, Redirect r = {}, HANDLE job = nullptr) {
     std::wstring cmd;
     for (std::size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += L' ';
@@ -165,11 +165,37 @@ HANDLE start(const std::vector<std::string>& argv, Redirect r = {}) {
     }
     PROCESS_INFORMATION pi{};
     std::wstring app = widen(argv[0]);
-    BOOL ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    BOOL ok = CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, job ? CREATE_SUSPENDED : 0, nullptr, nullptr, &si, &pi);
     close_all();
     if (!ok) return nullptr;
+    if (job) {
+        AssignProcessToJobObject(job, pi.hProcess);   // if it can't, it runs outside one
+        ResumeThread(pi.hThread);
+    }
     CloseHandle(pi.hThread);
     return pi.hProcess;
+}
+
+// A job whose programs, and those they start, are killed if it closes while it may: when this
+// process ends without letting it go, as when it's killed. Its programs may still leave it.
+HANDLE kill_on_close_job() {
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) return nullptr;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof info)) {
+        CloseHandle(job);
+        return nullptr;
+    }
+    return job;
+}
+
+// Lets the job's programs go on after it closes.
+void let_go(HANDLE job) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof info);
+    CloseHandle(job);
 }
 
 int finish(HANDLE h) {
@@ -342,10 +368,22 @@ std::string hash_hex(const std::vector<std::string_view>& parts) {
 }
 
 int run_process(const std::vector<std::string>& argv) {
-    auto h = start(argv);
 #ifdef _WIN32
-    if (!h) return -1;
+    // `calx run` stands for the program: if it's killed, as a test runner stops one that ran too
+    // long, the program and everything it started go with it, which `taskkill /T` alone can't
+    // reach once their parents have gone. A program that ends by itself leaves what it started
+    // running, as it would have without `calx run`.
+    HANDLE job = kill_on_close_job();
+    auto h = start(argv, {}, job);
+    if (!h) {
+        if (job) CloseHandle(job);
+        return -1;
+    }
+    int status = finish(h);
+    if (job) let_go(job);
+    return status;
 #else
+    auto h = start(argv);
     if (h < 0) return -1;
 #endif
     return finish(h);
@@ -975,6 +1013,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_lz4_"})) parts_ok = part("calx_lz4.c");
     if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
+    if (parts_ok && calls({"cx_proc_"})) parts_ok = part("calx_proc.c");
     if (parts_ok && calls({"cx_queue_", "cx_thread_", "cx_Sender", "cx_Receiver", "cx_Thread"})) parts_ok = part("calx_thread.c");
     if (parts_ok && calls({"cx_sort_i8(", "cx_sort_i16(", "cx_sort_i32(", "cx_sort_i64(", "cx_sort_u8(", "cx_sort_u16(",
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool("})) {

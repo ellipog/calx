@@ -1,0 +1,14 @@
+// Reading the output of a child whose output isn't a pipe is a mistake in the program, so it
+// panics. The child is this program again, given an argument, which makes it end at once.
+
+import std.env.{args}
+import std.process.{Command, Stdio, current_exe}
+
+fn main() {
+    if args().len() > 0 {
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdout(Stdio.Null).spawn()!
+    let line = c.read_line(1000)    // panic: the child's standard output isn't Stdio.Pipe
+    println("{line ?? String()} {c.wait().status}")
+}

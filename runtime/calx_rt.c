@@ -143,14 +143,24 @@ static void park(void) {
 
 static void term_end(int flush);
 
+/* Set by calx_proc.c once the program has started another, and called as the program ends, with
+ * whether it's ending as it means to: by returning from `main` or calling `exit`. When it isn't,
+ * as after a panic, the programs it started end with it. */
+void (*cx_children_at_exit)(int normal);
+
 /* The terminal is put back as the program found it first (see "std.term" below), so what the
- * program writes as it ends, such as a panic's message, shows as it would have. */
-static void take_exit(void) {
+ * program writes as it ends, such as a panic's message, shows as it would have. `normal` says
+ * whether it's ending as it means to. */
+static void take_exit_as(int normal) {
     if (exit_mine) return;
     if (__atomic_exchange_n(&exit_taken, 1, __ATOMIC_ACQ_REL)) park();
     exit_mine = 1;
+    void (*children)(int) = __atomic_load_n(&cx_children_at_exit, __ATOMIC_ACQUIRE);
+    if (children) children(normal);
     term_end(1);
 }
+
+static void take_exit(void) { take_exit_as(0); }
 
 /* The threads `Thread.spawn` started that are still running, which own memory the leak check
  * would count, and whether this is one of them. */
@@ -583,7 +593,7 @@ void cx_start(int argc, char** argv) {
 }
 
 int cx_finish(void) {
-    take_exit();
+    take_exit_as(1);
     flush_out();
 #ifdef CX_DEBUG
     /* Debug builds count the blocks still allocated, and a program that ends with any left has
@@ -1025,7 +1035,7 @@ void cx_process_exit(cx_u8 code) {
         panic_text("can't exit inside a `parallel for`");
         cx_panic_end();
     }
-    take_exit();
+    take_exit_as(1);
     flush_out();
     fflush(stderr);
     _Exit(code);
