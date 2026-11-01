@@ -2722,9 +2722,21 @@ $dropall    m->len = 0;
     }
 
     // A constant's value as a C initializer: an array is its elements in braces, as the struct
-    // holding them, rather than a compound literal, which C allows only inside functions.
+    // holding them, and a tuple its elements in braces, rather than a compound literal, which C
+    // allows only inside functions. Another constant is its value, as C can't start a constant
+    // from one.
     std::string const_init(Expr* e) {
-        if (e->type->kind != TypeKind::array || e->has_bits) return expr(e);
+        if (e->has_bits) return expr(e);
+        if ((e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::const_ && e->item->value &&
+            (e->type->kind == TypeKind::array || e->type->kind == TypeKind::tuple)) {
+            return const_init(e->item->value);
+        }
+        if (e->type->kind == TypeKind::tuple) {
+            std::string s = "{";
+            for (std::size_t i = 0; i < e->elems.size(); i++) s += (i ? ", " : " ") + const_init(e->elems[i]);
+            return s + " }";
+        }
+        if (e->type->kind != TypeKind::array) return expr(e);
         std::string s = "{{";
         if (e->repeat) {
             std::string x = const_init(e->elems[0]);

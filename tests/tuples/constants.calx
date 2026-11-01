@@ -1,0 +1,25 @@
+// Constant tuples: values known while compiling, of numbers, `bool`, `char` and `rune`, nested,
+// in arrays, and built from other constants. Each is a `static const` in C.
+const ORIGIN: (i32, i32) = (0, 0)
+const UNKNOWN: (i32, i32) = (i32.MIN, i32.MIN)
+const N: i32 = 3
+const STEP: (i32, f64, bool) = (N, 0.5, true)
+const NESTED: ((u8, u8), char) = ((1, 2), 'x')
+const CORNERS: [(i32, i32); 2] = [(-1, -1), (1, 1)]
+const SAME: (i32, i32) = UNKNOWN
+
+fn is_unknown(p: (i32, i32)) -> bool {
+    return p == UNKNOWN
+}
+
+fn main() {
+    println("{ORIGIN.0} {ORIGIN.1} {UNKNOWN.0}")            // out: 0 0 -2147483648
+    println("{STEP.0} {STEP.1} {STEP.2}")                   // out: 3 0.5 true
+    println("{NESTED.0.1} {NESTED.1}")                      // out: 2 x
+    println("{CORNERS[1].0} {CORNERS}")                     // out: 1 [(-1, -1), (1, 1)]
+    var p = ORIGIN       // a copy, which can change
+    p.0 = 4
+    println("{p} {ORIGIN} {is_unknown(SAME)} {is_unknown(p)}")    // out: (4, 0) (0, 0) true false
+    let (x, y) = if STEP.0 == 3 and STEP.2 { (1, 2) } else { ORIGIN }
+    println("{x} {y}")                                      // out: 1 2
+}

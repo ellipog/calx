@@ -1,0 +1,16 @@
+// What a tuple constant can't be: holding anything but numbers, `bool`, `char` and `rune`, of
+// the wrong shape, or a value only known when the program runs.
+const P: (i32, i32) = (1, 2)
+const S: (i32, String) = (1, "a")    // error: constants of this type aren't implemented yet
+const L: (i32, i32) = (1, 2, 3)      // error: expected `(i32, i32)`, found `(i32, i32, i32)`
+
+fn f() -> i32 {
+    return 1
+}
+
+const X: (i32, i32) = (1, f())       // error: a constant's value must be known at compile time
+
+fn main() {
+    P.0 = 4                          // error: can't assign to `P`: it isn't a variable
+    println("{P.1} {S.0} {L.0} {X.0}")
+}

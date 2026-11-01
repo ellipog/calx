@@ -2555,13 +2555,20 @@ private:
     // table of coefficients.
     static bool const_type(const Type* t) {
         if (t->kind == TypeKind::array) return const_type(t->elem);
+        if (t->kind == TypeKind::tuple) {
+            for (const Type* x : t->elems) {
+                if (!const_type(x)) return false;
+            }
+            return true;
+        }
         return is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ || t->kind == TypeKind::rune;
     }
 
-    // Whether an expression's value is known at compile time: a constant, or an array of them.
+    // Whether an expression's value is known at compile time: a constant, or an array or tuple of
+    // them.
     static bool known(const Expr* e) {
         if (e->is_const) return true;
-        if (e->kind != ExprKind::array_lit) return false;
+        if (e->kind != ExprKind::array_lit && e->kind != ExprKind::tuple) return false;
         if (e->repeat) return !e->elems.empty() && known(e->elems[0]);
         for (const Expr* x : e->elems) {
             if (!known(x)) return false;
@@ -2609,8 +2616,9 @@ private:
                 if (!is_bad(vt) && !known(c->value)) {
                     error(c->value->span, "a constant's value must be known at compile time");
                 }
-                // Integers are written where they're used; floats and arrays are C constants.
-                if (is_float(t) || t->kind == TypeKind::array) prog_.consts.push_back(c);
+                // Integers are written where they're used; floats, arrays and tuples are C
+                // constants.
+                if (is_float(t) || t->kind == TypeKind::array || t->kind == TypeKind::tuple) prog_.consts.push_back(c);
             }
         }
         checking_consts_.erase(c);
