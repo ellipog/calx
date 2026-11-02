@@ -437,6 +437,64 @@ impl PalettedContainer {
         return self.storage.bits()
     }
 
+    /// Each value looked up in `table`, written over `out` in index order: `out` ends with the
+    /// container's size of bytes, `table[v]` for the value `v` that `get_at` gives at each index.
+    /// Each palette entry is looked up once, so it's much faster than `get_at` at every index.
+    /// Panics unless `table` has an entry for each value that's there.
+    @track_caller
+    pub fn map_into(self, table: List<u8>, out: mut List<u8>) {
+        let n = self.storage.len()
+        out.clear()
+        out.reserve(n)
+        let width = self.storage.bits()
+        if width == 0 {
+            let b = table[usize(self.palette.entries[0])]
+            unsafe {
+                let to = out.as_mut_ptr()
+                for i in 0usize..n {
+                    to.add(i).write(b)
+                }
+                out.set_len(n)
+            }
+            return
+        }
+        // Each index's byte, for every index the bits can hold. A container never holds one past
+        // its palette's end, so those are 0, and none is looked up out of range.
+        var mapped = List<u8>()
+        if not self.global {
+            let size = usize.wrap(1 << width)
+            mapped.reserve(size)
+            for j in 0usize..size {
+                mapped.push(if j < self.palette.entries.len() { table[usize(self.palette.entries[j])] } else { 0 })
+            }
+        }
+        let per = usize(self.storage.per_long)
+        let mask = i64(self.storage.mask)
+        var i: usize = 0
+        unsafe {
+            let to = out.as_mut_ptr()
+            let from = mapped.as_ptr()
+            for w in self.storage.data {
+                var x = w
+                let end = (i + per).min(n)
+                if self.global {
+                    while i < end {
+                        to.add(i).write(table[usize.wrap(x & mask)])
+                        x = x >>> width
+                        i += 1
+                    }
+                } else {
+                    while i < end {
+                        to.add(i).write(from.add(usize.wrap(x & mask)).read())
+                        x = x >>> width
+                        i += 1
+                    }
+                }
+            }
+            out.set_len(n)
+        }
+    }
+
     /// Each value in the container with how many times it's there, as vanilla's `count` gives
     /// them: for a palette of one entry, that entry; for an indexed palette, its entries that are
     /// there, in its order; with no palette, by ID.

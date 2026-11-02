@@ -204,6 +204,50 @@ fn unpacks() {
     println(outcome(biomes, Packed { palette: [1, 2], data: some([]) }))    // out: Length { got: 0, expected: 1 }
 }
 
+// Whether `out` is each value's byte in `table`, as `get_at` gives the values.
+fn agrees(c: PalettedContainer, table: List<u8>, out: List<u8>) -> bool {
+    if out.len() != 4096 {
+        return false
+    }
+    for i in 0usize..4096 {
+        if out[i] != table[usize(c.get_at(i))] {
+            return false
+        }
+    }
+    return true
+}
+
+// `map_into` gives each value's byte from a table, for a palette of one entry, indexed palettes
+// of 4 and 5 bits, and the registry's IDs, and writes over what `out` had.
+fn mapped() {
+    let blocks = Strategy.block_states(35723)
+    var table: List<u8> = []
+    for v in 0u32..35723 {
+        table.push(u8.wrap(v * 7 + 3))
+    }
+    var out: List<u8> = [1, 2, 3]
+    var c = PalettedContainer.new(9, blocks)
+    c.map_into(table, mut out)
+    println("{c.bits()} {out.len()} {out[0]} {out[4095]} {agrees(c, table, out)}")    // out: 0 4096 66 66 true
+    for i in 0usize..4096 {
+        if i % 3 == 0 {
+            c.set_at(i, u32.wrap(i % 7))
+        }
+    }
+    c.map_into(table, mut out)
+    println("{c.bits()} {out[0]} {out[1]} {out[3]} {agrees(c, table, out)}")    // out: 4 3 66 24 true
+    for i in 0usize..20 {
+        c.set_at(i * 200, u32.wrap(100 + i))
+    }
+    c.map_into(table, mut out)
+    println("{c.bits()} {out[200]} {agrees(c, table, out)}")    // out: 5 198 true
+    for i in 0usize..300 {
+        c.set_at(i * 13, u32.wrap(1000 + i))
+    }
+    c.map_into(table, mut out)
+    println("{c.bits()} {out[13]} {agrees(c, table, out)}")    // out: 16 98 true
+}
+
 fn main() {
     storage()
     strategies()
@@ -211,4 +255,5 @@ fn main() {
     growth()
     dropped()
     unpacks()
+    mapped()
 }

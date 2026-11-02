@@ -1,0 +1,9 @@
+// A value the table has no byte for panics at the call.
+
+import std.palette.{PalettedContainer, Strategy}
+
+fn main() {
+    let c = PalettedContainer.new(9, Strategy.block_states(35723))
+    var out: List<u8> = []
+    c.map_into([1, 2, 3], mut out)    // panic: index 9 is out of bounds for length 3
+}
