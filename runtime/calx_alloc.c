@@ -21,6 +21,8 @@
  * system, and then to whichever size needs a page next. So memory that held one size goes to
  * others, and to the system, as it's freed. A thread that takes a new page trims the size whose
  * shared lists hold the most, now and then, and a program can trim every size when it's quiet.
+ * A page with blocks still in use gives back each 4 KiB of it that holds only free blocks, and
+ * those blocks leave the lists as holes, which count as free when the page's last block is.
  *
  * Bigger blocks come from the system, rounded to four sizes for each doubling, and a freed one
  * waits in a cache for the next block of its size, up to 256 MiB in all. The Windows heap gives
@@ -216,7 +218,8 @@ enum { PAGE_NEW = 0, PAGE_CUTTING = 1, PAGE_SEALED = 2, PAGE_FREE = 3 };
 
 typedef struct {
     cx_u16 cut;
-    cx_u16 seen; /* while a trim counts: its blocks in the shared lists */
+    cx_u16 seen;  /* while a trim counts: its blocks in the shared lists */
+    cx_u16 holes; /* blocks given back with the system pages they're on, in no list (CLX-119) */
     cx_u8 state;
     cx_u8 cls;
 } page_info;
@@ -262,6 +265,7 @@ static cx_u8* take_page(unsigned c, cx_u32* number) {
         page_of[n].cls = (cx_u8)c;
         page_of[n].cut = 0;
         page_of[n].seen = 0;
+        page_of[n].holes = 0;
     }
     unlock(&page_lock);
     *number = n;
@@ -273,17 +277,23 @@ static cx_u8* take_page(unsigned c, cx_u32* number) {
     return p;
 }
 
+/* Gives `n` bytes at `p` back to the system, a multiple of OS_PAGE in the range; the range's
+ * memory is committed again when its page is next taken. */
+static void decommit(cx_u8* p, cx_usize n) {
+#ifdef _WIN32
+    VirtualFree(p, n, MEM_DECOMMIT);
+#else
+    madvise(p, n, MADV_DONTNEED);
+#endif
+}
+
 /* Gives page `n` back to the system, and to the free pages. */
 static void give_page(cx_u32 n) {
-    cx_u8* p = arena + ((cx_usize)n << PAGE_SHIFT);
-#ifdef _WIN32
-    VirtualFree(p, PAGE, MEM_DECOMMIT);
-#else
-    madvise(p, PAGE, MADV_DONTNEED);
-#endif
+    decommit(arena + ((cx_usize)n << PAGE_SHIFT), PAGE);
     lock(&page_lock);
     page_of[n].state = PAGE_FREE;
     page_of[n].cut = 0;
+    page_of[n].holes = 0;
     free_pages[free_count++] = n;
     unlock(&page_lock);
 }
@@ -376,18 +386,43 @@ static void seal(heap* h, unsigned c) {
     __atomic_store_n(&page_of[n].state, (cx_u8)PAGE_SEALED, __ATOMIC_RELEASE);
 }
 
+/* The system pages in a page, which a page with blocks in use can give back one by one. */
+#define OS_PAGES (PAGE / OS_PAGE)
+
+/* The system pages a block covers, as bits of a page's OS_PAGES. */
+static inline cx_u32 block_span(cx_u32 i, cx_usize size) {
+    cx_usize from = (cx_usize)i * size, to = from + size - 1;
+    cx_u32 first = (cx_u32)(from / OS_PAGE), last = (cx_u32)(to / OS_PAGE);
+    return (cx_u32)(((2ull << last) - 1) & ~((1ull << first) - 1));
+}
+
 /* Gives back each sealed page of class `c` whose every block is in the shared lists: the lists
  * are counted with the class's lock held, so none of those blocks can be taken meanwhile, and
- * those blocks leave them. Returns the bytes given back. */
-static cx_usize trim_class(unsigned c) {
+ * those blocks leave them. A page that still has blocks in use, but whose free blocks fill a
+ * system page or more, has its free blocks mapped, and each system page that holds only free
+ * blocks, or none, goes back: its blocks leave the lists as holes, which count as free when the
+ * rest of the page is (CLX-119). That's only `with_holes`, for a program gone quiet: while it's
+ * busy, free blocks are kept for the next ones. Returns the bytes given back. */
+static cx_usize trim_class(unsigned c, int with_holes) {
     shared_list* s = &shared[c];
     if (!arena || !__atomic_load_n(&s->count, __ATOMIC_RELAXED)) return 0;
     cx_u32 most = __atomic_load_n(&next_page, __ATOMIC_ACQUIRE);
     if (!most) return 0;
-    /* The pages it sees, each once. */
-    cx_u32* seen = (cx_u32*)os_alloc(pages((cx_usize)most * sizeof(cx_u32)));
-    cx_u32 nseen = 0;
-    cx_u32 going = 0;
+    cx_usize size = class_size(c);
+    /* The pages it sees, each once; those of them that go, and those still in use that may give
+     * back some of their system pages. */
+    cx_usize list_bytes = pages((cx_usize)most * sizeof(cx_u32));
+    cx_u32* seen = (cx_u32*)os_alloc(list_bytes);
+    cx_u32* part = (cx_u32*)os_alloc(list_bytes);
+    cx_u32 nseen = 0, going = 0, parts = 0;
+    /* For each page in `part`, from `slot` by its number: which of its blocks are free, a bit
+     * each, and which of its system pages go. */
+    cx_u32* slot = NULL;
+    cx_u8* free_bits = NULL;
+    cx_u32* gone = NULL;
+    cx_usize bits_each = (PAGE / size + 7) / 8;
+    cx_usize bits_bytes = 0, gone_bytes = 0;
+    cx_usize holed = 0;
     lock(&s->lock);
     for (cx_u32 i = 0; i < s->n; i++) {
         for (void* q = s->b[i].head; q; q = *(void**)q) {
@@ -396,17 +431,55 @@ static cx_usize trim_class(unsigned c) {
             if (page_of[n].seen++ == 0) seen[nseen++] = n;
         }
     }
-    /* A page goes when the lists hold every block cut from it: its state says so until it's given
-     * back, and every other page's count starts again at 0. */
+    /* A page goes when the lists and its holes hold every block cut from it: its state says so
+     * until it's given back, and every other page's count starts again at 0. */
     for (cx_u32 i = 0; i < nseen; i++) {
-        page_info* pi = &page_of[seen[i]];
-        if (pi->cut && pi->seen == pi->cut) {
+        cx_u32 n = seen[i];
+        page_info* pi = &page_of[n];
+        if (pi->cut && pi->seen + pi->holes == pi->cut) {
             pi->state = PAGE_FREE;
-            seen[going++] = seen[i];
+            seen[going++] = n;
+        } else if (with_holes && (cx_usize)pi->seen * size >= OS_PAGE) {
+            part[parts++] = n;
         }
         pi->seen = 0;
     }
-    if (going) {
+    if (parts) {
+        slot = (cx_u32*)os_alloc(list_bytes);
+        bits_bytes = pages((cx_usize)parts * bits_each);
+        free_bits = (cx_u8*)os_alloc(bits_bytes);
+        gone_bytes = pages((cx_usize)parts * sizeof(cx_u32));
+        gone = (cx_u32*)os_alloc(gone_bytes);
+        for (cx_u32 k = 0; k < parts; k++) slot[part[k]] = k + 1;
+        for (cx_u32 i = 0; i < s->n; i++) {
+            for (void* q = s->b[i].head; q; q = *(void**)q) {
+                cx_u32 n = page_number(q);
+                if (n == NO_PAGE || !slot[n]) continue;
+                cx_u32 b = (cx_u32)((cx_usize)((cx_u8*)q - (arena + ((cx_usize)n << PAGE_SHIFT))) / size);
+                free_bits[(cx_usize)(slot[n] - 1) * bits_each + b / 8] |= (cx_u8)(1u << (b % 8));
+            }
+        }
+        /* A system page goes when every block cut that's on it is free; the blocks on those that
+         * go become holes, all free, so no block in use is on one. */
+        for (cx_u32 k = 0; k < parts; k++) {
+            page_info* pi = &page_of[part[k]];
+            const cx_u8* bits = free_bits + (cx_usize)k * bits_each;
+            cx_u32 keep = 0;
+            for (cx_u32 b = 0; b < pi->cut; b++) {
+                if (!(bits[b / 8] >> (b % 8) & 1)) keep |= block_span(b, size);
+            }
+            /* Holes aren't in the lists, so the system pages given back before are kept as they are. */
+            cx_u32 drop = ~keep & ((1u << OS_PAGES) - 1);
+            gone[k] = drop;
+            if (!drop) continue;
+            cx_u32 holes = 0;
+            for (cx_u32 b = 0; b < pi->cut; b++) {
+                if (block_span(b, size) & drop) holes++;
+            }
+            pi->holes = (cx_u16)(pi->holes + holes);
+        }
+    }
+    if (going || parts) {
         cx_u32 kept_batches = 0, total = 0;
         for (cx_u32 i = 0; i < s->n; i++) {
             void* head = NULL;
@@ -415,7 +488,12 @@ static cx_usize trim_class(unsigned c) {
             for (void* q = s->b[i].head; q;) {
                 void* next = *(void**)q;
                 cx_u32 n = page_number(q);
-                if (n == NO_PAGE || page_of[n].state != PAGE_FREE) {
+                int keep = n == NO_PAGE || page_of[n].state != PAGE_FREE;
+                if (keep && n != NO_PAGE && slot && slot[n]) {
+                    cx_u32 b = (cx_u32)((cx_usize)((cx_u8*)q - (arena + ((cx_usize)n << PAGE_SHIFT))) / size);
+                    keep = !(block_span(b, size) & gone[slot[n] - 1]);
+                }
+                if (keep) {
                     if (tail) *(void**)tail = q;
                     else head = q;
                     tail = q;
@@ -435,9 +513,31 @@ static cx_usize trim_class(unsigned c) {
         __atomic_store_n(&s->count, total, __ATOMIC_RELAXED);
     }
     unlock(&s->lock);
+    /* What's no longer in any list goes back: whole pages, and runs of system pages. */
     for (cx_u32 i = 0; i < going; i++) give_page(seen[i]);
-    os_free(seen, pages((cx_usize)most * sizeof(cx_u32)));
-    return (cx_usize)going << PAGE_SHIFT;
+    for (cx_u32 k = 0; k < parts; k++) {
+        cx_u32 drop = gone[k];
+        cx_u8* page = arena + ((cx_usize)part[k] << PAGE_SHIFT);
+        for (cx_u32 j = 0; j < OS_PAGES;) {
+            if (!(drop >> j & 1)) {
+                j++;
+                continue;
+            }
+            cx_u32 run = j;
+            while (run < OS_PAGES && drop >> run & 1) run++;
+            decommit(page + (cx_usize)j * OS_PAGE, (cx_usize)(run - j) * OS_PAGE);
+            holed += (cx_usize)(run - j) * OS_PAGE;
+            j = run;
+        }
+    }
+    if (parts) {
+        os_free(slot, list_bytes);
+        os_free(free_bits, bits_bytes);
+        os_free(gone, gone_bytes);
+    }
+    os_free(part, list_bytes);
+    os_free(seen, list_bytes);
+    return ((cx_usize)going << PAGE_SHIFT) + holed;
 }
 
 /* How often a thread taking a page trims: after this many pages, 64 MiB, and then only the class
@@ -455,7 +555,7 @@ static void trim_some(void) {
             most = c;
         }
     }
-    if (bytes >= TRIM_AT) (void)trim_class(most);
+    if (bytes >= TRIM_AT) (void)trim_class(most, 0);
 }
 
 /* A new page to cut class `c` from; the one cut from before is sealed. */
@@ -648,10 +748,25 @@ void* cx_realloc(void* p, cx_usize old, cx_usize n) {
 
 cx_usize cx_alloc_live(void) { return 0; }
 
+/* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
+ * first, then each small class's whole free pages go, with `with_holes` the free system pages of
+ * those still in use too, and the big blocks the cache keeps. Free blocks other threads keep for
+ * themselves, at most 256 KiB of each size each, stay. Returns the bytes given back. */
+static cx_usize trim_all(int with_holes) {
+    heap* h = &tls;
+    for (unsigned c = 0; c < CLASSES; c++) {
+        if (h->free[c]) share(h, c);
+    }
+    cx_usize bytes = 0;
+    for (unsigned c = 0; c < CLASSES; c++) bytes += trim_class(c, with_holes);
+    return bytes + trim_large();
+}
+
 /* This thread has waited a while on a queue, with nothing to do: it cuts no more from its pages
  * and shares its free blocks, as it would if it ended, so a trim can give back the pages they
  * held up, and then trims. A busy thread keeps them, so it takes and frees without a lock; an
- * idle one's would only sit there (CLX-117). */
+ * idle one's would only sit there (CLX-117). Other threads may be busy, so it gives back whole
+ * pages, and leaves the free blocks of pages in use for them. */
 void cx_alloc_idle(void) {
     heap* h = &tls;
     for (unsigned c = 0; c < CLASSES; c++) {
@@ -659,21 +774,10 @@ void cx_alloc_idle(void) {
         h->bump[c] = h->end[c] = NULL;
         if (h->free[c]) share(h, c);
     }
-    (void)cx_alloc_trim();
+    (void)trim_all(0);
 }
 
-/* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
- * first, then each small class's whole free pages go, and the big blocks the cache keeps. Free
- * blocks other threads keep for themselves, at most 256 KiB of each size each, stay. Returns the
- * bytes given back. */
-cx_usize cx_alloc_trim(void) {
-    heap* h = &tls;
-    for (unsigned c = 0; c < CLASSES; c++) {
-        if (h->free[c]) share(h, c);
-    }
-    cx_usize bytes = 0;
-    for (unsigned c = 0; c < CLASSES; c++) bytes += trim_class(c);
-    return bytes + trim_large();
-}
+/* `std.memory.trim`: a program gone quiet gives back all it can, holes too (CLX-119). */
+cx_usize cx_alloc_trim(void) { return trim_all(1); }
 
 #endif

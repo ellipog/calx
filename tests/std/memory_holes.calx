@@ -1,0 +1,65 @@
+// A trim gives back the free system pages of pages that still have blocks in use (CLX-119): the
+// values kept on them read as they were, new ones of the same size are made elsewhere, and once
+// the kept ones go too, the pages are free and made into blocks again.
+
+import std.memory.{trim}
+
+// Text `n` bytes long that says which it is, so a value made over another's memory shows.
+fn text(n: usize, which: usize) -> String {
+    var s = String()
+    s.reserve(n)
+    let mark = "<{which}>"
+    while s.len() + mark.len() <= n {
+        s.push_str(mark)
+    }
+    while s.len() < n {
+        s.push_str(".")
+    }
+    return s
+}
+
+fn check(got: List<String>, n: usize, first: usize, step: usize, what: String) {
+    for i in 0..got.len() {
+        if got[i] != text(n, first + i * step) {
+            panic("{what}: value {i} of {n} bytes changed")
+        }
+    }
+}
+
+fn main() {
+    var sizes = 0
+    for n in [24usize, 100, 300, 1000, 3000, 5000, 9000, 20000, 30000] {
+        // Many of one size, then one in 16 kept and the rest freed: each page keeps a few.
+        var kept = List<String>()
+        var freed = List<String>()
+        for i in 0..3000usize {
+            if i % 16 == 0 {
+                kept.push(text(n, i))
+            } else {
+                freed.push(text(n, i))
+            }
+        }
+        freed.clear()
+        trim()
+        check(kept, n, 0, 16, "kept, after the trim")
+        // New ones of the size aren't made on what was given back.
+        var more = List<String>()
+        for j in 0..3000usize {
+            more.push(text(n, 100000 + j))
+        }
+        check(kept, n, 0, 16, "kept, after more were made")
+        check(more, n, 100000, 1, "made after the trim")
+        // With the kept ones gone too, their pages are free, holes and all, and made again.
+        kept.clear()
+        more.clear()
+        trim()
+        var again = List<String>()
+        for j in 0..3000usize {
+            again.push(text(n, 200000 + j))
+        }
+        trim()
+        check(again, n, 200000, 1, "made once the pages were free")
+        sizes += 1
+    }
+    println("{sizes} sizes")    // out: 9 sizes
+}
