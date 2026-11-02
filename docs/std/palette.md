@@ -63,6 +63,7 @@ fn main() {
 | `c.map_into(table: List<u8>, out: mut List<u8>)` | Each value's byte in `table`, written over `out` in index order: `out[i]` is `table[c.get_at(i)]`. Each palette entry is looked up once, and with a 4-bit palette each byte of indices gives two bytes at once, so reading a whole section this way is much faster than `get_at` at each index. Panics unless `table` has an entry for each value that's there |
 | `c.counts() -> List<(u32, usize)>` | Each value that's there and how many times, as Minecraft's `count` gives them: the palette's order, or by ID with no palette. Sections count their blocks and fluids with it |
 | `c.write(out: mut List<u8>)` | Adds the container to `out` as `PalettedContainer.write` sends it |
+| `c.write_aligned(out: mut List<u8>)` | As `write`, but a list of 5 to 7 bits a value is sent at 8, a byte a value, where the strategy's lists go up to 8 bits, as block states' do. A client reads a list of any of 5 to 8 bits and gets the same values, and a byte a value deflates smaller: on a real join's chunks, the packets come 4% smaller |
 | `c.pack() -> Packed` | The container as `pack` saves it |
 | `PalettedContainer.unpack(strategy: Strategy, packed: own Packed) -> PalettedContainer ! Error` | The container `unpack` reads from a region file's palette and longs |
 | `Packed { palette: List<u32>, data: List<i64>? }` | A saved container: the palette, and the longs, which there are none of for a palette of one entry |
@@ -80,6 +81,7 @@ How the palette grows is Minecraft's, for each strategy:
 
 - A new value goes at the end of the palette. An entry stays when nothing refers to it any more, until the palette is full. Then the values move to a palette of the next size, added in index order, so it holds only those that are there, in the order they first appear.
 - `write` sends a byte of the bits, then the palette as VarInts: the one entry's ID, or the count and the IDs, or nothing with no palette. Then come the longs, 8 bytes each, big-endian, with no count before them.
+- `write_aligned` sends the same palette, and with 5 to 7 bits, 8 instead, then the values a byte each, 8 to a long, the first in its low byte, so each long's bytes are its values from the last to the first. Anything else it sends as `write` does.
 - `pack` makes a new palette of the values in the order they first appear, from index 0 up. The longs use the bits a palette of that size has. With more values than a list holds, that's the fewest bits that number them all, so 300 block states take 9 bits on disk, not 16. It looks each entry of a palette up once, the first time its index comes, and packs the longs one at a time, not value by value; an entry the palette holds twice packs to one, the first.
 - `unpack` gets the palette's kind from its size. With a palette, it keeps the longs as they are, including any bits above the values in each long, so they're sent as they were loaded. With no palette, it turns the indices into IDs, and only the values are kept.
 

@@ -266,6 +266,92 @@ fn mapped() {
     println("{c.bits()} {out[13]} {agrees(c, table, out)}")    // out: 16 98 true
 }
 
+// The values `write` or `write_aligned` wrote, read back as a client reads them: the bits, an
+// indexed palette, then the longs, 64 / bits values each.
+fn read_back(out: List<u8>, size: usize) -> List<u32> {
+    let bits = i32(out[0])
+    var at: usize = 1
+    var palette = List<u32>()
+    let entries = varint_at(out, mut at)
+    for _ in 0u32..entries {
+        palette.push(varint_at(out, mut at))
+    }
+    let per = usize.wrap(64 / bits)
+    var values = List<u32>()
+    while values.len() < size {
+        var w: i64 = 0
+        for _ in 0..8 {
+            w = (w << 8) | i64(out[at])
+            at += 1
+        }
+        for k in 0usize..per {
+            if values.len() < size {
+                values.push(palette[usize(u32.wrap((w >>> (i32.wrap(k) * bits)) & ((1i64 << bits) - 1)))])
+            }
+        }
+    }
+    return values
+}
+
+fn varint_at(out: List<u8>, at: mut usize) -> u32 {
+    var v: u32 = 0
+    var shift: u32 = 0
+    loop {
+        let b = out[at]
+        at += 1
+        v |= u32(b & 127) << shift
+        if b < 128 {
+            return v
+        }
+        shift += 7
+    }
+}
+
+// Written aligned, a palette of 5 to 7 bits is sent at 8, and reads back the same; one of 4 bits,
+// or none, and biomes', are written as `write` writes them.
+fn aligned() {
+    let blocks = Strategy.block_states(35723)
+    var c = PalettedContainer.new(0, blocks)
+    var plain: List<u8> = []
+    var wide: List<u8> = []
+    c.write_aligned(mut wide)
+    c.write(mut plain)
+    println("{wide == plain}")    // out: true
+    for i in 0usize..10 {
+        c.set_at(i * 7, u32.wrap(i + 1))
+    }
+    wide.clear()
+    plain.clear()
+    c.write_aligned(mut wide)
+    c.write(mut plain)
+    println("{c.bits()} {wide == plain}")    // out: 4 true
+    for i in 0usize..4096 {
+        c.set_at(i, u32.wrap(i % 40 + 1))
+    }
+    wide.clear()
+    plain.clear()
+    c.write_aligned(mut wide)
+    c.write(mut plain)
+    let back = read_back(wide, 4096)
+    var same = true
+    for i in 0usize..4096 {
+        if back[i] != c.get_at(i) {
+            same = false
+        }
+    }
+    println("{c.bits()} {wide[0]} {wide.len() - plain.len()} {same}")    // out: 6 8 816 true
+    let biomes = Strategy.biomes(65)
+    var b = PalettedContainer.new(0, biomes)
+    for i in 0usize..5 {
+        b.set_at(i, u32.wrap(i + 1))
+    }
+    wide.clear()
+    plain.clear()
+    b.write_aligned(mut wide)
+    b.write(mut plain)
+    println("{b.bits()} {wide == plain}")    // out: 3 true
+}
+
 fn main() {
     storage()
     strategies()
@@ -274,4 +360,5 @@ fn main() {
     dropped()
     unpacks()
     mapped()
+    aligned()
 }

@@ -619,6 +619,53 @@ impl PalettedContainer {
         }
     }
 
+    /// Writes the container as `write` does, but with an indexed palette of 5 to 7 bits written at
+    /// 8, a byte a value, where the strategy's indexed palettes go up to 8 bits, as block states'
+    /// do. A client reads an indexed palette of any of 5 to 8 bits, so it gets the same values,
+    /// and a byte a value deflates smaller than values that cross bytes. Anything else is written
+    /// as `write` writes it.
+    pub fn write_aligned(self, out: mut List<u8>) {
+        let bits = self.storage.bits()
+        if self.global or bits <= i32(self.strategy.min_bits) or bits >= 8 or self.strategy.max_bits != 8 {
+            self.write(mut out)
+            return
+        }
+        out.push(8)
+        varint(mut out, u32.wrap(self.palette.entries.len()))
+        for v in self.palette.entries {
+            varint(mut out, v)
+        }
+        // Eight values a long, the first in its low byte, so each long's bytes, big-endian, are
+        // its values from the last to the first; past the last value, 0.
+        let n = self.storage.len()
+        let bytes = (n + 7) / 8 * 8
+        let start = out.len()
+        out.reserve(bytes)
+        let width = i32(self.storage.width)
+        let per = usize(self.storage.per_long)
+        let mask = i64(self.storage.mask)
+        unsafe {
+            let to = out.as_mut_ptr().add(start)
+            var k: usize = 0
+            for w in self.storage.data {
+                var x = w
+                for _ in 0usize..per {
+                    if k == n {
+                        break
+                    }
+                    to.add(k - k % 8 + 7 - k % 8).write(u8.wrap(x & mask))
+                    x = x >>> width
+                    k += 1
+                }
+            }
+            while k < bytes {
+                to.add(k - k % 8 + 7 - k % 8).write(0)
+                k += 1
+            }
+            out.set_len(start + bytes)
+        }
+    }
+
     /// The container as vanilla's `pack` saves it: a palette of the values that are there, in
     /// the order they first appear, and the values as indices into it in the bits a palette of
     /// that size takes on disk, which for more entries than an indexed palette holds are the
