@@ -1,0 +1,74 @@
+// `trim` gives back whole free pages while threads allocate, free and share blocks of many sizes,
+// and every value made after it is still what it was made as.
+
+import std.memory.{trim}
+import std.thread.{Task}
+
+// Makes rounds of strings and lists of many sizes, and sends them to be freed elsewhere.
+struct Maker {
+    seed: u64
+    rounds: i32
+    out: Sender<List<String>>
+}
+
+impl Task for Maker {
+    fn run(own self) {
+        var x = self.seed
+        for r in 0..self.rounds {
+            var round = List<String>()
+            for k in 0..400 {
+                x = x * 6364136223846793005 + 1442695040888963407
+                let n = usize.wrap((x >> 33) % 3000)
+                var s = String()
+                s.reserve(n)
+                for _ in 0..n / 16 {
+                    s.push_str("abcdefghijklmnop")
+                }
+                s.push_str("{r}-{k}")
+                round.push(s)
+            }
+            self.out.send(round)
+        }
+    }
+}
+
+fn main() {
+    var total: u64 = 0
+    for pass in 0..3 {
+        var r = Receiver<List<String>>()
+        var threads = List<Thread>()
+        for t in 0u64..4 {
+            threads.push(unsafe { Thread.spawn(Maker { seed: t * 7919 + 1, rounds: 30, out: r.sender() }) })
+        }
+        var kept = List<List<String>>()
+        var got = 0
+        while got < 120 {
+            let round = r.wait() ?? List<String>()
+            got += 1
+            // Every other round is kept; the rest are freed here, on another thread than made them.
+            if got % 2 == 0 {
+                kept.push(round)
+            }
+            if got % 40 == 0 {
+                trim()
+            }
+        }
+        while let t = threads.pop() {
+            t.join()
+        }
+        // What's kept reads the same after the trims, whichever pages went.
+        let before = kept.copy()
+        trim()
+        var copies = List<List<String>>()
+        for k in kept {
+            copies.push(k.copy())
+        }
+        kept.clear()
+        trim()
+        if before != copies {
+            panic("pass {pass}: what was kept changed")
+        }
+        total += u64(copies.len())
+    }
+    println("{total}")    // out: 180
+}

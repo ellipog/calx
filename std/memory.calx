@@ -1,0 +1,13 @@
+/// The memory the program's freed values held, which the allocator keeps for the next ones.
+module std.memory
+
+extern "C" fn cx_alloc_trim() -> usize
+
+/// Gives the system back what it can of the memory freed values held: each 64 KiB page of small
+/// blocks whose blocks are all free, and the big blocks kept for reuse. A program calls it when
+/// it's gone quiet after a busy while, such as a server whose players have left, so what the busy
+/// while took goes back. The allocator also does some of this on its own as it takes new memory.
+/// What's given back depends on what every thread has freed, and when, so it isn't said.
+pub fn trim() {
+    _ = unsafe { cx_alloc_trim() }
+}

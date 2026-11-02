@@ -12,7 +12,15 @@
  * threads that allocate. Taking a batch, not every block shared, keeps one thread from holding
  * them all while the others cut new ones: a server whose chunk workers allocated what its main
  * thread freed took 3.6 GB from the system for 0.4 GB of small blocks in use that way, and
- * 0.7 GB with batches. New blocks are cut from 1 MiB chunks of fresh memory.
+ * 0.7 GB with batches.
+ *
+ * New blocks are cut from 64 KiB pages, each of one size, in a range of addresses reserved once,
+ * so a block's page is where it is in the range. Since a page holds one size, every free block of
+ * it that's shared is in that size's shared lists, and `trim` counts them there, with only that
+ * size's lock held: a page whose every block is there leaves the lists and goes back to the
+ * system, and then to whichever size needs a page next. So memory that held one size goes to
+ * others, and to the system, as it's freed. A thread that takes a new page trims the size whose
+ * shared lists hold the most, now and then, and a program can trim every size when it's quiet.
  *
  * Bigger blocks come from the system, rounded to four sizes for each doubling, and a freed one
  * waits in a cache for the next block of its size, up to 256 MiB in all. The Windows heap gives
@@ -93,6 +101,9 @@ void cx_free(void* p, cx_usize size) {
 
 cx_usize cx_alloc_live(void) { return __atomic_load_n(&live, __ATOMIC_RELAXED); }
 
+/* malloc keeps what it keeps. */
+cx_usize cx_alloc_trim(void) { return 0; }
+
 #else
 
 #ifdef _WIN32
@@ -106,7 +117,11 @@ cx_usize cx_alloc_live(void) { return __atomic_load_n(&live, __ATOMIC_RELAXED); 
 
 #define SMALL_MAX 32768
 #define CLASSES 40
-#define CHUNK ((cx_usize)1 << 20)
+/* Small blocks' pages, and the most of them the reserved range holds: 16 GiB. */
+#define PAGE_SHIFT 16
+#define PAGE ((cx_usize)1 << PAGE_SHIFT)
+#define ARENA_PAGES ((cx_u32)1 << 18)
+#define NO_PAGE 0xFFFFFFFFu
 #define LARGE_CLASSES 192
 /* Blocks bigger than this aren't rounded up or cached: a quarter more of 64 MiB is too much to
  * commit for nothing, and such blocks are rarely freed and made again. */
@@ -191,16 +206,100 @@ static inline cx_usize large_size(unsigned c) {
 
 static inline cx_usize pages(cx_usize n) { return (n + OS_PAGE - 1) & ~(OS_PAGE - 1); }
 
+/* --- pages ----------------------------------------------------------------------------- */
+
+/* A page is new until it's first taken; cut from by one thread; sealed once that thread cuts no
+ * more from it, with `cut` the blocks it cut; then free, given back to the system, until it's
+ * taken again. */
+enum { PAGE_NEW = 0, PAGE_CUTTING = 1, PAGE_SEALED = 2, PAGE_FREE = 3 };
+
+typedef struct {
+    cx_u16 cut;
+    cx_u16 seen; /* while a trim counts: its blocks in the shared lists */
+    cx_u8 state;
+    cx_u8 cls;
+} page_info;
+
+static cx_u8* arena;
+static int arena_tried;
+static page_info page_of[ARENA_PAGES];
+static int page_lock;
+static cx_u32 next_page;
+static cx_u32 free_pages[ARENA_PAGES];
+static cx_u32 free_count;
+/* Pages taken since the last trim a thread made as it took one. */
+static cx_u32 taken_since_trim;
+
+static inline cx_u32 page_number(const void* p) {
+    cx_usize at = (cx_usize)((const cx_u8*)p - arena);
+    return arena && (const cx_u8*)p >= arena && at < (cx_usize)ARENA_PAGES << PAGE_SHIFT ? (cx_u32)(at >> PAGE_SHIFT) : NO_PAGE;
+}
+
+static void reserve_arena(void) {
+    cx_usize n = (cx_usize)ARENA_PAGES << PAGE_SHIFT;
+#ifdef _WIN32
+    arena = (cx_u8*)VirtualAlloc(NULL, n, MEM_RESERVE, PAGE_READWRITE);
+#else
+    void* a = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    arena = a == MAP_FAILED ? NULL : (cx_u8*)a;
+#endif
+}
+
+/* A page for blocks of class `c`, from the free ones, or a new one, committed; or, where no
+ * range could be reserved or it's all in use, one from the system that's never given back. */
+static cx_u8* take_page(unsigned c, cx_u32* number) {
+    lock(&page_lock);
+    if (!arena_tried) {
+        arena_tried = 1;
+        reserve_arena();
+    }
+    cx_u32 n = NO_PAGE;
+    if (free_count) n = free_pages[--free_count];
+    else if (arena && next_page < ARENA_PAGES) n = next_page++;
+    if (n != NO_PAGE) {
+        page_of[n].state = PAGE_CUTTING;
+        page_of[n].cls = (cx_u8)c;
+        page_of[n].cut = 0;
+        page_of[n].seen = 0;
+    }
+    unlock(&page_lock);
+    *number = n;
+    if (n == NO_PAGE) return (cx_u8*)os_alloc(PAGE);
+    cx_u8* p = arena + ((cx_usize)n << PAGE_SHIFT);
+#ifdef _WIN32
+    if (!VirtualAlloc(p, PAGE, MEM_COMMIT, PAGE_READWRITE)) cx_panic_capacity();
+#endif
+    return p;
+}
+
+/* Gives page `n` back to the system, and to the free pages. */
+static void give_page(cx_u32 n) {
+    cx_u8* p = arena + ((cx_usize)n << PAGE_SHIFT);
+#ifdef _WIN32
+    VirtualFree(p, PAGE, MEM_DECOMMIT);
+#else
+    madvise(p, PAGE, MADV_DONTNEED);
+#endif
+    lock(&page_lock);
+    page_of[n].state = PAGE_FREE;
+    page_of[n].cut = 0;
+    free_pages[free_count++] = n;
+    unlock(&page_lock);
+}
+
 /* --- small blocks ----------------------------------------------------------------------- */
 
 /* A free block's first word points at the next one. A list's last block is remembered, so a
- * whole list moves between a thread and the shared lists in one step. */
+ * whole list moves between a thread and the shared lists in one step. Each size is cut from a
+ * page of its own, from `bump` up to `end`. */
 typedef struct {
     void* free[CLASSES];
     void* last[CLASSES];
     cx_u32 count[CLASSES];
-    cx_u8* bump; /* where the next new block is cut from, up to `end` */
-    cx_u8* end;
+    cx_u8* bump[CLASSES];
+    cx_u8* end[CLASSES];
+    cx_u32 page[CLASSES]; /* the page cut from, or NO_PAGE; 0 until the first */
+    cx_u8 cutting[CLASSES];
     int known; /* asked to be told when the thread ends */
 } heap;
 
@@ -234,15 +333,6 @@ static const cx_u32 kept[CLASSES] = {
     51,    42,   36,   32,   25,   21,   18,   16,   16,   16,   16,   16,
 };
 
-/* The rest of a chunk a thread no longer cuts from, for the next thread that needs one. */
-typedef struct spare {
-    struct spare* next;
-    cx_u8* end;
-} spare;
-
-static int spare_lock;
-static spare* spares;
-
 static void share(heap* h, unsigned c) {
     shared_list* s = &shared[c];
     lock(&s->lock);
@@ -273,46 +363,122 @@ static inline void put_free(heap* h, unsigned c, void* p) {
     h->count[c]++;
 }
 
-/* A new chunk to cut from. What's left of the old one becomes free blocks, biggest first. */
-static void new_chunk(heap* h) {
-    for (;;) {
-        cx_usize left = (cx_usize)(h->end - h->bump);
-        if (left < 16) break;
-        unsigned c = small_class(left > SMALL_MAX ? SMALL_MAX : left);
-        if (class_size(c) > left) c--;
-        put_free(h, c, h->bump);
-        h->bump += class_size(c);
-    }
-    spare* s = NULL;
-    if (__atomic_load_n(&spares, __ATOMIC_RELAXED)) {
-        lock(&spare_lock);
-        s = spares;
-        if (s) spares = s->next;
-        unlock(&spare_lock);
-    }
-    if (s) {
-        h->bump = (cx_u8*)s;
-        h->end = s->end;
-    } else {
-        h->bump = (cx_u8*)os_alloc(CHUNK);
-        h->end = h->bump + CHUNK;
-    }
+/* This thread cuts no more from its page of class `c`: the page is sealed with how many blocks
+ * were cut from it, and trims may give it back once they're all free. */
+static void seal(heap* h, unsigned c) {
+    if (!h->cutting[c]) return;
+    h->cutting[c] = 0;
+    cx_u32 n = h->page[c];
+    if (n == NO_PAGE) return;
+    cx_u8* start = arena + ((cx_usize)n << PAGE_SHIFT);
+    page_of[n].cut = (cx_u16)((cx_usize)(h->bump[c] - start) / class_size(c));
+    __atomic_store_n(&page_of[n].state, (cx_u8)PAGE_SEALED, __ATOMIC_RELEASE);
 }
 
-/* When a thread ends, its free blocks and the rest of its chunk go to the shared lists. */
+/* Gives back each sealed page of class `c` whose every block is in the shared lists: the lists
+ * are counted with the class's lock held, so none of those blocks can be taken meanwhile, and
+ * those blocks leave them. Returns the bytes given back. */
+static cx_usize trim_class(unsigned c) {
+    shared_list* s = &shared[c];
+    if (!arena || !__atomic_load_n(&s->count, __ATOMIC_RELAXED)) return 0;
+    cx_u32 most = __atomic_load_n(&next_page, __ATOMIC_ACQUIRE);
+    if (!most) return 0;
+    /* The pages it sees, each once. */
+    cx_u32* seen = (cx_u32*)os_alloc(pages((cx_usize)most * sizeof(cx_u32)));
+    cx_u32 nseen = 0;
+    cx_u32 going = 0;
+    lock(&s->lock);
+    for (cx_u32 i = 0; i < s->n; i++) {
+        for (void* q = s->b[i].head; q; q = *(void**)q) {
+            cx_u32 n = page_number(q);
+            if (n == NO_PAGE || __atomic_load_n(&page_of[n].state, __ATOMIC_ACQUIRE) != PAGE_SEALED) continue;
+            if (page_of[n].seen++ == 0) seen[nseen++] = n;
+        }
+    }
+    /* A page goes when the lists hold every block cut from it: its state says so until it's given
+     * back, and every other page's count starts again at 0. */
+    for (cx_u32 i = 0; i < nseen; i++) {
+        page_info* pi = &page_of[seen[i]];
+        if (pi->cut && pi->seen == pi->cut) {
+            pi->state = PAGE_FREE;
+            seen[going++] = seen[i];
+        }
+        pi->seen = 0;
+    }
+    if (going) {
+        cx_u32 kept_batches = 0, total = 0;
+        for (cx_u32 i = 0; i < s->n; i++) {
+            void* head = NULL;
+            void* tail = NULL;
+            cx_u32 count = 0;
+            for (void* q = s->b[i].head; q;) {
+                void* next = *(void**)q;
+                cx_u32 n = page_number(q);
+                if (n == NO_PAGE || page_of[n].state != PAGE_FREE) {
+                    if (tail) *(void**)tail = q;
+                    else head = q;
+                    tail = q;
+                    count++;
+                }
+                q = next;
+            }
+            if (!count) continue;
+            *(void**)tail = NULL;
+            s->b[kept_batches].head = head;
+            s->b[kept_batches].last = tail;
+            s->b[kept_batches].count = count;
+            kept_batches++;
+            total += count;
+        }
+        s->n = kept_batches;
+        __atomic_store_n(&s->count, total, __ATOMIC_RELAXED);
+    }
+    unlock(&s->lock);
+    for (cx_u32 i = 0; i < going; i++) give_page(seen[i]);
+    os_free(seen, pages((cx_usize)most * sizeof(cx_u32)));
+    return (cx_usize)going << PAGE_SHIFT;
+}
+
+/* How often a thread taking a page trims: after this many pages, 64 MiB, and then only the class
+ * whose shared lists hold the most, if that's at least 16 MiB. */
+#define TRIM_EVERY 1024
+#define TRIM_AT ((cx_usize)16 << 20)
+
+static void trim_some(void) {
+    unsigned most = 0;
+    cx_usize bytes = 0;
+    for (unsigned c = 0; c < CLASSES; c++) {
+        cx_usize b = (cx_usize)__atomic_load_n(&shared[c].count, __ATOMIC_RELAXED) * class_size(c);
+        if (b > bytes) {
+            bytes = b;
+            most = c;
+        }
+    }
+    if (bytes >= TRIM_AT) (void)trim_class(most);
+}
+
+/* A new page to cut class `c` from; the one cut from before is sealed. */
+static void new_page(heap* h, unsigned c) {
+    seal(h, c);
+    if (__atomic_add_fetch(&taken_since_trim, 1, __ATOMIC_RELAXED) >= TRIM_EVERY) {
+        __atomic_store_n(&taken_since_trim, 0, __ATOMIC_RELAXED);
+        trim_some();
+    }
+    cx_u32 n;
+    cx_u8* p = take_page(c, &n);
+    h->page[c] = n;
+    h->cutting[c] = 1;
+    h->bump[c] = p;
+    h->end[c] = p + PAGE / class_size(c) * class_size(c);
+}
+
+/* When a thread ends, its pages are sealed and its free blocks go to the shared lists. */
 static void give_back(heap* h) {
     for (unsigned c = 0; c < CLASSES; c++) {
+        seal(h, c);
+        h->bump[c] = h->end[c] = NULL;
         if (h->free[c]) share(h, c);
     }
-    if ((cx_usize)(h->end - h->bump) >= sizeof(spare)) {
-        spare* s = (spare*)h->bump;
-        s->end = h->end;
-        lock(&spare_lock);
-        s->next = spares;
-        spares = s;
-        unlock(&spare_lock);
-    }
-    h->bump = h->end = NULL;
 }
 
 #ifdef _WIN32
@@ -349,7 +515,7 @@ static void know(heap* h) {
 #endif
 }
 
-/* This thread has no free block of class `c`: take the shared ones, or cut a new one. */
+/* This thread has no free block of class `c`: take a batch of the shared ones, or cut a new one. */
 static __attribute__((noinline)) void* refill(heap* h, unsigned c) {
     if (!h->known) know(h);
     shared_list* s = &shared[c];
@@ -368,9 +534,9 @@ static __attribute__((noinline)) void* refill(heap* h, unsigned c) {
         if (p) return p;
     }
     cx_usize size = class_size(c);
-    if ((cx_usize)(h->end - h->bump) < size) new_chunk(h);
-    void* p = h->bump;
-    h->bump += size;
+    if ((cx_usize)(h->end[c] - h->bump[c]) < size) new_page(h, c);
+    void* p = h->bump[c];
+    h->bump[c] += size;
     return p;
 }
 
@@ -412,6 +578,27 @@ static void large_release(void* p, cx_usize n) {
     }
     unlock(&large_lock);
     if (p) os_free(p, size);
+}
+
+/* Gives back every big block the cache holds. Returns the bytes. */
+static cx_usize trim_large(void) {
+    void* lists[LARGE_CLASSES];
+    lock(&large_lock);
+    for (unsigned c = 0; c < LARGE_CLASSES; c++) {
+        lists[c] = large_free[c];
+        __atomic_store_n(&large_free[c], NULL, __ATOMIC_RELAXED);
+    }
+    cx_usize bytes = cached;
+    cached = 0;
+    unlock(&large_lock);
+    for (unsigned c = 0; c < LARGE_CLASSES; c++) {
+        for (void* p = lists[c]; p;) {
+            void* next = *(void**)p;
+            os_free(p, large_size(c));
+            p = next;
+        }
+    }
+    return bytes;
 }
 
 /* --- the interface ---------------------------------------------------------------------- */
@@ -459,5 +646,19 @@ void* cx_realloc(void* p, cx_usize old, cx_usize n) {
 }
 
 cx_usize cx_alloc_live(void) { return 0; }
+
+/* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
+ * first, then each small class's whole free pages go, and the big blocks the cache keeps. Free
+ * blocks other threads keep for themselves, at most 256 KiB of each size each, stay. Returns the
+ * bytes given back. */
+cx_usize cx_alloc_trim(void) {
+    heap* h = &tls;
+    for (unsigned c = 0; c < CLASSES; c++) {
+        if (h->free[c]) share(h, c);
+    }
+    cx_usize bytes = 0;
+    for (unsigned c = 0; c < CLASSES; c++) bytes += trim_class(c);
+    return bytes + trim_large();
+}
 
 #endif

@@ -92,6 +92,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
 25. [std.tar](std/tar.md): tar archives, plain or gzipped, read and written in memory: ustar, GNU long names and pax headers, links and modes
+26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 
 ### Java compatibility
 
