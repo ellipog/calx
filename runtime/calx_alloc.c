@@ -103,6 +103,7 @@ cx_usize cx_alloc_live(void) { return __atomic_load_n(&live, __ATOMIC_RELAXED); 
 
 /* malloc keeps what it keeps. */
 cx_usize cx_alloc_trim(void) { return 0; }
+void cx_alloc_idle(void) {}
 
 #else
 
@@ -646,6 +647,20 @@ void* cx_realloc(void* p, cx_usize old, cx_usize n) {
 }
 
 cx_usize cx_alloc_live(void) { return 0; }
+
+/* This thread has waited a while on a queue, with nothing to do: it cuts no more from its pages
+ * and shares its free blocks, as it would if it ended, so a trim can give back the pages they
+ * held up, and then trims. A busy thread keeps them, so it takes and frees without a lock; an
+ * idle one's would only sit there (CLX-117). */
+void cx_alloc_idle(void) {
+    heap* h = &tls;
+    for (unsigned c = 0; c < CLASSES; c++) {
+        seal(h, c);
+        h->bump[c] = h->end[c] = NULL;
+        if (h->free[c]) share(h, c);
+    }
+    (void)cx_alloc_trim();
+}
 
 /* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
  * first, then each small class's whole free pages go, and the big blocks the cache keeps. Free

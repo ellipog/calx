@@ -79,7 +79,7 @@ A queue carries messages of one type, `T`, which must be `Send`. Each message mo
 | `r.sender()` | A new end that sends to `r`'s queue |
 | `s.send(m)` | Moves `m` into the queue. If every receiving end is gone, `m` is dropped instead |
 | `r.next()` | The first message, or `none` at once if there isn't one |
-| `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone |
+| `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone. A thread that waits 2 seconds gives back the memory it keeps for itself ([std.memory](memory.md)) and goes on waiting |
 | `s.share()`, `r.share()` | Another end of the same kind, for the same queue |
 | `s.copy()` | The same as `s.share()`: a copy of a sending end is another end of the same queue |
 | `s.close()`, `r.close()` | Drops the end now, as going out of scope would |

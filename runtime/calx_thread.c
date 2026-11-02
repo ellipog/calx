@@ -17,7 +17,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #endif
 
 int cx_in_parallel(void);
@@ -46,16 +48,36 @@ struct cx_queue {
     cx_usize senders, receivers, waiting;
 };
 
+/* How long a thread waits on an empty queue before it counts as idle and gives back the memory it
+ * keeps for itself, in calx_alloc.c (CLX-117). */
+#define IDLE_MS 2000
+void cx_alloc_idle(void);
+
 #ifdef _WIN32
 static void q_lock(cx_queue* q) { AcquireSRWLockExclusive(&q->lock); }
 static void q_unlock(cx_queue* q) { ReleaseSRWLockExclusive(&q->lock); }
 static void q_wait(cx_queue* q) { SleepConditionVariableSRW(&q->ready, &q->lock, INFINITE, 0); }
+/* Whether it was woken, or may have been, before `ms` went by. */
+static int q_wait_for(cx_queue* q, unsigned ms) {
+    return SleepConditionVariableSRW(&q->ready, &q->lock, ms, 0) || GetLastError() != ERROR_TIMEOUT;
+}
 static void q_wake_one(cx_queue* q) { WakeConditionVariable(&q->ready); }
 static void q_wake_all(cx_queue* q) { WakeAllConditionVariable(&q->ready); }
 #else
 static void q_lock(cx_queue* q) { pthread_mutex_lock(&q->lock); }
 static void q_unlock(cx_queue* q) { pthread_mutex_unlock(&q->lock); }
 static void q_wait(cx_queue* q) { pthread_cond_wait(&q->ready, &q->lock); }
+static int q_wait_for(cx_queue* q, unsigned ms) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_sec += ms / 1000;
+    t.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (t.tv_nsec >= 1000000000L) {
+        t.tv_sec += 1;
+        t.tv_nsec -= 1000000000L;
+    }
+    return pthread_cond_timedwait(&q->ready, &q->lock, &t) != ETIMEDOUT;
+}
 static void q_wake_one(cx_queue* q) { pthread_cond_signal(&q->ready); }
 static void q_wake_all(cx_queue* q) { pthread_cond_broadcast(&q->ready); }
 #endif
@@ -180,9 +202,21 @@ cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at) {
     q_check(at);
     cx_queue* q = r->q;
     q_lock(q);
+    /* Once the first wait has gone on IDLE_MS with nothing come, the thread is idle: it gives back
+     * what memory it keeps, without the queue's lock, then waits as long as it takes. */
+    int idle = 0;
     while (!q->len && q->senders) {
         q->waiting++;
-        q_wait(q);
+        if (idle) {
+            q_wait(q);
+        } else if (!q_wait_for(q, IDLE_MS)) {
+            q->waiting--;
+            idle = 1;
+            q_unlock(q);
+            cx_alloc_idle();
+            q_lock(q);
+            continue;
+        }
         q->waiting--;
     }
     cx_bool got = q->len != 0;

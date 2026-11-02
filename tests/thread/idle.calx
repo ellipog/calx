@@ -1,0 +1,45 @@
+// A thread that waits on an empty queue for 2 s counts as idle and gives back the memory it keeps
+// for itself (CLX-117). Its wait goes on, and once a message comes it allocates as before, from
+// the blocks it gave back or new ones.
+
+import std.thread.{Task}
+import std.time.{Instant}
+
+struct Doubler {
+    jobs: Receiver<List<String>>
+    out: Sender<usize>
+}
+
+impl Task for Doubler {
+    fn run(own self) {
+        while let words = self.jobs.wait() {
+            var made = List<String>()
+            var total: usize = 0
+            for w in words {
+                made.push("{w}{w}")
+                total += w.len()
+            }
+            self.out.send(total + made.len())
+        }
+    }
+}
+
+fn main() {
+    let jobs = Receiver<List<String>>()
+    var results = Receiver<usize>()
+    var send = jobs.sender()
+    let t = unsafe { Thread.spawn(Doubler { jobs: jobs, out: results.sender() }) }
+    send.send(["a", "bb"])
+    println("{results.wait()}")    // out: some(5)
+    // Long enough that the thread's wait counts as idle.
+    let start = unsafe { Instant.now() }
+    var spins: u64 = 0
+    while unsafe { Instant.now() }.secs_since(start) < 2.5 {
+        spins += 1
+    }
+    send.send(["ccc", "dddd"])
+    println("{results.wait()}")    // out: some(9)
+    send.close()
+    t.join()
+    println("done {spins > 0}")    // out: done true
+}
