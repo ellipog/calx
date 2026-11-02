@@ -45,6 +45,8 @@ A thread that has waited on an empty [queue](thread.md#queues) for 2 seconds is 
 
 With one value in 16 of a size kept and the rest freed, so every page has some in use, `trim` takes a program from 209 MB to 52 MB with 1,000-byte strings, from 611 MB to 75 MB with 3,000-byte ones, and from 796 MB to 101 MB with 9,000-byte ones, where before it gave back nearly none; with 300 bytes or less, each 4 KiB holds one kept, and stays.
 
+A thread that ends shares the free blocks it kept in the same way, but not once the program is exiting. By then the system may have stopped the other threads wherever they were, one of them perhaps holding a size's lock, and the memory goes back with the process anyway. On Windows, a program whose `main` returned could hang on its way out, its last thread spinning on a lock a stopped thread held. A server stopped while it was generating hung on the first of 25 tries.
+
 What a busy thread keeps of each size was 256 KiB until it was cut to 64 KiB. Generating a world with 31 threads, a server's peak went from 1,204 MB to 1,132 MB, and it generated as fast; keeping less than 64 KiB saved little more.
 
 What `trim` gives back depends on what every thread has freed, and when, so it doesn't say. A program's results never depend on it. Debug builds, and builds with AddressSanitizer, use `malloc`, and there `trim` does nothing.

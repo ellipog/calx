@@ -583,10 +583,25 @@ static void give_back(heap* h) {
     }
 }
 
+/* Set as the process exits: a thread that ends then gives nothing back. */
+static int exiting;
+
+static void note_exit(void) {
+    __atomic_store_n(&exiting, 1, __ATOMIC_RELEASE);
+}
+
 #ifdef _WIN32
 static DWORD fls_index;
+/* As the process exits, Windows kills its other threads wherever they are, maybe holding a shared
+ * list's lock, then runs this for the thread exiting it: giving back would take that lock and
+ * spin forever. What it would give back goes with the process, so it gives back nothing once
+ * the loader's shutting down, or the C runtime's exiting. */
+typedef BOOLEAN(NTAPI* shutdown_check)(void);
+static shutdown_check shutting_down;
 static void NTAPI thread_ends(void* h) {
-    if (h) give_back((heap*)h);
+    if (!h || __atomic_load_n(&exiting, __ATOMIC_ACQUIRE)) return;
+    if (shutting_down && shutting_down()) return;
+    give_back((heap*)h);
 }
 #else
 static pthread_key_t key;
@@ -601,7 +616,10 @@ static void know(heap* h) {
     if (!__atomic_load_n(&ready, __ATOMIC_ACQUIRE)) {
         lock(&ready_lock);
         if (!ready) {
+            atexit(note_exit);
 #ifdef _WIN32
+            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            if (ntdll) shutting_down = (shutdown_check)(void*)GetProcAddress(ntdll, "RtlDllShutdownInProgress");
             fls_index = FlsAlloc(thread_ends);
 #else
             pthread_key_create(&key, thread_ends);
