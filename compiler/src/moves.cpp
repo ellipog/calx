@@ -1086,6 +1086,10 @@ private:
             case BMethod::queue_next: case BMethod::queue_wait:
                 expr(recv, Use::change);
                 return;
+            case BMethod::queue_wait_for:
+                expr(recv, Use::change);
+                expr(arg(0), Use::view);
+                return;
             case BMethod::queue_close: case BMethod::thread_join:
                 expr(recv, Use::consume);
                 return;

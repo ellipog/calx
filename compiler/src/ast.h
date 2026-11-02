@@ -182,7 +182,7 @@ enum class BMethod : std::uint8_t {
     arena_list, arena_reset, arena_used, to_list,
     // On a queue's ends: sending, taking a message that's there or waiting for one, another
     // end, and closing one; and starting and joining a thread (D121).
-    queue_send, queue_next, queue_wait, queue_sender, queue_share, queue_close, thread_spawn, thread_join,
+    queue_send, queue_next, queue_wait, queue_wait_for, queue_sender, queue_share, queue_close, thread_spawn, thread_join,
     lib_open, lib_find, lib_has, lib_close,
 };
 

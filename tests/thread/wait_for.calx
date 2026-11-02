@@ -1,0 +1,37 @@
+// `r.wait_for(ns)` (CLX-118): a message that's there, or comes in time, and `none` once the time is
+// up, or at once from a queue that's empty with every sender gone, as `wait` gives then.
+
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+
+struct Later {
+    out: Sender<i32>
+}
+
+impl Task for Later {
+    fn run(own self) {
+        unsafe { sleep(50000000) }
+        self.out.send(7)
+    }
+}
+
+fn main() {
+    var r = Receiver<i32>()
+    var s = r.sender()
+    s.send(1)
+    println("{unsafe { r.wait_for(0) }} {unsafe { r.wait_for(0) }}")    // out: some(1) none
+    // Nothing comes: none, after the time asked for, never less.
+    let start = unsafe { Instant.now() }
+    let got = unsafe { r.wait_for(30000000) }
+    let took = unsafe { Instant.now() }.secs_since(start)
+    println("{got} {took >= 0.03}")    // out: none true
+    // A thread sends one well before the time's up.
+    let t = unsafe { Thread.spawn(Later { out: r.sender() }) }
+    println("{unsafe { r.wait_for(20000000000) }}")    // out: some(7)
+    t.join()
+    // Empty, with every sender gone: none at once.
+    s.close()
+    let again = unsafe { Instant.now() }
+    let none_left = unsafe { r.wait_for(20000000000) }
+    println("{none_left} {unsafe { Instant.now() }.secs_since(again) < 5.0}")    // out: none true
+}

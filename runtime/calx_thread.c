@@ -17,7 +17,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
-#include <errno.h>
 #include <pthread.h>
 #include <time.h>
 #endif
@@ -50,37 +49,81 @@ struct cx_queue {
 
 /* How long a thread waits on an empty queue before it counts as idle and gives back the memory it
  * keeps for itself, in calx_alloc.c (CLX-117). */
-#define IDLE_MS 2000
+#define IDLE_NS 2000000000ull
 void cx_alloc_idle(void);
 
 #ifdef _WIN32
 static void q_lock(cx_queue* q) { AcquireSRWLockExclusive(&q->lock); }
 static void q_unlock(cx_queue* q) { ReleaseSRWLockExclusive(&q->lock); }
 static void q_wait(cx_queue* q) { SleepConditionVariableSRW(&q->ready, &q->lock, INFINITE, 0); }
-/* Whether it was woken, or may have been, before `ms` went by. */
-static int q_wait_for(cx_queue* q, unsigned ms) {
-    return SleepConditionVariableSRW(&q->ready, &q->lock, ms, 0) || GetLastError() != ERROR_TIMEOUT;
+/* Waits until woken, or `ms` has gone by. */
+static void q_wait_ms(cx_queue* q, cx_u64 ms) {
+    SleepConditionVariableSRW(&q->ready, &q->lock, ms >= INFINITE ? INFINITE - 1 : (DWORD)ms, 0);
 }
 static void q_wake_one(cx_queue* q) { WakeConditionVariable(&q->ready); }
 static void q_wake_all(cx_queue* q) { WakeAllConditionVariable(&q->ready); }
+/* Nanoseconds on a clock that only goes forward. */
+static cx_u64 now_ns(void) {
+    static LARGE_INTEGER hz;
+    if (!hz.QuadPart) QueryPerformanceFrequency(&hz);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    cx_u64 f = (cx_u64)hz.QuadPart, c = (cx_u64)t.QuadPart;
+    return c / f * 1000000000ull + c % f * 1000000000ull / f;
+}
 #else
 static void q_lock(cx_queue* q) { pthread_mutex_lock(&q->lock); }
 static void q_unlock(cx_queue* q) { pthread_mutex_unlock(&q->lock); }
 static void q_wait(cx_queue* q) { pthread_cond_wait(&q->ready, &q->lock); }
-static int q_wait_for(cx_queue* q, unsigned ms) {
+static void q_wait_ms(cx_queue* q, cx_u64 ms) {
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
-    t.tv_sec += ms / 1000;
+    t.tv_sec += (time_t)(ms / 1000);
     t.tv_nsec += (long)(ms % 1000) * 1000000L;
     if (t.tv_nsec >= 1000000000L) {
         t.tv_sec += 1;
         t.tv_nsec -= 1000000000L;
     }
-    return pthread_cond_timedwait(&q->ready, &q->lock, &t) != ETIMEDOUT;
+    pthread_cond_timedwait(&q->ready, &q->lock, &t);
 }
 static void q_wake_one(cx_queue* q) { pthread_cond_signal(&q->ready); }
 static void q_wake_all(cx_queue* q) { pthread_cond_broadcast(&q->ready); }
+static cx_u64 now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (cx_u64)t.tv_sec * 1000000000ull + (cx_u64)t.tv_nsec;
+}
 #endif
+
+/* Waits, with `q` locked, while it's empty and some sender is left, or, with `limit`, until the
+ * clock passes it. A thread whose wait goes on IDLE_NS is idle: it gives back what memory it keeps,
+ * without the queue's lock, then waits on. A timed wait is woken early, as a condition's can be,
+ * so it's counted again from the clock each time round. */
+static void q_wait_until(cx_queue* q, int limited, cx_u64 limit) {
+    cx_u64 idle_at = 0;
+    int idle = 0;
+    while (!q->len && q->senders) {
+        cx_u64 now = now_ns();
+        if (!idle_at) idle_at = now + IDLE_NS;
+        if (limited && now >= limit) return;
+        if (!idle && now >= idle_at) {
+            idle = 1;
+            q_unlock(q);
+            cx_alloc_idle();
+            q_lock(q);
+            continue;
+        }
+        q->waiting++;
+        if (idle && !limited) {
+            q_wait(q);
+        } else {
+            cx_u64 until = idle || (limited && limit < idle_at) ? limit : idle_at;
+            /* Rounded up to milliseconds, so it's never woken before its time by the rounding. */
+            q_wait_ms(q, (until - now + 999999) / 1000000);
+        }
+        q->waiting--;
+    }
+}
 
 /* Which message came first would depend on the threads, one thread or many, so it's the same
  * panic either way. */
@@ -202,22 +245,23 @@ cx_bool cx_queue_wait(const cx_Receiver* r, void* out, const char* at) {
     q_check(at);
     cx_queue* q = r->q;
     q_lock(q);
-    /* Once the first wait has gone on IDLE_MS with nothing come, the thread is idle: it gives back
-     * what memory it keeps, without the queue's lock, then waits as long as it takes. */
-    int idle = 0;
-    while (!q->len && q->senders) {
-        q->waiting++;
-        if (idle) {
-            q_wait(q);
-        } else if (!q_wait_for(q, IDLE_MS)) {
-            q->waiting--;
-            idle = 1;
-            q_unlock(q);
-            cx_alloc_idle();
-            q_lock(q);
-            continue;
-        }
-        q->waiting--;
+    q_wait_until(q, 0, 0);
+    cx_bool got = q->len != 0;
+    if (got) take(q, out);
+    q_unlock(q);
+    return got;
+}
+
+/* As `cx_queue_wait`, but for at most `ns`: no message then is none, as a closed queue's is. */
+cx_bool cx_queue_wait_for(const cx_Receiver* r, void* out, cx_u64 ns, const char* at) {
+    q_check(at);
+    cx_queue* q = r->q;
+    q_lock(q);
+    if (!q->len && q->senders && ns) {
+        cx_u64 now = now_ns();
+        /* So far off it can't come, it's the same as no limit. */
+        cx_u64 limit = now + ns;
+        q_wait_until(q, limit > now, limit);
     }
     cx_bool got = q->len != 0;
     if (got) take(q, out);

@@ -7545,8 +7545,8 @@ private:
         return T.thread;
     }
 
-    // `s.send(m)`, `s.share()` and `s.close()`; `r.next()`, `r.wait()`, `r.sender()`, `r.share()`
-    // and `r.close()`; and `t.join()`.
+    // `s.send(m)`, `s.share()` and `s.close()`; `r.next()`, `r.wait()`, `r.wait_for(ns)`,
+    // `r.sender()`, `r.share()` and `r.close()`; and `t.join()`.
     Type* handle_method(Expr* e, Type* recv) {
         Expr* callee = e->callee;
         std::string_view m = text(callee->member);
@@ -7566,6 +7566,7 @@ private:
             case TypeKind::receiver:
                 if (m == "next") b = BMethod::queue_next, result = T.optional_of(recv->elem);
                 else if (m == "wait") b = BMethod::queue_wait, result = T.optional_of(recv->elem);
+                else if (m == "wait_for") b = BMethod::queue_wait_for, result = T.optional_of(recv->elem), arg = T.u64;
                 else if (m == "sender") b = BMethod::queue_sender, result = T.sender_of(recv->elem);
                 else if (m == "share") b = BMethod::queue_share, result = recv;
                 else if (m == "close") b = BMethod::queue_close;
@@ -7588,7 +7589,8 @@ private:
         if (arg) {
             if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
                 for (Arg& a : e->args) check(a.value, nullptr);
-                error(e->span, q(m) + " takes one argument, the message, which moves into the queue");
+                error(e->span, q(m) + (b == BMethod::queue_wait_for ? " takes one argument, the most nanoseconds to wait, a `u64`"
+                                                                   : " takes one argument, the message, which moves into the queue"));
                 return T.error;
             }
             check(e->args[0].value, arg);
@@ -7599,8 +7601,16 @@ private:
                 return T.error;
             }
         }
-        if (!par_.empty() && (b == BMethod::queue_send || b == BMethod::queue_next || b == BMethod::queue_wait ||
-                              b == BMethod::thread_join)) {
+        // Whether a message came in time depends on timing, as reading the clock does (D88).
+        if (b == BMethod::queue_wait_for) {
+            if (unsafe_depth_ == 0) {
+                error(callee->span, "`wait_for` gives `none` once its time is up, which depends on timing, so calling it needs "
+                                    "`unsafe`");
+            }
+            unsafe_used_ = true;
+        }
+        bool takes = b == BMethod::queue_next || b == BMethod::queue_wait || b == BMethod::queue_wait_for;
+        if (!par_.empty() && (b == BMethod::queue_send || takes || b == BMethod::thread_join)) {
             error(callee->span, b == BMethod::thread_join
                                     ? "a thread can't be joined inside a `parallel for`, which would wait on timing"
                                     : "a queue can't be used inside a `parallel for`, since the order of the iterations' "
@@ -7608,7 +7618,7 @@ private:
             return result;
         }
         // Sending and taking change the queue, so the end is a variable that can change.
-        if (b == BMethod::queue_send || b == BMethod::queue_next || b == BMethod::queue_wait) {
+        if (b == BMethod::queue_send || takes) {
             if (Local* root = place_root(callee->lhs)) require_writable(callee->lhs, root, false);
             else error(callee->lhs->span, q(m) + " changes the queue, so call it on a variable");
         }

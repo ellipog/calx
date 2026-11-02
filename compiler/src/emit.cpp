@@ -5470,6 +5470,13 @@ $dropall    m->len = 0;
                 return "({ " + ot + " " + o + " = {0}; " + o + ".has = cx_queue_" + (e->bmethod == BMethod::queue_next ? "next" : "wait") +
                        "(" + address(recv) + ", &" + o + ".v, " + location(e->span) + "); " + o + "; })";
             }
+            case BMethod::queue_wait_for: {
+                std::string decls, o = tmp(), ot = ctype(e->type);
+                Expr* ns = e->args[0].value;
+                std::vector<std::string> v = sequence({{recv, t, Pass::address}, {ns, ns->type}}, decls);
+                return wrap(decls, "({ " + ot + " " + o + " = {0}; " + o + ".has = cx_queue_wait_for(" + v[0] + ", &" + o +
+                                       ".v, " + v[1] + ", " + location(e->span) + "); " + o + "; })");
+            }
             case BMethod::queue_sender: return "cx_queue_sender(" + address(recv) + ")";
             // A sender's copy is another end, as `share()` makes; nothing else here is copied.
             case BMethod::queue_share: case BMethod::copy:

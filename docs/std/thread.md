@@ -80,11 +80,12 @@ A queue carries messages of one type, `T`, which must be `Send`. Each message mo
 | `s.send(m)` | Moves `m` into the queue. If every receiving end is gone, `m` is dropped instead |
 | `r.next()` | The first message, or `none` at once if there isn't one |
 | `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone. A thread that waits 2 seconds gives back the memory it keeps for itself ([std.memory](memory.md)) and goes on waiting |
+| `r.wait_for(ns)` | As `wait`, but for at most `ns` nanoseconds: `none` if no message came in that time, as well as once every `Sender` is gone. The system may wake it late, never early. Needs `unsafe`, since whether one came in time depends on timing |
 | `s.share()`, `r.share()` | Another end of the same kind, for the same queue |
 | `s.copy()` | The same as `s.share()`: a copy of a sending end is another end of the same queue |
 | `s.close()`, `r.close()` | Drops the end now, as going out of scope would |
 
-`send`, `next` and `wait` change the queue, so they're called on a `var`, or a `mut` or `own` parameter. A queue grows as messages come, so `send` never waits.
+`send`, `next`, `wait` and `wait_for` change the queue, so they're called on a `var`, or a `mut` or `own` parameter. A queue grows as messages come, so `send` never waits.
 
 Since a copy of a `Sender` is another end, a value that holds one copies with it: a struct with a field that sends to a service can be copied, and each copy sends to the same queue. That's how every worker reading one value from a `Shared<T>` can ask one service for what they all want, such as a table made once:
 
@@ -101,6 +102,60 @@ fn main() {
     var c = a.copy()
     c.to.send(8)
     println("{r.wait()} {r.wait()}")    // out: some(7) some(8)
+}
+```
+
+`wait_for` is for a service that keeps something only while it's busy, such as a table it works from or a cache, and lets go of it after a while with nothing to do. After a `none`, `wait` tells the two kinds apart: it gives `none` at once if every `Sender` is gone, and waits for the next message if not.
+
+```calx
+import std.thread.{Task}
+
+struct Squares {
+    jobs: Receiver<usize>
+    out: Sender<u64>
+}
+
+impl Task for Squares {
+    fn run(own self) {
+        var table: List<u64>? = none
+        loop {
+            // Nothing for a second: the table goes, and is made again for the next job.
+            var job = unsafe { self.jobs.wait_for(1000000000) }
+            if job == none {
+                table = none
+                job = self.jobs.wait()
+            }
+            let n = job else return
+            if table == none {
+                var t = List<u64>()
+                var i: u64 = 0
+                while i < 1000 {
+                    t.push(i * i)
+                    i += 1
+                }
+                table = some(t)
+            }
+            if let t = table {
+                self.out.send(t[n])
+            }
+        }
+    }
+}
+
+fn main() {
+    let jobs = Receiver<usize>()
+    var results = Receiver<u64>()
+    var to_worker = jobs.sender()
+    let t = unsafe { Thread.spawn(Squares { jobs: jobs, out: results.sender() }) }
+    to_worker.send(12)
+    to_worker.send(999)
+    to_worker.close()
+    while let s = results.wait() {
+        println("{s}")
+    }
+    // out: 144
+    // out: 998001
+    t.join()
 }
 ```
 

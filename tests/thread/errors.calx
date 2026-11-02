@@ -45,6 +45,10 @@ fn main() {
     q.recv()                              // error: take the next message with `next()`, or wait for one with `wait()`
     q.send(2)                             // error: send with a `Sender`, which `sender()` makes
     println("{q == q}")                   // error: an end of a queue is a handle
+    var wq = Receiver<i32>()
+    _ = wq.wait_for(10)                   // error: `wait_for` gives `none` once its time is up, which depends on timing, so calling it needs `unsafe`
+    _ = unsafe { wq.wait_for() }          // error: `wait_for` takes one argument, the most nanoseconds to wait, a `u64`
+    _ = unsafe { q.wait_for(10) }         // error: `q` can't be changed
     parallel for i in 0..4 {
         _ = q.next()                      // error: a queue can't be used inside a `parallel for`
         println("{i}")
