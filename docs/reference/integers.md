@@ -82,7 +82,7 @@ fn main() {
 | `x.wrapping_add(y)`, `wrapping_sub`, `wrapping_mul` | The same as `+`, `-` and `*`, which also wrap. In a constant expression they say that wrapping is meant |
 | `x.floor_div(y)`, `x.floor_mod(y)` | Java's `Math.floorDiv` and `Math.floorMod`, for signed types. They panic on division by zero |
 | `x.rotate_left(n)`, `x.rotate_right(n)` | The bits rotated by `n`, an `i32`, taken modulo the width, as Java's `Integer.rotateLeft` and `Long.rotateLeft` do. Negative `n` rotates the other way |
-
+| `x.trailing_zeros()`, `x.leading_zeros()`, `x.count_ones()` | How many 0 bits are below the lowest 1 bit, and above the highest, and how many bits are 1, as an `i32`. They're counted in the type's own width, as Java's `numberOfTrailingZeros`, `numberOfLeadingZeros` and `bitCount` count them, so 0 has as many zeros as its type has bits: `0.trailing_zeros()` is 32, and `0u8.leading_zeros()` is 8. Each is one instruction where the processor has one, and works out while the program builds on a constant |
 | `x.checked_add(y)`, `checked_sub`, `checked_mul` | `some` of the result, or `none` if it doesn't fit the type |
 | `x.checked_div(y)`, `checked_rem` | `none` when `y` is 0. `MIN.checked_div(-1)` is `none`, since the result doesn't fit; `MIN.checked_rem(-1)` is `some(0)`, as Java's `%` gives |
 | `x.saturating_add(y)`, `saturating_sub`, `saturating_mul` | The result, clamped to the type's range |

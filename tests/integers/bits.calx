@@ -1,0 +1,75 @@
+// `trailing_zeros`, `leading_zeros` and `count_ones`, as Java's numberOfTrailingZeros,
+// numberOfLeadingZeros and bitCount: counted in the receiver's own width, so 0 has as many zeros
+// as its type has bits, and each gives an i32.
+
+const SHIFT: i32 = 64.trailing_zeros()
+const WIDE: i32 = 0u8.leading_zeros() + 255u16.count_ones()
+
+fn main() {
+    let a: List<i32> = [0, 1, 8, -1, i32.MIN]
+    var t = List<i32>()
+    var l = List<i32>()
+    var c = List<i32>()
+    for x in a {
+        t.push(x.trailing_zeros())
+        l.push(x.leading_zeros())
+        c.push(x.count_ones())
+    }
+    println("{t} {l} {c}")    // out: [32, 0, 3, 0, 31] [32, 31, 28, 0, 0] [0, 1, 1, 32, 1]
+
+    let b: List<i64> = [0, 1, -1, i64.MIN, 0x100000000]
+    t.clear()
+    l.clear()
+    c.clear()
+    for x in b {
+        t.push(x.trailing_zeros())
+        l.push(x.leading_zeros())
+        c.push(x.count_ones())
+    }
+    println("{t} {l} {c}")    // out: [64, 0, 0, 63, 32] [64, 63, 0, 0, 31] [0, 1, 64, 1, 1]
+
+    let s: List<u8> = [0, 1, 0x80, 0xFF, 0x18]
+    t.clear()
+    l.clear()
+    c.clear()
+    for x in s {
+        t.push(x.trailing_zeros())
+        l.push(x.leading_zeros())
+        c.push(x.count_ones())
+    }
+    println("{t} {l} {c}")    // out: [8, 0, 7, 0, 3] [8, 7, 0, 0, 3] [0, 1, 1, 8, 2]
+
+    let h: List<u16> = [0, 0x8000, 0x100]
+    t.clear()
+    l.clear()
+    c.clear()
+    for x in h {
+        t.push(x.trailing_zeros())
+        l.push(x.leading_zeros())
+        c.push(x.count_ones())
+    }
+    println("{t} {l} {c}")    // out: [16, 15, 8] [16, 0, 7] [0, 1, 1]
+
+    let n: i8 = -1
+    let m: i8 = 0x40
+    println("{n.trailing_zeros()} {n.leading_zeros()} {n.count_ones()} {m.trailing_zeros()} {m.leading_zeros()} {m.count_ones()}")    // out: 0 0 8 6 1 1
+
+    let z: usize = 0
+    let f: usize = 255
+    println("{z.trailing_zeros()} {z.leading_zeros()} {f.leading_zeros()} {f.count_ones()}")    // out: 64 64 56 8
+    let top: u32 = 0x80000000
+    let all: u64 = 0xFFFFFFFFFFFFFFFF
+    println("{top.trailing_zeros()} {top.leading_zeros()} {all.trailing_zeros()} {all.count_ones()}")    // out: 31 0 0 64
+
+    // Constants, worked out while the program builds.
+    println("{SHIFT} {WIDE} {(-8).trailing_zeros()} {0x0F0F.count_ones()}")    // out: 6 16 3 8
+
+    // The lowest set bit, a bit at a time.
+    var ways = 0b101100
+    var order = List<i32>()
+    while ways != 0 {
+        order.push(ways.trailing_zeros())
+        ways &= ways - 1
+    }
+    println("{order}")    // out: [2, 3, 5]
+}

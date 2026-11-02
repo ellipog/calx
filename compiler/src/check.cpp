@@ -8523,6 +8523,9 @@ private:
         else if (m == "total_cmp" && is_float(recv)) pm = PrimMethod::total_cmp, args = 1;
         else if (m == "rotate_left" && is_int(recv)) pm = PrimMethod::rotate_left, args = 1, arg_type = T.i32;
         else if (m == "rotate_right" && is_int(recv)) pm = PrimMethod::rotate_right, args = 1, arg_type = T.i32;
+        else if (m == "trailing_zeros" && is_int(recv)) pm = PrimMethod::trailing_zeros;
+        else if (m == "leading_zeros" && is_int(recv)) pm = PrimMethod::leading_zeros;
+        else if (m == "count_ones" && is_int(recv)) pm = PrimMethod::count_ones;
         if (pm == PrimMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
             for (Arg& a : e->args) check(a.value, nullptr);
@@ -8547,6 +8550,24 @@ private:
         if (pm == PrimMethod::to_bits) return recv->bits == 32 ? T.u32 : T.u64;
         if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);
         Expr* lhs = e->callee->lhs;
+        if (pm == PrimMethod::trailing_zeros || pm == PrimMethod::leading_zeros || pm == PrimMethod::count_ones) {
+            // Counted in the receiver's own width, as Java's numberOfTrailingZeros,
+            // numberOfLeadingZeros and bitCount are, so 0 has as many zeros as the type has bits.
+            if (lhs->has_bits) {
+                int width = recv->bits;
+                std::uint64_t v = width < 64 ? lhs->const_bits & ((std::uint64_t{1} << width) - 1) : lhs->const_bits;
+                std::uint64_t n = 0;
+                if (pm == PrimMethod::count_ones) {
+                    for (int i = 0; i < width; i++) n += (v >> i) & 1;
+                } else if (pm == PrimMethod::trailing_zeros) {
+                    while (n < std::uint64_t(width) && !((v >> n) & 1)) n++;
+                } else {
+                    while (n < std::uint64_t(width) && !((v >> (width - 1 - n)) & 1)) n++;
+                }
+                set_int(e, T.i32, n);
+            }
+            return T.i32;
+        }
         if (args == 1 && lhs->has_bits && e->args[0].value->has_bits && is_int(recv)) {
             if (pm == PrimMethod::wrapping_add) set_int(e, recv, lhs->const_bits + e->args[0].value->const_bits);
             else if (pm == PrimMethod::wrapping_sub) set_int(e, recv, lhs->const_bits - e->args[0].value->const_bits);

@@ -5105,6 +5105,25 @@ $dropall    m->len = 0;
                 r = "((" + ctype(t) + ")" + fn + "((" + unsigned_of(t) + ")" + v[0] + ", (cx_u32)" + v[1] + "))";
                 break;
             }
+            case PrimMethod::trailing_zeros:
+            case PrimMethod::leading_zeros:
+            case PrimMethod::count_ones: {
+                // In the receiver's width, as Java counts them: 0 has as many zeros as the type
+                // has bits, which clang makes one tzcnt or lzcnt where the target has it.
+                int bits = t->bits;
+                std::string u = "((" + std::string(bits == 64 ? "cx_u64" : "cx_u32") + ")(" + unsigned_of(t) + ")" + v[0] + ")";
+                std::string w = std::to_string(bits), z = tmp();
+                if (e->prim == PrimMethod::count_ones) {
+                    r = "((cx_i32)" + std::string(bits == 64 ? "__builtin_popcountll(" : "__builtin_popcount(") + u + "))";
+                } else if (e->prim == PrimMethod::trailing_zeros) {
+                    if (bits < 32) r = "((cx_i32)__builtin_ctz(" + u + " | " + std::to_string(1u << bits) + "u))";
+                    else r = "({ " + std::string(bits == 64 ? "cx_u64" : "cx_u32") + " " + z + " = " + u + "; (cx_i32)(" + z + " ? " + (bits == 64 ? "__builtin_ctzll" : "__builtin_ctz") + "(" + z + ") : " + w + "); })";
+                } else {
+                    if (bits < 32) r = "((cx_i32)__builtin_clz((" + u + " << " + std::to_string(32 - bits) + ") | " + std::to_string(1u << (31 - bits)) + "u))";
+                    else r = "({ " + std::string(bits == 64 ? "cx_u64" : "cx_u32") + " " + z + " = " + u + "; (cx_i32)(" + z + " ? " + (bits == 64 ? "__builtin_clzll" : "__builtin_clz") + "(" + z + ") : " + w + "); })";
+                }
+                break;
+            }
             default: r = "0"; break;
         }
         return wrap(decls, r);
