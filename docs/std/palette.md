@@ -80,7 +80,7 @@ How the palette grows is Minecraft's, for each strategy:
 
 - A new value goes at the end of the palette. An entry stays when nothing refers to it any more, until the palette is full. Then the values move to a palette of the next size, added in index order, so it holds only those that are there, in the order they first appear.
 - `write` sends a byte of the bits, then the palette as VarInts: the one entry's ID, or the count and the IDs, or nothing with no palette. Then come the longs, 8 bytes each, big-endian, with no count before them.
-- `pack` makes a new palette of the values in the order they first appear, from index 0 up. The longs use the bits a palette of that size has. With more values than a list holds, that's the fewest bits that number them all, so 300 block states take 9 bits on disk, not 16.
+- `pack` makes a new palette of the values in the order they first appear, from index 0 up. The longs use the bits a palette of that size has. With more values than a list holds, that's the fewest bits that number them all, so 300 block states take 9 bits on disk, not 16. It looks each entry of a palette up once, the first time its index comes, and packs the longs one at a time, not value by value; an entry the palette holds twice packs to one, the first.
 - `unpack` gets the palette's kind from its size. With a palette, it keeps the longs as they are, including any bits above the values in each long, so they're sent as they were loaded. With no palette, it turns the indices into IDs, and only the values are kept.
 
 Why a saved container doesn't load, as `Error`:

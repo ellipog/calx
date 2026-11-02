@@ -198,6 +198,28 @@ impl BitStorage {
     }
 }
 
+// The longs `values` come to packed `bits` bits each, from 1 to 32, as a `BitStorage` of them set
+// one by one holds them, a long at a time: each value must fit (CLX-127).
+fn packed_longs(bits: i32, values: List<u32>) -> List<i64> {
+    let per_long = usize.wrap(64 / bits)
+    let n = values.len()
+    var out = List<i64>()
+    out.reserve((n + per_long - 1) / per_long)
+    var i: usize = 0
+    while i < n {
+        let end = (i + per_long).min(n)
+        var w: i64 = 0
+        var shift = 0
+        for j in i..end {
+            w |= i64(values[j]) << shift
+            shift += bits
+        }
+        out.push(w)
+        i = end
+    }
+    return out
+}
+
 // The fewest bits that give `n` values each a number of its own: vanilla's `Mth.ceillog2`.
 fn ceil_log2(n: usize) -> i32 {
     var bits = 0
@@ -595,25 +617,41 @@ impl PalettedContainer {
         let n = self.storage.len()
         var palette = Palette.new(if self.global { ceil_log2(n) } else { self.storage.bits() })
         var values = self.storage.values()
-        var last: i64 = -1
-        var id: u32 = 0
-        for i in 0usize..n {
-            let old = values[i]
-            if i64(old) != last {
-                last = i64(old)
-                id = palette.find_or_add(self.value_for(old))
+        if self.global {
+            var last: i64 = -1
+            var id: u32 = 0
+            for i in 0usize..n {
+                let old = values[i]
+                if i64(old) != last {
+                    last = i64(old)
+                    id = palette.find_or_add(old)
+                }
+                values[i] = id
             }
-            values[i] = id
+        } else {
+            // Each index of the palette is looked up once, the first time it comes, which gives
+            // the palette looking up every value does, in the same order: an entry repeated
+            // in the palette finds the one added first (CLX-127).
+            var remap = List<u32>()
+            remap.reserve(self.palette.entries.len())
+            for _ in self.palette.entries {
+                remap.push(u32.MAX)
+            }
+            for i in 0usize..n {
+                let old = usize(values[i])
+                var id = remap[old]
+                if id == u32.MAX {
+                    id = palette.find_or_add(self.palette.entries[old])
+                    remap[old] = id
+                }
+                values[i] = id
+            }
         }
         let stored = self.strategy.config(ceil_log2(palette.entries.len())).stored
         if stored == 0 {
             return Packed { palette: palette.entries, data: none }
         }
-        var storage = BitStorage.new(stored, n)
-        for i in 0usize..n {
-            storage.set(i, values[i])
-        }
-        return Packed { palette: palette.entries, data: some(storage.into_longs()) }
+        return Packed { palette: palette.entries, data: some(packed_longs(stored, values)) }
     }
 
     /// The container `packed` holds, as vanilla's `unpack` reads it: the palette's size gives its

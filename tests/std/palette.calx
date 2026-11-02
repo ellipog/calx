@@ -103,6 +103,17 @@ fn flat() {
     var again: List<u8> = []
     back.write(mut again)
     println("{back.counts()} {hex(again, 0, 6)}")    // out: [(88, 256), (10, 512), (9, 256), (0, 3072)] 0404580a0900
+    // A palette with an entry twice packs both to one, the first: indices 1, 0, 2 at the start.
+    var longs = List<i64>()
+    for _ in 0..256 {
+        longs.push(0)
+    }
+    longs[0] = 0x201
+    let twice = PalettedContainer.unpack(blocks, Packed { palette: [5, 5, 7], data: some(longs) })!
+    let q = twice.pack()
+    if let d = q.data {
+        println("{q.palette} {d.len()} {hex64(d[0])} {hex64(d[1])}")    // out: [5, 7] 256 0000000000000100 0000000000000000
+    }
 }
 
 // The palette grows: one entry takes no bits, up to 16 take 4, up to 256 take 5 to 8, and more
