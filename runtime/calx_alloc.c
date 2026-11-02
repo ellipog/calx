@@ -7,7 +7,7 @@
  * Small blocks, up to 32 KiB, come in 40 sizes: steps of 16 bytes up to 128, then four steps for
  * each doubling, so less than a fifth of a block goes unused. Each thread keeps a list of free
  * blocks of each size, and takes from and gives to it with no lock. A thread that frees more than
- * it takes shares its list, about 256 KiB of blocks, as one batch, and a thread that runs out
+ * it takes shares its list, about 64 KiB of blocks, as one batch, and a thread that runs out
  * takes one batch before it cuts new blocks, so memory freed by one thread goes back to the
  * threads that allocate. Taking a batch, not every block shared, keeps one thread from holding
  * them all while the others cut new ones: a server whose chunk workers allocated what its main
@@ -336,12 +336,13 @@ typedef struct {
 static _Thread_local heap tls;
 static shared_list shared[CLASSES];
 
-/* How many free blocks of each size a thread keeps before it shares them: 256 KiB of them, and
- * at least 16. */
+/* How many free blocks of each size a thread keeps before it shares them: 64 KiB of them, and
+ * at least 16. With 256 KiB, Calcite's 31 chunk workers peaked at 1,204 MB generating a world,
+ * and at 1,132 MB with 64 KiB, as fast; less than 64 KiB saved little more (CLX-120). */
 static const cx_u32 kept[CLASSES] = {
-    16384, 8192, 5461, 4096, 3276, 2730, 2340, 2048, 1638, 1365, 1170, 1024, 819, 682,
-    585,   512,  409,  341,  292,  256,  204,  170,  146,  128,  102,  85,   73,  64,
-    51,    42,   36,   32,   25,   21,   18,   16,   16,   16,   16,   16,
+    4096, 2048, 1365, 1024, 819, 682, 585, 512, 409, 341, 292, 256, 204, 170,
+    146,  128,  102,  85,   73,  64,  51,  42,  36,  32,  25,  21,  18,  16,
+    16,   16,   16,   16,   16,  16,  16,  16,  16,  16,  16,  16,
 };
 
 static void share(heap* h, unsigned c) {
@@ -751,7 +752,7 @@ cx_usize cx_alloc_live(void) { return 0; }
 /* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
  * first, then each small class's whole free pages go, with `with_holes` the free system pages of
  * those still in use too, and the big blocks the cache keeps. Free blocks other threads keep for
- * themselves, at most 256 KiB of each size each, stay. Returns the bytes given back. */
+ * themselves, at most 64 KiB of each size each, stay. Returns the bytes given back. */
 static cx_usize trim_all(int with_holes) {
     heap* h = &tls;
     for (unsigned c = 0; c < CLASSES; c++) {
