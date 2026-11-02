@@ -1,0 +1,46 @@
+// What a `Shared` can't do: have its value changed, through a field, a method or a `mut`
+// argument; hold what isn't `Send`; or be used as a list.
+
+struct Config {
+    scale: i64
+    names: List<String>
+}
+
+impl Config {
+    fn grow(mut self) {
+        self.scale += 1
+    }
+}
+
+fn bump(c: mut Config) {
+    c.scale += 1
+}
+
+struct Holder<T> {
+    item: Shared<T>    // error: a `Shared` holds only what's `Send`, so `T` needs the bound: `T: Send`
+}
+
+fn main() {
+    var c = Shared(Config { scale: 1, names: List<String>() })
+    c.value.scale = 2    // error: `c.value.scale` can't be changed: every copy of `c` reads the one value it shares, so nothing changes it; change a copy, `c.value.copy()`, and share that
+    c.value.names.push(String("a"))    // error: `c.value.names` can't be changed
+    c.value.grow()    // error: `c.value` can't be changed
+    bump(mut c.value)    // error: `c.value` can't be changed
+    c.value = Config { scale: 3, names: List<String>() }    // error: `c.value` can't be changed
+    for n in mut c.value.names {    // error: `c.value.names` can't be changed
+        n.push_str("!")
+    }
+    // The whole `Shared` is a variable like any other: it can be given a new value.
+    c = Shared(Config { scale: 4, names: List<String>() })
+    println("{c[0].scale}")    // error: a `Shared` holds one value, which isn't indexed; it's `c.value`
+    let p: Holder<i32>? = none
+    let l: Shared<i32> = [1]    // error: a `Shared` isn't written as a list; make it with `Shared(value)`
+    let b: Shared<i32> = Box(1)    // error: expected `Shared<i32>`, found `Box<i32>`
+    let e = Shared()    // error: `Shared` takes one value, the one it holds: `Shared(c)`
+    for x in Shared(1) {    // error: a `for` loop doesn't go over a `Shared`, which holds one value
+        println("{x}")
+    }
+    if let _ = p {
+        println("{l} {b} {e}")
+    }
+}

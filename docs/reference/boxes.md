@@ -88,6 +88,8 @@ A box isn't a list, though it's one in memory:
 - It has no methods and no fields but `value`: `b.value.len()` is the value's.
 - It has no `JavaHash`, since Java has no boxes, so it isn't a key of a `JavaHashMap`. A native `Map`'s key can be one.
 
+A box's copy is a box of its own. For one value that many owners read without a copy each, use a [`Shared<T>`](shared.md).
+
 ## In C
 
 A box is a list of its one value: the same pointer, length and capacity, so it's freed, copied, compared and hashed by the same code. `b.value` is the element at index 0, read without a bounds check, since it's always there.

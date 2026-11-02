@@ -90,7 +90,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Box", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
+        for (const char* b : {"some", "ok", "err", "List", "Box", "Shared", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Library", "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
             reserved_names_.push_back(ctx.names.intern(b));
@@ -99,6 +99,7 @@ public:
         n_Deque_ = ctx.names.intern("Deque");
         n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
         n_Box_ = ctx.names.intern("Box");
+        n_Shared_ = ctx.names.intern("Shared");
         n_value_ = ctx.names.intern("value");
         n_Arena_ = ctx.names.intern("Arena");
         n_ArenaList_ = ctx.names.intern("ArenaList");
@@ -1477,6 +1478,7 @@ private:
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
             case TypeKind::list:
                 return t->heap         ? T.heap_of(subst(t->elem, s))
+                       : t->shared     ? T.shared_of(subst(t->elem, s))
                        : t->boxed      ? T.box_of(subst(t->elem, s))
                        : t->arena_list ? T.arena_list_of(subst(t->elem, s))
                                        : T.list_of(subst(t->elem, s));
@@ -1519,7 +1521,7 @@ private:
         }
         if (!pattern->open) return pattern == actual;
         if (pattern->kind != actual->kind || pattern->table != actual->table || pattern->heap != actual->heap ||
-            pattern->boxed != actual->boxed || pattern->arena_list != actual->arena_list) {
+            pattern->boxed != actual->boxed || pattern->shared != actual->shared || pattern->arena_list != actual->arena_list) {
             return false;
         }
         switch (pattern->kind) {
@@ -1780,7 +1782,7 @@ private:
             case TypeKind::unit: return "unit";
             case TypeKind::optional: return mangle(t->elem) + "_opt";
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
-            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->boxed ? "_box" : t->arena_list ? "_alist" : "_list");
+            case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->shared ? "_shared" : t->boxed ? "_box" : t->arena_list ? "_alist" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
             case TypeKind::sender: return mangle(t->elem) + "_sender";
             case TypeKind::receiver: return mangle(t->elem) + "_receiver";
@@ -2263,6 +2265,15 @@ private:
                     Type* elem = resolve_type(t->args[0]);
                     if (is_bad(elem) || !box_elem(elem, t->args[0]->span)) return T.error;
                     return T.box_of(elem);
+                }
+                if (n == n_Shared_ && !env_type(n)) {
+                    if (t->args.size() != 1) {
+                        error(t->span, "`Shared` takes one generic argument, the type of the value it holds: `Shared<Config>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !shared_elem(elem, t->args[0]->span)) return T.error;
+                    return T.shared_of(elem);
                 }
                 if (n == n_PriorityQueue_ && !env_type(n)) {
                     if (t->args.size() != 1) {
@@ -3022,6 +3033,15 @@ private:
 
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
+        for (const Expr* p = place; p->kind == ExprKind::field || p->kind == ExprKind::index || p->kind == ExprKind::unwrap; p = p->lhs) {
+            if (p->kind == ExprKind::index && p->box_value && p->lhs->type && p->lhs->type->shared) {
+                error(place->span, q(place_text(place)) + " can't be changed: every copy of " + q(place_text(p->lhs)) +
+                                       " reads the one value it shares, so nothing changes it; change a copy, " +
+                                       q(place_text(p) + ".copy()") + ", and share that");
+                l->used = l->mutated = true;
+                return;
+            }
+        }
         const LoopBorrow* b = loop_conflict(place, l);
         if (b && b->exclusive) {
             // Not a write for a `parallel for` either: the one error is that it's used at all.
@@ -3311,7 +3331,7 @@ private:
                 borrowed = place_root(s->value);
             } else if (t->boxed) {
                 by_mut = false;
-                error(it->span, "a `for` loop doesn't go over a `Box`, which holds one value: " + q(place_text(it) + ".value"));
+                error(it->span, "a `for` loop doesn't go over a " + box_word(t) + ", which holds one value: " + q(place_text(it) + ".value"));
             } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::set) {
                 elem = t->elem;
                 borrowed = place_root(it);
@@ -4006,7 +4026,7 @@ private:
             } else if (leaf->heap) {
                 why = ", and a `PriorityQueue` has no `JavaHash`, as Java's has no `hashCode` of its own";
             } else if (leaf->boxed) {
-                why = ", and a `Box` has no `JavaHash`, since Java has no boxes to have one";
+                why = ", and a " + box_word(leaf) + " has no `JavaHash`, since Java has no boxes to have one";
             } else if (leaf->kind != TypeKind::pointer) {
                 why = ", and only numbers, `bool`, `char`, `rune`, text and lists have a `JavaHash` built in";
             }
@@ -4900,7 +4920,7 @@ private:
         }
         if (base->boxed && !e->box_value) {
             check(e->rhs, nullptr);
-            error(e->span, "a `Box` holds one value, which isn't indexed; it's " + q(place_text(e->lhs) + ".value"));
+            error(e->span, "a " + box_word(base) + " holds one value, which isn't indexed; it's " + q(place_text(e->lhs) + ".value"));
             return T.error;
         }
         if (base->heap) {
@@ -5235,7 +5255,8 @@ private:
         if (expected && expected->boxed) {
             for (Expr* x : e->elems) check(x, expected->elem);
             if (e->repeat) check(e->repeat, T.usize);
-            error(e->span, "a `Box` isn't written as a list; make it with `Box(value)`");
+            error(e->span, "a " + box_word(expected) + " isn't written as a list; make it with " +
+                               (expected->shared ? "`Shared(value)`" : "`Box(value)`"));
             return T.error;
         }
         if (expected && expected->heap) {
@@ -6145,7 +6166,8 @@ private:
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
-            if (n == n_Box_ && !find_local(n)) return box_call(e, expected);
+            if (n == n_Box_ && !find_local(n)) return box_call(e, expected, false);
+            if (n == n_Shared_ && !find_local(n)) return box_call(e, expected, true);
             if (n == n_Arena_ && !find_local(n)) return arena_call(e);
             if (n == n_Receiver_ && !find_local(n)) return receiver_call(e, expected);
             if ((n == n_Sender_ || n == n_Thread_ || n == n_Library_) && !find_local(n)) {
@@ -7402,7 +7424,11 @@ private:
         }
         switch (t->kind) {
             case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: case TypeKind::library: return t;
-            case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::list:
+                // A copy of a `Shared` is one more owner of the same value.
+                if (t->shared) return nullptr;
+                return handle_inside(t->elem, depth + 1, seen);
+            case TypeKind::optional: case TypeKind::array: case TypeKind::deque: case TypeKind::set:
                 return handle_inside(t->elem, depth + 1, seen);
             case TypeKind::map:
                 if (const Type* h = handle_inside(t->key, depth + 1, seen)) return h;
@@ -7702,11 +7728,13 @@ private:
     }
 
     // `Box(v)` and `Box<T>(v)`: a box holding `v`. It's a list of that one value in memory, so the
-    // call becomes the list `[v]` of the box's type.
-    Type* box_call(Expr* e, Type* expected) {
+    // call becomes the list `[v]` of the box's type. `Shared(v)` too, with `shared`, which the
+    // emitter gives the count of its owners.
+    Type* box_call(Expr* e, Type* expected, bool shared) {
         Expr* callee = e->callee;
         callee->ref = Ref::type;
-        Type* want = expected && expected->kind == TypeKind::list && expected->boxed ? expected->elem : nullptr;
+        const char* word = shared ? "`Shared`" : "`Box`";
+        Type* want = expected && expected->kind == TypeKind::list && expected->boxed && expected->shared == shared ? expected->elem : nullptr;
         if (callee->type_args.size() == 1) {
             want = resolve_type(callee->type_args[0]);
             if (is_bad(want)) {
@@ -7714,12 +7742,13 @@ private:
                 return T.error;
             }
         } else if (!callee->type_args.empty()) {
-            error(callee->span, "`Box` takes one generic argument, the type of the value it holds: `Box<Node>(n)`");
+            error(callee->span, std::string(word) + " takes one generic argument, the type of the value it holds: " +
+                                    (shared ? "`Shared<Config>(c)`" : "`Box<Node>(n)`"));
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
-            error(e->span, "`Box` takes one value, the one it holds: `Box(n)`");
+            error(e->span, std::string(word) + " takes one value, the one it holds: " + (shared ? "`Shared(c)`" : "`Box(n)`"));
             for (Arg& a : e->args) check(a.value, nullptr);
             return T.error;
         }
@@ -7730,8 +7759,8 @@ private:
             if (!want) return T.error;
             t = want;
         }
-        if (!box_elem(t, value->span)) return T.error;
-        Type* box = T.box_of(t);
+        if (shared ? !shared_elem(t, value->span) : !box_elem(t, value->span)) return T.error;
+        Type* box = shared ? T.shared_of(t) : T.box_of(t);
         callee->named_type = box;
         std::vector<Expr*> one{value};
         e->kind = ExprKind::array_lit;
@@ -7749,6 +7778,29 @@ private:
         }
         return true;
     }
+
+    // Whether a `Shared` can hold `elem`: what a box can, which threads can read at once, so it
+    // must be `Send`.
+    bool shared_elem(Type* elem, Span span) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(span, "a `Shared` can't hold " + name_of(elem));
+            return false;
+        }
+        if (elem->kind == TypeKind::param && !elem->send_bound) {
+            error(span, "a `Shared` holds only what's `Send`, so " + name_of(elem) + " needs the bound: " +
+                            q(std::string(elem->name) + ": Send"));
+            return false;
+        }
+        if (!is_send(elem)) {
+            error(span, "a `Shared` can't hold " + name_of(elem) +
+                            ", which isn't `Send`: every thread with a copy reads the one value, so it can't be or hold a pointer, an arena list, or a parameter without the bound `Send`");
+            return false;
+        }
+        return true;
+    }
+
+    // How messages name a box: `Box` or `Shared`.
+    static std::string box_word(const Type* t) { return t->shared ? "`Shared`" : "`Box`"; }
 
     // `PriorityQueue<i32>()`: an empty queue, from the generic argument or the type expected (D113).
     Type* heap_call(Expr* e, Type* expected) {
@@ -8811,7 +8863,7 @@ private:
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
-    Name n_Box_, n_value_;
+    Name n_Box_, n_Shared_, n_value_;
     Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
     Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_, n_Library_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,

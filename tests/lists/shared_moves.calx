@@ -1,0 +1,16 @@
+// The value of a `Shared`, which every copy reads, can't be moved out of it; it's copied out.
+struct Config {
+    scale: i64
+    names: List<String>
+}
+
+fn take(c: own Config) -> i64 {
+    return c.scale
+}
+
+fn main() {
+    let c = Shared(Config { scale: 1, names: List<String>() })
+    println("{take(c.value)}")    // error: can't move the value out of `c`, which keeps it; move a copy with `.copy()`
+    let names = c.value.names    // error: can't move `c.value.names` out of `c`; move a copy with `c.value.names.copy()`
+    println("{names.len()}")
+}

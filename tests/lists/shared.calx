@@ -1,0 +1,88 @@
+// `Shared<T>`: one value that every copy reads, which nothing changes. A copy counts one more
+// owner, and the last one dropped frees the value, whichever thread drops it.
+
+import std.thread.{Task}
+
+struct Config {
+    name: String
+    scale: i64
+    names: List<String>
+}
+
+// Each thread reads the one config through its own copy.
+struct Reader {
+    config: Shared<Config>
+    from: i64
+    out: Sender<i64>
+}
+
+impl Task for Reader {
+    fn run(own self) {
+        var total: i64 = 0
+        for k in 0i64..1000 {
+            total += (self.from + k) * self.config.value.scale + i64.wrap(self.config.value.names.len())
+        }
+        self.out.send(total)
+    }
+}
+
+fn length(c: Config) -> usize {
+    return c.name.len()
+}
+
+struct Holder<T: Send> {
+    item: Shared<T>
+}
+
+fn main() {
+    let c = Shared(Config { name: String("overworld"), scale: 3, names: [String("a"), String("b")] })
+    // Read through `.value`, which is a place like a field, and passed as one.
+    println("{c.value.name} {c.value.scale} {length(c.value)}")     // out: overworld 3 9
+
+    // A copy shares the value: the same memory, not a second config.
+    let d = c.copy()
+    println("{d.value.name} {c == d} {d}")    // out: overworld true Config { name: overworld, scale: 3, names: [a, b] }
+
+    // Copies go to threads, and each reads the one value at once.
+    var results = Receiver<i64>()
+    var threads = List<Thread>()
+    for t in 0..8 {
+        threads.push(unsafe { Thread.spawn(Reader { config: c.copy(), from: i64(t) * 1000, out: results.sender() }) })
+    }
+    var sum: i64 = 0
+    for _ in 0..8 {
+        sum += results.wait() ?? 0
+    }
+    while let t = threads.pop() {
+        t.join()
+    }
+    println("{sum}")    // out: 96004000
+
+    // A `parallel for` reads it, and copies it, from every iteration.
+    var lens = [0usize; 64]
+    parallel for k in 0usize..64 {
+        let mine = c.copy()
+        lens[k] = mine.value.names.len() + k
+    }
+    var all: usize = 0
+    for l in lens {
+        all += l
+    }
+    println("{all}")    // out: 2144
+
+    // Compared, hashed and shown as its value, and it can hold any value that's `Send`.
+    var seen = Set<Shared<String>>()
+    seen.insert(Shared(String("x")))
+    seen.insert(Shared(String("x")))
+    seen.insert(Shared<String>(String("y")))
+    println("{seen.len()} {Shared(5) == Shared(5)} {Shared(5) < Shared(6)}")    // out: 2 true true
+    let h = Holder { item: Shared(List<i32>()) }
+    let i = Holder { item: h.item.copy() }
+    println("{i.item.value.len()} {h.item}")    // out: 0 []
+
+    // A changed copy of the value is shared again.
+    var next = c.value.copy()
+    next.scale = 4
+    let e = Shared(next)
+    println("{e.value.scale} {c.value.scale}")    // out: 4 3
+}

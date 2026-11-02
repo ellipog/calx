@@ -159,9 +159,7 @@ Calx's checker is stricter than Rust's: every rule is an error, no flag turns on
 
 ### Ownership
 
-Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take values apart, and freeing in reverse order of declaration ([Ownership](reference/ownership.md)), and `Box<T>`, which owns a value on the heap, for recursive types ([Boxes](reference/boxes.md)). Still to build:
-
-- `Shared<T>` is an immutable value with an atomic reference count, for data many regions read: registries, config and the tick snapshot. It's `Share`, and nothing can change it.
+Built: owners, `Copy`, moves, `.copy()`, partial moves, patterns that take values apart, and freeing in reverse order of declaration ([Ownership](reference/ownership.md)), `Box<T>`, which owns a value on the heap, for recursive types ([Boxes](reference/boxes.md)), and `Shared<T>`, an immutable value with an atomic count of its owners, for data many regions and threads read: registries, config and the tick snapshot. Its value is the read-only place `s.value`, it holds only what's `Send`, and nothing can change it ([Shared values](reference/shared.md)).
 
 ### Views
 
@@ -280,7 +278,7 @@ Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). 
 ```calx
 fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
     parallel for c in mut counters.values() {
-        c.total += bonus.amount       // bonus is Share, so every iteration may read it
+        c.total += bonus.value.amount // bonus is Share, so every iteration may read it
     }
 }
 ```

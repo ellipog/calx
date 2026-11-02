@@ -14,7 +14,7 @@ Calx's first large program is [Calcite](https://github.com/ellipog/calcite), a M
 Everything in the [reference](README.md#reference) and the [standard library](README.md#standard-library) is built, and every example on those pages is compiled and run on Windows and Linux on every push:
 
 - The types: integers and floats with defined results on every platform, structs, enums, tuples, optionals, error values, generics and interfaces.
-- Memory safety without a garbage collector: ownership, views, arenas and `Box<T>`, with `unsafe` code and C functions for what the checker can't see.
+- Memory safety without a garbage collector: ownership, views, arenas, `Box<T>` and `Shared<T>`, with `unsafe` code and C functions for what the checker can't see.
 - `parallel for`, whose capture check gives the same result with any number of threads, and messages between actors, delivered in a fixed order.
 - Modules, libraries that a program opens while it runs, and attributes that libraries write in Calx, which generate code while the program compiles.
 - Lists, deques, priority queues, maps and sets, and the [Java-compatible](README.md#java-compatibility) hash tables.
@@ -26,7 +26,6 @@ Everything in the [reference](README.md#reference) and the [standard library](RE
 The [spec](CALX_SPEC.md) has the design of each of these:
 
 - **Handles**: `Handle<T>`, a checked reference to an object in a slot map, which says when the object is gone instead of reading freed memory ([spec](CALX_SPEC.md#handles)).
-- **Shared data**: `Shared<T>`, for data that many iterations of a `parallel for` read at once ([spec](CALX_SPEC.md#memory-model)).
 - **More parallel loops**: a `parallel for` over the values of a slot map or a map, and on a pool the program picks ([spec](CALX_SPEC.md#parallel-loops)).
 - **Values of different types together**: `dyn` interfaces, associated types, and interfaces for the operators ([spec](CALX_SPEC.md#interfaces-and-generics)).
 - **`java.ArrayList`**, a list that grows as Java's does, for code that must match Java's capacities ([spec](CALX_SPEC.md#collections)).

@@ -436,7 +436,7 @@ private:
         switch (t->kind) {
             case TypeKind::array: s = "cx_arr" + std::to_string(t->length) + "_" + part(t->elem); break;
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
-            case TypeKind::list: s = (t->heap ? "cx_heap_" : t->boxed ? "cx_box_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
+            case TypeKind::list: s = (t->heap ? "cx_heap_" : t->shared ? "cx_shared_" : t->boxed ? "cx_box_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
@@ -2448,6 +2448,10 @@ $dropall    m->len = 0;
         }
     }
 
+    // The bytes before a `Shared`'s value, which hold the count of its owners, as many as keep the
+    // value aligned.
+    static constexpr const char* SHARED_HEAD = "16";
+
     std::string drop_fn(const Type* t) const {
         (void)ctype(t);
         return "cx_drop_" + part(t);
@@ -2515,6 +2519,15 @@ $dropall    m->len = 0;
             case TypeKind::list:
                 if (t->arena_list) {
                     s += "    (void)p;\n";
+                    break;
+                }
+                if (t->shared) {
+                    // The count of its owners is the CX_SHARED_HEAD bytes before its value. The
+                    // last owner sees what every other one did before it let go.
+                    s += "    if (!p->ptr) return;\n    cx_usize* n = (cx_usize*)((char*)p->ptr - " + std::string(SHARED_HEAD) +
+                         ");\n    if (__atomic_sub_fetch(n, 1, __ATOMIC_ACQ_REL)) return;\n";
+                    if (!is_copy(t->elem)) s += "    " + drop_fn(t->elem) + "(&p->ptr[0]);\n";
+                    s += "    cx_free(n, " + std::string(SHARED_HEAD) + " + sizeof(*p->ptr));\n";
                     break;
                 }
                 if (!is_copy(t->elem)) s += "    for (cx_usize i = 0; i < p->len; i++) " + drop_fn(t->elem) + "(&p->ptr[i]);\n";
@@ -2636,6 +2649,11 @@ $dropall    m->len = 0;
             }
             case TypeKind::list: {
                 if (t->arena_list) break;
+                if (t->shared) {
+                    s += "    if (p->ptr) __atomic_add_fetch((cx_usize*)((char*)p->ptr - " + std::string(SHARED_HEAD) +
+                         "), 1, __ATOMIC_RELAXED);\n";
+                    break;
+                }
                 std::string e = ctype(t->elem);
                 s = "    " + c + " r = {0};\n    if (!p->len) return r;\n    r.ptr = (" + e + "*)cx_alloc(p->len * sizeof(" + e +
                     "));\n    r.len = r.cap = p->len;\n";
@@ -5186,6 +5204,12 @@ $dropall    m->len = 0;
                    n + "; " + i + "++) " + r + ".ptr[" + i + "] = " + v + "; " + r + ".len = " + n + "; } " + r + "; })";
         }
         if (e->elems.empty()) return "((" + l + "){0})";
+        if (t->shared) {
+            std::string b = tmp(), p = tmp();
+            return "({ char* " + b + " = (char*)cx_alloc(" + SHARED_HEAD + " + sizeof(" + el + ")); *(cx_usize*)" + b + " = 1; " + el +
+                   "* " + p + " = (" + el + "*)(" + b + " + " + SHARED_HEAD + "); " + p + "[0] = " + value(e->elems[0], t->elem) + "; (" +
+                   l + "){ " + p + ", 1, 1 }; })";
+        }
         std::string p = tmp(), n = std::to_string(e->elems.size());
         std::string s = "({ " + el + "* " + p + " = (" + el + "*)cx_alloc(" + n + " * sizeof(" + el + ")); ";
         for (std::size_t k = 0; k < e->elems.size(); k++) {
@@ -5328,7 +5352,7 @@ $dropall    m->len = 0;
                 inner("array", t->elem);
                 s += std::to_string(t->length);
                 return;
-            case TypeKind::list: inner(t->heap ? "heap" : t->boxed ? "box" : t->arena_list ? "arena_list" : "list", t->elem); return;
+            case TypeKind::list: inner(t->heap ? "heap" : t->shared ? "shared" : t->boxed ? "box" : t->arena_list ? "arena_list" : "list", t->elem); return;
             case TypeKind::deque: inner("deque", t->elem); return;
             case TypeKind::set: inner(("set" + std::to_string(static_cast<int>(t->table))).c_str(), t->elem); return;
             case TypeKind::map:

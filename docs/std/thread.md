@@ -103,6 +103,7 @@ fn main() {
 
 ## What it doesn't allow
 
+- Data every thread reads, such as tables or configuration, goes to each in a [`Shared<T>`](../reference/shared.md): a copy of it is one more owner of the same value, not a second value.
 - A `Sender`, a `Receiver` and a `Thread` can't be copied, compared, shown or hashed. Each is a handle to something threads share, and `share()` is how to get another end.
 - A queue can't be used, and a thread can't be joined, inside a `parallel for`: which iteration's message came first would depend on timing. Writing it in the body is an error, and reaching it from a function the body calls panics, with one thread as with many.
 - Threads share no memory: every value has one owner (D76). A task, and every message, must be `Send`, so it holds no pointers, and a generic one needs the bound `T: Send`.
