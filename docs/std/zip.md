@@ -41,7 +41,7 @@ To work with a file, read it with [`std.fs.read`](fs.md) and write the archive w
 | Item | Gives |
 | --- | --- |
 | `Zip.open(bytes: own List<u8>) -> Zip ! String` | The archive, read from its central directory, or why it can't be. The archive keeps the bytes |
-| `Zip.walk(bytes: own List<u8>) -> Zip ! String` | The files read one after another from the start, for a stretch of an archive without its central directory, as Java's `ZipInputStream` reads |
+| `Zip.walk(bytes: own List<u8>) -> Zip ! String` | The files read one after another from the start, for a stretch of an archive without its central directory, as Java's `ZipInputStream` reads. A file whose sizes are only in the data descriptor after it, as `ZipOutputStream` writes a deflated one, is inflated to find where it ends, and again when it's read: none is kept inflated |
 | `z.entries() -> List<Entry>` | Its files and directories, in the central directory's order |
 | `z.len() -> usize`, `z.name(i: usize) -> String` | How many there are, and the path of one |
 | `z.find(name: String) -> usize?` | The index of the entry at `name`. A later entry of the same name wins |

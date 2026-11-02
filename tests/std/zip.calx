@@ -3,6 +3,7 @@
 import std.fs.{is_dir, metadata, read_text, remove_dir_all, separator, temp_dir}
 import std.time.{DateTime}
 import std.zip.{Writer, Zip}
+import std.zlib.{Format, compress, crc32}
 
 fn main() {
     var w = Writer.new()
@@ -45,6 +46,38 @@ fn main() {
     // Walking the local headers finds the same files, without modes.
     let walked = Zip.walk(bytes.copy())!
     println("{walked.len()} {walked.entries()[1].mode} {walked.read(2)! == big}")    // out: 5 0 true
+
+    // Files whose sizes are only in the data descriptor after them, as Java's ZipOutputStream
+    // writes deflated files, are inflated to find where each ends, and again when read.
+    var streamed = List<u8>()
+    var long = List<u8>()
+    for i in 0..3000 {
+        long.push(u8.wrap(97 + i % 5))
+    }
+    for (name, data) in [("a.txt", long), ("b.txt", "second".to_bytes())] {
+        let packed = compress(data, Format.Raw, 6)
+        put_le(mut streamed, 0x04034b50u64, 4)
+        put_le(mut streamed, 20, 2)
+        put_le(mut streamed, 8, 2)    // its sizes are in its descriptor
+        put_le(mut streamed, 8, 2)    // deflated
+        put_le(mut streamed, 0, 4)    // its time and date
+        put_le(mut streamed, 0, 12)    // its CRC-32 and sizes, left 0
+        put_le(mut streamed, u64(name.len()), 2)
+        put_le(mut streamed, 0, 2)
+        for b in name.to_bytes() {
+            streamed.push(b)
+        }
+        for b in packed {
+            streamed.push(b)
+        }
+        put_le(mut streamed, 0x08074b50u64, 4)
+        put_le(mut streamed, u64(crc32(data)), 4)
+        put_le(mut streamed, u64(packed.len()), 4)
+        put_le(mut streamed, u64(data.len()), 4)
+    }
+    let s = Zip.walk(streamed)!
+    let first = String.from_utf8(s.read(0)!) ?? "?"
+    println("{s.len()} {s.entries()[0].size} {first.len()} {String.from_utf8(s.read_named("b.txt")!) ?? "?"}")    // out: 2 3000 3000 second
 
     // More than 65,535 entries need Zip64's end records.
     var many = Writer.new()
@@ -97,5 +130,12 @@ fn main() {
     match Zip.open(flipped)!.read(1) {
         ok(_) => println("read"),
         err(e) => println(e),    // out: invalid entry CRC in bin/tool
+    }
+}
+
+// `v`'s low `n` bytes, little-endian, at the end of `out`.
+fn put_le(out: mut List<u8>, v: u64, n: usize) {
+    for k in 0..n {
+        out.push(u8.wrap(if k < 8 { v >> u64(k * 8) } else { 0 }))
     }
 }

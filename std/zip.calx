@@ -30,8 +30,6 @@ pub struct Entry {
     compressed: usize
     // Where its local header starts.
     header: usize
-    // Where in the archive's `inflated` its bytes are, if they were inflated to find its end.
-    inflated: usize?
 }
 
 impl Entry {
@@ -46,8 +44,6 @@ pub struct Zip {
     bytes: List<u8>
     files: List<Entry>
     by_name: Map<String, usize>
-    // The files that were inflated as they were walked, one after another.
-    inflated: List<u8>
 }
 
 // The records' signatures.
@@ -174,23 +170,25 @@ impl Zip {
             let mode = if u32(le16(bytes, p + 4)) >> 8 == 3 { (le32(bytes, p + 38) >> 16) & 0o7777 } else { 0 }
             let modified = dos_time(le16(bytes, p + 14), le16(bytes, p + 12))
             by_name.insert(name.copy(), files.len())
-            files.push(Entry { name: name, size: usize.wrap(size), mode: mode, modified: modified, method: method, crc: le32(bytes, p + 16), compressed: usize.wrap(compressed), header: usize.wrap(header), inflated: none })
+            files.push(Entry { name: name, size: usize.wrap(size), mode: mode, modified: modified, method: method, crc: le32(bytes, p + 16), compressed: usize.wrap(compressed), header: usize.wrap(header) })
             p = next
         }
-        return Zip { bytes: bytes, files: files, by_name: by_name, inflated: [] }
+        return Zip { bytes: bytes, files: files, by_name: by_name }
     }
 
     /// The files in `bytes`, read from its start one after another until it ends, or why they
     /// can't be: each a local header, its data, and the data descriptor after it if it has one,
     /// as a stretch of an archive without its central directory holds them. A deflated file whose
-    /// sizes are only in its descriptor is inflated to find where it ends, and kept, so reading it
-    /// costs a copy, but no more inflating. Its CRC-32 is checked when it's read. A central
-    /// directory, as a whole archive has after its files, ends the walk. Local headers
-    /// don't record modes, so each `mode` is 0.
+    /// sizes are only in its descriptor is inflated to find where it ends, and inflated again when
+    /// it's read, as the others are: Minecraft's data has 10,470 such files, 10.5 MB inflated,
+    /// which kept would stay in memory as long as the archive. Its CRC-32 is checked when it's
+    /// read. A central directory, as a whole archive has after its files, ends the walk. Local
+    /// headers don't record modes, so each `mode` is 0.
     pub fn walk(bytes: own List<u8>) -> Zip ! String {
         let n = bytes.len()
         var files = List<Entry>()
         var by_name = Map<String, usize>()
+        // Where each file found by inflating it is inflated, one at a time.
         var inflated = List<u8>()
         var at: usize = 0
         while at < n {
@@ -231,20 +229,19 @@ impl Zip {
                 }
                 x += 4 + len
             }
-            var kept: usize? = none
             var next: usize = 0
             if flags & 8 != 0 {
                 if method != 8 {
                     fail "invalid LOC header (stored entry with a data descriptor) in {name}"
                 }
-                let from = inflated.len()
+                inflated.clear()
                 // Deflate makes at most about 1,032 bytes of each byte it reads.
                 let end = match decompress_stream(bytes, start, n, Format.Raw, (n - start) * 1032 + 1024, mut inflated) {
                     ok(e) => e,
                     err(_) => fail "invalid entry compressed data in {name}",
                 }
                 let used = u64(end - start)
-                let made = u64(inflated.len() - from)
+                let made = u64(inflated.len())
                 // The descriptor's signature is optional, and Zip64 makes its sizes 8 bytes.
                 let d = if le32(bytes, end) == DESCRIPTOR { end + 4 } else { end }
                 if d + 12 <= n and u64(le32(bytes, d + 4)) == used and u64(le32(bytes, d + 8)) == made {
@@ -257,7 +254,6 @@ impl Zip {
                 crc = le32(bytes, d)
                 compressed = used
                 size = made
-                kept = some(from)
             } else {
                 if compressed > u64(n - start) or size > compressed * 1032 + 1024 {
                     fail "invalid LOC header (bad entry size) in {name}"
@@ -265,10 +261,10 @@ impl Zip {
                 next = start + usize.wrap(compressed)
             }
             by_name.insert(name.copy(), files.len())
-            files.push(Entry { name: name, size: usize.wrap(size), mode: 0, modified: modified, method: method, crc: crc, compressed: usize.wrap(compressed), header: at, inflated: kept })
+            files.push(Entry { name: name, size: usize.wrap(size), mode: 0, modified: modified, method: method, crc: crc, compressed: usize.wrap(compressed), header: at })
             at = next
         }
-        return Zip { bytes: bytes, files: files, by_name: by_name, inflated: inflated }
+        return Zip { bytes: bytes, files: files, by_name: by_name }
     }
 
     /// Its files, in the order the central directory lists them.
@@ -297,13 +293,6 @@ impl Zip {
         let size = self.files[i].size
         let compressed = self.files[i].compressed
         let method = self.files[i].method
-        if let from = self.files[i].inflated {
-            let out = slice(self.inflated, from, size)
-            if crc32(out) != self.files[i].crc {
-                fail "invalid entry CRC in {self.files[i].name}"
-            }
-            return out
-        }
         let n = self.bytes.len()
         if header + 30 > n or le32(self.bytes, header) != LOCAL {
             fail "invalid LOC header (bad signature) in {self.files[i].name}"
