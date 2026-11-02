@@ -596,16 +596,26 @@ impl PalettedContainer {
                 }
             }
         }
-        out.reserve(self.storage.data.len() * 8)
-        for w in self.storage.data {
-            out.push(u8.wrap(w >>> 56))
-            out.push(u8.wrap(w >>> 48))
-            out.push(u8.wrap(w >>> 40))
-            out.push(u8.wrap(w >>> 32))
-            out.push(u8.wrap(w >>> 24))
-            out.push(u8.wrap(w >>> 16))
-            out.push(u8.wrap(w >>> 8))
-            out.push(u8.wrap(w))
+        // The longs, big-endian, written straight into the room made for them, with no check a
+        // byte (CLX-128).
+        let start = out.len()
+        let bytes = self.storage.data.len() * 8
+        out.reserve(bytes)
+        unsafe {
+            let to = out.as_mut_ptr().add(start)
+            var k: usize = 0
+            for w in self.storage.data {
+                to.add(k).write(u8.wrap(w >>> 56))
+                to.add(k + 1).write(u8.wrap(w >>> 48))
+                to.add(k + 2).write(u8.wrap(w >>> 40))
+                to.add(k + 3).write(u8.wrap(w >>> 32))
+                to.add(k + 4).write(u8.wrap(w >>> 24))
+                to.add(k + 5).write(u8.wrap(w >>> 16))
+                to.add(k + 6).write(u8.wrap(w >>> 8))
+                to.add(k + 7).write(u8.wrap(w))
+                k += 8
+            }
+            out.set_len(start + bytes)
         }
     }
 
