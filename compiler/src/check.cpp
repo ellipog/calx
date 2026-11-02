@@ -4549,7 +4549,11 @@ private:
             Type* t = check_pair(e->lhs, e->rhs, nullptr);
             if (is_bad(t)) return T.bool_;
             bool ordered = op != Op::eq && op != Op::ne;
-            bool ok = is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune ||
+            // `x == none` asks only whether there's a value, so it compares no values, and any
+            // optional can: one holding a queue's end, or a type with no `==`.
+            bool with_none = !ordered && t->kind == TypeKind::optional &&
+                             (e->lhs->kind == ExprKind::none_lit || e->rhs->kind == ExprKind::none_lit);
+            bool ok = is_numeric(t) || t->kind == TypeKind::char_ || t->kind == TypeKind::rune || with_none ||
                       (ordered ? orderable(t) : equatable(t));
             if (!ok) {
                 if (ordered) {

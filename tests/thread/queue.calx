@@ -71,4 +71,10 @@ fn main() {
     println("{r4.wait()} {r4.wait()} {r4.wait()}")    // out: some(a) some(b) some(bare)
     bare.close()
     println("{r4.wait()}")                // out: none
+
+    // A value holding an end isn't compared, but whether an optional one is there is.
+    var held: Link? = none
+    println("{held == none}")             // out: true
+    held = some(Link { name: "c", to: r4.sender() })
+    println("{held != none} {none == held}")    // out: true false
 }

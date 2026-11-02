@@ -129,6 +129,8 @@ fn main() {
 
 `==` and `!=` compare two optionals: they're equal when both are `none`, or both hold equal values. In a string, an optional shows as `some(3)` or `none` ([comparing and printing](comparing.md)). An optional compares only with another optional, so it's `opt == some(3)`, not `opt == 3`. A float inside compares as floats do, so `some(NaN)` doesn't equal itself. `<` and the other orderings put `none` before any value ([comparing and printing](comparing.md#order)).
 
+`opt == none` and `opt != none` only ask whether there's a value, so they work on any optional, even one whose values can't be compared, such as a struct that holds a queue's `Sender`.
+
 ```calx
 fn main() {
     let n: i32? = none
