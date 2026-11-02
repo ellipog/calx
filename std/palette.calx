@@ -7,6 +7,10 @@
 /// client is sent and the NBT a region file holds are vanilla's.
 module std.palette
 
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
 /// Why a packed container didn't unpack.
 pub enum Error {
     /// The palette has no entries.
@@ -439,7 +443,8 @@ impl PalettedContainer {
 
     /// Each value looked up in `table`, written over `out` in index order: `out` ends with the
     /// container's size of bytes, `table[v]` for the value `v` that `get_at` gives at each index.
-    /// Each palette entry is looked up once, so it's much faster than `get_at` at every index.
+    /// Each palette entry is looked up once, and with a 4-bit palette each byte of indices gives
+    /// two bytes at once, so it's much faster than `get_at` at every index.
     /// Panics unless `table` has an entry for each value that's there.
     @track_caller
     pub fn map_into(self, table: List<u8>, out: mut List<u8>) {
@@ -471,6 +476,30 @@ impl PalettedContainer {
         let per = usize(self.storage.per_long)
         let mask = i64(self.storage.mask)
         var i: usize = 0
+        if not self.global and width == 4 and n == self.storage.data.len() * 16 {
+            // Two indices a byte, so each byte of a long gives two bytes at once, from a table of
+            // the 256 pairs: half the steps, as most sections' blocks take 4 bits.
+            var pairs = List<u8>()
+            pairs.reserve(512)
+            for j in 0usize..256 {
+                pairs.push(mapped[j & 15])
+                pairs.push(mapped[j / 16])
+            }
+            unsafe {
+                let to = out.as_mut_ptr()
+                let from = pairs.as_ptr()
+                for w in self.storage.data {
+                    var x = w
+                    for _ in 0..8 {
+                        _ = memcpy(to.add(i), from.add(usize.wrap(x & 255) * 2), 2)
+                        x = x >>> 8
+                        i += 2
+                    }
+                }
+                out.set_len(n)
+            }
+            return
+        }
         unsafe {
             let to = out.as_mut_ptr()
             let from = mapped.as_ptr()

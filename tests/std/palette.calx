@@ -236,6 +236,13 @@ fn mapped() {
     }
     c.map_into(table, mut out)
     println("{c.bits()} {out[0]} {out[1]} {out[3]} {agrees(c, table, out)}")    // out: 4 3 66 24 true
+    // All 16 entries of a 4-bit palette, which are read two at a time.
+    var full = PalettedContainer.new(200, blocks)
+    for i in 0usize..4096 {
+        full.set_at(i, 200 + u32.wrap((i * 7 + i / 16) % 16))
+    }
+    full.map_into(table, mut out)
+    println("{full.bits()} {out.len()} {out[1]} {out[4095]} {agrees(full, table, out)}")    // out: 4 4096 172 179 true
     for i in 0usize..20 {
         c.set_at(i * 200, u32.wrap(100 + i))
     }

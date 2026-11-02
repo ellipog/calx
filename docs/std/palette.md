@@ -60,7 +60,7 @@ fn main() {
 | `c.set(x, y, z, value: u32)`, `c.set_at(i: usize, value: u32)` | Sets a value, growing the palette if it's new |
 | `c.get_and_set(x, y, z, value: u32) -> u32`, `c.get_and_set_at(i, value) -> u32` | Sets a value, and gives the one it replaced |
 | `c.bits() -> i32` | How many bits each value takes now |
-| `c.map_into(table: List<u8>, out: mut List<u8>)` | Each value's byte in `table`, written over `out` in index order: `out[i]` is `table[c.get_at(i)]`. Each palette entry is looked up once, so reading a whole section this way is much faster than `get_at` at each index. Panics unless `table` has an entry for each value that's there |
+| `c.map_into(table: List<u8>, out: mut List<u8>)` | Each value's byte in `table`, written over `out` in index order: `out[i]` is `table[c.get_at(i)]`. Each palette entry is looked up once, and with a 4-bit palette each byte of indices gives two bytes at once, so reading a whole section this way is much faster than `get_at` at each index. Panics unless `table` has an entry for each value that's there |
 | `c.counts() -> List<(u32, usize)>` | Each value that's there and how many times, as Minecraft's `count` gives them: the palette's order, or by ID with no palette. Sections count their blocks and fluids with it |
 | `c.write(out: mut List<u8>)` | Adds the container to `out` as `PalettedContainer.write` sends it |
 | `c.pack() -> Packed` | The container as `pack` saves it |
