@@ -27,12 +27,13 @@ impl Task for Worker {
 fn main() {
     let jobs = Receiver<u64>()
     var results = Receiver<(u64, u64)>()
+    // The sender comes first: a worker that waited on a queue with none would find it over.
+    var send = jobs.sender()
     var threads: List<Thread> = []
     for id in 0u32..4 {
         let w = Worker { id: id, jobs: jobs.share(), out: results.sender() }
         threads.push(unsafe { Thread.spawn(w) })
     }
-    var send = jobs.sender()
     jobs.close()
     for n in 1u64..=1000 {
         send.send(n)

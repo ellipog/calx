@@ -98,6 +98,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux |
 | `CALX_NO_UPDATE_CHECK` | Set to anything, turns off the [daily check](#updating) for a newer release |
+| `CALX_PROFILE` | Set to `1`, builds keep every function's frame pointer, so a sampling profiler such as `perf record -g` sees the calls that led to each sample. It costs a register, a few percent of speed, so it's off otherwise |
 | `CALX_RELEASES` | Where `calx update` finds releases. Otherwise `https://github.com/ellipog/calx/releases`. For a mirror, or a test |
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.

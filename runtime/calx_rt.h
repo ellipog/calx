@@ -205,12 +205,10 @@ CX_FN(void, cx_drop_Receiver, (cx_Receiver* r));
 CX_FN(cx_Thread, cx_thread_spawn, (void (*run)(void*), void* task));
 CX_FN(void, cx_thread_join, (cx_Thread* t, const char* at));
 CX_FN(void, cx_drop_Thread, (cx_Thread* t));
-/* Never called, since none of them can be copied (D121), but a type's copy glue names the copy
- * of each of its fields. */
-static inline __attribute__((nodebug)) cx_Sender cx_copy_Sender(const cx_Sender* s) {
-    (void)s;
-    __builtin_trap();
-}
+/* A sender's copy is another end of its queue, as `share()` makes (CLX-115). */
+static inline __attribute__((nodebug)) cx_Sender cx_copy_Sender(const cx_Sender* s) { return cx_queue_share_sender(s); }
+/* Never called, since a receiver and a thread can't be copied (D121), but a type's copy glue
+ * names the copy of each of its fields. */
 static inline __attribute__((nodebug)) cx_Receiver cx_copy_Receiver(const cx_Receiver* r) {
     (void)r;
     __builtin_trap();

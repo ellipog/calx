@@ -952,6 +952,13 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         flags.push_back("-O3");
         flags.push_back("-march=x86-64-v3");
     }
+    // `CALX_PROFILE=1` keeps every function's frame pointer, so a sampling profiler such as perf
+    // walks the stack from its samples without unwind tables. It costs a register, so it's off.
+    // The flags are part of every cache key, so such a build never mixes with another.
+    if (env("CALX_PROFILE") == "1") {
+        flags.push_back("-fno-omit-frame-pointer");
+        flags.push_back("-mno-omit-leaf-frame-pointer");
+    }
     // Release builds compile each file to LLVM bitcode, and optimize the program as a whole when
     // it links (ThinLTO), so a small function inlines into every module that calls it, as it would
     // within one, and so do the runtime's. Only lld can; without it each file is optimized alone

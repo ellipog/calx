@@ -7408,9 +7408,11 @@ private:
         return true;
     }
 
-    // An end of a queue or a thread in `t`, which can't be copied, or null. Each struct and enum
-    // is gone into once, as `is_copy` goes into them, so types that hold each other through
-    // lists take one path down rather than one for each way.
+    // A receiving end of a queue, a thread or a library in `t`, which can't be copied, or null. A
+    // sending end can: its copy is another end of the same queue, as `share()` makes, so a value
+    // that sends to a service copies with it. Each struct and enum is gone into once, as `is_copy`
+    // goes into them, so types that hold each other through lists take one path down rather than
+    // one for each way.
     const Type* handle_inside(const Type* t) {
         std::vector<const Item*> seen;
         return handle_inside(t, 0, seen);
@@ -7423,7 +7425,7 @@ private:
             seen.push_back(t->item);
         }
         switch (t->kind) {
-            case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread: case TypeKind::library: return t;
+            case TypeKind::receiver: case TypeKind::thread: case TypeKind::library: return t;
             case TypeKind::list:
                 // A copy of a `Shared` is one more owner of the same value.
                 if (t->shared) return nullptr;

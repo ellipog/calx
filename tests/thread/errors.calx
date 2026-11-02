@@ -13,7 +13,7 @@ impl Task for Job {
 }
 
 struct Holder {
-    s: Sender<i32>
+    r: Receiver<i32>
 }
 
 fn queue_of<T>() -> Receiver<T> {    // error: `T` isn't `Send`, so it can't go to another thread in a queue; give `T` the bound `Send`
@@ -37,8 +37,8 @@ fn main() {
     let s = Sender<i32>()                 // error: a `Sender` comes from the `Receiver` of its queue
     let q = Receiver<i32>()
     let c = q.copy()                      // error: `Receiver<i32>` can't be copied; make another end of the same queue with `share()`
-    let h = Holder { s: q.sender() }
-    let h2 = h.copy()                     // error: `Holder` can't be copied, since it holds `Sender<i32>`
+    let h = Holder { r: q.share() }
+    let h2 = h.copy()                     // error: `Holder` can't be copied, since it holds `Receiver<i32>`
     let tx = q.sender()
     tx.send(1)                            // error: `tx` can't be changed
     tx.next()                             // error: `Sender<i32>` has no method `next`; the queue's `Receiver` takes its messages

@@ -1,6 +1,16 @@
 // A queue on one thread: what `next` and `wait` give, and what happens to messages that nobody
 // takes. The leak check at the end shows every one of them was dropped.
 
+struct Link {
+    name: String
+    to: Sender<String>
+}
+
+// Sends the link's name, then drops the link, and its end of the queue with it.
+fn send_from(l: own Link) {
+    l.to.send(l.name.copy())
+}
+
 fn drain(r: mut Receiver<String>) -> String {
     var s = String("")
     while let m = r.next() {
@@ -47,4 +57,18 @@ fn main() {
         b.send(7)
     }
     println("{inner.next()}")             // out: some(7)
+
+    // A copy of a sender is another end of its queue, so a value holding one copies (CLX-115),
+    // and the queue counts each copy: waiting gives `none` only once every one is gone.
+    var r4 = Receiver<String>()
+    let a = Link { name: "a", to: r4.sender() }
+    var b2 = a.copy()
+    b2.name = "b"
+    var bare = b2.to.copy()
+    send_from(a)
+    send_from(b2)
+    bare.send("bare")
+    println("{r4.wait()} {r4.wait()} {r4.wait()}")    // out: some(a) some(b) some(bare)
+    bare.close()
+    println("{r4.wait()}")                // out: none
 }

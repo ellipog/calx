@@ -5471,7 +5471,8 @@ $dropall    m->len = 0;
                        "(" + address(recv) + ", &" + o + ".v, " + location(e->span) + "); " + o + "; })";
             }
             case BMethod::queue_sender: return "cx_queue_sender(" + address(recv) + ")";
-            case BMethod::queue_share:
+            // A sender's copy is another end, as `share()` makes; nothing else here is copied.
+            case BMethod::queue_share: case BMethod::copy:
                 return std::string(t->kind == TypeKind::sender ? "cx_queue_share_sender(" : "cx_queue_share_receiver(") + address(recv) + ")";
             case BMethod::queue_close: case BMethod::thread_join: {
                 std::string h = tmp();

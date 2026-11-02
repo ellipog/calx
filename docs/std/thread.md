@@ -81,9 +81,28 @@ A queue carries messages of one type, `T`, which must be `Send`. Each message mo
 | `r.next()` | The first message, or `none` at once if there isn't one |
 | `r.wait()` | The first message, waiting for one if the queue is empty. Gives `none` once it's empty and every `Sender` is gone |
 | `s.share()`, `r.share()` | Another end of the same kind, for the same queue |
+| `s.copy()` | The same as `s.share()`: a copy of a sending end is another end of the same queue |
 | `s.close()`, `r.close()` | Drops the end now, as going out of scope would |
 
 `send`, `next` and `wait` change the queue, so they're called on a `var`, or a `mut` or `own` parameter. A queue grows as messages come, so `send` never waits.
+
+Since a copy of a `Sender` is another end, a value that holds one copies with it: a struct with a field that sends to a service can be copied, and each copy sends to the same queue. That's how every worker reading one value from a `Shared<T>` can ask one service for what they all want, such as a table made once:
+
+```calx
+struct Link {
+    to: Sender<i32>
+}
+
+fn main() {
+    var r = Receiver<i32>()
+    let a = Link { to: r.sender() }
+    var b = a.copy()
+    b.to.send(7)
+    var c = a.copy()
+    c.to.send(8)
+    println("{r.wait()} {r.wait()}")    // out: some(7) some(8)
+}
+```
 
 Messages still in a queue when its last receiving end goes are dropped then. Once every end of a queue is gone, its memory is freed.
 
@@ -104,7 +123,7 @@ fn main() {
 ## What it doesn't allow
 
 - Data every thread reads, such as tables or configuration, goes to each in a [`Shared<T>`](../reference/shared.md): a copy of it is one more owner of the same value, not a second value.
-- A `Sender`, a `Receiver` and a `Thread` can't be copied, compared, shown or hashed. Each is a handle to something threads share, and `share()` is how to get another end.
+- A `Receiver` and a `Thread` can't be copied: a receiving end is shared on purpose, with `share()`, since its copies would split the messages between them, and a thread is joined once. None of the three are compared, shown or hashed. Each is a handle to something threads share.
 - A queue can't be used, and a thread can't be joined, inside a `parallel for`: which iteration's message came first would depend on timing. Writing it in the body is an error, and reaching it from a function the body calls panics, with one thread as with many.
 - Threads share no memory: every value has one owner (D76). A task, and every message, must be `Send`, so it holds no pointers, and a generic one needs the bound `T: Send`.
 
