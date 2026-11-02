@@ -154,7 +154,10 @@ static void buf_add_wide(const wchar_t* w, int units) {
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
     wchar_t* w = wide(path, len);
     if (!w) return -1;
-    HANDLE h = write == 3 ? CreateFileW(w, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    /* 3 writes in place, and keeps a file open: shared as Java's FileChannel shares one, so others
+     * may read, write and remove it meanwhile. */
+    HANDLE h = write == 3 ? CreateFileW(w, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
              : write == 2 ? CreateFileW(w, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
              : write ? CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
                      : CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,

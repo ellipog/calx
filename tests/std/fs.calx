@@ -324,8 +324,13 @@ fn main() {
     // Opened again, it keeps what it holds.
     let reopened = open("{dir}/kept.bin")!
     reopened.write_parts([(8u64, [5])], false)!
-    reopened.close()!
     println("{read("{dir}/kept.bin")!.len()}")    // out: 9
+    // While it's open, others can write it and remove it, as with Java's `FileChannel`.
+    write_parts("{dir}/kept.bin", [(0u64, [6])], false)!
+    println("{reopened.read_part(0, 1)!}")    // out: [6]
+    remove_file("{dir}/kept.bin")!
+    reopened.close()!
+    println("{is_file("{dir}/kept.bin")}")    // out: false
     match open("{dir}/x") {
         ok(_) => println("opened a directory"),
         err(e) => println(describe(e)),    // out: is a directory

@@ -299,7 +299,8 @@ pub struct File {
 }
 
 /// Opens the file at `path` to read and write, creating it if nothing is there and keeping what
-/// it holds. Other programs can read it while it's open, but not write it.
+/// it holds. Other programs, and this one, can read, write and remove it while it's open, as Java
+/// lets them while it has a `FileChannel` open.
 pub fn open(path: String) -> File ! FsError {
     let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 3) }
     if h < 0 {
