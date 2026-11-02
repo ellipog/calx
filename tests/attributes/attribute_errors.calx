@@ -1,4 +1,4 @@
-// The compiler knows `@track_caller`, `@export` and `@attribute`. The rest are functions a library
+// The compiler knows `@track_caller`, `@export`, `@handle` and `@attribute`. The rest are functions a library
 // marks `@attribute`, imported as any function is (D57, D124).
 
 @track_caller    // error: `@track_caller` is only for a function written in Calx

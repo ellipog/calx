@@ -460,6 +460,7 @@ struct Item {
     bool exported = false;       // `@export`: a library exports it under its own name (D123)
     bool generated = false;      // an attribute generated it (D124), so "never used" isn't the program's mistake
     bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
+    bool is_handle = false;      // `@handle`: a struct that stands for something of the system's, which can't be copied
     std::string_view abi;
     // struct, enum
     Slice<FieldDecl> fields;

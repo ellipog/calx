@@ -378,6 +378,8 @@ bool copy_walk(const Type* t, int depth, Seen& seen) {
             }
             return true;
         case TypeKind::struct_:
+            // A handle stands for something of the system's, so copying its bytes would make two.
+            if (t->item->is_handle) return false;
             for (const FieldDecl& f : t->item->fields) {
                 if (f.resolved && !copy_walk(f.resolved, depth + 1, seen)) return false;
             }

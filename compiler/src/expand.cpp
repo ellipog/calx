@@ -20,7 +20,9 @@ namespace {
 std::string q(std::string_view s) { return "`" + std::string(s) + "`"; }
 
 // The attributes the compiler knows itself.
-bool builtin_attribute(std::string_view n) { return n == "track_caller" || n == "export" || n == "attribute"; }
+bool builtin_attribute(std::string_view n) {
+    return n == "track_caller" || n == "export" || n == "attribute" || n == "handle";
+}
 
 // How many programs' expansions the cache keeps (D64). Each is a few small text files.
 constexpr std::size_t kKeepExpansions = 256;

@@ -598,6 +598,18 @@ private:
                 }
                 continue;
             }
+            if (name == "handle") {
+                if (!a.args.empty()) {
+                    error(a.span, "`@handle` takes no arguments");
+                } else if (it->kind != ItemKind::struct_ || owner) {
+                    error(a.span, "`@handle` is for a struct, one that stands for something of the system's, such as an open file");
+                } else if (it->is_handle) {
+                    error(a.span, "`@handle` is already on " + q(text(it->name)));
+                } else {
+                    it->is_handle = true;
+                }
+                continue;
+            }
             if (name != "track_caller") {
                 if (owner) {
                     error(a.span, "an attribute from a library goes on a struct, an enum or a function on its own, not one in " +
@@ -7445,6 +7457,7 @@ private:
                 }
                 return nullptr;
             case TypeKind::struct_:
+                if (t->item->is_handle) return t;
                 for (const FieldDecl& f : t->item->fields) {
                     if (!f.resolved) continue;
                     if (const Type* h = handle_inside(f.resolved, depth + 1, seen)) return h;
@@ -8148,6 +8161,8 @@ private:
             error(e->callee->span, name_of(recv) + " can't be copied" + (h == recv ? "" : ", since it holds " + name_of(h)) +
                                        (h->kind == TypeKind::thread    ? "; a thread is joined once, by whatever holds it"
                                         : h->kind == TypeKind::library ? "; a library is closed once, by whatever holds it"
+                                        : h->kind == TypeKind::struct_ ? "; it's `@handle`, which stands for something of the "
+                                                                         "system's that's let go once, by whatever holds it"
                                                                        : "; make another end of the same queue with `share()`"));
             return T.error;
         }

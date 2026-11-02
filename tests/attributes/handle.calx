@@ -1,0 +1,27 @@
+// `@handle` marks a struct that stands for something of the system's, such as an open file: it's
+// never `Copy`, so it moves, and it can't be copied, nor can anything that holds one.
+
+@handle
+struct Door {
+    id: i64
+}
+
+impl Door {
+    fn close(own self) -> i64 {
+        return self.id
+    }
+}
+
+struct House {
+    door: Door
+    name: String
+}
+
+fn main() {
+    let d = Door { id: 7 }
+    let moved = d
+    println("{moved.close()}")    // out: 7
+    let h = House { door: Door { id: 3 }, name: String("home") }
+    let House { door: door, name: name } = h
+    println("{name} {door.close()}")    // out: home 3
+}

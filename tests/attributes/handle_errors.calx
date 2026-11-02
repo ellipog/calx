@@ -1,0 +1,35 @@
+// `@handle` can't be copied by `.copy()`, and holding one makes a value that can't be copied
+// either. It's only for a struct, once, with nothing after it.
+
+@handle
+struct Door {
+    id: i64
+}
+
+struct House {
+    door: Door
+}
+
+@handle    // error: `@handle` is for a struct, one that stands for something of the system's
+enum Kind {
+    Open
+}
+
+@handle(1)    // error: `@handle` takes no arguments
+struct Gate {
+    id: i64
+}
+
+@handle
+@handle    // error: `@handle` is already on `Lock`
+struct Lock {
+    id: i64
+}
+
+fn main() {
+    let d = Door { id: 1 }
+    let again = d.copy()    // error: `Door` can't be copied; it's `@handle`
+    let h = House { door: Door { id: 2 } }
+    let other = h.copy()    // error: `House` can't be copied, since it holds `Door`
+    println("{again.id} {other.door.id} {d.id} {Kind.Open} {Gate { id: 3 }.id} {Lock { id: 4 }.id}")
+}

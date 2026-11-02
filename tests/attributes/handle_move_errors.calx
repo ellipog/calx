@@ -1,0 +1,14 @@
+// A `@handle` struct is never `Copy`, though all it holds is: using it moves it, so it can't be
+// used again.
+
+@handle
+struct Door {
+    id: i64
+}
+
+fn main() {
+    let d = Door { id: 1 }
+    let twice = d
+    let thrice = d    // error: moved
+    println("{twice.id} {thrice.id}")
+}

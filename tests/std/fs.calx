@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, set_mode, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, open, set_mode, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -308,6 +308,31 @@ fn main() {
     match try_lock("{dir}/x", snowman) {
         ok(_) => println("locked a directory"),
         err(e) => println(describe(e)),    // out: is a directory
+    }
+
+    // A file kept open: made if it isn't there, read and written in parts without opening it
+    // again, synced, and closed, after which what was written is there to `read`.
+    let kept = open("{dir}/kept.bin")!
+    println("{kept.size()!} {kept.path() == "{dir}/kept.bin"}")    // out: 0 true
+    kept.write_parts([(0u64, [1, 2, 3, 4]), (6u64, [7, 8])], false)!
+    kept.write_parts([(2u64, [9])], true)!
+    kept.sync()!
+    println("{kept.size()!} {kept.read_part(0, 8)!} {kept.read_part(6, 10)!}")    // out: 8 [1, 2, 9, 4, 0, 0, 7, 8] [7, 8]
+    println("{kept.read_parts([(1u64, 2usize), (7u64, 5usize), (20u64, 1usize)])!}")    // out: [[2, 9], [8], []]
+    kept.close()!
+    println("{read("{dir}/kept.bin")!}")    // out: [1, 2, 9, 4, 0, 0, 7, 8]
+    // Opened again, it keeps what it holds.
+    let reopened = open("{dir}/kept.bin")!
+    reopened.write_parts([(8u64, [5])], false)!
+    reopened.close()!
+    println("{read("{dir}/kept.bin")!.len()}")    // out: 9
+    match open("{dir}/x") {
+        ok(_) => println("opened a directory"),
+        err(e) => println(describe(e)),    // out: is a directory
+    }
+    match open("{dir}/missing/kept.bin") {
+        ok(_) => println("opened in a missing directory"),
+        err(e) => println(describe(e)),    // out: not found
     }
 
     // Everything goes.

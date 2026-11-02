@@ -32,6 +32,29 @@ A type is `Copy` when its values own no memory. Copying one copies its bytes, an
 
 Nothing marks a type `Copy`: it follows from what the type holds. A struct that gains a `String` field stops being `Copy`, and the compiler then checks every use of it as an owning value.
 
+### Handles
+
+A struct marked `@handle` stands for something of the system's, such as an open file, kept as a number the system gave. It's never `Copy`, whatever it holds, so using it moves it, and `.copy()` on it, or on anything that holds one, is an error: a copy would be a second struct for one open file, and closing both would close the file twice, or, once the system gave the number to another file, close that one. [`std.fs`'s `File`](../std/fs.md#files-kept-open) and `FileLock` are handles.
+
+```calx
+@handle
+struct Door {
+    id: i64
+}
+
+impl Door {
+    fn close(own self) -> i64 {
+        return self.id
+    }
+}
+
+fn main() {
+    let d = Door { id: 7 }
+    let moved = d          // `d` moves, though all it holds is an `i64`
+    println("{moved.close()}")    // out: 7
+}
+```
+
 ## Moves
 
 An owning value moves when it's given a new owner:

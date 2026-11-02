@@ -57,7 +57,9 @@ fn main() {
 | `separator() -> String` | What the system puts between a path's names, as Java's `File.separator`: `\` on Windows and `/` elsewhere, as in the paths `real_path` and `temp_dir` give. Either works in the paths `std.fs` is given |
 | `temp_dir() -> String ! FsError` | A new, empty directory of the program's own in the system's temporary folder, for it to remove |
 | `Metadata` | `size: u64`, the length in bytes, which for a directory is whatever the system says, and `modified: Timestamp`, when what it holds last changed, to the millisecond. Writing or appending to a file sets it. And `mode: u32`, its permission bits, such as `0o644`. On Windows, which has only a read-only flag, they're `0o666`, or `0o444` when it's read-only, with `0o111` added for a directory |
-| `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends |
+| `open(path: String) -> File ! FsError` | The file kept open to read and write, made if nothing's there, keeping what it holds. Other programs can read it while it's open, but not write it. See [Files kept open](#files-kept-open) |
+| `File` | An open file: its `path()`, `size() -> u64`, `read_part(from, n)` and `read_parts(ranges)`, which give what the functions of those names do, `write_parts(parts, sync)`, as the function does, `sync()`, and `close(own self)`. All but `path` fail with `FsError`. It's open until `close`, or until the program ends. It's a [handle](../reference/ownership.md#handles), so it can't be copied |
+| `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends. It's a handle too |
 | `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
@@ -87,7 +89,28 @@ fn main() {
 }
 ```
 
-There's no handle to a file left open, apart from a lock's: each call opens the file, does all it was asked, and closes it, so nothing a program forgets can stay open. A batch of parts costs one opening, so a program writes a region's chunks together, not one call each.
+Each of these functions opens the file, does all it was asked, and closes it, so nothing a program forgets stays open. A batch of parts costs one opening, so a program writes a region's chunks together, not one call each.
+
+## Files kept open
+
+A program that goes back to the same file again and again keeps it open with `open`, as Java keeps a `FileChannel`, and reads and writes its parts through the `File`. Opening costs a little each time, and on Windows closing a file that was written costs more: the antivirus scans it again. On the reference machine (an i9-13900K, with Windows Defender on), writing 20 KB into a 4 MB file and then 8 KB at its start took 7.8 ms as two calls of `write_parts`, and 8 µs through a `File` kept open; with `sync`, 11.5 ms and 4.5 ms, which is the wait for the disk. A server that saved every chunk it made through `write_parts` spent nearly all of its saving thread's time there, and its players' chunks waited behind it.
+
+```calx
+import std.fs.{open, read, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    let file = open("{dir}/r.0.0.mca")!
+    file.write_parts([(8u64, [0, 0, 0, 2, 2])], true)!
+    file.write_parts([(0u64, [0, 0, 2, 1])], true)!
+    println("{file.size()!} {file.read_part(8, 5)!}")    // out: 13 [0, 0, 0, 2, 2]
+    file.close()!
+    println("{read("{dir}/r.0.0.mca")!.len()}")    // out: 13
+    remove_dir_all(dir)!
+}
+```
+
+A `File` is open until `close`, or until the program ends, as a `FileLock` is held: nothing closes it when it's let go, so a program keeps the files it uses most and closes the others, as Minecraft keeps 256 region files. It's a [handle](../reference/ownership.md#handles), so there's never a copy of one to close it twice.
 
 ## Locking
 

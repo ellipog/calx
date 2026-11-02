@@ -285,8 +285,102 @@ pub fn write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsE
     }
 }
 
+/// A file kept open to read and write parts of, as Java keeps a `FileChannel`, for a program that
+/// goes back to the same file again and again, such as a game's region files. Each of the
+/// functions above opens the file and closes it again, and on Windows a file closed after a write
+/// is scanned again by the antivirus: writing 20 KB into a 4 MB file took 3 ms that way on the
+/// reference machine, where a `File` kept open took 30 µs. It's open until `close`, or until the
+/// program ends, so a program keeps the files it uses most and closes the rest. It's a handle, so
+/// it can't be copied: there's one open file, and one thing to close it.
+@handle
+pub struct File {
+    handle: i64
+    named: String
+}
+
+/// Opens the file at `path` to read and write, creating it if nothing is there and keeping what
+/// it holds. Other programs can read it while it's open, but not write it.
+pub fn open(path: String) -> File ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 3) }
+    if h < 0 {
+        fail last_error()
+    }
+    return File { handle: h, named: path.copy() }
+}
+
+impl File {
+    /// The path it was opened at.
+    pub fn path(self) -> String {
+        return self.named.copy()
+    }
+
+    /// Its length in bytes.
+    pub fn size(self) -> u64 ! FsError {
+        let size = unsafe { cx_fs_size(self.handle) }
+        if size < 0 {
+            fail last_error()
+        }
+        return u64.wrap(size)
+    }
+
+    /// The `n` bytes from byte `from`, or fewer where the file ends first, as `read_part` reads
+    /// them.
+    pub fn read_part(self, from: u64, n: usize) -> List<u8> ! FsError {
+        var out = List<u8>()
+        if not read_range(self.handle, from, n, mut out) {
+            fail last_error()
+        }
+        return out
+    }
+
+    /// What `read_part` gives for each of `ranges`, a byte offset and a length, in order.
+    pub fn read_parts(self, ranges: List<(u64, usize)>) -> List<List<u8>> ! FsError {
+        var parts = List<List<u8>>()
+        parts.reserve(ranges.len())
+        for (from, n) in ranges {
+            var out = List<u8>()
+            if not read_range(self.handle, from, n, mut out) {
+                fail last_error()
+            }
+            parts.push(out)
+        }
+        return parts
+    }
+
+    /// Writes each of `parts`, a byte offset and the bytes to put there, in order, as the
+    /// function `write_parts` does, and with `sync` returns once the system says they're on the
+    /// disk. A later part wins where two overlap; a part past the end makes the file longer.
+    pub fn write_parts(self, parts: List<(u64, List<u8>)>, sync: bool) ! FsError {
+        for (at, bytes) in parts {
+            if unsafe { cx_fs_seek(self.handle, at) } == 0 or unsafe { cx_fs_write(self.handle, bytes.as_ptr(), bytes.len()) } == 0 {
+                fail last_error()
+            }
+        }
+        if sync {
+            try self.sync()
+        }
+    }
+
+    /// Returns once the system says everything written to it is on the disk, as Java's
+    /// `FileChannel.force(true)`.
+    pub fn sync(self) ! FsError {
+        if unsafe { cx_fs_sync(self.handle) } == 0 {
+            fail last_error()
+        }
+    }
+
+    /// Closes it. What was written is the system's to put on the disk, as when any file is closed.
+    pub fn close(own self) ! FsError {
+        if unsafe { cx_fs_close(self.handle) } == 0 {
+            fail last_error()
+        }
+    }
+}
+
 /// A lock on a file, which no other program, and no other `try_lock` in this one, can take while
-/// it's held, Java's `FileLock`. It's held until `release`, or until the program ends.
+/// it's held, Java's `FileLock`. It's held until `release`, or until the program ends. It's a
+/// handle, so it can't be copied.
+@handle
 pub struct FileLock {
     handle: i64
 }
