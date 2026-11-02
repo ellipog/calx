@@ -27,14 +27,17 @@ const MAX_SIZE: usize = 67108864
 /// Values of up to 32 bits each, packed into longs as vanilla's `SimpleBitStorage` packs them:
 /// from each long's low bits up, as many whole values as fit, so none spans two longs. With 0
 /// bits, every value is 0 and there are no longs, as in vanilla's `ZeroBitStorage`.
+///
+/// It's 40 bytes: its numbers are kept in the widths they need, as a chunk keeps two for each of
+/// its sections.
 pub struct BitStorage {
-    width: i32
-    count: usize
-    per_long: usize
-    // floor(2^32 / per_long) + 1
-    divide_mul: u64
-    mask: i64
     data: List<i64>
+    count: u32
+    // floor(2^32 / per_long) + 1, which fits, as `per_long` is at least 2
+    divide_mul: u32
+    mask: u32
+    width: u8
+    per_long: u8
 }
 
 impl BitStorage {
@@ -49,15 +52,15 @@ impl BitStorage {
             panic("{size} values are more than a BitStorage holds, {MAX_SIZE}")
         }
         if bits == 0 {
-            return BitStorage { width: 0, count: size, per_long: 0, divide_mul: 0, mask: 0, data: [] }
+            return BitStorage { width: 0, count: u32.wrap(size), per_long: 0, divide_mul: 0, mask: 0, data: [] }
         }
         let per_long = usize.wrap(64 / bits)
         return BitStorage {
-            width: bits,
-            count: size,
-            per_long: per_long,
-            divide_mul: (1u64 << 32) / u64(per_long) + 1,
-            mask: (1i64 << bits) - 1,
+            width: u8.wrap(bits),
+            count: u32.wrap(size),
+            per_long: u8.wrap(per_long),
+            divide_mul: u32.wrap((1u64 << 32) / u64(per_long) + 1),
+            mask: u32.wrap((1i64 << bits) - 1),
             data: [0i64; (size + per_long - 1) / per_long],
         }
     }
@@ -77,64 +80,64 @@ impl BitStorage {
 
     /// How many bits each value takes.
     pub fn bits(self) -> i32 {
-        return self.width
+        return i32(self.width)
     }
 
     /// How many values there are.
     pub fn len(self) -> usize {
-        return self.count
+        return usize(self.count)
     }
 
     /// The value at `i`. Panics unless `i` is less than `len()`.
     @track_caller
     pub fn get(self, i: usize) -> u32 {
-        if i >= self.count {
+        if i >= usize(self.count) {
             panic("index {i} is out of bounds for {self.count} values")
         }
         if self.width == 0 {
             return 0
         }
-        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
-        let shift = i32.wrap(i - cell * self.per_long) * self.width
-        return u32.wrap((self.data[cell] >> shift) & self.mask)
+        let cell = usize.wrap((u64(i) * u64(self.divide_mul)) >> 32)
+        let shift = i32.wrap(i - cell * usize(self.per_long)) * i32(self.width)
+        return u32.wrap((self.data[cell] >> shift) & i64(self.mask))
     }
 
     /// Sets the value at `i` to `v`. Panics unless `i` is less than `len()` and `v` fits in
     /// `bits()`.
     @track_caller
     pub fn set(mut self, i: usize, v: u32) {
-        if i >= self.count {
+        if i >= usize(self.count) {
             panic("index {i} is out of bounds for {self.count} values")
         }
-        if i64(v) > self.mask {
+        if v > self.mask {
             panic("{v} doesn't fit in {self.width} bits")
         }
         if self.width == 0 {
             return
         }
-        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
-        let shift = i32.wrap(i - cell * self.per_long) * self.width
+        let cell = usize.wrap((u64(i) * u64(self.divide_mul)) >> 32)
+        let shift = i32.wrap(i - cell * usize(self.per_long)) * i32(self.width)
         let w = self.data[cell]
-        self.data[cell] = (w & ~(self.mask << shift)) | (i64(v) << shift)
+        self.data[cell] = (w & ~(i64(self.mask) << shift)) | (i64(v) << shift)
     }
 
     /// Sets the value at `i` to `v`, and gives the value it had. Panics as `set` does.
     @track_caller
     pub fn get_and_set(mut self, i: usize, v: u32) -> u32 {
-        if i >= self.count {
+        if i >= usize(self.count) {
             panic("index {i} is out of bounds for {self.count} values")
         }
-        if i64(v) > self.mask {
+        if v > self.mask {
             panic("{v} doesn't fit in {self.width} bits")
         }
         if self.width == 0 {
             return 0
         }
-        let cell = usize.wrap((u64(i) * self.divide_mul) >> 32)
-        let shift = i32.wrap(i - cell * self.per_long) * self.width
+        let cell = usize.wrap((u64(i) * u64(self.divide_mul)) >> 32)
+        let shift = i32.wrap(i - cell * usize(self.per_long)) * i32(self.width)
         let w = self.data[cell]
-        self.data[cell] = (w & ~(self.mask << shift)) | (i64(v) << shift)
-        return u32.wrap((w >> shift) & self.mask)
+        self.data[cell] = (w & ~(i64(self.mask) << shift)) | (i64(v) << shift)
+        return u32.wrap((w >> shift) & i64(self.mask))
     }
 
     /// Sets every value to `v`, as vanilla's `fill` does: when the bits don't divide 64, the bits
@@ -142,14 +145,14 @@ impl BitStorage {
     /// fits in `bits()`.
     @track_caller
     pub fn fill(mut self, v: u32) {
-        if i64(v) > self.mask {
+        if v > self.mask {
             panic("{v} doesn't fit in {self.width} bits")
         }
         if self.width == 0 {
             return
         }
         var cell = i64(v)
-        var offset = self.width
+        var offset = i32(self.width)
         while offset < 64 {
             cell |= cell << offset
             offset *= 2
@@ -162,18 +165,19 @@ impl BitStorage {
     /// Every value, in order.
     pub fn values(self) -> List<u32> {
         if self.width == 0 {
-            return [0u32; self.count]
+            return [0u32; usize(self.count)]
         }
+        let count = usize(self.count)
         var out = List<u32>()
-        out.reserve(self.count)
+        out.reserve(count)
         for w in self.data {
             var x = w
-            for _ in 0usize..self.per_long {
-                if out.len() == self.count {
+            for _ in 0usize..usize(self.per_long) {
+                if out.len() == count {
                     return out
                 }
-                out.push(u32.wrap(x & self.mask))
-                x = x >>> self.width
+                out.push(u32.wrap(x & i64(self.mask)))
+                x = x >>> i32(self.width)
             }
         }
         return out
@@ -202,13 +206,13 @@ fn ceil_log2(n: usize) -> i32 {
 /// How a container stores its values, as vanilla's `Strategy` does for block states or biomes:
 /// how many there are, and what a palette of a given size becomes.
 pub struct Strategy {
-    axis_bits: i32
+    registry: u32
+    axis_bits: u8
     // The bits an indexed palette takes at the least and at the most. Past the most, the
     // storage holds the registry's own IDs.
-    min_bits: i32
-    max_bits: i32
-    registry: u32
-    global_bits: i32
+    min_bits: u8
+    max_bits: u8
+    global_bits: u8
 }
 
 // What a palette of 2^bits entries becomes: vanilla's `Configuration`. `memory` is how many
@@ -228,7 +232,7 @@ impl Strategy {
         if states == 0 {
             panic("a registry needs at least one value")
         }
-        return Strategy { axis_bits: 4, min_bits: 4, max_bits: 8, registry: states, global_bits: ceil_log2(usize(states)) }
+        return Strategy { registry: states, axis_bits: 4, min_bits: 4, max_bits: 8, global_bits: u8.wrap(ceil_log2(usize(states))) }
     }
 
     /// A section's biomes, 4 × 4 × 4, from a registry of `biomes` biomes. Up to 8 different ones
@@ -239,12 +243,12 @@ impl Strategy {
         if biomes == 0 {
             panic("a registry needs at least one value")
         }
-        return Strategy { axis_bits: 2, min_bits: 1, max_bits: 3, registry: biomes, global_bits: ceil_log2(usize(biomes)) }
+        return Strategy { registry: biomes, axis_bits: 2, min_bits: 1, max_bits: 3, global_bits: u8.wrap(ceil_log2(usize(biomes))) }
     }
 
     /// How many values a container holds: 4,096 block states or 64 biomes.
     pub fn size(self) -> usize {
-        return usize.wrap(1 << (self.axis_bits * 3))
+        return usize.wrap(1 << (i32(self.axis_bits) * 3))
     }
 
     /// How many values the registry has, so every value is less than this.
@@ -256,22 +260,23 @@ impl Strategy {
     /// each is from 0 to 15 for block states, or 0 to 3 for biomes.
     @track_caller
     pub fn index(self, x: i32, y: i32, z: i32) -> usize {
-        let side = 1 << self.axis_bits
+        let axis = i32(self.axis_bits)
+        let side = 1 << axis
         if x < 0 or x >= side or y < 0 or y >= side or z < 0 or z >= side {
             panic("({x}, {y}, {z}) is outside a container {side} wide")
         }
-        return usize.wrap((((y << self.axis_bits) | z) << self.axis_bits) | x)
+        return usize.wrap((((y << axis) | z) << axis) | x)
     }
 
     fn config(self, bits: i32) -> Config {
         if bits == 0 {
             return Config { global: false, memory: 0, stored: 0 }
         }
-        if bits <= self.max_bits {
-            let b = bits.max(self.min_bits)
+        if bits <= i32(self.max_bits) {
+            let b = bits.max(i32(self.min_bits))
             return Config { global: false, memory: b, stored: b }
         }
-        return Config { global: true, memory: self.global_bits, stored: bits }
+        return Config { global: true, memory: i32(self.global_bits), stored: bits }
     }
 }
 
@@ -349,7 +354,8 @@ pub struct Packed {
     pub data: List<i64>?
 }
 
-/// A section's block states or biomes, as vanilla's `PalettedContainer` keeps them.
+/// A section's block states or biomes, as vanilla's `PalettedContainer` keeps them, in 112
+/// bytes.
 ///
 /// Values are registry IDs. The palette starts as the first value alone, with no bits. A value
 /// it doesn't have is added at the end; when that needs more bits, the values are moved to a

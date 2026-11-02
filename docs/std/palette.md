@@ -110,6 +110,10 @@ A palette of one entry ignores any longs, as Minecraft does. Where an entry appe
 - Finding a value's long divides by a multiply and a shift, as Minecraft does, with no division. That's exact for indices below 2^26, hence the limit on `size`.
 - Values are `u32`, so 32 bits hold up to 2^32 − 1. Minecraft checks values as an `int`, so it holds only up to 2^31 − 1 there. Nothing Minecraft stores comes near: block states take 16 bits.
 
+## Size
+
+A server keeps two containers for each section of each chunk it holds, so their size is memory per chunk. Each number is kept in the width it needs: a `BitStorage` is 40 bytes besides its longs, a `Strategy` 8, and a `PalettedContainer` 112 besides its palette's entries and its longs. A chunk of 24 sections, each two containers and a few counts, then fits in a 6 KiB block, where it took 8 KiB when a container was 144 bytes. Reading and setting values is as fast as it was.
+
 ## Checked against Minecraft
 
 The rig's `palette` probe (calcite/rig/PROTOCOL.md) runs a list of operations on a container or a storage and compares every result, byte for byte, with Minecraft 26.3's own `PalettedContainer` and `SimpleBitStorage`, through the same operations. Its 129 cases come from calcite/cases/palette/gen.py:
