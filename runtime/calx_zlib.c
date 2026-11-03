@@ -11,12 +11,36 @@
  * match is copied 8 bytes at a time.
  *
  * Deflating takes the whole input too. It finds matches through chains of the earlier positions
- * whose first four bytes hash the same, comparing 8 bytes at a time. At levels 4 to 9 it checks
- * whether the next position has a longer match before taking one, as zlib does. Each block of up
+ * whose first four bytes hash the same, comparing 8 bytes at a time. At levels 4 to 9 it also
+ * finds matches of three bytes, through a table of the last position with each three bytes'
+ * hash, and before taking a match it looks for a better one at the next position, as libdeflate
+ * does: half as hard, and better by its length less what its distance costs. Those levels end a
+ * block where the kinds of symbols change, as libdeflate's heuristic finds it. Each block of up
  * to BLOCK_SYMS symbols gets its own Huffman code, the fixed code, or no code, whichever is
  * shortest.
  *
- * Words are read and written little-endian, as every target Calx has is. */
+ * Words are read and written little-endian, as every target Calx has is.
+ *
+ * The lazy levels' parse, their search depths and lengths, and `block_should_end`, are written
+ * after libdeflate's (CLX-131), whose notice follows:
+ *
+ * Copyright 2016 Eric Biggers
+ * Copyright 2024 Google LLC
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+ * and associated documentation files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or
+ * substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+ * BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
 #include "calx_rt.h"
 
 #include <string.h>
@@ -749,16 +773,25 @@ leave:
 #define MAX_MATCH 258
 #define BLOCK_SYMS 16384
 
-/* How hard each level looks: how many earlier positions it tries, the length that's good enough
- * to stop at, whether it waits a position for a longer match (and up to what length it bothers),
- * and the length past which it tries a quarter as many. */
+/* How hard each level looks: how many earlier positions it tries and the length that's good
+ * enough to stop at. From LAZY_FROM on, it looks at the next position before taking a match. */
 typedef struct {
-    cx_u16 chain, nice, lazy, good;
+    cx_u16 chain, nice;
 } level_cfg;
 static const level_cfg levels[10] = {
-    {0, 0, 0, 0},       {2, 16, 0, 0},       {6, 32, 0, 0},       {16, 64, 0, 0},       {16, 32, 8, 4},
-    {32, 64, 16, 8},    {128, 128, 16, 8},   {256, 192, 64, 16},  {1024, 258, 128, 32}, {4096, 258, 258, 32},
+    {0, 0}, {2, 16}, {6, 32}, {16, 64}, {4, 12}, {8, 24}, {20, 65}, {35, 130}, {150, 258}, {300, 258},
 };
+#define LAZY_FROM 4
+
+/* The table of three-byte matches: its size, and how far back such a match may be, past which its
+ * distance costs more than it saves, as libdeflate counts it. */
+#define H3BITS 14
+#define FAR3 8192
+
+/* A block may end once this many symbols are counted since it last looked, and is at least
+ * MIN_BLOCK bytes, with as many to come. */
+#define SPLIT_EVERY 512
+#define MIN_BLOCK 5000
 
 typedef struct {
     cx_u8* p;
@@ -794,15 +827,20 @@ typedef struct {
     cx_u32 n;
     cx_u32* head;
     cx_u32* prev;
+    cx_u32* head3;    /* the lazy levels' last position with each three bytes' hash */
     cx_u32 hbits, wmask;
     cx_u32* syms;     /* a literal's byte, or 1 << 24 | distance << 8 | (length - 3) */
     cx_u32 nsyms;
     cx_u32 block;     /* the first input byte of the current block */
     cx_u32 lfreq[286], dfreq[30];
     bitout w;
+    /* The lazy levels' symbols by kind, the block's until it last looked and those since: a
+     * literal's top two bits and lowest, and a match short or long (block_should_end). */
+    cx_u32 kinds[10], new_kinds[10], nkinds, new_nkinds;
 } deflater;
 
 static inline cx_u32 hash4(const cx_u8* p, cx_u32 bits) { return (load32(p) * 0x9E3779B1u) >> (32 - bits); }
+static inline cx_u32 hash3(const cx_u8* p) { return ((load32(p) << 8) * 0x9E3779B1u) >> (32 - H3BITS); }
 
 static inline cx_u32 match_len(const cx_u8* a, const cx_u8* b, cx_u32 max) {
     cx_u32 len = 0;
@@ -846,6 +884,12 @@ static inline void insert(deflater* D, cx_u32 pos) {
     cx_u32 h = hash4(D->in + pos, D->hbits);
     D->prev[pos & D->wmask] = D->head[h];
     D->head[h] = pos;
+}
+
+/* `insert`, and into the table of three-byte matches, for the lazy levels. */
+static inline void insert_both(deflater* D, cx_u32 pos) {
+    D->head3[hash3(D->in + pos)] = pos;
+    insert(D, pos);
 }
 
 /* Huffman code lengths of at most `limit` bits for the symbols with these frequencies; 0 for a
@@ -1065,16 +1109,23 @@ static void flush_block(deflater* D, cx_u32 to, int last) {
     D->block = to;
     memset(D->lfreq, 0, sizeof D->lfreq);
     memset(D->dfreq, 0, sizeof D->dfreq);
+    memset(D->kinds, 0, sizeof D->kinds);
+    memset(D->new_kinds, 0, sizeof D->new_kinds);
+    D->nkinds = D->new_nkinds = 0;
 }
 
 static inline void emit_literal(deflater* D, cx_u32 pos) {
     cx_u8 b = D->in[pos];
+    D->new_kinds[(b >> 5 & 6) | (b & 1)]++;
+    D->new_nkinds++;
     D->syms[D->nsyms++] = b;
     D->lfreq[b]++;
     if (D->nsyms == BLOCK_SYMS) flush_block(D, pos + 1, 0);
 }
 
 static inline void emit_match(deflater* D, cx_u32 pos, cx_u32 len, cx_u32 dist) {
+    D->new_kinds[8 + (len >= 9)]++;
+    D->new_nkinds++;
     D->syms[D->nsyms++] = 1u << 24 | dist << 8 | (len - 3);
     D->lfreq[257 + len_code[len - 3]]++;
     D->dfreq[dist_code(dist)]++;
@@ -1104,38 +1155,81 @@ static void deflate_greedy(deflater* D, const level_cfg* c) {
     }
 }
 
-/* At each position, the match there is taken only if the next position's isn't longer. */
+/* Whether the block should end at `pos`, as libdeflate's heuristic finds it: once SPLIT_EVERY
+ * symbols are counted since it last looked, if their kinds' shares differ from the block's so far
+ * by enough. That's 200/512 in all, more for a block of fewer than 8192 symbols and 10,000 bytes,
+ * whose codes cost more for what they save, and less for each 4 KiB the block is long. Otherwise
+ * those symbols join the block's. Each share is scaled by both counts, so it's all integers. */
+static int block_should_end(deflater* D, cx_u32 pos) {
+    if (D->new_nkinds < SPLIT_EVERY || pos - D->block < MIN_BLOCK || D->n - pos < MIN_BLOCK) return 0;
+    if (D->nkinds > 0) {
+        cx_u32 delta = 0;
+        for (int i = 0; i < 10; i++) {
+            cx_u32 expected = D->kinds[i] * D->new_nkinds, actual = D->new_kinds[i] * D->nkinds;
+            delta += actual > expected ? actual - expected : expected - actual;
+        }
+        cx_u32 items = D->nkinds + D->new_nkinds, length = pos - D->block;
+        cx_u32 cutoff = D->new_nkinds * 200 / 512 * D->nkinds;
+        if (length < 10000 && items < 8192) cutoff += (cx_u32)((cx_u64)cutoff * (8192 - items) / 8192);
+        if (delta + (length / 4096) * D->nkinds >= cutoff) return 1;
+    }
+    for (int i = 0; i < 10; i++) D->kinds[i] += D->new_kinds[i], D->new_kinds[i] = 0;
+    D->nkinds += D->new_nkinds, D->new_nkinds = 0;
+    return 0;
+}
+
+static inline int log2_of(cx_u32 v) { return 31 - __builtin_clz(v); }
+
+/* The lazy levels. At each position: the longest match through the chain, or else one of three
+ * bytes within FAR3. With one, the next position is searched half as hard, and its match taken
+ * instead, after a literal, if it's longer by enough to pay for a farther distance: four for each
+ * byte longer against one for each doubling of the distance, more than 2 in all. That goes on
+ * until the next position has nothing better, then the match is taken and its other positions
+ * go in the tables. */
 static void deflate_lazy(deflater* D, const level_cfg* c) {
-    cx_u32 n = D->n, pos = 0, prev_len = 0, prev_dist = 0;
-    int pending = 0; /* in[pos - 1] is waiting to go out, as a literal or the start of prev_len */
+    cx_u32 n = D->n, pos = 0, depth = c->chain, nice = c->nice;
+    cx_u32 half = depth > 1 ? depth >> 1 : 1;
     while (pos < n) {
+        if (block_should_end(D, pos)) flush_block(D, pos, 0);
         cx_u32 len = 0, dist = 0;
         if (pos + MIN_MATCH <= n) {
+            cx_u32 h3 = hash3(D->in + pos), c3 = D->head3[h3];
+            D->head3[h3] = pos;
             cx_u32 h = hash4(D->in + pos, D->hbits), cand = D->head[h];
             D->prev[pos & D->wmask] = cand;
             D->head[h] = pos;
-            if (cand < pos && prev_len < c->lazy) {
-                cx_u32 chain = prev_len >= c->good ? c->chain >> 2 : c->chain;
-                len = longest(D, pos, cand, prev_len > MIN_MATCH - 1 ? prev_len : MIN_MATCH - 1, &dist, chain ? chain : 1, c->nice);
-                if (len <= prev_len) len = 0;
+            if (cand < pos) {
+                cx_u32 got = longest(D, pos, cand, MIN_MATCH - 1, &dist, depth, nice);
+                if (got >= MIN_MATCH) len = got;
             }
+            if (!len && c3 < pos && pos - c3 <= FAR3 && load32(D->in + c3) << 8 == load32(D->in + pos) << 8)
+                len = 3, dist = pos - c3;
         }
-        if (pending && prev_len >= MIN_MATCH && len == 0) {
-            emit_match(D, pos - 1, prev_len, prev_dist);
-            cx_u32 stop = pos - 1 + prev_len;
-            for (cx_u32 p = pos + 1; p < stop && p + MIN_MATCH <= n; p++) insert(D, p);
-            pos = stop;
-            pending = 0, prev_len = 0;
+        if (!len) {
+            emit_literal(D, pos++);
             continue;
         }
-        if (pending) emit_literal(D, pos - 1);
-        pending = 1;
-        prev_len = len, prev_dist = dist;
-        pos++;
-    }
-    if (pending) {
-        if (prev_len >= MIN_MATCH) emit_match(D, pos - 1, prev_len, prev_dist);
-        else emit_literal(D, pos - 1);
+        /* The match starts at `pos`; `next` is the first position not yet in the tables. */
+        cx_u32 next = pos + 1;
+        while (len < nice && next + MIN_MATCH <= n) {
+            cx_u32 at = next++;
+            D->head3[hash3(D->in + at)] = at;
+            cx_u32 h = hash4(D->in + at, D->hbits), cand = D->head[h];
+            D->prev[at & D->wmask] = cand;
+            D->head[h] = at;
+            cx_u32 floor = len > MIN_MATCH ? len - 1 : MIN_MATCH - 1, next_len = 0, next_dist = 0;
+            if (cand < at) {
+                cx_u32 got = longest(D, at, cand, floor, &next_dist, half, nice);
+                if (got > floor) next_len = got;
+            }
+            if (!(next_len >= len && 4 * (int)(next_len - len) + (log2_of(dist) - log2_of(next_dist)) > 2)) break;
+            emit_literal(D, pos);
+            pos = at, len = next_len, dist = next_dist;
+        }
+        emit_match(D, pos, len, dist);
+        cx_u32 stop = pos + len;
+        for (cx_u32 p = next; p < stop && p + MIN_MATCH <= n; p++) insert_both(D, p);
+        pos = stop;
     }
 }
 
@@ -1173,14 +1267,17 @@ cx_usize cx_deflate(const cx_u8* in, cx_usize n, cx_u32 format, cx_u32 level, cx
         while (hbits < 15 && (1u << hbits) < n) hbits++;
         cx_u32 wsize = 1u << hbits < WSIZE ? 1u << hbits : WSIZE;
         cx_u32 nsyms = n < BLOCK_SYMS ? (cx_u32)n + 1 : BLOCK_SYMS;
-        cx_usize mem_size = ((cx_usize)(1u << hbits) + wsize + nsyms) * sizeof(cx_u32);
+        cx_u32 lazy = level >= LAZY_FROM, n3 = lazy ? 1u << H3BITS : 0;
+        cx_usize mem_size = ((cx_usize)(1u << hbits) + wsize + nsyms + n3) * sizeof(cx_u32);
         void* mem = cx_alloc(mem_size);
         D.head = (cx_u32*)mem;
         D.prev = D.head + (1u << hbits);
         D.syms = D.prev + wsize;
+        D.head3 = D.syms + nsyms;
         D.hbits = hbits, D.wmask = wsize - 1;
         memset(D.head, 0, (cx_usize)(1u << hbits) * sizeof(cx_u32));
-        if (levels[level].lazy) deflate_lazy(&D, &levels[level]);
+        memset(D.head3, 0, (cx_usize)n3 * sizeof(cx_u32));
+        if (lazy) deflate_lazy(&D, &levels[level]);
         else deflate_greedy(&D, &levels[level]);
         flush_block(&D, (cx_u32)n, 1);
         cx_free(mem, mem_size);

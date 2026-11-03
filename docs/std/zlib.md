@@ -70,7 +70,7 @@ Why bytes don't inflate, as `Error`:
 - Bytes after the end of the stream are ignored, as Java ignores them.
 - gzip reads on into the next member when one follows, as `GZIPInputStream` does, and ignores what follows if it isn't a whole gzip header.
 - Minecraft's packet decoder gives `Inflater` an array of the length the packet says, then checks that it was filled. `decompress_into` with that length as the limit does the same: if it gives `false`, or adds fewer bytes, the packet is bad.
-- The bytes aren't always Java's bytes. Deflate allows many ways to write the same data, and `std.zlib` picks its own matches, so its output is its own, though Java reads it. At levels 1 to 6 it comes out about 1% smaller than Java's.
+- The bytes aren't always Java's bytes. Deflate allows many ways to write the same data, and `std.zlib` picks its own matches, so its output is its own, though Java reads it. On Minecraft's region files it comes out smaller than Java's at every level, and at 6, vanilla's, 99.8% of Java's bytes ([below](#how-its-built)).
 
 ## Checked against Java
 
@@ -87,23 +87,32 @@ Why bytes don't inflate, as `Error`:
 | --- | --- |
 | Inflating | Lookup tables of 10 bits for literals and lengths, and 8 for distances, with second tables under them for longer codes. A fast loop takes 64 bits of input at a time, and up to three literals for each read, while there are 16 bytes of input and 274 of room left. A slow loop takes the last bytes one code at a time |
 | Copying a match | 16 bytes at a time when the distance is 16 or more. For shorter distances, the pattern is built once and then copied 8 bytes at a time |
-| Compressing | Hash chains on 4 bytes, searched further at each level, with lazy matching from level 4. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
+| Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
 | Adler-32 | AVX2 where the processor has it, 32 bytes a step. Otherwise a byte at a time, 8 to a loop |
 | CRC-32 | 8 tables, 8 bytes a step |
 | The output | `decompress` guesses the length from how the first bytes inflated, and for gzip, from the length in its trailer, so most streams inflate in one call without copying |
 
-On an i9-13900K, one run each over the corpus:
+On an i9-13900K, one run each over the corpus (level 1 and inflating; the lazy levels have been rebuilt since, and are measured below):
 
 | | Calx | Java 25 |
 | --- | --- | --- |
-| Compressing, level 6 | 158 MB/s | 89 MB/s |
 | Compressing, level 1 | 578 MB/s | 288 MB/s |
-| Compressing, level 9 | 28 MB/s | 9.3 MB/s |
 | Inflating zlib | 1937 MB/s | 1022 MB/s |
 | Inflating gzip | 1090 MB/s | 671 MB/s |
-| A packet-sized record compressed, level 6 | 11.4 µs | 19.9 µs |
 | A packet-sized record inflated | 2.1 µs | 4.1 µs |
 
-At level 6 the output is 1.1% smaller than Java's, and at level 1, 1.3% smaller. At level 9 it's 2.3% bigger, since it doesn't look for 3-byte matches.
+At level 1 the output is 1.3% smaller than Java's.
+
+Minecraft's region files, compressed again: 2,000 of the chunks vanilla 26.3 saved, 68.9 MB inflated, each deflated as a zlib stream on one P-core, best of five runs for Calx and of up to three for Java 25's `Deflater`. Java's level 6 gives back vanilla's own bytes exactly.
+
+| Level | Calx, µs a chunk | Java, µs a chunk | Calx's bytes, of Java's |
+| --- | --- | --- | --- |
+| 1 | 74 | 134 | 94.6% |
+| 4 | 127 | 221 | 98.9% |
+| 5 | 135 | 298 | 99.3% |
+| 6 | 158 | 446 | 99.8% |
+| 7 | 176 | 571 | 99.9% |
+| 8 | 261 | 1416 | 99.8% |
+| 9 | 339 | 3258 | 99.5% |
 
 `std.zlib` is written in Calx over those runtime calls: [std/zlib.calx](../../std/zlib.calx).
