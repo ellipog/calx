@@ -187,6 +187,40 @@ impl BitStorage {
         return out
     }
 
+    // `size` values of `bits` bits each, from 1 to 32, already packed in `data`, which is as many
+    // longs as they take.
+    fn of_longs(bits: i32, size: usize, data: own List<i64>) -> BitStorage {
+        let per_long = usize.wrap(64 / bits)
+        return BitStorage {
+            width: u8.wrap(bits),
+            count: u32.wrap(size),
+            per_long: u8.wrap(per_long),
+            divide_mul: u32.wrap((1u64 << 32) / u64(per_long) + 1),
+            mask: u32.wrap((1i64 << bits) - 1),
+            data: data,
+        }
+    }
+
+    // Adds 1 to `per[v]` for each value `v`, read from the longs with no list of them made. Panics
+    // unless `per` has an entry for each.
+    @track_caller
+    fn tally(self, per: mut List<usize>) {
+        let count = usize(self.count)
+        let width = i32(self.width)
+        let mask = i64(self.mask)
+        let each = usize(self.per_long)
+        var i: usize = 0
+        for w in self.data {
+            var x = w
+            let end = (i + each).min(count)
+            while i < end {
+                per[usize.wrap(x & mask)] += 1
+                x = x >>> width
+                i += 1
+            }
+        }
+    }
+
     /// A copy of the longs the values are packed in.
     pub fn longs(self) -> List<i64> {
         return self.data.copy()
@@ -408,6 +442,92 @@ impl PalettedContainer {
         return PalettedContainer { strategy: strategy, global: false, palette: palette, storage: BitStorage.new(0, strategy.size()) }
     }
 
+    /// A container holding `values`, one for each index, the same as `new(first, strategy)` with
+    /// `set_at` then setting each index to its value in order: the same palette, in the same
+    /// order, at the same bits. It's worked out in a pass for the palette and one that packs the
+    /// values a long at a time, so it's much faster than setting them one by one (CLX-132).
+    /// Panics unless there are as many values as the strategy's size and `first` and each value
+    /// are less than the registry's size.
+    @track_caller
+    pub fn from_values(first: u32, strategy: Strategy, values: List<u32>) -> PalettedContainer {
+        let n = strategy.size()
+        if values.len() != n {
+            panic("{values.len()} values aren't the {n} a container holds")
+        }
+        var c = PalettedContainer.new(first, strategy)
+        // The palette as `id_for` grows it, with no values stored: one it doesn't have is added
+        // while there's room, and when there isn't, `relist` lists those `resize` would find.
+        var bits = 0
+        var last = first
+        var i: usize = 0
+        while i < n and not c.global {
+            let v = values[i]
+            if v != last {
+                if v >= strategy.registry {
+                    panic("{v} is past the end of a registry of {strategy.registry}")
+                }
+                last = v
+                if c.palette.find(v) == none {
+                    if u64(c.palette.entries.len()) >= (1u64 << bits) {
+                        bits = c.relist(values, i, first, bits + 1)
+                    }
+                    if not c.global {
+                        _ = c.palette.add(v)
+                    }
+                }
+            }
+            i += 1
+        }
+        if bits == 0 {
+            return c
+        }
+        if c.global {
+            // The rest are the registry's IDs as they are, each checked.
+            while i < n {
+                if values[i] >= strategy.registry {
+                    panic("{values[i]} is past the end of a registry of {strategy.registry}")
+                }
+                i += 1
+            }
+            c.storage = BitStorage.of_longs(bits, n, packed_longs(bits, values))
+            return c
+        }
+        // Each value's index in the palette, which a run of the same value looks up once.
+        let per = usize.wrap(64 / bits)
+        var data = List<i64>()
+        data.reserve((n + per - 1) / per)
+        var w: i64 = 0
+        var shift = 0
+        var put: usize = 0
+        var id: u32 = 0
+        last = first
+        if let j = c.palette.find(first) {
+            id = j
+        }
+        for v in values {
+            if v != last {
+                last = v
+                if let j = c.palette.find(v) {
+                    id = j
+                }
+            }
+            w |= i64(id) << shift
+            shift += bits
+            put += 1
+            if put == per {
+                data.push(w)
+                w = 0
+                shift = 0
+                put = 0
+            }
+        }
+        if put > 0 {
+            data.push(w)
+        }
+        c.storage = BitStorage.of_longs(bits, n, data)
+        return c
+    }
+
     /// The value at `x`, `y`, `z`. Panics as `Strategy.index` does.
     @track_caller
     pub fn get(self, x: i32, y: i32, z: i32) -> u32 {
@@ -556,12 +676,9 @@ impl PalettedContainer {
             out.push((self.palette.entries[0], n))
             return out
         }
-        var values = self.storage.values()
         if not self.global {
             var per: List<usize> = [0usize; self.palette.entries.len()]
-            for id in values {
-                per[usize(id)] += 1
-            }
+            self.storage.tally(mut per)
             for j in 0usize..per.len() {
                 if per[j] > 0 {
                     out.push((self.palette.entries[j], per[j]))
@@ -569,6 +686,7 @@ impl PalettedContainer {
             }
             return out
         }
+        var values = self.storage.values()
         values.sort()
         var start: usize = 0
         for i in 1usize..n + 1 {
@@ -672,9 +790,9 @@ impl PalettedContainer {
     /// fewest that number them all.
     pub fn pack(self) -> Packed {
         let n = self.storage.len()
-        var palette = Palette.new(if self.global { ceil_log2(n) } else { self.storage.bits() })
-        var values = self.storage.values()
         if self.global {
+            var palette = Palette.new(ceil_log2(n))
+            var values = self.storage.values()
             var last: i64 = -1
             var id: u32 = 0
             for i in 0usize..n {
@@ -685,30 +803,75 @@ impl PalettedContainer {
                 }
                 values[i] = id
             }
+            let stored = self.strategy.config(ceil_log2(palette.entries.len())).stored
+            return Packed { palette: palette.entries, data: some(packed_longs(stored, values)) }
+        }
+        // Each index of the palette is looked up once, the first time it comes, which gives the
+        // palette looking up every value does, in the same order: an entry repeated in the
+        // palette finds the one added first (CLX-127). The indices are read from the longs twice,
+        // with no list of them made: until every entry has come, for the palette, whose size
+        // gives the bits, then to pack them (CLX-132).
+        let entries = self.palette.entries.len()
+        var palette = Palette.new(self.storage.bits())
+        var remap: List<u32> = [u32.MAX; entries]
+        let width = i32(self.storage.width)
+        if width == 0 {
+            remap[0] = palette.add(self.palette.entries[0])
         } else {
-            // Each index of the palette is looked up once, the first time it comes, which gives
-            // the palette looking up every value does, in the same order: an entry repeated
-            // in the palette finds the one added first (CLX-127).
-            var remap = List<u32>()
-            remap.reserve(self.palette.entries.len())
-            for _ in self.palette.entries {
-                remap.push(u32.MAX)
-            }
-            for i in 0usize..n {
-                let old = usize(values[i])
-                var id = remap[old]
-                if id == u32.MAX {
-                    id = palette.find_or_add(self.palette.entries[old])
-                    remap[old] = id
+            let mask = i64(self.storage.mask)
+            let each = usize(self.storage.per_long)
+            var left = entries
+            var i: usize = 0
+            var k: usize = 0
+            while k < self.storage.data.len() and left > 0 {
+                var x = self.storage.data[k]
+                let end = (i + each).min(n)
+                while i < end {
+                    let old = usize.wrap(x & mask)
+                    if remap[old] == u32.MAX {
+                        remap[old] = palette.find_or_add(self.palette.entries[old])
+                        left -= 1
+                    }
+                    x = x >>> width
+                    i += 1
                 }
-                values[i] = id
+                k += 1
             }
         }
         let stored = self.strategy.config(ceil_log2(palette.entries.len())).stored
         if stored == 0 {
             return Packed { palette: palette.entries, data: none }
         }
-        return Packed { palette: palette.entries, data: some(packed_longs(stored, values)) }
+        let mask = i64(self.storage.mask)
+        let each = usize(self.storage.per_long)
+        let per = usize.wrap(64 / stored)
+        var out = List<i64>()
+        out.reserve((n + per - 1) / per)
+        var w: i64 = 0
+        var shift = 0
+        var put: usize = 0
+        var i: usize = 0
+        for long in self.storage.data {
+            var x = long
+            let end = (i + each).min(n)
+            while i < end {
+                w |= i64(remap[usize.wrap(x & mask)]) << shift
+                shift += stored
+                put += 1
+                if put == per {
+                    out.push(w)
+                    w = 0
+                    shift = 0
+                    put = 0
+                }
+                x = x >>> width
+                i += 1
+            }
+        }
+        if put > 0 {
+            out.push(w)
+        }
+        return Packed { palette: palette.entries, data: some(out) }
     }
 
     /// The container `packed` holds, as vanilla's `unpack` reads it: the palette's size gives its
@@ -824,6 +987,31 @@ impl PalettedContainer {
         self.global = config.global
         self.palette = palette
         self.storage = storage
+    }
+
+    // The palette `resize` to `bits` would leave as `from_values` sets index `i`, with no values
+    // stored: those set by then are the values before `i`, and `first` is still at every index
+    // from `i` on, so the new palette is those values in the order they first come, then `first`
+    // if it hasn't come. Gives the bits the values take.
+    fn relist(mut self, values: List<u32>, i: usize, first: u32, bits: i32) -> i32 {
+        let config = self.strategy.config(bits)
+        if config.global {
+            self.global = true
+            self.palette = Palette.new(0)
+            return config.memory
+        }
+        var palette = Palette.new(config.memory)
+        var last: i64 = -1
+        for j in 0usize..i {
+            let v = values[j]
+            if i64(v) != last {
+                last = i64(v)
+                _ = palette.find_or_add(v)
+            }
+        }
+        _ = palette.find_or_add(first)
+        self.palette = palette
+        return config.memory
     }
 }
 

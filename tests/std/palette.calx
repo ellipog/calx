@@ -352,6 +352,152 @@ fn aligned() {
     println("{b.bits()} {wide == plain}")    // out: 3 true
 }
 
+// A number below `bound` from a 64-bit LCG, which `seed` moves on.
+fn below(seed: mut i64, bound: u32) -> u32 {
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    return u32.wrap((seed >>> 33) % i64(bound))
+}
+
+// Whether two containers are the same: their bits, what `write` sends, which is the palette in
+// its order and every long, and their counts.
+fn alike(a: PalettedContainer, b: PalettedContainer) -> bool {
+    var x: List<u8> = []
+    var y: List<u8> = []
+    a.write(mut x)
+    b.write(mut y)
+    return a.bits() == b.bits() and x == y and "{a.counts()}" == "{b.counts()}"
+}
+
+// Whether `pack` gives what working it out from `get_at` alone gives: the values in the order
+// they first come, and each value's index in the bits a palette of that size takes on disk,
+// `min_bits` to `max_bits`, or the fewest past them.
+fn packs_by_hand(c: PalettedContainer, size: usize, min_bits: i32, max_bits: i32) -> bool {
+    var palette: List<u32> = []
+    var ids: List<u32> = []
+    for i in 0usize..size {
+        let v = c.get_at(i)
+        var j: usize = 0
+        while j < palette.len() and palette[j] != v {
+            j += 1
+        }
+        if j == palette.len() {
+            palette.push(v)
+        }
+        ids.push(u32.wrap(j))
+    }
+    var b = 0
+    while (1u64 << b) < u64(palette.len()) {
+        b += 1
+    }
+    let bits = if b == 0 { 0 } else if b <= max_bits { b.max(min_bits) } else { b }
+    var longs: List<i64> = []
+    if bits > 0 {
+        var i: usize = 0
+        while i < size {
+            var w: i64 = 0
+            for k in 0..64 / bits {
+                if i < size {
+                    w |= i64(ids[i]) << (k * bits)
+                    i += 1
+                }
+            }
+            longs.push(w)
+        }
+    }
+    let p = c.pack()
+    if p.palette != palette {
+        return false
+    }
+    if let d = p.data {
+        return bits > 0 and d == longs
+    }
+    return bits == 0
+}
+
+// `from_values` makes the container `set_at` makes setting each value in order, through every
+// size where a palette changes kind, with `first` among the values or not; and `pack` saves it,
+// and the container after random sets over it, as working it out by hand does.
+fn at_once() {
+    let blocks = Strategy.block_states(35723)
+    var seed: i64 = 7
+    var agree = 0
+    var packed = 0
+    var bits = String()
+    let spreads: List<u32> = [1, 2, 5, 15, 16, 17, 40, 255, 256, 257, 600]
+    for case in 0usize..44 {
+        let spread = spreads[case % spreads.len()]
+        // Runs of 1 to 64 of a value, as a section has, and shorter with more values, so they
+        // all come.
+        let run = usize(below(mut seed, if spread > 16 { 3 } else { 64 })) + 1
+        let first = below(mut seed, 35723)
+        var pick: List<u32> = []
+        for _ in 0u32..spread {
+            pick.push(below(mut seed, 35723))
+        }
+        var values: List<u32> = []
+        var v = pick[0]
+        for i in 0usize..4096 {
+            if i % run == 0 {
+                v = if case == 0 or (case % 4 >= 2 and below(mut seed, 3) == 0) { first } else { pick[usize(below(mut seed, spread))] }
+            }
+            values.push(v)
+        }
+        var c = PalettedContainer.new(first, blocks)
+        for i in 0usize..4096 {
+            c.set_at(i, values[i])
+        }
+        var d = PalettedContainer.from_values(first, blocks, values)
+        if alike(c, d) {
+            agree += 1
+        }
+        if case < 11 {
+            bits.push_str(" {d.bits()}")
+        }
+        if packs_by_hand(d, 4096, 4, 8) {
+            packed += 1
+        }
+        // Entries the sets leave with nothing referring to them, which `pack` drops.
+        for _ in 0..300 {
+            d.set_at(usize(below(mut seed, 4096)), (pick[usize(below(mut seed, spread))] + 1) % 35723)
+        }
+        if packs_by_hand(d, 4096, 4, 8) {
+            packed += 1
+        }
+    }
+    println("{agree} of 44 the same, bits{bits}; {packed} of 88 packed as by hand")    // out: 44 of 44 the same, bits 0 4 4 4 5 5 6 8 8 8 16; 88 of 88 packed as by hand
+
+    // Biomes, 64 of them, from 1 to 3 bits and past.
+    let biomes = Strategy.biomes(65)
+    var same_biomes = 0
+    var biome_bits = String()
+    for spread in 1u32..11 {
+        let first = below(mut seed, 65)
+        var values: List<u32> = []
+        for i in 0u32..64 {
+            values.push(if i < spread { (first + i + 1) % 65 } else { (first + below(mut seed, spread) + 1) % 65 })
+        }
+        var c = PalettedContainer.new(first, biomes)
+        for i in 0usize..64 {
+            c.set_at(i, values[i])
+        }
+        let d = PalettedContainer.from_values(first, biomes, values)
+        if alike(c, d) and packs_by_hand(d, 64, 1, 3) {
+            same_biomes += 1
+        }
+        biome_bits.push_str(" {d.bits()}")
+    }
+    println("{same_biomes} of 10, bits{biome_bits}")    // out: 10 of 10, bits 1 2 2 3 3 3 3 7 7 7
+
+    // An entry a loaded palette holds twice packs to the first.
+    var twice: List<i64> = []
+    for _ in 0..256 {
+        twice.push(0x3210321032103210)
+    }
+    let loaded = PalettedContainer.unpack(blocks, Packed { palette: [5, 9, 5, 3], data: some(twice) })!
+    let p = loaded.pack()
+    println("{p.palette} {loaded.counts()} {packs_by_hand(loaded, 4096, 4, 8)}")    // out: [5, 9, 3] [(5, 1024), (9, 1024), (5, 1024), (3, 1024)] true
+}
+
 fn main() {
     storage()
     strategies()
@@ -361,4 +507,5 @@ fn main() {
     unpacks()
     mapped()
     aligned()
+    at_once()
 }
