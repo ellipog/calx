@@ -1,5 +1,6 @@
 ---
-// The footer of the home page: what Calx is, the commit the site was built from, and where to go.
+// The footer of the home page: what Calx is, the commit the site was built from, where to go, and
+// the studio that makes it.
 import { COMMIT } from '../facts.mjs';
 import { GITHUB } from '../markdown.mjs';
 ---
@@ -26,6 +27,12 @@ import { GITHUB } from '../markdown.mjs';
 		<a href="/benchmarks/">Benchmarks</a>
 		<a href={GITHUB}>GitHub</a>
 		<a href="https://github.com/ellipog/calcite">Calcite</a>
+	</div>
+	<div class="studio">
+		<a href="https://aaenz.no">
+			<svg viewBox="79 74 720 720" fill="currentColor" aria-hidden="true"><use href="#aaen"></use></svg>
+			An Aaen Studios project
+		</a>
 	</div>
 </footer>
 
@@ -63,6 +70,26 @@ import { GITHUB } from '../markdown.mjs';
 	}
 	a:hover {
 		color: var(--ink);
+	}
+	.studio {
+		grid-column: 1 / -1;
+		border-top: 1px solid var(--line);
+		padding-top: 18px;
+	}
+	.studio a {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 13px;
+		color: var(--ink-3);
+	}
+	.studio a:hover {
+		color: var(--ink);
+	}
+	.studio svg {
+		width: 16px;
+		height: 16px;
+		flex: none;
 	}
 	@media (max-width: 900px) {
 		.foot {
