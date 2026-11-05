@@ -13,11 +13,14 @@ function git(...args) {
 			encoding: 'utf8',
 			stdio: ['ignore', 'pipe', 'ignore'],
 			maxBuffer: 64 << 20,
+			timeout: 60_000,
 		}).trim();
 	} catch {
 		return '';
 	}
 }
+
+const shallow = () => git('rev-parse', '--is-shallow-repository') === 'true';
 
 /** The short hash of the commit the site was built from, or '' outside a checkout. */
 export const COMMIT = git('rev-parse', '--short', 'HEAD');
@@ -36,15 +39,17 @@ export function isDocsFile(entry) {
 }
 
 // When each file in docs/ was first committed and last changed, from one `git log` over the folder.
-// A clone with only recent history (Vercel's is shallow) doesn't know the dates before it begins:
-// a file whose oldest commit there is where the history is cut off has no known first date, and
-// one last changed there has no known last date either, so neither is guessed.
+// Vercel's clone has only recent history, so the build fetches the rest first, from the public
+// repo, which takes a few seconds. If it can't, a clone with only recent history doesn't know the
+// dates before it begins: a file whose oldest commit there is where the history is cut off has no
+// known first date, and one last changed there has no known last date either, so neither is guessed.
 let DATES = null;
 function allDates() {
 	if (DATES) return DATES;
 	DATES = new Map();
+	if (shallow()) git('fetch', '--unshallow', '--quiet', `${GITHUB}.git`);
 	let cut = new Set();
-	if (git('rev-parse', '--is-shallow-repository') === 'true') {
+	if (shallow()) {
 		try {
 			cut = new Set(readFileSync(git('rev-parse', '--path-format=absolute', '--git-path', 'shallow'), 'utf8').split(/\s+/).filter(Boolean));
 		} catch {}
