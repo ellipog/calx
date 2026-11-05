@@ -28,6 +28,8 @@ export default defineConfig({
 			favicon: '/favicon.svg',
 			social: [{ icon: 'github', label: 'GitHub', href: GITHUB }],
 			sidebar: sidebar(),
+			// Each page's title and structured data for search engines (src/seo.mjs).
+			routeMiddleware: './src/route-data.mjs',
 			customCss: ['./src/styles/tokens.css', './src/styles/docs.css'],
 			// Starlight's heading anchors and asides, for files in docs/ as well as its own folder.
 			markdown: { processedDirs: ['../docs'] },

@@ -1,6 +1,6 @@
 ---
 title: Calx spec
-description: The design of every Calx feature that isn't built yet.
+description: The design of every Calx feature that isn't built yet - types, memory, strings, collections, actors and parallel loops, modules, C functions and attributes.
 ---
 
 # Calx spec v0

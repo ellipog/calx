@@ -1,6 +1,6 @@
 ---
 title: std.http
-description: HTTP and HTTPS requests on the system's own client, WinHTTP on Windows and libcurl on Linux, each on a thread of its own so a server's loop goes on while it waits.
+description: HTTP and HTTPS requests on the system's own client, WinHTTP on Windows and libcurl on Linux, each on its own thread so a program's loop goes on while it waits.
 ---
 
 # `std.http`

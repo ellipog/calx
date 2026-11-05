@@ -1,6 +1,6 @@
 ---
 title: Strictness
-description: The rules that make Calx's checker stricter than Rust's, and why.
+description: The rules that make Calx's checker stricter than Rust's - no warnings, no unused names, no shadowing, no silent conversions or precedence slips - and why.
 ---
 
 # Strictness

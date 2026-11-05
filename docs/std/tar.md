@@ -1,6 +1,6 @@
 ---
 title: std.tar
-description: Tar archives, plain or gzipped, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting to a folder without letting a path or a link climb out of it.
+description: Tar archives, plain or gzipped, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
 ---
 
 # `std.tar`

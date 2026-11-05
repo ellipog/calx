@@ -1,6 +1,7 @@
 {
 	"$schema": "https://openapi.vercel.sh/vercel.json",
 	"trailingSlash": true,
+	"cleanUrls": true,
 	"headers": [
 		{
 			"source": "/install.(ps1|sh)",
@@ -8,6 +9,11 @@
 				{ "key": "Content-Type", "value": "text/plain; charset=utf-8" },
 				{ "key": "Cache-Control", "value": "public, max-age=300" }
 			]
+		},
+		{
+			"source": "/(.*)",
+			"has": [{ "type": "host", "value": "(?<project>.*)\\.vercel\\.app" }],
+			"headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
 		}
 	]
 }

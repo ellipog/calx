@@ -1,6 +1,6 @@
 ---
 title: Sorted maps and sets
-description: SortedMap<K, V> and SortedSet<T>, which keep their keys in order, as Java's TreeMap and TreeSet and fastutil's tree tables do - their ends, the nearest key on either side, ranges, writing Java's and fastutil's methods, and their C.
+description: SortedMap<K, V> and SortedSet<T>, which keep their keys in order, as Java's TreeMap and TreeSet do - their ends, the nearest keys, ranges, and their C.
 ---
 
 # Sorted maps and sets

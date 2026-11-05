@@ -1,6 +1,6 @@
 ---
 title: std.meta
-description: Declarations as data for attributes. StructDecl, EnumDecl and FnDecl, their fields, variants, parameters and types, and Generated, the code an attribute gives back.
+description: Declarations as data for attributes - StructDecl, EnumDecl and FnDecl with their fields, variants and parameters, and Generated, the code an attribute returns.
 ---
 
 # `std.meta`

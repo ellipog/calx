@@ -1,6 +1,6 @@
 ---
 title: std.palette
-description: Minecraft's paletted containers - a chunk section's block states and biomes as palettes and bits packed in longs, grown, sent, saved and loaded as Minecraft 26.3 does - BitStorage, Strategy, PalettedContainer.
+description: Minecraft's paletted containers - a chunk section's block states and biomes packed in longs, grown, sent, saved and loaded as Minecraft 26.3 does.
 ---
 
 # `std.palette`

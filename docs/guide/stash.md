@@ -1,6 +1,6 @@
 ---
 title: The stash
-description: The guide's last page - keeping counts in a sorted map, parameters that own or change what they're given, matching an enum's fields, passing errors up with try, the whole program, and splitting it into modules.
+description: The guide's last page - a sorted map of counts, parameters that own or change what they're given, passing errors up with try, and modules.
 ---
 
 # The stash

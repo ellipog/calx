@@ -11,6 +11,7 @@ import { siteUrl, withoutDecisions } from '../markdown.mjs';
 import { DOCS } from '../paths.mjs';
 import { ACTA, ACTA_PAGE, GITHUB_ISSUES, STAGES, readApi, readFeed } from '../roadmap/acta.mjs';
 import { card, day, esc, ideaItem, markdown } from '../roadmap/render.mjs';
+import { pageTitle } from '../seo.mjs';
 import '../styles/dropdown.css';
 import '../styles/roadmap.css';
 
@@ -65,8 +66,8 @@ const json = JSON.stringify({ data, key: KEY ? true : false }).replace(/</g, '\\
 ---
 
 <Base
-	title="Roadmap | Calx"
-	description="What's planned for Calx, what's being built and what's shipped, read live from the board it's built from. Vote for what you want sooner, suggest an idea or report an issue."
+	title={pageTitle('Roadmap', 'roadmap')}
+	description="What's planned for Calx, what's being built and what's shipped, live from its board. Vote for what you want sooner, suggest an idea or report an issue."
 >
 	<main class="rm" data-roadmap>
 		<section class="rm-hero" data-pagefind-body>

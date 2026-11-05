@@ -9,6 +9,7 @@ import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
 import { errorOf, fences } from '../examples.mjs';
 import { buildTimes } from '../numbers.mjs';
+import { LANGUAGE } from '../seo.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
 // and the first example written not to compile.
@@ -47,16 +48,18 @@ const site = {
 ---
 
 <Base
-	title="The Calx programming language"
-	description="Calx is a general-purpose compiled language. It's memory-safe without a garbage collector, its math gives the same bits on every platform, and its parallel loops are checked when it compiles."
+	title={LANGUAGE}
+	description="Calx is a memory-safe compiled programming language with no garbage collector. Its math gives the same bits on every platform, and parallel loops can't race."
 	jsonLd={site}
 >
 	<main class="home">
 		<section class="hero">
 			<canvas class="crystal" data-scene="hero" aria-hidden="true"></canvas>
 			<div class="hero-in">
+				<!-- The logo is the heading. Its name is text as well, which search engines read as the heading. -->
 				<h1 class="hero-logo">
-					<svg viewBox="0 12 399.761 92" fill="currentColor" role="img" aria-label="Calx"><use href="#logo-shapes"></use></svg>
+					<span class="sr-only">Calx</span>
+					<svg viewBox="0 12 399.761 92" fill="currentColor" aria-hidden="true"><use href="#logo-shapes"></use></svg>
 				</h1>
 				<div class="hero-under">
 					<p class="tagline">A memory-safe compiled language whose programs give the same results on every machine.</p>

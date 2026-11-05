@@ -1,6 +1,6 @@
 ---
 title: Deques
-description: Deque<T>, a growable ring added to and taken from at both ends, which is Java's ArrayDeque and Rust's VecDeque - its methods, indexing, loops, Java's and Rust's names, and its C.
+description: Deque<T>, a growable ring added to and taken from at both ends, which is Java's ArrayDeque and Rust's VecDeque - its methods, indexing, loops, and its C.
 ---
 
 # Deques

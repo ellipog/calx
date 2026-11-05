@@ -27,7 +27,7 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 
 Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site at https://calxlang.com. The project's `vercel.app` address serves the same pages, and their canonical links send search engines to calxlang.com. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
 
-[`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, so each page has one address.
+[`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, and one ending in `index.html` to the page's own, so each page has one address.
 
 The project has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap's key ([The roadmap](#the-roadmap)). Without it the site still builds, and the roadmap is read only.
 
@@ -35,7 +35,10 @@ The project has one environment variable, `PUBLIC_ACTA_ROADMAP_KEY`, the roadmap
 
 Every page's links for search engines and link previews use the site's address, https://calxlang.com, set once as `SITE` in [`astro.config.mjs`](astro.config.mjs). Every build uses it, including previews and local builds, so no page names another address.
 
-- **Each page** has a title and description from its front matter, a canonical link to its own address, and the `og:` tags that link previews read, with `social.png` as the picture. A description longer than about 160 characters is cut short in search results, so a description should say what the page is first.
+- **Each page** has a title and description from its front matter, a canonical link to its own address, and the `og:` tags that link previews read, with `social.png` as the picture.
+- **Titles say which Calx.** "Calx" is also a word in chemistry and anatomy, so a page's `<title>` ends with the part of the site it's in: "Lists | Calx language reference", "std.zlib | Calx standard library", and "Install Calx | The Calx programming language" for the rest. [`src/seo.mjs`](src/seo.mjs) has the rule, and [`src/route-data.mjs`](src/route-data.mjs) applies it to the docs pages, as Starlight's route middleware. The page itself shows the front matter's title as it is.
+- **Descriptions are 160 characters at most.** Search results cut a longer one short, so a description says what the page is first, in under 160 characters, and over 70, so a result has something to show.
+- **One address for each page.** [`vercel.json`](vercel.json) sends `/reference/parallel` to `/reference/parallel/`, and `/index.html` to `/` (`cleanUrls`), so links to a page all count for the same address. The project's `vercel.app` addresses send `X-Robots-Tag: noindex`, so only calxlang.com is in search results.
 - **The site** has `robots.txt` ([`src/pages/robots.txt.ts`](src/pages/robots.txt.ts)), which lets every page be crawled and points at the sitemap, and the sitemap, which Starlight writes with every page but the 404 one.
 - **The 404 page** asks not to be indexed and has no canonical link.
 - **Structured data.** The home page names the site as Calx (schema.org's `WebSite`), and each docs page gives its crumbs as a `BreadcrumbList`, so a search result can show "Reference › Parallel loops" in place of the address.

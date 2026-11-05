@@ -1,6 +1,6 @@
 ---
 title: Arenas
-description: Arena and ArenaList, lists that take memory from an arena and are freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C.
+description: Arena and ArenaList, lists that take memory from an arena and are freed all at once, the rules that keep them safe without lifetimes, and their C.
 ---
 
 # Arenas

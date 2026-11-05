@@ -1,6 +1,6 @@
 ---
 title: Reading the commands
-description: The guide's second page - reading standard input a line at a time with std.io.Lines, optionals and while let, and splitting a line into words with a function of your own.
+description: The guide's second page - reading standard input a line at a time with std.io.Lines, optionals and while let, and splitting a line into words.
 ---
 
 # Reading the commands

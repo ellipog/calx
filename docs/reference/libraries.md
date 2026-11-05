@@ -1,6 +1,6 @@
 ---
 title: Libraries
-description: Building a library with `calx build --lib` and `@export`, opening it from a program with `Library`, checking the types of what it exports, and the one runtime the two share.
+description: Building a library with calx build --lib and @export, opening it while a program runs, checking the types of what it exports, and the runtime the two share.
 ---
 
 # Libraries

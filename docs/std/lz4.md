@@ -1,6 +1,6 @@
 ---
 title: std.lz4
-description: LZ4 block streams as lz4-java's LZ4BlockOutputStream writes them and LZ4BlockInputStream reads them - what Minecraft's region files hold when region-file-compression is lz4.
+description: LZ4 block streams as lz4-java's LZ4BlockOutputStream writes them and LZ4BlockInputStream reads them, such as Minecraft's region files compressed with lz4.
 ---
 
 # `std.lz4`

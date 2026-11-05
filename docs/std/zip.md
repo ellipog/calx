@@ -1,6 +1,6 @@
 ---
 title: std.zip
-description: Zip archives read and written in memory - stored and deflated entries, Zip64, Unix file modes, and extracting to a folder without letting a path climb out of it.
+description: Zip archives read and written in memory - stored and deflated entries, Zip64, Unix file modes, and extracting to a folder that no path can climb out of.
 ---
 
 # `std.zip`

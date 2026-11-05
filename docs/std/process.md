@@ -1,6 +1,6 @@
 ---
 title: std.process
-description: Starting other programs, with their arguments, folder, environment, input and output, timeouts, several at once, and finding them; and this process's memory, CPU time and processors, and ending it.
+description: Running other programs with their arguments, folder, environment, input, output and timeouts, and finding them; and this process's memory, CPU time and exit.
 ---
 
 # `std.process`

@@ -1,6 +1,6 @@
 ---
 title: Interfaces
-description: Interfaces with methods, static functions, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; and calls that name their interface.
+description: Interfaces with methods, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; and naming the interface.
 ---
 
 # Interfaces

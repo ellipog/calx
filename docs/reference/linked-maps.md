@@ -1,6 +1,6 @@
 ---
 title: Linked maps and sets
-description: LinkedMap<K, V> and LinkedSet<T>, which go over their keys in the order they went in, as Java's LinkedHashMap and fastutil's linked tables do - their ends, moving keys to them, writing Java's and fastutil's methods, and their C.
+description: LinkedMap<K, V> and LinkedSet<T>, which go over their keys in the order they went in, like Java's LinkedHashMap - their ends, moving keys to them, and their C.
 ---
 
 # Linked maps and sets

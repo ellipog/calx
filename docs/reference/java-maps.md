@@ -1,6 +1,6 @@
 ---
 title: Java's hash maps
-description: JavaHashMap<K, V> and JavaHashSet<T>, which go over their keys in the order Java's HashMap and HashSet do - JavaHash, writing Java's constructors and methods, and their C.
+description: JavaHashMap<K, V> and JavaHashSet<T>, which go over their keys in the order Java's HashMap and HashSet do - JavaHash, Java's methods in Calx, and their C.
 ---
 
 # Java's hash maps

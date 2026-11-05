@@ -1,6 +1,6 @@
 ---
 title: fastutil's hash maps
-description: OpenHashMap<K, V> and OpenHashSet<T>, which go over their keys in the order fastutil's open hash maps and sets do - which fastutil class each is, writing fastutil's constructors and methods, and their C.
+description: OpenHashMap<K, V> and OpenHashSet<T>, which go over their keys in the order fastutil's open hash maps and sets do, fastutil's methods in Calx, and their C.
 ---
 
 # fastutil's hash maps

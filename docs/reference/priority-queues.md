@@ -1,6 +1,6 @@
 ---
 title: Priority queues
-description: PriorityQueue<T>, least first, with its elements in the places Java's PriorityQueue puts them, so a loop goes in the order Java's iterator does - its methods, taking out marked elements as a Java iterator does, Java's names, and its C.
+description: PriorityQueue<T>, least first, with its elements where Java's PriorityQueue puts them, so a loop goes in the order Java's iterator does - its methods and its C.
 ---
 
 # Priority queues

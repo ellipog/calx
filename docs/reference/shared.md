@@ -1,6 +1,6 @@
 ---
 title: Shared values
-description: Shared<T>, one value that many owners and threads read at once without copying it - making one, its value as the read-only place s.value, copies that count owners, what it can hold, and its C.
+description: Shared<T>, one value that many owners and threads read at once without copying it - making one, the read-only place s.value, counted copies, and its C.
 ---
 
 # Shared values

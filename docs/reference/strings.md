@@ -1,6 +1,6 @@
 ---
 title: Strings
-description: The str and String types, literals that cost nothing, building strings, their methods, slicing by byte offset, Java's root-locale case mapping, going over runes and UTF-16 units, Java's hashCode and length, equality, patterns, and their C.
+description: The str and String types, literals that cost nothing, building strings, their methods, slicing, Java's case mapping, runes and UTF-16 units, and their C.
 ---
 
 # Strings

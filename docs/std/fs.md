@@ -1,6 +1,6 @@
 ---
 title: std.fs
-description: Files and directories - whole files read and written, parts written in place, atomic renames, synced or not, locks, sizes, modified times and modes, directories made, listed and removed, links read and made, real paths, and temporary directories.
+description: Files and directories - read and written whole or in place, atomic renames, locks, links, times and modes, listing and removing directories, and temporary ones.
 ---
 
 # `std.fs`

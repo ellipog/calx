@@ -1,6 +1,6 @@
 ---
 title: Attributes
-description: Attributes a library defines, as Calx functions the compiler runs while it compiles. What they take and return, using them, attributes on fields, the code they generate, errors, the cache, and calx expand.
+description: Attributes a library defines as Calx functions the compiler runs - what they take and return, the code they generate, the cache, and calx expand.
 ---
 
 # Attributes
