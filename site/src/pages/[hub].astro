@@ -1,0 +1,35 @@
+---
+// /guide/, /reference/ and /std/: a section of the docs on a page of its own, so the address above
+// every page in it is a page too, and a search for "Calx standard library" has a page to find.
+// Which sections have one is HUBS in src/seo.mjs; the list is docs/README.md's, as on /docs/.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import DocsList from '../components/DocsList.astro';
+import { docsIndex } from '../docs-index.mjs';
+import { HUBS } from '../seo.mjs';
+
+export function getStaticPaths() {
+	return HUBS.map((hub) => ({ params: { hub: hub.path }, props: { hub } }));
+}
+
+const { hub } = Astro.props;
+const sections = hub.sections.map((id) => {
+	const s = docsIndex().find((x) => x.id === id);
+	if (!s) throw new Error(`docs/README.md has no "### " section with the id ${id} (HUBS in src/seo.mjs)`);
+	return s;
+});
+const [own, ...more] = sections;
+---
+
+<StarlightPage
+	frontmatter={{ title: hub.title, description: hub.description }}
+	headings={more.map((s) => ({ depth: 2, slug: s.id, text: s.title }))}
+>
+	<DocsList sections={sections} untitled={own.id} />
+	<p class="all"><a href="/docs/">All the docs</a></p>
+</StarlightPage>
+
+<style>
+	.all {
+		margin-top: 2.5rem;
+	}
+</style>

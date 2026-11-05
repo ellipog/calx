@@ -9,7 +9,7 @@ import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
 import { errorOf, fences } from '../examples.mjs';
 import { buildTimes } from '../numbers.mjs';
-import { LANGUAGE } from '../seo.mjs';
+import { LANGUAGE, homeData } from '../seo.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
 // and the first example written not to compile.
@@ -36,21 +36,16 @@ const ownershipExample = exampleIn('reference/ownership.md', 'was moved');
 const strictExample = exampleIn('reference/strictness.md', 'value is unused');
 const builds = buildTimes().map((r) => ({ ...r, command: r.label.match(/^calx \w+/)?.[0] ?? '' }));
 
-// For search engines: the title says what Calx is in the words people search with, and the site's
-// name is Calx rather than its domain (schema.org's WebSite, which Google reads for that name).
-const site = {
-	'@context': 'https://schema.org',
-	'@type': 'WebSite',
-	name: 'Calx',
-	alternateName: 'Calx programming language',
-	url: new URL('/', Astro.site).href,
-};
+// For search engines: the title says what Calx is in the words people search with, and the
+// structured data names the site Calx rather than by its domain (src/seo.mjs).
+const description =
+	"Calx is a memory-safe compiled programming language with no garbage collector. Its math gives the same bits on every platform, and parallel loops can't race.";
 ---
 
 <Base
 	title={LANGUAGE}
-	description="Calx is a memory-safe compiled programming language with no garbage collector. Its math gives the same bits on every platform, and parallel loops can't race."
-	jsonLd={site}
+	description={description}
+	jsonLd={homeData(description)}
 >
 	<main class="home">
 		<section class="hero">

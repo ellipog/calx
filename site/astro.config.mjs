@@ -1,16 +1,21 @@
 // @ts-check
-// The Calx website: the home page, the 404 page and a docs overview are Astro pages in src/pages,
-// and Starlight renders every page of docs/ as it is (D40). site/README.md says how it fits.
+// The Calx website: the home page, the 404 page, a docs overview and the section pages are Astro
+// pages in src/pages, and Starlight renders every page of docs/ as it is (D40). site/README.md
+// says how it fits.
 import { defineConfig } from 'astro/config';
 import { satteri } from '@astrojs/markdown-satteri';
+import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 import { calxAssets } from './src/assets.mjs';
 import { sidebar } from './src/docs-index.mjs';
+import { datesOf } from './src/facts.mjs';
 import { calxDocs, GITHUB } from './src/markdown.mjs';
+import { ORIGIN, sourceOf } from './src/seo.mjs';
 
 // The site's one address, for canonical links, link previews, the sitemap and robots.txt. Every
 // build names it, previews and local ones too, so no page ever points search engines elsewhere.
-const SITE = 'https://calxlang.com';
+// It's ORIGIN in src/seo.mjs, which the structured data uses too.
+const SITE = ORIGIN;
 
 export default defineConfig({
 	// The build goes to dist/, Astro's own place for it, where Vercel looks.
@@ -22,6 +27,15 @@ export default defineConfig({
 	},
 	integrations: [
 		calxAssets(),
+		// Starlight's sitemap, with each page's last change, from git, where it's known. Starlight
+		// uses this one rather than adding its own.
+		sitemap({
+			serialize(item) {
+				const file = sourceOf(new URL(item.url).pathname);
+				const changed = file && datesOf(file).modified;
+				return changed ? { ...item, lastmod: changed } : item;
+			},
+		}),
 		starlight({
 			title: 'Calx',
 			description: 'A general-purpose compiled language: fast, memory-safe, and exact.',

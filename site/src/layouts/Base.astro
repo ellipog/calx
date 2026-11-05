@@ -38,7 +38,7 @@ const image = new URL('/social.png', Astro.site);
 		<meta property="og:image:height" content="630" />
 		<meta property="og:image:alt" content="The Calx logo beside a crystal drawn in dots" />
 		<meta name="twitter:card" content="summary_large_image" />
-		{jsonLd && <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />}
+		{jsonLd && <script type="application/ld+json" set:html={JSON.stringify(jsonLd).replace(/</g, '\\u003c')} />}
 		<!-- Starlight's choice, under its key, or the system's. -->
 		<script is:inline>
 			(() => {

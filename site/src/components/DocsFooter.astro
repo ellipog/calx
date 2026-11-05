@@ -1,10 +1,13 @@
 ---
-// The bottom of a docs page: the previous and next pages in the sidebar's order, and the file and
-// commit the page was built from.
-import { COMMIT, repoPath } from '../facts.mjs';
+// The bottom of a docs page: the previous and next pages in the sidebar's order, the file and
+// commit the page was built from, and when the file last changed, the date its structured data
+// gives search engines (src/route-data.mjs).
+import { COMMIT, datesOf, isDocsFile, repoPath } from '../facts.mjs';
+import { day } from '../roadmap/render.mjs';
 
 const { entry, pagination } = Astro.locals.starlightRoute;
 const { prev, next } = pagination;
+const changed = isDocsFile(entry) ? datesOf(repoPath(entry)).modified : null;
 ---
 
 <footer>
@@ -30,6 +33,7 @@ const { prev, next } = pagination;
 	}
 	<div class="docs-foot">
 		<span>Built from <code>{repoPath(entry)}</code>{COMMIT && <> at {COMMIT}</>}</span>
+		{changed && <span>Last changed <time datetime={changed}>{day(changed)}</time></span>}
 		<span>MIT licensed</span>
 	</div>
 </footer>

@@ -9,6 +9,11 @@ export function slugOf(path) {
 	return path === 'CALX_SPEC.md' ? 'spec' : path.replace(/\.md$/, '');
 }
 
+/** The path under docs/ of the page with this slug: slugOf the other way. */
+export function fileOf(slug) {
+	return slug === 'spec' ? 'CALX_SPEC.md' : `${slug}.md`;
+}
+
 /** The sections in the README's page list: [{ title, id, intro, pages: [{ title, slug, about }] }]. */
 export function docsIndex() {
 	const text = readFileSync(new URL('README.md', DOCS), 'utf8').replace(/\r\n/g, '\n');

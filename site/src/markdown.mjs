@@ -2,7 +2,8 @@
 // right on GitHub (D40):
 //
 // - Links between pages are relative paths to .md files. They become the pages' URLs, so
-//   "../reference/maps.md#hash" is "/reference/maps/#hash".
+//   "../reference/maps.md#hash" is "/reference/maps/#hash". A link to a section of the page list in
+//   README.md goes to that section's page, if it has one: "README.md#reference" is "/reference/".
 // - Links to the rest of the repo, such as "../../std/io.calx", go to the file on GitHub.
 // - Each page starts with its title as a "# " heading, for GitHub. The site shows the title from
 //   the front matter, so that first heading goes.
@@ -14,6 +15,7 @@ import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { slugOf } from './docs-index.mjs';
 import { DOCS } from './paths.mjs';
+import { sectionPath } from './seo.mjs';
 
 export const GITHUB = 'https://github.com/ellipog/calx';
 const docsDir = fileURLToPath(DOCS);
@@ -32,7 +34,8 @@ export function siteUrl(url, from) {
 	const anchor = hash ? '#' + hash : '';
 	if (inside(docsDir, target) && target.endsWith('.md')) {
 		const rel = relative(docsDir, target).split(sep).join('/');
-		return rel === 'README.md' ? '/docs/' + anchor : '/' + slugOf(rel) + '/' + anchor;
+		if (rel === 'README.md') return hash ? sectionPath(hash) : '/docs/';
+		return '/' + slugOf(rel) + '/' + anchor;
 	}
 	if (inside(repoDir, target)) {
 		let kind = 'blob';
