@@ -19,7 +19,7 @@ stop() {
 
 case "$(uname -s) $(uname -m)" in
     "Linux x86_64") ;;
-    *) stop "Calx releases are for 64-bit x86 Linux and Windows; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/docs/guide/install/" ;;
+    *) stop "Calx releases are for 64-bit x86 Linux and Windows; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/guide/install/#building-from-source" ;;
 esac
 
 if command -v curl > /dev/null 2>&1; then

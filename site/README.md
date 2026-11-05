@@ -49,6 +49,18 @@ Every page's links for search engines and link previews use the site's address, 
 
 Previews aren't indexed: Vercel serves them with `X-Robots-Tag: noindex`.
 
+The pages' furniture for search results and browsers is in every page's head (`HEAD` in [`src/seo.mjs`](src/seo.mjs)): the SVG favicon, with `favicon.ico` beside it for what asks for that file whatever the page says, `apple-touch-icon.png` for a phone's home screen, and `theme-color`, each theme's paper.
+
+## The docs for language models
+
+The docs are also plain Markdown, for language models and the tools that read docs to them ([`src/llms.mjs`](src/llms.mjs)):
+
+- [`/llms.txt`](https://calxlang.com/llms.txt), as [llmstxt.org](https://llmstxt.org) describes it: what Calx is, and every page by section, with the page list's line on what it covers;
+- [`/llms-full.txt`](https://calxlang.com/llms-full.txt), every page in one file, in reading order;
+- each page's own Markdown beside it, `/reference/parallel.md` for `/reference/parallel/`, which its head links to as `rel="alternate"`.
+
+Each is the page as the site shows it: the front matter's title and description at the top, no decisions cited, and every link a full address. `vercel.json` serves them with `X-Robots-Tag: noindex`, so search results show the pages rather than their Markdown.
+
 ## How it's made
 
 It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build), the docs theme.
@@ -105,6 +117,7 @@ The site's art is the crystal from the README's banner, dithered: ink dots by At
 - `calx-banner.png` and `calx-banner-dark.png`, the README's banner
 - `calx-social.png`, the card link previews show, 1200 by 630: the site's `og:image`
 - `calx-tones.jpg`, the photo's darkness and warmth, which the site dithers live in the browser with the script's own steps
+- `calx-icon-180.png` and `calx-icon.ico`, the mark in ink on paper, the site's `apple-touch-icon.png` and `favicon.ico`
 
 Dithering live means the dots are whole screen pixels at any size and screen density, so they stay sharp, and the crystal can grow in when it comes into view.
 

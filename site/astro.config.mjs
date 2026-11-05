@@ -10,7 +10,7 @@ import { calxAssets } from './src/assets.mjs';
 import { sidebar } from './src/docs-index.mjs';
 import { datesOf } from './src/facts.mjs';
 import { calxDocs, GITHUB } from './src/markdown.mjs';
-import { ORIGIN, sourceOf } from './src/seo.mjs';
+import { HEAD, ORIGIN, sourceOf } from './src/seo.mjs';
 
 // The site's one address, for canonical links, link previews, the sitemap and robots.txt. Every
 // build names it, previews and local ones too, so no page ever points search engines elsewhere.
@@ -57,6 +57,7 @@ export default defineConfig({
 				Footer: './src/components/DocsFooter.astro',
 			},
 			head: [
+				...HEAD,
 				{ tag: 'meta', attrs: { property: 'og:image', content: `${SITE}/social.png` } },
 				{ tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
 				{ tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },

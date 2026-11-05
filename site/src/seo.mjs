@@ -7,6 +7,10 @@ export const ORIGIN = 'https://calxlang.com';
 /** The site's name for the language, the home page's title, and the end of most titles. */
 export const LANGUAGE = 'The Calx programming language';
 
+/** What Calx is, in a sentence or two: the home page's description, and llms.txt's summary. */
+export const ABOUT =
+	"Calx is a memory-safe compiled programming language with no garbage collector. Its math gives the same bits on every platform, and parallel loops can't race.";
+
 // "Calx" alone is also a word in chemistry and in anatomy, so every title says which Calx this is,
 // and the part of the docs it's in: a result for std.zlib reads "std.zlib | Calx standard library".
 const ENDS = { reference: 'Calx language reference', std: 'Calx standard library' };
@@ -65,6 +69,15 @@ export function sourceOf(path) {
 	const listed = docsIndex().some((s) => s.pages.some((p) => p.slug === slug));
 	return listed && slug !== 'roadmap' ? `docs/${fileOf(slug)}` : null;
 }
+
+/** Tags every page's head has, on Starlight's pages and the site's own: the icons beside the SVG
+ *  favicon, and the color a phone's browser paints around the page, the theme's paper. */
+export const HEAD = [
+	{ tag: 'link', attrs: { rel: 'icon', href: '/favicon.ico', sizes: '48x48' } },
+	{ tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
+	{ tag: 'meta', attrs: { name: 'theme-color', media: '(prefers-color-scheme: light)', content: '#F7F3EC' } },
+	{ tag: 'meta', attrs: { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#0E1218' } },
+];
 
 /** The section a docs page is in, from the page list, or undefined. */
 export function sectionOf(slug) {

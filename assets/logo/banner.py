@@ -7,6 +7,8 @@ Needs Pillow and numpy. Writes:
 - calx-banner.png and calx-banner-dark.png, the README's banner, for light and dark themes
 - calx-social.png, the card that link previews show (the website's og:image), 1200 by 630
 - calx-tones.jpg, the tone map the website dithers live (see below)
+- calx-icon-180.png and calx-icon.ico, the mark in ink on paper, for the website's
+  apple-touch-icon and favicon.ico, beside its SVG favicon, for what can't show an SVG
 
 The photo is reduced to a grid of 4-pixel cells and dithered with Atkinson's error diffusion,
 which keeps highlights clean, in ink on paper, with the photo's warm veins as a third color by
@@ -30,6 +32,7 @@ from PIL import Image, ImageDraw, ImageFilter
 HERE = Path(__file__).resolve().parent
 PHOTO = HERE / "banner-photo.jpg"
 LOGO = HERE / "calx-logo.svg"
+MARK = HERE / "calx-mark.svg"
 
 CELL = 4             # pixels per dither cell
 TOP = 0.30           # where the photo's band starts, as a share of its height
@@ -48,6 +51,12 @@ OUTPUTS = {
     "calx-social.png": (1200, 630, 560, 0, LIGHT),
 }
 TONE_MAP = "calx-tones.jpg"
+
+# The icons: the mark's whole 128-unit square fills a small icon, where every pixel counts, and
+# 86% of the 180-pixel one, which a phone rounds and shows on its own.
+ICON = "calx-icon-180.png"
+ICO = "calx-icon.ico"
+ICO_SIZES = (16, 32, 48)
 
 BAYER = np.array([[0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
                   [12, 44, 4, 36, 14, 46, 6, 38], [60, 28, 52, 20, 62, 30, 54, 22],
@@ -176,10 +185,15 @@ def fill(polygons, evenodd, width, height, scale, ox, oy):
     return mask
 
 
-@functools.cache
 def logo_alpha(width, supersample=4):
     """The logo's coverage, 0 to 1, at `width` pixels wide."""
-    root = ET.parse(LOGO).getroot()
+    return svg_alpha(LOGO, width, supersample)
+
+
+@functools.cache
+def svg_alpha(path, width, supersample=4):
+    """The coverage of an SVG's shapes, 0 to 1, at `width` pixels wide."""
+    root = ET.parse(path).getroot()
     vx, vy, vw, vh = (float(v) for v in root.get("viewBox").split())
     scale = width * supersample / vw
     w, h = width * supersample, math.ceil(vh * scale / supersample) * supersample
@@ -309,6 +323,27 @@ def render(width, height, logo_width, corner, paper, ink, vein, logo):
     return rgba
 
 
+def icon(size, share):
+    """The mark in ink on paper, square and opaque, its square `share` of the icon's width."""
+    paper, ink = LIGHT[0], LIGHT[1]
+    inner = round(size * share)
+    alpha = svg_alpha(MARK, inner, 8)[..., None]
+    img = np.empty((size, size, 3))
+    img[:] = paper
+    o = (size - inner) // 2
+    img[o:o + inner, o:o + inner] = img[o:o + inner, o:o + inner] * (1 - alpha) + np.array(ink, float) * alpha
+    return Image.fromarray(img.round().astype(np.uint8))
+
+
+def icons():
+    icon(180, 0.86).save(HERE / ICON, optimize=True)
+    print(f"wrote {ICON}")
+    # The largest goes first: an .ico holds no size above its first image's.
+    first, *rest = (icon(s, 1.0) for s in sorted(ICO_SIZES, reverse=True))
+    first.save(HERE / ICO, sizes=[(s, s) for s in ICO_SIZES], append_images=rest)
+    print(f"wrote {ICO}")
+
+
 def main():
     for name, (width, height, logo_width, corner, colors) in OUTPUTS.items():
         image = render(width, height, logo_width, corner, *colors)
@@ -316,6 +351,7 @@ def main():
         image.quantize(64, method=Image.Quantize.FASTOCTREE).save(HERE / name, optimize=True)
         print(f"wrote {name}")
     tone_map()
+    icons()
 
 
 if __name__ == "__main__":

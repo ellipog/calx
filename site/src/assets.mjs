@@ -17,6 +17,10 @@ const favicon = () =>
 export const FILES = {
 	'/favicon.svg': { type: 'image/svg+xml', read: favicon },
 	'/social.png': { type: 'image/png', read: () => readFileSync(new URL('calx-social.png', LOGO)) },
+	// The mark on paper, for what can't show the SVG: browsers and crawlers that ask for
+	// /favicon.ico whatever the page says, and a phone's home screen.
+	'/favicon.ico': { type: 'image/x-icon', read: () => readFileSync(new URL('calx-icon.ico', LOGO)) },
+	'/apple-touch-icon.png': { type: 'image/png', read: () => readFileSync(new URL('calx-icon-180.png', LOGO)) },
 	'/crystal-tones.jpg': { type: 'image/jpeg', read: () => readFileSync(new URL('calx-tones.jpg', LOGO)) },
 	// The install scripts, from tools/install, for `irm calxlang.com/install.ps1 | iex` and
 	// `curl -fsSL calxlang.com/install.sh | sh`. vercel.json gives them a text type.

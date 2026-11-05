@@ -24,7 +24,7 @@ Each page adds to it, and the [last](stash.md) has the whole program. This page 
 
 ## The `calx` command
 
-Calx compiles to C, which clang compiles, so you need clang. Until Calx has releases, you build the compiler from source, as [Install Calx](install.md) says. That gives you `calx`, the one command for checking, building and running programs.
+Calx compiles to C, which clang compiles, so you need clang, as [Install Calx](install.md) says. Installing Calx gives you `calx`, the one command for checking, building and running programs.
 
 Here's a whole program:
 

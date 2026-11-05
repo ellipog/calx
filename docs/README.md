@@ -15,7 +15,7 @@ In reading order:
 
 Installing Calx, then learning it by building one small program, `stash`, which keeps count of items from commands it reads:
 
-1. [Install Calx](guide/install.md): building the compiler from source on Windows or Linux, and checking that it runs a program
+1. [Install Calx](guide/install.md): one command on Windows or Linux, clang, checking that it runs a program, staying up to date, and building from source
 2. [Getting started](guide/getting-started.md): the program, the `calx` command, values and variables, functions, loops, and the checker's errors
 3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
 4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list

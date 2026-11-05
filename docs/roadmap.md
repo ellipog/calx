@@ -5,7 +5,7 @@ description: Where Calx is - what's built and tested, what's designed but not bu
 
 # Roadmap
 
-Calx is pre-release: there are no releases yet, and the language can still change. You build the compiler from source ([Install Calx](guide/install.md)). The board Calx is built from is on [calxlang.com/roadmap](https://calxlang.com/roadmap/), where you can vote for what you'd like sooner, suggest ideas and report problems. This page sums it up by feature, and the site shows the summary under the board. When a feature is built, its section moves from the spec to the reference, and this page moves it up.
+Calx is pre-release: there's no stable release yet, and the language can still change. One command installs the newest nightly build ([Install Calx](guide/install.md)). The board Calx is built from is on [calxlang.com/roadmap](https://calxlang.com/roadmap/), where you can vote for what you'd like sooner, suggest ideas and report problems. This page sums it up by feature, and the site shows the summary under the board. When a feature is built, its section moves from the spec to the reference, and this page moves it up.
 
 Calx's first large program is [Calcite](https://github.com/ellipog/calcite), a Minecraft server, so Calcite's needs decide what gets built first. Every feature is designed for programs in general, though, and the reference describes them that way.
 

@@ -9,7 +9,7 @@ import SiteFooter from '../components/SiteFooter.astro';
 import { docsIndex } from '../docs-index.mjs';
 import { errorOf, fences } from '../examples.mjs';
 import { buildTimes } from '../numbers.mjs';
-import { LANGUAGE, homeData } from '../seo.mjs';
+import { ABOUT, LANGUAGE, homeData } from '../seo.mjs';
 
 // parallel.md: its first example, the C that example compiles to (the page's first two C blocks),
 // and the first example written not to compile.
@@ -38,8 +38,7 @@ const builds = buildTimes().map((r) => ({ ...r, command: r.label.match(/^calx \w
 
 // For search engines: the title says what Calx is in the words people search with, and the
 // structured data names the site Calx rather than by its domain (src/seo.mjs).
-const description =
-	"Calx is a memory-safe compiled programming language with no garbage collector. Its math gives the same bits on every platform, and parallel loops can't race.";
+const description = ABOUT;
 ---
 
 <Base
@@ -64,7 +63,7 @@ const description =
 						</a>
 						<a class="btn" href="/guide/getting-started/">Learn Calx</a>
 					</div>
-					<p class="fineprint">Calx is pre-release, and you build it from source. It runs on Windows and Linux.</p>
+					<p class="fineprint">Calx is pre-release, so installing it gets the newest nightly build. It runs on Windows and Linux.</p>
 				</div>
 			</div>
 		</section>
@@ -119,7 +118,7 @@ const description =
 					<p>Measured on the same machine as the benchmark below.</p>
 					<table class="times">
 						<thead>
-							<tr><th></th><th>Windows</th><th>Linux</th></tr>
+							<tr><th><span class="sr-only">Build</span></th><th>Windows</th><th>Linux</th></tr>
 						</thead>
 						<tbody>
 							{

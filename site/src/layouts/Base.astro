@@ -2,6 +2,7 @@
 // The frame of the pages Starlight doesn't render (the home page and the 404 page): the head, the
 // same header as the docs, and the theme, set before the page paints.
 import Header from '../components/Header.astro';
+import { HEAD } from '../seo.mjs';
 import '../styles/tokens.css';
 import '../styles/site.css';
 
@@ -27,6 +28,7 @@ const image = new URL('/social.png', Astro.site);
 		<meta name="description" content={description} />
 		{noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
 		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		{HEAD.map(({ tag: Tag, attrs }) => <Tag {...attrs} />)}
 		<link rel="sitemap" href="/sitemap-index.xml" />
 		<meta property="og:type" content="website" />
 		<meta property="og:title" content={title} />
