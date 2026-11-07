@@ -24,7 +24,7 @@ description: The f32 and f64 types - arithmetic, printing and methods - which ma
 
 ## Printing
 
-Floats print exactly as Java's `Double.toString` and `Float.toString` print them (JDK 19 and later): the shortest decimal that reads back as the same value. Between 10⁻³ and 10⁷ it's written plainly, with at least one digit after the point. Outside that range it's written `d.dddE<n>`.
+Floats print exactly as Java's `Double.toString` and `Float.toString` print them (JDK 19 and later): the shortest decimal that reads back as the same value, the closest one when there are several. Between 10⁻³ and 10⁷ it's written plainly, with at least one digit after the point. Outside that range it's written `d.dddE<n>`.
 
 ```calx
 fn main() {
@@ -32,10 +32,22 @@ fn main() {
     println("{0.1 + 0.2} {100.0} {1.0e7} {0.001} {1.0e-4}")   // out: 0.30000000000000004 100.0 1.0E7 0.001 1.0E-4
     println("{-zero} {1.0 / zero} {zero / zero}")              // out: -0.0 Infinity NaN
     println("{1.0f32 / 3.0f32} {f64(0.1f32)}")                // out: 0.33333334 0.10000000149011612
+    println("{f64.from_bits(1)} {f64.from_bits(2)} {f32.from_bits(1)}")    // out: 4.9E-324 9.9E-324 1.4E-45
 }
 ```
 
-The formatting is checked against Java by the rig. It's done in the runtime with the C library's correctly rounded conversions for now. `"{x}"` gives the same text as a `String`, which is what SNBT and JSON need, so there's no `java_string` method: it would be a second way to say the same thing.
+- When the shortest decimal has one digit, Java prints the closest of one or two digits instead. That only changes the smallest subnormals: `5.0E-324` reads back as the smallest double, but `4.9E-324` is closer, so that's what's printed.
+- `"{x}"` gives the same text as a `String`, which is what SNBT and JSON need, so there's no `java_string` method: it would be a second way to say the same thing.
+- The digits come from Żmij, Victor Zverovich's algorithm, which is based on Schubfach, as Java's own is. It takes one 192-bit multiply by a power of ten from a table, with no loop, no division and no C library. It's in [runtime/calx_float.c](../../runtime/calx_float.c), linked only into programs that print a float, with a table of 618 powers of ten, 10 KB, which [tools/float/gen_pow10.py](../../tools/float/gen_pow10.py) works out exactly. The smallest subnormals, where Java's rule for one digit can matter, are worked out exactly with big integers.
+- It matched Java 25 on 9.6 million doubles and floats: 3 million random bit patterns of each, every power of two and its neighbours, the 300,000 smallest subnormals of each and 300,000 random ones, a million decimals as programs write them, and the 40 values around every power of ten. [tools/float/FloatDump.java](../../tools/float/FloatDump.java) writes what Java prints for them, and [float_check.calx](../../tools/float/float_check.calx) compares.
+
+Printing 200,000 doubles into a `String`, `"{v},"` each, best of 5, on an i9-13900K:
+
+| | ms |
+| --- | --- |
+| Calx | 7.1 |
+| Calx before Żmij, trying `snprintf` with 1 to 17 digits and reading each back with `strtod` | 907 |
+| Rust, `write!(out, "{},", v)` | 13.3 |
 
 ## Constants
 

@@ -1,0 +1,29 @@
+// Reads tools/float/FloatDump.java's lines and checks Calx prints each value as Java did:
+//
+//     java tools/float/FloatDump.java floats.txt
+//     calx run tools/float/float_check.calx floats.txt
+import std.env.{args}
+import std.fs.{read_text}
+
+fn main() {
+    let path = args()[0].copy()
+    let text = read_text(path)! ?? String()
+    var checked: u64 = 0
+    var wrong: u64 = 0
+    for line in text.lines() {
+        if let (kind, rest) = line.split_once(" ") {
+            if let (bits, want) = rest.split_once(" ") {
+                let b = u64.wrap(i64.parse(bits) ?? 0)
+                let got = if kind == "d" { "{f64.from_bits(b)}" } else { "{f32.from_bits(u32.wrap(b))}" }
+                checked += 1
+                if got != want {
+                    wrong += 1
+                    if wrong <= 30 {
+                        println("{kind} {bits}: java {want}, calx {got}")
+                    }
+                }
+            }
+        }
+    }
+    println("{checked} checked, {wrong} differ")
+}

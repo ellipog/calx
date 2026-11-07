@@ -1,0 +1,20 @@
+// Floats print as Java 25's Double.toString and Float.toString print them. Each expected text is
+// what Java printed for the same bits, picked from the 9.6 million runtime/calx_float.c matched.
+
+fn main() {
+    // Zeros, the smallest subnormals, where Java takes the closest of one or two digits, and the
+    // ends of the range.
+    println("{f64.from_bits(0)} {f64.from_bits(9223372036854775808)} {f64.from_bits(1)} {f64.from_bits(2)} {f64.from_bits(3)}")    // out: 0.0 -0.0 4.9E-324 9.9E-324 1.5E-323
+    println("{f64.from_bits(4503599627370495)} {f64.from_bits(4503599627370496)} {f64.from_bits(9218868437227405311)}")    // out: 2.225073858507201E-308 2.2250738585072014E-308 1.7976931348623157E308
+    println("{f32.from_bits(0)} {f32.from_bits(2147483648)} {f32.from_bits(1)} {f32.from_bits(8388608)} {f32.from_bits(2139095039)}")    // out: 0.0 -0.0 1.4E-45 1.1754944E-38 3.4028235E38
+    // Powers of two, whose lower neighbour is half as far as the upper.
+    println("{f64.from_bits(9214364837600034816)} {f64.from_bits(4890909195324358656)} {f64.from_bits(4372995238176751616)} {f32.from_bits(2130706432)}")    // out: 8.98846567431158E307 9.223372036854776E18 2.220446049250313E-16 1.7014118E38
+    // Where the layout changes, and the closest of the shortest.
+    println("{f64.from_bits(4562254508917369340)} {f64.from_bits(4562254508917369339)} {f64.from_bits(4711630319722168320)} {f64.from_bits(4711630319722168319)}")    // out: 0.001 9.999999999999998E-4 1.0E7 9999999.999999998
+    println("{f64.from_bits(4950912855330343670)} {f64.from_bits(4955416454957714166)} {f32.from_bits(1343554297)} {f32.from_bits(1259902592)} {f32.from_bits(981668463)}")    // out: 1.0E23 2.0E23 1.0E10 1.0E7 0.001
+    // Random bits, decimals as programs write them, and subnormals.
+    println("{f64.from_bits(1865685866025895707)} {f64.from_bits(13831252142617148040)} {f64.from_bits(12421025208631064038)} {f64.from_bits(4925401668849345005)}")    // out: 5.956460717598632E-184 -1.154917625917422 -6.12219574539865E-95 1.9584452554295537E21
+    println("{f32.from_bits(3112102728)} {f32.from_bits(2412007167)} {f32.from_bits(1442230704)} {f32.from_bits(3608693611)}")    // out: -2.4310977E-4 -1.935752E-29 3.3905378E13 -1.6744969E14
+    println("{f64.from_bits(13868823933300513375)} {f64.from_bits(4677948931823167571)} {f64.from_bits(13686893763854880931)} {f32.from_bits(1143703142)} {f32.from_bits(3180353987)}")    // out: -383.3679474 56142.14926 -2.563275504E-10 686.1 -0.07048371
+    println("{f64.from_bits(8133)} {f64.from_bits(254302)} {f64.from_bits(214367)} {f32.from_bits(225638)} {f32.from_bits(6890626)}")    // out: 4.018E-320 1.25642E-318 1.059114E-318 3.16186E-40 9.655824E-39
+}

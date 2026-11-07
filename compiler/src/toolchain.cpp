@@ -995,7 +995,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // linked only into those: networking, so the others don't load the socket libraries when they
     // start, the sorts of integers (D96), which take clang a second to optimize, Java's tables (D105),
     // the tables that change the case of text (D117), the hashes, crypto, zlib, lz4 and HTTP (D118),
-    // threads and their queues (D121), and files.
+    // threads and their queues (D121), files, the text methods, and printing floats, with its
+    // table of powers of ten.
     auto calls = [&](std::initializer_list<const char*> names) {
         if (opens) return true;
         for (const std::string& c : c_sources) {
@@ -1024,6 +1025,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");
     if (parts_ok && calls({"cx_case_"})) parts_ok = part("calx_case.c");
+    if (parts_ok && calls({"cx_print_f"})) parts_ok = part("calx_float.c");
     if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
         parts_ok = part("calx_text.c");
     }
