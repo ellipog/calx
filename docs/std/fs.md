@@ -1,11 +1,11 @@
 ---
 title: std.fs
-description: Files and directories - read and written whole or in place, atomic renames, locks, links, times and modes, listing and removing directories, and temporary ones.
+description: Files and directories - read and written whole or in place, copies, atomic renames, locks, links, times and modes, directories listed, walked, globbed, copied and removed, the current folder, and temporary directories.
 ---
 
 # `std.fs`
 
-Files and directories. A file is read or written whole, or in parts in place, and a program replaces one safely by writing another and renaming it over the first. A lock on a file marks something as in use, so two programs don't both change it.
+Files and directories. A file is read or written whole, or in parts in place, and a program replaces one safely by writing another and renaming it over the first. A lock on a file marks something as in use, so two programs don't both change it. A script walks a tree, finds files by a glob such as `src/**/*.calx`, and copies files and whole trees. [`std.path`](path.md) takes paths apart as text.
 
 ```calx
 import std.fs.{read_text, write, rename, make_dir_all, list, remove_dir_all, temp_dir}
@@ -35,8 +35,11 @@ fn main() {
 | `read_parts(path: String, ranges: List<(u64, usize)>) -> List<List<u8>> ! FsError` | What `read_part` gives for each range, an offset and a length, in order, from one opening of the file |
 | `read_text(path: String) -> String? ! FsError` | The whole file as text, or `none` if it isn't UTF-8 |
 | `write(path: String, bytes: List<u8>) ! FsError` | Makes the file hold `bytes`, creating it or replacing what it held |
+| `write_text(path: String, text: String) ! FsError` | Makes the file hold `text`, as UTF-8, as `write` does, without copying it first |
 | `write_parts(path: String, parts: List<(u64, List<u8>)>, sync: bool) ! FsError` | Writes each part's bytes at its offset, in order, creating the file if nothing's there and keeping the rest of what it holds. Past the end, the file grows, with zeros in a gap. With `sync`, it returns once the system says the bytes are on the disk, as Java's `FileChannel.force(true)` |
 | `append(path: String, bytes: List<u8>) ! FsError` | Adds `bytes` to the end of the file, creating it if nothing's there, after everything it held, even what another program added |
+| `append_text(path: String, text: String) ! FsError` | Adds `text` to the end of the file, as UTF-8, as `append` adds bytes |
+| `copy(from: String, to: String) ! FsError` | Copies a file, replacing one at `to`, keeping its permission bits and modified time, as Python's `shutil.copy2`. A file copied onto itself stays as it is, and a directory is `IsDirectory`. See [Trees](#trees) |
 | `metadata(path: String) -> Metadata ! FsError` | The size, modified time and permission bits of what's at the path, following links, as Java's `Files.size` and `Files.getLastModifiedTime` read them |
 | `set_modified(path: String, at: Timestamp) ! FsError` | Sets when what's at the path was last modified, following links, as Java's `File.setLastModified` does, without changing what it holds |
 | `set_mode(path: String, mode: u32) ! FsError` | Sets the permission bits of what's at the path, following links, as `chmod` does: `0o755` for a program anyone may run, `0o644` for a file only its owner may change. On Windows only the owner's write bit, `0o200`, counts: without it the file is read-only |
@@ -47,10 +50,17 @@ fn main() {
 | `make_dir_all(path: String) ! FsError` | Makes a directory and each one missing on the way to it. Fine if it's there already |
 | `remove_dir(path: String) ! FsError` | Removes an empty directory |
 | `remove_dir_all(path: String) ! FsError` | Removes a directory and everything in it, never following a link out of it |
+| `copy_dir_all(from: String, to: String) ! FsError` | Copies a directory and everything in it, making `to` and the directories inside as needed, each file with `copy` and each link as a link, never followed. See [Trees](#trees) |
+| `walk(dir: String) -> List<Entry> ! FsError` | Everything in a directory and in the directories inside it, each directory just before what's in it, the names in each sorted, links listed and not followed. See [Trees](#trees) |
+| `glob(pattern: String) -> List<String> ! FsError` | The paths that match a glob, such as `src/**/*.calx`, sorted, as Python's `glob.glob` finds them with `recursive=True`. See [Trees](#trees) |
 | `list(path: String) -> List<String> ! FsError` | The names in a directory, without `.` and `..`, sorted by their bytes |
 | `kind(path: String) -> Kind? ! FsError` | What's at the path, without following a link, or `none` if nothing is |
 | `is_file(path: String) -> bool`, `is_dir(path: String) -> bool` | Whether the path is a file or a directory, following links. An error is `false`, as with Java's `Files.isRegularFile` and `Files.isDirectory` |
+| `exists(path: String) -> bool` | Whether anything is at the path, following links, as Python's `os.path.exists`: `false` for a link to nothing, and for an error |
 | `real_path(path: String) -> String ! FsError` | The absolute path of what's at `path`, with every link followed and each `.` and `..` resolved, as Java's `Path.toRealPath` gives it. `NotFound` if nothing is there |
+| `absolute(path: String) -> String ! FsError` | The path made absolute without looking at what's there, as Python's `os.path.abspath` makes it: on the current folder, with `.` and each `..` after a name taken out of the text. See [The current folder](#the-current-folder) |
+| `current_dir() -> String ! FsError` | The folder the program runs in, as the system gives it, which relative paths are on |
+| `set_current_dir(path: String) ! FsError` | Makes `path` the folder the program runs in, for every thread |
 | `read_link(path: String) -> Link? ! FsError` | What the link at `path` points to, without following it, or `none` if what's there isn't a link, as Java's `Files.readSymbolicLink` reads it. See [Links](#links) |
 | `make_link(target: String, path: String) ! FsError` | Makes a symbolic link at `path` to `target`, kept as it's given, as Java's `Files.createSymbolicLink` makes it. `Exists` if something's at `path`. See [Links](#links) |
 | `try_lock(path: String, bytes: List<u8>) -> FileLock? ! FsError` | Opens the file to write, creating it if nothing's there and keeping what it holds, writes `bytes` at its start and syncs them, then takes an exclusive lock on the whole file without waiting, as Java's `FileChannel.tryLock`. `none` if another lock is held on it, by this program or another |
@@ -62,6 +72,7 @@ fn main() {
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends. It's a handle too |
 | `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
+| `Entry` | What `walk` found: `path: String`, the directory walked and the names down to it, joined as [`join_path`](path.md) joins them, and `kind: Kind`, what's there, without following a link |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
 
 ## Writing in place
@@ -145,6 +156,64 @@ A path with a NUL byte fails with `BadPath`, since the system would read only th
 
 Names from `list` are UTF-8. On Linux, a name is bytes, and each part that isn't UTF-8 becomes U+FFFD. On Windows, an unpaired surrogate in a name becomes U+FFFD. `list` sorts the names, since each system lists them in its own order, and a program's output shouldn't depend on which it runs on.
 
+## Trees
+
+`walk`, `glob`, `copy` and `copy_dir_all` are what a script does with a tree of files: find them, look at each, and back them up.
+
+```calx
+import std.fs.{Kind, write_text, make_dir_all, walk, glob, copy_dir_all, remove_dir_all, temp_dir}
+
+fn main() {
+    let dir = temp_dir()!
+    make_dir_all("{dir}/src/net")!
+    write_text("{dir}/src/main.calx", "fn main\n")!
+    write_text("{dir}/src/net/http.calx", "fn get\n")!
+    write_text("{dir}/src/notes.txt", "to do\n")!
+    for path in glob("{dir}/src/**/*.calx")! {
+        println(path[dir.len() + 1..])
+    }
+    // out: src/main.calx
+    // out: src/net/http.calx
+    copy_dir_all("{dir}/src", "{dir}/backup")!
+    var files = 0
+    for e in walk("{dir}/backup")! {
+        match e.kind {
+            Kind.File => {
+                files += 1
+            },
+            _ => {},
+        }
+    }
+    println("{files} files backed up")    // out: 3 files backed up
+    remove_dir_all(dir)!
+}
+```
+
+- A glob's wildcards are [`std.path`'s](path.md#globs): `*` and `?` in a name, `[a-z]` and `[!a-z]`, and `**` for any number of directories. They pass over hidden names, those that start with `.`, as the shell's do, unless the pattern's name starts with `.` too. Letters match only in the same case, on Windows too, so a glob finds the same files everywhere.
+- `glob` gives the pattern up to the name with its first wildcard as it's written, and then the names it found, joined with `/`, or with `\` on Windows when that's all the pattern used. The paths are sorted by their bytes.
+- A pattern that ends with a separator, `*/`, finds only directories. A pattern with no wildcards gives itself if something's there, as Python's does.
+- `**` goes into directories but not through links to them, so it can't go round a loop, and neither can `walk`, which lists a link as a `Link` and doesn't follow it.
+- A directory `glob` may not list, or that went while it looked, has nothing in it to match, as in Python, so a glob over a home folder isn't stopped by one folder the system keeps to itself. `walk` fails instead, since it's to find everything.
+- `copy` keeps the permission bits and the modified time, as Python's `shutil.copy2` does. On Linux the kernel copies the bytes with `copy_file_range`, without bringing them into the program, and a file system that can, such as Btrfs or XFS, shares them instead. Windows copies with its own `CopyFileW`.
+- `copy_dir_all` is Python's `shutil.copytree` with `symlinks=True` and `dirs_exist_ok=True`: it makes a link again as a link to the same target, so nothing outside `from` is copied, and passes over devices, sockets and pipes. Each directory is listed before anything is made in it, so a copy into a directory inside `from` doesn't copy itself. On Windows a tree with a link in it needs the right to make links ([Links](#links)).
+
+## The current folder
+
+A relative path is on the folder the program runs in, `current_dir`, which `set_current_dir` changes for the whole program: every thread, and each program [`std.process`](process.md) starts without a folder of its own. A script that works in one folder can pass that folder to each call instead, which leaves the rest of the program alone.
+
+`absolute` makes a path absolute by its text alone, as Python's `os.path.abspath` does: on the current folder if it's relative, then without its `.` names and with each `..` taking off the name before it, as [`normalize_path`](path.md) does. It doesn't look at what's there, so the path needn't exist, and a `..` after a link goes back past the link's name. `real_path` follows links instead, and needs the path to be there. On Windows `absolute` is what the system's `GetFullPathNameW` makes of the path, with `\` between the names, and `C:x` is on drive C's own current folder.
+
+```calx
+import std.fs.{absolute, current_dir, separator}
+
+fn main() {
+    let here = current_dir()!
+    let sep = separator()
+    let wanted = "{here}{sep}logs{sep}latest.log"
+    println("{absolute("logs/old/../latest.log")! == wanted} {absolute("")! == here}")    // out: true true
+}
+```
+
 ## Links
 
 A symbolic link is a name that leads to another path. `read_link` reads where it leads without going there, so a program can check a folder's links before it trusts them, as a Minecraft server checks its world's against `allowed_symlinks.txt`. `kind`, `rename`, `remove_file` and `remove_dir_all` see the link itself too, and every other call follows it.
@@ -223,8 +292,8 @@ To keep a file whole through a power cut, write the new bytes with `write_parts`
 
 | Platform | Source |
 | --- | --- |
-| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetTempPathW` |
-| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `opendir`; `realpath`; `mkdtemp` in `TMPDIR` or `/tmp` |
+| Windows | `CreateFileW`, `ReadFile` and `WriteFile`; `LockFileEx`; `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and `MOVEFILE_WRITE_THROUGH` to sync; `CopyFileW`; `FindFirstFileExW`; `GetFinalPathNameByHandleW`, without the `\\?\` it puts first; `GetFullPathNameW`; `GetCurrentDirectoryW` and `SetCurrentDirectoryW`; `GetTempPathW` |
+| Linux | `open`, `read` and `write`; `fcntl` with `F_OFD_SETLK`; `rename`, then `fsync` on the folder it moved into and the one it moved from, to sync, where a file system that can't sync a folder offers nothing more; `copy_file_range`, or reads and writes where a file system can't, then `fchmod` and `futimens`; `opendir`; `realpath`; `getcwd` and `chdir`; `mkdtemp` in `TMPDIR` or `/tmp` |
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 

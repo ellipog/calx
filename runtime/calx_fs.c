@@ -493,6 +493,104 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
     return 1;
 }
 
+/* Whether `a` and `b` name one file, by its volume and its index on it. */
+static int same_file(const wchar_t* a, const wchar_t* b) {
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    HANDLE ha = CreateFileW(a, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (ha == INVALID_HANDLE_VALUE) return 0;
+    HANDLE hb = CreateFileW(b, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    int same = 0;
+    if (hb != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION ia, ib;
+        same = GetFileInformationByHandle(ha, &ia) && GetFileInformationByHandle(hb, &ib) &&
+               ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber && ia.nFileIndexHigh == ib.nFileIndexHigh &&
+               ia.nFileIndexLow == ib.nFileIndexLow;
+        CloseHandle(hb);
+    }
+    CloseHandle(ha);
+    return same;
+}
+
+/* Copies the file at `from` to `to`, replacing a file there, with the system's own copy, which
+ * keeps the modified time and the attributes, as it keeps the read-only flag. A file copied onto
+ * itself, which CopyFileW refuses, is left as it is, as on Linux. */
+cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
+    wchar_t* a = wide(from, from_len);
+    if (!a) return 0;
+    wchar_t* b = wide(to, to_len);
+    if (!b) {
+        free(a);
+        return 0;
+    }
+    BOOL ok = CopyFileW(a, b, FALSE);
+    if (!ok) {
+        DWORD e = GetLastError();
+        DWORD attrs = GetFileAttributesW(a);
+        if (same_file(a, b)) {
+            ok = TRUE;
+        } else if (e == ERROR_ACCESS_DENIED && attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            fs_fail(FS_IS_DIR, (cx_i32)e);
+        } else {
+            fail_win(e);
+        }
+    }
+    free(a);
+    free(b);
+    return ok ? 1 : 0;
+}
+
+/* The folder the program runs in, into the result buffer. */
+cx_i32 cx_fs_current_dir(void) {
+    fs_len = 0;
+    DWORD n = GetCurrentDirectoryW(0, NULL);
+    if (n == 0) {
+        fail_win(GetLastError());
+        return 0;
+    }
+    wchar_t* w = (wchar_t*)malloc((size_t)n * sizeof(wchar_t));
+    if (!w) fs_out_of_memory();
+    DWORD got = GetCurrentDirectoryW(n, w);
+    if (got == 0 || got >= n) {
+        free(w);
+        fail_win(got == 0 ? GetLastError() : ERROR_BUFFER_OVERFLOW);
+        return 0;
+    }
+    buf_add_wide(w, (int)got);
+    free(w);
+    return 1;
+}
+
+cx_i32 cx_fs_set_current_dir(const cx_u8* path, size_t len) {
+    wchar_t* w = wide(path, len);
+    if (!w) return 0;
+    BOOL ok = SetCurrentDirectoryW(w);
+    if (!ok) fail_win(GetLastError());
+    free(w);
+    return ok ? 1 : 0;
+}
+
+/* The path made absolute, into the result buffer, as Windows makes one, with GetFullPathNameW:
+ * on the current folder, or that of its drive for `C:x`, with `.` and `..` taken out by the text
+ * and each `/` a `\`. An empty path is the current folder. std.fs normalizes it after. */
+cx_i32 cx_fs_absolute(const cx_u8* path, size_t len) {
+    fs_len = 0;
+    wchar_t* w = len ? wide(path, len) : wide((const cx_u8*)".", 1);
+    if (!w) return 0;
+    DWORD n = GetFullPathNameW(w, 0, NULL, NULL);
+    wchar_t* full = n ? (wchar_t*)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+    if (n && !full) fs_out_of_memory();
+    DWORD got = n ? GetFullPathNameW(w, n, full, NULL) : 0;
+    int ok = n && got && got < n;
+    if (ok) {
+        buf_add_wide(full, (int)got);
+    } else {
+        fail_win(n == 0 || got == 0 ? GetLastError() : ERROR_BUFFER_OVERFLOW);
+    }
+    free(full);
+    free(w);
+    return ok;
+}
+
 /* A new, empty directory in the system's temporary folder, whose path goes in the result buffer. */
 cx_i32 cx_fs_temp_dir(void) {
     static volatile LONG counter;
@@ -1104,6 +1202,131 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
         fail_errno(err);
         return 0;
     }
+    return 1;
+}
+
+/* Copies the file at `from` to `to`, replacing a file there, keeping its permission bits and
+ * modified time, as Windows' own copy keeps them. The kernel copies the bytes, with
+ * `copy_file_range`, which shares them on a file system that can, or with reads and writes where
+ * it can't. */
+cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
+    char* a = cpath(from, from_len);
+    if (!a) return 0;
+    char* b = cpath(to, to_len);
+    if (!b) {
+        free(a);
+        return 0;
+    }
+    int in = open(a, O_RDONLY | O_CLOEXEC), out = -1, ok = 0;
+    struct stat st, ost;
+    if (in < 0) {
+        fail_errno(errno);
+    } else if (fstat(in, &st) != 0) {
+        fail_errno(errno);
+    } else if (S_ISDIR(st.st_mode)) {
+        fs_fail(FS_IS_DIR, EISDIR);
+    } else if ((out = open(b, O_WRONLY | O_CREAT | O_CLOEXEC, st.st_mode & 07777)) < 0) {
+        fail_errno(errno);
+    } else if (fstat(out, &ost) != 0) {
+        fail_errno(errno);
+    } else if (ost.st_dev == st.st_dev && ost.st_ino == st.st_ino) {
+        /* A file copied onto itself is left as it is: emptying `to` first would empty `from`. */
+        ok = 1;
+    } else if (ftruncate(out, 0) != 0) {
+        fail_errno(errno);
+    } else {
+        ok = 1;
+        int kernel = 1;
+        for (;;) {
+            ssize_t n;
+            if (kernel) {
+                n = copy_file_range(in, NULL, out, NULL, 1 << 30, 0);
+                if (n < 0 && (errno == EXDEV || errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP)) {
+                    kernel = 0;
+                    continue;
+                }
+            } else {
+                static _Thread_local char chunk[1 << 16];
+                n = read(in, chunk, sizeof chunk);
+                for (ssize_t done = 0; n > 0 && done < n;) {
+                    ssize_t w = write(out, chunk + done, (size_t)(n - done));
+                    if (w < 0) {
+                        if (errno == EINTR) continue;
+                        n = -1;
+                        break;
+                    }
+                    done += w;
+                }
+            }
+            if (n == 0) break;
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                fail_errno(errno);
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            struct timespec t[2] = {st.st_atim, st.st_mtim};
+            if (fchmod(out, st.st_mode & 07777) != 0 || futimens(out, t) != 0) {
+                fail_errno(errno);
+                ok = 0;
+            }
+        }
+    }
+    if (out >= 0 && close(out) != 0 && ok) {
+        fail_errno(errno);
+        ok = 0;
+    }
+    if (in >= 0) close(in);
+    free(a);
+    free(b);
+    return ok;
+}
+
+/* The folder the program runs in, into the result buffer. */
+cx_i32 cx_fs_current_dir(void) {
+    fs_len = 0;
+    size_t cap = 256;
+    for (;;) {
+        char* s = (char*)malloc(cap);
+        if (!s) fs_out_of_memory();
+        if (getcwd(s, cap)) {
+            buf_add(s, strlen(s));
+            free(s);
+            return 1;
+        }
+        int e = errno;
+        free(s);
+        if (e != ERANGE) {
+            fail_errno(e);
+            return 0;
+        }
+        cap *= 2;
+    }
+}
+
+cx_i32 cx_fs_set_current_dir(const cx_u8* path, size_t len) {
+    char* s = cpath(path, len);
+    if (!s) return 0;
+    int ok = chdir(s) == 0;
+    if (!ok) fail_errno(errno);
+    free(s);
+    return ok;
+}
+
+/* The path on the current folder, unless it starts at the root, into the result buffer, for
+ * std.fs to normalize: what Python's `os.path.abspath` does. */
+cx_i32 cx_fs_absolute(const cx_u8* path, size_t len) {
+    if (!path_ok(path, len)) return 0;
+    if (len > 0 && path[0] == '/') {
+        fs_len = 0;
+        buf_add((const char*)path, len);
+        return 1;
+    }
+    if (!cx_fs_current_dir()) return 0;
+    buf_add("/", 1);
+    buf_add((const char*)path, len);
     return 1;
 }
 

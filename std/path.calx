@@ -1,0 +1,576 @@
+/// Paths as text: joined, taken apart, normalized and matched against glob patterns, without
+/// looking at the file system. `std.fs` reads and changes what they name.
+///
+/// `/` separates names everywhere, and on Windows `\` does too, so a path written either way
+/// works there. Windows paths also have their own roots: a drive, `C:\`, a drive alone, `C:`,
+/// which is relative to that drive's current folder, and a share, `\\server\share\`.
+module std.path
+
+extern "C" {
+    fn cx_env_os() -> u32
+}
+
+// Whether the program was built for Windows, where `\` separates names too.
+fn windows() -> bool {
+    return unsafe { cx_env_os() } == 1
+}
+
+// Whether the byte `b` separates names.
+fn is_sep(b: u8, win: bool) -> bool {
+    return b == 47 or (win and b == 92)
+}
+
+// The separator a path built from `p` puts between names: `\` on Windows when `p` uses only
+// that one, so a Windows path stays as it was written, and `/` otherwise.
+fn sep_of(p: String, win: bool) -> String {
+    if win and p.contains("\\") and not p.contains("/") {
+        return "\\"
+    }
+    return "/"
+}
+
+fn is_letter(b: u8) -> bool {
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+}
+
+// How many bytes at the start of `p` are its root.
+fn root_len(p: String, win: bool) -> usize {
+    let n = p.len()
+    if n == 0 {
+        return 0
+    }
+    if not win {
+        return if p.byte_at(0) == 47 { 1 } else { 0 }
+    }
+    if n >= 2 and is_letter(p.byte_at(0)) and p.byte_at(1) == 58 {
+        return if n >= 3 and is_sep(p.byte_at(2), true) { 3 } else { 2 }
+    }
+    if n >= 2 and is_sep(p.byte_at(0), true) and is_sep(p.byte_at(1), true) {
+        // \\server\share\, through the separator after the share's name.
+        var at: usize = 2
+        while at < n and not is_sep(p.byte_at(at), true) {
+            at += 1
+        }
+        at += 1
+        while at < n and not is_sep(p.byte_at(at), true) {
+            at += 1
+        }
+        return if at < n { at + 1 } else { n }
+    }
+    return if is_sep(p.byte_at(0), true) { 1 } else { 0 }
+}
+
+// Where the name that starts at `i` ends: at the next separator, or the end.
+fn name_end(p: String, i: usize, win: bool) -> usize {
+    var at = i
+    while at < p.len() and not is_sep(p.byte_at(at), win) {
+        at += 1
+    }
+    return at
+}
+
+// Where the next name starts at or after `i`, past separators and `.` names, or the end.
+fn next_name(p: String, i: usize, win: bool) -> usize {
+    var at = i
+    loop {
+        while at < p.len() and is_sep(p.byte_at(at), win) {
+            at += 1
+        }
+        if at + 1 <= p.len() and p.byte_at(at) == 46 and (at + 1 == p.len() or is_sep(p.byte_at(at + 1), win)) {
+            at += 1
+            continue
+        }
+        return at
+    }
+}
+
+// Where the last name is, from its start to its end, past any separators and `.` names after
+// it, or `none` if there's no name after the root.
+fn last_name(p: String, win: bool) -> (usize, usize)? {
+    let r = root_len(p, win)
+    var end = p.len()
+    loop {
+        while end > r and is_sep(p.byte_at(end - 1), win) {
+            end -= 1
+        }
+        if end == r {
+            return none
+        }
+        var start = end
+        while start > r and not is_sep(p.byte_at(start - 1), win) {
+            start -= 1
+        }
+        if end - start == 1 and p.byte_at(start) == 46 {
+            end = start
+            continue
+        }
+        return some((start, end))
+    }
+}
+
+// Whether the name from `start` to `end` is `..`.
+fn is_up(p: String, start: usize, end: usize) -> bool {
+    return end - start == 2 and p.byte_at(start) == 46 and p.byte_at(start + 1) == 46
+}
+
+/// The root of `path`, as it's written: `/`, or on Windows `C:\`, `C:`, `\\server\share\` or a
+/// `\` alone, or `""` if it's relative.
+pub fn path_root(path: String) -> String {
+    return path[..root_len(path, windows())]
+}
+
+/// Whether `path` names the same thing from any folder: one that starts with `/`, or on
+/// Windows with a drive and a separator, `C:\`, or a share, `\\server\share`. On Windows a path
+/// that starts with `\` alone, or with a drive alone, `C:`, isn't: it depends on the current
+/// drive or that drive's current folder.
+pub fn is_absolute(path: String) -> bool {
+    let win = windows()
+    let r = root_len(path, win)
+    if not win {
+        return r > 0
+    }
+    // `C:\` or a share: a root of more than a `\`, ending at a separator or starting with two.
+    return r > 1 and (is_sep(path.byte_at(r - 1), true) or is_sep(path.byte_at(0), true))
+}
+
+/// `path` and then `more`, with a separator between them, as Python's `os.path.join` and
+/// Rust's `Path::join` put them together. If `more` is absolute, it's `more` alone. On Windows a
+/// `more` with a drive or a share is `more` alone too, and one that starts with a separator
+/// keeps only the drive or share of `path`. The separator is `/`, or `\` on Windows if `path`
+/// uses only that one.
+pub fn join_path(path: String, more: String) -> String {
+    let win = windows()
+    let mr = root_len(more, win)
+    if mr > 0 {
+        if not win or not is_sep(more.byte_at(0), true) or (mr >= 2 and is_sep(more.byte_at(1), true)) {
+            return more.copy()
+        }
+        // `\x` on Windows: on the drive or share of `path`.
+        var pr = root_len(path, win)
+        while pr > 0 and is_sep(path.byte_at(pr - 1), true) {
+            pr -= 1
+        }
+        return "{path[..pr]}{more}"
+    }
+    if path.is_empty() {
+        return more.copy()
+    }
+    let last = path.byte_at(path.len() - 1)
+    if is_sep(last, win) or (win and root_len(path, win) == path.len() and last == 58) {
+        return "{path}{more}"
+    }
+    return "{path}{sep_of(path, win)}{more}"
+}
+
+/// The last name in `path`, as Rust's `Path::file_name`: `report.txt` in `logs/report.txt`, and
+/// `logs` in `logs/` or `logs/.`. `none` if there's no name after the root, as in `/`, or if the
+/// last one is `..`.
+pub fn file_name(path: String) -> String? {
+    if let (start, end) = last_name(path, windows()) {
+        if is_up(path, start, end) {
+            return none
+        }
+        return some(path[start..end])
+    }
+    return none
+}
+
+/// `path` without its last name, as written up to it, without the separators between: `logs` in
+/// `logs/report.txt`, `/` in `/srv`, and `.` in `report.txt`, the folder it's in. `none` if
+/// there's no name to take off, as in `/`, `.` or `""`. It only looks at the text: the parent of
+/// `logs/..` is `logs`.
+pub fn parent_dir(path: String) -> String? {
+    let win = windows()
+    let r = root_len(path, win)
+    if let (start, _) = last_name(path, win) {
+        var end = start
+        loop {
+            while end > r and is_sep(path.byte_at(end - 1), win) {
+                end -= 1
+            }
+            if end >= r + 1 and path.byte_at(end - 1) == 46 and (end - 1 == r or is_sep(path.byte_at(end - 2), win)) {
+                end -= 1
+                continue
+            }
+            break
+        }
+        if end == 0 {
+            return some(".")
+        }
+        return some(path[..end])
+    }
+    return none
+}
+
+// Where the extension's dot is in the last name, from `start` to `end`, if it has one: the
+// last dot that isn't the name's first byte.
+fn dot_at(path: String, start: usize, end: usize) -> usize? {
+    if is_up(path, start, end) {
+        return none
+    }
+    var at = end
+    while at > start + 1 {
+        at -= 1
+        if path.byte_at(at) == 46 {
+            return some(at)
+        }
+    }
+    return none
+}
+
+/// The last name without its extension, as Rust's `Path::file_stem`: `archive.tar` in
+/// `archive.tar.gz`, and `.bashrc` in `.bashrc`, which has none. `none` where `file_name` is.
+pub fn file_stem(path: String) -> String? {
+    if let (start, end) = last_name(path, windows()) {
+        if is_up(path, start, end) {
+            return none
+        }
+        if let dot = dot_at(path, start, end) {
+            return some(path[start..dot])
+        }
+        return some(path[start..end])
+    }
+    return none
+}
+
+/// The last name's extension, after its last dot, without the dot, as Rust's
+/// `Path::extension`: `gz` in `archive.tar.gz`, and `""` in `notes.`. `none` if it has no dot,
+/// or only a first one, as `.bashrc` has, or if there's no name.
+pub fn file_extension(path: String) -> String? {
+    if let (start, end) = last_name(path, windows()) {
+        if let dot = dot_at(path, start, end) {
+            return some(path[dot + 1..end])
+        }
+    }
+    return none
+}
+
+/// `path` with the last name's extension made `ext`: `notes.md` from `notes.txt` and `md`, or
+/// from `notes` and `md`. An empty `ext` takes the extension off. If there's no name, or the
+/// last is `..`, it's `path` as it was.
+pub fn with_extension(path: String, ext: String) -> String {
+    if let (start, end) = last_name(path, windows()) {
+        if is_up(path, start, end) {
+            return path.copy()
+        }
+        let base = dot_at(path, start, end) ?? end
+        if ext.is_empty() {
+            return path[..base]
+        }
+        return "{path[..base]}.{ext}"
+    }
+    return path.copy()
+}
+
+/// `path` with its last name replaced by `name`: `logs/old.txt` and `new.txt` make
+/// `logs/new.txt`. If there's no name, or the last is `..`, it's `join_path(path, name)`.
+pub fn with_file_name(path: String, name: String) -> String {
+    if let (start, end) = last_name(path, windows()) {
+        if not is_up(path, start, end) {
+            return "{path[..start]}{name}"
+        }
+    }
+    return join_path(path, name)
+}
+
+/// The root of `path`, if it has one, and then each name in it, in order, without the
+/// separators, and without the `.` names and the empty ones that doubled separators make:
+/// `["/", "srv", "world"]` for `/srv//world/`, and `["logs", "..", "x"]` for `./logs/../x`.
+pub fn path_parts(path: String) -> List<String> {
+    let win = windows()
+    let r = root_len(path, win)
+    var out = List<String>()
+    if r > 0 {
+        out.push(path[..r])
+    }
+    var at = next_name(path, r, win)
+    while at < path.len() {
+        let end = name_end(path, at, win)
+        out.push(path[at..end])
+        at = next_name(path, end, win)
+    }
+    return out
+}
+
+/// `path` with its `.` names, its doubled separators and each `..` after a name taken out, as
+/// Python's `os.path.normpath` does: `a/c` for `a/./b/../c/`. It only looks at the text, so a
+/// `..` after a link goes back past the link's name, not to where the link leads, which
+/// `std.fs.real_path` follows. A `..` at the start of a relative path stays, and one right after
+/// the root goes, since the root has no parent. An empty result is `.`. The separator is `/`, or
+/// `\` on Windows if `path` uses only that one, and the root's are made the same.
+pub fn normalize_path(path: String) -> String {
+    let win = windows()
+    let sep = sep_of(path, win)
+    let r = root_len(path, win)
+    // A `..` goes back past the name before it. Right after the root it goes, since the root
+    // has no parent, and where there's no root, or only a drive, it stays.
+    let rooted = r > 0 and is_sep(path.byte_at(r - 1), win)
+    // The names kept, as where each starts and ends in `path`; the `..`s kept are all first.
+    var kept = List<(usize, usize)>()
+    var ups: usize = 0
+    var at = next_name(path, r, win)
+    while at < path.len() {
+        let end = name_end(path, at, win)
+        if is_up(path, at, end) {
+            if kept.len() > ups {
+                _ = kept.pop()
+            } else if not rooted {
+                kept.push((at, end))
+                ups += 1
+            }
+        } else {
+            kept.push((at, end))
+        }
+        at = next_name(path, end, win)
+    }
+    var out = String()
+    out.reserve(path.len())
+    var i: usize = 0
+    while i < r {
+        if is_sep(path.byte_at(i), win) {
+            out.push_str(sep)
+            i += 1
+        } else {
+            var e = name_end(path, i, win)
+            if e > r {
+                e = r
+            }
+            out.push_str(path[i..e])
+            i = e
+        }
+    }
+    var first = true
+    for (a, b) in kept {
+        if not first {
+            out.push_str(sep)
+        }
+        first = false
+        out.push_str(path[a..b])
+    }
+    if out.is_empty() {
+        out.push_str(".")
+    }
+    return out
+}
+
+/// Whether `path` matches the glob `pattern`, name by name, as `std.fs.glob` finds paths:
+///
+/// - `*` is any run of characters in a name, and `?` is any one.
+/// - `[abc]` is any one of those, `[a-z]` any in that range, and `[!abc]` or `[^abc]` any
+///   other. A `]` first in the brackets is one of them. `[*]` is a `*` itself.
+/// - `**` as a whole name is any number of names: none or more in the middle, as in
+///   `src/**/*.calx`, and one or more at the end, as in `logs/**`.
+/// - A name that starts with `.` is matched only by a pattern name that starts with `.`, so `*`
+///   and `**` pass over hidden files and folders, as the shell's globs do.
+///
+/// Letters match only in the same case, on every system, so a pattern finds the same paths
+/// everywhere. The roots must be the same, apart from the case of a Windows drive or share, and
+/// separators match separators, so `\` and `/` match each other on Windows. `.` names and a
+/// separator at the end are passed over in both.
+pub fn glob_matches(path: String, pattern: String) -> bool {
+    let win = windows()
+    let pr = root_len(pattern, win)
+    let sr = root_len(path, win)
+    if pr != sr {
+        return false
+    }
+    for i in 0..pr {
+        let a = pattern.byte_at(i)
+        let b = path.byte_at(i)
+        if is_sep(a, win) and is_sep(b, win) {
+            continue
+        }
+        if a != b and not (win and is_letter(a) and (a | 32) == (b | 32)) {
+            return false
+        }
+    }
+    return match_names(pattern, next_name(pattern, pr, win), path, next_name(path, sr, win), win)
+}
+
+fn is_up_or_hidden(s: String, at: usize) -> bool {
+    return s.byte_at(at) == 46
+}
+
+// Whether the names of `pat` from `pi` match those of `s` from `si`.
+fn match_names(pat: String, pi: usize, s: String, si: usize, win: bool) -> bool {
+    if pi >= pat.len() {
+        return si >= s.len()
+    }
+    let pe = name_end(pat, pi, win)
+    let pnext = next_name(pat, pe, win)
+    if pe - pi == 2 and pat.byte_at(pi) == 42 and pat.byte_at(pi + 1) == 42 {
+        if pnext >= pat.len() {
+            // `**` at the end: one name or more, none of them hidden.
+            if si >= s.len() {
+                return false
+            }
+            var at = si
+            while at < s.len() {
+                if is_up_or_hidden(s, at) {
+                    return false
+                }
+                at = next_name(s, name_end(s, at, win), win)
+            }
+            return true
+        }
+        var at = si
+        loop {
+            if match_names(pat, pnext, s, at, win) {
+                return true
+            }
+            if at >= s.len() or is_up_or_hidden(s, at) {
+                return false
+            }
+            at = next_name(s, name_end(s, at, win), win)
+        }
+    }
+    if si >= s.len() {
+        return false
+    }
+    let se = name_end(s, si, win)
+    if not match_name(pat, pi, pe, s, si, se) {
+        return false
+    }
+    return match_names(pat, pnext, s, next_name(s, se, win), win)
+}
+
+/// Whether the name `name` matches the glob `pattern`, a single name, by the rules of
+/// `glob_matches`: the test `std.fs.glob` puts each name in a folder to.
+pub fn glob_matches_name(name: String, pattern: String) -> bool {
+    return match_name(pattern, 0, pattern.len(), name, 0, name.len())
+}
+
+// The bytes of the rune whose first byte is `b`.
+fn rune_len(b: u8) -> usize {
+    if b < 0x80 {
+        return 1
+    }
+    if b < 0xE0 {
+        return 2
+    }
+    if b < 0xF0 {
+        return 3
+    }
+    return 4
+}
+
+// The rune at `i` in `s`, which is UTF-8, so `i` starts one.
+fn rune_at(s: String, i: usize) -> u32 {
+    let b = u32(s.byte_at(i))
+    if b < 0x80 {
+        return b
+    }
+    if b < 0xE0 {
+        return ((b & 0x1F) << 6) | (u32(s.byte_at(i + 1)) & 0x3F)
+    }
+    if b < 0xF0 {
+        return ((b & 0x0F) << 12) | ((u32(s.byte_at(i + 1)) & 0x3F) << 6) | (u32(s.byte_at(i + 2)) & 0x3F)
+    }
+    return ((b & 0x07) << 18) | ((u32(s.byte_at(i + 1)) & 0x3F) << 12) | ((u32(s.byte_at(i + 2)) & 0x3F) << 6) | (u32(s.byte_at(i + 3)) & 0x3F)
+}
+
+// Where the class that starts with `[` at `p` ends, past its `]`, if it's closed before `pe`.
+fn class_end(pat: String, p: usize, pe: usize) -> usize? {
+    var at = p + 1
+    if at < pe and (pat.byte_at(at) == 33 or pat.byte_at(at) == 94) {
+        at += 1
+    }
+    // A `]` first is one of the class.
+    if at < pe and pat.byte_at(at) == 93 {
+        at += 1
+    }
+    while at < pe {
+        if pat.byte_at(at) == 93 {
+            return some(at + 1)
+        }
+        at += rune_len(pat.byte_at(at))
+    }
+    return none
+}
+
+// Whether the rune `r` is in the class from `[` at `p` to just past its `]` at `end`.
+fn in_class(pat: String, p: usize, end: usize, r: u32) -> bool {
+    var at = p + 1
+    var not_in = false
+    if pat.byte_at(at) == 33 or pat.byte_at(at) == 94 {
+        not_in = true
+        at += 1
+    }
+    // Up to the closing `]` at `end - 1`, the only one but a first.
+    var found = false
+    while at < end - 1 {
+        let lo = rune_at(pat, at)
+        at += rune_len(pat.byte_at(at))
+        // A `-` between two is a range; one first or last is itself.
+        if at + 1 < end - 1 and pat.byte_at(at) == 45 {
+            let hi = rune_at(pat, at + 1)
+            at += 1 + rune_len(pat.byte_at(at + 1))
+            if r >= lo and r <= hi {
+                found = true
+            }
+        } else if r == lo {
+            found = true
+        }
+    }
+    return found != not_in
+}
+
+// Whether the name from `si` to `se` in `s` matches the pattern name from `pi` to `pe`.
+fn match_name(pat: String, pi: usize, pe: usize, s: String, si: usize, se: usize) -> bool {
+    // A hidden name only for a pattern that starts with a dot.
+    if si < se and s.byte_at(si) == 46 and not (pi < pe and pat.byte_at(pi) == 46) {
+        return false
+    }
+    var p = pi
+    var t = si
+    // Where the last `*` was, and where the text it's taken so far ends, to take one more rune
+    // when what follows doesn't match.
+    var star: usize? = none
+    var star_t = si
+    while t < se {
+        if p < pe {
+            let c = pat.byte_at(p)
+            if c == 42 {
+                while p < pe and pat.byte_at(p) == 42 {
+                    p += 1
+                }
+                star = some(p)
+                star_t = t
+                continue
+            }
+            if c == 63 {
+                p += 1
+                t += rune_len(s.byte_at(t))
+                continue
+            }
+            if c == 91 {
+                if let end = class_end(pat, p, pe) {
+                    if in_class(pat, p, end, rune_at(s, t)) {
+                        p = end
+                        t += rune_len(s.byte_at(t))
+                        continue
+                    }
+                } else if s.byte_at(t) == 91 {
+                    p += 1
+                    t += 1
+                    continue
+                }
+            } else if c == s.byte_at(t) {
+                p += 1
+                t += 1
+                continue
+            }
+        }
+        if let after = star {
+            star_t += rune_len(s.byte_at(star_t))
+            t = star_t
+            p = after
+            continue
+        }
+        return false
+    }
+    while p < pe and pat.byte_at(p) == 42 {
+        p += 1
+    }
+    return p == pe
+}

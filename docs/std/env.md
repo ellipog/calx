@@ -1,11 +1,11 @@
 ---
 title: std.env
-description: The program's command-line arguments and environment variables, as UTF-8 Strings on every platform.
+description: The program's command-line arguments and environment variables, as UTF-8 Strings on every platform, and the system it runs on.
 ---
 
 # `std.env`
 
-The program's command line and its environment.
+The program's command line, its environment, and the system it runs on.
 
 ```calx
 import std.env.{args}
@@ -30,6 +30,7 @@ fn main() {
 | --- | --- |
 | `args() -> List<String>` | The arguments the program was started with, after its own name, in order |
 | `variable(name: String) -> String?` | The value of the environment variable `name`, or `none` if it isn't set or `name` can't be one: empty, or with `=` or a zero byte in it. Windows matches names without regard to case |
+| `os() -> String` | The system the program runs on, `"windows"` or `"linux"`, as Rust's `std::env::consts::OS` names them, for the few things a script does differently on each. A program is built for one system, so it's the same on every call |
 
 Run a program with arguments by putting them after `--`: `calx run tool.calx -- --threads 24` ([the calx command](../reference/command.md)).
 
@@ -55,5 +56,14 @@ fn main() {
 ```
 
 The runtime reads the command line once at startup. Each call to `args` gives new copies, which the caller owns.
+
+```calx
+import std.env.{os}
+
+fn main() {
+    let shell = if os() == "windows" { "cmd" } else { "sh" }
+    println("{shell == "cmd" or shell == "sh"}")    // out: true
+}
+```
 
 `std.env` is written in Calx: [std/env.calx](../../std/env.calx).

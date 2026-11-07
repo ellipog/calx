@@ -1,0 +1,136 @@
+// std.fs over trees: text written and appended, files and directories copied, walks, globs, the
+// current folder, absolute paths and exists, in a temporary directory of the test's own.
+import std.time.{Timestamp}
+import std.fs.{FsError, Kind, temp_dir, write_text, append_text, read_text, copy, copy_dir_all, walk, glob, current_dir, set_current_dir, absolute, exists, make_dir_all, remove_dir_all, metadata, set_modified, set_mode, separator}
+
+fn kind_name(k: Kind) -> String {
+    return match k {
+        Kind.File => "file",
+        Kind.Dir => "dir",
+        Kind.Link => "link",
+        Kind.Other => "other",
+    }
+}
+
+fn show_walk(dir: String) {
+    for e in walk(dir)! {
+        println("{e.path} {kind_name(e.kind)}")
+    }
+}
+
+fn text(path: String) -> String {
+    return read_text(path)! ?? "not UTF-8"
+}
+
+fn main() {
+    let t = temp_dir()!
+    let start = current_dir()!
+    set_current_dir(t)!
+    println("{current_dir()! == t}")    // out: true
+
+    make_dir_all("src/a/b")!
+    make_dir_all("src/.git")!
+    write_text("src/main.calx", "fn main\n")!
+    append_text("src/main.calx", "// more\n")!
+    append_text("src/log.txt", "first\n")!
+    write_text("src/a/x.calx", "x")!
+    write_text("src/a/b/y.calx", "y")!
+    write_text("src/a/b/z.txt", "z")!
+    write_text("src/.git/h.calx", "h")!
+    write_text("src/.h.calx", "h")!
+    print(text("src/main.calx"))
+    // out: fn main
+    // out: // more
+    print(text("src/log.txt"))    // out: first
+
+    // A walk: each directory just before what's in it, names in order, hidden ones too.
+    show_walk("src")
+    // out: src/.git dir
+    // out: src/.git/h.calx file
+    // out: src/.h.calx file
+    // out: src/a dir
+    // out: src/a/b dir
+    // out: src/a/b/y.calx file
+    // out: src/a/b/z.txt file
+    // out: src/a/x.calx file
+    // out: src/log.txt file
+    // out: src/main.calx file
+
+    // Globs, sorted, passing over hidden names.
+    println(glob("src/**/*.calx")!.join(" "))    // out: src/a/b/y.calx src/a/x.calx src/main.calx
+    println(glob("src/*.calx")!.join(" "))    // out: src/main.calx
+    println(glob("src/*/")!.join(" "))    // out: src/a/
+    println(glob("src/**")!.join(" "))    // out: src/a src/a/b src/a/b/y.calx src/a/b/z.txt src/a/x.calx src/log.txt src/main.calx
+    println(glob("*/a/*.calx")!.join(" "))    // out: src/a/x.calx
+    println(glob("src/.git/*")!.join(" "))    // out: src/.git/h.calx
+    println(glob("src/.*")!.join(" "))    // out: src/.git src/.h.calx
+    println(glob("src/**/**/*.txt")!.join(" "))    // out: src/a/b/z.txt src/log.txt
+    println(glob("src/a/[xy].calx")!.join(" "))    // out: src/a/x.calx
+    println("{glob("src/main.calx")!.join(" ")} {glob("src")!.join(" ")} {glob("src/")!.join(" ")}")    // out: src/main.calx src src/
+    println("{glob("nothing/*")!.len()} {glob("src/nothing")!.len()} {glob("src/main.calx/*")!.len()} {glob("")!.len()}")    // out: 0 0 0 0
+    let found = glob("{t}/src/*.txt")!
+    let wanted = "{t}/src/log.txt"
+    println("{found.len() == 1 and found[0] == wanted}")    // out: true
+
+    // A copy keeps the modified time and the mode, and a file copied onto itself stays.
+    set_modified("src/log.txt", Timestamp { unix_ms: 1700000000000 })!
+    set_mode("src/log.txt", 0o444)!
+    copy("src/log.txt", "copy.txt")!
+    let m = metadata("copy.txt")!
+    println("{text("copy.txt")}{m.modified.unix_ms} {m.mode & 0o222}")
+    // out: first
+    // out: 1700000000000 0
+    set_mode("copy.txt", 0o644)!
+    set_mode("src/log.txt", 0o644)!
+    write_text("other.txt", "longer than the first\n")!
+    copy("src/log.txt", "other.txt")!
+    print(text("other.txt"))    // out: first
+    copy("other.txt", "other.txt")!
+    print(text("other.txt"))    // out: first
+    println(match copy("src", "x") {
+        ok => "copied a directory",
+        err(FsError.IsDirectory) => "is a directory",
+        err(_) => "another error",
+    })    // out: is a directory
+    println(match copy("missing", "x") {
+        ok => "copied nothing",
+        err(FsError.NotFound) => "not found",
+        err(_) => "another error",
+    })    // out: not found
+
+    // A tree copied, into a new directory and into one inside itself.
+    copy_dir_all("src", "dst/deeper")!
+    show_walk("dst")
+    // out: dst/deeper dir
+    // out: dst/deeper/.git dir
+    // out: dst/deeper/.git/h.calx file
+    // out: dst/deeper/.h.calx file
+    // out: dst/deeper/a dir
+    // out: dst/deeper/a/b dir
+    // out: dst/deeper/a/b/y.calx file
+    // out: dst/deeper/a/b/z.txt file
+    // out: dst/deeper/a/x.calx file
+    // out: dst/deeper/log.txt file
+    // out: dst/deeper/main.calx file
+    copy_dir_all("src", "src/inner")!
+    println(glob("src/inner/**")!.join(" "))    // out: src/inner/a src/inner/a/b src/inner/a/b/y.calx src/inner/a/b/z.txt src/inner/a/x.calx src/inner/log.txt src/inner/main.calx
+
+    // Exists, the current folder and absolute paths.
+    println("{exists("src")} {exists("src/main.calx")} {exists("nope")} {exists("")}")    // out: true true false false
+    let sep = separator()
+    let a = "{t}{sep}src{sep}a"
+    println("{absolute("src/../src/./a")! == a}")    // out: true
+    println("{absolute("")! == t} {absolute(".")! == t} {absolute(t)! == t} {absolute("a/..")! == t}")    // out: true true true true
+    set_current_dir("src")!
+    let inside = "{t}{sep}src"
+    println("{current_dir()! == inside}")    // out: true
+    println(text("a/x.calx"))    // out: x
+    println(match set_current_dir("missing") {
+        ok => "moved",
+        err(FsError.NotFound) => "not found",
+        err(_) => "another error",
+    })    // out: not found
+    set_current_dir(start)!
+    remove_dir_all(t)!
+    println("{exists(t)}")    // out: false
+}

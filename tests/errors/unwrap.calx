@@ -6,7 +6,18 @@ fn half(n: i32) -> i32 ! String {
     return n / 2
 }
 
+// The numbers up to n, which must be even.
+fn evens(n: i32) -> List<i32> ! String {
+    var out = List<i32>()
+    for i in 0..try half(n) {
+        out.push(i * 2)
+    }
+    return out
+}
+
 fn main() {
     println("{half(8)!}")    // out: 4
+    // A method on what `!` gives, as a place, with nothing copied.
+    println("{evens(6)!.len()} {evens(4)![1]}")    // out: 3 2
     println("{half(3)!}")    // panic: unwrapped an error with `!`
 }

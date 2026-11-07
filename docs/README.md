@@ -71,7 +71,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 2. [std.math](std/math.md): fast math functions, accurate to about half an ULP and the same on every platform
 3. [std.java.math](std/java-math.md): math functions with `StrictMath`'s results bit for bit
 4. [std.time](std/time.md): a monotonic clock, and the wall clock with its dates and local time zone, which only `unsafe` code can read
-5. [std.env](std/env.md): the command-line arguments
+5. [std.env](std/env.md): the command-line arguments, the environment variables, and the system the program runs on
 6. [std.pool](std/pool.md): the threads `parallel for` runs on
 7. [std.net](std/net.md): TCP connections driven by events, on IOCP and epoll
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
@@ -84,7 +84,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, the typed queues they talk through, and sleeping
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
-18. [std.fs](std/fs.md): files and directories, read and written whole or in parts in place, with atomic renames, locks, real paths and temporary directories
+18. [std.fs](std/fs.md): files and directories, read and written whole or in parts in place, copied, walked and found by globs, with atomic renames, locks, the current folder, absolute and real paths, and temporary directories
 19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): starting other programs, with their arguments, folder, environment, input, output and timeouts, talking to one while it runs, several at once, and finding them; and this process's memory, CPU time and processors, and `exit`
@@ -93,6 +93,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
 25. [std.tar](std/tar.md): tar archives, plain or gzipped, read and written in memory: ustar, GNU long names and pax headers, links and modes
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
+27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 
 ### Java compatibility
 

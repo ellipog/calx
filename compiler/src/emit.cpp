@@ -4354,7 +4354,15 @@ $dropall    m->len = 0;
             case ExprKind::field: return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
             case ExprKind::unwrap: {
+                const Type* lt = e->lhs->type;
+                // `f()!.len()` on a result with no value has nothing to point at.
+                if (lt->is_result && lt->item->variants[0].types.empty()) return "(" + expr(e) + ")";
                 std::string p = tmp(), at = place(e->lhs);
+                if (lt->is_result) {
+                    return "(*({ __typeof__(&" + at + ") " + p + " = &" + at + "; if (__builtin_expect(" + p +
+                           "->tag != " + int_const(lt->repr, 0) + ", 0)) cx_panic_unwrap_err(" + location(e->span) +
+                           "); &" + p + "->u.v0." + variant_field(lt, 0, 0) + "; }))";
+                }
                 return "(*({ __typeof__(&" + at + ") " + p + " = &" + at + "; if (__builtin_expect(!" + p +
                        "->has, 0)) cx_panic_unwrap(" + location(e->span) + "); &" + p + "->v; }))";
             }

@@ -436,6 +436,15 @@ cx_usize cx_arg_count(void) { return arg_count; }
 const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }
 cx_usize cx_arg_len(cx_usize i) { return args[i].len; }
 
+/* Declared by std/env.calx: the system the program was built for, 1 for Windows and 2 for Linux. */
+cx_u32 cx_env_os(void) {
+#ifdef _WIN32
+    return 1;
+#else
+    return 2;
+#endif
+}
+
 /* Declared by std/env.calx. The value of the environment variable named by the `n` bytes of
  * UTF-8 at `name`, written to `out` if its UTF-8 fits in `cap` bytes: its length in bytes, which
  * is more than `cap` if it didn't fit, or -1 if it isn't set or the name can't be one. Windows

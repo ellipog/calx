@@ -1,11 +1,17 @@
 /// Files and directories: whole files read and written, parts of files read and written in
-/// place, renames, sizes and modified times, directories made, listed and removed, links read
-/// and made, real paths, and temporary directories.
+/// place, copies, renames, sizes and modified times, directories made, listed, walked, copied
+/// and removed, globs, links read and made, the current folder, absolute and real paths, and
+/// temporary directories.
 module std.fs
 
+import std.path.{join_path, normalize_path, glob_matches_name, path_root, path_parts}
 import std.time.{Timestamp}
 
 extern "C" {
+    fn cx_fs_copy(from: *const u8, from_len: usize, to: *const u8, to_len: usize) -> i32
+    fn cx_fs_current_dir() -> i32
+    fn cx_fs_set_current_dir(path: *const u8, len: usize) -> i32
+    fn cx_fs_absolute(path: *const u8, len: usize) -> i32
     fn cx_fs_open(path: *const u8, len: usize, write: u32) -> i64
     fn cx_fs_size(h: i64) -> i64
     fn cx_fs_read(h: i64, to: *u8, n: usize) -> i64
@@ -214,15 +220,17 @@ pub fn read_text(path: String) -> String? ! FsError {
     return String.from_utf8(try read(path))
 }
 
-/// Makes the file at `path` hold `bytes`, creating it or replacing what it held. A crash part
-/// way through can leave it half written: to replace a file safely, write another and `rename`
-/// it over this one.
-pub fn write(path: String, bytes: List<u8>) ! FsError {
-    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 1) }
+// Opens `path` to write, `mode` 1 to replace what it holds and 2 to add to its end.
+fn open_to(path: String, mode: u32) -> i64 ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), mode) }
     if h < 0 {
         fail last_error()
     }
-    let wrote = unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) }
+    return h
+}
+
+// Closes `h` after a write, which `wrote` says went or not, failing with the write's error first.
+fn close_after(h: i64, wrote: i32) ! FsError {
     let e = if wrote == 0 { some(last_error()) } else { none }
     let closed = unsafe { cx_fs_close(h) }
     if let first = e {
@@ -233,22 +241,33 @@ pub fn write(path: String, bytes: List<u8>) ! FsError {
     }
 }
 
+/// Makes the file at `path` hold `bytes`, creating it or replacing what it held. A crash part
+/// way through can leave it half written: to replace a file safely, write another and `rename`
+/// it over this one.
+pub fn write(path: String, bytes: List<u8>) ! FsError {
+    let h = try open_to(path, 1)
+    try close_after(h, unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) })
+}
+
+/// Makes the file at `path` hold `text`, as UTF-8, as `write` makes it hold bytes, without
+/// copying the text first.
+pub fn write_text(path: String, text: String) ! FsError {
+    let h = try open_to(path, 1)
+    try close_after(h, unsafe { cx_fs_write(h, text.as_ptr(), text.len()) })
+}
+
 /// Adds `bytes` to the end of the file at `path`, creating it if nothing is there. The
 /// bytes go after everything the file held, even what another program added since it opened it.
 pub fn append(path: String, bytes: List<u8>) ! FsError {
-    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 2) }
-    if h < 0 {
-        fail last_error()
-    }
-    let wrote = unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) }
-    let e = if wrote == 0 { some(last_error()) } else { none }
-    let closed = unsafe { cx_fs_close(h) }
-    if let first = e {
-        fail first
-    }
-    if closed == 0 {
-        fail last_error()
-    }
+    let h = try open_to(path, 2)
+    try close_after(h, unsafe { cx_fs_write(h, bytes.as_ptr(), bytes.len()) })
+}
+
+/// Adds `text` to the end of the file at `path`, as UTF-8, as `append` adds bytes: for a log a
+/// program adds a line to now and then.
+pub fn append_text(path: String, text: String) ! FsError {
+    let h = try open_to(path, 2)
+    try close_after(h, unsafe { cx_fs_write(h, text.as_ptr(), text.len()) })
 }
 
 /// Writes each of `parts`, a byte offset and the bytes to put there, into the file at `path`, in
@@ -639,4 +658,276 @@ pub fn temp_dir() -> String ! FsError {
         fail last_error()
     }
     return result()
+}
+
+/// Whether anything is at `path`, following links, as Python's `os.path.exists`: `false` for a
+/// link to nothing. Any error is `false`.
+pub fn exists(path: String) -> bool {
+    let k = unsafe { cx_fs_kind(path.as_ptr(), path.len(), 1) }
+    return k >= 1 and k <= 4
+}
+
+/// Copies the file at `from` to `to`, replacing a file there, with its permission bits and
+/// modified time, as Python's `shutil.copy2` keeps them. Windows copies it with its own
+/// `CopyFileW`; on Linux the kernel copies the bytes, with `copy_file_range`, which on a file
+/// system that can, such as Btrfs or XFS, shares them instead. A file copied onto itself is left
+/// as it is. A directory at `from` is `IsDirectory`: `copy_dir_all` copies one.
+pub fn copy(from: String, to: String) ! FsError {
+    if unsafe { cx_fs_copy(from.as_ptr(), from.len(), to.as_ptr(), to.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// Copies the directory at `from` and everything in it to `to`, as Python's `shutil.copytree`
+/// does with `symlinks=True` and `dirs_exist_ok=True`: makes `to` and each directory inside as
+/// needed, copies each file with `copy`, replacing one that's there, and makes each link again
+/// as a link to the same target, never following it, so nothing outside `from` is copied.
+/// Devices, sockets and pipes are passed over. Each directory is listed before anything is made
+/// in it, so a `to` inside `from` isn't copied into itself.
+pub fn copy_dir_all(from: String, to: String) ! FsError {
+    let names = try list(from)
+    try make_dir_all(to)
+    for name in names {
+        let a = join_path(from, name)
+        let b = join_path(to, name)
+        match try kind(a) {
+            some(Kind.Dir) => try copy_dir_all(a, b),
+            some(Kind.File) => try copy(a, b),
+            some(Kind.Link) => {
+                if let link = try read_link(a) {
+                    try make_link(link.target, b)
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// A path `walk` found, and what's there.
+pub struct Entry {
+    /// The directory walked and the names down to it, joined as `join_path` joins them.
+    pub path: String
+    /// What's there, without following a link.
+    pub kind: Kind
+}
+
+/// Everything in the directory at `dir` and in each directory inside it, at any depth, as
+/// Python's `os.walk` and Rust's `walkdir` find it: each path, and what's there. A directory
+/// comes just before what's in it, and the names in each are in order of their bytes, as `list`
+/// sorts them, so a walk finds the same order on every system. Hidden files are there too. A
+/// link is listed and not followed, so a walk never leaves `dir`, nor goes round a loop.
+pub fn walk(dir: String) -> List<Entry> ! FsError {
+    var out = List<Entry>()
+    try walk_into(dir, mut out)
+    return out
+}
+
+fn walk_into(dir: String, out: mut List<Entry>) ! FsError {
+    for name in try list(dir) {
+        let inner = join_path(dir, name)
+        // What went between the listing and the look is passed over.
+        if let k = try kind(inner) {
+            let deeper = match k {
+                Kind.Dir => true,
+                _ => false,
+            }
+            out.push(Entry { path: inner.copy(), kind: k })
+            if deeper {
+                try walk_into(inner, mut out)
+            }
+        }
+    }
+}
+
+/// The paths that match the glob `pattern`, by the rules of `std.path`'s `glob_matches`, sorted
+/// by their bytes, as Python's `glob.glob` finds them with `recursive=True`: `logs/*.txt`,
+/// `src/**/*.calx`, `[0-9]*.png`. Each is the pattern up to the name with its first wildcard,
+/// as it's written, and then the names found, joined as `join_path` joins them.
+///
+/// - `*`, `?` and `[...]` pass over hidden names, and so does `**`, which goes into directories
+///   but not through links to them, so it can't go round a loop.
+/// - A pattern that ends with a separator, as `*/` does, finds only directories, and each path
+///   it gives ends with that separator.
+/// - A pattern with no wildcards gives itself, if something's there, even a link to nothing.
+/// - A directory that's missing, or that the system doesn't let the program list, has nothing
+///   in it to match, as in Python. Other errors fail.
+pub fn glob(pattern: String) -> List<String> ! FsError {
+    let win = separator() == "\\"
+    let n = pattern.len()
+    // Where the name with the first wildcard starts, and where the fixed part before it ends.
+    var at = path_root(pattern).len()
+    var fixed = at
+    var wild: usize? = none
+    while at < n {
+        while at < n and is_sep(pattern.byte_at(at), win) {
+            at += 1
+        }
+        var end = at
+        while end < n and not is_sep(pattern.byte_at(end), win) {
+            end += 1
+        }
+        if has_wildcard(pattern[at..end]) {
+            wild = some(at)
+            break
+        }
+        if end > at {
+            fixed = end
+        }
+        at = end
+    }
+    var out = List<String>()
+    let dirs_only = n > 0 and is_sep(pattern.byte_at(n - 1), win)
+    if let w = wild {
+        let names = path_parts(pattern[w..])
+        let suffix = if dirs_only { pattern[n - 1..] } else { String() }
+        try glob_in(pattern[..fixed], names, 0, suffix, mut out)
+    } else {
+        if n == 0 {
+            return out
+        }
+        let there = if dirs_only {
+            is_dir(pattern)
+        } else {
+            match try kind(pattern) {
+                some(_) => true,
+                none => false,
+            }
+        }
+        if there {
+            out.push(pattern.copy())
+        }
+        return out
+    }
+    out.sort()
+    // Two `**`s can find a path twice.
+    var unique = List<String>()
+    for i in 0..out.len() {
+        if i == 0 or out[i] != out[i - 1] {
+            unique.push(out[i].copy())
+        }
+    }
+    return unique
+}
+
+// Whether the byte `b` separates names: `/`, or on Windows `\` too.
+fn is_sep(b: u8, win: bool) -> bool {
+    return b == 47 or (win and b == 92)
+}
+
+fn has_wildcard(name: String) -> bool {
+    return name.contains("*") or name.contains("?") or name.contains("[")
+}
+
+// The names in the directory `at`, the current folder if it's empty, or none if it's missing or
+// the program may not list it.
+fn glob_list(at: String) -> List<String> ! FsError {
+    let here = if at.is_empty() { String(".") } else { at.copy() }
+    if not is_dir(here) {
+        return List<String>()
+    }
+    return match list(here) {
+        ok(names) => names,
+        err(FsError.NotFound) => List<String>(),
+        err(FsError.Denied) => List<String>(),
+        err(e) => {
+            fail e
+        },
+    }
+}
+
+// Finds what's in `at` that the pattern's names from `i` match, onto `out`. `at` is there, and
+// a directory if `i` isn't past the last name. `suffix` is the separator each directory found
+// ends with if only directories are wanted, or empty.
+fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut List<String>) ! FsError {
+    if i == names.len() {
+        if suffix.is_empty() {
+            out.push(at.copy())
+        } else if is_dir(at) {
+            out.push("{at}{suffix}")
+        }
+        return
+    }
+    let name = names[i].copy()
+    let last = i + 1 == names.len()
+    if name == "**" {
+        if not last {
+            try glob_in(at, names, i + 1, suffix, mut out)
+        }
+        for n in try glob_list(at) {
+            if n.starts_with(".") {
+                continue
+            }
+            let inner = join_path(at, n)
+            let dir = match try kind(inner) {
+                some(Kind.Dir) => true,
+                _ => false,
+            }
+            if last {
+                if suffix.is_empty() {
+                    out.push(inner.copy())
+                } else if dir {
+                    out.push("{inner}{suffix}")
+                }
+            }
+            if dir {
+                try glob_in(inner, names, i, suffix, mut out)
+            }
+        }
+        return
+    }
+    if not has_wildcard(name) {
+        // A name without wildcards is looked for, not listed: it can be hidden.
+        let inner = join_path(at, name)
+        let there = if last {
+            match try kind(inner) {
+                some(_) => true,
+                none => false,
+            }
+        } else {
+            is_dir(inner)
+        }
+        if there {
+            try glob_in(inner, names, i + 1, suffix, mut out)
+        }
+        return
+    }
+    for n in try glob_list(at) {
+        if glob_matches_name(n, name) {
+            let inner = join_path(at, n)
+            if last or is_dir(inner) {
+                try glob_in(inner, names, i + 1, suffix, mut out)
+            }
+        }
+    }
+}
+
+/// The folder the program runs in, as the system gives it, such as `/home/me/project` or
+/// `C:\Users\me\project`. Relative paths are on it.
+pub fn current_dir() -> String ! FsError {
+    if unsafe { cx_fs_current_dir() } == 0 {
+        fail last_error()
+    }
+    return result()
+}
+
+/// Makes `path` the folder the program runs in, for the whole program: every relative path after
+/// is on it, in every thread, and so is each program `std.process` starts without a folder of
+/// its own.
+pub fn set_current_dir(path: String) ! FsError {
+    if unsafe { cx_fs_set_current_dir(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+}
+
+/// `path` made absolute without looking at what's there, as Python's `os.path.abspath` makes it:
+/// on the current folder if it's relative, and then with its `.` names and each `..` after a name
+/// taken out, as `normalize_path` takes them out of the text. `real_path` follows links instead,
+/// and needs the path to be there. An empty path is the current folder. On Windows it's what the
+/// system makes of the path, with `\` between the names, and `C:x` is on drive C's current
+/// folder.
+pub fn absolute(path: String) -> String ! FsError {
+    if unsafe { cx_fs_absolute(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+    return normalize_path(result())
 }
