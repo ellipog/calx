@@ -27,7 +27,9 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   several files, their paths in it are just their names.
 - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
   the input is empty.
-- `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces.
+- `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces. The
+  program finds the compiler running it in the environment variable `CALX`, for tests of the
+  command itself.
 - `// status: N` is the exit status the program must end with, which is 0 without one.
 - `// lib: NAME.calx` builds that file of the test, or that file next to it, with
   `calx build --lib` in the same mode, before the program runs. The path of each library it built,
@@ -270,8 +272,9 @@ def run_limited(cmd, stdin):
     """Runs `cmd`, or returns None if it outlasts RUN_SECONDS. `calx run` starts the program as
     its own child, so the whole tree is stopped: the program would otherwise keep the pipes open."""
     group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    env = {**os.environ, "CALX": str(CALX)}
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          cwd=ROOT, **group) as p:
+                          cwd=ROOT, env=env, **group) as p:
         try:
             out, err = p.communicate(stdin, timeout=RUN_SECONDS)
         except subprocess.TimeoutExpired:

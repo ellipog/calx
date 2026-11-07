@@ -1,0 +1,44 @@
+// `calx file.calx args...` runs the file as `calx run` does: options before the file are calx's,
+// and everything after it is the program's, untouched. A file without `.calx` runs if it's there,
+// as a script on the PATH is. Anything else isn't a command.
+import std.env.{variable}
+import std.fs.{temp_dir, write_text, remove_dir_all, separator}
+import std.process.{Command}
+
+fn calx(args: List<String>) -> String {
+    let exe = variable("CALX") ?? String("calx")
+    match Command.new(exe).args(args).output() {
+        ok(o) => {
+            // What it printed, how it ended, and the first line of its errors.
+            var parts = List<String>()
+            let out = o.text()
+            if not out.trim().is_empty() {
+                parts.push(out.trim())
+            }
+            parts.push("[{o.status}]")
+            let lines = o.error_text().lines()
+            if not lines.is_empty() {
+                parts.push(lines[0].copy())
+            }
+            return parts.join(" ")
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let s = separator()
+    let script = "{dir}{s}tool.calx"
+    write_text(script, "#!/usr/bin/env calx\nimport std.env.\{args\}\nimport std.process.\{exit\}\n\nfn main() \{\n    let sep = \",\"\n    println(\"\{args().join(sep)\}\")\n    exit(4)\n\}\n")!
+    let bare = "{dir}{s}tool"
+    write_text(bare, "fn main() \{\n    println(\"bare\")\n\}\n")!
+
+    println(calx([script.copy(), "a", "--release", "-o", "b c", "--", "d"]))    // out: a,--release,-o,b c,--,d [exited with status 4]
+    println(calx(["--release", script.copy(), "x"]))    // out: x [exited with status 4]
+    println(calx([script.copy()]))    // out: [exited with status 4]
+    println(calx([bare.copy()]))    // out: bare [exited with status 0]
+    println(calx(["biuld", script.copy()]))    // out: [exited with status 2] calx: `biuld` isn't a command, or a file to run
+    println(calx(["-q", script.copy()]))    // out: [exited with status 2] calx: -q isn't an option for running a file; the options before one are --release, --timings and --verbose
+    remove_dir_all(dir)!
+}

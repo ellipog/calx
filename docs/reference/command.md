@@ -9,6 +9,7 @@ description: Checking, building and running Calx programs, the build modes, and 
 calx check hello.calx          # check without building
 calx run hello.calx            # build in debug mode and run
 calx run hello.calx -- a b     # arguments after -- go to the program
+calx hello.calx a b            # the same, as `python hello.py a b` is
 calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
@@ -36,6 +37,30 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `--json` | Print errors as JSON lines on standard output, [for editors](#errors-for-editors) |
 | `--stdin` | Read the file's text from standard input, with the path naming it |
 
+## Running a file
+
+`calx hello.calx a b` runs a program as `calx run hello.calx -- a b` does, the way `python hello.py a b` runs a script. Options for calx go before the file, and everything after it goes to the program untouched, so a program's own `--release` or `-o` reaches it:
+
+```sh
+calx tool.calx --release -o out.txt   # tool.calx gets --release, -o and out.txt
+calx --release tool.calx input.txt    # built optimized; tool.calx gets input.txt
+```
+
+The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
+
+A first line that starts with `#!` is the system's, and the compiler skips it, so on Linux and macOS a program runs by its own name, as a shell or Python script does:
+
+```sh
+#!/usr/bin/env calx
+```
+
+```sh
+chmod +x tool.calx
+./tool.calx input.txt
+```
+
+`#!/usr/bin/env -S calx --release` builds it optimized. The program is built the first time and reused until it or the compiler changes, so a script starts in about the time its program takes to start, plus a few milliseconds for calx to check that nothing changed ([fast builds](#fast-builds)). Windows doesn't read `#!` lines: there, `calx tool.calx` runs it.
+
 `calx run` stands for the program it runs. Its exit status is the program's, and on Windows, killing `calx run`, as a test runner stops one that ran too long, kills the program and every program it started, which `taskkill /T` can't reach once their parents have gone. A program that ends by itself leaves what it started running ([std.process](../std/process.md#when-this-program-ends)).
 
 ## Exit status
@@ -44,8 +69,8 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | --- | --- |
 | 0 | Success |
 | 1 | The program has errors, or building it failed |
-| 2 | The command line is wrong |
-| *the program's* | `calx run` exits with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
+| 2 | The command line is wrong, such as a name that's neither a command nor a file to run |
+| *the program's* | `calx run`, and `calx file.calx`, exit with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
 
 ## Build modes
 

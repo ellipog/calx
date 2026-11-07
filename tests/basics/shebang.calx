@@ -1,0 +1,7 @@
+#!/usr/bin/env calx
+// A first line that starts with `#!` is the system's, for running the file as a script, and the
+// compiler skips it. The lines after it keep their numbers, as shebang_errors.calx checks.
+
+fn main() {
+    println("ran")    // out: ran
+}

@@ -9,7 +9,7 @@ description: The VS Code extension - highlighting, errors as you type and runnin
 
 The extension in [`tools/vscode`](../../tools/vscode/README.md) gives VS Code:
 
-- Syntax highlighting for `.calx` files, and for ```` ```calx ```` blocks in Markdown, such as the examples in these docs.
+- Syntax highlighting for `.calx` files, scripts without the extension whose `#!` line runs `calx`, and ```` ```calx ```` blocks in Markdown, such as the examples in these docs.
 - The compiler's errors as you type. A moment after each change, it runs `calx check` on the editor's text and underlines what it reports.
 - **Calx: Run File**, the play button in the editor's title bar, which saves the file and runs `calx run` on it.
 - Comment toggling, bracket matching and indentation, and `///` continuing on the next line of a doc comment.

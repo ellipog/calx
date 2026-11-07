@@ -1,0 +1,7 @@
+#!/usr/bin/env -S calx --release
+// Errors after a `#!` line are on the lines they're on.
+
+fn main() {
+    let x: i32 = "no"    // error: expected `i32`, found `str`
+    println("{x}")
+}

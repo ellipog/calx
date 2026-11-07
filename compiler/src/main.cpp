@@ -44,6 +44,7 @@ void print_version() {
 int usage() {
     std::fputs(
         "usage: calx <command> [options] <file.calx>\n"
+        "       calx [options] <file.calx> [arguments]   run a program, giving it the arguments\n"
         "\n"
         "commands:\n"
         "  check     check a program without building it\n"
@@ -86,6 +87,47 @@ double ms(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
 }
 
+bool is_command(const std::string& c) {
+    return c == "check" || c == "build" || c == "run" || c == "emit-c" || c == "expand";
+}
+
+// `calx [options] file.calx args...` is `calx run [options] file.calx -- args...`, as `python
+// script.py args` is: options before the file are calx's, and everything after it is the
+// program's, untouched, so a script's own `--release` or `-o` reaches it. It's what a `#!` line
+// runs. The file is one that ends in `.calx`, or any that's there, for a script without the
+// extension. 0 when it's set up, or the status to stop with.
+int direct_run(int argc, char** argv, Options& opt) {
+    int i = 1;
+    for (; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--release") {
+            opt.mode = BuildMode::release;
+        } else if (a == "--timings") {
+            opt.timings = true;
+        } else if (a == "--verbose") {
+            opt.verbose = true;
+        } else if (!a.empty() && a[0] == '-') {
+            std::fprintf(stderr, "calx: %s isn't an option for running a file; the options before one are --release, --timings and --verbose\n", a.c_str());
+            return 2;
+        } else {
+            break;
+        }
+    }
+    if (i == argc) return usage();
+    std::string file = argv[i];
+    std::error_code ec;
+    bool there = std::filesystem::is_regular_file(file, ec);
+    if (!there && std::filesystem::path(file).extension() != ".calx") {
+        std::fprintf(stderr, "calx: `%s` isn't a command, or a file to run\n\n", file.c_str());
+        usage();
+        return 2;
+    }
+    opt.command = "run";
+    opt.input = file;
+    for (int j = i + 1; j < argc; j++) opt.program_args.push_back(argv[j]);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -102,7 +144,11 @@ int main(int argc, char** argv) {
     }
     if (opt.command == "update") return run_update(std::vector<std::string>(argv + 2, argv + argc));
     if (opt.command == "doctor") return run_doctor();
-    for (int i = 2; i < argc; i++) {
+    bool direct = !is_command(opt.command);
+    if (direct) {
+        if (int status = direct_run(argc, argv, opt)) return status;
+    }
+    for (int i = 2; i < argc && !direct; i++) {
         std::string a = argv[i];
         if (a == "--") {
             for (int j = i + 1; j < argc; j++) opt.program_args.push_back(argv[j]);
@@ -133,9 +179,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    bool known = opt.command == "check" || opt.command == "build" || opt.command == "run" || opt.command == "emit-c" ||
-                 opt.command == "expand";
-    if (!known || opt.input.empty()) return usage();
+    if (opt.input.empty()) return usage();
     if (!opt.json) update_notice();
     if (opt.library && opt.command == "run") {
         std::fprintf(stderr, "calx: a library doesn't run by itself; build it with `calx build --lib`, and open it from a program\n");

@@ -48,6 +48,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - Statements end at the end of the line. A line that ends in an operator or an open bracket continues on the next.
 - Blocks use braces. `if`, `match` and blocks are expressions: `let x = if c { 1 } else { 2 }`.
 - Comments are `//`. Doc comments are `///` and are required on every `pub` item of the Calcite host API (D41).
+- A first line that starts with `#!` is skipped, so a file runs as a script, and `calx file.calx args` runs one as `calx run` does. Built: [running a file](reference/command.md#running-a-file)
 - `pub` makes an item visible outside its module. Everything else is private to the module.
 - Attributes are `@name` or `@name(args)` before a declaration ([codegen hooks](#codegen-hooks)).
 - Strings interpolate with `{expr}`: `"moved {d} blocks"`. A raw string, `#"..."#`, has no escapes and interpolates with `#{expr}`, and one that ends its line is a block. Built: [raw strings](reference/syntax.md#raw-strings) (D125)

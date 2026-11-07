@@ -68,7 +68,13 @@ class Lexer {
 public:
     Lexer(const SourceFile& file, std::uint32_t file_id, std::uint32_t begin, std::uint32_t end, Names& names,
           Arena& arena, Diagnostics& diags)
-        : src_(file.text), file_(file_id), pos_(begin), end_(end), names_(names), arena_(arena), diags_(diags) {}
+        : src_(file.text), file_(file_id), pos_(begin), end_(end), names_(names), arena_(arena), diags_(diags) {
+        // A `#!` line, such as `#!/usr/bin/env calx`, which runs the file as a script, is the
+        // system's, not Calx's. Its line end stays, so the lines after it keep their numbers.
+        if (begin == 0 && end >= 2 && src_[0] == '#' && src_[1] == '!') {
+            while (pos_ < end_ && src_[pos_] != '\n') pos_++;
+        }
+    }
 
     std::vector<Token> run() {
         bool space = false;

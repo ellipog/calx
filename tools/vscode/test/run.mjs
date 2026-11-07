@@ -74,6 +74,7 @@ function expectScope(line, text, scope, nth = 0) {
 }
 
 const cases = [
+    ['#!/usr/bin/env calx', '/usr/bin/env calx', 'comment.line.shebang'],
     ['fn main() {', 'fn', 'storage.type.function'],
     ['fn main() {', 'main', 'entity.name.function.calx'],
     ['struct Point {', 'Point', 'entity.name.type'],

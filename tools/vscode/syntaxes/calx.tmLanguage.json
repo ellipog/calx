@@ -3,7 +3,16 @@
   "name": "Calx",
   "scopeName": "source.calx",
   "fileTypes": ["calx"],
-  "patterns": [{ "include": "#code" }],
+  "firstLineMatch": "^#!.*\\bcalx\\b",
+  "patterns": [
+    {
+      "comment": "A #! line, which runs the file as a script, is the system's and the compiler skips it.",
+      "name": "comment.line.shebang.calx",
+      "match": "\\A(#!).*$",
+      "captures": { "1": { "name": "punctuation.definition.comment.calx" } }
+    },
+    { "include": "#code" }
+  ],
   "repository": {
     "code": {
       "patterns": [
