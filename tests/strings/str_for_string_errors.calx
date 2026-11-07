@@ -1,0 +1,20 @@
+// Where a `str` still can't be a `String`: where the `String` is kept or changed, since a `str`
+// doesn't own its bytes.
+fn keep(s: own String) -> String {
+    return s
+}
+
+fn grow(s: mut String) {
+    s.push('!')
+}
+
+fn main() {
+    var word = "hey"
+    println(keep(word))    // error: expected `String`, found `str`; make one with `String(...)`
+    grow(mut word)    // error: expected `String`, found `str`; make one with `String(...)`
+    let s: String = word    // error: expected `String`, found `str`; make one with `String(...)`
+    var xs: List<String> = []
+    xs.push(word)    // error: expected `String`, found `str`; make one with `String(...)`
+    word = "ho"
+    println("{s} {xs} {word == 3}")    // error: expected `str`, found `i32`
+}

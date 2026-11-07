@@ -3604,6 +3604,12 @@ private:
         }
         if (t->is_result && e != result_ok_) t = result_value(e);
         e->type = t;
+        // CLX-141: a `str` argument for a `String` parameter that's only looked at is a `String`
+        // viewing the same bytes. It keeps its type, so it's worked out as the `str` it is.
+        if (e == str_view_ok_ && t == T.str && expected == T.string) {
+            e->str_view = true;
+            return T.string;
+        }
         if (expected && !is_bad(expected) && !is_bad(t) && t != expected && t->kind != TypeKind::never) {
             mismatch(e, expected, t);
             return T.error;
@@ -3779,6 +3785,30 @@ private:
 
     // Two operands that must have the same type. An untyped literal on the left takes its type
     // from the right, so `1 + x` works like `x + 1`.
+    // The two sides of a comparison, which must be the same type, except that text compares with
+    // text: a `String` with a `str`, as views of their bytes (CLX-141).
+    Type* compare_pair(Expr* a, Expr* b) {
+        if (is_untyped_literal(a)) return check_pair(a, b, nullptr);
+        Type* ta = check(a, nullptr);
+        if (is_bad(ta)) {
+            check(b, nullptr);
+            return T.error;
+        }
+        bool text = ta->kind == TypeKind::str || ta->kind == TypeKind::string;
+        if (!text) {
+            Type* tb = check(b, ta->kind == TypeKind::never ? nullptr : ta);
+            if (ta->kind == TypeKind::never) return tb;
+            return is_bad(tb) ? tb : ta;
+        }
+        Type* tb = check(b, nullptr);
+        if (is_bad(tb)) return tb;
+        if (tb->kind != TypeKind::str && tb->kind != TypeKind::string && tb->kind != TypeKind::never) {
+            mismatch(b, ta, tb);
+            return T.error;
+        }
+        return ta;
+    }
+
     Type* check_pair(Expr* a, Expr* b, Type* want) {
         if (is_untyped_literal(a) && !is_untyped_literal(b)) {
             Type* tb = check(b, want);
@@ -4744,7 +4774,7 @@ private:
         if (op == Op::coalesce) return coalesce(e, expected);
         bool compare = op == Op::eq || op == Op::ne || op == Op::lt || op == Op::le || op == Op::gt || op == Op::ge;
         if (compare) {
-            Type* t = check_pair(e->lhs, e->rhs, nullptr);
+            Type* t = compare_pair(e->lhs, e->rhs);
             if (is_bad(t)) return T.bool_;
             bool ordered = op != Op::eq && op != Op::ne;
             // `x == none` asks only whether there's a value, so it compares no values, and any
@@ -6913,7 +6943,10 @@ private:
             if (generic && is_untyped_literal(a.value) && unresolved(subst(want, s), vars, s)) {
                 later.push_back({a.value, want});
             } else {
+                Expr* saved_view = str_view_ok_;
+                if (p.mode == ParamMode::read && want == T.string) str_view_ok_ = a.value;
                 Type* got = generic ? check_inferred(a.value, want, s, vars) : check(a.value, want);
+                str_view_ok_ = saved_view;
                 if (is_bad(got)) bad_arg = true;
             }
             if (p.mode == ParamMode::mut) {
@@ -8665,7 +8698,11 @@ private:
         for (std::size_t i = 0; i < params.size(); i++) {
             Arg& a = e->args[i];
             if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+            // `names.contains(word)` only looks at `word`, so it can be a `str` (CLX-141).
+            Expr* saved_view = str_view_ok_;
+            if (b == BMethod::contains && params[i] == T.string) str_view_ok_ = a.value;
             Type* at = check(a.value, params[i]);
+            str_view_ok_ = saved_view;
             if (!params[i] && !is_bad(at) && at->kind != TypeKind::str && at->kind != TypeKind::string) {
                 error(a.value->span, q(m) + " takes a `str` or a `String`, not " + a_type(at));
                 return T.error;
@@ -9251,6 +9288,7 @@ private:
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
     Item* ordering_item_ = nullptr;  // `Ordering`, made when first needed
     Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
+    Expr* str_view_ok_ = nullptr;  // the argument that may be a `str` for a `String` it only looks at (CLX-141)
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;
     Scope* scope_ = nullptr;  // the module being worked on

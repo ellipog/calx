@@ -4143,7 +4143,7 @@ $dropall    m->len = 0;
         int last = -1;
         for (int i = 0; i < static_cast<int>(ops.size()); i++) {
             const Operand& o = ops[i];
-            bool temp_view = o.pass == Pass::address && !is_place(o.e) && !o.e->temp;
+            bool temp_view = o.pass == Pass::address && (!is_place(o.e) || o.e->str_view) && !o.e->temp;
             if (effects(o.e) || temp_view) last = i;
         }
         std::vector<std::string> out;
@@ -4156,7 +4156,8 @@ $dropall    m->len = 0;
             const Operand& o = ops[i];
             bool in_order = i < last || (i == last && held);
             if (o.pass == Pass::address) {
-                if (is_place(o.e) || o.e->temp) {
+                // A `str` for a `String` is a new `String` viewing its bytes, kept in a temporary.
+                if ((is_place(o.e) || o.e->temp) && !o.e->str_view) {
                     // A temporary is a place that lasts until the statement ends.
                     std::string a = "&" + place(o.e);
                     if (in_order && (o.e->temp || place_has_effects(o.e))) {
@@ -4236,6 +4237,7 @@ $dropall    m->len = 0;
         if (e->type->kind == TypeKind::never && want && want->kind != TypeKind::never && want->kind != TypeKind::unit) {
             return "({ " + expr(e) + "; __builtin_unreachable(); " + zero(want) + "; })";
         }
+        if (e->str_view) return "cx_str_view(" + expr(e) + ")";  // CLX-141
         return expr(e);
     }
 

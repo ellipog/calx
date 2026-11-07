@@ -1,0 +1,63 @@
+// A `str` goes where a `String` is only looked at (CLX-141): a parameter taken as it is, not
+// `own` or `mut`, and `contains` on a list of `String`s. It goes as a `String` viewing the same
+// bytes, so nothing is copied, and a copy of it copies them. Text compares with text, whichever
+// of the two each side is.
+import std.regex.{Regex}
+
+const NAME: str = "calx"
+
+struct Label {
+    text: String
+}
+
+impl Label {
+    fn has(self, s: String) -> bool {
+        return self.text.contains(s)
+    }
+}
+
+fn shout(s: String) -> String {
+    var out = s.copy()    // the view's bytes, copied into memory of its own
+    out.push('!')
+    return out
+}
+
+fn total(a: String, b: String) -> usize {
+    return a.len() + b.len()
+}
+
+fn keep(s: String, into: mut List<String>) {
+    into.push(s.copy())
+}
+
+fn parts(s: String) -> List<String> {
+    var out: List<String> = []
+    for p in s.split(",") {
+        out.push(p.copy())
+    }
+    return out
+}
+
+fn main() {
+    let log = "2026-11-07 player joined"
+    var re = Regex.new(#"\d{4}-\d{2}-\d{2}"#)!
+    let m = re.find(log)!
+    println("{re.is_match(log)} {m.text} {re.count(log)}")    // out: true 2026-11-07 1
+    let word = "hey"
+    println(shout(word))                                     // out: hey!
+    println("{total(word, log[0..4])} {total(NAME, word)}")  // out: 7 7
+    let l = Label { text: "a calx label" }
+    println("{l.has(NAME)} {l.has(word)}")                   // out: true false
+    let rest: str = log[11..]
+    println(shout(rest))                                     // out: player joined!
+    var kept: List<String> = []
+    keep(word, mut kept)
+    keep(rest.trim(), mut kept)
+    println("{kept} {parts("a,b,c")} {parts(log[0..7])}")    // out: [hey, player joined] [a, b, c] [2026-11]
+
+    let names: List<String> = ["ann", "bo"]
+    let who = "bo"
+    println("{names.contains(who)} {names.contains("cy")}") // out: true false
+    let s = String("bo")
+    println("{s == who} {who == s} {s != NAME} {s < who} {"a" < s}")    // out: true true true false true
+}

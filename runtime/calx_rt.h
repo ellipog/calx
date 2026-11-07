@@ -369,6 +369,12 @@ CX_FN(void, cx_sort_bool, (cx_bool* v, cx_usize n));
  * loop over `split` or `lines` gives. It's never freed, and `copy` copies it, where a capacity of 0,
  * a literal's, is shared. Only the top bit is set, so a drop's test costs what it did. */
 #define CX_VIEW_CAP ((cx_usize)1 << 63)
+/* A `str` passed for a `String` parameter that's only looked at (CLX-141): a view of its bytes,
+ * since a `str` can be a part of memory something else owns. */
+CX_INLINE cx_String cx_str_view(cx_str s) {
+    cx_String v = {(cx_u8*)s.ptr, s.len, CX_VIEW_CAP};
+    return v;
+}
 CX_INLINE void cx_drop_String(cx_String* s) {
     if ((cx_i64)s->cap > 0) cx_free(s->ptr, s->cap);
 }

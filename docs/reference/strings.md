@@ -27,6 +27,27 @@ fn main() {
 - Escapes and the rest of the literal syntax are in [syntax](syntax.md#character-and-string-literals).
 - A raw string, `#"..."#`, has no escapes, keeps its braces and backslashes as text, and inserts values with `#{...}`. One that starts at the end of a line is a block that can span lines and loses its closing line's indentation ([raw strings](syntax.md#raw-strings)). It's a `str` or `String` like any other literal.
 
+## A `str` where a `String` is wanted
+
+A `str` goes where a `String` is only looked at: a parameter taken as it is, not `own` or `mut`, such as the text `Regex.find` searches, and `contains` on a `List<String>`. It goes as a `String` that views the same bytes, so nothing is copied, and a `copy` of it copies them. Text also compares with text: `==`, `!=`, `<` and the rest take a `str` and a `String`, as views of their bytes.
+
+```calx
+fn shout(s: String) -> String {
+    var out = s.copy()
+    out.push('!')
+    return out
+}
+
+fn main() {
+    let word = "hey"    // a `str`
+    let names: List<String> = ["ann", "hey"]
+    let owned = String("hey")
+    println("{shout(word)} {names.contains(word)} {owned == word}")    // out: hey! true true
+}
+```
+
+Where the `String` is kept or changed, the `str` needs its own copy, `String(word)`: an `own` or `mut` parameter, a variable or field of type `String`, or `push` on a `List<String>`.
+
 ## Making one
 
 | Written | Gives |
@@ -297,6 +318,7 @@ cx_String command = cx_string_from(({ const cx_String* cx_t19 = &line; cx_usize 
 - `find` picks the two bytes of what it looks for that are likely rarest in text, by a table of how common each byte is, and tests 32 places at a time with AVX2, or 16 with SSE2, for both at once, comparing the rest only where both are. So `example`, whose first byte is common, is found about as fast as text whose every byte is rare. A one-byte needle is found by `memchr`, and without SIMD, `memchr` finds the rarest byte. `contains` is `find`.
 - `trim` and its kin are parts, as `s[a..b]` is: `cx_text_trim` gives a `cx_str` of the same bytes, copied by `cx_string_from` only where it's kept. `trim_prefix` and `trim_suffix` are inline C.
 - A `for` loop over `split`, `lines` or `split_whitespace` is a `while` over inline C that gives the next part, a `cx_str`, and where the one after starts. A loop variable is a `cx_String` with the part's pointer and length and a capacity of `CX_VIEW_CAP`, the top bit, which marks a view: freeing it frees nothing, and a copy of it copies the bytes, where a literal's capacity of 0 would share them.
+- A `str` passed for a `String` is `cx_str_view`, the same kind of `cx_String`, built in a temporary that the function gets a pointer to, so the call copies no bytes.
 - A one-byte separator and the line breaks are found sixteen bytes a step with SSE2, inline, so a short part costs no call, as `memchr`'s would. A longer separator goes through `find`.
 - `split`, `lines` and `split_whitespace` that make a list grow it as `push` does, each part a copy. A list's `join` works out the length first and allocates exactly that once. `s.lines().join(t)` and the others with no list start with room for all of `s`.
 - `replace` finds each match with `find` and copies the text between matches with `memcpy`, into a string that starts with room for all of `s`. `repeat` copies what it has so far, doubling, so `n` copies take about `log2(n)` calls.

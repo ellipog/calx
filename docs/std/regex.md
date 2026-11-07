@@ -12,7 +12,7 @@ import std.regex.{Regex, RegexError}
 
 fn main() ! RegexError {
     var date = try Regex.new(#"(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"#)
-    let log: String = "left 2026-11-07, back 2026-12-01"
+    let log = "left 2026-11-07, back 2026-12-01"
     println("{date.is_match(log)} {date.count(log)}")    // out: true 2
     if let m = date.find(log) {
         println("{m.start}..{m.end} {m.text}")    // out: 5..15 2026-11-07
