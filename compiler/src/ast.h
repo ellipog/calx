@@ -158,6 +158,7 @@ enum class CallKind : std::uint8_t {
 enum class BMethod : std::uint8_t {
     none, copy, len, is_empty, push, pop, clear, insert, remove, swap_remove, swap, reserve, capacity, contains,
     truncate, push_str, starts_with, ends_with, byte_at, as_ptr, as_mut_ptr, set_len, get, cmp, sort,
+    extend,  // on a `List`: a copy of each element of a list or an array, added at the end
     hash_add,  // `h.add(x)` on a `Hasher`
     java_hash,  // Java's `hashCode`, on anything with `JavaHash` and on floats (D105)
     utf16_len,  // on text, as Java's `length()`

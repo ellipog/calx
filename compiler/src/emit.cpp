@@ -2765,9 +2765,14 @@ $dropall    m->len = 0;
     // from one.
     std::string const_init(Expr* e) {
         if (e->has_bits) return expr(e);
-        if ((e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::const_ && e->item->value &&
-            (e->type->kind == TypeKind::array || e->type->kind == TypeKind::tuple)) {
+        if ((e->kind == ExprKind::name || e->kind == ExprKind::self || e->kind == ExprKind::field) && e->ref == Ref::const_ &&
+            e->item->value &&
+            (e->type->kind == TypeKind::array || e->type->kind == TypeKind::tuple || e->type->kind == TypeKind::str)) {
             return const_init(e->item->value);
+        }
+        if (e->kind == ExprKind::string_lit) {
+            std::string s = literal_text(e);
+            return "{(const cx_u8*)" + c_string_literal(s) + ", " + std::to_string(s.size()) + "}";
         }
         if (e->type->kind == TypeKind::tuple) {
             std::string s = "{";
@@ -4318,6 +4323,17 @@ $dropall    m->len = 0;
         return expr_inner(e);
     }
 
+    // A constant that isn't an integer: its C constant. A `str` constant used as a `String` is a
+    // `String` of its bytes, which it doesn't own, as a literal's is.
+    std::string const_value(Expr* e) {
+        if (uses_) uses_->add_const(e->item);
+        std::string name(e->item->c_name);
+        if (e->type->kind == TypeKind::string && e->item->declared->kind == TypeKind::str) {
+            return "cx_string_lit((const char*)" + name + ".ptr, " + name + ".len)";
+        }
+        return name;
+    }
+
     std::string expr_inner(Expr* e) {
         if (e->has_bits) {
             if (is_float(e->type)) return float_const(e->type, e->const_bits);
@@ -4330,10 +4346,7 @@ $dropall    m->len = 0;
                 return "cx_string_lit(" + c_string_literal(literal_text(e)) + ", " + std::to_string(literal_text(e).size()) + ")";
             case ExprKind::name:
             case ExprKind::self:
-                if (e->ref == Ref::const_) {
-                    if (uses_) uses_->add_const(e->item);
-                    return std::string(e->item->c_name);
-                }
+                if (e->ref == Ref::const_) return const_value(e);
                 if (e->ref == Ref::fn) {
                     // A function as a value is its address (D122).
                     if (uses_) uses_->add_fn(e->item);
@@ -4345,6 +4358,7 @@ $dropall    m->len = 0;
             case ExprKind::call: return call(e);
             case ExprKind::field:
                 if (e->ref == Ref::variant) return variant_value(e->type, e->field_index, {});  // `Shape.Empty`
+                if (e->ref == Ref::const_) return const_value(e);  // `Point.ORIGIN`
                 if (e->ref == Ref::fn) {
                     if (uses_) uses_->add_fn(e->item);
                     return std::string(e->item->c_name);  // `Point.len` as a value (D122)
@@ -4352,7 +4366,9 @@ $dropall    m->len = 0;
                 return place_or_value(e);
             case ExprKind::index: return place_or_value(e);
             // A `String`'s part is kept, so it's copied; a `str`'s is a view of the same bytes.
-            case ExprKind::slice: return e->type->kind == TypeKind::string ? "cx_string_from(" + slice_view(e) + ")" : slice_view(e);
+            case ExprKind::slice:
+                if (e->type->kind == TypeKind::list) return list_slice(e);
+                return e->type->kind == TypeKind::string ? "cx_string_from(" + slice_view(e) + ")" : slice_view(e);
             case ExprKind::struct_lit: return e->ref == Ref::variant ? record_variant(e) : struct_literal(e);
             case ExprKind::array_lit:
                 return e->type->kind == TypeKind::list || e->type->kind == TypeKind::deque ? list_literal(e) : array_literal(e);
@@ -4681,6 +4697,14 @@ $dropall    m->len = 0;
             const Local* l = f->params[p].local;
             ops.push_back({x, l->type, l->is_view ? Pass::address : Pass::value});
             param_of.push_back(p);
+        }
+        // Then the defaults of the parameters it leaves out, which are constants (CLX-111).
+        for (std::size_t i = 0; i < e->ordered_args.size(); i++) {
+            Expr* x = e->ordered_args[i];
+            if (std::find(source.begin(), source.end(), x) != source.end()) continue;
+            const Local* l = f->params[i].local;
+            ops.push_back({x, l->type, l->is_view ? Pass::address : Pass::value});
+            param_of.push_back(i);
         }
         std::string decls;
         std::vector<std::string> v = sequence(ops, decls);
@@ -5475,7 +5499,7 @@ $dropall    m->len = 0;
     // `trim_suffix` gives. It's a view of the same bytes where it's only looked at, and copied only
     // where it's kept, so `line.trim() == "stop"` copies nothing.
     static bool is_part(const Expr* e) {
-        if (e->kind == ExprKind::slice) return true;
+        if (e->kind == ExprKind::slice) return e->type->kind != TypeKind::list;  // a list's is a new list
         if (e->kind != ExprKind::call || e->call != CallKind::builtin_method) return false;
         switch (e->bmethod) {
             case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
@@ -5501,6 +5525,38 @@ $dropall    m->len = 0;
     // `s[a..b]` as a `cx_str` of the same bytes. The text is found first and then the offsets, in
     // Java's order. A `String` that's a place is reached through a pointer and viewed after the
     // offsets are worked out, so it's viewed as they leave it.
+    // `xs[a..b]` of a list or an array: a new list of copies of those elements, in one allocation
+    // (CLX-111). The list, then the ends, are worked out in order.
+    std::string list_slice(Expr* e) {
+        Expr* base = e->lhs;
+        Expr* r = e->rhs;
+        Type* bt = base->type;
+        Type* et = bt->elem;
+        std::string lt = ctype(e->type), el = ctype(et);
+        std::vector<Operand> ops = {{base, bt, Pass::address}};
+        if (r->lhs) ops.push_back({r->lhs, r->lhs->type});
+        if (r->rhs) ops.push_back({r->rhs, r->rhs->type});
+        std::string decls;
+        std::vector<std::string> v = sequence(ops, decls);
+        std::string b = tmp(), lo = tmp(), end = tmp(), n = tmp(), out = tmp(), i = tmp();
+        bool array = bt->kind == TypeKind::array;
+        std::string len = array ? std::to_string(bt->length) : b + "->len";
+        std::string src = b + (array ? "->v" : "->ptr") + " + " + lo;
+        std::string s = "({ " + decls + "const " + ctype(bt) + "* " + b + " = " + v[0] + "; cx_usize " + lo + " = " +
+                        (r->lhs ? v[1] : std::string("0")) + "; cx_usize " + end + " = cx_slice_end(" + lo + ", " +
+                        (r->rhs ? v.back() : len) + ", " + (r->rhs && r->inclusive ? "1" : "0") + ", " + len + ", " +
+                        location(e->span) + "); cx_usize " + n + " = " + end + " - " + lo + "; " + lt + " " + out + " = {0}; if (" +
+                        n + ") { " + out + ".ptr = (" + el + "*)cx_alloc(" + n + " * sizeof(" + el + ")); " + out + ".len = " + out +
+                        ".cap = " + n + "; ";
+        if (is_copy(et)) {
+            s += "__builtin_memcpy(" + out + ".ptr, " + src + ", " + n + " * sizeof(" + el + ")); ";
+        } else {
+            s += "for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) " + out + ".ptr[" + i + "] = " + copy_fn(et) + "(&(" +
+                 src + ")[" + i + "]); ";
+        }
+        return s + "} " + out + "; })";
+    }
+
     std::string slice_view(Expr* e) {
         Expr* base = e->lhs;
         Expr* r = e->rhs;
@@ -5917,6 +5973,24 @@ $dropall    m->len = 0;
                 return head + p + "->len ? (" + o + "){ .v = " + p + "->ptr[--" + p + "->len], .has = 1 } : (" + o + "){0}; })";
             }
             case BMethod::clear: return head + drop_from("0") + p + "->len = 0; })";
+            case BMethod::extend: {
+                // The list, then what's added, in order; one copy of the bytes for `Copy` elements.
+                Expr* from = e->args[0].value;
+                Type* at = from->type;
+                std::string decls, s = tmp(), n = tmp();
+                std::vector<std::string> ops = sequence({{recv, t, Pass::address}, {from, at, Pass::address}}, decls);
+                std::string src = s + (at->kind == TypeKind::array ? "->v" : "->ptr");
+                std::string out = "({ " + decls + l + "* " + p + " = " + ops[0] + "; const " + ctype(at) + "* " + s + " = " + ops[1] +
+                                  "; cx_usize " + n + " = " + (at->kind == TypeKind::array ? std::to_string(at->length) : s + "->len") +
+                                  "; if (" + n + ") { if (" + n + " > " + p + "->cap - " + p + "->len) " + grow(n) + " ";
+                if (is_copy(et)) {
+                    out += "__builtin_memcpy(" + p + "->ptr + " + p + "->len, " + src + ", " + n + " * sizeof(" + el + ")); ";
+                } else {
+                    out += "for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) " + p + "->ptr[" + p + "->len + " + i +
+                           "] = " + copy_fn(et) + "(&" + src + "[" + i + "]); ";
+                }
+                return out + p + "->len += " + n + "; } })";
+            }
             case BMethod::truncate:
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (" + i + " < " + p + "->len) { " +
                        drop_from(i) + p + "->len = " + i + "; } })";

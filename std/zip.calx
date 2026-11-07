@@ -9,10 +9,6 @@ import std.fs.{make_dir_all, set_mode, write}
 import std.time.{DateTime}
 import std.zlib.{Format, compress_into, crc32, decompress_into, decompress_stream}
 
-extern "C" {
-    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
-}
-
 /// A file or a directory in an archive.
 pub struct Entry {
     /// Its path in the archive, such as `data/minecraft/dimension_type/overworld.json`. A
@@ -394,15 +390,10 @@ impl Writer {
         self.time = u16.wrap((at.hour << 11) | (at.minute << 5) | (at.second / 2))
     }
 
-    /// Adds a file, deflated at zlib's level 6, with mode `0o644`.
-    pub fn add(mut self, name: String, bytes: List<u8>) {
-        self.add_with(name, bytes, 6, 0o644)
-    }
-
     /// Adds a file deflated at `level`, from 1, fastest, to 9, smallest, or stored as it is
     /// with 0, with the permission bits `mode`, such as `0o755` for a program. A file that
-    /// deflate can't make smaller is stored.
-    pub fn add_with(mut self, name: String, bytes: List<u8>, level: u32, mode: u32) {
+    /// deflate can't make smaller is stored. Level 6 is zlib's default.
+    pub fn add(mut self, name: String, bytes: List<u8>, level: u32 = 6, mode: u32 = 0o644) {
         self.entry(name, bytes, level, 0o100000 | (mode & 0o7777), false)
     }
 
@@ -431,7 +422,7 @@ impl Writer {
         put32(mut self.out, if big { 0xFFFFFFFF } else { u32.wrap(size) })
         put16(mut self.out, u32.wrap(name.len()))
         put16(mut self.out, if big { 20 } else { 0 })
-        append(mut self.out, name.to_bytes())
+        self.out.extend(name.to_bytes())
         let extra = self.out.len()
         if big {
             put16(mut self.out, 1)
@@ -450,7 +441,7 @@ impl Writer {
             }
         }
         if method == 0 {
-            append(mut self.out, bytes)
+            self.out.extend(bytes)
         }
         let compressed = self.out.len() - start
         set16(mut self.out, offset + 8, method)
@@ -487,7 +478,7 @@ impl Writer {
         put16(mut self.central, 0)    // internal attributes
         put32(mut self.central, (mode << 16) | (if dir { 0x10 } else { 0 }))    // and MS-DOS's directory flag
         put32(mut self.central, if far { 0xFFFFFFFF } else { u32.wrap(offset) })
-        append(mut self.central, name.to_bytes())
+        self.central.extend(name.to_bytes())
         if extra_len > 0 {
             put16(mut self.central, 1)
             put16(mut self.central, extra_len)
@@ -506,7 +497,7 @@ impl Writer {
     pub fn finish(own self) -> List<u8> {
         var out = self.out
         let directory = out.len()
-        append(mut out, self.central)
+        out.extend(self.central)
         let directory_size = out.len() - directory
         let count = self.count
         if count >= 0xFFFF or u64(directory) >= 0xFFFFFFFF or u64(directory_size) >= 0xFFFFFFFF {
@@ -635,35 +626,12 @@ fn set64(out: mut List<u8>, at: usize, v: u64) {
     set32(mut out, at + 4, u32.wrap(v >> 32))
 }
 
-// Adds all of `bytes` to the end of `out`, in one copy.
-fn append(out: mut List<u8>, bytes: List<u8>) {
-    let n = bytes.len()
-    if n == 0 {
-        return
-    }
-    out.reserve(n)
-    unsafe {
-        let at = out.len()
-        _ = memcpy(out.as_mut_ptr().add(at), bytes.as_ptr(), n)
-        out.set_len(at + n)
-    }
-}
-
 // The `len` bytes of `b` from `at`, in one copy.
 fn slice(b: List<u8>, at: usize, len: usize) -> List<u8> {
     if at > b.len() or len > b.len() - at {
         panic("the range {at}..{at + len} is out of bounds for {b.len()} bytes")
     }
-    var out = List<u8>()
-    if len == 0 {
-        return out
-    }
-    out.reserve(len)
-    unsafe {
-        _ = memcpy(out.as_mut_ptr(), b.as_ptr().add(at), len)
-        out.set_len(len)
-    }
-    return out
+    return b[at..at + len]
 }
 
 // `len` bytes at `at` as UTF-8, as Java's `ZipFile` reads names by default.

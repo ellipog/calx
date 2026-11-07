@@ -1,7 +1,7 @@
-// What a tuple constant can't be: holding anything but numbers, `bool`, `char` and `rune`, of
-// the wrong shape, or a value only known when the program runs.
+// What a tuple constant can't be: holding anything but numbers, `bool`, `char`, `rune` and
+// `str`, of the wrong shape, or a value only known when the program runs.
 const P: (i32, i32) = (1, 2)
-const S: (i32, String) = (1, "a")    // error: constants of this type aren't implemented yet
+const S: (i32, String) = (1, "a")    // error: a constant can't hold a `String`, which owns its memory; write `str`, which is a `String` where one is wanted
 const L: (i32, i32) = (1, 2, 3)      // error: expected `(i32, i32)`, found `(i32, i32, i32)`
 
 fn f() -> i32 {

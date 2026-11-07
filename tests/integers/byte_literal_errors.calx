@@ -1,0 +1,10 @@
+// What a byte literal can't be: more or less than one byte, a character past ASCII, or `\x`
+// without two hex digits.
+fn main() {
+    let a = b'é'      // error: a byte literal holds an ASCII character; write `\xHH` for a byte above 127
+    let b = b'ab'     // error: a byte literal holds exactly one byte
+    let c = b''       // error: a byte literal holds exactly one byte
+    let d = b'\x7'    // error: `\x` in a byte literal needs two hex digits, such as `b'\x7F'`
+    let e = b'\q'     // error: unknown escape `\q`
+    println("{a} {b} {c} {d} {e}")
+}

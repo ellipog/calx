@@ -1,7 +1,7 @@
-// What an array constant can't be: anything but numbers, `bool`, `char` and `rune`, the wrong
-// length, or a value only known when the program runs.
+// What an array constant can't be: anything but numbers, `bool`, `char`, `rune` and `str`, the
+// wrong length, or a value only known when the program runs.
 const T: [i32; 2] = [1, 2]
-const S: [String; 1] = ["a"]    // error: constants of this type aren't implemented yet
+const S: [String; 1] = ["a"]    // error: a constant can't hold a `String`, which owns its memory; write `str`, which is a `String` where one is wanted
 const L: [i32; 3] = [1, 2]      // error: expected `[i32; 3]`, found `[i32; 2]`
 
 fn f() -> i32 {

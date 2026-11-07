@@ -1,0 +1,42 @@
+// `xs.extend(ys)` adds a copy of each element of a list or an array, and `xs[a..b]` of a list
+// or an array is a new list of copies of those elements (CLX-111). `Copy` elements are copied
+// as one block of bytes; others each with their `copy`.
+fn bytes() -> List<u8> {
+    return [9, 8, 7, 6]
+}
+
+fn names() -> List<String> {
+    return ["x", "y", "z"]
+}
+
+fn main() {
+    var out: List<u8> = []
+    out.extend([1, 2, 3])
+    let more: List<u8> = [4, 5]
+    out.extend(more)
+    out.extend(bytes())
+    let empty: List<u8> = []
+    out.extend(empty)
+    let arr = [10u8, 20, 30]
+    out.extend(arr)
+    println("{out} {out.len()} {more}")    // out: [1, 2, 3, 4, 5, 9, 8, 7, 6, 10, 20, 30] 12 [4, 5]
+    println("{out[1..3]} {out[..2]} {out[9..]} {out[2..=3]} {out[3..3]}")    // out: [2, 3] [1, 2] [10, 20, 30] [3, 4] []
+    println("{arr[1..]} {bytes()[1..3]} {out[..].len()}")    // out: [20, 30] [8, 7] 12
+
+    var all: List<String> = ["a"]
+    let extra: List<String> = ["b", "c"]
+    all.extend(extra)
+    all.extend(names()[1..])
+    all.extend(["q"])
+    var part = all[1..3]
+    part.push("new")
+    println("{all} {part} {extra}")    // out: [a, b, c, y, z, q] [b, c, new] [b, c]
+
+    // The list, then the ends, are worked out in the order they're written.
+    var k = 0usize
+    let s = out[{ k += 1; k }..{ k += 2; k }]
+    println("{s} {k}")    // out: [2, 3] 3
+
+    let big = out[2..20]    // panic: the range 2..20 is out of bounds for length 12
+    println("{big}")
+}

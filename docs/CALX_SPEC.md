@@ -56,7 +56,8 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - Logic uses words: `and`, `or`, `not`. Comparison and arithmetic use the usual symbols.
 - `match v { Pattern => expr, ... }` matches enum variants, `none` and `some(x)`, `ok(v)` and `err(e)`, literals, tuples and `_`.
 - A function with no `->` returns nothing. `fn f() ! E` returns nothing but can fail with an `E`.
-- Calls can name their arguments, `teleport(to: home)`, and parameters can have defaults, `fn f(n: i32 = 3)`.
+- Calls can name their arguments, `teleport(to: home)`, and parameters can have defaults, `fn f(n: i32 = 3)`. Built: [default values](reference/functions.md#default-values) (CLX-111)
+- `b'0'` is a byte literal, the `u8` 48. Built: [byte literals](reference/syntax.md#byte-literals) (CLX-111)
 - A closure passed as the last argument can follow the call: `p.after(ticks: 60) |p| { ... }`.
 - In an `impl T` block, a function whose first parameter is a `T` in any mode (`self: T`, `r: mut T`, `x: own T`) is a method, called as `value.f(...)`. `self` alone means a read-only `self: T`.
 

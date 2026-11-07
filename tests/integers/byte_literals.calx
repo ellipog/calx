@@ -1,0 +1,32 @@
+// Byte literals (CLX-111): `b'0'` is the `u8` 48, written as the character, with the character
+// escapes and `\xHH` for any byte. They're integer literals, so they fold, match and fill
+// constants and arrays like `48u8`.
+const ZERO: u8 = b'0'
+const MAGIC: [u8; 4] = [b'P', b'K', b'\x03', b'\x04']
+
+fn digit(c: u8) -> u8? {
+    if c >= b'0' and c <= b'9' {
+        return some(c - b'0')
+    }
+    return none
+}
+
+fn kind(flag: u8) -> str {
+    return match flag {
+        b'0' | b'\0' => "file",
+        b'5' => "dir",
+        b'L'..=b'M' => "long name",
+        _ => "other",
+    }
+}
+
+fn main() {
+    println("{b'a'} {b'A'} {b' '} {ZERO} {b'~'}")              // out: 97 65 32 48 126
+    println("{b'\n'} {b'\t'} {b'\r'} {b'\0'} {b'\\'} {b'\''}")  // out: 10 9 13 0 92 39
+    println("{b'\"'} {b'{'} {b'\x7F'} {b'\xff'} {b'\xA0'}")    // out: 34 123 127 255 160
+    println("{MAGIC}")                                         // out: [80, 75, 3, 4]
+    println("{digit(b'7')} {digit(b'x')}")                     // out: some(7) none
+    println("{kind(b'0')} {kind(0)} {kind(b'5')} {kind(b'M')} {kind(b'x')}")    // out: file file dir long name other
+    let text = "Hi!"
+    println("{text.byte_at(0) == b'H'} {b'z' - b'a'}")         // out: true 25
+}

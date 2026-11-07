@@ -1,0 +1,64 @@
+// `str` constants (CLX-111): text known while compiling, in arrays and tuples too. One is a `str`,
+// or a `String` where one is wanted, as its literal is, pointing at the program's text without
+// copying it. It matches as its literal does.
+const NAME: str = "calx"
+const ALIAS: str = NAME
+const MONTHS: [str; 3] = ["jan", "feb", "mar"]
+const PAIR: (str, i32) = ("tab\there", 2)
+const BRACES: str = "\{x\}"
+
+struct Tool {
+    name: String = NAME,
+    tag: str = ALIAS,
+}
+
+interface Named {
+    const LABEL: str
+}
+
+struct Cat {}
+
+impl Named for Cat {
+    const LABEL: str = "cat"
+}
+
+fn label<T: Named>() -> str {
+    return T.LABEL
+}
+
+fn owned(s: String) -> usize {
+    return s.len()
+}
+
+fn what(s: str) -> str {
+    return match s {
+        NAME => "the name",
+        "rust" => "another",
+        _ => "something else",
+    }
+}
+
+fn main() {
+    println(NAME)                                         // out: calx
+    println("{ALIAS} {MONTHS[1]} {PAIR.0} {PAIR.1}")      // out: calx feb tab	here 2
+    let s: String = NAME
+    var t: String = ALIAS
+    t.push_str("!")
+    println("{s} {t} {owned(NAME)} {BRACES}")             // out: calx calx! 4 {x}
+    let tool = Tool {}
+    println("{tool.name} {tool.tag}")                     // out: calx calx
+    println("{label<Cat>()} {Cat.LABEL}")                 // out: cat cat
+    println("{what("calx")} {what("rust")} {what("go")}") // out: the name another something else
+    var names: List<String> = []
+    for m in MONTHS {
+        names.push(String(m))
+    }
+    names.push(NAME)
+    println("{names} {s == NAME}")                        // out: [jan, feb, mar, calx] true
+    let text: String = "calx"
+    let found = match text {
+        ALIAS => true,
+        _ => false,
+    }
+    println("{found}")                                    // out: true
+}

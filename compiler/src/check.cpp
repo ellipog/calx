@@ -925,6 +925,11 @@ private:
             m->interface_item = it;
             m->impl_type = self;
             if (m->is_unsafe) error(m->name_span, "an interface's functions can't be `unsafe`");
+            for (Param& p : m->params) {
+                if (!p.default_value) continue;
+                error(p.default_value->span, "an interface's functions can't have defaults; the types implementing it can give theirs");
+                p.default_value = nullptr;
+            }
             if (m->kind == ItemKind::const_) {
                 if (m->value) not_yet(m->value->span, "default values for an interface's constants");
                 if (!m->type) {
@@ -2519,9 +2524,14 @@ private:
         Type* saved_impl = current_impl_type_;
         std::size_t mark = push_env(f);
         current_impl_type_ = f->impl_type;
+        const Param* defaulted = nullptr;  // the first parameter with a default
         for (std::size_t i = 0; i < f->params.size(); i++) {
             Param& p = f->params[i];
-            if (p.default_value) not_yet(p.default_value->span, "default arguments");
+            if (p.default_value && !defaulted) defaulted = &p;
+            if (!p.default_value && defaulted) {
+                error(p.span, "a parameter without a default can't follow one with a default; move " + q(text(p.name)) +
+                                  " before " + q(text(defaulted->name)));
+            }
             Type* t;
             if (p.is_self) {
                 if (!f->impl_type) {
@@ -2549,6 +2559,7 @@ private:
             l->mode = p.mode;
             l->is_view = p.mode == ParamMode::mut || (p.mode == ParamMode::read && is_view_type(t));
             p.local = l;
+            if (p.default_value) check_default(f, p, t);
         }
         f->result_type = f->result ? resolve_type(f->result, f->is_extern) : T.unit;
         if (exported(f)) {
@@ -2563,6 +2574,46 @@ private:
         if (f->error) f->result_type = fails_with(f, f->result_type);
         pop_env(mark);
         current_impl_type_ = saved_impl;
+    }
+
+    // `n: i32 = 3`, a parameter's default: a constant that a call leaving the parameter out
+    // passes. It's checked once, here, seeing only module-level names, as a constant's value is.
+    void check_default(Item* f, Param& p, Type* t) {
+        Expr* v = p.default_value;
+        if (is_bad(t)) return;
+        if (p.is_self) {
+            error(v->span, "`self` can't have a default");
+            return;
+        }
+        if (p.mode == ParamMode::mut) {
+            error(v->span, "a `mut` parameter can't have a default, since the function changes the variable it's given");
+            return;
+        }
+        if (mentions_any(t, f->type_params)) {
+            error(v->span, "a parameter whose type is generic can't have a default yet");
+            return;
+        }
+        // Nothing a call passes for it owns memory: a literal's `String` points at the program's
+        // text.
+        const Type* inner = t->kind == TypeKind::optional ? t->elem : t;
+        if (!is_copy(inner) && inner != T.string) {
+            error(v->span, a_type(t) + " parameter can't have a default; give it a `Copy` type, a `String` or an optional of one");
+            return;
+        }
+        std::vector<Local*> saved_visible;
+        std::vector<std::size_t> saved_marks;
+        saved_visible.swap(visible_);
+        saved_marks.swap(scope_marks_);
+        Item* saved_fn = fn_;
+        Item* saved_item = current_item_;
+        fn_ = nullptr;
+        current_item_ = f;
+        Type* vt = check(v, t);
+        if (!is_bad(vt) && !known(v)) error(v->span, "a parameter's default must be a constant, such as a literal or a `const`");
+        visible_.swap(saved_visible);
+        scope_marks_.swap(saved_marks);
+        fn_ = saved_fn;
+        current_item_ = saved_item;
     }
 
     // `-> T ! E`: the function returns a `T` or fails with an `E`.
@@ -2585,9 +2636,10 @@ private:
         return result_of(ok, e);
     }
 
-    // What a constant can be: a number, `bool`, `char` or `rune`, or an array of them, such as a
-    // table of coefficients.
-    static bool const_type(const Type* t) {
+    // What a constant can be: a number, `bool`, `char`, `rune` or `str`, or an array or tuple of
+    // them, such as a table of coefficients or of names.
+    bool const_type(const Type* t) const {
+        if (t == T.str) return true;
         if (t->kind == TypeKind::array) return const_type(t->elem);
         if (t->kind == TypeKind::tuple) {
             for (const Type* x : t->elems) {
@@ -2596,6 +2648,18 @@ private:
             return true;
         }
         return is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ || t->kind == TypeKind::rune;
+    }
+
+    // A `String`, or an array or tuple with one in it, which a constant can't be.
+    bool holds_string(const Type* t) const {
+        if (t == T.string) return true;
+        if (t->kind == TypeKind::array) return holds_string(t->elem);
+        if (t->kind == TypeKind::tuple) {
+            for (const Type* x : t->elems) {
+                if (holds_string(x)) return true;
+            }
+        }
+        return false;
     }
 
     // Whether an expression's value is known at compile time: a constant, or an array or tuple of
@@ -2643,16 +2707,24 @@ private:
         if (!c->value) {
             error(c->name_span, "constant " + q(text(c->name)) + " needs a value");
         } else if (!is_bad(t)) {
-            if (!const_type(t)) {
+            if (holds_string(t)) {
+                error(c->type->span, std::string(t == T.string ? "a constant can't be" : "a constant can't hold") +
+                                         " a `String`, which owns its memory; write `str`, which is a `String` where one is wanted");
+            } else if (!const_type(t)) {
                 not_yet(c->type->span, "constants of this type");
+            } else if (c->value->kind == ExprKind::string_lit && !c->value->interpolations.empty()) {
+                error(c->value->span, "a constant's text must be known at compile time, so it can't interpolate `{...}`; "
+                                      "write `\\{` for a brace");
             } else {
                 Type* vt = check(c->value, t);
                 if (!is_bad(vt) && !known(c->value)) {
                     error(c->value->span, "a constant's value must be known at compile time");
                 }
-                // Integers are written where they're used; floats, arrays and tuples are C
-                // constants.
-                if (is_float(t) || t->kind == TypeKind::array || t->kind == TypeKind::tuple) prog_.consts.push_back(c);
+                // Integers are written where they're used; floats, `str`s, arrays and tuples are
+                // C constants.
+                if (is_float(t) || t == T.str || t->kind == TypeKind::array || t->kind == TypeKind::tuple) {
+                    prog_.consts.push_back(c);
+                }
             }
         }
         checking_consts_.erase(c);
@@ -3043,11 +3115,17 @@ private:
                 Type* base = check_place(e->lhs, root);
                 return e->type = index_type(e, base);
             }
-            case ExprKind::slice:
-                if (!is_bad(check(e, nullptr))) {
+            case ExprKind::slice: {
+                Type* t = check(e, nullptr);
+                if (is_bad(t)) return T.error;
+                if (t->kind == TypeKind::list) {
+                    error(e->span, "a slice of a list is a new list, so changing it wouldn't change this one; change the "
+                                   "elements by index: `xs[i] = ...`");
+                } else {
                     error(e->span, "a part of a text can't be changed where it is; build a new `String` from the parts");
                 }
                 return T.error;
+            }
             default:
                 if (!is_bad(check(e, nullptr))) error(e->span, "can't assign to this expression");
                 return T.error;
@@ -4298,7 +4376,9 @@ private:
         if (fn_ != it && current_item_ != it && !(fn_ && fn_->origin == it)) it->used = true;
     }
 
-    Type* const_ref(Expr* e, Item* c) {
+    // A constant by name. A `str` constant is a `String` where one is wanted, as its literal
+    // would be, without copying the text.
+    Type* const_ref(Expr* e, Item* c, Type* expected) {
         check_const(c);
         e->ref = Ref::const_;
         e->item = c;
@@ -4308,6 +4388,7 @@ private:
             e->const_bits = c->value->const_bits;
             e->is_nan_const = c->value->is_nan_const;
         }
+        if (c->declared == T.str && expected == T.string) return T.string;
         return c->declared;
     }
 
@@ -4360,7 +4441,7 @@ private:
                 return r.local->type;
             case NameKind::item:
                 use_item(r.item);
-                if (r.item->kind == ItemKind::const_) return const_ref(e, r.item);
+                if (r.item->kind == ItemKind::const_) return const_ref(e, r.item, expected);
                 error(e->span, q(text(n)) + " is an interface, not a value");
                 return T.error;
             case NameKind::type:
@@ -5008,7 +5089,7 @@ private:
                 return subst(mem.konst->declared, mem.s);
             }
             use_item(mem.konst);
-            return const_ref(e, mem.konst);
+            return const_ref(e, mem.konst, expected);
         }
         if (mem.fn) {
             // `Point.len` as a value: a method takes what it's called on first (D122).
@@ -5073,13 +5154,14 @@ private:
         if (r->lhs) bad = is_bad(check(r->lhs, T.usize)) || bad;
         if (r->rhs) bad = is_bad(check(r->rhs, T.usize)) || bad;
         r->type = T.usize;
+        bool elements = !is_bad(base) && (base->kind == TypeKind::list || base->kind == TypeKind::array);
         if (!r->rhs && r->inclusive) {
-            error(r->span, "`..=` needs the byte it goes up to");
+            error(r->span, elements ? "`..=` needs the index it goes up to" : "`..=` needs the byte it goes up to");
             bad = true;
         }
         if (bad) return T.error;
-        if (base->kind != TypeKind::str && base->kind != TypeKind::string) {
-            error(e->span, name_of(base) + " can't be sliced; only text can be, by byte offsets, for now");
+        if (base->kind != TypeKind::str && base->kind != TypeKind::string && !elements) {
+            error(e->span, name_of(base) + " can't be sliced; text, lists and arrays can be");
             return T.error;
         }
         bool lo_known = !r->lhs || r->lhs->has_bits, hi_known = r->rhs && r->rhs->has_bits;
@@ -5088,6 +5170,20 @@ private:
         if (lo_known && hi_known && lo > hi) {
             error(r->span, "the range starts after it ends");
             return T.error;
+        }
+        // `xs[a..b]` of a list or an array is a new list of copies of those elements (CLX-111).
+        if (elements) {
+            if (const Type* h = handle_inside(base->elem)) {
+                error(e->span, "a slice copies the elements, and " + name_of(base->elem) + " can't be copied" +
+                                   (h == base->elem ? "" : ", since it holds " + name_of(h)));
+                return T.error;
+            }
+            if (base->kind == TypeKind::array && hi_known && hi > base->length) {
+                error(r->rhs->span, "index " + std::to_string(hi) + " is past the end of the array, which has " +
+                                        std::to_string(base->length) + " elements");
+                return T.error;
+            }
+            return T.list_of(base->elem);
         }
         // In a literal, the offsets are checked here.
         if (e->lhs->kind == ExprKind::string_lit && e->lhs->interpolations.empty()) {
@@ -5849,10 +5945,16 @@ private:
         Type* lt = check(p->value, t);
         if (is_bad(lt)) return false;
         if (text) {
-            if (p->value->kind != ExprKind::string_lit || !p->value->interpolations.empty()) {
-                error(p->value->span, "a string pattern must be a plain string literal");
+            // A `str` constant matches as its literal.
+            Expr* v = p->value;
+            while ((v->kind == ExprKind::name || v->kind == ExprKind::field) && v->ref == Ref::const_ && v->item->value) {
+                v = v->item->value;
+            }
+            if (v->kind != ExprKind::string_lit || !v->interpolations.empty()) {
+                error(p->value->span, "a string pattern must be a string literal or a `str` constant");
                 return false;
             }
+            p->value = v;
             return true;
         }
         if (!p->value->has_bits) {
@@ -6788,8 +6890,11 @@ private:
                 }
                 index = next++;
                 if (index >= n) {
-                    error(a.span, q(text(f->name)) + " takes " + std::to_string(n - first) + " argument" +
-                                      (n - first == 1 ? "" : "s") + ", but more were given");
+                    std::size_t least = n;
+                    while (least > first && f->params[least - 1].default_value) least--;
+                    std::string count = least == n ? std::to_string(n - first) : std::to_string(least - first) + " to " + std::to_string(n - first);
+                    error(a.span, q(text(f->name)) + " takes " + count + " argument" + (least == n && n - first == 1 ? "" : "s") +
+                                      ", but more were given");
                     check(a.value, nullptr);
                     ok = false;
                     continue;
@@ -6831,6 +6936,9 @@ private:
             // A second `none` that still can't tell its type would only repeat the first's error.
             if (bad_arg && v->kind == ExprKind::none_lit && unresolved(subst(want, s), vars, s)) continue;
             if (is_bad(check_inferred(v, want, s, vars))) bad_arg = true;
+        }
+        for (std::size_t i = first; i < n; i++) {
+            if (!ordered[i] && f->params[i].default_value) ordered[i] = f->params[i].default_value;  // CLX-111
         }
         for (std::size_t i = first; i < n && ok; i++) {
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
@@ -8530,6 +8638,7 @@ private:
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
             else if (m == "sort") b = BMethod::sort, changes = true;
+            else if (m == "extend" && recv->kind == TypeKind::list) return extend_call(e, recv);
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
@@ -8602,6 +8711,48 @@ private:
             }
         }
         return result;
+    }
+
+    // `xs.extend(ys)`: a copy of each element of the list or array `ys`, added to the end of `xs`
+    // in one go, as one copy of the bytes when the elements are `Copy` (CLX-111).
+    Type* extend_call(Expr* e, Type* recv) {
+        e->bmethod = BMethod::extend;
+        Type* el = recv->elem;
+        if (e->args.size() != 1) {
+            error(e->span, "`extend` takes one argument, the list or array whose elements it adds");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Arg& a = e->args[0];
+        if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+        // A literal is an array of the list's elements, so nothing is allocated for it.
+        Expr* v = a.value;
+        Type* want = nullptr;
+        if (v->kind == ExprKind::array_lit) {
+            want = v->repeat || v->elems.empty() ? T.list_of(el) : T.array_of(el, v->elems.size());
+        }
+        Type* at = check(v, want);
+        if (is_bad(at) || is_bad(el)) return T.error;
+        if ((at->kind != TypeKind::list && at->kind != TypeKind::array) || at->elem != el) {
+            error(v->span, "`extend` adds the elements of a list or an array of " + name_of(el) + ", not " + a_type(at));
+            return T.error;
+        }
+        if (const Type* h = handle_inside(el)) {
+            error(e->callee->span, "`extend` copies the elements, and " + name_of(el) + " can't be copied" +
+                                       (h == el ? "" : ", since it holds " + name_of(h)));
+            return T.error;
+        }
+        Expr* lhs = e->callee->lhs;
+        if (Local* root = place_root(lhs)) {
+            require_writable(lhs, root, false);
+            // D48: the list can't grow under the elements being copied from it.
+            if (mentions(v, root)) {
+                error(v->span, q(text(root->name)) + " is changed by `extend`, so it can't be what's added; add a copy");
+            }
+        } else {
+            error(lhs->span, "`extend` changes " + name_of(recv) + ", so call it on a variable");
+        }
+        return T.unit;
     }
 
     // The methods of `*T` and `*const T`, which only `unsafe` code can call, since the receiver

@@ -128,7 +128,7 @@ fn main() {
 - It panics unless `a <= b`, `b` is at most the length, and both are where runes start, so a part is always UTF-8. With a literal and constant offsets, the checker says so instead.
 - Offsets are `usize`. `find` gives offsets that are always where runes start, since a match in UTF-8 can't start inside a rune.
 - A part can't be assigned to or changed, as in `s[0..2] = "x"` or `s[1..].push('x')`. Build a new `String` from the parts.
-- Only text can be sliced for now.
+- A list or an array slices too, into a new list of copies of its elements ([slices](lists.md#slices)).
 
 ## Taking text apart
 

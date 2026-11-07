@@ -1,6 +1,6 @@
 ---
 title: Functions
-description: Declaring and calling functions, parameter modes, self, named arguments, returns, main, and functions as values.
+description: Declaring and calling functions, parameter modes, self, named arguments, default values, returns, main, and functions as values.
 ---
 
 # Functions
@@ -100,7 +100,38 @@ fn main() {
 
 ## Named arguments
 
-Arguments can be named, in any order after the unnamed ones: `area(height: 2, width: 3)`. Arguments run in the order they're written, whatever order the parameters are in. Default parameter values aren't built yet.
+Arguments can be named, in any order after the unnamed ones: `area(height: 2, width: 3)`. Arguments run in the order they're written, whatever order the parameters are in.
+
+## Default values
+
+A parameter can have a default, `level: u32 = 6`, which a call that leaves it out passes. Naming the arguments skips some defaults and gives later ones, so one function serves where Java would overload it.
+
+```calx
+enum Align {
+    Left,
+    Right,
+}
+
+fn pad(text: str, width: usize = 8, fill: rune = ' ', align: Align = Align.Right) -> String {
+    return match align {
+        Align.Left => text.pad_end(width, fill),
+        Align.Right => text.pad_start(width, fill),
+    }
+}
+
+fn main() {
+    println("[{pad("ab")}]")                           // out: [      ab]
+    println("[{pad("ab", 4)}]")                        // out: [  ab]
+    println("[{pad("ab", fill: '.', width: 5)}]")      // out: [...ab]
+    println("[{pad("ab", align: Align.Left)}]")        // out: [ab      ]
+}
+```
+
+- A default is a constant: a literal, a [constant](variables.md#constants), `none`, an enum's variant without data, or an array or tuple of them. It sees only names at the module's top level, not the other parameters, and it's worked out where the function is declared, once.
+- The parameters with defaults come last.
+- A parameter with a default has a `Copy` type, a `String`, whose default points at the program's text, or an optional of one, so a call that passes the default allocates nothing.
+- A `mut` parameter can't have a default, since it changes the caller's variable, and neither can one whose type is generic, nor an interface's functions.
+- A function value has no defaults: `let f = pad` takes all four arguments.
 
 ## Evaluation order
 

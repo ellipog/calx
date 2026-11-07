@@ -1,6 +1,6 @@
 ---
 title: Lists
-description: "List<T>, the growable array: literals, methods, indexing, loops, printing, and its C."
+description: "List<T>, the growable array: literals, methods, indexing, slices, loops, printing, and its C."
 ---
 
 # Lists
@@ -31,6 +31,7 @@ fn main() {
 | `[x; n]` where a list is wanted | `n` copies of `x`, which must be `Copy`. `n` can be worked out at run time |
 | `List<T>()` | An empty list. `List()` works when the type is known from where it's used |
 | `xs.copy()` | A copy of the list and of each element |
+| `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` | A new list of copies of the elements from index `a` up to `b`, of a list or an array ([slices](#slices)) |
 
 A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1, 2]` or a `List` parameter. Elsewhere `[1, 2]` is an [array](types.md#arrays).
 
@@ -41,6 +42,7 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.len()`, `xs.is_empty()` | The number of elements, a `usize`, and whether it's 0 |
 | `xs.capacity()` | How many elements fit before it must grow |
 | `xs.push(x)` | Adds `x` at the end |
+| `xs.extend(ys)` | Adds a copy of each element of the list or array `ys` at the end, growing once ([slices](#slices)) |
 | `xs.pop()` | Removes the last element and gives it, or `none` when the list is empty |
 | `xs.insert(i, x)` | Puts `x` at index `i`, moving the rest up. `i` can be `len()`, which is the end |
 | `xs.remove(i)` | Removes the element at `i` and gives it, moving the rest down |
@@ -86,6 +88,28 @@ fn main() {
 ```
 
 `insert` past the end panics too, and `remove`, `swap_remove` and `swap` check their indexes the same way. `swap` works out both indexes before checking either.
+
+## Slices
+
+`xs[a..b]` is a new list holding copies of the elements from index `a` up to `b`, from a list or an array. `xs[a..]` goes to the end, `xs[..b]` starts at 0, and `xs[a..=b]` includes `b`. `xs.extend(ys)` adds copies of the elements of a list or an array to the end of `xs`. Both copy `Copy` elements as one block of bytes, and others each with `copy`, so a file format's fields come out of its bytes without `unsafe`.
+
+```calx
+fn main() {
+    let packet: List<u8> = [0xCA, 0xFE, 1, 2, 3, 4]
+    let magic = packet[..2]
+    let body = packet[2..]
+    var out: List<u8> = []
+    out.extend(body)
+    out.extend([0, 0])
+    println("{magic} {body} {out} {packet[1..=2]}")    // out: [202, 254] [1, 2, 3, 4] [1, 2, 3, 4, 0, 0] [254, 1]
+    let i = packet.len()
+    println("{packet[2..i + 1]}")    // panic: the range 2..7 is out of bounds for length 6
+}
+```
+
+- The list, then the ends, are worked out in the order they're written. A range that starts after it ends, or goes past the end, panics.
+- A slice is a new list, so it can't be assigned to: `xs[0..2] = ys` is an error. Change the elements by index.
+- `xs.extend(xs)` is an error, since `xs` would grow under the elements being copied. Add a copy: `xs.extend(xs.copy())`.
 
 ## Loops
 

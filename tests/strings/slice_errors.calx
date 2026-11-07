@@ -5,8 +5,8 @@ fn main() {
     s.push('!')
     s[1..3] = "x"    // error: a part of a text can't be changed where it is; build a new `String` from the parts
     s[1..].push('x')    // error: `push` changes `String`, so call it on a variable
-    let xs: List<i32> = [1, 2, 3]
-    println("{xs[0..2]}")    // error: `List<i32>` can't be sliced; only text can be, by byte offsets, for now
+    let m: Map<i32, i32> = Map()
+    println("{m[0..2]}")    // error: `Map<i32, i32>` can't be sliced; text, lists and arrays can be
     println("{"abc"[2..1]}")    // error: the range starts after it ends
     println("{"abc"[0..5]}")    // error: byte 5 is past the end of the text, which is 3 bytes long
     println("{"abc"[4..]}")    // error: byte 4 is past the end of the text, which is 3 bytes long

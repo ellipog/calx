@@ -35,7 +35,7 @@ fn main() {
 - `t.0`, `t.1` and so on read a part. On a `var` they can be assigned.
 - Tuples are values, copied when assigned, like structs.
 - Tuples compare with `==` part by part, and print as `(1, a, true)` ([comparing and printing](comparing.md)). `match` sees inside them.
-- A tuple of numbers, `bool`, `char` and `rune` can be a [constant](variables.md#constants): `const NOWHERE: (i32, i32) = (i32.MIN, i32.MIN)`.
+- A tuple of numbers, `bool`, `char`, `rune` and `str` can be a [constant](variables.md#constants): `const NOWHERE: (i32, i32) = (i32.MIN, i32.MIN)`.
 
 ## Destructuring
 

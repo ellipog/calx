@@ -9,14 +9,14 @@ fn main() {
     var w = Writer.new()
     w.set_time(DateTime { year: 2026, month: 11, day: 1, hour: 13, minute: 37, second: 43, milli: 0 })
     w.add_dir("bin")
-    w.add_with("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), 9, 0o755)
+    w.add("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), level: 9, mode: 0o755)
     var big = List<u8>()
     for i in 0..100000 {
         big.push(u8.wrap(i % 7))
     }
     w.add("data/big.bin", big.copy())
     w.add("data/empty", [])
-    w.add_with("ünïcode/naïve.txt", "hé".to_bytes(), 0, 0o600)
+    w.add("ünïcode/naïve.txt", "hé".to_bytes(), level: 0, mode: 0o600)
     let bytes = w.finish()
     println("{bytes.len()}")    // out: 699
 
@@ -37,10 +37,10 @@ fn main() {
     var again = Writer.new()
     again.set_time(DateTime { year: 2026, month: 11, day: 1, hour: 13, minute: 37, second: 42, milli: 0 })
     again.add_dir("bin/")
-    again.add_with("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), 9, 0o755)
+    again.add("bin/tool", "#!/bin/sh\necho hi\n".to_bytes(), 9, 0o755)
     again.add("data/big.bin", big.copy())
     again.add("data/empty", [])
-    again.add_with("ünïcode/naïve.txt", "hé".to_bytes(), 0, 0o600)
+    again.add("ünïcode/naïve.txt", "hé".to_bytes(), 0, 0o600)
     println("{again.finish() == bytes}")    // out: true
 
     // Walking the local headers finds the same files, without modes.

@@ -13,7 +13,7 @@ import std.zip.{Writer, Zip}
 fn main() {
     var w = Writer.new()
     w.add("notes/hello.txt", "hello hello hello hello".to_bytes())
-    w.add_with("bin/run", "#!/bin/sh".to_bytes(), 9, 0o755)
+    w.add("bin/run", "#!/bin/sh".to_bytes(), level: 9, mode: 0o755)
     w.add_dir("empty")
     let bytes = w.finish()
     println("{bytes.len()} bytes")    // out: 324 bytes
@@ -61,8 +61,7 @@ To work with a file, read it with [`std.fs.read`](fs.md) and write the archive w
 | Item | Does |
 | --- | --- |
 | `Writer.new() -> Writer` | An empty archive |
-| `w.add(name: String, bytes: List<u8>)` | Adds a file, deflated at level 6, with mode `0o644` |
-| `w.add_with(name: String, bytes: List<u8>, level: u32, mode: u32)` | Adds a file deflated at `level`, from 1, fastest, to 9, smallest, or stored with 0, with the permission bits `mode` |
+| `w.add(name: String, bytes: List<u8>, level: u32 = 6, mode: u32 = 0o644)` | Adds a file deflated at `level`, from 1, fastest, to 9, smallest, or stored with 0, with the permission bits `mode` |
 | `w.add_dir(name: String)` | Adds a directory, with mode `0o755`. The name gets its `/` if it hasn't got it |
 | `w.set_time(at: DateTime)` | Dates the entries added after it, to two seconds, between 1980 and 2107 |
 | `w.finish() -> List<u8>` | The archive, with its central directory |

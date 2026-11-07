@@ -107,7 +107,7 @@ Everything is as the source writes it. Types, defaults and values are text, and 
 | --- | --- |
 | `Field` | `name`, `ty: TypeRef`, `is_pub`, `default`, its default value as written or `""`, `attributes: List<AttributeUse>`, `doc` |
 | `Variant` | `name`, `payload: List<TypeRef>`, the types of `Circle(f64)`, `fields: List<Field>`, the fields of `Rect { w: f64, h: f64 }`, `value`, such as `"1"` for `OnGround = 1` or `""`, `doc` |
-| `Param` | `name`, `mode: Mode`, `is_self`, `ty: TypeRef` |
+| `Param` | `name`, `mode: Mode`, `is_self`, `ty: TypeRef`, `default`, its [default value](../reference/functions.md#default-values) as written or `""` |
 | `AttributeUse` | `name`, `args: List<String>`, each argument as written, such as `255` or `"hp"` |
 
 - `Mode` is `Read`, `Mut` or `Own`.

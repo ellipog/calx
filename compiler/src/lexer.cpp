@@ -160,6 +160,10 @@ private:
                 lex_string(start, names_.intern(text));
                 return;
             }
+            if (text == "b" && pos_ < end_ && src_[pos_] == '\'') {
+                lex_byte(start);
+                return;
+            }
             for (const Keyword& k : kKeywords) {
                 if (k.text == text) {
                     push(k.kind, start, pos_);
@@ -421,6 +425,50 @@ private:
         pos_++;
         Token& t = push(Tok::char_lit, start, pos_);
         t.int_value = cp < 0 ? 0 : static_cast<std::uint64_t>(cp);
+    }
+
+    // `b'0'`, a byte literal: a u8, lexed as the integer literal it stands for, so `b'0'` is
+    // `48u8` everywhere, patterns included. It holds an ASCII character, one of the character
+    // escapes below 128, or `\xHH` for any byte.
+    void lex_byte(std::uint32_t start) {
+        pos_++;  // the quote
+        std::int64_t v = -1;
+        bool hex = false, empty = false;
+        if (peek() == '\\' && peek(1) == 'x') {
+            pos_ += 2;
+            int n = 0;
+            std::int64_t b = 0;
+            while (n < 2 && pos_ < end_ && digit_value(src_[pos_]) < 16) {
+                b = b * 16 + digit_value(src_[pos_++]);
+                n++;
+            }
+            hex = true;
+            if (n == 2) v = b;
+            else diags_.error(span(start, pos_), "`\\x` in a byte literal needs two hex digits, such as `b'\\x7F'`");
+        } else if (peek() == '\\') {
+            pos_++;
+            v = escape();
+        } else if (peek() != '\'' && peek() != '\n' && pos_ < end_) {
+            v = utf8_char();
+        } else {
+            empty = true;  // `b''`
+        }
+        if (peek() != '\'' || empty) {
+            while (pos_ < end_ && src_[pos_] != '\'' && src_[pos_] != '\n') pos_++;
+            if (peek() == '\'') pos_++;
+            diags_.error(span(start, pos_), "a byte literal holds exactly one byte");
+            v = 0;
+        } else {
+            pos_++;
+            if (!hex && v >= 0x80) {
+                diags_.error(span(start, pos_), "a byte literal holds an ASCII character; write `\\xHH` for a byte above 127");
+                v = 0;
+            }
+        }
+        Token& t = push(Tok::int_lit, start, pos_);
+        t.int_value = v < 0 ? 0 : static_cast<std::uint64_t>(v);
+        t.digits = arena_.copy(std::to_string(t.int_value));
+        t.suffix = "u8";
     }
 
     // A string literal from the opening quote at pos_, with `{expr}` interpolations. The

@@ -13,7 +13,7 @@ import std.tar.{Kind, Tar, Writer}
 fn main() {
     var w = Writer.new()
     w.add_dir("app")
-    w.add_with("app/run", "#!/bin/sh".to_bytes(), 0o755)
+    w.add("app/run", "#!/bin/sh".to_bytes(), mode: 0o755)
     w.add_symlink("app/latest", "run")
     let gz = w.finish_gz(6)
 
@@ -52,8 +52,7 @@ fn main() {
 | Item | Does |
 | --- | --- |
 | `Writer.new() -> Writer` | An empty archive |
-| `w.add(name: String, bytes: List<u8>)` | Adds a file, with mode `0o644` |
-| `w.add_with(name: String, bytes: List<u8>, mode: u32)` | Adds a file with the permission bits `mode` |
+| `w.add(name: String, bytes: List<u8>, mode: u32 = 0o644)` | Adds a file with the permission bits `mode` |
 | `w.add_dir(name: String)` | Adds a directory, with mode `0o755` |
 | `w.add_symlink(name: String, target: String)` | Adds a symbolic link at `name` that points to `target` |
 | `w.set_time(at: Timestamp)` | Dates the entries added after it |

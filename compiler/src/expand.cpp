@@ -605,6 +605,7 @@ private:
             put_count(out, p.mode == ParamMode::mut ? 1 : p.mode == ParamMode::own ? 2 : 0);
             put_flag(out, p.is_self);
             write_type(out, p.type);
+            put(out, p.default_value ? span_text(p.default_value->span) : std::string());
         }
         if (it->result) {
             write_type(out, it->result);

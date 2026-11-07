@@ -49,14 +49,14 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
         var z = ZipWriter.new()
         for f in files {
             let (path, data, mode) = f.copy()
-            z.add_with(path, data, 9, mode)
+            z.add(path, data, level: 9, mode: mode)
         }
         bytes = z.finish()
     } else {
         var t = TarWriter.new()
         for f in files {
             let (path, data, mode) = f.copy()
-            t.add_with(path, data, mode)
+            t.add(path, data, mode: mode)
         }
         bytes = t.finish_gz(9)
     }

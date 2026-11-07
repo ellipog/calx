@@ -1,0 +1,81 @@
+// Default parameter values (CLX-111): a call can leave out a parameter with a default, which
+// passes the default, a constant. Named arguments skip some and give later ones.
+const SEP: str = ", "
+
+enum Mode {
+    Fast,
+    Slow,
+}
+
+struct Counter {
+    n: i32
+}
+
+impl Counter {
+    fn bump(c: mut Counter, by: i32 = 1) {
+        c.n += by
+    }
+}
+
+fn join(parts: [str; 3], sep: str = SEP, end: String = "!") -> String {
+    var s = String()
+    for i in 0usize..3 {
+        if i > 0 {
+            s.push_str(sep)
+        }
+        s.push_str(parts[i])
+    }
+    s.push_str(end)
+    return s
+}
+
+fn pick(mode: Mode = Mode.Fast, limit: i32? = none, scale: f64 = 1.5, sign: i32 = -2) -> String {
+    let m = match mode {
+        Mode.Fast => "fast",
+        Mode.Slow => "slow",
+    }
+    return "{m} {limit} {scale} {sign}"
+}
+
+fn total(xs: [i32; 3] = [1, 2, 3], flag: u8 = b'+', on: bool = true) -> i32 {
+    let sum = xs[0] + xs[1] + xs[2]
+    return if on and flag == b'+' { sum } else { -sum }
+}
+
+fn first<T>(xs: List<T>, skip: usize = 0) -> usize {
+    return xs.len() - skip
+}
+
+fn note(n: i32) -> i32 {
+    println("note {n}")
+    return n
+}
+
+fn order(a: i32, b: i32 = 10, c: i32 = 20) -> i32 {
+    return a * 100 + b + c
+}
+
+fn main() {
+    let parts = ["a", "b", "c"]
+    println(join(parts))                                    // out: a, b, c!
+    println(join(parts, " "))                               // out: a b c!
+    println(join(parts, end: "?"))                          // out: a, b, c?
+    println(join(parts, end: ".", sep: "-"))                // out: a-b-c.
+    println(pick())                                         // out: fast none 1.5 -2
+    println(pick(Mode.Slow))                                // out: slow none 1.5 -2
+    println(pick(limit: some(4)))                           // out: fast some(4) 1.5 -2
+    println(pick(sign: 7, mode: Mode.Slow))                 // out: slow none 1.5 7
+    println("{total()} {total([4, 5, 6])} {total(on: false)}")    // out: 6 15 -6
+    let xs: List<i32> = [1, 2, 3]
+    println("{first(xs)} {first(xs, 1)}")                   // out: 3 2
+    var c = Counter { n: 0 }
+    c.bump()
+    c.bump(10)
+    c.bump(by: 100)
+    println("{c.n}")                                        // out: 111
+    // The arguments given run in the order they're written; the defaults are constants.
+    println("{order(c: note(1), a: note(2))}")
+    // out: note 1
+    // out: note 2
+    // out: 211
+}

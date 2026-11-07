@@ -25,7 +25,7 @@ fn main() {
 
 ## Constants
 
-`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char` or `rune`, or arrays and tuples of them, such as a table of coefficients or a point that stands for "none":
+`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char`, `rune` or [`str`](#text-constants), or arrays and tuples of them, such as a table of coefficients or a point that stands for "none":
 
 ```calx
 const STEP: i32 = 4
@@ -43,7 +43,35 @@ fn main() {
 }
 ```
 
-An integer constant is written into the code wherever it's used, so it costs nothing. A float, an array or a tuple is a `static const` in C, in each file that uses it. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
+An integer constant is written into the code wherever it's used, so it costs nothing. A float, a `str`, an array or a tuple is a `static const` in C, in each file that uses it. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
+
+### Text constants
+
+A constant can be a `str`, or hold some, from a string literal without `{...}`. Like the literal, it's a `String` where one is wanted, such as a `String` parameter or field, and that `String` points at the program's text, so nothing is copied or allocated. It also matches as its literal does. A constant can't be a `String`, since a `String` owns memory.
+
+```calx
+const GREETING: str = "hello"
+const DAYS: [str; 3] = ["mon", "tue", "wed"]
+
+struct Note {
+    text: String = GREETING
+}
+
+fn shout(s: String) -> String {
+    return s.to_upper_root()
+}
+
+fn main() {
+    let note = Note {}
+    println("{shout(GREETING)} {DAYS[1]} {note.text}")    // out: HELLO tue hello
+    let word = "hello"
+    let known = match word {
+        GREETING => true,
+        _ => false,
+    }
+    println("{known}")    // out: true
+}
+```
 
 ## Assignment
 

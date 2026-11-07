@@ -507,6 +507,14 @@ CX_INLINE cx_str cx_str_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclus
     }
     return (cx_str){s.ptr + lo, end - lo};
 }
+/* `xs[lo..hi]` of a list or an array of `length` elements, or `xs[lo..=hi]` with `inclusive`:
+ * where the elements copied end, after checking that the range is in order and inside. */
+CX_COLD CX_FN(void, cx_panic_elements, (cx_usize lo, cx_usize hi, cx_bool inclusive, cx_usize length, const char* at));
+CX_INLINE cx_usize cx_slice_end(cx_usize lo, cx_usize hi, cx_bool inclusive, cx_usize length, const char* at) {
+    cx_usize end = hi + (inclusive ? 1 : 0);
+    if (__builtin_expect(lo > end || end > length || end < hi, 0)) cx_panic_elements(lo, hi, inclusive, length, at);
+    return end;
+}
 /* Where `needle` first or last starts in `hay`, a byte offset, or CX_NOT_FOUND. Both are UTF-8,
  * so a match starts where a rune does. `""` is found at 0, or last at the end. */
 CX_FN(cx_usize, cx_str_find, (cx_str hay, cx_str needle));

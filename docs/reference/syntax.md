@@ -106,6 +106,25 @@ fn main() {
 
 `true` and `false` are the `bool` literals.
 
+### Byte literals
+
+`b'0'` is a byte literal: the `u8` that an ASCII character is, here 48. It holds one ASCII character, one of the escapes above below 128, or `\xHH` with two hex digits for any byte. It's an integer literal, the same as writing `48u8`, so it can be a constant, a pattern or an array element, for file formats whose fields are ASCII.
+
+```calx
+const DIR: u8 = b'5'
+
+fn main() {
+    let header = [b'P', b'K', b'\x03', b'\x04']
+    let flag = b'5'
+    let kind = match flag {
+        b'0' | b'\0' => "file",
+        DIR => "directory",
+        _ => "other",
+    }
+    println("{header} {kind} {b'a' - b'A'} {b'\n'} {b'\xFF'}")    // out: [80, 75, 3, 4] directory 32 10 255
+}
+```
+
 ### Raw strings
 
 A raw string is written `#"..."#`. It has no escapes, and its braces and backslashes are just text, so it suits code, JSON and paths. `#{expr}` inserts a value (D125).

@@ -108,6 +108,8 @@ pub struct Param {
     pub is_self: bool
     /// Its type, as written. A bare `self` has none: its kind is `SelfType`.
     pub ty: TypeRef
+    /// Its default value as written, or `""` when it has none.
+    pub default: String
 }
 
 pub struct FnDecl {
@@ -270,7 +272,8 @@ impl Request {
             }
             let is_self = self.flag_piece()
             let ty = self.type_ref()
-            params.push(Param { name: pname, mode: mode, is_self: is_self, ty: ty })
+            let default = self.piece()
+            params.push(Param { name: pname, mode: mode, is_self: is_self, ty: ty, default: default })
         }
         let result = self.type_ref()
         let can_fail = self.flag_piece()

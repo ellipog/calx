@@ -1,0 +1,62 @@
+// What a parameter's default can't be: before a parameter without one, on a `mut` parameter, a
+// type that owns memory or is generic, or a value only known when the program runs. An
+// interface's functions have none.
+interface Shape {
+    fn area(self, scale: f64 = 1.0) -> f64    // error: an interface's functions can't have defaults; the types implementing it can give theirs
+}
+
+struct Square {
+    side: f64
+}
+
+impl Shape for Square {
+    fn area(self, scale: f64) -> f64 {
+        return self.side * self.side * scale
+    }
+}
+
+fn gap(a: i32 = 1, b: i32) -> i32 {    // error: a parameter without a default can't follow one with a default; move `b` before `a`
+    return a + b
+}
+
+fn grow(xs: mut List<i32> = []) {    // error: a `mut` parameter can't have a default, since the function changes the variable it's given
+    xs.push(1)
+}
+
+fn owned(xs: List<i32> = [1]) -> usize {    // error: a `List<i32>` parameter can't have a default; give it a `Copy` type, a `String` or an optional of one
+    return xs.len()
+}
+
+fn three() -> i32 {
+    return 3
+}
+
+fn late(n: i32 = three()) -> i32 {    // error: a parameter's default must be a constant, such as a literal or a `const`
+    return n
+}
+
+fn generic<T>(x: T = 0) -> T {    // error: a parameter whose type is generic can't have a default yet
+    return x
+}
+
+fn wrong(n: i32 = "x") -> i32 {    // error: expected `i32`, found `str`
+    return n
+}
+
+fn sees(a: i32, b: i32 = a) -> i32 {    // error: unknown name `a`
+    return a + b
+}
+
+fn some_of(n: i32, m: i32 = 2) -> i32 {
+    return n + m
+}
+
+fn main() {
+    let s = Square { side: 2.0 }
+    println("{s.area(1.0)} {gap(1, 2)} {owned()} {late()} {generic<i32>()} {wrong()} {sees(1)}")
+    var xs: List<i32> = []
+    grow(mut xs)
+    println("{some_of(1, 2, 3)}")    // error: `some_of` takes 1 to 2 arguments, but more were given
+    println("{some_of()}")    // error: missing argument `n` for `some_of`
+    println("{some_of(m: 1)}")    // error: missing argument `n` for `some_of`
+}

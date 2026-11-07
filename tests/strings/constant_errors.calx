@@ -1,0 +1,10 @@
+// What a text constant can't be: a `String`, which owns memory, or text only known when the
+// program runs.
+const OWNED: String = "x"    // error: a constant can't be a `String`, which owns its memory; write `str`, which is a `String` where one is wanted
+const N: i32 = 3
+const SHOWN: str = "n is {N}"    // error: a constant's text must be known at compile time, so it can't interpolate `{...}`; write `\{` for a brace
+const NUMBER: str = 5    // error: expected `str`, found `i32`
+
+fn main() {
+    println("{OWNED} {SHOWN} {NUMBER} {N}")
+}

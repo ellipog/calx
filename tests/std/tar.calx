@@ -38,7 +38,7 @@ fn main() {
     var w = Writer.new()
     w.set_time(Timestamp { unix_ms: 1793491200999 })
     w.add_dir("app/bin")
-    w.add_with("app/bin/tool", "run me".to_bytes(), 0o755)
+    w.add("app/bin/tool", "run me".to_bytes(), mode: 0o755)
     var deep = String("app/")
     for _ in 0..30 {
         deep.push_str("deep/")

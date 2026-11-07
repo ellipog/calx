@@ -6,23 +6,19 @@ import std.fs.{make_dir_all, make_link, set_mode, write}
 import std.time.{Timestamp}
 import std.zlib.{Format, compress, decompress}
 
-extern "C" {
-    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
-}
-
 // The type flags in a header, ASCII characters.
-const FILE: u8 = 48           // `0`
+const FILE: u8 = b'0'
 const OLD_FILE: u8 = 0
-const CONTIGUOUS: u8 = 55     // `7`, a file to tar
-const HARDLINK: u8 = 49       // `1`
-const SYMLINK: u8 = 50        // `2`
-const DIR: u8 = 53            // `5`
-const GNU_NAME: u8 = 76       // `L`: the data is the next entry's name
-const GNU_LINK: u8 = 75       // `K`: the data is the next entry's link
-const PAX: u8 = 120           // `x`: the data is pax records for the next entry
-const PAX_GLOBAL: u8 = 103    // `g`: pax records for every entry after it
-const DIGIT_0: u8 = 48
-const DIGIT_7: u8 = 55
+const CONTIGUOUS: u8 = b'7'    // a file to tar
+const HARDLINK: u8 = b'1'
+const SYMLINK: u8 = b'2'
+const DIR: u8 = b'5'
+const GNU_NAME: u8 = b'L'     // the data is the next entry's name
+const GNU_LINK: u8 = b'K'     // the data is the next entry's link
+const PAX: u8 = b'x'          // the data is pax records for the next entry
+const PAX_GLOBAL: u8 = b'g'   // pax records for every entry after it
+const DIGIT_0: u8 = b'0'
+const DIGIT_7: u8 = b'7'
 
 /// What an entry is.
 pub enum Kind {
@@ -200,15 +196,10 @@ impl Writer {
         self.time = if at.unix_ms < 0 { 0 } else { at.unix_ms / 1000 }
     }
 
-    /// Adds a file, with mode `0o644`.
-    pub fn add(mut self, name: String, bytes: List<u8>) {
-        self.add_with(name, bytes, 0o644)
-    }
-
     /// Adds a file with the permission bits `mode`, such as `0o755` for a program.
-    pub fn add_with(mut self, name: String, bytes: List<u8>, mode: u32) {
+    pub fn add(mut self, name: String, bytes: List<u8>, mode: u32 = 0o644) {
         self.header(name, FILE, mode, bytes.len(), "")
-        append(mut self.out, bytes)
+        self.out.extend(bytes)
         self.pad()
     }
 
@@ -281,7 +272,7 @@ impl Writer {
         if not pax.is_empty() {
             let body = pax.to_bytes()
             self.block("PaxHeader", "", PAX, 0o644, body.len(), "")
-            append(mut self.out, body)
+            self.out.extend(body)
             self.pad()
         }
         let link_field = cut(link, 100)
@@ -622,33 +613,10 @@ fn parent_of(path: String) -> String {
     return String()
 }
 
-// Adds all of `bytes` to the end of `out`, in one copy.
-fn append(out: mut List<u8>, bytes: List<u8>) {
-    let n = bytes.len()
-    if n == 0 {
-        return
-    }
-    out.reserve(n)
-    unsafe {
-        let at = out.len()
-        _ = memcpy(out.as_mut_ptr().add(at), bytes.as_ptr(), n)
-        out.set_len(at + n)
-    }
-}
-
 // The `len` bytes of `b` from `at`, in one copy.
 fn slice(b: List<u8>, at: usize, len: usize) -> List<u8> {
     if at > b.len() or len > b.len() - at {
         panic("the range {at}..{at + len} is out of bounds for {b.len()} bytes")
     }
-    var out = List<u8>()
-    if len == 0 {
-        return out
-    }
-    out.reserve(len)
-    unsafe {
-        _ = memcpy(out.as_mut_ptr(), b.as_ptr().add(at), len)
-        out.set_len(len)
-    }
-    return out
+    return b[at..at + len]
 }

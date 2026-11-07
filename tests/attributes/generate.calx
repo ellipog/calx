@@ -18,8 +18,8 @@ enum Shape {
 }
 
 @logged(prefix: "call")
-fn twice(n: i32) -> i32 {
-    return n * 2
+fn twice(n: i32, by: i32 = 2) -> i32 {
+    return n * by
 }
 
 fn main() {
@@ -31,7 +31,7 @@ fn main() {
     // out: P.WHY: i32 = -4
     println(shape_variants())    // out: Circle(f64), Rect { w: f64, h: f64 }, Dot
     println("{twice_logged(21)}")
-    // out: call twice(n: i32) -> i32
+    // out: call twice(n: i32, by: i32 = 2) -> i32
     // out: 42
 }
 
@@ -120,6 +120,9 @@ pub fn logged(decl: FnDecl, prefix: String) -> Generated {
             args.push_str(", ")
         }
         params.push_str("{p.name}: {p.ty.text}")
+        if not p.default.is_empty() {
+            params.push_str(" = {p.default}")
+        }
         args.push_str(p.name)
     }
     let result = if decl.result.kind == TypeKind.Tuple { String() } else { " -> {decl.result.text}" }

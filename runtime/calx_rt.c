@@ -1705,6 +1705,21 @@ void cx_panic_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclusive, const
     cx_panic_end();
 }
 
+void cx_panic_elements(cx_usize lo, cx_usize hi, cx_bool inclusive, cx_usize length, const char* at) {
+    char text[128];
+    cx_usize end = hi + (inclusive ? 1 : 0);
+    const char* dots = inclusive ? "..=" : "..";
+    unsigned long long a = (unsigned long long)lo, b = (unsigned long long)hi;
+    cx_panic_begin(at);
+    if (end > length || end < hi) {
+        snprintf(text, sizeof text, "the range %llu%s%llu is out of bounds for length %llu", a, dots, b, (unsigned long long)length);
+    } else {
+        snprintf(text, sizeof text, "the range %llu%s%llu starts after it ends", a, dots, b);
+    }
+    panic_text(text);
+    cx_panic_end();
+}
+
 void cx_panic_div_zero(const char* at) {
     cx_panic_begin(at);
     panic_text("division by zero");

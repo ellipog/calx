@@ -1,0 +1,22 @@
+// What `extend` and a list's slices don't allow: a list growing under its own elements, the
+// wrong element type, elements that can't be copied, and changing a slice in place.
+fn main() {
+    var xs: List<i32> = [1, 2]
+    xs.extend(xs)    // error: `xs` is changed by `extend`, so it can't be what's added; add a copy
+    xs.extend(xs[0..1])    // error: `xs` is changed by `extend`, so it can't be what's added; add a copy
+    let words: List<String> = ["a"]
+    xs.extend(words)    // error: `extend` adds the elements of a list or an array of `i32`, not a `List<String>`
+    xs.extend(5)    // error: `extend` adds the elements of a list or an array of `i32`, not an `i32`
+    xs.extend()    // error: `extend` takes one argument, the list or array whose elements it adds
+    let fixed: List<i32> = [3]
+    fixed.extend([4])    // error: `fixed` can't be changed; declare it with `var` to change it
+    xs[0..1] = [5]    // error: a slice of a list is a new list, so changing it wouldn't change this one; change the elements by index: `xs[i] = ...`
+    let arr = [1, 2, 3]
+    println("{arr[1..5]}")    // error: index 5 is past the end of the array, which has 3 elements
+    println("{xs[2..1]}")    // error: the range starts after it ends
+    println("{xs[..=]}")    // error: `..=` needs the index it goes up to
+    let threads: List<Receiver<i32>> = []
+    let more: List<Receiver<i32>> = []
+    threads.extend(more)    // error: `extend` copies the elements, and `Receiver<i32>` can't be copied
+    println("{threads[0..0].len()}")    // error: a slice copies the elements, and `Receiver<i32>` can't be copied
+}
