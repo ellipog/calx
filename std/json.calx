@@ -1,0 +1,1024 @@
+/// JSON: text parsed into a tree of values, with the line and column of what's wrong when it isn't
+/// JSON, values written back as compact or indented text, and `@json`, which writes a struct's
+/// `to_json` and `from_json`.
+module std.json
+
+import std.meta.{StructDecl, TypeRef, TypeKind, Field, Generated}
+
+/// A JSON value.
+pub enum Json {
+    Null
+    Bool(bool)
+    /// A number written without a fraction or an exponent, that fits an `i64`.
+    Int(i64)
+    /// One written the same way that's too big for an `i64` but fits a `u64`: from 2^63 to
+    /// 2^64 - 1. With it, every `u64` comes through exactly.
+    UInt(u64)
+    /// Any other number.
+    Float(f64)
+    Str(String)
+    Array(List<Json>)
+    /// An object's members, in the order the text had them. A key given twice keeps its first
+    /// place and its last value, as in Python and JavaScript.
+    Object(LinkedMap<String, Json>)
+}
+
+/// Why text isn't JSON, or a value isn't what `from_json` wants.
+pub struct JsonError {
+    pub message: String
+    /// Where in the text, from 1, or 0 for an error in a value rather than in text.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for JsonError {
+    fn show(self) {
+        if self.line > 0 {
+            print("line {self.line}, column {self.column}: ")
+        }
+        print(self.message)
+    }
+}
+
+/// How deep arrays and objects may nest, so that hostile text can't run the stack out.
+const MAX_DEPTH: usize = 512
+
+// --- parsing -------------------------------------------------------------------------------------
+
+/// The JSON value in `text`, with nothing but white space around it, as RFC 8259 defines it: no
+/// comments, no trailing commas, no single quotes, and no `NaN`.
+pub fn parse_json(text: String) -> Json ! JsonError {
+    var at: usize = 0
+    skip_space(text, mut at)
+    let v = try parse_value(text, mut at, 0)
+    skip_space(text, mut at)
+    if at < text.len() {
+        fail error_at(text, at, "{found(text, at)} after the value, where the text should end")
+    }
+    return v
+}
+
+// The error at byte `at` of `text`, with its line and column.
+fn error_at(text: String, at: usize, message: own String) -> JsonError {
+    var line: usize = 1
+    var start: usize = 0
+    for i in 0..at {
+        if text.byte_at(i) == 10 {
+            line += 1
+            start = i + 1
+        }
+    }
+    var column: usize = 1
+    for i in start..at {
+        if (text.byte_at(i) & 0xC0) != 0x80 {
+            column += 1
+        }
+    }
+    return JsonError { message: message, line: line, column: column }
+}
+
+// What's at byte `at`, for an error: the rune in backquotes, or the end.
+fn found(text: String, at: usize) -> String {
+    if at >= text.len() {
+        return "the end"
+    }
+    let b = text.byte_at(at)
+    let n: usize = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    return "`{text[at..at + n]}`"
+}
+
+fn skip_space(text: String, at: mut usize) {
+    while at < text.len() {
+        let b = text.byte_at(at)
+        if b != 32 and b != 10 and b != 13 and b != 9 {
+            return
+        }
+        at += 1
+    }
+}
+
+fn parse_value(text: String, at: mut usize, depth: usize) -> Json ! JsonError {
+    if at >= text.len() {
+        fail error_at(text, at, "the end, where a value should be")
+    }
+    let b = text.byte_at(at)
+    if b == 34 {
+        return Json.Str(try parse_string(text, mut at))
+    }
+    if b == 123 or b == 91 {
+        if depth >= MAX_DEPTH {
+            fail error_at(text, at, "arrays and objects nested more than {MAX_DEPTH} deep")
+        }
+        if b == 123 {
+            return Json.Object(try parse_object(text, mut at, depth + 1))
+        }
+        return Json.Array(try parse_array(text, mut at, depth + 1))
+    }
+    if b == 45 or (b >= 48 and b <= 57) {
+        return try parse_number(text, mut at)
+    }
+    if word(text, at, "true") {
+        at += 4
+        return Json.Bool(true)
+    }
+    if word(text, at, "false") {
+        at += 5
+        return Json.Bool(false)
+    }
+    if word(text, at, "null") {
+        at += 4
+        return Json.Null
+    }
+    fail error_at(text, at, "{found(text, at)} where a value should be")
+}
+
+// Whether `w` is at byte `at`.
+fn word(text: String, at: usize, w: String) -> bool {
+    if at + w.len() > text.len() {
+        return false
+    }
+    for i in 0..w.len() {
+        if text.byte_at(at + i) != w.byte_at(i) {
+            return false
+        }
+    }
+    return true
+}
+
+fn parse_array(text: String, at: mut usize, depth: usize) -> List<Json> ! JsonError {
+    at += 1
+    var items = List<Json>()
+    skip_space(text, mut at)
+    if at < text.len() and text.byte_at(at) == 93 {
+        at += 1
+        return items
+    }
+    loop {
+        items.push(try parse_value(text, mut at, depth))
+        skip_space(text, mut at)
+        if at < text.len() {
+            let b = text.byte_at(at)
+            if b == 44 {
+                at += 1
+                skip_space(text, mut at)
+                continue
+            }
+            if b == 93 {
+                at += 1
+                return items
+            }
+        }
+        fail error_at(text, at, "{found(text, at)} in an array, where `,` or `]` should be")
+    }
+}
+
+fn parse_object(text: String, at: mut usize, depth: usize) -> LinkedMap<String, Json> ! JsonError {
+    at += 1
+    var members = LinkedMap<String, Json>()
+    skip_space(text, mut at)
+    if at < text.len() and text.byte_at(at) == 125 {
+        at += 1
+        return members
+    }
+    loop {
+        if at >= text.len() or text.byte_at(at) != 34 {
+            fail error_at(text, at, "{found(text, at)} in an object, where a key in double quotes should be")
+        }
+        let key = try parse_string(text, mut at)
+        skip_space(text, mut at)
+        if at >= text.len() or text.byte_at(at) != 58 {
+            fail error_at(text, at, "{found(text, at)} after a key, where `:` should be")
+        }
+        at += 1
+        skip_space(text, mut at)
+        let v = try parse_value(text, mut at, depth)
+        members.insert(key, v)
+        skip_space(text, mut at)
+        if at < text.len() {
+            let b = text.byte_at(at)
+            if b == 44 {
+                at += 1
+                skip_space(text, mut at)
+                continue
+            }
+            if b == 125 {
+                at += 1
+                return members
+            }
+        }
+        fail error_at(text, at, "{found(text, at)} in an object, where `,` or `\}` should be")
+    }
+}
+
+// A string, from its opening quote at `at`, with its escapes decoded. The text is UTF-8 already,
+// so the runs between escapes are copied whole.
+fn parse_string(text: String, at: mut usize) -> String ! JsonError {
+    let open = at
+    at += 1
+    var start = at
+    var out = String()
+    loop {
+        if at >= text.len() {
+            fail error_at(text, open, "a string that doesn't end")
+        }
+        let b = text.byte_at(at)
+        if b == 34 {
+            out.push_str(text[start..at])
+            at += 1
+            return out
+        }
+        if b == 92 {
+            out.push_str(text[start..at])
+            try parse_escape(text, mut at, mut out)
+            start = at
+            continue
+        }
+        if b < 0x20 {
+            fail error_at(text, at, "a control character in a string, which JSON writes as an escape, such as `\\n`")
+        }
+        at += 1
+    }
+}
+
+// The escape at `at`, its `\` first, added to `out`.
+fn parse_escape(text: String, at: mut usize, out: mut String) ! JsonError {
+    let slash = at
+    at += 1
+    if at >= text.len() {
+        fail error_at(text, slash, "a string that doesn't end")
+    }
+    let e = text.byte_at(at)
+    at += 1
+    if e == 34 or e == 92 or e == 47 {
+        out.push(rune(e))
+    } else if e == 110 {
+        out.push('\n')
+    } else if e == 116 {
+        out.push('\t')
+    } else if e == 114 {
+        out.push('\r')
+    } else if e == 98 {
+        out.push('\u{8}')
+    } else if e == 102 {
+        out.push('\u{c}')
+    } else if e == 117 {
+        var cp = try hex4(text, mut at, slash)
+        if cp >= 0xD800 and cp < 0xDC00 {
+            // A high surrogate, which an escaped low one must follow.
+            if not word(text, at, "\\u") {
+                fail error_at(text, slash, "half a surrogate pair, `\\u{text[slash + 2..slash + 6]}`, without its other half")
+            }
+            at += 2
+            let low = try hex4(text, mut at, slash)
+            if low < 0xDC00 or low >= 0xE000 {
+                fail error_at(text, slash, "half a surrogate pair, `\\u{text[slash + 2..slash + 6]}`, without its other half")
+            }
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
+        } else if cp >= 0xDC00 and cp < 0xE000 {
+            fail error_at(text, slash, "half a surrogate pair, `\\u{text[slash + 2..slash + 6]}`, without its other half")
+        }
+        out.push(rune.try_from(cp) ?? '\u{FFFD}')
+    } else {
+        fail error_at(text, slash, "{found(text, slash + 1)} after `\\` in a string, which isn't an escape")
+    }
+}
+
+fn hex4(text: String, at: mut usize, slash: usize) -> u32 ! JsonError {
+    if at + 4 > text.len() {
+        fail error_at(text, slash, "`\\u` without four hex digits after it")
+    }
+    var v: u32 = 0
+    for i in 0..4usize {
+        let b = u32(text.byte_at(at + i))
+        let d = if b >= 48 and b <= 57 {
+            b - 48
+        } else if b >= 97 and b <= 102 {
+            b - 87
+        } else if b >= 65 and b <= 70 {
+            b - 55
+        } else {
+            fail error_at(text, slash, "`\\u` without four hex digits after it")
+        }
+        v = v * 16 + d
+    }
+    at += 4
+    return v
+}
+
+// A number, checked against JSON's grammar: `-`, digits without a leading zero, then a fraction
+// and an exponent if there are. One with neither that fits an `i64` is an `Int`, and one past that
+// that fits a `u64` a `UInt`.
+fn parse_number(text: String, at: mut usize) -> Json ! JsonError {
+    let start = at
+    let negative = text.byte_at(at) == 45
+    if negative {
+        at += 1
+    }
+    let digits = at
+    // The magnitude, in a u64 until it can't hold it.
+    var mag: u64 = 0
+    var fits = true
+    while at < text.len() {
+        let b = text.byte_at(at)
+        if b < 48 or b > 57 {
+            break
+        }
+        let d = u64(b - 48)
+        if mag > 1844674407370955161 or (mag == 1844674407370955161 and d > 5) {
+            fits = false
+        } else {
+            mag = mag * 10 + d
+        }
+        at += 1
+    }
+    if at == digits {
+        fail error_at(text, start, "a number with no digits after its `-`")
+    }
+    if at - digits > 1 and text.byte_at(digits) == 48 {
+        fail error_at(text, digits, "a number that starts with `0` and goes on, which JSON doesn't allow")
+    }
+    var whole = true
+    if at < text.len() and text.byte_at(at) == 46 {
+        whole = false
+        at += 1
+        let frac = at
+        skip_digits(text, mut at)
+        if at == frac {
+            fail error_at(text, start, "a number with no digits after its `.`")
+        }
+    }
+    if at < text.len() and (text.byte_at(at) == 101 or text.byte_at(at) == 69) {
+        whole = false
+        at += 1
+        if at < text.len() and (text.byte_at(at) == 43 or text.byte_at(at) == 45) {
+            at += 1
+        }
+        let exp = at
+        skip_digits(text, mut at)
+        if at == exp {
+            fail error_at(text, start, "a number with no digits in its exponent")
+        }
+    }
+    if whole and fits {
+        if not negative {
+            if mag <= 9223372036854775807 {
+                return Json.Int(i64.wrap(mag))
+            }
+            return Json.UInt(mag)
+        }
+        if mag <= 9223372036854775808 {
+            return Json.Int(i64.wrap(0 - mag))
+        }
+    }
+    return Json.Float(f64.parse(text[start..at]) ?? 0.0)
+}
+
+fn skip_digits(text: String, at: mut usize) {
+    while at < text.len() and text.byte_at(at) >= 48 and text.byte_at(at) <= 57 {
+        at += 1
+    }
+}
+
+// --- writing -------------------------------------------------------------------------------------
+
+/// `{v}` is the value as compact JSON, with no white space: what `JSON.stringify` writes.
+impl Display for Json {
+    fn show(self) {
+        var out = String()
+        write_json(mut out, self, false, 0, 0)
+        print(out)
+    }
+}
+
+/// `value` as JSON indented by `indent` spaces a level, as Python's `json.dumps(v, indent=2)`
+/// writes it, with a key's value after `: ` and each array's element and object's member on a
+/// line of its own. An empty array or object is `[]` or `\{\}`. An `indent` of 0 puts them on lines
+/// of their own all the same, without indenting them, as Python's `indent=0` does.
+pub fn pretty_json(value: Json, indent: usize) -> String {
+    var out = String()
+    write_json(mut out, value, true, indent, 0)
+    return out
+}
+
+// Adds `v` to `out`: compact, or with each element and member on a line of its own, `indent`
+// spaces a level and `level` levels in.
+fn write_json(out: mut String, v: Json, pretty: bool, indent: usize, level: usize) {
+    match v {
+        Json.Null => out.push_str("null"),
+        Json.Bool(b) => out.push_str(if b { "true" } else { "false" }),
+        Json.Int(n) => out.push_str("{n}"),
+        Json.UInt(n) => out.push_str("{n}"),
+        Json.Float(f) => {
+            // JSON has no NaN or infinity; JavaScript writes them as null too.
+            if f - f == 0.0 {
+                out.push_str("{f}")
+            } else {
+                out.push_str("null")
+            }
+        },
+        Json.Str(s) => write_string(mut out, s),
+        Json.Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]")
+                return
+            }
+            out.push('[')
+            var first = true
+            for item in items {
+                if not first {
+                    out.push(',')
+                }
+                first = false
+                new_line(mut out, pretty, indent, level + 1)
+                write_json(mut out, item, pretty, indent, level + 1)
+            }
+            new_line(mut out, pretty, indent, level)
+            out.push(']')
+        },
+        Json.Object(members) => {
+            if members.is_empty() {
+                out.push_str("\{\}")
+                return
+            }
+            out.push('{')
+            var first = true
+            for (k, value) in members {
+                if not first {
+                    out.push(',')
+                }
+                first = false
+                new_line(mut out, pretty, indent, level + 1)
+                write_string(mut out, k)
+                out.push(':')
+                if pretty {
+                    out.push(' ')
+                }
+                write_json(mut out, value, pretty, indent, level + 1)
+            }
+            new_line(mut out, pretty, indent, level)
+            out.push('}')
+        },
+    }
+}
+
+fn new_line(out: mut String, pretty: bool, indent: usize, level: usize) {
+    if not pretty {
+        return
+    }
+    out.push('\n')
+    for _ in 0..indent * level {
+        out.push(' ')
+    }
+}
+
+// Adds `s` as a JSON string: `"` and `\` escaped, and each control character, as `\n` and the like
+// or `\u00XX`. Everything else is written as itself, so text that isn't ASCII stays UTF-8.
+fn write_string(out: mut String, s: String) {
+    out.reserve(s.len() + 2)
+    out.push('"')
+    var start: usize = 0
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b >= 0x20 and b != 34 and b != 92 {
+            continue
+        }
+        out.push_str(s[start..i])
+        start = i + 1
+        if b == 34 {
+            out.push_str("\\\"")
+        } else if b == 92 {
+            out.push_str("\\\\")
+        } else if b == 10 {
+            out.push_str("\\n")
+        } else if b == 13 {
+            out.push_str("\\r")
+        } else if b == 9 {
+            out.push_str("\\t")
+        } else if b == 8 {
+            out.push_str("\\b")
+        } else if b == 12 {
+            out.push_str("\\f")
+        } else {
+            let hex = "0123456789abcdef"
+            out.push_str("\\u00")
+            out.push(rune(hex.byte_at(usize(u32(b) >> 4))))
+            out.push(rune(hex.byte_at(usize(u32(b) & 15))))
+        }
+    }
+    out.push_str(s[start..])
+    out.push('"')
+}
+
+// --- reading values ------------------------------------------------------------------------------
+
+impl Json {
+    /// A copy of the member `key`'s value, if this is an object that has one. A `match` on the
+    /// value reads it in place instead, without the copy.
+    pub fn get(self, key: String) -> Json? {
+        return match self {
+            Json.Object(members) => if members.contains(key) { some(members[key].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// A copy of element `i`, if this is an array that long.
+    pub fn at(self, i: usize) -> Json? {
+        return match self {
+            Json.Array(items) => if i < items.len() { some(items[i].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// The text, if this is a string.
+    pub fn as_str(self) -> String? {
+        return match self {
+            Json.Str(s) => some(s.copy()),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is one written as an integer that fits an `i64`.
+    pub fn as_i64(self) -> i64? {
+        return match self {
+            Json.Int(n) => some(n),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is one written as an integer from 0 that fits a `u64`.
+    pub fn as_u64(self) -> u64? {
+        return match self {
+            Json.Int(n) => if n >= 0 { some(u64.wrap(n)) } else { none },
+            Json.UInt(n) => some(n),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is one, as the nearest `f64`.
+    pub fn as_f64(self) -> f64? {
+        return match self {
+            Json.Int(n) => some(f64.nearest(n)),
+            Json.UInt(n) => some(f64.nearest(n)),
+            Json.Float(f) => some(f),
+            _ => none,
+        }
+    }
+
+    /// The value, if this is `true` or `false`.
+    pub fn as_bool(self) -> bool? {
+        return match self {
+            Json.Bool(b) => some(b),
+            _ => none,
+        }
+    }
+
+    /// Whether this is `null`.
+    pub fn is_null(self) -> bool {
+        return match self {
+            Json.Null => true,
+            _ => false,
+        }
+    }
+
+    /// How many elements an array has, or members an object has. Anything else has none.
+    pub fn len(self) -> usize {
+        return match self {
+            Json.Array(items) => items.len(),
+            Json.Object(members) => members.len(),
+            _ => 0,
+        }
+    }
+
+    /// An object's keys, in order, or none for anything else.
+    pub fn keys(self) -> List<String> {
+        var out = List<String>()
+        if let Json.Object(members) = self {
+            out.reserve(members.len())
+            for (k, _) in members {
+                out.push(k.copy())
+            }
+        }
+        return out
+    }
+
+    /// What kind of value this is, for messages: `null`, `a bool`, `a number`, `a string`, `an
+    /// array` or `an object`.
+    pub fn kind(self) -> String {
+        return match self {
+            Json.Null => "null",
+            Json.Bool(_) => "a bool",
+            Json.Int(_) => "a number",
+            Json.UInt(_) => "a number",
+            Json.Float(_) => "a number",
+            Json.Str(_) => "a string",
+            Json.Array(_) => "an array",
+            Json.Object(_) => "an object",
+        }
+    }
+}
+
+// --- what @json's code calls ---------------------------------------------------------------------
+
+/// The error for `what`, which should be `wanted` but is `value`. `@json`'s code calls it.
+pub fn json_expected(value: Json, wanted: String, what: String) -> JsonError {
+    return JsonError { message: "`{what}` should be {wanted}, not {value.kind()}", line: 0, column: 0 }
+}
+
+/// The error for a member that isn't there. `@json`'s code calls it.
+pub fn json_missing(what: String) -> JsonError {
+    return JsonError { message: "`{what}` is missing", line: 0, column: 0 }
+}
+
+/// `value` as a `bool`, for `what`. `@json`'s code calls it.
+pub fn json_bool(value: Json, what: String) -> bool ! JsonError {
+    if let Json.Bool(b) = value {
+        return b
+    }
+    fail json_expected(value, "true or false", what)
+}
+
+/// `value` as an integer from `min` to `max`, for `what`. `@json`'s code calls it.
+pub fn json_int(value: Json, what: String, min: i64, max: i64) -> i64 ! JsonError {
+    match value {
+        Json.Int(n) => {
+            if n < min or n > max {
+                fail JsonError { message: "`{what}` should be from {min} to {max}, not {n}", line: 0, column: 0 }
+            }
+            return n
+        },
+        Json.UInt(n) => {
+            fail JsonError { message: "`{what}` should be from {min} to {max}, not {n}", line: 0, column: 0 }
+        },
+        _ => {},
+    }
+    fail json_expected(value, "an integer", what)
+}
+
+/// `value` as a `u64`, for `what`. `@json`'s code calls it.
+pub fn json_u64(value: Json, what: String) -> u64 ! JsonError {
+    match value {
+        Json.Int(n) => {
+            if n < 0 {
+                fail JsonError { message: "`{what}` should be 0 or more, not {n}", line: 0, column: 0 }
+            }
+            return u64.wrap(n)
+        },
+        Json.UInt(n) => {
+            return n
+        },
+        _ => {},
+    }
+    fail json_expected(value, "an integer", what)
+}
+
+/// `n` as a JSON number: an `Int` if it fits an `i64`, and a `UInt` if it doesn't. `@json`'s code
+/// calls it.
+pub fn json_from_u64(n: u64) -> Json {
+    if n <= 9223372036854775807 {
+        return Json.Int(i64.wrap(n))
+    }
+    return Json.UInt(n)
+}
+
+/// `value` as an `f64`, for `what`. `@json`'s code calls it.
+pub fn json_f64(value: Json, what: String) -> f64 ! JsonError {
+    return match value {
+        Json.Int(n) => f64.nearest(n),
+        Json.UInt(n) => f64.nearest(n),
+        Json.Float(f) => f,
+        _ => {
+            fail json_expected(value, "a number", what)
+        },
+    }
+}
+
+/// `value` as a `String`, for `what`. `@json`'s code calls it.
+pub fn json_string(value: Json, what: String) -> String ! JsonError {
+    if let Json.Str(s) = value {
+        return s.copy()
+    }
+    fail json_expected(value, "a string", what)
+}
+
+// --- @json ---------------------------------------------------------------------------------------
+
+/// Writes `to_json(self) -> Json` and `from_json(value: Json) -> Self ! JsonError` for a struct,
+/// and `to_json_text` and `from_json_text` beside them, from its fields' types. See
+/// docs/std/json.md.
+@attribute("json_key")
+pub fn json(decl: StructDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@json` can't write a generic struct's JSON yet"
+    }
+    var w = Writer { owner: decl.name.copy(), helpers: String(), next: 0, uses: List<String>() }
+    var to = String()
+    var from = String()
+    for f in decl.fields {
+        let key = try json_key(f)
+        let what = "{decl.name}.{key}"
+        let put = try w.to_json(f.ty, "self.{f.name}")
+        to.push_str(#"        out.insert("#{key}", #{put})"#)
+        to.push('\n')
+        let get = try w.from_json(f.ty, #"members["#{key}"]"#, what)
+        // A missing member is `none` for an optional, the field's default if it has one, and an
+        // error otherwise.
+        var missing = String()
+        if f.ty.kind == TypeKind.Optional {
+            missing.push_str("none")
+        } else if not f.default.is_empty() {
+            missing.push_str(f.default)
+        } else {
+            w.use_name("json_missing")
+            missing.push_str(#"
+                    fail json_missing("#{what}")
+                "#)
+        }
+        from.push_str(#"            #{f.name}: if members.contains("#{key}") { #{get} } else { #{missing} },"#)
+        from.push('\n')
+    }
+    w.use_name("Json")
+    w.use_name("JsonError")
+    w.use_name("json_expected")
+    w.use_name("parse_json")
+    var g = Generated.new()
+    g.add(w.imports())
+    g.add(#"
+        impl #{decl.name} {
+            /// This, as JSON, as `@json` writes it.
+            pub fn to_json(self) -> Json {
+                var out = LinkedMap<String, Json>()
+        #{to}        return Json.Object(out)
+            }
+
+            /// This, as compact JSON text.
+            pub fn to_json_text(self) -> String {
+                return "{self.to_json()}"
+            }
+
+            /// The value JSON describes, as `@json` reads it: an object with a member for each
+            /// field, whose others are passed over.
+            pub fn from_json(value: Json) -> #{decl.name} ! JsonError {
+                if let Json.Object(members) = value {
+                    return #{decl.name} {
+        #{from}            }
+                }
+                fail json_expected(value, "an object", "#{decl.name}")
+            }
+
+            /// The value JSON text describes, as `from_json` reads it.
+            pub fn from_json_text(text: String) -> #{decl.name} ! JsonError {
+                let value = try parse_json(text)
+                return try #{decl.name}.from_json(value)
+            }
+        }
+        "#)
+    if not w.helpers.is_empty() {
+        g.add(w.helpers.copy())
+    }
+    return g
+}
+
+// The key a field is written under: its name, or what `@json_key("...")` says.
+fn json_key(f: Field) -> String ! String {
+    for a in f.attributes {
+        if a.name == "json_key" {
+            if a.args.len() != 1 or not a.args[0].starts_with("\"") {
+                fail "`@json_key` takes the key, as a string: `@json_key(\"serverPort\")`"
+            }
+            return a.args[0][1..a.args[0].len() - 1]
+        }
+    }
+    return f.name.copy()
+}
+
+// What `@json` has written so far for one declaration: helper functions for lists, maps and
+// optionals, and the names it needs from `std.json`.
+struct Writer {
+    owner: String
+    helpers: String
+    next: usize
+    uses: List<String>
+}
+
+impl Writer {
+    fn use_name(mut self, name: String) {
+        for u in self.uses {
+            if u == name {
+                return
+            }
+        }
+        self.uses.push(name.copy())
+    }
+
+    // Adds a helper function, on lines of its own.
+    fn add_helper(mut self, code: own String) {
+        self.helpers.push_str(code)
+        self.helpers.push('\n')
+    }
+
+    fn imports(self) -> String {
+        return "import std.json.\{{self.uses.join(", ")}\}"
+    }
+
+    fn fresh(mut self) -> String {
+        self.next += 1
+        return "json_{self.owner.to_lower_root()}_{self.next}"
+    }
+
+    // An expression that's `value`, of type `t`, as a `Json`.
+    fn to_json(mut self, t: TypeRef, value: String) -> String ! String {
+        if t.kind == TypeKind.Optional {
+            let inner = try self.to_json(t.args[0], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Json {
+                    return match v {
+                        some(x) => #{inner},
+                        none => Json.Null,
+                    }
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if t.kind != TypeKind.Named {
+            fail "`@json` can't write a `{t.text}` field yet: it writes numbers, `bool`, `String`, `Json`, lists, maps with `String` keys, optionals, and types with `@json` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            return "Json.Bool({value})"
+        }
+        if n == "i64" {
+            return "Json.Int({value})"
+        }
+        if n == "i8" or n == "i16" or n == "i32" or n == "u8" or n == "u16" or n == "u32" {
+            return "Json.Int(i64({value}))"
+        }
+        if n == "u64" or n == "usize" {
+            // Past `i64`'s range it's a number all the same, as near as an `f64` comes.
+            self.use_name("json_from_u64")
+            return if n == "u64" { "json_from_u64({value})" } else { "json_from_u64(u64({value}))" }
+        }
+        if n == "f64" {
+            return "Json.Float({value})"
+        }
+        if n == "f32" {
+            return "Json.Float(f64({value}))"
+        }
+        if n == "String" {
+            return "Json.Str({value}.copy())"
+        }
+        if n == "Json" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.to_json(t.args[0], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Json {
+                    var out = List<Json>()
+                    out.reserve(v.len())
+                    for x in v {
+                        out.push(#{inner})
+                    }
+                    return Json.Array(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@json` writes maps with `String` keys, since JSON's keys are text, not `{t.text}`"
+            }
+            let inner = try self.to_json(t.args[1], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Json {
+                    var out = LinkedMap<String, Json>()
+                    out.reserve(v.len())
+                    for (k, x) in v {
+                        out.insert(k.copy(), #{inner})
+                    }
+                    return Json.Object(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if not t.args.is_empty() {
+            fail "`@json` can't write a `{t.text}` field yet"
+        }
+        // A type with `@json` of its own.
+        return "{value}.to_json()"
+    }
+
+    // An expression that's the `Json` `value` as a `t`, failing with a `JsonError` for `what`.
+    fn from_json(mut self, t: TypeRef, value: String, what: String) -> String ! String {
+        if t.kind == TypeKind.Optional {
+            let inner = try self.from_json(t.args[0], "v", what)
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Json) -> #{t.text} ! JsonError {
+                    if let Json.Null = v {
+                        return none
+                    }
+                    return some(#{inner})
+                }
+                "#)
+            return "try {name}({value})"
+        }
+        if t.kind != TypeKind.Named {
+            fail "`@json` can't read a `{t.text}` field yet: it reads numbers, `bool`, `String`, `Json`, lists, maps with `String` keys, optionals, and types with `@json` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            self.use_name("json_bool")
+            return #"try json_bool(#{value}, "#{what}")"#
+        }
+        let range = int_range(n)
+        if let (lo, hi) = range {
+            self.use_name("json_int")
+            if n == "i64" {
+                return #"try json_int(#{value}, "#{what}", #{lo}, #{hi})"#
+            }
+            return #"#{n}.wrap(try json_int(#{value}, "#{what}", #{lo}, #{hi}))"#
+        }
+        if n == "u64" or n == "usize" {
+            self.use_name("json_u64")
+            if n == "u64" {
+                return #"try json_u64(#{value}, "#{what}")"#
+            }
+            return #"usize.wrap(try json_u64(#{value}, "#{what}"))"#
+        }
+        if n == "f64" {
+            self.use_name("json_f64")
+            return #"try json_f64(#{value}, "#{what}")"#
+        }
+        if n == "f32" {
+            self.use_name("json_f64")
+            return #"f32.nearest(try json_f64(#{value}, "#{what}"))"#
+        }
+        if n == "String" {
+            self.use_name("json_string")
+            return #"try json_string(#{value}, "#{what}")"#
+        }
+        if n == "Json" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.from_json(t.args[0], "x", "{what}[]")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Json) -> #{t.text} ! JsonError {
+                    if let Json.Array(items) = v {
+                        var out = #{t.text}()
+                        out.reserve(items.len())
+                        for x in items {
+                            out.push(#{inner})
+                        }
+                        return out
+                    }
+                    fail json_expected(v, "an array", "#{what}")
+                }
+                "#)
+            return "try {name}({value})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@json` reads maps with `String` keys, since JSON's keys are text, not `{t.text}`"
+            }
+            let inner = try self.from_json(t.args[1], "x", "{what}[]")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Json) -> #{t.text} ! JsonError {
+                    if let Json.Object(members) = v {
+                        var out = #{t.text}()
+                        for (k, x) in members {
+                            out.insert(k.copy(), #{inner})
+                        }
+                        return out
+                    }
+                    fail json_expected(v, "an object", "#{what}")
+                }
+                "#)
+            return "try {name}({value})"
+        }
+        if not t.args.is_empty() {
+            fail "`@json` can't read a `{t.text}` field yet"
+        }
+        return "try {n}.from_json({value})"
+    }
+}
+
+// The range of an integer type up to `i64`'s, as the literals `@json`'s code checks against.
+fn int_range(n: String) -> (String, String)? {
+    return match n {
+        "i8" => some(("-128", "127")),
+        "i16" => some(("-32768", "32767")),
+        "i32" => some(("-2147483648", "2147483647")),
+        "i64" => some(("-9223372036854775807 - 1", "9223372036854775807")),
+        "u8" => some(("0", "255")),
+        "u16" => some(("0", "65535")),
+        "u32" => some(("0", "4294967295")),
+        _ => none,
+    }
+}

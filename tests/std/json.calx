@@ -1,0 +1,116 @@
+// std.json: text parsed into values, with where it's wrong when it isn't JSON, and values written
+// back compact and indented.
+import std.json.{Json, JsonError, parse_json, pretty_json}
+
+fn try_parse(text: String) {
+    match parse_json(text) {
+        ok(v) => println("ok {v}"),
+        err(e) => println("{e}"),
+    }
+}
+
+fn main() {
+    let text = String(#"{"name": "calx", "port": 25565, "ratio": 0.75, "tags": ["a", "b"], "on": true, "none": null, "nested": {"x": [], "y": {}}}"#)
+    let j = parse_json(text)!
+    println("{j}")    // out: {"name":"calx","port":25565,"ratio":0.75,"tags":["a","b"],"on":true,"none":null,"nested":{"x":[],"y":{}}}
+    print(pretty_json(j, 2))
+    println("")
+    // out: {
+    // out:   "name": "calx",
+    // out:   "port": 25565,
+    // out:   "ratio": 0.75,
+    // out:   "tags": [
+    // out:     "a",
+    // out:     "b"
+    // out:   ],
+    // out:   "on": true,
+    // out:   "none": null,
+    // out:   "nested": {
+    // out:     "x": [],
+    // out:     "y": {}
+    // out:   }
+    // out: }
+    println(pretty_json(parse_json(String("[1, [2]]"))!, 4))
+    // out: [
+    // out:     1,
+    // out:     [
+    // out:         2
+    // out:     ]
+    // out: ]
+    println(pretty_json(parse_json(String(#"{"a": [1]}"#))!, 0))
+    // out: {
+    // out: "a": [
+    // out: 1
+    // out: ]
+    // out: }
+
+    // Reading values.
+    println("{j.get("port")} {j.get("name")} {j.get("missing")} {j.len()} {j.keys().join(",")}")    // out: some(25565) some("calx") none 7 name,port,ratio,tags,on,none,nested
+    let tags = j.get("tags") ?? Json.Null
+    println("{tags.at(1)} {tags.at(2)} {tags.kind()} {j.kind()}")    // out: some("b") none an array an object
+    let port = j.get("port") ?? Json.Null
+    let ratio = j.get("ratio") ?? Json.Null
+    println("{port.as_i64()} {port.as_f64()} {ratio.as_i64()} {ratio.as_f64()} {port.as_str()} {(j.get("on") ?? Json.Null).as_bool()} {(j.get("none") ?? Json.Null).is_null()}")    // out: some(25565) some(25565.0) none some(0.75) none some(true) true
+    match j {
+        Json.Object(members) => {
+            for (k, v) in members {
+                if let Json.Str(s) = v {
+                    println("{k} is the string {s}")    // out: name is the string calx
+                }
+            }
+        },
+        _ => {},
+    }
+
+    // Strings: escapes in and out, and text that isn't ASCII as itself.
+    try_parse(String(#"["a\"b\\c\/d\b\f\n\r\t", "\u00e9\u4e16\ud83d\ude00", "é世😀"]"#))    // out: ok ["a\"b\\c/d\b\f\n\r\t","é世😀","é世😀"]
+    try_parse(String(#""\u0001\u001f""#))    // out: ok "\u0001\u001f"
+
+    // Numbers: integers that fit an i64 or a u64, and everything else as an f64.
+    try_parse(String("[0, -0, 9223372036854775807, -9223372036854775808, 9223372036854775808, 18446744073709551615, 18446744073709551616, -9223372036854775809, 1e3, 1.5E-3, -0.0, 12345678901234567890]"))    // out: ok [0,0,9223372036854775807,-9223372036854775808,9223372036854775808,18446744073709551615,1.8446744073709552E19,-9.223372036854776E18,1000.0,0.0015,-0.0,12345678901234567890]
+    let big = parse_json(String("[18446744073709551615, 7, -7, 2.5]"))!
+    for i in 0..big.len() {
+        let n = big.at(i) ?? Json.Null
+        println("{n.as_i64()} {n.as_u64()} {n.as_f64()}")
+    }
+    // out: none some(18446744073709551615) some(1.8446744073709552E19)
+    // out: some(7) some(7) some(7.0)
+    // out: some(-7) none some(-7.0)
+    // out: none none some(2.5)
+
+    // A key given twice keeps its first place and its last value.
+    try_parse(String(#"{"a": 1, "b": 2, "a": 3}"#))    // out: ok {"a":3,"b":2}
+
+    // What isn't JSON, with where.
+    try_parse(String(""))    // out: line 1, column 1: the end, where a value should be
+    try_parse(String("[1,]"))    // out: line 1, column 4: `]` where a value should be
+    try_parse(String("[1 2]"))    // out: line 1, column 4: `2` in an array, where `,` or `]` should be
+    try_parse(String(#"{"a" 1}"#))    // out: line 1, column 6: `1` after a key, where `:` should be
+    try_parse(String("\{a: 1\}"))    // out: line 1, column 2: `a` in an object, where a key in double quotes should be
+    try_parse(String(#"{"a": 1,}"#))    // out: line 1, column 9: `}` in an object, where a key in double quotes should be
+    try_parse(String("[01]"))    // out: line 1, column 2: a number that starts with `0` and goes on, which JSON doesn't allow
+    try_parse(String("[1.]"))    // out: line 1, column 2: a number with no digits after its `.`
+    try_parse(String("[-]"))    // out: line 1, column 2: a number with no digits after its `-`
+    try_parse(String("[1e+]"))    // out: line 1, column 2: a number with no digits in its exponent
+    try_parse(String(#""abc"#))    // out: line 1, column 1: a string that doesn't end
+    try_parse(String(#"["\x"]"#))    // out: line 1, column 3: `x` after `\` in a string, which isn't an escape
+    try_parse(String(#"["\u12"]"#))    // out: line 1, column 3: `\u` without four hex digits after it
+    try_parse(String(#"["\ud800"]"#))    // out: line 1, column 3: half a surrogate pair, `\ud800`, without its other half
+    try_parse(String("[\"a\tb\"]"))    // out: line 1, column 4: a control character in a string, which JSON writes as an escape, such as `\n`
+    try_parse(String("[true] false"))    // out: line 1, column 8: `f` after the value, where the text should end
+    try_parse(String("[nul]"))    // out: line 1, column 2: `n` where a value should be
+    try_parse(String("[NaN]"))    // out: line 1, column 2: `N` where a value should be
+    try_parse(String("\{\n  \"a\": [1,\n    é]\n\}"))    // out: line 3, column 5: `é` where a value should be
+
+    // Nesting deeper than 512 is refused, not followed down the stack.
+    let deep = "[".repeat(600)
+    try_parse(deep)    // out: line 1, column 513: arrays and objects nested more than 512 deep
+    var fine = "[".repeat(512)
+    fine.push_str("]".repeat(512))
+    println("{parse_json(fine)!.len()}")    // out: 1
+
+    // NaN and the infinities have no JSON, and are written as null, as JavaScript writes them.
+    println("{Json.Array([Json.Float(0.0 / 0.0), Json.Float(1.0 / 0.0), Json.Float(2.5)])}")    // out: [null,null,2.5]
+    let e = JsonError { message: String("by hand"), line: 0, column: 0 }
+    println("{e}")    // out: by hand
+}

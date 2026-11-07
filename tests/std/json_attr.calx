@@ -1,0 +1,85 @@
+// `@json` writes a struct's `to_json` and `from_json`, and the `_text` pair beside them, from its
+// fields' types: numbers in range, strings, lists, maps with string keys, optionals, `Json` as it
+// is, and types with `@json` of their own, here one from another module.
+// file: main.calx
+import std.json.{json, Json, JsonError}
+import shapes.{Pos}
+
+@json
+struct Player {
+    name: String
+    @json_key("serverPort")
+    port: u16
+    ratio: f64
+    scale: f32
+    tags: List<String>
+    on: bool
+    pos: Pos
+    home: Pos?
+    nick: String?
+    grid: List<List<i64>>
+    scores: SortedMap<String, i32>
+    order: LinkedMap<String, bool>
+    extra: Json
+    id: u64
+    count: usize
+    small: i8
+    limit: i32 = 10
+}
+
+fn show(text: String) {
+    match Player.from_json_text(text) {
+        ok(p) => println("ok {p.to_json_text()}"),
+        err(e) => println("{e}"),
+    }
+}
+
+fn main() ! JsonError {
+    let text = String(#"{"name": "steve", "serverPort": 25565, "ratio": 0.75, "scale": 1.5, "tags": ["a", "b"], "on": true, "pos": {"x": 1.5, "z": -2}, "home": null, "grid": [[1, 2], [3]], "scores": {"b": 2, "a": 1}, "order": {"z": true, "y": false}, "extra": {"any": [1, null]}, "id": 18446744073709551615, "count": 3, "small": -128, "unknown": [1, 2, 3]}"#)
+    let p = try Player.from_json_text(text)
+    let has_home = match p.home { some(_) => true, none => false }
+    println("{p.name} {p.port} {p.ratio} {p.scale} {p.tags} {p.on} {p.pos.x} {p.pos.z} {has_home} {p.nick} {p.grid} {p.scores} {p.extra} {p.id} {p.count} {p.small} {p.limit}")
+    // out: steve 25565 0.75 1.5 [a, b] true 1.5 -2.0 false none [[1, 2], [3]] {a: 1, b: 2} {"any":[1,null]} 18446744073709551615 3 -128 10
+    let back = p.to_json_text()
+    println(back)
+    // out: {"name":"steve","serverPort":25565,"ratio":0.75,"scale":1.5,"tags":["a","b"],"on":true,"pos":{"x":1.5,"z":-2.0},"home":null,"nick":null,"grid":[[1,2],[3]],"scores":{"a":1,"b":2},"order":{"z":true,"y":false},"extra":{"any":[1,null]},"id":18446744073709551615,"count":3,"small":-128,"limit":10}
+    let again = try Player.from_json_text(back.copy())
+    println("{again.to_json_text() == back}")    // out: true
+    let some_home = String(#"{"name": "a", "serverPort": 1, "ratio": 1, "scale": 0, "tags": [], "on": false, "pos": {"x": 0, "z": 0}, "home": {"x": 3, "z": 4}, "nick": "al", "grid": [], "scores": {}, "order": {}, "extra": null, "id": 0, "count": 0, "small": 127, "limit": -1}"#)
+    show(some_home)
+    // out: ok {"name":"a","serverPort":1,"ratio":1.0,"scale":0.0,"tags":[],"on":false,"pos":{"x":0.0,"z":0.0},"home":{"x":3.0,"z":4.0},"nick":"al","grid":[],"scores":{},"order":{},"extra":null,"id":0,"count":0,"small":127,"limit":-1}
+
+    // What's wrong, by the field's name in the struct and its key in the text.
+    show(String("[1]"))    // out: `Player` should be an object, not an array
+    show(String("\{\}"))    // out: `Player.name` is missing
+    show(String(#"{"name": 1}"#))    // out: `Player.name` should be a string, not a number
+    show(String(#"{"name": "x", "serverPort": 70000}"#))    // out: `Player.serverPort` should be from 0 to 65535, not 70000
+    show(String(#"{"name": "x", "serverPort": 1.0}"#))    // out: `Player.serverPort` should be an integer, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": "1"}"#))    // out: `Player.ratio` should be a number, not a string
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [1]}"#))    // out: `Player.tags[]` should be a string, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": {}}"#))    // out: `Player.tags` should be an array, not an object
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": null}"#))    // out: `Player.on` should be true or false, not null
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1}}"#))    // out: `Pos.z` is missing
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "home": 5}"#))    // out: `Pos` should be an object, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [[1], ["2"]]}"#))    // out: `Player.grid[][]` should be an integer, not a string
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {"a": 3000000000}}"#))    // out: `Player.scores[]` should be from -2147483648 to 2147483647, not 3000000000
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": -1}"#))    // out: `Player.id` should be 0 or more, not -1
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 18446744073709551616}"#))    // out: `Player.id` should be an integer, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 1, "count": 1, "small": 9223372036854775808}"#))    // out: `Player.small` should be from -128 to 127, not 9223372036854775808
+    show(String(#"{"name": "x""#))    // out: line 1, column 13: the end in an object, where `,` or `}` should be
+
+    // A type with `@json` builds and reads `Json` values as they are.
+    let pos = Pos { x: 0.5, z: 8.0 }
+    let j = pos.to_json()
+    let read = try Pos.from_json(j)
+    println("{j.get("z")} {read.x}")    // out: some(8.0) 0.5
+}
+
+// file: shapes.calx
+import std.json.{json}
+
+@json
+pub struct Pos {
+    pub x: f64
+    pub z: f64
+}

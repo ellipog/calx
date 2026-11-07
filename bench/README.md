@@ -133,3 +133,15 @@ py -I bench/text/text.py
 ```
 
 All three print the same total. The times are in [Strings](../docs/reference/strings.md#in-c).
+
+## Reading and writing JSON
+
+[`json/json.calx`](json/json.calx) reads and writes 100,000 player records as a script does with [`std.json`](../docs/std/json.md): the text parsed into a tree, the tree written back as compact text, and the text read into `@json` structs. Each time is the best of 7. [`json/rust`](json/rust) is the same with serde_json, its `Value` and `#[derive(Deserialize)]`, and [`json/json.py`](json/json.py) with Python's `json` module and dataclasses.
+
+```sh
+calx build --release -o json bench/json/json.calx
+cargo build --release --manifest-path bench/json/rust/Cargo.toml
+py -I bench/json/json.py
+```
+
+The times aren't recorded yet.

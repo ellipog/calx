@@ -1,0 +1,25 @@
+// What `@json` refuses, with why, at the use.
+import std.json.{json}
+
+@json    // error: `@json` can't write a generic struct's JSON yet
+struct Boxed<T> {
+    v: T
+}
+
+@json    // error: `@json` writes maps with `String` keys, since JSON's keys are text, not `Map<i32, String>`
+struct ById {
+    names: Map<i32, String>
+}
+
+@json    // error: `@json` can't write a `(i32, i32)` field yet: it writes numbers, `bool`, `String`, `Json`, lists, maps with `String` keys, optionals, and types with `@json` of their own
+struct Pair {
+    both: (i32, i32)
+}
+
+@json    // error: `@json_key` takes the key, as a string: `@json_key("serverPort")`
+struct Keyed {
+    @json_key(port)
+    port: u16
+}
+
+fn main() {}

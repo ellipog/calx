@@ -166,7 +166,12 @@ private:
         next();
         return true;
     }
-    Span prev_span() const { return toks_[pos_ > 0 ? pos_ - 1 : 0].span; }
+    // The last token taken, or the `>` taken off the front of a `>>` that closed generic
+    // arguments, so `List<i64>` in `List<List<i64>>` ends at its own `>`.
+    Span prev_span() const {
+        if (split_pos_ == pos_ && split_span_.end) return split_span_;
+        return toks_[pos_ > 0 ? pos_ - 1 : 0].span;
+    }
 
     [[noreturn]] void fail(Span span, std::string message) {
         error(span, std::move(message));
@@ -303,6 +308,8 @@ private:
             case Tok::ushr_eq: rest = Tok::shr_eq; break;
             default: fail(t.span, std::string("expected `>` to close the generic arguments, found ") + tok_text(t.kind));
         }
+        split_pos_ = pos_;
+        split_span_ = Span{t.span.file, t.span.begin, t.span.begin + 1};
         t.kind = rest;
         t.span.begin += 1;
         t.space_before = false;
@@ -1731,6 +1738,9 @@ private:
     std::uint32_t file_;
     std::vector<Token> toks_;
     std::size_t pos_ = 0;
+    // Where `expect_close_angle` last split a token, and the `>` it took off.
+    std::size_t split_pos_ = SIZE_MAX;
+    Span split_span_{};
     bool no_struct_ = false;
     std::uint32_t last_error_ = UINT32_MAX;
 };

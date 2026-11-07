@@ -1,0 +1,57 @@
+// JSON as a script reads and writes it: 100,000 records parsed into a tree, written back as
+// compact text, and parsed into structs with `@json`. bench/json/rust and json.py do the same.
+import std.json.{json, Json, JsonError, parse_json}
+import std.time.{Instant}
+
+@json
+struct Pos {
+    x: f64
+    z: f64
+}
+
+@json
+struct Player {
+    id: i64
+    name: String
+    pos: Pos
+    tags: List<String>
+    active: bool
+    level: i32
+}
+
+fn main() ! JsonError {
+    var text = String()
+    text.push('[')
+    for i in 0..100000 {
+        if i > 0 {
+            text.push(',')
+        }
+        let active = if i % 2 == 0 { "true" } else { "false" }
+        text.push_str(#"{"id":#{i},"name":"player #{i}","pos":{"x":#{i}.5,"z":-#{i}.25},"tags":["builder","mod\u00e9rateur"],"active":#{active},"level":#{i % 100}}"#)
+    }
+    text.push(']')
+    var parse: u64 = u64.MAX
+    var write: u64 = u64.MAX
+    var typed: u64 = u64.MAX
+    var total: usize = 0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        let tree = try parse_json(text)
+        let t1 = unsafe { Instant.now() }
+        let out = "{tree}"
+        let t2 = unsafe { Instant.now() }
+        var players = List<Player>()
+        if let Json.Array(items) = try parse_json(text) {
+            players.reserve(items.len())
+            for item in items {
+                players.push(try Player.from_json(item))
+            }
+        }
+        let t3 = unsafe { Instant.now() }
+        total += tree.len() + out.len() + players.len() + usize.wrap(players[99999].level)
+        parse = parse.min(t1.nanos_since(t0) / 1000)
+        write = write.min(t2.nanos_since(t1) / 1000)
+        typed = typed.min(t3.nanos_since(t2) / 1000)
+    }
+    println("calx: {text.len()} bytes, parse {parse} us, write {write} us, typed {typed} us, total {total}")
+}
