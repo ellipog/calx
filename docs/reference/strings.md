@@ -294,7 +294,7 @@ cx_String command = cx_string_from(({ const cx_String* cx_t19 = &line; cx_usize 
     cx_usize cx_t18 = space; cx_str cx_t16 = cx_sv(*cx_t19); cx_str_slice(cx_t16, cx_t17, cx_t18, 0, "main.calx:7:19"); }));
 ```
 
-- `find` takes each place the first byte of what it looks for is, with `memchr`, which goes many bytes a step, and compares the rest only there. `contains` is `find`.
+- `find` picks the two bytes of what it looks for that are likely rarest in text, by a table of how common each byte is, and tests 32 places at a time with AVX2, or 16 with SSE2, for both at once, comparing the rest only where both are. So `example`, whose first byte is common, is found about as fast as text whose every byte is rare. A one-byte needle is found by `memchr`, and without SIMD, `memchr` finds the rarest byte. `contains` is `find`.
 - `trim` and its kin are parts, as `s[a..b]` is: `cx_text_trim` gives a `cx_str` of the same bytes, copied by `cx_string_from` only where it's kept. `trim_prefix` and `trim_suffix` are inline C.
 - A `for` loop over `split`, `lines` or `split_whitespace` is a `while` over inline C that gives the next part, a `cx_str`, and where the one after starts. A loop variable is a `cx_String` with the part's pointer and length and a capacity of `CX_VIEW_CAP`, the top bit, which marks a view: freeing it frees nothing, and a copy of it copies the bytes, where a literal's capacity of 0 would share them.
 - A one-byte separator and the line breaks are found sixteen bytes a step with SSE2, inline, so a short part costs no call, as `memchr`'s would. A longer separator goes through `find`.

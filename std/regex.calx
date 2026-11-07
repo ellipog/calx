@@ -1,0 +1,3074 @@
+/// Regular expressions, as scripts use Python's `re` and Rust's `regex`: matches found, captured
+/// and replaced, and text split by them. Every search takes time in proportion to the text's
+/// length times the pattern's, whatever either is, so no pattern can hang a program on hostile
+/// text, which is the promise RE2, Go and Rust make. That's why there are no backreferences or
+/// lookaround, which can't keep it. See docs/std/regex.md.
+module std.regex
+
+import std.text.ucd.{WORD, WORD_LEN, DIGIT, SPACE, FOLD_FROM, FOLD_FROM_LEN, FOLD_NEXT}
+
+// In the runtime: where bytes are found fast, for the searches' skips. More than `len` for none.
+extern "C" {
+    fn cx_bytes_rare(needle: *const u8, n: usize) -> usize
+    fn cx_bytes_find_rare(hay: *const u8, len: usize, needle: *const u8, n: usize, k: usize) -> usize
+    fn cx_rx_skip(hay: *const u8, len: usize, from: usize, set: *const u8, count: u32, bytes: u32) -> usize
+}
+
+/// Why a pattern isn't one `Regex.new` takes.
+pub struct RegexError {
+    pub message: String
+    /// The rune in the pattern where it's wrong, from 1.
+    pub column: usize
+}
+
+impl Display for RegexError {
+    fn show(self) {
+        print("column {self.column}: {self.message}")
+    }
+}
+
+/// A match: where it is in the text, in bytes, and its text.
+pub struct Match {
+    pub start: usize
+    pub end: usize
+    pub text: String
+}
+
+/// A match and its groups. `groups[0]` is the whole match, and `groups[i]` group `i`, `none` if
+/// it took no part in the match.
+pub struct Captures {
+    pub groups: List<Match?>
+    names: List<String>
+}
+
+impl Captures {
+    /// The text of group `i`, if it took part in the match. 0 is the whole match.
+    pub fn get(self, i: usize) -> String? {
+        if i < self.groups.len() {
+            if let m = self.groups[i] {
+                return some(m.text.copy())
+            }
+        }
+        return none
+    }
+
+    /// The text of the group named `name`, if there is one and it took part in the match.
+    pub fn name(self, name: String) -> String? {
+        for i in 0..self.names.len() {
+            if self.names[i] == name {
+                return self.get(i + 1)
+            }
+        }
+        return none
+    }
+
+    /// Where group `i` is in the text, as a byte range, if it took part in the match.
+    pub fn span(self, i: usize) -> (usize, usize)? {
+        if i < self.groups.len() {
+            if let m = self.groups[i] {
+                return some((m.start, m.end))
+            }
+        }
+        return none
+    }
+
+    /// How many groups there are, counting the whole match.
+    pub fn len(self) -> usize {
+        return self.groups.len()
+    }
+}
+
+// --- the pattern as a tree ----------------------------------------------------------------------
+
+const NONE: u32 = 0xFFFFFFFF
+const NO_MAX: u32 = 0xFFFFFFFF
+const MAX_RUNE: u32 = 0x10FFFF
+const MAX_REPEAT: u32 = 100000
+const MAX_DEPTH: u32 = 250
+// How many instructions a program may have, so a pattern like `(a{1000}){1000}` is refused rather
+// than taking all the memory there is.
+const MAX_PROGRAM: usize = 2000000
+
+// Flags, from `(?imsxUa)`.
+const F_I: u32 = 1
+const F_M: u32 = 2
+const F_S: u32 = 4
+const F_X: u32 = 8
+const F_U: u32 = 16
+const F_A: u32 = 32
+
+// What an assertion looks at.
+const LOOK_START_TEXT: u32 = 1
+const LOOK_END_TEXT: u32 = 2
+const LOOK_START_LINE: u32 = 3
+const LOOK_END_LINE: u32 = 4
+const LOOK_WORD: u32 = 5
+const LOOK_NOT_WORD: u32 = 6
+const LOOK_WORD_ASCII: u32 = 7
+const LOOK_NOT_WORD_ASCII: u32 = 8
+
+enum Node {
+    Empty
+    /// Runes matched as they are.
+    Lit(List<u32>)
+    /// Runes in ranges: each first rune, then the last, in order, apart.
+    Class(List<u32>)
+    Look(u32)
+    /// A capturing group and its number, from 1.
+    Group(Box<Node>, u32)
+    Concat(List<Node>)
+    Alt(List<Node>)
+    /// What's repeated, at least, at most (`NO_MAX` for no limit), and whether greedily.
+    Repeat(Box<Node>, u32, u32, bool)
+}
+
+// The rune that starts at byte `i` of `s`, and how many bytes it takes. `s` is UTF-8, as every
+// `String` is.
+fn rune_at(s: String, i: usize) -> (u32, usize) {
+    let b0 = u32(s.byte_at(i))
+    if b0 < 0x80 {
+        return (b0, 1)
+    }
+    if b0 < 0xE0 {
+        return (((b0 & 0x1F) << 6) | (u32(s.byte_at(i + 1)) & 0x3F), 2)
+    }
+    if b0 < 0xF0 {
+        return (((b0 & 0x0F) << 12) | ((u32(s.byte_at(i + 1)) & 0x3F) << 6) | (u32(s.byte_at(i + 2)) & 0x3F), 3)
+    }
+    return (((b0 & 0x07) << 18) | ((u32(s.byte_at(i + 1)) & 0x3F) << 12) | ((u32(s.byte_at(i + 2)) & 0x3F) << 6) | (u32(s.byte_at(i + 3)) & 0x3F), 4)
+}
+
+// The rune that ends at byte `i` of `s`.
+fn rune_before(s: String, i: usize) -> u32 {
+    var j = i - 1
+    while j > 0 and s.byte_at(j) >= 0x80 and s.byte_at(j) < 0xC0 {
+        j -= 1
+    }
+    let (r, _) = rune_at(s, j)
+    return r
+}
+
+fn is_word_ascii(r: u32) -> bool {
+    return (r >= 48 and r <= 57) or (r >= 65 and r <= 90) or (r >= 97 and r <= 122) or r == 95
+}
+
+fn is_word_rune(r: u32) -> bool {
+    if r < 0x80 {
+        return is_word_ascii(r)
+    }
+    var lo: usize = 0
+    var hi = WORD_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r < WORD[mid * 2] {
+            hi = mid
+        } else if r > WORD[mid * 2 + 1] {
+            lo = mid + 1
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// The next rune in `r`'s case-folding orbit, or `r` if it folds with nothing.
+fn fold_next(r: u32) -> u32 {
+    var lo: usize = 0
+    var hi = FOLD_FROM_LEN
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if FOLD_FROM[mid] < r {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo < FOLD_FROM_LEN and FOLD_FROM[lo] == r {
+        return FOLD_NEXT[lo]
+    }
+    return r
+}
+
+// --- rune ranges --------------------------------------------------------------------------------
+
+// `ranges` sorted, with the ones that overlap or touch merged, and without the surrogates, which
+// no text holds.
+fn canon(ranges: List<u32>) -> List<u32> {
+    var packed = List<u64>()
+    packed.reserve(ranges.len() / 2)
+    var i: usize = 0
+    while i + 1 < ranges.len() {
+        packed.push((u64(ranges[i]) << 32) | u64(ranges[i + 1]))
+        i += 2
+    }
+    packed.sort()
+    var out = List<u32>()
+    for p in packed {
+        let lo = u32.wrap(p >> 32)
+        let hi = u32.wrap(p & 0xFFFFFFFF)
+        let n = out.len()
+        if n > 0 and lo <= out[n - 1] + 1 {
+            if hi > out[n - 1] {
+                out[n - 1] = hi
+            }
+        } else {
+            out.push(lo)
+            out.push(hi)
+        }
+    }
+    return cut_surrogates(out)
+}
+
+fn cut_surrogates(ranges: List<u32>) -> List<u32> {
+    var out = List<u32>()
+    var i: usize = 0
+    while i < ranges.len() {
+        let lo = ranges[i]
+        let hi = ranges[i + 1]
+        if hi < 0xD800 or lo > 0xDFFF {
+            out.push(lo)
+            out.push(hi)
+        } else {
+            if lo < 0xD800 {
+                out.push(lo)
+                out.push(0xD7FF)
+            }
+            if hi > 0xDFFF {
+                out.push(0xE000)
+                out.push(hi)
+            }
+        }
+        i += 2
+    }
+    return out
+}
+
+// Every rune `ranges` doesn't have.
+fn negated(ranges: List<u32>) -> List<u32> {
+    var out = List<u32>()
+    var next: u32 = 0
+    var i: usize = 0
+    while i < ranges.len() {
+        if ranges[i] > next {
+            out.push(next)
+            out.push(ranges[i] - 1)
+        }
+        next = ranges[i + 1] + 1
+        i += 2
+    }
+    if next <= MAX_RUNE {
+        out.push(next)
+        out.push(MAX_RUNE)
+    }
+    return cut_surrogates(out)
+}
+
+// `ranges` with every rune that case folding puts with one of theirs.
+fn folded(ranges: List<u32>) -> List<u32> {
+    var out = ranges.copy()
+    var i: usize = 0
+    while i < ranges.len() {
+        let lo = ranges[i]
+        let hi = ranges[i + 1]
+        // The folding runes in the range, found by a binary search for the first.
+        var a: usize = 0
+        var b = FOLD_FROM_LEN
+        while a < b {
+            let mid = (a + b) / 2
+            if FOLD_FROM[mid] < lo {
+                a = mid + 1
+            } else {
+                b = mid
+            }
+        }
+        while a < FOLD_FROM_LEN and FOLD_FROM[a] <= hi {
+            var r = FOLD_NEXT[a]
+            while r != FOLD_FROM[a] {
+                out.push(r)
+                out.push(r)
+                r = fold_next(r)
+            }
+            a += 1
+        }
+        i += 2
+    }
+    return canon(out)
+}
+
+// `\d`, `\w` or `\s`, by its letter, Unicode's or ASCII's.
+fn perl_class(letter: u32, ascii: bool) -> List<u32> {
+    var out = List<u32>()
+    if letter == 100 {
+        if ascii {
+            return [48, 57]
+        }
+        for v in DIGIT {
+            out.push(v)
+        }
+    } else if letter == 119 {
+        if ascii {
+            return [48, 57, 65, 90, 95, 95, 97, 122]
+        }
+        for v in WORD {
+            out.push(v)
+        }
+    } else {
+        if ascii {
+            return [9, 13, 32, 32]
+        }
+        for v in SPACE {
+            out.push(v)
+        }
+    }
+    return out
+}
+
+// A POSIX class's ASCII ranges, by its name, as `[[:alpha:]]` names it.
+fn posix_class(name: String) -> List<u32>? {
+    return match name {
+        "alnum" => some([48, 57, 65, 90, 97, 122]),
+        "alpha" => some([65, 90, 97, 122]),
+        "ascii" => some([0, 127]),
+        "blank" => some([9, 9, 32, 32]),
+        "cntrl" => some([0, 31, 127, 127]),
+        "digit" => some([48, 57]),
+        "graph" => some([33, 126]),
+        "lower" => some([97, 122]),
+        "print" => some([32, 126]),
+        "punct" => some([33, 47, 58, 64, 91, 96, 123, 126]),
+        "space" => some([9, 13, 32, 32]),
+        "upper" => some([65, 90]),
+        "word" => some([48, 57, 65, 90, 95, 95, 97, 122]),
+        "xdigit" => some([48, 57, 65, 70, 97, 102]),
+        _ => none,
+    }
+}
+
+// --- parsing ------------------------------------------------------------------------------------
+
+struct Parser {
+    pat: String
+    at: usize
+    groups: u32
+    names: List<String>
+}
+
+impl Parser {
+    fn error(self, at: usize, message: own String) -> RegexError {
+        var column: usize = 1
+        var i: usize = 0
+        while i < at and i < self.pat.len() {
+            let b = self.pat.byte_at(i)
+            if b < 0x80 or b >= 0xC0 {
+                column += 1
+            }
+            i += 1
+        }
+        return RegexError { message: message, column: column }
+    }
+
+    fn done(self) -> bool {
+        return self.at >= self.pat.len()
+    }
+
+    // The byte at `at`, or `NONE` at the end. The syntax is all ASCII.
+    fn peek(self) -> u32 {
+        if self.at >= self.pat.len() {
+            return NONE
+        }
+        return u32(self.pat.byte_at(self.at))
+    }
+
+    fn peek_at(self, k: usize) -> u32 {
+        if self.at + k >= self.pat.len() {
+            return NONE
+        }
+        return u32(self.pat.byte_at(self.at + k))
+    }
+
+    // Passes over white space and `#` comments in `(?x)` mode.
+    fn skip_space(mut self, flags: u32) {
+        if flags & F_X == 0 {
+            return
+        }
+        while self.at < self.pat.len() {
+            let b = self.pat.byte_at(self.at)
+            if b == 32 or (b >= 9 and b <= 13) {
+                self.at += 1
+            } else if b == 35 {
+                while self.at < self.pat.len() and self.pat.byte_at(self.at) != 10 {
+                    self.at += 1
+                }
+            } else {
+                break
+            }
+        }
+    }
+
+    fn parse_alt(mut self, flags: mut u32, depth: u32) -> Node ! RegexError {
+        if depth > MAX_DEPTH {
+            fail self.error(self.at, "groups nested more than {MAX_DEPTH} deep")
+        }
+        var alts = List<Node>()
+        loop {
+            alts.push(try self.parse_concat(mut flags, depth))
+            if self.peek() == 124 {
+                self.at += 1
+                continue
+            }
+            break
+        }
+        if alts.len() == 1 {
+            return alts.pop() ?? Node.Empty
+        }
+        return Node.Alt(alts)
+    }
+
+    fn parse_concat(mut self, flags: mut u32, depth: u32) -> Node ! RegexError {
+        var items = List<Node>()
+        // Whether the last item can take a quantifier: not after `(?i)`, and not after one.
+        var can_repeat = false
+        loop {
+            self.skip_space(flags)
+            let b = self.peek()
+            if b == NONE or b == 124 or b == 41 {
+                break
+            }
+            let start = self.at
+            if b == 42 or b == 43 or b == 63 or (b == 123 and self.counted_ahead()) {
+                if not can_repeat {
+                    if items.is_empty() {
+                        fail self.error(start, "`{self.pat[start..start + 1]}` with nothing before it to repeat")
+                    }
+                    fail self.error(start, "`{self.pat[start..start + 1]}` after something that can't be repeated, such as another quantifier; put it in a group to repeat it again")
+                }
+                let last = items.pop() ?? Node.Empty
+                items.push(try self.parse_repeat(last, flags, start))
+                can_repeat = false
+                continue
+            }
+            let atom = try self.parse_atom(mut flags, depth)
+            if let a = atom {
+                items.push(a)
+                can_repeat = true
+            } else {
+                can_repeat = false
+            }
+        }
+        return concat_of(items)
+    }
+
+    // Whether `{` at `at` starts a counted repetition: `{n}`, `{n,}`, `{n,m}` or `{,m}`. Anything
+    // else is a `{` to match, as in Python.
+    fn counted_ahead(self) -> bool {
+        var i = self.at + 1
+        var digits = 0
+        var comma = false
+        while i < self.pat.len() {
+            let b = self.pat.byte_at(i)
+            if b >= 48 and b <= 57 {
+                digits += 1
+            } else if b == 44 and not comma {
+                comma = true
+            } else if b == 125 {
+                return digits > 0
+            } else {
+                return false
+            }
+            i += 1
+        }
+        return false
+    }
+
+    fn number(mut self) -> u32 ! RegexError {
+        let start = self.at
+        var n: u64 = 0
+        while self.at < self.pat.len() and self.pat.byte_at(self.at) >= 48 and self.pat.byte_at(self.at) <= 57 {
+            n = n * 10 + u64(self.pat.byte_at(self.at) - 48)
+            if n > u64(MAX_REPEAT) {
+                fail self.error(start, "a count over {MAX_REPEAT}")
+            }
+            self.at += 1
+        }
+        return u32.wrap(n)
+    }
+
+    fn parse_repeat(mut self, node: own Node, flags: u32, start: usize) -> Node ! RegexError {
+        let b = self.peek()
+        self.at += 1
+        var min: u32 = 0
+        var max: u32 = NO_MAX
+        if b == 43 {
+            min = 1
+        } else if b == 63 {
+            max = 1
+        } else if b == 123 {
+            if self.peek() != 44 {
+                min = try self.number()
+            }
+            if self.peek() == 44 {
+                self.at += 1
+                if self.peek() != 125 {
+                    max = try self.number()
+                }
+            } else {
+                max = min
+            }
+            self.at += 1
+            if min > max {
+                fail self.error(start, "`{self.pat[start..self.at]}` repeats at least {min} times and at most {max}")
+            }
+        }
+        var greedy = true
+        if self.peek() == 63 {
+            self.at += 1
+            greedy = false
+        } else if self.peek() == 43 {
+            fail self.error(self.at, "possessive quantifiers, such as `*+`, aren't supported: a quantifier matches greedily, or lazily with `?`")
+        }
+        if flags & F_U != 0 {
+            greedy = not greedy
+        }
+        if min == 1 and max == 1 {
+            return node
+        }
+        if max == 0 {
+            return Node.Empty
+        }
+        return Node.Repeat(Box(node), min, max, greedy)
+    }
+
+    // An item: a group, a class, an escape, `.`, `^`, `$` or a rune. `none` for `(?i)`, which only
+    // changes `flags`.
+    fn parse_atom(mut self, flags: mut u32, depth: u32) -> Node? ! RegexError {
+        let b = self.peek()
+        if b == 40 {
+            return try self.parse_group(mut flags, depth)
+        }
+        if b == 91 {
+            let ranges = try self.parse_class(flags)
+            return some(Node.Class(ranges))
+        }
+        if b == 46 {
+            self.at += 1
+            return some(Node.Class(if flags & F_S != 0 { [0, MAX_RUNE] } else { [0, 9, 11, MAX_RUNE] }))
+        }
+        if b == 94 {
+            self.at += 1
+            return some(Node.Look(if flags & F_M != 0 { LOOK_START_LINE } else { LOOK_START_TEXT }))
+        }
+        if b == 36 {
+            self.at += 1
+            return some(Node.Look(if flags & F_M != 0 { LOOK_END_LINE } else { LOOK_END_TEXT }))
+        }
+        if b == 92 {
+            return some(try self.parse_escape(flags))
+        }
+        let (r, n) = rune_at(self.pat, self.at)
+        self.at += n
+        return some(lit_node(r, flags))
+    }
+
+    fn parse_group(mut self, flags: mut u32, depth: u32) -> Node? ! RegexError {
+        let open = self.at
+        self.at += 1
+        var inner = flags
+        var group: u32 = 0
+        if self.peek() == 63 {
+            self.at += 1
+            let c = self.peek()
+            let d = self.peek_at(1)
+            if (c == 80 and d == 60) or (c == 60 and d != 61 and d != 33) {
+                self.at += if c == 80 { 2 } else { 1 }
+                let name = try self.group_name(open)
+                self.groups += 1
+                group = self.groups
+                self.names.push(name)
+            } else if c == 61 or c == 33 or c == 60 {
+                fail self.error(open, "lookaround, such as `(?=...)` and `(?<!...)`, isn't supported: std.regex finds every match in linear time, which lookaround can't keep")
+            } else if c == 80 and d == 61 {
+                fail self.error(open, "backreferences, such as `(?P=name)`, aren't supported: std.regex finds every match in linear time, which backreferences can't keep")
+            } else if c == 62 {
+                fail self.error(open, "atomic groups, `(?>...)`, aren't supported")
+            } else {
+                // Flags, for the rest of this group, or for a group of their own with `:`.
+                var on = true
+                var any = false
+                var set = flags
+                loop {
+                    let f = self.peek()
+                    if f == NONE {
+                        fail self.error(open, "`(` with no `)` to close it")
+                    }
+                    if f == 41 or f == 58 {
+                        break
+                    }
+                    let bit: u32 = match f {
+                        105 => F_I,
+                        109 => F_M,
+                        115 => F_S,
+                        120 => F_X,
+                        85 => F_U,
+                        97 => F_A,
+                        45 => 0,
+                        _ => NONE,
+                    }
+                    if bit == NONE {
+                        let (_, n) = rune_at(self.pat, self.at)
+                        fail self.error(self.at, "`{self.pat[self.at..self.at + n]}` isn't a flag; the flags are `i`, `m`, `s`, `x`, `U` and `a`")
+                    }
+                    if bit == 0 {
+                        if not on {
+                            fail self.error(self.at, "a second `-` in the flags")
+                        }
+                        on = false
+                    } else if on {
+                        set = set | bit
+                        any = true
+                    } else {
+                        set = set & (0xFFFFFFFF ^ bit)
+                        any = true
+                    }
+                    self.at += 1
+                }
+                if not any and self.peek() == 41 {
+                    fail self.error(open, "`(?)` sets no flags")
+                }
+                if self.peek() == 41 {
+                    self.at += 1
+                    flags = set
+                    return none
+                }
+                self.at += 1
+                inner = set
+            }
+        } else {
+            self.groups += 1
+            group = self.groups
+            self.names.push(String())
+        }
+        let node = try self.parse_alt(mut inner, depth + 1)
+        if self.peek() != 41 {
+            fail self.error(open, "`(` with no `)` to close it")
+        }
+        self.at += 1
+        if group > 0 {
+            return some(Node.Group(Box(node), group))
+        }
+        return some(node)
+    }
+
+    fn group_name(mut self, open: usize) -> String ! RegexError {
+        let start = self.at
+        while self.at < self.pat.len() {
+            let b = u32(self.pat.byte_at(self.at))
+            if b == 62 {
+                break
+            }
+            if not is_word_ascii(b) or (self.at == start and b >= 48 and b <= 57) {
+                fail self.error(self.at, "a group's name is letters, digits and `_`, and doesn't start with a digit")
+            }
+            self.at += 1
+        }
+        if self.at >= self.pat.len() {
+            fail self.error(open, "a group's name with no `>` to end it")
+        }
+        if self.at == start {
+            fail self.error(open, "a group with an empty name")
+        }
+        let name = self.pat[start..self.at]
+        for n in self.names {
+            if n == name {
+                fail self.error(start, "a second group named `{name}`")
+            }
+        }
+        self.at += 1
+        return name
+    }
+
+    // An escape outside a class: a class such as `\d`, an assertion such as `\b`, or a rune.
+    fn parse_escape(mut self, flags: u32) -> Node ! RegexError {
+        let start = self.at
+        let c = self.peek_at(1)
+        let ascii = flags & F_A != 0
+        if c == 100 or c == 119 or c == 115 {
+            self.at += 2
+            return Node.Class(perl_class(c, ascii))
+        }
+        if c == 68 or c == 87 or c == 83 {
+            self.at += 2
+            return Node.Class(negated(perl_class(c + 32, ascii)))
+        }
+        if c == 98 {
+            self.at += 2
+            return Node.Look(if ascii { LOOK_WORD_ASCII } else { LOOK_WORD })
+        }
+        if c == 66 {
+            self.at += 2
+            return Node.Look(if ascii { LOOK_NOT_WORD_ASCII } else { LOOK_NOT_WORD })
+        }
+        if c == 65 {
+            self.at += 2
+            return Node.Look(LOOK_START_TEXT)
+        }
+        if c == 122 or c == 90 {
+            self.at += 2
+            return Node.Look(LOOK_END_TEXT)
+        }
+        if c == 112 or c == 80 {
+            fail self.error(start, "Unicode properties, such as `\\p\{L\}`, aren't supported yet")
+        }
+        if c >= 49 and c <= 57 {
+            fail self.error(start, "backreferences, such as `\\1`, aren't supported: std.regex finds every match in linear time, which backreferences can't keep")
+        }
+        let r = try self.escape_rune()
+        return lit_node(r, flags)
+    }
+
+    // The rune an escape stands for, `at` on its `\`.
+    fn escape_rune(mut self) -> u32 ! RegexError {
+        let start = self.at
+        self.at += 1
+        if self.at >= self.pat.len() {
+            fail self.error(start, "`\\` at the end of the pattern, with nothing to escape")
+        }
+        let c = u32(self.pat.byte_at(self.at))
+        self.at += 1
+        let simple: u32 = match c {
+            110 => 10,
+            116 => 9,
+            114 => 13,
+            102 => 12,
+            118 => 11,
+            97 => 7,
+            48 => 0,
+            _ => NONE,
+        }
+        if simple != NONE {
+            return simple
+        }
+        if c == 120 or c == 117 or c == 85 {
+            // `\x` with two hex digits, `\u` with four, `\U` with eight, or any of them with the
+            // digits in braces.
+            let want: usize = if c == 120 { 2 } else if c == 117 { 4 } else { 8 }
+            var braces = false
+            if self.peek() == 123 {
+                braces = true
+                self.at += 1
+            }
+            var v: u64 = 0
+            var count: usize = 0
+            while self.at < self.pat.len() {
+                let h = u32(self.pat.byte_at(self.at))
+                let d = if h >= 48 and h <= 57 { h - 48 } else if h >= 97 and h <= 102 { h - 87 } else if h >= 65 and h <= 70 { h - 55 } else { NONE }
+                if d == NONE or (not braces and count == want) {
+                    break
+                }
+                v = v * 16 + u64(d)
+                count += 1
+                self.at += 1
+                if v > u64(MAX_RUNE) {
+                    fail self.error(start, "`{self.pat[start..self.at]}` is past U+10FFFF, the last rune")
+                }
+            }
+            if braces {
+                if self.peek() != 125 or count == 0 {
+                    fail self.error(start, "`{self.pat[start..start + 2]}\{` needs hex digits and a `\}` after them")
+                }
+                self.at += 1
+            } else if count != want {
+                fail self.error(start, "`{self.pat[start..start + 2]}` needs {want} hex digits after it, or some in braces")
+            }
+            let r = u32.wrap(v)
+            if r >= 0xD800 and r <= 0xDFFF {
+                fail self.error(start, "`{self.pat[start..self.at]}` is a surrogate, which isn't a rune")
+            }
+            return r
+        }
+        if c < 0x80 and not is_word_ascii(c) {
+            return c
+        }
+        let (_, n) = rune_at(self.pat, start + 1)
+        fail self.error(start, "`\\{self.pat[start + 1..start + 1 + n]}` isn't an escape")
+    }
+
+    // A class, `at` on its `[`: its ranges, folded and negated as its flags say.
+    fn parse_class(mut self, flags: u32) -> List<u32> ! RegexError {
+        let open = self.at
+        self.at += 1
+        var negate = false
+        if self.peek() == 94 {
+            negate = true
+            self.at += 1
+        }
+        var ranges = List<u32>()
+        var first = true
+        let ascii = flags & F_A != 0
+        loop {
+            self.skip_space(flags)
+            let b = self.peek()
+            if b == NONE {
+                fail self.error(open, "`[` with no `]` to close it")
+            }
+            if b == 93 and not first {
+                self.at += 1
+                break
+            }
+            first = false
+            if b == 91 {
+                if self.peek_at(1) == 58 {
+                    // `[:alpha:]` and `[:^alpha:]`.
+                    let start = self.at
+                    var i = self.at + 2
+                    var neg = false
+                    if i < self.pat.len() and self.pat.byte_at(i) == 94 {
+                        neg = true
+                        i += 1
+                    }
+                    let name_start = i
+                    while i < self.pat.len() and self.pat.byte_at(i) >= 97 and self.pat.byte_at(i) <= 122 {
+                        i += 1
+                    }
+                    if i + 1 < self.pat.len() and self.pat.byte_at(i) == 58 and self.pat.byte_at(i + 1) == 93 {
+                        let name = self.pat[name_start..i]
+                        if let rs = posix_class(name) {
+                            self.at = i + 2
+                            let got = if neg { negated(rs) } else { rs }
+                            for v in got {
+                                ranges.push(v)
+                            }
+                            continue
+                        }
+                        fail self.error(start, "`[:{name}:]` isn't a class; the ones in brackets are alnum, alpha, ascii, blank, cntrl, digit, graph, lower, print, punct, space, upper, word and xdigit")
+                    }
+                }
+                let inner = try self.parse_class(flags)
+                for v in inner {
+                    ranges.push(v)
+                }
+                continue
+            }
+            let item = self.at
+            if b == 92 {
+                let c = self.peek_at(1)
+                if c == 100 or c == 119 or c == 115 {
+                    self.at += 2
+                    for v in perl_class(c, ascii) {
+                        ranges.push(v)
+                    }
+                    continue
+                }
+                if c == 68 or c == 87 or c == 83 {
+                    self.at += 2
+                    for v in negated(perl_class(c + 32, ascii)) {
+                        ranges.push(v)
+                    }
+                    continue
+                }
+                if c == 98 or c == 66 or c == 65 or c == 122 or c == 90 {
+                    fail self.error(item, "`{self.pat[item..item + 2]}` can't be in a class, since it matches a place, not a rune")
+                }
+                if c == 112 or c == 80 {
+                    fail self.error(item, "Unicode properties, such as `\\p\{L\}`, aren't supported yet")
+                }
+            }
+            let lo = try self.class_rune()
+            var hi = lo
+            if self.peek() == 45 and self.peek_at(1) != 93 and self.peek_at(1) != NONE {
+                self.at += 1
+                self.skip_space(flags)
+                let c = self.peek()
+                let d = self.peek_at(1)
+                if c == 91 or (c == 92 and (d == 100 or d == 119 or d == 115 or d == 68 or d == 87 or d == 83)) {
+                    fail self.error(item, "a range needs a rune at each end, not a class")
+                }
+                hi = try self.class_rune()
+                if hi < lo {
+                    fail self.error(item, "`{self.pat[item..self.at]}` is a range whose end comes before its start")
+                }
+            }
+            ranges.push(lo)
+            ranges.push(hi)
+        }
+        var out = canon(ranges)
+        if flags & F_I != 0 {
+            out = folded(out)
+        }
+        if negate {
+            out = negated(out)
+        }
+        return out
+    }
+
+    fn class_rune(mut self) -> u32 ! RegexError {
+        if self.peek() == 92 {
+            return try self.escape_rune()
+        }
+        let (r, n) = rune_at(self.pat, self.at)
+        self.at += n
+        return r
+    }
+}
+
+// A rune to match, or its case-folding orbit as a class under `(?i)`.
+fn lit_node(r: u32, flags: u32) -> Node {
+    if flags & F_I != 0 {
+        let next = fold_next(r)
+        if next != r {
+            var rs: List<u32> = [r, r]
+            var x = next
+            while x != r {
+                rs.push(x)
+                rs.push(x)
+                x = fold_next(x)
+            }
+            return Node.Class(canon(rs))
+        }
+    }
+    return Node.Lit([r])
+}
+
+// `items` in a row, with runs of runes joined into one `Lit`.
+fn concat_of(items: own List<Node>) -> Node {
+    var out = List<Node>()
+    var run = List<u32>()
+    for item in items {
+        match item {
+            Node.Empty => {},
+            Node.Lit(rs) => {
+                for r in rs {
+                    run.push(r)
+                }
+            },
+            other => {
+                if not run.is_empty() {
+                    out.push(Node.Lit(run))
+                    run = List<u32>()
+                }
+                out.push(other.copy())
+            },
+        }
+    }
+    if not run.is_empty() {
+        out.push(Node.Lit(run))
+    }
+    if out.is_empty() {
+        return Node.Empty
+    }
+    if out.len() == 1 {
+        return out.pop() ?? Node.Empty
+    }
+    return Node.Concat(out)
+}
+
+// Whether `node` can match without taking a rune.
+fn matches_empty(node: Node) -> bool {
+    return match node {
+        Node.Empty => true,
+        Node.Lit(rs) => rs.is_empty(),
+        Node.Class(_) => false,
+        Node.Look(_) => true,
+        Node.Group(inner, _) => matches_empty(inner.value),
+        Node.Concat(items) => {
+            for item in items {
+                if not matches_empty(item) {
+                    return false
+                }
+            }
+            true
+        },
+        Node.Alt(alts) => {
+            for a in alts {
+                if matches_empty(a) {
+                    return true
+                }
+            }
+            false
+        },
+        Node.Repeat(inner, min, _, _) => min == 0 or matches_empty(inner.value),
+    }
+}
+
+fn parse(pattern: String) -> (Node, u32, List<String>) ! RegexError {
+    var p = Parser { pat: pattern.copy(), at: 0, groups: 0, names: List<String>() }
+    var flags: u32 = 0
+    let node = try p.parse_alt(mut flags, 0)
+    if not p.done() {
+        fail p.error(p.at, "`)` with no `(` before it")
+    }
+    return (node, p.groups, p.names.copy())
+}
+
+// --- the program --------------------------------------------------------------------------------
+
+// What each instruction does. A rune instruction goes to `next` past a rune it matches.
+const OP_RUNE: u8 = 0
+const OP_CLASS: u8 = 1
+const OP_SPLIT: u8 = 2
+const OP_SAVE: u8 = 3
+const OP_LOOK: u8 = 4
+const OP_MATCH: u8 = 5
+
+// A class the program tests runes against: its ranges, and a bitmap of its ASCII runes.
+struct RuneClass {
+    ranges: List<u32>
+    low: u64
+    high: u64
+}
+
+fn class_has(c: RuneClass, r: u32) -> bool {
+    if r < 64 {
+        return (c.low >> u64(r)) & 1 != 0
+    }
+    if r < 128 {
+        return (c.high >> u64(r - 64)) & 1 != 0
+    }
+    var lo: usize = 0
+    var hi = c.ranges.len() / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r < c.ranges[mid * 2] {
+            hi = mid
+        } else if r > c.ranges[mid * 2 + 1] {
+            lo = mid + 1
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// The pattern as instructions, a rune at a time, for the Pike VM: `op[i]` with its operands `a[i]`
+// and `b[i]`, and `next[i]` after it. A rune instruction matches from `a` to `b`, a class one
+// class `a`, a split goes to `a` first and `b` second, a save sets slot `a`, and a look checks
+// assertion `a`.
+struct Prog {
+    op: List<u8>
+    a: List<u32>
+    b: List<u32>
+    next: List<u32>
+    classes: List<RuneClass>
+    start: u32
+    slots: usize
+    too_big: bool
+}
+
+impl Prog {
+    fn emit(mut self, op: u8, a: u32, b: u32, next: u32) -> u32 {
+        if self.op.len() >= MAX_PROGRAM {
+            self.too_big = true
+            return 0
+        }
+        self.op.push(op)
+        self.a.push(a)
+        self.b.push(b)
+        self.next.push(next)
+        return u32.wrap(self.op.len() - 1)
+    }
+
+    // The instructions for `node`, going on to `k` after it: the first of them.
+    fn compile(mut self, node: Node, k: u32) -> u32 {
+        if self.too_big {
+            return k
+        }
+        match node {
+            Node.Empty => {
+                return k
+            },
+            Node.Lit(rs) => {
+                var at = k
+                var i = rs.len()
+                while i > 0 {
+                    i -= 1
+                    at = self.emit(OP_RUNE, rs[i], rs[i], at)
+                }
+                return at
+            },
+            Node.Class(ranges) => {
+                if ranges.len() == 2 {
+                    return self.emit(OP_RUNE, ranges[0], ranges[1], k)
+                }
+                var low: u64 = 0
+                var high: u64 = 0
+                var i: usize = 0
+                while i < ranges.len() and ranges[i] < 128 {
+                    var r = ranges[i]
+                    let last = if ranges[i + 1] < 127 { ranges[i + 1] } else { 127 }
+                    while r <= last {
+                        if r < 64 {
+                            low = low | (1u64 << u64(r))
+                        } else {
+                            high = high | (1u64 << u64(r - 64))
+                        }
+                        r += 1
+                    }
+                    i += 2
+                }
+                let index = u32.wrap(self.classes.len())
+                self.classes.push(RuneClass { ranges: ranges.copy(), low: low, high: high })
+                return self.emit(OP_CLASS, index, 0, k)
+            },
+            Node.Look(kind) => {
+                return self.emit(OP_LOOK, kind, 0, k)
+            },
+            Node.Group(inner, g) => {
+                let close = self.emit(OP_SAVE, g * 2 + 1, 0, k)
+                let body = self.compile(inner.value, close)
+                return self.emit(OP_SAVE, g * 2, 0, body)
+            },
+            Node.Concat(items) => {
+                var at = k
+                var i = items.len()
+                while i > 0 {
+                    i -= 1
+                    at = self.compile(items[i], at)
+                }
+                return at
+            },
+            Node.Alt(alts) => {
+                var at = self.compile(alts[alts.len() - 1], k)
+                var i = alts.len() - 1
+                while i > 0 {
+                    i -= 1
+                    let first = self.compile(alts[i], k)
+                    at = self.emit(OP_SPLIT, first, at, 0)
+                }
+                return at
+            },
+            Node.Repeat(inner, min, max, greedy) => {
+                // Built as Rust's regex builds them, so their matches are preferred in the same
+                // order: `x{n,}` as `x` n - 1 times and then `x+`, with `x*` as `(x+)?` when `x`
+                // can match nothing, and `x{n,m}` as `x` n times and then m - n optional ones that
+                // each leave for what comes after.
+                var at = k
+                var copies = min
+                if max == NO_MAX {
+                    let loop_split = self.emit(OP_SPLIT, 0, 0, 0)
+                    let body = self.compile(inner.value, loop_split)
+                    self.prefer(loop_split, body, k, greedy)
+                    if min == 0 {
+                        if matches_empty(inner.value) {
+                            // `(x+)?`
+                            at = self.emit(OP_SPLIT, 0, 0, 0)
+                            self.prefer(at, body, k, greedy)
+                        } else {
+                            at = loop_split
+                        }
+                    } else {
+                        at = body
+                        copies = min - 1
+                    }
+                } else {
+                    var extra = max - min
+                    while extra > 0 and not self.too_big {
+                        let body = self.compile(inner.value, at)
+                        let split = self.emit(OP_SPLIT, 0, 0, 0)
+                        self.prefer(split, body, k, greedy)
+                        at = split
+                        extra -= 1
+                    }
+                }
+                while copies > 0 and not self.too_big {
+                    at = self.compile(inner.value, at)
+                    copies -= 1
+                }
+                return at
+            },
+        }
+    }
+
+    // Sets the split at `at` to go to `body` first when greedy, and to `rest` first when lazy.
+    fn prefer(mut self, at: u32, body: u32, rest: u32, greedy: bool) {
+        if self.too_big {
+            return
+        }
+        self.a[usize(at)] = if greedy { body } else { rest }
+        self.b[usize(at)] = if greedy { rest } else { body }
+    }
+}
+
+// --- the Pike VM --------------------------------------------------------------------------------
+
+const UNSET: u64 = u64.MAX
+
+// What the assertions can see at one place: the rune before it and the rune after it, or `NONE`
+// at either end of the text.
+struct Around {
+    before: u32
+    after: u32
+}
+
+fn around(text: String, at: usize) -> Around {
+    let before = if at == 0 { NONE } else { rune_before(text, at) }
+    var after = NONE
+    if at < text.len() {
+        let (r, _) = rune_at(text, at)
+        after = r
+    }
+    return Around { before: before, after: after }
+}
+
+fn look_holds(kind: u32, c: Around) -> bool {
+    return match kind {
+        1 => c.before == NONE,
+        2 => c.after == NONE,
+        3 => c.before == NONE or c.before == 10,
+        4 => c.after == NONE or c.after == 10,
+        5 => (c.before != NONE and is_word_rune(c.before)) != (c.after != NONE and is_word_rune(c.after)),
+        6 => (c.before != NONE and is_word_rune(c.before)) == (c.after != NONE and is_word_rune(c.after)),
+        7 => (c.before != NONE and is_word_ascii(c.before)) != (c.after != NONE and is_word_ascii(c.after)),
+        _ => (c.before != NONE and is_word_ascii(c.before)) == (c.after != NONE and is_word_ascii(c.after)),
+    }
+}
+
+// What the Pike VM keeps between searches, so a search allocates nothing. It has two lists of
+// threads, the ones at this place in the text and the ones at the next, side by side in the same
+// arrays: list `w` is sparse set `w` of the program's instructions, in the order its threads are
+// preferred, and each thread's slots.
+struct Pike {
+    n: usize
+    dense: List<u32>
+    sparse: List<u32>
+    caps: List<u64>
+    lens: List<usize>
+    // Instructions still to follow when a thread is added, and slots to put back after.
+    stack_pc: List<u32>
+    stack_slot: List<usize>
+    stack_value: List<u64>
+    work: List<u64>
+    best: List<u64>
+}
+
+fn new_pike(prog: Prog) -> Pike {
+    let n = prog.op.len()
+    return Pike {
+        n: n,
+        dense: [0; n * 2],
+        sparse: [0; n * 2],
+        caps: [0; n * 2 * prog.slots],
+        lens: [0, 0],
+        stack_pc: List<u32>(),
+        stack_slot: List<usize>(),
+        stack_value: List<u64>(),
+        work: [UNSET; prog.slots],
+        best: [UNSET; prog.slots],
+    }
+}
+
+// Adds the thread at `pc0` to list `w`, with the slots in `work`, following splits, saves and
+// looks in the order they prefer. Only the first `slots` slots are kept.
+fn add_thread(prog: Prog, p: mut Pike, w: usize, pc0: u32, at: usize, c: Around, slots: usize) {
+    let off = w * p.n
+    p.stack_pc.push(pc0)
+    p.stack_slot.push(0)
+    p.stack_value.push(0)
+    while not p.stack_pc.is_empty() {
+        var pc = p.stack_pc.pop() ?? 0
+        let slot = p.stack_slot.pop() ?? 0
+        let value = p.stack_value.pop() ?? 0
+        if pc == NONE {
+            p.work[slot] = value
+            continue
+        }
+        loop {
+            let i = usize(pc)
+            let s = usize(p.sparse[off + i])
+            if s < p.lens[w] and p.dense[off + s] == pc {
+                break
+            }
+            let len = p.lens[w]
+            p.sparse[off + i] = u32.wrap(len)
+            p.dense[off + len] = pc
+            p.lens[w] = len + 1
+            let op = prog.op[i]
+            if op == OP_SPLIT {
+                p.stack_pc.push(prog.b[i])
+                p.stack_slot.push(0)
+                p.stack_value.push(0)
+                pc = prog.a[i]
+            } else if op == OP_SAVE {
+                let k = usize(prog.a[i])
+                if k < slots {
+                    // Put back once everything after this save has been followed.
+                    p.stack_pc.push(NONE)
+                    p.stack_slot.push(k)
+                    p.stack_value.push(p.work[k])
+                    p.work[k] = u64(at)
+                }
+                pc = prog.next[i]
+            } else if op == OP_LOOK {
+                if not look_holds(prog.a[i], c) {
+                    break
+                }
+                pc = prog.next[i]
+            } else {
+                let base = (off + i) * slots
+                for k in 0..slots {
+                    p.caps[base + k] = p.work[k]
+                }
+                break
+            }
+        }
+    }
+}
+
+// The leftmost-first match from `from` up to `limit`, with its first `slots` slots in `p.best`,
+// or false if there's none. Anchored, it must start at `from`.
+fn pike_search(prog: Prog, p: mut Pike, text: String, from: usize, limit: usize, anchored: bool, slots: usize) -> bool {
+    var now: usize = 0
+    p.lens[0] = 0
+    p.lens[1] = 0
+    var matched = false
+    var at = from
+    var c = around(text, at)
+    loop {
+        if not matched and (not anchored or at == from) {
+            for k in 0..slots {
+                p.work[k] = UNSET
+            }
+            add_thread(prog, mut p, now, prog.start, at, c, slots)
+        }
+        if p.lens[now] == 0 {
+            break
+        }
+        var r = NONE
+        var n: usize = 0
+        if at < limit {
+            let (x, len) = rune_at(text, at)
+            r = x
+            n = len
+        }
+        let next = 1 - now
+        p.lens[next] = 0
+        // What the assertions see past this rune: it, and the one after.
+        var after = NONE
+        if at + n < text.len() {
+            let (x, _) = rune_at(text, at + n)
+            after = x
+        }
+        let past = Around { before: if r == NONE { c.before } else { r }, after: after }
+        let off = now * p.n
+        var i: usize = 0
+        while i < p.lens[now] {
+            let pc = p.dense[off + i]
+            let ip = usize(pc)
+            let op = prog.op[ip]
+            if op == OP_MATCH {
+                let base = (off + ip) * slots
+                for k in 0..slots {
+                    p.best[k] = p.caps[base + k]
+                }
+                p.best[1] = u64(at)
+                matched = true
+                // Threads after this one are less preferred than its match.
+                break
+            }
+            if r != NONE and (op == OP_RUNE or op == OP_CLASS) {
+                let hit = if op == OP_RUNE { r >= prog.a[ip] and r <= prog.b[ip] } else { class_has(prog.classes[usize(prog.a[ip])], r) }
+                if hit {
+                    let base = (off + ip) * slots
+                    for k in 0..slots {
+                        p.work[k] = p.caps[base + k]
+                    }
+                    add_thread(prog, mut p, next, prog.next[ip], at + n, past, slots)
+                }
+            }
+            i += 1
+        }
+        if r == NONE {
+            break
+        }
+        now = next
+        at += n
+        c = past
+    }
+    return matched
+}
+
+// --- bytes: the program the DFAs run -----------------------------------------------------------
+
+// The byte program's instructions: a range of bytes, a split, an assertion, and the match.
+const B_RANGE: u8 = 0
+const B_SPLIT: u8 = 1
+const B_LOOK: u8 = 2
+const B_MATCH: u8 = 3
+
+// Adds the UTF-8 of `r` to `out`.
+fn push_utf8(out: mut List<u32>, r: u32) {
+    if r < 0x80 {
+        out.push(r)
+    } else if r < 0x800 {
+        out.push(0xC0 | (r >> 6))
+        out.push(0x80 | (r & 0x3F))
+    } else if r < 0x10000 {
+        out.push(0xE0 | (r >> 12))
+        out.push(0x80 | ((r >> 6) & 0x3F))
+        out.push(0x80 | (r & 0x3F))
+    } else {
+        out.push(0xF0 | (r >> 18))
+        out.push(0x80 | ((r >> 12) & 0x3F))
+        out.push(0x80 | ((r >> 6) & 0x3F))
+        out.push(0x80 | (r & 0x3F))
+    }
+}
+
+// Adds to `out` the byte sequences whose UTF-8 is the runes from `lo` to `hi`, none of them
+// surrogates: for each, how many bytes, then each byte's first and last. The range is split where
+// the encoding's length changes, and then where a lower byte would wrap, until each byte of the
+// sequence is a range of its own.
+fn utf8_sequences(lo: u32, hi: u32, out: mut List<u32>) {
+    let limits: [u32; 3] = [0x7F, 0x7FF, 0xFFFF]
+    for l in limits {
+        if lo <= l and hi > l {
+            utf8_sequences(lo, l, mut out)
+            utf8_sequences(l + 1, hi, mut out)
+            return
+        }
+    }
+    if hi < 0x80 {
+        out.push(1)
+        out.push(lo)
+        out.push(hi)
+        return
+    }
+    let n: u32 = if hi < 0x800 { 2 } else if hi < 0x10000 { 3 } else { 4 }
+    var i: u32 = 1
+    while i < n {
+        let m = (1u32 << (6 * i)) - 1
+        if (lo & (0xFFFFFFFF ^ m)) != (hi & (0xFFFFFFFF ^ m)) {
+            if lo & m != 0 {
+                utf8_sequences(lo, lo | m, mut out)
+                utf8_sequences((lo | m) + 1, hi, mut out)
+                return
+            }
+            if hi & m != m {
+                utf8_sequences(lo, (hi & (0xFFFFFFFF ^ m)) - 1, mut out)
+                utf8_sequences(hi & (0xFFFFFFFF ^ m), hi, mut out)
+                return
+            }
+        }
+        i += 1
+    }
+    var a = List<u32>()
+    var b = List<u32>()
+    push_utf8(mut a, lo)
+    push_utf8(mut b, hi)
+    out.push(n)
+    for k in 0..usize(n) {
+        out.push(a[k])
+        out.push(b[k])
+    }
+}
+
+// The assertion that means, read backward, what `kind` means read forward.
+fn reversed_look(kind: u32) -> u32 {
+    return match kind {
+        1 => LOOK_END_TEXT,
+        2 => LOOK_START_TEXT,
+        3 => LOOK_END_LINE,
+        4 => LOOK_START_LINE,
+        _ => kind,
+    }
+}
+
+// The pattern as instructions a byte at a time, forward or backward, for a DFA: `op[i]` with
+// `a[i]` and `b[i]`, and `next[i]` after it. A range matches a byte from `a` to `b`, a split goes
+// to `a` first, and a look checks assertion `a`.
+struct ByteProg {
+    op: List<u8>
+    a: List<u32>
+    b: List<u32>
+    next: List<u32>
+    // Ranges already made, by their bytes and where they go, so sequences share their ends.
+    shared: Map<u64, u32>
+    // The assertions it has, as bits `1 << kind`.
+    looks: u32
+    too_big: bool
+}
+
+impl ByteProg {
+    fn emit(mut self, op: u8, a: u32, b: u32, next: u32) -> u32 {
+        if self.op.len() >= MAX_PROGRAM {
+            self.too_big = true
+            return 0
+        }
+        self.op.push(op)
+        self.a.push(a)
+        self.b.push(b)
+        self.next.push(next)
+        return u32.wrap(self.op.len() - 1)
+    }
+
+    fn range(mut self, lo: u32, hi: u32, next: u32) -> u32 {
+        let key = (u64(lo) << 40) | (u64(hi) << 32) | u64(next)
+        if let id = self.shared.get(key) {
+            return id
+        }
+        let id = self.emit(B_RANGE, lo, hi, next)
+        self.shared.insert(key, id)
+        return id
+    }
+
+    // The instructions for `node`, going on to `k`, read backward if `rev`: the first of them.
+    fn compile(mut self, node: Node, k: u32, rev: bool) -> u32 {
+        if self.too_big {
+            return k
+        }
+        match node {
+            Node.Empty => {
+                return k
+            },
+            Node.Lit(rs) => {
+                var bytes = List<u32>()
+                for r in rs {
+                    push_utf8(mut bytes, r)
+                }
+                var at = k
+                if rev {
+                    for x in bytes {
+                        at = self.emit(B_RANGE, x, x, at)
+                    }
+                } else {
+                    var i = bytes.len()
+                    while i > 0 {
+                        i -= 1
+                        at = self.emit(B_RANGE, bytes[i], bytes[i], at)
+                    }
+                }
+                return at
+            },
+            Node.Class(ranges) => {
+                var seqs = List<u32>()
+                var i: usize = 0
+                while i < ranges.len() {
+                    utf8_sequences(ranges[i], ranges[i + 1], mut seqs)
+                    i += 2
+                }
+                var starts = List<u32>()
+                var j: usize = 0
+                while j < seqs.len() {
+                    let n = usize(seqs[j])
+                    var at = k
+                    if rev {
+                        for t in 0..n {
+                            at = self.range(seqs[j + 1 + 2 * t], seqs[j + 2 + 2 * t], at)
+                        }
+                    } else {
+                        var t = n
+                        while t > 0 {
+                            t -= 1
+                            at = self.range(seqs[j + 1 + 2 * t], seqs[j + 2 + 2 * t], at)
+                        }
+                    }
+                    starts.push(at)
+                    j += 1 + 2 * n
+                }
+                if starts.is_empty() {
+                    // A class of no runes, such as `[^\x00-\u{10FFFF}]`, matches nothing.
+                    return self.emit(B_RANGE, 1, 0, k)
+                }
+                var at = starts[starts.len() - 1]
+                var s = starts.len() - 1
+                while s > 0 {
+                    s -= 1
+                    at = self.emit(B_SPLIT, starts[s], at, 0)
+                }
+                return at
+            },
+            Node.Look(kind) => {
+                let kd = if rev { reversed_look(kind) } else { kind }
+                self.looks = self.looks | (1u32 << kd)
+                return self.emit(B_LOOK, kd, 0, k)
+            },
+            Node.Group(inner, _) => {
+                return self.compile(inner.value, k, rev)
+            },
+            Node.Concat(items) => {
+                var at = k
+                if rev {
+                    for item in items {
+                        at = self.compile(item, at, rev)
+                    }
+                } else {
+                    var i = items.len()
+                    while i > 0 {
+                        i -= 1
+                        at = self.compile(items[i], at, rev)
+                    }
+                }
+                return at
+            },
+            Node.Alt(alts) => {
+                var at = self.compile(alts[alts.len() - 1], k, rev)
+                var i = alts.len() - 1
+                while i > 0 {
+                    i -= 1
+                    let first = self.compile(alts[i], k, rev)
+                    at = self.emit(B_SPLIT, first, at, 0)
+                }
+                return at
+            },
+            Node.Repeat(inner, min, max, greedy) => {
+                // As `Prog.compile` builds them.
+                var at = k
+                var copies = min
+                if max == NO_MAX {
+                    let loop_split = self.emit(B_SPLIT, 0, 0, 0)
+                    let body = self.compile(inner.value, loop_split, rev)
+                    self.prefer(loop_split, body, k, greedy)
+                    if min == 0 {
+                        if matches_empty(inner.value) {
+                            at = self.emit(B_SPLIT, 0, 0, 0)
+                            self.prefer(at, body, k, greedy)
+                        } else {
+                            at = loop_split
+                        }
+                    } else {
+                        at = body
+                        copies = min - 1
+                    }
+                } else {
+                    var extra = max - min
+                    while extra > 0 and not self.too_big {
+                        let body = self.compile(inner.value, at, rev)
+                        let split = self.emit(B_SPLIT, 0, 0, 0)
+                        self.prefer(split, body, k, greedy)
+                        at = split
+                        extra -= 1
+                    }
+                }
+                while copies > 0 and not self.too_big {
+                    at = self.compile(inner.value, at, rev)
+                    copies -= 1
+                }
+                return at
+            },
+        }
+    }
+
+    fn prefer(mut self, at: u32, body: u32, rest: u32, greedy: bool) {
+        if self.too_big {
+            return
+        }
+        self.a[usize(at)] = if greedy { body } else { rest }
+        self.b[usize(at)] = if greedy { rest } else { body }
+    }
+}
+
+// --- the lazy DFA -------------------------------------------------------------------------------
+
+// What a DFA state knows of the byte before it, for the assertions after it.
+const FL_START: u32 = 1
+const FL_LINE: u32 = 2
+const FL_WORD: u32 = 4
+
+// A transition that's not been worked out, the state with no threads, and giving up.
+const T_UNKNOWN: u32 = 0xFFFFFFFF
+const T_DEAD: u32 = 0
+const T_QUIT: u32 = 1
+// Set on a transition when a match ends before its byte.
+const T_MATCH: u32 = 0x80000000
+// Set on a transition to a state that's only the search looking for where a match starts, when
+// the search can skip ahead from there.
+const T_START: u32 = 0x40000000
+
+// How a forward search skips ahead when it's back to looking for where a match starts: not, to the
+// next place a literal every match starts with is, to the next byte a match can start with, or
+// by a literal inside every match.
+const SKIP_NONE: u32 = 0
+const SKIP_PREFIX: u32 = 1
+const SKIP_BYTES: u32 = 2
+// To no earlier than a match with the next place a literal inside every match is can start.
+const SKIP_INNER: u32 = 3
+// After this many skips, whether they went far enough on average to be worth it, in bytes.
+const SKIP_WINDOW: u32 = 64
+const SKIP_WORTH: u64 = 8
+// How big the transitions may grow before the DFA starts over, in entries: 8 MB.
+const MAX_TRANSITIONS: usize = 2097152
+
+// Searches' answers besides a place in the text.
+const NO_MATCH: u64 = 0xFFFFFFFFFFFFFFFF
+const GAVE_UP: u64 = 0xFFFFFFFFFFFFFFFE
+
+fn is_word_byte(b: u32) -> bool {
+    return is_word_ascii(b)
+}
+
+// The assertions that hold between a state with `flags` and byte `b`, `NONE` for the end of the
+// text, as bits `1 << kind`.
+fn holding(flags: u32, b: u32) -> u32 {
+    var s: u32 = 0
+    if flags & FL_START != 0 {
+        s = s | (1u32 << LOOK_START_TEXT) | (1u32 << LOOK_START_LINE)
+    }
+    if flags & FL_LINE != 0 {
+        s = s | (1u32 << LOOK_START_LINE)
+    }
+    if b == NONE {
+        s = s | (1u32 << LOOK_END_TEXT) | (1u32 << LOOK_END_LINE)
+    } else if b == 10 {
+        s = s | (1u32 << LOOK_END_LINE)
+    }
+    let before = flags & FL_WORD != 0
+    let after = b != NONE and is_word_byte(b)
+    if before != after {
+        s = s | (1u32 << LOOK_WORD) | (1u32 << LOOK_WORD_ASCII)
+    } else {
+        s = s | (1u32 << LOOK_NOT_WORD) | (1u32 << LOOK_NOT_WORD_ASCII)
+    }
+    return s
+}
+
+// A DFA worked out as it runs, from a byte program: each state is the program's threads after a
+// byte, in the order they're preferred, with what the assertions need of that byte. Leftmost-first
+// for the forward search, which drops the threads after one that matches, and every match for the
+// backward one, which finds where the match starts.
+struct Dfa {
+    // Whether the program fit; a DFA that doesn't isn't used.
+    ok: bool
+    prog: ByteProg
+    start: u32
+    loop_start: u32
+    first: bool
+    quit_high: bool
+    need: u32
+    cls: List<u32>
+    rep: List<u32>
+    stride: usize
+    trans: List<u32>
+    keys: List<List<u32>>
+    ids: Map<List<u32>, u32>
+    starts: List<u32>
+    mark: List<u32>
+    stamp: u32
+    stack: List<u32>
+    closed: List<u32>
+    next_ids: List<u32>
+    // How the search skips ahead, `SKIP_*`: to `prefix`, or to a byte that's nonzero in
+    // `skip_set`, `skip_count` of them, which with three or fewer are `skip_bytes`, one a byte.
+    skip: u32
+    prefix: List<u8>
+    prefix_rare: usize
+    skip_set: List<u8>
+    skip_count: u32
+    skip_bytes: u32
+    // How many skips since the last look at whether they're worth it, and how far they went.
+    skips: u32
+    skipped: u64
+    // Where the last forward search stopped reading.
+    stopped: usize
+    // For `SKIP_INNER`, in the search going on: where the literal is next, and where a match can
+    // start, `UNSET` before the first skip.
+    jump_lit: usize
+    jump_start: usize
+}
+
+fn new_dfa(node: Node, rev: bool) -> Dfa {
+    var prog = ByteProg { op: List<u8>(), a: List<u32>(), b: List<u32>(), next: List<u32>(), shared: Map<u64, u32>(), looks: 0, too_big: false }
+    let done = prog.emit(B_MATCH, 0, 0, 0)
+    let start = prog.compile(node, done, rev)
+    // `(?s:.)*?` before it, as bytes, for a search that can start anywhere.
+    let loop_split = prog.emit(B_SPLIT, 0, 0, 0)
+    let any = prog.emit(B_RANGE, 0, 255, loop_split)
+    prog.prefer(loop_split, any, start, false)
+    let fits = not prog.too_big
+    let looks = prog.looks
+    var need: u32 = 0
+    if looks & ((1u32 << LOOK_START_TEXT) | (1u32 << LOOK_START_LINE)) != 0 {
+        need = need | FL_START
+    }
+    if looks & (1u32 << LOOK_START_LINE) != 0 {
+        need = need | FL_LINE
+    }
+    let words = (1u32 << LOOK_WORD) | (1u32 << LOOK_NOT_WORD) | (1u32 << LOOK_WORD_ASCII) | (1u32 << LOOK_NOT_WORD_ASCII)
+    if looks & words != 0 {
+        need = need | FL_WORD
+    }
+    let quit_high = looks & ((1u32 << LOOK_WORD) | (1u32 << LOOK_NOT_WORD)) != 0
+    // The byte classes: bytes no instruction or assertion tells apart share one.
+    var cuts: List<bool> = [false; 257]
+    for i in 0..prog.op.len() {
+        if prog.op[i] == B_RANGE and prog.a[i] <= prog.b[i] {
+            cuts[usize(prog.a[i])] = true
+            cuts[usize(prog.b[i]) + 1] = true
+        }
+    }
+    if looks & ((1u32 << LOOK_START_LINE) | (1u32 << LOOK_END_LINE)) != 0 {
+        cuts[10] = true
+        cuts[11] = true
+    }
+    if need & FL_WORD != 0 {
+        let edges: [usize; 8] = [48, 58, 65, 91, 95, 96, 97, 123]
+        for e in edges {
+            cuts[e] = true
+        }
+    }
+    if quit_high {
+        cuts[128] = true
+    }
+    var cls: List<u32> = [0; 256]
+    var rep = List<u32>()
+    var c: u32 = 0
+    var b: usize = 0
+    while b < 256 {
+        if b > 0 and cuts[b] {
+            c += 1
+        }
+        if usize(c) == rep.len() {
+            rep.push(u32.wrap(b))
+        }
+        cls[b] = c
+        b += 1
+    }
+    let stride = rep.len() + 1
+    let n = prog.op.len()
+    var d = Dfa {
+        ok: fits,
+        prog: prog,
+        start: start,
+        loop_start: loop_split,
+        first: not rev,
+        quit_high: quit_high,
+        need: need,
+        cls: cls,
+        rep: rep,
+        stride: stride,
+        trans: List<u32>(),
+        keys: List<List<u32>>(),
+        ids: Map<List<u32>, u32>(),
+        starts: [T_UNKNOWN; 16],
+        mark: [0; n],
+        stamp: 0,
+        stack: List<u32>(),
+        closed: List<u32>(),
+        next_ids: List<u32>(),
+        skip: SKIP_NONE,
+        prefix: List<u8>(),
+        prefix_rare: 0,
+        skip_set: [0; 256],
+        skip_count: 0,
+        skip_bytes: 0,
+        skips: 0,
+        skipped: 0,
+        stopped: 0,
+        jump_lit: 0,
+        jump_start: 0,
+    }
+    d.reset()
+    return d
+}
+
+impl Dfa {
+    // Empties the cache, leaving the dead state. A state is named by where its row of transitions
+    // starts, so following one is a load and an add; the dead state's row is 0.
+    fn reset(mut self) {
+        self.trans.clear()
+        self.keys.clear()
+        self.ids.clear()
+        for i in 0..16usize {
+            self.starts[i] = T_UNKNOWN
+        }
+        self.keys.push([NONE])
+        for _ in 0..self.stride {
+            self.trans.push(T_DEAD)
+        }
+    }
+
+    fn flags_after(self, b: u32) -> u32 {
+        var f: u32 = 0
+        if b == 10 {
+            f = FL_LINE
+        }
+        if is_word_byte(b) {
+            f = f | FL_WORD
+        }
+        return f & self.need
+    }
+
+    // The flags a forward search starting at `i` starts with, from the byte before it, or `T_QUIT`
+    // when that byte is one this DFA can't judge `\b` by.
+    fn flags_at(self, text: String, i: usize) -> u32 {
+        if i == 0 {
+            return FL_START & self.need
+        }
+        let b = u32(text.byte_at(i - 1))
+        if self.quit_high and b >= 0x80 {
+            return T_QUIT
+        }
+        return self.flags_after(b)
+    }
+
+    // The same for a backward search starting at `i`, from the byte after it.
+    fn flags_before(self, text: String, i: usize) -> u32 {
+        if i == text.len() {
+            return FL_START & self.need
+        }
+        let b = u32(text.byte_at(i))
+        if self.quit_high and b >= 0x80 {
+            return T_QUIT
+        }
+        return self.flags_after(b)
+    }
+
+    // Works out how a forward search skips ahead, given the bytes every match starts with. It
+    // doesn't when a match can be empty, or when the bytes a match can start with are so many,
+    // or so common, that the skips would be short.
+    // The bytes a match can start with, read the way this DFA reads, as a table with a nonzero
+    // entry for each: what the threads at the start take, with every assertion taken to hold.
+    // None when a match can be empty.
+    fn first_bytes(mut self) -> List<u8>? {
+        self.new_stamp()
+        self.closed.clear()
+        let start = self.start
+        self.close(start, 0xFFFFFFFF)
+        var set: List<u8> = [0; 256]
+        for pc in self.closed {
+            let i = usize(pc)
+            let op = self.prog.op[i]
+            if op == B_MATCH {
+                return none
+            }
+            if op == B_RANGE {
+                var b = self.prog.a[i]
+                while b <= self.prog.b[i] {
+                    set[usize(b)] = 1
+                    b += 1
+                }
+            }
+        }
+        return some(set)
+    }
+
+    fn plan_skips(mut self, prefix: own List<u8>) {
+        if not self.ok or not self.first {
+            return
+        }
+        var set = List<u8>()
+        if let s = self.first_bytes() {
+            set = s
+        } else {
+            return
+        }
+        var count: u32 = 0
+        var bytes: u32 = 0
+        var common = false
+        for b in 0..256u32 {
+            if set[usize(b)] != 0 {
+                if count < 3 {
+                    bytes = bytes | (b << (8 * count))
+                }
+                count += 1
+                if b == 32 or (b >= 97 and b <= 122) {
+                    common = true
+                }
+            }
+        }
+        if prefix.len() >= 2 {
+            self.skip = SKIP_PREFIX
+            unsafe {
+                self.prefix_rare = cx_bytes_rare(prefix.as_ptr(), prefix.len())
+            }
+            self.prefix = prefix
+        } else if count <= 3 or (count <= 24 and not common) {
+            self.skip = SKIP_BYTES
+            self.skip_set = set
+            self.skip_count = count
+            self.skip_bytes = bytes
+        }
+    }
+
+    // Has the search skip by `lit`, a literal every match has after its start, and `set`, the
+    // bytes the part of the pattern before it can take. See `skip_from`.
+    fn plan_jumps(mut self, lit: own List<u8>, set: own List<u8>) {
+        self.skip = SKIP_INNER
+        unsafe {
+            self.prefix_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
+        }
+        self.prefix = lit
+        self.skip_set = set
+    }
+
+    // Where the next place a match can start is from `i`, `text.len()` if there's none, or for
+    // `SKIP_INNER`, a place no match starts before. A match from `i` has the literal in it at the
+    // first place it is from `i` or later, and if it starts before there, the part of the pattern
+    // before the literal takes every byte up to it: so it starts no earlier than the byte after
+    // the last one before the literal that the part can't take. The literal's place and that start
+    // are kept for the next skip until the search goes past them.
+    fn skip_from(mut self, text: String, i: usize) -> usize {
+        let n = text.len()
+        unsafe {
+            if self.skip == SKIP_INNER {
+                if self.jump_lit == usize.wrap(UNSET) or i > self.jump_lit {
+                    let k = cx_bytes_find_rare(text.as_ptr().add(i), n - i, self.prefix.as_ptr(), self.prefix.len(), self.prefix_rare)
+                    if k > n - i {
+                        self.jump_lit = n
+                        self.jump_start = n
+                        return n
+                    }
+                    let bp = text.as_ptr()
+                    let sp = self.skip_set.as_ptr()
+                    var s = i + k
+                    while s > i and sp.add(usize(bp.add(s - 1).read())).read() != 0 {
+                        s -= 1
+                    }
+                    self.jump_lit = i + k
+                    self.jump_start = s
+                }
+                return if i > self.jump_start { i } else { self.jump_start }
+            }
+            if self.skip == SKIP_PREFIX {
+                let k = cx_bytes_find_rare(text.as_ptr().add(i), n - i, self.prefix.as_ptr(), self.prefix.len(), self.prefix_rare)
+                if k > n - i {
+                    return n
+                }
+                return i + k
+            }
+            return cx_rx_skip(text.as_ptr(), n, i, self.skip_set.as_ptr(), self.skip_count, self.skip_bytes)
+        }
+    }
+
+    // A forward search at `i` in a state where it's looking for where a match starts: the state
+    // to go on in from where the next match can start, which `i` is moved to; `T_DEAD` when
+    // there's no next, or `T_QUIT`. A search whose skips are short stops skipping.
+    fn skip_ahead(mut self, text: String, i: mut usize, s: u32) -> u32 {
+        let n = text.len()
+        let j = self.skip_from(text, i)
+        self.skips += 1
+        self.skipped += u64(j - i)
+        if j >= n {
+            i = n
+            return T_DEAD
+        }
+        var state = s
+        if j > i {
+            i = j
+            let flags = self.flags_at(text, j)
+            if flags == T_QUIT {
+                return T_QUIT
+            }
+            state = self.start_state(flags, false)
+        }
+        if self.skips >= SKIP_WINDOW {
+            if self.skipped < u64(SKIP_WINDOW) * SKIP_WORTH {
+                // Not worth it: forget the transitions marked as skips, and go on without.
+                self.skip = SKIP_NONE
+                self.reset()
+                let flags = self.flags_at(text, i)
+                if flags == T_QUIT {
+                    return T_QUIT
+                }
+                state = self.start_state(flags, false)
+            }
+            self.skips = 0
+            self.skipped = 0
+        }
+        return state
+    }
+
+    // The state a search starts in after a byte with `flags`, anchored or not.
+    fn start_state(mut self, flags: u32, anchored: bool) -> u32 {
+        let index = usize(flags) + if anchored { 8 } else { 0 }
+        if self.starts[index] == T_UNKNOWN {
+            let pc = if anchored { self.start } else { self.loop_start }
+            let row = self.intern([flags, pc])
+            if row == T_QUIT {
+                return T_QUIT
+            }
+            self.starts[index] = row
+        }
+        return self.starts[index]
+    }
+
+    // The state for `key`, made if it's new, or `T_QUIT` when the cache is full, which empties it.
+    fn intern(mut self, key: own List<u32>) -> u32 {
+        if let row = self.ids.get(key) {
+            return row
+        }
+        if self.trans.len() + self.stride > MAX_TRANSITIONS {
+            self.reset()
+            return T_QUIT
+        }
+        let row = u32.wrap(self.trans.len())
+        self.ids.insert(key.copy(), row)
+        self.keys.push(key)
+        for _ in 0..self.stride {
+            self.trans.push(T_UNKNOWN)
+        }
+        return row
+    }
+
+    // Adds to `closed` the threads `pc0` leads to without a byte, given the assertions in `holds`,
+    // in the order they're preferred.
+    fn close(mut self, pc0: u32, holds: u32) {
+        self.stack.push(pc0)
+        while not self.stack.is_empty() {
+            var pc = self.stack.pop() ?? 0
+            loop {
+                let i = usize(pc)
+                if self.mark[i] == self.stamp {
+                    break
+                }
+                self.mark[i] = self.stamp
+                let op = self.prog.op[i]
+                if op == B_SPLIT {
+                    self.stack.push(self.prog.b[i])
+                    pc = self.prog.a[i]
+                } else if op == B_LOOK {
+                    if holds & (1u32 << self.prog.a[i]) == 0 {
+                        break
+                    }
+                    pc = self.prog.next[i]
+                } else {
+                    self.closed.push(pc)
+                    break
+                }
+            }
+        }
+    }
+
+    fn new_stamp(mut self) {
+        if self.stamp == 0xFFFFFFFF {
+            for i in 0..self.mark.len() {
+                self.mark[i] = 0
+            }
+            self.stamp = 0
+        }
+        self.stamp += 1
+    }
+
+    // Works out the transition from the state at `row` on byte class `c`, the last class being the
+    // end of the text.
+    fn compute(mut self, row: u32, c: usize) -> u32 {
+        let key = self.keys[usize(row) / self.stride].copy()
+        let flags = key[0]
+        let b = if c == self.stride - 1 { NONE } else { self.rep[c] }
+        if self.quit_high and b != NONE and b >= 0x80 {
+            self.trans[usize(row) + c] = T_QUIT
+            return T_QUIT
+        }
+        let holds = holding(flags, b)
+        self.new_stamp()
+        self.closed.clear()
+        for k in 1..key.len() {
+            self.close(key[k], holds)
+        }
+        var matched = false
+        self.new_stamp()
+        self.next_ids.clear()
+        for pc in self.closed {
+            let i = usize(pc)
+            let op = self.prog.op[i]
+            if op == B_MATCH {
+                matched = true
+                if self.first {
+                    break
+                }
+            } else if b != NONE and b >= self.prog.a[i] and b <= self.prog.b[i] {
+                let nx = self.prog.next[i]
+                if self.mark[usize(nx)] != self.stamp {
+                    self.mark[usize(nx)] = self.stamp
+                    self.next_ids.push(nx)
+                }
+            }
+        }
+        var target = T_DEAD
+        var restart = false
+        if not self.next_ids.is_empty() {
+            var nk: List<u32> = [if b == NONE { 0 } else { self.flags_after(b) }]
+            for x in self.next_ids {
+                nk.push(x)
+            }
+            // Only the loop that looks for where a match starts: a start state.
+            restart = self.skip != SKIP_NONE and nk.len() == 2 and nk[1] == self.loop_start
+            target = self.intern(nk)
+            if target == T_QUIT {
+                return T_QUIT
+            }
+        }
+        if restart {
+            target = target | T_START
+        }
+        let t = if matched { target | T_MATCH } else { target }
+        self.trans[usize(row) + c] = t
+        return t
+    }
+
+    // The transition from `row` on class `c`, worked out if it hasn't been.
+    fn step(mut self, row: u32, c: usize) -> u32 {
+        let t = self.trans[usize(row) + c]
+        if t == T_UNKNOWN {
+            return self.compute(row, c)
+        }
+        return t
+    }
+
+    // Where the leftmost-first match from `from` ends, `NO_MATCH` if there's none, or `GAVE_UP`.
+    // With `earliest`, where the first match it sees ends, for `is_match`; `anchored`, only a
+    // match that starts at `from`. `stopped` is left where it stopped reading.
+    fn forward(mut self, text: String, from: usize, earliest: bool, anchored: bool) -> u64 {
+        let n = text.len()
+        self.stopped = n
+        self.jump_lit = usize.wrap(UNSET)
+        let flags = self.flags_at(text, from)
+        if flags == T_QUIT {
+            return GAVE_UP
+        }
+        var s = self.start_state(flags, anchored)
+        if s == T_QUIT {
+            return GAVE_UP
+        }
+        var i = from
+        if self.skip != SKIP_NONE and not anchored {
+            s = self.skip_ahead(text, mut i, s)
+            if s == T_QUIT {
+                return GAVE_UP
+            }
+            if s == T_DEAD {
+                return NO_MATCH
+            }
+        }
+        var last = NO_MATCH
+        let first_row = u32.wrap(self.stride)
+        loop {
+            // The fast loop, while each transition is to a state already worked out, and not one
+            // to skip ahead from.
+            var t: u32 = 0
+            unsafe {
+                let tp = self.trans.as_ptr()
+                let cp = self.cls.as_ptr()
+                let bp = text.as_ptr()
+                while i < n {
+                    // The class first, which the state doesn't hold up, so only the load waits on it.
+                    t = tp.add(usize(cp.add(usize(bp.add(i).read())).read())).add(usize(s)).read()
+                    // Below the first row, or a mark above it: one test, as it wraps.
+                    if t - first_row >= T_START - first_row {
+                        // A match that ends here, on the way to a state worked out, is taken
+                        // without leaving the loop; the rest is for the slow path.
+                        if t == T_UNKNOWN or t < T_MATCH or earliest {
+                            break
+                        }
+                        last = u64(i)
+                        t = t ^ T_MATCH
+                        if t - first_row >= T_START - first_row {
+                            break
+                        }
+                    }
+                    s = t
+                    i += 1
+                }
+            }
+            if i >= n {
+                break
+            }
+            if t == T_UNKNOWN {
+                let c = usize(self.cls[usize(text.byte_at(i))])
+                t = self.compute(s, c)
+            }
+            if t == T_QUIT {
+                return GAVE_UP
+            }
+            if t >= T_MATCH {
+                last = u64(i)
+                if earliest {
+                    return last
+                }
+                t = t ^ T_MATCH
+            }
+            if t == T_DEAD {
+                self.stopped = i
+                return last
+            }
+            i += 1
+            if t >= T_START {
+                // Back to looking for where a match starts, which no match found so far leaves
+                // the search in: skip to where one can.
+                s = self.skip_ahead(text, mut i, t ^ T_START)
+                if s == T_QUIT {
+                    return GAVE_UP
+                }
+                if s == T_DEAD {
+                    return last
+                }
+            } else {
+                s = t
+            }
+        }
+        let eof = self.stride - 1
+        let t = self.step(s, eof)
+        if t == T_QUIT {
+            return GAVE_UP
+        }
+        if t >= T_MATCH {
+            last = u64(n)
+        }
+        return last
+    }
+
+    // Where the match that ends at `end` starts, as far left as it can and not before `from`, read
+    // backward; `NO_MATCH`, or `GAVE_UP`.
+    fn backward(mut self, text: String, end: usize, from: usize) -> u64 {
+        let flags = self.flags_before(text, end)
+        if flags == T_QUIT {
+            return GAVE_UP
+        }
+        var s = self.start_state(flags, true)
+        if s == T_QUIT {
+            return GAVE_UP
+        }
+        var best = NO_MATCH
+        var i = end
+        let first_row = u32.wrap(self.stride)
+        loop {
+            var t: u32 = 0
+            unsafe {
+                let tp = self.trans.as_ptr()
+                let cp = self.cls.as_ptr()
+                let bp = text.as_ptr()
+                while i > from {
+                    t = tp.add(usize(cp.add(usize(bp.add(i - 1).read())).read())).add(usize(s)).read()
+                    if t - first_row >= T_MATCH - first_row {
+                        if t == T_UNKNOWN or t < T_MATCH {
+                            break
+                        }
+                        best = u64(i)
+                        t = t ^ T_MATCH
+                        if t - first_row >= T_MATCH - first_row {
+                            break
+                        }
+                    }
+                    s = t
+                    i -= 1
+                }
+            }
+            if i <= from {
+                break
+            }
+            if t == T_UNKNOWN {
+                let c = usize(self.cls[usize(text.byte_at(i - 1))])
+                t = self.compute(s, c)
+            }
+            if t == T_QUIT {
+                return GAVE_UP
+            }
+            if t >= T_MATCH {
+                best = u64(i)
+                t = t ^ T_MATCH
+            }
+            if t == T_DEAD {
+                return best
+            }
+            s = t
+            i -= 1
+        }
+        // Whether one starts at `from` itself, which the byte before it, or the start, decides.
+        let c = if from == 0 { self.stride - 1 } else { usize(self.cls[usize(text.byte_at(from - 1))]) }
+        let t = self.step(s, c)
+        if t == T_QUIT {
+            return GAVE_UP
+        }
+        if t >= T_MATCH {
+            best = u64(from)
+        }
+        return best
+    }
+}
+
+// --- Regex --------------------------------------------------------------------------------------
+
+/// A compiled regular expression. Searching changes what it keeps for the next search, so a
+/// `Regex` that searches is declared with `var`.
+pub struct Regex {
+    source: String
+    prog: Prog
+    pike: Pike
+    groups: usize
+    names: List<String>
+    // The pattern as plain text, when it's nothing more, found with `find` as it is.
+    literal: String?
+    // The DFAs that find where a match ends, reading forward, and then where it starts, reading
+    // back from there.
+    fwd: Dfa
+    rev: Dfa
+    // A literal every match has after its start, `inner`, empty if there's none, and the DFA that
+    // reads back from it over what comes before it in the pattern. See `inner_span`.
+    inner: List<u8>
+    inner_rare: usize
+    before: Dfa
+    // The bytes the part before `inner` can end with, as a table, empty when it can be empty: a
+    // place the literal is whose byte before isn't one of them is passed over without reading back.
+    before_ends: List<u8>
+    // Which byte of `literal` is likely rarest, for looking for it.
+    lit_rare: usize
+}
+
+// Whether byte `b` is inside a rune, not the start of one.
+fn inside_rune(b: u8) -> bool {
+    return b >= 0x80 and b < 0xC0
+}
+
+impl Display for Regex {
+    fn show(self) {
+        print(self.source)
+    }
+}
+
+impl Regex {
+    /// The pattern compiled, or why it isn't one. See docs/std/regex.md for the syntax.
+    pub fn new(pattern: String) -> Regex ! RegexError {
+        let (node, groups, names) = try parse(pattern)
+        var prog = Prog { op: List<u8>(), a: List<u32>(), b: List<u32>(), next: List<u32>(), classes: List<RuneClass>(), start: 0, slots: usize(groups) * 2 + 2, too_big: false }
+        let done = prog.emit(OP_MATCH, 0, 0, 0)
+        let body = prog.compile(node, done)
+        let open = prog.emit(OP_SAVE, 0, 0, body)
+        prog.start = open
+        if prog.too_big {
+            fail RegexError { message: "the pattern compiles to more than {MAX_PROGRAM} instructions; repeat less, such as `x+` for `x\{1,100000\}`", column: 1 }
+        }
+        let literal = literal_of(node)
+        let pike = new_pike(prog)
+        var fwd = new_dfa(node, false)
+        let rev = new_dfa(node, true)
+        var prefix = List<u8>()
+        _ = literal_prefix(node, mut prefix)
+        fwd.plan_skips(prefix)
+        // A literal inside, when the search can't skip to where a match starts by its first byte.
+        var inner = List<u8>()
+        var before = new_dfa(Node.Empty, true)
+        var before_ends = List<u8>()
+        if fwd.skip_count > 3 or fwd.skip == SKIP_NONE {
+            if let (bytes, head, clear) = inner_literal(node) {
+                if clear {
+                    var d = new_dfa(head, true)
+                    if d.ok {
+                        inner = bytes
+                        before_ends = d.first_bytes() ?? List<u8>()
+                        before = d
+                    }
+                } else if fwd.ok {
+                    if let set = byte_set(head) {
+                        fwd.plan_jumps(bytes, set)
+                    }
+                }
+            }
+        }
+        var inner_rare: usize = 0
+        var lit_rare: usize = 0
+        unsafe {
+            inner_rare = cx_bytes_rare(inner.as_ptr(), inner.len())
+            if let lit = literal {
+                lit_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
+            }
+        }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare }
+    }
+
+    /// The pattern as it was written.
+    pub fn pattern(self) -> String {
+        return self.source.copy()
+    }
+
+    /// How many groups the pattern has, not counting the whole match.
+    pub fn group_count(self) -> usize {
+        return self.groups
+    }
+
+    /// The groups' names, in order, `""` for a group without one.
+    pub fn group_names(self) -> List<String> {
+        return self.names.copy()
+    }
+
+    /// Whether the pattern matches anywhere in `text`.
+    pub fn is_match(mut self, text: String) -> bool {
+        if let lit = self.literal {
+            return text.contains(lit)
+        }
+        if not self.inner.is_empty() {
+            let (s, _) = self.inner_span(text, 0)
+            if s != GAVE_UP {
+                return s != NO_MATCH
+            }
+        }
+        if self.fwd.ok {
+            let e = self.fwd.forward(text, 0, true, false)
+            if e == NO_MATCH {
+                return false
+            }
+            if e != GAVE_UP {
+                let end = usize.wrap(e)
+                if end >= text.len() or not inside_rune(text.byte_at(end)) {
+                    return true
+                }
+                // An empty match inside a rune, which isn't one: look properly.
+                return self.span_at(text, 0) != none
+            }
+        }
+        return pike_search(self.prog, mut self.pike, text, 0, text.len(), false, 2)
+    }
+
+    /// The first match in `text`, as Python's `re.search` finds it.
+    pub fn find(mut self, text: String) -> Match? {
+        return self.find_at(text, 0)
+    }
+
+    /// The first match that starts at byte `from` of `text` or after it. The assertions see the
+    /// text before `from`, so `\b` and `^` mean the same as they would in the whole text.
+    pub fn find_at(mut self, text: String, from: usize) -> Match? {
+        if let (s, e) = self.span_at(text, from) {
+            return some(Match { start: s, end: e, text: text[s..e] })
+        }
+        return none
+    }
+
+    // Where the first match from `from` is, found by the literal inside every match, `inner`: at
+    // each place it is, the DFA for the part of the pattern before it reads back to where that
+    // part starts as far left as it can, and the whole pattern's DFA reads forward from there for
+    // where the match ends. The part before can't take the literal's first byte, which is what
+    // makes the first place to give a match give the leftmost one: a match that starts earlier
+    // and has its literal later would have that part take the byte. It reads each byte back once,
+    // as the part before stops at the literal's last place; reading forward could go over the
+    // same bytes again and again, so when it would, it gives up, `GAVE_UP`, and the usual search
+    // runs instead. `(NO_MATCH, 0)` for none.
+    fn inner_span(mut self, text: String, from: usize) -> (u64, u64) {
+        let n = text.len()
+        let m = self.inner.len()
+        var at = from
+        // Where the literal has to be for reading forward not to go over bytes it has.
+        var least = from
+        loop {
+            if at + m > n {
+                return (NO_MATCH, 0)
+            }
+            var k: usize = 0
+            unsafe {
+                k = cx_bytes_find_rare(text.as_ptr().add(at), n - at, self.inner.as_ptr(), m, self.inner_rare)
+            }
+            if k > n - at {
+                return (NO_MATCH, 0)
+            }
+            k += at
+            if k < least {
+                return (GAVE_UP, 0)
+            }
+            if not self.before_ends.is_empty() and (k == from or self.before_ends[usize(text.byte_at(k - 1))] == 0) {
+                at = k + 1
+                continue
+            }
+            let s = self.before.backward(text, k, from)
+            if s == GAVE_UP {
+                return (GAVE_UP, 0)
+            }
+            if s != NO_MATCH {
+                let e = self.fwd.forward(text, usize.wrap(s), false, true)
+                if e == GAVE_UP {
+                    return (GAVE_UP, 0)
+                }
+                if e != NO_MATCH {
+                    return (s, e)
+                }
+                least = self.fwd.stopped
+            }
+            at = k + 1
+        }
+    }
+
+    // Where the first match from `from` is, for a pattern every match of which starts with the
+    // literal `fwd.prefix`: at each place it is, a search anchored there, so where the match starts
+    // is known without reading back. It gives up as `inner_span` does.
+    fn prefix_span(mut self, text: String, from: usize) -> (u64, u64) {
+        let n = text.len()
+        var at = from
+        var least = from
+        loop {
+            if at >= n {
+                return (NO_MATCH, 0)
+            }
+            let j = self.fwd.skip_from(text, at)
+            if j >= n {
+                return (NO_MATCH, 0)
+            }
+            if j < least {
+                return (GAVE_UP, 0)
+            }
+            let e = self.fwd.forward(text, j, false, true)
+            if e == GAVE_UP {
+                return (GAVE_UP, 0)
+            }
+            if e != NO_MATCH {
+                return (u64(j), e)
+            }
+            least = self.fwd.stopped
+            at = j + 1
+        }
+    }
+
+    // Where the first match from `from` is.
+    fn span_at(mut self, text: String, from: usize) -> (usize, usize)? {
+        if from > text.len() {
+            return none
+        }
+        if let lit = self.literal {
+            let n = text.len()
+            var k: usize = 0
+            unsafe {
+                k = cx_bytes_find_rare(text.as_ptr().add(from), n - from, lit.as_ptr(), lit.len(), self.lit_rare)
+            }
+            if k > n - from {
+                return none
+            }
+            return some((from + k, from + k + lit.len()))
+        }
+        if self.fwd.skip == SKIP_PREFIX or not self.inner.is_empty() {
+            let (s, e) = if self.fwd.skip == SKIP_PREFIX { self.prefix_span(text, from) } else { self.inner_span(text, from) }
+            if s == NO_MATCH {
+                return none
+            }
+            if s != GAVE_UP {
+                return some((usize.wrap(s), usize.wrap(e)))
+            }
+        }
+        if self.fwd.ok and self.rev.ok {
+            var at = from
+            loop {
+                let e = self.fwd.forward(text, at, false, false)
+                if e == NO_MATCH {
+                    return none
+                }
+                if e == GAVE_UP {
+                    break
+                }
+                let s = self.rev.backward(text, usize.wrap(e), at)
+                if s == GAVE_UP or s == NO_MATCH {
+                    break
+                }
+                let start = usize.wrap(s)
+                let end = usize.wrap(e)
+                if start == end and start < text.len() and inside_rune(text.byte_at(start)) {
+                    // An empty match inside a rune, which isn't a place a match can be: the next
+                    // one is after this rune.
+                    var next = start + 1
+                    while next < text.len() and inside_rune(text.byte_at(next)) {
+                        next += 1
+                    }
+                    at = next
+                    continue
+                }
+                return some((start, end))
+            }
+        }
+        if pike_search(self.prog, mut self.pike, text, from, text.len(), false, 2) {
+            return some((usize.wrap(self.pike.best[0]), usize.wrap(self.pike.best[1])))
+        }
+        return none
+    }
+
+    /// Every match in `text`, one after another, none overlapping. An empty match right after
+    /// another isn't one, as in Rust, so `a*` finds `aaa` in `baaa` once, not an empty match after.
+    pub fn find_all(mut self, text: String) -> List<Match> {
+        var out = List<Match>()
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        loop {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                out.push(Match { start: s, end: e, text: text[s..e] })
+            } else {
+                break
+            }
+        }
+        return out
+    }
+
+    /// How many matches `find_all` finds, without making them, so without copying their text.
+    pub fn count(mut self, text: String) -> usize {
+        var n: usize = 0
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        loop {
+            if self.next_span(text, mut at, mut last_end) == none {
+                break
+            }
+            n += 1
+        }
+        return n
+    }
+
+    // The next match from `at` in a walk over every match, which moves `at` past it. `last_end` is
+    // where the last one ended, which an empty match can't be.
+    fn next_span(mut self, text: String, at: mut usize, last_end: mut usize) -> (usize, usize)? {
+        while at <= text.len() {
+            if let (s, e) = self.span_at(text, at) {
+                if s == e and s == last_end {
+                    // An empty match where the last one ended: look again a rune on.
+                    if s >= text.len() {
+                        return none
+                    }
+                    let (_, n) = rune_at(text, s)
+                    at = s + n
+                    continue
+                }
+                last_end = e
+                at = e
+                return some((s, e))
+            }
+            return none
+        }
+        return none
+    }
+
+    /// The first match and its groups.
+    pub fn captures(mut self, text: String) -> Captures? {
+        return self.captures_at(text, 0)
+    }
+
+    /// The first match from byte `from` and its groups.
+    pub fn captures_at(mut self, text: String, from: usize) -> Captures? {
+        if from > text.len() {
+            return none
+        }
+        if let (s, e) = self.span_at(text, from) {
+            return self.groups_at(text, s, e)
+        }
+        return none
+    }
+
+    // The groups of the match from `s` to `e`. The DFAs find where a match is, and the Pike VM,
+    // run over it alone, its groups, when it has any.
+    fn groups_at(mut self, text: String, s: usize, e: usize) -> Captures? {
+        if self.groups == 0 {
+            var groups = List<Match?>()
+            groups.push(some(Match { start: s, end: e, text: text[s..e] }))
+            return some(Captures { groups: groups, names: self.names.copy() })
+        }
+        let slots = self.prog.slots
+        if pike_search(self.prog, mut self.pike, text, s, e, true, slots) {
+            return some(self.groups_of(text))
+        }
+        return none
+    }
+
+    // The groups in `pike.best`, of the match just found.
+    fn groups_of(self, text: String) -> Captures {
+        var groups = List<Match?>()
+        groups.reserve(self.groups + 1)
+        for g in 0..self.groups + 1 {
+            let s = self.pike.best[g * 2]
+            let e = self.pike.best[g * 2 + 1]
+            if s == UNSET or e == UNSET {
+                groups.push(none)
+            } else {
+                groups.push(some(Match { start: usize.wrap(s), end: usize.wrap(e), text: text[usize.wrap(s)..usize.wrap(e)] }))
+            }
+        }
+        return Captures { groups: groups, names: self.names.copy() }
+    }
+
+    /// Every match and its groups, as `find_all` finds the matches.
+    pub fn captures_all(mut self, text: String) -> List<Captures> {
+        var out = List<Captures>()
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        loop {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                if let c = self.groups_at(text, s, e) {
+                    out.push(c)
+                }
+            } else {
+                break
+            }
+        }
+        return out
+    }
+
+    /// `text` with its first match replaced by `with`, in which `$1` and `${1}` are group 1's
+    /// text, `${name}` and `$name` the named group's, `$0` the whole match's, and `$$` a `$`.
+    pub fn replace(mut self, text: String, with: String) -> String {
+        return self.replace_n(text, with, 1)
+    }
+
+    /// `text` with every match replaced by `with`, as `replace` replaces one.
+    pub fn replace_all(mut self, text: String, with: String) -> String {
+        return self.replace_n(text, with, usize.wrap(UNSET))
+    }
+
+    fn replace_n(mut self, text: String, with: String, limit: usize) -> String {
+        var out = String()
+        var kept: usize = 0
+        var count: usize = 0
+        let plain = not with.contains("$")
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        while count < limit {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                out.push_str(text[kept..s])
+                if plain {
+                    out.push_str(with)
+                } else if let c = self.groups_at(text, s, e) {
+                    expand(mut out, with, c)
+                }
+                kept = e
+                count += 1
+            } else {
+                break
+            }
+        }
+        out.push_str(text[kept..])
+        return out
+    }
+
+    /// The parts of `text` between its matches, as Python's `re.split` gives them without groups,
+    /// empty parts too.
+    pub fn split(mut self, text: String) -> List<String> {
+        var out = List<String>()
+        var kept: usize = 0
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        loop {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                out.push(text[kept..s])
+                kept = e
+            } else {
+                break
+            }
+        }
+        out.push(text[kept..])
+        return out
+    }
+}
+
+// Adds `with` to `out`, with `$1`, `${name}` and the rest replaced by the groups in `c`.
+fn expand(out: mut String, with: String, c: Captures) {
+    var i: usize = 0
+    var kept: usize = 0
+    while i < with.len() {
+        if with.byte_at(i) != 36 {
+            i += 1
+            continue
+        }
+        out.push_str(with[kept..i])
+        i += 1
+        if i < with.len() and with.byte_at(i) == 36 {
+            out.push('$')
+            i += 1
+            kept = i
+            continue
+        }
+        var name = String()
+        if i < with.len() and with.byte_at(i) == 123 {
+            if let j = with[i..].find("\}") {
+                name = with[i + 1..i + j]
+                i = i + j + 1
+            } else {
+                out.push('$')
+                kept = i
+                continue
+            }
+        } else {
+            let start = i
+            while i < with.len() and is_word_ascii(u32(with.byte_at(i))) {
+                i += 1
+            }
+            name = with[start..i]
+        }
+        kept = i
+        if name.is_empty() {
+            out.push('$')
+            continue
+        }
+        if let n = usize.parse(name) {
+            if let t = c.get(n) {
+                out.push_str(t)
+            }
+        } else if let t = c.name(name) {
+            out.push_str(t)
+        }
+    }
+    out.push_str(with[kept..])
+}
+
+// The text a pattern is, when it's nothing but runes to match as they are.
+fn literal_of(node: Node) -> String? {
+    if let Node.Lit(rs) = node {
+        var s = String()
+        for r in rs {
+            if let x = rune.try_from(r) {
+                s.push(x)
+            }
+        }
+        return some(s)
+    }
+    return none
+}
+
+// Adds the UTF-8 of runes `rs` to `out`.
+fn push_lit(out: mut List<u8>, rs: List<u32>) {
+    var bs = List<u32>()
+    for r in rs {
+        push_utf8(mut bs, r)
+    }
+    for b in bs {
+        out.push(u8.wrap(b))
+    }
+}
+
+// Adds to `out` the bytes every match of `node` starts with; whether they're all of it, so that
+// what comes after it starts where they end.
+fn literal_prefix(node: Node, out: mut List<u8>) -> bool {
+    return match node {
+        Node.Empty => true,
+        Node.Look(_) => true,
+        Node.Lit(rs) => {
+            push_lit(mut out, rs)
+            true
+        },
+        Node.Group(inner, _) => literal_prefix(inner.value, mut out),
+        Node.Concat(items) => {
+            for item in items {
+                if not literal_prefix(item, mut out) {
+                    return false
+                }
+            }
+            true
+        },
+        Node.Repeat(inner, min, max, _) => {
+            if min == 0 {
+                return false
+            }
+            literal_prefix(inner.value, mut out) and min == 1 and max == 1
+        },
+        _ => false,
+    }
+}
+
+// A literal every match of `node` has after something else, which a search can look for first,
+// the part of the pattern before it, and whether that part can't take the literal's first byte,
+// which `Regex.inner_span` needs; a forward search's skips don't (`SKIP_INNER`). The longest
+// literal, one that can be had first; none where the only one is a single common byte, which
+// would turn up too often to be worth looking for.
+fn inner_literal(node: Node) -> (List<u8>, Node, bool)? {
+    match node {
+        Node.Group(inner, _) => {
+            return inner_literal(inner.value)
+        },
+        Node.Concat(items) => {
+            var best: usize = 0
+            var best_bytes = List<u8>()
+            var best_clear = false
+            for i in 1..items.len() {
+                if let Node.Lit(rs) = items[i] {
+                    var bytes = List<u8>()
+                    push_lit(mut bytes, rs)
+                    let b0 = u32(bytes[0])
+                    if bytes.len() == 1 and (b0 == 32 or (b0 >= 97 and b0 <= 122)) {
+                        continue
+                    }
+                    var clear = true
+                    for j in 0..i {
+                        if takes_lead(items[j], b0) {
+                            clear = false
+                            break
+                        }
+                    }
+                    let better = if clear == best_clear { bytes.len() > best_bytes.len() } else { clear }
+                    if best_bytes.is_empty() or better {
+                        best = i
+                        best_bytes = bytes
+                        best_clear = clear
+                    }
+                }
+            }
+            if best_bytes.is_empty() {
+                return none
+            }
+            var head = List<Node>()
+            for j in 0..best {
+                head.push(items[j].copy())
+            }
+            return some((best_bytes, concat_of(head), best_clear))
+        },
+        _ => {
+            return none
+        },
+    }
+}
+
+// The bytes `node` can take, as a table with a nonzero entry for each; none if it's too big to
+// work out.
+fn byte_set(node: Node) -> List<u8>? {
+    var prog = ByteProg { op: List<u8>(), a: List<u32>(), b: List<u32>(), next: List<u32>(), shared: Map<u64, u32>(), looks: 0, too_big: false }
+    let done = prog.emit(B_MATCH, 0, 0, 0)
+    _ = prog.compile(node, done, false)
+    if prog.too_big {
+        return none
+    }
+    var set: List<u8> = [0; 256]
+    for i in 0..prog.op.len() {
+        if prog.op[i] == B_RANGE {
+            var b = prog.a[i]
+            while b <= prog.b[i] {
+                set[usize(b)] = 1
+                b += 1
+            }
+        }
+    }
+    return some(set)
+}
+
+// Whether `node` can take a rune whose UTF-8 starts with byte `lead`.
+fn takes_lead(node: Node, lead: u32) -> bool {
+    var lo = lead
+    var hi = lead
+    if lead >= 0xF0 {
+        lo = (lead & 0x07) << 18
+        hi = lo + 0x3FFFF
+    } else if lead >= 0xE0 {
+        lo = (lead & 0x0F) << 12
+        hi = lo + 0xFFF
+    } else if lead >= 0xC0 {
+        lo = (lead & 0x1F) << 6
+        hi = lo + 0x3F
+    }
+    return takes_runes(node, lo, hi)
+}
+
+// Whether `node` can take a rune from `lo` to `hi`.
+fn takes_runes(node: Node, lo: u32, hi: u32) -> bool {
+    return match node {
+        Node.Empty => false,
+        Node.Look(_) => false,
+        Node.Lit(rs) => {
+            for r in rs {
+                if r >= lo and r <= hi {
+                    return true
+                }
+            }
+            false
+        },
+        Node.Class(ranges) => {
+            var i: usize = 0
+            while i + 1 < ranges.len() {
+                if ranges[i] <= hi and ranges[i + 1] >= lo {
+                    return true
+                }
+                i += 2
+            }
+            false
+        },
+        Node.Group(inner, _) => takes_runes(inner.value, lo, hi),
+        Node.Repeat(inner, _, _, _) => takes_runes(inner.value, lo, hi),
+        Node.Concat(items) => {
+            for item in items {
+                if takes_runes(item, lo, hi) {
+                    return true
+                }
+            }
+            false
+        },
+        Node.Alt(alts) => {
+            for a in alts {
+                if takes_runes(a, lo, hi) {
+                    return true
+                }
+            }
+            false
+        },
+    }
+}

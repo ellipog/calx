@@ -1,0 +1,54 @@
+// `find` against a search a byte at a time, for needles put at every place in texts as long as
+// SIMD's steps and longer, among near misses: the runtime tests 16 or 32 places at a time for the
+// needle's two rarest bytes, and the places before the end are what a step can't read past.
+
+fn naive(hay: String, needle: String) -> usize? {
+    let n = needle.len()
+    var i: usize = 0
+    while i + n <= hay.len() {
+        var j: usize = 0
+        while j < n and hay.byte_at(i + j) == needle.byte_at(j) {
+            j += 1
+        }
+        if j == n {
+            return some(i)
+        }
+        i += 1
+    }
+    return none
+}
+
+fn main() {
+    let needles: List<String> = ["xq", "exq", "example", "aab", "zz", "é", "éx", "a.b", "😀q", "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"]
+    var checked = 0
+    var wrong = 0
+    for needle in needles {
+        for len in 0..80usize {
+            for at in 0..len + 1 {
+                // A text of near misses, `ex` and `q` without each other, with the needle at `at`.
+                var hay = String()
+                var k: usize = 0
+                while hay.len() < at {
+                    hay.push(if k % 3 == 0 { 'q' } else if k % 3 == 1 { 'e' } else { 'x' })
+                    k += 1
+                }
+                if hay.len() + needle.len() <= len {
+                    hay.push_str(needle)
+                }
+                while hay.len() < len {
+                    hay.push('a')
+                }
+                checked += 1
+                if hay.find(needle) != naive(hay, needle) {
+                    wrong += 1
+                    if wrong <= 5 {
+                        println("[{hay}] [{needle}]: {hay.find(needle)}, not {naive(hay, needle)}")
+                    }
+                }
+            }
+        }
+    }
+    println("{wrong} wrong of {checked}")    // out: 0 wrong of 32400
+    println("{String("").find("")} {String("a").find("")} {String("").find("a")}")    // out: some(0) some(0) none
+    println("{String("abab").find("bab")} {String("aaa").find("aaaa")}")    // out: some(1) none
+}

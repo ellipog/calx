@@ -1,0 +1,211 @@
+// std.regex: finding, capturing, replacing and splitting, the syntax and its flags, Unicode, the
+// empty-match rules Rust has, and the patterns it refuses, with where. The long texts at the end
+// take the searches' skips: by a literal prefix, by the bytes a match can start with, and by a
+// literal inside, including the cases where skipping stops or a search gives up and starts over.
+import std.regex.{Regex, Match}
+
+fn found(m: Match?) -> String {
+    if let x = m {
+        return x.text.copy()
+    }
+    return "none"
+}
+
+fn spans(ms: List<Match>) -> String {
+    var parts = List<String>()
+    for m in ms {
+        parts.push("{m.start}-{m.end}")
+    }
+    return parts.join(" ")
+}
+
+fn texts(ms: List<Match>) -> String {
+    var parts = List<String>()
+    for m in ms {
+        parts.push(m.text.copy())
+    }
+    return parts.join("|")
+}
+
+fn refused(pattern: String) {
+    match Regex.new(pattern) {
+        ok(_) => println("compiled {pattern}"),
+        err(e) => println("{e}"),
+    }
+}
+
+// Every match, found by a naive search from each place, for checking the skips on long texts.
+fn naive_count(re: mut Regex, text: String) -> usize {
+    var n: usize = 0
+    var at: usize = 0
+    while at <= text.len() {
+        if let m = re.find_at(text, at) {
+            n += 1
+            at = if m.end > m.start { m.end } else { m.end + 1 }
+        } else {
+            break
+        }
+    }
+    return n
+}
+
+fn main() {
+    // Finding.
+    var re = Regex.new(#"\d+"#)!
+    println("{re} {re.pattern()} {re.group_count()}")    // out: \d+ \d+ 0
+    println("{re.is_match("abc")} {re.is_match("a1")}")    // out: false true
+    if let m = re.find("ab 123 45") {
+        println("{m.start} {m.end} {m.text}")    // out: 3 6 123
+    }
+    println("{found(re.find_at("ab 123 45", 4))}")    // out: 23
+    println("{spans(re.find_all("ab 123 45 6"))} {re.count("ab 123 45 6")}")    // out: 3-6 7-9 10-11 3
+    println("{re.find("none here") == none}")    // out: true
+
+    // Leftmost-first, as Perl, Python and Rust choose: the first alternative that matches wins.
+    var alt = Regex.new("samwise|sam")!
+    println("{found(alt.find("samwise"))}")    // out: samwise
+    var alt2 = Regex.new("sam|samwise")!
+    println("{found(alt2.find("samwise"))}")    // out: sam
+    var lazy = Regex.new("a+?")!
+    println("{found(lazy.find("aaa"))}")    // out: a
+    var swap = Regex.new("(?U)a+")!
+    println("{found(swap.find("aaa"))}")    // out: a
+
+    // Captures, numbered and named, with a group that took no part.
+    var date = Regex.new(#"(?P<y>\d{4})-(?P<m>\d{2})(-(\d{2}))?"#)!
+    println("{date.group_count()} {date.group_names().join(",")}")    // out: 4 y,m,,
+    if let c = date.captures("on 2026-11 and 2026-11-07") {
+        println("{c.len()} {c.get(0)} {c.name("y")} {c.get(3)} {c.span(1)}")    // out: 5 some(2026-11) some(2026) none some((3, 7))
+    }
+    var all = List<String>()
+    for c in date.captures_all("2026-11 2027-01-02") {
+        all.push("{c.name("m") ?? String()}/{c.get(4) ?? String("-")}")
+    }
+    println(all.join(" "))    // out: 11/- 01/02
+    var bare = Regex.new("ab")!
+    if let c = bare.captures("xab") {
+        println("{c.len()} {c.span(0)}")    // out: 1 some((1, 3))
+    }
+
+    // Replacing, with groups in the template; `$` templates are raw strings, since `{}` would
+    // interpolate.
+    println(date.replace_all("2026-11-07 and 2027-01", #"${m}/${y}"#))    // out: 11/2026 and 01/2027
+    println(re.replace("a1b22c333", "#"))    // out: a#b22c333
+    println(re.replace_all("a1b22c333", "#"))    // out: a#b#c#
+    var swap2 = Regex.new(#"(\w+) (\w+)"#)!
+    println(swap2.replace_all("hello world", #"$2 $1 $$ $0"#))    // out: world hello $ hello world
+    var named = Regex.new(#"(?<word>\w+)"#)!
+    println(named.replace_all("a bc", #"[$word]"#))    // out: [a] [bc]
+
+    // Splitting, as Python's `re.split` without groups.
+    var comma = Regex.new(#"\s*,\s*"#)!
+    println(comma.split("a , b,c ,, d").join("|"))    // out: a|b|c||d
+    println("{comma.split("").len()}")    // out: 1
+
+    // Empty matches: one after another isn't, as in Rust.
+    var stars = Regex.new("a*")!
+    println(spans(stars.find_all("baaa")))    // out: 0-0 1-4
+    println(spans(stars.find_all("")))    // out: 0-0
+    var nothing = Regex.new("")!
+    println(spans(nothing.find_all("é1")))    // out: 0-0 2-2 3-3
+    println(nothing.replace_all("ab", "-"))    // out: -a-b-
+
+    // Flags and anchors. `$` is the end of the text unless `(?m)`, as in Rust, not before a last
+    // line end as in Python.
+    var anchored = Regex.new("^b$")!
+    println("{anchored.is_match("a\nb\n")} {anchored.is_match("b")}")    // out: false true
+    var lines = Regex.new("(?m)^b$")!
+    println("{lines.is_match("a\nb\n")}")    // out: true
+    var dots = Regex.new("a.b")!
+    var dots_s = Regex.new("(?s)a.b")!
+    println("{dots.is_match("a\nb")} {dots_s.is_match("a\nb")}")    // out: false true
+    var spaced = Regex.new("(?x) a b  # a comment\n c")!
+    println("{found(spaced.find("xabc"))}")    // out: abc
+    var text_ends = Regex.new(#"\Aab\z"#)!
+    println("{text_ends.is_match("ab")} {text_ends.is_match("ab\n")}")    // out: true false
+    var words = Regex.new(#"\bcat\b"#)!
+    println("{spans(words.find_all("cat concat cat."))}")    // out: 0-3 11-14
+    var inside = Regex.new(#"\Bcat"#)!
+    println("{spans(inside.find_all("cat concat"))}")    // out: 7-10
+
+    // Case, folded as Unicode does.
+    var case = Regex.new("(?i)straße")!
+    println("{case.is_match("STRASSE")} {case.is_match("STRAẞE")} {case.is_match("Straße")}")    // out: false true true
+    var kelvin = Regex.new("(?i)k")!
+    println("{kelvin.count("kK\u{212A}")}")    // out: 3
+    var part = Regex.new("a(?i:b)c")!
+    println("{part.is_match("aBc")} {part.is_match("ABc")}")    // out: true false
+
+    // Classes: ranges, negation, nesting, POSIX, Perl, and their ASCII forms.
+    var cls = Regex.new("[a-c[x-z]]+")!
+    println("{texts(cls.find_all("abcdxyz"))}")    // out: abc|xyz
+    var neg = Regex.new("[^a-c]+")!
+    println("{texts(neg.find_all("abcdé😀a"))}")    // out: dé😀
+    var posix = Regex.new("[[:upper:][:digit:]]+")!
+    println("{texts(posix.find_all("aB1c"))}")    // out: B1
+    var uni = Regex.new(#"\w+"#)!
+    println("{texts(uni.find_all("héllo wörld 東京"))}")    // out: héllo|wörld|東京
+    var ascii = Regex.new(#"(?a)\w+"#)!
+    println("{texts(ascii.find_all("héllo"))}")    // out: h|llo
+    var digits = Regex.new(#"\d"#)!
+    println("{digits.count("1٣")}")    // out: 2
+    var esc = Regex.new(#"\x41\u{1F600}\."#)!
+    println("{esc.is_match("A😀.")}")    // out: true
+    var counted = Regex.new(#"a{2,3}"#)!
+    println("{texts(counted.find_all("aaaaaaa"))}")    // out: aaa|aaa
+    var brace = Regex.new(#"a{,2}x"#)!
+    println("{found(brace.find("aaax"))}")    // out: aax
+    var literal_brace = Regex.new(#"a{x"#)!
+    println("{literal_brace.is_match("a\{x")}")    // out: true
+
+    // What it refuses, and where.
+    refused("(?=a)")    // out: column 1: lookaround, such as `(?=...)` and `(?<!...)`, isn't supported: std.regex finds every match in linear time, which lookaround can't keep
+    refused(#"(a)\1"#)    // out: column 4: backreferences, such as `\1`, aren't supported: std.regex finds every match in linear time, which backreferences can't keep
+    refused(#"\pL"#)    // out: column 1: Unicode properties, such as `\p{L}`, aren't supported yet
+    refused("a**")    // out: column 3: `*` after something that can't be repeated, such as another quantifier; put it in a group to repeat it again
+    refused("*a")    // out: column 1: `*` with nothing before it to repeat
+    refused("(a")    // out: column 1: `(` with no `)` to close it
+    refused("[a")    // out: column 1: `[` with no `]` to close it
+    refused("[z-a]")    // out: column 2: `z-a` is a range whose end comes before its start
+    refused(#"a{3,2}"#)    // out: column 2: `{3,2}` repeats at least 3 times and at most 2
+    refused(#"a{100001}"#)    // out: column 3: a count over 100000
+    refused("(?q)")    // out: column 3: `q` isn't a flag; the flags are `i`, `m`, `s`, `x`, `U` and `a`
+    refused("(?P<a>x)(?P<a>y)")    // out: column 13: a second group named `a`
+    refused("[[:nope:]]")    // out: column 2: `[:nope:]` isn't a class; the ones in brackets are alnum, alpha, ascii, blank, cntrl, digit, graph, lower, print, punct, space, upper, word and xdigit
+    refused(#"\q"#)    // out: column 1: `\q` isn't an escape
+    refused("a*+")    // out: column 3: possessive quantifiers, such as `*+`, aren't supported: a quantifier matches greedily, or lazily with `?`
+
+    // Long texts, which take the skips. Each count is checked against finding the matches one
+    // place at a time.
+    var log = String()
+    for i in 0..3000u32 {
+        log.push_str("player{i % 97} joined at 2026-11-{i % 28 + 1} from 10.0.{i % 256}.{i % 7}, mail steve{i % 9}@example.com, mining\n")
+    }
+    let patterns: List<String> = ["example", "(?m)^player9", #"\d{4}-\d{2}"#, #"(\d+)\.(\d+)\.(\d+)\.(\d+)"#, "(?i)STEVE", #"\b\w+ing\b"#, #"\w+@\w+"#, "[0-9]x", #"\d-.*Z"#, "[sS]teve8"]
+    var results = List<String>()
+    for p in patterns {
+        var r = Regex.new(p)!
+        let n = r.count(log)
+        var check = Regex.new(p)!
+        let want = naive_count(mut check, log)
+        results.push(if n == want { "{n}" } else { "{p} {n} != {want}" })
+    }
+    println(results.join(" "))    // out: 3000 241 3000 3000 3000 3000 3000 0 0 333
+    // A near miss on almost every byte, so skipping stops; then a literal inside whose forward
+    // search would read the same bytes again, so the search starts over without it.
+    var near = String()
+    for _ in 0..2000u32 {
+        near.push_str("1y")
+    }
+    near.push_str("1x")
+    var nx = Regex.new("[0-9]x")!
+    println("{nx.find(near)?.start} {nx.count(near)}")    // out: some(4000) 1
+    var dashes = String()
+    for _ in 0..2000u32 {
+        dashes.push_str("1-")
+    }
+    var reread = Regex.new(#"\d-.*Z"#)!
+    println("{reread.find(dashes) == none}")    // out: true
+    dashes.push('Z')
+    println("{reread.find(dashes)?.start} {reread.find(dashes)?.end}")    // out: some(0) some(4001)
+}

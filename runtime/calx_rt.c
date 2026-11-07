@@ -1474,22 +1474,163 @@ cx_bool cx_parse_f32(cx_str s, cx_f32* out) {
 
 cx_bool cx_str_contains(cx_str hay, cx_str needle) { return cx_str_find(hay, needle) != CX_NOT_FOUND; }
 
-/* `memchr` finds each place the needle's first byte is, which it does many bytes a step, and only
- * there are the rest compared. */
-cx_usize cx_str_find(cx_str hay, cx_str needle) {
-    if (needle.len == 0) return 0;
-    if (needle.len > hay.len) return CX_NOT_FOUND;
-    const cx_u8* p = hay.ptr;
-    const cx_u8* stop = hay.ptr + (hay.len - needle.len) + 1;  // past the last place it can start
-    cx_u8 first = needle.ptr[0];
-    while (p < stop) {
-        p = (const cx_u8*)memchr(p, first, (size_t)(stop - p));
-        if (!p) return CX_NOT_FOUND;
-        if (memcmp(p + 1, needle.ptr + 1, needle.len - 1) == 0) return (cx_usize)(p - hay.ptr);
-        p++;
+/* How often a byte turns up in text, roughly, from 0 for the rarest: spaces and lowercase letters
+ * most, in English's order, then line ends and common punctuation, digits, capitals, bytes of
+ * UTF-8, other punctuation, and control bytes least. */
+static int byte_commonness(cx_u8 b) {
+    /* a to z, 250 for `e` down by 3 a place in "etaoinsrhldcumfpgwybvkxjqz". */
+    static const cx_u8 letters[26] = {244, 193, 217, 220, 250, 208, 202, 226, 238, 181, 187, 223, 211,
+                                      235, 241, 205, 178, 229, 232, 247, 214, 190, 199, 184, 196, 175};
+    if (b == ' ') return 255;
+    if (b >= 'a' && b <= 'z') return letters[b - 'a'];
+    if (b == '\n' || b == '.' || b == ',') return 170;
+    if (b >= '0' && b <= '9') return 150 - (b - '0');
+    if (b >= 'A' && b <= 'Z') return 120;
+    if (b == '\t' || b == '\r') return 110;
+    if (b >= 0x80) return b >= 0xC0 ? 90 : 100;
+    if (b < 0x20 || b == 0x7F) return 5;
+    return 80;
+}
+
+/* Where `needle` first is in the `len` bytes at `hay`. See `cx_bytes_find_rare`. */
+cx_usize cx_bytes_find(const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n) {
+    return cx_bytes_find_rare(hay, len, needle, n, cx_bytes_rare(needle, n));
+}
+
+/* Which two of the `n` bytes at `needle` are likely the rarest in text, for `cx_bytes_find_rare`:
+ * the rarest's place, and the next's shifted up 16 bits, both among the first 65536. */
+cx_usize cx_bytes_rare(const cx_u8* needle, cx_usize n) {
+    cx_usize m = n < 65536 ? n : 65536;
+    cx_usize k1 = 0, k2 = 0;
+    int b1 = 1000, b2 = 1000;
+    for (cx_usize i = 0; i < m; i++) {
+        int c = byte_commonness(needle[i]);
+        if (c < b1) {
+            k2 = k1;
+            b2 = b1;
+            k1 = i;
+            b1 = c;
+        } else if (c < b2) {
+            k2 = i;
+            b2 = c;
+        }
+    }
+    if (m > 1 && k2 == k1) k2 = k1 == 0 ? 1 : 0;
+    return k1 | (k2 << 16);
+}
+
+/* Whether the `n` bytes at `s` are the needle's. A short needle is compared a byte at a time,
+ * which beats calling `memcmp` for the few bytes there are. */
+static inline int bytes_same(const cx_u8* s, const cx_u8* needle, cx_usize n) {
+    if (n <= 32) {
+        cx_usize j = 0;
+        while (j < n && s[j] == needle[j]) j++;
+        return j == n;
+    }
+    return memcmp(s, needle, n) == 0;
+}
+
+/* `cx_bytes_find`, given what `cx_bytes_rare` says of the needle, for a search that looks for the
+ * same needle again and again. With SIMD, each step tests 32 places the needle could start, or
+ * 16, for both of its rarest bytes at once, and only where both are there is the rest compared:
+ * that's rarely, even when each byte alone is common. Without it, `memchr` finds the rarest. */
+#if defined(__AVX2__)
+typedef char find_v __attribute__((vector_size(32), aligned(1)));
+#define FIND_STEP 32
+#define FIND_MASK(v) ((cx_u32)__builtin_ia32_pmovmskb256(v))
+#elif defined(__SSE2__)
+typedef char find_v __attribute__((vector_size(16), aligned(1)));
+#define FIND_STEP 16
+#define FIND_MASK(v) ((cx_u32)__builtin_ia32_pmovmskb128(v))
+#endif
+cx_usize cx_bytes_find_rare(const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n, cx_usize k) {
+    if (n == 0) return 0;
+    if (n > len) return CX_NOT_FOUND;
+    if (n == 1) {
+        const cx_u8* q = (const cx_u8*)memchr(hay, needle[0], (size_t)len);
+        return q ? (cx_usize)(q - hay) : CX_NOT_FOUND;
+    }
+    cx_usize k1 = k & 0xFFFF, k2 = (k >> 16) & 0xFFFF;
+    cx_u8 c1 = needle[k1], c2 = needle[k2];
+    cx_usize last = len - n;  // the last place the needle can start
+    cx_usize p = 0;
+#if defined(FIND_STEP)
+    /* Each step's loads end at p + k + FIND_STEP - 1, which is inside the text while the starts it
+     * tests, up to p + FIND_STEP - 1, are no later than `last`. */
+    while (p <= last && last - p >= FIND_STEP - 1) {
+        find_v a = *(const find_v*)(hay + p + k1);
+        find_v b = *(const find_v*)(hay + p + k2);
+        cx_u32 m = FIND_MASK((a == (char)c1) & (b == (char)c2));
+        while (m) {
+            cx_usize j = p + (cx_usize)__builtin_ctz(m);
+            if (bytes_same(hay + j, needle, n)) return j;
+            m &= m - 1;
+        }
+        p += FIND_STEP;
+    }
+    for (; p <= last; p++) {
+        if (hay[p + k1] == c1 && hay[p + k2] == c2 && bytes_same(hay + p, needle, n)) return p;
     }
     return CX_NOT_FOUND;
+#else
+    const cx_u8* q = hay + k1;
+    const cx_u8* stop = hay + last + k1 + 1;  // past the last place the rarest byte can be
+    while (q < stop) {
+        q = (const cx_u8*)memchr(q, c1, (size_t)(stop - q));
+        if (!q) return CX_NOT_FOUND;
+        const cx_u8* s = q - k1;
+        if (s[k2] == c2 && bytes_same(s, needle, n)) return (cx_usize)(s - hay);
+        q++;
+    }
+    return CX_NOT_FOUND;
+#endif
 }
+cx_usize cx_str_find(cx_str hay, cx_str needle) { return cx_bytes_find(hay.ptr, hay.len, needle.ptr, needle.len); }
+
+/* For std.regex: the first byte from `from` that a match can start with, or `len` if there's none.
+ * `set` has a nonzero entry for each of them, `count` of them, and with three or fewer, `bytes`
+ * holds them, one a byte. One is found by `memchr`; two or three by testing many bytes at once
+ * for any of them, 32 or 16 with SIMD and 8 without, then looking at those one by one only when
+ * one is there; more by the table, a byte at a time. */
+#define RX_ONES 0x0101010101010101ull
+#define RX_HIGHS 0x8080808080808080ull
+#define RX_HAS_ZERO(v) (((v) - RX_ONES) & ~(v) & RX_HIGHS)
+cx_usize cx_rx_skip(const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* set, cx_u32 count, cx_u32 bytes) {
+    const cx_u8* p = hay + from;
+    const cx_u8* end = hay + len;
+    if (count == 1) {
+        const cx_u8* q = (const cx_u8*)memchr(p, (int)(bytes & 0xFF), (size_t)(end - p));
+        return q ? (cx_usize)(q - hay) : len;
+    }
+    if (count == 2 || count == 3) {
+#if defined(FIND_STEP)
+        char ca = (char)(bytes & 0xFF);
+        char cb = (char)((bytes >> 8) & 0xFF);
+        char cc = (char)(count == 3 ? (bytes >> 16) & 0xFF : (bytes >> 8) & 0xFF);
+        while (end - p >= FIND_STEP) {
+            find_v w = *(const find_v*)p;
+            if (FIND_MASK((w == ca) | (w == cb) | (w == cc))) break;
+            p += FIND_STEP;
+        }
+#endif
+        cx_u64 a = RX_ONES * (bytes & 0xFF);
+        cx_u64 b = RX_ONES * ((bytes >> 8) & 0xFF);
+        cx_u64 c = count == 3 ? RX_ONES * ((bytes >> 16) & 0xFF) : b;
+        while (end - p >= 8) {
+            cx_u64 w;
+            memcpy(&w, p, 8);
+            if (RX_HAS_ZERO(w ^ a) | RX_HAS_ZERO(w ^ b) | RX_HAS_ZERO(w ^ c)) break;
+            p += 8;
+        }
+    }
+    while (p < end && !set[*p]) p++;
+    return (cx_usize)(p - hay);
+}
+#undef RX_ONES
+#undef RX_HIGHS
+#undef RX_HAS_ZERO
+#undef FIND_STEP
+#undef FIND_MASK
 
 cx_usize cx_str_find_last(cx_str hay, cx_str needle) {
     if (needle.len > hay.len) return CX_NOT_FOUND;

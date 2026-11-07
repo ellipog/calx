@@ -511,6 +511,14 @@ CX_INLINE cx_str cx_str_slice(cx_str s, cx_usize lo, cx_usize hi, cx_bool inclus
  * so a match starts where a rune does. `""` is found at 0, or last at the end. */
 CX_FN(cx_usize, cx_str_find, (cx_str hay, cx_str needle));
 CX_FN(cx_usize, cx_str_find_last, (cx_str hay, cx_str needle));
+/* Where the `n` bytes at `needle` first are in the `len` at `hay`, or CX_NOT_FOUND. */
+CX_FN(cx_usize, cx_bytes_find, (const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n));
+/* The same, for a needle looked for again and again: which of its bytes is likely rarest is worked
+ * out once by `cx_bytes_rare`, and passed as `k`. */
+CX_FN(cx_usize, cx_bytes_rare, (const cx_u8* needle, cx_usize n));
+CX_FN(cx_usize, cx_bytes_find_rare, (const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n, cx_usize k));
+/* For std.regex: the first byte from `from` that's in `set`, or `len`. */
+CX_FN(cx_usize, cx_rx_skip, (const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* set, cx_u32 count, cx_u32 bytes));
 /* Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, in calx_case.c (D117). Text
  * that doesn't change comes back without a copy when `keep` says its bytes are a literal's. */
 CX_FN(cx_String, cx_case_lower, (cx_str s, cx_bool keep));
