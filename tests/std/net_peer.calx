@@ -66,11 +66,7 @@ fn main() {
     let net = Net.new()!
     let port = net.listen("127.0.0.1", 0)!
     println(both_ends(net, "127.0.0.1", port))    // out: 127.0.0.1 -> 127.0.0.1
-
-    // A socket listening on every address sees an IPv4 client as IPv4, not as ::ffff:127.0.0.1.
-    let any = net.listen("", 0)!
-    println(both_ends(net, "127.0.0.1", any))     // out: 127.0.0.1 -> 127.0.0.1
-    println(both_ends(net, "::1", any))           // out: ::1 -> ::1
+    // A socket listening on every address is net_any.calx's.
 
     // RFC 5952's text: the longest run of zero groups, the first on a tie, and never just one.
     println(v6([0x2001, 0xdb8, 0, 0, 8, 0x800, 0x200c, 0x417a], 0).to_string())    // out: 2001:db8::8:800:200c:417a

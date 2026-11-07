@@ -33,6 +33,10 @@ A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/refer
   `calx build --lib` in the same mode, before the program runs. The path of each library it built,
   in order, goes to the program as its first arguments, before those `// args:` gives (D123).
 - `// kind: library` checks a test that expects errors as a library, with `calx check --lib`.
+- `// firewall: TEXT` marks a test that listens on every address, not just loopback, which makes
+  Windows' firewall ask the person at the desktop whether to allow it, each time the program is
+  new, as every build's is. On Windows such a test runs only in CI, whose runners don't ask, and
+  is skipped elsewhere, saying so.
 
 A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
@@ -64,7 +68,7 @@ BUILD = ROOT / "build" / "compiler" / PLATFORM
 CALX = BUILD / ("calx.exe" if os.name == "nt" else "calx")
 DOC_DIRS = [ROOT / "docs" / "reference", ROOT / "docs" / "std", ROOT / "docs" / "guide"]
 
-EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind):(.*)$")
+EXPECT = re.compile(r"//\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall):(.*)$")
 FILE = re.compile(r"^// file: (\S+\.calx)\s*$")
 DIAG = re.compile(r"^(.*?):(\d+):(\d+): error: (.*)$")
 PANIC = re.compile(r"^panic at (.*?):(\d+):(\d+): (.*)$")
@@ -92,6 +96,7 @@ class Test:
         self.status = 0
         self.libs = []  # files to build as libraries first
         self.library = False  # checked as a library
+        self.firewall = None  # why it listens on every address, which Windows' firewall asks about
         self.files = []  # (name, text) for a test of several modules, the main one first
         lines = source.splitlines()
         starts = [(i, FILE.match(l).group(1)) for i, l in enumerate(lines) if FILE.match(l)]
@@ -119,6 +124,8 @@ class Test:
                 self.libs.append(text.strip())
             elif kind == "kind":
                 self.library = text.strip() == "library"
+            elif kind == "firewall":
+                self.firewall = text.strip()
             elif kind == "trace":
                 self.trace.append(text.strip())
             elif kind == "error":
@@ -387,6 +394,12 @@ def main():
         build_compiler()
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     tests = find_tests(args.paths)
+    # No firewall prompts at a Windows desktop: those tests run there only in CI.
+    asks = PLATFORM == "windows" and not os.environ.get("CI")
+    skipped = [t for t in tests if t.firewall and asks]
+    for t in skipped:
+        print(f"skipped {t.name}: it {t.firewall}, which Windows' firewall would ask about; CI runs it")
+    tests = [t for t in tests if t not in skipped]
     jobs = [(t, m) for t in tests for m in (modes if not t.errors else modes[:1])]
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -398,7 +411,8 @@ def main():
             for p in problems:
                 print(indent(p))
     passed = len(jobs) - failed
-    print(f"{passed} passed, {failed} failed ({len(tests)} tests, modes: {', '.join(modes)}, "
+    skips = f", {len(skipped)} skipped" if skipped else ""
+    print(f"{passed} passed, {failed} failed{skips} ({len(tests)} tests, modes: {', '.join(modes)}, "
           f"{platform.system()} {platform.machine()})")
     return 1 if failed else 0
 

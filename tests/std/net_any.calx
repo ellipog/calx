@@ -1,0 +1,61 @@
+// std.net: a socket listening on every address, IPv4 and IPv6 at once, sees an IPv4 client as
+// IPv4, not as ::ffff:127.0.0.1. It's apart from net_peer.calx since listening beyond loopback
+// makes Windows' firewall ask whether to allow the program.
+// firewall: listens on every address
+import std.net.{Net, Conn, Event}
+
+// Connects to `host`, and gives back what the server saw as the client's address, and what the
+// client saw as the server's.
+fn both_ends(net: Net, host: String, port: u16) -> String {
+    let client = net.connect(host, port)!
+    var server: Conn? = none
+    var events = List<Event>()
+    var accepted = String()
+    var connected = String()
+    while accepted.is_empty() or connected.is_empty() {
+        net.poll(2000, mut events)
+        for e in events {
+            match e {
+                Event.Accepted(c) => {
+                    server = some(c)
+                    let a = net.peer(c)!
+                    accepted = a.ip.to_string()
+                },
+                Event.Connected(c) => {
+                    let a = net.peer(c)!
+                    connected = if a.port == port { a.ip.to_string() } else { String("wrong port") }
+                },
+                Event.Closed(_) => panic("couldn't connect to {host}"),
+                _ => {},
+            }
+        }
+    }
+    net.close(client)
+    // Its Closed comes before the next connection's events.
+    var closed = false
+    while not closed {
+        net.poll(2000, mut events)
+        for e in events {
+            match e {
+                Event.Closed(c) => {
+                    if c == client {
+                        closed = true
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    if let c = server {
+        net.close(c)
+    }
+    net.poll(0, mut events)
+    return "{accepted} -> {connected}"
+}
+
+fn main() {
+    let net = Net.new()!
+    let any = net.listen("", 0)!
+    println(both_ends(net, "127.0.0.1", any))     // out: 127.0.0.1 -> 127.0.0.1
+    println(both_ends(net, "::1", any))           // out: ::1 -> ::1
+}

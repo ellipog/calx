@@ -103,7 +103,7 @@ import std.net.{Net, Event}
 
 fn main() {
     let net = Net.new()!
-    let port = net.listen("", 0)!    // every address
+    let port = net.listen("127.0.0.1", 0)!
     _ = net.connect("127.0.0.1", port)!
     var events = List<Event>()
     var seen = false
