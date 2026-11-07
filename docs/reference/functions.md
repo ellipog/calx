@@ -178,7 +178,7 @@ fn main() {
 - A `@track_caller` function can only be called, since its panics name the place that called it.
 - `fn(i32) -> i32?` is a function that gives back an optional. An optional function is `(fn(i32) -> i32)?`.
 
-Closures, which capture values from where they're written, aren't built yet.
+A [closure](closures.md), `|x| x + n`, is a function written where it's used, which reads the variables around it. One that captures nothing is a plain function value too.
 
 ### In C
 

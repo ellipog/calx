@@ -19,7 +19,7 @@ bool copyable(const Type* t) { return !t || is_copy(t); }
 enum class Use : std::uint8_t { consume, view, change };
 
 // Why a local doesn't own its value.
-enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, mut_element, part };
+enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, mut_element, part, capture };
 
 bool is_local_name(const Expr* e) {
     return (e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::local && e->local;
@@ -46,15 +46,26 @@ public:
     Pass(MoveContext ctx, bool report) : ctx_(ctx), report_(report) {}
 
     void run(Item* f) {
+        closure_ = f->is_closure;
+        // A closure's captures are the code around it's, which it only reads, where they are
+        // (CLX-98): it can't move them, and doesn't drop them. That code's own pass is done.
+        std::vector<std::pair<Local*, bool>> owned;
+        for (Local* l : f->captures) {
+            owned.push_back({l, l->owns});
+            l->owns = false;
+            view_of_[l] = ViewOf::capture;
+        }
         // The scan finds every local that's moved anywhere, which decides which patterns take
         // their value apart. Then the walk follows the flow of control.
         scan_ = true;
         body(f);
         scan_ = false;
         body(f);
+        for (auto [l, was] : owned) l->owns = was;
     }
 
 private:
+    bool closure_ = false;  // whether the function is a closure's, whose parameters can't be `own`
     enum : std::uint8_t { live = 0, moved = 1, maybe = 2 };
 
     // A field moved out of a local that owns its value, such as `p.name`: its path of field
@@ -92,6 +103,8 @@ private:
         bool shown = false;
         // `by` is an arena list made from the arena `root` holds, rather than a view (D114).
         bool arena = false;
+        // A closure passed to the call being worked out reads it, until the call is done (CLX-98).
+        bool closure = false;
     };
 
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -286,6 +299,10 @@ private:
             return;
         }
         if (const Borrow* b = borrowed(l)) {
+            if (b->closure) {
+                closure_reads(e, b);
+                return;
+            }
             if (b->by && b->arena) {
                 error(e->span, "can't move " + name_of(l) + " while " + name_of(b->by) + " holds memory from it");
                 note(b->at, name_of(b->by) + " is made from " + (b->over ? q(place_text(b->over)) : name_of(l)) + " here");
@@ -330,7 +347,22 @@ private:
         auto it = view_of_.find(l);
         ViewOf why = it == view_of_.end() ? ViewOf::none : it->second;
         switch (why) {
+            case ViewOf::capture:
+                error(e->span, q(n) + " is what the closure reads from the code around it, where it is, so it can't be "
+                                   "moved; move a copy with " + q(n + ".copy()") + hint);
+                break;
             case ViewOf::read_param:
+                // A closure reads what it captures where it is, so it's only ever called (CLX-98).
+                if (l->type && l->type->call && (l->type->kind == TypeKind::param || l->type->kind == TypeKind::closure)) {
+                    error(e->span, q(n) + " is a closure or a function the caller passed, which can only be called, or "
+                                       "passed on to a parameter with an `Fn` bound");
+                    break;
+                }
+                if (closure_) {
+                    error(e->span, q(n) + " is what the closure is given to read, so it can't be moved; move a copy with " +
+                                       q(n + ".copy()") + hint);
+                    break;
+                }
                 error(e->span, q(n) + " is a view of the caller's value, so it can't be moved; take it as " +
                                    q(n + ": own " + std::string(l->type->name)) + ", or move a copy with " +
                                    q(n + ".copy()") + hint);
@@ -862,6 +894,14 @@ private:
                 loop_expr(e);
                 rvalue(e, u);
                 return;
+            case ExprKind::closure:
+                if (e->item) {
+                    for (Local* l : e->item->captures) {
+                        if (!scan_) use(e, l);
+                        borrows_.push_back({l, nullptr, e->span, nullptr, {}, false, false, true});
+                    }
+                }
+                return;
             default: return;
         }
     }
@@ -962,6 +1002,10 @@ private:
                                (l->owns ? "" : ", a view of the caller's value") + "; move a copy with " +
                                q(place_text(e) + ".copy()") + copy_hint(e->type));
         } else if (const Borrow* b = borrowed(l, &w.path)) {
+            if (b->closure) {
+                closure_reads(e, b);
+                return;
+            }
             std::string over = b->by || b->path.empty() ? r : place_text(b->over);
             if (b->shown) {
                 error(e->span, "can't move " + q(place_text(e)) + shown_after(b));
@@ -1004,6 +1048,8 @@ private:
     }
 
     void call(Expr* e, Use u) {
+        // What a closure passed to it reads can't move until it's done (CLX-98).
+        std::size_t held = borrows_.size();
         switch (e->call) {
             case CallKind::fn:
             case CallKind::method: {
@@ -1058,10 +1104,25 @@ private:
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 break;
         }
+        borrows_.resize(held);
         rvalue(e, u);
     }
 
+    // A move of `l`, or a part of it, while a closure passed to the same call reads it.
+    void closure_reads(Expr* e, const Borrow* b) {
+        error(e->span, "can't move " + q(place_text(e)) + " while the closure before it in this call reads " +
+                           q(text(b->root->name)) + "; move it in a call of its own first, or pass the closure a copy");
+        note(b->at, "the closure is here");
+    }
+
+    // A closure passed to a method reads what it captures until the method is done (CLX-98).
     void builtin_method(Expr* e) {
+        std::size_t held = borrows_.size();
+        builtin_method_parts(e);
+        borrows_.resize(held);
+    }
+
+    void builtin_method_parts(Expr* e) {
         Expr* recv = e->callee->lhs;
         auto arg = [&](std::size_t i) { return i < e->args.size() ? e->args[i].value : nullptr; };
         switch (e->bmethod) {
@@ -1085,7 +1146,8 @@ private:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
             case BMethod::set_len: case BMethod::as_mut_ptr: case BMethod::sort: case BMethod::hash_add: case BMethod::trim:
             case BMethod::pop_first: case BMethod::pop_last: case BMethod::move_to_first: case BMethod::move_to_last:
-            case BMethod::remove_marked: case BMethod::extend:
+            case BMethod::remove_marked: case BMethod::extend: case BMethod::list_retain: case BMethod::sort_by:
+            case BMethod::sort_by_key:
                 expr(recv, Use::change);
                 for (const Arg& a : e->args) expr(a.value, Use::view);
                 return;

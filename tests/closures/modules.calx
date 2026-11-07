@@ -1,0 +1,41 @@
+// Closures in generic functions of another module, which are made in the caller's file for
+// each closure, and their sorts with them (CLX-98).
+
+// file: main.calx
+import util.{count_eq, sorted_desc, apply_all}
+
+struct P {
+    name: String
+    age: i32
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 2, 3]
+    println("{count_eq(xs, 2)}")                              // out: 2
+    let ws: List<String> = ["b", "a", "c"]
+    println("{sorted_desc(ws)} {sorted_desc(xs)}")            // out: [c, b, a] [3, 2, 2, 1]
+    let ys: List<i32> = [5, 1, 3]
+    // A closure in a closure, each reading a list.
+    println("{xs.map(|x| ys.filter(|y| y > x).len())}")       // out: [2, 2, 2, 1]
+    let base = 100
+    println("{apply_all(xs, |x| x + base)}")                  // out: [101, 102, 102, 103]
+    var ps: List<P> = [P { name: String("x"), age: 30 }, P { name: String("y"), age: 20 }]
+    ps.sort_by(|a, b| a.age.cmp(b.age))
+    println("{ps.map(|p| p.name.copy())}")                    // out: [y, x]
+    let maybe: String? = some(String("hey"))
+    println("{maybe.map(|s| s.len())} {maybe.map(|s| "{s}!")}")  // out: some(3) some(hey!)
+}
+// file: util.calx
+pub fn count_eq<T: Copy + Equal>(xs: List<T>, v: T) -> usize {
+    return xs.count(|x| x == v)
+}
+
+pub fn sorted_desc<T: Order>(xs: List<T>) -> List<T> {
+    var c = xs.copy()
+    c.sort_by(|a, b| b.cmp(a))
+    return c
+}
+
+pub fn apply_all(xs: List<i32>, f: Fn(i32) -> i32) -> List<i32> {
+    return xs.map(f)
+}

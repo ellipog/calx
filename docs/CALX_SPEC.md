@@ -58,7 +58,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - A function with no `->` returns nothing. `fn f() ! E` returns nothing but can fail with an `E`.
 - Calls can name their arguments, `teleport(to: home)`, and parameters can have defaults, `fn f(n: i32 = 3)`. Built: [default values](reference/functions.md#default-values) (CLX-111)
 - `b'0'` is a byte literal, the `u8` 48. Built: [byte literals](reference/syntax.md#byte-literals) (CLX-111)
-- A closure passed as the last argument can follow the call: `p.after(ticks: 60) |p| { ... }`.
+- A closure passed as the last argument can follow the call: `p.after(ticks: 60) |p| { ... }`. Built: [after the call](reference/closures.md#after-the-call) (CLX-98)
 - In an `impl T` block, a function whose first parameter is a `T` in any mode (`self: T`, `r: mut T`, `x: own T`) is a method, called as `value.f(...)`. `self` alone means a read-only `self: T`.
 
 ## Types
@@ -69,16 +69,15 @@ Built: see [Types](reference/types.md).
 
 ### Compound types
 
-Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)), [Lists](reference/lists.md), and plain functions as values, `fn(A, mut B) -> R ! E` ([functions as values](reference/functions.md#functions-as-values), D122). Still to build:
+Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)), [Lists](reference/lists.md), plain functions as values, `fn(A, mut B) -> R ! E` ([functions as values](reference/functions.md#functions-as-values), D122), and [closures](reference/closures.md), `|a| expr`, each with a type of its own, passed to parameters with bounds such as `Fn(A) -> B` and reading what they capture where it is, or plain `fn(A) -> B` values when they capture nothing (CLX-98). Still to build:
 
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
-- **Closures:** written `|a| expr`, with types of their own, accepted through interfaces such as `Fn(A) -> B`. A plain `fn(A) -> B` holds no captures.
 
 ### Optionals, no null
 
-Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns.md). Still to build:
+Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns.md), and `opt.map(|x| ...)` ([closures](reference/closures.md#methods-that-take-one)). Still to build:
 
-- `opt.map(f)` and `opt.or(default)`, with closures and generics.
+- `opt.or(default)`, as a method beside `??`.
 - `?.` calling a method, `opt?.len()`, as well as reading a field.
 - Binding names in or-patterns, `Circle(r) | Ring(r)`, when every alternative binds the same names with the same types.
 

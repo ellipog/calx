@@ -78,7 +78,7 @@ for n, (count, deep) in sizes.items():
     net = list(batcher(0, n))
     check(net, n)
     assert (len(net), len(layers(net))) == (count, deep), n
-    out.append(f"static inline void CX_SORT_F(_net{n})(CX_SORT_T* v) {{")
+    out.append(f"static inline void CX_SORT_F(_net{n})(CX_SORT_T* v CX_SORT_P) {{")
     out += wrap([f"x{k} = v[{k}]," for k in range(n - 1)] + [f"x{n - 1} = v[{n - 1}];"], "    CX_SORT_T ")
     for layer in layers(net):
         out += wrap([f"CX_SORT_CAS(x{i}, x{j});" for i, j in layer], "    ")

@@ -1,0 +1,64 @@
+// What the checker catches about closures (CLX-98).
+
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 {
+    return f(x)
+}
+
+fn consume(s: own String) -> usize {
+    return s.len()
+}
+
+fn copy_it<T: Copy>(x: T) -> T {
+    return x
+}
+
+fn by_len(a: String, b: String) -> Ordering {
+    return a.len().cmp(b.len())
+}
+
+fn twice_bad<F: Fn(i32) -> i32, G: Fn(i32) -> i32 + Fn(i64) -> i64>(f: F, g: G) -> i32 {  // error: `G` already has an `Fn` bound
+    return f(1) + g(1)
+}
+
+struct Holder {
+    f: fn(i32) -> i32
+}
+
+fn main() {
+    var n = 1
+    let s = String("x")
+    _ = twice_bad(|x| x, |x| x)
+    _ = apply(|x| { n = 2; x }, 1)          // error: a closure reads what it captures where it is, so it can't change `n`
+    _ = apply(|x| { return x }, 1)          // error: `return` would leave the function around the closure
+    _ = apply(|_x| consume(s), 1)           // error: expected `i32`, found `usize`
+    _ = apply(|x| x > 1, 1)                 // error: expected `i32`, found `bool`
+    _ = apply(|x, y| x + y, 1)              // error: this closure takes 2 parameters, but 1 is wanted
+    _ = copy_it(|x: i32| x)
+    let g = |x| x                           // error: can't tell what `x` is; give it a type
+    _ = g
+    let h = |x: i32| x + n                  // error: this closure reads `n`, so it can't be a `fn(...)`
+    _ = h
+    let k: Fn(i32) -> i32 = |x| x           // error: `Fn(...)` is what a closure is called as, a bound
+    _ = Holder { f: |x| x + n }             // error: this closure reads `n`, so it can't be a `fn(...)`
+    for i in 0..3 {
+        _ = apply(|_x| { break }, i)        // error: `break` can't leave a closure
+    }
+
+    var xs: List<i32> = [3, 1, 2]
+    let ws: List<String> = ["a"]
+    let opt: i32? = some(1)
+    _ = xs.map(|x| println("{x}"))          // error: `map` makes a list of what the closure gives back, and it gives back nothing
+    _ = xs.filter(|x| x)                    // error: expected `bool`, found `i32`
+    xs.sort_by(|a, b| a < b)                // error: expected `Ordering`, found `bool`
+    xs.sort_by(|a, b| { _ = xs.len(); a.cmp(b) })  // error: `xs` is changed by `sort_by`, so the closure can't read it
+    _ = xs.map(3)                           // error: `map` calls what it's given on each element, so it takes a closure
+    xs.sort_by(by_len)                      // error: `sort_by` calls it as `Fn(i32, i32) -> Ordering`, so it can't be an `fn(String, String) -> Ordering`
+    var vs = ws.copy()
+    vs.sort_by_key(|w| w.copy())            // error: `sort_by_key` compares the keys the closure gives back with `<`, so they must be `Copy`
+    _ = opt.map(|x| some(x))                // error: an optional can't hold another optional
+    _ = xs.count()                          // error: `count` takes one argument, a closure
+    ws.retain(|w| w.len() > 0)              // error: `ws` can't be changed
+    _ = xs.nope(|x| x + 1)                  // error: `List<i32>` has no method `nope`
+    _ = opt.map(|_x| { })                   // error: `map` makes an optional of what the closure gives back, and it gives back nothing
+    _ = xs.any(|x| x + 1)                   // error: expected `bool`, found `i32`
+}

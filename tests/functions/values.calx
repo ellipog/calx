@@ -14,7 +14,7 @@ fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
 }
 
 fn twice(f: fn(i32) -> i32) -> fn(i32) -> i32 {
-    // No closures yet, so this gives back what it was given.
+    // A function value is `Copy`, so this gives back what it was given.
     return f
 }
 

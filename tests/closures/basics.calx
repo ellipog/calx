@@ -1,0 +1,120 @@
+// Closures (CLX-98): passed to parameters with `Fn` bounds, reading what they capture where it
+// is, and plain `fn(...)` values when they capture nothing.
+
+struct Player {
+    name: String
+    score: i32
+}
+
+struct Team {
+    players: List<Player>
+    bonus: i32
+}
+
+impl Team {
+    fn total_with(self, f: Fn(Player) -> i32) -> i32 {
+        var t = 0
+        for p in self.players {
+            t += f(p)
+        }
+        return t
+    }
+
+    // A closure in a method reads `self`.
+    fn boosted(self) -> i32 {
+        return self.total_with(|p| p.score + self.bonus)
+    }
+}
+
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 {
+    return f(x)
+}
+
+fn twice(f: Fn(i32) -> i32, x: i32) -> i32 {
+    return f(f(x))
+}
+
+fn map_all<T, U, F: Fn(T) -> U>(xs: List<T>, f: F) -> List<U> {
+    var out = List<U>()
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+
+fn count_if<T, F: Fn(T) -> bool>(xs: List<T>, keep: F) -> usize {
+    var n: usize = 0
+    for x in xs {
+        if keep(x) {
+            n += 1
+        }
+    }
+    return n
+}
+
+// A closure passed on, and one made of a parameter.
+fn any_over<T: Copy>(xs: List<T>, limit: T, above: Fn(T, T) -> bool) -> bool {
+    return count_if(xs, |x| above(x, limit)) > 0
+}
+
+fn call0(f: Fn() -> String) -> String {
+    return f()
+}
+
+fn each(xs: List<String>, f: Fn(String)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+fn repeat_text(n: usize, f: Fn(usize) -> String) -> String {
+    var s = String()
+    for i in 0..n {
+        s.push_str(f(i))
+    }
+    return s
+}
+
+fn main() {
+    let n = 10
+    println("{apply(|x| x + n, 5)}")                       // out: 15
+    println("{twice(|x| x * 3, 2)} {apply(double, 4)}")    // out: 18 8
+    let xs: List<i32> = [1, 2, 3]
+    println("{map_all(xs, |x| "n{x + n}")}")               // out: [n11, n12, n13]
+
+    // One that captures nothing is a plain function value.
+    let f: fn(i32) -> i32 = |x| x - 1
+    let g = |x: i32| x * x
+    println("{f(10)} {g(7)}")                              // out: 9 49
+
+    let team = Team { players: [Player { name: String("a"), score: 3 }, Player { name: String("b"), score: 5 }], bonus: 10 }
+    println("{team.total_with(|p| p.score)} {team.boosted()}")  // out: 8 28
+
+    let names: List<String> = ["ann", "bob", "al"]
+    println("{count_if(names, |s| s.starts_with("a"))}")   // out: 2
+    let min_len: usize = 3
+    println("{count_if(names, |s| s.len() >= min_len)}")   // out: 2
+    println("{any_over(xs, 2, |a, b| a > b)} {any_over(xs, 3, |a, b| a > b)}")  // out: true false
+
+    let prefix = String("hi ")
+    println(call0(|| "{prefix}there"))                     // out: hi there
+    each(names, |s| println("{prefix}{s}"))
+    // out: hi ann
+    // out: hi bob
+    // out: hi al
+
+    // A closure inside a closure, reading the outer one's parameter and a local.
+    let lists: List<List<i32>> = [[1, 2], [3, 40]]
+    let big = 10
+    println("{count_if(lists, |l| count_if(l, |x| x > big) > 0)}")  // out: 1
+
+    // After the call, a closure is its last argument.
+    let dashes = repeat_text(3) |i| {
+        "{i}-"
+    }
+    println(dashes)                                        // out: 0-1-2-
+}

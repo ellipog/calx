@@ -1,0 +1,30 @@
+// What a closure can't do with what it captures, and with what it's given (CLX-98).
+
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 {
+    return f(x)
+}
+
+fn keep<F: Fn(i32) -> i32>(f: F) -> F {
+    return f                                  // error: `f` is a closure or a function the caller passed, which can only be called
+}
+
+fn consume(s: own String) -> i32 {
+    return i32.wrap(s.len())
+}
+
+fn takes_both(f: Fn(i32) -> i32, s: own String) -> usize {
+    return s.len() + usize.wrap(f(1))
+}
+
+fn main() {
+    let s = String("x")
+    _ = apply(|x| x + consume(s), 1)          // error: `s` is what the closure reads from the code around it, where it is, so it can't be moved
+    let t = String("y")
+    _ = takes_both(|x| x + i32.wrap(t.len()), t)  // error: can't move `t` while the closure before it in this call reads `t`
+    let u = String("z")
+    _ = consume(u)
+    _ = apply(|x| x + i32.wrap(u.len()), 1)   // error: `u` was moved, so it can't be used here
+    _ = keep(|x| x)
+    let names: List<String> = ["a", "b"]
+    _ = names.map(|n| n)                      // error: `n` is what the closure is given to read, so it can't be moved; move a copy with `n.copy()`
+}

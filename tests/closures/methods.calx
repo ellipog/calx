@@ -1,0 +1,83 @@
+// The methods of a list and of an optional that call a closure, or a function (CLX-98).
+
+struct Player {
+    name: String
+    score: i32
+}
+
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+fn by_len(a: String, b: String) -> Ordering {
+    return a.len().cmp(b.len())
+}
+
+fn keep_if<T: Copy, F: Fn(T) -> bool>(xs: List<T>, f: F) -> List<T> {
+    return xs.filter(f)
+}
+
+fn sort_with(xs: mut List<i32>, f: Fn(i32, i32) -> Ordering) {
+    xs.sort_by(f)
+}
+
+fn names() -> List<String> {
+    return ["cy", "ann", "bob", "al"]
+}
+
+fn main() {
+    let xs: List<i32> = [3, 1, 4, 1, 5, 9, 2, 6]
+    let limit = 3
+    println("{xs.map(|x| x * 10)}")             // out: [30, 10, 40, 10, 50, 90, 20, 60]
+    println("{xs.filter(|x| x > limit)}")       // out: [4, 5, 9, 6]
+    println("{xs.any(|x| x > 8)} {xs.all(|x| x > 0)} {xs.all(|x| x > 1)}")  // out: true true false
+    println("{xs.count(|x| x == 1)}")           // out: 2
+    println("{xs.find(|x| x > 4)} {xs.find(|x| x > 100)}")  // out: some(5) none
+    println("{xs.position(|x| x == 4)} {xs.position(|x| x == 7)}")  // out: some(2) none
+    println("{xs.map(double)}")                 // out: [6, 2, 8, 2, 10, 18, 4, 12]
+    println("{keep_if(xs, |x| x % 2 == 0)}")    // out: [4, 2, 6]
+
+    var ys = xs.copy()
+    ys.sort_by(|a, b| b.cmp(a))
+    println("{ys}")                             // out: [9, 6, 5, 4, 3, 2, 1, 1]
+    sort_with(mut ys, |a, b| a.cmp(b))
+    println("{ys}")                             // out: [1, 1, 2, 3, 4, 5, 6, 9]
+    ys.retain(|x| x != 1)
+    println("{ys}")                             // out: [2, 3, 4, 5, 6, 9]
+
+    // Elements that own memory are read in place, and copied where they're kept.
+    let words: List<String> = ["pear", "fig", "banana", "kiwi"]
+    println("{words.map(|w| w.len())}")         // out: [4, 3, 6, 4]
+    println("{words.map(|w| "<{w}>")}")         // out: [<pear>, <fig>, <banana>, <kiwi>]
+    println("{words.filter(|w| w.len() == 4)}")  // out: [pear, kiwi]
+    println("{words.find(|w| w.starts_with("b"))}")  // out: some(banana)
+
+    // `sort_by` and `sort_by_key` keep equal elements in order.
+    var ws = words.copy()
+    ws.sort_by(by_len)
+    println("{ws}")                             // out: [fig, pear, kiwi, banana]
+    ws.sort_by(|a, b| a.cmp(b))
+    println("{ws}")                             // out: [banana, fig, kiwi, pear]
+    ws.sort_by_key(|w| w.len())
+    println("{ws}")                             // out: [fig, kiwi, pear, banana]
+    ws.retain(|w| w.len() > 3)
+    println("{ws}")                             // out: [kiwi, pear, banana]
+
+    var team: List<Player> = [Player { name: String("a"), score: 3 }, Player { name: String("b"), score: 9 },
+                              Player { name: String("c"), score: 5 }]
+    team.sort_by_key(|p| -p.score)
+    println("{team.map(|p| p.name.copy())}")    // out: [b, c, a]
+    println("{team.find(|p| p.score > 4).map(|p| p.score)}")  // out: some(9)
+
+    let four: i32? = some(4)
+    let nothing: i32? = none
+    println("{four.map(|x| x + limit)} {four.map(|x| "{x}!")} {nothing.map(|x| x + 1)}")  // out: some(7) some(4!) none
+
+    // On a list that's made for the call.
+    println("{names().map(|s| s.len())}")       // out: [2, 3, 3, 2]
+    println("{names().filter(|s| s.len() > 2)}")  // out: [ann, bob]
+
+    let empty: List<i32> = []
+    println("{empty.map(|x| x + 1)} {empty.filter(|x| x > 0)} {empty.any(|x| x > 0)} {empty.all(|x| x > 0)}")  // out: [] [] false true
+    println("{xs.map(|_| 0).len()}")            // out: 8
+}

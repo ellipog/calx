@@ -158,6 +158,8 @@ fn main() {
 
 A parameter's bounds are the [interfaces](interfaces.md) its type must implement: `<T: Shape>`, or `<T: Shape + Code>` for more than one. A call checks that its types have them.
 
+A bound can also be `Fn(A) -> R`, what a [closure](closures.md#fn-bounds) is called as: `<F: Fn(T) -> bool>`, or a parameter written `f: Fn(T) -> bool`.
+
 ```calx
 interface Shape {
     fn area(self) -> f64

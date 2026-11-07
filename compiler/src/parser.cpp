@@ -463,9 +463,38 @@ private:
         it->name = ident("as the function's name");
         it->generics = slice(generics());
         fn_signature(it);
+        callable_params(it);
         if (at(Tok::lbrace)) it->body = block();
         else end_line();
         return it;
+    }
+
+    // `f: Fn(i32) -> i32` is short for a generic parameter with that bound, as Rust's
+    // `f: impl Fn(i32) -> i32` is, so each closure passed has its own instance (CLX-98). The
+    // parameter is named as the bound is written, which is what messages call it.
+    void callable_params(Item* it) {
+        std::vector<GenericParam> generics(it->generics.begin(), it->generics.end());
+        std::size_t before = generics.size();
+        for (Param& p : it->params) {
+            if (!p.type || p.type->kind != TypeExprKind::fn || !p.type->callable) continue;
+            const std::string& src = ctx_.sources.file(p.type->span.file).text;
+            std::string name = src.substr(p.type->span.begin, p.type->span.end - p.type->span.begin);
+            for (const GenericParam& g : generics) {
+                if (ctx_.names.text(g.name) == name) name += " of " + std::string(ctx_.names.text(p.name));
+            }
+            GenericParam g;
+            g.name = ctx_.names.intern(name);
+            g.span = p.type->span;
+            std::vector<TypeExpr*> bound{p.type};
+            g.bounds = slice(bound);
+            generics.push_back(g);
+            TypeExpr* use = new_type(TypeExprKind::named, p.type->span);
+            std::vector<Name> one{g.name};
+            use->path.parts = slice(one);
+            use->path.span = p.type->span;
+            p.type = use;
+        }
+        if (generics.size() != before) it->generics = slice(generics);
     }
 
     void fn_signature(Item* it) {
@@ -749,6 +778,27 @@ private:
         return t;
     }
 
+    // A function type's parameters, result and error, after `fn` or `Fn`.
+    TypeExpr* fn_type_rest(TypeExpr* t, Span start) {
+        expect(Tok::lparen, "to start the function type's parameters");
+        std::vector<TypeExpr*> params;
+        std::vector<ParamMode> modes;
+        while (!at(Tok::rparen)) {
+            if (accept(Tok::kw_mut)) modes.push_back(ParamMode::mut);
+            else if (accept(Tok::kw_own)) modes.push_back(ParamMode::own);
+            else modes.push_back(ParamMode::read);
+            params.push_back(type());
+            if (!accept(Tok::comma)) break;
+        }
+        expect(Tok::rparen, "to end the function type's parameters");
+        t->args = slice(params);
+        t->modes = slice(modes);
+        if (accept(Tok::arrow)) t->inner = type();
+        if (accept(Tok::bang)) t->error = type();
+        t->span = Span::join(start, prev_span());
+        return t;
+    }
+
     TypeExpr* type_base() {
         Span start = peek().span;
         switch (peek().kind) {
@@ -758,6 +808,13 @@ private:
                     next();
                     t->kind = TypeExprKind::self;
                     return t;
+                }
+                // `Fn(i32) -> i32`: what a closure, or a function, can be called as (CLX-98).
+                if (ctx_.names.text(peek().name) == "Fn" && peek(1).kind == Tok::lparen && !peek(1).space_before) {
+                    next();
+                    t->kind = TypeExprKind::fn;
+                    t->callable = true;
+                    return fn_type_rest(t, start);
                 }
                 t->path = path();
                 if (at(Tok::lt) && !peek().space_before) {
@@ -804,23 +861,7 @@ private:
                 next();
                 TypeExpr* t = new_type(TypeExprKind::fn, start);
                 t->is_unsafe = is_unsafe;
-                expect(Tok::lparen, "to start the function type's parameters");
-                std::vector<TypeExpr*> params;
-                std::vector<ParamMode> modes;
-                while (!at(Tok::rparen)) {
-                    if (accept(Tok::kw_mut)) modes.push_back(ParamMode::mut);
-                    else if (accept(Tok::kw_own)) modes.push_back(ParamMode::own);
-                    else modes.push_back(ParamMode::read);
-                    params.push_back(type());
-                    if (!accept(Tok::comma)) break;
-                }
-                expect(Tok::rparen, "to end the function type's parameters");
-                t->args = slice(params);
-                t->modes = slice(modes);
-                if (accept(Tok::arrow)) t->inner = type();
-                if (accept(Tok::bang)) t->error = type();
-                t->span = Span::join(start, prev_span());
-                return t;
+                return fn_type_rest(t, start);
             }
             case Tok::star: {
                 next();

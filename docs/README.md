@@ -35,33 +35,34 @@ What's built, one page per feature:
 8. [Conversions](reference/conversions.md): exact `T(x)`, the named lossy conversions, and `try_from`
 9. [Control flow](reference/control-flow.md): if, while, while let, for, `for x in mut xs`, loop, break and continue
 10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
-11. [Structs](reference/structs.md): fields, defaults, literals and methods
-12. [Enums](reference/enums.md): variants with and without data, representations, conversions
-13. [Tuples](reference/tuples.md): values grouped by position, and destructuring
-14. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
-15. [Errors](reference/errors.md): functions that can fail, `fail`, `try`, matching `ok` and `err`, `!`, a failing `main`, and their C
-16. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
-17. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods, slicing, Java's case mapping and matching
-18. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
-19. [Deques](reference/deques.md): `Deque<T>`, added to and taken from at both ends, its methods, indexing, Java's and Rust's names for them, and its C
-20. [Priority queues](reference/priority-queues.md): `PriorityQueue<T>`, least first, its elements in Java's places, its methods, taking out marked elements, Java's names for them, and its C
-21. [Boxes](reference/boxes.md): `Box<T>`, one value on the heap so a type can hold itself, its value as the place `b.value`, and its C
-22. [Shared values](reference/shared.md): `Shared<T>`, one value that many owners and threads read without copying it, its read-only place `s.value`, and its C
-23. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
-24. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
-25. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
-26. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
-27. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
-28. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
-29. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
-30. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-31. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
-33. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-34. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
-35. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
-36. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
-37. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+11. [Closures](reference/closures.md): `|x| expr`, `Fn` bounds, what a closure captures, trailing closures, `map`, `filter`, `sort_by` and the other methods that take one, and their C
+12. [Structs](reference/structs.md): fields, defaults, literals and methods
+13. [Enums](reference/enums.md): variants with and without data, representations, conversions
+14. [Tuples](reference/tuples.md): values grouped by position, and destructuring
+15. [Optionals](reference/optionals.md): `T?` instead of null, `??`, `!`, `?.`
+16. [Errors](reference/errors.md): functions that can fail, `fail`, `try`, matching `ok` and `err`, `!`, a failing `main`, and their C
+17. [Patterns and match](reference/patterns.md): match, exhaustiveness, `if let`, `let ... else`
+18. [Strings](reference/strings.md): `str` and `String`, free literals, building, methods, slicing, Java's case mapping and matching
+19. [Lists](reference/lists.md): `List<T>`, its methods, indexing, loops and printing
+20. [Deques](reference/deques.md): `Deque<T>`, added to and taken from at both ends, its methods, indexing, Java's and Rust's names for them, and its C
+21. [Priority queues](reference/priority-queues.md): `PriorityQueue<T>`, least first, its elements in Java's places, its methods, taking out marked elements, Java's names for them, and its C
+22. [Boxes](reference/boxes.md): `Box<T>`, one value on the heap so a type can hold itself, its value as the place `b.value`, and its C
+23. [Shared values](reference/shared.md): `Shared<T>`, one value that many owners and threads read without copying it, its read-only place `s.value`, and its C
+24. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
+25. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
+26. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
+27. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+28. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
+29. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
+30. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+31. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
+32. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+33. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
+34. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+35. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
+36. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
+37. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
+38. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 

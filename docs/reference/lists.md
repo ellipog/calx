@@ -54,6 +54,7 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.contains(x)` | Whether an element `== x`. The element type must have `==` |
 | `xs.sort()` | Puts the elements in order, from least to greatest. The element type must have [`Order`](comparing.md#order) ([sorting](#sorting)) |
 | `xs.as_ptr()`, `xs.as_mut_ptr()`, `xs.set_len(n)` | A pointer to the elements, and setting the length, for [unsafe code](unsafe.md#pointers) |
+| `xs.map(\|x\| ...)`, `filter`, `retain`, `any`, `all`, `count`, `find`, `position`, `sort_by`, `sort_by_key` | Call a closure on the elements ([closures](closures.md#methods-that-take-one)) |
 
 - Methods that change the list need a variable declared with `var`, or a `mut` parameter.
 - `push`, `insert` and the literals move the elements in. `pop`, `remove` and `swap_remove` move them out.
@@ -117,7 +118,7 @@ fn main() {
 
 ## Sorting
 
-`xs.sort()` sorts the list in place, by the elements' [`Order`](comparing.md#order). It takes O(n log n) time at worst, and linear time on a list that's already in order or in reverse.
+`xs.sort()` sorts the list in place, by the elements' [`Order`](comparing.md#order). It takes O(n log n) time at worst, and linear time on a list that's already in order or in reverse. To sort by something else, `xs.sort_by(|a, b| ...)` and `xs.sort_by_key(|x| ...)` take a [closure](closures.md#methods-that-take-one), and sort stably.
 
 ```calx
 struct Score {

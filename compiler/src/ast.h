@@ -49,6 +49,7 @@ struct TypeExpr {
     Expr* length = nullptr;       // array
     bool is_const = false;        // pointer
     bool is_unsafe = false;       // fn: `unsafe fn`, which only `unsafe` code can call
+    bool callable = false;        // fn: `Fn(A) -> R`, a bound any closure or function it fits has (CLX-98)
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -190,6 +191,10 @@ enum class BMethod : std::uint8_t {
     // end, and closing one; and starting and joining a thread (D121).
     queue_send, queue_next, queue_wait, queue_wait_for, queue_sender, queue_share, queue_close, thread_spawn, thread_join,
     lib_open, lib_find, lib_has, lib_close,
+    // On a `List`, calling a closure or a function on its elements; and `map` on an optional
+    // (CLX-98).
+    list_map, list_filter, list_retain, list_any, list_all, list_count, list_find, list_position, sort_by, sort_by_key,
+    opt_map,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };
@@ -473,6 +478,13 @@ struct Item {
     bool generated = false;      // an attribute generated it (D124), so "never used" isn't the program's mistake
     bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
     bool is_handle = false;      // `@handle`: a struct that stands for something of the system's, which can't be copied
+    // A closure's body, as a function of its own (CLX-98), which each C file that reaches it
+    // copies, as instances are. It reads `captures`, the locals of the code around it that it
+    // names, through their addresses; one that captures nothing and is a `fn(...)` value takes
+    // no addresses at all (`plain`).
+    bool is_closure = false;
+    bool plain = false;
+    Slice<Local*> captures;
     std::string_view abi;
     // struct, enum
     Slice<FieldDecl> fields;

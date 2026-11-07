@@ -70,6 +70,14 @@ struct LoopCtx {
     bool parallel = false;  // a `parallel for`, which runs every iteration
 };
 
+// A closure whose body is being checked (CLX-98): its function, where its own locals start in
+// `visible_`, and what it captures, in the order it first names them.
+struct ClosureCtx {
+    Item* item;
+    std::size_t mark;
+    std::vector<Local*> captures;
+};
+
 // A `parallel for` whose body is being checked (D21).
 struct ParLoop {
     Stmt* s = nullptr;
@@ -206,6 +214,7 @@ public:
             check_fn(f);
         }
         instance_mode_ = false;
+        for (Item* c : closure_items_) prog_.fns.push_back(c);
         order_types();
         for (Type* t : T.compounds()) {
             if (t->table == TableKind::java && !t->open && orderable(t->kind == TypeKind::map ? t->key : t->elem)) {
@@ -219,6 +228,8 @@ public:
             MoveContext mc{ctx_.names, ctx_.arena, ctx_.diags};
             for (Item* f : all_fns_) check_moves(mc, f, true);
             for (Item* f : pending_fns_) check_moves(mc, f, false);
+            // A closure's, after the code around it's, whose locals it reads (CLX-98).
+            for (auto [c, report] : closure_moves_) check_moves(mc, c, report);
         }
         find_main(modules.back(), need_main && !library);
         if (library) {
@@ -284,6 +295,7 @@ private:
             marks_.swap(c.scope_marks_);
             loops_.swap(c.loops_);
             par_.swap(c.par_);
+            closures_.swap(c.closures_);
             fn_ = c.fn_;
             item_ = c.current_item_;
             impl_ = c.current_impl_type_;
@@ -299,6 +311,7 @@ private:
             c_.scope_marks_.swap(marks_);
             c_.loops_.swap(loops_);
             c_.par_.swap(par_);
+            c_.closures_.swap(closures_);
             c_.fn_ = fn_;
             c_.current_item_ = item_;
             c_.current_impl_type_ = impl_;
@@ -315,6 +328,7 @@ private:
         std::vector<std::size_t> marks_;
         std::vector<LoopCtx> loops_;
         std::vector<ParLoop> par_;
+        std::vector<ClosureCtx> closures_;
         Item* fn_ = nullptr;
         Item* item_ = nullptr;
         Type* impl_ = nullptr;
@@ -1578,6 +1592,29 @@ private:
             // A bound can mention the other parameters: `U: From<T>`.
             std::size_t env_mark = push_env(param_owner_[p]);
             for (TypeExpr* b : g->bounds) {
+                // `Fn(A) -> R`: what a closure or a function passed for it is called as (CLX-98).
+                if (b->kind == TypeExprKind::fn && b->callable) {
+                    callable_ok_ = true;
+                    Type* call = resolve_type(b);
+                    callable_ok_ = false;
+                    if (is_bad(call)) continue;
+                    if (p->call) {
+                        error(b->span, q(text(g->name)) + " already has an `Fn` bound");
+                        continue;
+                    }
+                    bool read = true;
+                    for (std::uint8_t m : call->modes) read = read && m == static_cast<std::uint8_t>(ParamMode::read);
+                    if (!read) {
+                        error(b->span, "a closure's parameters are only read, so `Fn` takes no `mut` or `own`");
+                        continue;
+                    }
+                    if (call->elem->is_result) {
+                        error(b->span, "a closure can't fail yet, so `Fn` takes no `!`");
+                        continue;
+                    }
+                    p->call = call;
+                    continue;
+                }
                 // The derived properties, which every type that can have them has without an impl.
                 bool* flag = nullptr;
                 if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
@@ -1909,6 +1946,35 @@ private:
             for (Item* b : p->bounds) if (!b->type_args.empty()) bound_args = binding(params, args);
         }
         for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
+            // A closure reads what it captures where it is, so it's only ever called (CLX-98).
+            if (args[i]->kind == TypeKind::closure &&
+                (params[i]->copy_bound || params[i]->equal_bound || params[i]->hash_bound || params[i]->java_hash_bound ||
+                 params[i]->order_bound || params[i]->send_bound || params[i]->display_bound || !params[i]->bounds.empty() ||
+                 !params[i]->call)) {
+                error(span, "a closure can only be called, so it can't be " + q(params[i]->name) + " in " + what +
+                                (params[i]->call ? "" : ", which has no `Fn` bound"));
+                ok = false;
+                continue;
+            }
+            if (params[i]->call && !is_bad(args[i])) {
+                Type* want = subst(params[i]->call, binding(params, args));
+                Type* got = args[i]->kind == TypeKind::closure ? args[i]->call
+                            : args[i]->kind == TypeKind::fn_   ? args[i]
+                            : args[i]->kind == TypeKind::param ? args[i]->call
+                                                               : nullptr;
+                if (!got) {
+                    error(span, q(params[i]->name) + " is called as " + q(callable_text(want)) + ", so " + what +
+                                    " needs a closure or a function for it, not " + a_type(args[i]));
+                    ok = false;
+                    continue;
+                }
+                if (got != want) {
+                    error(span, q(params[i]->name) + " is called as " + q(callable_text(want)) + ", but this is called as " +
+                                    q(callable_text(got)));
+                    ok = false;
+                    continue;
+                }
+            }
             if (params[i]->copy_bound && !is_bad(args[i]) && !is_copy(args[i])) {
                 error(span, name_of(args[i]) + " isn't `Copy`, which " + what + " needs for " + q(params[i]->name));
                 ok = false;
@@ -2110,6 +2176,12 @@ private:
                 std::string s = t->unsafe_fn ? "ufn" : "fn";
                 for (std::size_t i = 0; i < t->elems.size(); i++) s += std::string("_") + mode[t->modes[i]] + mangle(t->elems[i]);
                 return s + "_to_" + mangle(t->elem);
+            }
+            case TypeKind::closure: {
+                // Its function's name, which says where it's written, without the module's prefix.
+                std::string n(t->item->c_name);
+                std::string prefix = std::string(t->item->module->prefix) + "__";
+                return n.compare(0, prefix.size(), prefix) == 0 ? n.substr(prefix.size()) : n;
             }
             default: return std::string(t->name);
         }
@@ -2725,6 +2797,12 @@ private:
                 return optional_type(inner, t->span);
             }
             case TypeExprKind::fn: {
+                if (t->callable && !callable_ok_) {
+                    error(t->span, "`Fn(...)` is what a closure is called as, a bound: write it as a parameter's type, "
+                                   "`f: Fn(i32) -> i32`, or a generic parameter's, `<F: Fn(i32) -> i32>`; a variable or a "
+                                   "field holds a plain `fn(...)`");
+                    return T.error;
+                }
                 // D122: a plain function as a value. Its parameters are written as a function's are,
                 // with their modes, and pointers go only to and from an `unsafe fn`.
                 std::vector<Type*> params;
@@ -3068,7 +3146,9 @@ private:
             // An interface fixes its functions' parameters, names included, so one impl not using
             // a parameter is fine.
             if (fn_ && fn_->interface_item) return;
-            if (!l->used && !l->mutated && !starts_with_underscore(n)) {
+            // One whose type is an error has an error already, such as a closure's parameter that
+            // isn't wanted.
+            if (!l->used && !l->mutated && !starts_with_underscore(n) && !is_bad(l->type)) {
                 if (l->name == n_self_) {
                     error(l->span, "`self` is never used; make " + q(text(fn_->name)) +
                                        " a plain function instead of a method");
@@ -3203,7 +3283,7 @@ private:
             case StmtKind::return_: check_return(s); return true;
             case StmtKind::break_: check_break(s); return true;
             case StmtKind::continue_:
-                if (loops_.empty()) error(s->span, "`continue` outside a loop");
+                if (loops_.empty()) error(s->span, closures_.empty() ? "`continue` outside a loop" : "`continue` can't leave a closure");
                 else s->loop_id = loops_.back().id;
                 return true;
             case StmtKind::while_: check_while(s); return false;
@@ -3392,6 +3472,7 @@ private:
                 e->local = l;
                 e->type = l->type;
                 *root = l;
+                note_capture(l);
                 return l->type;
             }
             case ExprKind::field: {
@@ -3421,6 +3502,12 @@ private:
 
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
+        if (captured(l)) {
+            error(place->span, "a closure reads what it captures where it is, so it can't change " + q(text(l->name)) +
+                                   "; change a copy in its body, or use a `for` loop");
+            l->used = l->mutated = true;
+            return;
+        }
         for (const Expr* p = place; p->kind == ExprKind::field || p->kind == ExprKind::index || p->kind == ExprKind::unwrap; p = p->lhs) {
             if (p->kind == ExprKind::index && p->box_value && p->lhs->type && p->lhs->type->shared) {
                 error(place->span, q(place_text(place)) + " can't be changed: every copy of " + q(place_text(p->lhs)) +
@@ -3591,6 +3678,12 @@ private:
     }
 
     void check_return(Stmt* s) {
+        if (!closures_.empty()) {
+            error(s->span, "`return` would leave the function around the closure; a closure gives back the value its "
+                           "body ends with");
+            if (s->value) check(s->value, nullptr);
+            return;
+        }
         if (!par_.empty()) {
             error(s->span, "a `parallel for` runs every iteration, so its body can't `return`; end an iteration early with `continue`");
         }
@@ -3611,6 +3704,11 @@ private:
 
     // `fail e`: returns the error `e` from a function that can fail.
     void check_fail(Stmt* s) {
+        if (!closures_.empty()) {
+            error(s->span, "a closure can't fail yet; handle the error in its body, with `match` or `!`");
+            if (s->value) check(s->value, nullptr);
+            return;
+        }
         if (!par_.empty()) {
             error(s->span, "a `parallel for` runs every iteration, so its body can't `fail`; keep each iteration's error in "
                            "an element of its own, such as `errors[k]`");
@@ -3638,7 +3736,7 @@ private:
 
     void check_break(Stmt* s) {
         if (loops_.empty()) {
-            error(s->span, "`break` outside a loop");
+            error(s->span, closures_.empty() ? "`break` outside a loop" : "`break` can't leave a closure");
             if (s->value) check(s->value, nullptr);
             return;
         }
@@ -3929,6 +4027,12 @@ private:
 
     // `try f()`: the call's value, or its error returned from this function.
     Type* check_try(Expr* e) {
+        if (!closures_.empty()) {
+            error(e->span, "a closure can't fail yet, so it can't pass an error up with `try`; handle it in its body, "
+                           "with `match` or `!`");
+            check(e->lhs, nullptr);
+            return T.error;
+        }
         Type* t = handled(e->lhs);
         if (is_bad(t)) return T.error;
         if (!t->is_result) {
@@ -4154,7 +4258,7 @@ private:
             case ExprKind::if_: return check_if(e, expected, false);
             case ExprKind::loop: return check_loop(e, expected, false);
             case ExprKind::match: return check_match(e, expected, false);
-            case ExprKind::closure: not_yet(e->span, "closures"); return T.error;
+            case ExprKind::closure: return closure_value(e, expected);
             case ExprKind::optional_field: return optional_field(e);
             case ExprKind::unwrap: {
                 Type* t = handled(e->lhs);
@@ -4755,6 +4859,7 @@ private:
                 e->ref = Ref::local;
                 e->local = r.local;
                 r.local->used = true;
+                note_capture(r.local);
                 return r.local->type;
             case NameKind::item:
                 use_item(r.item);
@@ -4851,6 +4956,13 @@ private:
     // `f(x)`, where `f` is a function value (D122). The arguments follow the type's modes, as a
     // direct call's follow the parameters', but a function value's parameters have no names, and
     // none can be left out.
+    // What a value of type `t` is called as, if it's a closure, or a generic parameter with an
+    // `Fn` bound (CLX-98).
+    static Type* callable(const Type* t) {
+        if (t->kind == TypeKind::closure || t->kind == TypeKind::param) return t->call;
+        return nullptr;
+    }
+
     Type* value_call(Expr* e, Type* ft) {
         Expr* callee = e->callee;
         e->call = CallKind::value;
@@ -4860,7 +4972,7 @@ private:
         }
         std::size_t n = ft->elems.size();
         if (e->args.size() != n) {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             error(e->span, "this " + name_of(ft) + " takes " + std::to_string(n) + " argument" + (n == 1 ? "" : "s") + ", but " +
                                std::to_string(e->args.size()) + (e->args.size() == 1 ? " was given" : " were given"));
             return T.error;
@@ -5555,7 +5667,7 @@ private:
         e->call = CallKind::some;
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
             error(e->span, "`some` takes one value");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Type* want = expected && expected->kind == TypeKind::optional ? expected->elem : nullptr;
@@ -6690,19 +6802,281 @@ private:
         return std::to_string(bits);
     }
 
+    // --- closures (CLX-98) ----------------------------------------------------------------
+    //
+    // A closure is a function of its own, checked where it's written, among the locals around
+    // it. Those it names are its captures, which it reads where they are, through their
+    // addresses, so it can't change them, and it's never stored, returned or sent: it's only ever
+    // an argument, to a parameter whose type is a generic one with a bound `Fn(A) -> R`, which
+    // each closure has an instance of, as Rust's `impl Fn` has. One that captures nothing can be
+    // a plain `fn(...)` value too.
+
+    // The closures being checked, innermost last.
+    std::vector<ClosureCtx> closures_;
+
+    // Where `l` is in `visible_`, or `visible_.size()` if it isn't there.
+    std::size_t visible_index(const Local* l) const {
+        for (std::size_t i = visible_.size(); i-- > 0;) {
+            if (visible_[i] == l) return i;
+        }
+        return visible_.size();
+    }
+
+    // `l` was named in the closures being checked: each one it's from outside of captures it.
+    void note_capture(Local* l) {
+        if (closures_.empty()) return;
+        std::size_t at = visible_index(l);
+        if (at == visible_.size()) return;
+        for (std::size_t k = closures_.size(); k-- > 0;) {
+            ClosureCtx& c = closures_[k];
+            if (at >= c.mark) break;  // its own, and so the inner ones'
+            if (std::find(c.captures.begin(), c.captures.end(), l) == c.captures.end()) c.captures.push_back(l);
+        }
+    }
+
+    // Whether `l` is from outside the innermost closure being checked, which can only read it.
+    bool captured(const Local* l) const {
+        if (closures_.empty()) return false;
+        std::size_t at = visible_index(l);
+        return at < closures_.back().mark;
+    }
+
+    // `|a, b| body`, the closure `e`, given what its parameters are, and what it gives back, or
+    // null to take its body's type: its function, checked, with `e->item` set to it. `fn_value`
+    // makes it a plain `fn(...)`, which can't capture anything.
+    Item* closure_fn(Expr* e, const std::vector<Type*>& params, Type* result, bool fn_value) {
+        auto* it = ctx_.arena.make<Item>();
+        it->kind = ItemKind::fn;
+        it->span = e->span;
+        it->name_span = e->span;
+        it->name = ctx_.names.intern("closure");
+        it->module = scope_->module;
+        it->is_closure = true;
+        it->plain = fn_value;
+        it->checked_signature = true;
+        it->used = true;
+        e->item = it;
+        std::vector<Param> ps(e->params.begin(), e->params.end());
+        if (ps.size() != params.size()) {
+            error(e->span, "this closure takes " + std::to_string(ps.size()) + " parameter" + (ps.size() == 1 ? "" : "s") +
+                               ", but " + std::to_string(params.size()) + (params.size() == 1 ? " is" : " are") + " wanted");
+        }
+        for (std::size_t i = 0; i < ps.size(); i++) {
+            Param& p = ps[i];
+            Type* t = i < params.size() ? params[i] : T.error;
+            if (p.type) {
+                Type* written = resolve_type(p.type);
+                if (!is_bad(written) && !is_bad(t) && written != t) {
+                    error(p.type->span, "this parameter is " + a_type(t) + " here, not " + a_type(written));
+                }
+                if (is_bad(t)) t = written;
+            }
+            if (p.mode != ParamMode::read) {
+                error(p.span, "a closure's parameters are only read, so they can't be `mut`; change a copy in its body");
+            }
+            auto* l = ctx_.arena.make<Local>();
+            l->name = p.name;
+            l->type = t;
+            l->span = p.span;
+            l->is_param = true;
+            l->mode = ParamMode::read;
+            l->is_view = is_view_type(t);
+            p.local = l;
+            p.mode = ParamMode::read;
+        }
+        it->params = ctx_.arena.copy(ps);
+        // Its body is checked here, among the locals around it, but `return`, `break`,
+        // `continue`, `try` and `fail` don't leave it.
+        closures_.push_back({it, visible_.size(), {}});
+        std::vector<LoopCtx> outer_loops;
+        outer_loops.swap(loops_);
+        push_scope();
+        for (Param& p : it->params) declare(p.local);
+        Type* body = check(e->body, result);
+        pop_scope();
+        loops_.swap(outer_loops);
+        std::vector<Local*> caps = std::move(closures_.back().captures);
+        closures_.pop_back();
+        // A closure inside this one reads what it captures through this one's captures.
+        for (Local* l : caps) note_capture(l);
+        Type* r = result ? result : body;
+        if (r->kind == TypeKind::never) r = T.unit;
+        it->result_type = r;
+        if (fn_value && !caps.empty()) {
+            error(e->span, "this closure reads " + q(text(caps[0]->name)) + ", so it can't be a `fn(...)`, which holds "
+                           "nothing; pass it straight to a parameter with a bound such as `Fn(i32) -> i32`, which can "
+                           "read what it captures where it is");
+        }
+        it->captures = ctx_.arena.copy(caps);
+        // Its value, given back: the body, or a statement of it for a closure that gives nothing.
+        auto* st = ctx_.arena.make<Stmt>();
+        st->span = e->body->span;
+        st->kind = r->kind == TypeKind::unit ? StmtKind::expr : StmtKind::return_;
+        st->value = e->body;
+        auto* b = ctx_.arena.make<Block>();
+        b->span = e->body->span;
+        std::vector<Stmt*> one{st};
+        b->stmts = ctx_.arena.copy(one);
+        it->body = b;
+        it->c_name = unique_c_name(std::string(fn_ ? fn_->c_name : std::string_view("cx")) + "__closure");
+        closure_moves_.push_back({it, !instance_mode_});
+        // A generic definition's closures are only checked; its instances' are what's emitted.
+        if (fn_ && fn_->type_params.empty() && !(fn_->is_closure && fn_->result_type && fn_->result_type->open)) {
+            closure_items_.push_back(it);
+        }
+        return it;
+    }
+
+    // The arguments of a call that's wrong, checked for the names they use: a closure's
+    // parameters take the error's type, so its body isn't reported again for them.
+    void check_args(Expr* e) {
+        for (Arg& a : e->args) {
+            if (a.value->kind == ExprKind::closure && fn_) {
+                closure_fn(a.value, std::vector<Type*>(a.value->params.size(), T.error), nullptr, false);
+            } else {
+                check(a.value, nullptr);
+            }
+        }
+    }
+
+    // `Fn(i32) -> i32`, for the function type `call`.
+    static std::string callable_text(const Type* call) {
+        std::string n(call->name);
+        return "Fn" + n.substr(2);
+    }
+
+    // A closure's own type, for one passed to a parameter with an `Fn` bound.
+    Type* closure_type(Item* it) {
+        std::vector<Type*> params;
+        std::vector<std::uint8_t> modes;
+        for (const Param& p : it->params) {
+            params.push_back(p.local->type);
+            modes.push_back(static_cast<std::uint8_t>(ParamMode::read));
+        }
+        Type* call = T.fn_of(params, modes, it->result_type, false);
+        auto [ln, col] = ctx_.sources.file(it->span.file).position(it->span.begin);
+        (void)col;
+        std::string name = "the closure on line " + std::to_string(ln);
+        return T.closure_of(it, call, name);
+    }
+
+    // `|x| ...` where a value goes: a plain `fn(...)` when that's what's wanted, or when its
+    // parameters say their types, and it captures nothing. Passed to an `Fn` bound, it has a type
+    // of its own, which `call_closure` gives it.
+    Type* closure_value(Expr* e, Type* expected) {
+        if (!fn_) {
+            error(e->span, "a closure can only be written in a function");
+            return T.error;
+        }
+        // Where an error left what's wanted unknown, its body is checked for the names it uses.
+        if (expected && is_bad(expected)) {
+            closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false);
+            return T.error;
+        }
+        if (expected && expected->kind == TypeKind::fn_) {
+            if (expected->unsafe_fn) {
+                error(e->span, "a closure isn't an `unsafe fn`");
+                return T.error;
+            }
+            for (std::uint8_t m : expected->modes) {
+                if (m != static_cast<std::uint8_t>(ParamMode::read)) {
+                    error(e->span, "a closure's parameters are only read, so it can't be " + a_type(expected));
+                    return T.error;
+                }
+            }
+            if (expected->elem->is_result) {
+                error(e->span, "a closure can't fail yet, so it can't be " + a_type(expected));
+                return T.error;
+            }
+            std::vector<Type*> params(expected->elems.begin(), expected->elems.end());
+            closure_fn(e, params, expected->elem, true);
+            return expected;
+        }
+        std::vector<Type*> params;
+        for (const Param& p : e->params) {
+            if (!p.type) {
+                error(p.span, "can't tell what " + q(text(p.name)) + " is; give it a type, as in " +
+                                  q("|" + std::string(text(p.name)) + ": i32| ...") +
+                                  ", or pass the closure to a parameter that says");
+                return T.error;
+            }
+            params.push_back(resolve_type(p.type));
+            if (is_bad(params.back())) return T.error;
+        }
+        Item* it = closure_fn(e, params, nullptr, true);
+        std::vector<Type*> ps;
+        std::vector<std::uint8_t> modes;
+        for (const Param& p : it->params) {
+            ps.push_back(p.local->type);
+            modes.push_back(static_cast<std::uint8_t>(ParamMode::read));
+        }
+        return T.fn_of(ps, modes, it->result_type, false);
+    }
+
+    // A closure passed to a parameter of generic type `f`, whose bound `Fn(A) -> R` says what its
+    // parameters are, once the other arguments have said what the generic types in it are, and
+    // whose result fills in the generic types in `R`. It gets a type of its own, which `f` takes.
+    // After an argument's error, `quiet`, one it left unknown is checked with that error's type,
+    // so its body's names count as used without a second error.
+    Type* call_closure(Expr* e, Type* f, Subst& s, const Slice<Type*>& vars, bool quiet = false) {
+        Type* sig = subst(f->call, s);
+        std::vector<Type*> params;
+        for (std::size_t i = 0; i < sig->elems.size(); i++) {
+            Type* want = sig->elems[i];
+            if (i < e->params.size() && e->params[i].type && unresolved(want, vars, s)) {
+                Type* written = resolve_type(e->params[i].type);
+                if (is_bad(written)) return T.error;
+                unify(sig->elems[i], written, s, vars);
+                want = subst(want, s);
+            }
+            if (unresolved(want, vars, s) && quiet) {
+                closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false);
+                return T.error;
+            }
+            if (unresolved(want, vars, s)) {
+                std::string name = i < e->params.size() ? std::string(text(e->params[i].name)) : "x";
+                error(i < e->params.size() ? e->params[i].span : e->span,
+                      "can't tell what " + q(name) + " is yet; give it a type, as in " + q("|" + name + ": i32| ...") +
+                          ", or the arguments before the closure that say");
+                return T.error;
+            }
+            params.push_back(want);
+        }
+        Type* want_result = subst(sig->elem, s);
+        bool infer_result = unresolved(want_result, vars, s);
+        Item* it = closure_fn(e, params, infer_result ? nullptr : want_result, false);
+        if (is_bad(it->result_type) || e->params.size() != params.size()) return T.error;
+        if (infer_result && !unify(sig->elem, it->result_type, s, vars)) {
+            error(e->body->span, "this closure gives back " + a_type(it->result_type) + ", which doesn't fit " +
+                                     q(callable_text(f->call)));
+            return T.error;
+        }
+        Type* t = closure_type(it);
+        e->type = t;
+        s[f] = t;
+        return t;
+    }
+
     // --- calls -------------------------------------------------------------------------------
 
     Type* call(Expr* e, Type* expected) {
         Expr* callee = e->callee;
+        // `f(a) |x| { ... }`: a closure after the call is its last argument (CLX-98).
         if (e->trailing) {
-            not_yet(e->trailing->span, "closures");
-            return T.error;
+            std::vector<Arg> args(e->args.begin(), e->args.end());
+            Arg a;
+            a.value = e->trailing;
+            a.span = e->trailing->span;
+            args.push_back(a);
+            e->args = ctx_.arena.copy(args);
+            e->trailing = nullptr;
         }
         // `(s.f)(x)`: what's in parentheses is a value, so this calls a function value (D122).
         if (callee->parens) {
             Type* t = check(callee, nullptr);
             if (t->kind == TypeKind::fn_) return value_call(e, t);
-            for (Arg& a : e->args) check(a.value, nullptr);
+            if (Type* call = callable(t)) return value_call(e, call);
+            check_args(e);
             if (!is_bad(t)) error(callee->span, name_of(t) + " can't be called");
             return T.error;
         }
@@ -6720,12 +7094,12 @@ private:
                 error(callee->span, n == n_Sender_   ? "a `Sender` comes from the `Receiver` of its queue: `r.sender()`"
                                     : n == n_Thread_ ? "a `Thread` is started with `Thread.spawn(task)`"
                                                      : "a `Library` is opened with `Library.open(path)`, in `unsafe`");
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (n == n_ArenaList_ && !find_local(n)) {
                 error(callee->span, "an `ArenaList` is made by an arena, in a `let` of its own: `var xs = a.list<i32>()`");
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (is_table_name(n) && !find_local(n)) {
@@ -6750,7 +7124,7 @@ private:
                 case NameKind::type: {
                     Type* t = type_of_name(callee, r.type);
                     if (is_bad(t)) {
-                        for (Arg& a : e->args) check(a.value, nullptr);
+                        check_args(e);
                         return T.error;
                     }
                     callee->ref = Ref::type;
@@ -6759,12 +7133,12 @@ private:
                     if (t == T.string) return string_call(e);
                     if (t->kind == TypeKind::enum_) {
                         error(callee->span, "build " + a_type(t) + " from one of its variants, such as " + q(variant_text(t, 0)));
-                        for (Arg& a : e->args) check(a.value, nullptr);
+                        check_args(e);
                         return T.error;
                     }
                     if (t->kind == TypeKind::param) {
                         error(callee->span, q(t->name) + " is a generic parameter, so there's nothing to build or convert to");
-                        for (Arg& a : e->args) check(a.value, nullptr);
+                        check_args(e);
                         return T.error;
                     }
                     return conversion(e, t, Conv::exact);
@@ -6772,7 +7146,8 @@ private:
                 case NameKind::local: {
                     Type* t = check(callee, nullptr);
                     if (t->kind == TypeKind::fn_) return value_call(e, t);
-                    for (Arg& a : e->args) check(a.value, nullptr);
+            if (Type* call = callable(t)) return value_call(e, call);
+                    check_args(e);
                     if (!is_bad(t)) error(callee->span, q(text(n)) + " is " + a_type(t) + ", not a function");
                     return T.error;
                 }
@@ -6780,14 +7155,14 @@ private:
                     if (!module_item_error(callee->span, n) && !module_name_error(callee->span, n, "a function")) {
                         error(callee->span, "unknown function " + q(text(n)));
                     }
-                    for (Arg& a : e->args) check(a.value, nullptr);
+                    check_args(e);
                     return T.error;
             }
         }
         if (callee->kind == ExprKind::optional_field) {
             not_yet(callee->span, "`?.` method calls");
             check(callee->lhs, nullptr);
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (callee->kind == ExprKind::field && !callee->is_tuple_index && callee->lhs->kind == ExprKind::name &&
@@ -6812,7 +7187,7 @@ private:
                 if (r.kind == NameKind::type) {
                     Type* t = type_of_name(callee->lhs, r.type);
                     if (is_bad(t)) {
-                        for (Arg& a : e->args) check(a.value, nullptr);
+                        check_args(e);
                         return T.error;
                     }
                     callee->lhs->ref = Ref::type;
@@ -6825,7 +7200,7 @@ private:
             Type* recv = context ? handled(callee->lhs) : check(callee->lhs, nullptr);
             if (context && recv->is_result) return context_call(e, recv);
             if (is_bad(recv)) {
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (recv->kind == TypeKind::arena) return arena_method(e, recv, expected);
@@ -6836,7 +7211,7 @@ private:
             if (recv->kind == TypeKind::library && callee->member != n_copy_) return library_method(e, expected);
             if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
                 error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (callee->member == n_copy_ && !e->only_interface) return copy_call(e, recv);
@@ -6850,17 +7225,17 @@ private:
             if (mem.ambiguous) {
                 error(callee->span, q(text(callee->member)) + " is in more than one interface " + name_of(recv) +
                                         " implements; say which, as in " + q(ambiguity_example(recv, callee->member)));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (!mem.fn && e->only_interface) {
                 error(callee->lhs->span, name_of(recv) + " doesn't implement " + q(iface_text(e->only_interface)));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (mem.fn && prop_of(mem.iface) >= 0) {
                 error(callee->span, called_by_name(mem.iface));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (mem.fn) {
@@ -6868,7 +7243,7 @@ private:
                 if (!mem.fn->is_method) {
                     error(callee->span, q(text(mem.fn->name)) + " isn't a method; call it as " +
                                             q(std::string(recv->name) + "." + std::string(text(mem.fn->name)) + "(...)"));
-                    for (Arg& a : e->args) check(a.value, nullptr);
+                    check_args(e);
                     return T.error;
                 }
                 use_item(mem.fn);
@@ -6878,7 +7253,7 @@ private:
                 error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)) +
                                         (recv->bounds.empty() ? "; give it a bound that has one, such as " + q("<" + std::string(recv->name) + ": Shape>")
                                                               : std::string("")));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             if (recv->kind == TypeKind::struct_ || recv->kind == TypeKind::enum_) {
@@ -6895,7 +7270,7 @@ private:
                                                     (fn ? "; call the function it holds with " +
                                                               q("(" + place_text(callee) + ")(...)")
                                                         : std::string()));
-                            for (Arg& a : e->args) check(a.value, nullptr);
+                            check_args(e);
                             return T.error;
                         }
                     }
@@ -6913,7 +7288,8 @@ private:
         }
         Type* t = check(callee, nullptr);
         if (t->kind == TypeKind::fn_) return value_call(e, t);
-        for (Arg& a : e->args) check(a.value, nullptr);
+            if (Type* call = callable(t)) return value_call(e, call);
+        check_args(e);
         if (!is_bad(t)) error(callee->span, "this can't be called");
         return T.error;
     }
@@ -6925,25 +7301,25 @@ private:
         use_item(iface);
         if (prop_of(iface) >= 0) {
             error(callee->span, called_by_name(iface));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Item* member = interface_member(iface, callee->member);
         if (!member || member->kind != ItemKind::fn) {
             error(callee->span, q(text(iface->name)) + " has no function " + q(text(callee->member)));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (!member->is_method) {
             error(callee->span, "call " + q(text(member->name)) + " on a type that implements " + q(text(iface->name)) +
                                     ", as in " + q("T." + std::string(text(member->name)) + "(...)"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (e->args.empty() || e->args[0].name) {
             error(e->span, q(std::string(text(iface->name)) + "." + std::string(text(member->name))) +
                                " takes the value to call it on first");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Expr* recv = e->args[0].value;
@@ -6975,7 +7351,7 @@ private:
         e->bmethod = BMethod::hash_add;
         if (e->args.size() != 1) {
             error(e->span, "`add` takes one argument, the value to add to the hash");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Arg& a = e->args[0];
@@ -7034,21 +7410,21 @@ private:
             error(e->callee->span, q(m) + " is in more than one " + (is_identity(t) ? "impl of " : "interface ") + name_of(t) +
                                        (is_identity(t) ? "; give its types, as in " + q(std::string(text(t->generic->name)) + "<...>." + std::string(m) + "(...)")
                                                        : std::string(" implements")));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (mem.fn) {
             if (!member_visible(mem)) private_member(e->callee->span, mem.fn);
             if (mem.fn->is_method) {
                 error(e->callee->span, q(text(mem.fn->name)) + " is a method; call it on a value: " + q("x." + std::string(m) + "(...)"));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             use_item(mem.fn);
             return fn_call(e, mem.fn, nullptr, expected, std::move(mem.s), e->callee->type_args);
         }
         error(e->callee->span, name_of(t) + " has no function " + q(m));
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         return T.error;
     }
 
@@ -7059,19 +7435,19 @@ private:
         e->field_index = i;
         if (v.types.empty()) {
             error(e->span, q(variant_text(t, i)) + " holds no data; write it without parentheses");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (v.has_fields) {
             error(e->span, q(variant_text(t, i)) + " has named fields; write " + q(variant_text(t, i) + " { ... }"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (e->args.size() != v.types.size()) {
             error(e->span, q(variant_text(t, i)) + " holds " + std::to_string(v.types.size()) +
                                (v.types.size() == 1 ? " value" : " values") + ", but " +
                                std::to_string(e->args.size()) + " were given");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         // `Either.Left(1)`: a generic enum's types come from the values, or from where it goes.
@@ -7237,6 +7613,16 @@ private:
             // what the parameters are, so `pick(c, 1, 2i64)` picks between `i64`s.
             if (generic && is_untyped_literal(a.value) && unresolved(subst(want, s), vars, s)) {
                 later.push_back({a.value, want});
+            } else if (generic && a.value->kind == ExprKind::closure && want->kind == TypeKind::param && want->call &&
+                       std::find(vars.begin(), vars.end(), want) != vars.end()) {
+                // It reads what it captures where it is, so nothing can keep it (CLX-98).
+                if (p.mode == ParamMode::own) {
+                    error(a.value->span, q(text(f->name)) + " takes " + q(text(p.name)) + " as `own`, to keep, and a closure "
+                                         "reads what it captures where it is, so it can only be passed to a parameter that "
+                                         "isn't `own`");
+                    bad_arg = true;
+                }
+                later.push_back({a.value, want});
             } else {
                 Expr* saved_view = str_view_ok_;
                 if (p.mode == ParamMode::read && want == T.string) str_view_ok_ = a.value;
@@ -7261,9 +7647,21 @@ private:
             ordered[index] = a.value;
         }
         for (auto& [v, want] : later) {
+            if (v->kind == ExprKind::closure) {
+                if (is_bad(call_closure(v, want, s, vars, bad_arg))) bad_arg = true;
+                continue;
+            }
             // A second `none` that still can't tell its type would only repeat the first's error.
             if (bad_arg && v->kind == ExprKind::none_lit && unresolved(subst(want, s), vars, s)) continue;
             if (is_bad(check_inferred(v, want, s, vars))) bad_arg = true;
+        }
+        // What a function or a closure passed for an `Fn` bound gives back says what the generic
+        // types in the bound's result are.
+        for (Type* p : vars) {
+            if (!p->call) continue;
+            auto it = s.find(p);
+            if (it == s.end()) continue;
+            if (Type* got = it->second->kind == TypeKind::fn_ ? it->second : callable(it->second)) unify(p->call, got, s, vars);
         }
         for (std::size_t i = first; i < n; i++) {
             if (!ordered[i] && f->params[i].default_value) ordered[i] = f->params[i].default_value;  // CLX-111
@@ -7350,7 +7748,7 @@ private:
         if (e->args.size() != 1 || e->args[0].name) {
             error(e->span, "`.context` takes one argument, the text that says what was being done, as in "
                            "`try read_text(path).context(\"reading {path}\")`");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Type* text_t = check(e->args[0].value, T.string);
@@ -7616,7 +8014,7 @@ private:
                     error(e->span, "can't tell what types this " + q(text(t->generic->name)) + " has; give them, as in " +
                                        q(std::string(text(t->generic->name)) + "<...>()") + ", or give the variable a type");
                 }
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
             t = expected;
@@ -7627,7 +8025,7 @@ private:
         if (!e->args.empty()) {
             error(e->span, "build " + a_type(t) + " with " + q(std::string(t->name) + " { field: value }") +
                                "; " + q(std::string(t->name) + "()") + " takes no arguments");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         for (const FieldDecl& f : s->fields) {
@@ -7646,7 +8044,7 @@ private:
     Expr* single_arg(Expr* e, const char* what) {
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
             error(e->span, std::string(what) + " takes one argument");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return nullptr;
         }
         return e->args[0].value;
@@ -7843,12 +8241,12 @@ private:
         } else if (expected && expected->kind == TypeKind::list && !expected->heap && !expected->boxed) {
             t = expected;
         } else {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (expected && is_bad(expected)) return T.error;
             error(e->span, "can't tell what this list holds; give it, as in `List<i32>()`, or give the variable a type");
             return T.error;
         }
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             error(e->args[0].span, "`List<T>()` takes no arguments; push the elements, or write them as `[a, b]`");
             return T.error;
@@ -7878,12 +8276,12 @@ private:
         } else if (expected && expected->kind == TypeKind::deque) {
             t = expected;
         } else {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (expected && is_bad(expected)) return T.error;
             error(e->span, "can't tell what this deque holds; give it, as in `Deque<i32>()`, or give the variable a type");
             return T.error;
         }
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             error(e->args[0].span, "`Deque<T>()` takes no arguments; push the elements, or write them as `[a, b]`");
             return T.error;
@@ -7900,12 +8298,12 @@ private:
         callee->ref = Ref::type;
         if (!callee->type_args.empty()) {
             error(callee->type_args[0]->span, "`Arena` doesn't take generic arguments; the lists made from it do: `a.list<i32>()`");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (e->args.size() > 1) {
             error(e->span, "`Arena` takes no arguments, or one: how many bytes its first chunk holds");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         for (Arg& a : e->args) {
@@ -7976,12 +8374,12 @@ private:
                                : m == "clear" || m == "free"                  ? "; free everything in it with `reset()`"
                                                                               : "";
             error(callee->span, "`Arena` has no method " + q(m) + hint);
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->bmethod = b;
         if (!callee->type_args.empty()) error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             error(e->span, q(m) + " takes no arguments");
             return T.error;
@@ -8085,7 +8483,7 @@ private:
         } else if (!expected || !is_bad(expected)) {
             error(e->span, "can't tell what this queue carries; give it, as in `Receiver<i32>()`, or give the variable a type");
         }
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!t) return T.error;
         if (!e->args.empty()) {
             error(e->args[0].span, "`Receiver<T>()` takes no arguments; the queue grows as messages come");
@@ -8106,7 +8504,7 @@ private:
         std::string_view m = text(callee->member);
         if (m != "spawn") {
             error(callee->span, "`Thread` has no function " + q(m) + "; start a thread with `Thread.spawn(task)`");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->call = CallKind::builtin_method;
@@ -8117,7 +8515,7 @@ private:
         unsafe_used_ = true;
         if (!callee->type_args.empty()) error(callee->type_args[0]->span, "`spawn` doesn't take generic arguments");
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             error(e->span, "`Thread.spawn` takes one argument, the task the thread runs, which moves to it");
             return T.error;
         }
@@ -8179,21 +8577,21 @@ private:
         }
         if (b == BMethod::none) {
             error(callee->span, name_of(recv) + " has no method " + q(m) + hint);
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->bmethod = b;
         if (!callee->type_args.empty()) error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
         if (arg) {
             if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 error(e->span, q(m) + (b == BMethod::queue_wait_for ? " takes one argument, the most nanoseconds to wait, a `u64`"
                                                                    : " takes one argument, the message, which moves into the queue"));
                 return T.error;
             }
             check(e->args[0].value, arg);
         } else {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (!e->args.empty()) {
                 error(e->args[0].span, q(m) + " takes no arguments");
                 return T.error;
@@ -8233,7 +8631,7 @@ private:
         std::string_view m = text(callee->member);
         if (m != "open") {
             error(callee->span, "`Library` has no function " + q(m) + "; open a library with `Library.open(path)`");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->call = CallKind::builtin_method;
@@ -8245,7 +8643,7 @@ private:
         unsafe_used_ = true;
         if (!callee->type_args.empty()) error(callee->type_args[0]->span, "`open` doesn't take generic arguments");
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             error(e->span, "`Library.open` takes one argument, the library's path");
             return T.error;
         }
@@ -8278,7 +8676,7 @@ private:
         }
         if (b == BMethod::none) {
             error(callee->span, "`Library` has no method " + q(m) + hint);
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->bmethod = b;
@@ -8313,7 +8711,7 @@ private:
             error(callee->type_args[0]->span, q(m) + " doesn't take generic arguments");
         }
         if (b == BMethod::lib_close) {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (!e->args.empty()) {
                 error(e->args[0].span, "`close` takes no arguments");
                 return T.error;
@@ -8326,7 +8724,7 @@ private:
             return T.unit;
         }
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             error(e->span, q(m) + " takes one argument, the name the library exports the function as");
             return T.error;
         }
@@ -8352,18 +8750,18 @@ private:
         if (callee->type_args.size() == 1) {
             want = resolve_type(callee->type_args[0]);
             if (is_bad(want)) {
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
         } else if (!callee->type_args.empty()) {
             error(callee->span, std::string(word) + " takes one generic argument, the type of the value it holds: " +
                                     (shared ? "`Shared<Config>(c)`" : "`Box<Node>(n)`"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
             error(e->span, std::string(word) + " takes one value, the one it holds: " + (shared ? "`Shared(c)`" : "`Box(n)`"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Expr* value = e->args[0].value;
@@ -8431,12 +8829,12 @@ private:
         } else if (expected && expected->kind == TypeKind::list && expected->heap) {
             t = expected;
         } else {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (expected && is_bad(expected)) return T.error;
             error(e->span, "can't tell what this queue holds; give it, as in `PriorityQueue<i32>()`, or give the variable a type");
             return T.error;
         }
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             // Java's `new PriorityQueue<>(n, comparator)`.
             error(e->args[0].span, "`PriorityQueue<T>()` takes no arguments, since its elements go in their `Order`; elements "
@@ -8620,7 +9018,7 @@ private:
                 check(a.value, i == 0 ? T.usize : T.f32);
             }
         } else {
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             if (!e->args.empty()) {
                 error(e->args[0].span, java ? q(name + "<...>()") + " takes at most one argument, the capacity Java's " +
                                                   (map ? "`new HashMap<>(n)`" : "`new HashSet<>(n)`") + " starts with"
@@ -8664,7 +9062,7 @@ private:
         e->bmethod = BMethod::cmp;
         if (e->args.size() != 1) {
             error(e->span, "`cmp` takes one argument, the value to compare with");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Arg& a = e->args[0];
@@ -8683,7 +9081,7 @@ private:
     Type* java_hash_call(Expr* e, Type* recv) {
         e->call = CallKind::builtin_method;
         e->bmethod = BMethod::java_hash;
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             error(e->span, "`java_hash` takes no arguments");
             return T.error;
@@ -8727,7 +9125,7 @@ private:
     Type* copy_call(Expr* e, Type* recv) {
         e->call = CallKind::builtin_method;
         e->bmethod = BMethod::copy;
-        for (Arg& a : e->args) check(a.value, nullptr);
+        check_args(e);
         if (!e->args.empty()) {
             error(e->span, "`copy` takes no arguments");
             return T.error;
@@ -8776,6 +9174,7 @@ private:
             // leaves another.
             if (m == "take") b = BMethod::take, changes = true, result = recv;
             else if (m == "replace") b = BMethod::replace, changes = true, params = {recv->elem}, result = recv;
+            else if (m == "map") return optional_map(e, recv);
         } else if (recv->kind == TypeKind::string || recv->kind == TypeKind::str) {
             bool owned = recv->kind == TypeKind::string;
             if (m == "len") b = BMethod::len, result = T.usize;
@@ -8811,14 +9210,14 @@ private:
                 // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
                 if (e != for_iter_) {
                     error(e->callee->span, q(m) + " goes over the text in a `for` loop: " + q("for x in s." + std::string(m) + "()"));
-                    for (Arg& a : e->args) check(a.value, nullptr);
+                    check_args(e);
                     return T.error;
                 }
                 b = m == "runes" ? BMethod::runes : BMethod::chars, result = recv;
             } else if (!owned) {
                 if (m == "push" || m == "push_str" || m == "clear" || m == "reserve") {
                     error(e->callee->span, "a `str` can't change; make a `String` with " + q("String(...)"));
-                    for (Arg& a : e->args) check(a.value, nullptr);
+                    check_args(e);
                     return T.error;
                 }
             } else if (m == "push") b = BMethod::push, changes = true, params = {T.rune};
@@ -8873,7 +9272,7 @@ private:
                     if (!is_copy(key) && !is_bad(key)) {
                         error(e->callee->span, q(m) + " copies the key out, so it needs keys that are `Copy`, and " + name_of(key) +
                                                    " owns memory; go over the keys from it with " + q("for k in s.range(x..)"));
-                        for (Arg& a : e->args) check(a.value, nullptr);
+                        check_args(e);
                         return T.error;
                     }
                 } else if (sorted && m == "range") {
@@ -8890,14 +9289,14 @@ private:
                     error(e->callee->span, q(m) + " copies the key out, so it needs keys that are `Copy`, and " + name_of(key) +
                                                " owns memory; take it out with " + q(b == BMethod::first ? "pop_first" : "pop_last") +
                                                ", or read it in a loop, which starts at the " + (sorted ? "least" : "first"));
-                    for (Arg& a : e->args) check(a.value, nullptr);
+                    check_args(e);
                     return T.error;
                 }
             }
             if (b == BMethod::get && !is_copy(recv->elem) && !is_bad(recv->elem)) {
                 error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(recv->elem) +
                                            " owns memory; read it in place with `m[key]`");
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
         } else if (recv->boxed) {
@@ -8905,7 +9304,7 @@ private:
             error(e->callee->span, name_of(recv) + " has no method " + q(m) + "; its value is " +
                                        q(place_text(e->callee->lhs) + ".value") + ", as in " +
                                        q(place_text(e->callee->lhs) + ".value." + std::string(m) + "()"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         } else if (recv->heap) {
             // Java's `PriorityQueue`: the least element comes out first, and a loop goes in the
@@ -8925,7 +9324,7 @@ private:
             if (b == BMethod::peek && !is_copy(el) && !is_bad(el)) {
                 error(e->callee->span, "`peek` copies the element out, so it needs elements that are `Copy`, and " + name_of(el) +
                                            " owns memory; take it out with `pop`, or read it in a loop, which starts with it");
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
         } else if (recv->kind == TypeKind::deque) {
@@ -8947,11 +9346,12 @@ private:
             if ((b == BMethod::first || b == BMethod::last) && !is_copy(el) && !is_bad(el)) {
                 error(e->callee->span, q(m) + " copies the element out, so it needs elements that are `Copy`, and " + name_of(el) +
                                            " owns memory; read it in place with " + q(b == BMethod::first ? "d[0]" : "d[d.len() - 1]"));
-                for (Arg& a : e->args) check(a.value, nullptr);
+                check_args(e);
                 return T.error;
             }
         } else {
             Type* el = recv->elem;
+            if (recv->kind == TypeKind::list && closure_method(m) != BMethod::none) return list_closure_call(e, recv, closure_method(m));
             if (m == "len") b = BMethod::len, result = T.usize;
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
             else if (m == "capacity") b = BMethod::capacity, result = T.usize;
@@ -8978,7 +9378,7 @@ private:
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +
                                        (recv->kind == TypeKind::deque ? deque_hint(m) : recv->heap ? heap_hint(m) : ""));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->bmethod = b;
@@ -8987,7 +9387,7 @@ private:
                                (params.empty() ? std::string("no arguments")
                                                : params.size() == 1 ? std::string("one argument")
                                                                     : std::to_string(params.size()) + " arguments"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         for (std::size_t i = 0; i < params.size(); i++) {
@@ -9052,7 +9452,7 @@ private:
         Type* el = recv->elem;
         if (e->args.size() != 1) {
             error(e->span, "`extend` takes one argument, the list or array whose elements it adds");
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         Arg& a = e->args[0];
@@ -9087,6 +9487,173 @@ private:
         return T.unit;
     }
 
+    // The methods of a list that call a closure, or a function, on its elements (CLX-98).
+    static BMethod closure_method(std::string_view m) {
+        if (m == "map") return BMethod::list_map;
+        if (m == "filter") return BMethod::list_filter;
+        if (m == "retain") return BMethod::list_retain;
+        if (m == "any") return BMethod::list_any;
+        if (m == "all") return BMethod::list_all;
+        if (m == "count") return BMethod::list_count;
+        if (m == "find") return BMethod::list_find;
+        if (m == "position") return BMethod::list_position;
+        if (m == "sort_by") return BMethod::sort_by;
+        if (m == "sort_by_key") return BMethod::sort_by_key;
+        return BMethod::none;
+    }
+
+    // How a call of the method `b` is written, for its errors.
+    static std::string closure_example(BMethod b) {
+        switch (b) {
+            case BMethod::list_map: case BMethod::opt_map: return "|x| x * 2";
+            case BMethod::sort_by: return "|a, b| a.cmp(b)";
+            case BMethod::sort_by_key: return "|x| x.len()";
+            default: return "|x| x > 0";
+        }
+    }
+
+    // What a method that calls its argument was given: a closure, whose parameters are `params`
+    // and which gives back `result`, or anything for null; or a function value, or a parameter
+    // holding a closure or a function, that takes `params` and gives back `result`. What it's
+    // called as, or null after an error.
+    Type* method_callable(Expr* e, BMethod b, Expr* arg, const std::vector<Type*>& params, Type* result) {
+        std::string m(text(e->callee->member));
+        std::vector<std::uint8_t> modes(params.size(), static_cast<std::uint8_t>(ParamMode::read));
+        if (arg->kind == ExprKind::closure) {
+            if (!fn_) {
+                error(arg->span, "a closure can only be written in a function");
+                return nullptr;
+            }
+            Item* it = closure_fn(arg, params, result, false);
+            if (arg->params.size() != params.size() || is_bad(it->result_type)) return nullptr;
+            arg->type = closure_type(it);
+            return arg->type->call;
+        }
+        Type* t = check(arg, nullptr);
+        if (is_bad(t)) return nullptr;
+        Type* sig = t->kind == TypeKind::fn_ ? t : callable(t);
+        if (!sig) {
+            error(arg->span, q(m) + " calls what it's given on " + (b == BMethod::opt_map ? "the value" : "each element") +
+                                 ", so it takes a closure, as in " + q(closure_example(b)) + ", or a function, not " + a_type(t));
+            return nullptr;
+        }
+        bool fits = sig->elems.size() == params.size() && !sig->unsafe_fn && !is_bad(sig->elem);
+        for (std::size_t i = 0; fits && i < params.size(); i++) {
+            fits = sig->elems[i] == params[i] && sig->modes[i] == static_cast<std::uint8_t>(ParamMode::read);
+        }
+        if (fits && result) fits = sig->elem == result;
+        if (!fits) {
+            Type* want = T.fn_of(params, modes, result ? result : sig->elem, false);
+            error(arg->span, q(m) + " calls it as " + q(callable_text(want)) + ", so it can't be " + a_type(t));
+            return nullptr;
+        }
+        return sig;
+    }
+
+    // `xs.map(|x| ...)` and the other methods of a list that call a closure on its elements.
+    Type* list_closure_call(Expr* e, Type* recv, BMethod b) {
+        std::string m(text(e->callee->member));
+        e->bmethod = b;
+        Type* el = recv->elem;
+        if (e->args.size() != 1) {
+            error(e->span, q(m) + " takes one argument, a closure, as in " + q("xs." + m + "(" + closure_example(b) + ")"));
+            check_args(e);
+            return T.error;
+        }
+        Arg& a = e->args[0];
+        if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+        std::vector<Type*> params{el};
+        if (b == BMethod::sort_by) params.push_back(el);
+        Type* want = b == BMethod::list_map || b == BMethod::sort_by_key ? nullptr
+                     : b == BMethod::sort_by                            ? ordering_type()
+                                                                        : T.bool_;
+        Type* sig = method_callable(e, b, a.value, params, want);
+        bool changes = b == BMethod::list_retain || b == BMethod::sort_by || b == BMethod::sort_by_key;
+        Type* result = T.unit;
+        if (sig && !is_bad(el)) {
+            Type* r = sig->elem;
+            switch (b) {
+                case BMethod::list_map:
+                    if (r->kind == TypeKind::unit) {
+                        error(a.value->span, "`map` makes a list of what the closure gives back, and it gives back nothing; "
+                                             "go over the list with a `for` loop");
+                        result = T.error;
+                    } else {
+                        result = T.list_of(r);
+                    }
+                    break;
+                case BMethod::list_filter: case BMethod::list_find:
+                    if (const Type* h = handle_inside(el)) {
+                        error(e->callee->span, q(m) + " copies the elements it keeps, and " + name_of(el) + " can't be copied" +
+                                                   (h == el ? "" : ", since it holds " + name_of(h)) +
+                                                   (b == BMethod::list_filter ? "; keep them in place with `retain`" : ""));
+                        result = T.error;
+                    } else {
+                        result = b == BMethod::list_filter ? T.list_of(el) : T.optional_of(el);
+                    }
+                    break;
+                case BMethod::list_any: case BMethod::list_all: result = T.bool_; break;
+                case BMethod::list_count: result = T.usize; break;
+                case BMethod::list_position: result = T.optional_of(T.usize); break;
+                case BMethod::sort_by_key:
+                    if (!is_bad(r) && (!orderable(r) || !is_copy(r))) {
+                        error(a.value->span, "`sort_by_key` compares the keys the closure gives back with `<`, so they must be "
+                                             "`Copy` and have `Order`, and " + name_of(r) +
+                                             (orderable(r) ? " owns memory" : " has no `Order`" + lacking(r, p_order)) +
+                                             "; compare the elements with " + q("sort_by(|a, b| ...)"));
+                        result = T.error;
+                    }
+                    break;
+                default: break;
+            }
+        } else {
+            result = T.error;
+        }
+        if (changes) {
+            Expr* lhs = e->callee->lhs;
+            if (Local* root = place_root(lhs)) {
+                require_writable(lhs, root, false);
+                // The list changes while the closure runs, so the closure can't read it.
+                bool reads = a.value->kind == ExprKind::closure && a.value->item &&
+                             std::find(a.value->item->captures.begin(), a.value->item->captures.end(), root) !=
+                                 a.value->item->captures.end();
+                if (reads || (a.value->kind != ExprKind::closure && mentions(a.value, root))) {
+                    error(a.value->span, q(text(root->name)) + " is changed by " + q(m) +
+                                             ", so the closure can't read it; copy what it needs into a variable first");
+                }
+            } else {
+                error(lhs->span, q(m) + " changes " + name_of(recv) + ", so call it on a variable");
+            }
+        }
+        return result;
+    }
+
+    // `opt.map(|x| ...)`: what the closure gives back for the optional's value, or `none`.
+    Type* optional_map(Expr* e, Type* recv) {
+        e->bmethod = BMethod::opt_map;
+        if (e->args.size() != 1) {
+            error(e->span, "`map` takes one argument, a closure, as in " + q("opt.map(|x| x * 2)"));
+            check_args(e);
+            return T.error;
+        }
+        Arg& a = e->args[0];
+        if (a.name || a.is_mut) error(a.span, "this argument can't be named or `mut`");
+        Type* sig = method_callable(e, BMethod::opt_map, a.value, {recv->elem}, nullptr);
+        if (!sig || is_bad(recv->elem)) return T.error;
+        Type* r = sig->elem;
+        if (r->kind == TypeKind::unit) {
+            error(a.value->span, "`map` makes an optional of what the closure gives back, and it gives back nothing; "
+                                 "use `if let x = opt { ... }`");
+            return T.error;
+        }
+        if (r->kind == TypeKind::optional) {
+            error(a.value->span, "this closure gives back " + a_type(r) + ", and an optional can't hold another optional; "
+                                 "use `if let x = opt { ... }`");
+            return T.error;
+        }
+        return T.optional_of(r);
+    }
+
     // The methods of `*T` and `*const T`, which only `unsafe` code can call, since the receiver
     // is a pointer.
     Type* pointer_method(Expr* e, Type* recv) {
@@ -9101,14 +9668,14 @@ private:
         else if (m == "is_null") b = BMethod::ptr_is_null, result = T.bool_;
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         e->bmethod = b;
         std::size_t want = param ? 1 : 0;
         if (e->args.size() != want) {
             error(e->span, q(m) + " takes " + (want ? "one argument" : "no arguments"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         for (Arg& a : e->args) {
@@ -9183,7 +9750,7 @@ private:
         else if (m == "count_ones" && is_int(recv)) pm = PrimMethod::count_ones;
         if (pm == PrimMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         if (pm == PrimMethod::abs && is_int(recv) && !recv->is_signed) {
@@ -9193,7 +9760,7 @@ private:
         e->prim = pm;
         if (static_cast<int>(e->args.size()) != args) {
             error(e->span, q(m) + " takes " + (args == 2 ? "two arguments" : args ? "one argument" : "no arguments"));
-            for (Arg& a : e->args) check(a.value, nullptr);
+            check_args(e);
             return T.error;
         }
         for (Arg& a : e->args) {
@@ -9639,6 +10206,11 @@ private:
     std::unordered_set<std::string> c_names_;
     std::unordered_set<std::string> prefixes_;
     std::unordered_set<Item*> failed_generics_;
+    std::vector<Item*> closure_items_;  // the closures that are emitted, in the order they were checked (CLX-98)
+    // Every closure, for the ownership pass, and whether its errors are reported: an instance's
+    // were its definition's.
+    std::vector<std::pair<Item*, bool>> closure_moves_;
+    bool callable_ok_ = false;          // resolving a bound, where `Fn(A) -> R` can be written
     std::vector<Type*> pending_defaults_;  // instances made before the generic structs' defaults were checked
     bool defaults_ready_ = false;
     bool defer_bounds_ = false;

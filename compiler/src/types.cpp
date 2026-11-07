@@ -321,6 +321,14 @@ Type* Types::fn_of(const std::vector<Type*>& params, const std::vector<std::uint
     return t;
 }
 
+Type* Types::closure_of(Item* item, Type* call, std::string_view name) {
+    Type* t = make(TypeKind::closure, arena_.copy(name));
+    t->item = item;
+    t->call = call;
+    t->open = call->open;
+    return t;
+}
+
 bool is_view_type(const Type* t) {
     switch (t->kind) {
         case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
@@ -401,6 +409,7 @@ bool send_walk(const Type* t, int depth, Seen& seen) {
     if (t->has_pointer || t->scoped) return false;
     switch (t->kind) {
         case TypeKind::pointer: return false;
+        case TypeKind::closure: return false;  // it reads its captures where they are
         case TypeKind::param: return t->send_bound;
         case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
             return send_walk(t->elem, depth + 1, seen);

@@ -44,6 +44,11 @@ enum class TypeKind : std::uint8_t {
     // `fn(A, mut B) -> R`: a plain function as a value (D122). `elems` are its parameters' types
     // and `modes` their modes, and `elem` is what it gives back, a result when it can fail.
     fn_,
+    // `|x| x + n`: a closure, each its own type (CLX-98). `item` is the function its body is, and
+    // `call` what it's called as, a `fn_` type. It reads what it captures where it is, so it's
+    // only ever an argument: it's never stored, returned, sent or copied by the program. In C it's
+    // the addresses of what it captures, which its function reads.
+    closure,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -100,6 +105,9 @@ struct Type {
     // grows from its arena, frees nothing itself, and can't move or be stored.
     bool arena_list = false;
     bool scoped = false;     // it is or holds an `ArenaList`, so it's only ever a variable or parameter of its own
+    // closure: what it's called as; param: its bound `Fn(A) -> R`, what what it stands for can be
+    // called as. Either is a `fn_` type (CLX-98).
+    Type* call = nullptr;
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };
@@ -143,6 +151,8 @@ public:
     Type* make_param(std::string_view name);
     Type* pointer_of(Type* elem, bool is_const);
     Type* fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe);
+    // A new closure's type, for the function `item`, called as `call`.
+    Type* closure_of(Item* item, Type* call, std::string_view name);
     // The function types made so far, in the order they were made.
     const std::vector<Type*>& fn_types() const { return fns_; }
     // The arrays, optionals, tuples, lists, maps and sets made so far, in the order they were made.

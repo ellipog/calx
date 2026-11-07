@@ -60,6 +60,7 @@ fn main() {
 | `opt!` | The value, or a panic: `unwrapped \`none\` with \`!\`` |
 | `opt?.field` | `some` of the field, or `none` |
 | `match opt { some(x) => ..., none => ... }` | Either, with patterns inside `some` ([patterns](patterns.md)) |
+| `opt.map(\|x\| ...)` | `some` of what the [closure](closures.md#methods-that-take-one) gives back for the value, or `none` |
 
 - In `a ?? b`, `b` is a `T` or a `T?`. With a `T` the result is a `T`. With a `T?` it's a `T?`, so `a ?? b ?? 0` tries `a`, then `b`, then gives 0.
 - `??` next to any other binary operator needs parentheses: `(a ?? 0) + 1` ([strictness](strictness.md#parentheses)).
@@ -146,4 +147,4 @@ Besides functions that return them: [`T.try_from(x)`](conversions.md#try_from), 
 
 ## In memory
 
-A `T?` is a `T` followed by a `bool` saying whether it's there, so it costs no allocation and no indirection. `opt.map(f)` and `opt.or(x)` come with closures and generics.
+A `T?` is a `T` followed by a `bool` saying whether it's there, so it costs no allocation and no indirection.
