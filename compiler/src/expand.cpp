@@ -718,7 +718,9 @@ private:
         }
         std::error_code ec;
         fs::create_directories(dir_.parent_path(), ec);
-        std::string base = (dir_.parent_path() / key_).string();
+        // Two builds of the same program at once, a debug and a release one say, run the
+        // attributes with the same key, so each has its own files to talk to them through.
+        std::string base = (dir_.parent_path() / (key_ + "." + unique_stamp())).string();
         std::string in = base + ".request", out = base + ".answer", err = base + ".errors";
         if (!write_file_atomic(in, request)) {
             error(uses_[0].attr->span, "can't write " + in);

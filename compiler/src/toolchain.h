@@ -67,6 +67,10 @@ bool read_file(const std::string& path, std::string& out);
 bool write_file_atomic(const std::string& path, const std::string& data);
 bool file_exists(const std::string& path);
 
+// A name part no other build, in this process or another, uses at the same time, for the files a
+// build writes in the shared cache.
+std::string unique_stamp();
+
 struct BuildResult {
     bool ok = false;
     std::string exe;        // the linked program or library, in the cache

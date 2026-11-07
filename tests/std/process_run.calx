@@ -147,8 +147,9 @@ fn main() {
     let merged = Command.new(me).arg("both").stderr(Stdio.Stdout).output()!
     println("merged: {merged.stdout.len()} {merged.stderr.len()}")    // out: merged: 1049600 0
 
-    // A timeout kills it.
-    let slow = Command.new(me).arg("sleep").timeout(200).output()!
+    // A timeout kills it, and what it wrote before is kept. The time is long enough for the child
+    // to start and write on a busy machine.
+    let slow = Command.new(me).arg("sleep").timeout(2000).output()!
     println("timeout: {slow.status.timed_out} {slow.status.success()} [{slow.text()}]")    // out: timeout: true false [started
     // out: ]
     println("{slow.status}")    // out: ran out of time, and was killed

@@ -1,0 +1,95 @@
+// A key is worked out before its value, so when the value leaves the statement, by a `try` that
+// fails or a `break` inside it, the key is dropped on the way out. The runner's leak check is the
+// test: none of these may lose the key, on any kind of table.
+
+fn checked(n: i32) -> i32 ! String {
+    if n < 0 {
+        fail "{n} is negative"
+    }
+    return n
+}
+
+fn hash(n: i32) -> usize ! String {
+    var m = Map<String, i32>()
+    m.insert("key {n}", try checked(n))
+    return m.len()
+}
+
+fn linked(n: i32) -> usize ! String {
+    var m = LinkedMap<String, i32>()
+    m.insert("key {n}", try checked(n))
+    m.insert_first("first {n}", try checked(n))
+    m.insert_last("last {n}", try checked(n))
+    return m.len()
+}
+
+fn sorted(n: i32) -> usize ! String {
+    var m = SortedMap<String, i32>()
+    m.insert("key {n}", try checked(n))
+    return m.len()
+}
+
+fn java(n: i32) -> usize ! String {
+    var m = JavaHashMap<String, i32>()
+    m.insert("key {n}", try checked(n))
+    _ = m.compute_if_absent("other {n}", try checked(n))
+    return m.len()
+}
+
+fn open(n: i32) -> usize ! String {
+    var m = OpenHashMap<String, i32>()
+    m.insert("key {n}", try checked(n))
+    return m.len()
+}
+
+// A key from a loop, copied, as `@json`'s code reads a map.
+fn copied(from: LinkedMap<String, i32>) -> SortedMap<String, i32> ! String {
+    var out = SortedMap<String, i32>()
+    for (k, x) in from {
+        out.insert(k.copy(), try checked(x))
+    }
+    return out
+}
+
+fn on(what: str, n: i32) -> usize ! String {
+    return match what {
+        "hash" => try hash(n),
+        "linked" => try linked(n),
+        "sorted" => try sorted(n),
+        "java" => try java(n),
+        _ => try open(n),
+    }
+}
+
+fn main() {
+    for n in [1, -1] {
+        for what in ["hash", "linked", "sorted", "java", "open"] {
+            match on(what, n) {
+                ok(len) => println("{what}: {len}"),
+                err(e) => println("{what}: {e}"),
+            }
+        }
+    }
+    // out: hash: 1
+    // out: linked: 3
+    // out: sorted: 1
+    // out: java: 2
+    // out: open: 1
+    // out: hash: -1 is negative
+    // out: linked: -1 is negative
+    // out: sorted: -1 is negative
+    // out: java: -1 is negative
+    // out: open: -1 is negative
+    var from = LinkedMap<String, i32>()
+    from.insert("a key long enough for the heap", 1)
+    from.insert("b", -2)
+    match copied(from) {
+        ok(m) => println("{m.len()}"),
+        err(e) => println("{e}"),    // out: -2 is negative
+    }
+    var m = Map<String, i32>()
+    for n in 0..3 {
+        m.insert("key {n}", if n == 2 { break } else { n })
+    }
+    println("{m.len()}")    // out: 2
+}

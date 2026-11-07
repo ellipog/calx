@@ -42,6 +42,8 @@ constexpr const char* kExe = "";
 constexpr const char* kLib = ".so";
 #endif
 
+}  // namespace
+
 // A name part no other build, in this process or another, uses at the same time: for the
 // temporary files a build writes into the shared cache before renaming them.
 std::string unique_stamp() {
@@ -54,6 +56,8 @@ std::string unique_stamp() {
     return std::to_string(pid) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
            "-" + std::to_string(count++);
 }
+
+namespace {
 
 std::string find_on_path(const std::string& name) {
     std::string path = env("PATH");
@@ -586,6 +590,11 @@ void print_file(const std::string& path) {
 // (D64). If a cached command fails, say because Visual Studio moved, the driver works it out again.
 bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, const std::string& output,
                   const std::vector<std::string>& link_flags, bool verbose) {
+    // An object another build's trim deleted is made again by the caller, which links once more,
+    // so it isn't an error to print: clang would say the file is missing.
+    for (const std::string& in : inputs) {
+        if (!file_exists(in)) return false;
+    }
     std::vector<std::string> driver = {tc.clang};
     driver.insert(driver.end(), inputs.begin(), inputs.end());
     driver.push_back("-o");

@@ -1292,6 +1292,19 @@ private:
         return s + indent + "    }\n" + indent + "}\n";
     }
 
+    // The key of `m.insert(k, v)` and the like, worked out into `key` before the value is. If the
+    // value can leave the statement, a `try` in it say, a key that must be dropped then waits in
+    // one of the statement's temporaries, and `then` moves it into `key` once the value is out.
+    struct HeldKey {
+        std::string first, then;
+    };
+    HeldKey held_key(Expr* a, Type* k, Expr* later, const std::string& key) {
+        if (is_copy(k) || !later || !may_exit(later)) return {ctype(k) + " " + key + " = " + value(a, k) + "; ", std::string()};
+        std::string t = tmp();
+        frames_.back().temps.emplace_back(t, k);
+        return {t + " = " + value(a, k) + "; ", ctype(k) + " " + key + " = " + t + "; " + t + " = " + zero(k) + "; "};
+    }
+
     // `m.insert(k, v)` and the rest, on a sorted table. The receiver is found first, then the
     // arguments, in order.
     std::string sorted_method(Expr* e) {
@@ -1308,11 +1321,12 @@ private:
             case BMethod::len: return "(" + expr(recv) + ").len";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::insert: {
-                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                std::string s = head + hk.first;
                 if (!map) return s + tc + "_put(" + p + ", " + key + "); })";
                 std::string v = tmp();
-                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + tc + "_put(" + p + ", " + key + ", " +
-                       v + "); })";
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + hk.then + tc + "_put(" + p + ", " +
+                       key + ", " + v + "); })";
             }
             case BMethod::contains: return view + look(e->args[0].value) + tc + "_has(" + p + ", " + key + "); })";
             case BMethod::get:
@@ -1701,10 +1715,11 @@ $dropall    cx_jt_clear(&m->t);
             case BMethod::len: return "(" + expr(recv) + ").len";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::insert: case BMethod::compute_if_absent: {
-                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                std::string s = head + hk.first;
                 if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
                 std::string v = tmp();
-                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " +
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + hk.then +
                        table_fn(e->bmethod == BMethod::insert ? "put" : "cia", t) + "(" + p + ", " + key + ", " + v + "); })";
             }
             case BMethod::contains: return view + found(e->args[0].value) + i + " >= 0; })";
@@ -2139,11 +2154,12 @@ $dropall    m->len = 0;
             case BMethod::len: return "((cx_usize)(" + expr(recv) + ").len)";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::insert: {
-                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                std::string s = head + hk.first;
                 if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
                 std::string v = tmp();
-                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + table_fn("put", t) + "(" + p + ", " +
-                       key + ", " + v + "); })";
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + hk.then + table_fn("put", t) + "(" +
+                       p + ", " + key + ", " + v + "); })";
             }
             case BMethod::contains: return view + found(e->args[0].value) + i + " >= 0; })";
             case BMethod::get: {
@@ -2204,11 +2220,12 @@ $dropall    m->len = 0;
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::capacity: return view + p + "->len + " + p + "->growth; })";
             case BMethod::insert: {
-                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                std::string s = head + hk.first;
                 if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
                 std::string v = tmp();
-                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + table_fn("put", t) + "(" + p + ", " +
-                       key + ", " + v + "); })";
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + hk.then + table_fn("put", t) + "(" +
+                       p + ", " + key + ", " + v + "); })";
             }
             case BMethod::contains: return view + found(e->args[0].value) + i + " != CX_NOT_FOUND; })";
             case BMethod::get: {
@@ -2247,11 +2264,12 @@ $dropall    m->len = 0;
             }
             case BMethod::insert_first: case BMethod::insert_last: {
                 std::string front = e->bmethod == BMethod::insert_first ? "1" : "0";
-                std::string s = head + ctype(k) + " " + key + " = " + value(e->args[0].value, k) + "; ";
+                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                std::string s = head + hk.first;
                 if (!map) return s + table_fn("putend", t) + "(" + p + ", " + key + ", " + front + "); })";
                 std::string v = tmp();
-                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + table_fn("putend", t) + "(" + p +
-                       ", " + key + ", " + v + ", " + front + "); })";
+                return s + ctype(t->elem) + " " + v + " = " + value(e->args[1].value, t->elem) + "; " + hk.then + table_fn("putend", t) +
+                       "(" + p + ", " + key + ", " + v + ", " + front + "); })";
             }
             default: return "0";
         }
