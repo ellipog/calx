@@ -1,0 +1,123 @@
+// `@cli` (CLX-99): a struct's fields as a program's options, flags and arguments by place, read
+// from a list with `parse_from`, and the help that `--help` gives.
+import std.cli.{cli, choices}
+
+@choices
+enum Format {
+    Plain
+    Json
+    JsonLines
+}
+
+/// Counts the lines in files.
+@cli(name: "count")
+struct Args {
+    /// The files to read.
+    @positional
+    files: List<String>
+    /// Count words too.
+    @short("w")
+    words: bool
+    /// Stop after this many lines.
+    @short("n")
+    max_count: i32 = 100
+    /// How to print the counts.
+    format: Format = Format.Plain
+    /// Where to write them.
+    out: String?
+    /// Lines to skip, matching any of these.
+    skip: List<String>
+    /// How much to scale by.
+    scale: f64 = 1.0
+    /// Sizes to group by.
+    @short("g")
+    group: List<u16>
+}
+
+/// Copies a file.
+@cli(name: "copy")
+struct CopyArgs {
+    @positional
+    from: String
+    @positional
+    to: String?
+    @short("f")
+    force: bool
+}
+
+fn show(given: List<String>) {
+    match Args.parse_from(given) {
+        ok(a) => {
+            let f = match a.format {
+                Format.Plain => "plain",
+                Format.Json => "json",
+                Format.JsonLines => "json-lines",
+            }
+            println("{a.files} {a.words} {a.max_count} {f} {a.out} {a.skip} {a.scale} {a.group}")
+        }
+        err(e) => println("{if e.help { "help" } else { "error" }}: {e.message}"),
+    }
+}
+
+fn copy(given: List<String>) {
+    match CopyArgs.parse_from(given) {
+        ok(c) => println("{c.from} {c.to} {c.force}"),
+        err(e) => println("error: {e.message} / {e.usage}"),
+    }
+}
+
+fn main() {
+    show([])                                                          // out: [] false 100 plain none [] 1.0 []
+    show(["a.txt", "-w", "b.txt", "--max-count", "5"])               // out: [a.txt, b.txt] true 5 plain none [] 1.0 []
+    show(["-wn7", "--format=json-lines", "--out", "x.txt", "--skip", "#", "--skip=//", "--", "-odd", "--x"])
+    // out: [-odd, --x] true 7 json-lines some(x.txt) [#, //] 1.0 []
+    show(["-n", "-3", "--scale", "2.5e1", "-g8", "-g", "16", "-"])  // out: [-] false -3 plain none [] 25.0 [8, 16]
+    show(["--format", "xml"])                    // out: error: `--format` takes one of plain, json, json-lines, not `xml`
+    show(["--max-count", "lots"])                // out: error: `--max-count` takes an integer, not `lots`
+    show(["--scale", "big"])                     // out: error: `--scale` takes a number, not `big`
+    show(["-g", "70000"])                        // out: error: `--group` takes an integer, not `70000`
+    show(["--max-cont", "3"])                    // out: error: `--max-cont` isn't an option; did you mean `--max-count`?
+    show(["--colour"])                           // out: error: `--colour` isn't an option
+    show(["--words=1"])                          // out: error: `--words` is a flag, so it takes no value
+    show(["-wq"])                                // out: error: `-q` isn't an option
+    show(["--out"])                              // out: error: `--out` needs a value
+    show(["-n"])                                 // out: error: `-n` needs a value
+    show(["--out", "a", "--out", "b"])           // out: error: `--out` is given more than once
+    show(["-w", "-w"])                           // out: error: `--words` is given more than once
+    copy(["a"])                                  // out: a none false
+    copy(["-f", "a", "b"])                       // out: a some(b) true
+    copy([])                                     // out: error: <from> is needed / copy [options] <from> [to]
+    copy(["a", "b", "c"])                        // out: error: `c` is one argument more than the program takes / copy [options] <from> [to]
+    show(["-h"])
+    // out: help: Counts the lines in files.
+    // out:
+    // out: Usage: count [options] [files]...
+    // out:
+    // out: Arguments:
+    // out:   [files]...                   The files to read.
+    // out:
+    // out: Options:
+    // out:   -w, --words                  Count words too.
+    // out:   -n, --max-count <MAX_COUNT>  Stop after this many lines. [default: 100]
+    // out:       --format <FORMAT>        How to print the counts. [one of: plain, json, json-lines] [default: plain]
+    // out:       --out <OUT>              Where to write them.
+    // out:       --skip <SKIP>...         Lines to skip, matching any of these.
+    // out:       --scale <SCALE>          How much to scale by. [default: 1.0]
+    // out:   -g, --group <GROUP>...       Sizes to group by.
+    // out:   -h, --help                   Print this help.
+    // out:
+    print(CopyArgs.help())
+    // out: Copies a file.
+    // out:
+    // out: Usage: copy [options] <from> [to]
+    // out:
+    // out: Arguments:
+    // out:   <from>
+    // out:   [to]
+    // out:
+    // out: Options:
+    // out:   -f, --force
+    // out:   -h, --help   Print this help.
+    println(Format.choices())    // out: plain, json, json-lines
+    println("{Format.from_choice("json") == some(Format.Json)} {Format.from_choice("Json") == none}")    // out: true true
+}

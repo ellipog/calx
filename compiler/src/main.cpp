@@ -332,7 +332,9 @@ int main(int argc, char** argv) {
     run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
     std::fflush(stdout);
     std::fflush(stderr);
-    int status = run_process(run);
+    // The program sees the file it was built from as its `argv[0]`, as a Python script sees
+    // `sys.argv[0]`, rather than the cached program's path, so `std.env.program()` names it.
+    int status = run_process(run, opt.input);
     if (status < 0) {
         std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());
         return 1;

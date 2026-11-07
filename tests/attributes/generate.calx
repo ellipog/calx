@@ -1,5 +1,6 @@
 // Attributes from a library (D57, D124): functions the compiler runs on a struct, an enum and a
-// function, with each kind of argument, and the attributes on fields that they read.
+// function, with each kind of argument, a default for one left out, and the attributes on fields
+// that they read.
 // file: main.calx
 import gen.{describe, variants, logged, Style}
 
@@ -17,7 +18,7 @@ enum Shape {
     Dot
 }
 
-@logged(prefix: "call")
+@logged
 fn twice(n: i32, by: i32 = 2) -> i32 {
     return n * by
 }
@@ -111,7 +112,7 @@ pub fn variants(decl: EnumDecl) -> Generated {
 
 /// A version of the function that says it's called.
 @attribute
-pub fn logged(decl: FnDecl, prefix: String) -> Generated {
+pub fn logged(decl: FnDecl, prefix: String = "call") -> Generated {
     var params = String()
     var args = String()
     for p in decl.params {

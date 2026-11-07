@@ -1,0 +1,688 @@
+/// A program's command-line arguments, read into a struct: `@cli` on one writes `T.parse()`, which
+/// reads them into it, with `--help` written from its docs, as Rust's clap derive and Python's
+/// argparse do. `@choices` on an enum lets a field be one of its variants. See docs/std/cli.md.
+module std.cli
+
+import std.env.{args, program}
+import std.meta.{StructDecl, EnumDecl, Field, TypeRef, TypeKind, Generated}
+import std.process.{exit}
+
+/// Why the arguments aren't ones the program takes, or the help that `--help` asked for.
+pub struct CliError {
+    /// What's wrong, or the help.
+    pub message: String
+    /// Whether it's the help, which isn't a mistake.
+    pub help: bool
+    /// The usage line, which a mistake is shown with.
+    pub usage: String
+}
+
+impl Display for CliError {
+    fn show(self) {
+        print(self.message)
+    }
+}
+
+/// What a field is on the command line.
+pub enum CliKind {
+    /// `--name`, a `bool` that's `true` when it's given.
+    Flag
+    /// `--name value` or `--name=value`, at most once.
+    Value
+    /// `--name value`, any number of times, for a `List`.
+    Many
+    /// An argument by its place.
+    Place
+    /// The arguments left, by place, for a `List`.
+    Rest
+}
+
+/// The parser that the code `@cli` writes builds: what each field is, then what was given.
+pub struct CliParser {
+    about: String
+    name: String
+    kinds: List<CliKind>
+    names: List<String>      // a `--` option's name, or a positional's
+    shorts: List<String>     // its `-x` letter, or ""
+    helps: List<String>
+    defaults: List<String>   // its default, as `--help` shows it, or ""
+    choices: List<String>    // what it can be, as `--help` lists them, or ""
+    required: List<bool>
+    seen: List<List<String>>   // what was given for each
+}
+
+impl CliParser {
+    /// A parser for a program that `about` says what it does, named `name`, or what
+    /// `std.env.program()` gives when that's empty.
+    pub fn new(about: String, name: String) -> CliParser {
+        return CliParser {
+            about: about.copy(),
+            name: if name.is_empty() { program() } else { name.copy() },
+            kinds: List<CliKind>(),
+            names: List<String>(),
+            shorts: List<String>(),
+            helps: List<String>(),
+            defaults: List<String>(),
+            choices: List<String>(),
+            required: List<bool>(),
+            seen: List<List<String>>(),
+        }
+    }
+
+    /// Adds field `name`, which `help` says what it's for, as `kind`.
+    pub fn add(mut self, name: String, help: String, kind: CliKind = CliKind.Value, short: String = "", default: String = "",
+               one_of: String = "", required: bool = false) {
+        self.kinds.push(kind)
+        self.names.push(name.copy())
+        self.shorts.push(short.copy())
+        self.helps.push(help.copy())
+        self.defaults.push(default.copy())
+        self.choices.push(one_of.copy())
+        self.required.push(required)
+        self.seen.push(List<String>())
+    }
+
+    /// Reads `args`, the arguments after the program's name.
+    pub fn run(mut self, given: List<String>) ! CliError {
+        var place: usize = 0    // the positional the next argument by place is for
+        var only_places = false
+        var i: usize = 0
+        while i < given.len() {
+            let a = given[i].copy()
+            i += 1
+            if only_places or a == "-" or not a.starts_with("-") {
+                try self.positional(a, mut place)
+                continue
+            }
+            if a == "--" {
+                only_places = true
+                continue
+            }
+            if a == "--help" or a == "-h" {
+                fail CliError { message: self.help(), help: true, usage: self.usage() }
+            }
+            if a.starts_with("--") {
+                var name: String = a[2..]
+                var value: String? = none
+                if let at = name.find("=") {
+                    value = some(name[at + 1..])
+                    name = name[..at]
+                }
+                let k = self.long(name) else fail self.mistake("`--{name}` isn't an option{self.close(name)}")
+                if self.kinds[k] == CliKind.Flag {
+                    if value != none {
+                        fail self.mistake("`--{name}` is a flag, so it takes no value")
+                    }
+                    try self.give(k, String())
+                    continue
+                }
+                if value == none {
+                    if i >= given.len() {
+                        fail self.mistake("`--{name}` needs a value")
+                    }
+                    value = some(given[i].copy())
+                    i += 1
+                }
+                try self.give(k, value ?? String())
+                continue
+            }
+            // `-v`, `-vq` for flags together, and `-n5` or `-n 5` for a value.
+            var j: usize = 1
+            while j < a.len() {
+                if a.byte_at(j) >= 128 {
+                    fail self.mistake("`{a}` isn't an option")
+                }
+                let letter: String = a[j..j + 1]
+                let k = self.short(letter) else fail self.mistake("`-{letter}` isn't an option")
+                j += 1
+                if self.kinds[k] == CliKind.Flag {
+                    try self.give(k, String())
+                    continue
+                }
+                var value: String = a[j..]
+                if value.is_empty() {
+                    if i >= given.len() {
+                        fail self.mistake("`-{letter}` needs a value")
+                    }
+                    value = given[i].copy()
+                    i += 1
+                }
+                try self.give(k, value)
+                j = a.len()
+            }
+        }
+        for k in 0usize..self.kinds.len() {
+            if self.required[k] and self.seen[k].is_empty() {
+                fail self.mistake("{self.shown(k)} is needed")
+            }
+        }
+    }
+
+    /// Whether flag `k` was given.
+    pub fn given(self, k: usize) -> bool {
+        return not self.seen[k].is_empty()
+    }
+
+    /// What field `k` was given, if it was.
+    pub fn value(self, k: usize) -> String? {
+        if self.seen[k].is_empty() {
+            return none
+        }
+        return some(self.seen[k][0].copy())
+    }
+
+    /// Each value field `k` was given, in order.
+    pub fn values(self, k: usize) -> List<String> {
+        return self.seen[k].copy()
+    }
+
+    /// The error for field `k`, needed but not given.
+    pub fn missing(self, k: usize) -> CliError {
+        return self.mistake("{self.shown(k)} is needed")
+    }
+
+    /// The error for `value`, given for field `k`, which takes `what`, such as "an integer".
+    pub fn bad(self, k: usize, value: String, what: String) -> CliError {
+        return self.mistake("{self.shown(k)} takes {what}, not `{value}`")
+    }
+
+    /// The help, as `--help` prints it.
+    pub fn help(self) -> String {
+        var out = String()
+        if not self.about.is_empty() {
+            out.push_str(self.about)
+            out.push_str("\n\n")
+        }
+        out.push_str("Usage: {self.usage()}\n")
+        var places = List<(String, String)>()
+        var options = List<(String, String)>()
+        for k in 0usize..self.kinds.len() {
+            var help = self.helps[k].copy()
+            if not self.choices[k].is_empty() {
+                if not help.is_empty() {
+                    help.push(' ')
+                }
+                help.push_str("[one of: {self.choices[k]}]")
+            }
+            if not self.defaults[k].is_empty() {
+                if not help.is_empty() {
+                    help.push(' ')
+                }
+                help.push_str("[default: {self.defaults[k]}]")
+            }
+            let kind = self.kinds[k]
+            if kind == CliKind.Place or kind == CliKind.Rest {
+                places.push((self.place_text(k), help))
+                continue
+            }
+            var left = if self.shorts[k].is_empty() { String("    ") } else { "-{self.shorts[k]}, " }
+            left.push_str("--{self.names[k]}")
+            if kind != CliKind.Flag {
+                left.push_str(" <{self.names[k].replace("-", "_").to_upper_root()}>")
+            }
+            if kind == CliKind.Many {
+                left.push_str("...")
+            }
+            options.push((left, help))
+        }
+        options.push((String("-h, --help"), String("Print this help.")))
+        var width: usize = 0
+        for (left, _) in places {
+            width = if left.len() > width { left.len() } else { width }
+        }
+        for (left, _) in options {
+            width = if left.len() > width { left.len() } else { width }
+        }
+        if not places.is_empty() {
+            out.push_str("\nArguments:\n")
+            for (left, help) in places {
+                out.push_str("  {left.pad_end(width, ' ')}  {help}".trim_end())
+                out.push('\n')
+            }
+        }
+        out.push_str("\nOptions:\n")
+        for (left, help) in options {
+            out.push_str("  {left.pad_end(width, ' ')}  {help}".trim_end())
+            out.push('\n')
+        }
+        return out
+    }
+
+    /// The usage line: the program's name, `[options]`, and the arguments by place.
+    pub fn usage(self) -> String {
+        var out = "{self.name} [options]"
+        for k in 0usize..self.kinds.len() {
+            if self.kinds[k] == CliKind.Place or self.kinds[k] == CliKind.Rest {
+                out.push(' ')
+                out.push_str(self.place_text(k))
+            }
+        }
+        return out
+    }
+
+    // `<file>`, `[out]`, `<files>...` or `[files]...`.
+    fn place_text(self, k: usize) -> String {
+        var out = if self.required[k] { "<{self.names[k]}>" } else { "[{self.names[k]}]" }
+        if self.kinds[k] == CliKind.Rest {
+            out.push_str("...")
+        }
+        return out
+    }
+
+    // How a message names field `k`.
+    fn shown(self, k: usize) -> String {
+        if self.kinds[k] == CliKind.Place or self.kinds[k] == CliKind.Rest {
+            return self.place_text(k)
+        }
+        return "`--{self.names[k]}`"
+    }
+
+    fn mistake(self, message: String) -> CliError {
+        return CliError { message: message.copy(), help: false, usage: self.usage() }
+    }
+
+    fn long(self, name: String) -> usize? {
+        for k in 0usize..self.kinds.len() {
+            if self.kinds[k] != CliKind.Place and self.kinds[k] != CliKind.Rest and self.names[k] == name {
+                return some(k)
+            }
+        }
+        return none
+    }
+
+    fn short(self, letter: String) -> usize? {
+        for k in 0usize..self.kinds.len() {
+            if self.shorts[k] == letter {
+                return some(k)
+            }
+        }
+        return none
+    }
+
+    // `; did you mean --x?` when an option's name is a letter or two from `name`.
+    fn close(self, name: String) -> String {
+        var best = String()
+        var least: usize = 3
+        for k in 0usize..self.kinds.len() {
+            if self.kinds[k] == CliKind.Place or self.kinds[k] == CliKind.Rest {
+                continue
+            }
+            let d = distance(name, self.names[k])
+            if d < least {
+                least = d
+                best = self.names[k].copy()
+            }
+        }
+        return if best.is_empty() { String() } else { "; did you mean `--{best}`?" }
+    }
+
+    fn give(mut self, k: usize, value: own String) ! CliError {
+        let kind = self.kinds[k]
+        if (kind == CliKind.Flag or kind == CliKind.Value or kind == CliKind.Place) and not self.seen[k].is_empty() {
+            fail self.mistake("{self.shown(k)} is given more than once")
+        }
+        self.seen[k].push(value)
+    }
+
+    fn positional(mut self, a: own String, place: mut usize) ! CliError {
+        var seen: usize = 0
+        for k in 0usize..self.kinds.len() {
+            let kind = self.kinds[k]
+            if kind != CliKind.Place and kind != CliKind.Rest {
+                continue
+            }
+            if seen == place {
+                if kind == CliKind.Place {
+                    place += 1
+                }
+                self.seen[k].push(a)
+                return
+            }
+            seen += 1
+        }
+        fail self.mistake("`{a}` is one argument more than the program takes")
+    }
+}
+
+/// The program's arguments after its name, as `std.env.args` gives them, for the code `@cli`
+/// writes.
+pub fn cli_args() -> List<String> {
+    return args()
+}
+
+/// Ends the program for `e`: the help goes to standard output with status 0, and a mistake to
+/// standard error, with the usage line, with status 2, as argparse and clap do.
+pub fn cli_exit(e: CliError) {
+    if e.help {
+        print(e.message)
+        exit(0)
+    }
+    eprintln("error: {e.message}")
+    eprintln()
+    eprintln("Usage: {e.usage}")
+    eprintln()
+    eprintln("For more, try `--help`.")
+    exit(2)
+}
+
+// How many letters to add, drop or change to make `a` into `b`, for "did you mean".
+fn distance(a: String, b: String) -> usize {
+    var row = List<usize>()
+    for j in 0usize..b.len() + 1 {
+        row.push(j)
+    }
+    for i in 0usize..a.len() {
+        var last = row[0]
+        row[0] = i + 1
+        for j in 0usize..b.len() {
+            let here = row[j + 1]
+            let change = if a.byte_at(i) == b.byte_at(j) { last } else { last + 1 }
+            var best = if here + 1 < row[j] + 1 { here + 1 } else { row[j] + 1 }
+            best = if change < best { change } else { best }
+            row[j + 1] = best
+            last = here
+        }
+    }
+    return row[b.len()]
+}
+
+// --- @cli ------------------------------------------------------------------------------------
+
+/// Reads the program's arguments into the struct: `T.parse()`, `T.parse_from(args)` and
+/// `T.help()`. Each field is an option named after it, `--max-count` for `max_count`; a `bool`
+/// is a flag; `@short("n")` adds `-n`, and `@positional` makes it an argument by place. A field
+/// is needed unless it's a flag, optional, a list or has a default. `name` names the program in
+/// the help, which is `std.env.program()` otherwise.
+@attribute("short", "positional")
+pub fn cli(decl: StructDecl, name: String = "") -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@cli` reads arguments into a struct that isn't generic"
+    }
+    var specs = String()
+    var reads = String()
+    var fields = String()
+    var shorts = List<String>()
+    var rest = String()          // a `List` by place, which takes the arguments left
+    var optional_place = String()
+    var k: usize = 0
+    for f in decl.fields {
+        let long = f.name.replace("_", "-")
+        var short = String()
+        var positional = false
+        for a in f.attributes {
+            if a.name == "positional" {
+                if not a.args.is_empty() {
+                    fail "`@positional` takes no arguments"
+                }
+                positional = true
+            } else if a.name == "short" {
+                if a.args.len() != 1 or a.args[0].len() != 3 or not a.args[0].starts_with("\"") {
+                    fail "`@short` takes the option's letter, as a string: `@short(\"n\")`"
+                }
+                short = a.args[0][1..2]
+                let b = short.byte_at(0)
+                let letter = (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9')
+                if not letter {
+                    fail "`@short` takes a letter or a digit, not `{short}`"
+                }
+                if short == "h" {
+                    fail "`-h` is the help's, so `{f.name}` can't have it"
+                }
+                if shorts.contains(short) {
+                    fail "`-{short}` is given to two fields"
+                }
+                shorts.push(short.copy())
+            }
+        }
+        if long == "help" {
+            fail "`--help` is the help's, so a field can't be named `help`"
+        }
+        if positional and not short.is_empty() {
+            fail "`{f.name}` is an argument by place, so it can't have `@short`"
+        }
+        if not rest.is_empty() and positional {
+            fail "`{f.name}` comes after `{rest}`, which takes the arguments left"
+        }
+        // What the field holds: `T`, `T?` or `List<T>`, for a `T` that's one value.
+        var t = f.ty.copy()
+        var optional = false
+        var many = false
+        if t.kind == TypeKind.Optional {
+            optional = true
+            t = t.args[0].copy()
+        }
+        if t.kind == TypeKind.Named and t.name == "List" and t.args.len() == 1 {
+            many = true
+            t = t.args[0].copy()
+        }
+        if t.kind != TypeKind.Named or not t.args.is_empty() or (optional and many) {
+            fail "`@cli` can't read `{f.name}`, a `{f.ty.text}`; a field is a `T`, a `T?` or a `List<T>`, for a `String`, a number, a `bool` or an enum with `@choices`"
+        }
+        let flag = t.name == "bool"
+        if flag and (optional or many or positional) {
+            fail "`{f.name}` is a flag, a `bool` that's given or not, so it's neither optional, a list nor by place"
+        }
+        if flag and not f.default.is_empty() and f.default != "false" {
+            fail "a flag is `false` until it's given, so `{f.name}` can't start `{f.default}`; name it for what giving it does"
+        }
+        let required = not flag and not optional and not many and f.default.is_empty()
+        if positional {
+            if required and not optional_place.is_empty() {
+                fail "`{f.name}` is needed, so it can't come after `{optional_place}`, which isn't"
+            }
+            if not required {
+                optional_place = f.name.copy()
+            }
+            if many {
+                rest = f.name.copy()
+            }
+        }
+        let kind = if flag { "Flag" } else if positional { if many { "Rest" } else { "Place" } } else if many { "Many" } else { "Value" }
+        let choice = not flag and not is_text(t.name) and not is_number(t.name)
+        let shown_name = if positional { f.name.copy() } else { long.copy() }
+        var spec = "        cli_p.add(\"{shown_name}\", {literal(one_line(f.doc))}, kind: CliKind.{kind}"
+        if not short.is_empty() {
+            spec.push_str(", short: \"{short}\"")
+        }
+        if not f.default.is_empty() and not flag {
+            spec.push_str(", default: {literal(shown_default(f.default))}")
+        }
+        if choice {
+            spec.push_str(", one_of: {t.name}.choices()")
+        }
+        if required {
+            spec.push_str(", required: true")
+        }
+        specs.push_str(spec)
+        specs.push_str(")\n")
+        reads.push_str(read_field(k, f, t, flag, optional, many, required))
+        fields.push_str("            {f.name}: cli_{k},\n")
+        k += 1
+    }
+    let about = literal(decl.doc)
+    var g = Generated.new()
+    g.add(if k == 0 { "import std.cli.\{CliParser, CliError, cli_args, cli_exit\}" }
+          else { "import std.cli.\{CliParser, CliKind, CliError, cli_args, cli_exit\}" })
+    g.add(#"
+        impl #{decl.name} {
+            /// The program's arguments, read as `@cli` reads them. `--help` prints the help and
+            /// ends the program with status 0, and a mistake prints what's wrong, with the usage
+            /// line, and ends it with status 2.
+            pub fn parse() -> #{decl.name} {
+                match #{decl.name}.parse_from(cli_args()) {
+                    ok(cli_ok) => return cli_ok,
+                    err(cli_err) => cli_exit(cli_err),
+                }
+                panic("`cli_exit` returned")
+            }
+
+            /// The arguments `cli_given`, read as `parse` reads the program's, but given back as a
+            /// `CliError` rather than printed: for tests, and for arguments from elsewhere.
+            pub fn parse_from(cli_given: List<String>) -> #{decl.name} ! CliError {
+                var cli_p = #{decl.name}.cli_parser()
+                try cli_p.run(cli_given)
+        #{reads}        return #{decl.name} {
+        #{fields}        }
+            }
+
+            /// The help that `--help` prints.
+            pub fn help() -> String {
+                return #{decl.name}.cli_parser().help()
+            }
+
+            fn cli_parser() -> CliParser {
+                var cli_p = CliParser.new(#{about}, #{literal(name)})
+        #{specs}        return cli_p
+            }
+        }
+        "#)
+    return g
+}
+
+// The statements that read field `k` into `cli_k`, of type `t` itself, or as an optional or a
+// list of them.
+fn read_field(k: usize, f: Field, t: TypeRef, flag: bool, optional: bool, many: bool, required: bool) -> String {
+    let v = "cli_{k}"
+    if flag {
+        return "        let {v} = cli_p.given({k})\n"
+    }
+    if many {
+        return "        var {v} = List<{t.name}>()\n        for cli_text in cli_p.values({k}) \{\n{convert(k, t, "cli_text", "cli_value", 3)}            {v}.push(cli_value)\n        \}\n"
+    }
+    if required {
+        return "        let {v}_text = cli_p.value({k}) else fail cli_p.missing({k})\n{convert(k, t, "{v}_text", v, 2)}"
+    }
+    let start = if not f.default.is_empty() { f.default.copy() } else { String("none") }
+    let put = if optional { "some(cli_value)" } else { "cli_value" }
+    return "        var {v}: {f.ty.text} = {start}\n        if let cli_text = cli_p.value({k}) \{\n{convert(k, t, "cli_text", "cli_value", 3)}            {v} = {put}\n        \}\n"
+}
+
+// A line, at `depth` levels in, that makes `to` the `t` that the text `from` says.
+fn convert(k: usize, t: TypeRef, from: String, to: String, depth: usize) -> String {
+    let indent = "    ".repeat(depth)
+    if is_text(t.name) {
+        return "{indent}let {to} = {from}.copy()\n"
+    }
+    if is_number(t.name) {
+        let what = if t.name == "f32" or t.name == "f64" { "a number" } else { "an integer" }
+        return "{indent}let {to} = {t.name}.parse({from}) else fail cli_p.bad({k}, {from}, \"{what}\")\n"
+    }
+    return "{indent}let {to} = {t.name}.from_choice({from}) else fail cli_p.bad({k}, {from}, \"one of \{{t.name}.choices()\}\")\n"
+}
+
+fn is_text(name: String) -> bool {
+    return name == "String"
+}
+
+fn is_number(name: String) -> bool {
+    for n in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "f32", "f64"] {
+        if name == n {
+            return true
+        }
+    }
+    return false
+}
+
+// A default as `--help` shows it: a string's text without its quotes, and a variant as its choice.
+fn shown_default(text: String) -> String {
+    if text.starts_with("\"") and text.ends_with("\"") and text.len() >= 2 {
+        return text[1..text.len() - 1]
+    }
+    if let dot = text.find_last(".") {
+        let after: String = text[dot + 1..]
+        if not after.is_empty() and after.byte_at(0) >= b'A' and after.byte_at(0) <= b'Z' {
+            return kebab(after)
+        }
+    }
+    return text.copy()
+}
+
+// A doc comment's lines as one, for a line of the help.
+fn one_line(doc: String) -> String {
+    var out = String()
+    for line in doc.lines() {
+        let l = line.trim()
+        if l.is_empty() {
+            continue
+        }
+        if not out.is_empty() {
+            out.push(' ')
+        }
+        out.push_str(l)
+    }
+    return out
+}
+
+// `text` as a Calx string literal.
+fn literal(text: String) -> String {
+    var out = String("\"")
+    for r in text.runes() {
+        if r == '"' or r == '\\' or r == '{' or r == '}' {
+            out.push('\\')
+            out.push(r)
+        } else if r == '\n' {
+            out.push_str("\\n")
+        } else {
+            out.push(r)
+        }
+    }
+    out.push('"')
+    return out
+}
+
+// `JsonLines` as `json-lines`.
+fn kebab(name: String) -> String {
+    var out = String()
+    for i in 0usize..name.len() {
+        let b = name.byte_at(i)
+        let letter: String = name[i..i + 1]
+        if b >= b'A' and b <= b'Z' {
+            if i > 0 {
+                out.push('-')
+            }
+            out.push_str(letter.to_lower_root())
+        } else {
+            out.push_str(letter)
+        }
+    }
+    return out
+}
+
+// --- @choices ---------------------------------------------------------------------------------
+
+/// Lets a field of `@cli` be one of the enum's variants, named in kebab-case, `json-lines` for
+/// `JsonLines`: `T.from_choice(text)` and `T.choices()`.
+@attribute
+pub fn choices(decl: EnumDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@choices` is for an enum that isn't generic"
+    }
+    var arms = String()
+    var names = List<String>()
+    for v in decl.variants {
+        if not v.payload.is_empty() or not v.fields.is_empty() {
+            fail "`@choices` is for an enum whose variants hold no data, and `{v.name}` does"
+        }
+        let choice = kebab(v.name)
+        arms.push_str("                \"{choice}\" => some({decl.name}.{v.name}),\n")
+        names.push(choice)
+    }
+    var g = Generated.new()
+    g.add(#"
+        impl #{decl.name} {
+            /// The variant `text` names, in kebab-case, as `@cli` reads it: `json-lines` for
+            /// `JsonLines`.
+            pub fn from_choice(text: String) -> #{decl.name}? {
+                return match text {
+        #{arms}                _ => none,
+                }
+            }
+
+            /// The variants' names, as `--help` lists them.
+            pub fn choices() -> String {
+                return "#{names.join(", ")}"
+            }
+        }
+        "#)
+    return g
+}

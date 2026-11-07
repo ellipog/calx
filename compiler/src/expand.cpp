@@ -61,6 +61,7 @@ struct ParamInfo {
     std::string type;          // as written: `String`, `i32`, `State`
     Item* enum_item = nullptr; // variant: the enum
     Module* enum_module = nullptr;
+    const Expr* default_value = nullptr;  // what a use that leaves it out gives
 };
 
 // An attribute function the program uses.
@@ -307,6 +308,7 @@ private:
             const Param& p = f->params[i];
             ParamInfo info;
             info.name = p.name;
+            info.default_value = p.default_value;
             std::string why = "an attribute's parameters after the declaration are `String`, integers, `bool` and enums "
                               "without data, which a use gives as literals";
             if (p.mode != ParamMode::read) {
@@ -403,13 +405,14 @@ private:
         }
         std::vector<std::string> values;
         for (std::size_t i = 0; i < a->params.size(); i++) {
-            if (!given[i]) {
+            const Expr* value = given[i] ? given[i]->value : a->params[i].default_value;
+            if (!value) {
                 if (ok) error(u.attr->span, attr_name(u) + " needs its " + q(text(a->params[i].name)) + " argument");
                 ok = false;
                 continue;
             }
             std::string v;
-            if (arg_value(u, a->params[i], given[i]->value, v)) {
+            if (arg_value(u, a->params[i], value, v, given[i] ? nullptr : a->module)) {
                 values.push_back(v);
             } else {
                 ok = false;
@@ -426,8 +429,9 @@ private:
         }
     }
 
-    // An argument as the request gives it, checked against what the parameter takes.
-    bool arg_value(const Use& u, const ParamInfo& p, const Expr* e, std::string& out) {
+    // An argument as the request gives it, checked against what the parameter takes. A default
+    // names things as the attribute's module `in` does.
+    bool arg_value(const Use& u, const ParamInfo& p, const Expr* e, std::string& out, Module* in = nullptr) {
         std::string where = attr_name(u) + "'s " + q(text(p.name));
         switch (p.kind) {
             case ArgKind::text: {
@@ -477,7 +481,7 @@ private:
                 bool shape = e->kind == ExprKind::field && !e->is_tuple_index && e->lhs && e->lhs->kind == ExprKind::name &&
                              e->lhs->path.parts.size() == 1;
                 Module* from = nullptr;
-                Item* named = shape ? lookup(u.module, e->lhs->path.parts[0], from) : nullptr;
+                Item* named = shape ? lookup(in ? in : u.module, e->lhs->path.parts[0], from) : nullptr;
                 if (named != p.enum_item) {
                     error(e->span, where + " is " + (std::string("aeiouAEIOU").find(p.type[0]) != std::string::npos ? "an " : "a ") +
                                        q(p.type) + ", so it takes one of its variants, such as " + such);

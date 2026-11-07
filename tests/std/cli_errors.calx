@@ -1,0 +1,79 @@
+// What `@cli` and `@choices` refuse, with why, at the attribute (CLX-99).
+import std.cli.{cli, choices}
+
+@cli    // error: `@cli` can't read `pair`, a `(i32, i32)`; a field is a `T`, a `T?` or a `List<T>`
+struct Pair {
+    pair: (i32, i32)
+}
+
+@cli    // error: a flag is `false` until it's given, so `quiet` can't start `true`
+struct Quiet {
+    quiet: bool = true
+}
+
+@cli    // error: `maybe` is a flag, a `bool` that's given or not, so it's neither optional, a list nor by place
+struct Maybe {
+    maybe: bool?
+}
+
+@cli    // error: `-h` is the help's, so `height` can't have it
+struct Height {
+    @short("h")
+    height: i32
+}
+
+@cli    // error: `-v` is given to two fields
+struct Twice {
+    @short("v")
+    verbose: bool
+    @short("v")
+    version: bool
+}
+
+@cli    // error: `out` comes after `files`, which takes the arguments left
+struct Rest {
+    @positional
+    files: List<String>
+    @positional
+    out: String
+}
+
+@cli    // error: `to` is needed, so it can't come after `from`, which isn't
+struct Order {
+    @positional
+    from: String?
+    @positional
+    to: String
+}
+
+@cli    // error: `@short` takes the option's letter, as a string: `@short("n")`
+struct Long {
+    @short("nn")
+    n: i32
+}
+
+@cli    // error: `--help` is the help's, so a field can't be named `help`
+struct Help {
+    help: bool
+}
+
+@cli    // error: `file` is an argument by place, so it can't have `@short`
+struct Place {
+    @positional
+    @short("f")
+    file: String
+}
+
+@cli    // error: `@cli` reads arguments into a struct that isn't generic
+struct Generic<T> {
+    value: T
+}
+
+@choices    // error: `@choices` is for an enum whose variants hold no data, and `Size` does
+enum Shape {
+    Dot
+    Size(i32)
+}
+
+fn main() {
+}

@@ -153,7 +153,7 @@ pub fn describe(decl: StructDecl, prefix: String, style: Style, times: u8) -> Ge
 }
 ```
 
-- Arguments are given like a call's: by position, then by name. Each parameter needs one, and none is given twice.
+- Arguments are given like a call's: by position, then by name. Each parameter needs one unless it has a [default](functions.md#default-values), which a use that leaves it out gives, and none is given twice. [`@cli(name: "count")`](../std/cli.md) is one: `@cli` alone names the program as `std.env.program()` does.
 - Each argument is a literal, since the attribute runs before the program does:
 
 | Parameter | Argument |

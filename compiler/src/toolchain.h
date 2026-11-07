@@ -49,8 +49,9 @@ bool start_detached(const std::vector<std::string>& argv);
 // A 128-bit hash as 32 hex digits, for cache keys.
 std::string hash_hex(const std::vector<std::string_view>& parts);
 
-// Runs a program and waits for it. Returns its exit status, or -1 if it couldn't start.
-int run_process(const std::vector<std::string>& argv);
+// Runs a program and waits for it. Returns its exit status, or -1 if it couldn't start. With
+// `name`, the program sees that as its `argv[0]`, rather than its path.
+int run_process(const std::vector<std::string>& argv, const std::string& name = "");
 
 // Runs a program with its standard output and error going to the file `output`.
 int run_to_file(const std::vector<std::string>& argv, const std::string& output);

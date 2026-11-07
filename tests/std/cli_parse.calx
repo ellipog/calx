@@ -1,0 +1,27 @@
+// `T.parse()` reads the program's own arguments (CLX-99).
+// args: Ann
+// args: --times=2
+// args: --loud
+import std.cli.{cli}
+
+/// Greets someone.
+@cli
+struct Greet {
+    /// Who to greet.
+    @positional
+    who: String
+    /// How many times.
+    @short("n")
+    times: u32 = 1
+    /// In capitals.
+    loud: bool
+}
+
+fn main() {
+    let g = Greet.parse()
+    for _ in 0u32..g.times {
+        println(if g.loud { "HELLO, {g.who.to_upper_root()}" } else { "hello, {g.who}" })
+    }
+    // out: HELLO, ANN
+    // out: HELLO, ANN
+}

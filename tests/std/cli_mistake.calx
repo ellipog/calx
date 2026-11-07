@@ -1,0 +1,21 @@
+// A mistake in the arguments ends the program with status 2, as argparse and clap do, having
+// said what's wrong on standard error (CLX-99).
+// args: --times
+// args: lots
+// status: 2
+import std.cli.{cli}
+
+@cli
+struct Greet {
+    times: u32 = 1
+}
+
+fn main() {
+    let g = Greet.parse()
+    println("not reached {g.times}")
+    // stderr: error: `--times` takes an integer, not `lots`
+    // stderr:
+    // stderr: Usage: cli_mistake [options]
+    // stderr:
+    // stderr: For more, try `--help`.
+}

@@ -127,11 +127,11 @@ HANDLE open_for(const std::string& path, bool write) {
 }
 
 // Starts a program, with its streams where `r` says, in `job` if there's one.
-HANDLE start(const std::vector<std::string>& argv, Redirect r = {}, HANDLE job = nullptr) {
+HANDLE start(const std::vector<std::string>& argv, Redirect r = {}, HANDLE job = nullptr, const std::string& name = "") {
     std::wstring cmd;
     for (std::size_t i = 0; i < argv.size(); i++) {
         if (i) cmd += L' ';
-        cmd += quote_arg(widen(argv[i]));
+        cmd += quote_arg(widen(i == 0 && !name.empty() ? name : argv[i]));
     }
     STARTUPINFOW si{};
     si.cb = sizeof si;
@@ -219,9 +219,10 @@ struct Redirect {
 };
 
 // Starts a program, with its streams where `r` says.
-pid_t start(const std::vector<std::string>& argv, Redirect r = {}) {
+pid_t start(const std::vector<std::string>& argv, Redirect r = {}, const std::string& name = "") {
     std::vector<char*> args;
     for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    if (!name.empty()) args[0] = const_cast<char*>(name.c_str());
     args.push_back(nullptr);
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -235,7 +236,7 @@ pid_t start(const std::vector<std::string>& argv, Redirect r = {}) {
         }
     }
     pid_t pid;
-    int rc = posix_spawnp(&pid, args[0], &actions, nullptr, args.data(), environ);
+    int rc = posix_spawnp(&pid, argv[0].c_str(), &actions, nullptr, args.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     return rc == 0 ? pid : -1;
 }
@@ -371,14 +372,14 @@ std::string hash_hex(const std::vector<std::string_view>& parts) {
     return buf;
 }
 
-int run_process(const std::vector<std::string>& argv) {
+int run_process(const std::vector<std::string>& argv, const std::string& name) {
 #ifdef _WIN32
     // `calx run` stands for the program: if it's killed, as a test runner stops one that ran too
     // long, the program and everything it started go with it, which `taskkill /T` alone can't
     // reach once their parents have gone. A program that ends by itself leaves what it started
     // running, as it would have without `calx run`.
     HANDLE job = kill_on_close_job();
-    auto h = start(argv, {}, job);
+    auto h = start(argv, {}, job, name);
     if (!h) {
         if (job) CloseHandle(job);
         return -1;
@@ -387,7 +388,7 @@ int run_process(const std::vector<std::string>& argv) {
     if (job) let_go(job);
     return status;
 #else
-    auto h = start(argv);
+    auto h = start(argv, {}, name);
     if (h < 0) return -1;
 #endif
     return finish(h);

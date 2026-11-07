@@ -46,7 +46,7 @@ calx tool.calx --release -o out.txt   # tool.calx gets --release, -o and out.txt
 calx --release tool.calx input.txt    # built optimized; tool.calx gets input.txt
 ```
 
-The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
+The program sees the file as its `argv[0]`, as a Python script sees `sys.argv[0]`, rather than the path of the program built from it, so [`std.env.program()`](../std/env.md) names it after the file, as `calx run` does too. The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
 
 A first line that starts with `#!` is the system's, and the compiler skips it, so on Linux and macOS a program runs by its own name, as a shell or Python script does:
 

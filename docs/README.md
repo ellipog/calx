@@ -96,6 +96,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, written compact or indented, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
 29. [std.regex](std/regex.md): regular expressions in Rust's syntax, found, counted, captured, replaced and split in time linear in the text, with Unicode classes and case folding
+30. [std.cli](std/cli.md): `@cli`, which reads a program's command-line options, flags and arguments into a struct, with `--help` written from its docs
 
 ### Java compatibility
 
