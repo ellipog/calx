@@ -724,6 +724,8 @@ private:
                 if (!scan_) declare(hidden);
             }
         }
+        // The separator of `s.split(sep)` is worked out after `s`, before the loop.
+        if (s->text_sep) expr(s->text_sep, Use::view);
         // The ends of `m.range(a..b)` are worked out after `m`, before the loop (D112).
         if (s->range_of) {
             if (s->range_of->lhs) expr(s->range_of->lhs, Use::view);

@@ -176,6 +176,10 @@ enum class BMethod : std::uint8_t {
     // On text: Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, and where some
     // text is first or last found in it (D117).
     to_lower_root, to_upper_root, find, find_last, to_bytes,
+    // On text: a part without whitespace or a prefix or suffix, which is copied only where it's
+    // kept, as a slice is; and new text or lists of it. `join` is on a list of text.
+    text_trim, text_trim_start, text_trim_end, trim_prefix, trim_suffix, split, split_once, split_whitespace, lines, text_replace,
+    repeat, pad_start, pad_end, join,
     ptr_read, ptr_write, ptr_add, ptr_is_null,  // on a pointer
     // On an `Arena`: a list from it, freeing everything at once, and the bytes taken since; and
     // on an `ArenaList`, a `List` with its elements (D114).
@@ -360,7 +364,8 @@ struct Stmt {
     bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type
-    BMethod text_iter = BMethod::none;  // for: `s.runes()` or `s.chars()`, with `value` now `s`
+    BMethod text_iter = BMethod::none;  // for: `s.runes()`, `s.chars()`, `s.split(sep)`, `s.lines()` or `s.split_whitespace()`, with `value` now `s`
+    Expr* text_sep = nullptr;      // for: the `sep` of `s.split(sep)`
     Expr* range_of = nullptr;      // for: the range of `m.range(a..b)`, with `value` now `m` (D112)
     Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).

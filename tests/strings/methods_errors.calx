@@ -1,0 +1,13 @@
+// What the text methods and the loops over a text's parts don't allow.
+
+fn main() {
+    let a = "a,b".split(1)    // error: `split` takes a `str` or a `String`, not
+    let nums: List<i32> = [1, 2]
+    let b = nums.join(",")    // error: has no method `join`
+    var s = String("a,b")
+    for part in s.split(",") {
+        s.push('x')    // error: `s` can't be changed while a `for` loop goes over it
+        println(part)
+    }
+    println("{a.len()} {b}")
+}

@@ -2992,6 +2992,7 @@ $dropall    m->len = 0;
         for (Stmt* s : b->stmts) {
             if (s->kind == StmtKind::while_ || s->kind == StmtKind::for_) u.loop = true;
             if (s->range_of) view_use(s->range_of, l, u);  // `m.range(a..b)`, which `each_child` leaves out
+            if (s->text_sep) view_use(s->text_sep, l, u);  // and the `sep` of `s.split(sep)`
         }
         each_child(b, [&](Expr* x) { view_use(x, l, u); }, [&](Block* c) { view_use(c, l, u); });
     }
@@ -3343,6 +3344,41 @@ $dropall    m->len = 0;
             }
             std::string elem_at;
             bool bins = false;  // two loops: a Java table bin by bin, then along each bin, or a table a group at a time
+            if (s->text_iter == BMethod::split || s->text_iter == BMethod::lines || s->text_iter == BMethod::split_whitespace) {
+                // Each part is found as the loop goes, a view of the text's bytes: a `str`, or a
+                // `String` with the capacity that says it doesn't own them, so it's never freed and
+                // `copy` copies it. The loop can't change the text, so the views stay good.
+                std::string src = tmp(), pos = tmp(), part = tmp(), sep = tmp(), next;
+                line("cx_str " + src + " = {(const cx_u8*)" + arr + "->ptr, " + arr + "->len};");
+                if (s->text_iter == BMethod::split) {
+                    line("cx_str " + sep + " = " + text_view(s->text_sep) + ";");
+                    next = "cx_text_split_next(" + src + ", " + sep + ", &" + pos + ", &" + part + ")";
+                } else {
+                    next = std::string(s->text_iter == BMethod::lines ? "cx_text_lines_next(" : "cx_text_words_next(") + src + ", &" + pos +
+                           ", &" + part + ")";
+                }
+                line("cx_usize " + pos + " = 0;");
+                line("cx_str " + part + ";");
+                line("while (" + next + ") {");
+                indent_++;
+                // A `str`'s bytes are a literal's, so its parts are too: a capacity of 0, shared
+                // for free when they're copied, as a literal's `String` is.
+                if (var.empty()) {
+                    line("(void)" + part + ";");
+                } else {
+                    line("cx_String " + var + " = {(cx_u8*)" + part + ".ptr, " + part + ".len, " +
+                         (at->kind == TypeKind::str ? "0" : "CX_VIEW_CAP") + "};");
+                }
+                stmts(s->body, false);
+                line("cx_cont" + id + ":;");
+                indent_--;
+                line("}");
+                line("cx_brk" + id + ":;");
+                if (s->hidden && s->drop_hidden) line(drop_fn(s->hidden->type) + "(&" + local_name(s->hidden) + ");");
+                indent_--;
+                line("}");
+                return;
+            }
             if (s->text_iter != BMethod::none) {
                 // Decoded as the loop goes. Text is always UTF-8, so nothing is checked. A rune past
                 // U+FFFF is two UTF-16 units, so `chars` keeps the second for the next pass.
@@ -5175,11 +5211,11 @@ $dropall    m->len = 0;
     // out first, left to right, into `decls`, and only then is anything printed.
     void print_parts(Expr* m, std::string& decls, std::string& out) {
         if (m->kind != ExprKind::string_lit) {
-            out += (m->kind == ExprKind::slice ? "cx_print_str(" + slice_view(m) + ");" : show_value(m->type, expr(m))) + " ";
+            out += (is_part(m) ? "cx_print_str(" + text_view(m) + ");" : show_value(m->type, expr(m))) + " ";
             return;
         }
         std::vector<Operand> ops;
-        for (Expr* x : m->interpolations) ops.push_back({x, x->type, x->kind == ExprKind::slice ? Pass::text : Pass::value});
+        for (Expr* x : m->interpolations) ops.push_back({x, x->type, is_part(x) ? Pass::text : Pass::value});
         std::vector<std::string> values = sequence(ops, decls);
         // `sequence` leaves only the last operand with an effect in place; it runs first too.
         for (std::size_t i = ops.size(); i-- > 0;) {
@@ -5196,7 +5232,7 @@ $dropall    m->len = 0;
                 continue;
             }
             Expr* x = m->interpolations[next];
-            out += (x->kind == ExprKind::slice ? "cx_print_str(" + values[next++] + ");" : show_value(x->type, values[next++])) + " ";
+            out += (is_part(x) ? "cx_print_str(" + values[next++] + ");" : show_value(x->type, values[next++])) + " ";
         }
     }
 
@@ -5298,10 +5334,63 @@ $dropall    m->len = 0;
         }
     }
 
+    // `s.split(x).join(sep)`, `s.lines().join(sep)` or `s.split_whitespace().join(sep)`: the parts
+    // go straight into the new text, with no list of them made.
+    std::string join_parts(Expr* e) {
+        Expr* parts = e->callee->lhs;
+        std::string src = tmp(), split = tmp(), sep = tmp(), r = tmp(), at = tmp(), part = tmp(), first = tmp(), next;
+        std::string out = "({ cx_str " + src + " = " + text_view(parts->callee->lhs) + "; ";
+        if (parts->bmethod == BMethod::split) {
+            out += "cx_str " + split + " = " + text_view(parts->args[0].value) + "; ";
+            next = "cx_text_split_next(" + src + ", " + split + ", &" + at + ", &" + part + ")";
+        } else {
+            next = std::string(parts->bmethod == BMethod::lines ? "cx_text_lines_next(" : "cx_text_words_next(") + src + ", &" + at +
+                   ", &" + part + ")";
+        }
+        return out + "cx_str " + sep + " = " + text_view(e->args[0].value) + "; cx_String " + r + " = {0, 0, 0}; cx_string_reserve(&" + r +
+               ", " + src + ".len); cx_usize " + at + " = 0; cx_str " + part + "; cx_bool " + first + " = 1; while (" + next + ") { if (!" +
+               first + ") cx_string_push_str(&" + r + ", " + sep + "); " + first + " = 0; cx_string_push_str(&" + r + ", " + part + "); } " +
+               r + "; })";
+    }
+
+    // A `List<String>` the runtime built, as a `cx_StringList`, in the list type's own layout.
+    std::string string_list(const std::string& call, const Type* t) {
+        std::string r = tmp();
+        return "({ cx_StringList " + r + " = " + call + "; (" + ctype(t) + "){ .ptr = " + r + ".ptr, .len = " + r + ".len, .cap = " + r +
+               ".cap }; })";
+    }
+
     // Text that's only looked at, as a `cx_str`: a part of a `String` isn't copied.
     std::string text_view(Expr* e) {
-        if (e->kind == ExprKind::slice) return slice_view(e);
+        if (is_part(e)) return part_view(e);
         return e->type->kind == TypeKind::string ? "cx_sv(" + expr(e) + ")" : expr(e);
+    }
+
+    // A part of some text: a slice, or what `trim`, `trim_start`, `trim_end`, `trim_prefix` or
+    // `trim_suffix` gives. It's a view of the same bytes where it's only looked at, and copied only
+    // where it's kept, so `line.trim() == "stop"` copies nothing.
+    static bool is_part(const Expr* e) {
+        if (e->kind == ExprKind::slice) return true;
+        if (e->kind != ExprKind::call || e->call != CallKind::builtin_method) return false;
+        switch (e->bmethod) {
+            case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
+            case BMethod::trim_suffix:
+                return e->callee->lhs->type->kind == TypeKind::string || e->callee->lhs->type->kind == TypeKind::str;
+            default: return false;
+        }
+    }
+
+    // A part, as a `cx_str` of the bytes it's a part of.
+    std::string part_view(Expr* e) {
+        if (e->kind == ExprKind::slice) return slice_view(e);
+        std::string p = tmp(), view = "({ cx_str " + p + " = " + text_view(e->callee->lhs) + "; ";
+        switch (e->bmethod) {
+            case BMethod::text_trim: return view + "cx_text_trim(" + p + ", 3); })";
+            case BMethod::text_trim_start: return view + "cx_text_trim(" + p + ", 1); })";
+            case BMethod::text_trim_end: return view + "cx_text_trim(" + p + ", 2); })";
+            case BMethod::trim_prefix: return view + "cx_text_trim_prefix(" + p + ", " + text_view(e->args[0].value) + "); })";
+            default: return view + "cx_text_trim_suffix(" + p + ", " + text_view(e->args[0].value) + "); })";
+        }
     }
 
     // `s[a..b]` as a `cx_str` of the same bytes. The text is found first and then the offsets, in
@@ -5320,7 +5409,7 @@ $dropall    m->len = 0;
             // A part of a part is a view of the first text, unless the offsets can change that:
             // then the first part is copied.
             bool later = (r->lhs && effects(r->lhs)) || (r->rhs && effects(r->rhs));
-            bool copy = later && base->kind == ExprKind::slice && base->type->kind == TypeKind::string;
+            bool copy = later && is_part(base) && base->type->kind == TypeKind::string;
             out += "cx_str " + b + " = " + (copy ? "cx_sv(" + expr(base) + ")" : text_view(base)) + "; ";
         }
         out += "cx_usize " + lo + " = " + (r->lhs ? value(r->lhs, r->lhs->type) : std::string("0")) + "; ";
@@ -5601,10 +5690,12 @@ $dropall    m->len = 0;
             bool owned = t->kind == TypeKind::string;
             std::string head = "({ cx_String* " + p + " = " + address(recv) + "; ";
             std::string view = "({ cx_str " + p + " = " + text_view(recv) + "; ";
+            // A part is only looked at, so it isn't copied to be measured.
+            auto whole = [&] { return is_part(recv) ? text_view(recv) : expr(recv); };
             switch (e->bmethod) {
-                case BMethod::len: return "(" + expr(recv) + ").len";
-                case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
-                case BMethod::as_ptr: return "((cx_u8 const*)(" + expr(recv) + ").ptr)";
+                case BMethod::len: return "(" + whole() + ").len";
+                case BMethod::is_empty: return "((" + whole() + ").len == 0)";
+                case BMethod::as_ptr: return "((cx_u8 const*)(" + whole() + ").ptr)";
                 case BMethod::byte_at: {
                     std::string i = tmp();
                     return view + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; " + p + ".ptr[cx_index(" + i + ", " +
@@ -5623,7 +5714,7 @@ $dropall    m->len = 0;
                     // literal's: a `str`, or a `String` that owns no memory.
                     std::string fn = e->bmethod == BMethod::to_lower_root ? "cx_case_lower(" : "cx_case_upper(";
                     if (!owned) return view + fn + p + ", 1); })";
-                    if (recv->kind == ExprKind::slice) return view + fn + p + ", 0); })";
+                    if (is_part(recv)) return view + fn + p + ", 0); })";
                     return "({ cx_String " + p + " = " + expr(recv) + "; " + fn + "cx_sv(" + p + "), " + p + ".cap == 0); })";
                 }
                 case BMethod::find: case BMethod::find_last: {
@@ -5631,6 +5722,33 @@ $dropall    m->len = 0;
                     std::string fn = e->bmethod == BMethod::find ? "cx_str_find(" : "cx_str_find_last(";
                     return view + "cx_usize " + r + " = " + fn + p + ", " + text_arg(0) + "); (" + o + "){ .v = " + r + ", .has = " + r +
                            " != CX_NOT_FOUND }; })";
+                }
+                case BMethod::text_trim: case BMethod::text_trim_start: case BMethod::text_trim_end: case BMethod::trim_prefix:
+                case BMethod::trim_suffix:
+                    return owned ? "cx_string_from(" + part_view(e) + ")" : part_view(e);
+                case BMethod::split: return string_list(view + "cx_text_split(" + p + ", " + text_arg(0) + "); })", e->type);
+                case BMethod::split_whitespace: return string_list(view + "cx_text_split_whitespace(" + p + "); })", e->type);
+                case BMethod::lines: return string_list(view + "cx_text_lines(" + p + "); })", e->type);
+                case BMethod::split_once: {
+                    std::string o = ctype(e->type), pair = ctype(e->type->elem), sep = tmp(), k = tmp();
+                    std::string rest = "(cx_str){" + p + ".ptr + " + k + " + " + sep + ".len, " + p + ".len - " + k + " - " + sep + ".len}";
+                    return view + "cx_str " + sep + " = " + text_arg(0) + "; cx_usize " + k + " = cx_str_find(" + p + ", " + sep + "); " +
+                           k + " == CX_NOT_FOUND ? (" + o + "){ .has = 0 } : (" + o + "){ .has = 1, .v = (" + pair +
+                           "){ .f0 = cx_string_from((cx_str){" + p + ".ptr, " + k + "}), .f1 = cx_string_from(" + rest + ") } }; })";
+                }
+                case BMethod::text_replace: {
+                    // The arguments are worked out in order, as Java works them out.
+                    std::string a = tmp(), b = tmp();
+                    return view + "cx_str " + a + " = " + text_arg(0) + "; cx_str " + b + " = " + text_arg(1) + "; cx_text_replace(" + p +
+                           ", " + a + ", " + b + ", " + location(e->span) + "); })";
+                }
+                case BMethod::repeat:
+                    return view + "cx_text_repeat(" + p + ", " + arg(0, e->args[0].value->type) + ", " + location(e->span) + "); })";
+                case BMethod::pad_start: case BMethod::pad_end: {
+                    std::string w = tmp(), f = tmp();
+                    return view + "cx_usize " + w + " = " + arg(0, e->args[0].value->type) + "; cx_rune " + f + " = " +
+                           arg(1, e->args[1].value->type) + "; cx_text_pad(" + p + ", " + w + ", " + f + ", " +
+                           (e->bmethod == BMethod::pad_start ? "1" : "0") + ", " + location(e->span) + "); })";
                 }
                 case BMethod::to_bytes: {
                     // A copy, which has a list's layout.
@@ -5715,6 +5833,14 @@ $dropall    m->len = 0;
                        "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p + "->ptr[" + j + "]; " + p + "->ptr[" + j + "] = " +
                        v + "; })";
             case BMethod::sort: return head + sort_call(et, p, location(e->span)) + "; })";
+            case BMethod::join:
+                if (recv->kind == ExprKind::call && recv->call == CallKind::builtin_method &&
+                    (recv->bmethod == BMethod::split || recv->bmethod == BMethod::lines || recv->bmethod == BMethod::split_whitespace)) {
+                    return join_parts(e);
+                }
+                return "({ const " + l + "* " + p + " = " + address(recv) + "; " +
+                       (et->kind == TypeKind::string ? "cx_text_join(" : "cx_text_join_str(") + p + "->ptr, " + p + "->len, " + text_arg(0) +
+                       ", " + location(e->span) + "); })";
             case BMethod::to_list: {
                 std::string r = tmp(), lt = ctype(e->type);
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " + lt + " " + r + " = {0}; if (" + p + "->len) { " + r +

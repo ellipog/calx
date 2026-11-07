@@ -364,8 +364,12 @@ CX_FN(void, cx_sort_usize, (cx_usize* v, cx_usize n));
 CX_FN(void, cx_sort_char, (cx_char* v, cx_usize n));
 CX_FN(void, cx_sort_rune, (cx_rune* v, cx_usize n));
 CX_FN(void, cx_sort_bool, (cx_bool* v, cx_usize n));
+/* The capacity of a `String` that views bytes it doesn't own, which aren't a literal's: a part a
+ * loop over `split` or `lines` gives. It's never freed, and `copy` copies it, where a capacity of 0,
+ * a literal's, is shared. Only the top bit is set, so a drop's test costs what it did. */
+#define CX_VIEW_CAP ((cx_usize)1 << 63)
 CX_INLINE void cx_drop_String(cx_String* s) {
-    if (s->cap) cx_free(s->ptr, s->cap);
+    if ((cx_i64)s->cap > 0) cx_free(s->ptr, s->cap);
 }
 CX_FN(cx_String, cx_copy_String, (const cx_String* s));
 /* A `String` that owns a copy of the bytes. */
@@ -511,6 +515,33 @@ CX_FN(cx_usize, cx_str_find_last, (cx_str hay, cx_str needle));
 CX_FN(cx_String, cx_case_lower, (cx_str s, cx_bool keep));
 CX_FN(cx_String, cx_case_upper, (cx_str s, cx_bool keep));
 
+/* A list of strings with a `List<String>`'s layout, as the text functions below build one. */
+typedef struct {
+    cx_String* ptr;
+    cx_usize len;
+    cx_usize cap;
+} cx_StringList;
+/* Text methods, in calx_text.c: `trim` (`ends` 1 for the start, 2 the end, 3 both), `replace`,
+ * `repeat`, `pad_start` and `pad_end`, `split`, `split_whitespace`, `lines`, and a list's `join`.
+ * `trim` and the two below give a part of the text, which the emitter copies only where it's
+ * kept, as it does a slice. */
+CX_FN(cx_str, cx_text_trim, (cx_str s, cx_u32 ends));
+CX_FN(cx_String, cx_text_replace, (cx_str s, cx_str from, cx_str to, const char* at));
+CX_FN(cx_String, cx_text_repeat, (cx_str s, cx_usize n, const char* at));
+CX_FN(cx_String, cx_text_pad, (cx_str s, cx_usize width, cx_rune fill, cx_bool start, const char* at));
+CX_FN(cx_StringList, cx_text_split, (cx_str s, cx_str sep));
+CX_FN(cx_StringList, cx_text_split_whitespace, (cx_str s));
+CX_FN(cx_StringList, cx_text_lines, (cx_str s));
+CX_FN(cx_String, cx_text_join, (const cx_String* parts, cx_usize n, cx_str sep, const char* at));
+CX_FN(cx_String, cx_text_join_str, (const cx_str* parts, cx_usize n, cx_str sep, const char* at));
+CX_FN(cx_bool, cx_text_words_next, (cx_str s, cx_usize* at, cx_str* part));
+CX_INLINE cx_str cx_text_trim_prefix(cx_str s, cx_str p) {
+    return cx_str_starts_with(s, p) ? (cx_str){s.ptr + p.len, s.len - p.len} : s;
+}
+CX_INLINE cx_str cx_text_trim_suffix(cx_str s, cx_str p) {
+    return cx_str_ends_with(s, p) ? (cx_str){s.ptr, s.len - p.len} : s;
+}
+
 /* MD5, SHA-1 and SHA-256 (kind 0, 1 and 2) and HMAC-SHA256, in calx_digest.c (D118). A context is
  * CX_DIGEST_CTX bytes, with no alignment needed. `cx_digest_finish` writes the digest, 16, 20 or
  * 32 bytes, and returns its length. */
@@ -621,6 +652,66 @@ CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
 #define CX_CTRL_DELETED ((cx_u8)0xFE)
 #define CX_GROUP 16
 #define CX_NOT_FOUND ((cx_usize)-1)
+
+/* Where the first byte that's `a` or `b` is in `p` up to `end`, or `end`: sixteen bytes at a time
+ * with SSE2, which every x86-64 has, so a short part costs no call, as memchr's would. */
+#if defined(__x86_64__)
+typedef char cx_v16 __attribute__((vector_size(16)));
+#endif
+CX_INLINE const cx_u8* cx_find2(const cx_u8* p, const cx_u8* end, cx_u8 a, cx_u8 b) {
+#if defined(__x86_64__)
+    cx_v16 va = (cx_v16){0} + (char)a, vb = (cx_v16){0} + (char)b;
+    while (end - p >= 16) {
+        cx_v16 v;
+        __builtin_memcpy(&v, p, 16);
+        int m = __builtin_ia32_pmovmskb128((cx_v16)((v == va) | (v == vb)));
+        if (m) return p + __builtin_ctz((unsigned)m);
+        p += 16;
+    }
+#endif
+    while (p < end && *p != a && *p != b) p++;
+    return p;
+}
+/* A loop over `s.split(sep)`: the next part from `*at`, and where the one after starts, or
+ * CX_NOT_FOUND after the last. 0 when there are no more. */
+CX_INLINE cx_bool cx_text_split_next(cx_str s, cx_str sep, cx_usize* at, cx_str* part) {
+    cx_usize i = *at;
+    if (i == CX_NOT_FOUND) return 0;
+    if (sep.len == 1) {
+        const cx_u8* e = cx_find2(s.ptr + i, s.ptr + s.len, sep.ptr[0], sep.ptr[0]);
+        cx_usize k = (cx_usize)(e - s.ptr);
+        *part = (cx_str){s.ptr + i, k - i};
+        *at = k == s.len ? CX_NOT_FOUND : k + 1;
+        return 1;
+    }
+    if (sep.len == 0) {
+        if (i >= s.len) return 0;
+        cx_usize j = i;
+        cx_utf8_next(s.ptr, &j);
+        *part = (cx_str){s.ptr + i, j - i};
+        *at = j;
+        return 1;
+    }
+    cx_usize k = cx_str_find((cx_str){s.ptr + i, s.len - i}, sep);
+    if (k == CX_NOT_FOUND) {
+        *part = (cx_str){s.ptr + i, s.len - i};
+        *at = CX_NOT_FOUND;
+        return 1;
+    }
+    *part = (cx_str){s.ptr + i, k};
+    *at = i + k + sep.len;
+    return 1;
+}
+/* A loop over `s.lines()`: the next line from `*at`, without the `\n`, `\r\n` or `\r` that ends
+ * it, as Java's `readLine` and `std.io.Lines` end lines. */
+CX_INLINE cx_bool cx_text_lines_next(cx_str s, cx_usize* at, cx_str* part) {
+    cx_usize i = *at;
+    if (i >= s.len) return 0;
+    cx_usize j = (cx_usize)(cx_find2(s.ptr + i, s.ptr + s.len, '\n', '\r') - s.ptr);
+    *part = (cx_str){s.ptr + i, j - i};
+    *at = j + 1 + (j + 1 < s.len && s.ptr[j] == '\r' && s.ptr[j + 1] == '\n');
+    return 1;
+}
 #ifdef CX_LIBRARY
 /* A library's tables start at the program's, so either can free the other's (D123). */
 extern const cx_u8* cx_table_empty_at;

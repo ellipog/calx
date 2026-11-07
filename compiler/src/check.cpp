@@ -3341,6 +3341,19 @@ private:
                 s->value = it->callee->lhs;
                 over = s->value;
                 borrowed = place_root(s->value);
+            } else if (it->kind == ExprKind::call && it->call == CallKind::builtin_method &&
+                       (it->bmethod == BMethod::split || it->bmethod == BMethod::lines || it->bmethod == BMethod::split_whitespace) &&
+                       !is_bad(t)) {
+                // `for part in s.split(sep)`: each part is a view of `s`'s bytes, found as the loop
+                // goes, with no list made and nothing copied, so the loop goes over `s`. The parts
+                // are `String`s the loop looks at, as a list's elements are, whether `s` is a
+                // `String` or a `str`, as they are in the list `split` gives.
+                s->text_iter = it->bmethod;
+                if (it->bmethod == BMethod::split) s->text_sep = it->args[0].value;
+                s->value = it->callee->lhs;
+                elem = T.string;
+                over = s->value;
+                borrowed = place_root(s->value);
             } else if (t->boxed) {
                 by_mut = false;
                 error(it->span, "a `for` loop doesn't go over a " + box_word(t) + ", which holds one value: " + q(place_text(it) + ".value"));
@@ -3367,7 +3380,7 @@ private:
                 error(s->value->span, "a `parallel for` goes over a range of indexes, such as " + q("0..xs.len()") +
                                           ", or the elements of a list or an array, not " +
                                           (s->range_of ? std::string("a part of a sorted table")
-                                           : s->text_iter != BMethod::none ? std::string("the text's ") + (s->text_iter == BMethod::runes ? "runes" : "UTF-16 units")
+                                           : s->text_iter != BMethod::none ? "the text's " + text_iter_name(s->text_iter)
                                                                            : a_type(it->type)));
                 par = elements = false;
             }
@@ -3428,6 +3441,17 @@ private:
         pop_scope();
     }
 
+    // What a loop over text goes over, for messages.
+    static std::string text_iter_name(BMethod b) {
+        switch (b) {
+            case BMethod::runes: return "runes";
+            case BMethod::chars: return "UTF-16 units";
+            case BMethod::split: return "parts";
+            case BMethod::lines: return "lines";
+            default: return "words";
+        }
+    }
+
     // `for x in mut xs`: whether it can go over `xs` changing its elements, with `root` the variable
     // `xs` is in, if it's a place.
     bool mut_loop_over(Stmt* s, Local* root) {
@@ -3435,8 +3459,7 @@ private:
         Type* t = it->type;
         if (s->range_of || s->text_iter != BMethod::none) {
             error(it->span, std::string("`for x in mut` changes the elements of a list, an array or a deque, not ") +
-                                (s->range_of ? "a part of a sorted table"
-                                 : s->text_iter == BMethod::runes ? "a text's runes" : "a text's UTF-16 units"));
+                                (s->range_of ? std::string("a part of a sorted table") : "a text's " + text_iter_name(s->text_iter)));
             return false;
         }
         if (t->kind == TypeKind::set) {
@@ -8206,6 +8229,22 @@ private:
             else if (m == "find") b = BMethod::find, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "find_last") b = BMethod::find_last, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "to_bytes") b = BMethod::to_bytes, result = T.list_of(T.u8);
+            // A part of the text, like a slice: a `str`'s is a `str` and a `String`'s a `String`.
+            else if (m == "trim") b = BMethod::text_trim, result = recv;
+            else if (m == "trim_start") b = BMethod::text_trim_start, result = recv;
+            else if (m == "trim_end") b = BMethod::text_trim_end, result = recv;
+            else if (m == "trim_prefix") b = BMethod::trim_prefix, params = {nullptr}, result = recv;
+            else if (m == "trim_suffix") b = BMethod::trim_suffix, params = {nullptr}, result = recv;
+            else if (m == "split") b = BMethod::split, params = {nullptr}, result = T.list_of(T.string);
+            else if (m == "split_once") {
+                b = BMethod::split_once, params = {nullptr}, result = T.optional_of(T.tuple_of({T.string, T.string}));
+            }
+            else if (m == "split_whitespace") b = BMethod::split_whitespace, result = T.list_of(T.string);
+            else if (m == "lines") b = BMethod::lines, result = T.list_of(T.string);
+            else if (m == "replace") b = BMethod::text_replace, params = {nullptr, nullptr}, result = T.string;
+            else if (m == "repeat") b = BMethod::repeat, params = {T.usize}, result = T.string;
+            else if (m == "pad_start") b = BMethod::pad_start, params = {T.usize, T.rune}, result = T.string;
+            else if (m == "pad_end") b = BMethod::pad_end, params = {T.usize, T.rune}, result = T.string;
             else if (m == "runes" || m == "chars") {
                 // Nothing holds the runes or the UTF-16 units, so they're only gone over in place.
                 if (e != for_iter_) {
@@ -8369,6 +8408,9 @@ private:
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
             else if (m == "set_len") b = BMethod::set_len, changes = true, needs_unsafe = true, params = {T.usize};
             else if (m == "to_list" && recv->arena_list) b = BMethod::to_list, result = T.list_of(el);
+            else if (m == "join" && (el->kind == TypeKind::string || el->kind == TypeKind::str) && !recv->arena_list) {
+                b = BMethod::join, params = {nullptr}, result = T.string;
+            }
         }
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +

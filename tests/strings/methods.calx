@@ -1,0 +1,96 @@
+// Trimming, splitting, joining, replacing, repeating and padding text, and loops over the parts
+// of a text, which are views of it.
+
+fn keep(s: String) -> String {
+    return s.copy()
+}
+
+fn main() {
+    // trim takes Unicode's whitespace off, and gives a part, copied only where it's kept.
+    let s = String("  \t hello world \r\n")
+    println("[{s.trim()}] {s.trim_start().len()} {s.trim_start().starts_with("hello")} [{s.trim_end()}]")    // out: [hello world] 14 true [  	 hello world]
+    let kept = s.trim()
+    println("{kept.len()} {s.trim() == "hello world"} {s.trim().len()} {"\u{3000}wide\u{a0}\u{2009}".trim()}")    // out: 11 true 11 wide
+    println("[{"".trim()}] [{"   ".trim()}] [{"x".trim_end()}]")    // out: [] [] [x]
+    println("{"v1.2".trim_prefix("v")} {"a.tar.gz".trim_suffix(".gz")} {"keep".trim_prefix("x")} {"vv".trim_prefix("v")}")    // out: 1.2 a.tar keep v
+
+    // split gives every part, empty ones too; an empty separator gives the runes.
+    let parts = "a,b,,c".split(",")
+    println("{parts.len()} [{parts[0]}] [{parts[2]}] [{parts[3]}]")    // out: 4 [a] [] [c]
+    println("{"".split(",").len()} {",".split(",").len()} {"héllo".split("").len()} {"a--b".split("--").len()}")    // out: 1 2 5 2
+    match "key = value = more".split_once(" = ") {
+        some((k, v)) => println("[{k}] [{v}]"),    // out: [key] [value = more]
+        none => println("none"),
+    }
+    println("{"novalue".split_once("=") == none}")    // out: true
+    let words = "  the quick\tbrown\n fox  ".split_whitespace()
+    println("{words.len()} {words.join("|")} {"   ".split_whitespace().len()}")    // out: 4 the|quick|brown|fox 0
+
+    // lines ends a line at \n, \r\n or \r, and an ending at the very end doesn't start another.
+    let lines = "one\ntwo\r\nthree\rfour\n".lines()
+    println("{lines.len()} {lines.join(",")}")    // out: 4 one,two,three,four
+    println("{"".lines().len()} {"\n".lines().len()} {"a\n\nb".lines().len()} {"a\r".lines().len()}")    // out: 0 1 3 1
+
+    // replace, repeat and padding.
+    println("{"aaa".replace("a", "bb")} {"abc".replace("", "-")} {"hello".replace("xyz", "q")} {"a.b.c".replace(".", "")}")    // out: bbbbbb -a-b-c- hello abc
+    println("[{"ab".repeat(3)}] [{"x".repeat(0)}] [{"".repeat(5)}] {"0123456789".repeat(1000).len()}")    // out: [ababab] [] [] 10000
+    println("[{"7".pad_start(3, '0')}] [{"ab".pad_end(5, '.')}] [{"long".pad_start(2, ' ')}] [{"é".pad_start(3, '*')}]")    // out: [007] [ab...] [long] [**é]
+
+    // join, on a list of `String`s or of `str`s.
+    let names: List<String> = ["ann", "bo", "cy"]
+    let short: List<str> = ["x", "y"]
+    println("{names.join(", ")} {short.join("+")} [{List<String>().join(",")}]")    // out: ann, bo, cy x+y []
+    println("{"a b  c".split(" ").join("_")} {"l1\nl2".lines().join("/")} {" p  q ".split_whitespace().join("-")}")    // out: a_b__c l1/l2 p-q
+
+    // A loop over the parts makes no list: each part is a view of the text.
+    var text = String("alpha, beta ,gamma\r\nsecond line\n\nlast")
+    var trimmed = List<String>()
+    for line in text.lines() {
+        for part in line.split(",") {
+            if part.trim() == "beta" {
+                println("found beta")    // out: found beta
+            }
+            trimmed.push(part.trim())
+        }
+    }
+    println(trimmed.join("|"))    // out: alpha|beta|gamma|second line||last
+    // Copies own their bytes, however they're made, so they outlive what the text held.
+    var copies = List<String>()
+    for w in text.split_whitespace() {
+        copies.push(w.copy())
+        copies.push(keep(w))
+        copies.push(w.to_lower_root())
+        copies.push("{w}!")
+    }
+    text.clear()
+    text.push_str("bytes that are all different now, and longer too")
+    println(copies.join(" "))    // out: alpha, alpha, alpha, alpha,! beta beta beta beta! ,gamma ,gamma ,gamma ,gamma! second second second second! line line line line! last last last last!
+    // A literal's parts, an empty separator's runes, break and continue, and a new text's parts.
+    for p in "a-b-c".split("-") {
+        print("{p};")
+    }
+    println("")    // out: a;b;c;
+    for r in "héllo".split("") {
+        print("[{r}]")
+    }
+    println("")    // out: [h][é][l][l][o]
+    for w in "one two three four".split_whitespace() {
+        if w == "two" {
+            continue
+        }
+        if w == "four" {
+            break
+        }
+        print("<{w}>")
+    }
+    println("")    // out: <one><three>
+    for p in String("tmp:val").split(":") {
+        print("[{p}]")
+    }
+    println("")    // out: [tmp][val]
+    var count = 0
+    for _ in "x\ny\nz".lines() {
+        count += 1
+    }
+    println("{count}")    // out: 3
+}

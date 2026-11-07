@@ -1014,6 +1014,9 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_jt_"})) parts_ok = part("calx_jtable.c");
     if (parts_ok && calls({"cx_oh_"})) parts_ok = part("calx_ohtable.c");
     if (parts_ok && calls({"cx_case_"})) parts_ok = part("calx_case.c");
+    if (parts_ok && calls({"cx_text_trim(", "cx_text_replace", "cx_text_repeat", "cx_text_pad", "cx_text_split(", "cx_text_split_whitespace(", "cx_text_lines(", "cx_text_join", "cx_text_words"})) {
+        parts_ok = part("calx_text.c");
+    }
     if (parts_ok && calls({"cx_digest_"})) parts_ok = part("calx_digest.c");
     if (parts_ok && calls({"cx_crypto_", "cx_cfb8_", "cx_rsa_"})) parts_ok = part("calx_crypto.c");
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");

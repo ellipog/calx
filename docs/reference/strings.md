@@ -68,9 +68,19 @@ fn main() {
 | `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match Java's hashes ([Java's view](#javas-view-of-a-string)) |
 | `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
 | `s.to_bytes()` | A copy of the bytes, a `List<u8>`, which `String.from_utf8` turns back into text |
+| `s.trim()`, `s.trim_start()`, `s.trim_end()` | The text without the whitespace at both ends, the start or the end, as a part of `s` ([taking text apart](#taking-text-apart)) |
+| `s.trim_prefix(t)`, `s.trim_suffix(t)` | The text without `t` at the start or the end, once, if it's there; otherwise all of it. A part of `s` |
+| `s.split(t)` | The parts between each `t`, a `List<String>`, empty parts too. `""` splits into the runes |
+| `s.split_once(t)` | The parts before and after the first `t`, a `(String, String)?`, or `none` if there's no `t` |
+| `s.split_whitespace()` | The words between whitespace, a `List<String>`, with no empty ones |
+| `s.lines()` | The lines, a `List<String>`, each without the `\n`, `\r\n` or `\r` that ends it |
+| `s.replace(from, to)` | A new `String` with every `from` replaced by `to`. `""` puts `to` between the runes and at both ends |
+| `s.repeat(n)` | A new `String` of `s` `n` times |
+| `s.pad_start(width, r)`, `s.pad_end(width, r)` | A new `String` of at least `width` runes, with the `rune` `r` added at the start or the end |
+| `xs.join(t)` | A list of `String`s or of `str`s as one `String`, with `t` between them |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
-- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`.
+- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`, and the ones that give new text or parts, from `trim` to `pad_end`. A `str`'s trimmed part is a `str`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
 - `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).
 - `s.push_str(s)` is an error, since `s` would change while being read. Push a copy.
@@ -119,6 +129,55 @@ fn main() {
 - Offsets are `usize`. `find` gives offsets that are always where runes start, since a match in UTF-8 can't start inside a rune.
 - A part can't be assigned to or changed, as in `s[0..2] = "x"` or `s[1..].push('x')`. Build a new `String` from the parts.
 - Only text can be sliced for now.
+
+## Taking text apart
+
+`trim`, `split`, `lines`, `replace` and `join` take text apart and put it back together, as a script reads a CSV, a config file or a log:
+
+```calx
+fn main() {
+    let config = "name = calx\n  # a comment\nport=25565\r\nmotd = Hello, world \n"
+    for line in config.lines() {
+        let t = line.trim()
+        if t.is_empty() or t.starts_with("#") {
+            continue
+        }
+        if let (key, value) = t.split_once("=") {
+            println("{key.trim()}: [{value.trim()}]")
+        }
+    }
+    // out: name: [calx]
+    // out: port: [25565]
+    // out: motd: [Hello, world]
+    let row = "a, b ,,c"
+    let cells = row.split(",")
+    println("{cells.len()} {row.split_whitespace().join("_")} {"x".repeat(3)} {"7".pad_start(3, '0')}")    // out: 4 a,_b_,,c xxx 007
+    println("{"a-b-c".replace("-", " - ")} {"v2.1".trim_prefix("v")}")    // out: a - b - c 2.1
+}
+```
+
+- Whitespace is what Unicode calls `White_Space`: ASCII's space, tab, line breaks, vertical tab and form feed, and the other spaces, such as U+0085, U+00A0, U+2028 and U+3000. Rust's `trim` takes the same. Python's `strip` takes the separators U+001C to U+001F too, and Java's `strip` takes those as well but keeps U+0085, U+00A0, U+2007 and U+202F.
+- `trim` and its kin give a part of the text, as [slicing](#slicing) does: a view where it's only looked at, and a copy where it's kept.
+- `split`, `split_whitespace` and `lines` give a new `List<String>`, each part a copy. In a `for` loop they don't: the loop goes over the parts in place, as views of the text, with no list made and nothing copied.
+- `lines` ends a line at `\n`, `\r\n` or a lone `\r`, as Java's `BufferedReader.readLine` and [`std.io`](../std/io.md)'s lines do, and a line break at the very end doesn't start another line. `split("\n")` gives an empty last part there instead.
+- `xs.split(t).join(u)`, `s.lines().join(u)` and `s.split_whitespace().join(u)` put the parts straight into the new text, with no list made.
+- `pad_start` and `pad_end` count runes, not bytes, so `"é".pad_start(3, '*')` is `**é`.
+
+```calx
+fn main() {
+    var text = String("alpha, beta\ngamma")
+    var kept = List<String>()
+    for line in text.lines() {
+        for cell in line.split(",") {
+            kept.push(cell.trim())    // the part is copied here, where it's kept
+        }
+    }
+    text.clear()
+    println(kept.join("|"))    // out: alpha|beta|gamma
+}
+```
+
+- In such a loop, each part is a view of the text, so the text can't change while the loop goes over it, as with a list, and a part can't be moved out of the loop: `kept.push(cell)` is an error. Keep a copy, `cell.copy()`, or anything made from it, such as `cell.trim()` or `"{cell}"`.
 
 ## Changing the case
 
@@ -236,3 +295,19 @@ cx_String command = cx_string_from(({ const cx_String* cx_t19 = &line; cx_usize 
 ```
 
 - `find` takes each place the first byte of what it looks for is, with `memchr`, which goes many bytes a step, and compares the rest only there. `contains` is `find`.
+- `trim` and its kin are parts, as `s[a..b]` is: `cx_text_trim` gives a `cx_str` of the same bytes, copied by `cx_string_from` only where it's kept. `trim_prefix` and `trim_suffix` are inline C.
+- A `for` loop over `split`, `lines` or `split_whitespace` is a `while` over inline C that gives the next part, a `cx_str`, and where the one after starts. A loop variable is a `cx_String` with the part's pointer and length and a capacity of `CX_VIEW_CAP`, the top bit, which marks a view: freeing it frees nothing, and a copy of it copies the bytes, where a literal's capacity of 0 would share them.
+- A one-byte separator and the line breaks are found sixteen bytes a step with SSE2, inline, so a short part costs no call, as `memchr`'s would. A longer separator goes through `find`.
+- `split`, `lines` and `split_whitespace` that make a list grow it as `push` does, each part a copy. A list's `join` works out the length first and allocates exactly that once. `s.lines().join(t)` and the others with no list start with room for all of `s`.
+- `replace` finds each match with `find` and copies the text between matches with `memcpy`, into a string that starts with room for all of `s`. `repeat` copies what it has so far, doubling, so `n` copies take about `log2(n)` calls.
+- They're in [runtime/calx_text.c](../../runtime/calx_text.c), linked only into programs that use them.
+
+Taking a text of 200,000 CSV lines (10.4 MB) apart, in ms, best of 7, from [`bench/text`](../../bench/text), on an i9-13900K pinned to one P-core: each line's fields trimmed and their lengths summed, in loops over `lines()` and `split(",")`; the lines joined with `|`; and that text with `name` replaced by `NAME`:
+
+| | Calx | Rust | Python 3.14 |
+| --- | --- | --- | --- |
+| The fields of every line, trimmed | 3.9 | 9.8 | 107 |
+| The lines joined | 1.2 | 5.8 | 15 |
+| A word replaced | 1.7 | 3.7 | 5.9 |
+
+All three give the same total. The Rust is written as Rust usually is: `text.lines()`, `line.split(',')` and `c.trim()`, then `lines().collect::<Vec<_>>().join("|")` and `replace`. Its `lines` and `split` look for the break with a general search that's slower on short parts, and its `join` makes a list of the lines first, which Calx's doesn't.

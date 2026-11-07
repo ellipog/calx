@@ -121,3 +121,15 @@ rustc -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3 -
 ```
 
 Both print the same total. The times are in [Strings](../docs/reference/strings.md#in-c).
+
+## Taking text apart
+
+[`text/text.calx`](text/text.calx) takes a text of 200,000 CSV lines apart as a script does: the fields of every line, trimmed, in loops over `lines()` and `split(",")`; the lines joined with `|`; and that text with a word replaced. Each time is the best of 7. [`text/text.rs`](text/text.rs) is the same with Rust's `str` methods, and [`text/text.py`](text/text.py) with Python's.
+
+```sh
+calx build --release -o text bench/text/text.calx
+rustc -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3 -o text_rs bench/text/text.rs
+py -I bench/text/text.py
+```
+
+All three print the same total. The times are in [Strings](../docs/reference/strings.md#in-c).

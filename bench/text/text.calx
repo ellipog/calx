@@ -1,0 +1,33 @@
+// Takes text apart as a script does a CSV or a log: the fields of every line, trimmed; the lines
+// joined with `|`; and that text with a word replaced. bench/text/text.rs and text.py do the same.
+import std.time.{Instant}
+
+fn main() {
+    var text = String()
+    for i in 0..200000 {
+        text.push_str("  {i}, name {i} , {i * 7}, some more text here \n")
+    }
+    var loops: u64 = u64.MAX
+    var join: u64 = u64.MAX
+    var replace: u64 = u64.MAX
+    var total: usize = 0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var fields: usize = 0
+        for line in text.lines() {
+            for c in line.split(",") {
+                fields += c.trim().len()
+            }
+        }
+        let t1 = unsafe { Instant.now() }
+        let joined = text.lines().join("|")
+        let t2 = unsafe { Instant.now() }
+        let replaced = joined.replace("name", "NAME")
+        let t3 = unsafe { Instant.now() }
+        total += fields + replaced.len()
+        loops = loops.min(t1.nanos_since(t0) / 1000)
+        join = join.min(t2.nanos_since(t1) / 1000)
+        replace = replace.min(t3.nanos_since(t2) / 1000)
+    }
+    println("calx: fields {loops} us, lines joined {join} us, replace {replace} us, total {total}")
+}

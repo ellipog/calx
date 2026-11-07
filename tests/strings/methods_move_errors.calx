@@ -1,0 +1,13 @@
+// A loop's part is a view of the text, so keeping one takes a copy.
+
+fn main() {
+    let s = String("a,b")
+    var kept = List<String>()
+    for part in s.split(",") {
+        kept.push(part)    // error: `part` is an element the loop looks at, so it can't be moved; move a copy with `part.copy()`
+    }
+    for line in "x\ny".lines() {
+        kept.push(line)    // error: `line` is an element the loop looks at
+    }
+    println("{kept.len()}")
+}
