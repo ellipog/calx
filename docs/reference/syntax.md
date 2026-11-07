@@ -101,7 +101,7 @@ fn main() {
 
 - A character literal holds one character in single quotes. It's a `char` (one UTF-16 code unit, Java's `char`) where a `char` is expected, and otherwise a `rune` (a Unicode scalar value).
 - A string literal is in double quotes, on one line. It's a `str`.
-- `{expr}` inside a string inserts the value of `expr`, which makes the literal a `String` ([strings](strings.md#literals)). An empty `{}` is an error.
+- `{expr}` inside a string inserts the value of `expr`, which makes the literal a `String` ([strings](strings.md#literals)). An empty `{}` is an error. `{expr:spec}` writes it with a format, such as `{x:.2}` or `{n:>8}` ([formats](printing.md#formats)); the first `:` outside brackets starts the format.
 - Escapes, in both: `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\{`, `\}`, and `\u{...}` with 1 to 6 hex digits naming a Unicode scalar value.
 
 `true` and `false` are the `bool` literals.

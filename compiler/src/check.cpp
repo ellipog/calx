@@ -3889,9 +3889,13 @@ private:
         // The parts are worked out in order. A part that's `Copy` is copied then, but one that owns
         // memory is shown as it is once they all are, so a later part can't change it.
         std::size_t held = loop_borrows_.size();
-        for (Expr* part : e->interpolations) {
+        std::size_t next = 0;
+        for (const StringPart& sp : e->literal.parts) {
+            if (!sp.is_expr || next >= e->interpolations.size()) continue;
+            Expr* part = e->interpolations[next++];
             Type* t = check(part, nullptr);
             if (!is_bad(t) && !printable(t)) error(part->span, name_of(t) + " can't be shown in a string" + lacking(t, true));
+            else check_format(sp.spec, t);
             Local* root = place_root(part);
             if (root && !is_bad(t) && !is_copy(t)) loop_borrows_.push_back({root, field_path(part), part, true});
         }
@@ -3900,6 +3904,49 @@ private:
         if (printed) return T.str;
         if (!e->interpolations.empty() || expected == T.string) return T.string;
         return T.str;
+    }
+
+    // Which parts of `{x:spec}` a value of type `t` takes. Integers take everything but a
+    // precision; floats everything but `#` and the integer kinds; and anything else only a fill,
+    // an alignment and a width, with a precision for text, the most runes to write.
+    void check_format(const FormatSpec& f, Type* t) {
+        if (!f.present || is_bad(t)) return;
+        auto kind_text = [&] { return std::string("`") + f.kind + "`"; };
+        if (is_int(t)) {
+            bool bits = f.kind == 'x' || f.kind == 'X' || f.kind == 'o' || f.kind == 'b';
+            if (f.precision >= 0) {
+                error(f.span, "an integer has no digits after the point; `.N` is for floats, and for text the most runes to write");
+            } else if (f.kind == 'e' || f.kind == 'E' || f.kind == '%') {
+                error(f.span, kind_text() + " is for floats; convert the integer first, as in " + q(std::string("{f64(n):") + f.kind + "}"));
+            } else if (bits && f.plus) {
+                error(f.span, "`+` is for decimal numbers; hex, octal and binary write the bits, with no sign");
+            } else if (bits && f.group == ',') {
+                error(f.span, "`,` groups decimal digits; group hex, octal and binary digits with `_`");
+            } else if (f.alt && !bits) {
+                error(f.span, "`#` puts `0x`, `0o` or `0b` before hex, octal or binary digits, so it needs `x`, `X`, `o` or `b` too");
+            }
+            return;
+        }
+        if (is_float(t)) {
+            if (f.kind == 'x' || f.kind == 'X' || f.kind == 'o' || f.kind == 'b') {
+                error(f.span, "a float isn't written in hex, octal or binary; " + q("{x.to_bits():x}") + " writes its bits");
+            } else if (f.alt) {
+                error(f.span, "`#` is for integers in hex, octal or binary");
+            } else if (f.group && (f.kind == 'e' || f.kind == 'E')) {
+                error(f.span, "the digits of scientific notation aren't grouped");
+            }
+            return;
+        }
+        bool text = t->kind == TypeKind::str || t->kind == TypeKind::string;
+        std::string flag = f.plus ? "+" : f.alt ? "#" : f.zero ? "0" : f.group ? std::string(1, f.group) : "";
+        if (f.kind) {
+            error(f.span, kind_text() + " is for numbers, not " + a_type(t));
+        } else if (!flag.empty()) {
+            error(f.span, "`" + flag + "` is for numbers, not " + a_type(t) + "; " + a_type(t) + " takes a fill, an alignment and a width");
+        } else if (f.precision >= 0 && !text) {
+            error(f.span, "`.N` is the most runes of text, or the digits after a float's point; " + a_type(t) +
+                              " takes a fill, an alignment and a width");
+        }
     }
 
     // The derived properties `Equal`, `Display` and `Hash`: whether `==` works on the type,
@@ -8466,6 +8513,10 @@ private:
                 if (b == BMethod::push_str && mentions(e->args[0].value, root)) {
                     error(e->args[0].value->span, q(text(root->name)) + " is changed by `push_str`, so it can't be "
                                                   "what's pushed; push a copy");
+                } else if (b == BMethod::push_str && e->args[0].value->kind == ExprKind::string_lit &&
+                           !e->args[0].value->interpolations.empty()) {
+                    // Nothing pushed mentions the string, so the parts print straight into it.
+                    e->print_into = true;
                 }
             } else {
                 error(lhs->span, q(m) + " changes " + name_of(recv) + ", so call it on a variable");

@@ -48,11 +48,27 @@ enum class Tok : std::uint8_t {
 
 const char* tok_text(Tok t);  // "identifier", "`fn`", "`+`" and so on, for messages
 
+// How `{x:spec}` writes its value: `[[fill]align][+][#][0][width][,|_][.precision][kind]`.
+struct FormatSpec {
+    bool present = false;
+    std::uint32_t fill = ' ';     // a rune
+    char align = 0;               // '<', '>', '^', or 0 for the type's own: numbers right, the rest left
+    bool plus = false;            // `+`: a sign on numbers that aren't negative too
+    bool alt = false;             // `#`: `0x`, `0o` or `0b` before the digits
+    bool zero = false;            // `0`: zeros after the sign, up to the width
+    char group = 0;               // ',' or '_' between groups of digits, or 0
+    std::uint32_t width = 0;      // in runes
+    std::int32_t precision = -1;  // digits after the point, or the most runes of text; -1 for none
+    char kind = 0;                // 'x', 'X', 'o', 'b', 'e', 'E', '%', or 0
+    Span span;                    // the text after the `:`
+};
+
 // One piece of a string literal: either decoded text, or the span of an interpolated expression.
 struct StringPart {
     bool is_expr = false;
     std::string_view text;  // decoded, for text parts
     Span span;              // the expression's source, for expression parts
+    FormatSpec spec;        // `{x:spec}`, for expression parts
 };
 
 struct Token {

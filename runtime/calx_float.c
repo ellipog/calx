@@ -1019,3 +1019,383 @@ void cx_print_f32(cx_f32 v) {
     int n = java_text(bits, 1, out);
     cx_print_str((cx_str){(const cx_u8*)out, (cx_usize)n});
 }
+
+/* --- `{x:spec}` for floats (CLX-93) ---------------------------------------------------------
+ *
+ * `{x:.2}` and `{x:.2%}` round the exact value of the float, ties to even, as Rust, Python and C
+ * do, not the shortest decimal Java prints, so 0.125 is 0.12 and 2.675, which is a little under,
+ * is 2.67. `{x:e}` is the shortest digits again, in scientific notation as Rust writes it, `1.5e3`,
+ * and `{x:.2e}` rounds the exact value to three digits. `{x:%}` is the shortest digits a hundred
+ * times larger, `12.5%`.
+ *
+ * Rounding takes one 128-bit multiply when there are at most 19 digits after the point and the
+ * value is under 2^64, which covers what programs print, and exact big integers otherwise. A
+ * double's value has at most 1074 digits after the point and 767 significant ones, so past those
+ * the digits are zeros, written without being worked out. */
+
+#define WIDE_WORDS 160 /* 5120 bits: 2^1024 * 10^1100 and twice it fit */
+typedef struct {
+    cx_u32 w[WIDE_WORDS];
+    int n; /* words in use; the rest are 0 */
+} wide;
+
+static void wide_set(wide* a, cx_u64 v) {
+    a->w[0] = (cx_u32)v;
+    a->w[1] = (cx_u32)(v >> 32);
+    a->n = a->w[1] ? 2 : a->w[0] ? 1 : 0;
+}
+
+static void wide_mul(wide* a, cx_u32 m) {
+    cx_u64 carry = 0;
+    for (int i = 0; i < a->n; i++) {
+        cx_u64 t = (cx_u64)a->w[i] * m + carry;
+        a->w[i] = (cx_u32)t;
+        carry = t >> 32;
+    }
+    if (carry) a->w[a->n++] = (cx_u32)carry;
+}
+
+static void wide_mul_pow10(wide* a, int t) {
+    static const cx_u32 small[10] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+    for (; t >= 9; t -= 9) wide_mul(a, 1000000000u);
+    if (t) wide_mul(a, small[t]);
+}
+
+static void wide_add_small(wide* a, cx_u32 v) {
+    cx_u64 carry = v;
+    for (int i = 0; carry && i < a->n; i++) {
+        cx_u64 t = (cx_u64)a->w[i] + carry;
+        a->w[i] = (cx_u32)t;
+        carry = t >> 32;
+    }
+    if (carry) a->w[a->n++] = (cx_u32)carry;
+}
+
+static void wide_shl(wide* a, int bits) {
+    if (a->n == 0 || bits == 0) return;
+    int words = bits / 32, r = bits % 32, n = a->n + words + 1;
+    for (int i = n - 1; i >= 0; i--) {
+        int src = i - words;
+        cx_u64 hi = src >= 0 && src < a->n ? a->w[src] : 0;
+        cx_u64 lo = src - 1 >= 0 && src - 1 < a->n ? a->w[src - 1] : 0;
+        a->w[i] = r ? (cx_u32)((hi << r) | (lo >> (32 - r))) : (cx_u32)hi;
+    }
+    a->n = n;
+    while (a->n && !a->w[a->n - 1]) a->n--;
+}
+
+static void wide_shr(wide* a, int bits) {
+    int words = bits / 32, r = bits % 32;
+    if (words >= a->n) {
+        a->n = 0;
+        return;
+    }
+    int n = a->n - words;
+    for (int i = 0; i < n; i++) {
+        cx_u64 lo = a->w[i + words];
+        cx_u64 hi = i + words + 1 < a->n ? a->w[i + words + 1] : 0;
+        a->w[i] = r ? (cx_u32)((lo >> r) | (hi << (32 - r))) : (cx_u32)lo;
+    }
+    for (int i = n; i < a->n; i++) a->w[i] = 0;
+    a->n = n;
+    while (a->n && !a->w[a->n - 1]) a->n--;
+}
+
+/* Divides by d, giving the remainder. */
+static cx_u32 wide_div(wide* a, cx_u32 d) {
+    cx_u64 rem = 0;
+    for (int i = a->n - 1; i >= 0; i--) {
+        cx_u64 cur = rem << 32 | a->w[i];
+        a->w[i] = (cx_u32)(cur / d);
+        rem = cur % d;
+    }
+    while (a->n && !a->w[a->n - 1]) a->n--;
+    return (cx_u32)rem;
+}
+
+static int wide_cmp(const wide* a, const wide* b) {
+    if (a->n != b->n) return a->n < b->n ? -1 : 1;
+    for (int i = a->n - 1; i >= 0; i--) {
+        if (a->w[i] != b->w[i]) return a->w[i] < b->w[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+/* Its decimal digits into out, at least one; their count. Leaves a at 0. */
+static int wide_digits(wide* a, char* out) {
+    char chunks[1600];
+    int k = (int)sizeof chunks;
+    while (a->n) {
+        cx_u32 r = wide_div(a, 1000000000u);
+        for (int i = 0; i < 9; i++) {
+            chunks[--k] = (char)('0' + r % 10);
+            r /= 10;
+        }
+    }
+    while (k < (int)sizeof chunks && chunks[k] == '0') k++;
+    if (k == (int)sizeof chunks) chunks[--k] = '0';
+    memcpy(out, chunks + k, sizeof chunks - (size_t)k);
+    return (int)sizeof chunks - k;
+}
+
+static const cx_u64 P10[20] = {1ull, 10ull, 100ull, 1000ull, 10000ull, 100000ull, 1000000ull, 10000000ull, 100000000ull,
+                               1000000000ull, 10000000000ull, 100000000000ull, 1000000000000ull, 10000000000000ull,
+                               100000000000000ull, 1000000000000000ull, 10000000000000000ull, 100000000000000000ull,
+                               1000000000000000000ull, 10000000000000000000ull};
+
+/* The decimal digits of m * 2^q * 10^t rounded to an integer, ties to even, into out (1600
+ * bytes); their count. "0" for 0. */
+static int exact_digits(cx_u64 m, int q, int t, char* out) {
+    if (m == 0) {
+        out[0] = '0';
+        return 1;
+    }
+    if (q >= 0 && q <= 11 && t >= 0) {
+        int n = u64_digits(m << q, out);
+        memset(out + n, '0', (size_t)t);
+        return n + t;
+    }
+    if (q < 0 && t >= 0 && t <= 19) {
+        int k = -q;
+        cx_u64 whole = k < 64 ? m >> k : 0, frac = k < 64 ? m & (((cx_u64)1 << k) - 1) : m, r = 0;
+        if (k <= 127) {
+            u128 prod = (u128)frac * P10[t];
+            r = (cx_u64)(prod >> k);
+            u128 rem = prod & (((u128)1 << k) - 1), half = (u128)1 << (k - 1);
+            cx_u64 last = t == 0 ? whole : r;
+            if (rem > half || (rem == half && (last & 1))) r++;
+        }
+        if (r == P10[t]) {
+            whole++;
+            r = 0;
+        }
+        if (whole == 0) return u64_digits(r, out);
+        int n = u64_digits(whole, out);
+        if (t == 0) return n;
+        char tail[20];
+        int len = u64_digits(r, tail);
+        memset(out + n, '0', (size_t)(t - len));
+        memcpy(out + n + t - len, tail, (size_t)len);
+        return n + t;
+    }
+    wide a, c;
+    wide_set(&a, m);
+    if (q > 0) wide_shl(&a, q);
+    if (t > 0) wide_mul_pow10(&a, t);
+    int a2 = q < 0 ? -q : 0, a10 = t < 0 ? -t : 0;
+    if (a2 == 0 && a10 == 0) return wide_digits(&a, out);
+    /* r = floor(a / (2^a2 * 10^a10)), and it rounds up when 2a > (2r + 1) * 2^a2 * 10^a10, or
+     * when they're equal and r is odd. */
+    wide r = a;
+    wide_shr(&r, a2);
+    for (int d = a10; d > 0; d -= 9) wide_div(&r, d >= 9 ? 1000000000u : (cx_u32)P10[d]);
+    c = r;
+    wide_mul(&c, 2);
+    wide_add_small(&c, 1);
+    wide_shl(&c, a2);
+    wide_mul_pow10(&c, a10);
+    wide_mul(&a, 2);
+    int k = wide_cmp(&a, &c);
+    if (k > 0 || (k == 0 && r.n && (r.w[0] & 1))) wide_add_small(&r, 1);
+    return wide_digits(&r, out);
+}
+
+/* Whether m * 2^q < 10^e, exactly. */
+static int below_pow10(cx_u64 m, int q, int e) {
+    wide a, b;
+    wide_set(&a, m);
+    wide_set(&b, 1);
+    if (q > 0) wide_shl(&a, q);
+    else wide_shl(&b, -q);
+    if (e > 0) wide_mul_pow10(&b, e);
+    else wide_mul_pow10(&a, -e);
+    return wide_cmp(&a, &b) < 0;
+}
+
+/* The parts of a formatted float after its integer digits: `.`, the digits, zeros, and the
+ * suffix, into a buffer that's big enough. */
+typedef struct {
+    char* p;
+    cx_usize len, cap;
+    char small[256];
+} text_buf;
+
+static void buf_init(text_buf* b, cx_usize need) {
+    b->len = 0;
+    b->cap = need <= sizeof b->small ? sizeof b->small : need;
+    b->p = need <= sizeof b->small ? b->small : (char*)cx_alloc(need);
+}
+static void buf_add(text_buf* b, const char* s, cx_usize n) {
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+}
+static void buf_zeros(text_buf* b, cx_usize n) {
+    memset(b->p + b->len, '0', n);
+    b->len += n;
+}
+static void buf_free(text_buf* b) {
+    if (b->p != b->small) cx_free(b->p, b->cap);
+}
+
+static int exp_text(int e, char* out) {
+    int k = 0;
+    if (e < 0) {
+        out[k++] = '-';
+        e = -e;
+    }
+    return k + u64_digits((cx_u64)e, out + k);
+}
+
+static const cx_str NO_TEXT = {(const cx_u8*)"", 0};
+
+static void format_float(cx_u64 bits, int is32, cx_spec s) {
+    int sign_bit = is32 ? 31 : 63;
+    cx_u64 mag = bits & (((cx_u64)1 << sign_bit) - 1);
+    cx_u64 inf = is32 ? 0x7F800000u : 0x7FF0000000000000u;
+    int percent = s.kind == '%';
+    cx_str sign = NO_TEXT;
+    if (mag <= inf) {
+        if (bits >> sign_bit) sign = (cx_str){(const cx_u8*)"-", 1};
+        else if (s.flags & CX_SPEC_PLUS) sign = (cx_str){(const cx_u8*)"+", 1};
+    }
+    if (mag >= inf) {
+        /* NaN and Infinity aren't padded with zeros. */
+        s.flags &= (cx_u8)~CX_SPEC_ZERO;
+        const char* word = mag > inf ? (percent ? "NaN%" : "NaN") : percent ? "Infinity%" : "Infinity";
+        cx_format_number(sign, NO_TEXT, NO_TEXT, (cx_str){(const cx_u8*)word, strlen(word)}, s, 3);
+        return;
+    }
+    /* The exact value, m * 2^q, from the double that holds it. */
+    cx_u64 b64 = mag;
+    if (is32) {
+        float f;
+        cx_u32 u = (cx_u32)mag;
+        memcpy(&f, &u, 4);
+        double d = f;
+        memcpy(&b64, &d, 8);
+    }
+    int raw = (int)(b64 >> 52);
+    cx_u64 m = raw ? (b64 & ((((cx_u64)1) << 52) - 1)) | ((cx_u64)1 << 52) : b64;
+    int q = raw ? raw - 1075 : -1074;
+    if (m) {
+        int tz = __builtin_ctzll(m);
+        m >>= tz;
+        q += tz;
+    }
+    char d[1600];
+    int n, e;
+    text_buf rest;
+    if (s.precision < 0 && s.kind == 0) {
+        /* As `{x}` writes it, padded: the digits before the point are the ones grouped. */
+        n = java_text(mag, is32, d);
+        int k = 0;
+        while (k < n && d[k] >= '0' && d[k] <= '9') k++;
+        cx_format_number(sign, NO_TEXT, (cx_str){(const cx_u8*)d, (cx_usize)k}, (cx_str){(const cx_u8*)d + k, (cx_usize)(n - k)}, s, 3);
+        return;
+    }
+    if (s.kind == 'e' || s.kind == 'E') {
+        char ex[8];
+        ex[0] = (char)s.kind;
+        int ex_len;
+        if (m == 0) {
+            d[0] = '0';
+            n = 1;
+            e = 0;
+        } else if (s.precision < 0) {
+            n = shortest(mag, is32, d, &e);
+        } else {
+            int p = s.precision < 800 ? s.precision : 800;
+            /* The exponent of the first digit is the shortest decimal's, unless that's a power of
+             * ten the value is just under, when it's one less. */
+            int sn = shortest(mag, is32, d, &e);
+            if (sn == 1 && d[0] == '1' && below_pow10(m, q, e)) e--;
+            n = exact_digits(m, q, p - e, d);
+            if (n > p + 1) {
+                /* It rounded up to the next power of ten. */
+                e++;
+                n = p + 1;
+            }
+        }
+        if (m == 0 && s.precision > 0) {
+            memset(d + 1, '0', (size_t)(s.precision < 800 ? s.precision : 800));
+            n = 1 + (s.precision < 800 ? s.precision : 800);
+        }
+        ex_len = 1 + exp_text(e, ex + 1);
+        cx_usize more = s.precision > 800 ? (cx_usize)(s.precision - 800) : 0;
+        buf_init(&rest, (cx_usize)n + more + 16);
+        if (n > 1 || more) buf_add(&rest, ".", 1);
+        buf_add(&rest, d + 1, (cx_usize)(n - 1));
+        buf_zeros(&rest, more);
+        buf_add(&rest, ex, (cx_usize)ex_len);
+        cx_format_number(sign, NO_TEXT, (cx_str){(const cx_u8*)d, 1}, (cx_str){(const cx_u8*)rest.p, rest.len}, s, 3);
+        buf_free(&rest);
+        return;
+    }
+    if (s.precision < 0) {
+        /* `{x:%}`: the shortest digits, a hundred times larger, written plainly. */
+        if (m == 0) {
+            d[0] = '0';
+            n = 1;
+            e = -2;
+        } else {
+            n = shortest(mag, is32, d, &e);
+        }
+        e += 2;
+        buf_init(&rest, (cx_usize)(n + (e < 0 ? -e : 0) + 8));
+        cx_str whole;
+        if (e >= n - 1) {
+            memset(d + n, '0', (size_t)(e - (n - 1)));
+            whole = (cx_str){(const cx_u8*)d, (cx_usize)(e + 1)};
+        } else if (e >= 0) {
+            whole = (cx_str){(const cx_u8*)d, (cx_usize)(e + 1)};
+            buf_add(&rest, ".", 1);
+            buf_add(&rest, d + e + 1, (cx_usize)(n - e - 1));
+        } else {
+            whole = (cx_str){(const cx_u8*)"0", 1};
+            buf_add(&rest, ".", 1);
+            buf_zeros(&rest, (cx_usize)(-e - 1));
+            buf_add(&rest, d, (cx_usize)n);
+        }
+        buf_add(&rest, "%", 1);
+        cx_format_number(sign, NO_TEXT, whole, (cx_str){(const cx_u8*)rest.p, rest.len}, s, 3);
+        buf_free(&rest);
+        return;
+    }
+    /* `{x:.p}` and `{x:.p%}`: the exact value, times 10^p, or 10^(p + 2), rounded. */
+    int p = s.precision, t = p + (percent ? 2 : 0), limit = 1076;
+    int t_eff = t < limit ? t : limit;
+    int places = p - (t - t_eff); /* the digits after the point worked out; the rest are zeros */
+    n = exact_digits(m, q, t_eff, d);
+    cx_str whole;
+    buf_init(&rest, (cx_usize)p + 8);
+    if (n > places) {
+        whole = (cx_str){(const cx_u8*)d, (cx_usize)(n - places)};
+    } else {
+        whole = (cx_str){(const cx_u8*)"0", 1};
+    }
+    if (p > 0) {
+        buf_add(&rest, ".", 1);
+        if (n > places) {
+            buf_add(&rest, d + n - places, (cx_usize)places);
+        } else {
+            buf_zeros(&rest, (cx_usize)(places - n));
+            buf_add(&rest, d, (cx_usize)n);
+        }
+        buf_zeros(&rest, (cx_usize)(p - places));
+    }
+    if (percent) buf_add(&rest, "%", 1);
+    cx_format_number(sign, NO_TEXT, whole, (cx_str){(const cx_u8*)rest.p, rest.len}, s, 3);
+    buf_free(&rest);
+}
+
+void cx_format_f64(cx_f64 v, cx_spec s) {
+    cx_u64 bits;
+    memcpy(&bits, &v, 8);
+    format_float(bits, 0, s);
+}
+
+void cx_format_f32(cx_f32 v, cx_spec s) {
+    cx_u32 bits;
+    memcpy(&bits, &v, 4);
+    format_float(bits, 1, s);
+}

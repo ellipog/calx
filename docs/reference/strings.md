@@ -76,7 +76,7 @@ fn main() {
 | `s.lines()` | The lines, a `List<String>`, each without the `\n`, `\r\n` or `\r` that ends it |
 | `s.replace(from, to)` | A new `String` with every `from` replaced by `to`. `""` puts `to` between the runes and at both ends |
 | `s.repeat(n)` | A new `String` of `s` `n` times |
-| `s.pad_start(width, r)`, `s.pad_end(width, r)` | A new `String` of at least `width` runes, with the `rune` `r` added at the start or the end |
+| `s.pad_start(width, r)`, `s.pad_end(width, r)` | A new `String` of at least `width` runes, with the `rune` `r` added at the start or the end. In a string, `{s:>8}` and `{s:<8}` pad as they print ([formats](printing.md#formats)) |
 | `xs.join(t)` | A list of `String`s or of `str`s as one `String`, with `t` between them |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.

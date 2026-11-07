@@ -260,6 +260,8 @@ struct Expr {
     std::uint32_t loop_id = 0;   // loop, match: its labels in C
     bool let_unwraps = false;    // if_: `if let p = opt` matches `p` against the optional's value
     bool from_while = false;     // loop, if_: what a `while let` is parsed as (D111)
+    bool print_into = false;     // `s.push_str("..{x}..")`: the parts print straight into `s`,
+                                 // which none of them mentions, with no string between
     // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
     // that interface. A copy for an instance keeps the rewrite.
     Item* only_interface = nullptr;

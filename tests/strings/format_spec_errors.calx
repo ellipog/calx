@@ -1,0 +1,18 @@
+// What a format can't say: each line is one mistake, with what to write instead.
+
+fn main() {
+    let x = 1.5
+    let n = 7
+    println("{x:}")    // error: a `:` in `{...}` needs a format after it
+    println("{x:.2f}")    // error: `f` isn't needed: `.2` already means two digits after the point
+    println("{n:d}")    // error: `d` isn't needed: integers are written in decimal
+    println("{x:g}")    // error: Calx has no `g`
+    println("{x:?}")    // error: Calx has no debug format
+    println("{n:-5}")    // error: a negative number has its `-` already
+    println("{n:0}")    // error: `0` pads with zeros up to a width
+    println("{n:<05}")    // error: write a fill and an alignment or `0`, not both
+    println("{x:.}")    // error: `.` needs a number after it
+    println("{n:99999}")    // error: a width or precision is at most 65535
+    println("{n:>5q}")    // error: unexpected `q` in the format
+    println("{n:=8}")    // error: Calx has no `=` alignment
+}

@@ -5232,8 +5232,48 @@ $dropall    m->len = 0;
                 continue;
             }
             Expr* x = m->interpolations[next];
-            out += (is_part(x) ? "cx_print_str(" + values[next++] + ");" : show_value(x->type, values[next++])) + " ";
+            const std::string& v = values[next++];
+            if (p.spec.present) out += format_value(x->type, v, p.spec, is_part(x)) + " ";
+            else out += (is_part(x) ? "cx_print_str(" + v + ");" : show_value(x->type, v)) + " ";
         }
+    }
+
+    // `{x:spec}`: the call that writes the value `v` of type `t` as the format says (CLX-93), or
+    // with `part`, the text `v`, a `cx_str`. Numbers, text, `bool`s, runes and plain enums go
+    // straight to the runtime. Anything else is shown into a string first, which is padded.
+    std::string format_value(const Type* t, const std::string& v, const FormatSpec& f, bool part) {
+        int flags = (f.plus ? 1 : 0) | (f.alt ? 2 : 0) | (f.zero ? 4 : 0) | (f.group == ',' ? 8 : 0) | (f.group == '_' ? 16 : 0);
+        std::string spec = "((cx_spec){" + std::to_string(f.fill) + "u, " + std::to_string(f.width) + "u, " + std::to_string(f.precision) +
+                           ", " + std::to_string(static_cast<unsigned char>(f.align)) + ", " + std::to_string(flags) + ", " +
+                           std::to_string(static_cast<unsigned char>(f.kind)) + "})";
+        if (part) return "cx_format_str(" + v + ", " + spec + ");";
+        if (!hand(t, prop_display)) {
+            if (is_int(t)) {
+                if (f.kind == 'x' || f.kind == 'X' || f.kind == 'o' || f.kind == 'b') {
+                    return "cx_format_u64((cx_u64)(" + std::string(unsigned_of(t)) + ")(" + v + "), " + spec + ");";
+                }
+                return t->is_signed ? "cx_format_i64((cx_i64)(" + v + "), " + spec + ");" : "cx_format_u64((cx_u64)(" + v + "), " + spec + ");";
+            }
+            if (is_float(t)) return std::string(t->bits == 32 ? "cx_format_f32(" : "cx_format_f64(") + v + ", " + spec + ");";
+            switch (t->kind) {
+                case TypeKind::str: return "cx_format_str(" + v + ", " + spec + ");";
+                case TypeKind::string: return "cx_format_str(cx_sv(" + v + "), " + spec + ");";
+                case TypeKind::bool_: return "cx_format_str((" + v + ") ? " + str_const("true") + " : " + str_const("false") + ", " + spec + ");";
+                case TypeKind::rune: return "cx_format_rune(" + v + ", " + spec + ");";
+                case TypeKind::char_: {
+                    std::string c = tmp();
+                    return "{ cx_char " + c + " = " + v + "; cx_format_rune(" + c + " >= 0xD800 && " + c + " <= 0xDFFF ? 0xFFFD : " + c + ", " +
+                           spec + "); }";
+                }
+                case TypeKind::enum_:
+                    if (!t->has_data) return "cx_format_str(" + enum_name_fn(t) + "(" + v + "), " + spec + ");";
+                    break;
+                default: break;
+            }
+        }
+        std::string b = tmp(), prev = tmp();
+        return "{ cx_String " + b + " = {0}; cx_String* " + prev + " = cx_fmt_begin(&" + b + "); " + show_value(t, v) + " cx_fmt_end(" + prev +
+               "); cx_format_str(cx_sv(" + b + "), " + spec + "); cx_drop_String(&" + b + "); }";
     }
 
     // A string literal with `{...}` parts, as a `String`: the values are worked out, then printed
@@ -5702,7 +5742,15 @@ $dropall    m->len = 0;
                            p + ".len, " + location(e->args[0].value->span) + ")]; })";
                 }
                 case BMethod::push: return head + "cx_string_push_rune(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
-                case BMethod::push_str: return head + "cx_string_push_str(" + p + ", " + text_arg(0) + "); })";
+                case BMethod::push_str:
+                    if (e->print_into) {
+                        // `s.push_str("..{x}..")`: the parts print into `s`, as `write!` does in
+                        // Rust, with no string built and copied between.
+                        std::string decls, out, prev = tmp();
+                        print_parts(e->args[0].value, decls, out);
+                        return head + decls + "cx_String* " + prev + " = cx_fmt_begin(" + p + "); " + out + "cx_fmt_end(" + prev + "); })";
+                    }
+                    return head + "cx_string_push_str(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::clear: return "cx_string_clear(" + address(recv) + ")";
                 case BMethod::reserve: return head + "cx_string_reserve(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
                 case BMethod::contains: return view + "cx_str_contains(" + p + ", " + text_arg(0) + "); })";

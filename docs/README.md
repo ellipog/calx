@@ -56,7 +56,7 @@ What's built, one page per feature:
 29. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
 30. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
 31. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, assert and panic, and `@track_caller`
+32. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
 33. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
 34. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
 35. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`

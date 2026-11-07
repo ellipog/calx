@@ -1,0 +1,24 @@
+// Which parts of a format each type takes.
+
+struct Point {
+    x: i32,
+}
+
+fn main() {
+    let x = 1.5
+    let n = 7
+    let s = "text"
+    println("{n:.2}")    // error: an integer has no digits after the point
+    println("{n:e}")    // error: `e` is for floats; convert the integer first
+    println("{n:%}")    // error: `%` is for floats
+    println("{n:+x}")    // error: `+` is for decimal numbers
+    println("{n:,x}")    // error: `,` groups decimal digits; group hex, octal and binary digits with `_`
+    println("{n:#}")    // error: `#` puts `0x`, `0o` or `0b` before hex, octal or binary digits
+    println("{x:x}")    // error: a float isn't written in hex, octal or binary
+    println("{x:#.2}")    // error: `#` is for integers in hex, octal or binary
+    println("{x:,e}")    // error: the digits of scientific notation aren't grouped
+    println("{s:x}")    // error: `x` is for numbers, not
+    println("{s:+}")    // error: `+` is for numbers, not
+    println("{true:.2}")    // error: `.N` is the most runes of text, or the digits after a float's point
+    println("{Point { x: 1 }:05}")    // error: `0` is for numbers, not
+}

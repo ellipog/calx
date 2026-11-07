@@ -1061,21 +1061,15 @@ void cx_thread_sleep(cx_u64 ns) {
 
 void cx_print_u64(cx_u64 v) {
     char buf[24];
-    int i = sizeof buf;
-    do {
-        buf[--i] = (char)('0' + v % 10);
-        v /= 10;
-    } while (v);
-    write_bytes(buf + i, sizeof buf - (size_t)i);
+    int n = cx_u64_text(v, buf + sizeof buf);
+    write_bytes(buf + sizeof buf - n, (size_t)n);
 }
 
 void cx_print_i64(cx_i64 v) {
-    if (v < 0) {
-        write_bytes("-", 1);
-        cx_print_u64((cx_u64)0 - (cx_u64)v);
-    } else {
-        cx_print_u64((cx_u64)v);
-    }
+    char buf[24];
+    int n = cx_u64_text(v < 0 ? (cx_u64)0 - (cx_u64)v : (cx_u64)v, buf + sizeof buf);
+    if (v < 0) buf[sizeof buf - ++n] = '-';
+    write_bytes(buf + sizeof buf - n, (size_t)n);
 }
 
 void cx_print_bool(cx_bool v) {

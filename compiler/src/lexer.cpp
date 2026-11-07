@@ -456,6 +456,7 @@ private:
                 StringPart p;
                 p.is_expr = true;
                 p.span = span(expr_start, pos_ - 1);
+                split_spec(p);
                 if (p.span.begin == p.span.end) diags_.error(span(expr_start - 1, pos_), "empty `{}` in a string");
                 parts.push_back(p);
                 continue;
@@ -600,6 +601,7 @@ private:
                 StringPart part;
                 part.is_expr = true;
                 part.span = span(expr_start, pos_ - 1);
+                split_spec(part);
                 if (part.span.begin == part.span.end) {
                     diags_.error(span(p, pos_), "empty `" + std::string(hashes, '#') + "{}` in a raw string");
                 }
@@ -614,6 +616,192 @@ private:
         pos_ = close + 1 + hashes;
         Token& t = push(Tok::string_lit, start, pos_);
         t.parts = arena_.copy(parts);
+    }
+
+    // `{x:spec}`: the expression ends at the first `:` outside brackets, strings and runes, and
+    // the format after it says how its value is written. Nothing else in an expression has a `:`
+    // outside brackets, except a closure's parameter types, which go in parentheses there.
+    void split_spec(StringPart& part) {
+        std::uint32_t b = part.span.begin, e = part.span.end;
+        std::uint32_t colon = spec_colon(b, e);
+        if (colon == e) return;
+        part.span = span(b, colon);
+        part.spec = parse_spec(colon + 1, e);
+    }
+
+    std::uint32_t spec_colon(std::uint32_t b, std::uint32_t e) const {
+        int depth = 0;
+        for (std::uint32_t p = b; p < e; p++) {
+            char c = src_[p];
+            if (c == '(' || c == '[' || c == '{') {
+                depth++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                depth--;
+            } else if (c == '"') {
+                p = past_quoted(p + 1, e) - 1;
+            } else if (c == '\'') {
+                std::uint32_t q = p + 1;
+                if (q < e && src_[q] == '\\') q += 2;
+                while (q < e && src_[q] != '\'') q++;
+                p = q;  // the closing quote, which the loop steps past
+            } else if (c == '#') {
+                std::uint32_t q = p, hashes = 0;
+                while (q < e && src_[q] == '#') {
+                    q++;
+                    hashes++;
+                }
+                if (q < e && src_[q] == '"') p = past_raw(q + 1, e, hashes) - 1;
+            } else if (c == ':' && depth == 0) {
+                return p;
+            }
+        }
+        return e;
+    }
+
+    // Past the closing quote of a string whose text starts at `p`, through its `{...}` parts.
+    std::uint32_t past_quoted(std::uint32_t p, std::uint32_t e) const {
+        while (p < e) {
+            char c = src_[p];
+            if (c == '\\') {
+                p += 2;
+                continue;
+            }
+            if (c == '"') return p + 1;
+            if (c == '{') {
+                p = past_braces(p + 1, e);
+                continue;
+            }
+            p++;
+        }
+        return e;
+    }
+
+    // Past the `}` that closes a `{` just before `p`.
+    std::uint32_t past_braces(std::uint32_t p, std::uint32_t e) const {
+        int depth = 0;
+        while (p < e) {
+            char c = src_[p];
+            if (c == '"') {
+                p = past_quoted(p + 1, e);
+                continue;
+            }
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                if (depth == 0) return p + 1;
+                depth--;
+            }
+            p++;
+        }
+        return e;
+    }
+
+    // Past the closing quote and `#`s of a raw string whose text starts at `p`.
+    std::uint32_t past_raw(std::uint32_t p, std::uint32_t e, std::uint32_t hashes) const {
+        for (; p < e; p++) {
+            if (src_[p] != '"') continue;
+            std::uint32_t h = 0;
+            while (h < hashes && p + 1 + h < e && src_[p + 1 + h] == '#') h++;
+            if (h == hashes && !(p + 1 + h < e && src_[p + 1 + h] == '{')) return p + 1 + h;
+        }
+        return e;
+    }
+
+    // The format in `src_[b, e)`: `[[fill]align][+][#][0][width][,|_][.precision][kind]`, as
+    // Rust's and Python's formats are written. Which parts a value's type takes is the checker's.
+    FormatSpec parse_spec(std::uint32_t b, std::uint32_t e) {
+        FormatSpec f;
+        f.present = true;
+        f.span = span(b, e);
+        const std::string shape = "a format is `[[fill]align][+][#][0][width][,|_][.precision][x|X|o|b|e|E|%]`, such as `{x:>8}`, "
+                                  "`{x:08.3}` or `{n:#x}`";
+        if (b == e) {
+            diags_.error(span(b - 1, e), "a `:` in `{...}` needs a format after it; " + shape);
+            return f;
+        }
+        auto is_align = [](char c) { return c == '<' || c == '>' || c == '^'; };
+        std::uint32_t p = b;
+        // A fill is any rune before an alignment.
+        unsigned char lead = static_cast<unsigned char>(src_[p]);
+        std::uint32_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        if (p + n > e) n = 1;
+        if (p + n < e && is_align(src_[p + n])) {
+            std::uint32_t cp = n == 1 ? lead : lead & (0x7Fu >> n);
+            for (std::uint32_t i = 1; i < n; i++) cp = cp << 6 | (static_cast<unsigned char>(src_[p + i]) & 0x3Fu);
+            f.fill = cp;
+            f.align = src_[p + n];
+            p += n + 1;
+        } else if (is_align(src_[p])) {
+            f.align = src_[p++];
+        }
+        if (p < e && src_[p] == '+') {
+            f.plus = true;
+            p++;
+        } else if (p < e && src_[p] == '-') {
+            diags_.error(span(p, p + 1), "a negative number has its `-` already; `+` puts a sign on the others too");
+            p++;
+        }
+        if (p < e && src_[p] == '#') {
+            f.alt = true;
+            p++;
+        }
+        std::uint32_t zero_at = p;
+        if (p < e && src_[p] == '0') {
+            f.zero = true;
+            p++;
+        }
+        auto number = [&](std::uint32_t& out) {
+            std::uint32_t start = p;
+            std::uint64_t v = 0;
+            while (p < e && src_[p] >= '0' && src_[p] <= '9') {
+                v = v * 10 + static_cast<std::uint64_t>(src_[p] - '0');
+                if (v > 65535) v = 65536;
+                p++;
+            }
+            if (v > 65535) diags_.error(span(start, p), "a width or precision is at most 65535");
+            out = static_cast<std::uint32_t>(v > 65535 ? 0 : v);
+            return p > start;
+        };
+        bool has_width = number(f.width);
+        if (f.zero && (!has_width || f.width == 0)) {
+            diags_.error(span(zero_at, p), "`0` pads with zeros up to a width; give one too, such as `{x:05}`");
+        }
+        if (f.zero && f.align) {
+            diags_.error(span(zero_at, zero_at + 1), "write a fill and an alignment or `0`, not both: `0` puts zeros after the sign");
+        }
+        if (p < e && (src_[p] == ',' || src_[p] == '_')) f.group = src_[p++];
+        if (p < e && src_[p] == '.') {
+            std::uint32_t dot = p++;
+            std::uint32_t precision = 0;
+            if (!number(precision)) {
+                diags_.error(span(dot, p), "`.` needs a number after it, such as `{x:.2}` for two digits after the point");
+            }
+            f.precision = static_cast<std::int32_t>(precision);
+        }
+        if (p < e && std::string_view("xXobeE%").find(src_[p]) != std::string_view::npos) f.kind = src_[p++];
+        if (p < e) {
+            char c = src_[p];
+            std::string msg;
+            if (c == 'f' || c == 'F') {
+                msg = "`f` isn't needed: `.2` already means two digits after the point, as in `{x:.2}`";
+            } else if (c == 'd') {
+                msg = "`d` isn't needed: integers are written in decimal unless the format says `x`, `X`, `o` or `b`";
+            } else if (c == 's') {
+                msg = "`s` isn't needed: text is written as it is";
+            } else if (c == 'g' || c == 'G') {
+                msg = "Calx has no `g`: `{x}` writes the shortest digits that read back, `{x:.2}` two digits after the point, "
+                      "and `{x:e}` scientific notation";
+            } else if (c == '?') {
+                msg = "Calx has no debug format: `{x}` writes any value that can be shown";
+            } else if (c == '=') {
+                msg = "Calx has no `=` alignment: `0`, as in `{x:08}`, puts zeros after the sign";
+            } else {
+                msg = "unexpected `" + std::string(src_.substr(p, e - p)) + "` in the format; " + shape +
+                      ". If the `:` belongs to the expression, put the expression in parentheses";
+            }
+            diags_.error(span(p, e), msg);
+        }
+        return f;
     }
 
     // Skips an interpolated expression up to and past its closing brace, through nested braces

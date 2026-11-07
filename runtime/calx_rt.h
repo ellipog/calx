@@ -535,6 +535,52 @@ CX_FN(cx_StringList, cx_text_lines, (cx_str s));
 CX_FN(cx_String, cx_text_join, (const cx_String* parts, cx_usize n, cx_str sep, const char* at));
 CX_FN(cx_String, cx_text_join_str, (const cx_str* parts, cx_usize n, cx_str sep, const char* at));
 CX_FN(cx_bool, cx_text_words_next, (cx_str s, cx_usize* at, cx_str* part));
+/* `{x:spec}`: how a value is written, as the compiler read the format (CLX-93). `align` is '<',
+ * '>', '^', or 0 for the type's own; `kind` is 'x', 'X', 'o', 'b', 'e', 'E', '%', or 0. Integers,
+ * text and runes are in calx_format.c, floats in calx_float.c. Signed integers in hex, octal or
+ * binary come as their bits, unsigned, so they're written as Java's `toHexString` writes them. */
+typedef struct {
+    cx_u32 fill;
+    cx_u32 width;
+    cx_i32 precision; /* -1 for none */
+    cx_u8 align;
+    cx_u8 flags;
+    cx_u8 kind;
+} cx_spec;
+#define CX_SPEC_PLUS 1
+#define CX_SPEC_ALT 2
+#define CX_SPEC_ZERO 4
+#define CX_SPEC_COMMA 8
+#define CX_SPEC_UNDER 16
+CX_FN(void, cx_format_i64, (cx_i64 v, cx_spec s));
+CX_FN(void, cx_format_u64, (cx_u64 v, cx_spec s));
+CX_FN(void, cx_format_str, (cx_str v, cx_spec s));
+CX_FN(void, cx_format_rune, (cx_rune v, cx_spec s));
+CX_FN(void, cx_format_f64, (cx_f64 v, cx_spec s));
+CX_FN(void, cx_format_f32, (cx_f32 v, cx_spec s));
+/* The decimal digits of v, written backwards from `end`, two at a time; their count. */
+CX_INLINE int cx_u64_text(cx_u64 v, char* end) {
+    static const char pairs[201] = "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+                                   "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+                                   "8081828384858687888990919293949596979899";
+    char* p = end;
+    while (v >= 100) {
+        cx_u64 q = v / 100;
+        p -= 2;
+        __builtin_memcpy(p, pairs + 2 * (v - q * 100), 2);
+        v = q;
+    }
+    if (v >= 10) {
+        p -= 2;
+        __builtin_memcpy(p, pairs + 2 * v, 2);
+    } else {
+        *--p = (char)('0' + v);
+    }
+    return (int)(end - p);
+}
+/* A number, from its parts: `digits` the integer digits, which grouping and `0` apply to, and
+ * `rest` what follows them. For calx_float.c. */
+void cx_format_number(cx_str sign, cx_str prefix, cx_str digits, cx_str rest, cx_spec s, int group);
 CX_INLINE cx_str cx_text_trim_prefix(cx_str s, cx_str p) {
     return cx_str_starts_with(s, p) ? (cx_str){s.ptr + p.len, s.len - p.len} : s;
 }
