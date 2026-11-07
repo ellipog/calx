@@ -59,13 +59,13 @@ fn main() {
 
 Why bytes don't inflate, as `Error`:
 
-| Error | When |
-| --- | --- |
-| `Corrupt` | They aren't a stream zlib accepts: a bad header, a code that can't be, or a distance back past the start |
-| `Truncated` | They end before the stream does |
-| `Checksum` | The Adler-32, the CRC-32, gzip's length or gzip's header CRC doesn't match |
-| `TooLong` | The data is more than `decompress`'s limit |
-| `Dictionary` | The zlib header asks for a preset dictionary. Java's `Inflater` stops there without an error, and `needsDictionary()` says why. Neither Minecraft nor `std.zlib` uses one |
+| Error | When | `{e}` |
+| --- | --- | --- |
+| `Corrupt` | They aren't a stream zlib accepts: a bad header, a code that can't be, or a distance back past the start | corrupt data |
+| `Truncated` | They end before the stream does | the data ends early |
+| `Checksum` | The Adler-32, the CRC-32, gzip's length or gzip's header CRC doesn't match | checksum mismatch |
+| `TooLong` | The data is more than `decompress`'s limit | longer than the limit when inflated |
+| `Dictionary` | The zlib header asks for a preset dictionary. Java's `Inflater` stops there without an error, and `needsDictionary()` says why. Neither Minecraft nor `std.zlib` uses one | the data needs a preset dictionary |
 
 - Bytes after the end of the stream are ignored, as Java ignores them.
 - gzip reads on into the next member when one follows, as `GZIPInputStream` does, and ignores what follows if it isn't a whole gzip header.

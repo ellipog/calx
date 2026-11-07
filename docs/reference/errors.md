@@ -265,7 +265,7 @@ fn listen(path: String) -> u16 ! Error {
 fn main() {
     match listen("missing.properties") {
         ok(p) => println("listening on {p}"),
-        err(e) => println("{e}"),    // out: reading missing.properties: NotFound
+        err(e) => println("{e}"),    // out: reading missing.properties: not found
     }
     match port("lots") {
         ok(p) => println("listening on {p}"),
@@ -277,7 +277,7 @@ fn main() {
 - `try` makes an `Error` of any error that can be shown ([`Display`](comparing.md#display)) when the function fails with `Error`: the `FsError` above, an enum of a program's own, a `String`, even a number. Its text is what `{e}` shows of the error.
 - `fail` in a function that fails with `Error` takes anything that can be shown too, so `fail "{text} isn't a port"` needs nothing more.
 - `f().context(text)` is `f`'s result with its error made an `Error`, and `text` added to it, so it's handled at the call as any result is: with `try`, `match`, `if let` or `!`. The text is worked out only if `f` fails, so `"reading {path}"` builds nothing when the read succeeds. Rust's `anyhow` builds `.context(format!(...))` every time, and needs `.with_context(|| ...)` to wait. A variable given as the text is copied only if `f` fails, and stays the caller's.
-- An `Error` shows each context, the outermost first, and then the error's own text: `loading the config: reading server.properties: NotFound`. A `main` that fails with one prints that after `error: `.
+- An `Error` shows each context, the outermost first, and then the error's own text: `loading the config: reading server.properties: not found`, since std's errors say what went wrong in words (CLX-139). A `main` that fails with one prints that after `error: `.
 
 | Item | Gives |
 | --- | --- |

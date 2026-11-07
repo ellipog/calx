@@ -98,13 +98,13 @@ fn main() {
     var flipped = good.copy()
     let last = flipped.len() - 1
     flipped[last] = flipped[last] + 1
-    println(outcome(unhex("789d"), Format.Zlib, 10))    // out: Corrupt
-    println(outcome(unhex("789c07"), Format.Zlib, 10))    // out: Corrupt
-    println(outcome(cut, Format.Zlib, data.len()))    // out: Truncated
-    println(outcome(flipped, Format.Zlib, data.len()))    // out: Checksum
-    println(outcome(good.copy(), Format.Zlib, data.len() - 1))    // out: TooLong
-    println(outcome(unhex("78bb01020304"), Format.Zlib, 10))    // out: Dictionary
-    println(outcome([], Format.Raw, 10))    // out: Truncated
+    println(outcome(unhex("789d"), Format.Zlib, 10))    // out: corrupt data
+    println(outcome(unhex("789c07"), Format.Zlib, 10))    // out: corrupt data
+    println(outcome(cut, Format.Zlib, data.len()))    // out: the data ends early
+    println(outcome(flipped, Format.Zlib, data.len()))    // out: checksum mismatch
+    println(outcome(good.copy(), Format.Zlib, data.len() - 1))    // out: longer than the limit when inflated
+    println(outcome(unhex("78bb01020304"), Format.Zlib, 10))    // out: the data needs a preset dictionary
+    println(outcome([], Format.Raw, 10))    // out: the data ends early
 
     // Anything after the stream is ignored, and gzip reads on into a second member.
     var trailing = compress("abc".to_bytes(), Format.Zlib, 6)
@@ -152,6 +152,6 @@ fn main() {
     var short: List<u8> = []
     match decompress_stream(joined, 0, joined.len(), Format.Raw, 10, mut short) {
         ok(end) => println("ended at {end}"),
-        err(e) => println("{e} {short.len()}"),    // out: TooLong 10
+        err(e) => println("{e} {short.len()}"),    // out: longer than the limit when inflated 10
     }
 }

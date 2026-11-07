@@ -37,6 +37,19 @@ pub enum NetError {
     Os(i32)
 }
 
+/// What went wrong, in words: `connection refused`, `address already in use`, or
+/// `system error 10060` with the system's code.
+impl Display for NetError {
+    fn show(self) {
+        match self {
+            AddressInUse => print("address already in use"),
+            BadAddress => print("not an address, or no name server knows the host"),
+            Refused => print("connection refused"),
+            Os(code) => print("system error {code}"),
+        }
+    }
+}
+
 /// A connection, as `Event`s name it and `read`, `write` and `close` take it.
 pub struct Conn {
     number: u32,

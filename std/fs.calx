@@ -62,6 +62,23 @@ pub enum FsError {
     Os(i32)
 }
 
+/// What went wrong, in words, as Python says it: `not found`, `permission denied`, or
+/// `system error 32` with the system's code. In an `Error`, after what was being done:
+/// `reading config.toml: not found`.
+impl Display for FsError {
+    fn show(self) {
+        match self {
+            NotFound => print("not found"),
+            Denied => print("permission denied"),
+            Exists => print("already exists"),
+            BadPath => print("not a valid path"),
+            IsDirectory => print("is a directory"),
+            NotEmpty => print("directory not empty"),
+            Os(code) => print("system error {code}"),
+        }
+    }
+}
+
 /// What `metadata` reads of a file or a directory.
 pub struct Metadata {
     /// Its length in bytes. A directory's is whatever the system says, often 0.

@@ -153,7 +153,7 @@ fn main() {
     serve(net, mut bufs, big)
     match big.wait() {
         ok(_) => println("ok"),
-        err(e) => println("{e}"),    // out: TooLong
+        err(e) => println("{e}"),    // out: the body is longer than the limit
     }
 
     // The server never answers this one.
@@ -161,7 +161,7 @@ fn main() {
     serve(net, mut bufs, slow)
     match slow.wait() {
         ok(_) => println("ok"),
-        err(e) => println("{e}"),    // out: Timeout
+        err(e) => println("{e}"),    // out: timed out
     }
 
     // URLs that aren't HTTP fail without a thread.
@@ -177,5 +177,5 @@ fn main() {
             err(e) => bad.push_str("{finished}:{e}"),
         }
     }
-    println(bad)    // out: true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl true:BadUrl
+    println(bad)    // out: true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL
 }

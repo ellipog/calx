@@ -98,18 +98,18 @@ fn main() {
     flipped[8] = 0x36
     var bad_check = packed.copy()
     bad_check[17] = bad_check[17] + 1
-    println(outcome(cut, data.len()))    // out: Truncated
-    println(outcome(flipped, data.len()))    // out: Corrupt
-    println(outcome(bad_check, data.len()))    // out: Checksum
-    println(outcome(packed.copy(), data.len() - 1))    // out: TooLong
-    println(outcome("LZ4Blocx".to_bytes(), 10))    // out: Truncated
-    println(outcome(unhex("4c5a34426c6f636c16000000000000000000000000"), 10))    // out: Corrupt
-    println(outcome([], 10))    // out: Truncated
+    println(outcome(cut, data.len()))    // out: the data ends early
+    println(outcome(flipped, data.len()))    // out: corrupt data
+    println(outcome(bad_check, data.len()))    // out: checksum mismatch
+    println(outcome(packed.copy(), data.len() - 1))    // out: longer than the limit when decompressed
+    println(outcome("LZ4Blocx".to_bytes(), 10))    // out: the data ends early
+    println(outcome(unhex("4c5a34426c6f636c16000000000000000000000000"), 10))    // out: corrupt data
+    println(outcome([], 10))    // out: the data ends early
 
     // Blocks that lz4-java takes and the LZ4 format says no compressor writes. 8 literals, a match
     // of 4 one back, then 5 literals: the last match starts 9 bytes from the end, not 12.
     let near_end = unhex("8061626364656667680100507677787979")
-    println(outcome(one_block(near_end.copy(), 17, 0), 100))    // out: Checksum
+    println(outcome(one_block(near_end.copy(), 17, 0), 100))    // out: checksum mismatch
     let right = decompress(one_block(near_end, 17, xxh32("abcdefghhhhhvwxyy".to_bytes(), 0x9747B28C) & 0x0FFFFFFF), 100)!
     println(String.from_utf8(right) ?? "bad")    // out: abcdefghhhhhvwxyy
     // A match 0 back is zeros.
@@ -121,7 +121,7 @@ fn main() {
     // literals, a match of 8 one back, and a "z": by itself the literals would have to be the last.
     let late = unhex("d46162636465666768696a6b6c6d0100107a")
     let late_check = xxh32("abcdefghijklmmmmmmmmmz".to_bytes(), 0x9747B28C) & 0x0FFFFFFF
-    println(outcome(one_block(late.copy(), 22, late_check), 100))    // out: Corrupt
+    println(outcome(one_block(late.copy(), 22, late_check), 100))    // out: corrupt data
     var after = compress(chunkish(1000))
     after.truncate(after.len() - 21)
     for b in one_block(late, 22, late_check) {

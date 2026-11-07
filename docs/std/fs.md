@@ -240,22 +240,10 @@ On Windows, a link holds two names, the one it follows and the one the system sh
 
 ## Errors
 
-The same failure is the same `FsError` on both systems:
+The same failure is the same `FsError` on both systems, and `{e}` says it in words, as Python does: `not found`, `permission denied`, `already exists`, `not a valid path`, `is a directory`, `directory not empty`, or `system error 32` with the system's code. In an [`Error`](../reference/errors.md), after what was being done, that's `reading config.toml: not found`.
 
 ```calx
 import std.fs.{FsError, read, make_dir, write, remove_dir_all, temp_dir}
-
-fn describe(e: FsError) -> String {
-    return match e {
-        NotFound => String("not found"),
-        Denied => String("denied"),
-        Exists => String("exists"),
-        BadPath => String("bad path"),
-        IsDirectory => String("is a directory"),
-        NotEmpty => String("not empty"),
-        Os(code) => "system error {code}",
-    }
-}
 
 fn main() {
     let dir = temp_dir()!
@@ -263,16 +251,20 @@ fn main() {
     for path in errors {
         match read(path) {
             ok(bytes) => println("{bytes.len()} bytes"),
-            err(e) => println(describe(e)),
+            err(e) => println("{e}"),
         }
     }
     // out: not found
     // out: is a directory
-    // out: bad path
+    // out: not a valid path
     write("{dir}/x", [1, 2, 3])!
     match make_dir("{dir}/x") {
         ok => println("made"),
-        err(e) => println(describe(e)),    // out: exists
+        err(e) => println("{e}"),    // out: already exists
+    }
+    match read("{dir}/gone") {
+        ok(_) => println("read it"),
+        err(e) => println("{e == FsError.NotFound}"),    // out: true
     }
     remove_dir_all(dir)!
 }

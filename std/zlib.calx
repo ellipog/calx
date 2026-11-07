@@ -43,6 +43,19 @@ pub enum Error {
     Dictionary
 }
 
+/// What went wrong, in words: `corrupt data`, `the data ends early`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Corrupt => print("corrupt data"),
+            Truncated => print("the data ends early"),
+            Checksum => print("checksum mismatch"),
+            TooLong => print("longer than the limit when inflated"),
+            Dictionary => print("the data needs a preset dictionary"),
+        }
+    }
+}
+
 fn format_code(format: Format) -> u32 {
     return match format {
         Format.Zlib => 0,

@@ -67,7 +67,7 @@ fn main() ! Error {
         ok(n) => println("{n} bytes"),
         err(e) => println("{e} | {e.contexts().join(" > ")} | {e.message()}"),
     }
-    // out: loading the config: reading no/such/file.txt: NotFound | loading the config > reading no/such/file.txt | NotFound
+    // out: loading the config: reading no/such/file.txt: not found | loading the config > reading no/such/file.txt | not found
 
     let e = Error.new("by hand").with_context("inner step").with_context("outer step")
     println("{e}")    // out: outer step: inner step: by hand

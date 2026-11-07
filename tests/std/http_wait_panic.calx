@@ -6,7 +6,7 @@ fn main() {
     var r = get("ftp://example.com/", [], 1000, 100)
     match r.wait() {
         ok(_) => println("ok"),
-        err(e) => println("{e}"),    // out: BadUrl
+        err(e) => println("{e}"),    // out: not a valid URL
     }
     match r.wait() {    // panic: the request's response was taken already
         ok(_) => println("ok"),

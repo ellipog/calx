@@ -128,30 +128,21 @@ An IPv4 client of a socket that listens on IPv6 too, as one on every address doe
 
 ## Errors
 
-`Net.new`, `listen` and `connect` fail with a `NetError` ([errors](../reference/errors.md)):
+`Net.new`, `listen` and `connect` fail with a `NetError` ([errors](../reference/errors.md)), which `{e}` says in words, as Python does: `address already in use`, `connection refused`, or `system error 10060` with the system's code:
 
 ```calx
-import std.net.{Net, NetError}
-
-fn describe(e: NetError) -> String {
-    return match e {
-        AddressInUse => String("address in use"),
-        BadAddress => String("bad address"),
-        Refused => String("refused"),
-        Os(code) => "system error {code}",
-    }
-}
+import std.net.{Net}
 
 fn main() {
     let net = Net.new()!
     let port = net.listen("127.0.0.1", 0)!
     match net.listen("127.0.0.1", port) {
         ok(_) => println("listened twice"),
-        err(e) => println(describe(e)),    // out: address in use
+        err(e) => println("{e}"),    // out: address already in use
     }
     match net.connect("not an address", 25565) {
         ok(_) => println("connecting"),
-        err(e) => println(describe(e)),    // out: bad address
+        err(e) => println("{e}"),    // out: not an address, or no name server knows the host
     }
 }
 ```

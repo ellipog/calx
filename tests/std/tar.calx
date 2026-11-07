@@ -145,7 +145,7 @@ fn main() {
     }
     match Tar.open([0x1fu8, 0x8b, 1, 2, 3]) {
         ok(_) => println("opened"),
-        err(e) => println(e),    // out: the gzip stream is broken: Corrupt
+        err(e) => println(e),    // out: the gzip stream is broken: corrupt data
     }
     println("{Tar.open([])!.len()}")    // out: 0
 }

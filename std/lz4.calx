@@ -24,6 +24,18 @@ pub enum Error {
     TooLong
 }
 
+/// What went wrong, in words: `corrupt data`, `the data ends early`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Corrupt => print("corrupt data"),
+            Truncated => print("the data ends early"),
+            Checksum => print("checksum mismatch"),
+            TooLong => print("longer than the limit when decompressed"),
+        }
+    }
+}
+
 /// The bytes compressed, in blocks of 64 KiB, as vanilla's `new LZ4BlockOutputStream(out)`
 /// writes them.
 pub fn compress(bytes: List<u8>) -> List<u8> {

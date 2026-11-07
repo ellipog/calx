@@ -48,6 +48,24 @@ pub enum Error {
     Os(i32)
 }
 
+/// What went wrong, in words: `timed out`, `can't find the host`, or `system error 7` with
+/// the system's code.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            BadUrl => print("not a valid URL"),
+            Resolve => print("can't find the host"),
+            Connect => print("can't connect: nothing answered at the host and port"),
+            Tls => print("the TLS handshake failed"),
+            Timeout => print("timed out"),
+            Protocol => print("the response ended early, or isn't HTTP"),
+            TooLong => print("the body is longer than the limit"),
+            Unavailable => print("there's no HTTP client on this system; on Linux, install libcurl"),
+            Os(code) => print("system error {code}"),
+        }
+    }
+}
+
 /// What the server answered.
 pub struct Response {
     /// The status code, such as 200, or 204 when Mojang's session server says a player hasn't

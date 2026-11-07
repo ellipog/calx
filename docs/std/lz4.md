@@ -38,12 +38,12 @@ fn main() {
 
 Why bytes don't decompress, as `Error`:
 
-| Error | When |
-| --- | --- |
-| `Corrupt` | They aren't a stream `LZ4BlockInputStream` accepts: a bad header, or a block its decompressor refuses |
-| `Truncated` | They end before the stream does |
-| `Checksum` | A block's checksum doesn't match what it decompresses to |
-| `TooLong` | The data is more than `decompress`'s limit |
+| Error | When | `{e}` |
+| --- | --- | --- |
+| `Corrupt` | They aren't a stream `LZ4BlockInputStream` accepts: a bad header, or a block its decompressor refuses | corrupt data |
+| `Truncated` | They end before the stream does | the data ends early |
+| `Checksum` | A block's checksum doesn't match what it decompresses to | checksum mismatch |
+| `TooLong` | The data is more than `decompress`'s limit | longer than the limit when decompressed |
 
 Java throws an `IOException` for all of the first three, "Stream is corrupted" or "Stream ended prematurely". `std.lz4` says which.
 

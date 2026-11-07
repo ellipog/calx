@@ -1,0 +1,33 @@
+// std's errors say what went wrong in words, as Python's do, so an `Error` made from one with
+// `context` reads `reading config.toml: not found` (CLX-139).
+import std.fs.{FsError, read}
+import std.http
+import std.net.{NetError}
+import std.zlib
+import std.lz4
+
+fn load(path: String) -> List<u8> ! Error {
+    return try read(path).context("reading {path}")
+}
+
+fn main() {
+    let fs_errors = [FsError.NotFound, FsError.Denied, FsError.Exists, FsError.BadPath, FsError.IsDirectory, FsError.NotEmpty, FsError.Os(32)]
+    for e in fs_errors {
+        println("{e}")
+    }
+    // out: not found
+    // out: permission denied
+    // out: already exists
+    // out: not a valid path
+    // out: is a directory
+    // out: directory not empty
+    // out: system error 32
+    println("{http.Error.Resolve} | {http.Error.Connect} | {http.Error.Tls} | {http.Error.Protocol}")    // out: can't find the host | can't connect: nothing answered at the host and port | the TLS handshake failed | the response ended early, or isn't HTTP
+    println("{http.Error.Unavailable} | {http.Error.Os(7)}")    // out: there's no HTTP client on this system; on Linux, install libcurl | system error 7
+    println("{NetError.AddressInUse} | {NetError.BadAddress} | {NetError.Refused} | {NetError.Os(10060)}")    // out: address already in use | not an address, or no name server knows the host | connection refused | system error 10060
+    println("{zlib.Error.Corrupt} | {zlib.Error.Dictionary} | {zlib.Error.TooLong} | {lz4.Error.TooLong}")    // out: corrupt data | the data needs a preset dictionary | longer than the limit when inflated | longer than the limit when decompressed
+    match load("no/such/config.toml") {
+        ok(_) => println("read it"),
+        err(e) => println("{e}"),    // out: reading no/such/config.toml: not found
+    }
+}

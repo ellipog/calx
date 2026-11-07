@@ -49,17 +49,17 @@ fn main() {
 
 Why a request got no response, as `Error`:
 
-| Error | When |
-| --- | --- |
-| `BadUrl` | The URL isn't `http://` or `https://`, then a host, then an optional port and path. It must be printable ASCII, with anything else percent-encoded, and have no user name before the host |
-| `Resolve` | No name server knows the host |
-| `Connect` | Nothing answered at the host and port |
-| `Tls` | The TLS handshake failed, or the system doesn't trust the server's certificate |
-| `Timeout` | The response didn't come within the time |
-| `Protocol` | The server closed the connection early, or what it sent isn't HTTP |
-| `TooLong` | The body is longer than the limit |
-| `Unavailable` | There's no HTTP client on the system: on Linux, libcurl isn't installed |
-| `Os(code)` | Something else, with the system's error code |
+| Error | When | `{e}` |
+| --- | --- | --- |
+| `BadUrl` | The URL isn't `http://` or `https://`, then a host, then an optional port and path. It must be printable ASCII, with anything else percent-encoded, and have no user name before the host | not a valid URL |
+| `Resolve` | No name server knows the host | can't find the host |
+| `Connect` | Nothing answered at the host and port | can't connect: nothing answered at the host and port |
+| `Tls` | The TLS handshake failed, or the system doesn't trust the server's certificate | the TLS handshake failed |
+| `Timeout` | The response didn't come within the time | timed out |
+| `Protocol` | The server closed the connection early, or what it sent isn't HTTP | the response ended early, or isn't HTTP |
+| `TooLong` | The body is longer than the limit | the body is longer than the limit |
+| `Unavailable` | There's no HTTP client on the system: on Linux, libcurl isn't installed | there's no HTTP client on this system; on Linux, install libcurl |
+| `Os(code)` | Something else, with the system's error code | system error 7 |
 
 ## What's sent
 

@@ -12,6 +12,6 @@ fn main() {
     _ = pack([1, 2, 3], 9)
 }
 
-// trace: std.lz4.compress_into:40
+// trace: std.lz4.compress_into:52
 // trace: trace_std.pack:7
 // trace: trace_std.main:12
