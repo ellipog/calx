@@ -936,6 +936,16 @@ private:
     // twice. The names already there are dropped from it.
     bool keep_import(Module* m, const std::vector<Item*>& added, Item* imp) {
         std::string path = dotted(imp->import_path.parts);
+        // `import std.fs`, the module itself: kept unless it's imported so already, by that name.
+        if (imp->import_names.empty()) {
+            auto same = [&](const Item* it) {
+                return it->kind == ItemKind::import && it->import_names.empty() && it->import_alias == imp->import_alias &&
+                       dotted(it->import_path.parts) == path;
+            };
+            for (const Item* it : m->items) if (same(it)) return false;
+            for (const Item* it : added) if (same(it)) return false;
+            return true;
+        }
         auto there = [&](const ImportName& n) {
             auto check = [&](const Item* it) {
                 if (it->kind != ItemKind::import || dotted(it->import_path.parts) != path) return false;

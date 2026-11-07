@@ -1,0 +1,66 @@
+// What a module's name refuses: items that aren't there or aren't `pub`, the module as a value or
+// a type, second names, and names it would shadow (CLX-138).
+// file: main.calx
+import util
+import util as again    // error: `util` is already imported, as `util`
+import geo.shapes as shapes    // error: `geo.shapes as shapes` doesn't rename anything; import it as `geo.shapes`
+import geo.shapes as print    // error: `print` is a built-in name, so the module needs another
+import geo.shapes as Pt    // error: `Pt` is already the name of a struct here; Calx doesn't allow shadowing, but `as` can rename the import
+import other    // error: `other` is imported but never used
+import geo.shapes as geo
+import util.{twice}
+import geo.shapes.{area as util}    // error: `util` is already the name of the module `util`
+
+struct Pt {
+    x: i32
+}
+
+fn twice_of(util: i32) -> i32 {    // error: `util` is already the name of the module `util`; Calx doesn't allow shadowing
+    return util
+}
+
+fn pick<geo>(x: geo) -> geo {    // error: `geo` is already the name of the module `geo.shapes`
+    return x
+}
+
+fn main() {
+    let a = util.nope(1)    // error: `util` has no `nope`
+    let b = util.secret()    // error: `secret` isn't `pub` in `util`
+    let c = util    // error: `util` is the module `util`, not a value; write one of its items, as in `util.twice`
+    let d: util = 1    // error: `util` is the module `util`, not a type
+    let e: geo = geo.Square { side: 1.0 }    // error: `geo` is the module `geo.shapes`, not a type; write one of its items, as in `geo.Square`
+    let f = util.twice(2)    // error: `twice` is imported by name, so write `twice` rather than `util.twice`
+    let g = geo.Missing { x: 1 }    // error: `geo.shapes` has no `Missing`
+    let h: geo.Nope = 1    // error: `geo.shapes` has no `Nope`
+    util(1)    // error: `util` is the module `util`, not a function
+    let p = Pt { x: twice(1) }
+    println("{a} {b} {c} {d} {e.side} {f} {g} {h} {p.x} {twice_of(1)} {pick(1)}")
+}
+
+// file: util.calx
+pub fn twice(n: i32) -> i32 {
+    return n * 2
+}
+
+fn secret() -> i32 {
+    return 1
+}
+
+pub fn use_secret() -> i32 {
+    return secret()
+}
+
+// file: other.calx
+pub fn unused() {
+}
+
+// file: geo/shapes.calx
+module geo.shapes
+
+pub struct Square {
+    pub side: f64
+}
+
+pub fn area(s: Square) -> f64 {
+    return s.side * s.side
+}

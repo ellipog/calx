@@ -72,7 +72,7 @@ fn main() {
 | `FileLock` | A lock `try_lock` took, held until its `release(own self) ! FsError`, which lets it go and closes the file, or until the program ends. It's a handle too |
 | `Link` | `target: String`, where a link leads, as it was made, and `junction: bool`, whether it's a Windows junction |
 | `Kind` | `File`, `Dir`, `Link` (a symbolic link, or a junction on Windows) or `Other`, such as a device |
-| `Entry` | What `walk` found: `path: String`, the directory walked and the names down to it, joined as [`join_path`](path.md) joins them, and `kind: Kind`, what's there, without following a link |
+| `Entry` | What `walk` found: `path: String`, the directory walked and the names down to it, joined as [`std.path.join`](path.md) joins them, and `kind: Kind`, what's there, without following a link |
 | `FsError` | `NotFound`, `Denied`, `Exists`, `BadPath`, `IsDirectory`, `NotEmpty`, or `Os(i32)` with the system's error code |
 
 ## Writing in place
@@ -201,7 +201,7 @@ fn main() {
 
 A relative path is on the folder the program runs in, `current_dir`, which `set_current_dir` changes for the whole program: every thread, and each program [`std.process`](process.md) starts without a folder of its own. A script that works in one folder can pass that folder to each call instead, which leaves the rest of the program alone.
 
-`absolute` makes a path absolute by its text alone, as Python's `os.path.abspath` does: on the current folder if it's relative, then without its `.` names and with each `..` taking off the name before it, as [`normalize_path`](path.md) does. It doesn't look at what's there, so the path needn't exist, and a `..` after a link goes back past the link's name. `real_path` follows links instead, and needs the path to be there. On Windows `absolute` is what the system's `GetFullPathNameW` makes of the path, with `\` between the names, and `C:x` is on drive C's own current folder.
+`absolute` makes a path absolute by its text alone, as Python's `os.path.abspath` does: on the current folder if it's relative, then without its `.` names and with each `..` taking off the name before it, as [`std.path.normalize`](path.md) does. It doesn't look at what's there, so the path needn't exist, and a `..` after a link goes back past the link's name. `real_path` follows links instead, and needs the path to be there. On Windows `absolute` is what the system's `GetFullPathNameW` makes of the path, with `\` between the names, and `C:x` is on drive C's own current folder.
 
 ```calx
 import std.fs.{absolute, current_dir, separator}

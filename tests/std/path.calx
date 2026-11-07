@@ -1,7 +1,7 @@
 // std.path: paths joined, taken apart, normalized and matched against globs, by the text alone,
 // with what Windows reads differently checked on each system.
 import std.env.{os}
-import std.path.{path_root, is_absolute, join_path, file_name, parent_dir, file_stem, file_extension, with_extension, with_file_name, path_parts, normalize_path, glob_matches, glob_matches_name}
+import std.path.{root, is_absolute, join, file_name, parent_dir, file_stem, file_extension, with_extension, with_file_name, parts, normalize, glob_matches, glob_matches_name}
 
 fn show(s: String?) -> String {
     if let v = s {
@@ -31,8 +31,8 @@ fn main() {
     println(describe(""))    // out: none none none none
 
     // Joining.
-    println("{join_path("a", "b")} {join_path("a/", "b")} {join_path("", "b")} {join_path("a", "/b")} {join_path("a", "")}")    // out: a/b a/b b /b a/
-    println("{join_path(join_path("world", "region"), "r.0.0.mca")}")    // out: world/region/r.0.0.mca
+    println("{join("a", "b")} {join("a/", "b")} {join("", "b")} {join("a", "/b")} {join("a", "")}")    // out: a/b a/b b /b a/
+    println("{join(join("world", "region"), "r.0.0.mca")}")    // out: world/region/r.0.0.mca
 
     // Changing the last name.
     println("{with_extension("a/notes.txt", "md")} {with_extension("a/notes", "md")} {with_extension("a/notes.txt", "")} {with_extension("a/b/", "x")}")    // out: a/notes.md a/notes.md a/notes a/b.x
@@ -40,11 +40,11 @@ fn main() {
     println("{with_file_name("logs/old.txt", "new.txt")} {with_file_name("/", "x")} {with_file_name("a/..", "x")}")    // out: logs/new.txt /x a/../x
 
     // Parts and normalizing.
-    println(path_parts("./logs/../x").join("|"))    // out: logs|..|x
-    println(path_parts("/srv//world/").join("|"))    // out: /|srv|world
-    println("{path_parts(".").len()}")    // out: 0
-    println("{normalize_path("a/./b/../c/")} {normalize_path("/../a")} {normalize_path("../a/..")} {normalize_path("a/../..")}")    // out: a/c /a .. ..
-    println("{normalize_path("./")} {normalize_path("")} {normalize_path("a//b")} {normalize_path("x/y/../../..")}")    // out: . . a/b ..
+    println(parts("./logs/../x").join("|"))    // out: logs|..|x
+    println(parts("/srv//world/").join("|"))    // out: /|srv|world
+    println("{parts(".").len()}")    // out: 0
+    println("{normalize("a/./b/../c/")} {normalize("/../a")} {normalize("../a/..")} {normalize("a/../..")}")    // out: a/c /a .. ..
+    println("{normalize("./")} {normalize("")} {normalize("a//b")} {normalize("x/y/../../..")}")    // out: . . a/b ..
 
     // Globs.
     println("{glob_matches("src/main.calx", "src/*.calx")} {glob_matches("src/a/b/main.calx", "src/**/*.calx")} {glob_matches("src/main.calx", "src/**/*.calx")}")    // out: true true true
@@ -59,12 +59,12 @@ fn main() {
 
     // What only Windows reads as roots and separators.
     let win = os() == "windows"
-    println("{path_root("/srv") == "/"} {is_absolute("/srv") == not win} {is_absolute("srv")}")    // out: true true false
-    println("{path_root("C:\\x") == (if win { "C:\\" } else { "" })} {is_absolute("C:\\x") == win} {is_absolute("C:x")} {is_absolute("\\\\srv\\share") == win}")    // out: true true false true
+    println("{root("/srv") == "/"} {is_absolute("/srv") == not win} {is_absolute("srv")}")    // out: true true false
+    println("{root("C:\\x") == (if win { "C:\\" } else { "" })} {is_absolute("C:\\x") == win} {is_absolute("C:x")} {is_absolute("\\\\srv\\share") == win}")    // out: true true false true
     println("{file_name("a\\b") == (if win { some(String("b")) } else { some(String("a\\b")) })}")    // out: true
-    println("{join_path("C:\\a", "b") == (if win { "C:\\a\\b" } else { "C:\\a/b" })} {join_path("C:\\a", "\\b") == (if win { "C:\\b" } else { "C:\\a/\\b" })}")    // out: true true
-    println("{join_path("C:", "b") == (if win { "C:b" } else { "C:/b" })} {join_path("x", "D:\\y") == (if win { "D:\\y" } else { "x/D:\\y" })}")    // out: true true
-    println("{normalize_path("C:\\a\\..\\b") == (if win { "C:\\b" } else { "C:\\a\\..\\b" })} {normalize_path("C:a\\..\\..\\b") == (if win { "C:..\\b" } else { "C:a\\..\\..\\b" })}")    // out: true true
+    println("{join("C:\\a", "b") == (if win { "C:\\a\\b" } else { "C:\\a/b" })} {join("C:\\a", "\\b") == (if win { "C:\\b" } else { "C:\\a/\\b" })}")    // out: true true
+    println("{join("C:", "b") == (if win { "C:b" } else { "C:/b" })} {join("x", "D:\\y") == (if win { "D:\\y" } else { "x/D:\\y" })}")    // out: true true
+    println("{normalize("C:\\a\\..\\b") == (if win { "C:\\b" } else { "C:\\a\\..\\b" })} {normalize("C:a\\..\\..\\b") == (if win { "C:..\\b" } else { "C:a\\..\\..\\b" })}")    // out: true true
     println("{parent_dir("\\\\srv\\share\\d") == (if win { some(String("\\\\srv\\share\\")) } else { some(String(".")) })}")    // out: true
     println("{glob_matches("C:\\x\\y.txt", "c:/x/*.txt") == win}")    // out: true
 }

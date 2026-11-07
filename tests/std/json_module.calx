@@ -1,0 +1,19 @@
+// `std.json` through its name beside `@json`, whose code imports what it calls by names of its
+// own: `Json`, and `parse` as `json_parse`. Those are second names for what the program reaches as
+// `js.Json` and `js.parse`, which is fine for code an attribute wrote (CLX-138).
+import std.json.{json}
+import std.json as js
+
+@json
+struct Point {
+    x: i32
+    y: i32
+}
+
+fn main() {
+    let p = Point.from_json_text(#"{"x": 3, "y": 4}"#)!
+    let v = js.parse("[1, 2]")!
+    if let js.Json.Array(items) = v {
+        println("{p.x + p.y} {items.len()} {js.pretty(p.to_json(), 0).len()}")    // out: 7 2 18
+    }
+}

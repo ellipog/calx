@@ -1,0 +1,11 @@
+// An empty import list imports nothing, which is never what was meant (CLX-138).
+// file: main.calx
+import util.{}    // error: an import list names what it imports, as in `.{Name}`; to import the module itself, leave the list out
+
+fn main() {
+}
+
+// file: util.calx
+pub fn twice(n: i32) -> i32 {
+    return n * 2
+}

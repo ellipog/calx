@@ -115,7 +115,7 @@ fn is_up(p: String, start: usize, end: usize) -> bool {
 
 /// The root of `path`, as it's written: `/`, or on Windows `C:\`, `C:`, `\\server\share\` or a
 /// `\` alone, or `""` if it's relative.
-pub fn path_root(path: String) -> String {
+pub fn root(path: String) -> String {
     return path[..root_len(path, windows())]
 }
 
@@ -138,7 +138,7 @@ pub fn is_absolute(path: String) -> bool {
 /// `more` with a drive or a share is `more` alone too, and one that starts with a separator
 /// keeps only the drive or share of `path`. The separator is `/`, or `\` on Windows if `path`
 /// uses only that one.
-pub fn join_path(path: String, more: String) -> String {
+pub fn join(path: String, more: String) -> String {
     let win = windows()
     let mr = root_len(more, win)
     if mr > 0 {
@@ -263,20 +263,20 @@ pub fn with_extension(path: String, ext: String) -> String {
 }
 
 /// `path` with its last name replaced by `name`: `logs/old.txt` and `new.txt` make
-/// `logs/new.txt`. If there's no name, or the last is `..`, it's `join_path(path, name)`.
+/// `logs/new.txt`. If there's no name, or the last is `..`, it's `join(path, name)`.
 pub fn with_file_name(path: String, name: String) -> String {
     if let (start, end) = last_name(path, windows()) {
         if not is_up(path, start, end) {
             return "{path[..start]}{name}"
         }
     }
-    return join_path(path, name)
+    return join(path, name)
 }
 
 /// The root of `path`, if it has one, and then each name in it, in order, without the
 /// separators, and without the `.` names and the empty ones that doubled separators make:
 /// `["/", "srv", "world"]` for `/srv//world/`, and `["logs", "..", "x"]` for `./logs/../x`.
-pub fn path_parts(path: String) -> List<String> {
+pub fn parts(path: String) -> List<String> {
     let win = windows()
     let r = root_len(path, win)
     var out = List<String>()
@@ -298,7 +298,7 @@ pub fn path_parts(path: String) -> List<String> {
 /// `std.fs.real_path` follows. A `..` at the start of a relative path stays, and one right after
 /// the root goes, since the root has no parent. An empty result is `.`. The separator is `/`, or
 /// `\` on Windows if `path` uses only that one, and the root's are made the same.
-pub fn normalize_path(path: String) -> String {
+pub fn normalize(path: String) -> String {
     let win = windows()
     let sep = sep_of(path, win)
     let r = root_len(path, win)

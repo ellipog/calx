@@ -4390,6 +4390,9 @@ $dropall    m->len = 0;
 
     // A place: a variable, or a field or element of one. Views are pointers in C.
     std::string place(Expr* e) {
+        // A constant is a C object of its own, as `NAME.len()` and `Cat.LABEL.len()` of `str`
+        // ones read it.
+        if (e->ref == Ref::const_) return "(" + expr(e) + ")";
         switch (e->kind) {
             case ExprKind::name:
             case ExprKind::self: {

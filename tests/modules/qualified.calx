@@ -1,0 +1,128 @@
+// A module's items through its name: `import geo.shapes` brings in `shapes`, and `as` names it
+// otherwise. Functions, constants, types, generic ones, interfaces and enum variants all work
+// through it, in code, in types and in patterns (CLX-138).
+// file: main.calx
+import geo.shapes
+import util as u
+import util.{Counter}
+import std.path
+import std.json
+
+struct Tri {
+    base: f64
+    height: f64
+}
+
+impl shapes.Shape for Tri {
+    fn area(self) -> f64 {
+        return self.base * self.height / 2.0
+    }
+}
+
+fn biggest<T: shapes.Shape>(a: T, b: T) -> f64 {
+    return a.area().max(b.area())
+}
+
+fn describe(k: shapes.Kind) -> String {
+    return match k {
+        shapes.Kind.Round => "round"
+        shapes.Kind.Flat(n) => "flat {n}"
+        shapes.Kind.Box { w, h } => "box {w}x{h}"
+    }
+}
+
+fn main() {
+    let s = shapes.Square { side: 2.0 }
+    println("{s.area()} {shapes.total(s, shapes.Square.unit())} {u.twice(u.LIMIT)}")    // out: 4.0 5.0 20
+    println("{biggest(Tri { base: 4.0, height: 3.0 }, Tri { base: 1.0, height: 1.0 })}")    // out: 6.0
+    println("{describe(shapes.Kind.Round)}, {describe(shapes.Kind.Flat(3))}, {describe(shapes.Kind.Box { w: 1, h: 2 })}")    // out: round, flat 3, box 1x2
+    let b: shapes.Pair<i32> = shapes.Pair<i32> { a: 1, b: 2 }
+    println("{shapes.swap(b).a} {shapes.first<str>(["x", "y"])}")    // out: 2 x
+    let double = u.twice
+    println("{double(21)} {u.GREETING} {u.GREETING.len()}")    // out: 42 hello 5
+    var c = Counter.new()
+    c.bump()
+    println("{c.get()}")    // out: 1
+    println("{path.join("logs", "today.txt")} {path.normalize("a/./b/../c")} {path.parts("/srv/world").len()}")    // out: logs/today.txt a/c 3
+    let v = json.parse(#"{"id": 7, "tags": ["a"]}"#)!
+    println(json.pretty(v, 0))
+    // out: {
+    // out: "id": 7,
+    // out: "tags": [
+    // out: "a"
+    // out: ]
+    // out: }
+    if let json.Json.Object(members) = v {
+        println("{members.len()}")    // out: 2
+    }
+}
+
+// file: geo/shapes.calx
+module geo.shapes
+
+pub interface Shape {
+    fn area(self) -> f64
+}
+
+pub struct Square {
+    pub side: f64
+}
+
+impl Square {
+    pub fn unit() -> Square {
+        return Square { side: 1.0 }
+    }
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+}
+
+pub fn total<T: Shape>(a: T, b: T) -> f64 {
+    return a.area() + b.area()
+}
+
+pub enum Kind {
+    Round
+    Flat(i32)
+    Box { w: i32, h: i32 }
+}
+
+pub struct Pair<T> {
+    pub a: T
+    pub b: T
+}
+
+pub fn swap<T: Copy>(p: Pair<T>) -> Pair<T> {
+    return Pair<T> { a: p.b, b: p.a }
+}
+
+pub fn first<T: Copy>(xs: [T; 2]) -> T {
+    return xs[0]
+}
+
+// file: util.calx
+pub const LIMIT: i32 = 10
+pub const GREETING: str = "hello"
+
+pub fn twice(n: i32) -> i32 {
+    return n * 2
+}
+
+pub struct Counter {
+    hits: i32
+}
+
+impl Counter {
+    pub fn new() -> Counter {
+        return Counter { hits: 0 }
+    }
+    pub fn bump(c: mut Counter) {
+        c.hits += 1
+    }
+    pub fn get(self) -> i32 {
+        return self.hits
+    }
+}

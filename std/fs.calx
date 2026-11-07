@@ -4,7 +4,7 @@
 /// temporary directories.
 module std.fs
 
-import std.path.{join_path, normalize_path, glob_matches_name, path_root, path_parts}
+import std.path.{join, normalize, glob_matches_name, root as path_root, parts as path_parts}
 import std.time.{Timestamp}
 
 extern "C" {
@@ -688,8 +688,8 @@ pub fn copy_dir_all(from: String, to: String) ! FsError {
     let names = try list(from)
     try make_dir_all(to)
     for name in names {
-        let a = join_path(from, name)
-        let b = join_path(to, name)
+        let a = join(from, name)
+        let b = join(to, name)
         match try kind(a) {
             some(Kind.Dir) => try copy_dir_all(a, b),
             some(Kind.File) => try copy(a, b),
@@ -705,7 +705,7 @@ pub fn copy_dir_all(from: String, to: String) ! FsError {
 
 /// A path `walk` found, and what's there.
 pub struct Entry {
-    /// The directory walked and the names down to it, joined as `join_path` joins them.
+    /// The directory walked and the names down to it, joined as `std.path.join` joins them.
     pub path: String
     /// What's there, without following a link.
     pub kind: Kind
@@ -724,7 +724,7 @@ pub fn walk(dir: String) -> List<Entry> ! FsError {
 
 fn walk_into(dir: String, out: mut List<Entry>) ! FsError {
     for name in try list(dir) {
-        let inner = join_path(dir, name)
+        let inner = join(dir, name)
         // What went between the listing and the look is passed over.
         if let k = try kind(inner) {
             let deeper = match k {
@@ -742,7 +742,7 @@ fn walk_into(dir: String, out: mut List<Entry>) ! FsError {
 /// The paths that match the glob `pattern`, by the rules of `std.path`'s `glob_matches`, sorted
 /// by their bytes, as Python's `glob.glob` finds them with `recursive=True`: `logs/*.txt`,
 /// `src/**/*.calx`, `[0-9]*.png`. Each is the pattern up to the name with its first wildcard,
-/// as it's written, and then the names found, joined as `join_path` joins them.
+/// as it's written, and then the names found, joined as `std.path.join` joins them.
 ///
 /// - `*`, `?` and `[...]` pass over hidden names, and so does `**`, which goes into directories
 ///   but not through links to them, so it can't go round a loop.
@@ -857,7 +857,7 @@ fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut L
             if n.starts_with(".") {
                 continue
             }
-            let inner = join_path(at, n)
+            let inner = join(at, n)
             let dir = match try kind(inner) {
                 some(Kind.Dir) => true,
                 _ => false,
@@ -877,7 +877,7 @@ fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut L
     }
     if not has_wildcard(name) {
         // A name without wildcards is looked for, not listed: it can be hidden.
-        let inner = join_path(at, name)
+        let inner = join(at, name)
         let there = if last {
             match try kind(inner) {
                 some(_) => true,
@@ -893,7 +893,7 @@ fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut L
     }
     for n in try glob_list(at) {
         if glob_matches_name(n, name) {
-            let inner = join_path(at, n)
+            let inner = join(at, n)
             if last or is_dir(inner) {
                 try glob_in(inner, names, i + 1, suffix, mut out)
             }
@@ -921,7 +921,7 @@ pub fn set_current_dir(path: String) ! FsError {
 
 /// `path` made absolute without looking at what's there, as Python's `os.path.abspath` makes it:
 /// on the current folder if it's relative, and then with its `.` names and each `..` after a name
-/// taken out, as `normalize_path` takes them out of the text. `real_path` follows links instead,
+/// taken out, as `std.path.normalize` takes them out of the text. `real_path` follows links instead,
 /// and needs the path to be there. An empty path is the current folder. On Windows it's what the
 /// system makes of the path, with `\` between the names, and `C:x` is on drive C's current
 /// folder.
@@ -929,5 +929,5 @@ pub fn absolute(path: String) -> String ! FsError {
     if unsafe { cx_fs_absolute(path.as_ptr(), path.len()) } == 0 {
         fail last_error()
     }
-    return normalize_path(result())
+    return normalize(result())
 }

@@ -5,7 +5,7 @@ import util.{missing}                                // error: `util` has no `mi
 import util.{LIMIT}                                  // error: `LIMIT` is imported but never used
 import util.{twice}                                  // error: `twice` is already imported
 import util.{Point}                                  // error: `Point` is already the name of a struct here
-import util                                          // error: say what to import from `util`, as in `import util.{Name}`
+import util                                          // error: `util` is imported but never used
 import util.{Sealed, Hidden}                         // error: `Hidden` isn't `pub` in `util`
 
 struct Point {

@@ -61,4 +61,6 @@ fn main() {
         _ => false,
     }
     println("{found}")                                    // out: true
+    // Its methods read it where it is, as a C constant (CLX-138 found `.len()` crashing).
+    println("{NAME.len()} {ALIAS.is_empty()} {MONTHS[2].len()} {Cat.LABEL.len()}")    // out: 4 false 3 3
 }

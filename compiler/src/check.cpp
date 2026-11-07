@@ -152,7 +152,10 @@ public:
         for (Module* m : modules) {
             if (m->builtin) find_core(m);
         }
-        for (Module* m : modules) resolve_imports(m);
+        for (Module* m : modules) {
+            resolve_imports(m);
+            qualify_module(m);
+        }
         // Bounds are checked once every impl is known, since a type's fields can need one, and so
         // can a bound's own arguments, as in `T: From<Wrapper<U>>`.
         defer_bounds_ = true;
@@ -241,9 +244,28 @@ private:
             Item* item;
             Span span;
             bool used = false;
+            // Written by an attribute, whose imports can name an item the module imports too.
+            bool generated = false;
         };
         std::unordered_map<Name, Import> imports;
+        // `import std.fs`: `fs` names the module, and `fs.read` its item `read` (CLX-138).
+        struct ModuleImport {
+            Module* module;
+            Span span;
+            bool used = false;
+            bool generated = false;
+        };
+        std::unordered_map<Name, ModuleImport> modules;
     };
+
+    // `fs.read`, written where `fs` names a module, is reached through a hidden import named
+    // `fs.read`, so every place a name is written finds it as it would `read`. Which module `fs`
+    // is depends on the module it's written in, whose scope says.
+    struct Qualified {
+        Name alias;
+        Name member;
+    };
+    std::unordered_map<Name, Qualified> qualified_;
 
     // Work on an item happens among its own module's names. Asked for from another module, say
     // to resolve an imported struct's fields in the middle of a function, it also sets aside that
@@ -407,6 +429,49 @@ private:
         if (const Item* it = private_part(t)) error(at, q(text(it->name)) + " isn't `pub`, so " + why);
     }
 
+    // `import a.b` brings the module in as `b`, or what `as` names it, whose `pub` items are then
+    // `b.X` (CLX-138).
+    void import_module(Scope* here, Item* it) {
+        std::string from_name = module_name(it->imported);
+        Name last = it->import_path.parts[it->import_path.parts.size() - 1];
+        Name local = it->import_alias ? it->import_alias : last;
+        Span local_span = it->import_alias ? it->import_alias_span : it->import_path.span;
+        if (it->import_alias == last) {
+            error(it->import_alias_span, q(from_name + " as " + std::string(text(last))) +
+                                             " doesn't rename anything; import it as " + q(from_name));
+            return;
+        }
+        if (is_builtin_name(local)) {
+            error(local_span, q(text(local)) + " is a built-in name, so the module needs another: " +
+                                  q("import " + from_name + " as " + std::string(text(local)) + "s"));
+            return;
+        }
+        if (auto own = here->items.find(local); own != here->items.end()) {
+            error(local_span, q(text(local)) + " is already the name of a " + item_kind(own->second) +
+                                  " here; Calx doesn't allow shadowing, but `as` can rename the import");
+            note(own->second->name_span, "it's defined here");
+            return;
+        }
+        if (auto prev = here->imports.find(local); prev != here->imports.end()) {
+            error(local_span, q(text(local)) + " is already imported");
+            note(prev->second.span, "it's imported here");
+            return;
+        }
+        if (auto prev = here->modules.find(local); prev != here->modules.end()) {
+            error(local_span, q(text(local)) + " is already the name of the module " + q(module_name(prev->second.module)) +
+                                  "; `as` can rename this one");
+            note(prev->second.span, "it's imported here");
+            return;
+        }
+        for (const auto& [other, imp] : here->modules) {
+            if (imp.module != it->imported || imp.generated || it->generated) continue;
+            error(local_span, q(from_name) + " is already imported, as " + q(text(other)));
+            note(imp.span, "it's imported here");
+            return;
+        }
+        here->modules.emplace(local, Scope::ModuleImport{it->imported, local_span, it->generated, it->generated});
+    }
+
     // `import a.b.{X, Y}` brings `pub` items of `a.b` in by name.
     void resolve_imports(Module* m) {
         Scope* here = scopes_.at(m).get();
@@ -415,8 +480,7 @@ private:
             Scope* from = scopes_.at(it->imported).get();
             std::string from_name = module_name(it->imported);
             if (it->import_names.empty()) {
-                error(it->import_path.span, "say what to import from " + q(from_name) + ", as in " +
-                                                q("import " + from_name + ".{Name}"));
+                import_module(here, it);
                 continue;
             }
             for (const ImportName& n : it->import_names) {
@@ -450,19 +514,234 @@ private:
                     note(prev->second.span, "it's imported here");
                     continue;
                 }
+                if (auto prev = here->modules.find(local); prev != here->modules.end()) {
+                    error(local_span, q(text(local)) + " is already the name of the module " +
+                                          q(module_name(prev->second.module)) + "; `as` can rename the import");
+                    note(prev->second.span, "it's imported here");
+                    continue;
+                }
                 // One name for each item: a second would only be a second way to say the same thing.
+                // An attribute's code imports what it calls under names of its own, which can
+                // be second names for what the module imports.
                 bool twice = false;
                 for (const auto& [other, imp] : here->imports) {
-                    if (imp.item != target) continue;
+                    if (imp.item != target || imp.generated || it->generated) continue;
                     error(local_span, q(text(n.name)) + " is already imported, as " + q(text(other)));
                     note(imp.span, "it's imported here");
                     twice = true;
                     break;
                 }
                 if (twice) continue;
-                here->imports.emplace(local, Scope::Import{target, local_span, it->generated});
+                here->imports.emplace(local, Scope::Import{target, local_span, it->generated, it->generated});
             }
         }
+    }
+
+    // --- a module's items through its name (CLX-138) --------------------------------------
+
+    // `alias.member`, where `alias` names a module here: the hidden import's name, which is
+    // made the first time it's written. No name when `alias` isn't a module.
+    Name qualify(Scope* here, Name alias, Name member, Span at) {
+        auto a = here->modules.find(alias);
+        if (a == here->modules.end() || !member) return Name{};
+        a->second.used = true;
+        Name n = ctx_.names.intern(std::string(text(alias)) + "." + std::string(text(member)));
+        qualified_.emplace(n, Qualified{alias, member});
+        if (here->imports.count(n)) return n;
+        Scope* from = scopes_.at(a->second.module).get();
+        auto found = from->items.find(member);
+        // What isn't there, or isn't `pub`, is said where it's used, as an unknown name would be.
+        if (found == from->items.end() || !found->second->is_pub) return n;
+        // One name for each item, as with two imports of it.
+        for (auto& [other, imp] : here->imports) {
+            if (imp.item != found->second || imp.generated || qualified_.count(other)) continue;
+            error(at, q(text(member)) + " is imported by name, so write " + q(text(other)) + " rather than " + q(text(n)));
+            note(imp.span, "it's imported here");
+            imp.used = true;
+            break;
+        }
+        here->imports.emplace(n, Scope::Import{found->second, at, true});
+        return n;
+    }
+
+    // A path whose first part names a module: its first two parts become the hidden import's
+    // name, so `fs.Kind.Dir` is `Kind.Dir` of the module.
+    void qualify_path(Scope* here, Path& p) {
+        if (p.parts.size() < 2) return;
+        Name n = qualify(here, p.parts[0], p.parts[1], p.span);
+        if (!n) return;
+        std::vector<Name> parts{n};
+        for (std::size_t i = 2; i < p.parts.size(); i++) parts.push_back(p.parts[i]);
+        p.parts = ctx_.arena.copy(parts);
+    }
+
+    void qualify_type(Scope* here, TypeExpr* t) {
+        if (!t) return;
+        if (t->kind == TypeExprKind::named) qualify_path(here, t->path);
+        for (TypeExpr* a : t->args) qualify_type(here, a);
+        qualify_type(here, t->inner);
+        qualify_type(here, t->error);
+        qualify_expr(here, t->length);
+    }
+
+    void qualify_pattern(Scope* here, Pattern* p) {
+        if (!p) return;
+        qualify_path(here, p->path);
+        for (Pattern* e : p->elems) qualify_pattern(here, e);
+        for (FieldPattern& f : p->fields) qualify_pattern(here, f.pattern);
+        qualify_expr(here, p->value);
+        qualify_expr(here, p->end);
+    }
+
+    void qualify_params(Scope* here, Slice<Param> params) {
+        for (Param& p : params) {
+            qualify_type(here, p.type);
+            qualify_expr(here, p.default_value);
+        }
+    }
+
+    void qualify_expr(Scope* here, Expr* e) {
+        if (!e) return;
+        // `fs.read`, as a value or called: the name of the hidden import, with any generic
+        // arguments, `fs.parse<i32>`, now the name's.
+        if (e->kind == ExprKind::field && !e->is_tuple_index && e->lhs->kind == ExprKind::name && e->lhs->type_args.empty()) {
+            if (Name n = qualify(here, e->lhs->path.parts[0], e->member, e->span)) {
+                e->kind = ExprKind::name;
+                std::vector<Name> one{n};
+                e->path.parts = ctx_.arena.copy(one);
+                e->path.span = e->span;
+                e->lhs = nullptr;
+                e->member = Name{};
+            }
+        }
+        for (Expr* i : e->interpolations) qualify_expr(here, i);
+        for (TypeExpr* t : e->type_args) qualify_type(here, t);
+        qualify_expr(here, e->lhs);
+        qualify_expr(here, e->rhs);
+        qualify_expr(here, e->callee);
+        for (Arg& a : e->args) qualify_expr(here, a.value);
+        qualify_expr(here, e->trailing);
+        if (e->kind == ExprKind::struct_lit) qualify_path(here, e->type_path);
+        for (FieldInit& f : e->fields) qualify_expr(here, f.value);
+        for (Expr* x : e->elems) qualify_expr(here, x);
+        qualify_expr(here, e->repeat);
+        qualify_block(here, e->block);
+        qualify_expr(here, e->cond);
+        qualify_pattern(here, e->let_pattern);
+        qualify_expr(here, e->else_);
+        qualify_expr(here, e->scrutinee);
+        for (MatchArm& arm : e->arms) {
+            qualify_pattern(here, arm.pattern);
+            qualify_expr(here, arm.guard);
+            qualify_expr(here, arm.body);
+        }
+        qualify_params(here, e->params);
+        qualify_expr(here, e->body);
+    }
+
+    void qualify_block(Scope* here, Block* b) {
+        if (!b) return;
+        for (Stmt* s : b->stmts) {
+            qualify_pattern(here, s->pattern);
+            qualify_type(here, s->type);
+            qualify_expr(here, s->value);
+            qualify_expr(here, s->target);
+            qualify_expr(here, s->else_);
+            qualify_block(here, s->else_block);
+            qualify_expr(here, s->cond);
+            qualify_block(here, s->body);
+            qualify_expr(here, s->pool);
+            if (s->item) qualify_item(here, s->item);
+        }
+        qualify_expr(here, b->tail);
+    }
+
+    void qualify_fields(Scope* here, Slice<FieldDecl> fields) {
+        for (FieldDecl& f : fields) {
+            qualify_type(here, f.type);
+            qualify_expr(here, f.default_value);
+            for (Attribute& a : f.attributes) for (Arg& g : a.args) qualify_expr(here, g.value);
+        }
+    }
+
+    void qualify_item(Scope* here, Item* it) {
+        for (Attribute& a : it->attributes) for (Arg& g : a.args) qualify_expr(here, g.value);
+        for (GenericParam& g : it->generics) for (TypeExpr* b : g.bounds) qualify_type(here, b);
+        qualify_params(here, it->params);
+        qualify_type(here, it->result);
+        qualify_type(here, it->error);
+        qualify_block(here, it->body);
+        qualify_fields(here, it->fields);
+        for (VariantDecl& v : it->variants) {
+            for (TypeExpr* t : v.payload) qualify_type(here, t);
+            qualify_fields(here, v.fields);
+            qualify_expr(here, v.value);
+        }
+        qualify_type(here, it->interface);
+        qualify_type(here, it->self_type);
+        for (Item* m : it->members) qualify_item(here, m);
+        qualify_type(here, it->type);
+        qualify_expr(here, it->value);
+    }
+
+    void qualify_module(Module* m) {
+        Scope* here = scopes_.at(m).get();
+        if (here->modules.empty()) return;
+        for (Item* it : m->items) qualify_item(here, it);
+    }
+
+    // `n`, when it's `m.x` for a module `m` with no `pub` item `x`: says so, rather than that
+    // `m.x` is unknown, and gives true.
+    bool module_item_error(Span at, Name n) {
+        auto qn = qualified_.find(n);
+        if (qn == qualified_.end()) return false;
+        auto a = scope_->modules.find(qn->second.alias);
+        if (a == scope_->modules.end()) return false;
+        std::string from_name = module_name(a->second.module);
+        Name member = qn->second.member;
+        Scope* from = scopes_.at(a->second.module).get();
+        auto found = from->items.find(member);
+        if (found == from->items.end()) {
+            error(at, q(from_name) + " has no " + q(text(member)));
+        } else {
+            error(at, q(text(member)) + " isn't `pub` in " + q(from_name));
+            note(found->second->name_span, "it's declared here");
+        }
+        return true;
+    }
+
+    // `n`, when it names a module here, written where a value or a type goes: says so, and
+    // gives true.
+    bool module_name_error(Span at, Name n, const char* what) {
+        auto a = scope_->modules.find(n);
+        if (a == scope_->modules.end()) return false;
+        a->second.used = true;
+        // An example of the kind wanted: a type where a type goes, a function or constant otherwise.
+        std::string_view w = what;
+        bool type_wanted = w == "a type" || w == "a struct";
+        std::string example;
+        for (Item* it : a->second.module->items) {
+            if (!it->is_pub || !it->name) continue;
+            bool fits = w == "an interface" ? it->kind == ItemKind::interface
+                        : type_wanted       ? is_type_item(it)
+                                            : it->kind == ItemKind::fn || it->kind == ItemKind::const_;
+            if (!fits) continue;
+            example = "; write one of its items, as in " + q(std::string(text(n)) + "." + std::string(text(it->name)));
+            break;
+        }
+        error(at, q(text(n)) + " is the module " + q(module_name(a->second.module)) + ", not " + what + example);
+        return true;
+    }
+
+    // A local or a generic parameter named like a module here: Calx doesn't allow shadowing.
+    bool shadows_module(Span at, Name n) {
+        auto a = scope_->modules.find(n);
+        if (a == scope_->modules.end()) return false;
+        error(at, q(text(n)) + " is already the name of the module " + q(module_name(a->second.module)) +
+                      "; Calx doesn't allow shadowing, but `as` can rename the import");
+        note(a->second.span, "it's imported here");
+        a->second.used = true;
+        return true;
     }
 
     // --- reporting -----------------------------------------------------------------------
@@ -1291,6 +1570,7 @@ private:
             } else if (Item* it = find_item(g->name)) {
                 error(g->span, q(text(g->name)) + " is already the name of a " + item_kind(it) +
                                    "; Calx doesn't allow shadowing");
+            } else if (shadows_module(g->span, g->name)) {
             } else if (is_builtin_name(g->name)) {
                 error(g->span, q(text(g->name)) + " is a built-in name");
             }
@@ -1333,6 +1613,10 @@ private:
         }
         Item* it = find_item(t->path.parts[0]);
         if (!it || it->kind != ItemKind::interface) {
+            if (!it && (module_item_error(t->span, t->path.parts[0]) ||
+                        module_name_error(t->span, t->path.parts[0], "an interface"))) {
+                return nullptr;
+            }
             error(t->span, q(path_text(t->path)) + (!it ? " isn't defined" : " isn't an interface"));
             return nullptr;
         }
@@ -2380,7 +2664,9 @@ private:
                         error(t->span, q(text(n)) + " isn't a type");
                         return T.error;
                     } else {
-                        error(t->span, "unknown type " + q(text(n)));
+                        if (!module_item_error(t->span, n) && !module_name_error(t->span, n, "a type")) {
+                            error(t->span, "unknown type " + q(text(n)));
+                        }
                         return T.error;
                     }
                 }
@@ -2826,6 +3112,7 @@ private:
                                "; Calx doesn't allow shadowing");
             note(it->name_span, "it's defined here");
             it->used = true;
+        } else if (shadows_module(l->span, l->name)) {
         } else if (is_builtin_name(l->name)) {
             error(l->span, q(text(l->name)) + " is a built-in name");
         }
@@ -4482,7 +4769,9 @@ private:
                 return T.error;
             case NameKind::none:
                 if (e->kind == ExprKind::self) error(e->span, "`self` only exists in a method");
-                else error(e->span, "unknown name " + q(text(n)));
+                else if (!module_item_error(e->span, n) && !module_name_error(e->span, n, "a value")) {
+                    error(e->span, "unknown name " + q(text(n)));
+                }
                 return T.error;
         }
         return T.error;
@@ -5357,7 +5646,10 @@ private:
             return T.error;
         }
         if (r.kind != NameKind::type || r.type->kind != TypeKind::struct_) {
-            error(e->type_path.span, q(path_text(e->type_path)) + " isn't a struct");
+            if (r.kind != NameKind::none || (!module_item_error(e->type_path.span, e->type_path.parts[0]) &&
+                                             !module_name_error(e->type_path.span, e->type_path.parts[0], "a struct"))) {
+                error(e->type_path.span, q(path_text(e->type_path)) + " isn't a struct");
+            }
             for (FieldInit& f : e->fields) {
                 if (f.value) check(f.value, nullptr);
                 else if (Local* l = find_local(f.name)) l->used = true;
@@ -5847,6 +6139,7 @@ private:
         Name v;
         if (path.parts.size() == 2) {
             Resolved r = resolve_name(path.parts[0]);
+            if (r.kind == NameKind::none && module_item_error(span, path.parts[0])) return UINT32_MAX;
             if (r.kind != NameKind::type || r.type != t) {
                 error(span, q(text(path.parts[0])) + " isn't " + name_of(t) + ", the type being matched");
                 return UINT32_MAX;
@@ -6484,7 +6777,9 @@ private:
                     return T.error;
                 }
                 case NameKind::none:
-                    error(callee->span, "unknown function " + q(text(n)));
+                    if (!module_item_error(callee->span, n) && !module_name_error(callee->span, n, "a function")) {
+                        error(callee->span, "unknown function " + q(text(n)));
+                    }
                     for (Arg& a : e->args) check(a.value, nullptr);
                     return T.error;
             }
@@ -9027,6 +9322,9 @@ private:
         }
         for (const auto& [m, scope] : scopes_) {
             for (const auto& [n, imp] : scope->imports) {
+                if (!imp.used) error(imp.span, q(text(n)) + " is imported but never used");
+            }
+            for (const auto& [n, imp] : scope->modules) {
                 if (!imp.used) error(imp.span, q(text(n)) + " is imported but never used");
             }
         }

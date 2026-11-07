@@ -48,7 +48,7 @@ const MAX_DEPTH: usize = 512
 
 /// The JSON value in `text`, with nothing but white space around it, as RFC 8259 defines it: no
 /// comments, no trailing commas, no single quotes, and no `NaN`.
-pub fn parse_json(text: String) -> Json ! JsonError {
+pub fn parse(text: String) -> Json ! JsonError {
     var at: usize = 0
     skip_space(text, mut at)
     let v = try parse_value(text, mut at, 0)
@@ -395,7 +395,7 @@ impl Display for Json {
 /// writes it, with a key's value after `: ` and each array's element and object's member on a
 /// line of its own. An empty array or object is `[]` or `\{\}`. An `indent` of 0 puts them on lines
 /// of their own all the same, without indenting them, as Python's `indent=0` does.
-pub fn pretty_json(value: Json, indent: usize) -> String {
+pub fn pretty(value: Json, indent: usize) -> String {
     var out = String()
     write_json(mut out, value, true, indent, 0)
     return out
@@ -403,7 +403,7 @@ pub fn pretty_json(value: Json, indent: usize) -> String {
 
 // Adds `v` to `out`: compact, or with each element and member on a line of its own, `indent`
 // spaces a level and `level` levels in.
-fn write_json(out: mut String, v: Json, pretty: bool, indent: usize, level: usize) {
+fn write_json(out: mut String, v: Json, indented: bool, indent: usize, level: usize) {
     match v {
         Json.Null => out.push_str("null"),
         Json.Bool(b) => out.push_str(if b { "true" } else { "false" }),
@@ -430,10 +430,10 @@ fn write_json(out: mut String, v: Json, pretty: bool, indent: usize, level: usiz
                     out.push(',')
                 }
                 first = false
-                new_line(mut out, pretty, indent, level + 1)
-                write_json(mut out, item, pretty, indent, level + 1)
+                new_line(mut out, indented, indent, level + 1)
+                write_json(mut out, item, indented, indent, level + 1)
             }
-            new_line(mut out, pretty, indent, level)
+            new_line(mut out, indented, indent, level)
             out.push(']')
         },
         Json.Object(members) => {
@@ -448,22 +448,22 @@ fn write_json(out: mut String, v: Json, pretty: bool, indent: usize, level: usiz
                     out.push(',')
                 }
                 first = false
-                new_line(mut out, pretty, indent, level + 1)
+                new_line(mut out, indented, indent, level + 1)
                 write_string(mut out, k)
                 out.push(':')
-                if pretty {
+                if indented {
                     out.push(' ')
                 }
-                write_json(mut out, value, pretty, indent, level + 1)
+                write_json(mut out, value, indented, indent, level + 1)
             }
-            new_line(mut out, pretty, indent, level)
+            new_line(mut out, indented, indent, level)
             out.push('}')
         },
     }
 }
 
-fn new_line(out: mut String, pretty: bool, indent: usize, level: usize) {
-    if not pretty {
+fn new_line(out: mut String, indented: bool, indent: usize, level: usize) {
+    if not indented {
         return
     }
     out.push('\n')
@@ -740,7 +740,7 @@ pub fn json(decl: StructDecl) -> Generated ! String {
     w.use_name("Json")
     w.use_name("JsonError")
     w.use_name("json_expected")
-    w.use_name("parse_json")
+    w.use_name("parse as json_parse")
     var g = Generated.new()
     g.add(w.imports())
     g.add(#"
@@ -768,7 +768,7 @@ pub fn json(decl: StructDecl) -> Generated ! String {
 
             /// The value JSON text describes, as `from_json` reads it.
             pub fn from_json_text(text: String) -> #{decl.name} ! JsonError {
-                let value = try parse_json(text)
+                let value = try json_parse(text)
                 return try #{decl.name}.from_json(value)
             }
         }

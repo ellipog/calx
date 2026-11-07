@@ -1,9 +1,9 @@
 // std.json: text parsed into values, with where it's wrong when it isn't JSON, and values written
 // back compact and indented.
-import std.json.{Json, JsonError, parse_json, pretty_json}
+import std.json.{Json, JsonError, parse, pretty}
 
 fn try_parse(text: String) {
-    match parse_json(text) {
+    match parse(text) {
         ok(v) => println("ok {v}"),
         err(e) => println("{e}"),
     }
@@ -11,9 +11,9 @@ fn try_parse(text: String) {
 
 fn main() {
     let text = String(#"{"name": "calx", "port": 25565, "ratio": 0.75, "tags": ["a", "b"], "on": true, "none": null, "nested": {"x": [], "y": {}}}"#)
-    let j = parse_json(text)!
+    let j = parse(text)!
     println("{j}")    // out: {"name":"calx","port":25565,"ratio":0.75,"tags":["a","b"],"on":true,"none":null,"nested":{"x":[],"y":{}}}
-    print(pretty_json(j, 2))
+    print(pretty(j, 2))
     println("")
     // out: {
     // out:   "name": "calx",
@@ -30,14 +30,14 @@ fn main() {
     // out:     "y": {}
     // out:   }
     // out: }
-    println(pretty_json(parse_json(String("[1, [2]]"))!, 4))
+    println(pretty(parse(String("[1, [2]]"))!, 4))
     // out: [
     // out:     1,
     // out:     [
     // out:         2
     // out:     ]
     // out: ]
-    println(pretty_json(parse_json(String(#"{"a": [1]}"#))!, 0))
+    println(pretty(parse(String(#"{"a": [1]}"#))!, 0))
     // out: {
     // out: "a": [
     // out: 1
@@ -68,7 +68,7 @@ fn main() {
 
     // Numbers: integers that fit an i64 or a u64, and everything else as an f64.
     try_parse(String("[0, -0, 9223372036854775807, -9223372036854775808, 9223372036854775808, 18446744073709551615, 18446744073709551616, -9223372036854775809, 1e3, 1.5E-3, -0.0, 12345678901234567890]"))    // out: ok [0,0,9223372036854775807,-9223372036854775808,9223372036854775808,18446744073709551615,1.8446744073709552E19,-9.223372036854776E18,1000.0,0.0015,-0.0,12345678901234567890]
-    let big = parse_json(String("[18446744073709551615, 7, -7, 2.5]"))!
+    let big = parse(String("[18446744073709551615, 7, -7, 2.5]"))!
     for i in 0..big.len() {
         let n = big.at(i) ?? Json.Null
         println("{n.as_i64()} {n.as_u64()} {n.as_f64()}")
@@ -107,7 +107,7 @@ fn main() {
     try_parse(deep)    // out: line 1, column 513: arrays and objects nested more than 512 deep
     var fine = "[".repeat(512)
     fine.push_str("]".repeat(512))
-    println("{parse_json(fine)!.len()}")    // out: 1
+    println("{parse(fine)!.len()}")    // out: 1
 
     // NaN and the infinities have no JSON, and are written as null, as JavaScript writes them.
     println("{Json.Array([Json.Float(0.0 / 0.0), Json.Float(1.0 / 0.0), Json.Float(2.5)])}")    // out: [null,null,2.5]

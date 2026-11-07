@@ -654,8 +654,11 @@ private:
         Span p0 = peek().span;
         parts.push_back(ident("after `import`"));
         std::vector<ImportName> names;
+        bool listed = false;
         while (accept(Tok::dot)) {
             if (at(Tok::lbrace)) {
+                listed = true;
+                Span open = peek().span;
                 next();
                 skip_newlines();
                 while (!at(Tok::rbrace)) {
@@ -674,6 +677,10 @@ private:
                     skip_newlines();
                 }
                 expect(Tok::rbrace, "to end the import list");
+                if (names.empty()) {
+                    error(Span::join(open, prev_span()), "an import list names what it imports, as in `.{Name}`; "
+                                                         "to import the module itself, leave the list out");
+                }
                 break;
             }
             parts.push_back(ident("in the import path"));
@@ -681,6 +688,12 @@ private:
         it->import_path.parts = slice(parts);
         it->import_path.span = Span::join(p0, prev_span());
         it->import_names = slice(names);
+        // `import std.fs as files`: the module, under another name.
+        if (!listed && at(Tok::ident) && ctx_.names.text(peek().name) == "as") {
+            next();
+            it->import_alias_span = peek().span;
+            it->import_alias = ident("after `as`");
+        }
         end_line();
         return it;
     }
@@ -1475,9 +1488,12 @@ private:
     Expr* struct_literal(Expr* type_expr) {
         Expr* s = new_expr(ExprKind::struct_lit, type_expr->span);
         s->type_path = to_path(type_expr);
-        const Expr* base = type_expr;
-        while (base->kind == ExprKind::field) base = base->lhs;
-        s->type_args = base->type_args;
+        // The generic arguments are on the type's name: `Pair<i32> { ... }`, and on the part
+        // after a module's name, `shapes.Pair<i32> { ... }`.
+        for (const Expr* part = type_expr;; part = part->lhs) {
+            if (!part->type_args.empty()) s->type_args = part->type_args;
+            if (part->kind != ExprKind::field) break;
+        }
         next();  // `{`
         bool saved = no_struct_;
         no_struct_ = false;

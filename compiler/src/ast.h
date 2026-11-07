@@ -488,7 +488,9 @@ struct Item {
     Expr* value = nullptr;
     // import
     Path import_path;
-    Slice<ImportName> import_names;  // `import a.b.{X, Y}`
+    Slice<ImportName> import_names;  // `import a.b.{X, Y}`; empty for `import a.b`, the module itself
+    Name import_alias;               // `import a.b as c`; no name when it isn't renamed
+    Span import_alias_span;
     Module* imported = nullptr;      // filled in by the loader: the module it names
 
     // Filled in by the checker.

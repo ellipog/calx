@@ -1,6 +1,6 @@
 // JSON as a script reads and writes it: 100,000 records parsed into a tree, written back as
 // compact text, and parsed into structs with `@json`. bench/json/rust and json.py do the same.
-import std.json.{json, Json, JsonError, parse_json}
+import std.json.{json, Json, JsonError, parse as parse_json}
 import std.time.{Instant}
 
 @json

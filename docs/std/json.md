@@ -8,7 +8,7 @@ description: JSON text parsed into a Json tree with the line and column of any m
 JSON as RFC 8259 defines it: text parsed into a tree of `Json` values, with the line and column of what's wrong when it isn't JSON, values written back as compact or indented text, and `@json`, which writes a struct's `to_json` and `from_json` from its fields' types, as serde's derives and Python's dataclasses do.
 
 ```calx
-import std.json.{json, Json, JsonError, parse_json, pretty_json}
+import std.json.{json, Json, JsonError, parse, pretty}
 
 @json
 struct Server {
@@ -25,9 +25,9 @@ fn main() ! JsonError {
     println("{s.name} {s.max_players} {s.motd} {s.tags} {s.port}")    // out: lobby 50 none [survival] 25565
     println(s.to_json_text())    // out: {"name":"lobby","maxPlayers":50,"motd":null,"tags":["survival"],"port":25565}
 
-    let tree = try parse_json(#"{"id": 7, "pos": [1.5, -2]}"#)
+    let tree = try parse(#"{"id": 7, "pos": [1.5, -2]}"#)
     println("{tree.get("id")} {(tree.get("pos") ?? Json.Null).at(1)}")    // out: some(7) some(-2)
-    println(pretty_json(tree, 2))
+    println(pretty(tree, 2))
     // out: {
     // out:   "id": 7,
     // out:   "pos": [
@@ -44,9 +44,9 @@ fn main() ! JsonError {
 | --- | --- |
 | `Json` | A JSON value. See [Values](#values) |
 | `JsonError` | Why text isn't JSON, or a value isn't what `from_json` wants: `message`, and the `line` and `column` in the text, from 1, or 0 for an error in a value. `{e}` is `line 3, column 5: ...`, or the message alone |
-| `parse_json(text: String) -> Json ! JsonError` | The value in `text`, with nothing but white space around it |
+| `parse(text: String) -> Json ! JsonError` | The value in `text`, with nothing but white space around it. With `import std.json`, it's `json.parse(text)`, as Python's is `json.loads` |
 | `{v}` | The value as compact JSON, with no white space: what JavaScript's `JSON.stringify(v)` writes |
-| `pretty_json(value: Json, indent: usize) -> String` | The value with each element and member on a line of its own, `indent` spaces a level, as Python's `json.dumps(v, indent=2)` writes it. See [Writing](#writing) |
+| `pretty(value: Json, indent: usize) -> String` | The value with each element and member on a line of its own, `indent` spaces a level, as Python's `json.dumps(v, indent=2)` writes it. See [Writing](#writing) |
 | `v.get(key: String) -> Json?` | A copy of member `key`'s value, if `v` is an object that has one |
 | `v.at(i: usize) -> Json?` | A copy of element `i`, if `v` is an array that long |
 | `v.as_str()`, `v.as_bool()` | The text or the bool, if `v` is one |
@@ -80,10 +80,10 @@ pub enum Json {
 `get` and `at` copy the value, which suits a number or a short string. A `match` reads a big one in place:
 
 ```calx
-import std.json.{Json, parse_json}
+import std.json.{Json, parse}
 
 fn main() {
-    let j = parse_json(#"{"players": [{"name": "alex"}, {"name": "sam"}], "max": 18446744073709551615}"#)!
+    let j = parse(#"{"players": [{"name": "alex"}, {"name": "sam"}], "max": 18446744073709551615}"#)!
     if let Json.Object(members) = j {
         if let Json.Array(players) = members["players"] {
             for p in players {
@@ -99,12 +99,12 @@ fn main() {
 
 ## Writing
 
-- `{v}` writes compact JSON, and `pretty_json(v, indent)` writes each element and member on a line of its own, with `: ` after a key. An empty array or object stays `[]` or `{}`. An `indent` of 0 still puts each on a line of its own, without indenting it, as Python's `indent=0` does.
+- `{v}` writes compact JSON, and `pretty(v, indent)` writes each element and member on a line of its own, with `: ` after a key. An empty array or object stays `[]` or `{}`. An `indent` of 0 still puts each on a line of its own, without indenting it, as Python's `indent=0` does.
 - A string escapes `"`, `\` and the control characters, as `\n`, `\t` and the like or `\u` and four hex digits, and writes everything else as itself, so text that isn't ASCII stays UTF-8, as Python's `ensure_ascii=False` and serde_json write it.
 - A float is written with the fewest digits that read back as the same `f64`, as `{x}` prints it, and with `.0` if it has no fraction, so it reads back as a `Float`. JSON has no `NaN` or infinity, and they're written as `null`, as JavaScript writes them.
 
 ```calx
-import std.json.{Json, pretty_json}
+import std.json.{Json, pretty}
 
 fn main() {
     var m = LinkedMap<String, Json>()
@@ -113,7 +113,7 @@ fn main() {
     m.insert("empty", Json.Object(LinkedMap<String, Json>()))
     let v = Json.Object(m)
     println("{v}")    // out: {"text":"tab\tquote\" é","nums":[0.1,2.0,null,-3],"empty":{}}
-    println(pretty_json(v, 0))
+    println(pretty(v, 0))
     // out: {
     // out: "text": "tab\tquote\" é",
     // out: "nums": [
@@ -132,11 +132,11 @@ fn main() {
 What isn't JSON is a `JsonError` with the line and the column, both from 1, the column counted in runes, and a message that says what was found and what should have been there:
 
 ```calx
-import std.json.{parse_json}
+import std.json.{parse}
 
 fn main() {
     for text in ["[1, 2,]", "\{\"a\" 1\}", "[01]", "\"tab\there\"", "\{\n  \"a\": [1,\n    nul]\n\}"] {
-        match parse_json(String(text)) {
+        match parse(String(text)) {
             ok(v) => println("{v}"),
             err(e) => println("{e}"),
         }

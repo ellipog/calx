@@ -307,10 +307,9 @@ So nothing one region can name belongs to another. WASM plugins get the same rul
 
 ## Modules and builds
 
-Built: see [Modules](reference/modules.md) and [the calx command](reference/command.md). A [library](reference/libraries.md), built with `calx build --lib`, exports functions marked `@export`, which a program opens while it runs and finds by name and type: the type is checked down to every struct's fields, and the library uses the program's runtime, so its memory, output and panics are the program's (D123). That's what a native plugin is. Still to build:
+Built: see [Modules](reference/modules.md), with [a module's items through its name](reference/modules.md#a-modules-name), `import std.path`, then `path.join(a, b)` (CLX-138), and [the calx command](reference/command.md). A [library](reference/libraries.md), built with `calx build --lib`, exports functions marked `@export`, which a program opens while it runs and finds by name and type: the type is checked down to every struct's fields, and the library uses the program's runtime, so its memory, output and panics are the program's (D123). That's what a native plugin is. Still to build:
 
 - **A package** is a folder with a `calx.toml` giving its name, version and dependencies. Calcite, each plugin and the standard library are packages, and a package's modules are found under its own root.
-- **Reaching items through a module's name:** `import std.math`, then `math.floor(x)`.
 - **Merging instances.** Each module's file has its own copy of the generic instances it uses. Release builds can have the linker fold identical copies (`-ffunction-sections` with identical code folding).
 - **Targets:** `x86_64-windows`, `x86_64-linux` and `wasm32` from Phase 3 and Phase 7. `aarch64-macos` comes later (D7).
 

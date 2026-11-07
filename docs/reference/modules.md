@@ -87,8 +87,56 @@ pub fn area(r: f64) -> f64 {
 }
 ```
 
-- `import a.b` alone is an error: say what to import. Reaching items through a module's name, as in `b.f()`, isn't built yet.
 - A type's methods and its interfaces' functions come with the type. Once a module has a `Square`, its `pub` methods work, and so do the functions of every `pub` interface it implements, without importing anything more.
+
+## A module's name
+
+`import a.b` brings in the module itself, as `b`, and its `pub` items are then `b.X`: functions, constants, types, interfaces and enums with their variants, in code, in types and in patterns. A script reads better with the module named at each call, as Python's `os.path.join` and `json.loads` are.
+
+```calx
+// file: main.calx
+import geo.shapes
+import std.path
+
+fn area_of(s: shapes.Square) -> f64 {
+    return s.side * s.side
+}
+
+fn main() {
+    let s = shapes.Square { side: 3.0 }
+    let k = shapes.Kind.Flat(2)
+    let name: String = match k {
+        shapes.Kind.Round => "round"
+        shapes.Kind.Flat(n) => "flat {n}"
+    }
+    println("{area_of(s)} {shapes.double(s).side} {name} {shapes.LIMIT}")    // out: 9.0 6.0 flat 2 10
+    println(path.join("logs", "today.txt"))    // out: logs/today.txt
+}
+
+// file: geo/shapes.calx
+module geo.shapes
+
+pub const LIMIT: i32 = 10
+
+pub struct Square {
+    pub side: f64
+}
+
+pub fn double(s: Square) -> Square {
+    return Square { side: s.side * 2.0 }
+}
+
+pub enum Kind {
+    Round
+    Flat(i32)
+}
+```
+
+- `import a.b as c` brings it in as `c`. `b as b` is an error, as `X as X` is.
+- The module's name follows the rules of any other name: it must be used, a module is imported once, under one name, and nothing else here can be called the same, since there's no shadowing. So a function with a parameter named `path` can't be in a module that imports `std.path` as `path`. Import it under another name, `import std.path as paths`, or import its functions by name.
+- `b.X` is a second name for what `import a.b.{X}` brings in, so a module that imports `X` by name writes `X`, and `b.X` is an error that says so. Both imports can be there: `import std.json.{Json}` beside `import std.json` gives `Json`, and `json.parse`.
+- `b` alone isn't a value or a type, and `b.X` must be `pub` in `a.b`. The errors say which module was searched: "`std.path` has no `nope`".
+- An attribute is used by its name, so it's imported by name: `import std.json.{json}`. Then `std.json` itself needs another name: `import std.json as js`.
 
 ## `pub`
 
@@ -174,4 +222,4 @@ Since a file holds exactly what it uses, its text changes only when something it
 
 A function is `static` unless another module's file calls it, which lets clang inline it and drop it. Release builds inline across files too, when they link (ThinLTO, D99), so splitting code into modules costs nothing at run time. An item's C name starts with its module's: `Square` in `geo.shapes` is `geo_shapes__Square`. `calx emit-c` prints each file after a line `// ---- NAME.c`, and `-o` with a folder writes them there.
 
-Packages (`calx.toml`) and reaching items through a module's name are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).
+Packages (`calx.toml`) are designed but not built yet ([spec](../CALX_SPEC.md#modules-and-builds)).
