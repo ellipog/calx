@@ -738,8 +738,18 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
     }
     if (old.empty()) return;
     std::sort(old.begin(), old.end());
+    // Another build may have marked an entry as used since the listing, so its files' times are
+    // read again just before it goes, and an entry with any file used since stays whole: a
+    // program isn't kept without its PDB.
+    std::vector<std::string> used;
     for (const auto& [hash, path] : files) {
-        if (std::binary_search(old.begin(), old.end(), hash)) fs::remove(path, ec);
+        if (!std::binary_search(old.begin(), old.end(), hash)) continue;
+        fs::file_time_type t = fs::last_write_time(path, ec);
+        if (!ec && t >= recent) used.push_back(hash);
+    }
+    std::sort(used.begin(), used.end());
+    for (const auto& [hash, path] : files) {
+        if (std::binary_search(old.begin(), old.end(), hash) && !std::binary_search(used.begin(), used.end(), hash)) fs::remove(path, ec);
     }
 }
 
@@ -1116,77 +1126,84 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
 
     auto t0 = std::chrono::steady_clock::now();
-    std::vector<std::vector<std::string>> compiles;
-    std::vector<std::pair<std::string, std::string>> renames;
-    auto compile = [&](const std::string& src_path, const std::string& obj, const std::vector<std::string>& extra) {
-        std::string temp = obj + ".tmp" + unique_stamp();
-        std::vector<std::string> cmd = {tc.clang, "-c"};
-        cmd.insert(cmd.end(), flags.begin(), flags.end());
-        cmd.insert(cmd.end(), extra.begin(), extra.end());
-        cmd.push_back("-I" + runtime.string());
-        cmd.push_back(src_path);
-        cmd.push_back("-o");
-        cmd.push_back(temp);
-        compiles.push_back(cmd);
-        renames.push_back({temp, obj});
-    };
-    if (!library) {  // a library links none of the runtime
-        if (file_exists(rt_obj)) touch(rt_obj);
-        else compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-        if (file_exists(alloc_obj)) touch(alloc_obj);
-        else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-        for (const auto& [file, obj] : parts) {
-            if (file_exists(obj)) touch(obj);
-            else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
-        }
-    }
-    // Each build writes its C under a name of its own: two builds that need the same module, such
-    // as a std one, would otherwise share the file, and one could delete it while the other's
-    // clang is still to read it.
-    std::string c_stamp = unique_stamp();
-    std::vector<std::string> c_paths;
-    for (std::size_t i = 0; i < c_sources.size(); i++) {
-        if (file_exists(objs[i])) {
-            touch(objs[i]);
-            continue;
-        }
-        std::string c_path = (fs::path(obj_dir) / (keys[i] + "." + c_stamp + ".c")).string();
-        if (!write_file_atomic(c_path, c_sources[i])) {
-            std::fprintf(stderr, "calx: can't write %s\n", c_path.c_str());
-            return r;
-        }
-        c_paths.push_back(c_path);
-        compile(c_path, objs[i], {});
-    }
-    if (verbose) {
-        for (const auto& c : compiles) {
-            for (const std::string& a : c) std::fprintf(stderr, "%s ", a.c_str());
-            std::fputc('\n', stderr);
-        }
-    }
-    if (!compiles.empty()) {
-        int status = run_parallel(compiles);
-        std::error_code ec;
-        if (status != 0) {
-            for (auto& [temp, obj] : renames) fs::remove(temp, ec);
-            // The compiler checks everything it emits, so a failure is either clang not finding the
-            // system's headers and libraries, or a bug in Calx.
-            std::fprintf(stderr,
-                         "calx: clang failed (status %d). If it couldn't find a header or a library, `calx doctor`\n"
-                         "says what's missing. Otherwise it's a bug in the Calx compiler, worth reporting at\n"
-                         "https://github.com/ellipog/calx/issues\n",
-                         status);
-            return r;
-        }
-        for (auto& [temp, obj] : renames) {
-            fs::rename(temp, obj, ec);
-            if (ec && !file_exists(obj)) {
-                std::fprintf(stderr, "calx: can't write %s\n", obj.c_str());
-                return r;
+    // Compiles every object that isn't in the cache, and marks the rest as just used. It runs again
+    // when the link finds one gone: another build's `trim` can read an object's time before this
+    // build marks it, and delete it after.
+    auto make_objects = [&]() -> bool {
+        std::vector<std::vector<std::string>> compiles;
+        std::vector<std::pair<std::string, std::string>> renames;
+        auto compile = [&](const std::string& src_path, const std::string& obj, const std::vector<std::string>& extra) {
+            std::string temp = obj + ".tmp" + unique_stamp();
+            std::vector<std::string> cmd = {tc.clang, "-c"};
+            cmd.insert(cmd.end(), flags.begin(), flags.end());
+            cmd.insert(cmd.end(), extra.begin(), extra.end());
+            cmd.push_back("-I" + runtime.string());
+            cmd.push_back(src_path);
+            cmd.push_back("-o");
+            cmd.push_back(temp);
+            compiles.push_back(cmd);
+            renames.push_back({temp, obj});
+        };
+        if (!library) {  // a library links none of the runtime
+            if (file_exists(rt_obj)) touch(rt_obj);
+            else compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+            if (file_exists(alloc_obj)) touch(alloc_obj);
+            else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+            for (const auto& [file, obj] : parts) {
+                if (file_exists(obj)) touch(obj);
+                else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
             }
         }
-        for (const std::string& c_path : c_paths) fs::remove(c_path, ec);
-    }
+        // Each build writes its C under a name of its own: two builds that need the same module, such
+        // as a std one, would otherwise share the file, and one could delete it while the other's
+        // clang is still to read it.
+        std::string c_stamp = unique_stamp();
+        std::vector<std::string> c_paths;
+        for (std::size_t i = 0; i < c_sources.size(); i++) {
+            if (file_exists(objs[i])) {
+                touch(objs[i]);
+                continue;
+            }
+            std::string c_path = (fs::path(obj_dir) / (keys[i] + "." + c_stamp + ".c")).string();
+            if (!write_file_atomic(c_path, c_sources[i])) {
+                std::fprintf(stderr, "calx: can't write %s\n", c_path.c_str());
+                return false;
+            }
+            c_paths.push_back(c_path);
+            compile(c_path, objs[i], {});
+        }
+        if (verbose) {
+            for (const auto& c : compiles) {
+                for (const std::string& a : c) std::fprintf(stderr, "%s ", a.c_str());
+                std::fputc('\n', stderr);
+            }
+        }
+        if (!compiles.empty()) {
+            int status = run_parallel(compiles);
+            std::error_code ec;
+            if (status != 0) {
+                for (auto& [temp, obj] : renames) fs::remove(temp, ec);
+                // The compiler checks everything it emits, so a failure is either clang not finding the
+                // system's headers and libraries, or a bug in Calx.
+                std::fprintf(stderr,
+                             "calx: clang failed (status %d). If it couldn't find a header or a library, `calx doctor`\n"
+                             "says what's missing. Otherwise it's a bug in the Calx compiler, worth reporting at\n"
+                             "https://github.com/ellipog/calx/issues\n",
+                             status);
+                return false;
+            }
+            for (auto& [temp, obj] : renames) {
+                fs::rename(temp, obj, ec);
+                if (ec && !file_exists(obj)) {
+                    std::fprintf(stderr, "calx: can't write %s\n", obj.c_str());
+                    return false;
+                }
+            }
+            for (const std::string& c_path : c_paths) fs::remove(c_path, ec);
+        }
+        return true;
+    };
+    if (!make_objects()) return r;
     r.compile_ms = ms_since(t0);
 
     auto t1 = std::chrono::steady_clock::now();
@@ -1200,7 +1217,11 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         inputs.push_back(alloc_obj);
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
     }
-    if (!link_program(tc, inputs, temp_exe, link_flags, verbose)) {
+    bool linked = link_program(tc, inputs, temp_exe, link_flags, verbose);
+    if (!linked && std::any_of(inputs.begin(), inputs.end(), [](const std::string& f) { return !file_exists(f); })) {
+        linked = make_objects() && link_program(tc, inputs, temp_exe, link_flags, verbose);
+    }
+    if (!linked) {
         std::fprintf(stderr, "calx: linking failed; `calx doctor` checks the linker and the system's libraries\n");
         return r;
     }
