@@ -228,6 +228,7 @@ fn main() {
 - Defaults can use the interface's parameters, as `twice` does.
 - Every parameter must be used by a member, or no use could tell what it is.
 - [`From<T>`](errors.md#converting-errors) is a built-in generic interface, which `try` converts errors with.
+- [`Iterator<T>`](control-flow.md#iterators) is another, with `fn next(mut self) -> T?`, which a `for` loop calls until it gives `none`.
 
 ## Errors
 

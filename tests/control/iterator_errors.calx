@@ -1,0 +1,68 @@
+// What the checker catches about loops over an `Iterator` (CLX-101).
+
+struct Counter {
+    n: i32
+}
+
+impl Iterator<i32> for Counter {
+    fn next(mut self) -> i32? {
+        self.n += 1
+        return if self.n > 3 { none } else { some(self.n) }
+    }
+}
+
+struct Pairs {
+    done: bool
+}
+
+impl Iterator<(String, String)> for Pairs {
+    fn next(mut self) -> (String, String)? {
+        if self.done {
+            return none
+        }
+        self.done = true
+        return some((String("a"), String("b")))
+    }
+}
+
+struct Both {
+    n: i32
+}
+
+impl Iterator<i32> for Both {
+    fn next(mut self) -> i32? {
+        return none
+    }
+}
+
+impl Iterator<bool> for Both {
+    fn next(mut self) -> bool? {
+        return none
+    }
+}
+
+fn main() {
+    let c = Counter { n: 0 }
+    for x in c {                           // error: `c` can't be changed; declare it with `var` to change it
+        _ = x
+    }
+    var d = Counter { n: 0 }
+    for x in mut d {                       // error: an iterator gives values, not places
+        _ = x
+    }
+    for (a, _) in (Pairs { done: false }) {  // error: a loop over an iterator owns each value, so its pattern can't leave out a part that owns memory
+        _ = a
+    }
+    for (a, _b) in (Pairs { done: false }) {
+        _ = a
+    }
+    for x in (Both { n: 0 }) {             // error: `Both` is an iterator of `i32` and of `bool`, so a loop can't tell which it goes over
+        _ = x
+    }
+    parallel for x in d {                  // error: a `parallel for` goes over a range or a list's elements, not an iterator
+        _ = x
+    }
+    for x in d.rev() {                     // error: `rev` goes backwards over a range, a list, an array or a zip of them, not a `Counter`
+        _ = x
+    }
+}

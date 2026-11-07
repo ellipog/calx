@@ -100,7 +100,7 @@ public:
         }
         for (const char* b : {"some", "ok", "err", "List", "Box", "Shared", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Library", "Equal", "Display",
-                              "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash"}) {
+                              "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash", "Iterator"}) {
             reserved_names_.push_back(ctx.names.intern(b));
         }
         n_List_ = ctx.names.intern("List");
@@ -128,6 +128,8 @@ public:
         n_LinkedMap_ = ctx.names.intern("LinkedMap");
         n_LinkedSet_ = ctx.names.intern("LinkedSet");
         n_JavaHash_ = ctx.names.intern("JavaHash");
+        n_Iterator_ = ctx.names.intern("Iterator");
+        n_next_ = ctx.names.intern("next");
         n_Send_ = ctx.names.intern("Send");
         n_java_hash_ = ctx.names.intern("java_hash");
         n_Hash_ = ctx.names.intern("Hash");
@@ -343,7 +345,7 @@ private:
         }
         // `std.core`'s names are reserved, so no module declares them, and every module sees them.
         if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_ || n == n_From_ ||
-                            n == n_JavaHash_)) {
+                            n == n_JavaHash_ || n == n_Iterator_)) {
             if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
         }
         // `Error` isn't reserved: a module's own, or one it imports, comes first (CLX-95).
@@ -361,6 +363,7 @@ private:
         hasher_type_ = h->declared;
         prog_.hasher = hasher_type_;
         from_iface_ = core_scope_->items.at(n_From_);
+        iterator_iface_ = core_scope_->items.at(n_Iterator_);
         error_item_ = core_scope_->items.at(n_Error_);
         error_from_fn_ = core_scope_->items.at(ctx_.names.intern("error_from"));
         error_context_fn_ = core_scope_->items.at(ctx_.names.intern("error_context"));
@@ -3783,6 +3786,7 @@ private:
     void check_for(Stmt* s) {
         if (s->pool) not_yet(s->pool->span, "pools for `parallel for`");
         Pattern* p = s->pattern;
+        peel_adaptors(s);
         Expr* it = s->value;
         bool par = s->is_parallel;
         bool by_mut = s->iter_mut;
@@ -3837,6 +3841,8 @@ private:
                 elem = T.string;
                 over = s->value;
                 borrowed = place_root(s->value);
+            } else if (Type* item = iterated(t, it->span)) {
+                elem = iterator_loop(s, t, item, by_mut, par);
             } else if (t->boxed) {
                 by_mut = false;
                 error(it->span, "a `for` loop doesn't go over a " + box_word(t) + ", which holds one value: " + q(place_text(it) + ".value"));
@@ -3855,6 +3861,8 @@ private:
                                          : std::string()));
             }
         }
+        Local* zip_root = nullptr;
+        if (s->rev || s->enumerate || s->zip_with || s->step) elem = adapt_loop(s, elem, by_mut, par, zip_root);
         if (by_mut && !is_bad(it->type)) by_mut = mut_loop_over(s, borrowed);
         bool elements = par && it->kind != ExprKind::range;
         if (elements && !is_bad(it->type)) {
@@ -3897,6 +3905,9 @@ private:
                 std::string missing;
                 if (!irrefutable(p, elem, &missing)) {
                     error(p->span, "a `for` loop's pattern must match every element, but this one misses " + q(missing));
+                } else if (s->iter_next && !names_owned_parts(p, elem)) {
+                    error(p->span, "a loop over an iterator owns each value, so its pattern can't leave out a part that "
+                                   "owns memory; give the part a name, as in `_rest`, or take the value apart in the body");
                 }
             }
         }
@@ -3911,9 +3922,11 @@ private:
             par_.push_back(std::move(pl));
         }
         if (borrowed) loop_borrows_.push_back({borrowed, field_path(over), over, false, nullptr, by_mut, by_mut ? s->local : nullptr});
+        if (zip_root) loop_borrows_.push_back({zip_root, field_path(s->zip_with), s->zip_with, false, nullptr, false, nullptr});
         if (borrowed && by_mut) mut_loops_++;
         check_block(s->body, nullptr, BlockUse::stmt);
         if (borrowed && by_mut) mut_loops_--;
+        if (zip_root) loop_borrows_.pop_back();
         if (borrowed) loop_borrows_.pop_back();
         loops_.pop_back();
         if (par) {
@@ -3922,6 +3935,209 @@ private:
             par_check(pl);
         }
         pop_scope();
+    }
+
+    // What a loop over `t` gets from it, when `t` is an `Iterator<T>`: `T`, or null (CLX-101).
+    Type* iterated(Type* t, Span at) {
+        if (!iterator_iface_ || is_bad(t)) return nullptr;
+        std::vector<Type*> found;
+        if (t->kind == TypeKind::param) {
+            for (Item* b : t->bounds) {
+                if (iface_root(b) == iterator_iface_ && !b->type_args.empty()) found.push_back(b->type_args[0]);
+            }
+        } else if (auto it = impls_by_head_.find(head(t)); it != impls_by_head_.end()) {
+            for (ImplInfo* info : it->second) {
+                if (!info->iface || iface_root(info->iface) != iterator_iface_ || info->iface->type_args.empty()) continue;
+                Subst s;
+                if (!unify(info->self, t, s, info->impl->type_params) || !bounds_hold(info->impl->type_params, s)) continue;
+                info->used = true;
+                found.push_back(subst(info->iface->type_args[0], s));
+            }
+        }
+        if (found.empty()) return nullptr;
+        if (found.size() > 1) {
+            error(at, name_of(t) + " is an iterator of " + name_of(found[0]) + " and of " + name_of(found[1]) +
+                          ", so a loop can't tell which it goes over");
+            return T.error;
+        }
+        return found[0];
+    }
+
+    // `for x in it` over an `Iterator`: `next` for each pass, on `it` when it's a place, or on a
+    // variable with no name that holds it for the loop. Each value is the pass's own.
+    Type* iterator_loop(Stmt* s, Type* t, Type* item, bool& by_mut, bool& par) {
+        Expr* it = s->value;
+        if (is_bad(item)) return T.error;
+        if (by_mut) {
+            error(it->span, "`for x in mut` changes the elements of a list, an array or a deque where they are, and an "
+                            "iterator gives values, not places");
+            by_mut = false;
+        }
+        if (par) {
+            error(it->span, "a `parallel for` goes over a range or a list's elements, not an iterator, whose `next` gives "
+                            "one value at a time");
+            par = false;
+        }
+        Expr* recv = it;
+        Local* held = nullptr;
+        if (!place_root(it)) {
+            // A name no program can write, so nothing else finds it, and none once it's checked,
+            // so the C names it as the ownership pass's own values.
+            held = ctx_.arena.make<Local>();
+            held->name = ctx_.names.intern("the loop's iterator " + std::to_string(++held_iterators_));
+            held->type = t;
+            held->span = it->span;
+            held->is_var = true;
+            held->used = true;
+            held->mutated = true;
+            s->hidden = held;
+            declare(held);
+            recv = ctx_.arena.make<Expr>();
+            recv->kind = ExprKind::name;
+            recv->span = it->span;
+            std::vector<Name> one{held->name};
+            recv->path.parts = ctx_.arena.copy(one);
+        }
+        auto* callee = ctx_.arena.make<Expr>();
+        callee->kind = ExprKind::field;
+        callee->span = it->span;
+        callee->lhs = recv;
+        callee->member = n_next_;
+        auto* call = ctx_.arena.make<Expr>();
+        call->kind = ExprKind::call;
+        call->span = it->span;
+        call->callee = callee;
+        s->iter_next = call;
+        Type* r = check(call, nullptr);
+        if (held) held->name = Name{};
+        if (is_bad(r) || r->kind != TypeKind::optional) return T.error;
+        return r->elem;
+    }
+
+    // Whether a pattern over an iterator's values names every part that owns memory, so nothing
+    // the pass owns is left without a name to drop it by.
+    bool names_owned_parts(const Pattern* p, const Type* t) {
+        if (!p || is_bad(t) || is_copy(t) || p->kind == PatternKind::binding) return true;
+        if (p->kind == PatternKind::tuple && t->kind == TypeKind::tuple && p->elems.size() == t->elems.size()) {
+            for (std::size_t i = 0; i < p->elems.size(); i++) {
+                if (!names_owned_parts(p->elems[i], t->elems[i])) return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // The name of the loop adaptor `e` calls, `x.enumerate()`, `x.rev()`, `x.zip(y)` or
+    // `x.step_by(n)`, or empty (CLX-101).
+    std::string adaptor_name(const Expr* e) const {
+        if (e->kind != ExprKind::call || e->callee->kind != ExprKind::field || e->callee->parens || e->callee->is_tuple_index) {
+            return "";
+        }
+        std::string m(text(e->callee->member));
+        return m == "enumerate" || m == "rev" || m == "zip" || m == "step_by" ? m : "";
+    }
+
+    // `for x in xs.rev().enumerate()`: takes the adaptors off what the loop goes over, outermost
+    // first, so it goes over `xs` in one loop, with them in `s`. They go in this order from the
+    // outside: `enumerate`, `rev`, `enumerate` again when there wasn't one, then `zip` or `step_by`.
+    void peel_adaptors(Stmt* s) {
+        int stage = 0;  // 1 past an outer `enumerate`, 2 past `rev`, 3 past an inner `enumerate`, 4 past `zip` or `step_by`
+        for (;;) {
+            Expr* v = s->value;
+            std::string m = adaptor_name(v);
+            if (m.empty()) return;
+            bool one = m == "zip" || m == "step_by";
+            if (v->args.size() != (one ? 1u : 0u)) {
+                error(v->span, q(m) + (m == "zip"       ? " takes one argument, the list or array to go over beside this one"
+                                       : m == "step_by" ? " takes one argument, the step, as in `(0..n).step_by(2)`"
+                                                        : " takes no arguments"));
+                check_args(v);
+            } else if (v->trailing) {
+                error(v->trailing->span, q(m) + " doesn't take a closure");
+            } else if (m == "enumerate") {
+                if (s->enumerate) {
+                    error(v->callee->span, "the loop already counts with `enumerate`");
+                } else if (stage == 0 || stage == 2) {
+                    s->enumerate = stage == 0 ? 1 : 2;
+                } else {
+                    error(v->callee->span, "`enumerate` goes outside `zip` and `step_by`, as in `xs.zip(ys).enumerate()`");
+                }
+                stage = stage == 0 ? 1 : 3;
+            } else if (m == "rev") {
+                if (s->rev) {
+                    error(v->callee->span, "the loop already goes backwards with `rev`");
+                } else if (stage <= 1) {
+                    s->rev = true;
+                } else {
+                    error(v->callee->span, "`rev` goes outside `zip` and `step_by`, as in `(0..n).step_by(2).rev()`");
+                }
+                stage = 2;
+            } else if (stage == 4) {
+                error(v->callee->span, "`zip` and `step_by` go on what the loop goes over, once");
+            } else {
+                (m == "zip" ? s->zip_with : s->step) = v->args[0].value;
+                stage = 4;
+            }
+            s->value = v->callee->lhs;
+        }
+    }
+
+    // What each pass of a loop with adaptors gives, from `elem`, what the loop goes over gives,
+    // after checking that it can have them. A zip's other list is borrowed for the loop too, by
+    // way of `zip_root`.
+    Type* adapt_loop(Stmt* s, Type* elem, bool& by_mut, bool& par, Local*& zip_root) {
+        Expr* it = s->value;
+        Type* t = it->type ? it->type : T.error;
+        bool range = it->kind == ExprKind::range;
+        bool plain = !range && !s->range_of && s->text_iter == BMethod::none;
+        bool indexable = plain && (t->kind == TypeKind::list || t->kind == TypeKind::array) && !t->boxed;
+        std::string what = range ? std::string("a range")
+                           : s->range_of ? std::string("a part of a sorted table")
+                           : s->text_iter != BMethod::none ? "the text's " + text_iter_name(s->text_iter)
+                                                          : a_type(t);
+        if (par) {
+            error(it->span, "a `parallel for` goes over a range or a list's elements as they are, without `enumerate`, `rev`, "
+                            "`zip` or `step_by`");
+            par = false;
+        }
+        if (by_mut && (s->enumerate || s->zip_with || s->step)) {
+            error(it->span, std::string("`for x in mut` changes each element where it is, so it can't ") +
+                                (s->enumerate ? "count with `enumerate`" : s->zip_with ? "go beside another list with `zip`" : "step") +
+                                "; go over the indexes and change " + q("xs[i]") + ", as in " + q("for i in 0..xs.len()"));
+            by_mut = false;
+        }
+        if (s->step) {
+            if (!range) {
+                if (!is_bad(t)) error(s->step->span, "`step_by` goes over a range, as in `(0..n).step_by(2)`, not " + what);
+                check(s->step, nullptr);
+            } else {
+                check(s->step, is_bad(elem) ? nullptr : elem);
+            }
+        }
+        if (s->zip_with) {
+            Type* zt = check(s->zip_with, nullptr);
+            bool ok = !is_bad(t) && !is_bad(zt) && !is_bad(elem);
+            if (!is_bad(t) && !indexable) {
+                error(it->span, "`zip` goes over two lists or arrays side by side, not " + what);
+                ok = false;
+            } else if (!is_bad(zt) && ((zt->kind != TypeKind::list && zt->kind != TypeKind::array) || zt->boxed)) {
+                error(s->zip_with->span, "`zip` goes over two lists or arrays side by side, not " + a_type(zt));
+                ok = false;
+            } else if (ok && !(zip_root = place_root(s->zip_with)) && !is_copy(zt)) {
+                error(s->zip_with->span, "`zip` goes over a list in a variable, or in a part of one, which the loop reads in "
+                                         "place; put this one in a `let` first");
+                ok = false;
+            }
+            elem = ok ? T.tuple_of({elem, zt->elem}) : T.error;
+        }
+        if (s->rev && !range && !indexable && !is_bad(t)) {
+            error(it->span, "`rev` goes backwards over a range, a list, an array or a zip of them, not " + what);
+        }
+        if (s->enumerate) {
+            s->item_type = elem;
+            elem = is_bad(elem) ? T.error : T.tuple_of({T.usize, elem});
+        }
+        return elem;
     }
 
     // What a loop over text goes over, for messages.
@@ -8888,6 +9104,14 @@ private:
     }
 
     // What a deque calls a method of Java's `ArrayDeque` or Rust's `VecDeque` (D110).
+    // A loop adaptor anywhere but what a `for` loop goes over (CLX-101).
+    static std::string loop_hint(std::string_view m) {
+        if (m == "enumerate") return "; `enumerate` is only what a `for` loop goes over, as in `for (i, x) in xs.enumerate()`";
+        if (m == "zip") return "; `zip` is only what a `for` loop goes over, as in `for (a, b) in xs.zip(ys)`";
+        if (m == "rev") return "; `rev` is only what a `for` loop goes over, as in `for x in xs.rev()`";
+        return "";
+    }
+
     static std::string deque_hint(std::string_view m) {
         if (m == "push") return "; a deque adds at either end, with `push_last`, or `push_first`, which is Java's `push`";
         if (m == "pop") return "; a deque takes from either end, with `pop_last`, or `pop_first`, which is Java's `pop`";
@@ -9377,7 +9601,7 @@ private:
         }
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +
-                                       (recv->kind == TypeKind::deque ? deque_hint(m) : recv->heap ? heap_hint(m) : ""));
+                                       (recv->kind == TypeKind::deque ? deque_hint(m) : recv->heap ? heap_hint(m) : loop_hint(m)));
             check_args(e);
             return T.error;
         }
@@ -10130,8 +10354,10 @@ private:
     Type* hasher_type_ = nullptr;
     bool hand_ready_ = false;  // every impl is known
     std::map<std::pair<const Type*, int>, Item*> hand_;
-    Name n_Hasher_, n_add_, n_From_, n_Error_, n_context_;
+    Name n_Hasher_, n_add_, n_From_, n_Error_, n_context_, n_Iterator_, n_next_;
     Item* from_iface_ = nullptr;
+    Item* iterator_iface_ = nullptr;  // `Iterator<T>`, which a `for` loop calls `next` on (CLX-101)
+    std::uint32_t held_iterators_ = 0;  // the loops that hold an iterator made for them
     // CLX-95: `std.core`'s `Error`, and the functions that make one from another error.
     Item* error_item_ = nullptr;
     Item* error_from_fn_ = nullptr;

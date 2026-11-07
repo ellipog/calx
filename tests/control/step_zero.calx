@@ -1,0 +1,11 @@
+// A step that isn't above 0 would never get past the range's start (CLX-101).
+
+fn step() -> i32 {
+    return 0
+}
+
+fn main() {
+    for i in (0..10).step_by(step()) {    // panic: the step of `step_by` must be above 0
+        println("{i}")
+    }
+}

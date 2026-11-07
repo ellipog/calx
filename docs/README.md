@@ -33,7 +33,7 @@ What's built, one page per feature:
 6. [Integers](reference/integers.md): wrapping, division, shifts and constant expressions, as in Java
 7. [Floats](reference/floats.md): IEEE 754 arithmetic and printing, as in Java
 8. [Conversions](reference/conversions.md): exact `T(x)`, the named lossy conversions, and `try_from`
-9. [Control flow](reference/control-flow.md): if, while, while let, for, `for x in mut xs`, loop, break and continue
+9. [Control flow](reference/control-flow.md): if, while, while let, for, `for x in mut xs`, `enumerate`, `zip`, `rev`, `step_by`, iterators, loop, break and continue
 10. [Functions](reference/functions.md): parameter modes, named arguments, returns, evaluation order
 11. [Closures](reference/closures.md): `|x| expr`, `Fn` bounds, what a closure captures, trailing closures, `map`, `filter`, `sort_by` and the other methods that take one, and their C
 12. [Structs](reference/structs.md): fields, defaults, literals and methods

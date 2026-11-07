@@ -1,0 +1,149 @@
+// What a `for` loop goes over, counted, backwards, side by side or in steps (CLX-101): one loop,
+// with nothing made to go over.
+
+fn line_of(parts: List<String>) -> String {
+    var s = String()
+    for (i, p) in parts.enumerate() {
+        if i > 0 {
+            s.push_str(" ")
+        }
+        s.push_str(p)
+    }
+    return s
+}
+
+fn main() {
+    let xs: List<i32> = [10, 20, 30]
+    let names: List<String> = ["ann", "bob"]
+    var out: List<String> = []
+
+    for (i, x) in xs.enumerate() {
+        out.push("{i}:{x}")
+    }
+    println(line_of(out))                 // out: 0:10 1:20 2:30
+    out.clear()
+    for x in xs.rev() {
+        out.push("{x}")
+    }
+    println(line_of(out))                 // out: 30 20 10
+    out.clear()
+    // Each element keeps its own index going backwards; counting after `rev` counts the passes.
+    for (i, x) in xs.enumerate().rev() {
+        out.push("{i}:{x}")
+    }
+    println(line_of(out))                 // out: 2:30 1:20 0:10
+    out.clear()
+    for (i, x) in xs.rev().enumerate() {
+        out.push("{i}:{x}")
+    }
+    println(line_of(out))                 // out: 0:30 1:20 2:10
+    out.clear()
+
+    // `zip` stops at the shorter one.
+    for (x, n) in xs.zip(names) {
+        out.push("{x}={n}")
+    }
+    println(line_of(out))                 // out: 10=ann 20=bob
+    out.clear()
+    for (i, (x, n)) in xs.zip(names).enumerate() {
+        out.push("{i}:{x}={n}")
+    }
+    println(line_of(out))                 // out: 0:10=ann 1:20=bob
+    out.clear()
+    for (x, n) in xs.zip(names).rev() {
+        out.push("{x}={n}")
+    }
+    println(line_of(out))                 // out: 20=bob 10=ann
+    out.clear()
+    let bytes: [u8; 3] = [1, 2, 3]
+    for (b, x) in bytes.zip(xs) {
+        out.push("{b}+{x}")
+    }
+    println(line_of(out))                 // out: 1+10 2+20 3+30
+    out.clear()
+
+    // Ranges.
+    for i in (0..5).rev() {
+        out.push("{i}")
+    }
+    for i in (1..=3).rev() {
+        out.push("{i}")
+    }
+    println(line_of(out))                 // out: 4 3 2 1 0 3 2 1
+    out.clear()
+    for i in (0..10).step_by(3) {
+        out.push("{i}")
+    }
+    for i in (0..=9).step_by(3) {
+        out.push("{i}")
+    }
+    println(line_of(out))                 // out: 0 3 6 9 0 3 6 9
+    out.clear()
+    // Backwards from the last value a step reaches.
+    for i in (0..10).step_by(3).rev() {
+        out.push("{i}")
+    }
+    for i in (0..9).step_by(3).rev() {
+        out.push("{i}")
+    }
+    println(line_of(out))                 // out: 9 6 3 0 6 3 0
+    out.clear()
+    for (k, i) in (0..10).step_by(3).enumerate().rev() {
+        out.push("{k}:{i}")
+    }
+    println(line_of(out))                 // out: 3:9 2:6 1:3 0:0
+    out.clear()
+    for (k, i) in (5..8).enumerate().rev() {
+        out.push("{k}:{i}")
+    }
+    println(line_of(out))                 // out: 2:7 1:6 0:5
+    out.clear()
+    // The ends of the type's range, with no step past them.
+    for i in (i8.MIN..=i8.MAX).step_by(100) {
+        out.push("{i}")
+    }
+    for i in (i8.MIN..=i8.MAX).step_by(100).rev() {
+        out.push("{i}")
+    }
+    for i in (250u8..=255).rev() {
+        out.push("{i}")
+    }
+    println(line_of(out))                 // out: -128 -28 72 72 -28 -128 255 254 253 252 251 250
+    out.clear()
+
+    // Counting anything a loop goes over, after `continue` too.
+    for (i, r) in "héllo".runes().enumerate() {
+        out.push("{i}{r}")
+    }
+    for (i, w) in "a bb ccc".split(" ").enumerate() {
+        if i == 1 {
+            continue
+        }
+        out.push("{i}{w}")
+    }
+    var m = Map<String, i32>()
+    m.insert("x", 1)
+    for (i, (k, v)) in m.enumerate() {
+        out.push("{i}:{k}={v}")
+    }
+    println(line_of(out))                 // out: 0h 1é 2l 3l 4o 0a 2ccc 0:x=1
+    out.clear()
+
+    var ys: List<i32> = [1, 2, 3]
+    for y in mut ys.rev() {
+        y *= 10
+    }
+    println("{ys}")                       // out: [10, 20, 30]
+
+    // Nothing to go over.
+    let empty: List<i32> = []
+    for (i, x) in empty.enumerate().rev() {
+        println("{i}{x}")
+    }
+    for i in (5..5).rev() {
+        println("{i}")
+    }
+    for i in (5..3).step_by(2).rev() {
+        println("{i}")
+    }
+}

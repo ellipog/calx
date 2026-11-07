@@ -918,6 +918,8 @@ CX_FN(void, cx_lk_free, (cx_u32* link, cx_usize buckets));
 CX_COLD CX_FN(void, cx_panic_key, (const char* at));
 /* `m.range(a..b)` on a `SortedMap` or a `SortedSet`, with `b` before `a` (D112). */
 CX_COLD CX_FN(void, cx_panic_range, (const char* at));
+/* A panic that says `message`, as `(a..b).step_by(0)` does (CLX-101). */
+CX_COLD CX_FN(void, cx_panic_text, (const char* at, const char* message));
 /* `q.remove_marked(marks)` on a `PriorityQueue`, without one mark for each element (D113). */
 CX_COLD CX_FN(void, cx_panic_marks, (cx_usize marks, cx_usize length, const char* at));
 /* `m.remove_marked(marks)` on an `OpenHashMap` or an `OpenHashSet`, without one mark for each key

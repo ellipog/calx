@@ -52,6 +52,10 @@ pub interface JavaHash {
     fn java_hash(self) -> i32
 }
 
+pub interface Iterator<T> {
+    fn next(mut self) -> T?
+}
+
 pub struct Error {
     text: String
     doing: List<String>

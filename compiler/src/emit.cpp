@@ -3360,24 +3360,113 @@ $dropall    m->len = 0;
         line("{");
         indent_++;
         loop_frames_[s->loop_id] = frames_.size();
+        // With `enumerate`, each pass pairs a count with what the loop goes over (CLX-101): the
+        // passes, counted after `continue`'s label, or with `enumerate().rev()` the element's own
+        // index, which `count` is set to below.
+        Type* item_t = s->enumerate ? s->item_type : elem;
+        std::string count;
+        if (s->enumerate == 1) {
+            count = tmp();
+            line("cx_usize " + count + " = 0;");
+        }
+        auto cont = [&] {
+            line("cx_cont" + id + ":;");
+            if (s->enumerate == 1) line(count + "++;");
+        };
+        // Binds the pattern to `item`, the element's value, which may have effects to run when
+        // nothing binds it.
+        auto bind_item = [&](const std::string& item, bool effects) {
+            std::string v = item;
+            if (s->enumerate) {
+                std::string held = tmp();
+                line(ctype(item_t) + " " + held + " = " + item + ";");
+                v = "((" + ctype(elem) + "){ " + count + ", " + held + " })";
+            }
+            if (!var.empty()) {
+                line(ctype(elem) + " " + var + " = " + v + ";");
+            } else if (s->pattern->kind != PatternKind::wildcard) {
+                // `for (a, b) in pairs`: the checker made sure the pattern matches every element.
+                Match m;
+                walk(s->pattern, v, m);
+                bind(m);
+            } else if (effects && !s->enumerate) {
+                line("(void)" + v + ";");
+            }
+        };
         if (it->kind == ExprKind::range) {
-            std::string i = tmp(), end = tmp();
-            line(ctype(elem) + " " + i + " = " + value(it->lhs, elem) + ";");
-            line(ctype(elem) + " " + end + " = " + value(it->rhs, elem) + ";");
-            if (it->inclusive) {
-                // `a..=MAX` must stop without stepping past the end.
-                line("if (" + i + " <= " + end + ") for (;;) {");
+            Type* rt = item_t;
+            std::string k = tmp(), lo = tmp(), hi = tmp(), st;
+            std::string ct = ctype(rt), ut = rt->is_usize ? "cx_usize" : "cx_u" + std::to_string(rt->bits);
+            line(ct + " " + lo + " = " + value(it->lhs, rt) + ";");
+            line(ct + " " + hi + " = " + value(it->rhs, rt) + ";");
+            if (s->step) {
+                st = tmp();
+                line(ct + " " + st + " = " + value(s->step, rt) + ";");
+                line("if (__builtin_expect(" + st + " <= 0, 0)) cx_panic_text(" + location(s->step->span) +
+                     ", \"the step of `step_by` must be above 0\");");
+            }
+            // The distance from `lo` to `k`, which can't overflow as unsigned: `k` is never below `lo`.
+            // Each difference is cast back, since C works out a narrower one as an `int`.
+            auto diff = [&](const std::string& a, const std::string& b) {
+                return "((" + ut + ")((" + ut + ")" + a + " - (" + ut + ")" + b + "))";
+            };
+            std::string from_lo = diff(k, lo);
+            if (s->enumerate == 2) count = "(cx_usize)" + (s->step ? "(" + from_lo + " / (" + ut + ")" + st + ")" : from_lo);
+            std::string go = it->inclusive ? lo + " <= " + hi : lo + " < " + hi;
+            if (!s->rev && !s->step && !it->inclusive) {
+                line(ct + " " + k + " = " + lo + ";");
+                line("for (; " + k + " < " + hi + "; " + k + "++) {");
+            } else if (!s->rev) {
+                // `a..=MAX` and a step stop without stepping past the end.
+                line(ct + " " + k + " = " + lo + ";");
+                line("if (" + go + ") for (;;) {");
+            } else if (!s->step && !it->inclusive) {
+                line(ct + " " + k + " = " + hi + ";");
+                line("while (" + k + " > " + lo + ") {");
+                indent_++;
+                line(k + "--;");
+                indent_--;
             } else {
-                line("for (; " + i + " < " + end + "; " + i + "++) {");
+                // Down from the last value it reaches: `hi`, or with a step the last whole step.
+                std::string last = hi;
+                if (s->step) {
+                    std::string dist = it->inclusive ? diff(hi, lo) : "((" + ut + ")(" + diff(hi, lo) + " - 1))";
+                    last = "(" + ct + ")((" + ut + ")" + lo + " + " + dist + " / (" + ut + ")" + st + " * (" + ut + ")" + st + ")";
+                }
+                line(ct + " " + k + " = " + go + " ? " + last + " : " + lo + ";");
+                line("if (" + go + ") for (;;) {");
             }
             indent_++;
-            if (!var.empty()) line(ctype(elem) + " " + var + " = " + i + ";");
+            bind_item(k, false);
             stmts(s->body, false);
-            line("cx_cont" + id + ":;");
-            if (it->inclusive) {
-                line("if (" + i + " == " + end + ") break;");
-                line(i + "++;");
+            cont();
+            if (!s->rev && s->step) {
+                line("if (" + diff(hi, k) + (it->inclusive ? " < " : " <= ") + "(" + ut + ")" + st + ") break;");
+                line(k + " += " + st + ";");
+            } else if (!s->rev && it->inclusive) {
+                line("if (" + k + " == " + hi + ") break;");
+                line(k + "++;");
+            } else if (s->rev && (s->step || it->inclusive)) {
+                line("if (" + k + " == " + lo + ") break;");
+                line(k + " -= " + (s->step ? st : "1") + ";");
             }
+            indent_--;
+            line("}");
+        } else if (s->iter_next) {
+            // Over an `Iterator`: `next` until it gives `none`. Each value is the pass's own, dropped
+            // at its end unless the body moved it, or at once when nothing names it (CLX-101).
+            Type* at = it->type;
+            if (s->hidden) line(ctype(at) + " " + local_name(s->hidden) + " = " + value(it, at) + ";");
+            std::string o = tmp();
+            line("for (;;) {");
+            indent_++;
+            line(ctype(s->iter_next->type) + " " + o + " = " + expr(s->iter_next) + ";");
+            line("if (!" + o + ".has) break;");
+            bind_item(o + ".v", false);
+            if (s->pattern->kind == PatternKind::wildcard && !is_copy(item_t)) line(drop_fn(item_t) + "(&" + o + ".v);");
+            stmts(s->body, false);
+            drops(s->pass_drops);
+            cont();
             indent_--;
             line("}");
         } else {
@@ -3421,14 +3510,11 @@ $dropall    m->len = 0;
                 indent_++;
                 // A `str`'s bytes are a literal's, so its parts are too: a capacity of 0, shared
                 // for free when they're copied, as a literal's `String` is.
-                if (var.empty()) {
-                    line("(void)" + part + ";");
-                } else {
-                    line("cx_String " + var + " = {(cx_u8*)" + part + ".ptr, " + part + ".len, " +
-                         (at->kind == TypeKind::str ? "0" : "CX_VIEW_CAP") + "};");
-                }
+                bind_item("((cx_String){(cx_u8*)" + part + ".ptr, " + part + ".len, " +
+                              (at->kind == TypeKind::str ? "0" : "CX_VIEW_CAP") + "})",
+                          false);
                 stmts(s->body, false);
-                line("cx_cont" + id + ":;");
+                cont();
                 indent_--;
                 line("}");
                 line("cx_brk" + id + ":;");
@@ -3451,9 +3537,9 @@ $dropall    m->len = 0;
                     next = "cx_utf16_next(" + arr + "->ptr, &" + i + ", &" + low + ")";
                 }
                 indent_++;
-                line(var.empty() ? "(void)" + next + ";" : ctype(elem) + " " + var + " = " + next + ";");
+                bind_item(next, true);
                 stmts(s->body, false);
-                line("cx_cont" + id + ":;");
+                cont();
                 indent_--;
                 line("}");
                 line("cx_brk" + id + ":;");
@@ -3544,31 +3630,48 @@ $dropall    m->len = 0;
                 line("for (cx_usize " + i + " = " + g + "; " + i + " < " + end + "; " + i + "++) {");
                 indent_++;
                 bins = true;
-            } else if (list && s->iter_mut) {
-                std::string p = tmp(), n = tmp();
-                line(ctype(elem) + "* " + p + " = " + arr + "->ptr;");
-                line("cx_usize " + n + " = " + arr + "->len;");
-                elem_at = p + "[" + i + "]";
-                line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
-                indent_++;
             } else {
-                std::string n = list ? arr + "->len" : std::to_string(at->length);
-                elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
-                line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
+                // A list or an array, forwards or backwards (CLX-101), beside another with `zip`.
+                std::string n = tmp(), p = tmp();
+                if (list && s->iter_mut) {
+                    line(ctype(item_t) + "* " + p + " = " + arr + "->ptr;");
+                    elem_at = p + "[" + i + "]";
+                } else {
+                    elem_at = arr + (list ? "->ptr[" : "->v[") + i + "]";
+                }
+                line("cx_usize " + n + " = " + (list ? arr + "->len" : std::to_string(at->length)) + ";");
+                if (s->zip_with) {
+                    // The other is read in place too, and the loop stops at the shorter one.
+                    Expr* z = s->zip_with;
+                    Type* zt = z->type;
+                    bool zlist = zt->kind == TypeKind::list;
+                    std::string arr2 = tmp();
+                    if (is_place(z) && !effects(z)) {
+                        line("const " + ctype(zt) + "* " + arr2 + " = &" + place(z) + ";");
+                    } else {
+                        std::string val = tmp();
+                        line(ctype(zt) + " " + val + " = " + value(z, zt) + ";");
+                        line("const " + ctype(zt) + "* " + arr2 + " = &" + val + ";");
+                    }
+                    std::string n2 = zlist ? arr2 + "->len" : std::to_string(zt->length);
+                    line("if (" + n2 + " < " + n + ") " + n + " = " + n2 + ";");
+                    elem_at = "((" + ctype(item_t) + "){ " + elem_at + ", " + arr2 + (zlist ? "->ptr[" : "->v[") + i + "] })";
+                }
+                if (s->rev) {
+                    line("for (cx_usize " + i + " = " + n + "; " + i + "-- > 0;) {");
+                } else {
+                    line("for (cx_usize " + i + " = 0; " + i + " < " + n + "; " + i + "++) {");
+                }
+                if (s->enumerate == 2) count = i;
                 indent_++;
             }
             if (!var.empty() && s->iter_mut) {
                 line(ctype(elem) + "* " + var + " = &" + elem_at + ";");
-            } else if (!var.empty()) {
-                line(ctype(elem) + " " + var + " = " + elem_at + ";");
-            } else if (s->pattern->kind != PatternKind::wildcard) {
-                // `for (a, b) in pairs`: the checker made sure the pattern matches every element.
-                Match m;
-                walk(s->pattern, elem_at, m);
-                bind(m);
+            } else {
+                bind_item(elem_at, false);
             }
             stmts(s->body, false);
-            line("cx_cont" + id + ":;");
+            cont();
             indent_--;
             line("}");
             if (bins) {

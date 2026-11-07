@@ -1,0 +1,36 @@
+// What the ownership pass catches about loops over an `Iterator` (CLX-101).
+
+struct Words {
+    parts: List<String>
+    at: usize
+}
+
+impl Iterator<String> for Words {
+    fn next(mut self) -> String? {
+        if self.at >= self.parts.len() {
+            return none
+        }
+        self.at += 1
+        return some(self.parts[self.at - 1].copy())
+    }
+}
+
+fn eat(w: own Words) -> usize {
+    return w.at
+}
+
+fn keep(s: own String) -> usize {
+    return s.len()
+}
+
+fn main() {
+    var w = Words { parts: ["a", "b"], at: 0 }
+    for x in w {                           // error: `w` might have been moved, so it can't be used here
+        _ = eat(w)
+        _ = x
+    }
+    for x in (Words { parts: ["c"], at: 0 }) {
+        _ = keep(x)
+        _ = keep(x)                        // error: `x` was moved, so it can't be used here
+    }
+}

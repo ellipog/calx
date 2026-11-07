@@ -379,6 +379,13 @@ struct Stmt {
     BMethod text_iter = BMethod::none;  // for: `s.runes()`, `s.chars()`, `s.split(sep)`, `s.lines()` or `s.split_whitespace()`, with `value` now `s`
     Expr* text_sep = nullptr;      // for: the `sep` of `s.split(sep)`
     Expr* range_of = nullptr;      // for: the range of `m.range(a..b)`, with `value` now `m` (D112)
+    // for: what's around what it goes over, with `value` now that (CLX-101).
+    bool rev = false;              // `.rev()`: from the last to the first
+    std::uint8_t enumerate = 0;    // `.enumerate()`: 1 counts the passes, 2 gives each element's index, as in `.enumerate().rev()`
+    Expr* zip_with = nullptr;      // `a.zip(b)`: `b`
+    Expr* step = nullptr;          // `(a..b).step_by(n)`: `n`
+    Type* item_type = nullptr;     // with `enumerate`: what each count is paired with
+    Expr* iter_next = nullptr;     // over an `Iterator`: the call of `next`, on `value` or on `hidden`
     Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).
     Slice<Local*> drops;           // return, break, continue: what's dropped before leaving
@@ -387,6 +394,7 @@ struct Stmt {
     bool consumes = false;         // let with a pattern: it takes the value apart
     Local* hidden = nullptr;       // let with a pattern, for: the new value matched or iterated
     bool drop_hidden = false;      // for: `hidden` is dropped after the loop
+    Slice<Local*> pass_drops;      // for over an `Iterator`: what each pass drops at its end
 };
 
 struct Block {

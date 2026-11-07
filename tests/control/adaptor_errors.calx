@@ -1,0 +1,50 @@
+// What the checker catches about `enumerate`, `rev`, `zip` and `step_by` (CLX-101).
+
+fn main() {
+    var xs: List<i32> = [1, 2]
+    let s = String("ab")
+    var m = Map<String, i32>()
+    m.insert("a", 1)
+    for x in s.runes().rev() {             // error: `rev` goes backwards over a range, a list, an array or a zip of them, not the text's runes
+        print("{x}")
+    }
+    for (a, b) in xs.zip(s) {              // error: `zip` goes over two lists or arrays side by side, not a `String`
+        print("{a}{b}")
+    }
+    for (a, b) in xs.zip(List<i32>()) {    // error: `zip` goes over a list in a variable, or in a part of one
+        print("{a}{b}")
+    }
+    for x in xs.step_by(2) {               // error: `step_by` goes over a range, as in `(0..n).step_by(2)`, not a `List<i32>`
+        print("{x}")
+    }
+    for (i, x) in mut xs.enumerate() {     // error: `for x in mut` changes each element where it is, so it can't count with `enumerate`
+        print("{i}{x}")
+    }
+    for (i, x) in xs.enumerate().enumerate() {  // error: the loop already counts with `enumerate`
+        print("{i}{x}")
+    }
+    for x in xs.rev().rev() {              // error: the loop already goes backwards with `rev`
+        print("{x}")
+    }
+    for x in (0..3).rev().step_by(2) {     // error: `rev` goes outside `zip` and `step_by`, as in `(0..n).step_by(2).rev()`
+        print("{x}")
+    }
+    parallel for x in xs.rev() {           // error: a `parallel for` goes over a range or a list's elements as they are
+        _ = x
+    }
+    for x in m.rev() {                     // error: `rev` goes backwards over a range, a list, an array or a zip of them, not a `Map<String, i32>`
+        _ = x
+    }
+    let e = xs.enumerate()                 // error: `enumerate` is only what a `for` loop goes over, as in `for (i, x) in xs.enumerate()`
+    _ = e
+    for x in xs.zip() {                    // error: `zip` takes one argument, the list or array to go over beside this one
+        _ = x
+    }
+    for x in xs.zip(xs) {
+        xs.push(1)                         // error: `xs` can't be changed while a `for` loop goes over it
+        _ = x
+    }
+    for i in (0..10).step_by(2u8) {        // error: expected `i32`, found `u8`
+        _ = i
+    }
+}

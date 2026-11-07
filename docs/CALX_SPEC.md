@@ -52,7 +52,7 @@ pub fn manhattan(a: Point, b: Point) -> i32 {
 - `pub` makes an item visible outside its module. Everything else is private to the module.
 - Attributes are `@name` or `@name(args)` before a declaration ([codegen hooks](#codegen-hooks)).
 - Strings interpolate with `{expr}`: `"moved {d} blocks"`. A raw string, `#"..."#`, has no escapes and interpolates with `#{expr}`, and one that ends its line is a block. Built: [raw strings](reference/syntax.md#raw-strings) (D125)
-- Loops are `while cond { }`, `while let pattern = value { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`. Built: [control flow](reference/control-flow.md#while-let) (D111)
+- Loops are `while cond { }`, `while let pattern = value { }`, `for x in iterable { }` and `loop { }`, with `break` and `continue`. Built: [control flow](reference/control-flow.md#while-let) (D111). A `for` loop counts with `xs.enumerate()`, goes backwards with `rev()`, beside another list with `xs.zip(ys)` and in steps with `(a..b).step_by(n)`, all written into the loop itself, and goes over any type that implements the built-in `Iterator<T>`: [counting and stepping](reference/control-flow.md#counting-backwards-side-by-side-in-steps), [iterators](reference/control-flow.md#iterators) (CLX-101)
 - Logic uses words: `and`, `or`, `not`. Comparison and arithmetic use the usual symbols.
 - `match v { Pattern => expr, ... }` matches enum variants, `none` and `some(x)`, `ok(v)` and `err(e)`, literals, tuples and `_`.
 - A function with no `->` returns nothing. `fn f() ! E` returns nothing but can fail with an `E`.

@@ -738,7 +738,53 @@ private:
         st_ = join(exit, breaks);
     }
 
+    // `for x in it` over an `Iterator` (CLX-101): each pass's `next` changes `it`, or the variable
+    // that holds it for the loop, and each value is the pass's own, dropped at its end unless the
+    // body moves it.
+    void iterator_loop(Stmt* s) {
+        Expr* it = s->value;
+        scopes_.emplace_back();
+        Local* hidden = s->hidden;
+        if (hidden) {
+            expr(it, Use::consume);
+            hidden->owns = true;
+            if (!scan_) declare(hidden);
+        }
+        auto iteration = [&] {
+            scopes_.emplace_back();
+            expr(s->iter_next, Use::consume);
+            if (s->local) {
+                s->local->owns = true;
+                if (!scan_) declare(s->local);
+            } else {
+                bind(s->pattern, true, nullptr, "");
+            }
+            block(s->body, Use::view);
+            s->pass_drops = drops_from(scopes_.size() - 1);
+            unborrow_scope();
+            end_scope();
+            return st_;
+        };
+        if (scan_) {
+            iteration();
+        } else {
+            State head;
+            State breaks = walk_loop(s->loop_id, scopes_.size(), iteration, &head);
+            st_ = join(head, breaks);
+            if (hidden) {
+                std::uint8_t x = get(hidden);
+                s->drop_hidden = !st_.dead && x != moved && !copyable(hidden->type);
+                if (x == maybe) hidden->clear_on_move = true;
+            }
+        }
+        end_scope();
+    }
+
     void for_loop(Stmt* s) {
+        if (s->iter_next) {
+            iterator_loop(s);
+            return;
+        }
         Expr* it = s->value;
         scopes_.emplace_back();
         Local* root = nullptr;
@@ -758,6 +804,10 @@ private:
         }
         // The separator of `s.split(sep)` is worked out after `s`, before the loop.
         if (s->text_sep) expr(s->text_sep, Use::view);
+        // A zip's other list, and a range's step, after it (CLX-101).
+        Local* zip_root = s->zip_with ? place_root(s->zip_with) : nullptr;
+        if (s->zip_with) expr(s->zip_with, Use::view);
+        if (s->step) expr(s->step, Use::view);
         // The ends of `m.range(a..b)` are worked out after `m`, before the loop (D112).
         if (s->range_of) {
             if (s->range_of->lhs) expr(s->range_of->lhs, Use::view);
@@ -766,6 +816,7 @@ private:
         auto iteration = [&] {
             scopes_.emplace_back();
             if (root) borrows_.push_back({root, nullptr, it->span, it, field_path(it), false});
+            if (zip_root) borrows_.push_back({zip_root, nullptr, s->zip_with->span, s->zip_with, field_path(s->zip_with), false});
             if (s->local) {
                 // `for x in mut xs`: a view, even of a number, since a change goes to the element.
                 s->local->owns = !s->iter_mut && copyable(s->local->type);
@@ -776,6 +827,7 @@ private:
             }
             block(s->body, Use::view);
             unborrow_scope();
+            if (zip_root) borrows_.pop_back();
             if (root) borrows_.pop_back();
             end_scope();
             return st_;

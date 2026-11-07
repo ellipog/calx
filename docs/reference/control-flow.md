@@ -145,6 +145,94 @@ fn main() {
 
 In C, `x` is a pointer to the element, and the list's length and memory are read once before the loop, since nothing in the body can change them.
 
+### Counting, backwards, side by side, in steps
+
+What a loop goes over can be counted, turned around, paired with another list or stepped (CLX-101):
+
+```calx
+fn main() {
+    let xs: List<i32> = [10, 20, 30]
+    let names: List<String> = ["ann", "bob"]
+    for (i, x) in xs.enumerate() {
+        println("{i}: {x}")
+    }
+    // out: 0: 10
+    // out: 1: 20
+    // out: 2: 30
+    for (x, n) in xs.zip(names) {
+        println("{n} has {x}")
+    }
+    // out: ann has 10
+    // out: bob has 20
+    var down: List<i32> = []
+    for i in (0..10).step_by(3).rev() {
+        down.push(i)
+    }
+    println("{down}")    // out: [9, 6, 3, 0]
+    var last = String()
+    for (i, x) in xs.enumerate().rev() {
+        last.push_str("{i}:{x};")
+    }
+    println(last)        // out: 2:30;1:20;0:10;
+}
+```
+
+| Written | Goes over |
+| --- | --- |
+| `xs.enumerate()` | `(i, x)`: each element with its count, a `usize` from 0. It works on anything a loop goes over, a range, a map or a text's runes included |
+| `xs.rev()` | The elements from the last to the first, of a range, a list, an array or a zip |
+| `xs.zip(ys)` | `(x, y)`: an element of each, side by side, from two lists or arrays of any element types, until the shorter one ends |
+| `(a..b).step_by(n)` | `a`, `a + n`, `a + 2n` and on, up to `b`, of a range, as Python's `range(a, b, n)`. A step that isn't above 0 panics |
+
+- They go in this order: `enumerate`, `rev`, then `zip` or `step_by` on what the loop goes over. `xs.enumerate().rev()` keeps each element's own index going backwards, and `xs.rev().enumerate()` counts the passes, 0 first.
+- They're only what a `for` loop goes over, as `s.runes()` is: the loop is written for them, so nothing is made to go over, and the count is a number the loop keeps. Elsewhere, `xs.enumerate()` is an error.
+- The elements are views, as in any loop over a list, and both lists of a zip are kept from changing until the loop ends. A zip's second list is a variable, or a part of one, unless its elements are `Copy`.
+- `for x in mut xs.rev()` changes the elements from the last. To change them while counting, go over the indexes: `for i in 0..xs.len()`.
+- A stepped range backwards starts at the last value its step reaches, so `(0..10).step_by(3).rev()` is 9, 6, 3, 0, as in Rust. Ranges up to the type's end stop without overflowing, with or without a step.
+
+### Iterators
+
+A type that implements `Iterator<T>` can be gone over too. `for x in it` calls `next` until it gives `none`:
+
+```calx
+struct Countdown {
+    n: i32
+}
+
+impl Iterator<i32> for Countdown {
+    fn next(mut self) -> i32? {
+        if self.n == 0 {
+            return none
+        }
+        self.n -= 1
+        return some(self.n + 1)
+    }
+}
+
+fn main() {
+    var got: List<i32> = []
+    for x in (Countdown { n: 3 }) {
+        got.push(x)
+    }
+    println("{got}")    // out: [3, 2, 1]
+    var c = Countdown { n: 5 }
+    for x in c {
+        if x == 4 {
+            break
+        }
+    }
+    println("{c.n}")    // out: 3
+}
+```
+
+- `Iterator<T>` is built in, with one method, `fn next(mut self) -> T?`.
+- What the loop goes over is a `var`, a `mut` parameter, a field of either, or a value made there, which the loop holds while it runs. A variable keeps what's left after a `break`. A struct literal in a loop's head goes in parentheses.
+- Each value is the pass's own: the body can move it, and what it doesn't move is freed at the end of the pass. A pattern names every part that owns memory, as `(a, _rest)` does, so nothing is left without a name to free it by.
+- A generic parameter with the bound `Iterator<T>` can be gone over: `fn total<I: Iterator<i32>>(it: mut I)`.
+- `enumerate` counts an iterator's values. `rev`, `zip` and `step_by` need to know where the end is, so they don't go on an iterator.
+- `parallel for` and `for x in mut` don't go over an iterator, which gives values one at a time rather than places.
+- In C the loop calls `next` directly, as a function of the type's own, each pass, with no table or allocation in between.
+
 ## `loop`
 
 `loop { }` runs until a `break`. Used as a value, it gives the value of `break value`.
