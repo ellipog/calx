@@ -1035,6 +1035,16 @@ private:
             case CallKind::some:
                 for (const Arg& a : e->args) expr(a.value, Use::consume);
                 break;
+            case CallKind::context:
+                // The call's result, then the text, each moved into the `Error` (CLX-95). The text is
+                // worked out only if the call fails, so a place is only read, and copied then.
+                expr(e->callee->lhs, Use::consume);
+                for (const Arg& a : e->args) {
+                    ExprKind k = a.value->kind;
+                    bool place = k == ExprKind::name || k == ExprKind::field || k == ExprKind::index || k == ExprKind::self;
+                    expr(a.value, place ? Use::view : Use::consume);
+                }
+                break;
             case CallKind::builtin_method: builtin_method(e); break;
             case CallKind::prim_static:
                 // `String.from_utf8` takes the list's memory for the string.

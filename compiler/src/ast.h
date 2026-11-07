@@ -152,6 +152,7 @@ enum class CallKind : std::uint8_t {
     builtin_method,  // a method of `String`, `str`, `List` or a pointer, or `x.copy()`: `bmethod` says which
     prim_static, // `i32.parse(s)`, `f64.from_bits(b)`, `String.from_utf8(bytes)`: `prim` says which
     value,       // `f(x)` where `f` is a function value (D122), `callee` of type `fn(...)`
+    context,     // `f().context(text)`: `f`'s error as an `Error`, with `text`; `item` makes it (CLX-95)
 };
 
 enum class BMethod : std::uint8_t {
@@ -363,6 +364,7 @@ struct Stmt {
 
     // Filled in by the checker.
     Local* local = nullptr;        // let, for: the variable bound by a plain name
+    Item* convert = nullptr;       // fail: what makes the value an `Error`, in a function that fails with one (CLX-95)
     bool let_unwraps = false;      // let-else: the pattern matches the optional's value
     std::uint32_t loop_id = 0;     // while, for: its labels in C
     Type* elem_type = nullptr;     // for: the element type

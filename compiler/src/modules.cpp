@@ -17,6 +17,11 @@ std::string q(std::string_view s) { return "`" + std::string(s) + "`"; }
 // `std.core`: the interfaces behind the derived properties, which a struct or an enum implements to
 // write its own (D102). Every program has it, and nothing imports it: the checker finds these
 // names here when a module doesn't declare them, and they're reserved, so none can.
+//
+// `Error` is here too, the error any error converts into (CLX-95): a module sees it unless it
+// declares or imports an `Error` of its own, as `std.zlib` does. `try` converts with
+// `error_from`, and `.context(...)` with `error_context` or `error_add_context`, which no module
+// can name. Only the functions a program uses are compiled into it.
 const char* const kCore = R"(module std.core
 
 pub interface Equal {
@@ -45,6 +50,63 @@ pub interface From<T> {
 
 pub interface JavaHash {
     fn java_hash(self) -> i32
+}
+
+pub struct Error {
+    text: String
+    doing: List<String>
+}
+
+impl Error {
+    pub fn new(message: own String) -> Error {
+        return Error { text: message, doing: List<String>() }
+    }
+
+    pub fn message(self) -> String {
+        return self.text.copy()
+    }
+
+    pub fn contexts(self) -> List<String> {
+        var out = List<String>()
+        out.reserve(self.doing.len())
+        var i = self.doing.len()
+        while i > 0 {
+            i -= 1
+            out.push(self.doing[i].copy())
+        }
+        return out
+    }
+
+    pub fn with_context(own self, text: own String) -> Error {
+        var e = self
+        e.doing.push(text)
+        return e
+    }
+}
+
+impl Display for Error {
+    fn show(self) {
+        var i = self.doing.len()
+        while i > 0 {
+            i -= 1
+            print("{self.doing[i]}: ")
+        }
+        print(self.text)
+    }
+}
+
+pub fn error_from<T: Display>(value: own T) -> Error {
+    return Error { text: "{value}", doing: List<String>() }
+}
+
+pub fn error_context<T: Display>(value: own T, text: own String) -> Error {
+    var doing = List<String>()
+    doing.push(text)
+    return Error { text: "{value}", doing: doing }
+}
+
+pub fn error_add_context(value: own Error, text: own String) -> Error {
+    return value.with_context(text)
 }
 )";
 

@@ -1,0 +1,41 @@
+// What `Error` and `.context` don't allow.
+
+fn half(n: i32) -> i32 ! String {
+    if n % 2 != 0 {
+        fail "odd"
+    }
+    return n / 2
+}
+
+fn plain<E>(e: own E) -> i32 ! E {
+    fail e
+}
+
+fn shown<E>(e: own E) -> i32 ! Error {
+    return try plain(e)    // error: which can't become an `Error`
+}
+
+fn noted<E>(e: own E) -> i32 ! Error {
+    return try plain(e).context("noting")    // error: which can't become an `Error`
+}
+
+fn no_text() -> i32 ! Error {
+    return try half(3).context()    // error: `.context` takes one argument
+}
+
+fn not_a_string() -> i32 ! Error {
+    return try half(3).context(5)    // error: expected `String`
+}
+
+fn kept() -> i32 ! String {
+    return try half(3).context("halving")    // error: declare `! Error` on `kept` too
+}
+
+fn unhandled() -> i32 ! Error {
+    let r = half(3).context("halving")    // error: `half` can fail, so handle its error here
+    return 0
+}
+
+fn main() {
+    println("{shown(1)!} {noted(1)!} {no_text()!} {not_a_string()!} {kept()!} {unhandled()!}")
+}

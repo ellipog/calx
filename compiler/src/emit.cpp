@@ -72,7 +72,9 @@ public:
                 if (!seen.insert(g).second) return;
                 if (g->is_extern) {
                     p.c_fns.push_back(g);
-                } else if (g->origin || g->module == m) {
+                } else if (g->origin || g->module == m || g->module->builtin) {
+                    // `std.core`'s functions, as `Error`'s, are copied into each file that uses one,
+                    // as instances are, so a program that uses none compiles none (CLX-95).
                     p.defs.push_back(g);
                 } else {
                     p.externs.push_back(g);
@@ -80,7 +82,7 @@ public:
                 }
             };
             for (Item* f : prog_.fns) {
-                if (f->module == m && !f->origin && seen.insert(f).second) p.defs.push_back(f);
+                if (f->module == m && !f->origin && !m->builtin && seen.insert(f).second) p.defs.push_back(f);
             }
             if (p.has_exports) {
                 for (const Program::Export& x : prog_.exports) take(x.fn);
@@ -3239,7 +3241,14 @@ $dropall    m->len = 0;
                 if (rt->is_result) {
                     std::uint32_t i = s->kind == StmtKind::fail ? 1 : 0;
                     std::vector<std::string> parts;
-                    if (s->value) parts.push_back(value(s->value, rt->item->variants[i].types[0]));
+                    if (s->value && s->convert) {
+                        // `fail "text"` in a function that fails with `Error` (CLX-95).
+                        if (uses_) uses_->add_fn(s->convert);
+                        std::string x = value(s->value, s->value->type);
+                        parts.push_back(call_hand(s->convert, {x.c_str()}));
+                    } else if (s->value) {
+                        parts.push_back(value(s->value, rt->item->variants[i].types[0]));
+                    }
                     v = variant_value(rt, i, parts);
                 } else {
                     v = value(s->value, rt);
@@ -4566,10 +4575,40 @@ $dropall    m->len = 0;
         }
     }
 
+    // `f().context(text)`: `f`'s result, with its error made an `Error` that holds `text` too. The
+    // text is worked out in the unlikely branch, so a call that succeeds builds none (CLX-95).
+    std::string context_value(Expr* e) {
+        const Type* in = e->callee->lhs->type;
+        const Type* out = e->type;
+        Item* conv = e->item;
+        if (uses_) uses_->add_fn(conv);
+        std::string t = tmp(), r = tmp();
+        std::string call = expr(e->callee->lhs);
+        Expr* text = e->args[0].value;
+        ExprKind k = text->kind;
+        std::string words;
+        if (k == ExprKind::name || k == ExprKind::field || k == ExprKind::index || k == ExprKind::self) {
+            // A place is only read, so the error gets a copy.
+            std::string v = tmp();
+            words = "({ cx_String " + v + " = " + expr(text) + "; cx_copy_String(&" + v + "); })";
+        } else {
+            words = value(text, text->type);
+        }
+        std::string err = t + ".u.v1." + variant_field(in, 1, 0);
+        std::string ok = in->item->variants[0].types.empty()
+                             ? variant_value(out, 0, {})
+                             : variant_value(out, 0, {t + ".u.v0." + variant_field(in, 0, 0)});
+        return "({ " + ctype(in) + " " + t + " = " + call + "; " + ctype(out) + " " + r + "; if (__builtin_expect(" + t +
+               ".tag != " + int_const(in->repr, 0) + ", 0)) " + r + " = " +
+               variant_value(out, 1, {call_hand(conv, {err.c_str(), words.c_str()})}) + "; else " + r + " = " + ok + "; " + r +
+               "; })";
+    }
+
     std::string call(Expr* e) {
         switch (e->call) {
             case CallKind::builtin: return builtin(e);
             case CallKind::convert: return conversion(e);
+            case CallKind::context: return context_value(e);
             case CallKind::construct:
                 // `OpenHashMap<K, V>(n, f)`: fastutil's table for `n` keys at the load factor `f`, 0.75
                 // if it isn't given (D107).

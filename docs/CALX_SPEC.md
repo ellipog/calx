@@ -82,7 +82,7 @@ Built: see [Optionals](reference/optionals.md) and [Patterns](reference/patterns
 
 ### Errors are values
 
-Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). `try` converts the call's error to the function's through the built-in `From<T>` when their types differ ([converting errors](reference/errors.md#converting-errors), D103). Still to build:
+Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`, `try f()`, matching `ok(v)` and `err(e)` with `match`, `if let` and `let ... else`, `f()!`, and `fn main() ! E`, which shows the error and exits with status 1. A result is handled at the call, so it's never stored or dropped (D91). `try` converts the call's error to the function's through the built-in `From<T>` when their types differ ([converting errors](reference/errors.md#converting-errors), D103), and into the built-in [`Error`](reference/errors.md#error) from any error that can be shown, with `.context(...)` to say what was being done (CLX-95). Still to build:
 
 - `! E` in closures' types.
 

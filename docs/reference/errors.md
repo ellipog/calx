@@ -1,6 +1,6 @@
 ---
 title: Errors
-description: Functions that can fail, fail, try, converting errors with From, matching ok and err, unwrapping with !, and their C.
+description: Functions that can fail, fail, try, converting errors with From, the Error any error becomes, with context, matching ok and err, unwrapping with !, and their C.
 ---
 
 # Errors
@@ -242,6 +242,76 @@ fn main() {
 
 Generic code converts through a bound: `fn lift<E: From<IoError>>() -> i32 ! E` can `try` a call that fails with an `IoError`.
 
+## `Error`
+
+`Error` is the error for code that only reports what went wrong, as a script or a tool does. Any error that can be shown in a string becomes one, without a `From` for each type, and `.context` says what was being done when it went wrong:
+
+```calx
+import std.fs.{read_text}
+
+fn port(text: String) -> u16 ! Error {
+    let n = u16.parse(text) else {
+        fail "{text} isn't a port"
+    }
+    return n
+}
+
+fn listen(path: String) -> u16 ! Error {
+    let text = try read_text(path).context("reading {path}")
+    let line = text ?? String("")
+    return try port(line.trim()).context("the port in {path}")
+}
+
+fn main() {
+    match listen("missing.properties") {
+        ok(p) => println("listening on {p}"),
+        err(e) => println("{e}"),    // out: reading missing.properties: NotFound
+    }
+    match port("lots") {
+        ok(p) => println("listening on {p}"),
+        err(e) => println("{e}"),    // out: lots isn't a port
+    }
+}
+```
+
+- `try` makes an `Error` of any error that can be shown ([`Display`](comparing.md#display)) when the function fails with `Error`: the `FsError` above, an enum of a program's own, a `String`, even a number. Its text is what `{e}` shows of the error.
+- `fail` in a function that fails with `Error` takes anything that can be shown too, so `fail "{text} isn't a port"` needs nothing more.
+- `f().context(text)` is `f`'s result with its error made an `Error`, and `text` added to it, so it's handled at the call as any result is: with `try`, `match`, `if let` or `!`. The text is worked out only if `f` fails, so `"reading {path}"` builds nothing when the read succeeds. Rust's `anyhow` builds `.context(format!(...))` every time, and needs `.with_context(|| ...)` to wait. A variable given as the text is copied only if `f` fails, and stays the caller's.
+- An `Error` shows each context, the outermost first, and then the error's own text: `loading the config: reading server.properties: NotFound`. A `main` that fails with one prints that after `error: `.
+
+| Item | Gives |
+| --- | --- |
+| `Error.new(message: own String) -> Error` | An `Error` with this text |
+| `e.message() -> String` | The error's own text, without the contexts |
+| `e.contexts() -> List<String>` | What was being done, the outermost first |
+| `e.with_context(own self, text: own String) -> Error` | The error with `text` added outside the contexts it has, as `.context` adds it |
+
+```calx
+enum SaveError {
+    Old(i32)
+}
+
+fn check(version: i32) ! SaveError {
+    if version < 3 {
+        fail SaveError.Old(version)
+    }
+}
+
+fn main() ! Error {
+    try check(5).context("checking the save")
+    println("version 5 is fine")    // out: version 5 is fine
+    let e = Error.new("no room").with_context("saving region 0, 0").with_context("saving the world")
+    println("{e.message()} | {e.contexts().join(" > ")}")    // out: no room | saving the world > saving region 0, 0
+    try check(2).context("checking the save")
+}
+// stderr: error: checking the save: Old(2)
+// status: 1
+```
+
+- `Error` holds an error's text, not the error, so code that must tell errors apart fails with an enum of its own, as `check` does, and matches its cases. The enum becomes an `Error` where the code only reports it.
+- Every module sees `Error` without importing it, unless it declares or imports an `Error` of its own, as [`std.zlib`](../std/zlib.md) declares one. There, `Error` is that one, and `std.core`'s isn't seen.
+- `try f().context(...)` in a function that fails with something other than `Error` is an error that says to declare `! Error`, since an `Error`'s text can't become another type.
+
 ## Matching `ok` and `err`
 
 `ok(p)` and `err(p)` match a result, and `p` can be any pattern, such as `err(ParseError.TooLong(n))` or `ok(0)`. A `match` must cover both, and every case of each ([Patterns](patterns.md)). When the function returns nothing, `ok` holds nothing and is written alone:
@@ -381,5 +451,7 @@ static cx_Result_i32_ReadError game__short(const cx_list_u8* restrict bytes) {
 When an earlier part of the same expression made a value that's owned, such as the `name.copy()` in `pair(name.copy(), try read())`, the value waits in a temporary of the statement. The `try` is worked out before the call, and the temporary is cleared only as the value moves into it. So passing the error up drops the value, and the normal path doesn't drop it twice, whatever order C evaluates the arguments in.
 
 A `try` that converts calls the impl's `from` on the error, in the unlikely branch, before the drops: `.u.v1 = { .f0 = game__NetError__From_IoError__from(cx_t1.u.v1.f0) }`. The impl's C name includes the interface's arguments, so a type's impls of `From` don't meet. In a release build, a small `from`, such as one that wraps the error in a variant, is inlined, so the conversion costs no call.
+
+An `Error` is a struct of a `String`, the error's text, and a `List<String>`, its contexts. A `try` that makes one calls `std.core`'s `error_from` for the call's error type, `std_core__error_from__FsError` for an `FsError`, which formats the error as `{e}` does, in the unlikely branch. `.context` is a branch too, with the text built on the side that fails. `Error`'s functions are compiled into the files that use them, as a generic function's instances are, so a program that never uses an `Error` compiles none of them.
 
 Still to build, in the [spec](../CALX_SPEC.md#errors-are-values): `! E` in function types.

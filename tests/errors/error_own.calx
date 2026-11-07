@@ -1,0 +1,30 @@
+// A module that declares an `Error` of its own, or imports one, uses that one, and `std.core`'s
+// isn't seen there.
+// file: main.calx
+import codec.{check, Error}
+
+fn both(a: String, b: String) -> usize ! Error {
+    return (try check(a)) + (try check(b))
+}
+
+fn main() {
+    println("{both("ab", "cde")!}")    // out: 5
+    match both("ab", "too long") {
+        ok(n) => println("{n}"),
+        err(Error.TooLong(n)) => println("too long: {n}"),    // out: too long: 8
+    }
+}
+
+// file: codec.calx
+module codec
+
+pub enum Error {
+    TooLong(usize)
+}
+
+pub fn check(s: String) -> usize ! Error {
+    if s.len() > 4 {
+        fail Error.TooLong(s.len())
+    }
+    return s.len()
+}

@@ -1,0 +1,89 @@
+// `Error`: any error that can be shown becomes one through `try`, `fail` takes any text, and
+// `.context` says what was being done, built only when the call fails. A `main` that fails with
+// one prints it.
+import std.fs.{read_text}
+
+enum ParseError {
+    Empty
+    Bad(String)
+}
+
+fn parse(s: String) -> i32 ! ParseError {
+    if s.is_empty() {
+        fail ParseError.Empty
+    }
+    return i32.parse(s) ?? {
+        fail ParseError.Bad(s.copy())
+    }
+}
+
+fn port(s: String) -> i32 ! Error {
+    let n = try parse(s)
+    if n > 65535 {
+        fail "port {n} is too big"
+    }
+    return n
+}
+
+fn load(path: String) -> String ! Error {
+    let text = try read_text(path).context("reading {path}")
+    return text ?? {
+        fail "{path} isn't UTF-8"
+    }
+}
+
+// The text is a variable the function keeps using, so it's copied only if the call fails.
+fn nested(path: String) -> usize ! Error {
+    let what = String("loading the config")
+    let text = try load(path).context(what)
+    println("loaded, still {what}")
+    return text.len()
+}
+
+fn odd(n: i32) -> i32 ! i32 {
+    if n % 2 == 0 {
+        fail n
+    }
+    return n
+}
+
+fn describe(r: String) {
+    println(r)
+}
+
+fn main() ! Error {
+    for s in ["25565", "", "x1", "70000"] {
+        match port(String(s)) {
+            ok(n) => println("port {n}"),
+            err(e) => println("[{e}] [{e.message()}] {e.contexts().len()}"),
+        }
+    }
+    // out: port 25565
+    // out: [Empty] [Empty] 0
+    // out: [Bad(x1)] [Bad(x1)] 0
+    // out: [port 70000 is too big] [port 70000 is too big] 0
+
+    match nested("no/such/file.txt") {
+        ok(n) => println("{n} bytes"),
+        err(e) => println("{e} | {e.contexts().join(" > ")} | {e.message()}"),
+    }
+    // out: loading the config: reading no/such/file.txt: NotFound | loading the config > reading no/such/file.txt | NotFound
+
+    let e = Error.new("by hand").with_context("inner step").with_context("outer step")
+    println("{e}")    // out: outer step: inner step: by hand
+    println(e.contexts().join(", "))    // out: outer step, inner step
+    let same = Error.new("by hand").with_context("inner step").with_context("outer step")
+    println("{e == same}")    // out: true
+
+    // Any error that can be shown, even a number.
+    let n = try odd(3).context("checking 3")
+    println("{n}")    // out: 3
+    if let err(failed) = odd(4).context("checking 4") {
+        describe("{failed}")    // out: checking 4: 4
+    }
+
+    _ = try port("lots")
+    println("not reached")
+}
+// stderr: error: Bad(lots)
+// status: 1

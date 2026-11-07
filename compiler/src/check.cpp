@@ -133,6 +133,8 @@ public:
         n_Hasher_ = ctx.names.intern("Hasher");
         n_add_ = ctx.names.intern("add");
         n_From_ = ctx.names.intern("From");
+        n_Error_ = ctx.names.intern("Error");
+        n_context_ = ctx.names.intern("context");
         n_ok_ = ctx.names.intern("ok");
         n_err_ = ctx.names.intern("err");
     }
@@ -308,6 +310,8 @@ private:
                             n == n_JavaHash_)) {
             if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
         }
+        // `Error` isn't reserved: a module's own, or one it imports, comes first (CLX-95).
+        if (core_scope_ && n == n_Error_) return error_item_;
         return nullptr;
     }
 
@@ -321,7 +325,14 @@ private:
         hasher_type_ = h->declared;
         prog_.hasher = hasher_type_;
         from_iface_ = core_scope_->items.at(n_From_);
+        error_item_ = core_scope_->items.at(n_Error_);
+        error_from_fn_ = core_scope_->items.at(ctx_.names.intern("error_from"));
+        error_context_fn_ = core_scope_->items.at(ctx_.names.intern("error_context"));
+        error_add_fn_ = core_scope_->items.at(ctx_.names.intern("error_add_context"));
     }
+
+    // `std.core`'s `Error` as a type, the error any error converts into (CLX-95).
+    Type* error_type() const { return error_item_ ? error_item_->declared : nullptr; }
 
     // Which derived property an interface is, or -1.
     int prop_of(const Item* iface) const {
@@ -3248,7 +3259,16 @@ private:
             }
             return;
         }
-        check(s->value, err_type(rt));
+        Type* want = err_type(rt);
+        s->convert = nullptr;
+        // In a function that fails with `Error`, anything that can be shown fails as one: `fail "no
+        // port {p}"`.
+        if (want == error_type() && !is_bad(want)) {
+            Type* t = check(s->value, s->value->kind == ExprKind::string_lit ? T.string : nullptr);
+            if (!is_bad(t) && t != want) s->convert = to_error(t, s->value->span);
+            return;
+        }
+        check(s->value, want);
     }
 
     void check_break(Stmt* s) {
@@ -3526,7 +3546,11 @@ private:
     // D91: a result is handled where the call is, so an error is never stored, passed on or
     // dropped without the code saying what happens to it.
     Type* result_value(Expr* e) {
-        std::string what = e->kind == ExprKind::call && e->item ? q(text(e->item->name)) : std::string("this call");
+        // `f().context(...)` is `f`'s result, with its error made an `Error`.
+        const Expr* named = e->kind == ExprKind::call && e->call == CallKind::context ? e->callee->lhs : e;
+        std::string what = named->kind == ExprKind::call && named->call != CallKind::context && named->item
+                               ? q(text(named->item->name))
+                               : std::string("this call");
         error(e->span, what + " can fail, so handle its error here: pass it up with `try`, match `ok` and `err` with "
                               "`match`, or unwrap it with `!`");
         return T.error;
@@ -3562,6 +3586,17 @@ private:
         Type* to = err_type(rt);
         if (from != to && !is_bad(from) && !is_bad(to)) {
             e->item = error_conversion(from, to, e->span);
+            // Any error that can be shown becomes an `Error` without a `From` (CLX-95).
+            if (!e->item && to == error_type()) {
+                e->item = to_error(from, e->span);
+                return ok_type(t);
+            }
+            if (!e->item && from == error_type()) {
+                error(e->span, "`try` passes the error up, but this call fails with an `Error`, which holds only an error's text, "
+                               "and " + q(text(fn_->name)) + " fails with " + a_type(to) + "; declare `! Error` on " +
+                               q(text(fn_->name)) + " too");
+                return ok_type(t);
+            }
             if (!e->item) {
                 error(e->span, "`try` passes the error up, but this call fails with " + a_type(from) + " and " +
                                    q(text(fn_->name)) + " fails with " + a_type(to) + "; to convert one to the other, implement " +
@@ -6358,7 +6393,10 @@ private:
                     return static_call(e, t, expected);
                 }
             }
-            Type* recv = check(callee->lhs, nullptr);
+            // `f().context(text)` takes the result of a call that can fail (CLX-95).
+            bool context = callee->member == n_context_ && error_item_ && callee->type_args.empty() && !e->only_interface;
+            Type* recv = context ? handled(callee->lhs) : check(callee->lhs, nullptr);
+            if (context && recv->is_result) return context_call(e, recv);
             if (is_bad(recv)) {
                 for (Arg& a : e->args) check(a.value, nullptr);
                 return T.error;
@@ -6854,6 +6892,47 @@ private:
             }
         }
         return f->body ? instance_fn(f, args, site) : nullptr;
+    }
+
+    // What makes an `Error` of an error of type `from`, its text, where `try` or `fail` passes it to
+    // a function that fails with `Error` (CLX-95). Null, with the reason, if it can't be shown.
+    Item* to_error(Type* from, Span site) {
+        if (!printable(from)) {
+            error(site, "this error is " + a_type(from) + ", which can't become an `Error`, since `Error` holds an error's " +
+                            "text and " + name_of(from) + " can't be shown in a string" + lacking(from, p_display));
+            return nullptr;
+        }
+        if (from->open) return error_from_fn_;
+        return instance_fn(error_from_fn_, {from}, site);
+    }
+
+    // `f().context(text)`: `f`'s result with its error made an `Error`, and `text`, what was being
+    // done, added to it (CLX-95). `text` is worked out only if `f` fails.
+    Type* context_call(Expr* e, Type* recv) {
+        e->call = CallKind::context;
+        Type* et = error_type();
+        if (e->args.size() != 1 || e->args[0].name) {
+            error(e->span, "`.context` takes one argument, the text that says what was being done, as in "
+                           "`try read_text(path).context(\"reading {path}\")`");
+            for (Arg& a : e->args) check(a.value, nullptr);
+            return T.error;
+        }
+        Type* text_t = check(e->args[0].value, T.string);
+        Type* from = err_type(recv);
+        e->ordered_args = ctx_.arena.copy(std::vector<Expr*>{e->callee->lhs, e->args[0].value});
+        if (is_bad(from) || is_bad(text_t)) return T.error;
+        if (from == et) {
+            e->item = error_add_fn_;
+        } else if (!printable(from)) {
+            error(e->callee->lhs->span, "this call fails with " + a_type(from) + ", which can't become an `Error`, since `Error` " +
+                                            "holds an error's text and " + name_of(from) + " can't be shown in a string" +
+                                            lacking(from, p_display));
+            return T.error;
+        } else {
+            e->item = from->open ? error_context_fn_ : instance_fn(error_context_fn_, {from}, e->span);
+            if (!e->item) return T.error;
+        }
+        return result_of(ok_type(recv), et);
     }
 
     // The function `try` converts an error with: `to`'s `from`, through `From<from>` (D103). In
@@ -8998,8 +9077,13 @@ private:
     Type* hasher_type_ = nullptr;
     bool hand_ready_ = false;  // every impl is known
     std::map<std::pair<const Type*, int>, Item*> hand_;
-    Name n_Hasher_, n_add_, n_From_;
+    Name n_Hasher_, n_add_, n_From_, n_Error_, n_context_;
     Item* from_iface_ = nullptr;
+    // CLX-95: `std.core`'s `Error`, and the functions that make one from another error.
+    Item* error_item_ = nullptr;
+    Item* error_from_fn_ = nullptr;
+    Item* error_context_fn_ = nullptr;
+    Item* error_add_fn_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     const Expr* place_lhs_ = nullptr;  // the base of the field or index being checked
     int mut_loops_ = 0;                // `for ... in mut` loops around the code being checked
