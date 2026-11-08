@@ -192,6 +192,7 @@ fn main() ! Error {
 | `csv.reader(f)`, `csv.DictReader(f)`, `csv.writer(f)` | `parse`, `parse_records` and `format` from [`std.csv`](../std/csv.md), or `Reader` for a row at a time |
 | `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |
 | `html.escape(t)`, `html.unescape(t)` | `escape(t)` and `unescape(t)` from [`std.html`](../std/html.md) |
+| `textwrap.fill(t, 70)`, `textwrap.dedent(t)`, `TextWrapper(width=40, ...)` | `fill(t, 70)`, `dedent(t)` and `Wrapper { width: 40, ... }` from [`std.textwrap`](../std/textwrap.md) |
 | `unicodedata.normalize("NFC", t)`, `unicodedata.is_normalized` | `normalize(t, Form.NFC)` and `is_normalized` from [`std.unicode`](../std/unicode.md) |
 | `sqlite3.connect(p)`, `execute`, `executemany`, `fetchall` | `Database.open(p)`, then `execute`, `execute_many` and `query` from [`std.sqlite`](../std/sqlite.md), with SQLite built in and each statement its own transaction unless it's between `begin` and `commit` |
 | `urllib.parse.quote`, `urlsplit`, `urljoin` | `encode`, `Url.parse`, `url.join` from [`std.url`](../std/url.md) |

@@ -1,0 +1,691 @@
+/// Text wrapped and filled to a width, shortened, dedented and indented, as Python's `textwrap`
+/// does it, with its defaults for breaking on hyphens and breaking long words.
+module std.textwrap
+
+import std.text.ucd.{ALNUM, ALNUM_LEN, DIGIT, DIGIT_LEN}
+
+/// How `wrap`, `fill` and `shorten` break text into lines: Python's `TextWrapper`, with its
+/// fields and defaults. Widths count runes, as Python counts characters.
+pub struct Wrapper {
+    /// The most runes on a line, its indent too, unless a word that long can't be broken.
+    pub width: usize = 70
+    /// What the first line starts with.
+    pub initial_indent: String = ""
+    /// What every line after the first starts with.
+    pub subsequent_indent: String = ""
+    /// Whether tabs become spaces first, up to the next multiple of `tabsize` on their line.
+    pub expand_tabs: bool = true
+    pub tabsize: usize = 8
+    /// Whether each tab, newline, vertical tab, form feed and carriage return left becomes a space.
+    pub replace_whitespace: bool = true
+    /// Whether a sentence's end, a lowercase letter, then `.`, `!` or `?`, and a quote if there's
+    /// one, gets two spaces after it.
+    pub fix_sentence_endings: bool = false
+    /// Whether a word longer than a line is broken; otherwise it's a line of its own, too long.
+    pub break_long_words: bool = true
+    /// Whether white space at the start and end of each line is dropped.
+    pub drop_whitespace: bool = true
+    /// Whether a line can end after a hyphen between letters, as in `full-time`.
+    pub break_on_hyphens: bool = true
+    /// The most lines; the last one shown ends with `placeholder`.
+    pub max_lines: usize? = none
+    pub placeholder: String = " [...]"
+}
+
+/// `text` as lines of at most `width` runes, broken at white space and after hyphens, as Python's
+/// `textwrap.wrap(text, width)` gives them.
+@track_caller
+pub fn wrap(text: String, width: usize = 70) -> List<String> {
+    let w = Wrapper { width: width }
+    return w.wrap(text)
+}
+
+/// `wrap`'s lines joined with `\n`, as Python's `textwrap.fill(text, width)` gives them.
+@track_caller
+pub fn fill(text: String, width: usize = 70) -> String {
+    let w = Wrapper { width: width }
+    return w.fill(text)
+}
+
+/// `text` with its white space collapsed to single spaces, and if that's longer than `width`,
+/// the words that fit and then `placeholder`, as Python's `textwrap.shorten(text, width)` gives
+/// it.
+@track_caller
+pub fn shorten(text: String, width: usize, placeholder: String = " [...]") -> String {
+    let w = Wrapper { width: width, placeholder: placeholder.copy() }
+    return w.shorten(text)
+}
+
+impl Wrapper {
+    /// `text` as lines, as Python's `TextWrapper.wrap` gives them. It panics for a `width` of 0,
+    /// and for `max_lines` with a `placeholder` too long for a line.
+    @track_caller
+    pub fn wrap(self, text: String) -> List<String> {
+        let t = munge(self, text)
+        var at = List<usize>()
+        var cs = List<u32>()
+        decode(t, mut at, mut cs)
+        var chunks = if self.break_on_hyphens { split_words(cs) } else { split_spaces(cs) }
+        if self.fix_sentence_endings {
+            fix_endings(cs, mut chunks)
+        }
+        return wrap_chunks(self, t, at, cs, mut chunks)
+    }
+
+    /// `wrap`'s lines joined with `\n`, as `TextWrapper.fill` gives them.
+    @track_caller
+    pub fn fill(self, text: String) -> String {
+        return self.wrap(text).join("\n")
+    }
+
+    /// `text` with its white space collapsed, on one line, as `shorten` gives it with this
+    /// wrapper's settings and `max_lines` of 1.
+    @track_caller
+    pub fn shorten(self, text: String) -> String {
+        var w = self.copy()
+        w.max_lines = some(1)
+        return w.fill(collapse(text))
+    }
+}
+
+/// `text` with the white space every line starts with taken off each, as Python's
+/// `textwrap.dedent` does it: lines of white space only don't count, and become empty. Tabs and
+/// spaces are different, so `"  a"` and `"\ta"` start with nothing in common.
+pub fn dedent(text: String) -> String {
+    let lines = text.split("\n")
+    // The longest start of spaces and tabs the lines that aren't blank have in common: that
+    // much of the first such line.
+    var first_line: usize? = none
+    var margin: usize = 0
+    for i in 0..lines.len() {
+        if lines[i].is_empty() or is_blank(lines[i]) {
+            continue
+        }
+        let n = lead_len(lines[i])
+        if let f = first_line {
+            var m: usize = 0
+            while m < margin and m < n and lines[f].byte_at(m) == lines[i].byte_at(m) {
+                m += 1
+            }
+            margin = m
+        } else {
+            first_line = some(i)
+            margin = n
+        }
+    }
+    var out = String()
+    out.reserve(text.len())
+    var first = true
+    for l in lines {
+        if not first {
+            out.push('\n')
+        }
+        first = false
+        if not is_blank(l) {
+            out.push_str(l[margin.min(l.len())..])
+        }
+    }
+    return out
+}
+
+// The spaces and tabs `l` starts with.
+fn lead_len(l: String) -> usize {
+    var n: usize = 0
+    while n < l.len() and (l.byte_at(n) == 32 or l.byte_at(n) == 9) {
+        n += 1
+    }
+    return n
+}
+
+/// `text` with `prefix` before each line that isn't white space only, as Python's
+/// `textwrap.indent(text, prefix)` gives it. Lines end where Python's `splitlines` ends them, and
+/// keep their ends.
+pub fn indent(text: String, prefix: String) -> String {
+    return indent_where(text, prefix, |line| not is_blank(line))
+}
+
+/// `text` with `prefix` before each line `keep` is true for, given the line with its end, as
+/// Python's `textwrap.indent(text, prefix, predicate)` gives it: `|_| true` indents every line.
+pub fn indent_where(text: String, prefix: String, keep: Fn(String) -> bool) -> String {
+    var out = String()
+    out.reserve(text.len() + prefix.len() * 8)
+    var start: usize = 0
+    var i: usize = 0
+    let n = text.len()
+    while start < n {
+        // The end of the line from `start`, past its line break.
+        i = start
+        var end = n
+        while i < n {
+            let b = text.byte_at(i)
+            // Most bytes can't start a line break: printable ASCII, and every lead byte but two.
+            if (b > 0x1E and b < 0x80) or (b >= 0x80 and b != 0xC2 and b != 0xE2) {
+                i += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+                continue
+            }
+            let k = line_break(text, i)
+            if k > 0 {
+                end = i + k
+                break
+            }
+            i += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+        }
+        let line = text[start..end]
+        if keep(line) {
+            out.push_str(prefix)
+        }
+        out.push_str(line)
+        start = end
+    }
+    return out
+}
+
+// The bytes of the line break at byte `i` of `text`, as Python's `splitlines` breaks lines: `\n`,
+// `\r`, `\r\n`, `\v`, `\f`, U+001C to U+001E, U+0085, U+2028 and U+2029; or 0 for none.
+fn line_break(text: String, i: usize) -> usize {
+    let b = text.byte_at(i)
+    if b == 13 {
+        return if i + 1 < text.len() and text.byte_at(i + 1) == 10 { 2 } else { 1 }
+    }
+    if b == 10 or b == 11 or b == 12 or b == 0x1C or b == 0x1D or b == 0x1E {
+        return 1
+    }
+    if b == 0xC2 and i + 1 < text.len() and text.byte_at(i + 1) == 0x85 {
+        return 2
+    }
+    if b == 0xE2 and i + 2 < text.len() and text.byte_at(i + 1) == 0x80 and (text.byte_at(i + 2) == 0xA8 or text.byte_at(i + 2) == 0xA9) {
+        return 3
+    }
+    return 0
+}
+
+// --- characters ----------------------------------------------------------------------------------
+
+// Whether `c` is white space as Python's `str.isspace` has it.
+fn is_space(c: u32) -> bool {
+    if c < 0x80 {
+        return (c >= 9 and c <= 13) or (c >= 0x1C and c <= 0x20)
+    }
+    return c == 0x85 or c == 0xA0 or c == 0x1680 or (c >= 0x2000 and c <= 0x200A) or c == 0x2028 or c == 0x2029 or c == 0x202F or c == 0x205F or c == 0x3000
+}
+
+// Whether `s` is white space only, as `s.strip() == ""` is in Python: the empty string is.
+fn is_blank(s: String) -> bool {
+    for r in s.runes() {
+        if not is_space(u32(r)) {
+            return false
+        }
+    }
+    return true
+}
+
+// Python's `\w`: `str.isalnum`, or `_`.
+fn is_word(c: u32) -> bool {
+    if c < 0x80 {
+        return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95
+    }
+    var lo: usize = 0
+    var hi = ALNUM_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if c > ALNUM[2 * mid + 1] {
+            lo = mid + 1
+        } else if c < ALNUM[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// Python's `\d`: the decimal digits.
+fn is_decimal(c: u32) -> bool {
+    if c < 0x80 {
+        return c >= 48 and c <= 57
+    }
+    var lo: usize = 0
+    var hi = DIGIT_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if c > DIGIT[2 * mid + 1] {
+            lo = mid + 1
+        } else if c < DIGIT[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// A letter as textwrap's pattern has it, `[^\d\W]`: a word rune that isn't a decimal digit.
+fn is_letter(c: u32) -> bool {
+    return is_word(c) and not is_decimal(c)
+}
+
+// What can come before an em dash, `[\w!"'&.,?]`.
+fn is_word_punct(c: u32) -> bool {
+    return is_word(c) or c == 33 or c == 34 or c == 39 or c == 38 or c == 46 or c == 44 or c == 63
+}
+
+// White space as textwrap breaks text at it: ASCII's six, and no other.
+fn is_break(c: u32) -> bool {
+    return c == 32 or (c >= 9 and c <= 13)
+}
+
+// --- splitting -----------------------------------------------------------------------------------
+
+// A piece of text a line is made of: runes `from` up to `to`, and `extra` spaces after them, which
+// a sentence's end gets.
+struct Chunk {
+    from: usize
+    to: usize
+    extra: usize = 0
+}
+
+fn chunk_len(c: Chunk) -> usize {
+    return c.to - c.from + c.extra
+}
+
+// `text` with tabs expanded and white space made spaces, as the wrapper says.
+fn munge(w: Wrapper, text: String) -> String {
+    if not w.expand_tabs and not w.replace_whitespace {
+        return text.copy()
+    }
+    var out = String()
+    out.reserve(text.len())
+    var column: usize = 0
+    for r in text.runes() {
+        let c = u32(r)
+        if c == 9 and w.expand_tabs {
+            if w.tabsize > 0 {
+                let n = w.tabsize - column % w.tabsize
+                for _ in 0..n {
+                    out.push(' ')
+                }
+                column += n
+            }
+            continue
+        }
+        if c == 10 or c == 13 {
+            column = 0
+        } else {
+            column += 1
+        }
+        if w.replace_whitespace and c >= 9 and c <= 13 {
+            out.push(' ')
+        } else {
+            out.push(r)
+        }
+    }
+    return out
+}
+
+// `t`'s runes into `cs`, and the byte where each starts into `at`, with the end after the last.
+fn decode(t: String, at: mut List<usize>, cs: mut List<u32>) {
+    at.reserve(t.len() + 1)
+    cs.reserve(t.len())
+    var i: usize = 0
+    for r in t.runes() {
+        at.push(i)
+        let c = u32(r)
+        cs.push(c)
+        i += if c < 0x80 { 1 } else if c < 0x800 { 2 } else if c < 0x10000 { 3 } else { 4 }
+    }
+    at.push(i)
+}
+
+// The chunks textwrap's pattern splits text into: runs of white space, em dashes between words,
+// and words, each ending at white space, after a hyphen between letters, or before an em dash.
+fn split_words(cs: List<u32>) -> List<Chunk> {
+    let n = cs.len()
+    var out = List<Chunk>()
+    var p: usize = 0
+    while p < n {
+        if is_break(cs[p]) {
+            var q = p + 1
+            while q < n and is_break(cs[q]) {
+                q += 1
+            }
+            out.push(Chunk { from: p, to: q })
+            p = q
+            continue
+        }
+        // An em dash between words: two hyphens or more, after word punctuation and before a word.
+        if p > 0 and cs[p] == 45 and is_word_punct(cs[p - 1]) {
+            var q = p
+            while q < n and cs[q] == 45 {
+                q += 1
+            }
+            if q - p >= 2 and q < n and is_word(cs[q]) {
+                out.push(Chunk { from: p, to: q })
+                p = q
+                continue
+            }
+        }
+        // A word, as short as it can be: up to white space or the end, through a hyphen with two
+        // letters before it, or with a letter and a hyphen and a letter before it, and letters
+        // after it; or up to an em dash after word punctuation.
+        var q = p + 1
+        var end = n
+        loop {
+            if q < n and cs[q] == 45 and hyphen_breaks(cs, q) {
+                end = q + 1
+                break
+            }
+            if q >= n or is_break(cs[q]) {
+                end = q
+                break
+            }
+            if cs[q] == 45 and is_word_punct(cs[q - 1]) and em_dash_at(cs, q) {
+                end = q
+                break
+            }
+            q += 1
+        }
+        out.push(Chunk { from: p, to: end })
+        p = end
+    }
+    return out
+}
+
+// Whether a word can end after the hyphen at `q`: `(?<=L{2}-)` or `(?<=L-L-)`, then `(?=L-?L)`.
+fn hyphen_breaks(cs: List<u32>, q: usize) -> bool {
+    let n = cs.len()
+    let before = (q >= 2 and is_letter(cs[q - 2]) and is_letter(cs[q - 1])) or
+        (q >= 3 and is_letter(cs[q - 3]) and cs[q - 2] == 45 and is_letter(cs[q - 1]))
+    if not before or q + 1 >= n or not is_letter(cs[q + 1]) {
+        return false
+    }
+    if q + 3 < n and cs[q + 2] == 45 and is_letter(cs[q + 3]) {
+        return true
+    }
+    return q + 2 < n and is_letter(cs[q + 2])
+}
+
+// Whether two hyphens or more, then a word rune, are at `q`.
+fn em_dash_at(cs: List<u32>, q: usize) -> bool {
+    var k = q
+    while k < cs.len() and cs[k] == 45 {
+        k += 1
+    }
+    return k - q >= 2 and k < cs.len() and is_word(cs[k])
+}
+
+// The chunks text splits into when it doesn't break on hyphens: runs of white space, and of the
+// rest.
+fn split_spaces(cs: List<u32>) -> List<Chunk> {
+    let n = cs.len()
+    var out = List<Chunk>()
+    var p: usize = 0
+    while p < n {
+        let space = is_break(cs[p])
+        var q = p + 1
+        while q < n and is_break(cs[q]) == space {
+            q += 1
+        }
+        out.push(Chunk { from: p, to: q })
+        p = q
+    }
+    return out
+}
+
+// Two spaces after each sentence's end, a chunk ending with a lowercase letter, then `.`, `!` or
+// `?`, then a quote if there's one, that one space follows.
+fn fix_endings(cs: List<u32>, chunks: mut List<Chunk>) {
+    var i: usize = 0
+    while i + 1 < chunks.len() {
+        let next = chunks[i + 1]
+        if next.extra == 0 and next.to == next.from + 1 and cs[next.from] == 32 and ends_sentence(cs, chunks[i]) {
+            chunks[i + 1].extra = 1
+            i += 2
+        } else {
+            i += 1
+        }
+    }
+}
+
+fn ends_sentence(cs: List<u32>, c: Chunk) -> bool {
+    if c.extra > 0 {
+        return false
+    }
+    var e = c.to
+    if e > c.from and (cs[e - 1] == 34 or cs[e - 1] == 39) {
+        e -= 1
+        if e - c.from >= 2 and is_end_mark(cs[e - 1]) and cs[e - 2] >= 97 and cs[e - 2] <= 122 {
+            return true
+        }
+        e += 1
+    }
+    return e - c.from >= 2 and is_end_mark(cs[e - 1]) and cs[e - 2] >= 97 and cs[e - 2] <= 122
+}
+
+fn is_end_mark(c: u32) -> bool {
+    return c == 46 or c == 33 or c == 63
+}
+
+// Whether chunk `c` is white space only.
+fn chunk_blank(cs: List<u32>, c: Chunk) -> bool {
+    for i in c.from..c.to {
+        if not is_space(cs[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn utf8_len(c: u32) -> usize {
+    return if c < 0x80 { 1 } else if c < 0x800 { 2 } else if c < 0x10000 { 3 } else { 4 }
+}
+
+fn rune_count(s: String) -> usize {
+    var n: usize = 0
+    for i in 0..s.len() {
+        if (s.byte_at(i) & 0xC0) != 0x80 {
+            n += 1
+        }
+    }
+    return n
+}
+
+// `s` without white space at its start, or at its end.
+fn strip_start(s: String) -> String {
+    var i: usize = 0
+    for r in s.runes() {
+        if not is_space(u32(r)) {
+            break
+        }
+        i += utf8_len(u32(r))
+    }
+    return s[i..].copy()
+}
+
+fn strip_end(s: String) -> String {
+    var end: usize = 0
+    var i: usize = 0
+    for r in s.runes() {
+        i += utf8_len(u32(r))
+        if not is_space(u32(r)) {
+            end = i
+        }
+    }
+    return s[..end].copy()
+}
+
+// `text`'s words, the runs between white space, joined with single spaces.
+fn collapse(text: String) -> String {
+    var out = String()
+    out.reserve(text.len())
+    var gap = false
+    for r in text.runes() {
+        if is_space(u32(r)) {
+            gap = not out.is_empty()
+            continue
+        }
+        if gap {
+            out.push(' ')
+            gap = false
+        }
+        out.push(r)
+    }
+    return out
+}
+
+// --- wrapping ------------------------------------------------------------------------------------
+
+fn add_chunk(out: mut String, t: String, at: List<usize>, c: Chunk) {
+    out.push_str(t[at[c.from]..at[c.to]])
+    for _ in 0..c.extra {
+        out.push(' ')
+    }
+}
+
+fn line_text(lead: String, t: String, at: List<usize>, line: List<Chunk>) -> String {
+    var out = lead.copy()
+    for c in line {
+        add_chunk(mut out, t, at, c)
+    }
+    return out
+}
+
+// The chunks as lines, as Python's `TextWrapper._wrap_chunks` makes them.
+@track_caller
+fn wrap_chunks(w: Wrapper, t: String, at: List<usize>, cs: List<u32>, chunks: mut List<Chunk>) -> List<String> {
+    var lines = List<String>()
+    if w.width == 0 {
+        panic("invalid width 0 (must be > 0)")
+    }
+    let placeholder_len = rune_count(w.placeholder)
+    if let most = w.max_lines {
+        let first = if most > 1 { rune_count(w.subsequent_indent) } else { rune_count(w.initial_indent) }
+        if first + rune_count(strip_start(w.placeholder)) > w.width {
+            panic("placeholder too large for max width")
+        }
+    }
+    let n = chunks.len()
+    var k: usize = 0
+    while k < n {
+        var line = List<Chunk>()
+        var used: i64 = 0
+        let lead = if lines.is_empty() { w.initial_indent.copy() } else { w.subsequent_indent.copy() }
+        let width = i64.wrap(w.width) - i64.wrap(rune_count(lead))
+        // White space at the start of a line after the first is dropped.
+        if w.drop_whitespace and chunk_blank(cs, chunks[k]) and not lines.is_empty() {
+            k += 1
+        }
+        while k < n {
+            let l = i64.wrap(chunk_len(chunks[k]))
+            if used + l > width {
+                break
+            }
+            line.push(chunks[k])
+            used += l
+            k += 1
+        }
+        // A word too long for a line of its own.
+        if k < n and i64.wrap(chunk_len(chunks[k])) > width {
+            if chunk_len(chunks[k]) == 0 {
+                // What's left of a word whose last rune went on the line before, when the indent
+                // is wider than the line. Python's textwrap splits it again forever.
+                k += 1
+                continue
+            }
+            let left: i64 = if width < 1 { 1 } else { width - used }
+            if w.break_long_words and left > 0 {
+                let c = chunks[k]
+                var end = usize.wrap(left)
+                if w.break_on_hyphens and chunk_len(c) > end {
+                    // After the last hyphen that fits, if there's more than hyphens before it.
+                    var h = end.min(c.to - c.from)
+                    var found = false
+                    while h > 0 {
+                        h -= 1
+                        if cs[c.from + h] == 45 {
+                            found = true
+                            break
+                        }
+                    }
+                    if found and h > 0 {
+                        var other = false
+                        for i in c.from..c.from + h {
+                            if cs[i] != 45 {
+                                other = true
+                                break
+                            }
+                        }
+                        if other {
+                            end = h + 1
+                        }
+                    }
+                }
+                line.push(take_front(mut chunks[k], end))
+            } else if line.is_empty() {
+                line.push(chunks[k])
+                k += 1
+            }
+            used = 0
+            for c in line {
+                used += i64.wrap(chunk_len(c))
+            }
+        }
+        if w.drop_whitespace and not line.is_empty() and chunk_blank(cs, line[line.len() - 1]) {
+            used -= i64.wrap(chunk_len(line[line.len() - 1]))
+            _ = line.pop()
+        }
+        if line.is_empty() {
+            continue
+        }
+        let fits = if let most = w.max_lines {
+            lines.len() + 1 < most or ((k == n or (w.drop_whitespace and k + 1 == n and chunk_blank(cs, chunks[k]))) and used <= width)
+        } else {
+            true
+        }
+        if fits {
+            lines.push(line_text(lead, t, at, line))
+            continue
+        }
+        // The last line there's room for: as many chunks as leave room for the placeholder.
+        while not line.is_empty() {
+            let last = line[line.len() - 1]
+            if not chunk_blank(cs, last) and used + i64.wrap(placeholder_len) <= width {
+                var text = line_text(lead, t, at, line)
+                text.push_str(w.placeholder)
+                lines.push(text)
+                return lines
+            }
+            used -= i64.wrap(chunk_len(last))
+            _ = line.pop()
+        }
+        if not lines.is_empty() {
+            let prev = strip_end(lines[lines.len() - 1])
+            if rune_count(prev) + placeholder_len <= w.width {
+                var text = prev
+                text.push_str(w.placeholder)
+                let last = lines.len() - 1
+                lines[last] = text
+                return lines
+            }
+        }
+        var text = lead.copy()
+        text.push_str(strip_start(w.placeholder))
+        lines.push(text)
+        return lines
+    }
+    return lines
+}
+
+// The first `n` runes of chunk `c`, which keeps the rest.
+fn take_front(c: mut Chunk, n: usize) -> Chunk {
+    let runes = c.to - c.from
+    if n <= runes {
+        let front = Chunk { from: c.from, to: c.from + n }
+        c.from += n
+        return front
+    }
+    // Into the extra spaces after a sentence's end.
+    let front = Chunk { from: c.from, to: c.to, extra: n - runes }
+    c.from = c.to
+    c.extra -= n - runes
+    return front
+}

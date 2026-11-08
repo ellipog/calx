@@ -1,0 +1,8 @@
+// A width of 0 is a mistake in the program, so std.textwrap panics on it, where Python's textwrap
+// raises ValueError.
+
+import std.textwrap.{wrap}
+
+fn main() {
+    _ = wrap(String("text"), 0)    // panic: invalid width 0 (must be > 0)
+}

@@ -1,4 +1,4 @@
-// Writes std/text/ucd.calx, the Unicode tables std.regex reads, from the Unicode Character
+// Writes std/text/ucd.calx, the Unicode tables std.regex and std.textwrap read, from the Unicode Character
 // Database's own files, which it downloads from unicode.org into build/ucd/<version> the first
 // time, and reads from there after.
 //
@@ -11,6 +11,8 @@
 //   all marks, which WORD has anyway, except the circled and squared Latin letters.
 // - DIGIT, `\d`: the decimal digits, Nd.
 // - SPACE, `\s`: White_Space.
+// - ALNUM, Python's `str.isalnum`, whose runes and `_` are Python's `\w`, for std.textwrap: the
+//   letters, and each rune with a numeric value in UnicodeData.txt.
 // - FOLD, simple case folding, as orbits: each rune that folds with others, and the next one in its
 //   orbit, the smallest past it or else the smallest of all, as Go's unicode.SimpleFold gives. A
 //   rune folds with its full case folding when that's one rune, CaseFolding.txt's C entries, and
@@ -234,6 +236,7 @@ fn main() {
     for c in 0u32..(MAX + 1) {
         lower.push(c)
     }
+    var numeric: List<bool> = [false; size]
     var first: u32? = none
     for r in rows(ucd_file(cache.copy(), String("UnicodeData.txt"))) {
         let c = hex(r[0].copy())
@@ -244,6 +247,7 @@ fn main() {
         let lo = if r[1].ends_with(", Last>") { first ?? c } else { c }
         for k in lo..(c + 1) {
             category[usize(k)] = r[2].copy()
+            numeric[usize(k)] = not r[6].is_empty() or not r[7].is_empty() or not r[8].is_empty()
         }
         if not r[13].is_empty() {
             lower[usize(c)] = hex(r[13].copy())
@@ -280,10 +284,12 @@ fn main() {
 
     var is_word: List<bool> = [false; size]
     var is_digit: List<bool> = [false; size]
+    var is_alnum: List<bool> = [false; size]
     for c in 0..size {
         let cat = category[c].copy()
         is_word[c] = cat.starts_with("L") or cat.starts_with("M") or cat == "Nd" or cat == "Nl" or cat == "Pc"
         is_digit[c] = cat == "Nd"
+        is_alnum[c] = cat.starts_with("L") or numeric[c]
     }
     var word_spans = ranges(is_word)
     for s in property(props, "Other_Alphabetic") {
@@ -297,6 +303,7 @@ fn main() {
     let word = merge(word_spans)
     let digit = ranges(is_digit)
     let space = merge(property(props, "White_Space"))
+    let alnum = ranges(is_alnum)
 
     // The orbits: each rune joined with its folding, or else its lowercase, when that's one rune.
     var parent: List<u32> = []
@@ -335,17 +342,19 @@ fn main() {
 
     let parts: List<String> = [
         String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
-        "/// match, and simple case folding. Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
+        String("/// match, and simple case folding; and for std.textwrap, Python's `str.isalnum`."),
+        "/// Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
         String("module std.text.ucd"),
         String(),
         notice(),
         table("WORD", "`\\w`'s runes, as ranges: each first rune, then the last.", flat(word)),
         table("DIGIT", "`\\d`'s runes, the decimal digits, as ranges.", flat(digit)),
         table("SPACE", "`\\s`'s runes, White_Space, as ranges.", flat(space)),
+        table("ALNUM", "The runes Python's `str.isalnum` is true for, the letters and those with a numeric value, as ranges.", flat(alnum)),
         table("FOLD_FROM", "Each rune that case folding puts with others, in order.", pairs.map(|p| p.0)),
         table("FOLD_NEXT", "The next rune in `FOLD_FROM[i]`'s orbit: the smallest past it, or else the smallest.", pairs.map(|p| p.1)),
     ]
     let out = "{root}/std/text/ucd.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
-    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {pairs.len()} folds")
+    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds")
 }

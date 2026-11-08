@@ -1,0 +1,57 @@
+// std.textwrap wraps, fills, shortens, dedents and indents as Python 3.14's textwrap does
+// (CLX-164): breaking at white space and after hyphens between letters, em dashes, long words
+// broken or not, white space kept or dropped, indents, tabs, sentence ends, a most lines with its
+// placeholder, Unicode, and the case Python never finishes. Each line of output ends with `|`.
+import std.textwrap.{Wrapper, dedent, fill, indent, indent_where, shorten, wrap}
+
+fn show(name: str, lines: List<String>) {
+    if lines.is_empty() {
+        println("{name}: no lines")
+        return
+    }
+    var out = String()
+    for l in lines {
+        out.push_str(l.replace("\t", "\\t").replace("\n", "\\n"))
+        out.push('|')
+    }
+    println("{name}: {out}")
+}
+
+fn main() {
+    let s = String("The quick brown fox jumps over the lazy dog. A state-of-the-art test -- of wrapping.")
+    show("defaults", wrap(s.copy(), 20))    // out: defaults: The quick brown fox|jumps over the lazy|dog. A state-of-the-|art test -- of|wrapping.|
+    let long = String("supercalifragilisticexpialidocious is long")
+    show("long word", wrap(long.copy(), 10))    // out: long word: supercalif|ragilistic|expialidoc|ious is|long|
+    show("no break", Wrapper { width: 10, break_long_words: false }.wrap(long.copy()))    // out: no break: supercalifragilisticexpialidocious|is long|
+    let hy = String("a well-known long-term self-made x-y")
+    show("hyphens", wrap(hy.copy(), 12))    // out: hyphens: a well-known|long-term|self-made|x-y|
+    show("no hyphens", Wrapper { width: 12, break_on_hyphens: false }.wrap(hy.copy()))    // out: no hyphens: a well-known|long-term|self-made|x-y|
+    show("em dash", wrap(String("word--word and so--on? yes--1"), 6))    // out: em dash: word--|word|and so|--on?|yes--1|
+    show("keep space", Wrapper { width: 8, drop_whitespace: false }.wrap(String("  two  spaces  here  ")))    // out: keep space:   two  |spaces  |here  |
+    show("indents", Wrapper { width: 30, initial_indent: "* ", subsequent_indent: "  " }.wrap(s.copy()))
+    // out: indents: * The quick brown fox jumps|  over the lazy dog. A state-|  of-the-art test -- of|  wrapping.|
+    show("tabs", wrap(String("a\tb\tc\nd"), 40))    // out: tabs: a       b       c d|
+    show("tabsize", Wrapper { width: 40, tabsize: 4 }.wrap(String("a\tb\tc")))    // out: tabsize: a   b   c|
+    show("raw tabs", Wrapper { width: 40, expand_tabs: false, replace_whitespace: false }.wrap(String("a\tb\nc")))    // out: raw tabs: a\tb\nc|
+    show("sentences", Wrapper { width: 80, fix_sentence_endings: true }.wrap(String("End here. Next one! And \"quoted.\" Mr. Smith e.g. this.")))
+    // out: sentences: End here.  Next one!  And "quoted."  Mr.  Smith e.g.  this.|
+    show("max lines", Wrapper { width: 20, max_lines: some(2) }.wrap(s.copy()))    // out: max lines: The quick brown fox|jumps over the [...]|
+    show("max lines dots", Wrapper { width: 20, max_lines: some(3), placeholder: "..." }.wrap(s.copy()))    // out: max lines dots: The quick brown fox|jumps over the lazy|dog. A state-of-...|
+    show("unicode", wrap(String("naïve café 日本語 кот-пёс \u{E9}t\u{301}\u{E9}"), 8))    // out: unicode: naïve|café 日本語|кот-пёс|ét́é|
+    show("empty", wrap(String(), 10))    // out: empty: no lines
+    show("spaces", wrap(String("   "), 10))    // out: spaces: no lines
+    // Python's textwrap never returns from this: the indent is wider than the line, and what's
+    // left of a word after its last rune is split off again forever.
+    show("wide indent", Wrapper { width: 2, initial_indent: "    " }.wrap(String("  a")))    // out: wide indent:     a|
+    println(fill(String("one two three four five"), 9).replace("\n", "/"))    // out: one two/three/four five
+
+    println("{shorten(String("Hello  world!"), 12)}|{shorten(String("Hello  world!"), 11)}|{shorten(String("  a \n b \t c  "), 40)}|{shorten(s.copy(), 30, "...")}")
+    // out: Hello world!|Hello [...]|a b c|The quick brown fox jumps...
+
+    // Lines of white space only become empty; tabs and spaces are different.
+    println(dedent(String("    def f():\n        return 1\n  \n    x\n")).replace("\n", "\\n"))    // out: def f():\n    return 1\n\nx\n
+    println(dedent(String("  a\n\tb\n")).replace("\n", "\\n").replace("\t", "\\t"))    // out:   a\n\tb\n
+    println(dedent(String("  \ta\n  \t\tb\n  c\n")).replace("\n", "\\n").replace("\t", "\\t"))    // out: \ta\n\t\tb\nc\n
+    println(indent(String("a\n\n  \nb\r\nc"), String("> ")).replace("\n", "\\n").replace("\r", "\\r"))    // out: > a\n\n  \n> b\r\n> c
+    println(indent_where(String("a\n\nb"), String("> "), |_| true).replace("\n", "\\n"))    // out: > a\n> \n> b
+}

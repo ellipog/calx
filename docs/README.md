@@ -116,6 +116,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 45. [std.sqlite](std/sqlite.md): SQLite databases as Python's `sqlite3` reads and writes them, with SQLite built in: SQL with parameters, rows of typed values, transactions, and prepared statements kept for the next run
 46. [std.unicode](std/unicode.md): text normalized to NFC, NFD, NFKC or NFKD, as Python's `unicodedata.normalize` and `is_normalized` give it, with Unicode 16's tables, and combining classes
 47. [std.toml](std/toml.md): TOML 1.0 config files read as Python's `tomllib` reads them, with the line and column of any mistake, written back byte for byte as tomli-w writes them, and `@toml`, which reads a config straight into a struct
+48. [std.textwrap](std/textwrap.md): text wrapped and filled to a width, shortened, dedented and indented, exactly as Python's `textwrap` does it, with its settings
 
 ### Java compatibility
 
