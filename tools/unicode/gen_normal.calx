@@ -1,0 +1,426 @@
+// Writes std/text/normal.calx, the tables std.unicode normalizes text with, from the Unicode
+// Character Database's own files, which it downloads from unicode.org into build/ucd/<version> the
+// first time, and reads from there after.
+//
+//     calx run tools/unicode/gen_normal.calx
+//
+// The tables are Unicode 16's, as Python 3.14's unicodedata has it. For each rune: its canonical
+// combining class; its full canonical and compatibility decompositions, each applied again to what
+// it gives until nothing decomposes further; and its quick checks, whether it can be in text in
+// each form, from DerivedNormalizationProps.txt. For each block of runes, the forms in which every
+// rune of it passes the quick check, so text in them is passed over a block lookup at a time. Then
+// the pairs that compose: each canonical decomposition of two runes whose rune isn't a
+// Full_Composition_Exclusion. Hangul syllables decompose and compose by arithmetic, so the pairs
+// leave them out.
+import std.env
+import std.fs
+import std.http
+import std.path
+import std.process
+
+const VERSION: str = "16.0.0"
+const MAX: u32 = 0x10FFFF
+// The composition table's size, a power of two about twice the number of pairs.
+const PAIR_SLOTS: usize = 2048
+
+// Hangul syllables, as the Unicode Standard's section 3.12 makes them from jamo.
+const S_BASE: u32 = 0xAC00
+const L_BASE: u32 = 0x1100
+const V_BASE: u32 = 0x1161
+const T_BASE: u32 = 0x11A7
+const T_COUNT: u32 = 28
+const N_COUNT: u32 = 588
+const S_COUNT: u32 = 11172
+
+fn notice() -> String {
+    let text = #"
+    // The tables below are from the Unicode Character Database, under this notice:
+    //
+    // UNICODE LICENSE V3
+    //
+    // COPYRIGHT AND PERMISSION NOTICE
+    //
+    // Copyright (c) 1991-2024 Unicode, Inc.
+    //
+    // NOTICE TO USER: Carefully read the following legal agreement. BY DOWNLOADING, INSTALLING,
+    // COPYING OR OTHERWISE USING DATA FILES, AND/OR SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE
+    // BOUND BY, ALL OF THE TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+    // DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a copy of data files and
+    // any associated documentation (the "Data Files") or software and any associated documentation
+    // (the "Software") to deal in the Data Files or Software without restriction, including without
+    // limitation the rights to use, copy, modify, merge, publish, distribute, and/or sell copies of
+    // the Data Files or Software, and to permit persons to whom the Data Files or Software are
+    // furnished to do so, provided that either (a) this copyright and permission notice appear with
+    // all copies of the Data Files or Software, or (b) this copyright and permission notice appear in
+    // associated Documentation.
+    //
+    // THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    // PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
+    //
+    // IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE BE LIABLE FOR ANY
+    // CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM
+    // LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+    // ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA FILES OR
+    // SOFTWARE.
+    //
+    // Except as contained in this notice, the name of a copyright holder shall not be used in
+    // advertising or otherwise to promote the sale, use or other dealings in these Data Files or
+    // Software without prior written authorization of the copyright holder.
+    "#
+    return "{text}\n"
+}
+
+fn stop(why: String) -> never {
+    eprintln("gen_normal: {why}")
+    process.exit(1)
+}
+
+// A file of the database, downloaded once into `cache`.
+fn ucd_file(cache: String, name: String) -> String {
+    let local = "{cache}/{name}"
+    if not fs.is_file(local.copy()) {
+        let url = "https://www.unicode.org/Public/{VERSION}/ucd/{name}"
+        println("downloading {url}")
+        var r = http.get(url.copy(), [], 60000, 16777216)
+        match r.wait() {
+            ok(resp) => {
+                if resp.status != 200 {
+                    stop("{url} gave status {resp.status}")
+                }
+                fs.make_dir_all(cache)!
+                fs.write(local.copy(), resp.body)!
+            },
+            err(e) => stop("can't download {url}: {e}"),
+        }
+    }
+    return fs.read_text(local)! ?? String()
+}
+
+fn hex(s: String) -> u32 {
+    return u32.parse_radix(s.trim(), 16) ?? stop("{s} isn't hex")
+}
+
+// The fields of each line that isn't a comment, split at `;`, without the comment at its end.
+fn rows(text: String) -> List<List<String>> {
+    var out: List<List<String>> = []
+    for line in text.lines() {
+        let data = (line.split_once("#") ?? (line.copy(), String())).0
+        if data.trim().is_empty() {
+            continue
+        }
+        out.push(data.split(";").map(|f| f.trim()))
+    }
+    return out
+}
+
+fn span(s: String) -> (u32, u32) {
+    if let (lo, hi) = s.split_once("..") {
+        return (hex(lo), hex(hi))
+    }
+    let c = hex(s.copy())
+    return (c, c)
+}
+
+// The quick-check bit for a line of DerivedNormalizationProps.txt, as std/unicode.calx reads them.
+fn qc_bit(prop: String, value: String) -> u8 {
+    if prop == "NFD_QC" and value == "N" {
+        return 1
+    }
+    if prop == "NFKD_QC" and value == "N" {
+        return 2
+    }
+    if prop == "NFC_QC" and value == "N" {
+        return 4
+    }
+    if prop == "NFC_QC" and value == "M" {
+        return 8
+    }
+    if prop == "NFKC_QC" and value == "N" {
+        return 16
+    }
+    if prop == "NFKC_QC" and value == "M" {
+        return 32
+    }
+    return 0
+}
+
+// `c`'s decomposition in `raw`, applied again to each rune it gives until none decomposes, onto
+// `out`. A Hangul syllable, which some compatibility decompositions hold, decomposes by
+// arithmetic, as std.unicode does it.
+fn full(c: u32, raw: Map<u32, List<u32>>, out: mut List<u32>) {
+    if raw.contains(c) {
+        for d in raw[c] {
+            full(d, raw, mut out)
+        }
+        return
+    }
+    if c >= S_BASE and c < S_BASE + S_COUNT {
+        let s = c - S_BASE
+        out.push(L_BASE + s / N_COUNT)
+        out.push(V_BASE + (s % N_COUNT) / T_COUNT)
+        if s % T_COUNT != 0 {
+            out.push(T_BASE + s % T_COUNT)
+        }
+        return
+    }
+    out.push(c)
+}
+
+// Where `seq` is in `pool`, put at its end the first time it's asked for.
+fn place(pool: mut List<u32>, pooled: mut Map<String, usize>, seq: List<u32>) -> usize {
+    if seq.is_empty() {
+        return 0
+    }
+    let key = "{seq}"
+    if let at = pooled.get(key.copy()) {
+        return at
+    }
+    let at = pool.len()
+    for x in seq {
+        pool.push(x)
+    }
+    pooled.insert(key, at)
+    return at
+}
+
+// `index` as two stages: the first gives each block of `block` runes the place of its numbers in
+// the second, where blocks that are the same are kept once.
+fn stages(index: List<u32>, block: usize) -> (List<u32>, List<u32>) {
+    var first: List<u32> = []
+    var second: List<u32> = []
+    var seen = Map<String, u32>()
+    var b: usize = 0
+    while b < index.len() {
+        let part = index[b..b + block]
+        let key = "{part}"
+        if let at = seen.get(key.copy()) {
+            first.push(at)
+        } else {
+            let at = u32.wrap(second.len() / block)
+            for x in part {
+                second.push(x)
+            }
+            seen.insert(key, at)
+            first.push(at)
+        }
+        b += block
+    }
+    return (first, second)
+}
+
+// The pair's slot in the composition table: a multiplicative hash of both runes, its top 11 bits.
+// `pair_slot` in std/unicode.calx is the same.
+fn pair_slot(a: u32, b: u32) -> usize {
+    let h = (a * 0x9E3779B1) ^ (b * 0x85EBCA77)
+    return usize(h >> 21)
+}
+
+fn table(name: str, doc: str, ty: str, values: List<u32>) -> String {
+    var lines: List<String> = ["/// {doc}", "pub const {name}: [{ty}; {values.len()}] = ["]
+    var i: usize = 0
+    while i < values.len() {
+        let end = (i + 16).min(values.len())
+        var parts: List<String> = []
+        for k in i..end {
+            parts.push("{values[k]}")
+        }
+        lines.push("    {parts.join(", ")},")
+        i = end
+    }
+    lines.push("]")
+    return "{lines.join("\n")}\n\n"
+}
+
+fn main() {
+    let here = path.parent_dir(env.script() ?? stop(String("run this with `calx run`"))) ?? String()
+    let root = path.parent_dir(path.parent_dir(here) ?? String()) ?? String()
+    let cache = "{root}/build/ucd/{VERSION}"
+    let size = usize(MAX) + 1
+
+    // Each rune's combining class and its decomposition one step down, from UnicodeData.txt. A
+    // range there, two lines, its first and its last, has class 0 and no decomposition.
+    var ccc: List<u8> = [0; size]
+    var canon_raw = Map<u32, List<u32>>()
+    var compat_raw = Map<u32, List<u32>>()
+    for r in rows(ucd_file(cache.copy(), String("UnicodeData.txt"))) {
+        let c = hex(r[0].copy())
+        ccc[usize(c)] = u8.parse(r[3].copy()) ?? stop("{r[0]} has the class {r[3]}")
+        if r[5].is_empty() {
+            continue
+        }
+        let parts = r[5].split_whitespace()
+        var runes: List<u32> = []
+        for p in parts {
+            if not p.starts_with("<") {
+                runes.push(hex(p.copy()))
+            }
+        }
+        if not parts[0].starts_with("<") {
+            canon_raw.insert(c, runes.copy())
+        }
+        compat_raw.insert(c, runes)
+    }
+
+    // The quick checks, and the runes that never come out of composing.
+    var flags: List<u8> = [0; size]
+    var excluded: List<bool> = [false; size]
+    for r in rows(ucd_file(cache.copy(), String("DerivedNormalizationProps.txt"))) {
+        let s = span(r[0].copy())
+        let bit = if r.len() >= 3 { qc_bit(r[1].copy(), r[2].copy()) } else { 0u8 }
+        let exclusion = r[1] == "Full_Composition_Exclusion"
+        for c in s.0..(s.1 + 1) {
+            flags[usize(c)] |= bit
+            if exclusion {
+                excluded[usize(c)] = true
+            }
+        }
+    }
+
+    // Each rune's record: its class, its quick checks, and where its full decompositions are in
+    // the pool and how long. Runes with the same record share it; record 0 is nothing at all.
+    var pool: List<u32> = [0]
+    var pooled = Map<String, usize>()
+    var record_of = Map<String, u32>()
+    var records: List<List<u32>> = [[0, 0, 0, 0, 0, 0]]
+    var index: List<u32> = [0; size]
+    var longest: usize = 0
+    for c in 0u32..(MAX + 1) {
+        let k = usize(c)
+        if ccc[k] == 0 and flags[k] == 0 and not compat_raw.contains(c) {
+            continue
+        }
+        var cd: List<u32> = []
+        if canon_raw.contains(c) {
+            full(c, canon_raw, mut cd)
+        }
+        var kd: List<u32> = []
+        if compat_raw.contains(c) {
+            full(c, compat_raw, mut kd)
+        }
+        longest = longest.max(kd.len())
+        let ca = place(mut pool, mut pooled, cd)
+        let ka = place(mut pool, mut pooled, kd)
+        let rec: List<u32> = [u32(ccc[k]), u32(flags[k]), u32.wrap(ca), u32.wrap(cd.len()), u32.wrap(ka), u32.wrap(kd.len())]
+        let key = "{rec}"
+        if let at = record_of.get(key.copy()) {
+            index[k] = at
+        } else {
+            let at = u32.wrap(records.len())
+            records.push(rec)
+            record_of.insert(key, at)
+            index[k] = at
+        }
+    }
+    if pool.len() > 65535 or records.len() > 65535 or longest > 255 {
+        stop("the pool has {pool.len()} runes and there are {records.len()} records, the longest {longest}, past what u16 and u8 hold")
+    }
+
+    // The two stages with the block size that makes them smallest.
+    var best_block: usize = 0
+    var best_size = usize.wrap(0 - 1)
+    for shift in 4usize..10 {
+        var block: usize = 1
+        for _ in 0..shift {
+            block *= 2
+        }
+        let st = stages(index, block)
+        let total = st.0.len() + st.1.len()
+        if total < best_size {
+            best_size = total
+            best_block = shift
+        }
+    }
+    var block: usize = 1
+    for _ in 0..best_block {
+        block *= 2
+    }
+    let st = stages(index, block)
+
+    // For each block, a bit for each form in which every rune of it has class 0 and is certainly
+    // in it, as the quick check reads them: 1 NFD, 2 NFKD, 4 NFC, 8 NFKC.
+    var easy: List<u32> = []
+    var at: usize = 0
+    while at < size {
+        var bits: u32 = 15
+        for k in at..at + block {
+            if ccc[k] != 0 {
+                bits = 0
+            }
+            let q = u32(flags[k])
+            if q & 1 != 0 {
+                bits &= 14
+            }
+            if q & 2 != 0 {
+                bits &= 13
+            }
+            if q & 12 != 0 {
+                bits &= 11
+            }
+            if q & 48 != 0 {
+                bits &= 7
+            }
+        }
+        easy.push(bits)
+        at += block
+    }
+
+    // The pairs that compose: a canonical decomposition of two runes that isn't excluded.
+    var pairs: List<(u32, u32, u32)> = []
+    for (c, d) in canon_raw {
+        if d.len() == 2 and not excluded[usize(c)] {
+            pairs.push((d[0], d[1], c))
+        }
+    }
+    pairs.sort()
+    var pa: List<u32> = [0; PAIR_SLOTS]
+    var pb: List<u32> = [0; PAIR_SLOTS]
+    var pc: List<u32> = [0; PAIR_SLOTS]
+    var tries: usize = 0
+    for p in pairs {
+        var s = pair_slot(p.0, p.1)
+        var t: usize = 1
+        while pa[s] != 0 {
+            s = (s + 1) % PAIR_SLOTS
+            t += 1
+        }
+        pa[s] = p.0
+        pb[s] = p.1
+        pc[s] = p.2
+        tries = tries.max(t)
+    }
+
+    var out = String()
+    out.push_str("/// Tables for `std.unicode`'s normalization, from the Unicode Character Database. Written by\n")
+    out.push_str("/// tools/unicode/gen_normal.calx from Unicode {VERSION}; don't edit by hand.\n")
+    out.push_str("module std.text.normal\n\n")
+    out.push_str(notice())
+    out.push_str("/// The runes in a block of the two stages.\n")
+    out.push_str("pub const BLOCK: usize = {block}\n\n")
+    out.push_str(table("STAGE1", "For each block of runes, where its records' numbers start in STAGE2, in blocks.", "u16", st.0))
+    out.push_str(table("STAGE2", "Each rune's record, by blocks.", "u16", st.1))
+    var cols: List<List<u32>> = [[], [], [], [], [], []]
+    for rec in records {
+        for i in 0usize..6 {
+            cols[i].push(rec[i])
+        }
+    }
+    out.push_str(table("EASY", "For each block, the forms in which every rune of it has class 0 and passes the quick check: 1 NFD, 2 NFKD, 4 NFC, 8 NFKC.", "u8", easy))
+    out.push_str(table("CCC", "Each record's canonical combining class.", "u8", cols[0]))
+    out.push_str(table("QC", "Each record's quick checks: 1 not in NFD, 2 not in NFKD, 4 not in NFC, 8 maybe in NFC, 16 not in NFKC, 32 maybe in NFKC.", "u8", cols[1]))
+    out.push_str(table("CANON_AT", "Where each record's full canonical decomposition is in POOL.", "u16", cols[2]))
+    out.push_str(table("CANON_LEN", "Its length, 0 if the rune has none.", "u8", cols[3]))
+    out.push_str(table("COMPAT_AT", "Where each record's full compatibility decomposition is in POOL.", "u16", cols[4]))
+    out.push_str(table("COMPAT_LEN", "Its length, 0 if the rune has none.", "u8", cols[5]))
+    out.push_str(table("POOL", "The decompositions' runes.", "u32", pool))
+    out.push_str("/// The pairs that compose, by `pair_slot` in std/unicode.calx, each in its slot or the next free\n")
+    out.push_str("/// one after it: the first rune, 0 for a free slot, the second, and what they compose to. Every\n")
+    out.push_str("/// pair is found within {tries} tries.\n")
+    out.push_str(table("PAIR_FIRST", "The first runes.", "u32", pa))
+    out.push_str(table("PAIR_SECOND", "The second runes.", "u32", pb))
+    out.push_str(table("PAIR_RESULT", "What they compose to.", "u32", pc))
+    fs.write_text("{root}/std/text/normal.calx", out)!
+    println("wrote std/text/normal.calx: {records.len()} records, a pool of {pool.len()}, blocks of {block} in {st.1.len()} numbers, {pairs.len()} pairs within {tries} tries")
+}

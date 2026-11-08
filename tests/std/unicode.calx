@@ -1,0 +1,55 @@
+// std.unicode normalizes as Python's unicodedata does (CLX-107): the four forms on the cases UAX
+// #15 is careful about, the quick checks' three answers, Hangul both ways, compatibility forms,
+// long text normalized only where it needs to be, and combining classes.
+import std.unicode.{Form, combining, is_normalized, normalize}
+
+fn codes(s: String) -> String {
+    var parts: List<String> = []
+    for r in s.runes() {
+        parts.push("{u32(r):X}")
+    }
+    return parts.join(" ")
+}
+
+fn all(s: str) {
+    var forms: List<String> = []
+    for f in [Form.NFC, Form.NFD, Form.NFKC, Form.NFKD] {
+        forms.push(codes(normalize(String(s), f)))
+    }
+    println(forms.join(" | "))
+}
+
+fn main() {
+    all("e\u{301} caf\u{E9}")    // out: E9 20 63 61 66 E9 | 65 301 20 63 61 66 65 301 | E9 20 63 61 66 E9 | 65 301 20 63 61 66 65 301
+    // The long s with a dot above and one below, UAX #15's own example.
+    all("\u{1E9B}\u{323}")    // out: 1E9B 323 | 17F 323 307 | 1E69 | 73 323 307
+    // Singletons, an exclusion, and decompositions that start with a mark, none of which compose back.
+    all("\u{212B} \u{2126} \u{958} \u{344} \u{F73}")
+    // out: C5 20 3A9 20 915 93C 20 308 301 20 F71 F72 | 41 30A 20 3A9 20 915 93C 20 308 301 20 F71 F72 | C5 20 3A9 20 915 93C 20 308 301 20 F71 F72 | 41 30A 20 3A9 20 915 93C 20 308 301 20 F71 F72
+    // Marks put in order, composing past a mark of a lower class, a mark blocked by one of its own
+    // class, and a mark with nothing before it.
+    all("a\u{301}\u{323} a\u{335}\u{301} a\u{301}\u{301} \u{301}a")
+    // out: 1EA1 301 20 E1 335 20 E1 301 20 301 61 | 61 323 301 20 61 335 301 20 61 301 301 20 301 61 | 1EA1 301 20 E1 335 20 E1 301 20 301 61 | 61 323 301 20 61 335 301 20 61 301 301 20 301 61
+    // Hangul from jamo and to them, two starters that compose, and jamo a mark keeps apart.
+    all("\u{1100}\u{1161}\u{11A8} \u{AC00}\u{11A8} \u{AC01} \u{B47}\u{B3E} \u{1100}\u{301}\u{1161}")
+    // out: AC01 20 AC01 20 AC01 20 B4B 20 1100 301 1161 | 1100 1161 11A8 20 1100 1161 11A8 20 1100 1161 11A8 20 B47 B3E 20 1100 301 1161 | AC01 20 AC01 20 AC01 20 B4B 20 1100 301 1161 | 1100 1161 11A8 20 1100 1161 11A8 20 1100 1161 11A8 20 B47 B3E 20 1100 301 1161
+    // Compatibility forms, one that becomes several runes, and one that holds a Hangul syllable.
+    all("\u{FB01}\u{B2}\u{2460}\u{FF26} \u{3300} \u{320E}")
+    // out: FB01 B2 2460 FF26 20 3300 20 320E | FB01 B2 2460 FF26 20 3300 20 320E | 66 69 32 31 46 20 30A2 30D1 30FC 30C8 20 28 AC00 29 | 66 69 32 31 46 20 30A2 30CF 309A 30FC 30C8 20 28 1100 1161 29
+    println("[{normalize(String(), Form.NFC)}] [{normalize(String(), Form.NFKD)}] {is_normalized(String(), Form.NFD)}")    // out: [] [] true
+
+    // The quick checks: yes, no, and maybe, which only normalizing settles.
+    println("{is_normalized(String("x\u{301}"), Form.NFC)} {is_normalized(String("a\u{301}"), Form.NFC)} {is_normalized(String("\u{AC00}\u{11A8}"), Form.NFC)}")    // out: true false false
+    println("{is_normalized(String("a\u{301}\u{323}"), Form.NFD)} {is_normalized(String("a\u{323}\u{301}"), Form.NFD)} {is_normalized(String("plain"), Form.NFKD)}")    // out: false true true
+    println("{is_normalized(String("\u{FB01}"), Form.NFC)} {is_normalized(String("\u{FB01}"), Form.NFKC)}")    // out: true false
+
+    // Long text with one change deep inside it: the text before it is copied as it is.
+    let long = "{"abc ".repeat(1000)}e\u{301}{" xyz".repeat(1000)}"
+    let n = normalize(long.copy(), Form.NFC)
+    println("{n.len()} {n.contains("\u{E9}")} {n.contains("e\u{301}")} {is_normalized(n.copy(), Form.NFC)}")    // out: 8002 true false true
+    let ko = "{"\u{D55C}\u{AD6D}\u{C5B4} ".repeat(500)}\u{1100}\u{1161}{"\u{D55C}".repeat(10)}"
+    let k = normalize(ko.copy(), Form.NFC)
+    println("{k.len()} {k.contains("\u{AC00}")} {normalize(k.copy(), Form.NFD).len()}")    // out: 5033 true 12596
+
+    println("{combining('\u{301}')} {combining('\u{323}')} {combining('a')} {combining('\u{5B0}')} {combining('\u{E48}')}")    // out: 230 220 0 10 107
+}

@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 #ifdef _WIN32
 #include <errno.h>
@@ -1311,6 +1314,25 @@ cx_String cx_string_from(cx_str s) {
     cx_String r = {0, 0, 0};
     cx_string_push_bytes(&r, s.ptr, s.len);
     return r;
+}
+
+/* How many of the `n` bytes at `p` come before the first that's `limit` or more: 16 at a time
+ * where the processor has SSE2, which every x86-64 one does. std.unicode skips text that can't
+ * change with it. */
+cx_usize cx_bytes_below(const cx_u8* p, cx_usize n, cx_u8 limit) {
+    cx_usize i = 0;
+    if (limit == 0) return 0;
+#if defined(__SSE2__)
+    __m128i top = _mm_set1_epi8((char)(limit - 1));
+    while (n - i >= 16) {
+        __m128i v = _mm_loadu_si128((const __m128i*)(p + i));
+        int below = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(v, top), top));
+        if (below != 0xFFFF) return i + (cx_usize)__builtin_ctz(~below & 0xFFFF);
+        i += 16;
+    }
+#endif
+    while (i < n && p[i] < limit) i++;
+    return i;
 }
 
 cx_bool cx_utf8_valid(const cx_u8* p, cx_usize n) {

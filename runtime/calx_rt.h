@@ -447,6 +447,7 @@ CX_INLINE void cx_string_clear(cx_String* s) {
 CX_FN(cx_bool, cx_str_contains, (cx_str hay, cx_str needle));
 /* Whether the bytes are UTF-8: no overlong forms, surrogates, or values past U+10FFFF. */
 CX_FN(cx_bool, cx_utf8_valid, (const cx_u8* p, cx_usize n));
+CX_FN(cx_usize, cx_bytes_below, (const cx_u8* p, cx_usize n, cx_u8 limit));
 /* Java's String.hashCode and length(), over the UTF-16 units the text stands for. */
 CX_FN(cx_i32, cx_str_java_hash, (cx_str s));
 CX_FN(cx_usize, cx_str_utf16_len, (cx_str s));
