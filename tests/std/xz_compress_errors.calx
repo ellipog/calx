@@ -1,0 +1,6 @@
+// std.xz's compress panics for a preset past 9, as xz refuses -10 (CLX-176).
+import std.xz.{compress}
+
+fn main() {
+    _ = compress("hello".to_bytes(), 10)    // panic: the preset is 0 to 9, not 10
+}

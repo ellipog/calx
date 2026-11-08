@@ -1,8 +1,9 @@
-/// .xz and .lzma files, decompressed as Python's `lzma.decompress` reads them (CLX-173): release
-/// archives such as `.tar.xz`, and whatever `xz` or Python's `lzma` wrote.
+/// .xz and .lzma files, decompressed as Python's `lzma.decompress` reads them (CLX-173), and
+/// compressed as `xz` and `lzma.compress` write them (CLX-176): release archives such as
+/// `.tar.xz`, and whatever `xz` or Python's `lzma` wrote.
 module std.xz
 
-import std.bytes.{u32_le, u64_le}
+import std.bytes.{put_u32_le, put_u64_le, set_u32_le, u32_le, u64_le}
 
 extern "C" {
     fn cx_xz_lzma2_size(input: *const u8, n: usize, info: *u64) -> i32
@@ -20,9 +21,13 @@ extern "C" {
     fn cx_digest_start(ctx: *u8, kind: u32)
     fn cx_digest_add(ctx: *u8, p: *const u8, n: usize)
     fn cx_digest_finish(ctx: *u8, out: *u8) -> usize
+    fn cx_xze_start(input: *const u8, n: u64, opt: *const u64, sizes: *u64) -> u64
+    fn cx_xze_blocks(n: u64, block: u64) -> u64
+    fn cx_xze_take(h: u64, b: u64, dst: *u8)
+    fn cx_xze_end(h: u64)
 }
 
-/// Which files `decompress` takes.
+/// Which files `decompress` takes, and which `compress` writes.
 pub enum Format {
     /// Any, by the first byte, as Python's `FORMAT_AUTO`: .xz, .lzma, or lzip's .lz, which
     /// liblzma reads since xz 5.4.
@@ -134,6 +139,211 @@ pub fn is_xz(bytes: List<u8>) -> bool {
 /// `xz` and liblzma's `lzma_crc64` give it.
 pub fn crc64(bytes: List<u8>) -> u64 {
     return unsafe { cx_xz_crc64(0, bytes.as_ptr(), bytes.len()) }
+}
+
+/// Which check `compress` puts after each block of an .xz file, as `xz --check` and Python's
+/// `check=` choose it.
+pub enum Check {
+    /// None, as `CHECK_NONE`.
+    None
+    /// CRC-32, as `CHECK_CRC32`.
+    Crc32
+    /// CRC-64, as `CHECK_CRC64`, which `xz` and Python write unless told otherwise.
+    Crc64
+    /// SHA-256, as `CHECK_SHA256`.
+    Sha256
+}
+
+/// The bytes compressed: an .xz file, as `lzma.compress(bytes)` and `xz` write one, or with
+/// `Format.Alone` a .lzma file, which has no check. `preset` is 0, fastest, to 9, smallest, as
+/// `xz -0` to `xz -9`, and `extreme` is `xz -e`, a little smaller for a lot more time. The text is
+/// cut into blocks of `block_size` bytes, or of three times the preset's dictionary, as `xz -T0`
+/// cuts it, which compress at once on all the processors and decompress at once too. A block
+/// that's alone on a processor is cut into slices that compress at once as well. Panics for a
+/// preset past 9 or for `Format.Auto`.
+@track_caller
+pub fn compress(bytes: List<u8>, preset: u32 = 6, check: Check = Check.Crc64, format: Format = Format.Xz, extreme: bool = false, block_size: u64 = 0) -> List<u8> {
+    if preset > 9 {
+        panic("the preset is 0 to 9, not {preset}")
+    }
+    if format == Format.Auto {
+        panic("`compress` writes `Format.Xz` or `Format.Alone`, not `Format.Auto`")
+    }
+    let s = preset_settings(preset, extreme)
+    let n = u64(bytes.len())
+    let lzma = format == Format.Alone
+    var each = block_size
+    if each == 0 {
+        each = if 3 * s.dict > 1048576 { 3 * s.dict } else { 1048576 }
+    }
+    let blocks = if lzma { 1u64 } else { unsafe { cx_xze_blocks(n, each) } }
+    let opt: List<u64> = [s.dict, 3, 0, 2, if s.fast { 1 } else { 0 }, s.nice, if s.bt { 1 } else { 0 }, s.depth, each, 0, 0, if lzma { 1 } else { 0 }]
+    var sizes: List<u64> = [0; usize.wrap(blocks)]
+    let h = unsafe { cx_xze_start(bytes.as_ptr(), n, opt.as_ptr(), sizes.as_mut_ptr()) }
+    var out = List<u8>()
+    if lzma {
+        // lc 3, lp 0, pb 2, the dictionary, and the size, which the data then stops at.
+        out.push(93)
+        put_u32_le(mut out, u32.wrap(dict_size(dict_code(if n < s.dict { n } else { s.dict }))))
+        put_u64_le(mut out, n)
+        take(h, 0, sizes[0], mut out)
+    } else {
+        write_xz(bytes, s.dict, each, check, h, sizes, mut out)
+    }
+    unsafe {
+        cx_xze_end(h)
+    }
+    return out
+}
+
+// A preset's dictionary size, whether its parser is the fast one, how long a match is long enough
+// to take without looking further, whether its match finder is a binary tree, and how deep that
+// looks, 0 for its own depth: as `xz`'s manual lists them.
+struct Settings {
+    dict: u64
+    fast: bool
+    nice: u64
+    bt: bool
+    depth: u64
+}
+
+fn preset_settings(preset: u32, extreme: bool) -> Settings {
+    let dicts: List<u64> = [18, 20, 21, 22, 22, 23, 23, 24, 25, 26]
+    let dict = 1u64 << dicts[usize(preset)]
+    if extreme {
+        if preset == 3 or preset == 5 {
+            return Settings { dict: dict, fast: false, nice: 192, bt: true, depth: 0 }
+        }
+        return Settings { dict: dict, fast: false, nice: 273, bt: true, depth: 512 }
+    }
+    if preset <= 3 {
+        let nices: List<u64> = [128, 128, 273, 273]
+        let depths: List<u64> = [4, 8, 24, 48]
+        return Settings { dict: dict, fast: true, nice: nices[usize(preset)], bt: false, depth: depths[usize(preset)] }
+    }
+    let nice: u64 = if preset == 4 { 16 } else if preset == 5 { 32 } else { 64 }
+    return Settings { dict: dict, fast: false, nice: nice, bt: true, depth: 0 }
+}
+
+// The code for the smallest dictionary LZMA2's properties can give that holds `want` bytes, at
+// least 4 KiB: 2^n or 2^n + 2^(n-1).
+fn dict_code(want: u64) -> u8 {
+    for b in 0u8..40 {
+        if dict_size(b) >= want {
+            return b
+        }
+    }
+    return 40
+}
+
+fn dict_size(code: u8) -> u64 {
+    if code >= 40 {
+        return 4294967295
+    }
+    return (2u64 | u64(code & 1)) << (u64(code / 2) + 11)
+}
+
+// Copies block b's data from the compressor onto the end of `out`.
+fn take(h: u64, b: u64, size: u64, out: mut List<u8>) {
+    let at = out.len()
+    out.reserve(usize.wrap(size))
+    unsafe {
+        cx_xze_take(h, b, out.as_mut_ptr().add(at))
+        out.set_len(at + usize.wrap(size))
+    }
+}
+
+// The .xz stream around the blocks: the header, each block with its header, padding and check,
+// the index, and the footer.
+fn write_xz(bytes: List<u8>, dict: u64, each: u64, check: Check, h: u64, sizes: List<u64>, out: mut List<u8>) {
+    let id: u8 = match check {
+        None => 0,
+        Crc32 => 1,
+        Crc64 => 4,
+        Sha256 => 10,
+    }
+    let magic: List<u8> = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0]
+    out.extend(magic)
+    out.push(0)
+    out.push(id)
+    let flags = crc32(out, 6, 8)
+    put_u32_le(mut out, flags)
+    let n = u64(bytes.len())
+    var records = List<u8>()
+    for b in 0u64..u64(sizes.len()) {
+        let from = b * each
+        let len = if n - from < each { n - from } else { each }
+        let packed = sizes[usize.wrap(b)]
+        // Both sizes, so the blocks can be decompressed at once, then LZMA2's filter flags.
+        let head = out.len()
+        out.push(0)
+        out.push(0xC0)
+        put_vli(mut out, packed)
+        put_vli(mut out, len)
+        out.push(0x21)
+        out.push(1)
+        out.push(dict_code(if len < dict { len } else { dict }))
+        while (out.len() - head) % 4 != 0 {
+            out.push(0)
+        }
+        out[head] = u8.wrap((out.len() - head) / 4)
+        let head_crc = crc32(out, head, out.len())
+        put_u32_le(mut out, head_crc)
+        let head_size = out.len() - head
+        take(h, b, packed, mut out)
+        while (out.len() - head) % 4 != 0 {
+            out.push(0)
+        }
+        put_check(id, bytes, usize.wrap(from), usize.wrap(from + len), mut out)
+        put_vli(mut records, u64(head_size) + packed + u64(check_size(id)))
+        put_vli(mut records, len)
+    }
+    let listed = out.len()
+    out.push(0)
+    put_vli(mut out, u64(sizes.len()))
+    out.extend(records)
+    while (out.len() - listed) % 4 != 0 {
+        out.push(0)
+    }
+    let index_crc = crc32(out, listed, out.len())
+    put_u32_le(mut out, index_crc)
+    let backward = u32.wrap((out.len() - listed) / 4 - 1)
+    let footer = out.len()
+    put_u32_le(mut out, 0)
+    put_u32_le(mut out, backward)
+    out.push(0)
+    out.push(id)
+    let footer_crc = crc32(out, footer + 4, footer + 10)
+    set_u32_le(mut out, footer, footer_crc)
+    out.push(0x59)
+    out.push(0x5A)
+}
+
+// The check of bytes[from..to) whose ID is `id`, onto the end of `out`.
+fn put_check(id: u8, bytes: List<u8>, from: usize, to: usize, out: mut List<u8>) {
+    if id == 1 {
+        put_u32_le(mut out, crc32(bytes, from, to))
+    } else if id == 4 {
+        put_u64_le(mut out, unsafe { cx_xz_crc64(0, bytes.as_ptr().add(from), to - from) })
+    } else if id == 10 {
+        var ctx: List<u8> = [0; 224]
+        var digest: List<u8> = [0; 64]
+        unsafe {
+            cx_digest_start(ctx.as_mut_ptr(), 2)
+            cx_digest_add(ctx.as_mut_ptr(), bytes.as_ptr().add(from), to - from)
+            _ = cx_digest_finish(ctx.as_mut_ptr(), digest.as_mut_ptr())
+        }
+        out.extend(digest[0..32])
+    }
+}
+
+fn put_vli(out: mut List<u8>, v: u64) {
+    var x = v
+    while x >= 0x80 {
+        out.push(u8.wrap(x) | 0x80)
+        x >>= 7
+    }
+    out.push(u8.wrap(x))
 }
 
 // Decodes the one stream at bytes[at..to) onto `out`, and gives where it ends.

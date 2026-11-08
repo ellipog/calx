@@ -58,9 +58,10 @@ fn main() {
 | `w.set_time(at: Timestamp)` | Dates the entries added after it |
 | `w.finish() -> List<u8>` | The archive, ended with its two empty blocks |
 | `w.finish_gz(level: u32) -> List<u8>` | The archive gzipped at `level`, from 1 to 9: a `.tar.gz` |
+| `w.finish_xz(preset: u32 = 6) -> List<u8>` | The archive compressed by [`std.xz`](xz.md) at `preset`, from 0 to 9, as `xz -0` to `xz -9` do: a `.tar.xz` |
 
-- **The same files make the same bytes.** Entries are dated 1970-01-01 and owned by user and group 0 until `set_time` says otherwise.
+- **The same files make the same bytes.** Entries are dated 1970-01-01 and owned by user and group 0 until `set_time` says otherwise. `finish_gz` and `finish_xz` give the same bytes on any machine, however many processors it has.
 - **Long paths** of up to 255 bytes are split between ustar's prefix and name at a `/`. Longer ones, and ones with no `/` to split at, get a pax `path` header, as GNU tar and bsdtar write them, and so do files of 8 GiB or more.
 - **Non-ASCII names get a pax `path` too.** A header's name field has no encoding, and bsdtar on Windows reads it in the console's code page. A pax path is always UTF-8.
 
-`std.tar` is written in Calx over [std.zlib](zlib.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.
+`std.tar` is written in Calx over [std.zlib](zlib.md) and [std.xz](xz.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.

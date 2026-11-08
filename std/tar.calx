@@ -184,7 +184,8 @@ impl Tar {
     }
 }
 
-/// Builds an archive in memory: add entries, then `finish` it, or `finish_gz` for a `.tar.gz`.
+/// Builds an archive in memory: add entries, then `finish` it, or `finish_gz` for a `.tar.gz`, or
+/// `finish_xz` for a `.tar.xz`.
 /// Paths too long for ustar's fields, and files of 8 GiB or more, get a pax header, as GNU tar
 /// and bsdtar write them.
 pub struct Writer {
@@ -236,6 +237,14 @@ impl Writer {
     pub fn finish_gz(own self, level: u32) -> List<u8> {
         let tar = self.finish()
         return compress(tar, Format.Gzip, level)
+    }
+
+    /// The archive compressed by std.xz at `preset`, from 0, fastest, to 9, smallest, as `xz -0`
+    /// to `xz -9`: a `.tar.xz`. Panics for a preset past 9.
+    @track_caller
+    pub fn finish_xz(own self, preset: u32 = 6) -> List<u8> {
+        let tar = self.finish()
+        return xz.compress(tar, preset)
     }
 
     // Pads the last entry's data to a whole block.

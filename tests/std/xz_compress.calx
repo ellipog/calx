@@ -1,0 +1,120 @@
+// std.xz's compress (CLX-176): what it writes decompresses to what went in, at every preset and
+// with every check, as .xz and as .lzma, in one block or many, and in slices that compress at
+// once; the same bytes make the same file on any number of workers; and the file is about as
+// small as liblzma's. Python's lzma and xz 5.8.3 read what it writes, checked outside the tests.
+
+import std.xz.{Check, Format, compress, decompress, is_xz}
+import std.tar.{Tar, Writer}
+import std.pool.{set_workers, workers}
+
+// Bytes like text: words from a small vocabulary, picked by a fixed generator, so there are
+// matches near and far, and literals between.
+fn words(n: usize, seed: u64) -> List<u8> {
+    let vocab: List<str> = ["the ", "match ", "finder ", "slice ", "block ", "of ", "and ", "xz ", "range ", "coder ", "\n", "probability ", "literal ", "distance ", "length "]
+    var out = List<u8>()
+    out.reserve(n + 16)
+    var x = seed
+    while out.len() < n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        let w = vocab[usize.wrap((x >> 33) % u64(vocab.len()))]
+        for i in 0..w.len() {
+            out.push(w.byte_at(i))
+        }
+        // Now and then a number, which makes literals.
+        if (x >> 20) % 7 == 0 {
+            out.push(u8.wrap(48 + (x >> 40) % 10))
+        }
+    }
+    out.truncate(n)
+    return out
+}
+
+fn noise(n: usize, seed: u64) -> List<u8> {
+    var out = List<u8>()
+    out.reserve(n)
+    var x = seed
+    for _ in 0..n {
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        out.push(u8.wrap(x >> 24))
+    }
+    return out
+}
+
+fn back(packed: List<u8>, data: List<u8>, format: Format = Format.Auto) -> bool {
+    return match decompress(packed, format) {
+        ok(b) => b == data,
+        err(_) => false,
+    }
+}
+
+fn main() {
+    let text = words(300000, 1)
+    var mixed = words(40000, 2)
+    mixed.extend(noise(90000, 3))
+    let gap: List<u8> = [0; 70000]
+    mixed.extend(gap)
+    mixed.extend(text[0..50000])
+
+    // Every preset, and the extreme ones, each with a check of its own.
+    let checks: List<Check> = [Check.Crc64, Check.None, Check.Crc32, Check.Sha256]
+    var all = true
+    for p in 0u32..10 {
+        for data in [text.copy(), mixed.copy()] {
+            let packed = compress(data.copy(), p, checks[usize(p % 4)])
+            all = all and is_xz(packed) and back(packed, data)
+        }
+    }
+    for p in [0u32, 3, 6] {
+        all = all and back(compress(mixed.copy(), p, Check.Crc64, Format.Xz, true), mixed)
+    }
+    println("{all}")    // out: true
+
+    // Preset 6 smaller than preset 0, and the text a fifth of its size or less.
+    let p0 = compress(text.copy(), 0).len()
+    let p6 = compress(text.copy(), 6).len()
+    println("{p6 < p0} {p6 * 5 < text.len()}")    // out: true true
+
+    // Nothing, a byte, noise that doesn't compress, and a long run.
+    let empty = compress(List<u8>())
+    println("{empty.len()} {back(empty, List<u8>())}")    // out: 32 true
+    println("{back(compress([0x61u8]), [0x61u8])}")    // out: true
+    let rand = noise(200000, 9)
+    let packed_rand = compress(rand.copy())
+    println("{back(packed_rand.copy(), rand)} {packed_rand.len() < rand.len() + 200}")    // out: true true
+    let zeros: List<u8> = [0; 1000000]
+    let packed_zeros = compress(zeros.copy())
+    println("{back(packed_zeros.copy(), zeros)} {packed_zeros.len() < 300}")    // out: true true
+
+    // .lzma, which has no check, and decompresses as Alone or Auto.
+    let lz = compress(text.copy(), 6, Check.Crc64, Format.Alone)
+    println("{lz[0]} {back(lz.copy(), text, Format.Alone)} {back(lz, text)}")    // out: 93 true true
+
+    // Many blocks, which decompress at once, and blocks cut into slices.
+    let blocks = compress(mixed.copy(), 4, Check.Crc32, Format.Xz, false, 20000)
+    println("{back(blocks, mixed)}")    // out: true
+    var big = words(1300000, 5)
+    big.extend(noise(100000, 6))
+    big.extend(words(1300000, 7))
+    let had = unsafe { workers() }
+    var same = true
+    for p in [1u32, 4] {
+        let packed = compress(big.copy(), p)
+        same = same and back(packed.copy(), big)
+        // The same bytes on one worker, which compresses the slices one after another.
+        set_workers(1)
+        same = same and compress(big.copy(), p) == packed
+        set_workers(3)
+        same = same and compress(big.copy(), p) == packed
+        set_workers(had)
+    }
+    println("{same}")    // out: true
+
+    // A .tar.xz.
+    var w = Writer.new()
+    w.add("notes.txt", text.copy())
+    w.add_dir("empty")
+    let t = Tar.open(w.finish_xz())!
+    println("{t.len()} {t.read_named("notes.txt")! == text}")    // out: 2 true
+}

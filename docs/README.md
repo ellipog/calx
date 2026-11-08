@@ -122,7 +122,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 51. [std.http.server](std/http-server.md): a small HTTP/1.1 server for scripts, as Python's `http.server` is, with each request handed to the program in turn, and a folder served as `python -m http.server` serves it
 52. [std.yaml](std/yaml.md): YAML read into a tree as PyYAML's `safe_load` reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and written back byte for byte as `safe_dump` writes it, and `@yaml`, which reads a config straight into a struct
 53. [std.log](std/log.md): logging as Python's `logging` module does it, messages at a level written in Python's formats with the time, the level and the logger's name, to standard error or a file, set up once with `config`
-54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, with `xz -T`'s blocks decoded at once on all the processors
+54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, and .xz and .lzma files compressed at `xz`'s presets, both on all the processors
 
 ### Java compatibility
 

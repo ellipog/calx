@@ -863,6 +863,14 @@ CX_FN(cx_u64, cx_xz_crc64, (cx_u64 crc, const cx_u8* p, cx_usize n));
  * its size, with its padding and check right. */
 #define CX_XZ_BLOCK 14
 CX_FN(void, cx_xz_blocks, (const cx_u8* in, const cx_u64* desc, cx_usize n, cx_u8* out, cx_u8* ok));
+/* LZMA2 and LZMA compression, in calx_xzenc.c, behind std.xz's `compress` (CLX-176).
+ * `cx_xze_start` compresses `n` bytes in blocks, with the settings in `opt` that calx_xzenc.c
+ * lists, on `parallel for`'s threads, and gives a handle: sizes[k] is how big block k's LZMA2 is,
+ * with its end, and `cx_xze_take` copies it out. `cx_xze_end` frees it all. */
+CX_FN(cx_u64, cx_xze_start, (const cx_u8* in, cx_u64 n, const cx_u64* opt, cx_u64* sizes));
+CX_FN(cx_u64, cx_xze_blocks, (cx_u64 n, cx_u64 block));
+CX_FN(void, cx_xze_take, (cx_u64 h, cx_u64 b, cx_u8* dst));
+CX_FN(void, cx_xze_end, (cx_u64 h));
 
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's
