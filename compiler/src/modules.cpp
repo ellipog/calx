@@ -136,6 +136,47 @@ pub fn error_context<T: Display>(value: own T, text: own String) -> Error {
 pub fn error_add_context(value: own Error, text: own String) -> Error {
     return value.with_context(text)
 }
+/// The place a `@track_caller` function was called from, as `caller()` gives it inside one.
+pub struct Caller {
+    /// The source file's path, as the program was built from it: `src/main.calx`.
+    pub file: String
+    pub line: u32
+    pub column: u32
+    /// The name of the function the call is in, such as `main`, or `<closure>` in a closure.
+    pub function: String
+}
+
+impl Display for Caller {
+    fn show(self) {
+        print("{self.file}:{self.line}:{self.column}")
+    }
+}
+
+// A `@track_caller` function's hidden parameter, `path:line:column`, a zero byte, then the
+// function's name. The path can hold colons, as `C:/a.calx` does, so the numbers are the last two.
+pub fn caller_from(text: str) -> Caller {
+    var nul: usize = 0
+    while text.byte_at(nul) != 0 {
+        nul += 1
+    }
+    var at = nul
+    var column: u32 = 0
+    var scale: u32 = 1
+    while text.byte_at(at - 1) != 58 {
+        at -= 1
+        column += u32(text.byte_at(at) - 48) * scale
+        scale *= 10
+    }
+    at -= 1
+    var line: u32 = 0
+    scale = 1
+    while text.byte_at(at - 1) != 58 {
+        at -= 1
+        line += u32(text.byte_at(at) - 48) * scale
+        scale *= 10
+    }
+    return Caller { file: String(text[0..at - 1]), line: line, column: column, function: String(text[nul + 1..text.len()]) }
+}
 )";
 
 }  // namespace

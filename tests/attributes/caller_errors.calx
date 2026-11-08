@@ -1,0 +1,30 @@
+// `caller()` is only in a `@track_caller` function, which is given the place that called it, and
+// not in a closure or a `parallel for` there, which are functions of their own (CLX-175).
+
+fn plain() -> u32 {
+    return caller().line    // error: `caller()` is for a `@track_caller` function, which is given the place that called it; mark `plain` `@track_caller`, or name a `caller` of your own
+}
+
+@track_caller
+fn in_closure() -> u32 {
+    let f = || caller().line    // error: `caller()` can't be in a closure, which is a function of its own; read it outside the closure
+    return f()
+}
+
+@track_caller
+fn in_parallel(xs: mut List<u32>) {
+    parallel for i in 0..xs.len() {
+        xs[i] = caller().line    // error: `caller()` can't be in a `parallel for`, whose iterations run on threads of their own; read it before the loop
+    }
+}
+
+@track_caller
+fn with_args() -> u32 {
+    return caller(1).line    // error: `caller` takes nothing: `caller()` is the place that called this function
+}
+
+fn main() {
+    var xs: List<u32> = [0, 0]
+    in_parallel(mut xs)
+    println("{plain()} {in_closure()} {with_args()} {xs[0]}")
+}

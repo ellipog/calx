@@ -39,6 +39,8 @@ fn main() {
 
 Each record is a line. A message with line breaks in it is written as it is, as Python writes it.
 
+The functions that log are [`@track_caller`](../reference/printing.md#reading-the-caller), so a record knows the line and the function that logged it, for `%(lineno)d` and `%(funcName)s`, at the cost of one pointer per call.
+
 ## Setting up
 
 `config` takes what `logging.basicConfig` does, each with Python's default:
@@ -57,9 +59,9 @@ Each call replaces what the last one set up, as `basicConfig(force=True)` does: 
 import std.log.{config, warning}
 
 fn main() {
-    match config(format: "%(lineno)d %(message)s") {
+    match config(format: "%(threadName)s %(message)s") {
         ok => {},
-        err(e) => println("{e}"),    // out: `%(lineno)` in the format, a field of Python's records that Calx's don't have
+        err(e) => println("{e}"),    // out: `%(threadName)` in the format, a field of Python's records that Calx's don't have
     }
     match config(file: "no/such/folder/app.log") {
         ok => {},
@@ -91,12 +93,16 @@ A format is Python's `%` style: `%(field)s` for a field, with flags, a width and
 | `%(relativeCreated)d` | The milliseconds since the program first logged |
 | `%(process)d` | The process's id |
 | `%(processName)s` | `MainProcess`, as Python's is outside `multiprocessing` |
+| `%(lineno)d` | The line of the call that logged it |
+| `%(funcName)s` | The name of the function that call is in, or `<closure>` in a closure |
+| `%(filename)s`, `%(module)s` | The name of the file it's in, `main.calx`, and that without its extension, `main` |
+| `%(pathname)s` | The file's path, as the program was built from it and as its panics name it: `src/main.calx`. Python's is the absolute path |
 
 - `-` pads on the right, `0` pads a number with zeros, and `+` and a space put a sign before one: `%(levelname)-8s`, `%(msecs)03d`.
 - `.N` cuts text to N runes, and gives a float N digits after the point: `%(levelname).1s`, `%(created).3f`.
 - `s` writes any field, `d`, `i` and `u` a number's whole part, `f` and `F` a float, and `x`, `X` and `o` a whole number in hex or octal.
 
-`config` checks a format: a field Calx's records don't have, as `%(lineno)d` and `%(threadName)s`, is an error there, as is a `%` that starts no field. Python finds those as it writes each record, and writes a traceback instead of the record.
+`config` checks a format: a field Calx's records don't have, as `%(threadName)s` and `%(exc_info)s`, is an error there, as is a `%` that starts no field. Python finds those as it writes each record, and writes a traceback instead of the record.
 
 ```calx
 import std.log.{Level, config, error, logger}

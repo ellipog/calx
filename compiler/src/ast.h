@@ -137,7 +137,7 @@ struct Local {
 // What the checker found a name or call to be.
 enum class Ref : std::uint8_t { none, local, fn, const_, type, builtin, variant };
 
-enum class Builtin : std::uint8_t { none, print, println, eprint, eprintln, panic, assert_ };
+enum class Builtin : std::uint8_t { none, print, println, eprint, eprintln, panic, assert_, caller };
 
 enum class CallKind : std::uint8_t {
     none,

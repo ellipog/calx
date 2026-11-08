@@ -203,6 +203,40 @@ fn main() {
 - A `@track_caller` function that calls another passes its own caller on, so a check two calls deep still names the code outside them.
 - A `parallel for` inside one names its own places, since its body runs apart from the call.
 - It's for functions, a type's own methods, and the impls of the [operator interfaces](interfaces.md#operators), `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`, so a struct's `a / b` can name the line that divides. Every use of an operator is a call of the impl the checker finds, in a generic function too, where the place is the line in that function. The functions of other interfaces' impls can't have it, since the code the compiler writes calls them too, for a map's hashing or a string's `Display`, with no place to give. Neither can `main`, since no Calx code calls it.
-- In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, and its panics use that string, so it costs one pointer per call.
+- In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, then a zero byte and the name of the function the call is in. Its panics use the string up to the zero, so it costs one pointer per call.
+
+#### Reading the caller
+
+Inside a `@track_caller` function, `caller()` is the place that called it, as a `Caller` (CLX-175). That's for code that reports where it was used without panicking, such as a log line or a test helper's message. [std.log](../std/log.md) writes Python's `%(lineno)d` and `%(funcName)s` from it.
+
+```calx
+@track_caller
+fn expect(holds: bool, what: String) {
+    if not holds {
+        let at = caller()
+        println("{what} failed in {at.function}, at column {at.column}")
+    }
+}
+
+fn check_sizes() {
+    expect(2 + 2 == 4, "adding")
+    expect(3 > 4, "comparing")    // out: comparing failed in check_sizes, at column 5
+}
+
+fn main() {
+    check_sizes()
+}
+```
+
+| Field | Is |
+| --- | --- |
+| `file: String` | The source file's path, as the program was built from it and as its panics name it: `src/main.calx` |
+| `line: u32`, `column: u32` | Where the call starts, from 1 |
+| `function: String` | The name of the function the call is in, such as `main` or a method's name, or `<closure>` in a closure |
+
+- A `Caller` shows as panics name a place: `src/main.calx:20:16`.
+- A `@track_caller` function that calls another passes its caller on, so `caller()` two calls deep is still the code outside them.
+- `caller()` is an error outside a `@track_caller` function, and in a closure or a `parallel for` inside one, which run as functions of their own. Read it before them.
+- A `caller` or a `Caller` of the program's own comes first, so neither name is taken from a program that has one.
 
 `@track_caller`, [`@export`](libraries.md#building-a-library), [`@handle`](ownership.md#handles), [`@test`](command.md#testing) and `@attribute` are the attributes the compiler knows. Any other is a function a library marks `@attribute` ([attributes](attributes.md)), and one that's neither is an error.

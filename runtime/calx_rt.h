@@ -124,6 +124,13 @@ CX_FN(void, cx_err_end, (cx_out_to was));
  * it, and `cx_panic_end` finishes it, writes the stack trace and exits with status 101. */
 CX_FN(void, cx_panic_begin, (const char* at));
 CX_COLD CX_FN(void, cx_panic_end, (void));
+/* A `@track_caller` function's hidden parameter as a `str`: the place that called it, a zero byte,
+ * and the name of the function that call is in, which std.core's `caller_from` takes apart for
+ * `caller()` (CLX-175). Panics print only the place, up to the zero. */
+CX_INLINE cx_str cx_caller_str(const char* at) {
+    cx_usize n = __builtin_strlen(at);
+    return (cx_str){(const cx_u8*)at, n + 1 + __builtin_strlen(at + n + 1)};
+}
 /* Writes Calx frames of the calling thread's stack through `text`, a line each, in calx_trace.c:
  * all of them (`mode` 0), or for a panic in a `parallel for`, the part of them this thread has
  * (1 to 3, which `cx_trace_write` explains). */

@@ -2911,6 +2911,16 @@ $dropall    m->len = 0;
         return c_string_literal(sources_.file(s.file).path + ":" + std::to_string(ln) + ":" + std::to_string(col));
     }
 
+    // What a call to a `@track_caller` function passes it: this call's place, a zero byte, and the
+    // name of the function the call is in, which `caller()` reads (CLX-175). Or the place this
+    // function's own caller gave it, passed on.
+    std::string caller_arg(Span s) {
+        if (fn_ && fn_->track_caller && !in_par_body_) return "cx_caller";
+        std::string where = location(s);
+        std::string_view name = !fn_ ? std::string_view("<module>") : fn_->is_closure || !fn_->name ? std::string_view("<closure>") : text(fn_->name);
+        return where + " \"\\000\" " + c_string_literal(name);
+    }
+
     std::string tmp() { return "cx_t" + std::to_string(++tmp_); }
 
     // Runs `body` with the output redirected, and returns what it wrote.
@@ -4985,7 +4995,7 @@ $dropall    m->len = 0;
         }
         // A function whose panics name its caller gets this call's place, or the place its own
         // caller gave it.
-        if (f->track_caller) s += (by_param.empty() ? "" : ", ") + location(e->span);
+        if (f->track_caller) s += (by_param.empty() ? "" : ", ") + caller_arg(e->span);
         return wrap(decls, s + ")");
     }
 
@@ -6621,6 +6631,10 @@ $dropall    m->len = 0;
                 }
                 return "({ if (!" + expr(e->args[0].value) + ") { " + decls + "cx_panic_begin(" + location(e->span) + "); " +
                        s + "cx_panic_end(); } })";
+            case Builtin::caller:
+                // std.core's `caller_from` reads the hidden parameter (CLX-175).
+                if (uses_) uses_->add_fn(e->item);
+                return std::string(e->item->c_name) + "(cx_caller_str(cx_caller))";
             case Builtin::none: break;
         }
         return "0";

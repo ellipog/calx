@@ -114,26 +114,31 @@ pub fn enabled(level: Level) -> bool {
 }
 
 /// Logs `message` at `Debug` on the root logger, as `logging.debug(message)` does.
+@track_caller
 pub fn debug(message: String) {
     log(Level.Debug, message)
 }
 
 /// Logs `message` at `Info` on the root logger, as `logging.info(message)` does.
+@track_caller
 pub fn info(message: String) {
     log(Level.Info, message)
 }
 
 /// Logs `message` at `Warning` on the root logger, as `logging.warning(message)` does.
+@track_caller
 pub fn warning(message: String) {
     log(Level.Warning, message)
 }
 
 /// Logs `message` at `Error` on the root logger, as `logging.error(message)` does.
+@track_caller
 pub fn error(message: String) {
     log(Level.Error, message)
 }
 
 /// Logs `message` at `Critical` on the root logger, as `logging.critical(message)` does.
+@track_caller
 pub fn critical(message: String) {
     log(Level.Critical, message)
 }
@@ -141,10 +146,11 @@ pub fn critical(message: String) {
 /// Logs `message` at `level` on the root logger, as `logging.log(level, message)` does. Before
 /// `config`, the first message sets logging up as `config()` would, as Python's module functions
 /// call basicConfig.
+@track_caller
 pub fn log(level: Level, message: String) {
     ready()
     if level.value() >= root_level() {
-        emit("root", level, message)
+        emit("root", level, message, caller())
     }
 }
 
@@ -179,22 +185,27 @@ impl Logger {
         return level.value() >= at
     }
 
+    @track_caller
     pub fn debug(self, message: String) {
         self.log(Level.Debug, message)
     }
 
+    @track_caller
     pub fn info(self, message: String) {
         self.log(Level.Info, message)
     }
 
+    @track_caller
     pub fn warning(self, message: String) {
         self.log(Level.Warning, message)
     }
 
+    @track_caller
     pub fn error(self, message: String) {
         self.log(Level.Error, message)
     }
 
+    @track_caller
     pub fn critical(self, message: String) {
         self.log(Level.Critical, message)
     }
@@ -202,6 +213,7 @@ impl Logger {
     /// Logs `message` at `level`, if this logger writes that level. Before anything sets logging
     /// up, a message at `Warning` or above is written alone to standard error, as Python's
     /// handler of last resort writes it.
+    @track_caller
     pub fn log(self, level: Level, message: String) {
         if not self.enabled(level) {
             return
@@ -212,7 +224,7 @@ impl Logger {
             }
             return
         }
-        emit(self.name, level, message)
+        emit(self.name, level, message, caller())
     }
 }
 
@@ -244,11 +256,11 @@ fn setting(which: u32) -> String {
     }
 }
 
-// Writes a record's line where logging goes.
-fn emit(name: String, level: Level, message: String) {
+// Writes a record's line where logging goes. `at` is the place that logged it.
+fn emit(name: String, level: Level, message: String, at: Caller) {
     let now = unsafe { Timestamp.now() }
     var line = String()
-    write_record(mut line, setting(0), setting(1), name, level, message, now)
+    write_record(mut line, setting(0), setting(1), name, level, message, at, now)
     line.push('\n')
     if unsafe { cx_log_to_file() } {
         let b = line.to_bytes()
@@ -270,16 +282,16 @@ const MILLI: u8 = 2
 
 // A field's kind, or 255 for a name Python's records have that Calx's don't, and 254 for none.
 fn field_kind(key: String) -> u8 {
-    if key == "name" or key == "levelname" or key == "message" or key == "asctime" or key == "processName" {
+    if key == "name" or key == "levelname" or key == "message" or key == "asctime" or key == "processName" or key == "pathname" or key == "filename" or key == "module" or key == "funcName" {
         return TEXT
     }
-    if key == "levelno" or key == "process" {
+    if key == "levelno" or key == "process" or key == "lineno" {
         return WHOLE
     }
     if key == "created" or key == "msecs" or key == "relativeCreated" {
         return MILLI
     }
-    if key == "pathname" or key == "filename" or key == "module" or key == "lineno" or key == "funcName" or key == "thread" or key == "threadName" or key == "taskName" or key == "exc_info" or key == "exc_text" or key == "stack_info" or key == "args" or key == "msg" {
+    if key == "thread" or key == "threadName" or key == "taskName" or key == "exc_info" or key == "exc_text" or key == "stack_info" or key == "args" or key == "msg" {
         return 255
     }
     return 254
@@ -397,7 +409,7 @@ fn check_format(f: String) ! LogError {
 }
 
 // Adds a record's line, without its line break.
-fn write_record(out: mut String, f: String, datefmt: String, name: String, level: Level, message: String, now: Timestamp) {
+fn write_record(out: mut String, f: String, datefmt: String, name: String, level: Level, message: String, at: Caller, now: Timestamp) {
     let start = unsafe { cx_log_start_ms(now.unix_ms) }
     var i: usize = 0
     var plain: usize = 0
@@ -440,12 +452,26 @@ fn write_record(out: mut String, f: String, datefmt: String, name: String, level
                 text.push_str(message)
             } else if s.key == "asctime" {
                 asctime(mut text, now, datefmt)
+            } else if s.key == "pathname" {
+                text.push_str(at.file)
+            } else if s.key == "filename" {
+                text.push_str(base_name(at.file))
+            } else if s.key == "module" {
+                // The file's name without its extension, as Python's `module` is.
+                let file = base_name(at.file)
+                var dot = file.len()
+                while dot > 0 and file.byte_at(dot - 1) != b'.' {
+                    dot -= 1
+                }
+                text.push_str(if dot > 0 { file[0..dot - 1] } else { file[0..] })
+            } else if s.key == "funcName" {
+                text.push_str(at.function)
             } else {
                 text.push_str("MainProcess")
             }
             write_text(mut out, s, text)
         } else if kind == WHOLE {
-            let n = if s.key == "levelno" { i64(level.value()) } else { i64(unsafe { cx_log_pid() }) }
+            let n = if s.key == "levelno" { i64(level.value()) } else if s.key == "lineno" { i64(at.line) } else { i64(unsafe { cx_log_pid() }) }
             write_number(mut out, s, n * 1000)
         } else {
             let milli = if s.key == "created" {
@@ -461,6 +487,15 @@ fn write_record(out: mut String, f: String, datefmt: String, name: String, level
         plain = i
     }
     out.push_str(f[plain..])
+}
+
+// The part of a path after its last `/`, or `\` on Windows.
+fn base_name(path: String) -> String {
+    var at = path.len()
+    while at > 0 and path.byte_at(at - 1) != b'/' and path.byte_at(at - 1) != b'\\' {
+        at -= 1
+    }
+    return path[at..].copy()
 }
 
 // `asctime`: the local time by `datefmt`, or as Python writes it without one,

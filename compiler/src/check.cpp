@@ -153,6 +153,7 @@ public:
         n_add_ = ctx.names.intern("add");
         n_From_ = ctx.names.intern("From");
         n_Error_ = ctx.names.intern("Error");
+        n_Caller_ = ctx.names.intern("Caller");
         n_context_ = ctx.names.intern("context");
         n_ok_ = ctx.names.intern("ok");
         n_err_ = ctx.names.intern("err");
@@ -360,6 +361,8 @@ private:
         }
         // `Error` isn't reserved: a module's own, or one it imports, comes first (CLX-95).
         if (core_scope_ && n == n_Error_) return error_item_;
+        // Nor is `Caller`, what `caller()` gives (CLX-175).
+        if (core_scope_ && n == n_Caller_) return core_scope_->items.at(n_Caller_);
         return nullptr;
     }
 
@@ -379,6 +382,7 @@ private:
         error_from_fn_ = core_scope_->items.at(ctx_.names.intern("error_from"));
         error_context_fn_ = core_scope_->items.at(ctx_.names.intern("error_context"));
         error_add_fn_ = core_scope_->items.at(ctx_.names.intern("error_add_context"));
+        prog_.caller_from = core_scope_->items.at(ctx_.names.intern("caller_from"));
     }
 
     // `std.core`'s `Error` as a type, the error any error converts into (CLX-95).
@@ -5181,6 +5185,8 @@ private:
                     : s == "eprintln" ? Builtin::eprintln
                     : s == "panic" ? Builtin::panic
                     : s == "assert" ? Builtin::assert_
+                    // Not reserved, as the others are: a `caller` of the program's own comes first.
+                    : s == "caller" ? Builtin::caller
                                      : Builtin::none;
         if (r.builtin != Builtin::none) r.kind = NameKind::builtin;
         return r;
@@ -8745,6 +8751,28 @@ private:
                 }
                 if (e->args.size() == 2) message(e->args[1].value);
                 return T.unit;
+            case Builtin::caller: {
+                // CLX-175: the place a `@track_caller` function was called from, which it's given
+                // as a hidden parameter. A `parallel for`'s body is a function of its own.
+                Item* make = prog_.caller_from;
+                check_signature(make);
+                if (!e->args.empty()) {
+                    error(e->span, "`caller` takes nothing: `caller()` is the place that called this function");
+                    check_args(e);
+                } else if (!fn_ || !fn_->track_caller) {
+                    error(e->span, "`caller()` is for a `@track_caller` function, which is given the place that called it; mark " +
+                                       std::string(fn_ ? q(text(fn_->name)) + " `@track_caller`" : "the function `@track_caller`") +
+                                       ", or name a `caller` of your own");
+                } else if (!closures_.empty()) {
+                    error(e->span, "`caller()` can't be in a closure, which is a function of its own; read it outside the closure");
+                } else if (!par_.empty()) {
+                    error(e->span, "`caller()` can't be in a `parallel for`, whose iterations run on threads of their own; "
+                                   "read it before the loop");
+                }
+                use_item(make);
+                e->item = make;
+                return make->result_type;
+            }
             case Builtin::none: break;
         }
         return T.error;
@@ -10815,7 +10843,7 @@ private:
     Type* hasher_type_ = nullptr;
     bool hand_ready_ = false;  // every impl is known
     std::map<std::pair<const Type*, int>, Item*> hand_;
-    Name n_Hasher_, n_add_, n_From_, n_Error_, n_context_, n_Iterator_, n_next_;
+    Name n_Hasher_, n_add_, n_From_, n_Error_, n_Caller_, n_context_, n_Iterator_, n_next_;
     Item* from_iface_ = nullptr;
     Item* iterator_iface_ = nullptr;  // `Iterator<T>`, which a `for` loop calls `next` on (CLX-101)
     std::uint32_t held_iterators_ = 0;  // the loops that hold an iterator made for them

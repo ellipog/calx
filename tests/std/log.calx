@@ -52,13 +52,13 @@ fn main() {
     warning("back on standard error")    // stderr: WARNING:root:back on standard error
 
     // What config refuses, which leaves logging as it was.
-    for format in ["%(lineno)d %(message)s", "100% %(message)s", "%(nope)s", "%(message)", "%(levelname)d", "%(created)x", "no fields", "%(message)r", "%(threadName)s"] {
+    for format in ["%(exc_info)s %(message)s", "100% %(message)s", "%(nope)s", "%(message)", "%(levelname)d", "%(created)x", "no fields", "%(message)r", "%(threadName)s"] {
         match config(format: format) {
             ok => println("set up"),
             err(e) => println("{e}"),
         }
     }
-    // out: `%(lineno)` in the format, a field of Python's records that Calx's don't have
+    // out: `%(exc_info)` in the format, a field of Python's records that Calx's don't have
     // out: a `%` in the format `100% %(message)s` that starts no `%(field)s`; write `%%` for a `%`
     // out: `%(nope)` in the format, which names no field of a record
     // out: `%(message)` with no conversion after it, as `s` or `d` in the format `%(message)`
@@ -72,4 +72,24 @@ fn main() {
         err(_) => println("can't open it"),    // out: can't open it
     }
     warning("still")    // stderr: WARNING:root:still
+
+    // Where each record was logged from: the functions are `@track_caller`, so they're given it.
+    config(format: "%(filename)s %(module)s %(funcName)s:%(lineno)d %(message)s")!
+    warning("here")    // stderr: log.calx log main:78 here
+    logged_from_here()
+    // stderr: log.calx log logged_from_here:92 there
+    // stderr: log.calx log <closure>:93 in a closure 4
+    // The path as the program was built from it, which here is the test runner's.
+    config(format: "%(pathname)s", file: path, append: false)!
+    warning("")
+    config()!
+    let named = read_text(path)! ?? String()
+    println("{named.trim_end().ends_with("log.calx")}")    // out: true
+    remove_file(path)!
+}
+
+fn logged_from_here() {
+    logger("db").error("there")
+    let x = |n: i32| error("in a closure {n}")
+    x(4)
 }

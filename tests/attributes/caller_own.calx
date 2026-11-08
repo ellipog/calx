@@ -1,0 +1,19 @@
+// A `caller` and a `Caller` of the program's own come before the built-in ones (CLX-175), in a
+// `@track_caller` function too, so neither name is taken from programs that had them.
+
+struct Caller {
+    name: String
+}
+
+fn caller() -> Caller {
+    return Caller { name: "mine" }
+}
+
+@track_caller
+fn uses_own() -> String {
+    return caller().name
+}
+
+fn main() {
+    println(uses_own())    // out: mine
+}

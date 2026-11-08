@@ -34,6 +34,7 @@ struct Program {
     // `show`, `hash`, `cmp` or `java_hash`, or its instance for a generic type (D102).
     std::unordered_map<const Type*, Item*> hand[kProps];
     const Type* hasher = nullptr;  // `std.core`'s `Hasher`, what a hand-written `hash` adds to
+    Item* caller_from = nullptr;   // `std.core`'s, which makes `caller()`'s `Caller` (CLX-175)
     // The keys of `JavaHashMap` and `JavaHashSet` with `Order`, which a tree bin sorts by (D105).
     std::unordered_set<const Type*> java_ordered;
     Item* main = nullptr;

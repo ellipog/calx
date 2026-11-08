@@ -1,0 +1,41 @@
+// `caller()` (CLX-175): inside a `@track_caller` function, the place that called it, with the
+// name of the function the call is in. One such function calling another passes its caller on,
+// and a `Caller` shows as panics name the place.
+
+@track_caller
+fn here() -> Caller {
+    return caller()
+}
+
+@track_caller
+fn line_of() -> u32 {
+    return here().line
+}
+
+struct Check {
+    name: String
+}
+
+impl Check {
+    @track_caller
+    fn that(self, holds: bool) -> String {
+        let at = caller()
+        return if holds { "ok" } else { "{self.name} failed at line {at.line}, column {at.column}, in {at.function}" }
+    }
+}
+
+fn helper() -> String {
+    let c = Check { name: "sizes" }
+    return c.that(1 > 2)
+}
+
+fn main() {
+    let at = here()
+    println("{at.line} {at.column} {at.function} {at.file.ends_with("caller.calx")}")    // out: 33 14 main true
+    println("{line_of()}")    // out: 35
+    println(helper())    // out: sizes failed at line 29, column 12, in helper
+    let shown = "{here()}"
+    println("{shown.ends_with("caller.calx:37:19")}")    // out: true
+    let f = |n: i32| here().line + u32.wrap(n)
+    println("{f(1)}")    // out: 40
+}
