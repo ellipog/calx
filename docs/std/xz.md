@@ -105,7 +105,7 @@ The [tests](../../tests/std/xz.calx) hold Python's bytes and Python's outcomes.
 | Bits in trees | Without branches, and with the next level's probabilities loaded before the bit is known |
 | Literals after a match | Both of the next probabilities loaded at once |
 | Copying a match | 16 bytes at a time when the distance is at least the length, never past its end, so blocks next to each other can decode at the same time |
-| CRC-64 | Folded with the processor's carry-less multiply, 16 bytes a step, at about 8 GB/s, with tables where it's missing |
+| CRC-64 | Folded with the processor's carry-less multiply in four lanes, 64 bytes a step, at about 39 GB/s on bytes in the cache, with tables where it's missing |
 | CRC-32 and SHA-256 | `std.zlib`'s and `std.hash`'s |
 
 `std.xz` reads the headers, the index and the footer in Calx over those runtime calls, in the order liblzma checks them, so broken files fail the same way: [std/xz.calx](../../std/xz.calx).

@@ -912,16 +912,36 @@ static int clmul_ok(void) {
     return k;
 }
 
-/* The register over n bytes, n at least 32. */
+/* One 16-byte lane folded forward and added to `y`: the constants are x^(8d+63) and x^(8d-1)
+ * modulo the polynomial, reflected, to fold it d bytes on. */
+__attribute__((target("pclmul,sse4.1"))) static inline __m128i crc64_fold(__m128i x, __m128i k, __m128i y) {
+    return _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128(x, k, 0x00), _mm_clmulepi64_si128(x, k, 0x11)), y);
+}
+
+/* The register over n bytes, n at least 64: four lanes folded 64 bytes at a time, as the multiplies
+ * take several cycles each and one lane would wait on them, then folded into one. */
 __attribute__((target("pclmul,sse4.1"))) static cx_u64 crc64_clmul(cx_u64 crc, const cx_u8* p, cx_usize n) {
-    const __m128i k = _mm_set_epi64x((long long)0xdabe95afc7875f40ull, (long long)0xe05dd497ca393ae4ull);
-    __m128i x = _mm_xor_si128(_mm_loadu_si128((const __m128i*)p), _mm_cvtsi64_si128((long long)crc));
-    p += 16;
-    n -= 16;
+    const __m128i k64 = _mm_set_epi64x((long long)0x081f6054a7842df4ull, (long long)0x6ae3efbb9dd441f3ull);
+    const __m128i k48 = _mm_set_epi64x((long long)0x69a35d91c3730254ull, (long long)0xb5ea1af9c013aca4ull);
+    const __m128i k32 = _mm_set_epi64x((long long)0x3be653a30fe1af51ull, (long long)0x60095b008a9efa44ull);
+    const __m128i k16 = _mm_set_epi64x((long long)0xdabe95afc7875f40ull, (long long)0xe05dd497ca393ae4ull);
+    __m128i a = _mm_xor_si128(_mm_loadu_si128((const __m128i*)p), _mm_cvtsi64_si128((long long)crc));
+    __m128i b = _mm_loadu_si128((const __m128i*)(p + 16));
+    __m128i c = _mm_loadu_si128((const __m128i*)(p + 32));
+    __m128i d = _mm_loadu_si128((const __m128i*)(p + 48));
+    p += 64;
+    n -= 64;
+    while (n >= 64) {
+        a = crc64_fold(a, k64, _mm_loadu_si128((const __m128i*)p));
+        b = crc64_fold(b, k64, _mm_loadu_si128((const __m128i*)(p + 16)));
+        c = crc64_fold(c, k64, _mm_loadu_si128((const __m128i*)(p + 32)));
+        d = crc64_fold(d, k64, _mm_loadu_si128((const __m128i*)(p + 48)));
+        p += 64;
+        n -= 64;
+    }
+    __m128i x = crc64_fold(a, k48, crc64_fold(b, k32, crc64_fold(c, k16, d)));
     while (n >= 16) {
-        __m128i lo = _mm_clmulepi64_si128(x, k, 0x00);
-        __m128i hi = _mm_clmulepi64_si128(x, k, 0x11);
-        x = _mm_xor_si128(_mm_xor_si128(lo, hi), _mm_loadu_si128((const __m128i*)p));
+        x = crc64_fold(x, k16, _mm_loadu_si128((const __m128i*)p));
         p += 16;
         n -= 16;
     }

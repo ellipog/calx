@@ -30,6 +30,18 @@ fn outcome(bytes: List<u8>, format: Format = Format.Auto, limit: u64 = u64.MAX) 
     }
 }
 
+// The CRC-64 a bit at a time, as the format describes it.
+fn crc64_bits(bytes: List<u8>, from: usize, to: usize) -> u64 {
+    var crc = u64.MAX
+    for i in from..to {
+        crc ^= u64(bytes[i])
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0xc96c5795d7870f42 } else { crc >> 1 }
+        }
+    }
+    return ~crc
+}
+
 fn joined(a: List<u8>, b: List<u8>) -> List<u8> {
     var out = a.copy()
     for x in b {
@@ -135,6 +147,26 @@ fn main() {
     }
 
     println("{crc64("123456789".to_bytes()) == 0x995dc9bbdf1939fa} {crc64([])}")    // out: true 0
+    // Every length to 300, from three starts: four lanes of 16 bytes, then one, then bytes.
+    var noise: List<u8> = []
+    var x: u32 = 5
+    for _ in 0..304 {
+        x = x * 1103515245 + 12345
+        noise.push(u8.wrap(x >> 24))
+    }
+    var wrong = 0
+    for start in 0usize..3 {
+        for n in 0usize..301 {
+            var part: List<u8> = []
+            for i in start..start + n {
+                part.push(noise[i])
+            }
+            if crc64(part) != crc64_bits(noise, start, start + n) {
+                wrong += 1
+            }
+        }
+    }
+    println("{wrong} wrong")    // out: 0 wrong
 
     // std.tar opens a .tar.xz: one file, notes/a.txt, from Python's tarfile.
     let tar = Tar.open(unhex("fd377a585a000004e6d6b4460200210116000000742fe5a3e027ff00695d00371bcaeee65b2ec059340dfc3c84e374715f3a237e0b351195121d9075796f2349e63a45447816d7de4d866fdcfbe8e39c7e11a6ad230f372bd214489a3bf90f2caa07dd089fe4aabcb8d82e199726633cd8689dc19d6246943003ae072e28cc0103a75dee03535500000000004263f8bd59ecbf9100018501805000008de0ad31b1c467fb020000000004595a"))!
