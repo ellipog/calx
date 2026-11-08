@@ -182,12 +182,17 @@ static inline cx_u64 br_read(br_t* b, cx_u32 n) {
 
 /* Moves back over the bytes read, so at least 56 bits are there unless the start is near. */
 static inline void br_reload(br_t* b) {
-    cx_usize can = (cx_usize)(b->p - b->start);
-    if (can == 0) return;
-    cx_usize back = b->used >> 3;
-    if (back > can) back = can;
-    b->p -= back;
-    b->used -= (cx_u32)(back * 8);
+    const cx_usize back = b->used >> 3;
+    const cx_usize can = (cx_usize)(b->p - b->start);
+    /* Away from the start, which is nearly always, the test is off the path the next bits wait
+     * on. */
+    if (__builtin_expect(can >= back, 1)) {
+        b->p -= back;
+        b->used &= 7;
+    } else {
+        b->p = b->start;
+        b->used -= (cx_u32)(can * 8);
+    }
     b->bits = ld64(b->p);
 }
 
@@ -834,6 +839,42 @@ typedef struct {
     cx_usize dict_n;
 } out_t;
 
+/* Copies a match of `ml` bytes from s, `off` back, to op, with room for fast copies past it. */
+static inline void match_fast(cx_u8* op, const cx_u8* s, cx_u32 off, cx_u32 ml) {
+    if (off >= 32) {
+        copy32(op, s, ml);
+        return;
+    }
+    if (off >= 16) {
+        copy16(op, s, ml);
+        return;
+    }
+    /* A repeating pattern shorter than 16 bytes. Its first 8 bytes are made so that the copy can
+     * go on from a whole number of patterns back, 8 or more: under 8, four bytes one by one and
+     * four more from where the pattern lines up again. libzstd's decoder does the same; the tables
+     * are worked out here for each offset. */
+    if (off < 8) {
+        static const cx_u8 next[8] = {0, 1, 2, 1, 4, 4, 4, 4};
+        static const cx_u8 back[8] = {0, 8, 8, 9, 8, 10, 12, 14};
+        op[0] = s[0];
+        op[1] = s[1];
+        op[2] = s[2];
+        op[3] = s[3];
+        memcpy(op + 4, s + next[off], 4);
+        s = op + 8 - back[off];
+    } else {
+        memcpy(op, s, 8);
+        s += 8;
+    }
+    cx_u8* d = op + 8;
+    cx_u8* const e = op + ml;
+    while (d < e) {
+        memcpy(d, s, 8);
+        d += 8;
+        s += 8;
+    }
+}
+
 /* Copies a match of `ml` bytes from `off` back to op. 0 if it reaches past what there is. */
 static inline int copy_match(const out_t* o, cx_u8* op, cx_u32 off, cx_u32 ml) {
     const cx_usize have = (cx_usize)(op - o->base);
@@ -852,38 +893,7 @@ static inline int copy_match(const out_t* o, cx_u8* op, cx_u32 off, cx_u32 ml) {
     }
     const cx_u8* s = op - off;
     if (op + ml <= o->fast) {
-        if (off >= 32) {
-            copy32(op, s, ml);
-            return 1;
-        }
-        if (off >= 16) {
-            copy16(op, s, ml);
-            return 1;
-        }
-        /* A repeating pattern shorter than 16 bytes. Its first 8 bytes are made so that the copy
-         * can go on from a whole number of patterns back, 8 or more: under 8, four bytes one by
-         * one and four more from where the pattern lines up again. libzstd's decoder does the
-         * same; the tables are worked out here for each offset. */
-        if (off < 8) {
-            static const cx_u8 next[8] = {0, 1, 2, 1, 4, 4, 4, 4};
-            static const cx_u8 back[8] = {0, 8, 8, 9, 8, 10, 12, 14};
-            op[0] = s[0];
-            op[1] = s[1];
-            op[2] = s[2];
-            op[3] = s[3];
-            memcpy(op + 4, s + next[off], 4);
-            s = op + 8 - back[off];
-        } else {
-            memcpy(op, s, 8);
-            s += 8;
-        }
-        cx_u8* d = op + 8;
-        cx_u8* const e = op + ml;
-        while (d < e) {
-            memcpy(d, s, 8);
-            d += 8;
-            s += 8;
-        }
+        match_fast(op, s, off, ml);
         return 1;
     }
     for (cx_u32 i = 0; i < ml; i++) op[i] = s[i];
@@ -909,9 +919,16 @@ static inline cx_u32 offset_of(cx_u32 v, cx_u32 ll, cx_u32* r0, cx_u32* r1, cx_u
     return off;
 }
 
+/* Carries out a sequence whose match reaches into the dictionary, which seq_run's loop leaves. 0
+ * if it reaches past it. */
+static __attribute__((noinline, cold)) int seq_cold(const out_t* o, cx_u8* op, const cx_u8* lit, cx_u32 ll, cx_u32 ml, cx_u32 off) {
+    copy32(op, lit, ll);
+    return copy_match(o, op + ll, off, ml);
+}
+
 /* Decodes `count` sequences from the bitstream p[0..n) and carries each out as it's decoded, with
  * the literals, onto the output at *opp: the way one thread goes fastest. 0 if they're broken. */
-static int seq_run(ent_t* e, const cx_u8* p, cx_usize n, cx_u32 count, const cx_u8* lit, cx_usize lit_n, const out_t* o, cx_u8** opp) {
+static __attribute__((noinline)) int seq_run(ent_t* e, const cx_u8* p, cx_usize n, cx_u32 count, const cx_u8* lit, cx_usize lit_n, const out_t* o, cx_u8** opp) {
     cx_u8* op = *opp;
     const cx_u8* lit_end = lit + lit_n;
     if (count) {
@@ -921,49 +938,74 @@ static int seq_run(ent_t* e, const cx_u8* p, cx_usize n, cx_u32 count, const cx_
         cx_u32 os = (cx_u32)br_read(&b, e->of_log);
         cx_u32 ms = (cx_u32)br_read(&b, e->ml_log);
         br_reload(&b);
-        cx_u32 r0 = e->rep[0], r1 = e->rep[1], r2 = e->rep[2];
-        for (cx_u32 i = 0; i < count; i++) {
-            const cell_t lc = e->ll[ls], oc = e->of[os], mc = e->ml[ms];
+        /* The loop holds as little as it can, so what each sequence waits on stays in registers:
+         * a cell is one load, its fields taken out where they're used, and the two older repeated
+         * offsets, which only repeat codes read, stay in e. */
+        cx_u32 r0 = e->rep[0];
+        cx_u32* const rep = e->rep;
+        for (cx_u32 left = count; left; left--) {
+            cx_u64 lc, oc, mc;
+            memcpy(&lc, &e->ll[ls], 8);
+            memcpy(&oc, &e->of[os], 8);
+            memcpy(&mc, &e->ml[ms], 8);
+            /* A cell is next in bits 0 to 15, bits in 16 to 23, extra in 24 to 31, and base in
+             * the top 32. */
+            const cx_u32 lx = (cx_u32)(lc >> 24) & 0xFF, ox = (cx_u32)(oc >> 24) & 0xFF, mx = (cx_u32)(mc >> 24) & 0xFF;
             cx_u32 v, ml, ll;
             /* A reload leaves at least 57 bits. Extra bits of 30 or fewer and the states' 26 at
              * most fit in them, so most sequences take one reload, at their end, as in libzstd's
              * decoder. */
-            if (__builtin_expect(oc.extra + mc.extra + lc.extra <= 30, 1)) {
-                v = oc.base + (cx_u32)br_read(&b, oc.extra);
-                ml = mc.base + (cx_u32)br_read(&b, mc.extra);
-                ll = lc.base + (cx_u32)br_read(&b, lc.extra);
+            if (__builtin_expect(ox + mx + lx <= 30, 1)) {
+                v = (cx_u32)(oc >> 32) + (cx_u32)br_read(&b, ox);
+                ml = (cx_u32)(mc >> 32) + (cx_u32)br_read(&b, mx);
+                ll = (cx_u32)(lc >> 32) + (cx_u32)br_read(&b, lx);
             } else {
-                v = oc.base + (cx_u32)br_read(&b, oc.extra);
+                v = (cx_u32)(oc >> 32) + (cx_u32)br_read(&b, ox);
                 br_reload(&b);
-                ml = mc.base + (cx_u32)br_read(&b, mc.extra);
-                ll = lc.base + (cx_u32)br_read(&b, lc.extra);
+                ml = (cx_u32)(mc >> 32) + (cx_u32)br_read(&b, mx);
+                ll = (cx_u32)(lc >> 32) + (cx_u32)br_read(&b, lx);
                 br_reload(&b);
             }
-            if (i + 1 < count) {
-                ls = lc.next + (cx_u32)br_read(&b, lc.bits);
-                ms = mc.next + (cx_u32)br_read(&b, mc.bits);
-                os = oc.next + (cx_u32)br_read(&b, oc.bits);
+            if (left > 1) {
+                ls = ((cx_u32)lc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(lc >> 16) & 0xFF);
+                ms = ((cx_u32)mc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(mc >> 16) & 0xFF);
+                os = ((cx_u32)oc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(oc >> 16) & 0xFF);
             }
             br_reload(&b);
-            const cx_u32 off = offset_of(v, ll, &r0, &r1, &r2);
-            if (off == 0) return 0;
-            /* The literals, then the match. */
+            cx_u32 off;
+            if (v > 3) {
+                off = v - 3;
+                rep[2] = rep[1];
+                rep[1] = r0;
+                r0 = off;
+            } else {
+                const cx_u32 k = v - 1 + (ll == 0);
+                if (k == 0) {
+                    off = r0;
+                } else {
+                    off = k == 3 ? r0 - 1 : k == 1 ? rep[1] : rep[2];
+                    if (off == 0) return 0;
+                    if (k != 1) rep[2] = rep[1];
+                    rep[1] = r0;
+                    r0 = off;
+                }
+            }
+            /* The literals, then the match. The output has SLACK bytes past the block's room, so
+             * the fast copies fit whenever the sequence does. */
             if ((cx_usize)(lit_end - lit) < ll) return 0;
             if ((cx_usize)(o->bound - op) < (cx_usize)ll + ml) return 0;
-            if (op + ll <= o->fast) {
+            cx_u8* const m = op + ll;
+            if (__builtin_expect(off <= (cx_usize)(m - o->base), 1)) {
                 copy32(op, lit, ll);
-            } else {
-                memcpy(op, lit, ll);
+                match_fast(m, m - off, off, ml);
+            } else if (!seq_cold(o, op, lit, ll, ml, off)) {
+                return 0;
             }
-            op += ll;
+            op = m + ml;
             lit += ll;
-            if (!copy_match(o, op, off, ml)) return 0;
-            op += ml;
         }
         if (!br_done(&b)) return 0;
         e->rep[0] = r0;
-        e->rep[1] = r1;
-        e->rep[2] = r2;
     }
     const cx_usize rest = (cx_usize)(lit_end - lit);
     if ((cx_usize)(o->bound - op) < rest) return 0;
@@ -1048,15 +1090,17 @@ static int seq_exec(seq_t* s, cx_u32 count, cx_u32* rep, const cx_u8* lit, cx_us
             ahead += f->ll + f->ml;
         }
         const cx_u32 ll = s[i].ll, ml = s[i].ml, off = s[i].off;
-        if (op + ll <= o->fast) {
+        /* seq_decode checked that the sequences fit the block, and the output has SLACK bytes
+         * past it, so the fast copies fit; a match into the dictionary is left to seq_cold. */
+        cx_u8* const m = op + ll;
+        if (__builtin_expect(off <= (cx_usize)(m - o->base), 1)) {
             copy32(op, lit, ll);
-        } else {
-            memcpy(op, lit, ll);
+            match_fast(m, m - off, off, ml);
+        } else if (!seq_cold(o, op, lit, ll, ml, off)) {
+            return 0;
         }
-        op += ll;
+        op = m + ml;
         lit += ll;
-        if (!copy_match(o, op, off, ml)) return 0;
-        op += ml;
     }
     const cx_usize rest = (cx_usize)(lit_end - lit);
     memcpy(op, lit, rest);
