@@ -228,3 +228,12 @@ pub fn get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize) ->
 pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request {
     return start(true, url, headers, body, timeout_ms, limit)
 }
+
+/// GETs `url` and waits for what the server answers, as a script wants it, as Python's
+/// `requests.get(url)` does: no headers of its own, 60 seconds in all, and a body of up to 1 GiB.
+/// Any status is an answer, so a 404 comes back as a `Response` with that status; only no answer
+/// is an error.
+pub fn fetch(url: String, timeout_ms: u32 = 60000) -> Response ! Error {
+    var r = start(false, url, List<Header>(), List<u8>(), timeout_ms, 1073741824)
+    return try r.wait()
+}

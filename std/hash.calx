@@ -6,6 +6,8 @@
 /// SHA-512. They give what Java's `MessageDigest` and `Mac` and Python's `hashlib` and `hmac` give.
 module std.hash
 
+import std.fs.{FsError, open_read}
+
 extern "C" {
     fn cx_digest_start(ctx: *u8, kind: u32)
     fn cx_digest_add(ctx: *u8, p: *const u8, n: usize)
@@ -101,6 +103,24 @@ impl Digest {
 pub fn digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8> {
     var d = Digest.new(algorithm)
     d.add(bytes)
+    return d.finish()
+}
+
+/// The hash of the file at `path`, read a mebibyte at a time so a file of any size takes no more
+/// memory than that, as Python's `hashlib.file_digest(f, name).digest()`. `std.bytes.hex` writes
+/// it as `sha256sum` and `hexdigest` do.
+pub fn file_digest(algorithm: Algorithm, path: String) -> List<u8> ! FsError {
+    let f = try open_read(path)
+    var d = Digest.new(algorithm)
+    var at: u64 = 0
+    loop {
+        let chunk = try f.read_part(at, 1048576)
+        if chunk.is_empty() {
+            break
+        }
+        at += u64(chunk.len())
+        d.add(chunk)
+    }
     return d.finish()
 }
 

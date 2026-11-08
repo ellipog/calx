@@ -47,8 +47,10 @@ fn main() ! JsonError {
 | `parse(text: String) -> Json ! JsonError` | The value in `text`, with nothing but white space around it. With `import std.json`, it's `json.parse(text)`, as Python's is `json.loads` |
 | `{v}` | The value as compact JSON, with no white space: what JavaScript's `JSON.stringify(v)` writes |
 | `pretty(value: Json, indent: usize) -> String` | The value with each element and member on a line of its own, `indent` spaces a level, as Python's `json.dumps(v, indent=2)` writes it. See [Writing](#writing) |
+| `sort_keys(value: Json) -> Json` | The value with every object's members in the order of their keys, all the way down, as Python's `sort_keys=True` writes them: `pretty(sort_keys(v), 2)` |
 | `v.get(key: String) -> Json?` | A copy of member `key`'s value, if `v` is an object that has one |
 | `v.at(i: usize) -> Json?` | A copy of element `i`, if `v` is an array that long |
+| `v.pointer(path: String) -> Json?` | A copy of the value a JSON Pointer names, as RFC 6901 and serde_json read one: `/downloads/server/url` is member `url` of member `server` of member `downloads`, `/versions/0` an array's first element, with `~1` for `/` and `~0` for `~` in a name. `""` is the whole value. Only what's found is copied |
 | `v.as_str()`, `v.as_bool()` | The text or the bool, if `v` is one |
 | `v.as_i64() -> i64?`, `v.as_u64() -> u64?` | The number, if `v` is an integer that fits |
 | `v.as_f64() -> f64?` | Any number, as the nearest `f64` |

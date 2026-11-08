@@ -21,11 +21,15 @@ pub struct Entry {
     /// When it was last modified, to two seconds, in the time zone of whoever archived it, as
     /// zip records it.
     pub modified: DateTime
-    method: u16
-    crc: u32
-    compressed: usize
-    // Where its local header starts.
-    header: usize
+    /// How it's compressed: 0, stored, or 8, deflated. Python's `compress_type`.
+    pub method: u16
+    /// The CRC-32 of what it holds, which `read` checks. Python's `CRC`.
+    pub crc: u32
+    /// How many bytes its data takes in the archive. Python's `compress_size`.
+    pub compressed: usize
+    /// Where its local header starts in the archive, the bytes before its data. Python's
+    /// `header_offset`.
+    pub offset: usize
 }
 
 impl Entry {
@@ -166,7 +170,7 @@ impl Zip {
             let mode = if u32(le16(bytes, p + 4)) >> 8 == 3 { (le32(bytes, p + 38) >> 16) & 0o7777 } else { 0 }
             let modified = dos_time(le16(bytes, p + 14), le16(bytes, p + 12))
             by_name.insert(name.copy(), files.len())
-            files.push(Entry { name: name, size: usize.wrap(size), mode: mode, modified: modified, method: method, crc: le32(bytes, p + 16), compressed: usize.wrap(compressed), header: usize.wrap(header) })
+            files.push(Entry { name: name, size: usize.wrap(size), mode: mode, modified: modified, method: method, crc: le32(bytes, p + 16), compressed: usize.wrap(compressed), offset: usize.wrap(header) })
             p = next
         }
         return Zip { bytes: bytes, files: files, by_name: by_name }
@@ -257,7 +261,7 @@ impl Zip {
                 next = start + usize.wrap(compressed)
             }
             by_name.insert(name.copy(), files.len())
-            files.push(Entry { name: name, size: usize.wrap(size), mode: 0, modified: modified, method: method, crc: crc, compressed: usize.wrap(compressed), header: at })
+            files.push(Entry { name: name, size: usize.wrap(size), mode: 0, modified: modified, method: method, crc: crc, compressed: usize.wrap(compressed), offset: at })
             at = next
         }
         return Zip { bytes: bytes, files: files, by_name: by_name }
@@ -285,7 +289,7 @@ impl Zip {
 
     /// What file `i` holds, or why it can't be read.
     pub fn read(self, i: usize) -> List<u8> ! String {
-        let header = self.files[i].header
+        let header = self.files[i].offset
         let size = self.files[i].size
         let compressed = self.files[i].compressed
         let method = self.files[i].method

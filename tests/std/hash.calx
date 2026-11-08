@@ -4,7 +4,8 @@
 // than one block. build/scratch's wider checks compared 3000 random inputs with Java, and 2510 of
 // every hash and HMAC with Python, whole and in two pieces (CLX-149).
 
-import std.hash.{Algorithm, Digest, hmac, hmac_sha256, md5, sha1, sha256, sha384, sha512}
+import std.fs.{exists, remove_dir_all, temp_dir, write}
+import std.hash.{Algorithm, Digest, file_digest, hmac, hmac_sha256, md5, sha1, sha256, sha384, sha512}
 
 fn hex(bytes: List<u8>) -> String {
     let digits = "0123456789abcdef"
@@ -119,4 +120,21 @@ fn main() {
     d.add_text("Notch")
     // UUID.nameUUIDFromBytes starts from this, then sets the version and variant bits.
     println(hex(d.finish()))    // out: b50ad385829da141a2167e7d7539ba7f
+
+    // A file hashed a mebibyte at a time, across the edge of one, gives what its bytes give.
+    let dir = temp_dir()!
+    var data = List<u8>()
+    for i in 0usize..2621440 {
+        data.push(u8.wrap(i * 31 + i / 977))
+    }
+    write("{dir}/data.bin", data.copy())!
+    write("{dir}/empty.bin", [])!
+    println("{file_digest(Algorithm.Sha256, "{dir}/data.bin")! == sha256(data.copy())} {file_digest(Algorithm.Sha512, "{dir}/data.bin")! == sha512(data)}")    // out: true true
+    println(hex(file_digest(Algorithm.Sha1, "{dir}/empty.bin")!))    // out: da39a3ee5e6b4b0d3255bfef95601890afd80709
+    // A missing file is NotFound, and isn't made.
+    match file_digest(Algorithm.Md5, "{dir}/missing.bin") {
+        ok(_) => println("hashed"),
+        err(e) => println("{e} {exists("{dir}/missing.bin")}"),    // out: not found false
+    }
+    remove_dir_all(dir)!
 }

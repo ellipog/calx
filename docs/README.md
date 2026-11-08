@@ -81,7 +81,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions
 12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
-14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own
+14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own, and `fetch`, which waits for one, for scripts
 15. [std.lz4](std/lz4.md): LZ4 block streams, as lz4-java's `LZ4BlockOutputStream` and `LZ4BlockInputStream` write and read them
 16. [std.thread](std/thread.md): threads for services, which only `unsafe` code starts, the typed queues they talk through, and sleeping
 17. [std.meta](std/meta.md): declarations as data, and the code an attribute gives back
@@ -95,7 +95,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 25. [std.tar](std/tar.md): tar archives, plain or gzipped, read and written in memory: ustar, GNU long names and pax headers, links and modes
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
-28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, written compact or indented, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
+28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, read by JSON Pointers, written compact or indented with keys in order or sorted, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
 29. [std.regex](std/regex.md): regular expressions in Rust's syntax, found, counted, captured, replaced and split in time linear in the text, with Unicode classes and case folding
 30. [std.cli](std/cli.md): `@cli`, which reads a program's command-line options, flags and arguments into a struct, with `--help` written from its docs
 31. [std.random](std/random.md): random numbers from a seed, the same on every system, or seeded from the system: integers, floats, normal values, shuffles, picks and samples

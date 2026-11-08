@@ -1,7 +1,7 @@
 // std.fs: files written, read, renamed and removed, directories made, listed and removed, and
 // the errors, in a temporary directory of the test's own.
 import std.time.{Timestamp}
-import std.fs.{FsError, Kind, append, metadata, open, set_mode, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
+import std.fs.{FsError, Kind, append, metadata, open, open_read, set_mode, set_modified, read, read_part, read_parts, read_text, write, write_parts, rename, rename_synced, remove_file, remove_dir, remove_dir_all, make_dir, make_dir_all, kind, is_file, is_dir, list, real_path, read_link, make_link, separator, temp_dir, try_lock}
 
 fn describe(e: FsError) -> String {
     return match e {
@@ -338,6 +338,20 @@ fn main() {
     match open("{dir}/missing/kept.bin") {
         ok(_) => println("opened in a missing directory"),
         err(e) => println(describe(e)),    // out: not found
+    }
+
+    // Opened only to read, a file that isn't there stays not there, and can't be written.
+    write("{dir}/ro.bin", [1, 2, 3])!
+    let ro = open_read("{dir}/ro.bin")!
+    println("{ro.size()!} {ro.read_part(1, 5)!}")    // out: 3 [2, 3]
+    match ro.write_parts([(0u64, [9])], false) {
+        ok => println("wrote through a read-only file"),
+        err(_) => println("can't write"),    // out: can't write
+    }
+    ro.close()!
+    match open_read("{dir}/nothing.bin") {
+        ok(_) => println("opened nothing"),
+        err(e) => println("{describe(e)} {is_file("{dir}/nothing.bin")}"),    // out: not found false
     }
 
     // Everything goes.

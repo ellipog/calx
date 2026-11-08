@@ -2,7 +2,7 @@
 // while each request runs on its own thread, the way a Calcite server's loop goes on while a
 // login waits for Mojang.
 
-import std.http.{Header, Request, get, post}
+import std.http.{Header, Request, fetch, get, post}
 import std.net.{Event, Net}
 
 // The value of a header in a request the server got, or "none".
@@ -178,4 +178,15 @@ fn main() {
         }
     }
     println(bad)    // out: true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL true:not a valid URL
+
+    // `fetch` waits for the answer itself, so its error comes straight back. Its answers are
+    // `get` and `wait`'s, which the server above can't give while this thread waits.
+    match fetch("ftp://example.com/") {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: not a valid URL
+    }
+    match fetch("http://user@host/", timeout_ms: 50) {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: not a valid URL
+    }
 }

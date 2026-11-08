@@ -45,6 +45,7 @@ fn main() {
 | `sha384(bytes: List<u8>) -> List<u8>` | The SHA-384, 48 bytes |
 | `sha512(bytes: List<u8>) -> List<u8>` | The SHA-512, 64 bytes |
 | `digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8>` | The hash with any of them, as Python's `hashlib.new(name, data).digest()` |
+| `file_digest(algorithm: Algorithm, path: String) -> List<u8> ! FsError` | The hash of a file, read a mebibyte at a time so a file of any size takes no more memory than that, as Python's `hashlib.file_digest`. `NotFound` if it isn't there |
 | `hmac(algorithm: Algorithm, key: List<u8>, message: List<u8>) -> List<u8>` | The HMAC of the message under the key, as RFC 2104 makes it and Java's `Mac` and Python's `hmac.digest` give it. A key longer than a block is hashed first |
 | `hmac_sha256(key: List<u8>, message: List<u8>) -> List<u8>` | The HMAC-SHA256 of the message under the key, 32 bytes, as Java's `Mac.getInstance("HmacSHA256")` gives. A key longer than 64 bytes is hashed first, as the RFC says |
 | `Algorithm` | `Md5`, `Sha1`, `Sha256`, `Sha384` or `Sha512` |

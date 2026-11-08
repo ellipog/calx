@@ -401,6 +401,80 @@ pub fn pretty(value: Json, indent: usize) -> String {
     return out
 }
 
+/// `value` with each object's members in the order of their keys, all the way down, as Python's
+/// `json.dumps(v, sort_keys=True)` writes them: `pretty(sort_keys(v), 2)`. Keys are ordered by
+/// their UTF-8 bytes, which is the order of their code points, as Python orders them.
+pub fn sort_keys(value: Json) -> Json {
+    return match value {
+        Json.Array(items) => {
+            var out = List<Json>()
+            out.reserve(items.len())
+            for item in items {
+                out.push(sort_keys(item))
+            }
+            Json.Array(out)
+        },
+        Json.Object(members) => {
+            var keys = List<String>()
+            keys.reserve(members.len())
+            for (k, _) in members {
+                keys.push(k.copy())
+            }
+            keys.sort()
+            var out = LinkedMap<String, Json>()
+            out.reserve(keys.len())
+            for k in keys {
+                let v = sort_keys(members[k])
+                out.insert(k.copy(), v)
+            }
+            Json.Object(out)
+        },
+        _ => value.copy(),
+    }
+}
+
+// The value at the rest of a pointer, the part from `at`, which is just after a `/`.
+fn find(v: Json, path: String, at: usize) -> Json? {
+    var end = at
+    while end < path.len() and path.byte_at(end) != b'/' {
+        end += 1
+    }
+    var token = path[at..end]
+    if token.contains("~") {
+        token = token.replace("~1", "/").replace("~0", "~")
+    }
+    let last = end == path.len()
+    match v {
+        Json.Object(members) => {
+            if not members.contains(token) {
+                return none
+            }
+            return if last { some(members[token].copy()) } else { find(members[token], path, end + 1) }
+        },
+        Json.Array(items) => {
+            // An index is digits without a leading 0, or `0` itself.
+            let n = token.len()
+            if n == 0 or n > 19 or (n > 1 and token.byte_at(0) == b'0') {
+                return none
+            }
+            var i: u64 = 0
+            for k in 0usize..n {
+                let d = token.byte_at(k)
+                if d < b'0' or d > b'9' {
+                    return none
+                }
+                i = i * 10 + u64(d - b'0')
+            }
+            if i >= u64(items.len()) {
+                return none
+            }
+            let j = usize.wrap(i)
+            return if last { some(items[j].copy()) } else { find(items[j], path, end + 1) }
+        },
+        _ => return none,
+    }
+}
+
 // Adds `v` to `out`: compact, or with each element and member on a line of its own, `indent`
 // spaces a level and `level` levels in.
 fn write_json(out: mut String, v: Json, indented: bool, indent: usize, level: usize) {
@@ -528,6 +602,21 @@ impl Json {
             Json.Array(items) => if i < items.len() { some(items[i].copy()) } else { none },
             _ => none,
         }
+    }
+
+    /// A copy of the value a JSON Pointer names, as RFC 6901 reads one and serde_json's `pointer`
+    /// does: `/downloads/server/url` is member `url` of member `server` of member `downloads`, and
+    /// `/versions/0` is an array's first element. `~1` in a name is `/` and `~0` is `~`. The empty
+    /// pointer is the whole value. `none` if something on the way isn't there, or the pointer
+    /// doesn't start with `/`. Only what's found is copied.
+    pub fn pointer(self, path: String) -> Json? {
+        if path.is_empty() {
+            return some(self.copy())
+        }
+        if path.byte_at(0) != b'/' {
+            return none
+        }
+        return find(self, path, 1)
     }
 
     /// The text, if this is a string.

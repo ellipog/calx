@@ -32,6 +32,13 @@ fn main() {
     println("{z.read_named("data/big.bin")! == big} {z.read_named("data/empty")!.len()}")    // out: true 0
     println(String.from_utf8(z.read_named("ünïcode/naïve.txt")!) ?? "?")    // out: hé
     println("{z.find("bin/tool") ?? 99} {z.find("nope") == none} {z.len()}")    // out: 1 true 5
+    // Each entry's method, CRC-32, compressed size and local header's offset, as Python's ZipInfo
+    // gives them for these bytes.
+    var fields = List<String>()
+    for e in z.entries() {
+        fields.push("{e.method} {e.crc} {e.compressed} {e.offset}")
+    }
+    println(fields.join(", "))    // out: 0 0 0 0, 0 3923393071 18 34, 8 253078848 168 90, 0 0 0 300, 0 4133018699 3 340
 
     // The same files make the same bytes.
     var again = Writer.new()
@@ -46,6 +53,7 @@ fn main() {
     // Walking the local headers finds the same files, without modes.
     let walked = Zip.walk(bytes.copy())!
     println("{walked.len()} {walked.entries()[1].mode} {walked.read(2)! == big}")    // out: 5 0 true
+    println("{walked.entries()[2].offset} {walked.entries()[2].compressed} {walked.entries()[4].crc}")    // out: 90 168 4133018699
 
     // Files whose sizes are only in the data descriptor after them, as Java's ZipOutputStream
     // writes deflated files, are inflated to find where each ends, and again when read.

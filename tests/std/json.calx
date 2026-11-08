@@ -1,6 +1,6 @@
 // std.json: text parsed into values, with where it's wrong when it isn't JSON, and values written
 // back compact and indented.
-import std.json.{Json, JsonError, parse, pretty}
+import std.json.{Json, JsonError, parse, pretty, sort_keys}
 
 fn try_parse(text: String) {
     match parse(text) {
@@ -113,4 +113,27 @@ fn main() {
     println("{Json.Array([Json.Float(0.0 / 0.0), Json.Float(1.0 / 0.0), Json.Float(2.5)])}")    // out: [null,null,2.5]
     let e = JsonError { message: String("by hand"), line: 0, column: 0 }
     println("{e}")    // out: by hand
+
+    // JSON Pointers, as RFC 6901 reads them: `~1` is `/`, `~0` is `~`, and an index has no
+    // leading 0.
+    let doc = parse(#"{"b": {"z": 1, "a/b": [10, {"m~n": "x", "c": null}], "é": 2, "A": 3}, "a": []}"#)!
+    var found = List<String>()
+    for p in ["/b/z", "/b/a~1b/1/m~0n", "/b/a~1b/0", "/b/a~1b/1/c", "/b/é", "/b/a~1b/01", "/b/a~1b/2", "/b/a~1b/-", "/nope", "b", "/a/0", "/b/z/x"] {
+        found.push("{doc.pointer(String(p))}")
+    }
+    println(found.join(" "))    // out: some(1) some("x") some(10) some(null) some(2) none none none none none none none
+    println("{doc.pointer("") == some(doc.copy())}")    // out: true
+
+    // sort_keys orders every object's keys as Python's sort_keys=True does, by code point.
+    println("{sort_keys(doc.copy())}")    // out: {"a":[],"b":{"A":3,"a/b":[10,{"c":null,"m~n":"x"}],"z":1,"é":2}}
+    println(pretty(sort_keys(parse(#"{"y": [{"q": 1, "p": 2}], "x": {}}"#)!), 2))
+    // out: {
+    // out:   "x": {},
+    // out:   "y": [
+    // out:     {
+    // out:       "p": 2,
+    // out:       "q": 1
+    // out:     }
+    // out:   ]
+    // out: }
 }

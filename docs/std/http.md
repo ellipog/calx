@@ -9,6 +9,19 @@ GET and POST over HTTP and HTTPS. An online-mode server uses it to ask Mojang's 
 
 Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, and libcurl on Linux.
 
+A script that only wants what's at a URL calls `fetch`, which waits for the answer:
+
+```
+import std.http.{fetch}
+import std.json.{parse}
+
+fn main() ! Error {
+    let resp = try fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+    let manifest = try parse(String.from_utf8(resp.body) ?? String())
+    println("{resp.status} {manifest.pointer("/latest/release")}")    // 200 some("26.3")
+}
+```
+
 Each request runs on a thread of its own. `get` and `post` return at once, `done` says when the request has finished, and `wait` takes the response. A server's loop asks `done` each tick and goes on with its work until then, as a game server's login might wait on an authentication service.
 
 ```calx
@@ -37,6 +50,7 @@ fn main() {
 | --- | --- |
 | `get(url: String, headers: List<Header>, timeout_ms: u32, limit: usize) -> Request` | Starts a GET. The whole request may take `timeout_ms` milliseconds, and the body may be at most `limit` bytes |
 | `post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request` | Starts a POST of `body`. Give a `Content-Type` header for it |
+| `fetch(url: String, timeout_ms: u32 = 60000) -> Response ! Error` | GETs `url` and waits for the answer, for scripts, as Python's `requests.get(url)`: no headers of its own and a body of up to 1 GiB. Any status is an answer; only no answer is an error |
 | `r.done() -> bool` | Whether the request has finished, so `wait` won't wait |
 | `r.wait() -> Response ! Error` | Waits for it to finish and takes the response. Panics if it was taken already, by `r` or a copy of it |
 | `Header { name: String, value: String }` | A header line |

@@ -346,6 +346,17 @@ pub fn open(path: String) -> File ! FsError {
     return File { handle: h, named: path.copy() }
 }
 
+/// Opens the file at `path` only to read, as Python's `open(path, "rb")`: `NotFound` if nothing's
+/// there, rather than a new empty file, and writing through it fails. For reading a big file a
+/// part at a time.
+pub fn open_read(path: String) -> File ! FsError {
+    let h = unsafe { cx_fs_open(path.as_ptr(), path.len(), 0) }
+    if h < 0 {
+        fail last_error()
+    }
+    return File { handle: h, named: path.copy() }
+}
+
 impl File {
     /// The path it was opened at.
     pub fn path(self) -> String {

@@ -49,7 +49,7 @@ To work with a file, read it with [`std.fs.read`](fs.md) and write the archive w
 | `z.read_named(name: String) -> List<u8> ! String` | What the entry at `name` holds |
 | `z.extract(to: String) ! String` | Writes every entry into the folder `to`, making folders on the way, and gives each file its mode where the archive has one |
 
-`Entry` has `name: String`, which ends with `/` for a directory; `size: usize`; `mode: u32`, the permission bits when it was archived on Unix, or 0; and `modified: DateTime` ([std.time](time.md)), local to whoever archived it, to two seconds. `e.is_dir()` says whether it's a directory.
+`Entry` has `name: String`, which ends with `/` for a directory; `size: usize`; `mode: u32`, the permission bits when it was archived on Unix, or 0; and `modified: DateTime` ([std.time](time.md)), local to whoever archived it, to two seconds. `e.is_dir()` says whether it's a directory. For code that reads the archive's bytes itself, it also has what Python's `ZipInfo` has: `method: u16`, 0 for stored or 8 for deflated; `crc: u32`, the CRC-32 that `read` checks; `compressed: usize`, how many bytes its data takes; and `offset: usize`, where its local header starts.
 
 - **Errors** are Java's `ZipException` messages, such as `invalid CEN header (bad signature)`, so a server can log what vanilla logs.
 - **Methods:** stored (0) and deflated (8). Anything else, and encrypted entries, are errors.
