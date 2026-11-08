@@ -58,9 +58,9 @@ jobs:
       - name: Tests
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
-      - name: Check the release tools
+      - name: Check the release tools and the art script
         shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx; do "$CALX_BIN" check "$f"; done
+        run: for f in tools/update/update.calx tools/release/package.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark

@@ -112,7 +112,7 @@ What it does:
 
 ## The crystal
 
-The site's art is the crystal from the README's banner, dithered: ink dots by Atkinson's error diffusion, and amber veins by ordered dithering. [`assets/logo/banner.py`](../assets/logo/banner.py) makes all of it:
+The site's art is the crystal from the README's banner, dithered: ink dots by Atkinson's error diffusion, and amber veins by ordered dithering. [`assets/logo/banner.calx`](../assets/logo/banner.calx) makes all of it, with nothing but Calx (`calx run assets/logo/banner.calx`):
 
 - `calx-banner.png` and `calx-banner-dark.png`, the README's banner
 - `calx-social.png`, the card link previews show, 1200 by 630: the site's `og:image`
@@ -125,7 +125,7 @@ How the site uses it:
 
 - **Accents only.** The crystal is in the home page's hero, the "Built with Calx" band and the 404 page. It never sits behind docs text, code or charts.
 - **The banner as the first screen.** The hero is the README's banner at the size of the screen: the logo in a clearing of the crystal, its own shape knocked out of the dots so they run up to its edges, and the page's one line and its two buttons under it. Each section of the home page has a line or two and an example, and the docs say the rest.
-- **Quiet around text.** The dither fades out around text, and around the logo in banner.py's ellipse.
+- **Quiet around text.** The dither fades out around text, and around the logo in banner.calx's ellipse.
 - **Narrow screens.** On a canvas taller than it is wide, such as the hero on a phone, the photo is turned a quarter so the crystal runs down the screen rather than being cut to a sliver. The photo's largest faces are its darkest, which the banner hides behind the logo but a narrow screen shows, so the darkest tones are eased off and dither rather than go solid. On a phone the band's text is as wide as the screen, so its crystal is above and below the text.
 - **Whole pixels.** Dots are drawn at whole screen pixels, never as a scaled image.
 - **Two colors for anything else.** Other illustrations are dithers in ink and amber, on the same paper.

@@ -1,0 +1,674 @@
+// Makes the Calx art: the crystal photo, dithered, with the Calx logo on top.
+//
+//     calx run assets/logo/banner.calx
+//
+// Needs nothing but Calx: std.image reads the photo and writes the files. Writes, beside itself:
+//
+// - calx-banner.png and calx-banner-dark.png, the README's banner, for light and dark themes
+// - calx-social.png, the card that link previews show (the website's og:image), 1200 by 630
+// - calx-tones.jpg, the tone map the website dithers live (see below)
+// - calx-icon-180.png and calx-icon.ico, the mark in ink on paper, for the website's
+//   apple-touch-icon and favicon.ico, beside its SVG favicon, for what can't show an SVG
+//
+// The photo is reduced to a grid of 4-pixel cells and dithered with Atkinson's error diffusion,
+// which keeps highlights clean, in ink on paper, with the photo's warm veins as a third color by
+// ordered dithering. The dither fades out in an ellipse around the logo, which is drawn on top
+// from calx-logo.svg, with a knockout of paper around it so no dot touches it.
+//
+// The website dithers the same crystal live, in the browser, with these steps and constants, so
+// the art and the site match. It starts from calx-tones.jpg, which holds this script's darkness and
+// warmth for the whole photo, so the site can take whatever crop and dot size each place needs.
+
+import std.env.{script}
+import std.fs.{read_text, write}
+import std.image.jpeg.{Sampling}
+import std.image.{Color, Filter, Image, Kind, encode_ico}
+import std.math.{PI, atan2, cos, hypot, pow, sin}
+import std.path.{join, parent_dir}
+import std.regex.{Match, Regex}
+
+const CELL: usize = 4      // pixels per dither cell
+const TOP: f64 = 0.30      // where the photo's band starts, as a share of its height
+const GAMMA: f64 = 1.5     // above 1 lightens the midtones, so ink gathers on edges
+const DETAIL: f64 = 1.2    // local contrast, so crystal facets carry the ink
+
+// Ordered dithering's thresholds, in 64ths: an 8 by 8 Bayer matrix, row by row.
+const BAYER: [i32; 64] = [
+    0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+    3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21,
+]
+
+// A theme's colors.
+struct Theme {
+    paper: Color
+    ink: Color
+    vein: Color
+    logo: Color
+}
+
+fn light_theme() -> Theme {
+    return Theme { paper: Color.rgb(247, 243, 236), ink: Color.rgb(30, 31, 36), vein: Color.rgb(214, 172, 112), logo: Color.rgb(30, 31, 36) }
+}
+
+fn dark_theme() -> Theme {
+    return Theme { paper: Color.rgb(13, 17, 23), ink: Color.rgb(222, 216, 204), vein: Color.rgb(196, 150, 88), logo: Color.rgb(240, 246, 252) }
+}
+
+// A grid of numbers, row by row.
+struct Grid {
+    w: usize
+    h: usize
+    v: List<f64>
+}
+
+// What an image's pixels are made of while it's drawn: floats, three a pixel, rounded at the end.
+struct Canvas {
+    w: usize
+    h: usize
+    v: List<f64>
+}
+
+impl Canvas {
+    fn new(w: usize, h: usize, c: Color) -> Canvas {
+        var v: List<f64> = []
+        v.reserve(w * h * 3)
+        for _ in 0usize..w * h {
+            v.push(f64(c.r))
+            v.push(f64(c.g))
+            v.push(f64(c.b))
+        }
+        return Canvas { w, h, v }
+    }
+
+    fn set(mut self, x: usize, y: usize, c: Color) {
+        let at = (y * self.w + x) * 3
+        self.v[at] = f64(c.r)
+        self.v[at + 1] = f64(c.g)
+        self.v[at + 2] = f64(c.b)
+    }
+
+    // Draws `c` over the pixel with coverage `a`, from 0 to 1.
+    fn blend(mut self, x: usize, y: usize, c: Color, a: f64) {
+        let at = (y * self.w + x) * 3
+        self.v[at] = self.v[at] * (1.0 - a) + f64(c.r) * a
+        self.v[at + 1] = self.v[at + 1] * (1.0 - a) + f64(c.g) * a
+        self.v[at + 2] = self.v[at + 2] * (1.0 - a) + f64(c.b) * a
+    }
+
+    // The pixels rounded as numpy rounds them, halves to even.
+    fn image(self) -> Image {
+        var px: List<u8> = []
+        px.reserve(self.v.len())
+        for v in self.v {
+            px.push(u8.wrap(i32.saturate(v.rint())))
+        }
+        return Image.from_pixels(self.w, self.h, Kind.Rgb, px)
+    }
+}
+
+// --- the logo, rasterized from its SVG -----------------------------------------------------------
+
+// Points along an SVG arc onto `out`, as x, y pairs, by the endpoint-to-center conversion in
+// SVG 1.1, F.6.5.
+fn arc_points(out: mut List<f64>, x1: f64, y1: f64, rx0: f64, ry0: f64, phi: f64, large: bool, sweep: bool, x2: f64, y2: f64) {
+    if rx0 == 0.0 or ry0 == 0.0 {
+        out.push(x2)
+        out.push(y2)
+        return
+    }
+    let c = cos(phi * (PI / 180.0))
+    let s = sin(phi * (PI / 180.0))
+    let dx = (x1 - x2) / 2.0
+    let dy = (y1 - y2) / 2.0
+    let xp = c * dx + s * dy
+    let yp = (-s) * dx + c * dy
+    var rx = rx0.abs()
+    var ry = ry0.abs()
+    let grow = (xp / rx) * (xp / rx) + (yp / ry) * (yp / ry)
+    if grow > 1.0 {
+        rx = rx * grow.sqrt()
+        ry = ry * grow.sqrt()
+    }
+    let num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp
+    let q = num / (rx * rx * yp * yp + ry * ry * xp * xp)
+    var k = (if q > 0.0 { q } else { 0.0 }).sqrt()
+    if large == sweep {
+        k = -k
+    }
+    let cxp = k * rx * yp / ry
+    let cyp = (-k) * ry * xp / rx
+    let cx = c * cxp - s * cyp + (x1 + x2) / 2.0
+    let cy = s * cxp + c * cyp + (y1 + y2) / 2.0
+    let ux = (xp - cxp) / rx
+    let uy = (yp - cyp) / ry
+    let vx = (-xp - cxp) / rx
+    let vy = (-yp - cyp) / ry
+    let start = atan2(uy, ux)
+    var turn = atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+    if not sweep and turn > 0.0 {
+        turn -= 2.0 * PI
+    } else if sweep and turn < 0.0 {
+        turn += 2.0 * PI
+    }
+    let n = i64.saturate(turn.abs() * (if rx >= ry { rx } else { ry }) / 0.5).max(8)
+    for i in 1i64..n + 1 {
+        let t = start + turn * f64.nearest(i) / f64.nearest(n)
+        let ex = rx * cos(t)
+        let ey = ry * sin(t)
+        out.push(c * ex - s * ey + cx)
+        out.push(s * ex + c * ey + cy)
+    }
+}
+
+fn next_number(tokens: List<Match>, i: mut usize) -> f64 {
+    i += 1
+    return f64.parse(tokens[i - 1].text) ?? 0.0
+}
+
+// The closed polygons an SVG path's subpaths make, each as x, y pairs. Handles M, L, H, V, A and Z.
+fn path_polygons(d: String) -> List<List<f64>> {
+    var re = Regex.new(#"[MmLlHhVvAaZz]|-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"#)!
+    let tokens = re.find_all(d)
+    var polygons: List<List<f64>> = []
+    var current: List<f64> = []
+    var x = 0.0
+    var y = 0.0
+    var cmd: u8 = 0
+    var i: usize = 0
+    while i < tokens.len() {
+        let first = tokens[i].text.byte_at(0)
+        if (first >= b'A' and first <= b'Z') or (first >= b'a' and first <= b'z') {
+            cmd = first
+            i += 1
+            if cmd == b'Z' or cmd == b'z' {
+                if current.len() > 0 {
+                    x = current[0]
+                    y = current[1]
+                    polygons.push(current.copy())
+                }
+                current.clear()
+                continue
+            }
+        }
+        let rel = cmd >= b'a'
+        let op = if rel { cmd - 32 } else { cmd }
+        if op == b'M' {
+            let nx = next_number(tokens, mut i)
+            let ny = next_number(tokens, mut i)
+            x = if rel { x + nx } else { nx }
+            y = if rel { y + ny } else { ny }
+            if current.len() > 0 {
+                polygons.push(current.copy())
+            }
+            current = [x, y]
+            // Coordinates after a move are lines.
+            cmd = if rel { b'l' } else { b'L' }
+        } else if op == b'L' {
+            let nx = next_number(tokens, mut i)
+            let ny = next_number(tokens, mut i)
+            x = if rel { x + nx } else { nx }
+            y = if rel { y + ny } else { ny }
+            current.push(x)
+            current.push(y)
+        } else if op == b'H' {
+            let nx = next_number(tokens, mut i)
+            x = if rel { x + nx } else { nx }
+            current.push(x)
+            current.push(y)
+        } else if op == b'V' {
+            let ny = next_number(tokens, mut i)
+            y = if rel { y + ny } else { ny }
+            current.push(x)
+            current.push(y)
+        } else if op == b'A' {
+            let rx = next_number(tokens, mut i)
+            let ry = next_number(tokens, mut i)
+            let phi = next_number(tokens, mut i)
+            let large = next_number(tokens, mut i)
+            let sweep = next_number(tokens, mut i)
+            let nx = next_number(tokens, mut i)
+            let ny = next_number(tokens, mut i)
+            let ex = if rel { x + nx } else { nx }
+            let ey = if rel { y + ny } else { ny }
+            arc_points(mut current, x, y, rx, ry, phi, large != 0.0, sweep != 0.0, ex, ey)
+            x = ex
+            y = ey
+        } else {
+            panic("path command {tokens[i - 1].text} isn't handled")
+        }
+    }
+    if current.len() > 0 {
+        polygons.push(current)
+    }
+    return polygons
+}
+
+// A rounded rectangle, as SVG's <rect> with rx draws it.
+fn rect_polygon(x: f64, y: f64, w: f64, h: f64, r: f64) -> List<f64> {
+    var p: List<f64> = [x + r, y, x + w - r, y]
+    arc_points(mut p, x + w - r, y, r, r, 0.0, false, true, x + w, y + r)
+    p.push(x + w)
+    p.push(y + h - r)
+    arc_points(mut p, x + w, y + h - r, r, r, 0.0, false, true, x + w - r, y + h)
+    p.push(x + r)
+    p.push(y + h)
+    arc_points(mut p, x + r, y + h, r, r, 0.0, false, true, x, y + h - r)
+    p.push(x)
+    p.push(y + r)
+    arc_points(mut p, x, y + r, r, r, 0.0, false, true, x + r, y)
+    return p
+}
+
+// Marks the pixel centers the polygons cover, by scanlines, with SVG's fill rules.
+fn fill(covered: mut List<bool>, polygons: List<List<f64>>, evenodd: bool, width: usize, height: usize, scale: f64, ox: f64, oy: f64) {
+    // Each edge that isn't level, as ax, ay, bx, by in pixels.
+    var edges: List<f64> = []
+    for p in polygons {
+        let n = p.len() / 2
+        for j in 0usize..n {
+            let k = (j + 1) % n
+            let ay = (p[j * 2 + 1] - oy) * scale
+            let by = (p[k * 2 + 1] - oy) * scale
+            if ay != by {
+                edges.push((p[j * 2] - ox) * scale)
+                edges.push(ay)
+                edges.push((p[k * 2] - ox) * scale)
+                edges.push(by)
+            }
+        }
+    }
+    // How the winding number changes at each pixel, along the row.
+    var steps: List<i32> = [0; width + 1]
+    for row in 0usize..height {
+        let yc = f64.nearest(row) + 0.5
+        var hit = false
+        for e in 0usize..edges.len() / 4 {
+            let ax = edges[e * 4]
+            let ay = edges[e * 4 + 1]
+            let bx = edges[e * 4 + 2]
+            let by = edges[e * 4 + 3]
+            if ay.min(by) <= yc and yc < ay.max(by) {
+                let cx = ax + (yc - ay) / (by - ay) * (bx - ax)
+                // The first pixel whose center is past the crossing.
+                var first: usize = if cx < 0.0 { 0 } else { usize.wrap(i64.saturate((cx - 0.5).floor()) + 1).min(width) }
+                while first > 0 and f64.nearest(first - 1) + 0.5 > cx {
+                    first -= 1
+                }
+                while first < width and f64.nearest(first) + 0.5 <= cx {
+                    first += 1
+                }
+                steps[first] += if evenodd or by > ay { 1 } else { -1 }
+                hit = true
+            }
+        }
+        if not hit {
+            continue
+        }
+        var winding: i32 = 0
+        for x in 0usize..width {
+            winding += steps[x]
+            steps[x] = 0
+            if (evenodd and winding % 2 == 1) or (not evenodd and winding != 0) {
+                covered[row * width + x] = true
+            }
+        }
+        steps[width] = 0
+    }
+}
+
+// The value of attribute `name` in an element's attributes.
+fn attribute(attrs: String, name: str) -> String? {
+    var re = Regex.new("(?:^|\\s){name}=\"([^\"]*)\"")!
+    let c = re.captures(attrs) else {
+        return none
+    }
+    return c.get(1)
+}
+
+fn number(attrs: String, name: str) -> f64 {
+    return f64.parse(attribute(attrs, name) ?? String("0")) ?? 0.0
+}
+
+// The coverage of an SVG's shapes, 0 to 1, at `width` pixels wide, from `ss` by `ss` samples a pixel.
+fn svg_alpha(path: String, width: usize, ss: usize) -> Grid ! Error {
+    let read = try read_text(path.copy()).context("reading {path}")
+    let text = read else {
+        fail "{path} isn't UTF-8"
+    }
+    var comments = Regex.new(#"(?s)<!--.*?-->"#)!
+    let svg = comments.replace_all(text, "")
+    let view = attribute(svg, "viewBox") else {
+        fail "{path} has no viewBox"
+    }
+    var words = Regex.new(#"\S+"#)!
+    let box: List<f64> = words.find_all(view).map(|m| f64.parse(m.text) ?? 0.0)
+    let (vx, vy, vw, vh) = (box[0], box[1], box[2], box[3])
+    let scale = f64.nearest(width * ss) / vw
+    let w = width * ss
+    let h = usize.wrap(i64.saturate((vh * scale / f64.nearest(ss)).ceil())) * ss
+    var covered: List<bool> = [false; w * h]
+    var elements = Regex.new(#"<(path|rect)\b([^>]*)>"#)!
+    for el in elements.captures_all(svg) {
+        let attrs = el.get(2) ?? String()
+        if el.get(1) == some(String("path")) {
+            let polygons = path_polygons(attribute(attrs, "d") ?? String())
+            fill(mut covered, polygons, attribute(attrs, "fill-rule") == some(String("evenodd")), w, h, scale, vx, vy)
+        } else {
+            let p = rect_polygon(number(attrs, "x"), number(attrs, "y"), number(attrs, "width"), number(attrs, "height"), number(attrs, "rx"))
+            fill(mut covered, [p], false, w, h, scale, vx, vy)
+        }
+    }
+    let lh = h / ss
+    var v: List<f64> = []
+    v.reserve(width * lh)
+    for y in 0usize..lh {
+        for x in 0usize..width {
+            var n: usize = 0
+            for sy in 0usize..ss {
+                for sx in 0usize..ss {
+                    if covered[(y * ss + sy) * w + x * ss + sx] {
+                        n += 1
+                    }
+                }
+            }
+            v.push(f64.nearest(n) / f64.nearest(ss * ss))
+        }
+    }
+    return Grid { w: width, h: lh, v }
+}
+
+// The logo's outline with its counters filled, grown by `pad` with round corners, `2 × pad`
+// bigger than the logo on each side.
+fn knockout(alpha: Grid, pad: usize) -> List<bool> {
+    var m = Image.new(alpha.w, alpha.h, Kind.Gray, Color.gray(0))
+    for i in 0usize..alpha.v.len() {
+        if alpha.v[i] > 0.05 {
+            m.pixels[i] = 255
+        }
+    }
+    var grown = m.expand(2 * pad, 2 * pad, 2 * pad, 2 * pad, Color.gray(0))
+    grown.flood_fill(0, 0, Color.gray(128))
+    for i in 0usize..grown.pixels.len() {
+        grown.pixels[i] = if grown.pixels[i] != 128 { 255 } else { 0 }
+    }
+    return grown.blur(f64.nearest(pad) / 1.6).pixels.map(|p| f64(p) / 255.0 > 0.08)
+}
+
+// --- the photo, dithered -------------------------------------------------------------------------
+
+// numpy's percentile of sorted values, by its default linear interpolation.
+fn percentile(sorted: List<f64>, p: f64) -> f64 {
+    let last = sorted.len() - 1
+    let at = f64.nearest(last) * (p / 100.0)
+    if at >= f64.nearest(last) {
+        return sorted[last]
+    }
+    let below = at.floor()
+    let a = sorted[usize.wrap(i64.saturate(below))]
+    let b = sorted[usize.wrap(i64.saturate(below)) + 1]
+    let t = at - below
+    let diff = b - a
+    return if t >= 0.5 { b - diff * (1.0 - t) } else { a + diff * t }
+}
+
+fn sort_floats(v: List<f64>) -> List<f64> {
+    var s = v.copy()
+    s.sort_by(|a, b| a.total_cmp(b))
+    return s
+}
+
+fn clip(v: f64) -> f64 {
+    return if v < 0.0 { 0.0 } else if v > 1.0 { 1.0 } else { v }
+}
+
+// Darkness and warmth from 0 to 1, for each pixel of the photo. `blur` is in pixels; the banner's
+// is 6 of its 400 cells across.
+fn measure(photo: Image, blur: f64) -> (Grid, Grid) {
+    let n = photo.width() * photo.height()
+    var lum: List<f64> = []
+    var warm: List<f64> = []
+    var gray: List<u8> = []
+    for i in 0usize..n {
+        let r = f64(photo.pixels[i * 3]) / 255.0
+        let g = f64(photo.pixels[i * 3 + 1]) / 255.0
+        let b = f64(photo.pixels[i * 3 + 2]) / 255.0
+        // Summed with fused multiply-adds in the order numpy's matrix product sums them on x86-64,
+        // so each dot lands where the Python original put it.
+        let l = b.mul_add(0.0722, r.mul_add(0.2126, g * 0.7152))
+        lum.push(l)
+        gray.push(u8.wrap(i32.saturate(l * 255.0)))
+        warm.push(r - b)
+    }
+    let blurred = Image.from_pixels(photo.width(), photo.height(), Kind.Gray, gray).blur(blur)
+    var detail: List<f64> = []
+    for i in 0usize..n {
+        detail.push(lum[i] + DETAIL * (lum[i] - f64(blurred.pixels[i]) / 255.0))
+    }
+    let ds = sort_floats(detail)
+    let lo = percentile(ds, 0.5)
+    let hi = percentile(ds, 99.5)
+    let dark = detail.map(|d| pow(1.0 - clip((d - lo) / (hi - lo)), GAMMA))
+    let ws = sort_floats(warm)
+    let wlo = percentile(ws, 80.0)
+    let whi = percentile(ws, 99.7)
+    let warmth = warm.map(|w| clip((w - wlo) / (whi - wlo)))
+    return (Grid { w: photo.width(), h: photo.height(), v: dark }, Grid { w: photo.width(), h: photo.height(), v: warmth })
+}
+
+// Each cell's darkness, for the ink, and warmth, for the veins, from 0 to 1. The image takes a
+// band of the photo as wide as the photo, from TOP down, or as far down as the band can start and
+// still fit.
+fn tones(photo: Image, width: usize, height: usize) -> (Grid, Grid) {
+    let band = usize.wrap(i64.saturate((f64.nearest(photo.width() * height) / f64.nearest(width)).rint()))
+    assert(band <= photo.height(), "the image is taller, for its width, than the photo")
+    let y0 = usize.wrap(i64.saturate((f64.nearest(photo.height()) * TOP).rint())).min(photo.height() - band)
+    let cells = photo.crop(0, y0, photo.width(), band).resize((width + CELL - 1) / CELL, (height + CELL - 1) / CELL, Filter.Lanczos)
+    return measure(cells, 6.0)
+}
+
+// The whole photo's darkness and warmth, for the website to dither live at any size: one
+// grayscale JPEG, darkness (0 paper to 255 full ink) on top and warmth below.
+fn tone_map(photo: Image, width: usize, quality: u32) -> List<u8> {
+    let height = usize.wrap(i64.saturate((f64.nearest(width * photo.height()) / f64.nearest(photo.width())).rint()))
+    let (dark, warm) = measure(photo.resize(width, height, Filter.Lanczos), f64.nearest(6 * width) / 400.0)
+    var px: List<u8> = []
+    for v in dark.v {
+        px.push(u8.wrap(i32.saturate((v * 255.0).rint())))
+    }
+    for v in warm.v {
+        px.push(u8.wrap(i32.saturate((v * 255.0).rint())))
+    }
+    return Image.from_pixels(width, height * 2, Kind.Gray, px).encode_jpeg(quality, Sampling.S420, true)
+}
+
+// 0 under the logo, rising to 1 in an ellipse around it.
+fn quiet(w: usize, h: usize, logo_w: usize, logo_h: usize) -> Grid {
+    let lw = f64.nearest(logo_w) / f64.nearest(CELL)
+    let lh = f64.nearest(logo_h) / f64.nearest(CELL)
+    var v: List<f64> = []
+    v.reserve(w * h)
+    for y in 0usize..h {
+        for x in 0usize..w {
+            let r = hypot((f64.nearest(x) - f64.nearest(w) / 2.0) / (lw * 0.575), (f64.nearest(y) - f64.nearest(h) / 2.0) / (lh * 0.92))
+            v.push(pow(clip((r - 0.55) / 0.75), 1.5))
+        }
+    }
+    return Grid { w, h, v }
+}
+
+// Atkinson's dither: each cell passes 6/8 of its error on, so highlights stay clean.
+fn atkinson(tone: Grid) -> List<bool> {
+    let (w, h) = (tone.w, tone.h)
+    // A cell of margin on the left, and two on the right and below, for the error that falls off.
+    let pw = w + 3
+    var v: List<f64> = [0.0; (h + 2) * pw]
+    for y in 0usize..h {
+        for x in 0usize..w {
+            v[y * pw + x + 1] = tone.v[y * w + x]
+        }
+    }
+    var out: List<bool> = [false; w * h]
+    for y in 0usize..h {
+        let row = y * pw
+        let below = row + pw
+        let below2 = below + pw
+        for x in 1usize..w + 1 {
+            let on = v[row + x] >= 0.5
+            let error = (v[row + x] - (if on { 1.0 } else { 0.0 })) / 8.0
+            out[y * w + x - 1] = on
+            v[row + x + 1] += error
+            v[row + x + 2] += error
+            v[below + x - 1] += error
+            v[below + x] += error
+            v[below + x + 1] += error
+            v[below2 + x] += error
+        }
+    }
+    return out
+}
+
+fn render(photo: Image, logo_svg: String, width: usize, height: usize, logo_width: usize, corner: usize, theme: Theme) -> Image ! Error {
+    let alpha = try svg_alpha(logo_svg, logo_width, 4)
+    let (dark, warm) = tones(photo, width, height)
+    let (cw, ch) = (dark.w, dark.h)
+    let calm = quiet(cw, ch, alpha.w, alpha.h)
+    var toned: List<f64> = []
+    for i in 0usize..cw * ch {
+        toned.push(dark.v[i] * calm.v[i])
+    }
+    let inked = atkinson(Grid { w: cw, h: ch, v: toned })
+    var img = Canvas.new(width, height, theme.paper)
+    for y in 0usize..height {
+        for x in 0usize..width {
+            let (cx, cy) = (x / CELL, y / CELL)
+            let i = cy * cw + cx
+            if inked[i] {
+                img.set(x, y, theme.ink)
+            } else if warm.v[i] * calm.v[i] * 0.9 > f64(BAYER[(cy % 8) * 8 + cx % 8]) / 64.0 + 1.0 / 128.0 {
+                img.set(x, y, theme.vein)
+            }
+        }
+    }
+
+    // Paper around the logo, so no dot touches it, and the logo over it.
+    let pad: usize = 10
+    let clear = knockout(alpha, pad)
+    let (lw, lh) = (alpha.w, alpha.h)
+    let (ox, oy) = ((width - lw) / 2, (height - lh) / 2)
+    let kw = lw + 4 * pad
+    for y in 0usize..lh + 4 * pad {
+        for x in 0usize..kw {
+            if clear[y * kw + x] {
+                img.set(ox - 2 * pad + x, oy - 2 * pad + y, theme.paper)
+            }
+        }
+    }
+    for y in 0usize..lh {
+        for x in 0usize..lw {
+            img.blend(ox + x, oy + y, theme.logo, alpha.v[y * lw + x])
+        }
+    }
+
+    let image = img.image()
+    if corner == 0 {
+        return image
+    }
+    // Rounded corners, antialiased from 4 by 4 samples a pixel by Lanczos, clear outside.
+    let (w4, h4, r4) = (width * 4, height * 4, corner * 4)
+    let reach = quarter_circle(r4)
+    var corners = Image.new(w4, h4, Kind.Gray, Color.gray(255))
+    for y in 0usize..h4 {
+        let dy = if y < r4 { r4 - y } else if y + 1 + r4 > h4 { y + 1 + r4 - h4 } else { 0 }
+        if dy == 0 {
+            continue
+        }
+        for x in 0usize..w4 {
+            let dx = if x < r4 { r4 - x } else if x + 1 + r4 > w4 { x + 1 + r4 - w4 } else { 0 }
+            if dx > reach[dy] {
+                corners.pixels[y * w4 + x] = 0
+            }
+        }
+    }
+    return image.with_alpha(corners.resize(width, height, Filter.Lanczos))
+}
+
+// How far a filled circle of radius `r` reaches across, in whole pixels from its center, in each
+// row from its center out. The edge is the lattice point nearest the circle, walked a step at a
+// time in doubled coordinates as Pillow's ellipse code walks it, so the corners are Pillow's.
+fn quarter_circle(r: usize) -> List<usize> {
+    let d = i64.wrap(2 * r)
+    let d2 = d * d
+    var reach: List<usize> = [0; r + 1]
+    var set: List<bool> = [false; r + 1]
+    var x = d
+    var y: i64 = 0
+    loop {
+        let row = usize.wrap(y / 2)
+        if not set[row] {
+            reach[row] = usize.wrap(x / 2)
+            set[row] = true
+        }
+        if x == 0 and y == d {
+            break
+        }
+        // Down, down and in, or in: whichever lands nearest the circle.
+        let down = (d2 * (y + 2) * (y + 2) + d2 * x * x - d2 * d2).abs()
+        if x <= 1 {
+            y += 2
+            continue
+        }
+        let diagonal = (d2 * (y + 2) * (y + 2) + d2 * (x - 2) * (x - 2) - d2 * d2).abs()
+        let inward = (d2 * y * y + d2 * (x - 2) * (x - 2) - d2 * d2).abs()
+        if inward < down.min(diagonal) {
+            x -= 2
+        } else if diagonal < down {
+            x -= 2
+            y += 2
+        } else {
+            y += 2
+        }
+    }
+    return reach
+}
+
+// The mark in ink on paper, square and opaque, its square `share` of the icon's width.
+fn icon(mark_svg: String, size: usize, share: f64) -> Image ! Error {
+    let theme = light_theme()
+    let inner = usize.wrap(i64.saturate((f64.nearest(size) * share).rint()))
+    let alpha = try svg_alpha(mark_svg, inner, 8)
+    var img = Canvas.new(size, size, theme.paper)
+    let o = (size - inner) / 2
+    for y in 0usize..inner {
+        for x in 0usize..inner {
+            img.blend(o + x, o + y, theme.ink, alpha.v[y * inner + x])
+        }
+    }
+    return img.image()
+}
+
+fn save(here: String, name: str, bytes: List<u8>) ! Error {
+    try write(join(here, name), bytes).context("writing {name}")
+    println("wrote {name}")
+}
+
+fn main() ! Error {
+    let here = parent_dir(script() ?? String("assets/logo/banner.calx")) ?? String(".")
+    let photo = (try Image.open(join(here, "banner-photo.jpg"))).to(Kind.Rgb)
+    let logo = join(here, "calx-logo.svg")
+    let mark = join(here, "calx-mark.svg")
+
+    // Width, height, logo width, rounded corners and colors. Corners are clear outside. The social
+    // card is opaque and square, since link previews crop and round cards themselves. Few colors,
+    // so a palette keeps each file small.
+    try save(here, "calx-banner.png", (try render(photo, logo, 1600, 480, 640, 20, light_theme())).quantize(64).encode_png(9))
+    try save(here, "calx-banner-dark.png", (try render(photo, logo, 1600, 480, 640, 20, dark_theme())).quantize(64).encode_png(9))
+    try save(here, "calx-social.png", (try render(photo, logo, 1200, 630, 560, 0, light_theme())).quantize(64).encode_png(9))
+    try save(here, "calx-tones.jpg", tone_map(photo, 480, 75))
+
+    // The icons: the mark's whole 128-unit square fills a small icon, where every pixel counts,
+    // and 86% of the 180-pixel one, which a phone rounds and shows on its own.
+    try save(here, "calx-icon-180.png", (try icon(mark, 180, 0.86)).encode_png(9))
+    try save(here, "calx-icon.ico", encode_ico([try icon(mark, 16, 1.0), try icon(mark, 32, 1.0), try icon(mark, 48, 1.0)]))
+}

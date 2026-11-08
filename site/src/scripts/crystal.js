@@ -1,8 +1,8 @@
-// The crystal: banner.py's dither of the calcite photo, drawn live on the page's canvases.
+// The crystal: banner.calx's dither of the calcite photo, drawn live on the page's canvases.
 //
-// /crystal-tones.jpg is assets/logo/calx-tones.jpg, which banner.py writes: the photo's darkness
+// /crystal-tones.jpg is assets/logo/calx-tones.jpg, which banner.calx writes: the photo's darkness
 // (top half) and warmth (bottom half). Each canvas dithers its own crop of it, Atkinson for the ink
-// and Bayer for the amber veins, as banner.py does. Dots are a whole number of screen pixels, so
+// and Bayer for the amber veins, as banner.calx does. Dots are a whole number of screen pixels, so
 // they stay crisp, and each scene fades out around what it keeps clear, measured where that is on
 // the page. It grows outward from that clearing the first time it comes into view, unless the
 // reader asks for less motion.
@@ -16,7 +16,7 @@ const DOT = 3.5; // CSS pixels per dot, before rounding to whole screen pixels
 const KNEE = 0.6; // tones darker than this are eased off by half
 
 // Crops are fractions of the photo: x0, y0, x1, y1. A quiet zone is kept clear: the logo's is
-// banner.py's ellipse, and a box's is a margin of pad and then soft to fade in over. The hero, like
+// banner.calx's ellipse, and a box's is a margin of pad and then soft to fade in over. The hero, like
 // the README's banner, also knocks the logo's own shape out of the dots, so they run up to its edges.
 const KINDS = {
 	hero: {
@@ -125,7 +125,7 @@ function layout(S) {
 			let c = 1;
 			for (const q of quiet) {
 				if (q.shape === 'logo') {
-					// banner.py's quiet(): an ellipse around the logo
+					// banner.calx's quiet(): an ellipse around the logo
 					const r = Math.hypot((px - q.x - q.w / 2) / (q.w * 0.575), (py - q.y - q.h / 2) / (q.h * 0.92));
 					c *= clamp01((r - 0.55) / 0.75) ** 1.5;
 				} else {
@@ -164,7 +164,7 @@ function layout(S) {
 			}
 		}
 
-	// Atkinson's dither, as banner.py's atkinson(): 6/8 of each dot's error passes on.
+	// Atkinson's dither, as banner.calx's atkinson(): 6/8 of each dot's error passes on.
 	const W = cols + 3, buf = new Float32Array(W * (rows + 2));
 	for (let j = 0; j < rows; j++) buf.set(tone.subarray(j * cols, (j + 1) * cols), j * W + 1);
 	const ink = new Uint8Array(n), vein = new Uint8Array(n);
@@ -182,7 +182,7 @@ function layout(S) {
 	for (let j = 0, i = 0; j < rows; j++)
 		for (let x = 0; x < cols; x++, i++) vein[i] = !ink[i] && warmth[i] * 0.9 > BAYER[(j & 7) * 8 + (x & 7)];
 
-	// The knockout: the logo grown by about 1.6% of its width, as banner.py's knockout(), kept clear.
+	// The knockout: the logo grown by about 1.6% of its width, as banner.calx's knockout(), kept clear.
 	if (S.knock) {
 		const r = $(S.knock).getBoundingClientRect(), sc = r.width / cs / 399.761;
 		const m = mask(cols, rows, (g) => {
