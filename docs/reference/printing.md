@@ -202,7 +202,7 @@ fn main() {
 - Every panic in the function names its caller: `panic`, a failed `assert`, an index out of bounds, `!` on `none`.
 - A `@track_caller` function that calls another passes its own caller on, so a check two calls deep still names the code outside them.
 - A `parallel for` inside one names its own places, since its body runs apart from the call.
-- It's for functions and a type's own methods. A method of an interface's impl can't have it, since the interface's callers don't pass a place, and neither can `main`, since no Calx code calls it.
+- It's for functions, a type's own methods, and the impls of the [operator interfaces](interfaces.md#operators), `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`, so a struct's `a / b` can name the line that divides. Every use of an operator is a call of the impl the checker finds, in a generic function too, where the place is the line in that function. The functions of other interfaces' impls can't have it, since the code the compiler writes calls them too, for a map's hashing or a string's `Display`, with no place to give. Neither can `main`, since no Calx code calls it.
 - In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, and its panics use that string, so it costs one pointer per call.
 
 `@track_caller`, [`@export`](libraries.md#building-a-library), [`@handle`](ownership.md#handles), [`@test`](command.md#testing) and `@attribute` are the attributes the compiler knows. Any other is a function a library marks `@attribute` ([attributes](attributes.md)), and one that's neither is an error.

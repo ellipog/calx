@@ -291,6 +291,7 @@ fn main() {
 
 - Both sides are views, as a method's receiver and arguments are, so neither is moved, and the result is a new value. A type that owns memory, such as a big integer, keeps its operands: `a * b + a` reads `a` twice and makes two new values, and drops the one in between.
 - `a += b` is `a = a + b`, and the same for the others. The place is read and then set, so it can't hold a call, which would run twice: `xs[next()] += v` is an error, and `xs[i] += v` isn't.
+- An operator's function can be [`@track_caller`](printing.md#panics-that-name-the-caller), so its panics name the line that used the operator, as dividing a `BigInt` by zero does (CLX-145).
 - A type can implement an operator for more than one type on the right, such as `Add<Money>` and `Add<i64>`, and the right side chooses, as for any [generic interface](#generic-interfaces). A literal there takes the type of the one impl it can be, so `m + 50` takes `Add<i64>`.
 - The value on the left is the one whose impl is called, and a number can't have one, so `2.0 * v` is an error that says to write `v * 2.0`.
 - In generic code, a bound such as `T: Add<T>` lets the body use `+` on `T`. Every number satisfies `Add`, `Sub`, `Mul`, `Div` and `Rem` with its own type, and signed integers and floats satisfy `Neg`, so an instance for numbers uses their own operators, which wrap, as they do anywhere.

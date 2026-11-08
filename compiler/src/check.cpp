@@ -994,7 +994,7 @@ private:
                 error(a.span, "`@track_caller` takes no arguments");
             } else if (it->kind != ItemKind::fn || it->is_extern) {
                 error(a.span, "`@track_caller` is only for a function written in Calx");
-            } else if (owner && (owner->kind == ItemKind::interface || owner->interface)) {
+            } else if (owner && owner->kind == ItemKind::interface) {
                 error(a.span, "`@track_caller` is for a function or a type's own method, not an interface's");
             } else if (it->track_caller) {
                 error(a.span, "`@track_caller` is already on " + q(text(it->name)));
@@ -1456,6 +1456,20 @@ private:
                                             ", whose functions can be called anywhere, so it can't be `unsafe`");
                 }
                 m->interface_item = iface;
+                // CLX-145: an operator's impl can name the place that used the operator, since
+                // every `a / b` is a call of the impl the checker finds, in a generic instance too.
+                // Other interfaces' functions are also called by the code the compiler writes, for
+                // a map's hashing or a string's `Display`, which has no place to give. Once `dyn`
+                // comes, a call through it passes its own place, as a direct call does.
+                if (m->track_caller && operator_of(iface) < 0) {
+                    Span at = m->name_span;
+                    for (const Attribute& a : m->attributes) {
+                        if (a.name.parts.size() == 1 && text(a.name.parts[0]) == "track_caller") at = a.span;
+                    }
+                    error(at, "`@track_caller` is for a function, a type's own method or an operator's impl, such as " + q("Div") +
+                                  "'s, not " + q(text(iface->name)) + "'s");
+                    m->track_caller = false;
+                }
             } else if (m->kind != ItemKind::fn) {
                 error(m->span, "an impl block holds only functions for now");
                 continue;

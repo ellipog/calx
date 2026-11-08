@@ -72,4 +72,4 @@ A `BigInt` is a sign and a list of 64-bit limbs, the lowest first, with no zero 
 - Dividing is Knuth's algorithm D, which works out each limb of the quotient from the top two limbs of what's left with one [`div_wide`](../reference/integers.md#methods), a single `div` instruction on x86-64. Python 3.12 and later switch to a recursive method for numbers of tens of thousands of digits, which is faster at those sizes.
 - Decimal text is read and written 19 digits at a time, the most that fit in a limb.
 - The inner loops read and write the limbs through pointers, with the bounds checked once for the whole loop.
-- A panic in an operator, such as dividing by zero with `/`, names a line of `std.bigint`, since an operator's function can't be `@track_caller` yet. `div_rem`, `floor_div` and `floor_mod` name the caller's line.
+- Dividing by zero, with `/`, `%`, `div_rem`, `floor_div` or `floor_mod`, panics, naming the line that divides ([`@track_caller`](../reference/printing.md#panics-that-name-the-caller)).

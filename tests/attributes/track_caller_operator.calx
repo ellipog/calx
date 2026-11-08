@@ -1,0 +1,35 @@
+// An operator's impl can be `@track_caller`, since every use of the operator is a call of the
+// impl the checker finds (CLX-145). So dividing a `BigInt` by zero, whose `Div` and `Rem` are,
+// names the line that divides, not one in std/bigint.calx, and so does a struct's own `Div`.
+// In a generic function, it's the line in that function.
+import std.bigint.{BigInt}
+
+struct Meters {
+    v: i64
+}
+
+impl Div<i64> for Meters {
+    @track_caller
+    fn div(self, other: i64) -> Meters {
+        if other == 0 {
+            panic("can't split {self.v} m into no parts")
+        }
+        return Meters { v: self.v / other }
+    }
+}
+
+fn halves<T: Div<i64>>(x: T) -> T {
+    return x / 2
+}
+
+fn main() {
+    let a = BigInt.from(7)
+    println("{a / BigInt.from(2)} {a % 4} {halves(a)}")    // out: 3 3 3
+    let m = Meters { v: 10 }
+    println("{(m / 3).v} {halves(m).v}")    // out: 3 5
+    let zero = BigInt.zero()
+    if a < zero {
+        println("{m / 0}")
+    }
+    println("{a % zero}")    // panic: division by zero
+}

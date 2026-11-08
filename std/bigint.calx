@@ -439,6 +439,7 @@ impl Mul<BigInt> for BigInt {
 }
 
 impl Div<BigInt> for BigInt {
+    @track_caller
     fn div(self, other: BigInt) -> BigInt {
         if other.mag.len() == 0 {
             panic("division by zero")
@@ -449,6 +450,7 @@ impl Div<BigInt> for BigInt {
 }
 
 impl Rem<BigInt> for BigInt {
+    @track_caller
     fn rem(self, other: BigInt) -> BigInt {
         if other.mag.len() == 0 {
             panic("division by zero")
@@ -479,12 +481,14 @@ impl Mul<i64> for BigInt {
 }
 
 impl Div<i64> for BigInt {
+    @track_caller
     fn div(self, other: i64) -> BigInt {
         return self / BigInt.from(other)
     }
 }
 
 impl Rem<i64> for BigInt {
+    @track_caller
     fn rem(self, other: i64) -> BigInt {
         return self % BigInt.from(other)
     }
@@ -509,12 +513,14 @@ impl Mul<i32> for BigInt {
 }
 
 impl Div<i32> for BigInt {
+    @track_caller
     fn div(self, other: i32) -> BigInt {
         return self / BigInt.from(other)
     }
 }
 
 impl Rem<i32> for BigInt {
+    @track_caller
     fn rem(self, other: i32) -> BigInt {
         return self % BigInt.from(other)
     }
