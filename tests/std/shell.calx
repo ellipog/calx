@@ -1,0 +1,56 @@
+// std.shell splits command lines into words as Python's shlex.split does, in POSIX mode, and
+// quotes and joins words as shlex.quote and shlex.join do (CLX-165): white space, single and
+// double quotes, escapes inside and outside quotes, empty words, comments, Unicode, the errors
+// with where they are, and quoting. Each word ends with `|`.
+import std.shell.{join, quote, split}
+
+fn show(name: str, text: str, comments: bool = false) {
+    match split(String(text), comments) {
+        ok(words) => {
+            if words.is_empty() {
+                println("{name}: no words")
+                return
+            }
+            var out = String()
+            for w in words {
+                out.push_str(w.replace("\n", "\\n"))
+                out.push('|')
+            }
+            println("{name}: {out}")
+        }
+        err(e) => println("{name}: {e}"),
+    }
+}
+
+fn main() {
+    show("plain", "ls -la  /tmp\tx\ny")    // out: plain: ls|-la|/tmp|x|y|
+    show("quotes", "cp 'my file' \"your file\" x\\ y")    // out: quotes: cp|my file|your file|x y|
+    show("joined", "--name=\"my file\" a'b'\"c\"d")    // out: joined: --name=my file|abcd|
+    show("empty", "'' \"\" x''")    // out: empty: ||x|
+    // In double quotes only `"` and `\` are escaped; before anything else the `\` stays.
+    show("double", "\"a \\\"b\\\" c\\\\d \\x $HOME\"")    // out: double: a "b" c\d \x $HOME|
+    show("single", "'a\\b \"c\" \\'")    // out: single: a\b "c" \|
+    show("escapes", "\\a\\\\b \\\" \\' \\#")    // out: escapes: a\b|"|'|#|
+    show("comment off", "a b # c\nd a#b")    // out: comment off: a|b|#|c|d|a#b|
+    show("comment on", "a b # c\nd a#b", true)    // out: comment on: a|b|d|a|
+    show("comment quoted", "'a#b' \"#\" \\# x# y", true)    // out: comment quoted: a#b|#|#|x|
+    show("unicode", "é '日本 語' \"😀\"")    // out: unicode: é|日本 語|😀|
+    show("nothing", "  \t\n ")    // out: nothing: no words
+    show("open single", "'abc")    // out: open single: line 1, column 1: a `'` that isn't closed
+    show("open double", "a\nb \"c")    // out: open double: line 2, column 3: a `"` that isn't closed
+    show("trailing", "abc\\")    // out: trailing: line 1, column 4: a `\` at the end, with nothing after it to escape
+    show("trailing quoted", "\"abc\\")    // out: trailing quoted: line 1, column 5: a `\` at the end, with nothing after it to escape
+
+    var q = String()
+    for w in ["", "abc", "a b", "it's", "$HOME", "é", "x=1,y/z@w:%+_-."] {
+        if not q.is_empty() {
+            q.push('|')
+        }
+        q.push_str(quote(String(w)))
+    }
+    println(q)    // out: ''|abc|'a b'|'it'"'"'s'|'$HOME'|'é'|x=1,y/z@w:%+_-.
+    let words: List<String> = ["ls", "my file", "it's", ""]
+    let line = join(words.copy())
+    println(line)    // out: ls 'my file' 'it'"'"'s' ''
+    println("{split(line.copy())! == words}")    // out: true
+}

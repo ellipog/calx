@@ -162,6 +162,7 @@ fn main() ! Error {
 | `subprocess.run(["git", "status"], check=True)` | `Command.new("git").arg("status").run()` |
 | `subprocess.check_output(...)` | `Command.new(...).read()`, its output as text |
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
+| `shlex.split(line)`, `shlex.quote(w)`, `shlex.join(words)` | `split(line)`, `quote(w)` and `join(words)` from [`std.shell`](../std/shell.md) |
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
 
 ```calx

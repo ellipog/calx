@@ -1,0 +1,213 @@
+/// Shell words: a command line split into its words, as a POSIX shell reads quotes and escapes and
+/// as Python's `shlex.split` gives them, and words quoted and joined into one a shell reads back,
+/// as `shlex.quote` and `shlex.join` write them.
+module std.shell
+
+/// Why text can't be split: a quote that isn't closed, or a `\` with nothing after it.
+pub struct ShellError {
+    pub message: String
+    /// Where in the text, from 1.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for ShellError {
+    fn show(self) {
+        print("line {self.line}, column {self.column}: {self.message}")
+    }
+}
+
+/// The words in `text`, as Python's `shlex.split(text)` gives them, and as a POSIX shell reads
+/// them, without expanding anything:
+///
+/// - White space, spaces, tabs and newlines, is between words.
+/// - In `'...'`, everything is itself. In `"..."`, a `\` escapes only `"` and `\`, and stays
+///   otherwise. Outside quotes, a `\` escapes whatever comes after it. Quoted parts and the rest
+///   join into one word, as in `--name="my file"`, and `''` is an empty word.
+/// - With `comments`, a `#` starts a comment to the end of its line, even inside a word, as
+///   `shlex.split(text, comments=True)` has it.
+pub fn split(text: String, comments: bool = false) -> List<String> ! ShellError {
+    var words = List<String>()
+    var word = String()
+    // Whether the word has begun: it has a rune, or a quoted part, which can be empty.
+    var started = false
+    let n = text.len()
+    var i: usize = 0
+    while i < n {
+        let b = text.byte_at(i)
+        if b == 32 or b == 9 or b == 10 or b == 13 {
+            if started {
+                words.push(word)
+                word = String()
+                started = false
+            }
+            i += 1
+            continue
+        }
+        if b == 35 and comments {
+            // To the end of the line, which ends the word.
+            while i < n and text.byte_at(i) != 10 {
+                i += 1
+            }
+            continue
+        }
+        started = true
+        if b == 92 {
+            if i + 1 >= n {
+                fail error_at(text, i, "a `\\` at the end, with nothing after it to escape")
+            }
+            let k = rune_len(text.byte_at(i + 1))
+            word.push_str(text[i + 1..i + 1 + k])
+            i += 1 + k
+            continue
+        }
+        if b == 39 {
+            let open = i
+            i += 1
+            let start = i
+            while i < n and text.byte_at(i) != 39 {
+                i += 1
+            }
+            if i >= n {
+                fail error_at(text, open, "a `'` that isn't closed")
+            }
+            word.push_str(text[start..i])
+            i += 1
+            continue
+        }
+        if b == 34 {
+            let open = i
+            i += 1
+            var start = i
+            loop {
+                if i >= n {
+                    fail error_at(text, open, "a `\"` that isn't closed")
+                }
+                let c = text.byte_at(i)
+                if c == 34 {
+                    break
+                }
+                if c == 92 {
+                    if i + 1 >= n {
+                        fail error_at(text, i, "a `\\` at the end, with nothing after it to escape")
+                    }
+                    // Only `"` and `\` are escaped in double quotes; before anything else the
+                    // `\` stays, and what's after it is read as usual.
+                    let e = text.byte_at(i + 1)
+                    if e == 34 or e == 92 {
+                        word.push_str(text[start..i])
+                        start = i + 1
+                        i += 2
+                    } else {
+                        i += 1
+                    }
+                    continue
+                }
+                i += 1
+            }
+            word.push_str(text[start..i])
+            i += 1
+            continue
+        }
+        // A run of ordinary runes.
+        let start = i
+        while i < n {
+            let c = text.byte_at(i)
+            if c == 32 or c == 9 or c == 10 or c == 13 or c == 92 or c == 39 or c == 34 or (c == 35 and comments) {
+                break
+            }
+            i += 1
+        }
+        word.push_str(text[start..i])
+    }
+    if started {
+        words.push(word)
+    }
+    return words
+}
+
+/// `word` as a shell reads back as itself, as Python's `shlex.quote(word)` writes it: as it is if
+/// it's only ASCII letters, digits and `%+,-./:=@_`, and otherwise in `'...'`, with each `'` in it
+/// as `'"'"'`. The empty word is `''`.
+pub fn quote(word: String) -> String {
+    var out = String()
+    out.reserve(word.len() + 2)
+    quote_into(mut out, word)
+    return out
+}
+
+/// The words quoted and joined with spaces, as Python's `shlex.join(words)` writes them: the
+/// command line `split` splits back into them.
+pub fn join(words: List<String>) -> String {
+    var size: usize = 0
+    for w in words {
+        size += w.len() + 3
+    }
+    var out = String()
+    out.reserve(size)
+    for i in 0..words.len() {
+        if i > 0 {
+            out.push(' ')
+        }
+        quote_into(mut out, words[i])
+    }
+    return out
+}
+
+fn quote_into(out: mut String, word: String) {
+    if word.is_empty() {
+        out.push_str("''")
+        return
+    }
+    var safe = true
+    for i in 0..word.len() {
+        if not is_safe(word.byte_at(i)) {
+            safe = false
+            break
+        }
+    }
+    if safe {
+        out.push_str(word)
+        return
+    }
+    out.push('\'')
+    var start: usize = 0
+    for i in 0..word.len() {
+        if word.byte_at(i) == 39 {
+            out.push_str(word[start..i])
+            out.push_str("'\"'\"'")
+            start = i + 1
+        }
+    }
+    out.push_str(word[start..])
+    out.push('\'')
+}
+
+fn is_safe(b: u8) -> bool {
+    return (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 58) or b == 37 or b == 43 or b == 44 or b == 45 or
+        b == 46 or b == 47 or b == 61 or b == 64 or b == 95
+}
+
+fn rune_len(b: u8) -> usize {
+    return if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+}
+
+// The error at byte `at` of `text`, with its line and column.
+fn error_at(text: String, at: usize, message: own String) -> ShellError {
+    var line: usize = 1
+    var start: usize = 0
+    for i in 0..at {
+        if text.byte_at(i) == 10 {
+            line += 1
+            start = i + 1
+        }
+    }
+    var column: usize = 1
+    for i in start..at {
+        if (text.byte_at(i) & 0xC0) != 0x80 {
+            column += 1
+        }
+    }
+    return ShellError { message: message, line: line, column: column }
+}
