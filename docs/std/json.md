@@ -58,7 +58,8 @@ fn main() ! JsonError {
 | `v.len() -> usize` | An array's elements or an object's members, and 0 for anything else |
 | `v.keys() -> List<String>` | An object's keys, in order |
 | `v.kind() -> String` | `null`, `a bool`, `a number`, `a string`, `an array` or `an object`, for messages |
-| `@json` | On a struct: its `to_json`, `to_json_text`, `from_json` and `from_json_text`. See [`@json`](#json) |
+| `@json` | On a struct: its `to_json`, `to_json_text`, `from_json`, `from_json_at` and `from_json_text`. See [`@json`](#json) |
+| `@json_enum` | On an enum whose variants hold nothing: its `to_json`, `from_json` and `from_json_at`, as the variants' names |
 
 ## Values
 
@@ -153,14 +154,17 @@ fn main() {
 
 ## `@json`
 
-`@json` on a struct writes four functions for it, from its fields' types:
+`@json` on a struct writes five functions for it, from its fields' types:
 
 | Function | Does |
 | --- | --- |
 | `s.to_json() -> Json` | The struct as an object with a member for each field, in the fields' order |
 | `s.to_json_text() -> String` | That, as compact text |
 | `T.from_json(value: Json) -> T ! JsonError` | The struct an object describes. Members it has no field for are passed over |
+| `T.from_json_at(value: Json, path: String) -> T ! JsonError` | The same for a value deep in a document, whose errors start with `path` |
 | `T.from_json_text(text: String) -> T ! JsonError` | The struct JSON text describes |
+
+`@json_enum` on an enum whose variants hold nothing writes `to_json`, `from_json` and `from_json_at` for it, as the names of its variants, so a struct with `@json` can have a field of its type: `"Survival"`. A string that names no variant is an error that lists them, `` `Player.mode` should be one of `Survival`, `Creative`, not `Adventure` ``.
 
 The fields can be of these types:
 
@@ -174,11 +178,11 @@ The fields can be of these types:
 | `T?` | `null` for `none`, or what `T` is |
 | `List<T>` | An array of what `T` is |
 | `Map<String, T>`, `LinkedMap<String, T>`, `SortedMap<String, T>` | An object whose members are what `T` is, written in the map's order |
-| A struct with `@json` of its own | What it is, from its own module too, once it's imported |
+| A struct with `@json`, or an enum with `@json_enum`, of its own | What it is, from its own module too, once it's imported |
 
 - **A member that isn't there** is `none` for an optional field, and the field's default if it has one, as `port` has above. For any other field it's an error, `` `Server.name` is missing ``.
 - **`@json_key("...")` on a field** names its member in JSON, for the names a format already has, such as `maxPlayers`. A field is written under its own name otherwise.
-- **An error names what's wrong** as the struct's name and the member's key, with `[]` for an element of a list or a map: `` `Server.tags[]` should be a string, not a number ``.
+- **An error names the path to what's wrong**: the struct's name, then a member's key after a `.` and an array's index in `[]`, through the structs inside it: `` `Server.tags[2]` should be a string, not a number ``, `` `Player.pos.z` is missing ``.
 - `@json` refuses a generic struct, a map whose keys aren't `String`, and a field of any other type, such as a tuple, with why, at the `@json`. A struct field whose type has no `@json` of its own is an error in the code `@json` writes, that the type has no `to_json`; give that type `@json` too.
 - `calx expand` prints the code `@json` writes, which is ordinary Calx.
 
@@ -211,8 +215,8 @@ fn main() {
     read(#"{"name": "alex", "level": 7, "pos": {"x": 1, "z": -2.5}, "inventory": {"stone": 64, "apple": 3}, "extra": true}"#)
     // out: ok {"name":"alex","level":7,"pos":{"x":1.0,"z":-2.5},"home":null,"inventory":{"apple":3,"stone":64}}
     read(#"{"name": "alex", "level": 300}"#)    // out: `Player.level` should be from 0 to 255, not 300
-    read(#"{"name": "alex", "level": 7, "pos": {"x": 1}}"#)    // out: `Pos.z` is missing
-    read(#"{"name": "alex", "level": 7, "pos": {"x": 1, "z": 2}, "inventory": {"stone": -1}}"#)    // out: `Player.inventory[]` should be from 0 to 4294967295, not -1
+    read(#"{"name": "alex", "level": 7, "pos": {"x": 1}}"#)    // out: `Player.pos.z` is missing
+    read(#"{"name": "alex", "level": 7, "pos": {"x": 1, "z": 2}, "inventory": {"stone": -1}}"#)    // out: `Player.inventory.stone` should be from 0 to 4294967295, not -1
     read(#"{"name": "alex", "level": 7,}"#)    // out: line 1, column 29: `}` in an object, where a key in double quotes should be
 }
 ```

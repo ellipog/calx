@@ -56,13 +56,13 @@ fn main() ! JsonError {
     show(String(#"{"name": "x", "serverPort": 70000}"#))    // out: `Player.serverPort` should be from 0 to 65535, not 70000
     show(String(#"{"name": "x", "serverPort": 1.0}"#))    // out: `Player.serverPort` should be an integer, not a number
     show(String(#"{"name": "x", "serverPort": 1, "ratio": "1"}"#))    // out: `Player.ratio` should be a number, not a string
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [1]}"#))    // out: `Player.tags[]` should be a string, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [1]}"#))    // out: `Player.tags[0]` should be a string, not a number
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": {}}"#))    // out: `Player.tags` should be an array, not an object
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": null}"#))    // out: `Player.on` should be true or false, not null
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1}}"#))    // out: `Pos.z` is missing
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "home": 5}"#))    // out: `Pos` should be an object, not a number
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [[1], ["2"]]}"#))    // out: `Player.grid[][]` should be an integer, not a string
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {"a": 3000000000}}"#))    // out: `Player.scores[]` should be from -2147483648 to 2147483647, not 3000000000
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1}}"#))    // out: `Player.pos.z` is missing
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "home": 5}"#))    // out: `Player.home` should be an object, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [[1], ["2"]]}"#))    // out: `Player.grid[1][0]` should be an integer, not a string
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {"a": 3000000000}}"#))    // out: `Player.scores.a` should be from -2147483648 to 2147483647, not 3000000000
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": -1}"#))    // out: `Player.id` should be 0 or more, not -1
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 18446744073709551616}"#))    // out: `Player.id` should be an integer, not a number
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 1, "count": 1, "small": 9223372036854775808}"#))    // out: `Player.small` should be from -128 to 127, not 9223372036854775808

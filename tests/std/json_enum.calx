@@ -1,0 +1,38 @@
+// @json_enum writes an enum whose variants hold nothing as their names, so @json can read and
+// write a field of its type, with an error that lists the names (CLX-178).
+import std.json.{json, json_enum, Json, JsonError}
+
+@json_enum
+enum Mode {
+    Survival
+    Creative
+}
+
+@json
+struct Rule {
+    name: String
+    mode: Mode
+}
+
+@json
+struct World {
+    modes: List<Mode>
+    rules: List<Rule>
+    fallback: Mode?
+}
+
+fn read(text: String) {
+    match World.from_json_text(text) {
+        ok(w) => println("ok {w.to_json_text()}"),
+        err(e) => println("{e}"),
+    }
+}
+
+fn main() {
+    read(#"{"modes": ["Creative", "Survival"], "rules": [{"name": "pvp", "mode": "Survival"}], "fallback": null}"#)
+    // out: ok {"modes":["Creative","Survival"],"rules":[{"name":"pvp","mode":"Survival"}],"fallback":null}
+    read(#"{"modes": ["Adventure"], "rules": []}"#)    // out: `World.modes[0]` should be one of `Survival`, `Creative`, not `Adventure`
+    read(#"{"modes": [], "rules": [{"name": "a", "mode": "Creative"}, {"name": "b", "mode": 3}]}"#)    // out: `World.rules[1].mode` should be one of `Survival`, `Creative`, not a number
+    read(#"{"modes": [], "rules": [], "fallback": "survival"}"#)    // out: `World.fallback` should be one of `Survival`, `Creative`, not `survival`
+    println("{Mode.Creative.to_json()} {Mode.from_json(Json.Str(String("Survival")))!.to_json()}")    // out: "Creative" "Survival"
+}

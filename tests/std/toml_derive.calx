@@ -100,10 +100,10 @@ fn main() ! TomlError {
     // What's wrong, by key.
     read("name = 'x'\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.max-players` is missing
     read("name = 'x'\nmax-players = -1\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.max-players` should be from 0 to 4294967295, not -1
-    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = [1]\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.ops[]` should be a string, not an integer
-    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\nnetwork = 5")    // out: error: `Network` should be a table, not an integer
+    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = [1]\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.ops[0]` should be a string, not an integer
+    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\nnetwork = 5")    // out: error: `Config.network` should be a table, not an integer
     read("name = 'x'\nmax-players = 1\nratio = 'fast'\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.ratio` should be a number, not a string
-    read("name = 'x'\nmax-players = 1\nratio = 1\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''\nport = 70000")    // out: error: `Network.port` should be from 0 to 65535, not 70000
+    read("name = 'x'\nmax-players = 1\nratio = 1\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''\nport = 70000")    // out: error: `Config.network.port` should be from 0 to 65535, not 70000
     read("name = 'x'\nmax-players = 1\nratio = 1\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''\ncompression-threshold = 9\nmotd = 'hi'")    // out: x 1 25565 some(9) 0 none
     read("name = 'x'\nmax-players = 1")    // out: error: `Config.ratio` is missing
     read("name = 'x'\nname = 'y'")    // out: error: line 2, column 1: `name` is in this table already

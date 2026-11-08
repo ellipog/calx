@@ -3,7 +3,7 @@
 /// writes it, and `@toml`, which writes a struct's `to_toml` and `from_toml`.
 module std.toml
 
-import std.meta.{Field, Generated, StructDecl, TypeKind, TypeRef}
+import std.meta.{EnumDecl, Field, Generated, StructDecl, TypeKind, TypeRef}
 import std.time.{DateTime, Timestamp, days_in_month}
 
 /// A TOML value.
@@ -1834,6 +1834,15 @@ pub fn toml_string(value: Toml, what: String) -> String ! TomlError {
     fail toml_expected(value, "a string", what)
 }
 
+/// The error for a string at `path` that names none of an enum's variants, `names`.
+/// `@toml_enum`'s code calls it.
+pub fn toml_not_one_of(value: Toml, names: String, path: String) -> TomlError {
+    if let Toml.Str(s) = value {
+        return TomlError { message: "`{path}` should be one of {names}, not `{s}`", line: 0, column: 0 }
+    }
+    return toml_expected(value, "one of {names}", path)
+}
+
 // --- @toml ---------------------------------------------------------------------------------------
 
 /// Writes `to_toml(self) -> Toml` and `from_toml(value: Toml) -> Self ! TomlError` for a struct,
@@ -1849,7 +1858,7 @@ pub fn toml(decl: StructDecl) -> Generated ! String {
     var from = String()
     for f in decl.fields {
         let key = try toml_key(f)
-        let what = "{decl.name}.{key}"
+        let at = #""{path}.#{key}""#
         // TOML has no null, so a field that's `none` is left out, as tomli-w can't write `None`.
         if f.ty.kind == TypeKind.Optional {
             let put = try w.to_toml(f.ty.args[0], "x")
@@ -1864,17 +1873,17 @@ pub fn toml(decl: StructDecl) -> Generated ! String {
         var get = String()
         var missing = String()
         if f.ty.kind == TypeKind.Optional {
-            let inner = try w.from_toml(f.ty.args[0], #"members["#{key}"]"#, what)
+            let inner = try w.from_toml(f.ty.args[0], #"members["#{key}"]"#, at)
             get.push_str("some({inner})")
             missing.push_str("none")
         } else {
-            get.push_str(try w.from_toml(f.ty, #"members["#{key}"]"#, what))
+            get.push_str(try w.from_toml(f.ty, #"members["#{key}"]"#, at))
             if not f.default.is_empty() {
                 missing.push_str(f.default)
             } else {
                 w.use_name("toml_missing")
                 missing.push_str(#"
-                    fail toml_missing("#{what}")
+                    fail toml_missing(#{at})
                 "#)
             }
         }
@@ -1904,11 +1913,16 @@ pub fn toml(decl: StructDecl) -> Generated ! String {
             /// The value a TOML table describes, as `@toml` reads it: a key for each field, whose
             /// others are passed over.
             pub fn from_toml(value: Toml) -> #{decl.name} ! TomlError {
+                return try #{decl.name}.from_toml_at(value, "#{decl.name}")
+            }
+
+            /// The same, for the value at `path` in a bigger document, which errors name.
+            pub fn from_toml_at(value: Toml, path: String) -> #{decl.name} ! TomlError {
                 if let Toml.Table(members) = value {
                     return #{decl.name} {
         #{from}            }
                 }
-                fail toml_expected(value, "a table", "#{decl.name}")
+                fail toml_expected(value, "a table", path)
             }
 
             /// The value a TOML document describes, as `from_toml` reads it.
@@ -1921,6 +1935,58 @@ pub fn toml(decl: StructDecl) -> Generated ! String {
     if not w.helpers.is_empty() {
         g.add(w.helpers.copy())
     }
+    return g
+}
+
+/// Writes `to_toml` and `from_toml` for an enum whose variants hold nothing, as their names, so a
+/// field of the enum's type can be in a struct with `@toml`. See docs/std/toml.md.
+@attribute
+pub fn toml_enum(decl: EnumDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@toml_enum` can't write a generic enum's TOML"
+    }
+    if decl.variants.is_empty() {
+        fail "`@toml_enum` writes an enum as the name of its variant, and `{decl.name}` has none"
+    }
+    var to = String()
+    var from = String()
+    var names = String()
+    for v in decl.variants {
+        if not v.payload.is_empty() or not v.fields.is_empty() {
+            fail "`@toml_enum` writes an enum as the name of its variant, so its variants can't hold anything, as `{v.name}` does"
+        }
+        to.push_str(#"                    #{decl.name}.#{v.name} => "#{v.name}","#)
+        to.push('\n')
+        from.push_str(#"                    if s == "#{v.name}" { return #{decl.name}.#{v.name} }"#)
+        from.push('\n')
+        if not names.is_empty() {
+            names.push_str(", ")
+        }
+        names.push_str("`{v.name}`")
+    }
+    var g = Generated.new()
+    g.add("import std.toml.\{Toml, TomlError, toml_not_one_of\}")
+    g.add(#"
+        impl #{decl.name} {
+            /// This, as the name of its variant.
+            pub fn to_toml(self) -> Toml {
+                return Toml.Str(match self {
+        #{to}            })
+            }
+
+            /// The variant a TOML string names.
+            pub fn from_toml(value: Toml) -> #{decl.name} ! TomlError {
+                return try #{decl.name}.from_toml_at(value, "#{decl.name}")
+            }
+
+            /// The same, for the value at `path` in a bigger document, which errors name.
+            pub fn from_toml_at(value: Toml, path: String) -> #{decl.name} ! TomlError {
+                if let Toml.Str(s) = value {
+        #{from}        }
+                fail toml_not_one_of(value, "#{names}", path)
+            }
+        }
+        "#)
     return g
 }
 
@@ -2042,7 +2108,8 @@ impl Writer {
         return "{value}.to_toml()"
     }
 
-    // An expression that's the `Toml` `value` as a `t`, failing with a `TomlError` for `what`.
+    // An expression that's the `Toml` `value` as a `t`, failing with a `TomlError` for the place
+    // `what`, an expression that's a `String`.
     fn from_toml(mut self, t: TypeRef, value: String, what: String) -> String ! String {
         if t.kind != TypeKind.Named {
             fail "`@toml` can't read a `{t.text}` field yet: it reads numbers, `bool`, `String`, `Toml`, lists, maps with `String` keys, optionals, and types with `@toml` of their own"
@@ -2050,61 +2117,61 @@ impl Writer {
         let n = t.name.copy()
         if n == "bool" {
             self.use_name("toml_bool")
-            return #"try toml_bool(#{value}, "#{what}")"#
+            return "try toml_bool({value}, {what})"
         }
         let range = int_range(n)
         if let (lo, hi) = range {
             self.use_name("toml_int")
             if n == "i64" {
-                return #"try toml_int(#{value}, "#{what}", #{lo}, #{hi})"#
+                return "try toml_int({value}, {what}, {lo}, {hi})"
             }
-            return #"#{n}.wrap(try toml_int(#{value}, "#{what}", #{lo}, #{hi}))"#
+            return "{n}.wrap(try toml_int({value}, {what}, {lo}, {hi}))"
         }
         if n == "u64" or n == "usize" {
             self.use_name("toml_int")
-            return #"#{n}.wrap(try toml_int(#{value}, "#{what}", 0, 9223372036854775807))"#
+            return "{n}.wrap(try toml_int({value}, {what}, 0, 9223372036854775807))"
         }
         if n == "f64" {
             self.use_name("toml_f64")
-            return #"try toml_f64(#{value}, "#{what}")"#
+            return "try toml_f64({value}, {what})"
         }
         if n == "f32" {
             self.use_name("toml_f64")
-            return #"f32.nearest(try toml_f64(#{value}, "#{what}"))"#
+            return "f32.nearest(try toml_f64({value}, {what}))"
         }
         if n == "String" {
             self.use_name("toml_string")
-            return #"try toml_string(#{value}, "#{what}")"#
+            return "try toml_string({value}, {what})"
         }
         if n == "Toml" {
             return "{value}.copy()"
         }
         if n == "List" {
-            let inner = try self.from_toml(t.args[0], "x", "{what}[]")
+            let inner = try self.from_toml(t.args[0], "x", #""{path}[{i}]""#)
             let name = self.fresh()
             self.add_helper(#"
-                fn #{name}(v: Toml) -> #{t.text} ! TomlError {
+                fn #{name}(v: Toml, path: String) -> #{t.text} ! TomlError {
                     if let Toml.Array(items) = v {
                         var out = #{t.text}()
                         out.reserve(items.len())
-                        for x in items {
+                        for (i, x) in items.enumerate() {
                             out.push(#{inner})
                         }
                         return out
                     }
-                    fail toml_expected(v, "an array", "#{what}")
+                    fail toml_expected(v, "an array", path)
                 }
                 "#)
-            return "try {name}({value})"
+            return "try {name}({value}, {what})"
         }
         if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
             if t.args[0].text != "String" {
                 fail "`@toml` reads maps with `String` keys, since TOML's keys are text, not `{t.text}`"
             }
-            let inner = try self.from_toml(t.args[1], "x", "{what}[]")
+            let inner = try self.from_toml(t.args[1], "x", #""{path}.{k}""#)
             let name = self.fresh()
             self.add_helper(#"
-                fn #{name}(v: Toml) -> #{t.text} ! TomlError {
+                fn #{name}(v: Toml, path: String) -> #{t.text} ! TomlError {
                     if let Toml.Table(members) = v {
                         var out = #{t.text}()
                         for (k, x) in members {
@@ -2112,15 +2179,15 @@ impl Writer {
                         }
                         return out
                     }
-                    fail toml_expected(v, "a table", "#{what}")
+                    fail toml_expected(v, "a table", path)
                 }
                 "#)
-            return "try {name}({value})"
+            return "try {name}({value}, {what})"
         }
         if not t.args.is_empty() {
             fail "`@toml` can't read a `{t.text}` field yet"
         }
-        return "try {n}.from_toml({value})"
+        return "try {n}.from_toml_at({value}, {what})"
     }
 }
 

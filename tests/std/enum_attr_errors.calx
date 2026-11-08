@@ -1,0 +1,18 @@
+// @json_enum and @toml_enum write an enum as its variants' names, so they refuse one whose
+// variants hold something (CLX-178).
+import std.json.{json_enum}
+import std.toml.{toml_enum}
+
+@json_enum    // error: `@json_enum` writes an enum as the name of its variant, so its variants can't hold anything, as `Circle` does
+enum Shape {
+    Dot
+    Circle(f64)
+}
+
+@toml_enum    // error: `@toml_enum` writes an enum as the name of its variant, so its variants can't hold anything, as `Move` does
+enum Event {
+    Quit
+    Move { x: i32, y: i32 }
+}
+
+fn main() {}

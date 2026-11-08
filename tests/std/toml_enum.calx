@@ -1,0 +1,40 @@
+// @toml_enum writes an enum whose variants hold nothing as their names, so @toml can read and
+// write a field of its type, with an error that lists the names (CLX-178).
+import std.toml.{toml, toml_enum, TomlError}
+
+@toml_enum
+enum Difficulty {
+    Peaceful
+    Easy
+    Hard
+}
+
+@toml
+struct Rule {
+    name: String
+    level: Difficulty
+}
+
+@toml
+struct Server {
+    difficulty: Difficulty = Difficulty.Easy
+    rules: List<Rule>
+}
+
+fn read(text: str) {
+    match Server.from_toml_text(String(text)) {
+        ok(s) => print(s.to_toml_text()),
+        err(e) => println("{e}"),
+    }
+}
+
+fn main() {
+    read("difficulty = 'Hard'\nrules = []")
+    // out: difficulty = "Hard"
+    // out: rules = []
+    read("rules = [\{ name = 'a', level = 'Peaceful' \}, \{ name = 'b', level = 'hard' \}]")    // out: `Server.rules[1].level` should be one of `Peaceful`, `Easy`, `Hard`, not `hard`
+    read("difficulty = 2\nrules = []")    // out: `Server.difficulty` should be one of `Peaceful`, `Easy`, `Hard`, not an integer
+    read("rules = []")
+    // out: difficulty = "Easy"
+    // out: rules = []
+}

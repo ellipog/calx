@@ -61,7 +61,8 @@ fn main() ! TomlError {
 | `v.len() -> usize` | An array's elements or a table's keys, and 0 for anything else |
 | `v.keys() -> List<String>` | A table's keys, in order |
 | `v.kind() -> String` | `a string`, `an integer`, `a float`, `a bool`, `a date-time`, `a local date-time`, `a date`, `a time`, `an array` or `a table`, for messages |
-| `@toml` | On a struct, writes its `to_toml`, `from_toml`, `to_toml_text` and `from_toml_text`. See [`@toml`](#toml) |
+| `@toml` | On a struct, writes its `to_toml`, `from_toml`, `from_toml_at`, `to_toml_text` and `from_toml_text`. See [`@toml`](#toml) |
+| `@toml_enum` | On an enum whose variants hold nothing, writes its `to_toml`, `from_toml` and `from_toml_at`, as the variants' names |
 
 A `match` reads a value in place, without the copy that `get` makes:
 
@@ -195,14 +196,17 @@ fn main() {
 
 ## `@toml`
 
-`@toml` on a struct writes four functions for it, from its fields' types, as `@json` does for JSON ([std.json](json.md#json)):
+`@toml` on a struct writes five functions for it, from its fields' types, as `@json` does for JSON ([std.json](json.md#json)):
 
 | Function | Does |
 | --- | --- |
 | `s.to_toml() -> Toml` | The struct as a table with a key for each field, in the fields' order |
 | `s.to_toml_text() -> String` | That, as a document, as `write` writes it |
 | `T.from_toml(value: Toml) -> T ! TomlError` | The struct a table describes. Keys it has no field for are passed over |
+| `T.from_toml_at(value: Toml, path: String) -> T ! TomlError` | The same for a value deep in a document, whose errors start with `path` |
 | `T.from_toml_text(text: String) -> T ! TomlError` | The struct a TOML document describes |
+
+`@toml_enum` on an enum whose variants hold nothing writes `to_toml`, `from_toml` and `from_toml_at` for it, as the names of its variants, so a struct with `@toml` can have a field of its type: `mode = "Survival"`. A string that names no variant is an error that lists them, `` `Config.mode` should be one of `Survival`, `Creative`, not `Adventure` ``.
 
 ```calx
 import std.toml.{toml, TomlError}
@@ -263,11 +267,11 @@ The fields can be of these types:
 | `T?` | What `T` is, or no key for `none`, since TOML has no null |
 | `List<T>` | An array of what `T` is. A list of structs is an array of tables |
 | `Map<String, T>`, `LinkedMap<String, T>`, `SortedMap<String, T>` | A table whose values are what `T` is, written in the map's order |
-| A struct with `@toml` of its own | A table, from its own module too, once it's imported |
+| A struct with `@toml`, or an enum with `@toml_enum`, of its own | A table, or the name of a variant, from its own module too, once it's imported |
 
 - **A key that isn't there** is `none` for an optional field, and the field's default if it has one, as `port` has above. For any other field it's an error, `` `Config.name` is missing ``.
 - **`@toml_key("...")` on a field** names its key in TOML, for a key that isn't a Calx name, such as `max-players`. A field is written under its own name otherwise.
-- **An error names what's wrong** as the struct's name and the key, with `[]` for an element of a list or a map: `` `Config.ops[]` should be a string, not an integer ``. An error in the text, before there's a table to read, has its line and column.
+- **An error names the path to what's wrong**: the struct's name, then a key after a `.` and an array's index in `[]`, through the structs inside it: `` `Config.ops[0]` should be a string, not an integer ``, `` `Config.network.port` should be from 0 to 65535, not 70000 ``. An error in the text, before there's a table to read, has its line and column.
 - `@toml` refuses a generic struct, a map whose keys aren't `String`, and a field of any other type, such as a tuple, with why, at the `@toml`. A struct field whose type has no `@toml` of its own is an error in the code `@toml` writes, that the type has no `to_toml`; give that type `@toml` too.
 - `calx expand` prints the code `@toml` writes, which is ordinary Calx.
 
