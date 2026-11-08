@@ -67,22 +67,22 @@ fn main() {
 
 - **SHA-1 and SHA-256** use the processor's SHA instructions where `cpuid` says it has them, which most x86-64 processors made since 2017 do: four rounds an instruction. The plain code is the fallback. `cpuid` is asked once per program, since under a hypervisor, as Windows with virtualization-based security runs, each one costs about a microsecond, which made hashing 50 bytes 8 times slower when it was asked every time.
 - **MD5** is written out round by round. Each round adds its message word and constant before the function of the round before's result, and an empty `asm` keeps clang from moving the constant back onto that chain.
-- **SHA-512 and SHA-384** compute the message schedule two words at a time in SSE2's 64-bit lanes, sixteen rounds ahead, inside the round loop, so it fills the gaps in the rounds' chain. Each round sums its parts in the order they're ready, and works out the majority function from the round before's `a ^ b`.
+- **SHA-512 and SHA-384** compute the message schedule two words at a time in SSE2's 64-bit lanes, sixteen rounds ahead, inside the round loop, so it fills the gaps in the rounds' chain. Where the processor has AVX2, they work out two blocks' schedules at once, one block in each half of a 256-bit register, as OpenSSL does: during the first block's rounds, after which the second block's rounds run on words already made. Each round sums its parts in the order they're ready, with the same empty `asm` as MD5's holding each partial sum where it is, so each round waits on the one before only for Sigma1 and an add. The majority function is worked out from the round before's `a | b` and `a & b`.
 - A `Digest` holds its state in a `List<u8>` of 224 bytes, which the runtime copies into a struct and back, so it needs no alignment and `std.hash` needs no unsafe types.
 - Whole blocks are hashed straight from the caller's bytes. Only a part block at the end of an `add` is copied, to wait for the next.
 - `hmac` is written in Calx over `Digest`. `hmac_sha256`, which Calcite checks Velocity's forwarding with, is one runtime call.
 
 ## Speed
 
-On our benchmark, hashing 64 MiB at once on an i9-13900K, the best of three runs, against Python 3.14's `hashlib`, which is OpenSSL 3. The desktop had other work running, so the numbers are rough.
+On our benchmark, hashing 64 MiB at once on one P-core of an i9-13900K, the best of ten runs, the two taking turns, against Python 3.14's `hashlib`, which is OpenSSL 3.5. The desktop had a game running on every core, so the numbers are rough.
 
 | Hash | Calx | Python |
 | --- | --- | --- |
-| MD5 | 1090 MiB/s | 1136 MiB/s |
-| SHA-1 | 2770 MiB/s | 2728 MiB/s |
-| SHA-256 | 2505 MiB/s | 2441 MiB/s |
-| SHA-512 | 962 MiB/s | 1097 MiB/s |
+| MD5 | 1019 MiB/s | 1037 MiB/s |
+| SHA-1 | 2756 MiB/s | 2731 MiB/s |
+| SHA-256 | 2431 MiB/s | 2302 MiB/s |
+| SHA-512 | 947 MiB/s | 998 MiB/s |
 
-SHA-512 is the one Python is ahead on: OpenSSL works out the schedule for two blocks at once in AVX2. Before CLX-149, Calx did MD5 at 635 MiB/s, SHA-1 at 600 and SHA-256 at 400.
+SHA-512 is the one Python is still ahead on, by about 5%. CLX-151 took it from about 12% behind, with the two-block schedule and the rounds' sums in order. Before CLX-149, Calx did MD5 at 635 MiB/s, SHA-1 at 600 and SHA-256 at 400.
 
 `std.hash` is written in Calx over those runtime calls: [std/hash.calx](../../std/hash.calx).

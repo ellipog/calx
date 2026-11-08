@@ -9,7 +9,8 @@
  * processors since 2017 do: four rounds an instruction, several times the speed of the plain
  * code, which is the fallback. MD5 is written out round by round, with each round's function in
  * the form that waits least on the round before. SHA-512 works in 64-bit words, eight rounds to a
- * loop so no variables are shuffled between them.
+ * loop so no variables are shuffled between them, and with AVX2 works out the words of two blocks
+ * at once.
  *
  * A context is CX_DIGEST_CTX bytes the caller owns, a `List<u8>` in std.hash, so they're copied
  * in and out of a struct here and need no alignment. */
@@ -34,7 +35,7 @@ typedef struct {
     cx_u64 len;    // bytes added
     cx_u32 kind;
     cx_u32 used;   // bytes waiting in `buf`
-    cx_u32 ni;     // whether to use the SHA extensions
+    cx_u32 ni;     // whether to use the SHA extensions, or for SHA-512 and SHA-384, AVX2
 } digest;
 
 _Static_assert(sizeof(digest) <= CX_DIGEST_CTX, "the context fits what std.hash makes room for");
@@ -57,12 +58,11 @@ static inline cx_u64 load_be64(const cx_u8* p) {
 /* Whether the processor has the SHA extensions, and SSSE3 and SSE4.1 beside them. It's asked
    once: under a hypervisor, as Windows with virtualization-based security runs, each cpuid traps
    out to it and costs about a microsecond, as much as hashing a kilobyte. */
-static cx_u32 sha_ni_ask(void) {
 #ifdef CX_X86
+static cx_u32 sha_ni_ask(void) {
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c >> 9 & 1) || !(c >> 19 & 1)) return 0;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) return b >> 29 & 1;
-#endif
     return 0;
 }
 
@@ -75,21 +75,26 @@ static cx_u32 sha_ni(void) {
     }
     return (cx_u32)k;
 }
+#endif
+
+/* An empty asm that says it changes `v`, so clang can't move the sums on either side of it across
+ * it: what's added to `v` before it stays added before. MD5 and SHA-512 use it to keep each
+ * round's sums in the order written, the parts that don't wait on the round before first, which
+ * clang otherwise reorders onto the chain each round waits on. */
+#define KEEP(v) __asm__("" : "+r"(v))
 
 /* --- MD5 ----------------------------------------------------------------------------------- */
 
 /* Each round adds the message word and constant first, which don't wait on the round before,
- * then the function of b, c and d, whose parts that don't need b are worked out first. The empty
- * asm keeps clang from moving the constant after the function, onto the chain each round waits
- * on, as it otherwise does. */
-#define MD5_KEEP(v) __asm__("" : "+r"(v))
+ * then the function of b, c and d, whose parts that don't need b are worked out first. `KEEP`
+ * keeps clang from moving the constant after the function. */
 #define MD5_F(b, c, d) ((d) ^ ((b) & ((c) ^ (d))))
 #define MD5_H(b, c, d) ((c) ^ (d) ^ (b))
 #define MD5_I(b, c, d) ((c) ^ ((b) | ~(d)))
-#define MD5_STEP(f, a, b, c, d, x, k, s) do { a += load_le(p + 4 * (x)) + (k); MD5_KEEP(a); a += f(b, c, d); a = rotl(a, s) + (b); } while (0)
+#define MD5_STEP(f, a, b, c, d, x, k, s) do { a += load_le(p + 4 * (x)) + (k); KEEP(a); a += f(b, c, d); a = rotl(a, s) + (b); } while (0)
 /* G is (b & d) | (c & ~d), whose two halves share no bits, so they can be added in turn, and the
  * one without b goes first. */
-#define MD5_STEP_G(a, b, c, d, x, k, s) do { a += load_le(p + 4 * (x)) + (k) + ((c) & ~(d)); MD5_KEEP(a); a += (b) & (d); a = rotl(a, s) + (b); } while (0)
+#define MD5_STEP_G(a, b, c, d, x, k, s) do { a += load_le(p + 4 * (x)) + (k) + ((c) & ~(d)); KEEP(a); a += (b) & (d); a = rotl(a, s) + (b); } while (0)
 
 static void md5_blocks(cx_u32* h, const cx_u8* p, cx_usize n) {
     cx_u32 a = h[0], b = h[1], c = h[2], d = h[3];
@@ -340,19 +345,34 @@ static const cx_u64 sha384_h[8] = {
     0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4,
 };
 
-/* `wk` holds each round's word with its constant already added. The sums go in the order their
- * parts are ready, the one waiting longest on the round before, Sigma1 of e, last, since that's
- * the chain each round waits on. Maj(a, b, c) is b ^ ((a ^ b) & (b ^ c)), and b ^ c is a ^ b of
- * the round before, kept in `bc`, which saves two operations a round. */
+/* `wk` holds each round's word with its constant already added. Each round waits on e and a from
+ * the round before, so the sums go in the order their parts are ready, with `KEEP` holding them
+ * there: h + wk, which waits on neither, goes into d and into t1 first, then Ch(e, f, g), then
+ * Sigma1(e) last, so the new e waits on e for Sigma1 and one add. The new a adds Maj(a, b, c) and
+ * then Sigma0(a) to t1 the same way. Maj is (a & (b | c)) | (b & c), and b | c and b & c are the
+ * round before's a | b and a & b, carried in `bor` and `band`, so Maj waits on a for two
+ * operations. CLX-151: hashing 64 MiB on one core of a busy i9-13900K, this was about 1037
+ * MiB/s, against 958 with the sums in their plain order and 1066 for `openssl speed`. */
 #define SHA512_ROUND(a, b, c, d, e, f, g, h, i)                                                  \
     do {                                                                                         \
-        cx_u64 t1 = h + wk[i];                                                                   \
-        t1 += g ^ (e & (f ^ g));                                                                 \
-        t1 += rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);                                     \
-        d += t1;                                                                                 \
-        cx_u64 ab = a ^ b;                                                                       \
-        h = t1 + (b ^ (ab & bc)) + (rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39));              \
-        bc = ab;                                                                                 \
+        cx_u64 hk = h + wk[i];                                                                   \
+        KEEP(hk);                                                                                \
+        cx_u64 dk = d + hk;                                                                      \
+        KEEP(dk);                                                                                \
+        cx_u64 ch = g ^ (e & (f ^ g));                                                           \
+        cx_u64 s1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41);                               \
+        dk += ch;                                                                                \
+        KEEP(dk);                                                                                \
+        d = dk + s1;                                                                             \
+        cx_u64 t1 = hk + ch;                                                                     \
+        KEEP(t1);                                                                                \
+        t1 += s1;                                                                                \
+        cx_u64 maj = (a & bor) | band;                                                           \
+        bor = a | b;                                                                             \
+        band = a & b;                                                                            \
+        t1 += maj;                                                                               \
+        KEEP(t1);                                                                                \
+        h = t1 + (rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39));                                \
     } while (0)
 
 #ifdef CX_X86
@@ -385,7 +405,7 @@ static void sha512_blocks(cx_u64* hs, const cx_u8* p, cx_usize n) {
             _mm_storeu_si128((__m128i*)(wk + 2 * j), _mm_add_epi64(w[j], _mm_loadu_si128((const __m128i*)(sha512_k + 2 * j))));
         }
         cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7];
-        cx_u64 bc = b ^ c;
+        cx_u64 bor = b | c, band = b & c;
         for (int i = 0; i < 80; i += 8) {
             if (i < 64) {
                 sha512_pair(w, wk, i / 2 + 8);
@@ -405,6 +425,101 @@ static void sha512_blocks(cx_u64* hs, const cx_u8* p, cx_usize n) {
         hs[0] += a, hs[1] += b, hs[2] += c, hs[3] += d, hs[4] += e, hs[5] += f, hs[6] += g, hs[7] += h;
     }
 }
+
+/* CLX-151: with AVX2, two blocks' schedules are worked out at once, each 256-bit register holding
+ * the same two words of both, the first block's in its low half and the second's in its high, as
+ * OpenSSL's AVX2 code does. The rounds are most of the work, and the schedule's vector work shares
+ * their ports, so halving it is what's left to win: the first block's rounds run with it in their
+ * gaps, then the second's on its words, already there. */
+#define AVX2_TARGET __attribute__((target("avx2,bmi,bmi2")))
+
+AVX2_TARGET static inline __m256i rotr_lanes4(__m256i x, int n) {
+    return _mm256_or_si256(_mm256_srli_epi64(x, n), _mm256_slli_epi64(x, 64 - n));
+}
+
+/* Words 2j and 2j + 1 of both blocks, as `sha512_pair` makes them for one: `_mm256_shuffle_pd`
+ * takes the straddling pairs within each half, so the two blocks never mix. With their constants
+ * added, they're stored as they are, the first block's two then the second's, so one store does
+ * for both and the rounds read each block's from where it is. */
+AVX2_TARGET static inline void sha512_pair2(__m256i* w, cx_u64* wk, int j) {
+    __m256i x2 = w[j - 1];
+    __m256i x7 = _mm256_castpd_si256(_mm256_shuffle_pd(_mm256_castsi256_pd(w[j - 4]), _mm256_castsi256_pd(w[j - 3]), 5));
+    __m256i x15 = _mm256_castpd_si256(_mm256_shuffle_pd(_mm256_castsi256_pd(w[j - 8]), _mm256_castsi256_pd(w[j - 7]), 5));
+    __m256i s0 = _mm256_xor_si256(_mm256_xor_si256(rotr_lanes4(x15, 1), rotr_lanes4(x15, 8)), _mm256_srli_epi64(x15, 7));
+    __m256i s1 = _mm256_xor_si256(_mm256_xor_si256(rotr_lanes4(x2, 19), rotr_lanes4(x2, 61)), _mm256_srli_epi64(x2, 6));
+    w[j] = _mm256_add_epi64(_mm256_add_epi64(w[j - 8], s0), _mm256_add_epi64(x7, s1));
+    __m256i k = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(sha512_k + 2 * j)));
+    _mm256_storeu_si256((__m256i*)(wk + 4 * j), _mm256_add_epi64(w[j], k));
+}
+
+/* Where round t's word is in `wk`, for the first block and for the second. */
+#define SHA512_AT1(t) (2 * (t) - ((t) & 1))
+#define SHA512_AT2(t) (2 * (t) - ((t) & 1) + 2)
+
+/* The 80 rounds of one block on its words with their constants added, from the state in `hs`:
+ * round t's is `wk[at(t)]`. */
+#define SHA512_ROUNDS(at, before)                                                                \
+    do {                                                                                         \
+        cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7]; \
+        cx_u64 bor = b | c, band = b & c;                                                        \
+        for (int i = 0; i < 80; i += 8) {                                                        \
+            before;                                                                              \
+            SHA512_ROUND(a, b, c, d, e, f, g, h, at(i));                                         \
+            SHA512_ROUND(h, a, b, c, d, e, f, g, at(i + 1));                                     \
+            SHA512_ROUND(g, h, a, b, c, d, e, f, at(i + 2));                                     \
+            SHA512_ROUND(f, g, h, a, b, c, d, e, at(i + 3));                                     \
+            SHA512_ROUND(e, f, g, h, a, b, c, d, at(i + 4));                                     \
+            SHA512_ROUND(d, e, f, g, h, a, b, c, at(i + 5));                                     \
+            SHA512_ROUND(c, d, e, f, g, h, a, b, at(i + 6));                                     \
+            SHA512_ROUND(b, c, d, e, f, g, h, a, at(i + 7));                                     \
+        }                                                                                        \
+        hs[0] += a, hs[1] += b, hs[2] += c, hs[3] += d, hs[4] += e, hs[5] += f, hs[6] += g, hs[7] += h; \
+    } while (0)
+
+AVX2_TARGET static void sha512_blocks_avx2(cx_u64* hs, const cx_u8* p, cx_usize n) {
+    /* Each 64-bit word's bytes reversed, in both halves. */
+    const __m256i swap = _mm256_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14,
+                                          13, 12, 11, 10, 9, 8);
+    for (; n >= 2; n -= 2, p += 256) {
+        __m256i w[40];
+        cx_u64 wk[160];
+        for (int j = 0; j < 8; j++) {
+            __m128i lo = _mm_loadu_si128((const __m128i*)(p + 16 * j));
+            __m128i hi = _mm_loadu_si128((const __m128i*)(p + 128 + 16 * j));
+            w[j] = _mm256_shuffle_epi8(_mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1), swap);
+            __m256i k = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(sha512_k + 2 * j)));
+            _mm256_storeu_si256((__m256i*)(wk + 4 * j), _mm256_add_epi64(w[j], k));
+        }
+        SHA512_ROUNDS(SHA512_AT1, if (i < 64) {
+            sha512_pair2(w, wk, i / 2 + 8);
+            sha512_pair2(w, wk, i / 2 + 9);
+            sha512_pair2(w, wk, i / 2 + 10);
+            sha512_pair2(w, wk, i / 2 + 11);
+        });
+        SHA512_ROUNDS(SHA512_AT2, (void)0);
+    }
+    if (n) sha512_blocks(hs, p, n);
+}
+
+/* Whether the processor and the system have AVX2, asked once, as `sha_ni` is. */
+static cx_u32 avx2_ask(void) {
+    unsigned a, b, c, d, lo, hi;
+    if (!__get_cpuid(1, &a, &b, &c, &d) || !(c >> 27 & 1) || !(c >> 28 & 1)) return 0;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    (void)hi;
+    if ((lo & 6) != 6 || !__get_cpuid_count(7, 0, &a, &b, &c, &d)) return 0;
+    return (b >> 5 & 1) && (b >> 3 & 1) && (b >> 8 & 1);  // AVX2, BMI1 and BMI2
+}
+
+static cx_u32 has_avx2(void) {
+    static int known = -1; /* threads that race here store the same answer */
+    int k = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (k < 0) {
+        k = (int)avx2_ask();
+        __atomic_store_n(&known, k, __ATOMIC_RELAXED);
+    }
+    return (cx_u32)k;
+}
 #else
 static void sha512_blocks(cx_u64* hs, const cx_u8* p, cx_usize n) {
     for (; n; n--, p += 128) {
@@ -417,7 +532,7 @@ static void sha512_blocks(cx_u64* hs, const cx_u8* p, cx_usize n) {
         }
         for (int t = 0; t < 80; t++) wk[t] = w[t] + sha512_k[t];
         cx_u64 a = hs[0], b = hs[1], c = hs[2], d = hs[3], e = hs[4], f = hs[5], g = hs[6], h = hs[7];
-        cx_u64 bc = b ^ c;
+        cx_u64 bor = b | c, band = b & c;
         for (int i = 0; i < 80; i += 8) {
             SHA512_ROUND(a, b, c, d, e, f, g, h, i);
             SHA512_ROUND(h, a, b, c, d, e, f, g, i + 1);
@@ -443,11 +558,12 @@ static void blocks(digest* d, const cx_u8* p, cx_usize n) {
 #ifdef CX_X86
         case SHA1: if (d->ni) sha1_blocks_ni(d->h.w, p, n); else sha1_blocks(d->h.w, p, n); break;
         case SHA256: if (d->ni) sha256_blocks_ni(d->h.w, p, n); else sha256_blocks(d->h.w, p, n); break;
+        default: if (d->ni) sha512_blocks_avx2(d->h.q, p, n); else sha512_blocks(d->h.q, p, n); break;
 #else
         case SHA1: sha1_blocks(d->h.w, p, n); break;
         case SHA256: sha256_blocks(d->h.w, p, n); break;
-#endif
         default: sha512_blocks(d->h.q, p, n); break;
+#endif
     }
 }
 
@@ -457,7 +573,9 @@ static void start(digest* d, cx_u32 kind) {
     static const cx_u32 sha256_h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
     memset(d, 0, sizeof *d);
     d->kind = kind;
-    d->ni = (kind == SHA1 || kind == SHA256) && sha_ni();
+#ifdef CX_X86
+    d->ni = kind == SHA1 || kind == SHA256 ? sha_ni() : kind != MD5 && has_avx2();
+#endif
     switch (kind) {
         case MD5: memcpy(d->h.w, md5_h, sizeof md5_h); break;
         case SHA1: memcpy(d->h.w, sha1_h, sizeof sha1_h); break;
