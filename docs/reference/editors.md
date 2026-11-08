@@ -1,6 +1,6 @@
 ---
 title: Editor support
-description: The VS Code extension - highlighting, errors as you type and running files - and how other editors can use the same pieces.
+description: The VS Code extension - highlighting, errors as you type, formatting and running files - and how other editors can use the same pieces.
 ---
 
 # Editor support
@@ -11,6 +11,7 @@ The extension in [`tools/vscode`](../../tools/vscode/README.md) gives VS Code:
 
 - Syntax highlighting for `.calx` files, scripts without the extension whose `#!` line runs `calx`, and ```` ```calx ```` blocks in Markdown, such as the examples in these docs.
 - The compiler's errors as you type. A moment after each change, it runs `calx check` on the editor's text and underlines what it reports.
+- **Format Document**, and format on save with `"editor.formatOnSave": true`, which run [`calx fmt`](command.md#formatting) on the editor's text. A file with errors is left as it is.
 - **Calx: Run File**, the play button in the editor's title bar, which saves the file and runs `calx run` on it.
 - Comment toggling, bracket matching and indentation, and `///` continuing on the next line of a doc comment.
 
@@ -24,9 +25,10 @@ It finds the compiler built into `build/compiler/<platform>` when the file is in
 
 ## Other editors
 
-Two pieces aren't tied to VS Code:
+Three pieces aren't tied to VS Code:
 
 - **The grammar**, [`calx.tmLanguage.json`](../../tools/vscode/syntaxes/calx.tmLanguage.json), is a TextMate grammar, which other editors that read TextMate grammars can load, such as JetBrains IDEs through their TextMate bundle support. Its scopes follow the usual names, such as `keyword.control`, `storage.type` and `entity.name.function`, so themes color it without changes.
 - **Errors for editors.** `calx check --json --stdin path` reads the text from standard input and prints each error as a line of JSON, with positions counted the way editors count them ([the format](command.md#errors-for-editors)). An editor plugin can run it on each change.
+- **Formatting.** `calx fmt --stdin path` reads the text from standard input and prints it [formatted](command.md#formatting). When the text has errors, it prints them on standard error instead and exits with status 1.
 
 The language server planned for Phase 9 will add completion, go to definition and hover docs, and replace the extension's own checking.

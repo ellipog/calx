@@ -1340,6 +1340,7 @@ private:
             if (!binary_op(peek().kind, b) || b.prec < min_prec) break;
             // `a | b` after a call could also start a trailing closure; postfix() takes those first.
             Span op_span = next().span;
+            if (ctx_.binary_ops) ctx_.binary_ops->push_back(op_span.begin);
             // `&&` and `||` from other languages: two of the same token, touching.
             if ((b.op == Op::bit_and && at(Tok::amp)) || (b.op == Op::bit_or && at(Tok::pipe))) {
                 if (peek().span.begin == op_span.end) {

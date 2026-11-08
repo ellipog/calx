@@ -24,6 +24,7 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | `os.environ.get("HOME")` | `variable("HOME")` from [`std.env`](../std/env.md), a `String?` |
 | `input()`, `for line in sys.stdin:` | `Lines()` from [`std.io`](../std/io.md), whose `next()` gives each line, then `none` |
 | `print(s)`, `print(s, end="")`, `print(s, file=sys.stderr)` | `println(s)`, `print(s)`, `eprintln(s)` ([printing](../reference/printing.md)) |
+| `black`, `ruff format` | `calx fmt`, one format with no settings ([formatting](../reference/command.md#formatting)) |
 | `unittest`, `pytest` | `@test` on a function, and `calx test tool.calx`, which runs each test in a process of its own ([testing](../reference/command.md#testing)) |
 | `assert x == 1, "why"` | `assert(x == 1, "why")` |
 | `pip install requests` | Nothing: `std.http` comes with Calx |

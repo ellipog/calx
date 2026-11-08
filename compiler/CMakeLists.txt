@@ -27,6 +27,7 @@ add_executable(calx
     src/toolchain.cpp
     src/update.cpp
     src/manage.cpp
+    src/format.cpp
     src/doctor.cpp
 )
 

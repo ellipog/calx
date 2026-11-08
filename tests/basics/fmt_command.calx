@@ -1,0 +1,124 @@
+// `calx fmt` formats Calx in one fixed way (CLX-89): indentation by brackets, spaces by fixed
+// rules, the parser's view of `<` and `>`, blank lines, line ends, and comments where they were.
+// It keeps line breaks, checks that what it writes means the same, and leaves alone a file it
+// can't read.
+import std.env.{variable}
+import std.fs.{read_text, temp_dir, write_text, remove_dir_all, separator}
+import std.process.{Command}
+
+// What a calx printed, given `input`, run in `dir`, with backslashes as slashes, and how it ended.
+fn calx(exe: String, args: List<String>, input: String, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).input_text(input).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".replace("\\", "/")
+            return "{text}[{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let messy = #"
+        import std.env.{args}
+
+
+
+        // Points.
+        struct Point{
+          x:i32,
+        	y : i32
+        }
+        fn pick<T: Copy>(xs: List<T>, i: usize) -> T {
+                return xs[i]
+        }
+
+        fn main(){
+
+            let p=Point{x:1,y:-2}
+              var total=0
+            for n in 0..10{total+=n*2}
+            if total>10 and not args().is_empty(){
+                println("big {total}")   // lined up
+            }else{
+                println( "small" )     // with this
+            }
+            let xs: List<i32> = [1,2 ,3]
+            let small = pick<i32>(xs,0)<total
+            let m = match p.x { 1=>"one", _=>"other" }
+            let long = p.x +
+            p.y +
+                       total
+            println("{small} {m} {long} {-p.y*3 - -1}")
+
+
+        }
+        "#
+    let tidy = calx(exe, ["fmt", "--stdin"], String(messy), dir.copy())
+    println(tidy)
+    // out: import std.env.{args}
+    // out:
+    // out: // Points.
+    // out: struct Point {
+    // out:     x: i32,
+    // out:     y: i32
+    // out: }
+    // out: fn pick<T: Copy>(xs: List<T>, i: usize) -> T {
+    // out:     return xs[i]
+    // out: }
+    // out:
+    // out: fn main() {
+    // out:     let p = Point { x: 1, y: -2 }
+    // out:     var total = 0
+    // out:     for n in 0..10 { total += n * 2 }
+    // out:     if total > 10 and not args().is_empty() {
+    // out:         println("big {total}")   // lined up
+    // out:     } else {
+    // out:         println("small")       // with this
+    // out:     }
+    // out:     let xs: List<i32> = [1, 2, 3]
+    // out:     let small = pick<i32>(xs, 0) < total
+    // out:     let m = match p.x { 1 => "one", _ => "other" }
+    // out:     let long = p.x +
+    // out:         p.y +
+    // out:         total
+    // out:     println("{small} {m} {long} {-p.y*3 - -1}")
+    // out: }
+    // out: [exited with status 0]
+    let formatted = tidy.split("[exited")[0].copy()
+
+    // The same from Windows line ends and spaces at line ends, and again from what it made.
+    let crlf = messy.replace("\n", "   \r\n")
+    println("{calx(exe, ["fmt", "--stdin"], crlf, dir.copy()) == tidy}")    // out: true
+    println("{calx(exe, ["fmt", "--stdin"], formatted.copy(), dir.copy()) == tidy}")    // out: true
+
+    // What it made runs as what it was given did.
+    write_text("{dir}{s}messy.calx", String(messy))!
+    write_text("{dir}{s}tidy.calx", formatted.copy())!
+    println("{calx(exe, ["messy.calx"], String(), dir.copy()) == calx(exe, ["tidy.calx"], String(), dir.copy())}")    // out: true
+
+    // Files: --check says which aren't formatted and changes nothing; without it, they're formatted.
+    println(calx(exe, ["fmt", "--check", "."], String(), dir.copy()))
+    // out: ./messy.calx isn't formatted
+    // out: [exited with status 1]
+    println(calx(exe, ["fmt"], String(), dir.copy()))
+    // out: formatted ./messy.calx
+    // out: [exited with status 0]
+    println(calx(exe, ["fmt", "--check", "messy.calx", "tidy.calx"], String(), dir.copy()))    // out: [exited with status 0]
+    println("{(read_text("{dir}{s}messy.calx")! ?? String()) == formatted}")    // out: true
+
+    // A file it can't parse is left as it is.
+    write_text("{dir}{s}broken.calx", "fn main( \{\n  x\n\}\n")!
+    let broken = calx(exe, ["fmt", "broken.calx"], String(), dir.copy())
+    println("{broken.contains("broken.calx:") and broken.ends_with("[exited with status 1]")}")    // out: true
+    print(read_text("{dir}{s}broken.calx")! ?? String())
+    // out: fn main( {
+    // out:   x
+    // out: }
+    println(calx(exe, ["fmt", "--tabs"], String(), dir.copy()))
+    // out: calx fmt: unknown option --tabs; it takes --check, --stdin, and files or folders
+    // out: [exited with status 2]
+    remove_dir_all(dir)!
+}

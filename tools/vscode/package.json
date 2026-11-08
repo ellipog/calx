@@ -1,7 +1,7 @@
 {
   "name": "calx",
   "displayName": "Calx",
-  "description": "Syntax highlighting, compiler errors as you type, and running files, for the Calx language.",
+  "description": "Syntax highlighting, compiler errors as you type, formatting, and running files, for the Calx language.",
   "version": "0.1.0",
   "publisher": "aaen-studios",
   "license": "MIT",
@@ -16,7 +16,7 @@
   "engines": {
     "vscode": "^1.75.0"
   },
-  "categories": ["Programming Languages", "Linters"],
+  "categories": ["Programming Languages", "Linters", "Formatters"],
   "main": "./extension.js",
   "contributes": {
     "languages": [

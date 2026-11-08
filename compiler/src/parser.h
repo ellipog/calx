@@ -14,6 +14,9 @@ struct ParseContext {
     Names& names;
     Arena& arena;
     Diagnostics& diags;
+    // If set, where each token the parser takes as a binary operator starts, for `calx fmt`, which
+    // spaces `a < b` but not `List<i32>`.
+    std::vector<std::uint32_t>* binary_ops = nullptr;
 };
 
 // Parses one file. Syntax errors are reported to `ctx.diags`. The parser recovers at the next

@@ -19,6 +19,7 @@
 #include "check.h"
 #include "emit.h"
 #include "expand.h"
+#include "format.h"
 #include "manage.h"
 #include "modules.h"
 #include "parser.h"
@@ -66,6 +67,8 @@ int usage() {
         "            calx eval \"1 << 20\", or calx eval \"let x = 3; x * x\"\n"
         "  emit-c    print the C a program compiles to (-o names a file)\n"
         "  expand    print the code a program's attributes generate\n"
+        "  fmt       format .calx files in place, or those under a folder (--check changes nothing,\n"
+        "            --stdin formats standard input to standard output)\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
         "  doctor    check that Calx can build and run programs, and say how to fix what's wrong\n"
         "  clean     remove the build cache, and say how much that freed\n"
@@ -469,6 +472,7 @@ int main(int argc, char** argv) {
     if (opt.command == "uninstall") return run_uninstall(rest);
     if (opt.command == "completions") return run_completions(rest);
     if (opt.command == "new") return run_new(rest);
+    if (opt.command == "fmt") return run_fmt(rest);
     bool direct = !is_command(opt.command);
     if (direct) {
         if (int status = direct_run(argc, argv, opt)) return status;

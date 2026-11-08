@@ -1,6 +1,6 @@
 ---
 title: The calx command
-description: Starting, checking, building, running and testing Calx programs, running code from the command line, the build modes, and the object cache.
+description: Starting, checking, building, running, testing and formatting Calx programs, running code from the command line, the build modes, and the object cache.
 ---
 
 # The `calx` command
@@ -16,6 +16,7 @@ calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
+calx fmt                       # format the .calx files here, in Calx's one format
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
@@ -155,6 +156,28 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 - The last statement is printed as `"{value}"` prints it. If it has no value, such as a loop or a call that returns nothing, it just runs.
 - Arguments after `--` are the program's, which `env.args()` gives. `--release` before the code builds it optimized.
 - An error names the line of the program `calx eval` built, which is shown with it. Like any program, the code is built once and reused while it's the same, so running it again starts at once.
+
+## Formatting
+
+```sh
+calx fmt                    # format every .calx file in this folder and the folders in it
+calx fmt tool.calx lib      # format tool.calx, and the .calx files under lib
+calx fmt --check            # say which files aren't formatted, and change nothing
+calx fmt --stdin < a.calx   # print standard input formatted, for editors
+```
+
+Calx has one format, with no settings, so code reads the same wherever it's from. `calx fmt`:
+
+- indents four spaces for each bracket a line is inside, counting the brackets one line opens once, and once more for a line that goes on with the statement before it, after an operator such as `+`, `and` or `=`. A line that starts by closing a bracket lines up with the line that opened it;
+- puts one space after `,`, `;` and `:`, and around `=`, `->`, `=>` and binary operators, and none inside `()` and `[]`, before `,` and `:`, or around `.`. Braces get a space inside, as in `Point { x: 1 }`, except `{}` and an import's list, `std.fs.{read, write}`;
+- spaces `a < b` but not `List<i32>`, from what the parser read each `<` and `>` as. Where the space is part of the meaning, as before a `(` that calls or a `?` that makes a type optional, it stays as it was;
+- keeps line breaks where they are, since a line break ends a statement, and keeps at most one blank line in a row, with none just inside a block or at the ends of the file;
+- keeps comments as they're written, apart from spaces at their ends, and a comment after code keeps its column, so comments that line up stay lined up;
+- ends each line with `\n`, with no spaces before it, and the file with one.
+
+It doesn't wrap long lines or join short ones, and a string that spans lines keeps its lines, since they're its text.
+
+It checks what it writes: the result must have the same tokens and comments, with the same statement ends and operators, and formatting it again must change nothing. A file that doesn't parse, or that fails the check, is left as it was, with the error on standard error, and `calx fmt` exits with status 1. `--check` exits with status 1 when a file isn't formatted, for CI. Folders whose names start with `.` are skipped. Format Document in VS Code runs it too ([editor support](editors.md)).
 
 ## Exit status
 

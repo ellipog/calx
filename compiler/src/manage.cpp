@@ -304,6 +304,7 @@ const Command kCommands[] = {
     {"eval", "run code given as one argument"},
     {"emit-c", "print the C a program compiles to"},
     {"expand", "print the code attributes generate"},
+    {"fmt", "format files in the one Calx format"},
     {"update", "install the newest release"},
     {"doctor", "check that Calx can build and run programs"},
     {"clean", "remove the build cache"},

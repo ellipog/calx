@@ -4,6 +4,7 @@ Support for the [Calx](https://calxlang.com) language:
 
 - **Syntax highlighting** for `.calx` files, and for the ```` ```calx ```` blocks in Markdown, such as the examples in the Calx docs.
 - **Errors as you type.** The extension runs `calx check` on the open file a moment after each change, and underlines what the compiler reports. Notes, such as where something was first declared, show as related locations.
+- **Formatting.** Format Document, and format on save with `"editor.formatOnSave": true`, run `calx fmt` on the file. A file with errors is left as it is.
 - **Run File** (the play button in the editor's title bar, or **Calx: Run File** in the command palette) saves the file and runs `calx run` on it in a terminal panel.
 - Comment toggling, bracket matching, auto-closing pairs, indentation, and `///` continuing on the next line of a doc comment.
 
@@ -52,7 +53,7 @@ Tasks of type `calx` run the compiler on a file, for `tasks.json`:
 
 ## How it works
 
-The grammars are TextMate grammars in `syntaxes/`. For errors, the extension pipes the editor's text to `calx check --json --stdin <path>`, which prints each diagnostic as a line of JSON with editor positions ([the format](../../docs/reference/command.md#errors-for-editors)). The language server planned for Phase 9 (P9.2) will replace this with completion, go to definition and hover docs.
+The grammars are TextMate grammars in `syntaxes/`. For formatting, it pipes the editor's text to `calx fmt --stdin <path>` and replaces the text with what that prints. For errors, the extension pipes the editor's text to `calx check --json --stdin <path>`, which prints each diagnostic as a line of JSON with editor positions ([the format](../../docs/reference/command.md#errors-for-editors)). The language server planned for Phase 9 (P9.2) will replace this with completion, go to definition and hover docs.
 
 ## Developing
 

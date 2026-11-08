@@ -1,6 +1,7 @@
 // The Calx extension. Highlighting comes from the grammars in syntaxes/. This file shows the
-// compiler's errors as you type, by running `calx check --json --stdin` on the open file, and
-// runs files through `calx run`. The language server (P9.2) will take this over.
+// compiler's errors as you type, by running `calx check --json --stdin` on the open file, formats
+// files with `calx fmt --stdin`, and runs files through `calx run`. The language server (P9.2)
+// will take this over.
 'use strict';
 
 const vscode = require('vscode');
@@ -12,6 +13,7 @@ const { parseDiagnostics, samePath, diagnosticsFor, findCompiler } = require('./
 // `calx check` takes milliseconds, so a short pause after typing is enough to skip keystrokes.
 const CHECK_DELAY_MS = 150;
 const CHECK_TIMEOUT_MS = 10000;
+const FORMAT_TIMEOUT_MS = 10000;
 
 let collection;
 const timers = new Map();   // document URI to its pending check
@@ -34,6 +36,7 @@ function activate(context) {
             for (const doc of vscode.workspace.textDocuments) schedule(doc, 0);
         }),
         vscode.commands.registerCommand('calx.runFile', runFile),
+        vscode.languages.registerDocumentFormattingEditProvider('calx', { provideDocumentFormattingEdits: format }),
         vscode.tasks.registerTaskProvider('calx', { provideTasks: () => [], resolveTask }),
         { dispose: stopAll },
     );
@@ -172,6 +175,47 @@ function publish(doc, file, diags) {
         out.push(diag);
     }
     collection.set(doc.uri, out);
+}
+
+// --- formatting ---------------------------------------------------------------------------------
+
+// Format Document, and format on save: the file's text through `calx fmt --stdin`. A file with
+// errors is left as it is, since they're already shown.
+function format(doc, _options, token) {
+    return new Promise((resolve) => {
+        const compiler = compilerFor(doc);
+        const text = doc.getText();
+        let child;
+        try {
+            child = childProcess.spawn(compiler, ['fmt', '--stdin', filePath(doc)], { windowsHide: true });
+        } catch (err) {
+            cantRun(compiler, err.message);
+            resolve([]);
+            return;
+        }
+        let stdout = '';
+        const timeout = setTimeout(() => child.kill(), FORMAT_TIMEOUT_MS);
+        token.onCancellationRequested(() => child.kill());
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (s) => { stdout += s; });
+        child.stderr.on('data', () => {});
+        child.stdin.on('error', () => {});
+        child.on('error', (err) => {
+            clearTimeout(timeout);
+            cantRun(compiler, err.code === 'ENOENT' ? 'it wasn\'t found' : err.message);
+            resolve([]);
+        });
+        child.on('close', (code) => {
+            clearTimeout(timeout);
+            if (code !== 0 || token.isCancellationRequested || doc.getText() !== text || stdout === text) {
+                resolve([]);
+                return;
+            }
+            const all = new vscode.Range(doc.positionAt(0), doc.positionAt(text.length));
+            resolve([vscode.TextEdit.replace(all, stdout)]);
+        });
+        child.stdin.end(text, 'utf8');
+    });
 }
 
 // --- running ------------------------------------------------------------------------------------
