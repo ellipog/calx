@@ -1,0 +1,272 @@
+/// Zstandard files, decompressed as Python's `compression.zstd.decompress` reads them (CLX-181):
+/// release archives such as `.tar.zst`, and whatever `zstd` or Python wrote.
+module std.zstd
+
+extern "C" {
+    fn cx_zstd_ctx_size() -> usize
+    fn cx_zstd_ent_size() -> usize
+    fn cx_zstd_init(ctx: *u8)
+    fn cx_zstd_end(ctx: *u8)
+    fn cx_zstd_dict(d: *const u8, n: usize, ent: *u8, info: *u64) -> i32
+    fn cx_zstd_frame(ctx: *u8, input: *const u8, n: usize, at: usize, ent: *const u8, dict_id: u32, window_max: u64, info: *u64) -> i32
+    fn cx_zstd_blocks(ctx: *u8, input: *const u8, n: usize, out: *u8, start: usize, len: *usize, cap: usize, limit: usize, dict: *const u8, dict_n: usize, info: *u64) -> i32
+    fn cx_zstd_xxh64(p: *const u8, n: usize, seed: u64) -> u64
+}
+
+/// Why bytes didn't decompress. Python raises a `ZstdError` for each, and a `ValueError` for a
+/// dictionary that isn't one.
+pub enum Error {
+    /// They aren't Zstandard. Python says "Unknown frame descriptor".
+    Format
+    /// A frame sets a bit that's reserved. Python says "Unsupported frame parameter".
+    Unsupported
+    /// A frame asks for a window of more than 128 MiB, as Python refuses unless it's told
+    /// otherwise. Python says "Frame requires too much memory for decoding".
+    Window
+    /// They're broken. Python says "Data corruption detected", or names what's wrong.
+    Corrupt
+    /// A frame's checksum doesn't match what it decompresses to. Python says "Restored data
+    /// doesn't match checksum".
+    Checksum
+    /// A frame needs a dictionary it wasn't given, or another one. Python says "Dictionary
+    /// mismatch".
+    Dictionary
+    /// They end inside a frame. Python says "Compressed data ended before the end-of-stream
+    /// marker was reached".
+    Truncated
+    /// They decompress to more than the limit.
+    TooLong
+    /// A dictionary that isn't one. Python says "invalid Zstandard dictionary".
+    BadDictionary
+}
+
+/// What went wrong, in words: `corrupt data`, `the data ends early`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Format => print("not a Zstandard file"),
+            Unsupported => print("a frame setting that isn't supported"),
+            Window => print("a window bigger than 128 MiB"),
+            Corrupt => print("corrupt data"),
+            Checksum => print("checksum mismatch"),
+            Dictionary => print("the wrong dictionary, or none"),
+            Truncated => print("the data ends early"),
+            TooLong => print("longer than the limit when decompressed"),
+            BadDictionary => print("not a Zstandard dictionary"),
+        }
+    }
+}
+
+/// A dictionary, which small files compressed with it need to decompress, as Python's `ZstdDict`
+/// holds one.
+pub struct Dictionary {
+    bytes: List<u8>
+    // Its entropy tables and repeated offsets, as the runtime reads them.
+    tables: List<u8>
+    dict_id: u32
+    // Where its content starts after the tables, or 0 for bytes that are all content.
+    content: usize
+}
+
+impl Dictionary {
+    /// A dictionary that `zstd --train` or Python's `train_dict` made, which starts with its
+    /// magic number and an ID that isn't 0, as `ZstdDict(bytes)` takes it. Fails with
+    /// `BadDictionary` for other bytes, and for a dictionary whose tables are broken, which Python
+    /// only finds when it first decompresses with it.
+    pub fn new(bytes: own List<u8>) -> Dictionary ! Error {
+        let d = try Dictionary.read(bytes)
+        if d.content == 0 or d.dict_id == 0 {
+            fail Error.BadDictionary
+        }
+        return d
+    }
+
+    /// Bytes to use as a dictionary as they are, as `ZstdDict(bytes, is_raw=True)` takes them:
+    /// what came before, for matches to reach back into. Its ID is 0. As libzstd reads them,
+    /// bytes that start with the dictionary magic number are a dictionary all the same, with its
+    /// ID and tables. Fails with `BadDictionary` for fewer than eight bytes, as Python does, or
+    /// for such a dictionary whose tables are broken.
+    pub fn raw(bytes: own List<u8>) -> Dictionary ! Error {
+        return try Dictionary.read(bytes)
+    }
+
+    // Reads the bytes as libzstd does: a dictionary if they start with its magic number, and
+    // otherwise all content.
+    fn read(bytes: own List<u8>) -> Dictionary ! Error {
+        if bytes.len() < 8 {
+            fail Error.BadDictionary
+        }
+        var d = Dictionary { bytes: bytes, tables: tables_for(), dict_id: 0, content: 0 }
+        var info: List<u64> = [0; 2]
+        let r = unsafe { cx_zstd_dict(d.bytes.as_ptr(), d.bytes.len(), d.tables.as_mut_ptr(), info.as_mut_ptr()) }
+        if r != 0 {
+            fail Error.BadDictionary
+        }
+        d.dict_id = u32.wrap(info[0])
+        d.content = usize.wrap(info[1])
+        return d
+    }
+
+    // No dictionary at all.
+    fn empty() -> Dictionary {
+        var d = Dictionary { bytes: [], tables: tables_for(), dict_id: 0, content: 0 }
+        var info: List<u64> = [0; 2]
+        _ = unsafe { cx_zstd_dict(d.bytes.as_ptr(), 0, d.tables.as_mut_ptr(), info.as_mut_ptr()) }
+        return d
+    }
+
+    /// The ID frames compressed with it give, or 0 for content alone.
+    pub fn id(self) -> u32 {
+        return self.dict_id
+    }
+
+    /// What the bytes decompress to with this dictionary, as `decompress(bytes, zstd_dict=d)`
+    /// gives it.
+    pub fn decompress(self, bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error {
+        var out: List<u8> = []
+        try decode(bytes, 0, bytes.len(), limit, self, mut out)
+        return out
+    }
+
+    /// Decompresses `bytes[from..to]` onto the end of `out` with this dictionary, as
+    /// `decompress_into` does.
+    @track_caller
+    pub fn decompress_into(self, bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error {
+        try decode(bytes, from, to, limit, self, mut out)
+    }
+}
+
+fn tables_for() -> List<u8> {
+    let n = unsafe { cx_zstd_ent_size() }
+    let t: List<u8> = [0; n]
+    return t
+}
+
+// Python's limit on a frame's window, 2^27 bytes, and a size a frame doesn't give.
+const WINDOW_MAX: u64 = 134217728
+const UNKNOWN: u64 = 18446744073709551615
+// The room the runtime needs past where a frame ends.
+const SLACK: usize = 64
+
+/// What the bytes decompress to: every frame in them, one after another, as
+/// `compression.zstd.decompress(bytes)` gives it. Skippable frames give nothing. Fails with
+/// `TooLong` if it's more than `limit` bytes, which is no limit at all unless it's given.
+pub fn decompress(bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error {
+    var out: List<u8> = []
+    try decompress_into(bytes, 0, bytes.len(), limit, mut out)
+    return out
+}
+
+/// Decompresses the bytes from `from` up to `to` onto the end of `out`, as `decompress` does,
+/// adding at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in
+/// `bytes`.
+@track_caller
+pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error {
+    try decode(bytes, from, to, limit, Dictionary.empty(), mut out)
+}
+
+/// Whether the bytes start as a Zstandard frame does: `28 b5 2f fd`.
+pub fn is_zstd(bytes: List<u8>) -> bool {
+    return bytes.len() >= 4 and bytes[0] == 0x28 and bytes[1] == 0xB5 and bytes[2] == 0x2F and bytes[3] == 0xFD
+}
+
+/// The XXH64 hash of the bytes with `seed`, as Zstandard checks frames with its low 32 bits, and
+/// as the `xxhash` package's `xxh64_intdigest` gives it.
+pub fn xxh64(bytes: List<u8>, seed: u64 = 0) -> u64 {
+    return unsafe { cx_zstd_xxh64(bytes.as_ptr(), bytes.len(), seed) }
+}
+
+@track_caller
+fn decode(bytes: List<u8>, from: usize, to: usize, limit: u64, dict: Dictionary, out: mut List<u8>) ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let begin = out.len()
+    // The context is set up by the runtime, so it isn't cleared first, and what it takes on the
+    // way is given back however the frames end.
+    let size = unsafe { cx_zstd_ctx_size() }
+    var ctx = List<u8>()
+    ctx.reserve(size)
+    unsafe {
+        ctx.set_len(size)
+        cx_zstd_init(ctx.as_mut_ptr())
+    }
+    match frames(bytes, from, to, limit, dict, mut ctx, mut out) {
+        ok => {
+            unsafe {
+                cx_zstd_end(ctx.as_mut_ptr())
+            }
+        },
+        err(e) => {
+            unsafe {
+                cx_zstd_end(ctx.as_mut_ptr())
+            }
+            out.truncate(begin)
+            fail e
+        },
+    }
+}
+
+fn frames(bytes: List<u8>, from: usize, to: usize, limit: u64, dict: Dictionary, ctx: mut List<u8>, out: mut List<u8>) ! Error {
+    let begin = out.len()
+    // The longest out may get.
+    let most: u64 = if limit > u64.MAX - u64(begin) { u64.MAX } else { u64(begin) + limit }
+    let most_len = usize.wrap(most)
+    var info: List<u64> = [0; 4]
+    var lens: List<usize> = [0]
+    // Matches may reach back past the content into the tables, as libzstd lets them: its whole
+    // bytes are what came before.
+    let past = dict.bytes.len()
+    var at = from
+    // As Python reads them, frames follow one another to the end of the bytes, and nothing at
+    // all is a frame cut short.
+    loop {
+        let r = unsafe { cx_zstd_frame(ctx.as_mut_ptr(), bytes.as_ptr(), to, at, dict.tables.as_ptr(), dict.dict_id, WINDOW_MAX, info.as_mut_ptr()) }
+        if r == 1 {
+            at = usize.wrap(info[2])
+        } else if r != 0 {
+            fail error_for(r)
+        } else {
+            let start = out.len()
+            let given = info[0]
+            if given != UNKNOWN {
+                if given > most - u64(start) {
+                    fail Error.TooLong
+                }
+                out.reserve(usize.wrap(given) + SLACK)
+            }
+            loop {
+                lens[0] = out.len()
+                let got = unsafe { cx_zstd_blocks(ctx.as_mut_ptr(), bytes.as_ptr(), to, out.as_mut_ptr(), start, lens.as_mut_ptr(), out.capacity(), most_len, dict.bytes.as_ptr(), past, info.as_mut_ptr()) }
+                if got == 0 {
+                    unsafe {
+                        out.set_len(lens[0])
+                    }
+                    at = usize.wrap(info[0])
+                    break
+                }
+                if got != 2 {
+                    fail error_for(got)
+                }
+                unsafe {
+                    out.set_len(lens[0])
+                }
+                // The room the runtime asks for past the end, or twice as much as there is.
+                let need = usize.wrap(info[1])
+                out.reserve(if need > out.len() { need } else { out.len() })
+            }
+        }
+        if at == to {
+            return
+        }
+    }
+}
+
+// The runtime's codes, calx_zstd.c's ZS_ ones.
+fn error_for(code: i32) -> Error {
+    let errors: List<Error> = [Error.Format, Error.Unsupported, Error.Window, Error.Corrupt, Error.Checksum, Error.Dictionary, Error.Truncated, Error.BadDictionary, Error.TooLong]
+    if code < 0 and code >= -9 {
+        return errors[usize.wrap(-code - 1)]
+    }
+    return Error.Corrupt
+}

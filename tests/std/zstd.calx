@@ -1,0 +1,176 @@
+// std.zstd reads what Python 3.14's compression.zstd.decompress reads, with libzstd 1.5.7, and
+// fails where it fails, with the same kind of error. The hex below is Python's compress's, or made
+// by hand where it says so, and each outcome is Python's.
+
+import std.zstd.{Dictionary, Error, decompress, decompress_into, is_zstd, xxh64}
+import std.tar.{Tar}
+
+fn nibble(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn unhex(s: str) -> List<u8> {
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < s.len() {
+        out.push(nibble(s.byte_at(i)) * 16 + nibble(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn text(bytes: own List<u8>) -> String {
+    return String.from_utf8(bytes) ?? "not UTF-8"
+}
+
+fn outcome(bytes: List<u8>, limit: u64 = u64.MAX) -> String {
+    return match decompress(bytes, limit) {
+        ok(b) => if b.len() < 40 { "ok {text(b).trim_end()}" } else { "ok {b.len()} bytes" },
+        err(e) => "{e}",
+    }
+}
+
+fn joined(a: List<u8>, b: List<u8>) -> List<u8> {
+    var out = a.copy()
+    for x in b {
+        out.push(x)
+    }
+    return out
+}
+
+fn with(bytes: List<u8>, at: usize, value: u8) -> List<u8> {
+    var out = bytes.copy()
+    out[at] = value
+    return out
+}
+
+fn made(bytes: own List<u8>, raw: bool) -> String {
+    if raw {
+        return match Dictionary.raw(bytes) {
+            ok(_) => "ok",
+            err(e) => "{e}",
+        }
+    }
+    return match Dictionary.new(bytes) {
+        ok(_) => "ok",
+        err(e) => "{e}",
+    }
+}
+
+fn main() {
+    // `compress(b"hello, zstd\n")`: one raw block. With a checksum, the frame ends with four
+    // bytes of its XXH64.
+    let hello = unhex("28b52ffd200c61000068656c6c6f2c207a7374640a")
+    println(outcome(hello))    // out: ok hello, zstd
+    let checked = unhex("28b52ffd240c61000068656c6c6f2c207a7374640a84585ca0")
+    println(outcome(checked))    // out: ok hello, zstd
+    println("{is_zstd(hello)} {is_zstd([0x28u8, 0xb5])} {is_zstd("hello".to_bytes())}")    // out: true false false
+
+    // Two hundred lines, at levels 3 and 19: Huffman-coded literals in four streams, sequences
+    // and repeated offsets. Without a size, as a stream writes it, and with a checksum.
+    var lines = String()
+    for i in 0..200 {
+        lines.push_str("line {i}: the quick brown fox\n")
+    }
+    for hex in ["28b52ffd600216cd070022ce221980296903c0d8c7ac11a1ec86817985227ba794c9d32b8f290c7777777777666666666655555555554444444444ffffffbf6ddbb6ddb66ddb92244992333333332322222222327777777777666666666655555555554444444444ffffffbf6ddbb6ddb66ddb92244992333333337356749703d090201808864482c03018382c208ca2406104c82810878380c8a821f8f6bf03c0a37235112404ff270412dd17031b8d4d9586c6524da3b1a9d2d4586a6974db9795c4267f247c247b247924ef48e848e648e048dc48726dd4d85b6da7f7f4cebed57b7aa7efec59b292ec912db24216c8f6b13d76d7b139060bcbc2980896cb03ad0a", "28b52ffd640216650700620f2516804d3ac088e3388ec304d5455b4a29534a2e7de3a87467457739a59c15dde55c392bbacbb17256749753e5ace82e87ca59d15dcecb59d15d8ecb59d15d4ecb59d15d0ecb59d15dce0ccb59d15d4e296745773957ce8aee72ac9c15dde554392bbacba172567497f372567497e372567497d3725674972c67457709882c0a8902b2680812c4e0f06024048323094c42501c120180c8a821e067ff37d0539635112404ff2b041ddd07bb4b626d20c3b7747ccbc6ab69f8968e6fd978350ddfd2f12d9be3a710906859c83c3faab7317bfc48de46eef9293d2b99e74765c0cec139e664ceb2561e20558f950bae", "28b52ffd0058d50700720e241980296903c0d8638b50452926913115b27ba794c9d32b8f290c7777777777666666666655555555554444444444ffffffbf6ddbb6ddb66ddb92244992333333332322222222327777777777666666666655555555554444444444ffffffbf6ddbb6ddb66ddb922449923333333373567497338ac40101d0704030120c070902c360e0b080308a02851120a3481c100180c7a821f8f6ff0cc0a3723511fc7f4220d1f931a8dbbbddcdddeeed6eef767777bbb77bb52fbb884dfe48f848f648f248ec48d291cc91c491b891746d54daf2266f7997b77ccbbbbce55bdea36449b247b6c80e5920fb637bacae6371e4616bd80a6ca87e6d55"] {
+        let back = decompress(unhex(hex))!
+        println("{back.len()} {back == lines.to_bytes()}")    // out: 5890 true
+                                                        // out: 5890 true
+                                                        // out: 5890 true
+    }
+    // 5000 zeros, one RLE block.
+    let zeros = decompress(unhex("28b52ffd6088124d0000100000010083d3032c"))!
+    println("{zeros.len()} {zeros == [0u8; 5000]}")    // out: 5000 true
+
+    // 1.2 MB in ten blocks that each reach back into the one before, decoded on all the
+    // processors: with its size given, and without it and checked.
+    var fox: List<u8> = []
+    for _ in 0..60000 {
+        for b in "the quick brown fox\n".to_bytes() {
+            fox.push(b)
+        }
+    }
+    for hex in ["28b52ffda0804f1200e40000a074686520717569636b2062726f776e20666f780a0100d2ff2f9f4c4c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff3910024c0000086b0100fcff3910024c000008740100fcff3910024c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff391002450000086b01007ccf0e84", "28b52ffd0458e40000a074686520717569636b2062726f776e20666f780a0100d2ff2f9f4c4c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff3910024c0000086b0100fcff3910024c000008740100fcff3910024c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff391002450000086b01007ccf0e8452549150"] {
+        let back = decompress(unhex(hex))!
+        println("{back.len()} {back == fox}")    // out: 1200000 true
+                                                // out: 1200000 true
+    }
+
+    // Frames one after another, and skippable frames, which give nothing.
+    let skip = joined(unhex("502a4d1804000000"), "skip".to_bytes())
+    print(text(decompress(joined(joined(hello, skip), hello))!))    // out: hello, zstd
+                                                                    // out: hello, zstd
+
+    // Broken files, failing as Python's do. Some are made by hand: a window of 2^28 bytes, more
+    // than Python allows, is fine in a frame small enough to be decoded at once.
+    println(outcome("not zstd".to_bytes()))    // out: not a Zstandard file
+    println(outcome([]))    // out: the data ends early
+    println(outcome(with(hello, 4, hello[4] | 8)))    // out: a frame setting that isn't supported
+    println(outcome(unhex("28b52ffd009019000068690a")))    // out: a window bigger than 128 MiB
+    println(outcome(unhex("28b52ffd008819000068690a")))    // out: ok hi
+    println(outcome(unhex("28b52ffd80900300000019000068690a")))    // out: ok hi
+    var cut = hello.copy()
+    cut.truncate(hello.len() - 3)
+    println(outcome(cut))    // out: the data ends early
+    println(outcome(with(checked, checked.len() - 1, checked[checked.len() - 1] ^ 1)))    // out: checksum mismatch
+    println(outcome(with(hello, 6, 0x67)))    // out: corrupt data
+    println(outcome(with(hello, 5, 11)))    // out: corrupt data
+    println(outcome(joined(hello, "garbage!".to_bytes())))    // out: not a Zstandard file
+    println(outcome(joined(hello, unhex("28b52ffd"))))    // out: the data ends early
+    var skip_cut = joined(hello, skip)
+    skip_cut.truncate(skip_cut.len() - 1)
+    println(outcome(skip_cut))    // out: the data ends early
+
+    // A limit.
+    println(outcome(hello.copy(), 11))    // out: longer than the limit when decompressed
+    println(outcome(hello.copy(), 12))    // out: ok hello, zstd
+    match decompress(unhex("28b52ffda0804f1200e40000a074686520717569636b2062726f776e20666f780a0100d2ff2f9f4c4c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff3910024c0000086b0100fcff3910024c000008740100fcff3910024c0000086f0100fcff3910024c000008710100fcff3910024c000008660100fcff391002450000086b01007ccf0e84"), 1000000) {
+        ok(_) => println("ok"),
+        err(Error.TooLong) => println("too long"),    // out: too long
+        err(e) => println("{e}"),
+    }
+
+    // Part of a list, onto the end of another, which is as it was after an error.
+    let region = joined([7u8, 7], joined(hello, [7u8]))
+    var out = "> ".to_bytes()
+    decompress_into(region, 2, region.len() - 1, u64.MAX, mut out)!
+    print(text(out.copy()))    // out: > hello, zstd
+    match decompress_into(region, 0, region.len(), u64.MAX, mut out) {
+        ok => println("ok"),
+        err(e) => println("{e} {out.len()}"),    // out: not a Zstandard file 14
+    }
+
+    // Dictionaries: bytes as they are, and one `train_dict` made, with its ID.
+    let content = unhex("74686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2074686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2074686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e2074686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f672e20")
+    let raw = Dictionary.raw(content.copy())!
+    println("{text(raw.decompress(unhex("28b52ffd205a950000082e0500508de0f5b8a775013304309c0102"))!).len()} {raw.id()}")    // out: 90 0
+    let trained = Dictionary.new(unhex("37a430ecb5ffd1251b10e00a950effffffff3b048da4a3931ff08e94524a296503bcd302930500000086a98b0100000400000000296224305e4c1282af50570a0000000000000000040000000000000000542d864f26030000000000000000000000000001000000040000000800000061646d696e223a2066616c73657d7b226964223a203239342c20226e616d65223a20227573657232303538222c202261646d61646d696e223a2066616c73657d7b226964223a203233332c20226e616d65223a20227573657231363331222c202261646d2261646d696e223a2066616c73657d7b226964223a203133322c20226e616d65223a20227573657239323422"))!
+    let record = unhex("28b52ffd23b5ffd125309d0000383030303730303004fcb581a50115d48ab71e")
+    println("{text(trained.decompress(record)!)} {trained.id()}")    // out: {"id": 1000, "name": "user7000", "admin": false} 634519477
+    println(outcome(record))    // out: the wrong dictionary, or none
+    match raw.decompress(record) {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: the wrong dictionary, or none
+    }
+    // A dictionary has its magic number and an ID that isn't 0; any eight bytes do as they are.
+    println(made(content.copy(), false))    // out: not a Zstandard dictionary
+    println(made("abc".to_bytes(), false))    // out: not a Zstandard dictionary
+    println(made("abc".to_bytes(), true))    // out: not a Zstandard dictionary
+    println("{Dictionary.raw("abcdefgh".to_bytes())!.id()}")    // out: 0
+
+    // XXH64, as the `xxhash` package gives it, whose low 32 bits frames' checksums are.
+    println("{xxh64([]) == 0xef46db3751d8e999} {xxh64("a".to_bytes()) == 0xd24ec4f1a98c6e5b} {xxh64("abc".to_bytes()) == 0x44bc2cf5ad770999}")    // out: true true true
+    var count: List<u8> = []
+    for i in 0..100 {
+        count.push(u8.wrap(i))
+    }
+    println("{xxh64(count) & 0xffffffff == 0x32166597}")    // out: true
+
+    // std.tar opens a .tar.zst: one file, notes/a.txt, from Python's tarfile.
+    let tar = Tar.open(unhex("28b52ffd005865020014036e6f7465732f612e7478740030303030363434303030303030330000303130303437002030007573746172003068690a000900f905f004010a8837a40680e4400430688063e532358124"))!
+    print("{tar.len()} {tar.name(0)} {text(tar.read_named("notes/a.txt")!)}")    // out: 1 notes/a.txt hi
+    match Tar.open(cut) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the zstd stream is broken: the data ends early
+    }
+}

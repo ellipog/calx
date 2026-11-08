@@ -871,6 +871,19 @@ CX_FN(cx_u64, cx_xze_start, (const cx_u8* in, cx_u64 n, const cx_u64* opt, cx_u6
 CX_FN(cx_u64, cx_xze_blocks, (cx_u64 n, cx_u64 block));
 CX_FN(void, cx_xze_take, (cx_u64 h, cx_u64 b, cx_u8* dst));
 CX_FN(void, cx_xze_end, (cx_u64 h));
+/* Zstandard decompression, in calx_zstd.c, behind std.zstd (CLX-181). `cx_zstd_frame` starts the
+ * frame at in[at..n) in a context of `cx_zstd_ctx_size()` bytes, and `cx_zstd_blocks` decodes its
+ * blocks straight onto `out`; `cx_zstd_dict` reads a dictionary's tables into
+ * `cx_zstd_ent_size()` bytes. They give calx_zstd.c's ZS_ codes, negative for errors. */
+CX_FN(cx_usize, cx_zstd_ctx_size, (void));
+CX_FN(cx_usize, cx_zstd_ent_size, (void));
+CX_FN(void, cx_zstd_init, (cx_u8* ctx));
+CX_FN(void, cx_zstd_end, (cx_u8* ctx));
+CX_FN(cx_i32, cx_zstd_dict, (const cx_u8* d, cx_usize n, cx_u8* ent, cx_u64* info));
+CX_FN(cx_i32, cx_zstd_frame, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize at, const cx_u8* ent, cx_u32 dict_id, cx_u64 window_max, cx_u64* info));
+CX_FN(cx_i32, cx_zstd_blocks,
+      (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize start, cx_usize* len, cx_usize cap, cx_usize limit, const cx_u8* dict, cx_usize dict_n, cx_u64* info));
+CX_FN(cx_u64, cx_zstd_xxh64, (const cx_u8* p, cx_usize n, cx_u64 seed));
 
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's

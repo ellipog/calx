@@ -1,11 +1,11 @@
 ---
 title: std.tar
-description: Tar archives, plain, gzipped or xz'd, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
+description: Tar archives, plain, gzipped, xz'd or zstd'd, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
 ---
 
 # `std.tar`
 
-Tar archives, plain, gzipped or xz'd, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
+Tar archives, plain, gzipped, xz'd or zstd'd, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
 
 ```calx
 import std.tar.{Kind, Tar, Writer}
@@ -33,7 +33,7 @@ fn main() {
 
 | Item | Gives |
 | --- | --- |
-| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, and xz'd bytes are decompressed with [`std.xz`](xz.md), so a `.tar.gz` or a `.tar.xz` opens the same way |
+| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, xz'd bytes are decompressed with [`std.xz`](xz.md), and zstd'd ones with [`std.zstd`](zstd.md), so a `.tar.gz`, a `.tar.xz` or a `.tar.zst` opens the same way |
 | `t.entries() -> List<Entry>` | Its entries, in order |
 | `t.len() -> usize`, `t.name(i: usize) -> String` | How many there are, and the path of one |
 | `t.find(name: String) -> usize?` | The index of the entry at `name`. A later entry of the same name wins, as it does when tar extracts |
@@ -64,4 +64,4 @@ fn main() {
 - **Long paths** of up to 255 bytes are split between ustar's prefix and name at a `/`. Longer ones, and ones with no `/` to split at, get a pax `path` header, as GNU tar and bsdtar write them, and so do files of 8 GiB or more.
 - **Non-ASCII names get a pax `path` too.** A header's name field has no encoding, and bsdtar on Windows reads it in the console's code page. A pax path is always UTF-8.
 
-`std.tar` is written in Calx over [std.zlib](zlib.md) and [std.xz](xz.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.
+`std.tar` is written in Calx over [std.zlib](zlib.md), [std.xz](xz.md) and [std.zstd](zstd.md): [std/tar.calx](../../std/tar.calx). GNU tar and bsdtar read what it writes, and it reads what they write in the gnu, pax and ustar formats.

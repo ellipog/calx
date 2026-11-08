@@ -210,6 +210,7 @@ fn main() ! Error {
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
 | `lzma.decompress(b)` | `decompress(b)` from [`std.xz`](../std/xz.md), with the same errors and a limit if it's given |
 | `lzma.compress(b, preset=9)` | `compress(b, 9)` from [`std.xz`](../std/xz.md), on all the processors, the same bytes on any machine |
+| `compression.zstd.decompress(b)`, `ZstdDict(d)` | `decompress(b)` and `Dictionary.new(d)` from [`std.zstd`](../std/zstd.md), with the same errors, big frames on all the processors |
 | `datetime.now()`, `strftime`, `strptime` | `unsafe { Timestamp.now() }`, `format` and `parse` from [`std.time`](../std/time.md), with Python's codes |
 | `time.perf_counter()` | `unsafe { Instant.now() }` from [`std.time`](../std/time.md) |
 | `time.sleep(0.5)` | `unsafe { sleep(500_000_000) }`, in nanoseconds, from [`std.thread`](../std/thread.md) |

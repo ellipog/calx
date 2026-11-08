@@ -93,7 +93,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them or as Python, Rust and browsers do
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
-25. [std.tar](std/tar.md): tar archives, plain, gzipped or xz'd, read and written in memory: ustar, GNU long names and pax headers, links and modes
+25. [std.tar](std/tar.md): tar archives, plain, gzipped, xz'd or zstd'd, read and written in memory: ustar, GNU long names and pax headers, links and modes
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, read by JSON Pointers, written compact or indented with keys in order or sorted, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
@@ -123,6 +123,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 52. [std.yaml](std/yaml.md): YAML read into a tree as PyYAML's `safe_load` reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and written back byte for byte as `safe_dump` writes it, and `@yaml`, which reads a config straight into a struct
 53. [std.log](std/log.md): logging as Python's `logging` module does it, messages at a level written in Python's formats with the time, the level and the logger's name, to standard error or a file, set up once with `config`
 54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, and .xz and .lzma files compressed at `xz`'s presets, both on all the processors
+55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, big frames on all the processors
 
 ### Java compatibility
 

@@ -1,11 +1,13 @@
-/// Tar archives, plain, gzipped or xz'd, read from memory and written to it: POSIX ustar, with the
-/// GNU long names and pax headers that GNU tar and bsdtar write for long paths and big files.
+/// Tar archives, plain, gzipped, xz'd or zstd'd, read from memory and written to it: POSIX ustar,
+/// with the GNU long names and pax headers that GNU tar and bsdtar write for long paths and big
+/// files.
 module std.tar
 
 import std.fs.{make_dir_all, make_link, set_mode, write}
 import std.time.{Timestamp}
 import std.xz
 import std.zlib.{Format, compress, decompress}
+import std.zstd
 
 // The type flags in a header, ASCII characters.
 const FILE: u8 = b'0'
@@ -59,12 +61,20 @@ pub struct Tar {
 }
 
 impl Tar {
-    /// The archive in `bytes`, decompressed first if it's gzipped or xz'd, or why it can't be read.
+    /// The archive in `bytes`, decompressed first if it's gzipped, xz'd or zstd'd, or why it can't
+    /// be read.
     pub fn open(bytes: own List<u8>) -> Tar ! String {
         if xz.is_xz(bytes) {
             let unpacked = match xz.decompress(bytes) {
                 ok(b) => b,
                 err(e) => fail "the xz stream is broken: {e}",
+            }
+            return try parse(unpacked)
+        }
+        if zstd.is_zstd(bytes) {
+            let unpacked = match zstd.decompress(bytes) {
+                ok(b) => b,
+                err(e) => fail "the zstd stream is broken: {e}",
             }
             return try parse(unpacked)
         }
