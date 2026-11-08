@@ -5550,6 +5550,23 @@ $dropall    m->len = 0;
         Type* t = e->named_type;
         Expr* a = e->args[0].value;
         std::string o = ctype(e->type), v = tmp(), r = tmp();
+        if (e->prim == PrimMethod::div_wide) {
+            // The checks first, then one division twice as wide as the type.
+            std::string c = ctype(t), h = tmp(), l = tmp(), d = tmp(), q = tmp(), at = location(e->span);
+            std::string s = "({ " + c + " " + h + " = " + value(e->args[0].value, t) + "; " + c + " " + l + " = " +
+                            value(e->args[1].value, t) + "; " + c + " " + d + " = " + value(e->args[2].value, t) + "; ";
+            s += "if (__builtin_expect(" + d + " == 0, 0)) cx_panic_div_zero(" + at + "); ";
+            s += "if (__builtin_expect(" + h + " >= " + d + ", 0)) cx_panic_text(" + at +
+                 ", \"the quotient doesn't fit, since the high half isn't less than what it's divided by\"); ";
+            if (t->bits == 64) {
+                s += "cx_u64 " + r + "; cx_u64 " + q + " = cx_div_wide_u64(" + h + ", " + l + ", " + d + ", &" + r + "); ";
+            } else {
+                std::string n = tmp();
+                s += "cx_u64 " + n + " = ((cx_u64)" + h + " << " + std::to_string(t->bits) + ") | " + l + "; " + c + " " + q +
+                     " = (" + c + ")(" + n + " / " + d + "); " + c + " " + r + " = (" + c + ")(" + n + " % " + d + "); ";
+            }
+            return s + "(" + o + "){ (" + c + ")" + q + ", (" + c + ")" + r + " }; })";
+        }
         switch (e->prim) {
             case PrimMethod::parse: {
                 std::string text = text_view(a);

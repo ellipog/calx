@@ -100,6 +100,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 30. [std.cli](std/cli.md): `@cli`, which reads a program's command-line options, flags and arguments into a struct, with `--help` written from its docs
 31. [std.random](std/random.md): random numbers from a seed, the same on every system, or seeded from the system: integers, floats, normal values, shuffles, picks and samples
 32. [std.bytes](std/bytes.md): bytes as hex and base64 and back, finding bytes in bytes, and numbers read from and written to bytes in either byte order
+33. [std.bigint](std/bigint.md): integers of any size, with the arithmetic operators, powers, roots, gcd, and text in any base
 
 ### Java compatibility
 

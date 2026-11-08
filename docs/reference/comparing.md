@@ -214,7 +214,7 @@ fn main() {
 }
 ```
 
-Like `Copy`, `Equal`, `Order`, `Display` and `Hash` are properties: every type that can have one does, with nothing to write. As bounds, they mean the property, however the type has it. [`JavaHash`](java-maps.md#javahash), Java's `hashCode`, is one too, built into numbers, text and lists, which a struct or an enum writes for itself, as a Java class does. The names are reserved, as are `Ordering`, `Hasher` and [`Iterator`](control-flow.md#iterators).
+Like `Copy`, `Equal`, `Order`, `Display` and `Hash` are properties: every type that can have one does, with nothing to write. As bounds, they mean the property, however the type has it. [`JavaHash`](java-maps.md#javahash), Java's `hashCode`, is one too, built into numbers, text and lists, which a struct or an enum writes for itself, as a Java class does. The names are reserved, as are `Ordering`, `Hasher`, [`Iterator`](control-flow.md#iterators) and the [operator interfaces](interfaces.md#operators).
 
 ## Writing your own
 

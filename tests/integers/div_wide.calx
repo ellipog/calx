@@ -1,0 +1,27 @@
+// div_wide: a number twice the type's width, as its high and low halves, divided by one of the
+// type, the other way from widening_mul (CLX-102).
+
+fn main() {
+    let (q, r) = u64.div_wide(1, 0, 3)                          // 2^64 / 3
+    println("{q} {r}")                                          // out: 6148914691236517205 1
+    let (lo, hi) = 12345678901234567890u64.widening_mul(9876543210987654321)
+    let back = u64.div_wide(hi, lo, 9876543210987654321)
+    println("{back}")                                           // out: (12345678901234567890, 0)
+    println("{u64.div_wide(0, 100, 7)} {u64.div_wide(u64.MAX - 1, u64.MAX, u64.MAX)}")  // out: (14, 2) (18446744073709551615, 18446744073709551614)
+    println("{u32.div_wide(1, 0, 10)} {u8.div_wide(2, 3, 5)} {u16.div_wide(0, 9, 9)}")  // out: (429496729, 6) (103, 0) (1, 0)
+
+    // Ten to the 19th, the most that fits, divides a number of many halves a half at a time.
+    let ten19: u64 = 10000000000000000000
+    var rem: u64 = 0
+    let halves: List<u64> = [0xFFFFFFFFFFFFFFFF, 0x123456789ABCDEF0]
+    var quotient: List<u64> = []
+    for h in halves {
+        let p = u64.div_wide(rem, h, ten19)
+        quotient.push(p.0)
+        rem = p.1
+    }
+    println("{quotient} {rem}")                                 // out: [1, 15581492618384294728] 6239631825522450160
+
+    let hi_bad: u64 = 5
+    println("{u64.div_wide(hi_bad, 0, 5)}")                     // panic: the quotient doesn't fit
+}

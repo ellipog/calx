@@ -88,11 +88,14 @@ fn main() {
 | `x.saturating_add(y)`, `saturating_sub`, `saturating_mul` | The result, clamped to the type's range |
 | `x.widening_mul(y)` | The whole product of two unsigned integers of a fixed width, `u8` to `u64`, as a tuple of its low and high halves: `u64.MAX.widening_mul(2)` is `(18446744073709551614, 1)`. It's one multiply, twice as wide, as Rust's `widening_mul` is, for arithmetic on numbers bigger than a `u64` and for picking random numbers (CLX-102) |
 
+`u64.div_wide(high, low, by)` goes the other way: the number whose halves are `high` and `low`, divided by `by`, as a tuple of the quotient and the remainder. It's there for `u8` to `u64` too. The quotient must fit in the type, so it panics unless `high` is less than `by`, as it is when each step of a long division passes on its remainder. On x86-64 it's one `div` instruction, which C's 128-bit `/` can't use, since that has to handle quotients that don't fit (CLX-102).
+
 ```calx
 fn main() {
     let (low, high) = u64.MAX.widening_mul(u64.MAX)
     println("{low} {high}")                    // out: 1 18446744073709551614
     println("{4000000000u32.widening_mul(3)}")  // out: (3410065408, 2)
+    println("{u64.div_wide(high, low, u64.MAX)}")  // out: (18446744073709551615, 0)
 }
 ```
 

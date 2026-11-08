@@ -1,0 +1,39 @@
+// std.bigint at the sizes where multiplication switches to Karatsuba's method and division takes
+// many steps: numbers from a seeded generator, checked by identities that hold for any integers.
+
+import std.bigint.{BigInt}
+import std.random.{Random}
+
+fn number(r: mut Random, bytes: usize) -> BigInt {
+    let n = BigInt.from_bytes_be(r.bytes(bytes))
+    return if r.coin() { -n } else { n }
+}
+
+fn main() {
+    var r = Random.new(2026)
+    let sizes: List<usize> = [1, 8, 9, 100, 255, 256, 257, 600, 2000, 5000]
+    var checked = 0
+    var failed = 0
+    for sa in sizes {
+        for sb in sizes {
+            let a = number(mut r, sa)
+            var b = number(mut r, sb)
+            if b.is_zero() {
+                b = BigInt.from(3)
+            }
+            let c = number(mut r, sb)
+            let (q, m) = a.div_rem(b)
+            let holds = q * b + m == a and m.abs() < b.abs() and (m.is_zero() or m.is_negative() == a.is_negative()) and
+                     (a + b) * c == a * c + b * c and (a - b) + b == a and a * b == b * a and
+                     (a * b).div_rem(b).0 == a and a.floor_mod(b).sign() != -b.sign() and
+                     BigInt.parse("{a}")! == a and BigInt.parse_radix(a.to_radix(16), 16)! == a and
+                     a.shl(77).shr(77) == a and (a * a).abs().isqrt() == a.abs()
+            checked += 1
+            if not holds {
+                failed += 1
+                println("failed for sizes {sa} and {sb}")
+            }
+        }
+    }
+    println("{checked} checked, {failed} failed")              // out: 100 checked, 0 failed
+}

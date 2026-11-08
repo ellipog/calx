@@ -7809,6 +7809,7 @@ private:
             if (m == "round") return conversion(e, t, Conv::round);
             if (m == "try_from") return try_from(e, t);
             if (m == "parse" && is_numeric(t)) return static_builtin(e, t, PrimMethod::parse, nullptr, T.optional_of(t));
+            if (m == "div_wide" && is_int(t) && !t->is_signed && !t->is_usize) return div_wide(e, t);
             if (m == "from_bits" && is_float(t)) {
                 return static_builtin(e, t, PrimMethod::from_bits, t->bits == 32 ? T.u32 : T.u64, t);
             }
@@ -10164,6 +10165,30 @@ private:
     }
 
     // `T.parse(text)`, `f64.from_bits(b)` and `String.from_utf8(bytes)`.
+    // `u64.div_wide(high, low, by)`: the number whose high half is `high` and low half `low`,
+    // divided by `by`, as the quotient and the remainder, the other way from `widening_mul`. It
+    // panics when `by` isn't more than `high`, since the quotient wouldn't fit (CLX-102).
+    Type* div_wide(Expr* e, Type* t) {
+        e->call = CallKind::prim_static;
+        e->prim = PrimMethod::div_wide;
+        e->named_type = t;
+        if (e->args.size() != 3) {
+            error(e->span, q(std::string(t->name) + ".div_wide") + " takes three arguments: the high half, the low half, " +
+                               "and what to divide by");
+            check_args(e);
+            return T.error;
+        }
+        bool ok = true;
+        for (Arg& a : e->args) {
+            if (a.name || a.is_mut) {
+                error(a.span, "this argument can't be named or `mut`");
+                ok = false;
+            }
+            if (is_bad(check(a.value, t))) ok = false;
+        }
+        return ok ? T.tuple_of({t, t}) : T.error;
+    }
+
     Type* static_builtin(Expr* e, Type* t, PrimMethod pm, Type* param, Type* result) {
         std::string what = q(std::string(t->name) + "." + std::string(text(e->callee->member)) + "(...)");
         Expr* a = single_arg(e, what.c_str());

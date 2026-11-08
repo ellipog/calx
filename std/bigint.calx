@@ -1,0 +1,966 @@
+/// Integers of any size, as Python's `int` and Java's `BigInteger` are (CLX-102).
+///
+/// A `BigInt` is a sign and a magnitude of 64-bit limbs, the lowest first, with no zero limb at
+/// the top, so each number has one form and `==` and the hash are the derived ones. Arithmetic
+/// is through the operators, with a `BigInt`, an `i64` or an `i32` on the right: `a * b + 1`.
+/// Each makes a new `BigInt` and reads its operands where they are.
+module std.bigint
+
+/// The largest power of ten in a `u64`, 10^19, which decimal text is read and written in.
+const TEN19: u64 = 10000000000000000000
+/// From this many limbs in each factor, Karatsuba's three half-size products beat schoolbook's four.
+const KARATSUBA: usize = 32
+const DIGITS: str = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+/// An integer of any size.
+pub struct BigInt {
+    negative: bool       // below zero; zero never is
+    mag: List<u64>       // the magnitude's limbs, the lowest first, with no zero limb at the top
+}
+
+impl From<i64> for BigInt {
+    fn from(value: own i64) -> BigInt {
+        let bits = u64.wrap(value)
+        return small(value < 0, if value < 0 { 0 - bits } else { bits })
+    }
+}
+
+impl From<i32> for BigInt {
+    fn from(value: own i32) -> BigInt {
+        return BigInt.from(i64(value))
+    }
+}
+
+impl From<u64> for BigInt {
+    fn from(value: own u64) -> BigInt {
+        return small(false, value)
+    }
+}
+
+impl BigInt {
+    /// Zero.
+    pub fn zero() -> BigInt {
+        return BigInt { negative: false, mag: [] }
+    }
+
+    /// The integer in decimal text: an optional `+` or `-`, then one or more digits, as
+    /// `i64.parse` takes them; `none` for anything else.
+    pub fn parse(text: String) -> BigInt? {
+        return BigInt.parse_radix(text, 10)
+    }
+
+    /// The integer in base `radix`, from 2 to 36, with the digits after 9 as letters in either
+    /// case: `BigInt.parse_radix("ff", 16)`. It panics for another radix.
+    @track_caller
+    pub fn parse_radix(text: String, radix: u32) -> BigInt? {
+        if radix < 2 or radix > 36 {
+            panic("a radix is from 2 to 36, not {radix}")
+        }
+        let n = text.len()
+        var i: usize = 0
+        var neg = false
+        if n > 0 and (text.byte_at(0) == b'-' or text.byte_at(0) == b'+') {
+            neg = text.byte_at(0) == b'-'
+            i = 1
+        }
+        if i == n {
+            return none
+        }
+        // Digits a group at a time, as many as fit in a limb.
+        let (group, big) = radix_group(radix)
+        var mag: List<u64> = []
+        var chunk: u64 = 0
+        var count: u32 = 0
+        var scale: u64 = 1
+        while i < n {
+            let d = digit_value(text.byte_at(i))
+            if d >= radix {
+                return none
+            }
+            chunk = chunk * u64(radix) + u64(d)
+            scale *= u64(radix)
+            count += 1
+            if count == group {
+                mul_add_1(mut mag, big, chunk)
+                chunk = 0
+                count = 0
+                scale = 1
+            }
+            i += 1
+        }
+        if count > 0 {
+            mul_add_1(mut mag, scale, chunk)
+        }
+        return some(make(neg, mag))
+    }
+
+    /// The integer whose bytes, the most significant first, are `bytes`, as Python's
+    /// `int.from_bytes(b, "big")`. It's never negative.
+    pub fn from_bytes_be(bytes: List<u8>) -> BigInt {
+        var mag: List<u64> = [0; (bytes.len() + 7) / 8]
+        for (i, b) in bytes.enumerate() {
+            let k = bytes.len() - 1 - i
+            mag[k / 8] |= u64(b) << u32.wrap(k % 8 * 8)
+        }
+        return make(false, mag)
+    }
+
+    /// The magnitude's bytes, the most significant first and with none that are zero before the
+    /// first that isn't, as Python's `n.to_bytes(n.bit_len() // 8 + 1, "big")` without the sign.
+    /// Zero has none.
+    pub fn to_bytes_be(self) -> List<u8> {
+        let n = usize.wrap((self.bit_len() + 7) / 8)
+        var out: List<u8> = []
+        out.reserve(n)
+        var k = n
+        while k > 0 {
+            k -= 1
+            out.push(u8.wrap(self.mag[k / 8] >> u32.wrap(k % 8 * 8)))
+        }
+        return out
+    }
+
+    /// The digits in base `radix`, from 2 to 36, with lowercase letters after 9 and a `-` before a
+    /// negative one: `n.to_radix(16)` is Python's `format(n, "x")`. It panics for another radix.
+    @track_caller
+    pub fn to_radix(self, radix: u32) -> String {
+        if radix < 2 or radix > 36 {
+            panic("a radix is from 2 to 36, not {radix}")
+        }
+        return text_of(self, radix)
+    }
+
+    /// Whether it's 0.
+    pub fn is_zero(self) -> bool {
+        return self.mag.len() == 0
+    }
+
+    /// Whether it's below 0.
+    pub fn is_negative(self) -> bool {
+        return self.negative
+    }
+
+    /// Whether it divides by 2.
+    pub fn is_even(self) -> bool {
+        return self.mag.len() == 0 or self.mag[0] & 1 == 0
+    }
+
+    /// -1, 0 or 1, as it's below, at or above 0.
+    pub fn sign(self) -> i32 {
+        return if self.negative { -1 } else if self.mag.len() == 0 { 0 } else { 1 }
+    }
+
+    /// The absolute value.
+    pub fn abs(self) -> BigInt {
+        return BigInt { negative: false, mag: self.mag.copy() }
+    }
+
+    /// The number of bits the magnitude needs, without a sign: 0 for 0, and 8 for 255 and -255, as
+    /// Python's `bit_length`.
+    pub fn bit_len(self) -> u64 {
+        let n = self.mag.len()
+        if n == 0 {
+            return 0
+        }
+        return u64(n - 1) * 64 + u64.wrap(64 - self.mag[n - 1].leading_zeros())
+    }
+
+    /// The value as an `i64`, or `none` when it doesn't fit.
+    pub fn to_i64(self) -> i64? {
+        if self.mag.len() == 0 {
+            return some(0)
+        }
+        if self.mag.len() > 1 {
+            return none
+        }
+        let m = self.mag[0]
+        if not self.negative and m <= 9223372036854775807 {
+            return some(i64.wrap(m))
+        }
+        if self.negative and m <= 9223372036854775808 {
+            return some(i64.wrap(0 - m))
+        }
+        return none
+    }
+
+    /// The value as a `u64`, or `none` when it's negative or doesn't fit.
+    pub fn to_u64(self) -> u64? {
+        if self.negative or self.mag.len() > 1 {
+            return none
+        }
+        return some(if self.mag.len() == 0 { 0 } else { self.mag[0] })
+    }
+
+    /// The `f64` nearest the value, ties to even, as Python's `float(n)`, or infinity when it's
+    /// beyond the largest `f64`.
+    pub fn to_f64(self) -> f64 {
+        let bits = self.bit_len()
+        var x: f64 = 0.0
+        if bits <= 64 {
+            x = if self.mag.len() == 0 { 0.0 } else { f64.nearest(self.mag[0]) }
+        } else {
+            // The top 64 bits, with the lowest set if any bit below them is, so rounding to 53
+            // bits breaks ties as rounding the whole number would. Then times 2^shift, exactly.
+            let shift = bits - 64
+            let top = shr_mag(self.mag, shift)
+            var t = top[0]
+            if not low_bits_zero(self.mag, shift) {
+                t |= 1
+            }
+            x = f64.nearest(t)
+            if shift > 1023 {
+                x = f64.INFINITY
+            } else {
+                x *= f64.from_bits((1023 + shift) << 52)
+            }
+        }
+        return if self.negative { -x } else { x }
+    }
+
+    /// The value to the power `exp`, by squaring: `BigInt.from(2).pow(100)`.
+    pub fn pow(self, exp: u32) -> BigInt {
+        var result = BigInt.from(1)
+        var base = self.copy()
+        var e = exp
+        while e > 0 {
+            if e & 1 == 1 {
+                result *= base
+            }
+            e >>= 1
+            if e > 0 {
+                base = base * base
+            }
+        }
+        return result
+    }
+
+    /// The value to the power `exp`, modulo `m`, without the whole power: Python's
+    /// `pow(n, exp, m)`. The result is from 0 up to `m`. It panics unless `m` is positive and `exp`
+    /// isn't negative.
+    @track_caller
+    pub fn mod_pow(self, exp: BigInt, m: BigInt) -> BigInt {
+        if m.negative or m.mag.len() == 0 {
+            panic("the modulus must be positive, not {m}")
+        }
+        if exp.negative {
+            panic("the exponent can't be negative, as {exp} is")
+        }
+        var result = BigInt.from(1).floor_mod(m)
+        var base = self.floor_mod(m)
+        let bits = exp.bit_len()
+        var i: u64 = 0
+        while i < bits {
+            if (exp.mag[usize.wrap(i / 64)] >> u32.wrap(i % 64)) & 1 == 1 {
+                result = (result * base).floor_mod(m)
+            }
+            i += 1
+            if i < bits {
+                base = (base * base).floor_mod(m)
+            }
+        }
+        return result
+    }
+
+    /// The greatest common divisor, never negative: 0 only when both are 0.
+    pub fn gcd(self, other: BigInt) -> BigInt {
+        var a = self.mag.copy()
+        var b = other.mag.copy()
+        while b.len() > 0 {
+            let (_, r) = divmod_mag(a, b)
+            a = b
+            b = r
+        }
+        return make(false, a)
+    }
+
+    /// The largest integer whose square isn't more than the value, as Python's `math.isqrt`. It
+    /// panics for a negative value.
+    @track_caller
+    pub fn isqrt(self) -> BigInt {
+        if self.negative {
+            panic("{self} has no square root")
+        }
+        if self.mag.len() == 0 {
+            return BigInt.zero()
+        }
+        // Newton's method from a power of two above the root, which comes down to it.
+        var x = BigInt.from(1).shl((self.bit_len() + 1) / 2)
+        loop {
+            let y = (x + self / x).shr(1)
+            if y >= x {
+                return x
+            }
+            x = y
+        }
+    }
+
+    /// The quotient and the remainder, rounded toward zero as `/` and `%` are. It panics when
+    /// `other` is 0.
+    @track_caller
+    pub fn div_rem(self, other: BigInt) -> (BigInt, BigInt) {
+        if other.mag.len() == 0 {
+            panic("division by zero")
+        }
+        let (q, r) = divmod_mag(self.mag, other.mag)
+        return (make(self.negative != other.negative, q), make(self.negative, r))
+    }
+
+    /// The quotient rounded down, as Python's `//` and Java's `Math.floorDiv`. It panics when
+    /// `other` is 0.
+    @track_caller
+    pub fn floor_div(self, other: BigInt) -> BigInt {
+        let (q, r) = self.div_rem(other)
+        if r.mag.len() > 0 and self.negative != other.negative {
+            return q - 1
+        }
+        return q
+    }
+
+    /// The remainder of the quotient rounded down, with the sign of `other`, as Python's `%` and
+    /// Java's `Math.floorMod`. It panics when `other` is 0.
+    @track_caller
+    pub fn floor_mod(self, other: BigInt) -> BigInt {
+        let (_, r) = self.div_rem(other)
+        if r.mag.len() > 0 and self.negative != other.negative {
+            return r + other
+        }
+        return r
+    }
+
+    /// The value times 2^n.
+    pub fn shl(self, n: u64) -> BigInt {
+        return BigInt { negative: self.negative, mag: shl_mag(self.mag, n) }
+    }
+
+    /// The value divided by 2^n, rounded down, as `>>` on a negative integer is.
+    pub fn shr(self, n: u64) -> BigInt {
+        if not self.negative {
+            return make(false, shr_mag(self.mag, n))
+        }
+        // -((|x| - 1) >> n) - 1, which rounds toward minus infinity.
+        let less = sub_mag(self.mag, [1u64])
+        let shifted = shr_mag(less, n)
+        return make(true, add_mag(shifted, [1u64]))
+    }
+}
+
+impl Display for BigInt {
+    fn show(self) {
+        print(text_of(self, 10))
+    }
+}
+
+impl Order for BigInt {
+    fn cmp(self, other: Self) -> Ordering {
+        if self.negative != other.negative {
+            return if self.negative { Ordering.Less } else { Ordering.Greater }
+        }
+        let c = cmp_mag(self.mag, other.mag)
+        let d = if self.negative { -c } else { c }
+        return if d < 0 { Ordering.Less } else if d > 0 { Ordering.Greater } else { Ordering.Equal }
+    }
+}
+
+impl Neg for BigInt {
+    fn neg(self) -> BigInt {
+        return BigInt { negative: not self.negative and self.mag.len() > 0, mag: self.mag.copy() }
+    }
+}
+
+impl Add<BigInt> for BigInt {
+    fn add(self, other: BigInt) -> BigInt {
+        return add_signed(self.negative, self.mag, other.negative, other.mag)
+    }
+}
+
+impl Sub<BigInt> for BigInt {
+    fn sub(self, other: BigInt) -> BigInt {
+        return add_signed(self.negative, self.mag, not other.negative and other.mag.len() > 0, other.mag)
+    }
+}
+
+impl Mul<BigInt> for BigInt {
+    fn mul(self, other: BigInt) -> BigInt {
+        return make(self.negative != other.negative, mul_mag(self.mag, other.mag))
+    }
+}
+
+impl Div<BigInt> for BigInt {
+    fn div(self, other: BigInt) -> BigInt {
+        if other.mag.len() == 0 {
+            panic("division by zero")
+        }
+        let (q, _) = divmod_mag(self.mag, other.mag)
+        return make(self.negative != other.negative, q)
+    }
+}
+
+impl Rem<BigInt> for BigInt {
+    fn rem(self, other: BigInt) -> BigInt {
+        if other.mag.len() == 0 {
+            panic("division by zero")
+        }
+        let (_, r) = divmod_mag(self.mag, other.mag)
+        return make(self.negative, r)
+    }
+}
+
+// With an `i64` or an `i32` on the right, as a one-limb `BigInt`.
+
+impl Add<i64> for BigInt {
+    fn add(self, other: i64) -> BigInt {
+        return self + BigInt.from(other)
+    }
+}
+
+impl Sub<i64> for BigInt {
+    fn sub(self, other: i64) -> BigInt {
+        return self - BigInt.from(other)
+    }
+}
+
+impl Mul<i64> for BigInt {
+    fn mul(self, other: i64) -> BigInt {
+        return self * BigInt.from(other)
+    }
+}
+
+impl Div<i64> for BigInt {
+    fn div(self, other: i64) -> BigInt {
+        return self / BigInt.from(other)
+    }
+}
+
+impl Rem<i64> for BigInt {
+    fn rem(self, other: i64) -> BigInt {
+        return self % BigInt.from(other)
+    }
+}
+
+impl Add<i32> for BigInt {
+    fn add(self, other: i32) -> BigInt {
+        return self + BigInt.from(other)
+    }
+}
+
+impl Sub<i32> for BigInt {
+    fn sub(self, other: i32) -> BigInt {
+        return self - BigInt.from(other)
+    }
+}
+
+impl Mul<i32> for BigInt {
+    fn mul(self, other: i32) -> BigInt {
+        return self * BigInt.from(other)
+    }
+}
+
+impl Div<i32> for BigInt {
+    fn div(self, other: i32) -> BigInt {
+        return self / BigInt.from(other)
+    }
+}
+
+impl Rem<i32> for BigInt {
+    fn rem(self, other: i32) -> BigInt {
+        return self % BigInt.from(other)
+    }
+}
+
+// --- magnitudes: lists of limbs, the lowest first ----------------------------------------------
+
+fn small(neg: bool, m: u64) -> BigInt {
+    if m == 0 {
+        return BigInt { negative: false, mag: [] }
+    }
+    return BigInt { negative: neg, mag: [m] }
+}
+
+/// A `BigInt` of the limbs, without the zero limbs at the top, and never negative zero.
+fn make(neg: bool, mag: own List<u64>) -> BigInt {
+    var m = mag
+    trim(mut m)
+    return BigInt { negative: neg and m.len() > 0, mag: m }
+}
+
+fn trim(xs: mut List<u64>) {
+    var n = xs.len()
+    while n > 0 and xs[n - 1] == 0 {
+        n -= 1
+    }
+    xs.truncate(n)
+}
+
+fn cmp_mag(a: List<u64>, b: List<u64>) -> i32 {
+    if a.len() != b.len() {
+        return if a.len() < b.len() { -1 } else { 1 }
+    }
+    var i = a.len()
+    while i > 0 {
+        i -= 1
+        if a[i] != b[i] {
+            return if a[i] < b[i] { -1 } else { 1 }
+        }
+    }
+    return 0
+}
+
+/// `a` plus or minus `b`, with their signs.
+fn add_signed(a_neg: bool, a: List<u64>, b_neg: bool, b: List<u64>) -> BigInt {
+    if a_neg == b_neg {
+        return make(a_neg, add_mag(a, b))
+    }
+    let c = cmp_mag(a, b)
+    if c == 0 {
+        return BigInt.zero()
+    }
+    return if c > 0 { make(a_neg, sub_mag(a, b)) } else { make(b_neg, sub_mag(b, a)) }
+}
+
+fn add_mag(a: List<u64>, b: List<u64>) -> List<u64> {
+    if a.len() < b.len() {
+        return add_mag(b, a)
+    }
+    var out: List<u64> = []
+    out.reserve(a.len() + 1)
+    unsafe {
+        let pa = a.as_ptr()
+        let pb = b.as_ptr()
+        let po = out.as_mut_ptr()
+        var carry: u64 = 0
+        var i: usize = 0
+        while i < b.len() {
+            let x = pa.add(i).read()
+            let s = x + pb.add(i).read()
+            let t = s + carry
+            carry = if s < x or t < s { 1 } else { 0 }
+            po.add(i).write(t)
+            i += 1
+        }
+        while i < a.len() {
+            let x = pa.add(i).read()
+            let t = x + carry
+            carry = if t < x { 1 } else { 0 }
+            po.add(i).write(t)
+            i += 1
+        }
+        if carry != 0 {
+            po.add(i).write(carry)
+            i += 1
+        }
+        out.set_len(i)
+    }
+    return out
+}
+
+/// `a - b`, where `a` is at least `b`, without the zero limbs at the top.
+fn sub_mag(a: List<u64>, b: List<u64>) -> List<u64> {
+    var out: List<u64> = []
+    out.reserve(a.len())
+    unsafe {
+        let pa = a.as_ptr()
+        let pb = b.as_ptr()
+        let po = out.as_mut_ptr()
+        var borrow: u64 = 0
+        var i: usize = 0
+        while i < b.len() {
+            let x = pa.add(i).read()
+            let y = pb.add(i).read()
+            let d = x - y
+            let t = d - borrow
+            borrow = if x < y or d < borrow { 1 } else { 0 }
+            po.add(i).write(t)
+            i += 1
+        }
+        while i < a.len() {
+            let x = pa.add(i).read()
+            let t = x - borrow
+            borrow = if x < borrow { 1 } else { 0 }
+            po.add(i).write(t)
+            i += 1
+        }
+        out.set_len(i)
+    }
+    trim(mut out)
+    return out
+}
+
+/// `xs * m + add`, in place.
+fn mul_add_1(xs: mut List<u64>, m: u64, add: u64) {
+    var carry = add
+    for x in mut xs {
+        let p = x.widening_mul(m)
+        let lo = p.0 + carry
+        carry = p.1 + (if lo < p.0 { 1 } else { 0 })
+        x = lo
+    }
+    if carry != 0 {
+        xs.push(carry)
+    }
+}
+
+fn mul_mag(a: List<u64>, b: List<u64>) -> List<u64> {
+    if a.len() < b.len() {
+        return mul_mag(b, a)
+    }
+    if b.len() == 0 {
+        return []
+    }
+    if b.len() < KARATSUBA {
+        return schoolbook(a, b)
+    }
+    var out: List<u64> = [0; a.len() + b.len()]
+    if b.len() * 2 <= a.len() {
+        // Pieces of `a` as long as `b`, each times `b`, added in at their place.
+        var at: usize = 0
+        while at < a.len() {
+            let end = (at + b.len()).min(a.len())
+            var piece = a[at..end]
+            trim(mut piece)
+            add_at(mut out, mul_mag(piece, b), at)
+            at = end
+        }
+    } else {
+        // Karatsuba: with a = a1 B^h + a0 and b = b1 B^h + b0, the middle of the product is
+        // (a0 + a1)(b0 + b1) - a0 b0 - a1 b1, three products of half the size.
+        let h = a.len() / 2
+        var a0 = a[..h]
+        var b0 = b[..h]
+        trim(mut a0)
+        trim(mut b0)
+        let a1 = a[h..]
+        let b1 = b[h..]
+        let low = mul_mag(a0, b0)
+        let high = mul_mag(a1, b1)
+        let both = mul_mag(add_mag(a0, a1), add_mag(b0, b1))
+        let middle = sub_mag(sub_mag(both, low), high)
+        add_at(mut out, low, 0)
+        add_at(mut out, middle, h)
+        add_at(mut out, high, 2 * h)
+    }
+    trim(mut out)
+    return out
+}
+
+/// Each limb of `b` times all of `a`, added in at its place.
+fn schoolbook(a: List<u64>, b: List<u64>) -> List<u64> {
+    var out: List<u64> = [0; a.len() + b.len()]
+    unsafe {
+        let pa = a.as_ptr()
+        let pb = b.as_ptr()
+        let po = out.as_mut_ptr()
+        var j: usize = 0
+        while j < b.len() {
+            let m = pb.add(j).read()
+            let row = po.add(j)
+            var carry: u64 = 0
+            var i: usize = 0
+            while i < a.len() {
+                let p = pa.add(i).read().widening_mul(m)
+                let s = p.0 + row.add(i).read()
+                let t = s + carry
+                carry = p.1 + (if s < p.0 { 1 } else { 0 }) + (if t < s { 1 } else { 0 })
+                row.add(i).write(t)
+                i += 1
+            }
+            row.add(a.len()).write(carry)
+            j += 1
+        }
+    }
+    trim(mut out)
+    return out
+}
+
+/// Adds `x` into `out` from limb `at`, where `out` is long enough for the sum.
+fn add_at(out: mut List<u64>, x: List<u64>, at: usize) {
+    var carry: u64 = 0
+    var i: usize = 0
+    while i < x.len() {
+        let o = out[at + i]
+        let s = o + x[i]
+        let t = s + carry
+        carry = if s < o or t < s { 1 } else { 0 }
+        out[at + i] = t
+        i += 1
+    }
+    var k = at + x.len()
+    while carry != 0 {
+        let t = out[k] + 1
+        carry = if t == 0 { 1 } else { 0 }
+        out[k] = t
+        k += 1
+    }
+}
+
+/// The quotient and the remainder of `a` by `b`, which isn't zero.
+fn divmod_mag(a: List<u64>, b: List<u64>) -> (List<u64>, List<u64>) {
+    if cmp_mag(a, b) < 0 {
+        return ([], a.copy())
+    }
+    if b.len() == 1 {
+        var q = a.copy()
+        let r = div_1(mut q, b[0])
+        let rest: List<u64> = if r == 0 { [] } else { [r] }
+        return (q, rest)
+    }
+    // Knuth's algorithm D (The Art of Computer Programming, 4.3.1), with 64-bit digits. The
+    // divisor is shifted so its top bit is set, so each guess at a quotient digit, from the top
+    // two digits of what's left and the top one of the divisor, is at most two too big.
+    let n = b.len()
+    let s = u64.wrap(b[n - 1].leading_zeros())
+    let v = shl_mag(b, s)
+    var u = shl_mag(a, s)
+    if u.len() == a.len() {
+        u.push(0)
+    }
+    let m = a.len() - n
+    var q: List<u64> = [0; m + 1]
+    let vt = v[n - 1]
+    let vs = v[n - 2]
+    var j = m + 1
+    while j > 0 {
+        j -= 1
+        let ut = u[j + n]
+        let un = u[j + n - 1]
+        var qh: u64 = 0
+        var rh: u64 = 0
+        var refine = true
+        if ut >= vt {
+            // The top digits are equal: the guess is the largest digit, and its remainder may
+            // overflow, in which case the guess can't be too big by the test below.
+            qh = u64.MAX
+            rh = un + vt
+            refine = rh >= un
+        } else {
+            let p = u64.div_wide(ut, un, vt)
+            qh = p.0
+            rh = p.1
+        }
+        while refine {
+            let p = qh.widening_mul(vs)
+            if p.1 > rh or (p.1 == rh and p.0 > u[j + n - 2]) {
+                qh -= 1
+                let r2 = rh + vt
+                refine = r2 >= rh
+                rh = r2
+            } else {
+                refine = false
+            }
+        }
+        if sub_mul(mut u, j, v, qh) {
+            // Once in about 2^64 / 2 cases the guess was still one too big: add the divisor back.
+            qh -= 1
+            add_back(mut u, j, v)
+        }
+        q[j] = qh
+    }
+    trim(mut q)
+    var r = u[..n]
+    trim(mut r)
+    return (q, shr_mag(r, s))
+}
+
+/// `u[j..j + n + 1] -= qh * v`, where `n` is `v`'s length. Whether it went below zero.
+fn sub_mul(u: mut List<u64>, j: usize, v: List<u64>, qh: u64) -> bool {
+    let n = v.len()
+    var carry: u64 = 0
+    var borrow: u64 = 0
+    unsafe {
+        let pv = v.as_ptr()
+        let pu = u.as_mut_ptr().add(j)
+        var i: usize = 0
+        while i < n {
+            let p = pv.add(i).read().widening_mul(qh)
+            let lo = p.0 + carry
+            carry = p.1 + (if lo < p.0 { 1 } else { 0 })
+            let x = pu.add(i).read()
+            let d = x - lo
+            let t = d - borrow
+            borrow = if x < lo or d < borrow { 1 } else { 0 }
+            pu.add(i).write(t)
+            i += 1
+        }
+        let x = pu.add(n).read()
+        let d = x - carry
+        let t = d - borrow
+        let under = x < carry or d < borrow
+        pu.add(n).write(t)
+        return under
+    }
+}
+
+/// `u[j..j + n + 1] += v`, dropping the carry out of the top.
+fn add_back(u: mut List<u64>, j: usize, v: List<u64>) {
+    let n = v.len()
+    var carry: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let x = u[j + i]
+        let s = x + v[i]
+        let t = s + carry
+        carry = if s < x or t < s { 1 } else { 0 }
+        u[j + i] = t
+        i += 1
+    }
+    u[j + n] = u[j + n] + carry
+}
+
+/// Divides `xs` by `d`, which isn't zero, in place, and gives the remainder.
+fn div_1(xs: mut List<u64>, d: u64) -> u64 {
+    var rem: u64 = 0
+    var i = xs.len()
+    while i > 0 {
+        i -= 1
+        let p = u64.div_wide(rem, xs[i], d)
+        xs[i] = p.0
+        rem = p.1
+    }
+    trim(mut xs)
+    return rem
+}
+
+/// `a` times 2^n.
+fn shl_mag(a: List<u64>, n: u64) -> List<u64> {
+    if a.len() == 0 {
+        return []
+    }
+    let limbs = usize.wrap(n / 64)
+    let bits = u32.wrap(n % 64)
+    var out: List<u64> = [0; limbs]
+    out.reserve(a.len() + 1)
+    if bits == 0 {
+        out.extend(a)
+        return out
+    }
+    var carry: u64 = 0
+    for x in a {
+        out.push((x << bits) | carry)
+        carry = x >> (64 - bits)
+    }
+    if carry != 0 {
+        out.push(carry)
+    }
+    return out
+}
+
+/// `a` divided by 2^n, rounded down.
+fn shr_mag(a: List<u64>, n: u64) -> List<u64> {
+    let limbs = n / 64
+    if limbs >= u64(a.len()) {
+        return []
+    }
+    let from = usize.wrap(limbs)
+    let bits = u32.wrap(n % 64)
+    if bits == 0 {
+        return a[from..]
+    }
+    var out: List<u64> = []
+    out.reserve(a.len() - from)
+    var i = from
+    while i < a.len() {
+        let next = if i + 1 < a.len() { a[i + 1] << (64 - bits) } else { 0 }
+        out.push((a[i] >> bits) | next)
+        i += 1
+    }
+    trim(mut out)
+    return out
+}
+
+/// Whether the `n` lowest bits of `a` are all zero.
+fn low_bits_zero(a: List<u64>, n: u64) -> bool {
+    let limbs = usize.wrap(n / 64)
+    var i: usize = 0
+    while i < limbs and i < a.len() {
+        if a[i] != 0 {
+            return false
+        }
+        i += 1
+    }
+    let bits = u32.wrap(n % 64)
+    return bits == 0 or limbs >= a.len() or a[limbs] & ((1u64 << bits) - 1) == 0
+}
+
+// --- text ---------------------------------------------------------------------------------------
+
+/// How many digits in base `radix` fit in a limb, and that power of `radix`.
+fn radix_group(radix: u32) -> (u32, u64) {
+    if radix == 10 {
+        return (19, TEN19)
+    }
+    let r = u64(radix)
+    var big = r
+    var k: u32 = 1
+    while big <= u64.MAX / r {
+        big *= r
+        k += 1
+    }
+    return (k, big)
+}
+
+fn digit_value(c: u8) -> u32 {
+    if c >= b'0' and c <= b'9' {
+        return u32(c - b'0')
+    }
+    if c >= b'a' and c <= b'z' {
+        return u32(c - b'a') + 10
+    }
+    if c >= b'A' and c <= b'Z' {
+        return u32(c - b'A') + 10
+    }
+    return 99
+}
+
+/// The digits of `x` in base `radix`, with a `-` before a negative one.
+fn text_of(x: BigInt, radix: u32) -> String {
+    if x.mag.len() == 0 {
+        return String("0")
+    }
+    // Groups of digits from the lowest, by dividing by the largest power of the radix in a limb.
+    let (group, big) = radix_group(radix)
+    var groups: List<u64> = []
+    var w = x.mag.copy()
+    while w.len() > 0 {
+        groups.push(div_1(mut w, big))
+    }
+    var out: List<u8> = []
+    out.reserve(groups.len() * usize(group) + 1)
+    if x.negative {
+        out.push(b'-')
+    }
+    var i = groups.len() - 1
+    put_digits(mut out, groups[i], radix, 0)
+    while i > 0 {
+        i -= 1
+        put_digits(mut out, groups[i], radix, group)
+    }
+    return String.from_utf8(out)!
+}
+
+/// Adds the digits of `v` to `out`, with zeros before them up to `width` digits.
+fn put_digits(out: mut List<u8>, v: u64, radix: u32, width: u32) {
+    let start = out.len()
+    var x = v
+    var count: u32 = 0
+    if radix == 10 {
+        // A constant divisor, which clang turns into a multiply.
+        while x > 0 or count < width or count == 0 {
+            out.push(b'0' + u8.wrap(x % 10))
+            x /= 10
+            count += 1
+        }
+    } else {
+        let r = u64(radix)
+        while x > 0 or count < width or count == 0 {
+            out.push(DIGITS.byte_at(usize.wrap(x % r)))
+            x /= r
+            count += 1
+        }
+    }
+    var a = start
+    var b = out.len() - 1
+    while a < b {
+        out.swap(a, b)
+        a += 1
+        b -= 1
+    }
+}

@@ -205,6 +205,7 @@ enum class PrimMethod : std::uint8_t {
     to_bits, rotate_left, rotate_right, total_cmp, mul_add, rint, trailing_zeros, leading_zeros, count_ones,
     widening_mul,  // on an unsigned integer: the whole product, as its low and high halves (CLX-102)
     parse, from_bits, from_utf8,  // prim_static
+    div_wide,  // prim_static: a number twice as wide as the type, divided by one of it (CLX-102)
 };
 
 struct Expr {

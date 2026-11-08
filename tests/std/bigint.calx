@@ -1,0 +1,59 @@
+// std.bigint: integers of any size, checked against Python's int (CLX-102).
+
+import std.bigint.{BigInt}
+
+fn main() {
+    var f = BigInt.from(1)
+    for i in 1..=30 {
+        f *= i
+    }
+    println("{f}")                                              // out: 265252859812191058636308480000000
+    let two = BigInt.from(2)
+    println("{two.pow(100)} {-two.pow(65)} {BigInt.from(i64.MIN)} {BigInt.zero()}")  // out: 1267650600228229401496703205376 -36893488147419103232 -9223372036854775808 0
+
+    let a = BigInt.parse("123456789012345678901234567890")!
+    let b = BigInt.parse("-987654321098765432109876543210")!
+    println("{a + b} {a - b}")                                  // out: -864197532086419753208641975320 1111111110111111111011111111100
+    println("{a * b}")                                          // out: -121932631137021795226185032733622923332237463801111263526900
+    // `/` and `%` round toward zero, as on `i64`; floor_div and floor_mod are Python's `//` and `%`.
+    println("{b / a} {b % a} {b.floor_div(a)} {b.floor_mod(a)}")  // out: -8 -9000000000900000000090 -9 123456780012345678001234567800
+    println("{a + 1} {a - 10} {a * 3} {a / 1000000007} {a % 1000000007} {a + 5i64}")  // out: 123456789012345678901234567891 123456789012345678901234567880 370370367037037036703703703670 123456788148148161864 197434842 123456789012345678901234567895
+    println("{a < b} {b < a} {a == a.copy()} {a != b} {a.gcd(b)}")  // out: false true true true 9000000000900000000090
+
+    // Text in other bases, and what isn't a number.
+    println("{a.to_radix(16)} {BigInt.from(-255).to_radix(16)} {BigInt.parse_radix("zz", 36)!} {BigInt.parse_radix("-1010", 2)!}")  // out: 18ee90ff6c373e0ee4e3f0ad2 -ff 1295 -10
+    println("{BigInt.parse("+123")!} {BigInt.parse("-0")!} {BigInt.parse("")} {BigInt.parse("-")} {BigInt.parse("12a")} {BigInt.parse(" 1")}")  // out: 123 0 none none none none
+
+    // Conversions.
+    let max = BigInt.from(i64.MAX)
+    println("{max.to_i64()} {(max + 1).to_i64()} {BigInt.from(i64.MIN).to_i64()} {(BigInt.from(i64.MIN) - 1).to_i64()}")  // out: some(9223372036854775807) none some(-9223372036854775808) none
+    println("{BigInt.from(u64.MAX).to_u64()} {(BigInt.from(u64.MAX) + 1).to_u64()} {BigInt.from(-1).to_u64()}")  // out: some(18446744073709551615) none none
+    let big = two.pow(64)
+    println("{(two.pow(53) + 1).to_f64() == 9007199254740992.0} {(big + 2048).to_f64() == 18446744073709551616.0} {(big + 2049).to_f64() == 18446744073709555712.0}")  // out: true true true
+    println("{two.pow(1024).to_f64()} {-two.pow(5000).to_f64()} {BigInt.from(-12).to_f64()}")  // out: Infinity -Infinity -12.0
+    let n = two.pow(200) - 1
+    println("{n.to_bytes_be().len()} {BigInt.from_bytes_be(n.to_bytes_be()) == n} {BigInt.from_bytes_be([1u8, 0])} {BigInt.zero().to_bytes_be()}")  // out: 25 true 256 []
+
+    // Powers, roots and shifts.
+    let p = BigInt.from(1000000007)
+    println("{BigInt.from(3).mod_pow(BigInt.from(1000), p)} {BigInt.from(-7).mod_pow(BigInt.from(13), BigInt.from(1000))} {BigInt.from(5).mod_pow(BigInt.zero(), BigInt.from(1))}")  // out: 56888193 593 0
+    let e40 = BigInt.from(10).pow(40)
+    println("{e40.isqrt()} {(e40 - 1).isqrt()} {two.pow(127).isqrt()}")  // out: 100000000000000000000 99999999999999999999 13043817825332782212
+    println("{BigInt.from(-5).shr(1)} {BigInt.from(-4).shr(1)} {BigInt.from(-1).shr(10)} {two.pow(100).shr(99)} {(-two.pow(100)).shr(99)} {BigInt.from(5).shl(70)}")  // out: -3 -2 -1 2 -2 5902958103587056517120
+    println("{n.bit_len()} {BigInt.from(-255).bit_len()} {BigInt.zero().bit_len()}")  // out: 200 8 0
+    println("{b.sign()} {BigInt.zero().sign()} {b.abs()} {b.is_negative()} {BigInt.from(6).is_even()} {BigInt.zero().is_zero()}")  // out: -1 0 987654321098765432109876543210 true true true
+    println("{BigInt.zero().gcd(BigInt.from(12))} {BigInt.from(-12).gcd(BigInt.from(18))}")  // out: 12 6
+
+    // Ordered, hashed and shown like any value.
+    var xs: List<BigInt> = [BigInt.from(10).pow(20), BigInt.from(-3), BigInt.zero(), -BigInt.from(10).pow(20), BigInt.from(7)]
+    xs.sort()
+    println("{xs}")                                             // out: [-100000000000000000000, -3, 0, 7, 100000000000000000000]
+    var seen: Map<BigInt, i32> = Map()
+    seen.insert(two.pow(70), 1)
+    println("{seen.get(BigInt.from(2).pow(70))} {seen.get(two.pow(71))}")  // out: some(1) none
+
+    // Operands stay usable, and a quotient by zero panics at the call.
+    let q = a.div_rem(BigInt.from(7))
+    println("{q.0} {q.1} {a}")                                  // out: 17636684144620811271604938270 0 123456789012345678901234567890
+    println("{a.div_rem(BigInt.zero())}")                       // panic: division by zero
+}

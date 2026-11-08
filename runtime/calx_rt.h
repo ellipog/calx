@@ -920,6 +920,24 @@ CX_COLD CX_FN(void, cx_panic_key, (const char* at));
 CX_COLD CX_FN(void, cx_panic_range, (const char* at));
 /* A panic that says `message`, as `(a..b).step_by(0)` does (CLX-101). */
 CX_COLD CX_FN(void, cx_panic_text, (const char* at, const char* message));
+
+/* `u64.div_wide(hi, lo, d)`: the 128-bit number `hi:lo` divided by `d`, which the caller has
+ * checked is more than `hi`, so the quotient fits (CLX-102). x86-64 divides 128 bits by 64 in one
+ * instruction, which clang's 128-bit `/` doesn't use, since it can't know the quotient fits;
+ * elsewhere that `/` does it. */
+CX_INLINE cx_u64 cx_div_wide_u64(cx_u64 hi, cx_u64 lo, cx_u64 d, cx_u64* rem) {
+#if defined(__x86_64__)
+    cx_u64 q, r;
+    __asm__("divq %4" : "=a"(q), "=d"(r) : "a"(lo), "d"(hi), "rm"(d));
+    *rem = r;
+    return q;
+#else
+    unsigned __int128 n = ((unsigned __int128)hi << 64) | lo;
+    cx_u64 q = (cx_u64)(n / d);
+    *rem = lo - q * d; /* below `d`, so its low 64 bits are all of it */
+    return q;
+#endif
+}
 /* `q.remove_marked(marks)` on a `PriorityQueue`, without one mark for each element (D113). */
 CX_COLD CX_FN(void, cx_panic_marks, (cx_usize marks, cx_usize length, const char* at));
 /* `m.remove_marked(marks)` on an `OpenHashMap` or an `OpenHashSet`, without one mark for each key

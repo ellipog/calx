@@ -1,0 +1,8 @@
+// div_wide is for unsigned integers of a fixed width, and takes the high half, the low half, and
+// what to divide by.
+
+fn main() {
+    let _a = i64.div_wide(0, 1, 2)          // error: `i64` has no
+    let _b = u64.div_wide(0, 1)             // error: takes three arguments
+    let _c = usize.div_wide(0, 1, 2)        // error: `usize` has no
+}
