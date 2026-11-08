@@ -22,7 +22,9 @@ jobs:
         include:
           - os: windows-latest
             calx: build/compiler/windows/calx.exe
-          - os: ubuntu-latest
+          # Named, not ubuntu-latest, which GitHub moves from 24.04 to 26.04 one run at a time
+          # from 2026-10-19, so the tests run on one system, the newer.
+          - os: ubuntu-26.04
             calx: build/compiler/linux/calx
     runs-on: ${{ matrix.os }}
     env:
