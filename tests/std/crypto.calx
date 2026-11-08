@@ -152,8 +152,20 @@ fn main() {
         twice.push(byte)
     }
     println("{RsaKey.from_primes(twice) != none}")    // out: false
+    // A multiple of 3, made so by its last byte, which stays odd: one bit flipped could leave it
+    // prime, as p + 2 is about one time in 250. Each power of 256 is 1 more than a multiple of
+    // 3, so the number's remainder is its bytes' sum's.
     var composite = primes.copy()
-    composite[63] = composite[63] ^ 2
+    var sum: u32 = 0
+    for byte in part(primes.copy(), 0, 64) {
+        sum += u32(byte)
+    }
+    let last = composite[63]
+    var mask: u8 = 2
+    while (sum - u32(last) + u32(last ^ mask)) % 3 != 0 {
+        mask += 2
+    }
+    composite[63] = last ^ mask
     var low = primes.copy()
     low[0] = low[0] & 0x7F
     println("{RsaKey.from_primes(composite) != none} {RsaKey.from_primes(low) != none}")    // out: false false
