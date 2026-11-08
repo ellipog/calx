@@ -1,0 +1,18 @@
+// What an array can't do: change its length, sort floats with `<`, or change when it's `let` (CLX-142).
+
+fn main() {
+    var a = [3, 1, 2]
+    a.sort()
+    a.push(4)                       // error: `[i32; 3]` has no method `push`; an array's length is fixed, so make a list of it with `a.to_list()`, or declare it as a `List<i32>`
+    a.retain(|x| x > 1)             // error: `[i32; 3]` has no method `retain`; an array's length is fixed, so make a list of it with `a.to_list()`, or declare it as a `List<i32>`
+    a.clear()                       // error: `[i32; 3]` has no method `clear`; an array's length is fixed, so make a list of it with `a.to_list()`, or declare it as a `List<i32>`
+    var f = [1.5, 0.5]
+    f.sort()                        // error: `sort` compares with `<`, which `f64` doesn't have
+    let b = [1, 2]
+    b.sort()                        // error: `b` can't be changed; declare it with `var` to change it
+    let _c = a.map(|x| println("{x}"))  // error: `map` makes an array of what the closure gives back, and it gives back nothing; go over the array with a `for` loop
+    let _d: [i32; 0] = [1]          // error: an array holds at least one element; for none, use an empty list, `List<i32>()`
+    let _e = [7; 0]                 // error: an array holds at least one element; for none, use an empty list, `List<i32>()`
+    println("{a.capacity()}")       // error: `[i32; 3]` has no method `capacity`; an array's length is fixed, so make a list of it with `a.to_list()`, or declare it as a `List<i32>`
+    println("{a.first()}")          // error: `[i32; 3]` has no method `first`
+}

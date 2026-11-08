@@ -171,6 +171,7 @@ A list's methods that call a closure on each element, in order. Each also takes 
 - The closure reads each element in place. `filter` and `find` copy what they keep, so the elements can't hold a thread or another handle that can't be copied.
 - `sort_by` and `sort_by_key` keep equal elements in the order they were in, so sorting by one key and then another works.
 - `retain`, `sort_by` and `sort_by_key` change the list, so it must be a `var` or a `mut` parameter.
+- An [array](types.md#arrays) has them all but `retain`, which would change its length. Its `map` gives an array of the same length.
 
 ```calx
 struct Player {

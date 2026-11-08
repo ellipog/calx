@@ -50,7 +50,35 @@ fn main() {
 
 - `a[i]` reads element `i`, where `i` is a `usize`. An index out of bounds panics. A constant index out of bounds is a compile error.
 - `for x in a` goes over the elements in order ([control flow](control-flow.md#for)).
-- An empty `[]` needs its type from where it's used.
+- An array holds at least one element. For none, use an empty list.
+
+An array has the methods of a [list](lists.md) that keep its length:
+
+```calx
+fn main() {
+    var scores = [72, 95, 88]
+    scores.sort()
+    println("{scores} {scores.len()} {scores.contains(95)}")     // out: [72, 88, 95] 3 true
+    let curved = scores.map(|s| s + 5)                           // an array, `[i32; 3]`
+    println("{curved} {scores.filter(|s| s > 80)}")              // out: [77, 93, 100] [88, 95]
+    println("{["a", "b", "c"].join("-")} {scores.position(|s| s == 88)}")  // out: a-b-c some(1)
+}
+```
+
+| Method | Gives |
+| --- | --- |
+| `len()`, `is_empty()` | The length, `N`, which is known when the program is compiled |
+| `contains(x)` | Whether an element is `== x` |
+| `sort()`, `sort_by(\|a, b\| ...)`, `sort_by_key(\|x\| ...)` | The elements in order, in place, as a list's are sorted |
+| `swap(i, j)` | Elements `i` and `j` swapped, panicking for an index out of bounds |
+| `map(\|x\| ...)` | An array of the same length, of what the closure gives for each element. Nothing is allocated for it |
+| `filter(\|x\| ...)` | A list of copies of the elements the closure says `true` for |
+| `any`, `all`, `count`, `find`, `position` | As a list's ([closures](closures.md)) |
+| `join(sep)` | An array of text joined with `sep` between |
+| `to_list()` | A list of copies of the elements |
+| `as_ptr()`, `as_mut_ptr()` | A pointer to the first element ([unsafe](unsafe.md)) |
+
+Methods that change the length, such as `push` and `remove`, are a list's only: `a.to_list()` gives one with the array's elements.
 
 ## Strings and lists
 

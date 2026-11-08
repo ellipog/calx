@@ -799,18 +799,19 @@ private:
     // and an enum whose values go up as it declares them is sorted as its values; for anything
     // else the file has a sort of its own, from `calx_sort.h`. A stable one takes `at`, the sort's
     // place, for the panic when a hand-written `Order` contradicts itself.
-    std::string sort_call(const Type* t, const std::string& l, const std::string& at) const {
+    // Sorting the `len` elements of type `t` from `ptr`, a list's or an array's.
+    std::string sort_call(const Type* t, const std::string& ptr, const std::string& len, const std::string& at) const {
         const Type* key = t->kind == TypeKind::enum_ && !t->has_data && tags_in_order(t) && !hand(t, prop_order) ? t->repr : t;
         switch (key->kind) {
             case TypeKind::int_: case TypeKind::char_: case TypeKind::rune: case TypeKind::bool_:
-                return "cx_sort_" + helper(key) + "((" + ctype(key) + "*)" + l + "->ptr, " + l + "->len)";
+                return "cx_sort_" + helper(key) + "((" + ctype(key) + "*)" + ptr + ", " + len + ")";
             default: break;
         }
         (void)ctype(t);
         if (uses_) uses_->add_sort(t);
         std::unordered_set<const Type*> seen;
         std::string where = exact_order(t, seen) ? "" : ", " + at;
-        return "cx_sort_" + part(t) + "(" + l + "->ptr, " + l + "->len" + where + ")";
+        return "cx_sort_" + part(t) + "(" + ptr + ", " + len + where + ")";
     }
 
     // -1, 0 or 1, as `a` is less than, equal to or greater than `b`, both places of type `t`.
@@ -4965,12 +4966,17 @@ $dropall    m->len = 0;
         std::string l = ctype(t), el = ctype(et), p = tmp(), f = tmp(), i = tmp(), r = tmp();
         std::string out = "({ " + decls + (changes ? "" : "const ") + l + "* " + p + " = " + ops[0] + "; " + ctype(ft) + " " + f +
                           " = " + ops[1] + "; ";
-        std::string x = p + "->ptr[" + i + "]";
+        // An array's elements are `v`, a constant number of them (CLX-142).
+        bool array = t->kind == TypeKind::array;
+        std::string ptr = p + (array ? "->v" : "->ptr"), len = array ? "((cx_usize)" + std::to_string(t->length) + ")" : p + "->len";
+        std::string x = ptr + "[" + i + "]";
         std::string call = b == BMethod::sort_by || b == BMethod::sort_by_key ? "" : call_given(ft, f, {given(et, x)});
-        std::string loop = "for (cx_usize " + i + " = 0; " + i + " < " + p + "->len; " + i + "++) ";
+        std::string loop = "for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i + "++) ";
         std::string copy = is_copy(et) ? x : copy_fn(et) + "(&" + x + ")";
         switch (b) {
             case BMethod::list_map: {
+                // An array's is an array, with nothing allocated for it.
+                if (array) return out + ctype(e->type) + " " + r + "; " + loop + r + ".v[" + i + "] = " + call + "; " + r + "; })";
                 // The new list is the old one's length, and each element is the closure's value.
                 Type* ut = e->type->elem;
                 std::string u = ctype(ut);
@@ -5003,7 +5009,7 @@ $dropall    m->len = 0;
                        ".has = 1; break; } " + r + "; })";
             case BMethod::sort_by: case BMethod::sort_by_key: {
                 std::string env = ft->kind == TypeKind::closure ? f : "(const void* const*)&" + f;
-                return out + sort_by_fn(e, ft, et) + "(" + p + "->ptr, " + p + "->len, " + location(e->span) + ", " + env + "); })";
+                return out + sort_by_fn(e, ft, et) + "(" + ptr + ", " + len + ", " + location(e->span) + ", " + env + "); })";
             }
             default: return "0";
         }
@@ -6272,12 +6278,22 @@ $dropall    m->len = 0;
         };
         std::string i = tmp(), j = tmp(), v = tmp();
         auto index_at = [&](std::size_t k) { return location(e->args[k].value->span); };
+        // An array has the methods that keep the length, and its elements are `v`, `N` of them (CLX-142).
+        bool array = t->kind == TypeKind::array;
+        std::string n_text = array ? "((cx_usize)" + std::to_string(t->length) + ")" : "";
+        std::string ptr = p + (array ? "->v" : "->ptr"), len = array ? n_text : p + "->len";
+        if (array && (e->bmethod == BMethod::len || e->bmethod == BMethod::is_empty)) {
+            std::string n = e->bmethod == BMethod::len ? n_text : "(" + n_text + " == 0)";
+            return effects(recv) ? "((void)(" + expr(recv) + "), " + n + ")" : n;
+        }
         switch (e->bmethod) {
             case BMethod::len: return "(" + expr(recv) + ").len";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::capacity: return "(" + expr(recv) + ").cap";
-            case BMethod::as_ptr: return "((" + el + " const*)(" + expr(recv) + ").ptr)";
-            case BMethod::as_mut_ptr: return "(" + address(recv) + ")->ptr";
+            case BMethod::as_ptr:
+                if (array) return "((" + el + " const*)(" + address(recv) + ")->v)";
+                return "((" + el + " const*)(" + expr(recv) + ").ptr)";
+            case BMethod::as_mut_ptr: return "(" + address(recv) + ")" + (array ? "->v" : "->ptr");
             case BMethod::set_len:
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; if (__builtin_expect(" + i + " > " + p +
                        "->cap, 0)) cx_panic_set_len(" + i + ", " + p + "->cap, " + index_at(0) + "); " + p + "->len = " + i + "; })";
@@ -6331,21 +6347,29 @@ $dropall    m->len = 0;
             case BMethod::swap:
                 // Both indexes are worked out before either is checked, as Java's `Collections.swap` does.
                 return head + "cx_usize " + i + " = " + arg(0, e->args[0].value->type) + "; cx_usize " + j + " = " +
-                       arg(1, e->args[1].value->type) + "; (void)cx_index(" + i + ", " + p + "->len, " + index_at(0) +
-                       "); (void)cx_index(" + j + ", " + p + "->len, " + index_at(1) + "); " + el + " " + v + " = " + p +
-                       "->ptr[" + i + "]; " + p + "->ptr[" + i + "] = " + p + "->ptr[" + j + "]; " + p + "->ptr[" + j + "] = " +
-                       v + "; })";
-            case BMethod::sort: return head + sort_call(et, p, location(e->span)) + "; })";
+                       arg(1, e->args[1].value->type) + "; (void)cx_index(" + i + ", " + len + ", " + index_at(0) +
+                       "); (void)cx_index(" + j + ", " + len + ", " + index_at(1) + "); " + el + " " + v + " = " + ptr + "[" + i +
+                       "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " + ptr + "[" + j + "] = " + v + "; })";
+            case BMethod::sort: return head + sort_call(et, ptr, len, location(e->span)) + "; })";
             case BMethod::join:
                 if (recv->kind == ExprKind::call && recv->call == CallKind::builtin_method &&
                     (recv->bmethod == BMethod::split || recv->bmethod == BMethod::lines || recv->bmethod == BMethod::split_whitespace)) {
                     return join_parts(e);
                 }
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " +
-                       (et->kind == TypeKind::string ? "cx_text_join(" : "cx_text_join_str(") + p + "->ptr, " + p + "->len, " + text_arg(0) +
+                       (et->kind == TypeKind::string ? "cx_text_join(" : "cx_text_join_str(") + ptr + ", " + len + ", " + text_arg(0) +
                        ", " + location(e->span) + "); })";
             case BMethod::to_list: {
                 std::string r = tmp(), lt = ctype(e->type);
+                if (array) {
+                    // A copy of each element; one copy of the bytes for `Copy` elements. An array
+                    // holds at least one.
+                    std::string fill = is_copy(et) ? "__builtin_memcpy(" + r + ".ptr, " + ptr + ", " + len + " * sizeof(" + el + ")); "
+                                                   : "for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i + "++) " + r + ".ptr[" +
+                                                         i + "] = " + copy_fn(et) + "(&" + ptr + "[" + i + "]); ";
+                    return "({ const " + l + "* " + p + " = " + address(recv) + "; " + lt + " " + r + " = { .ptr = (" + el +
+                           "*)cx_alloc(" + len + " * sizeof(" + el + ")), .len = " + len + ", .cap = " + len + " }; " + fill + r + "; })";
+                }
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " + lt + " " + r + " = {0}; if (" + p + "->len) { " + r +
                        ".ptr = (" + el + "*)cx_alloc(" + p + "->len * sizeof(" + el + ")); " + r + ".len = " + r + ".cap = " + p +
                        "->len; __builtin_memcpy(" + r + ".ptr, " + p + "->ptr, " + p + "->len * sizeof(" + el + ")); } " + r + "; })";
@@ -6353,8 +6377,8 @@ $dropall    m->len = 0;
             case BMethod::contains: {
                 std::string r = tmp();
                 return "({ const " + l + "* " + p + " = " + address(recv) + "; " + el + " " + v + " = " + arg(0, et) +
-                       "; cx_bool " + r + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + p + "->len; " + i + "++) if (" +
-                       equal(et, p + "->ptr[" + i + "]", v) + ") { " + r + " = 1; break; } " + r + "; })";
+                       "; cx_bool " + r + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i + "++) if (" +
+                       equal(et, ptr + "[" + i + "]", v) + ") { " + r + " = 1; break; } " + r + "; })";
             }
             default: return "0";
         }

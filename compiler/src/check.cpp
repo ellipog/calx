@@ -2845,6 +2845,12 @@ private:
                     error(t->inner->span, "an array can't hold " + name_of(elem));
                     return T.error;
                 }
+                // C has no array of no elements, and an array of none holds nothing to read.
+                if (t->length->const_bits == 0) {
+                    error(t->length->span, "an array holds at least one element; for none, use an empty list, " +
+                                               q("List<" + std::string(elem->name) + ">()"));
+                    return T.error;
+                }
                 return T.array_of(elem, t->length->const_bits);
             }
             case TypeExprKind::self:
@@ -6338,6 +6344,11 @@ private:
                 error(e->repeat->span, "the length of `[x; n]` must be a constant");
                 return T.error;
             }
+            if (e->repeat->const_bits == 0) {
+                error(e->repeat->span, "an array holds at least one element; for none, use an empty list, " +
+                                           q("List<" + std::string(elem->name) + ">()"));
+                return T.error;
+            }
             return T.array_of(elem, e->repeat->const_bits);
         }
         if (e->elems.empty()) {
@@ -7692,7 +7703,7 @@ private:
             }
             if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list ||
                 recv->kind == TypeKind::deque || recv->kind == TypeKind::map || recv->kind == TypeKind::set ||
-                recv->kind == TypeKind::optional) {
+                recv->kind == TypeKind::optional || recv->kind == TypeKind::array) {
                 return builtin_method(e, recv);
             }
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
@@ -9818,6 +9829,37 @@ private:
                 check_args(e);
                 return T.error;
             }
+        } else if (recv->kind == TypeKind::array) {
+            // An array's length is fixed, so it has the methods of a list that keep the length (CLX-142).
+            Type* el = recv->elem;
+            BMethod cm = closure_method(m);
+            if (cm != BMethod::none && cm != BMethod::list_retain) return list_closure_call(e, recv, cm);
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
+            else if (m == "sort") b = BMethod::sort, changes = true;
+            else if (m == "swap") b = BMethod::swap, changes = true, params = {T.usize, T.usize};
+            else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
+            else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
+            else if (m == "to_list") b = BMethod::to_list, result = T.list_of(el);
+            else if (m == "join" && (el->kind == TypeKind::string || el->kind == TypeKind::str)) {
+                b = BMethod::join, params = {nullptr}, result = T.string;
+            } else if (m == "push" || m == "pop" || m == "insert" || m == "remove" || m == "swap_remove" || m == "truncate" ||
+                       m == "clear" || m == "extend" || m == "retain" || m == "reserve" || m == "capacity") {
+                error(e->callee->span, name_of(recv) + " has no method " + q(m) + "; an array's length is fixed, so make a list of it with " +
+                                           q(place_text(e->callee->lhs) + ".to_list()") + ", or declare it as a " +
+                                           q("List<" + std::string(el->name) + ">"));
+                check_args(e);
+                return T.error;
+            }
+            if (b == BMethod::to_list) {
+                if (const Type* h = handle_inside(el)) {
+                    error(e->callee->span, "`to_list` copies the elements, and " + name_of(el) + " can't be copied" +
+                                               (h == el ? "" : ", since it holds " + name_of(h)));
+                    check_args(e);
+                    return T.error;
+                }
+            }
         } else {
             Type* el = recv->elem;
             if (recv->kind == TypeKind::list && closure_method(m) != BMethod::none) return list_closure_call(e, recv, closure_method(m));
@@ -10044,11 +10086,14 @@ private:
             switch (b) {
                 case BMethod::list_map:
                     if (r->kind == TypeKind::unit) {
-                        error(a.value->span, "`map` makes a list of what the closure gives back, and it gives back nothing; "
-                                             "go over the list with a `for` loop");
+                        bool array = recv->kind == TypeKind::array;
+                        error(a.value->span, std::string("`map` makes ") + (array ? "an array" : "a list") +
+                                                 " of what the closure gives back, and it gives back nothing; go over the " +
+                                                 (array ? "array" : "list") + " with a `for` loop");
                         result = T.error;
                     } else {
-                        result = T.list_of(r);
+                        // An array's is an array of the same length (CLX-142).
+                        result = recv->kind == TypeKind::array ? T.array_of(r, recv->length) : T.list_of(r);
                     }
                     break;
                 case BMethod::list_filter: case BMethod::list_find:

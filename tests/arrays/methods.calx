@@ -1,0 +1,61 @@
+// An array has the methods of a list that keep its length, and `map` gives an array (CLX-142).
+
+const PRIMES: [i32; 4] = [2, 3, 5, 7]
+const MONTHS: [str; 3] = ["Jan", "Feb", "Mar"]
+
+struct Hand {
+    cards: [i32; 4],
+}
+
+fn made() -> [i32; 3] {
+    println("made")
+    return [9, 8, 7]
+}
+
+fn big(xs: [i32; 3]) -> usize {
+    return xs.count(|x| x > 7)
+}
+
+fn main() {
+    var a = [3, 1, 2]
+    println("{a.len()} {a.is_empty()} {a.contains(2)} {a.contains(7)}")   // out: 3 false true false
+    a.sort()
+    a.swap(0, 2)
+    println("{a}")                                                         // out: [3, 2, 1]
+    let doubled = a.map(|x| x * 2)
+    let lens = MONTHS.map(|m| m.len())
+    println("{doubled} {doubled.len()} {lens}")                            // out: [6, 4, 2] 3 [3, 3, 3]
+    println("{a.any(|x| x > 2)} {a.all(|x| x > 2)} {a.count(|x| x != 2)}") // out: true false 2
+    println("{a.find(|x| x < 3)} {a.position(|x| x == 1)} {a.find(|x| x > 5)}")  // out: some(2) some(2) none
+    println("{a.filter(|x| x > 1)} {a.to_list()}")                         // out: [3, 2] [3, 2, 1]
+
+    // Constants and literals.
+    println("{PRIMES.contains(5)} {PRIMES.len()} {PRIMES.map(|p| p * p)}") // out: true 4 [4, 9, 25, 49]
+    println("{MONTHS.join("/")} {MONTHS.position(|m| m == "Feb")} {[4, 5, 6].contains(5)}")  // out: Jan/Feb/Mar some(1) true
+
+    // Elements that own memory.
+    var words = [String("pear"), String("fig"), String("apple")]
+    words.sort()
+    println("{words} {words.filter(|w| w.len() > 3)}")                     // out: [apple, fig, pear] [apple, pear]
+    words.sort_by_key(|w| w.len())
+    println("{words} {words.join(" ")}")                                   // out: [fig, pear, apple] fig pear apple
+    words.sort_by(|x, y| y.cmp(x))
+    let copied = words.to_list()
+    println("{words} {copied} {words.find(|w| w.starts_with("f"))}")       // out: [pear, fig, apple] [pear, fig, apple] some(fig)
+
+    // Floats sort with `total_cmp`.
+    var fs = [2.5, -1.0, 0.5]
+    fs.sort_by(|x, y| x.total_cmp(y))
+    println("{fs} {unsafe { fs.as_ptr().add(1).read() }}")                 // out: [-1.0, 0.5, 2.5] 0.5
+
+    // A field, an array of arrays, and an array a call gives, which is made once.
+    var h = Hand { cards: [4, 2, 3, 1] }
+    h.cards.sort()
+    let grid = [[1, 2, 3], [4, 5, 6]]
+    println("{h.cards} {grid.map(|row| row.len())} {grid.len()}")          // out: [1, 2, 3, 4] [3, 3] 2
+    println("{made().len()} {big(made())} {made().map(|x| x + 1)}")
+    // out: made
+    // out: made
+    // out: made
+    // out: 3 2 [10, 9, 8]
+}
