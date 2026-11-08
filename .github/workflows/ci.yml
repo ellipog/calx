@@ -33,18 +33,36 @@ jobs:
       - name: Install clang, lld and Ninja
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang lld ninja-build
-      # Ninja's own release, pinned and checked.
+      # Ninja's own release, pinned and checked. GitHub's release downloads fail for minutes at a
+      # time now and then, so after a few tries this falls back to the Ninja Visual Studio ships.
       - name: Install Ninja
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $zip = "$env:RUNNER_TEMP\ninja-win.zip"
-          # GitHub's release downloads time out now and then; a few tries ride over it.
-          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
-          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
-          "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $got = $false
+          foreach ($wait in 10, 30, 60) {
+            try {
+              Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+              $got = $true
+              break
+            } catch {
+              Write-Host "Ninja's download failed: $_"
+              Start-Sleep -Seconds $wait
+            }
+          }
+          if ($got) {
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+            if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+            Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
+            "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          } else {
+            $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+            $dir = "$vs\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+            if (-not (Test-Path "$dir\ninja.exe")) { throw "Ninja's download failed, and Visual Studio has none to fall back to" }
+            Write-Host "Using Visual Studio's Ninja, $(& "$dir\ninja.exe" --version)"
+            $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
       # Puts the MSVC libraries the linker needs on the environment.
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
@@ -112,12 +130,29 @@ jobs:
         shell: pwsh
         run: |
           $zip = "$env:RUNNER_TEMP\ninja-win.zip"
-          # GitHub's release downloads time out now and then; a few tries ride over it.
-          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
-          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
-          "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $got = $false
+          foreach ($wait in 10, 30, 60) {
+            try {
+              Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+              $got = $true
+              break
+            } catch {
+              Write-Host "Ninja's download failed: $_"
+              Start-Sleep -Seconds $wait
+            }
+          }
+          if ($got) {
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+            if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+            Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
+            "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          } else {
+            $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+            $dir = "$vs\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+            if (-not (Test-Path "$dir\ninja.exe")) { throw "Ninja's download failed, and Visual Studio has none to fall back to" }
+            Write-Host "Using Visual Studio's Ninja, $(& "$dir\ninja.exe" --version)"
+            $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Version
