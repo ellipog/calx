@@ -20,6 +20,7 @@ Installing Calx, then learning it by building one small program, `stash`, which 
 3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
 4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
 5. [The stash](guide/stash.md): a sorted map, parameters that own or change what they're given, `try`, the whole program, and modules
+6. [Coming from Python](guide/from-python.md): the Python a script reaches for next to the Calx that does the same, from text, lists and files to JSON, CSV, the web and dates, and where Calx differs on purpose
 
 ### Reference
 
