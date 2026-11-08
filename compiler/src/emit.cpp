@@ -5496,6 +5496,14 @@ $dropall    m->len = 0;
             case PrimMethod::checked_add: r = checked("add", t, ctype(e->type), v); break;
             case PrimMethod::checked_sub: r = checked("sub", t, ctype(e->type), v); break;
             case PrimMethod::checked_mul: r = checked("mul", t, ctype(e->type), v); break;
+            case PrimMethod::widening_mul: {
+                // One multiply twice as wide, then its halves.
+                std::string wide = t->bits == 64 ? "unsigned __int128" : "cx_u" + std::to_string(t->bits * 2), p = tmp();
+                std::string c = ctype(t);
+                r = "({ " + wide + " " + p + " = (" + wide + ")" + v[0] + " * " + v[1] + "; ((" + ctype(e->type) + "){ (" + c + ")" + p +
+                    ", (" + c + ")(" + p + " >> " + std::to_string(t->bits) + ") }); })";
+                break;
+            }
             case PrimMethod::checked_div: r = checked_div(false, t, ctype(e->type), v); break;
             case PrimMethod::checked_rem: r = checked_div(true, t, ctype(e->type), v); break;
             case PrimMethod::saturating_add: r = saturating("add", t, v); break;

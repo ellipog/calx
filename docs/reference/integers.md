@@ -86,6 +86,15 @@ fn main() {
 | `x.checked_add(y)`, `checked_sub`, `checked_mul` | `some` of the result, or `none` if it doesn't fit the type |
 | `x.checked_div(y)`, `checked_rem` | `none` when `y` is 0. `MIN.checked_div(-1)` is `none`, since the result doesn't fit; `MIN.checked_rem(-1)` is `some(0)`, as Java's `%` gives |
 | `x.saturating_add(y)`, `saturating_sub`, `saturating_mul` | The result, clamped to the type's range |
+| `x.widening_mul(y)` | The whole product of two unsigned integers of a fixed width, `u8` to `u64`, as a tuple of its low and high halves: `u64.MAX.widening_mul(2)` is `(18446744073709551614, 1)`. It's one multiply, twice as wide, as Rust's `widening_mul` is, for arithmetic on numbers bigger than a `u64` and for picking random numbers (CLX-102) |
+
+```calx
+fn main() {
+    let (low, high) = u64.MAX.widening_mul(u64.MAX)
+    println("{low} {high}")                    // out: 1 18446744073709551614
+    println("{4000000000u32.widening_mul(3)}")  // out: (3410065408, 2)
+}
+```
 
 ## Parsing
 

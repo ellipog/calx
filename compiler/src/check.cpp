@@ -9972,8 +9972,13 @@ private:
         else if (m == "trailing_zeros" && is_int(recv)) pm = PrimMethod::trailing_zeros;
         else if (m == "leading_zeros" && is_int(recv)) pm = PrimMethod::leading_zeros;
         else if (m == "count_ones" && is_int(recv)) pm = PrimMethod::count_ones;
+        else if (m == "widening_mul" && is_int(recv) && !recv->is_signed && !recv->is_usize) pm = PrimMethod::widening_mul, args = 1;
         if (pm == PrimMethod::none) {
-            error(e->callee->span, name_of(recv) + " has no method " + q(m));
+            std::string hint;
+            if (m == "widening_mul" && is_int(recv))
+                hint = recv->is_usize ? "; it's for `u8`, `u16`, `u32` and `u64`, and `usize` can be 32 or 64 bits, so use `u64(n)`"
+                                      : "; it's for `u8`, `u16`, `u32` and `u64`";
+            error(e->callee->span, name_of(recv) + " has no method " + q(m) + hint);
             check_args(e);
             return T.error;
         }
@@ -9995,6 +10000,7 @@ private:
         if (pm == PrimMethod::total_cmp) return ordering_type();
         if (pm == PrimMethod::to_bits) return recv->bits == 32 ? T.u32 : T.u64;
         if (pm >= PrimMethod::checked_add && pm <= PrimMethod::checked_rem) return T.optional_of(recv);
+        if (pm == PrimMethod::widening_mul) return T.tuple_of({recv, recv});
         Expr* lhs = e->callee->lhs;
         if (pm == PrimMethod::trailing_zeros || pm == PrimMethod::leading_zeros || pm == PrimMethod::count_ones) {
             // Counted in the receiver's own width, as Java's numberOfTrailingZeros,

@@ -1,0 +1,81 @@
+// std.random: xoshiro256** from a seed, the same numbers on every system (CLX-102).
+
+import std.random.{Random}
+
+fn main() {
+    // The first numbers for seed 42, as the reference xoshiro256** with SplitMix64 seeding gives.
+    var r = Random.new(42)
+    println("{r.next_u64()} {r.next_u64()} {r.next_u32()}")  // out: 1546998764402558742 6990951692964543102 2920764210
+
+    // Each face about as often as the others.
+    var faces: List<i32> = [0; 6]
+    for _ in 0..60000 {
+        faces[usize.wrap(r.below(6))] += 1
+    }
+    var even = true
+    for n in faces {
+        even = even and n > 9500 and n < 10500
+    }
+    println("{even}")                                       // out: true
+
+    var ends = true
+    var lo = 0
+    var hi = 0
+    for _ in 0..10000 {
+        let x = r.range(-3, 3)
+        ends = ends and x >= -3 and x < 3
+        if x == -3 {
+            lo += 1
+        }
+        if x == 2 {
+            hi += 1
+        }
+    }
+    println("{ends} {lo > 1400} {hi > 1400}")               // out: true true true
+
+    var sum = 0.0
+    var inside = true
+    for _ in 0..100000 {
+        let f = r.float()
+        inside = inside and f >= 0.0 and f < 1.0
+        sum += f
+    }
+    println("{inside} {(sum / 100000.0 - 0.5).abs() < 0.01}")  // out: true true
+
+    var total = 0.0
+    var squares = 0.0
+    for _ in 0..100000 {
+        let x = r.normal(10.0, 2.0)
+        total += x
+        squares += (x - 10.0) * (x - 10.0)
+    }
+    println("{(total / 100000.0 - 10.0).abs() < 0.05} {(squares / 100000.0 - 4.0).abs() < 0.1}")  // out: true true
+
+    var xs: List<i32> = [1, 2, 3, 4, 5, 6, 7, 8]
+    r.shuffle(mut xs)
+    var sorted = xs.copy()
+    sorted.sort()
+    println("{sorted}")                                     // out: [1, 2, 3, 4, 5, 6, 7, 8]
+
+    let names: List<String> = ["ann", "bob", "cy"]
+    let empty: List<String> = []
+    println("{r.pick(names) != none} {r.pick(empty)}")      // out: true none
+    var two = r.sample(names, 2)
+    two.sort()
+    println("{two.len()} {two[0] != two[1]} {r.sample(names, 3).len()}")  // out: 2 true 3
+    println("{r.bytes(5).len()} {r.chance(1.0)} {r.chance(0.0)} {r.index(1)}")  // out: 5 true false 0
+    let u = r.uniform(5.0, 6.0)
+    println("{u >= 5.0 and u < 6.0}")                       // out: true
+
+    // The whole range of an `i64`.
+    let wide = r.range(i64.MIN, i64.MAX)
+    println("{wide < i64.MAX}")                             // out: true
+
+    var a = Random.new(7)
+    var b = Random.new(7)
+    var c = Random.new(8)
+    let first = a.next_u64()
+    println("{first == b.next_u64()} {first == c.next_u64()}")  // out: true false
+    var s = Random.system()
+    println("{s.next_u64() != s.next_u64()}")               // out: true
+}

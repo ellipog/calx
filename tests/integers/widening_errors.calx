@@ -1,0 +1,9 @@
+// widening_mul is for unsigned integers of a fixed width.
+
+fn main() {
+    let a: i64 = 3
+    let _x = a.widening_mul(4)        // error: it's for `u8`, `u16`, `u32` and `u64`
+    let n: usize = 3
+    let _y = n.widening_mul(4)        // error: `usize` can be 32 or 64 bits, so use `u64(n)`
+    let _z = 3u32.widening_mul()      // error: takes one argument
+}

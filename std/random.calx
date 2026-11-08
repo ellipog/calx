@@ -1,0 +1,200 @@
+/// Random numbers: a fast generator that gives the same numbers for the same seed on every
+/// system, for simulations, games, tests and sampling, and one seeded from the system's own
+/// generator when every run should differ.
+///
+/// It's xoshiro256** (Blackman and Vigna, 2018), whose 256 bits of state repeat only after
+/// 2^256 - 1 numbers, with SplitMix64 to spread a seed over them. It's not for keys or secrets,
+/// since its numbers can be worked out from a few of them: those come from
+/// `std.crypto.random_bytes` (CLX-102).
+module std.random
+
+import std.math.{log}
+
+extern "C" fn cx_crypto_random(p: *u8, n: usize)
+
+/// A generator of random numbers. Each method takes the next numbers from it, so the same seed
+/// and the same calls give the same values.
+pub struct Random {
+    s0: u64,
+    s1: u64,
+    s2: u64,
+    s3: u64,
+}
+
+// SplitMix64's step: from one 64-bit state, numbers whose bits are well mixed, as xoshiro's own
+// seeding wants.
+fn split_mix(state: mut u64) -> u64 {
+    state = state.wrapping_add(0x9E3779B97F4A7C15)
+    var z = state
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB)
+    return z ^ (z >> 31)
+}
+
+impl Random {
+    /// A generator whose numbers follow from `seed`, the same on every system and every run.
+    pub fn new(seed: u64) -> Random {
+        var state = seed
+        let a = split_mix(mut state)
+        let b = split_mix(mut state)
+        let c = split_mix(mut state)
+        let d = split_mix(mut state)
+        return Random { s0: a, s1: b, s2: c, s3: d }
+    }
+
+    /// A generator seeded from the system's generator, so each run gives different numbers.
+    pub fn system() -> Random {
+        var seed: List<u8> = [0; 32]
+        unsafe {
+            cx_crypto_random(seed.as_mut_ptr(), 32)
+        }
+        var s: List<u64> = [0; 4]
+        for i in 0..seed.len() {
+            s[i / 8] = s[i / 8] | (u64(seed[i]) << u64(8 * (i % 8)))
+        }
+        // All zeros is the one state that stays zero; it comes once in 2^256.
+        if s[0] == 0 and s[1] == 0 and s[2] == 0 and s[3] == 0 {
+            s[0] = 1
+        }
+        return Random { s0: s[0], s1: s[1], s2: s[2], s3: s[3] }
+    }
+
+    /// The next 64 random bits.
+    pub fn next_u64(mut self) -> u64 {
+        let result = (self.s1.wrapping_mul(5)).rotate_left(7).wrapping_mul(9)
+        let t = self.s1 << 17
+        self.s2 = self.s2 ^ self.s0
+        self.s3 = self.s3 ^ self.s1
+        self.s1 = self.s1 ^ self.s2
+        self.s0 = self.s0 ^ self.s3
+        self.s2 = self.s2 ^ t
+        self.s3 = self.s3.rotate_left(45)
+        return result
+    }
+
+    /// The next 32 random bits, the high half of the next 64.
+    pub fn next_u32(mut self) -> u32 {
+        return u32.wrap(self.next_u64() >> 32)
+    }
+
+    /// A number from 0 up to, but not including, `n`, each as likely as the others. It panics
+    /// when `n` is 0.
+    pub fn below(mut self, n: u64) -> u64 {
+        assert(n > 0, "`below` needs a number above 0")
+        // Lemire's method: the high half of a random number times `n`, retried only in the rare
+        // case that would make some results likelier than others.
+        var p = self.next_u64().widening_mul(n)
+        if p.0 < n {
+            let floor = (0u64.wrapping_sub(n)) % n
+            while p.0 < floor {
+                p = self.next_u64().widening_mul(n)
+            }
+        }
+        return p.1
+    }
+
+    /// A number from `lo` up to, but not including, `hi`, each as likely as the others. It panics
+    /// unless `lo` is below `hi`.
+    pub fn range(mut self, lo: i64, hi: i64) -> i64 {
+        assert(lo < hi, "`range` needs its start below its end")
+        let span = u64.wrap(hi).wrapping_sub(u64.wrap(lo))
+        return i64.wrap(u64.wrap(lo).wrapping_add(self.below(span)))
+    }
+
+    /// An index into a list of `len` elements, each as likely as the others. It panics when `len`
+    /// is 0.
+    pub fn index(mut self, len: usize) -> usize {
+        assert(len > 0, "`index` needs a length above 0")
+        return usize.wrap(self.below(u64(len)))
+    }
+
+    /// A float from 0 up to, but not including, 1, from 53 random bits, so every value it can
+    /// give is as likely as the others and evenly spaced.
+    pub fn float(mut self) -> f64 {
+        return f64.nearest(self.next_u64() >> 11) * 1.1102230246251565e-16
+    }
+
+    /// A float from `lo` up to, but not including, `hi`.
+    pub fn uniform(mut self, lo: f64, hi: f64) -> f64 {
+        return lo + (hi - lo) * self.float()
+    }
+
+    /// `true` or `false`, each half the time.
+    pub fn coin(mut self) -> bool {
+        return (self.next_u64() >> 63) == 1
+    }
+
+    /// `true` with probability `p`, from 0 for never to 1 for always.
+    pub fn chance(mut self, p: f64) -> bool {
+        return self.float() < p
+    }
+
+    /// A number from the normal distribution with this mean and standard deviation, by
+    /// Marsaglia's polar method.
+    pub fn normal(mut self, mean: f64, sd: f64) -> f64 {
+        loop {
+            let u = 2.0 * self.float() - 1.0
+            let v = 2.0 * self.float() - 1.0
+            let s = u * u + v * v
+            if s > 0.0 and s < 1.0 {
+                return mean + sd * u * (-2.0 * log(s) / s).sqrt()
+            }
+        }
+    }
+
+    /// Puts the elements in a random order, each order as likely as the others, by
+    /// Fisher and Yates's shuffle.
+    pub fn shuffle<T>(mut self, xs: mut List<T>) {
+        var i = xs.len()
+        while i > 1 {
+            let j = self.index(i)
+            i -= 1
+            xs.swap(i, j)
+        }
+    }
+
+    /// A copy of an element picked at random, or `none` when the list is empty.
+    pub fn pick<T>(mut self, xs: List<T>) -> T? {
+        if xs.is_empty() {
+            return none
+        }
+        return some(xs[self.index(xs.len())].copy())
+    }
+
+    /// Copies of `k` different elements picked at random, in the order they were picked. It panics
+    /// when the list has fewer than `k`.
+    pub fn sample<T>(mut self, xs: List<T>, k: usize) -> List<T> {
+        assert(k <= xs.len(), "`sample` can't pick more elements than the list has")
+        // The start of a shuffle of the indexes, which picks each without the ones before it.
+        var order: List<usize> = []
+        order.reserve(xs.len())
+        for i in 0..xs.len() {
+            order.push(i)
+        }
+        var out: List<T> = []
+        out.reserve(k)
+        for i in 0..k {
+            let j = i + self.index(xs.len() - i)
+            order.swap(i, j)
+            out.push(xs[order[i]].copy())
+        }
+        return out
+    }
+
+    /// `n` random bytes.
+    pub fn bytes(mut self, n: usize) -> List<u8> {
+        var out: List<u8> = [0; n]
+        var i: usize = 0
+        while i < n {
+            var x = self.next_u64()
+            var k = 0
+            while k < 8 and i < n {
+                out[i] = u8.wrap(x)
+                x = x >> 8
+                i += 1
+                k += 1
+            }
+        }
+        return out
+    }
+}

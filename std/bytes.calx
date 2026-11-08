@@ -1,0 +1,794 @@
+/// Bytes as text and text as bytes, finding bytes in bytes, and numbers read from and written to
+/// bytes in either byte order, as binary files and network protocols lay them out (CLX-102).
+///
+/// It's what Python's `bytes.hex`, `bytes.fromhex`, `base64`, `bytes.find` and `struct` do. A number
+/// is read at an index, as `u32_le(data, 8)`, and written at the end of a list, as
+/// `put_u32_le(mut out, v)`, or over bytes already there, as `set_u32_le(mut out, 8, v)`.
+module std.bytes
+
+const HEX: str = "0123456789abcdef"
+const BASE64: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const BASE64_URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+/// The bytes as lowercase hex digits, two for each byte, as in `"00ff10"`.
+pub fn hex(bytes: List<u8>) -> String {
+    var out: List<u8> = []
+    out.reserve(bytes.len() * 2)
+    for b in bytes {
+        out.push(HEX.byte_at(usize(u32(b) >> 4)))
+        out.push(HEX.byte_at(usize(u32(b) & 15)))
+    }
+    return String.from_utf8(out)!
+}
+
+fn hex_digit(c: u8) -> u8? {
+    if c >= b'0' and c <= b'9' {
+        return some(c - b'0')
+    }
+    if c >= b'a' and c <= b'f' {
+        return some(c - b'a' + 10)
+    }
+    if c >= b'A' and c <= b'F' {
+        return some(c - b'A' + 10)
+    }
+    return none
+}
+
+/// The bytes that hex digits stand for, two digits to a byte, either case, or `none` when the
+/// text has an odd number of digits or anything else.
+pub fn from_hex(text: String) -> List<u8>? {
+    if text.len() % 2 != 0 {
+        return none
+    }
+    var out: List<u8> = []
+    out.reserve(text.len() / 2)
+    var i: usize = 0
+    while i < text.len() {
+        let hi = hex_digit(text.byte_at(i)) else return none
+        let lo = hex_digit(text.byte_at(i + 1)) else return none
+        out.push(u8.wrap((u32(hi) << 4) | u32(lo)))
+        i += 2
+    }
+    return some(out)
+}
+
+fn encode64(bytes: List<u8>, alphabet: str, pad: bool) -> String {
+    var s: List<u8> = []
+    s.reserve((bytes.len() + 2) / 3 * 4)
+    var i: usize = 0
+    while i + 3 <= bytes.len() {
+        let n = (u32(bytes[i]) << 16) | (u32(bytes[i + 1]) << 8) | u32(bytes[i + 2])
+        for shift in [18u32, 12, 6, 0] {
+            s.push(alphabet.byte_at(usize((n >> shift) & 63)))
+        }
+        i += 3
+    }
+    let left = bytes.len() - i
+    if left > 0 {
+        var n = u32(bytes[i]) << 16
+        if left == 2 {
+            n = n | (u32(bytes[i + 1]) << 8)
+        }
+        s.push(alphabet.byte_at(usize((n >> 18) & 63)))
+        s.push(alphabet.byte_at(usize((n >> 12) & 63)))
+        if left == 2 {
+            s.push(alphabet.byte_at(usize((n >> 6) & 63)))
+        }
+        if pad {
+            s.push(b'=')
+            if left == 1 {
+                s.push(b'=')
+            }
+        }
+    }
+    return String.from_utf8(s)!
+}
+
+fn decode64(text: String, url: bool) -> List<u8>? {
+    var n = text.len()
+    // Padding is optional, but only as much as the last group needs.
+    if n > 0 and text.byte_at(n - 1) == b'=' {
+        n -= 1
+        if n > 0 and text.byte_at(n - 1) == b'=' {
+            n -= 1
+        }
+        if text.len() % 4 != 0 {
+            return none
+        }
+    }
+    if n % 4 == 1 {
+        return none
+    }
+    var out: List<u8> = []
+    out.reserve(n / 4 * 3 + 2)
+    var acc: u32 = 0
+    var bits: u32 = 0
+    for i in 0..n {
+        let c = text.byte_at(i)
+        var v: u32 = 0
+        if c >= b'A' and c <= b'Z' {
+            v = u32(c - b'A')
+        } else if c >= b'a' and c <= b'z' {
+            v = u32(c - b'a') + 26
+        } else if c >= b'0' and c <= b'9' {
+            v = u32(c - b'0') + 52
+        } else if c == (if url { b'-' } else { b'+' }) {
+            v = 62
+        } else if c == (if url { b'_' } else { b'/' }) {
+            v = 63
+        } else {
+            return none
+        }
+        acc = (acc << 6) | v
+        bits += 6
+        if bits >= 8 {
+            bits -= 8
+            out.push(u8.wrap(acc >> bits))
+            acc = acc & ((1u32 << bits) - 1)
+        }
+    }
+    // The bits past the last byte must be zero, so each text has one meaning.
+    if acc != 0 {
+        return none
+    }
+    return some(out)
+}
+
+/// The bytes in base64, with `+`, `/` and `=` padding, as MIME, PEM and data URLs write them
+/// (RFC 4648).
+pub fn base64(bytes: List<u8>) -> String {
+    return encode64(bytes, BASE64, true)
+}
+
+/// The bytes that base64 text stands for, with or without its `=` padding, or `none` when it has
+/// anything else in it, or bits that don't make whole bytes.
+pub fn from_base64(text: String) -> List<u8>? {
+    return decode64(text, false)
+}
+
+/// The bytes in URL-safe base64, with `-` and `_` and no padding, as JSON Web Tokens and URLs
+/// write them (RFC 4648, section 5).
+pub fn base64_url(bytes: List<u8>) -> String {
+    return encode64(bytes, BASE64_URL, false)
+}
+
+/// The bytes that URL-safe base64 text stands for, with or without padding, or `none`.
+pub fn from_base64_url(text: String) -> List<u8>? {
+    return decode64(text, true)
+}
+
+/// Where `needle` first appears in `haystack`, from index `from`, or `none`. An empty needle is
+/// found at `from`.
+pub fn find(haystack: List<u8>, needle: List<u8>, from: usize = 0) -> usize? {
+    if needle.is_empty() {
+        return if from <= haystack.len() { some(from) } else { none }
+    }
+    if needle.len() > haystack.len() {
+        return none
+    }
+    let first = needle[0]
+    var i = from
+    while i + needle.len() <= haystack.len() {
+        if haystack[i] == first {
+            var k: usize = 1
+            while k < needle.len() and haystack[i + k] == needle[k] {
+                k += 1
+            }
+            if k == needle.len() {
+                return some(i)
+            }
+        }
+        i += 1
+    }
+    return none
+}
+
+// Numbers in bytes. Each checks the range once, then reads or writes the bytes one at a time,
+// which clang turns into one load or store, swapped for the other byte order.
+
+/// The panic for `n` bytes from index `at` that go past the end of a list of `len`. It's apart from
+/// the functions that check, so each of them inlines as a compare and a load or store.
+@track_caller
+fn past_end(len: usize, at: usize, n: usize) {
+    panic("the {n} bytes from index {at} go past the end of {len} bytes")
+}
+
+/// The `u16` in the 2 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn u16_le(b: List<u8>, at: usize) -> u16 {
+    if at > b.len() or b.len() - at < 2 {
+        past_end(b.len(), at, 2)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return u16.wrap(u32(p.read()) | (u32(p.add(1).read()) << 8))
+    }
+}
+
+/// Adds `v`'s 2 bytes at the end of `out`, little-endian.
+pub fn put_u16_le(out: mut List<u8>, v: u16) {
+    let x = u32(v)
+    out.reserve(2)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        out.set_len(start + 2)
+    }
+}
+
+/// Writes `v`'s 2 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_u16_le(out: mut List<u8>, at: usize, v: u16) {
+    if at > out.len() or out.len() - at < 2 {
+        past_end(out.len(), at, 2)
+    }
+    let x = u32(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+    }
+}
+
+/// The `u16` in the 2 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn u16_be(b: List<u8>, at: usize) -> u16 {
+    if at > b.len() or b.len() - at < 2 {
+        past_end(b.len(), at, 2)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return u16.wrap((u32(p.read()) << 8) | u32(p.add(1).read()))
+    }
+}
+
+/// Adds `v`'s 2 bytes at the end of `out`, big-endian.
+pub fn put_u16_be(out: mut List<u8>, v: u16) {
+    let x = u32(v)
+    out.reserve(2)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 8))
+        p.add(1).write(u8.wrap(x))
+        out.set_len(start + 2)
+    }
+}
+
+/// Writes `v`'s 2 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_u16_be(out: mut List<u8>, at: usize, v: u16) {
+    if at > out.len() or out.len() - at < 2 {
+        past_end(out.len(), at, 2)
+    }
+    let x = u32(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 8))
+        p.add(1).write(u8.wrap(x))
+    }
+}
+
+/// The `u32` in the 4 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn u32_le(b: List<u8>, at: usize) -> u32 {
+    if at > b.len() or b.len() - at < 4 {
+        past_end(b.len(), at, 4)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return u32(p.read()) | (u32(p.add(1).read()) << 8) | (u32(p.add(2).read()) << 16) | (u32(p.add(3).read()) << 24)
+    }
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, little-endian.
+pub fn put_u32_le(out: mut List<u8>, v: u32) {
+    let x = v
+    out.reserve(4)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        out.set_len(start + 4)
+    }
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_u32_le(out: mut List<u8>, at: usize, v: u32) {
+    if at > out.len() or out.len() - at < 4 {
+        past_end(out.len(), at, 4)
+    }
+    let x = v
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+    }
+}
+
+/// The `u32` in the 4 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn u32_be(b: List<u8>, at: usize) -> u32 {
+    if at > b.len() or b.len() - at < 4 {
+        past_end(b.len(), at, 4)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return (u32(p.read()) << 24) | (u32(p.add(1).read()) << 16) | (u32(p.add(2).read()) << 8) | u32(p.add(3).read())
+    }
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, big-endian.
+pub fn put_u32_be(out: mut List<u8>, v: u32) {
+    let x = v
+    out.reserve(4)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 24))
+        p.add(1).write(u8.wrap(x >> 16))
+        p.add(2).write(u8.wrap(x >> 8))
+        p.add(3).write(u8.wrap(x))
+        out.set_len(start + 4)
+    }
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_u32_be(out: mut List<u8>, at: usize, v: u32) {
+    if at > out.len() or out.len() - at < 4 {
+        past_end(out.len(), at, 4)
+    }
+    let x = v
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 24))
+        p.add(1).write(u8.wrap(x >> 16))
+        p.add(2).write(u8.wrap(x >> 8))
+        p.add(3).write(u8.wrap(x))
+    }
+}
+
+/// The `u64` in the 8 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn u64_le(b: List<u8>, at: usize) -> u64 {
+    if at > b.len() or b.len() - at < 8 {
+        past_end(b.len(), at, 8)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return u64(p.read()) | (u64(p.add(1).read()) << 8) | (u64(p.add(2).read()) << 16) | (u64(p.add(3).read()) << 24) | (u64(p.add(4).read()) << 32) | (u64(p.add(5).read()) << 40) | (u64(p.add(6).read()) << 48) | (u64(p.add(7).read()) << 56)
+    }
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, little-endian.
+pub fn put_u64_le(out: mut List<u8>, v: u64) {
+    let x = v
+    out.reserve(8)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        p.add(4).write(u8.wrap(x >> 32))
+        p.add(5).write(u8.wrap(x >> 40))
+        p.add(6).write(u8.wrap(x >> 48))
+        p.add(7).write(u8.wrap(x >> 56))
+        out.set_len(start + 8)
+    }
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_u64_le(out: mut List<u8>, at: usize, v: u64) {
+    if at > out.len() or out.len() - at < 8 {
+        past_end(out.len(), at, 8)
+    }
+    let x = v
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        p.add(4).write(u8.wrap(x >> 32))
+        p.add(5).write(u8.wrap(x >> 40))
+        p.add(6).write(u8.wrap(x >> 48))
+        p.add(7).write(u8.wrap(x >> 56))
+    }
+}
+
+/// The `u64` in the 8 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn u64_be(b: List<u8>, at: usize) -> u64 {
+    if at > b.len() or b.len() - at < 8 {
+        past_end(b.len(), at, 8)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return (u64(p.read()) << 56) | (u64(p.add(1).read()) << 48) | (u64(p.add(2).read()) << 40) | (u64(p.add(3).read()) << 32) | (u64(p.add(4).read()) << 24) | (u64(p.add(5).read()) << 16) | (u64(p.add(6).read()) << 8) | u64(p.add(7).read())
+    }
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, big-endian.
+pub fn put_u64_be(out: mut List<u8>, v: u64) {
+    let x = v
+    out.reserve(8)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 56))
+        p.add(1).write(u8.wrap(x >> 48))
+        p.add(2).write(u8.wrap(x >> 40))
+        p.add(3).write(u8.wrap(x >> 32))
+        p.add(4).write(u8.wrap(x >> 24))
+        p.add(5).write(u8.wrap(x >> 16))
+        p.add(6).write(u8.wrap(x >> 8))
+        p.add(7).write(u8.wrap(x))
+        out.set_len(start + 8)
+    }
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_u64_be(out: mut List<u8>, at: usize, v: u64) {
+    if at > out.len() or out.len() - at < 8 {
+        past_end(out.len(), at, 8)
+    }
+    let x = v
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 56))
+        p.add(1).write(u8.wrap(x >> 48))
+        p.add(2).write(u8.wrap(x >> 40))
+        p.add(3).write(u8.wrap(x >> 32))
+        p.add(4).write(u8.wrap(x >> 24))
+        p.add(5).write(u8.wrap(x >> 16))
+        p.add(6).write(u8.wrap(x >> 8))
+        p.add(7).write(u8.wrap(x))
+    }
+}
+
+/// The `i16` in the 2 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn i16_le(b: List<u8>, at: usize) -> i16 {
+    if at > b.len() or b.len() - at < 2 {
+        past_end(b.len(), at, 2)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i16.wrap(u32(p.read()) | (u32(p.add(1).read()) << 8))
+    }
+}
+
+/// Adds `v`'s 2 bytes at the end of `out`, little-endian.
+pub fn put_i16_le(out: mut List<u8>, v: i16) {
+    let x = u32(u16.wrap(v))
+    out.reserve(2)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        out.set_len(start + 2)
+    }
+}
+
+/// Writes `v`'s 2 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_i16_le(out: mut List<u8>, at: usize, v: i16) {
+    if at > out.len() or out.len() - at < 2 {
+        past_end(out.len(), at, 2)
+    }
+    let x = u32(u16.wrap(v))
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+    }
+}
+
+/// The `i16` in the 2 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn i16_be(b: List<u8>, at: usize) -> i16 {
+    if at > b.len() or b.len() - at < 2 {
+        past_end(b.len(), at, 2)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i16.wrap((u32(p.read()) << 8) | u32(p.add(1).read()))
+    }
+}
+
+/// Adds `v`'s 2 bytes at the end of `out`, big-endian.
+pub fn put_i16_be(out: mut List<u8>, v: i16) {
+    let x = u32(u16.wrap(v))
+    out.reserve(2)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 8))
+        p.add(1).write(u8.wrap(x))
+        out.set_len(start + 2)
+    }
+}
+
+/// Writes `v`'s 2 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_i16_be(out: mut List<u8>, at: usize, v: i16) {
+    if at > out.len() or out.len() - at < 2 {
+        past_end(out.len(), at, 2)
+    }
+    let x = u32(u16.wrap(v))
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 8))
+        p.add(1).write(u8.wrap(x))
+    }
+}
+
+/// The `i32` in the 4 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn i32_le(b: List<u8>, at: usize) -> i32 {
+    if at > b.len() or b.len() - at < 4 {
+        past_end(b.len(), at, 4)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i32.wrap(u32(p.read()) | (u32(p.add(1).read()) << 8) | (u32(p.add(2).read()) << 16) | (u32(p.add(3).read()) << 24))
+    }
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, little-endian.
+pub fn put_i32_le(out: mut List<u8>, v: i32) {
+    let x = u32.wrap(v)
+    out.reserve(4)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        out.set_len(start + 4)
+    }
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_i32_le(out: mut List<u8>, at: usize, v: i32) {
+    if at > out.len() or out.len() - at < 4 {
+        past_end(out.len(), at, 4)
+    }
+    let x = u32.wrap(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+    }
+}
+
+/// The `i32` in the 4 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn i32_be(b: List<u8>, at: usize) -> i32 {
+    if at > b.len() or b.len() - at < 4 {
+        past_end(b.len(), at, 4)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i32.wrap((u32(p.read()) << 24) | (u32(p.add(1).read()) << 16) | (u32(p.add(2).read()) << 8) | u32(p.add(3).read()))
+    }
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, big-endian.
+pub fn put_i32_be(out: mut List<u8>, v: i32) {
+    let x = u32.wrap(v)
+    out.reserve(4)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 24))
+        p.add(1).write(u8.wrap(x >> 16))
+        p.add(2).write(u8.wrap(x >> 8))
+        p.add(3).write(u8.wrap(x))
+        out.set_len(start + 4)
+    }
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_i32_be(out: mut List<u8>, at: usize, v: i32) {
+    if at > out.len() or out.len() - at < 4 {
+        past_end(out.len(), at, 4)
+    }
+    let x = u32.wrap(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 24))
+        p.add(1).write(u8.wrap(x >> 16))
+        p.add(2).write(u8.wrap(x >> 8))
+        p.add(3).write(u8.wrap(x))
+    }
+}
+
+/// The `i64` in the 8 bytes from index `at`, little-endian, the low byte first, as x86, ARM, zip and most file formats store it. It panics past the end.
+@track_caller
+pub fn i64_le(b: List<u8>, at: usize) -> i64 {
+    if at > b.len() or b.len() - at < 8 {
+        past_end(b.len(), at, 8)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i64.wrap(u64(p.read()) | (u64(p.add(1).read()) << 8) | (u64(p.add(2).read()) << 16) | (u64(p.add(3).read()) << 24) | (u64(p.add(4).read()) << 32) | (u64(p.add(5).read()) << 40) | (u64(p.add(6).read()) << 48) | (u64(p.add(7).read()) << 56))
+    }
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, little-endian.
+pub fn put_i64_le(out: mut List<u8>, v: i64) {
+    let x = u64.wrap(v)
+    out.reserve(8)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        p.add(4).write(u8.wrap(x >> 32))
+        p.add(5).write(u8.wrap(x >> 40))
+        p.add(6).write(u8.wrap(x >> 48))
+        p.add(7).write(u8.wrap(x >> 56))
+        out.set_len(start + 8)
+    }
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, little-endian. It panics past the end.
+@track_caller
+pub fn set_i64_le(out: mut List<u8>, at: usize, v: i64) {
+    if at > out.len() or out.len() - at < 8 {
+        past_end(out.len(), at, 8)
+    }
+    let x = u64.wrap(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x))
+        p.add(1).write(u8.wrap(x >> 8))
+        p.add(2).write(u8.wrap(x >> 16))
+        p.add(3).write(u8.wrap(x >> 24))
+        p.add(4).write(u8.wrap(x >> 32))
+        p.add(5).write(u8.wrap(x >> 40))
+        p.add(6).write(u8.wrap(x >> 48))
+        p.add(7).write(u8.wrap(x >> 56))
+    }
+}
+
+/// The `i64` in the 8 bytes from index `at`, big-endian, the high byte first, as network protocols, Java and PNG store it. It panics past the end.
+@track_caller
+pub fn i64_be(b: List<u8>, at: usize) -> i64 {
+    if at > b.len() or b.len() - at < 8 {
+        past_end(b.len(), at, 8)
+    }
+    unsafe {
+        let p = b.as_ptr().add(at)
+        return i64.wrap((u64(p.read()) << 56) | (u64(p.add(1).read()) << 48) | (u64(p.add(2).read()) << 40) | (u64(p.add(3).read()) << 32) | (u64(p.add(4).read()) << 24) | (u64(p.add(5).read()) << 16) | (u64(p.add(6).read()) << 8) | u64(p.add(7).read()))
+    }
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, big-endian.
+pub fn put_i64_be(out: mut List<u8>, v: i64) {
+    let x = u64.wrap(v)
+    out.reserve(8)
+    unsafe {
+        let start = out.len()
+        let p = out.as_mut_ptr().add(start)
+        p.write(u8.wrap(x >> 56))
+        p.add(1).write(u8.wrap(x >> 48))
+        p.add(2).write(u8.wrap(x >> 40))
+        p.add(3).write(u8.wrap(x >> 32))
+        p.add(4).write(u8.wrap(x >> 24))
+        p.add(5).write(u8.wrap(x >> 16))
+        p.add(6).write(u8.wrap(x >> 8))
+        p.add(7).write(u8.wrap(x))
+        out.set_len(start + 8)
+    }
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, big-endian. It panics past the end.
+@track_caller
+pub fn set_i64_be(out: mut List<u8>, at: usize, v: i64) {
+    if at > out.len() or out.len() - at < 8 {
+        past_end(out.len(), at, 8)
+    }
+    let x = u64.wrap(v)
+    unsafe {
+        let p = out.as_mut_ptr().add(at)
+        p.write(u8.wrap(x >> 56))
+        p.add(1).write(u8.wrap(x >> 48))
+        p.add(2).write(u8.wrap(x >> 40))
+        p.add(3).write(u8.wrap(x >> 32))
+        p.add(4).write(u8.wrap(x >> 24))
+        p.add(5).write(u8.wrap(x >> 16))
+        p.add(6).write(u8.wrap(x >> 8))
+        p.add(7).write(u8.wrap(x))
+    }
+}
+
+/// The `f32` in the 4 bytes from index `at`, as IEEE 754 bits, little-endian. It panics past the end.
+@track_caller
+pub fn f32_le(b: List<u8>, at: usize) -> f32 {
+    return f32.from_bits(u32_le(b, at))
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, as IEEE 754 bits, little-endian.
+pub fn put_f32_le(out: mut List<u8>, v: f32) {
+    put_u32_le(mut out, v.to_bits())
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, as IEEE 754 bits, little-endian. It panics past the end.
+@track_caller
+pub fn set_f32_le(out: mut List<u8>, at: usize, v: f32) {
+    set_u32_le(mut out, at, v.to_bits())
+}
+
+/// The `f32` in the 4 bytes from index `at`, as IEEE 754 bits, big-endian. It panics past the end.
+@track_caller
+pub fn f32_be(b: List<u8>, at: usize) -> f32 {
+    return f32.from_bits(u32_be(b, at))
+}
+
+/// Adds `v`'s 4 bytes at the end of `out`, as IEEE 754 bits, big-endian.
+pub fn put_f32_be(out: mut List<u8>, v: f32) {
+    put_u32_be(mut out, v.to_bits())
+}
+
+/// Writes `v`'s 4 bytes over those from index `at`, as IEEE 754 bits, big-endian. It panics past the end.
+@track_caller
+pub fn set_f32_be(out: mut List<u8>, at: usize, v: f32) {
+    set_u32_be(mut out, at, v.to_bits())
+}
+
+/// The `f64` in the 8 bytes from index `at`, as IEEE 754 bits, little-endian. It panics past the end.
+@track_caller
+pub fn f64_le(b: List<u8>, at: usize) -> f64 {
+    return f64.from_bits(u64_le(b, at))
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, as IEEE 754 bits, little-endian.
+pub fn put_f64_le(out: mut List<u8>, v: f64) {
+    put_u64_le(mut out, v.to_bits())
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, as IEEE 754 bits, little-endian. It panics past the end.
+@track_caller
+pub fn set_f64_le(out: mut List<u8>, at: usize, v: f64) {
+    set_u64_le(mut out, at, v.to_bits())
+}
+
+/// The `f64` in the 8 bytes from index `at`, as IEEE 754 bits, big-endian. It panics past the end.
+@track_caller
+pub fn f64_be(b: List<u8>, at: usize) -> f64 {
+    return f64.from_bits(u64_be(b, at))
+}
+
+/// Adds `v`'s 8 bytes at the end of `out`, as IEEE 754 bits, big-endian.
+pub fn put_f64_be(out: mut List<u8>, v: f64) {
+    put_u64_be(mut out, v.to_bits())
+}
+
+/// Writes `v`'s 8 bytes over those from index `at`, as IEEE 754 bits, big-endian. It panics past the end.
+@track_caller
+pub fn set_f64_be(out: mut List<u8>, at: usize, v: f64) {
+    set_u64_be(mut out, at, v.to_bits())
+}

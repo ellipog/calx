@@ -1,0 +1,23 @@
+// widening_mul: the whole product of two unsigned integers, as its low and high halves (CLX-102).
+
+fn main() {
+    let (lo, hi) = u64.MAX.widening_mul(u64.MAX)
+    println("{lo} {hi}")                                        // out: 1 18446744073709551614
+    println("{u64.MAX.widening_mul(2)} {0u64.widening_mul(u64.MAX)} {1u64.widening_mul(7)}")  // out: (18446744073709551614, 1) (0, 0) (7, 0)
+    println("{4000000000u32.widening_mul(3)} {u32.MAX.widening_mul(u32.MAX)}")  // out: (3410065408, 2) (1, 4294967294)
+    println("{200u8.widening_mul(200)} {u16.MAX.widening_mul(u16.MAX)}")  // out: (64, 156) (1, 65534)
+
+    // The high half of x * n is a number below n, as Lemire's method picks one.
+    var x: u64 = 0x9E3779B97F4A7C15
+    var below = true
+    for _ in 0..1000 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+        let p = x.widening_mul(10)
+        below = below and p.1 < 10
+    }
+    println("{below}")                                          // out: true
+
+    // A constant works out the same way.
+    let c = 0xFFFFFFFFFFFFFFFFu64.widening_mul(0x10)
+    println("{c.0} {c.1}")                                      // out: 18446744073709551600 15
+}

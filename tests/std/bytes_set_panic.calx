@@ -1,0 +1,10 @@
+// Setting bytes past the end panics at the call, even for an index near the top of `usize`.
+
+import std.bytes
+
+fn main() {
+    var out: List<u8> = [1, 2, 3]
+    bytes.set_u16_le(mut out, 1, 0xFFFF)
+    println("{out}")                              // out: [1, 255, 255]
+    bytes.set_u16_be(mut out, 4000000000, 1)      // panic: the 2 bytes from index 4000000000 go past the end of 3 bytes
+}

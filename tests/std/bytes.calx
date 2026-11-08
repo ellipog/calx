@@ -1,0 +1,43 @@
+// std.bytes: hex, base64, finding, and numbers in either byte order (CLX-102).
+
+import std.bytes
+
+fn main() {
+    let data: List<u8> = [0, 255, 16, 1, 2, 3, 4, 5, 6, 7, 8]
+    println(bytes.hex(data))                                    // out: 00ff100102030405060708
+    println("{bytes.from_hex("00FF10")} {bytes.from_hex("0g")} {bytes.from_hex("abc")} {bytes.from_hex("")}")  // out: some([0, 255, 16]) none none some([])
+
+    // RFC 4648's examples, and strictness about what isn't base64.
+    let man: List<u8> = [77, 97, 110]
+    println("{bytes.base64(man)} {bytes.base64([77u8, 97])} {bytes.base64([77u8])} [{bytes.base64([])}]")  // out: TWFu TWE= TQ== []
+    println("{bytes.from_base64("TWFu")} {bytes.from_base64("TWE=")} {bytes.from_base64("TQ==")} {bytes.from_base64("TQ")}")  // out: some([77, 97, 110]) some([77, 97]) some([77]) some([77])
+    println("{bytes.from_base64("T@==")} {bytes.from_base64("TR==")} {bytes.from_base64("T")} {bytes.from_base64("TQ=")} {bytes.from_base64("====")}")  // out: none none none none none
+    let raw: List<u8> = [251, 255, 191]
+    println("{bytes.base64(raw)} {bytes.base64_url(raw)} {bytes.from_base64_url("-_-_")} {bytes.from_base64("-_-_")}")  // out: +/+/ -_-_ some([251, 255, 191]) none
+    let long = bytes.base64(data)
+    println("{long} {bytes.from_base64(long) == some(data.copy())}")   // out: AP8QAQIDBAUGBwg= true
+
+    println("{bytes.find(data, [1u8, 2])} {bytes.find(data, [9u8])} {bytes.find(data, [])} {bytes.find(data, [2u8], from: 5)}")  // out: some(3) none some(0) none
+    println("{bytes.find(data, [7u8, 8])} {bytes.find(data, [8u8, 9])} {bytes.find(data, [], from: 11)} {bytes.find(data, [], from: 12)}")  // out: some(9) none some(11) none
+
+    println("{bytes.u16_le(data, 1)} {bytes.u16_be(data, 1)} {bytes.u32_le(data, 3)} {bytes.u32_be(data, 3)}")  // out: 4351 65296 67305985 16909060
+    println("{bytes.u64_le(data, 3)} {bytes.u64_be(data, 3)} {bytes.i16_le(data, 0)} {bytes.i16_be(data, 1)}")  // out: 578437695752307201 72623859790382856 -256 -240
+    println("{bytes.i32_be([255u8, 255, 255, 254], 0)} {bytes.i32_le([254u8, 255, 255, 255], 0)} {bytes.i64_be([128u8, 0, 0, 0, 0, 0, 0, 0], 0)}")  // out: -2 -2 -9223372036854775808
+
+    var out: List<u8> = []
+    bytes.put_u32_be(mut out, 0x01020304)
+    bytes.put_i16_le(mut out, -2)
+    bytes.put_f64_le(mut out, 1.5)
+    bytes.put_u64_be(mut out, 1)
+    println("{out}")                                            // out: [1, 2, 3, 4, 254, 255, 0, 0, 0, 0, 0, 0, 248, 63, 0, 0, 0, 0, 0, 0, 0, 1]
+    println("{bytes.f64_le(out, 6)} {bytes.u64_be(out, 14)} {bytes.i16_le(out, 4)}")  // out: 1.5 1 -2
+    bytes.set_u16_be(mut out, 0, 0xABCD)
+    bytes.set_i32_le(mut out, 2, -1)
+    println("{out[0]} {out[1]} {out[2]} {out[5]} {out[6]}")     // out: 171 205 255 255 0
+    var f: List<u8> = []
+    bytes.put_f32_be(mut f, -0.25)
+    bytes.put_u16_le(mut f, 513)
+    bytes.put_i64_le(mut f, -1)
+    println("{f} {bytes.f32_be(f, 0)} {bytes.u16_le(f, 4)}")  // out: [190, 128, 0, 0, 1, 2, 255, 255, 255, 255, 255, 255, 255, 255] -0.25 513
+    println("{bytes.u32_le(data, 8)}")                          // panic: the 4 bytes from index 8 go past the end of 11 bytes
+}
