@@ -1,0 +1,51 @@
+// std.diff: Myers' edits over any list, and unified diffs of text as `diff -u` writes them (CLX-103).
+
+import std.diff.{EditKind}
+import std.diff
+
+fn show(a: List<str>, b: List<str>) {
+    println(diff.edits(a, b).map(|e| "{e.kind} {e.a_start}..{e.a_end} {e.b_start}..{e.b_end}").join("; "))
+}
+
+fn main() {
+    // The example in Myers' paper: five changes, the fewest there are.
+    show(["a", "b", "c", "a", "b", "b", "a"], ["c", "b", "a", "b", "a", "c"])  // out: Delete 0..2 0..0; Keep 2..3 0..1; Delete 3..4 1..1; Keep 4..5 1..2; Insert 5..5 2..3; Keep 5..7 3..5; Insert 7..7 5..6
+    show(["x", "y"], ["x", "y"])                                // out: Keep 0..2 0..2
+    show([], [])                                                // out:
+    show([], ["new"])                                           // out: Insert 0..0 0..1
+    show(["old", "same"], ["new", "same"])                      // out: Replace 0..1 0..1; Keep 1..2 1..2
+    let nums: List<i32> = [1, 2, 3, 4, 5]
+    let more: List<i32> = [1, 3, 4, 6, 5]
+    let es = diff.edits(nums, more)
+    println("{es.len()} {es[1].kind == EditKind.Delete} {es[3].kind == EditKind.Insert}")  // out: 5 true true
+
+    let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n"
+    let new = "zero\none\ntwo\nthree\nFOUR\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
+    print(diff.unified(old, new, a_name: "old.txt", b_name: "new.txt", context: 2))
+    // out: --- old.txt
+    // out: +++ new.txt
+    // out: @@ -1,6 +1,7 @@
+    // out: +zero
+    // out:  one
+    // out:  two
+    // out:  three
+    // out: -four
+    // out: +FOUR
+    // out:  five
+    // out:  six
+    // out: @@ -10,3 +11,3 @@
+    // out:  ten
+    // out:  eleven
+    // out: -twelve
+    // out: +twelve
+    // out: \ No newline at end of file
+    println("[{diff.unified(old, old)}]")                      // out: []
+    print(diff.unified("", "a\n"))
+    // out: --- a
+    // out: +++ b
+    // out: @@ -0,0 +1 @@
+    // out: +a
+    // A `\r` before the `\n` is part of the line, as it is for `diff`.
+    let crlf = diff.unified("a\r\nb\n", "a\nb\n")
+    println("{crlf.contains("-a\r\n+a\n b\n")}")               // out: true
+}

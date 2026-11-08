@@ -1,0 +1,359 @@
+/// The differences between two lists, and between two texts line by line, as `diff -u` and
+/// Python's `difflib` show them (CLX-103).
+///
+/// `edits` finds the fewest elements to delete and insert to turn one list into the other, with
+/// Myers' algorithm, and gives them as runs, as difflib's `get_opcodes` does. `unified` writes the
+/// differences between two texts as a unified diff.
+module std.diff
+
+/// What a run of a diff does.
+pub enum EditKind {
+    /// The elements are in both lists.
+    Keep,
+    /// The elements of the first list aren't in the second.
+    Delete,
+    /// The elements of the second list aren't in the first.
+    Insert,
+    /// The elements of the first list are replaced by those of the second.
+    Replace,
+}
+
+/// A run of a diff: the elements from `a_start` up to `a_end` of the first list, and from
+/// `b_start` up to `b_end` of the second.
+pub struct Edit {
+    pub kind: EditKind
+    pub a_start: usize
+    pub a_end: usize
+    pub b_start: usize
+    pub b_end: usize
+}
+
+/// The runs that turn `a` into `b`, in order, with the fewest elements deleted and inserted, as
+/// Myers' algorithm finds them: `Keep` runs between the changes, and a `Replace` where elements
+/// are deleted and others inserted in their place. Equal lists give one `Keep` run, and two empty
+/// lists none.
+pub fn edits<T: Equal>(a: List<T>, b: List<T>) -> List<Edit> {
+    var deleted: List<bool> = [false; a.len()]
+    var inserted: List<bool> = [false; b.len()]
+    var v: List<i64> = []
+    var w: List<i64> = []
+    mark(a, b, 0, 0, a.len(), b.len(), mut deleted, mut inserted, mut v, mut w)
+    return runs(deleted, inserted)
+}
+
+/// The differences between two texts as a unified diff, as `diff -u` writes them: a `---` line
+/// naming `a`, a `+++` line naming `b`, then each change with `context` lines around it, in
+/// hunks that start with `@@ -line,count +line,count @@`. Equal texts give empty text. A last
+/// line with no `\n` after it is marked `\ No newline at end of file`, and a `\r` before a `\n`
+/// is part of its line.
+pub fn unified(a: String, b: String, a_name: String = "a", b_name: String = "b", context: usize = 3) -> String {
+    // Each different line gets a number, so the diff compares numbers.
+    var ids: Map<String, u32> = Map()
+    let la = split_lines(a)
+    let lb = split_lines(b)
+    let ia = numbered(la, a, mut ids)
+    let ib = numbered(lb, b, mut ids)
+    let groups = grouped(edits(ia, ib), context)
+    var out = String()
+    if groups.len() == 0 {
+        return out
+    }
+    out.push_str("--- {a_name}\n+++ {b_name}\n")
+    for g in groups {
+        let first = g[0]
+        let last = g[g.len() - 1]
+        out.push_str("@@ -{range(first.a_start, last.a_end)} +{range(first.b_start, last.b_end)} @@\n")
+        for e in g {
+            if e.kind == EditKind.Keep {
+                put_lines(mut out, " ", la, a, e.a_start, e.a_end)
+                continue
+            }
+            if e.kind == EditKind.Delete or e.kind == EditKind.Replace {
+                put_lines(mut out, "-", la, a, e.a_start, e.a_end)
+            }
+            if e.kind == EditKind.Insert or e.kind == EditKind.Replace {
+                put_lines(mut out, "+", lb, b, e.b_start, e.b_end)
+            }
+        }
+    }
+    return out
+}
+
+// --- Myers' algorithm, in linear space ----------------------------------------------------------
+
+/// Marks what's deleted from `a[left..right]` and inserted from `b[top..bottom]`: the middle snake
+/// of the box, the path's middle part whose ends both searches reach, splits it into two smaller
+/// boxes, each marked the same way (Myers, 1986, section 4b).
+fn mark<T: Equal>(a: List<T>, b: List<T>, l0: usize, t0: usize, r0: usize, b1: usize, deleted: mut List<bool>,
+                  inserted: mut List<bool>, v: mut List<i64>, w: mut List<i64>) {
+    var left = l0
+    var top = t0
+    var right = r0
+    var bottom = b1
+    // What the two parts start and end with in common needs no search.
+    while left < right and top < bottom and a[left] == b[top] {
+        left += 1
+        top += 1
+    }
+    while left < right and top < bottom and a[right - 1] == b[bottom - 1] {
+        right -= 1
+        bottom -= 1
+    }
+    if left == right {
+        for j in top..bottom {
+            inserted[j] = true
+        }
+        return
+    }
+    if top == bottom {
+        for i in left..right {
+            deleted[i] = true
+        }
+        return
+    }
+    let s = middle_snake(a, b, i64.wrap(left), i64.wrap(top), i64.wrap(right), i64.wrap(bottom), mut v, mut w)
+    // s is the snake's start, where its diagonal starts and ends, and its end; the steps from the
+    // start to the diagonal and from the diagonal to the end are one deletion or insertion each,
+    // or none.
+    step(s.0, s.1, s.2, s.3, mut deleted, mut inserted)
+    step(s.4, s.5, s.6, s.7, mut deleted, mut inserted)
+    mark(a, b, left, top, usize.wrap(s.0), usize.wrap(s.1), mut deleted, mut inserted, mut v, mut w)
+    mark(a, b, usize.wrap(s.6), usize.wrap(s.7), right, bottom, mut deleted, mut inserted, mut v, mut w)
+}
+
+/// Marks the step from (x0, y0) to (x1, y1): one element deleted, or one inserted, or nothing.
+fn step(x0: i64, y0: i64, x1: i64, y1: i64, deleted: mut List<bool>, inserted: mut List<bool>) {
+    if x1 == x0 + 1 and y1 == y0 {
+        deleted[usize.wrap(x0)] = true
+    } else if y1 == y0 + 1 and x1 == x0 {
+        inserted[usize.wrap(y0)] = true
+    }
+}
+
+/// The middle snake of a box that has no common start or end and isn't empty: its start, the
+/// start and the end of its diagonal, and its end, as (x, y) pairs. A search from the top left
+/// and one from the bottom right go a step further in turn, until their paths meet.
+fn middle_snake<T: Equal>(a: List<T>, b: List<T>, left: i64, top: i64, right: i64, bottom: i64, v: mut List<i64>,
+                          w: mut List<i64>) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+    let width = right - left
+    let height = bottom - top
+    let delta = width - height
+    let odd = delta % 2 != 0
+    let most = (width + height + 1) / 2
+    // v[k + off] is how far right the forward search reached on diagonal k, and w[c + off] how far
+    // up the backward search reached on its diagonal c, measured from the bottom right.
+    let off = most + 1
+    let size = usize.wrap(2 * most + 3)
+    v.clear()
+    w.clear()
+    for _ in 0..size {
+        v.push(0)
+        w.push(0)
+    }
+    v[usize.wrap(1 + off)] = left
+    w[usize.wrap(1 + off)] = bottom
+    var d: i64 = 0
+    while d <= most {
+        // Forward, from the top left.
+        var k = d
+        while k >= -d {
+            let c = k - delta
+            var x: i64 = 0
+            var px: i64 = 0
+            if k == -d or (k != d and v[usize.wrap(k - 1 + off)] < v[usize.wrap(k + 1 + off)]) {
+                px = v[usize.wrap(k + 1 + off)]
+                x = px
+            } else {
+                px = v[usize.wrap(k - 1 + off)]
+                x = px + 1
+            }
+            var y = top + (x - left) - k
+            let py = if d == 0 or x != px { y } else { y - 1 }
+            let x0 = x
+            let y0 = y
+            while x < right and y < bottom and a[usize.wrap(x)] == b[usize.wrap(y)] {
+                x += 1
+                y += 1
+            }
+            v[usize.wrap(k + off)] = x
+            if odd and c >= -(d - 1) and c <= d - 1 and y >= w[usize.wrap(c + off)] {
+                return (px, py, x0, y0, x, y, x, y)
+            }
+            k -= 2
+        }
+        // Backward, from the bottom right.
+        var c = d
+        while c >= -d {
+            let kd = c + delta
+            var y: i64 = 0
+            var py: i64 = 0
+            if c == -d or (c != d and w[usize.wrap(c - 1 + off)] > w[usize.wrap(c + 1 + off)]) {
+                py = w[usize.wrap(c + 1 + off)]
+                y = py
+            } else {
+                py = w[usize.wrap(c - 1 + off)]
+                y = py - 1
+            }
+            var x = left + (y - top) + kd
+            let px = if d == 0 or y != py { x } else { x + 1 }
+            let x1 = x
+            let y1 = y
+            while x > left and y > top and a[usize.wrap(x - 1)] == b[usize.wrap(y - 1)] {
+                x -= 1
+                y -= 1
+            }
+            w[usize.wrap(c + off)] = y
+            if not odd and kd >= -d and kd <= d and x <= v[usize.wrap(kd + off)] {
+                return (x, y, x, y, x1, y1, px, py)
+            }
+            c -= 2
+        }
+        d += 1
+    }
+    // The searches always meet by `most` steps.
+    return (left, top, left, top, left, top, right, bottom)
+}
+
+/// The marks as runs: what's in both between the changes, and each change.
+fn runs(deleted: List<bool>, inserted: List<bool>) -> List<Edit> {
+    var out: List<Edit> = []
+    let n = deleted.len()
+    let m = inserted.len()
+    var i: usize = 0
+    var j: usize = 0
+    while i < n or j < m {
+        let ki = i
+        let kj = j
+        while i < n and j < m and not deleted[i] and not inserted[j] {
+            i += 1
+            j += 1
+        }
+        if i > ki {
+            out.push(Edit { kind: EditKind.Keep, a_start: ki, a_end: i, b_start: kj, b_end: j })
+        }
+        let ci = i
+        let cj = j
+        while i < n and deleted[i] {
+            i += 1
+        }
+        while j < m and inserted[j] {
+            j += 1
+        }
+        if i > ci or j > cj {
+            let kind = if i > ci and j > cj { EditKind.Replace } else if i > ci { EditKind.Delete } else { EditKind.Insert }
+            out.push(Edit { kind, a_start: ci, a_end: i, b_start: cj, b_end: j })
+        } else if i == ki {
+            break
+        }
+    }
+    return out
+}
+
+// --- unified diffs ------------------------------------------------------------------------------
+
+/// The runs in hunks, each change with `n` lines of what's in both around it, and changes closer
+/// than twice that in one hunk, as difflib's `get_grouped_opcodes` makes them.
+fn grouped(codes: List<Edit>, n: usize) -> List<List<Edit>> {
+    var out: List<List<Edit>> = []
+    var cs = codes.copy()
+    if cs.len() == 0 {
+        return out
+    }
+    let last = cs.len() - 1
+    if cs[0].kind == EditKind.Keep {
+        cs[0].a_start = cs[0].a_start.max(cs[0].a_end.max(n) - n)
+        cs[0].b_start = cs[0].b_start.max(cs[0].b_end.max(n) - n)
+    }
+    if cs[last].kind == EditKind.Keep {
+        cs[last].a_end = cs[last].a_end.min(cs[last].a_start + n)
+        cs[last].b_end = cs[last].b_end.min(cs[last].b_start + n)
+    }
+    var group: List<Edit> = []
+    for c in cs {
+        var e = c
+        if e.kind == EditKind.Keep and e.a_end - e.a_start > 2 * n {
+            group.push(Edit { kind: EditKind.Keep, a_start: e.a_start, a_end: e.a_end.min(e.a_start + n), b_start: e.b_start,
+                              b_end: e.b_end.min(e.b_start + n) })
+            out.push(group)
+            group = []
+            e.a_start = e.a_start.max(e.a_end - n)
+            e.b_start = e.b_start.max(e.b_end - n)
+        }
+        group.push(e)
+    }
+    if group.len() > 0 and not (group.len() == 1 and group[0].kind == EditKind.Keep) {
+        out.push(group)
+    }
+    return out
+}
+
+/// A hunk's range, as `diff -u` writes it: the first line, counted from 1, and the count unless
+/// it's 1. An empty range is written with the line before it.
+fn range(start: usize, end: usize) -> String {
+    let count = end - start
+    if count == 1 {
+        return "{start + 1}"
+    }
+    if count == 0 {
+        return "{start},0"
+    }
+    return "{start + 1},{count}"
+}
+
+/// Where each line of the text starts and ends, without the `\n`, and whether the last line has
+/// one: a text ending in `\n` has no empty line after it.
+struct Lines {
+    starts: List<usize>
+    ends: List<usize>
+    newline_at_end: bool
+}
+
+fn split_lines(t: String) -> Lines {
+    var starts: List<usize> = []
+    var ends: List<usize> = []
+    var from: usize = 0
+    for i in 0..t.len() {
+        if t.byte_at(i) == b'\n' {
+            starts.push(from)
+            ends.push(i)
+            from = i + 1
+        }
+    }
+    let complete = from == t.len()
+    if not complete {
+        starts.push(from)
+        ends.push(t.len())
+    }
+    return Lines { starts, ends, newline_at_end: complete }
+}
+
+/// Each line's number, the same for the same text. A last line with no `\n` after it differs
+/// from the same text with one, as it does for `diff`.
+fn numbered(ls: Lines, t: String, ids: mut Map<String, u32>) -> List<u32> {
+    var out: List<u32> = []
+    out.reserve(ls.starts.len())
+    for i in 0..ls.starts.len() {
+        var key: String = t[ls.starts[i]..ls.ends[i]]
+        if i == ls.starts.len() - 1 and not ls.newline_at_end {
+            key.push_str("\n")  // no line holds a `\n`, so this key is only for a last line without one
+        }
+        let next = u32.wrap(ids.len())
+        let id = ids.get(key) ?? next
+        if id == next {
+            ids.insert(key, id)
+        }
+        out.push(id)
+    }
+    return out
+}
+
+fn put_lines(out: mut String, sign: str, ls: Lines, t: String, from: usize, to: usize) {
+    for i in from..to {
+        out.push_str(sign)
+        out.push_str(t[ls.starts[i]..ls.ends[i]])
+        out.push_str("\n")
+        if i == ls.starts.len() - 1 and not ls.newline_at_end {
+            out.push_str("\\ No newline at end of file\n")
+        }
+    }
+}

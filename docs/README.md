@@ -102,6 +102,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 32. [std.bytes](std/bytes.md): bytes as hex and base64 and back, finding bytes in bytes, and numbers read from and written to bytes in either byte order
 33. [std.bigint](std/bigint.md): integers of any size, with the arithmetic operators, powers, roots, gcd, and text in any base
 34. [std.stats](std/stats.md): means, medians, quantiles, modes, variances, standard deviations, correlation and linear regression, as Python's `statistics` gives them to the last bit
+35. [std.diff](std/diff.md): the fewest changes between two lists with Myers' algorithm, and unified diffs of text as `diff -u` writes them
 
 ### Java compatibility
 
