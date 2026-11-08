@@ -502,7 +502,6 @@ fn find_root() -> String {
     }
     eprintln("run this from the Calx repository, which has tests/run.calx and compiler/ in it")
     process.exit(2)
-    return String()
 }
 
 fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {

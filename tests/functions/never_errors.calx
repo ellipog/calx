@@ -1,0 +1,35 @@
+// `-> never` promises the function never returns, so its body can't reach its end or `return`,
+// and `never` is only ever what a function returns (CLX-153).
+import std.process.{exit}
+
+fn ends(x: i32) -> never {
+    if x > 0 {
+        panic("big")
+    }
+}    // error: function `ends` returns `never`, but it can reach its end; end it with `panic`, a `loop` without `break`, or a call to another function that returns `never`
+
+fn returns() -> never {
+    return    // error: function `returns` returns `never`, so it can't `return`
+}
+
+fn takes(_x: never) {    // error: `never` is only what a function returns, for one that never returns, as in `fn die(why: String) -> never`
+}
+
+fn fails() -> never ! String {    // error: a function that can fail can't return `never`
+    panic("no")
+}
+
+fn after() -> i32 {
+    exit(1)
+    return 3    // error: this code is never reached
+}
+
+fn main() {
+    let v: List<never> = List()    // error: `never` is only what a function returns, for one that never returns, as in `fn die(why: String) -> never`
+    takes(fails()!)
+    println("{after()} {v.len()}")
+    if v.len() > 0 {
+        ends(1)
+    }
+    returns()
+}

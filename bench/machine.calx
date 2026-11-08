@@ -18,7 +18,6 @@ pub fn repo_root() -> String {
     }
     eprintln("run this with `calx run`, from anywhere: it finds the repository from where it is")
     process.exit(2)
-    return String()
 }
 
 /// `.exe` on Windows, and nothing on Linux.

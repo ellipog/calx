@@ -20,7 +20,8 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | `if __name__ == "__main__":` | `fn main()`, where the program starts |
 | `sys.argv[1:]` | `args()` from [`std.env`](../std/env.md), without the program's name |
 | `argparse` | `@cli` on a struct, from [`std.cli`](../std/cli.md), with `--help` written from its docs |
-| `sys.exit(2)` | `exit(2)` from [`std.process`](../std/process.md) |
+| `sys.exit(2)` | `exit(2)` from [`std.process`](../std/process.md), which returns `never`, so it can end a function that returns a value |
+| `sys.exit("bad input")` | A function of your own that prints it and calls `exit`, declared `-> never` ([functions that never return](../reference/functions.md#functions-that-never-return)) |
 | `os.environ.get("HOME")` | `variable("HOME")` from [`std.env`](../std/env.md), a `String?` |
 | `input()`, `for line in sys.stdin:` | `Lines()` from [`std.io`](../std/io.md), whose `next()` gives each line, then `none` |
 | `print(s)`, `print(s, end="")`, `print(s, file=sys.stderr)` | `println(s)`, `print(s)`, `eprintln(s)` ([printing](../reference/printing.md)) |

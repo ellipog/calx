@@ -169,7 +169,6 @@ fn timed(calx: String, root: String, args: List<String>, cache: String) -> f64 {
         err(e) => {
             eprintln("build: can't run the compiler: {e}")
             process.exit(1)
-            return 0.0
         },
     }
     let took = unsafe { Instant.now() }.secs_since(start)

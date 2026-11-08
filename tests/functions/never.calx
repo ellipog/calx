@@ -1,0 +1,52 @@
+// `-> never`: a function that never returns, as `panic` doesn't (CLX-153). A call to one has the
+// type `never`, which fits any type, so it can stand where a value goes, and a function that
+// returns a value needs no `return` after it. `std.process.exit` is one.
+import std.env.{variable}
+import std.process.{exit}
+
+// Says what's wrong and ends the program, as a script's `sys.exit("...")` does.
+fn die(why: String) -> never {
+    eprintln("tool: {why}")
+    exit(2)
+}
+
+// Calls another one, so it never returns either.
+fn usage() -> never {
+    die("usage: tool NAME")
+}
+
+// Ends in a loop without `break`.
+fn forever() -> never {
+    loop {
+        exit(3)
+    }
+}
+
+fn number(text: String) -> i32 {
+    match i32.parse(text) {
+        some(n) => return n,
+        none => die("{text} isn't a number"),
+    }
+}
+
+fn pick(xs: List<i32>, i: usize) -> i32 {
+    if i >= xs.len() {
+        usage()
+    }
+    return xs[i]
+}
+
+fn main() {
+    println("{number(String("42"))}")    // out: 42
+    let xs: List<i32> = [5, 6, 7]
+    println("{pick(xs, 2)}")    // out: 7
+    let fallback = variable("CALX_NEVER_SET_THIS") ?? String("unset")
+    println(fallback)    // out: unset
+    if xs.len() > 5 {
+        forever()
+    }
+    let port = variable("CALX_NEVER_SET_THIS") ?? die("CALX_NEVER_SET_THIS isn't set")
+    println(port)
+}
+// stderr: tool: CALX_NEVER_SET_THIS isn't set
+// status: 2

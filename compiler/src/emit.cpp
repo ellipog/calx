@@ -377,7 +377,8 @@ private:
         if (opt_.library && text(f->name).substr(0, 3) == "cx_") {
             return "#define " + std::string(f->c_name) + " " + std::string(text(f->name)) + "\n";
         }
-        std::string s = "extern " + ctype(f->result_type) + " " + std::string(f->c_name) + "(";
+        std::string s = std::string(f->result_type->kind == TypeKind::never ? "__attribute__((noreturn)) " : "") + "extern " +
+                        ctype(f->result_type) + " " + std::string(f->c_name) + "(";
         for (std::size_t i = 0; i < f->params.size(); i++) {
             if (i) s += ", ";
             s += ctype(f->params[i].local->type);
@@ -2832,7 +2833,9 @@ $dropall    m->len = 0;
     }
 
     std::string signature(const Item* f) {
-        std::string s = ctype(f->result_type) + " " + std::string(f->c_name) + "(";
+        // `-> never` (CLX-153): clang then knows that code after a call isn't reached.
+        std::string s = std::string(f->result_type->kind == TypeKind::never ? "__attribute__((noreturn)) " : "") +
+                        ctype(f->result_type) + " " + std::string(f->c_name) + "(";
         // A closure's function reads what it captures through their addresses (CLX-98).
         bool env = f->is_closure && !f->plain;
         if (env) s += "const void* const* cx_env" + std::string(f->params.empty() ? "" : ", ");
@@ -2973,6 +2976,7 @@ $dropall    m->len = 0;
         if (f->result_type->is_result && f->result_type->item->variants[0].types.empty()) {
             line("return " + variant_value(f->result_type, 0, {}) + ";");
         }
+        if (f->result_type->kind == TypeKind::never) line("__builtin_unreachable();");
         indent_ = 0;
         out_ += "}\n\n";
         o.body.swap(out_);

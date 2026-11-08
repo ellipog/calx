@@ -2631,7 +2631,8 @@ private:
             }
         }
         Type* r = f->result_type;
-        if (f->result && !is_bad(r) && r->kind != TypeKind::unit && !c_type(r)) {
+        // `-> never` is C's `noreturn`, as `exit` is.
+        if (f->result && !is_bad(r) && r->kind != TypeKind::unit && r->kind != TypeKind::never && !c_type(r)) {
             error(f->result->span, name_of(r) + " isn't a C type; a C function returns an integer, a float, a `bool`, "
                                                 "a pointer or nothing");
         }
@@ -2800,6 +2801,11 @@ private:
                         return T.error;
                     }
                     return ordering_type();
+                }
+                if (text(n) == "never" && !find_item(n)) {
+                    error(t->span, "`never` is only what a function returns, for one that never returns, as in "
+                                   "`fn die(why: String) -> never`");
+                    return T.error;
                 }
                 Type* r = T.primitive(text(n));
                 if (!r) {
@@ -3014,7 +3020,7 @@ private:
             p.local = l;
             if (p.default_value) check_default(f, p, t);
         }
-        f->result_type = f->result ? resolve_type(f->result, f->is_extern) : T.unit;
+        f->result_type = !f->result ? T.unit : names_never(f->result) ? T.never : resolve_type(f->result, f->is_extern);
         if (exported(f)) {
             for (const Param& p : f->params) {
                 if (p.local && p.type) public_type(p.local->type, p.type->span, "a `pub` function can't take it");
@@ -3027,6 +3033,14 @@ private:
         if (f->error) f->result_type = fails_with(f, f->result_type);
         pop_env(mark);
         current_impl_type_ = saved_impl;
+    }
+
+    // `-> never`: a function that never returns, as `panic` doesn't (CLX-153). Calls to it have
+    // the type `never`, which fits any type, so `x ?? die("...")` works, and code after one is
+    // never reached.
+    bool names_never(TypeExpr* t) {
+        return t->kind == TypeExprKind::named && t->path.parts.size() == 1 && t->args.empty() &&
+               text(t->path.parts[0]) == "never" && !find_item(t->path.parts[0]);
     }
 
     // `n: i32 = 3`, a parameter's default: a constant that a call leaving the parameter out
@@ -3204,8 +3218,11 @@ private:
             if (p.local) declare(p.local);
         }
         Type* body = check_block(f->body, nullptr, BlockUse::fn_body);
-        if (returns(f)->kind != TypeKind::unit && !is_bad(f->result_type) && body->kind != TypeKind::never) {
-            Span end{f->body->span.file, f->body->span.end - 1, f->body->span.end};
+        Span end{f->body->span.file, f->body->span.end - 1, f->body->span.end};
+        if (f->result_type->kind == TypeKind::never && body->kind != TypeKind::never) {
+            error(end, "function " + q(text(f->name)) + " returns `never`, but it can reach its end; end it with `panic`, a "
+                       "`loop` without `break`, or a call to another function that returns `never`");
+        } else if (returns(f)->kind != TypeKind::unit && !is_bad(f->result_type) && body->kind != TypeKind::never) {
             error(end, "function " + q(text(f->name)) + " can reach its end without returning a value");
         }
         pop_scope();
@@ -3831,6 +3848,11 @@ private:
             error(s->span, "a `parallel for` runs every iteration, so its body can't `return`; end an iteration early with `continue`");
         }
         Type* want = returns(fn_);
+        if (want->kind == TypeKind::never) {
+            if (s->value) check(s->value, nullptr);
+            error(s->span, "function " + q(text(fn_->name)) + " returns `never`, so it can't `return`");
+            return;
+        }
         if (!s->value) {
             if (want->kind != TypeKind::unit && !is_bad(want)) {
                 error(s->span, "function " + q(text(fn_->name)) + " must return " + a_type(want));

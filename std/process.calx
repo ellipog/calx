@@ -18,7 +18,7 @@ extern "C" {
     fn cx_process_memory_limit() -> u64
     fn cx_process_cpu_ns() -> u64
     fn cx_process_processors() -> u32
-    fn cx_process_exit(code: u8)
+    fn cx_process_exit(code: u8) -> never
     fn cx_clock_ns() -> u64
     fn cx_proc_group() -> i64
     fn cx_proc_group_free(g: i64)
@@ -895,7 +895,7 @@ pub unsafe fn processors() -> u32 {
 /// `std.term` says, and what was printed is written, as when `main` returns. Nothing else runs:
 /// other threads stop where they are, and no value is dropped. Inside a `parallel for` it panics,
 /// since which iteration got there first would depend on timing.
-pub fn exit(code: u8) {
+pub fn exit(code: u8) -> never {
     unsafe {
         cx_process_exit(code)
     }

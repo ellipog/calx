@@ -256,7 +256,7 @@ fn main() {
 
 ## Unreachable code
 
-Code after `return`, `break`, `continue` or a [panic](printing.md#panics) can never run, so it's an error.
+Code after `return`, `break`, `continue`, a [panic](printing.md#panics), or a call to a function that [never returns](functions.md#functions-that-never-return), such as `std.process.exit`, can never run, so it's an error.
 
 ```calx
 fn main() {

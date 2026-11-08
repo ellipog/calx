@@ -41,6 +41,40 @@ fn main() {
 }
 ```
 
+### Functions that never return
+
+`-> never` says a function never returns, as `panic` doesn't: it ends the program, or loops for good. Its body must end in a `panic`, a `loop` without `break`, or a call to another function that returns `never`, such as [`std.process.exit`](../std/process.md#this-process), and it can't `return`.
+
+A call to one has the type `never`, which fits wherever a value goes, so it can end a function that returns a value, end a `match` arm, or stand in for a value, as in `x ?? die("...")`. Code after a call to one can never run, so it's an error, as it is after `return`.
+
+```calx
+import std.process.{exit}
+
+// Says what's wrong and ends the program, as a script's `sys.exit("...")` does.
+fn die(why: String) -> never {
+    eprintln("tool: {why}")
+    exit(2)
+}
+
+fn level(text: String) -> i32 {
+    match i32.parse(text) {
+        some(n) => return n,
+        none => die("{text} isn't a level"),
+    }
+}
+
+fn main() {
+    println("{level(String("3"))}")    // out: 3
+    let name: String? = none
+    let shown = name ?? die("no name was given")
+    println(shown)
+}
+// stderr: tool: no name was given
+// status: 2
+```
+
+`never` is only what a function returns: a parameter, a variable or a list can't have it. A function that can fail can't return it either, since failing is returning. In C the function is `noreturn`, so clang knows the code after a call isn't reached.
+
 ## Parameter modes
 
 | Mode | Written | The function gets | The caller passes |
