@@ -1,0 +1,158 @@
+// std.ini reads, gives and writes INI files as Python's configparser does with its defaults
+// (CLX-166): sections, `=` and `:`, comments, values on several lines, [DEFAULT], keys that
+// aren't case-sensitive, `%(name)s` and `%%`, the typed getters, the mistakes with their lines,
+// set, add and remove, reading twice, and write, with and without spaces.
+import std.ini.{Ini, parse}
+
+fn mistake(text: str) {
+    match parse(String(text)) {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),
+    }
+}
+
+fn show(ini: Ini, section: str, key: str) {
+    match ini.get(String(section), String(key)) {
+        ok(v) => println("{key}: {v ?? String("none")}"),
+        err(e) => println("{key}: {e}"),
+    }
+}
+
+fn main() ! Error {
+    let text = String("# A comment\n[DEFAULT]\nhome = /srv\nRetries: 3\n\n[Server]\nPort = 8080\npath = %(home)s/www\nmotd = Hello\n  and welcome\n\n  back\n; another comment\nratio = 1_000.5e-3\ndebug = Yes\ndiscount = 10%%\n[db]\nurl=sqlite:///%(home)s/app.db\nretries = 5\n")
+    let ini = try parse(text)
+    println("{ini.sections()}")    // out: [Server, db]
+    println("{ini.keys(String("Server")) ?? List<String>()}")    // out: [port, path, motd, ratio, debug, discount, home, retries]
+    let motd = try ini.get(String("Server"), String("motd")) ?? String()
+    println("{try ini.get(String("Server"), String("PATH")) ?? String()}|{motd.replace("\n", "\\n")}|{try ini.get(String("Server"), String("discount")) ?? String()}|{ini.raw(String("Server"), String("discount")) ?? String()}")
+    // out: /srv/www|Hello\nand welcome\n\nback|10%|10%%
+    let port = try ini.get_int(String("Server"), String("port")) ?? 0
+    let ratio = try ini.get_float(String("Server"), String("ratio")) ?? 0.0
+    let debug = try ini.get_bool(String("Server"), String("debug")) ?? false
+    println("{port} {ratio} {debug} {try ini.get_int(String("db"), String("retries")) ?? 0} {try ini.get_int(String("Server"), String("retries")) ?? 0}")
+    // out: 8080 1.0005 true 5 3
+    println("{try ini.items(String("db")) ?? LinkedMap<String, String>()}")    // out: {home: /srv, retries: 5, url: sqlite:////srv/app.db}
+    println("{ini.has_key(String("db"), String("home"))} {ini.has_key(String("db"), String("nope"))} {ini.has_section(String("DEFAULT"))} {ini.has_section(String("db"))}")
+    // out: true false false true
+    println("{try ini.get(String("db"), String("nope"))} {try ini.get(String("nope"), String("home"))} {try ini.get(String("DEFAULT"), String("home"))}")
+    // out: none none some(/srv)
+    // A tab starts each line of a value after its first, which shows here as \t.
+    print((try ini.write()).replace("\t", "\\t"))
+    // out: [DEFAULT]
+    // out: home = /srv
+    // out: retries = 3
+    // out:
+    // out: [Server]
+    // out: port = 8080
+    // out: path = %(home)s/www
+    // out: motd = Hello
+    // out: \tand welcome
+    // out: \t
+    // out: \tback
+    // out: ratio = 1_000.5e-3
+    // out: debug = Yes
+    // out: discount = 10%%
+    // out:
+    // out: [db]
+    // out: url = sqlite:///%(home)s/app.db
+    // out: retries = 5
+    // out:
+
+    mistake("x = 1\n[s]")    // out: line 1: `x = 1` before the first [section]
+    mistake("[s]\na = 1\n[s]\n")    // out: line 3: a second [s] section
+    mistake("[s]\na = 1\nA = 2\n")    // out: line 3: a second `a` in [s]
+    mistake("[s]\na = 1\nnonsense\n[t]\nb = 2\n")    // out: line 3: `nonsense` is no [section], key with `=` or `:`, or comment
+    mistake("[s]\n= 1\n")    // out: line 2: a key with no name before its `=` or `:`
+    // A worse mistake later wins, as in Python.
+    mistake("[s]\nok = 1\njunk\n[s]\n")    // out: line 4: a second [s] section
+    mistake("[s]\n= 1\n=2\n")    // out: line 3: a second `` in [s]
+    // [DEFAULT] can come twice, but its keys can't.
+    mistake("[DEFAULT]\na = 1\n[s]\n[DEFAULT]\nb = 2\n")    // out: read
+    mistake("[DEFAULT]\na = 1\n[s]\n[DEFAULT]\nA = 2\n")    // out: line 5: a second `a` in [DEFAULT]
+
+    let refs = try parse(String("[s]\na = %(b)s\nb = %(c)s\nc = 100%\nd = %(missing)s\ne = %(e)s\nf = %(\n"))
+    show(refs, "s", "a")    // out: a: `a` in [s] has `%`, where a `%` should be `%%` or start a `%(name)s`
+    show(refs, "s", "d")    // out: d: `d` in [s] refers to `missing`, which isn't in [s] or [DEFAULT]
+    show(refs, "s", "e")    // out: e: `e` in [s] refers to values more than 10 deep, as values that refer to each other do
+    show(refs, "s", "f")    // out: f: `f` in [s] has `%(`, where a `%(` should start a `%(name)s`
+    var chain = String("[s]\n")
+    for i in 0..11 {
+        chain.push_str("k{i} = %(k{i + 1})s\n")
+    }
+    chain.push_str("k11 = end\n")
+    let deep = try parse(chain)
+    show(deep, "s", "k1")    // out: k1: end
+    show(deep, "s", "k0")    // out: k0: `k0` in [s] refers to values more than 10 deep, as values that refer to each other do
+
+    // Reading more text into a file, as Python's second read_string does.
+    var r = try parse(String("[a]\nx = 1\n"))
+    try r.read(String("[a]\ny = 2\n[b]\nz = 3\n"))
+    println("{r.sections()} {r.keys(String("a")) ?? List<String>()}")    // out: [a, b] [x, y]
+    // A key from an earlier text gets the new value; twice in one text is a mistake.
+    try r.read(String("[a]\nx = 2\n"))
+    println("{r.raw(String("a"), String("x")) ?? String()}")    // out: 2
+    match r.read(String("[a]\nz = 1\nZ = 2\n")) {
+        ok => println("read"),
+        err(e) => println("{e}"),    // out: line 3: a second `z` in [a]
+    }
+    _ = try r.remove_key(String("a"), String("z"))
+    try r.set(String("a"), String("Name"), String("two\nlines"))
+    try r.set(String(""), String("Shared"), String("yes"))
+    match r.set(String("a"), String("p"), String("50%")) {
+        ok => println("set"),
+        err(e) => println("{e}"),    // out: `50%` has a `%` that's neither `%%` nor in a `%(name)s`
+    }
+    try r.set(String("a"), String("p"), String("%(x)s and 100%%"))
+    match r.set(String("nope"), String("k"), String("v")) {
+        ok => println("set"),
+        err(e) => println("{e}"),    // out: there's no [nope] section
+    }
+    try r.add_section(String("c"))
+    match r.add_section(String("c")) {
+        ok => println("added"),
+        err(e) => println("{e}"),    // out: a second [c] section
+    }
+    match r.add_section(String("DEFAULT")) {
+        ok => println("added"),
+        err(e) => println("{e}"),    // out: [DEFAULT] can't be added, since it's always there
+    }
+    println("{try r.remove_key(String("a"), String("Y"))} {try r.remove_key(String("a"), String("y"))} {r.remove_section(String("b"))} {r.remove_section(String("b"))}")
+    // out: true false true false
+    print((try r.write(false)).replace("\t", "\\t"))
+    // out: [DEFAULT]
+    // out: shared=yes
+    // out:
+    // out: [a]
+    // out: x=2
+    // out: name=two
+    // out: \tlines
+    // out: p=%(x)s and 100%%
+    // out:
+    // out: [c]
+    // out:
+    println("{try r.get(String("a"), String("p")) ?? String()}")    // out: 2 and 100%
+    try r.set(String("c"), String("a=b"), String("1"))
+    match r.write() {
+        ok(_) => println("written"),
+        err(e) => println("{e}"),    // out: the key `a=b` can't be written, since it has a `=` or `:` in it
+    }
+
+    // Numbers as Python's int() and float() read them.
+    let nums = try parse(String("[n]\na =  1_000 \nb = -0\nc = +7\nd = \u{663}\u{664}\ne = 1e3\nf = .5\ng = 5.\nh = -inf\ni = 1_0.2_5\nj = 1__0\nk = 9223372036854775808\nl = 1_e5\n"))
+    var floats = List<String>()
+    for k in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
+        match nums.get_float(String("n"), String(k)) {
+            ok(v) => floats.push("{v ?? 0.0}"),
+            err(_) => floats.push(String("error")),
+        }
+    }
+    println(floats.join(" "))    // out: 1000.0 -0.0 7.0 34.0 1000.0 0.5 5.0 -Infinity 10.25
+    var ints = List<String>()
+    for k in ["a", "b", "c", "d", "j", "k", "l"] {
+        match nums.get_int(String("n"), String(k)) {
+            ok(v) => ints.push("{v ?? 0}"),
+            err(_) => ints.push(String("error")),
+        }
+    }
+    println(ints.join(" "))    // out: 1000 0 7 34 error error error
+}

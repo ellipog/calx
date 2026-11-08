@@ -1,0 +1,923 @@
+/// INI files, as Python's configparser reads and writes them: sections in `[...]`, keys with `=`
+/// or `:` and their values, comments, values on several lines, a `[DEFAULT]` section whose keys
+/// every section has, keys that aren't case-sensitive, and `%(name)s` in a value for another key's
+/// value, all as a `configparser.ConfigParser()` has them with its defaults.
+module std.ini
+
+import std.text.ucd.{DIGIT, DIGIT_LEN}
+
+/// Why text can't be read as INI, or a value can't be given, set or written.
+pub struct IniError {
+    pub message: String
+    /// The line it's on, from 1, or 0 for a mistake that isn't on a line, such as a value that
+    /// refers to a key that isn't there.
+    pub line: usize
+}
+
+impl Display for IniError {
+    fn show(self) {
+        if self.line > 0 {
+            print("line {self.line}: {self.message}")
+        } else {
+            print("{self.message}")
+        }
+    }
+}
+
+/// An INI file's sections, with their keys and values, in the order they came, and the keys and
+/// values of `[DEFAULT]`, as a `configparser.ConfigParser` holds them. The values are as they were
+/// read; `get` replaces their `%(name)s`.
+pub struct Ini {
+    defaults: LinkedMap<String, String>
+    tables: LinkedMap<String, LinkedMap<String, String>>
+}
+
+/// `text` read as an INI file, as Python's `ConfigParser().read_string(text)` reads it.
+pub fn parse(text: String) -> Ini ! IniError {
+    var ini = Ini.new()
+    try ini.read(text)
+    return ini
+}
+
+impl Ini {
+    /// An INI file with no sections and no defaults, as `ConfigParser()` starts.
+    pub fn new() -> Ini {
+        return Ini { defaults: LinkedMap<String, String>(), tables: LinkedMap<String, LinkedMap<String, String>>() }
+    }
+
+    /// `text` read into the file, as Python's `read_string(text)` reads more into a parser: a
+    /// section that's there already gets its keys, and a key that's there gets the new value. A
+    /// section, or a key in one, twice in `text` is a mistake. After a mistake, the file can hold
+    /// part of `text`.
+    pub fn read(mut self, text: String) ! IniError {
+        let n = text.len()
+        var at: usize = 0
+        if n >= 3 and text.byte_at(0) == 0xEF and text.byte_at(1) == 0xBB and text.byte_at(2) == 0xBF {
+            at = 3
+        }
+        // The keys each section has had in `text`, to find one that's there twice, where its table
+        // can't tell.
+        var seen = Map<String, Set<String>>()
+        // The section the lines go into, and whether there's one yet.
+        var section = String()
+        var in_section = false
+        var into_defaults = false
+        // Whether the section was made by this text, not an earlier one, and isn't [DEFAULT].
+        var fresh = false
+        // The key whose value is being read, if there is one, and its value so far.
+        var key = String()
+        var in_key = false
+        var val = String()
+        var indent_level: usize = 0
+        // The first line that's no section, key or comment: Python reads on, and raises at the end,
+        // unless something worse comes first.
+        var bad_line: usize = 0
+        var bad = String()
+        var line: usize = 0
+        while at < n {
+            let start = at
+            var e = at
+            while e < n and text.byte_at(e) != 10 {
+                e += 1
+            }
+            at = e + 1
+            line += 1
+            var s = start
+            while s < e {
+                let k = space_at(text, s, e)
+                if k == 0 {
+                    break
+                }
+                s += k
+            }
+            var t = e
+            while t > s {
+                let k = space_before(text, t, s)
+                if k == 0 {
+                    break
+                }
+                t -= k
+            }
+            if s == t {
+                // A blank line is part of the value, if one is being read.
+                if in_key {
+                    val.push('\n')
+                }
+                continue
+            }
+            let c = text.byte_at(s)
+            if c == 35 or c == 59 {
+                continue
+            }
+            var indent: usize = 0
+            for i in start..s {
+                if (text.byte_at(i) & 0xC0) != 0x80 {
+                    indent += 1
+                }
+            }
+            if in_key and indent > indent_level {
+                val.push('\n')
+                val.push_str(text[s..t])
+                continue
+            }
+            indent_level = indent
+            if c == 91 {
+                // The name runs to the last `]`, and what's after it doesn't count.
+                var p = t
+                var closed = false
+                while p > s + 2 {
+                    p -= 1
+                    if text.byte_at(p) == 93 {
+                        closed = true
+                        break
+                    }
+                }
+                if closed {
+                    if in_key {
+                        self.put(section, into_defaults, key, val)
+                        key = String()
+                        val = String()
+                        in_key = false
+                    }
+                    let name = text[s + 1..p].copy()
+                    if self.tables.contains(name) {
+                        if seen.contains(name) {
+                            fail IniError { message: "a second [{name}] section", line: line }
+                        }
+                        seen.insert(name.copy(), Set<String>())
+                        into_defaults = false
+                        fresh = false
+                    } else if name == "DEFAULT" {
+                        if not seen.contains(name) {
+                            seen.insert(name.copy(), Set<String>())
+                        }
+                        into_defaults = true
+                        fresh = false
+                    } else {
+                        self.tables.insert(name.copy(), LinkedMap<String, String>())
+                        seen.insert(name.copy(), Set<String>())
+                        into_defaults = false
+                        fresh = true
+                    }
+                    section = name
+                    in_section = true
+                    continue
+                }
+            }
+            if not in_section {
+                let what = text[s..t].copy()
+                fail IniError { message: "`{what}` before the first [section]", line: line }
+            }
+            var d = s
+            while d < t and text.byte_at(d) != 61 and text.byte_at(d) != 58 {
+                d += 1
+            }
+            if d == t {
+                if bad_line == 0 {
+                    let what = text[s..t].copy()
+                    bad_line = line
+                    bad = "`{what}` is no [section], key with `=` or `:`, or comment"
+                }
+                continue
+            }
+            var ke = d
+            while ke > s {
+                let k = space_before(text, ke, s)
+                if k == 0 {
+                    break
+                }
+                ke -= k
+            }
+            var vs = d + 1
+            while vs < t {
+                let k = space_at(text, vs, t)
+                if k == 0 {
+                    break
+                }
+                vs += k
+            }
+            if in_key {
+                self.put(section, into_defaults, key, val)
+                key = String()
+                val = String()
+                in_key = false
+            }
+            let name = text[s..ke].to_lower_root()
+            if ke == s and bad_line == 0 {
+                bad_line = line
+                bad = String("a key with no name before its `=` or `:`")
+            }
+            // A section new in this text has only this text's keys, so its own table tells a key
+            // that's there twice; the others, and keys with no name, which aren't kept, need `seen`.
+            if fresh and ke > s {
+                if self.tables[section].contains(name) {
+                    fail IniError { message: "a second `{name}` in [{section}]", line: line }
+                }
+            } else {
+                if seen[section].contains(name) {
+                    fail IniError { message: "a second `{name}` in [{section}]", line: line }
+                }
+                seen[section].insert(name.copy())
+            }
+            if ke > s {
+                key = name
+                val = text[vs..t].copy()
+                in_key = true
+            }
+        }
+        if in_key {
+            self.put(section, into_defaults, key, val)
+        }
+        if bad_line > 0 {
+            fail IniError { message: bad, line: bad_line }
+        }
+    }
+
+    // A value read, into its section. Python joins its lines and strips the white space at its
+    // end, which here can only be the newlines of blank lines.
+    fn put(mut self, section: String, into_defaults: bool, key: own String, val: own String) {
+        var v = val
+        var end = v.len()
+        while end > 0 and v.byte_at(end - 1) == 10 {
+            end -= 1
+        }
+        if end < v.len() {
+            v = v[0..end].copy()
+        }
+        if into_defaults {
+            self.defaults.insert(key, v)
+        } else {
+            self.tables[section].insert(key, v)
+        }
+    }
+
+    /// The sections' names, in order, without `DEFAULT`, as Python's `sections()` gives them.
+    pub fn sections(self) -> List<String> {
+        var out = List<String>()
+        out.reserve(self.tables.len())
+        for (name, _) in self.tables {
+            out.push(name.copy())
+        }
+        return out
+    }
+
+    /// Whether there's a section named `name`. `DEFAULT` doesn't count, as in Python's
+    /// `has_section`.
+    pub fn has_section(self, name: String) -> bool {
+        return self.tables.contains(name)
+    }
+
+    /// Whether `section` has `key`, or `[DEFAULT]` has it, as Python's `has_option` gives it. For
+    /// a `section` of `DEFAULT`, or `""`, whether `[DEFAULT]` has it.
+    pub fn has_key(self, section: String, key: String) -> bool {
+        let k = key.to_lower_root()
+        if section.is_empty() or section == "DEFAULT" {
+            return self.defaults.contains(k)
+        }
+        if not self.tables.contains(section) {
+            return false
+        }
+        return self.tables[section].contains(k) or self.defaults.contains(k)
+    }
+
+    /// The keys `section` has, its own and then those of `[DEFAULT]`, as Python's `options` gives
+    /// them, or `none` if there's no such section.
+    pub fn keys(self, section: String) -> List<String>? {
+        if not self.tables.contains(section) {
+            return none
+        }
+        var out = List<String>()
+        for (k, _) in self.tables[section] {
+            out.push(k.copy())
+        }
+        for (k, _) in self.defaults {
+            if not self.tables[section].contains(k) {
+                out.push(k.copy())
+            }
+        }
+        return some(out)
+    }
+
+    /// The value of `key` in `section`, or in `[DEFAULT]` if the section doesn't have it, as it was
+    /// read, as Python's `get(section, key, raw=True)` gives it, or `none` if there's no such
+    /// section or key. A `section` of `DEFAULT` looks in `[DEFAULT]`.
+    pub fn raw(self, section: String, key: String) -> String? {
+        if is_lower(key) {
+            return self.find(section, key)
+        }
+        return self.find(section, key.to_lower_root())
+    }
+
+    fn find(self, section: String, k: String) -> String? {
+        if section != "DEFAULT" {
+            if not self.tables.contains(section) {
+                return none
+            }
+            if self.tables[section].contains(k) {
+                return some(self.tables[section][k].copy())
+            }
+        }
+        if self.defaults.contains(k) {
+            return some(self.defaults[k].copy())
+        }
+        return none
+    }
+
+    /// The value of `key` in `section`, or in `[DEFAULT]` if the section doesn't have it, with each
+    /// `%(name)s` in it replaced by the value of `name`, from the same places, and each `%%` by
+    /// `%`, as Python's `get(section, key)` gives it; `none` if there's no such section or key. A
+    /// `%` that's neither, or a `name` that isn't there, is a mistake, as are values that refer to
+    /// each other, more than 10 deep.
+    pub fn get(self, section: String, key: String) -> String? ! IniError {
+        // Most keys are lowercase already, as they're asked for, and aren't lowered again.
+        if is_lower(key) {
+            return try self.get_lower(section, key)
+        }
+        return try self.get_lower(section, key.to_lower_root())
+    }
+
+    fn get_lower(self, section: String, k: String) -> String? ! IniError {
+        match self.find(section, k) {
+            some(v) => {
+                if not v.contains("%") {
+                    return some(v)
+                }
+                var out = String()
+                try self.interpolate(mut out, section, k, v, 1)
+                return some(out)
+            }
+            none => return none,
+        }
+    }
+
+    fn interpolate(self, out: mut String, section: String, k: String, rest: String, depth: usize) ! IniError {
+        if depth > 10 {
+            fail IniError { message: "`{k}` in [{section}] refers to values more than 10 deep, as values that refer to each other do", line: 0 }
+        }
+        let n = rest.len()
+        var i: usize = 0
+        while i < n {
+            var p = i
+            while p < n and rest.byte_at(p) != 37 {
+                p += 1
+            }
+            out.push_str(rest[i..p])
+            if p == n {
+                return
+            }
+            let c = if p + 1 < n { rest.byte_at(p + 1) } else { 0 }
+            if c == 37 {
+                out.push('%')
+                i = p + 2
+                continue
+            }
+            if c == 40 {
+                var q = p + 2
+                while q < n and rest.byte_at(q) != 41 {
+                    q += 1
+                }
+                if q == p + 2 or q + 1 >= n or rest.byte_at(q + 1) != 115 {
+                    let what = rest[p..].copy()
+                    fail IniError { message: "`{k}` in [{section}] has `{what}`, where a `%(` should start a `%(name)s`", line: 0 }
+                }
+                let name = rest[p + 2..q].to_lower_root()
+                match self.find(section, name) {
+                    some(v) => {
+                        if v.contains("%") {
+                            try self.interpolate(mut out, section, k, v, depth + 1)
+                        } else {
+                            out.push_str(v)
+                        }
+                    }
+                    none => fail IniError { message: "`{k}` in [{section}] refers to `{name}`, which isn't in [{section}] or [DEFAULT]", line: 0 },
+                }
+                i = q + 2
+                continue
+            }
+            let what = rest[p..].copy()
+            fail IniError { message: "`{k}` in [{section}] has `{what}`, where a `%` should be `%%` or start a `%(name)s`", line: 0 }
+        }
+    }
+
+    /// The keys of `section` and of `[DEFAULT]`, with their values as `get` gives them, as Python's
+    /// `items(section)` gives them: `[DEFAULT]`'s first, with the section's value for a key they
+    /// both have, and then the section's own. `none` if there's no such section; a `section` of
+    /// `DEFAULT` gives `[DEFAULT]`'s.
+    pub fn items(self, section: String) -> LinkedMap<String, String>? ! IniError {
+        let own_keys = section != "DEFAULT"
+        if own_keys and not self.tables.contains(section) {
+            return none
+        }
+        var order = List<String>()
+        for (k, _) in self.defaults {
+            order.push(k.copy())
+        }
+        if own_keys {
+            for (k, _) in self.tables[section] {
+                if not self.defaults.contains(k) {
+                    order.push(k.copy())
+                }
+            }
+        }
+        var out = LinkedMap<String, String>()
+        out.reserve(order.len())
+        for k in order {
+            let v = try self.get(section, k) ?? String()
+            out.insert(k.copy(), v)
+        }
+        return some(out)
+    }
+
+    /// The value of `key` in `section` as a whole number, as Python's `getint` gives it: `get`'s
+    /// value as `int()` reads it, with a sign, `_` between digits and white space around it. A
+    /// value that isn't one, or is too big for an `i64`, is a mistake.
+    pub fn get_int(self, section: String, key: String) -> i64? ! IniError {
+        match try self.get(section, key) {
+            some(v) => {
+                if let x = int_of(v) {
+                    return some(x)
+                }
+                fail IniError { message: "`{key}` in [{section}] is `{v}`, which isn't a whole number that fits in 64 bits", line: 0 }
+            }
+            none => return none,
+        }
+    }
+
+    /// The value of `key` in `section` as a number, as Python's `getfloat` gives it: `get`'s value
+    /// as `float()` reads it, with `inf` and `nan` too. A value that isn't one is a mistake.
+    pub fn get_float(self, section: String, key: String) -> f64? ! IniError {
+        match try self.get(section, key) {
+            some(v) => {
+                if let x = float_of(v) {
+                    return some(x)
+                }
+                fail IniError { message: "`{key}` in [{section}] is `{v}`, which isn't a number", line: 0 }
+            }
+            none => return none,
+        }
+    }
+
+    /// The value of `key` in `section` as `true` or `false`, as Python's `getboolean` gives it:
+    /// `1`, `yes`, `true` and `on` are `true`, and `0`, `no`, `false` and `off` `false`, in any
+    /// case. Another value is a mistake.
+    pub fn get_bool(self, section: String, key: String) -> bool? ! IniError {
+        match try self.get(section, key) {
+            some(v) => {
+                let l = v.to_lower_root()
+                if l == "1" or l == "yes" or l == "true" or l == "on" {
+                    return some(true)
+                }
+                if l == "0" or l == "no" or l == "false" or l == "off" {
+                    return some(false)
+                }
+                fail IniError { message: "`{key}` in [{section}] is `{v}`, which isn't true or false", line: 0 }
+            }
+            none => return none,
+        }
+    }
+
+    /// `key` in `section` set to `val`, as Python's `set(section, key, val)` sets it: in
+    /// `[DEFAULT]` for a `section` of `DEFAULT` or `""`. A section that isn't there is a mistake, as
+    /// is a `%` in `val` that's neither `%%` nor in a `%(name)s`.
+    pub fn set(mut self, section: String, key: String, val: String) ! IniError {
+        if val.contains("%") {
+            try check_percent(val)
+        }
+        let k = key.to_lower_root()
+        if section.is_empty() or section == "DEFAULT" {
+            self.defaults.insert(k, val.copy())
+            return
+        }
+        if not self.tables.contains(section) {
+            fail IniError { message: "there's no [{section}] section", line: 0 }
+        }
+        self.tables[section].insert(k, val.copy())
+    }
+
+    /// A new section, with no keys, after the others, as Python's `add_section(name)` adds it. A
+    /// section that's there already is a mistake, as is `DEFAULT`, which is always there.
+    pub fn add_section(mut self, name: String) ! IniError {
+        if name == "DEFAULT" {
+            fail IniError { message: "[DEFAULT] can't be added, since it's always there", line: 0 }
+        }
+        if self.tables.contains(name) {
+            fail IniError { message: "a second [{name}] section", line: 0 }
+        }
+        self.tables.insert(name.copy(), LinkedMap<String, String>())
+    }
+
+    /// The section named `name` taken out, with its keys, as Python's `remove_section` takes it.
+    /// Whether it was there.
+    pub fn remove_section(mut self, name: String) -> bool {
+        if not self.tables.contains(name) {
+            return false
+        }
+        _ = self.tables.remove(name)
+        return true
+    }
+
+    /// `key` taken out of `section`, or of `[DEFAULT]` for a `section` of `DEFAULT` or `""`, as
+    /// Python's `remove_option` takes it. Whether it was there. A section that isn't there is a
+    /// mistake.
+    pub fn remove_key(mut self, section: String, key: String) -> bool ! IniError {
+        let k = key.to_lower_root()
+        if section.is_empty() or section == "DEFAULT" {
+            if not self.defaults.contains(k) {
+                return false
+            }
+            _ = self.defaults.remove(k)
+            return true
+        }
+        if not self.tables.contains(section) {
+            fail IniError { message: "there's no [{section}] section", line: 0 }
+        }
+        if not self.tables[section].contains(k) {
+            return false
+        }
+        _ = self.tables[section].remove(k)
+        return true
+    }
+
+    /// The file as INI text, as Python's `write` writes it: `[DEFAULT]` first if it has keys, then
+    /// each section, each key as `key = value`, or `key=value` without `spaces`, a value's lines
+    /// after its first starting with a tab, and a blank line after each section. Comments aren't
+    /// kept. A key with `=` or `:` in it, or one that starts as a `[section]` does, is a mistake.
+    pub fn write(self, spaces: bool = true) -> String ! IniError {
+        let d = if spaces { " = " } else { "=" }
+        var out = String()
+        if not self.defaults.is_empty() {
+            try write_section(mut out, "DEFAULT", self.defaults, d)
+        }
+        for (name, keys) in self.tables {
+            try write_section(mut out, name, keys, d)
+        }
+        return out
+    }
+}
+
+// Whether `k` is ASCII with no capitals, which lowercasing leaves as it is.
+fn is_lower(k: String) -> bool {
+    for i in 0..k.len() {
+        let b = k.byte_at(i)
+        if b >= 0x80 or (b >= 65 and b <= 90) {
+            return false
+        }
+    }
+    return true
+}
+
+fn write_section(out: mut String, name: String, keys: LinkedMap<String, String>, d: str) ! IniError {
+    out.push('[')
+    out.push_str(name)
+    out.push_str("]\n")
+    for (k, v) in keys {
+        try check_key(k)
+        out.push_str(k)
+        out.push_str(d)
+        var from: usize = 0
+        for i in 0..v.len() {
+            if v.byte_at(i) == 10 {
+                out.push_str(v[from..i + 1])
+                out.push('\t')
+                from = i + 1
+            }
+        }
+        out.push_str(v[from..])
+        out.push('\n')
+    }
+    out.push('\n')
+}
+
+// A key Python won't write: one that starts as a `[section]` line does, or has `=` or `:` in it.
+fn check_key(k: String) ! IniError {
+    let n = k.len()
+    if n >= 3 and k.byte_at(0) == 91 {
+        var m: usize = 1
+        while m < n and k.byte_at(m) != 10 {
+            m += 1
+        }
+        for j in 2..m {
+            if k.byte_at(j) == 93 {
+                fail IniError { message: "the key `{k}` can't be written, since it would be read as a [section]", line: 0 }
+            }
+        }
+    }
+    for i in 0..n {
+        let b = k.byte_at(i)
+        if b == 61 or b == 58 {
+            fail IniError { message: "the key `{k}` can't be written, since it has a `=` or `:` in it", line: 0 }
+        }
+    }
+}
+
+// A value Python's `set` won't take: with its `%%`s taken out, a `%` that doesn't start a
+// `%(name)s`.
+fn check_percent(v: String) ! IniError {
+    var tmp = String()
+    tmp.reserve(v.len())
+    let n = v.len()
+    var i: usize = 0
+    while i < n {
+        if v.byte_at(i) == 37 and i + 1 < n and v.byte_at(i + 1) == 37 {
+            i += 2
+            continue
+        }
+        tmp.push_str(v[i..i + 1])
+        i += 1
+    }
+    let m = tmp.len()
+    var j: usize = 0
+    while j < m {
+        if tmp.byte_at(j) != 37 {
+            j += 1
+            continue
+        }
+        if j + 1 < m and tmp.byte_at(j + 1) == 40 {
+            var q = j + 2
+            while q < m and tmp.byte_at(q) != 41 {
+                q += 1
+            }
+            if q > j + 2 and q + 1 < m and tmp.byte_at(q + 1) == 115 {
+                j = q + 2
+                continue
+            }
+        }
+        fail IniError { message: "`{v}` has a `%` that's neither `%%` nor in a `%(name)s`", line: 0 }
+    }
+}
+
+// `s` as Python's `int(s)` reads it, if it's a whole number that fits in an i64.
+fn int_of(s: String) -> i64? {
+    var i: usize = 0
+    var e = s.len()
+    while i < e {
+        let k = space_at(s, i, e)
+        if k == 0 {
+            break
+        }
+        i += k
+    }
+    while e > i {
+        let k = space_before(s, e, i)
+        if k == 0 {
+            break
+        }
+        e -= k
+    }
+    var neg = false
+    if i < e and (s.byte_at(i) == 43 or s.byte_at(i) == 45) {
+        neg = s.byte_at(i) == 45
+        i += 1
+    }
+    let limit: u64 = if neg { 9223372036854775808 } else { 9223372036854775807 }
+    var x: u64 = 0
+    var digits = false
+    var under = false
+    for r in s[i..e].runes() {
+        let c = u32(r)
+        if c == 95 {
+            if not digits or under {
+                return none
+            }
+            under = true
+            continue
+        }
+        let dv = digit_value(c)
+        if dv < 0 {
+            return none
+        }
+        let du = u64.wrap(dv)
+        if x > (limit - du) / 10 {
+            return none
+        }
+        x = x * 10 + du
+        digits = true
+        under = false
+    }
+    if not digits or under {
+        return none
+    }
+    if not neg {
+        return some(i64.wrap(x))
+    }
+    if x == 0 {
+        return some(0)
+    }
+    return some(-i64.wrap(x - 1) - 1)
+}
+
+// `s` as Python's `float(s)` reads it, if it's a number: a sign, digits with `_` between them, a
+// `.` and more digits, and `e` and an exponent, or `inf`, `infinity` or `nan`.
+fn float_of(s: String) -> f64? {
+    var i: usize = 0
+    var e = s.len()
+    while i < e {
+        let k = space_at(s, i, e)
+        if k == 0 {
+            break
+        }
+        i += k
+    }
+    while e > i {
+        let k = space_before(s, e, i)
+        if k == 0 {
+            break
+        }
+        e -= k
+    }
+    var neg = false
+    if i < e and (s.byte_at(i) == 43 or s.byte_at(i) == 45) {
+        neg = s.byte_at(i) == 45
+        i += 1
+    }
+    let word = s[i..e].to_lower_root()
+    if word == "inf" or word == "infinity" {
+        return some(if neg { -f64.INFINITY } else { f64.INFINITY })
+    }
+    if word == "nan" {
+        return some(f64.NAN)
+    }
+    // The text in ASCII, with Unicode's digits as ASCII's.
+    var a = String()
+    a.reserve(e - i)
+    for r in s[i..e].runes() {
+        let c = u32(r)
+        if c == 95 or c == 46 or c == 43 or c == 45 or c == 101 or c == 69 {
+            a.push(r)
+            continue
+        }
+        let dv = digit_value(c)
+        if dv < 0 {
+            return none
+        }
+        a.push_str(DIGITS[usize.wrap(dv)..usize.wrap(dv) + 1])
+    }
+    let n = a.len()
+    let ie = digit_part(a, 0)
+    var fe = ie
+    if ie < n and a.byte_at(ie) == 46 {
+        fe = digit_part(a, ie + 1)
+        if ie == 0 and fe == 1 {
+            return none
+        }
+    } else if ie == 0 {
+        return none
+    }
+    var p = fe
+    var es = n
+    var ee = n
+    if p < n and (a.byte_at(p) == 101 or a.byte_at(p) == 69) {
+        es = p + 1
+        if es < n and (a.byte_at(es) == 43 or a.byte_at(es) == 45) {
+            es += 1
+        }
+        ee = digit_part(a, es)
+        if ee == es {
+            return none
+        }
+        p = ee
+    }
+    if p != n {
+        return none
+    }
+    // As `[-]whole.fraction[e[-]exponent]`, which f64.parse reads.
+    var out = String()
+    out.reserve(n + 4)
+    if neg {
+        out.push('-')
+    }
+    if ie == 0 {
+        out.push('0')
+    } else {
+        push_digits(mut out, a, 0, ie)
+    }
+    out.push('.')
+    if fe > ie + 1 {
+        push_digits(mut out, a, ie + 1, fe)
+    } else {
+        out.push('0')
+    }
+    if es < n {
+        out.push('e')
+        if a.byte_at(es - 1) == 45 {
+            out.push('-')
+        }
+        // Past seven digits, an exponent only makes the number 0 or infinite.
+        var z = es
+        while z < ee and (a.byte_at(z) == 48 or a.byte_at(z) == 95) {
+            z += 1
+        }
+        var exp = String()
+        push_digits(mut exp, a, z, ee)
+        if exp.is_empty() {
+            out.push('0')
+        } else if exp.len() > 7 {
+            out.push_str("9999999")
+        } else {
+            out.push_str(exp)
+        }
+    }
+    return f64.parse(out)
+}
+
+const DIGITS: str = "0123456789"
+
+// The end of the digits from `from` in `a`, with single `_`s between them, or `from` if there are
+// none.
+fn digit_part(a: String, from: usize) -> usize {
+    let n = a.len()
+    if from >= n or not is_digit(a.byte_at(from)) {
+        return from
+    }
+    var p = from + 1
+    while p < n {
+        if is_digit(a.byte_at(p)) {
+            p += 1
+        } else if a.byte_at(p) == 95 and p + 1 < n and is_digit(a.byte_at(p + 1)) {
+            p += 2
+        } else {
+            break
+        }
+    }
+    return p
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= 48 and b <= 57
+}
+
+fn push_digits(out: mut String, a: String, from: usize, to: usize) {
+    for i in from..to {
+        if a.byte_at(i) != 95 {
+            out.push_str(a[i..i + 1])
+        }
+    }
+}
+
+// The value of a decimal digit, as Python's `int` and `float` read any of Unicode's, or -1.
+fn digit_value(c: u32) -> i64 {
+    if c < 0x80 {
+        return if c >= 48 and c <= 57 { i64(c) - 48 } else { -1 }
+    }
+    var lo: usize = 0
+    var hi = DIGIT_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if c > DIGIT[2 * mid + 1] {
+            lo = mid + 1
+        } else if c < DIGIT[2 * mid] {
+            hi = mid
+        } else {
+            return i64((c - DIGIT[2 * mid]) % 10)
+        }
+    }
+    return -1
+}
+
+// The length of the white space rune at byte `i` of `t`, before `end`, as Python's `str.isspace`
+// has it, or 0 if it isn't white space.
+fn space_at(t: String, i: usize, end: usize) -> usize {
+    let b = t.byte_at(i)
+    if b < 0x80 {
+        return if (b >= 9 and b <= 13) or (b >= 0x1C and b <= 0x20) { 1 } else { 0 }
+    }
+    if b == 0xC2 {
+        if i + 1 < end {
+            let c = t.byte_at(i + 1)
+            if c == 0x85 or c == 0xA0 {
+                return 2
+            }
+        }
+        return 0
+    }
+    if b >= 0xE1 and b <= 0xE3 and i + 2 < end and is_wide_space(rune3(t, i)) {
+        return 3
+    }
+    return 0
+}
+
+// The length of the white space rune that ends at byte `i` of `t`, after `start`, or 0.
+fn space_before(t: String, i: usize, start: usize) -> usize {
+    let b = t.byte_at(i - 1)
+    if b < 0x80 {
+        return if (b >= 9 and b <= 13) or (b >= 0x1C and b <= 0x20) { 1 } else { 0 }
+    }
+    if i >= start + 2 and t.byte_at(i - 2) == 0xC2 and (b == 0x85 or b == 0xA0) {
+        return 2
+    }
+    if i >= start + 3 {
+        let a = t.byte_at(i - 3)
+        if a >= 0xE1 and a <= 0xE3 and is_wide_space(rune3(t, i - 3)) {
+            return 3
+        }
+    }
+    return 0
+}
+
+fn rune3(t: String, i: usize) -> u32 {
+    return ((u32(t.byte_at(i)) & 0x0F) << 12) | ((u32(t.byte_at(i + 1)) & 0x3F) << 6) | (u32(t.byte_at(i + 2)) & 0x3F)
+}
+
+fn is_wide_space(c: u32) -> bool {
+    return c == 0x1680 or (c >= 0x2000 and c <= 0x200A) or c == 0x2028 or c == 0x2029 or c == 0x202F or c == 0x205F or c == 0x3000
+}
