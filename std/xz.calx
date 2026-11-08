@@ -1,0 +1,814 @@
+/// .xz and .lzma files, decompressed as Python's `lzma.decompress` reads them (CLX-173): release
+/// archives such as `.tar.xz`, and whatever `xz` or Python's `lzma` wrote.
+module std.xz
+
+import std.bytes.{u32_le, u64_le}
+
+extern "C" {
+    fn cx_xz_lzma2_size(input: *const u8, n: usize, info: *u64) -> i32
+    fn cx_xz_lzma2_start(ctx: *u8, dict: u64, start: usize)
+    fn cx_xz_lzma2(ctx: *u8, input: *const u8, n: usize, out: *u8, cap: usize) -> i32
+    fn cx_xz_lzma1_start(ctx: *u8, props: u32, dict: u64, size: u64, start: usize) -> i32
+    fn cx_xz_lzma1(ctx: *u8, input: *const u8, n: usize, out: *u8, cap: usize) -> i32
+    fn cx_xz_len(ctx: *const u8) -> usize
+    fn cx_xz_used(ctx: *const u8) -> usize
+    fn cx_xz_delta(buf: *u8, n: usize, dist: u32)
+    fn cx_xz_bcj(id: u32, buf: *u8, n: usize, start: u32) -> i32
+    fn cx_xz_crc64(crc: u64, p: *const u8, n: usize) -> u64
+    fn cx_xz_blocks(input: *const u8, desc: *const u64, n: usize, out: *u8, ok: *u8)
+    fn cx_zlib_crc32(crc: u32, p: *const u8, n: usize) -> u32
+    fn cx_digest_start(ctx: *u8, kind: u32)
+    fn cx_digest_add(ctx: *u8, p: *const u8, n: usize)
+    fn cx_digest_finish(ctx: *u8, out: *u8) -> usize
+}
+
+/// Which files `decompress` takes.
+pub enum Format {
+    /// Any, by the first byte, as Python's `FORMAT_AUTO`: .xz, .lzma, or lzip's .lz, which
+    /// liblzma reads since xz 5.4.
+    Auto
+    /// `.xz` only, as `FORMAT_XZ`.
+    Xz
+    /// `.lzma` only, as `FORMAT_ALONE`, which takes headers `Auto` doesn't.
+    Alone
+}
+
+/// Why bytes didn't decompress. Python raises an `LZMAError` for all but `Truncated`, which is
+/// an `EOFError`.
+pub enum Error {
+    /// They're neither .xz nor .lzma. Python says "Input format not supported by decoder".
+    Format
+    /// They ask for a filter or a setting there's no decoder for. Python says "Invalid or
+    /// unsupported options".
+    Options
+    /// They're broken. Python says "Corrupt input data".
+    Corrupt
+    /// A block's check doesn't match what it decompresses to. Python says "Corrupt input data".
+    Checksum
+    /// They end before the stream does. Python says "Compressed data ended before the
+    /// end-of-stream marker was reached".
+    Truncated
+    /// They decompress to more than the limit.
+    TooLong
+}
+
+/// What went wrong, in words: `corrupt data`, `the data ends early`.
+impl Display for Error {
+    fn show(self) {
+        match self {
+            Format => print("not an .xz or .lzma file"),
+            Options => print("a filter or setting that isn't supported"),
+            Corrupt => print("corrupt data"),
+            Checksum => print("checksum mismatch"),
+            Truncated => print("the data ends early"),
+            TooLong => print("longer than the limit when decompressed"),
+        }
+    }
+}
+
+// The decoder's context, CX_XZ_CTX in the runtime.
+const CTX: usize = 28672
+// A size the header doesn't give.
+const UNKNOWN: u64 = 18446744073709551615
+// The largest a block may be, without its padding, and the first filter ID that's reserved.
+const UNPADDED_MAX: u64 = 9223372036854775804
+const RESERVED_ID: u64 = 4611686018427387904
+const LZMA2: u64 = 0x21
+const DELTA: u64 = 0x03
+
+/// What the bytes decompress to: an .xz or .lzma file, or several one after another, as
+/// `lzma.decompress(bytes)` gives it. As Python does, it stops quietly at whatever after the first
+/// stream isn't another, but fails if that's the start of one that's cut short. Fails with
+/// `TooLong` if it's more than `limit` bytes, which is no limit at all unless it's given.
+pub fn decompress(bytes: List<u8>, format: Format = Format.Auto, limit: u64 = u64.MAX) -> List<u8> ! Error {
+    var out: List<u8> = []
+    try decompress_into(bytes, 0, bytes.len(), format, limit, mut out)
+    return out
+}
+
+/// Decompresses the bytes from `from` up to `to` onto the end of `out`, as `decompress` does,
+/// adding at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in
+/// `bytes`.
+@track_caller
+pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, limit: u64, out: mut List<u8>) ! Error {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    let begin = out.len()
+    // How long the output may get.
+    let cap = if limit > u64.MAX - u64(begin) { u64.MAX } else { u64(begin) + limit }
+    // The context is written by the runtime before it's read, so it isn't cleared first.
+    var ctx = List<u8>()
+    ctx.reserve(CTX)
+    unsafe {
+        ctx.set_len(CTX)
+    }
+    var at = from
+    loop {
+        let mark = out.len()
+        match stream(bytes, at, to, format, cap, mut ctx, mut out) {
+            ok(next) => at = next,
+            err(e) => {
+                out.truncate(mark)
+                // Python's lzma.decompress raises for the first stream, and for a later one cut
+                // short, and stops quietly at anything else after the first.
+                if at == from or e == Error.Truncated or e == Error.TooLong {
+                    out.truncate(begin)
+                    fail e
+                }
+                return
+            }
+        }
+        if at == to {
+            return
+        }
+    }
+}
+
+/// Whether the bytes start as an .xz file does.
+pub fn is_xz(bytes: List<u8>) -> bool {
+    return bytes.len() >= 6 and bytes[0] == 0xFD and bytes[1] == 0x37 and bytes[2] == 0x7A and bytes[3] == 0x58 and bytes[4] == 0x5A and bytes[5] == 0
+}
+
+/// The CRC-64 of the bytes, as .xz files check their blocks with it: ECMA-182's, reflected, as
+/// `xz` and liblzma's `lzma_crc64` give it.
+pub fn crc64(bytes: List<u8>) -> u64 {
+    return unsafe { cx_xz_crc64(0, bytes.as_ptr(), bytes.len()) }
+}
+
+// Decodes the one stream at bytes[at..to) onto `out`, and gives where it ends.
+fn stream(bytes: List<u8>, at: usize, to: usize, format: Format, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    if format == Format.Xz {
+        return try xz(bytes, at, to, cap, mut ctx, mut out)
+    }
+    if format == Format.Alone {
+        return try alone(bytes, at, to, false, cap, mut ctx, mut out)
+    }
+    // liblzma's auto decoder: .xz starts with 0xFD, and .lz with an L, and anything else may be
+    // .lzma, whose header it checks more closely.
+    if at >= to {
+        fail Error.Truncated
+    }
+    if bytes[at] == 0xFD {
+        return try xz(bytes, at, to, cap, mut ctx, mut out)
+    }
+    if bytes[at] == 0x4C {
+        return try lzip(bytes, at, to, cap, mut ctx, mut out)
+    }
+    return try alone(bytes, at, to, true, cap, mut ctx, mut out)
+}
+
+// --- .xz --------------------------------------------------------------------------------------
+
+// The stream header, its blocks, the index and the footer, checked as liblzma checks them and in
+// its order, so the same bytes fail the same way.
+fn xz(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    if to - at < 12 {
+        fail Error.Truncated
+    }
+    if not (bytes[at] == 0xFD and bytes[at + 1] == 0x37 and bytes[at + 2] == 0x7A and bytes[at + 3] == 0x58 and bytes[at + 4] == 0x5A and bytes[at + 5] == 0) {
+        fail Error.Format
+    }
+    if crc32(bytes, at + 6, at + 8) != u32_le(bytes, at + 8) {
+        fail Error.Corrupt
+    }
+    if bytes[at + 6] != 0 or bytes[at + 7] & 0xF0 != 0 {
+        fail Error.Options
+    }
+    let check = bytes[at + 7]
+    // Each block's size without its padding, and what it decompresses to.
+    var sizes = List<u64>()
+    var p = at + 12
+    loop {
+        if p >= to {
+            fail Error.Truncated
+        }
+        if bytes[p] == 0 {
+            break
+        }
+        let next = blocks_at_once(bytes, p, to, check, cap, mut out, mut sizes)
+        if next != p {
+            p = next
+            continue
+        }
+        p = try block(bytes, p, to, check, cap, mut ctx, mut out, mut sizes)
+    }
+    let index_at = p
+    p = try index(bytes, p, to, sizes)
+    if to - p < 12 {
+        fail Error.Truncated
+    }
+    if bytes[p + 10] != 0x59 or bytes[p + 11] != 0x5A {
+        fail Error.Corrupt
+    }
+    if crc32(bytes, p + 4, p + 10) != u32_le(bytes, p) {
+        fail Error.Corrupt
+    }
+    if bytes[p + 8] != 0 or bytes[p + 9] & 0xF0 != 0 {
+        fail Error.Options
+    }
+    if (u64(u32_le(bytes, p + 4)) + 1) * 4 != u64(p - index_at) or bytes[p + 9] != check {
+        fail Error.Corrupt
+    }
+    return p + 12
+}
+
+// How many bytes a block's check takes, by its ID.
+fn check_size(check: u8) -> usize {
+    if check == 0 {
+        return 0
+    }
+    return usize.wrap(4u64 << u64((check - 1) / 3))
+}
+
+// The units a BCJ filter works on, which its start offset must be a multiple of.
+fn bcj_alignment(id: u64) -> u32 {
+    return match id {
+        5 => 4,
+        6 => 16,
+        7 => 4,
+        8 => 2,
+        9 => 4,
+        10 => 4,
+        11 => 2,
+        _ => 1,
+    }
+}
+
+// A block's filter: its ID, and the BCJ filters' start offset or the delta filter's distance.
+struct Filter {
+    id: u64
+    arg: u32
+}
+
+// A block's header, read and checked.
+struct Header {
+    // The header's own size, and where the data starts.
+    size: usize
+    data: usize
+    // What the data's size and what it decompresses to are, if the header says.
+    packed: u64
+    unpacked: u64
+    // LZMA2's dictionary size, and the filters, LZMA2 last.
+    dict: u64
+    filters: List<Filter>
+}
+
+// Reads the header of the block at `p`, checking it as liblzma does, in its order.
+fn header(bytes: List<u8>, p: usize, to: usize, check: u8) -> Header ! Error {
+    let size = (usize(bytes[p]) + 1) * 4
+    if to - p < size {
+        fail Error.Truncated
+    }
+    let end = p + size - 4
+    if crc32(bytes, p, end) != u32_le(bytes, end) {
+        fail Error.Corrupt
+    }
+    let flags = bytes[p + 1]
+    if flags & 0x3C != 0 {
+        fail Error.Options
+    }
+    var q = p + 2
+    var packed = UNKNOWN
+    if flags & 0x40 != 0 {
+        let v = try vli_in(bytes, q, end)
+        packed = v.value
+        q = v.next
+        if packed == 0 or packed > UNPADDED_MAX - u64(size + check_size(check)) {
+            fail Error.Corrupt
+        }
+    }
+    var unpacked = UNKNOWN
+    if flags & 0x80 != 0 {
+        let v = try vli_in(bytes, q, end)
+        unpacked = v.value
+        q = v.next
+    }
+    let count = usize(flags & 3) + 1
+    var filters = List<Filter>()
+    var dict: u64 = 0
+    for _ in 0..count {
+        let id = try vli_in(bytes, q, end)
+        if id.value >= RESERVED_ID {
+            fail Error.Corrupt
+        }
+        let len = try vli_in(bytes, id.next, end)
+        if u64(end - len.next) < len.value {
+            fail Error.Corrupt
+        }
+        let props = len.next
+        let n = usize.wrap(len.value)
+        q = props + n
+        var arg: u32 = 0
+        if id.value == LZMA2 {
+            if n != 1 or bytes[props] & 0xC0 != 0 or bytes[props] > 40 {
+                fail Error.Options
+            }
+            let b = u64(bytes[props])
+            dict = if b == 40 { 4294967295 } else { (2 | (b & 1)) << (b / 2 + 11) }
+        } else if id.value >= 4 and id.value <= 11 {
+            if n == 4 {
+                arg = u32_le(bytes, props)
+            } else if n != 0 {
+                fail Error.Options
+            }
+        } else if id.value == DELTA {
+            if n != 1 {
+                fail Error.Options
+            }
+            arg = u32(bytes[props]) + 1
+        } else {
+            fail Error.Options
+        }
+        filters.push(Filter { id: id.value, arg: arg })
+    }
+    while q < end {
+        if bytes[q] != 0 {
+            fail Error.Options
+        }
+        q += 1
+    }
+    // The chain is BCJ and delta filters, then LZMA2.
+    for k in 0..count {
+        if (filters[k].id == LZMA2) != (k == count - 1) {
+            fail Error.Options
+        }
+        if filters[k].id != LZMA2 and filters[k].id != DELTA and filters[k].arg % bcj_alignment(filters[k].id) != 0 {
+            fail Error.Options
+        }
+    }
+    return Header { size: size, data: end + 4, packed: packed, unpacked: unpacked, dict: dict, filters: filters }
+}
+
+// Decodes the block at `p` onto `out`, adds its sizes, and gives where it ends.
+fn block(bytes: List<u8>, p: usize, to: usize, check: u8, cap: u64, ctx: mut List<u8>, out: mut List<u8>, sizes: mut List<u64>) -> usize ! Error {
+    let h = try header(bytes, p, to, check)
+    // The data, which is as long as the header says, if it says.
+    var stop = to
+    var bounded = false
+    if h.packed != UNKNOWN and h.packed <= u64(to - h.data) {
+        stop = h.data + usize.wrap(h.packed)
+        bounded = true
+    }
+    let start = out.len()
+    try lzma2(bytes, h.data, stop, bounded, h.dict, cap, mut ctx, mut out)
+    let used = unsafe { cx_xz_used(ctx.as_ptr()) }
+    let made = out.len() - start
+    if (h.packed != UNKNOWN and u64(used) != h.packed) or (h.unpacked != UNKNOWN and u64(made) != h.unpacked) {
+        fail Error.Corrupt
+    }
+    // The filters before LZMA2, undone last first.
+    var k = h.filters.len() - 1
+    while k > 0 {
+        k -= 1
+        unsafe {
+            if h.filters[k].id == DELTA {
+                cx_xz_delta(out.as_mut_ptr().add(start), made, h.filters[k].arg)
+            } else {
+                _ = cx_xz_bcj(u32.wrap(h.filters[k].id), out.as_mut_ptr().add(start), made, h.filters[k].arg)
+            }
+        }
+    }
+    // Padding to 4 bytes, then the check.
+    var r = h.data + used
+    while (r - p) % 4 != 0 {
+        if r >= to {
+            fail Error.Truncated
+        }
+        if bytes[r] != 0 {
+            fail Error.Corrupt
+        }
+        r += 1
+    }
+    let check_len = check_size(check)
+    if to - r < check_len {
+        fail Error.Truncated
+    }
+    if not check_matches(check, out, start, bytes, r) {
+        fail Error.Checksum
+    }
+    sizes.push(u64(h.size + used + check_len))
+    sizes.push(u64(made))
+    return r + check_len
+}
+
+// Decodes the blocks from `p` on whose headers give both sizes, as `xz -T` writes them, at once,
+// each into its own part of `out` on a thread of its own, as many as there are in a row, and adds
+// their sizes. Gives where the first block it didn't do starts: `p` itself, for fewer than two. A
+// block that goes wrong is left for `block`, which finds the same error the same way.
+fn blocks_at_once(bytes: List<u8>, p: usize, to: usize, check: u8, cap: u64, out: mut List<u8>, sizes: mut List<u64>) -> usize {
+    let check_len = check_size(check)
+    let left = cap - u64(out.len())
+    var heads = List<Header>()
+    var starts = List<usize>()
+    var total: u64 = 0
+    var q = p
+    loop {
+        if q >= to or bytes[q] == 0 {
+            break
+        }
+        let h = match header(bytes, q, to, check) {
+            ok(h) => h,
+            err(_) => break,
+        }
+        if h.packed == UNKNOWN or h.unpacked == UNKNOWN or h.packed > u64(to - h.data) or h.unpacked > left - total {
+            break
+        }
+        // Padding to 4 bytes from the block's start, then the check.
+        let data_end = h.data + usize.wrap(h.packed)
+        let next = data_end + (4 - (data_end - q) % 4) % 4 + check_len
+        if next > to {
+            break
+        }
+        starts.push(q)
+        total += h.unpacked
+        heads.push(h)
+        q = next
+    }
+    let n = heads.len()
+    if n < 2 {
+        return p
+    }
+    // What each block is, for the runtime, which decodes them on `parallel for`'s threads.
+    let base = out.len()
+    var desc = List<u64>()
+    var at = u64(base)
+    for k in 0..n {
+        let data_end = heads[k].data + usize.wrap(heads[k].packed)
+        let check_at = data_end + (4 - (data_end - starts[k]) % 4) % 4
+        desc.push(u64(heads[k].data))
+        desc.push(heads[k].packed)
+        desc.push(heads[k].unpacked)
+        desc.push(at)
+        desc.push(heads[k].dict)
+        desc.push(u64(check))
+        desc.push(u64(check_at))
+        let before = heads[k].filters.len() - 1
+        desc.push(u64(before))
+        for f in 0usize..3 {
+            if f < before {
+                desc.push(heads[k].filters[f].id)
+                desc.push(u64(heads[k].filters[f].arg))
+            } else {
+                desc.push(0)
+                desc.push(0)
+            }
+        }
+        at += heads[k].unpacked
+    }
+    out.reserve(usize.wrap(total))
+    var good: List<u8> = []
+    for _ in 0..n {
+        good.push(0)
+    }
+    unsafe {
+        cx_xz_blocks(bytes.as_ptr(), desc.as_ptr(), n, out.as_mut_ptr(), good.as_mut_ptr())
+    }
+    var done = base
+    for k in 0..n {
+        if good[k] == 0 {
+            unsafe {
+                out.set_len(done)
+            }
+            return starts[k]
+        }
+        done += usize.wrap(heads[k].unpacked)
+        unsafe {
+            out.set_len(done)
+        }
+        sizes.push(u64(heads[k].size) + heads[k].packed + u64(check_len))
+        sizes.push(heads[k].unpacked)
+    }
+    return q
+}
+
+// Decodes the LZMA2 data at bytes[from..to) onto `out`. `bounded` says the block's header gave
+// where it ends, so data that runs out there is corrupt, not cut short.
+fn lzma2(bytes: List<u8>, from: usize, to: usize, bounded: bool, dict: u64, cap: u64, ctx: mut List<u8>, out: mut List<u8>) ! Error {
+    let n = to - from
+    // The chunks' headers say what it decompresses to: room for that in one go, unless it's more
+    // than data like this makes, which a broken header might claim, and then room as it's needed.
+    var info: List<u64> = [0, 0]
+    unsafe {
+        _ = cx_xz_lzma2_size(bytes.as_ptr().add(from), n, info.as_mut_ptr())
+        cx_xz_lzma2_start(ctx.as_mut_ptr(), dict, out.len())
+    }
+    let total = info[0]
+    let guess = u64(n) * 64 + 1048576
+    var room: u64 = if total < guess { total } else { guess }
+    loop {
+        let left = cap - u64(out.len())
+        if room > left {
+            room = left
+        }
+        out.reserve(usize.wrap(room))
+        let status = unsafe { cx_xz_lzma2(ctx.as_mut_ptr(), bytes.as_ptr().add(from), n, out.as_mut_ptr(), out.len() + usize.wrap(room)) }
+        unsafe {
+            out.set_len(cx_xz_len(ctx.as_ptr()))
+        }
+        if status == 0 {
+            return
+        }
+        if status == 1 {
+            if room == left {
+                fail Error.TooLong
+            }
+            if room >= total {
+                // The chunks are no bigger than their headers say, so this can't happen.
+                fail Error.Corrupt
+            }
+            room = if room * 2 < total { room * 2 } else { total }
+            continue
+        }
+        if status == -2 and not bounded {
+            fail Error.Truncated
+        }
+        fail Error.Corrupt
+    }
+}
+
+// Whether the check at bytes[at..] matches out[start..]: CRC-32, CRC-64 or SHA-256. A check of
+// another kind isn't checked, as liblzma doesn't.
+fn check_matches(check: u8, out: List<u8>, start: usize, bytes: List<u8>, at: usize) -> bool {
+    let n = out.len() - start
+    if check == 1 {
+        return unsafe { cx_zlib_crc32(0, out.as_ptr().add(start), n) } == u32_le(bytes, at)
+    }
+    if check == 4 {
+        return unsafe { cx_xz_crc64(0, out.as_ptr().add(start), n) } == u64_le(bytes, at)
+    }
+    if check == 10 {
+        var ctx: List<u8> = [0; 224]
+        var digest: List<u8> = [0; 64]
+        unsafe {
+            cx_digest_start(ctx.as_mut_ptr(), 2)
+            cx_digest_add(ctx.as_mut_ptr(), out.as_ptr().add(start), n)
+            _ = cx_digest_finish(ctx.as_mut_ptr(), digest.as_mut_ptr())
+        }
+        for i in 0usize..32 {
+            if digest[i] != bytes[at + i] {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+// Reads the index at `p` and checks it lists the blocks as they were, and gives where it ends.
+fn index(bytes: List<u8>, p: usize, to: usize, sizes: List<u64>) -> usize ! Error {
+    let blocks = sizes.len() / 2
+    // What the blocks add up to, as the index's records must.
+    var want_size: u64 = 0
+    var want_made: u64 = 0
+    var want_list: u64 = 0
+    for i in 0..blocks {
+        want_size += (sizes[2 * i] + 3) & ~3u64
+        want_made += sizes[2 * i + 1]
+        want_list += vli_size(sizes[2 * i]) + vli_size(sizes[2 * i + 1])
+    }
+    let count = try vli_at(bytes, p + 1, to)
+    if count.value != u64(blocks) {
+        fail Error.Corrupt
+    }
+    var q = count.next
+    var got_size: u64 = 0
+    var got_made: u64 = 0
+    var got_list: u64 = 0
+    var same = true
+    for i in 0..blocks {
+        let a = try vli_at(bytes, q, to)
+        if a.value < 5 or a.value > UNPADDED_MAX {
+            fail Error.Corrupt
+        }
+        let b = try vli_at(bytes, a.next, to)
+        q = b.next
+        got_size += (a.value + 3) & ~3u64
+        got_made += b.value
+        got_list += vli_size(a.value) + vli_size(b.value)
+        if got_size > want_size or got_made > want_made or got_list > want_list {
+            fail Error.Corrupt
+        }
+        if a.value != sizes[2 * i] or b.value != sizes[2 * i + 1] {
+            same = false
+        }
+    }
+    while (q - p) % 4 != 0 {
+        if q >= to {
+            fail Error.Truncated
+        }
+        if bytes[q] != 0 {
+            fail Error.Corrupt
+        }
+        q += 1
+    }
+    if not same or got_size != want_size or got_made != want_made or got_list != want_list {
+        fail Error.Corrupt
+    }
+    // The CRC-32, a byte at a time, as liblzma reads it.
+    let crc = crc32(bytes, p, q)
+    for k in 0usize..4 {
+        if q + k >= to {
+            fail Error.Truncated
+        }
+        if u32(bytes[q + k]) != (crc >> (8 * k)) & 0xFF {
+            fail Error.Corrupt
+        }
+    }
+    return q + 4
+}
+
+// A variable-length integer: seven bits a byte, least significant first, with the top bit set on
+// all but the last.
+struct Vli {
+    value: u64
+    next: usize
+    // 0, 1 for one that's malformed, or 2 for one that runs past the end.
+    status: u8
+}
+
+fn vli(bytes: List<u8>, at: usize, end: usize) -> Vli {
+    var value: u64 = 0
+    var i = at
+    var k: u64 = 0
+    loop {
+        if i >= end {
+            return Vli { value: value, next: i, status: 2 }
+        }
+        let b = bytes[i]
+        i += 1
+        value |= u64(b & 0x7F) << (7 * k)
+        k += 1
+        if b & 0x80 == 0 {
+            // The shortest form only.
+            if b == 0 and k > 1 {
+                return Vli { value: value, next: i, status: 1 }
+            }
+            return Vli { value: value, next: i, status: 0 }
+        }
+        if k == 9 {
+            return Vli { value: value, next: i, status: 1 }
+        }
+    }
+}
+
+// One in a block header, which ends at `end`: anything wrong with it is corrupt.
+fn vli_in(bytes: List<u8>, at: usize, end: usize) -> Vli ! Error {
+    let v = vli(bytes, at, end)
+    if v.status != 0 {
+        fail Error.Corrupt
+    }
+    return v
+}
+
+// One in the index, which may run past the end of the data, and then it's cut short.
+fn vli_at(bytes: List<u8>, at: usize, to: usize) -> Vli ! Error {
+    let v = vli(bytes, at, to)
+    if v.status == 1 {
+        fail Error.Corrupt
+    }
+    if v.status == 2 {
+        fail Error.Truncated
+    }
+    return v
+}
+
+fn vli_size(v: u64) -> u64 {
+    var n: u64 = 1
+    var x = v >> 7
+    while x != 0 {
+        n += 1
+        x >>= 7
+    }
+    return n
+}
+
+// --- .lzma -------------------------------------------------------------------------------------
+
+// A .lzma file: a properties byte, the dictionary size and the size, then LZMA data. `picky` is
+// liblzma's auto decoder, which takes only the dictionary sizes LZMA's tools write, and sizes
+// under 256 GiB, as so much else could pass for a header.
+fn alone(bytes: List<u8>, at: usize, to: usize, picky: bool, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    let n = to - at
+    if n < 1 {
+        fail Error.Truncated
+    }
+    let props = u32(bytes[at])
+    if props > 224 or props % 9 + props / 9 % 5 > 4 {
+        fail Error.Format
+    }
+    if n < 5 {
+        fail Error.Truncated
+    }
+    let dict = u32_le(bytes, at + 1)
+    if picky and dict != 4294967295 {
+        // 2^n or 2^n + 2^(n-1), as liblzma tells them.
+        var d = dict.wrapping_sub(1)
+        d |= d >> 2
+        d |= d >> 3
+        d |= d >> 4
+        d |= d >> 8
+        d |= d >> 16
+        if d.wrapping_add(1) != dict {
+            fail Error.Format
+        }
+    }
+    if n < 13 {
+        fail Error.Truncated
+    }
+    let size = u64_le(bytes, at + 5)
+    if picky and size != UNKNOWN and size >= 274877906944 {
+        fail Error.Format
+    }
+    return try lzma1(bytes, at + 13, to, props, dict, size, cap, mut ctx, mut out)
+}
+
+// A .lz file's member, as liblzma reads one since xz 5.4: `LZIP`, a version, the dictionary size,
+// LZMA data with an end marker, then the CRC-32 and size of what it holds, and for version 1 the
+// member's own size.
+fn lzip(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    let magic: List<u8> = [0x4C, 0x5A, 0x49, 0x50]
+    for k in 0usize..4 {
+        if at + k >= to {
+            fail Error.Truncated
+        }
+        if bytes[at + k] != magic[k] {
+            fail Error.Format
+        }
+    }
+    if to - at < 5 {
+        fail Error.Truncated
+    }
+    let version = bytes[at + 4]
+    if version > 1 {
+        fail Error.Options
+    }
+    if to - at < 6 {
+        fail Error.Truncated
+    }
+    // A power of two from 4 KiB to 512 MiB, less up to seven sixteenths of it.
+    let ds = u32(bytes[at + 5])
+    let log = ds & 0x1F
+    let frac = ds >> 5
+    if log < 12 or log > 29 or (log == 12 and frac > 0) {
+        fail Error.Corrupt
+    }
+    let dict = (1u32 << log) - (frac << (log - 4))
+    let start = out.len()
+    // lc 3, lp 0, pb 2.
+    let end = try lzma1(bytes, at + 6, to, 93, dict, UNKNOWN, cap, mut ctx, mut out)
+    let size: usize = if version == 0 { 12 } else { 20 }
+    if to - end < size {
+        fail Error.Truncated
+    }
+    let made = out.len() - start
+    if unsafe { cx_zlib_crc32(0, out.as_ptr().add(start), made) } != u32_le(bytes, end) {
+        fail Error.Checksum
+    }
+    if u64_le(bytes, end + 4) != u64(made) or (version == 1 and u64_le(bytes, end + 12) != u64(end + 20 - at)) {
+        fail Error.Corrupt
+    }
+    return end + size
+}
+
+// Decodes the LZMA data at bytes[data..to) onto `out`, with the properties byte, the dictionary
+// size, and the size the header gave, if it did, and gives where the data ends.
+fn lzma1(bytes: List<u8>, data: usize, to: usize, props: u32, dict: u32, size: u64, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    let len = to - data
+    unsafe {
+        _ = cx_xz_lzma1_start(ctx.as_mut_ptr(), props, u64(dict), size, out.len())
+    }
+    // Room for what the header says, unless it's more than data like this makes, or for a guess.
+    let guess = u64(len) * 8 + 65536
+    var room: u64 = if size < guess { size } else { guess }
+    loop {
+        let left = cap - u64(out.len())
+        if room > left {
+            room = left
+        }
+        out.reserve(usize.wrap(room))
+        let status = unsafe { cx_xz_lzma1(ctx.as_mut_ptr(), bytes.as_ptr().add(data), len, out.as_mut_ptr(), out.len() + usize.wrap(room)) }
+        unsafe {
+            out.set_len(cx_xz_len(ctx.as_ptr()))
+        }
+        if status == 0 {
+            return data + unsafe { cx_xz_used(ctx.as_ptr()) }
+        }
+        if status == 1 {
+            if room == left {
+                fail Error.TooLong
+            }
+            room = room * 2 + 4096
+            continue
+        }
+        if status == -2 {
+            fail Error.Truncated
+        }
+        fail Error.Corrupt
+    }
+}
+
+// --- bytes -------------------------------------------------------------------------------------
+
+fn crc32(bytes: List<u8>, from: usize, to: usize) -> u32 {
+    return unsafe { cx_zlib_crc32(0, bytes.as_ptr().add(from), to - from) }
+}

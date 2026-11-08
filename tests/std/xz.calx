@@ -1,0 +1,146 @@
+// std.xz reads what Python 3.14's lzma.decompress reads, with liblzma 5.8.3, and fails where it
+// fails. The hex below is Python's lzma.compress's or xz 5.8.3's, and so is each outcome, but
+// that a wrong check is `checksum mismatch` where Python says only that the data is corrupt.
+
+import std.xz.{Error, Format, crc64, decompress, decompress_into, is_xz}
+import std.tar.{Tar}
+
+fn nibble(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn unhex(s: str) -> List<u8> {
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < s.len() {
+        out.push(nibble(s.byte_at(i)) * 16 + nibble(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn text(bytes: own List<u8>) -> String {
+    return String.from_utf8(bytes) ?? "not UTF-8"
+}
+
+fn outcome(bytes: List<u8>, format: Format = Format.Auto, limit: u64 = u64.MAX) -> String {
+    return match decompress(bytes, format, limit) {
+        ok(b) => if b.len() < 40 { "ok {text(b).trim_end()}" } else { "ok {b.len()} bytes" },
+        err(e) => "{e}",
+    }
+}
+
+fn joined(a: List<u8>, b: List<u8>) -> List<u8> {
+    var out = a.copy()
+    for x in b {
+        out.push(x)
+    }
+    return out
+}
+
+fn main() {
+    // `lzma.compress(b"hello, xz\n")`, with a CRC-64.
+    let hello = unhex("fd377a585a000004e6d6b4460200210116000000742fe5a301000968656c6c6f2c20787a0a000000eb12b68bfc71df280001220a151ae1671fb6f37d010000000004595a")
+    println(outcome(hello))    // out: ok hello, xz
+    println("{is_xz(hello)} {is_xz([0xfdu8, 0x37])} {is_xz("hello".to_bytes())}")    // out: true false false
+
+    // A .lzma file, and a .lz file with a version 1 member.
+    let alone = unhex("5d00008000ffffffffffffffff00341949ee8def8c6a5793f0c06f15ceabfffedf3800")
+    println(outcome(alone))    // out: ok hello, lzma
+    println(outcome(unhex("4c5a4950011000341949ee8def8c6a5793bb880809717dffff07300000972e52d30c000000000000003100000000000000")))    // out: ok hello, lzip
+
+    // No check, CRC-32 and SHA-256.
+    println(outcome(unhex("fd377a585a000000ff12d9410200210116000000742fe5a3010007636865636b65640a000001180840a546ac06729e7a010000000000595a")))    // out: ok checked
+    println(outcome(unhex("fd377a585a0000016922de360200210116000000742fe5a3010007636865636b65640a00b3d7cb4600011c0844602ac89042990d010000000001595a")))    // out: ok checked
+    let sha = unhex("fd377a585a00000ae1fb0ca10200210116000000742fe5a3010007636865636b65640a0077c2ca150b61c7330da139378ffd3940d093f1bd74a1294689345d27e15b512400013808e281c239189b4b9a01000000000a595a")
+    println(outcome(sha.copy()))    // out: ok checked
+    var bad_sha = sha.copy()
+    bad_sha[50] = bad_sha[50] ^ 1
+    println(outcome(bad_sha))    // out: checksum mismatch
+
+    // Delta, then x86 calls, then LZMA2: 40 calls and a `ret`, the calls' targets made absolute.
+    let chain = decompress(unhex("fd377a585a000004e6d6b446030203010104002101160000809838cce0011a00835d0074013ee80c6291394e737327a1b45f801d8c4c807c28f9f5982d37897e96aead764339f814422b81d16024af64a7957fa535f6d748f656bc55d445d10ed740b73ed54537101822ffa86560c1452cd469b425f68c54a2818431fabaf7cf775598a681659e5993f3e6a83b0894232fba04525dd3e193b2288190db3fe67162f4b21f00000000d25e0b2757f58e260001a3019b020000e62c7808b1c467fb020000000004595a"))!
+    var calls: List<u8> = []
+    for i in 0..40 {
+        for b in [0xe8u8, u8.wrap(i), 0, 0, 0, 0x90, 0x90] {
+            calls.push(b)
+        }
+    }
+    for b in "ret".to_bytes() {
+        calls.push(b)
+    }
+    println("{chain.len()} {chain == calls}")    // out: 283 true
+
+    // `xz -T4 --block-size=1000`: six blocks with both sizes in their headers, decoded at once.
+    let blocks = unhex("fd377a585a000004e6d6b44603c075e8072101160000000076df9f7be003e7006d5d00361a4a1f08a026564e0d6cb8a5ed639c8e7cdb4ef69e4b7818565cf71f3076d68a4e6e079d3caf701c64dbfc9a18571cfc220a143792e1f6890994eb137e0e2bccdee46eacb1572f5c2d1f7a4f5260827139f7b63793180871e4db80bbe5bd61fe57e3a8da499841486ddc230000000000b4d63009d736bf8b03c074e8072101160000000048b45d94e003e7006c5d00101989e7b8574c617fa0d713aeef3f47a7ab95a9bd77ce2cdc2929676b29d6f819c6bfac38cf98f5fc8a5d6c0f3b72e0e3c1ca671d47ab1ca79a9480d1be853c5229a31f9b774ea45c73e7d3f1943cf58df896ee02449fcd8cf136ed37415bab34760ebb71d436376ed71100005449258dfe514b6903c073e8072101160000000031af8176e003e7006b5d003a1a08ce76c7e5e9d60734c3d10ebfce55e1aabddbf1c6717f6e16cc571d8893c3c3f5837db96a453c73702c7ef217b0e6809015f551fad4e2c03c7170d282ddcec15b4406ac62441edaeaf2619d0112b4f75e28d9c309a87711943993c150cb22a4cd611f5bc1ca2d53900000ff82c2a9ce64438e03c071e807210116000000000c7f7472e003e700695d00311c8a2347fb3a878736f16b8ef301b2a95d59c19eb81ace2b491bc96df990e289400da3b545e1633521fc945085ad3ac710422d949fd16130490eaeb0de7a14e825968a9e21fe3f8e9335c5e2e5c96c2c486c8014dc75249398213283819a891cc7f015f59d8fae000000000000c6dfef2df9e87c03c073e8072101160000000031af8176e003e7006b5d00361a4a1f08a02bed90b2495186bcf99d13a4493bdff93757547006bc3366ce8521948112bde55c0681c2050743d61ca806d2f1d8b024b1c13ba17709c2e650c33fe39682022a84b869f98b2bdc15396465b1d0ae5a7c0f5b04fb77b450d1e1005082c92e3bc9f29bf3ac0000005fdd120b95a9bff603c069fa062101160000000079d49108e0037900615d003a1a08ce76c7e5e9d60734c3d10ebfce55e1aabddbf1c6717f6e14e8db17c8c5d78139a971cabb076de59c7000e10b51eeebe7aa87c12879e7568266903caf846e28ff0ed3c587b4afff9e2765603488955dd735ef51859abcca5e98e81c1b2c00000000000ebc5862e956934c00068d01e8078c01e8078b01e8078901e8078b01e8078101fa060000952576930255aaab070000000004595a")
+    var lines = String()
+    for i in 0..200 {
+        lines.push_str("line {i}: the quick brown fox\n")
+    }
+    let back = decompress(blocks.copy())!
+    println("{back.len()} {back == lines.to_bytes()}")    // out: 5890 true
+    // A block broken in the middle is found and failed as one at a time would fail it.
+    var broken = blocks.copy()
+    broken[400] = broken[400] ^ 0x10
+    println(outcome(broken))    // out: corrupt data
+    var cut_blocks = blocks.copy()
+    cut_blocks.truncate(600)
+    println(outcome(cut_blocks.copy()))    // out: the data ends early
+
+    // Streams one after another; padding after one, in fours, is the start of a stream cut short,
+    // and anything else after one is left.
+    let both = decompress(joined(hello, alone))!
+    println("{both.len()} {both[9]} {both[21]}")    // out: 22 10 10
+    println("{decompress(joined(hello, hello))!.len()}")    // out: 20
+    println(outcome(joined(hello, [0u8, 0, 0, 0])))    // out: the data ends early
+    println(outcome(joined(hello, "garbage!".to_bytes())))    // out: ok hello, xz
+
+    // Broken files, failing as Python's do.
+    println(outcome("not xz".to_bytes()))    // out: not an .xz or .lzma file
+    println(outcome([]))    // out: the data ends early
+    println(outcome(unhex("fd377a585a0000109b026e5c")))    // out: a filter or setting that isn't supported
+    var cut = hello.copy()
+    cut.truncate(hello.len() - 3)
+    println(outcome(cut))    // out: the data ends early
+    var bad_check = hello.copy()
+    bad_check[40] = bad_check[40] ^ 1
+    println(outcome(bad_check))    // out: checksum mismatch
+    var bad_chunk = hello.copy()
+    bad_chunk[24] = 3
+    println(outcome(bad_chunk))    // out: corrupt data
+    var bad_header = hello.copy()
+    bad_header[13] = 0x22
+    println(outcome(bad_header))    // out: corrupt data
+
+    // Only one format, and a limit.
+    println(outcome(alone.copy(), Format.Xz))    // out: not an .xz or .lzma file
+    println(outcome(hello.copy(), Format.Alone))    // out: not an .xz or .lzma file
+    println(outcome(alone.copy(), Format.Alone))    // out: ok hello, lzma
+    println(outcome(hello.copy(), Format.Auto, 9))    // out: longer than the limit when decompressed
+    println(outcome(hello.copy(), Format.Auto, 10))    // out: ok hello, xz
+    match decompress(hello.copy(), Format.Auto, 3) {
+        ok(_) => println("ok"),
+        err(Error.TooLong) => println("too long"),    // out: too long
+        err(e) => println("{e}"),
+    }
+
+    // Part of a list, onto the end of another, which is as it was after an error.
+    let region = joined([7u8, 7], joined(hello, [7u8]))
+    var out = "> ".to_bytes()
+    decompress_into(region, 2, region.len() - 1, Format.Auto, u64.MAX, mut out)!
+    print(text(out.copy()))    // out: > hello, xz
+    match decompress_into(region, 0, region.len(), Format.Auto, u64.MAX, mut out) {
+        ok => println("ok"),
+        err(e) => println("{e} {out.len()}"),    // out: not an .xz or .lzma file 12
+    }
+
+    println("{crc64("123456789".to_bytes()) == 0x995dc9bbdf1939fa} {crc64([])}")    // out: true 0
+
+    // std.tar opens a .tar.xz: one file, notes/a.txt, from Python's tarfile.
+    let tar = Tar.open(unhex("fd377a585a000004e6d6b4460200210116000000742fe5a3e027ff00695d00371bcaeee65b2ec059340dfc3c84e374715f3a237e0b351195121d9075796f2349e63a45447816d7de4d866fdcfbe8e39c7e11a6ad230f372bd214489a3bf90f2caa07dd089fe4aabcb8d82e199726633cd8689dc19d6246943003ae072e28cc0103a75dee03535500000000004263f8bd59ecbf9100018501805000008de0ad31b1c467fb020000000004595a"))!
+    print("{tar.len()} {tar.name(0)} {text(tar.read_named("notes/a.txt")!)}")    // out: 1 notes/a.txt hi
+    match Tar.open(cut_blocks) {
+        ok(_) => println("opened"),
+        err(e) => println(e),    // out: the xz stream is broken: the data ends early
+    }
+}

@@ -1,11 +1,11 @@
 ---
 title: std.tar
-description: Tar archives, plain or gzipped, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
+description: Tar archives, plain, gzipped or xz'd, read and written in memory - ustar, GNU long names and pax headers, links, modes, and extracting that no path can climb out of.
 ---
 
 # `std.tar`
 
-Tar archives, plain or gzipped, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
+Tar archives, plain, gzipped or xz'd, read from memory and written to it. It reads what GNU tar and bsdtar write: POSIX ustar, GNU's long names, and pax headers. Calx's updater reads its Linux releases with it.
 
 ```calx
 import std.tar.{Kind, Tar, Writer}
@@ -33,7 +33,7 @@ fn main() {
 
 | Item | Gives |
 | --- | --- |
-| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, so a `.tar.gz` opens the same way |
+| `Tar.open(bytes: own List<u8>) -> Tar ! String` | The archive, or why it can't be read. Gzipped bytes, which start `1f 8b`, are inflated first, and xz'd bytes are decompressed with [`std.xz`](xz.md), so a `.tar.gz` or a `.tar.xz` opens the same way |
 | `t.entries() -> List<Entry>` | Its entries, in order |
 | `t.len() -> usize`, `t.name(i: usize) -> String` | How many there are, and the path of one |
 | `t.find(name: String) -> usize?` | The index of the entry at `name`. A later entry of the same name wins, as it does when tar extracts |

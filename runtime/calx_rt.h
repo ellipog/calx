@@ -830,6 +830,33 @@ CX_FN(void, cx_log_write, (const cx_u8* p, cx_usize n));
 CX_FN(cx_i64, cx_log_start_ms, (cx_i64 now));
 CX_FN(cx_u32, cx_log_pid, (void));
 
+/* LZMA and LZMA2, the xz branch filters and CRC-64, in calx_xz.c, behind std.xz (CLX-173). A
+ * decoder's context is CX_XZ_CTX bytes, aligned as cx_alloc aligns. The decoders write no further
+ * than `cap`, give 0 at the end, 1 when they need more room, -1 for corrupt data, and -2 when the
+ * data ends early, and carry on from where they stopped when called again with more room.
+ * `cx_xz_len` is how far the output got, and `cx_xz_used` how many bytes of the input were taken.
+ *
+ * `cx_xz_lzma2_size` reads an LZMA2 stream's chunk headers for the size of what it decodes to, and
+ * where it ends, into info[0] and info[1]. `cx_xz_lzma2_start` sets an LZMA2 decoder up with the
+ * dictionary size its filter's properties give, to write from out[start], and
+ * `cx_xz_lzma1_start` sets a .lzma file's decoder up from its header. */
+#define CX_XZ_CTX 28672
+CX_FN(cx_i32, cx_xz_lzma2_size, (const cx_u8* in, cx_usize n, cx_u64* info));
+CX_FN(void, cx_xz_lzma2_start, (cx_u8* ctx, cx_u64 dict, cx_usize start));
+CX_FN(cx_i32, cx_xz_lzma2, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize cap));
+CX_FN(cx_i32, cx_xz_lzma1_start, (cx_u8* ctx, cx_u32 props, cx_u64 dict, cx_u64 size, cx_usize start));
+CX_FN(cx_i32, cx_xz_lzma1, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize cap));
+CX_FN(cx_usize, cx_xz_len, (const cx_u8* ctx));
+CX_FN(cx_usize, cx_xz_used, (const cx_u8* ctx));
+CX_FN(void, cx_xz_delta, (cx_u8* buf, cx_usize n, cx_u32 dist));
+CX_FN(cx_i32, cx_xz_bcj, (cx_u32 id, cx_u8* buf, cx_usize n, cx_u32 start));
+CX_FN(cx_u64, cx_xz_crc64, (cx_u64 crc, const cx_u8* p, cx_usize n));
+/* Decodes blocks whose headers gave both sizes at once, on `parallel for`'s threads, each
+ * CX_XZ_BLOCK numbers in `desc`, as calx_xz.c says, and sets ok[k] to whether block k decoded to
+ * its size, with its padding and check right. */
+#define CX_XZ_BLOCK 14
+CX_FN(void, cx_xz_blocks, (const cx_u8* in, const cx_u64* desc, cx_usize n, cx_u8* out, cx_u8* ok));
+
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's
  * extended result code and a copy of its message in the connection, for `cx_sqlite_error_code`,
