@@ -71,6 +71,8 @@ The first run builds Calx's runtime as well as the program, which takes a moment
 
 If it says it can't find clang, put clang on your PATH, or set `CALX_CC` to its full path.
 
+`calx new hello` starts a program of your own: a folder `hello` with `hello.calx`, which reads its arguments and has a test, and a `.gitignore` ([starting a program](../reference/command.md#starting-a-program)).
+
 ## Staying up to date
 
 ```sh

@@ -14,6 +14,7 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | Python | Calx |
 | --- | --- |
 | `python tool.py a b` | `calx tool.calx a b`, or `calx run tool.calx -- a b` |
+| `uv init tool` | `calx new tool`, a folder with `tool.calx` and a `.gitignore`, or `calx new tool.calx` for one script ([starting a program](../reference/command.md#starting-a-program)) |
 | `python -c "print(2 ** 20)"` | `calx eval "1 << 20"`, which prints the last statement's value ([running code](../reference/command.md#running-code-from-the-command-line)) |
 | `#!/usr/bin/env python3` | `#!/usr/bin/env calx` ([running a file](../reference/command.md#running-a-file)) |
 | `if __name__ == "__main__":` | `fn main()`, where the program starts |

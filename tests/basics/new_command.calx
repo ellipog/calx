@@ -1,0 +1,75 @@
+// `calx new` starts a program (CLX-86): `calx new NAME` makes a folder with NAME.calx and a
+// .gitignore, `calx new NAME.calx` one script, and `calx new .` one in the current folder, named
+// after it. What it makes then runs, tests and builds as it says, and it never overwrites.
+import std.env.{os, variable}
+import std.fs.{exists, make_dir_all, metadata, read_text, temp_dir, write_text, remove_dir_all, separator}
+import std.process.{Command}
+
+// What a calx printed, run in `dir`, with backslashes as slashes, and how it ended.
+fn calx(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".replace("\\", "/")
+            return "{text.trim_end()} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+
+    // A folder, with a program that greets its arguments and has a test.
+    println(calx(exe, ["new", "hello"], dir.copy()))
+    // out: Made hello, with hello.calx and a .gitignore. Run it with:
+    // out:
+    // out:     cd hello
+    // out:     calx hello.calx
+    // out:
+    // out: `calx test hello.calx` runs its tests, and `calx build --release hello.calx` builds it. [exited with status 0]
+    let hello = "{dir}{s}hello"
+    print(read_text("{hello}{s}.gitignore")! ?? String())
+    // out: # What `calx build` makes
+    // out: /hello
+    // out: /hello.exe
+    // out: /hello.pdb
+    println(calx(exe, ["hello.calx"], hello.copy()))    // out: Hello, world! [exited with status 0]
+    println(calx(exe, ["hello.calx", "Ada", "Grace"], hello.copy()))
+    // out: Hello, Ada!
+    // out: Hello, Grace! [exited with status 0]
+    println(calx(exe, ["test", "hello.calx"], hello.copy()).lines()[0])    // out: ok    greets_by_name
+
+    // Again, it overwrites nothing.
+    println(calx(exe, ["new", "hello"], dir.copy()))    // out: calx new: hello/hello.calx is there already, so nothing was changed [exited with status 1]
+
+    // One script, in a folder it makes, with a `#!` line, which runs it by name on Linux.
+    let said = calx(exe, ["new", "tools/tidy.calx"], dir.copy())
+    println(said.lines()[0].split(" Run it")[0])    // out: Made tools/tidy.calx.
+    let tidy = "{dir}{s}tools{s}tidy.calx"
+    println((read_text(tidy)! ?? String()).lines()[0])    // out: #!/usr/bin/env calx
+    println(calx(exe, ["tools/tidy.calx", "Lin"], dir.copy()))    // out: Hello, Lin! [exited with status 0]
+    let runs = os() == "windows" or (metadata(tidy)!.mode & 0o111) == 0o111
+    println("{runs}")    // out: true
+
+    // `.` is the folder it runs in, named after it, with what a shell would quote as `-`; a
+    // .gitignore that's there is kept.
+    let mine = "{dir}{s}my stuff"
+    make_dir_all(mine)!
+    write_text("{mine}{s}.gitignore", "notes.txt\n")!
+    println(calx(exe, ["new", "."], mine.copy()))
+    // out: Made a program here, with my-stuff.calx, and kept the .gitignore that was there. Run it with:
+    // out:
+    // out:     calx my-stuff.calx
+    // out:
+    // out: `calx test my-stuff.calx` runs its tests, and `calx build --release my-stuff.calx` builds it. [exited with status 0]
+    print(read_text("{mine}{s}.gitignore")! ?? String())    // out: notes.txt
+    println("{exists("{mine}{s}my-stuff.calx")}")    // out: true
+
+    // What it refuses.
+    println(calx(exe, ["new"], dir.copy()))    // out: calx new: name the program: `calx new hello` makes hello/hello.calx, and `calx new tidy.calx` one script [exited with status 2]
+    println(calx(exe, ["new", "a", "b"], dir.copy()))    // out: calx new: name the program: `calx new hello` makes hello/hello.calx, and `calx new tidy.calx` one script [exited with status 2]
+    println(calx(exe, ["new", "tools/tidy.calx/x.calx"], dir.copy()))    // out: calx new: tools/tidy.calx is a file, not a folder [exited with status 1]
+    remove_dir_all(dir)!
+}

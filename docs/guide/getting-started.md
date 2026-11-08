@@ -44,6 +44,7 @@ calx run hello.calx
 - `calx hello.calx` is the same, for short, and gives the program any arguments after the file, as `python hello.py` does. With `#!/usr/bin/env calx` as its first line, a program runs by its own name on Linux and macOS, as a script does ([running a file](../reference/command.md#running-a-file)).
 - `calx check hello.calx` checks it without building, which is what an editor does as you type ([editor support](../reference/editors.md)).
 - `calx build --release hello.calx` builds an optimized executable, `hello` or `hello.exe`.
+- `calx new tool` starts a program of your own: a folder `tool` with `tool.calx`, which reads its arguments and has a test, and a `.gitignore` ([starting a program](../reference/command.md#starting-a-program)).
 
 The `// out:` comments show what a line prints. They're also how the guide is tested: every example on these pages is compiled and run by Calx's test suite, which compares what it prints with the comments.
 

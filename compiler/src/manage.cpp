@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -295,6 +296,7 @@ struct Command {
 // The commands, as `calx help` lists them, for the completions. No description has a `'`, which
 // would end the quotes each shell's script puts it in.
 const Command kCommands[] = {
+    {"new", "start a program"},
     {"check", "check a program without building it"},
     {"build", "build a program"},
     {"run", "build a program and run it"},
@@ -429,7 +431,128 @@ std::string powershell() {
            "}\n";
 }
 
+// The program `calx new` starts: it greets its arguments, and has a test, so `calx NAME.calx`,
+// `calx test NAME.calx` and `calx build NAME.calx` each do something the first time.
+std::string starter(const std::string& name, bool script) {
+    return std::string(script ? "#!/usr/bin/env calx\n" : "") + "// " + name +
+           ": say here what it does.\n"
+           "import std.env.{args}\n"
+           "\n"
+           "fn greeting(name: String) -> String {\n"
+           "    return \"Hello, {name}!\"\n"
+           "}\n"
+           "\n"
+           "fn main() {\n"
+           "    let names = args()\n"
+           "    if names.is_empty() {\n"
+           "        println(greeting(\"world\"))\n"
+           "    }\n"
+           "    for name in names {\n"
+           "        println(greeting(name))\n"
+           "    }\n"
+           "}\n"
+           "\n"
+           "// `calx test " + name + ".calx` runs each @test function in a process of its own.\n"
+           "@test\n"
+           "fn greets_by_name() {\n"
+           "    assert(greeting(\"Ada\") == \"Hello, Ada!\")\n"
+           "}\n";
+}
+
+// A program's name from a folder's or a file's: letters, digits, `-`, `_` and `.`, with anything
+// else, which a shell would want quoted, as `-`. Bytes past ASCII are letters of some language.
+std::string program_name(const std::string& from) {
+    std::string out;
+    for (char c : from) {
+        unsigned char u = static_cast<unsigned char>(c);
+        bool fine = u >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                    c == '-' || c == '_' || c == '.';
+        out += fine ? c : '-';
+    }
+    return out;
+}
+
+// A path as a shell takes it: in quotes if it has anything a shell would split or expand.
+std::string shell_word(const std::string& path) {
+    for (char c : path) {
+        if (program_name(std::string(1, c)) == "-" && c != '-' && c != '/' && c != '\\' && c != ':') return "\"" + path + "\"";
+    }
+    return path;
+}
+
+bool write_new(const fs::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+    out.close();
+    if (!out) {
+        std::fprintf(stderr, "calx new: couldn't write %s\n", path.string().c_str());
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
+
+int run_new(const std::vector<std::string>& args) {
+    if (args.size() != 1 || args[0].empty() || args[0][0] == '-') {
+        std::fprintf(stderr,
+                     "calx new: name the program: `calx new hello` makes hello/hello.calx, and `calx new tidy.calx` "
+                     "one script\n");
+        return 2;
+    }
+    std::string given = args[0];
+    while (given.size() > 1 && (given.back() == '/' || given.back() == '\\')) given.pop_back();
+    fs::path path(given);
+    std::error_code ec;
+    bool script = path.extension() == ".calx";
+    fs::path dir = script ? path.parent_path() : path;
+    // `.` and `..` have no name of their own, so the program takes the folder's.
+    fs::path named = fs::absolute(script ? path : dir, ec).lexically_normal();
+    while (!named.empty() && named.filename().empty()) named = named.parent_path();
+    std::string name = program_name(script ? named.stem().string() : named.filename().string());
+    if (name.empty() || name == "." || name == "..") {
+        std::fprintf(stderr, "calx new: %s has no name for the program to take; give one, as `calx new hello`\n", given.c_str());
+        return 2;
+    }
+    fs::path main = script ? path : dir / (name + ".calx");
+    if (fs::exists(main, ec)) {
+        std::fprintf(stderr, "calx new: %s is there already, so nothing was changed\n", main.string().c_str());
+        return 1;
+    }
+    if (!dir.empty() && fs::exists(dir, ec) && !fs::is_directory(dir, ec)) {
+        std::fprintf(stderr, "calx new: %s is a file, not a folder\n", dir.string().c_str());
+        return 1;
+    }
+    if (!dir.empty()) {
+        fs::create_directories(dir, ec);
+        if (ec) {
+            std::fprintf(stderr, "calx new: couldn't make %s: %s\n", dir.string().c_str(), ec.message().c_str());
+            return 1;
+        }
+    }
+    if (!write_new(main, starter(name, script))) return 1;
+    if (script) {
+#ifndef _WIN32
+        // So `./tidy.calx` runs it, through its `#!` line.
+        fs::permissions(main, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec, fs::perm_options::add, ec);
+        std::string run = path.is_absolute() || given.rfind("./", 0) == 0 || given.rfind("../", 0) == 0 ? given : "./" + given;
+        std::printf("Made %s. Run it with `calx %s`, or `%s`.\n", given.c_str(), shell_word(given).c_str(), shell_word(run).c_str());
+#else
+        std::printf("Made %s. Run it with `calx %s`.\n", given.c_str(), shell_word(given).c_str());
+#endif
+        return 0;
+    }
+    fs::path ignore = dir / ".gitignore";
+    bool kept = fs::exists(ignore, ec);
+    if (!kept && !write_new(ignore, "# What `calx build` makes\n/" + name + "\n/" + name + ".exe\n/" + name + ".pdb\n")) return 1;
+    bool here = fs::equivalent(dir, fs::current_path(ec), ec);
+    std::printf("Made %s, with %s.calx%s. Run it with:\n\n", here ? "a program here" : given.c_str(), name.c_str(),
+                kept ? ", and kept the .gitignore that was there" : " and a .gitignore");
+    if (!here) std::printf("    cd %s\n", shell_word(given).c_str());
+    std::printf("    calx %s.calx\n\n", name.c_str());
+    std::printf("`calx test %s.calx` runs its tests, and `calx build --release %s.calx` builds it.\n", name.c_str(), name.c_str());
+    return 0;
+}
 
 int run_completions(const std::vector<std::string>& args) {
     std::string shell = args.size() == 1 ? args[0] : "";

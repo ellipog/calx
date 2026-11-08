@@ -1,4 +1,5 @@
-// `calx clean`, `calx uninstall` and `calx completions`: managing Calx itself (CLX-85).
+// `calx clean`, `calx uninstall` and `calx completions`, for managing Calx itself (CLX-85), and
+// `calx new`, for starting a program (CLX-86).
 #pragma once
 
 #include <string>
@@ -16,5 +17,10 @@ int run_uninstall(const std::vector<std::string>& args);
 
 // `calx completions SHELL`: prints a completion script for bash, zsh, fish or PowerShell.
 int run_completions(const std::vector<std::string>& args);
+
+// `calx new NAME`: makes the folder NAME, or uses it, with a program NAME.calx in it and a
+// .gitignore for what `calx build` makes. `calx new NAME.calx` makes one script. Never overwrites
+// a program; returns the exit status.
+int run_new(const std::vector<std::string>& args);
 
 }  // namespace calx

@@ -1,11 +1,12 @@
 ---
 title: The calx command
-description: Checking, building, running and testing Calx programs, running code from the command line, the build modes, and the object cache.
+description: Starting, checking, building, running and testing Calx programs, running code from the command line, the build modes, and the object cache.
 ---
 
 # The `calx` command
 
 ```sh
+calx new hello                 # start a program: hello/hello.calx, with a test
 calx check hello.calx          # check without building
 calx run hello.calx            # build in debug mode and run
 calx run hello.calx -- a b     # arguments after -- go to the program
@@ -41,6 +42,25 @@ Before it checks a program, each command runs the [attributes](attributes.md) th
 | `--no-line` | Leave `#line` directives out of the C |
 | `--json` | Print errors as JSON lines on standard output, [for editors](#errors-for-editors) |
 | `--stdin` | Read the file's text from standard input, with the path naming it |
+
+## Starting a program
+
+```sh
+calx new hello        # a folder hello, with hello.calx and a .gitignore
+calx new tidy.calx    # one script
+calx new .            # a program in this folder, named after it
+```
+
+`calx new hello` makes the folder `hello`, or uses it if it's there, and puts two files in it:
+
+- `hello.calx`, a program that greets each of its arguments, or the world when it has none, with a `@test` for its one function. So `calx hello.calx Ada`, [`calx test hello.calx`](#testing) and `calx build hello.calx` each work at once, and the file shows the shape of a program to change into yours.
+- `.gitignore`, which leaves out what `calx build` makes: `hello` on Linux, and `hello.exe` and `hello.pdb` on Windows. A `.gitignore` that's there is kept as it is.
+
+The program is named after the folder, so `calx build` names the executable after it too. A character a shell would want quoted, such as a space, becomes `-` in the program's name: `calx new .` in a folder `my stuff` makes `my-stuff.calx`. `calx new` makes no repository, since the folder may be in one already; `git init` makes one.
+
+A name ending in `.calx` makes just that file, starting with a `#!/usr/bin/env calx` line, and on Linux it's executable, so `./tidy.calx` runs it. Folders on the way are made.
+
+`calx new` never overwrites: if the program's file is there, it says so, changes nothing, and exits with status 1.
 
 ## Running a file
 

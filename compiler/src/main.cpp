@@ -56,6 +56,7 @@ int usage() {
         "       calx [options] <file.calx> [arguments]   run a program, giving it the arguments\n"
         "\n"
         "commands:\n"
+        "  new       start a program: calx new hello makes hello/hello.calx, calx new tidy.calx a script\n"
         "  check     check a program without building it\n"
         "  build     build a program (-o names the output)\n"
         "  run       build a program and run it; arguments after -- go to the program\n"
@@ -467,6 +468,7 @@ int main(int argc, char** argv) {
     if (opt.command == "clean") return run_clean(rest);
     if (opt.command == "uninstall") return run_uninstall(rest);
     if (opt.command == "completions") return run_completions(rest);
+    if (opt.command == "new") return run_new(rest);
     bool direct = !is_command(opt.command);
     if (direct) {
         if (int status = direct_run(argc, argv, opt)) return status;
