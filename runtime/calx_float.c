@@ -892,9 +892,10 @@ static int java_two_digits(cx_u64 c, int s, char* digits, int* e) {
     return 2;
 }
 
-/* The shortest digits of a positive finite float, from its bits, into digits, as Java chooses
- * them; their count, with *e the decimal exponent of the first. */
-static int shortest(cx_u64 bits, int is32, char* digits, int* e) {
+/* The shortest digits of a positive finite float, from its bits, into digits; their count, with
+ * *e the decimal exponent of the first. With java, a subnormal whose shortest is one digit gets the
+ * closest of one or two, as Java prints it; without, the one, as Rust and Python write it. */
+static int shortest(cx_u64 bits, int is32, int java, char* digits, int* e) {
     int num_sig_bits = is32 ? 23 : 52;
     int exp_offset = is32 ? 127 + 23 : 1023 + 52;
     cx_u64 implicit = (cx_u64)1 << num_sig_bits;
@@ -932,7 +933,7 @@ static int shortest(cx_u64 bits, int is32, char* digits, int* e) {
         while (n > 1 && digits[n - 1] == '0') n--;
     }
     *e = dec_exp;
-    if (n == 1 && raw_exp == 0) n = java_two_digits(bin_sig, exp_offset - 1, digits, e);
+    if (java && n == 1 && raw_exp == 0) n = java_two_digits(bin_sig, exp_offset - 1, digits, e);
     return n;
 }
 
@@ -959,7 +960,7 @@ static int java_text(cx_u64 bits, int is32, char* out) {
     }
     char d[24];
     int e;
-    int n = shortest(mag, is32, d, &e);
+    int n = shortest(mag, is32, 1, d, &e);
     if (e >= -3 && e < 7) {
         if (e < 0) {
             out[k++] = '0';
@@ -1302,12 +1303,12 @@ static void format_float(cx_u64 bits, int is32, cx_spec s) {
             n = 1;
             e = 0;
         } else if (s.precision < 0) {
-            n = shortest(mag, is32, d, &e);
+            n = shortest(mag, is32, 0, d, &e);
         } else {
             int p = s.precision < 800 ? s.precision : 800;
             /* The exponent of the first digit is the shortest decimal's, unless that's a power of
              * ten the value is just under, when it's one less. */
-            int sn = shortest(mag, is32, d, &e);
+            int sn = shortest(mag, is32, 0, d, &e);
             if (sn == 1 && d[0] == '1' && below_pow10(m, q, e)) e--;
             n = exact_digits(m, q, p - e, d);
             if (n > p + 1) {
@@ -1338,7 +1339,7 @@ static void format_float(cx_u64 bits, int is32, cx_spec s) {
             n = 1;
             e = -2;
         } else {
-            n = shortest(mag, is32, d, &e);
+            n = shortest(mag, is32, 0, d, &e);
         }
         e += 2;
         buf_init(&rest, (cx_usize)(n + (e < 0 ? -e : 0) + 8));

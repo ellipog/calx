@@ -40,7 +40,10 @@ fn main() {
     let inf = 1.0 / 0.0
     let nan = 0.0 / 0.0
     println("[{x:12}] [{x:<12}] [{1.0e10:>10}] [{inf:9}] [{-inf:010.2}] [{nan:+.2}] [{nan:>5}]")    // out: [  3.14159265] [3.14159265  ] [    1.0E10] [ Infinity] [ -Infinity] [NaN] [  NaN]
-    println("[{f32.from_bits(1):e}] [{(0.1f32):.10}] [{1.5f32:+}] [{(2.5f32):.0}] [{(1.0f32 / 3.0f32):.3e}]")    // out: [1.4e-45] [0.1000000015] [+1.5] [2] [3.333e-1]
+    println("[{f32.from_bits(1):e}] [{(0.1f32):.10}] [{1.5f32:+}] [{(2.5f32):.0}] [{(1.0f32 / 3.0f32):.3e}]")    // out: [1e-45] [0.1000000015] [+1.5] [2] [3.333e-1]
+    // The smallest subnormals: `{x}` writes Java's closest of one or two digits, and `{x:e}` the
+    // one digit that reads back, as Rust and Python do.
+    println("[{f64.from_bits(1)}] [{f64.from_bits(1):e}] [{f32.from_bits(1)}] [{f64.from_bits(3):e}]")    // out: [4.9E-324] [5e-324] [1.4E-45] [1.5e-323]
 
     // Text, runes and anything else: a fill, an alignment and a width, in runes, and for text the
     // most runes to write.
