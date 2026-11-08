@@ -1,0 +1,9 @@
+// A format code std.time doesn't have panics at the call, not inside std.time.
+
+import std.time.{DateTime}
+
+fn main() {
+    let d = DateTime.new(2026, 11, 8)!
+    println(d.format("%Y-%m-%d"))     // out: 2026-11-08
+    println(d.format("%Y %Q"))        // panic: `%Q` isn't a format code
+}

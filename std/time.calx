@@ -128,3 +128,652 @@ fn floor_div(a: i64, b: i64) -> i64 {
     let q = a / b
     return if a % b < 0 { q - 1 } else { q }
 }
+
+fn floor_mod(a: i64, b: i64) -> i64 {
+    return a - floor_div(a, b) * b
+}
+
+const MONTH_NAMES: [str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                                "October", "November", "December"]
+const DAY_NAMES: [str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+/// Whether `year` has a 29th of February on the Gregorian calendar: every fourth year, but not
+/// every hundredth, though every four hundredth.
+pub fn is_leap(year: i32) -> bool {
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+}
+
+/// How many days month `month`, from 1 to 12, of `year` has. It panics for another month.
+@track_caller
+pub fn days_in_month(year: i32, month: i32) -> i32 {
+    if month < 1 or month > 12 {
+        panic("a month is from 1 to 12, not {month}")
+    }
+    if month == 2 {
+        return if is_leap(year) { 29 } else { 28 }
+    }
+    return if month == 4 or month == 6 or month == 9 or month == 11 { 30 } else { 31 }
+}
+
+impl DateTime {
+    /// The date and time, or `none` unless each part is in its range: the month from 1 to 12, the
+    /// day in that month, the hour from 0 to 23, the minute and second from 0 to 59 and the milli
+    /// from 0 to 999, as Python's `datetime(...)` checks them.
+    pub fn new(year: i32, month: i32, day: i32, hour: i32 = 0, minute: i32 = 0, second: i32 = 0, milli: i32 = 0) -> DateTime? {
+        let d = DateTime { year, month, day, hour, minute, second, milli }
+        return if d.is_valid() { some(d) } else { none }
+    }
+
+    /// Whether each part is in its range, as `DateTime.new` checks them.
+    pub fn is_valid(self) -> bool {
+        if self.month < 1 or self.month > 12 {
+            return false
+        }
+        return self.day >= 1 and self.day <= days_in_month(self.year, self.month) and self.hour >= 0 and self.hour <= 23 and
+               self.minute >= 0 and self.minute <= 59 and self.second >= 0 and self.second <= 59 and self.milli >= 0 and
+               self.milli <= 999
+    }
+
+    /// The moment this date and time is, where the clock is `offset` seconds ahead of UTC: the
+    /// way back from `Timestamp.date_time`.
+    pub fn timestamp(self, offset: i32) -> Timestamp {
+        let days = days_from_civil(i64(self.year), i64(self.month), i64(self.day))
+        let ms = days * 86400000 + i64(self.hour) * 3600000 + i64(self.minute) * 60000 + i64(self.second) * 1000 + i64(self.milli)
+        return Timestamp { unix_ms: ms - i64(offset) * 1000 }
+    }
+
+    /// The day of the week, from 0 for Monday to 6 for Sunday, as Python's `weekday()`.
+    pub fn weekday(self) -> i32 {
+        let days = days_from_civil(i64(self.year), i64(self.month), i64(self.day))
+        return i32.wrap(floor_mod(days + 3, 7))
+    }
+
+    /// The day of the year, from 1 for the 1st of January to 365, or 366 in a leap year.
+    pub fn day_of_year(self) -> i32 {
+        let start = days_from_civil(i64(self.year), 1, 1)
+        return i32.wrap(days_from_civil(i64(self.year), i64(self.month), i64(self.day)) - start) + 1
+    }
+
+    /// The same time of day, `n` days later, or earlier for a negative `n`.
+    pub fn add_days(self, n: i64) -> DateTime {
+        let t = Timestamp { unix_ms: self.timestamp(0).unix_ms + n * 86400000 }
+        return t.date_time(0)
+    }
+
+    /// The same day and time, `n` months later, or earlier for a negative `n`, with the day
+    /// brought back to the month's last when the month is shorter: a month after the 31st of
+    /// January is the 28th or 29th of February, as Java's `plusMonths` gives.
+    pub fn add_months(self, n: i32) -> DateTime {
+        let total = i64(self.year) * 12 + i64(self.month - 1) + i64(n)
+        let year = i32.wrap(floor_div(total, 12))
+        let month = i32.wrap(floor_mod(total, 12)) + 1
+        var d = self
+        d.year = year
+        d.month = month
+        d.day = self.day.min(days_in_month(year, month))
+        return d
+    }
+
+    /// The date and time in ISO 8601's form, as Python's `isoformat()` writes it:
+    /// `2026-11-08T14:05:09`, with `.250` after the seconds when there are millis.
+    pub fn iso(self) -> String {
+        var out = String()
+        put_iso(mut out, self)
+        return out
+    }
+
+    /// The date and time in ISO 8601's form, as `iso` writes it or with a space for the `T`, and
+    /// the time optional, or its minutes or seconds: `2026-11-08`, `2026-11-08T14`,
+    /// `2026-11-08T14:05`, `2026-11-08 14:05:09.250`. A fraction of a second keeps its millis.
+    /// `none` for anything else, an offset included, which `Timestamp.parse_iso` reads; and for a
+    /// date or time out of range.
+    pub fn parse_iso(text: String) -> DateTime? {
+        var p = Scan { text: text.copy(), at: 0 }
+        if let d = iso_date_time(mut p) {
+            if p.at == p.text.len() and d.is_valid() {
+                return some(d)
+            }
+        }
+        return none
+    }
+
+    /// The date and time written by `pattern`, with strftime's codes, as Python's `strftime`
+    /// writes them: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S` and the others in the table in
+    /// [std.time's page](../docs/std/time.md#formatting-and-parsing). Any other character is
+    /// written as it is. It panics for a code it doesn't have; `%z` is for `Timestamp.format`,
+    /// which has an offset.
+    @track_caller
+    pub fn format(self, pattern: String) -> String {
+        return format_with(self, pattern, none)
+    }
+
+    /// The date and time `text` writes by `pattern`, as Python's `strptime` reads it, with
+    /// `format`'s codes: four digits for `%Y`, one to six for `%f`, one or two for the other
+    /// numbers, names in any case, and any run of whitespace for a space. A part the pattern
+    /// doesn't give is as in the 1st of January 1900, at midnight, as Python's are. `none` unless
+    /// the whole text matches and the date and time are in range. It panics for a code `format`
+    /// doesn't have, and for `%z`, which `Timestamp.parse` reads.
+    @track_caller
+    pub fn parse(text: String, pattern: String) -> DateTime? {
+        var offset: i32 = 0
+        return parse_with(text, pattern, false, mut offset)
+    }
+}
+
+impl Timestamp {
+    /// The moment in ISO 8601's form, as RFC 3339 has it: the date and time at `offset` seconds
+    /// ahead of UTC, then `Z` for UTC or the offset, as `2026-11-08T14:05:09+01:00`.
+    pub fn iso(self, offset: i32) -> String {
+        var out = String()
+        put_iso(mut out, self.date_time(offset))
+        put_offset(mut out, offset, true, true)
+        return out
+    }
+
+    /// The moment in ISO 8601's form with an offset: a date and time as `DateTime.parse_iso` reads
+    /// them, then `Z` or an offset such as `+01:00`, `+0100` or `+01`. `none` for anything else,
+    /// a date and time with no offset included, since that could be any moment.
+    pub fn parse_iso(text: String) -> Timestamp? {
+        var p = Scan { text: text.copy(), at: 0 }
+        if let d = iso_date_time(mut p) {
+            if not d.is_valid() {
+                return none
+            }
+            var offset: i32 = 0
+            if p.offset(true, mut offset) and p.at == p.text.len() {
+                return some(d.timestamp(offset))
+            }
+        }
+        return none
+    }
+
+    /// The moment written by `pattern` at `offset` seconds ahead of UTC, with `DateTime.format`'s
+    /// codes and `%z` for the offset, as `+0100`, and `%:z` as `+01:00`.
+    @track_caller
+    pub fn format(self, pattern: String, offset: i32) -> String {
+        return format_with(self.date_time(offset), pattern, some(offset))
+    }
+
+    /// The moment `text` writes by `pattern`, as `DateTime.parse` reads it, with `%z` for the
+    /// offset: `Z`, or a sign, the hours and the minutes, as `+0100` or `+01:00`. `%:z` reads the
+    /// same. It panics for a pattern with no `%z`, since the text could then be any moment.
+    @track_caller
+    pub fn parse(text: String, pattern: String) -> Timestamp? {
+        if not has_zone(pattern) {
+            panic("a pattern for a `Timestamp` needs `%z` for its offset; parse a `DateTime` and give it one with `timestamp`")
+        }
+        var offset: i32 = 0
+        if let d = parse_with(text, pattern, true, mut offset) {
+            return some(d.timestamp(offset))
+        }
+        return none
+    }
+}
+
+// --- dates ----------------------------------------------------------------------------------------
+
+// Days from 1970-01-01 to the date, the way back from `date_time`'s arithmetic (Howard Hinnant's
+// `days_from_civil`).
+fn days_from_civil(y0: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y0 - 1 } else { y0 }
+    let era = floor_div(y, 400)
+    let year_of_era = y - era * 400
+    let mp = if m > 2 { m - 3 } else { m + 9 }
+    let day_of_year = (153 * mp + 2) / 5 + d - 1
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year
+    return era * 146097 + day_of_era - 719468
+}
+
+// `v` in at least `width` digits, with a `-` before a negative one.
+fn put_number(out: mut String, v: i32, width: i32) {
+    if v < 0 {
+        out.push('-')
+    }
+    let a = if v < 0 { 0 - i64(v) } else { i64(v) }
+    var digits: i32 = 1
+    var p: i64 = 1
+    while p * 10 <= a {
+        digits += 1
+        p *= 10
+    }
+    for _ in digits..width {
+        out.push('0')
+    }
+    var rest = a
+    while p > 0 {
+        out.push(rune(u8.wrap(rest / p) + b'0'))
+        rest %= p
+        p /= 10
+    }
+}
+
+fn put_iso(out: mut String, d: DateTime) {
+    put_number(mut out, d.year, 4)
+    out.push_str("-")
+    put_number(mut out, d.month, 2)
+    out.push_str("-")
+    put_number(mut out, d.day, 2)
+    out.push_str("T")
+    put_number(mut out, d.hour, 2)
+    out.push_str(":")
+    put_number(mut out, d.minute, 2)
+    out.push_str(":")
+    put_number(mut out, d.second, 2)
+    if d.milli != 0 {
+        out.push_str(".")
+        put_number(mut out, d.milli, 3)
+    }
+}
+
+// `+01:00`, or `Z` for UTC when `z` is set; with seconds when the offset has them.
+fn put_offset(out: mut String, offset: i32, colon: bool, z: bool) {
+    if z and offset == 0 {
+        out.push_str("Z")
+        return
+    }
+    out.push_str(if offset < 0 { "-" } else { "+" })
+    let a = if offset < 0 { 0 - offset } else { offset }
+    put_number(mut out, a / 3600, 2)
+    if colon {
+        out.push_str(":")
+    }
+    put_number(mut out, a / 60 % 60, 2)
+    if a % 60 != 0 {
+        if colon {
+            out.push_str(":")
+        }
+        put_number(mut out, a % 60, 2)
+    }
+}
+
+@track_caller
+fn format_with(d: DateTime, pattern: String, offset: i32?) -> String {
+    var out = String()
+    let n = pattern.len()
+    var i: usize = 0
+    var from: usize = 0
+    while i < n {
+        if pattern.byte_at(i) != b'%' {
+            i += 1
+            continue
+        }
+        out.push_str(pattern[from..i])
+        if i + 1 == n {
+            panic("the pattern ends with a `%` and no code")
+        }
+        var code = pattern.byte_at(i + 1)
+        i += 2
+        var colon = false
+        if code == b':' and i < n and pattern.byte_at(i) == b'z' {
+            colon = true
+            code = b'z'
+            i += 1
+        }
+        if code == b'Y' {
+            put_number(mut out, d.year, 4)
+        } else if code == b'y' {
+            put_number(mut out, i32.wrap(floor_mod(i64(d.year), 100)), 2)
+        } else if code == b'm' {
+            put_number(mut out, d.month, 2)
+        } else if code == b'd' {
+            put_number(mut out, d.day, 2)
+        } else if code == b'j' {
+            put_number(mut out, d.day_of_year(), 3)
+        } else if code == b'H' {
+            put_number(mut out, d.hour, 2)
+        } else if code == b'I' {
+            put_number(mut out, if d.hour % 12 == 0 { 12 } else { d.hour % 12 }, 2)
+        } else if code == b'p' {
+            out.push_str(if d.hour < 12 { "AM" } else { "PM" })
+        } else if code == b'M' {
+            put_number(mut out, d.minute, 2)
+        } else if code == b'S' {
+            put_number(mut out, d.second, 2)
+        } else if code == b'f' {
+            put_number(mut out, d.milli * 1000, 6)
+        } else if code == b'B' {
+            out.push_str(MONTH_NAMES[usize.wrap(d.month - 1)])
+        } else if code == b'b' {
+            out.push_str(MONTH_NAMES[usize.wrap(d.month - 1)][..3])
+        } else if code == b'A' {
+            out.push_str(DAY_NAMES[usize.wrap(d.weekday())])
+        } else if code == b'a' {
+            out.push_str(DAY_NAMES[usize.wrap(d.weekday())][..3])
+        } else if code == b'u' {
+            put_number(mut out, d.weekday() + 1, 1)
+        } else if code == b'w' {
+            put_number(mut out, (d.weekday() + 1) % 7, 1)
+        } else if code == b'F' {
+            put_number(mut out, d.year, 4)
+            out.push_str("-")
+            put_number(mut out, d.month, 2)
+            out.push_str("-")
+            put_number(mut out, d.day, 2)
+        } else if code == b'T' {
+            put_number(mut out, d.hour, 2)
+            out.push_str(":")
+            put_number(mut out, d.minute, 2)
+            out.push_str(":")
+            put_number(mut out, d.second, 2)
+        } else if code == b'z' {
+            if let o = offset {
+                put_offset(mut out, o, colon, false)
+            } else {
+                panic("a `DateTime` has no offset for `%z`; format a `Timestamp` with its offset")
+            }
+        } else if code == b'%' {
+            out.push_str("%")
+        } else {
+            panic("`%{rune(code)}` isn't a format code")
+        }
+        from = i
+    }
+    out.push_str(pattern[from..n])
+    return out
+}
+
+// `DateTime.parse`, and `Timestamp.parse` when `zone` is set, which reads `%z` into `offset`.
+@track_caller
+fn parse_with(text: String, pattern: String, zone: bool, offset: mut i32) -> DateTime? {
+    var d = DateTime { year: 1900, month: 1, day: 1, hour: 0, minute: 0, second: 0, milli: 0 }
+    var p = Scan { text: text.copy(), at: 0 }
+    var pm = false
+    var hour12 = false
+    var yday: i32 = -1
+    var i: usize = 0
+    let n = pattern.len()
+    while i < n {
+        let c = pattern.byte_at(i)
+        if is_space(c) {
+            if not p.skip_space() {
+                return none
+            }
+            while i < n and is_space(pattern.byte_at(i)) {
+                i += 1
+            }
+            continue
+        }
+        if c != b'%' {
+            if not p.take(c) {
+                return none
+            }
+            i += 1
+            continue
+        }
+        if i + 1 == n {
+            panic("the pattern ends with a `%` and no code")
+        }
+        var code = pattern.byte_at(i + 1)
+        i += 2
+        if code == b':' and i < n and pattern.byte_at(i) == b'z' {
+            code = b'z'
+            i += 1
+        }
+        var matched = true
+        if code == b'Y' {
+            matched = p.number(4, 4, mut d.year)
+        } else if code == b'y' {
+            var y: i32 = 0
+            matched = p.number(2, 2, mut y)
+            d.year = if y < 69 { 2000 + y } else { 1900 + y }
+        } else if code == b'm' {
+            matched = p.number(1, 2, mut d.month)
+        } else if code == b'd' {
+            matched = p.number(1, 2, mut d.day)
+        } else if code == b'j' {
+            matched = p.number(1, 3, mut yday) and yday >= 1
+        } else if code == b'H' {
+            matched = p.number(1, 2, mut d.hour)
+        } else if code == b'I' {
+            matched = p.number(1, 2, mut d.hour) and d.hour >= 1 and d.hour <= 12
+            hour12 = true
+        } else if code == b'p' {
+            if p.word("pm") {
+                pm = true
+            } else {
+                matched = p.word("am")
+            }
+        } else if code == b'M' {
+            matched = p.number(1, 2, mut d.minute)
+        } else if code == b'S' {
+            matched = p.number(1, 2, mut d.second)
+        } else if code == b'f' {
+            let from = p.at
+            var micros: i32 = 0
+            matched = p.number(1, 6, mut micros)
+            for _ in (p.at - from)..6 {
+                micros *= 10
+            }
+            d.milli = micros / 1000
+        } else if code == b'B' or code == b'b' {
+            var m: i32 = 0
+            matched = p.month_name(code == b'b', mut m)
+            d.month = m + 1
+        } else if code == b'A' or code == b'a' {
+            matched = p.day_name(code == b'a')
+        } else if code == b'u' {
+            var w: i32 = 0
+            matched = p.number(1, 1, mut w) and w >= 1 and w <= 7
+        } else if code == b'w' {
+            var w: i32 = 0
+            matched = p.number(1, 1, mut w) and w <= 6
+        } else if code == b'F' {
+            matched = p.number(4, 4, mut d.year) and p.take(b'-') and p.number(1, 2, mut d.month) and p.take(b'-') and
+                 p.number(1, 2, mut d.day)
+        } else if code == b'T' {
+            matched = p.number(1, 2, mut d.hour) and p.take(b':') and p.number(1, 2, mut d.minute) and p.take(b':') and
+                 p.number(1, 2, mut d.second)
+        } else if code == b'z' {
+            if not zone {
+                panic("a `DateTime` has no offset for `%z`; parse a `Timestamp`, which has one")
+            }
+            matched = p.offset(false, mut offset)
+        } else if code == b'%' {
+            matched = p.take(b'%')
+        } else {
+            panic("`%{rune(code)}` isn't a format code")
+        }
+        if not matched {
+            return none
+        }
+    }
+    if p.at != p.text.len() {
+        return none
+    }
+    // As in Python, `%p` sets the half of the day only for an hour read by `%I`.
+    if hour12 {
+        d.hour = d.hour % 12 + (if pm { 12 } else { 0 })
+    }
+    if yday >= 1 {
+        if yday > (if is_leap(d.year) { 366 } else { 365 }) {
+            return none
+        }
+        let first = DateTime { year: d.year, month: 1, day: 1, hour: d.hour, minute: d.minute, second: d.second, milli: d.milli }
+        if not first.is_valid() {
+            return none
+        }
+        d = first.add_days(i64(yday - 1))
+    }
+    return if d.is_valid() { some(d) } else { none }
+}
+
+// Whether a pattern has `%z` or `%:z`, rather than `%%z`.
+fn has_zone(pattern: String) -> bool {
+    let n = pattern.len()
+    var i: usize = 0
+    while i + 1 < n {
+        if pattern.byte_at(i) != b'%' {
+            i += 1
+            continue
+        }
+        let c = pattern.byte_at(i + 1)
+        if c == b'z' or (c == b':' and i + 2 < n and pattern.byte_at(i + 2) == b'z') {
+            return true
+        }
+        i += 2
+    }
+    return false
+}
+
+fn is_space(c: u8) -> bool {
+    return c == b' ' or c == b'\t' or c == b'\n' or c == b'\r'
+}
+
+// Where a parse has got to in its text.
+struct Scan {
+    text: String,
+    at: usize,
+}
+
+impl Scan {
+    fn take(mut self, c: u8) -> bool {
+        if self.at < self.text.len() and self.text.byte_at(self.at) == c {
+            self.at += 1
+            return true
+        }
+        return false
+    }
+
+    // A run of whitespace; whether there was any.
+    fn skip_space(mut self) -> bool {
+        let from = self.at
+        while self.at < self.text.len() and is_space(self.text.byte_at(self.at)) {
+            self.at += 1
+        }
+        return self.at > from
+    }
+
+    // `Z`, or a sign, two digits of hours, a `:` or none, and two of minutes, into `v` in seconds.
+    // The minutes can be left out when `short` is set, as ISO 8601 has it.
+    fn offset(mut self, short: bool, v: mut i32) -> bool {
+        if self.take(b'Z') or self.take(b'z') {
+            v = 0
+            return true
+        }
+        var sign: i32 = 1
+        if not self.take(b'+') {
+            if not self.take(b'-') {
+                return false
+            }
+            sign = -1
+        }
+        var h: i32 = 0
+        var m: i32 = 0
+        if not self.number(2, 2, mut h) {
+            return false
+        }
+        let colon = self.take(b':')
+        let more = self.at < self.text.len() and self.text.byte_at(self.at) >= b'0' and self.text.byte_at(self.at) <= b'9'
+        if (colon or more or not short) and not self.number(2, 2, mut m) {
+            return false
+        }
+        if h > 23 or m > 59 {
+            return false
+        }
+        v = sign * (h * 3600 + m * 60)
+        return true
+    }
+
+    // A number of `least` to `most` digits, into `v`.
+    fn number(mut self, least: usize, most: usize, v: mut i32) -> bool {
+        var x: i32 = 0
+        var k: usize = 0
+        while k < most and self.at < self.text.len() {
+            let c = self.text.byte_at(self.at)
+            if c < b'0' or c > b'9' {
+                break
+            }
+            x = x * 10 + i32(c - b'0')
+            self.at += 1
+            k += 1
+        }
+        v = x
+        return k >= least
+    }
+
+    // `w`, in any case.
+    fn word(mut self, w: str) -> bool {
+        if self.at + w.len() > self.text.len() {
+            return false
+        }
+        for k in 0..w.len() {
+            if lower(self.text.byte_at(self.at + k)) != lower(w.byte_at(k)) {
+                return false
+            }
+        }
+        self.at += w.len()
+        return true
+    }
+
+    // Which month's name comes next, whole or its first three letters, in any case.
+    fn month_name(mut self, short: bool, which: mut i32) -> bool {
+        for k in 0usize..12 {
+            let full = MONTH_NAMES[k]
+            if self.word(if short { full[..3] } else { full }) {
+                which = i32.wrap(k)
+                return true
+            }
+        }
+        return false
+    }
+
+    fn day_name(mut self, short: bool) -> bool {
+        for k in 0usize..7 {
+            let full = DAY_NAMES[k]
+            if self.word(if short { full[..3] } else { full }) {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+fn lower(c: u8) -> u8 {
+    return if c >= b'A' and c <= b'Z' { c + 32 } else { c }
+}
+
+// `YYYY-MM-DD`, then `T` or a space and `HH`, with `:MM`, `:SS` and a fraction optional in turn.
+fn iso_date_time(p: mut Scan) -> DateTime? {
+    var d = DateTime { year: 0, month: 1, day: 1, hour: 0, minute: 0, second: 0, milli: 0 }
+    if not (p.number(4, 4, mut d.year) and p.take(b'-') and p.number(2, 2, mut d.month) and p.take(b'-') and
+            p.number(2, 2, mut d.day)) {
+        return none
+    }
+    if p.take(b'T') or p.take(b't') or p.take(b' ') {
+        if not p.number(2, 2, mut d.hour) {
+            return none
+        }
+        if not p.take(b':') {
+            return some(d)
+        }
+        if not p.number(2, 2, mut d.minute) {
+            return none
+        }
+        if p.take(b':') {
+            if not p.number(2, 2, mut d.second) {
+                return none
+            }
+            if p.take(b'.') or p.take(b',') {
+                let from = p.at
+                var millis: i32 = 0
+                var k: usize = 0
+                while p.at < p.text.len() and p.text.byte_at(p.at) >= b'0' and p.text.byte_at(p.at) <= b'9' {
+                    if k < 3 {
+                        millis = millis * 10 + i32(p.text.byte_at(p.at) - b'0')
+                    }
+                    k += 1
+                    p.at += 1
+                }
+                if p.at == from {
+                    return none
+                }
+                while k < 3 {
+                    millis *= 10
+                    k += 1
+                }
+                d.milli = millis
+            }
+        }
+    }
+    return some(d)
+}

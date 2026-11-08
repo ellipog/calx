@@ -1,0 +1,9 @@
+// A pattern for a `Timestamp` needs `%z`, or the text could be any moment; `%%z` is a `%` and a `z`.
+
+import std.time.{Timestamp}
+
+fn main() {
+    let t = Timestamp.parse("2026-11-08 14:05 +0100", "%Y-%m-%d %H:%M %z")!
+    println("{t.unix_ms}")                                         // out: 1794143100000
+    println("{Timestamp.parse("2026-11-08 %z", "%Y-%m-%d %%z")}")  // panic: a pattern for a `Timestamp` needs `%z` for its offset; parse a `DateTime` and give it one with `timestamp`
+}

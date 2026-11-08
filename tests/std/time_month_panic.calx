@@ -1,0 +1,8 @@
+// `days_in_month` panics at the call for a month that isn't from 1 to 12.
+
+import std.time
+
+fn main() {
+    println("{time.days_in_month(2024, 2)}")      // out: 29
+    println("{time.days_in_month(2026, 13)}")     // panic: a month is from 1 to 12, not 13
+}
