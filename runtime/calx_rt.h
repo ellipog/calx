@@ -816,6 +816,45 @@ CX_FN(cx_usize, cx_lz4_bound, (cx_usize n));
 CX_FN(cx_usize, cx_lz4_compress, (const cx_u8* in, cx_usize n, cx_u8* out));
 CX_FN(cx_i32, cx_lz4_decode, (const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last));
 
+/* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
+ * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's
+ * extended result code and a copy of its message in the connection, for `cx_sqlite_error_code`,
+ * `cx_sqlite_error_len` and `cx_sqlite_error_copy`. Text and bytes come out as a length, then a
+ * copy into room that long. */
+CX_FN(cx_i64, cx_sqlite_open, (const cx_u8* path, cx_usize n, cx_i32 read_only));
+CX_FN(cx_i32, cx_sqlite_close, (cx_i64 h));
+CX_FN(cx_i32, cx_sqlite_error_code, (cx_i64 h));
+CX_FN(cx_usize, cx_sqlite_error_len, (cx_i64 h));
+CX_FN(void, cx_sqlite_error_copy, (cx_i64 h, cx_u8* out));
+CX_FN(cx_i64, cx_sqlite_prepare, (cx_i64 h, const cx_u8* sql, cx_usize n));
+CX_FN(void, cx_sqlite_release, (cx_i64 h, cx_i64 s));
+CX_FN(cx_i32, cx_sqlite_bind_null, (cx_i64 h, cx_i64 s, cx_i32 i));
+CX_FN(cx_i32, cx_sqlite_bind_int, (cx_i64 h, cx_i64 s, cx_i32 i, cx_i64 v));
+CX_FN(cx_i32, cx_sqlite_bind_real, (cx_i64 h, cx_i64 s, cx_i32 i, cx_f64 v));
+CX_FN(cx_i32, cx_sqlite_bind_text, (cx_i64 h, cx_i64 s, cx_i32 i, const cx_u8* p, cx_usize n));
+CX_FN(cx_i32, cx_sqlite_bind_blob, (cx_i64 h, cx_i64 s, cx_i32 i, const cx_u8* p, cx_usize n));
+CX_FN(cx_i32, cx_sqlite_parameter_count, (cx_i64 s));
+CX_FN(cx_i32, cx_sqlite_parameter_index, (cx_i64 s, const cx_u8* name, cx_usize n));
+CX_FN(cx_i32, cx_sqlite_step, (cx_i64 h, cx_i64 s));
+CX_FN(cx_i64, cx_sqlite_run, (cx_i64 h, cx_i64 s));
+CX_FN(void, cx_sqlite_reset, (cx_i64 s));
+CX_FN(void, cx_sqlite_clear, (cx_i64 s));
+CX_FN(cx_i32, cx_sqlite_column_count, (cx_i64 s));
+CX_FN(cx_i32, cx_sqlite_column_type, (cx_i64 s, cx_i32 col));
+CX_FN(cx_i64, cx_sqlite_column_int, (cx_i64 s, cx_i32 col));
+CX_FN(cx_f64, cx_sqlite_column_real, (cx_i64 s, cx_i32 col));
+CX_FN(cx_usize, cx_sqlite_column_text_len, (cx_i64 s, cx_i32 col));
+CX_FN(void, cx_sqlite_column_text_copy, (cx_i64 s, cx_i32 col, cx_u8* out));
+CX_FN(cx_usize, cx_sqlite_column_blob_len, (cx_i64 s, cx_i32 col));
+CX_FN(void, cx_sqlite_column_blob_copy, (cx_i64 s, cx_i32 col, cx_u8* out));
+CX_FN(cx_usize, cx_sqlite_column_name_len, (cx_i64 s, cx_i32 col));
+CX_FN(void, cx_sqlite_column_name_copy, (cx_i64 s, cx_i32 col, cx_u8* out));
+CX_FN(cx_i32, cx_sqlite_exec, (cx_i64 h, const cx_u8* sql, cx_usize n));
+CX_FN(cx_i64, cx_sqlite_last_insert_id, (cx_i64 h));
+CX_FN(cx_i32, cx_sqlite_autocommit, (cx_i64 h));
+CX_FN(cx_usize, cx_sqlite_version_len, (void));
+CX_FN(void, cx_sqlite_version_copy, (cx_u8* out));
+
 /* Files and directories, in calx_fs.c, behind std.fs. A handle is an `cx_i64`, negative when
  * opening failed; a function that fails returns 0 or a negative number and leaves why for
  * `cx_fs_error_kind` and `cx_fs_error_code`, and one that makes text or a list leaves it for

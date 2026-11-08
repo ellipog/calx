@@ -1,0 +1,708 @@
+/// SQLite databases, as Python's `sqlite3` reads and writes them: a file or `:memory:`, SQL run with
+/// `?` parameters, and rows of SQLite's five kinds of value. SQLite itself is built into the
+/// program, so there's nothing to install.
+///
+/// Each statement is its own transaction unless it's between `begin` and `commit`, as with
+/// Python's `autocommit=True`: nothing waits for a `commit` that's easy to forget. The statements a
+/// database runs are kept prepared, by their SQL, so running the same SQL again skips SQLite's
+/// parser, as Python's statement cache does.
+module std.sqlite
+
+import std.text.utf8.{decode_lossy_unicode}
+
+extern "C" {
+    fn cx_sqlite_open(path: *const u8, n: usize, read_only: i32) -> i64
+    fn cx_sqlite_close(c: i64) -> i32
+    fn cx_sqlite_error_code(c: i64) -> i32
+    fn cx_sqlite_error_len(c: i64) -> usize
+    fn cx_sqlite_error_copy(c: i64, out: *u8)
+    fn cx_sqlite_prepare(c: i64, sql: *const u8, n: usize) -> i64
+    fn cx_sqlite_release(c: i64, s: i64)
+    fn cx_sqlite_bind_null(c: i64, s: i64, i: i32) -> i32
+    fn cx_sqlite_bind_int(c: i64, s: i64, i: i32, v: i64) -> i32
+    fn cx_sqlite_bind_real(c: i64, s: i64, i: i32, v: f64) -> i32
+    fn cx_sqlite_bind_text(c: i64, s: i64, i: i32, p: *const u8, n: usize) -> i32
+    fn cx_sqlite_bind_blob(c: i64, s: i64, i: i32, p: *const u8, n: usize) -> i32
+    fn cx_sqlite_parameter_count(s: i64) -> i32
+    fn cx_sqlite_parameter_index(s: i64, name: *const u8, n: usize) -> i32
+    fn cx_sqlite_step(c: i64, s: i64) -> i32
+    fn cx_sqlite_run(c: i64, s: i64) -> i64
+    fn cx_sqlite_reset(s: i64)
+    fn cx_sqlite_clear(s: i64)
+    fn cx_sqlite_column_count(s: i64) -> i32
+    fn cx_sqlite_column_type(s: i64, col: i32) -> i32
+    fn cx_sqlite_column_int(s: i64, col: i32) -> i64
+    fn cx_sqlite_column_real(s: i64, col: i32) -> f64
+    fn cx_sqlite_column_text_len(s: i64, col: i32) -> usize
+    fn cx_sqlite_column_text_copy(s: i64, col: i32, out: *u8)
+    fn cx_sqlite_column_blob_len(s: i64, col: i32) -> usize
+    fn cx_sqlite_column_blob_copy(s: i64, col: i32, out: *u8)
+    fn cx_sqlite_column_name_len(s: i64, col: i32) -> usize
+    fn cx_sqlite_column_name_copy(s: i64, col: i32, out: *u8)
+    fn cx_sqlite_exec(c: i64, sql: *const u8, n: usize) -> i32
+    fn cx_sqlite_last_insert_id(c: i64) -> i64
+    fn cx_sqlite_autocommit(c: i64) -> i32
+    fn cx_sqlite_version_len() -> usize
+    fn cx_sqlite_version_copy(out: *u8)
+}
+
+// --- values --------------------------------------------------------------------------------------
+
+/// A value in a database, of one of SQLite's five kinds, which Python gives as `None`, `int`,
+/// `float`, `str` and `bytes`.
+pub enum Value {
+    Null,
+    Int(i64),
+    Real(f64),
+    Text(String),
+    Blob(List<u8>),
+}
+
+impl Value {
+    /// The integer, if it's an `Int`.
+    pub fn as_int(self) -> i64? {
+        return match self {
+            Value.Int(n) => some(n),
+            _ => none,
+        }
+    }
+
+    /// The number, if it's a `Real` or an `Int`.
+    pub fn as_real(self) -> f64? {
+        return match self {
+            Value.Real(x) => some(x),
+            Value.Int(n) => some(f64.nearest(n)),
+            _ => none,
+        }
+    }
+
+    /// A copy of the text, if it's `Text`.
+    pub fn as_text(self) -> String? {
+        return match self {
+            Value.Text(t) => some(t.copy()),
+            _ => none,
+        }
+    }
+
+    /// A copy of the bytes, if it's a `Blob`.
+    pub fn as_blob(self) -> List<u8>? {
+        return match self {
+            Value.Blob(b) => some(b.copy()),
+            _ => none,
+        }
+    }
+
+    /// Whether it's `Null`.
+    pub fn is_null(self) -> bool {
+        return match self {
+            Value.Null => true,
+            _ => false,
+        }
+    }
+}
+
+/// `NULL`, the number, the text as it is, or a blob as SQL writes one, `x'CAFE'`.
+impl Display for Value {
+    fn show(self) {
+        match self {
+            Value.Null => print("NULL"),
+            Value.Int(n) => print("{n}"),
+            Value.Real(x) => print("{x}"),
+            Value.Text(t) => print(t),
+            Value.Blob(b) => {
+                print("x'")
+                for byte in b {
+                    print("{byte:02X}")
+                }
+                print("'")
+            },
+        }
+    }
+}
+
+/// Why SQL didn't run: SQLite's extended result code, such as 2067 for a `UNIQUE` constraint, and
+/// its message, which is what Python's `sqlite3.Error` says.
+pub struct SqliteError {
+    pub code: i32
+    pub message: String
+}
+
+impl Display for SqliteError {
+    fn show(self) {
+        print(self.message)
+    }
+}
+
+/// The version of SQLite that's built in, such as `3.54.1`, Python's `sqlite3.sqlite_version`.
+pub fn version() -> String {
+    let n = unsafe { cx_sqlite_version_len() }
+    var bytes: List<u8> = []
+    bytes.reserve(n)
+    unsafe {
+        cx_sqlite_version_copy(bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return String.from_utf8(bytes) ?? String()
+}
+
+// --- the database --------------------------------------------------------------------------------
+
+/// An open database. It's a [handle](../reference/ownership.md#handles), so it can't be copied,
+/// and it's open until `close`, or until the program ends.
+@handle
+pub struct Database {
+    conn: i64
+}
+
+impl Database {
+    /// Opens the database file at `path`, making it if nothing is there, as Python's
+    /// `sqlite3.connect` does. `:memory:` is a database in memory, new and empty, gone when it's
+    /// closed. Waits up to 5 seconds for another connection's lock, as Python does by default.
+    pub fn open(path: String) -> Database ! SqliteError {
+        return try connect(path, 0)
+    }
+
+    /// Opens the database file at `path` only to read. It fails if nothing is there, and so does
+    /// SQL that would change it.
+    pub fn open_read(path: String) -> Database ! SqliteError {
+        return try connect(path, 1)
+    }
+
+    /// Runs one statement of SQL, with `params` for its `?`s in order, and gives the number of
+    /// rows an `INSERT`, `UPDATE` or `DELETE` changed, or 0 for any other statement. Rows a query
+    /// gives are passed over. Python's `execute`, then `rowcount`.
+    pub fn execute(self, sql: String, params: List<Value> = []) -> usize ! SqliteError {
+        let s = try prepare(self.conn, sql)
+        if s == 0 {
+            return 0
+        }
+        match run_with(self.conn, s, params) {
+            ok(n) => {
+                unsafe { cx_sqlite_release(self.conn, s) }
+                return n
+            },
+            err(e) => {
+                unsafe { cx_sqlite_release(self.conn, s) }
+                fail e
+            },
+        }
+    }
+
+    /// Runs one statement of SQL once for each list in `rows`, as Python's `executemany`, and
+    /// gives the number of rows changed in all. Outside a transaction it begins one and commits it
+    /// at the end, so the rows are written together, and if one fails, none are.
+    pub fn execute_many(self, sql: String, rows: List<List<Value>>) -> usize ! SqliteError {
+        let own_transaction = not self.in_transaction()
+        if own_transaction {
+            _ = try self.execute(String("BEGIN"))
+        }
+        match self.run_rows(sql, rows) {
+            ok(n) => {
+                if own_transaction {
+                    _ = try self.execute(String("COMMIT"))
+                }
+                return n
+            },
+            err(e) => {
+                if own_transaction and self.in_transaction() {
+                    if let err(_) = self.execute(String("ROLLBACK")) {}
+                }
+                fail e
+            },
+        }
+    }
+
+    fn run_rows(self, sql: String, rows: List<List<Value>>) -> usize ! SqliteError {
+        let s = try prepare(self.conn, sql)
+        if s == 0 {
+            return 0
+        }
+        var total: usize = 0
+        for row in rows {
+            match run_with(self.conn, s, row) {
+                ok(n) => total += n,
+                err(e) => {
+                    unsafe { cx_sqlite_release(self.conn, s) }
+                    fail e
+                },
+            }
+        }
+        unsafe { cx_sqlite_release(self.conn, s) }
+        return total
+    }
+
+    /// Runs every statement in `sql` in turn, as Python's `executescript`, for a schema or a dump.
+    /// They take no parameters.
+    pub fn execute_script(self, sql: String) ! SqliteError {
+        if unsafe { cx_sqlite_exec(self.conn, sql.as_ptr(), sql.len()) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Runs a query, with `params` for its `?`s in order, and gives its rows, each a list of its
+    /// columns' values. Python's `execute(...).fetchall()`.
+    pub fn query(self, sql: String, params: List<Value> = []) -> List<List<Value>> ! SqliteError {
+        let s = try prepare(self.conn, sql)
+        if s == 0 {
+            return []
+        }
+        match bind_all(self.conn, s, params) {
+            ok => {},
+            err(e) => {
+                unsafe { cx_sqlite_release(self.conn, s) }
+                fail e
+            },
+        }
+        match rows_of(self.conn, s) {
+            ok(rows) => {
+                unsafe { cx_sqlite_release(self.conn, s) }
+                return rows
+            },
+            err(e) => {
+                unsafe { cx_sqlite_release(self.conn, s) }
+                fail e
+            },
+        }
+    }
+
+    /// The query's first row, or `none` if it gives none. Python's `execute(...).fetchone()`.
+    pub fn query_one(self, sql: String, params: List<Value> = []) -> List<Value>? ! SqliteError {
+        let st = try self.prepare(sql)
+        match st.bind_all(params) {
+            ok => {},
+            err(e) => {
+                st.finish()
+                fail e
+            },
+        }
+        match st.step() {
+            ok(true) => {
+                let row = st.row()
+                st.finish()
+                return some(row)
+            },
+            ok(false) => {
+                st.finish()
+                return none
+            },
+            err(e) => {
+                st.finish()
+                fail e
+            },
+        }
+    }
+
+    /// The query's rows, each a map from its columns' names to their values, in the columns'
+    /// order, as Python's `sqlite3.Row` reads them by name. A name two columns share keeps the
+    /// first's place and the last's value.
+    pub fn query_records(self, sql: String, params: List<Value> = []) -> List<LinkedMap<String, Value>> ! SqliteError {
+        let st = try self.prepare(sql)
+        match st.bind_all(params) {
+            ok => {},
+            err(e) => {
+                st.finish()
+                fail e
+            },
+        }
+        let names = st.column_names()
+        var out: List<LinkedMap<String, Value>> = []
+        loop {
+            match st.step() {
+                ok(true) => {
+                    var record = LinkedMap<String, Value>()
+                    for col in 0..names.len() {
+                        let v = column(st.stmt, i32.wrap(col))
+                        if record.contains(names[col].copy()) {
+                            record[names[col].copy()] = v
+                        } else {
+                            record.insert(names[col].copy(), v)
+                        }
+                    }
+                    out.push(record)
+                },
+                ok(false) => break,
+                err(e) => {
+                    st.finish()
+                    fail e
+                },
+            }
+        }
+        st.finish()
+        return out
+    }
+
+    /// The statement in `sql`, prepared, to bind values to and step through by hand, which is the
+    /// quickest way to run it many times or read many rows. Give it back with `finish`.
+    pub fn prepare(self, sql: String) -> Statement ! SqliteError {
+        let s = try prepare(self.conn, sql)
+        if s == 0 {
+            fail SqliteError { code: 21, message: String("the SQL holds no statement") }
+        }
+        return Statement { conn: self.conn, stmt: s }
+    }
+
+    /// Begins a transaction: what runs after it is saved together at `commit`, or not at all.
+    pub fn begin(self) ! SqliteError {
+        _ = try self.execute(String("BEGIN"))
+    }
+
+    /// Saves what ran since `begin`.
+    pub fn commit(self) ! SqliteError {
+        _ = try self.execute(String("COMMIT"))
+    }
+
+    /// Undoes what ran since `begin`.
+    pub fn rollback(self) ! SqliteError {
+        _ = try self.execute(String("ROLLBACK"))
+    }
+
+    /// Whether a transaction is open, Python's `in_transaction`.
+    pub fn in_transaction(self) -> bool {
+        return unsafe { cx_sqlite_autocommit(self.conn) } == 0
+    }
+
+    /// The rowid of the last row an `INSERT` added, Python's `lastrowid`, or 0 before any.
+    pub fn last_insert_id(self) -> i64 {
+        return unsafe { cx_sqlite_last_insert_id(self.conn) }
+    }
+
+    /// Closes the database, rolling back a transaction left open. A statement still out fails
+    /// after it, and only needs its `finish`.
+    pub fn close(own self) ! SqliteError {
+        let rc = unsafe { cx_sqlite_close(self.conn) }
+        if rc != 0 {
+            fail SqliteError { code: rc, message: String("the database didn't close") }
+        }
+    }
+}
+
+fn connect(path: String, read_only: i32) -> Database ! SqliteError {
+    let c = unsafe { cx_sqlite_open(path.as_ptr(), path.len(), read_only) }
+    if c == 0 {
+        fail SqliteError { code: 7, message: String("out of memory") }
+    }
+    if unsafe { cx_sqlite_error_code(c) } != 0 {
+        let e = error(c)
+        _ = unsafe { cx_sqlite_close(c) }
+        fail e
+    }
+    return Database { conn: c }
+}
+
+// The error the connection's last call left.
+fn error(c: i64) -> SqliteError {
+    let n = unsafe { cx_sqlite_error_len(c) }
+    var bytes: List<u8> = []
+    bytes.reserve(n)
+    unsafe {
+        cx_sqlite_error_copy(c, bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    let code = unsafe { cx_sqlite_error_code(c) }
+    return SqliteError { code: code, message: String.from_utf8(bytes) ?? String("SQLite gave a message that isn't UTF-8") }
+}
+
+// The statement `sql` holds, from the cache when it ran before, or 0 if it's only space and
+// comments.
+fn prepare(c: i64, sql: String) -> i64 ! SqliteError {
+    let s = unsafe { cx_sqlite_prepare(c, sql.as_ptr(), sql.len()) }
+    if s == 0 and unsafe { cx_sqlite_error_code(c) } != 0 {
+        fail error(c)
+    }
+    return s
+}
+
+// Binds `params` to the statement's parameters in order, after checking there's one for each.
+fn bind_all(c: i64, s: i64, params: List<Value>) ! SqliteError {
+    let want = usize.wrap(unsafe { cx_sqlite_parameter_count(s) })
+    if params.len() != want {
+        fail SqliteError { code: 25, message: "the statement has {want} parameters, and {params.len()} values were given for them" }
+    }
+    for i in 0..params.len() {
+        try bind(c, s, i32.wrap(i + 1), params[i])
+    }
+}
+
+fn bind(c: i64, s: i64, at: i32, v: Value) ! SqliteError {
+    let rc = match v {
+        Value.Null => unsafe { cx_sqlite_bind_null(c, s, at) },
+        Value.Int(n) => unsafe { cx_sqlite_bind_int(c, s, at, n) },
+        Value.Real(x) => unsafe { cx_sqlite_bind_real(c, s, at, x) },
+        Value.Text(t) => unsafe { cx_sqlite_bind_text(c, s, at, t.as_ptr(), t.len()) },
+        Value.Blob(b) => unsafe { cx_sqlite_bind_blob(c, s, at, b.as_ptr(), b.len()) },
+    }
+    if rc != 0 {
+        fail error(c)
+    }
+}
+
+// Binds `params` and runs the statement to its end, giving the rows it changed.
+fn run_with(c: i64, s: i64, params: List<Value>) -> usize ! SqliteError {
+    try bind_all(c, s, params)
+    let n = unsafe { cx_sqlite_run(c, s) }
+    if n < 0 {
+        fail error(c)
+    }
+    return usize.wrap(n)
+}
+
+// Every row the statement gives, from where it is.
+fn rows_of(c: i64, s: i64) -> List<List<Value>> ! SqliteError {
+    let n = unsafe { cx_sqlite_column_count(s) }
+    var out: List<List<Value>> = []
+    loop {
+        let r = unsafe { cx_sqlite_step(c, s) }
+        if r == 0 {
+            return out
+        }
+        if r < 0 {
+            fail error(c)
+        }
+        var row: List<Value> = []
+        row.reserve(usize.wrap(n))
+        for col in 0..n {
+            row.push(column(s, col))
+        }
+        out.push(row)
+    }
+}
+
+// The value of column `col` in the statement's row.
+fn column(s: i64, col: i32) -> Value {
+    return match unsafe { cx_sqlite_column_type(s, col) } {
+        1 => Value.Int(unsafe { cx_sqlite_column_int(s, col) }),
+        2 => Value.Real(unsafe { cx_sqlite_column_real(s, col) }),
+        3 => Value.Text(text(s, col)),
+        4 => Value.Blob(blob(s, col)),
+        _ => Value.Null,
+    }
+}
+
+// Column `col` as text. SQLite keeps text as it was given, so text that isn't UTF-8 gets U+FFFD
+// for each piece that isn't, as Python's `errors="replace"` reads it.
+fn text(s: i64, col: i32) -> String {
+    let n = unsafe { cx_sqlite_column_text_len(s, col) }
+    var bytes: List<u8> = []
+    bytes.reserve(n)
+    unsafe {
+        cx_sqlite_column_text_copy(s, col, bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    if let t = String.from_utf8(bytes) {
+        return t
+    }
+    let again = blob(s, col)
+    return decode_lossy_unicode(again, 0, again.len())
+}
+
+// Column `col` as bytes.
+fn blob(s: i64, col: i32) -> List<u8> {
+    let n = unsafe { cx_sqlite_column_blob_len(s, col) }
+    var bytes: List<u8> = []
+    bytes.reserve(n)
+    unsafe {
+        cx_sqlite_column_blob_copy(s, col, bytes.as_mut_ptr())
+        bytes.set_len(n)
+    }
+    return bytes
+}
+
+// --- statements ----------------------------------------------------------------------------------
+
+/// A prepared statement, from `Database.prepare`. Values are bound to its parameters, which count
+/// from 1 as SQL's `?1` does, then `step` runs it to each row in turn and the column methods read
+/// that row, with columns counted from 0. It's a handle; give it back with `finish`.
+@handle
+pub struct Statement {
+    conn: i64
+    stmt: i64
+}
+
+impl Statement {
+    /// How many parameters it has.
+    pub fn parameters(self) -> usize {
+        return usize.wrap(unsafe { cx_sqlite_parameter_count(self.stmt) })
+    }
+
+    /// The number of the parameter written `name` in the SQL, such as `:id`, `@id` or `$id`.
+    pub fn parameter(self, name: String) -> usize? {
+        let i = unsafe { cx_sqlite_parameter_index(self.stmt, name.as_ptr(), name.len()) }
+        return if i == 0 { none } else { some(usize.wrap(i)) }
+    }
+
+    /// Binds `params` to its parameters in order, after checking there's one for each.
+    pub fn bind_all(self, params: List<Value>) ! SqliteError {
+        try bind_all(self.conn, self.stmt, params)
+    }
+
+    /// Binds `v` to parameter `i`.
+    pub fn bind(self, i: usize, v: Value) ! SqliteError {
+        try bind(self.conn, self.stmt, i32.wrap(i), v)
+    }
+
+    /// Binds the integer `v` to parameter `i`, without making a `Value`.
+    pub fn bind_int(self, i: usize, v: i64) ! SqliteError {
+        if unsafe { cx_sqlite_bind_int(self.conn, self.stmt, i32.wrap(i), v) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Binds the number `v` to parameter `i`.
+    pub fn bind_real(self, i: usize, v: f64) ! SqliteError {
+        if unsafe { cx_sqlite_bind_real(self.conn, self.stmt, i32.wrap(i), v) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Binds the text `v` to parameter `i`. SQLite takes a copy.
+    pub fn bind_text(self, i: usize, v: String) ! SqliteError {
+        if unsafe { cx_sqlite_bind_text(self.conn, self.stmt, i32.wrap(i), v.as_ptr(), v.len()) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Binds the bytes `v` to parameter `i`. SQLite takes a copy.
+    pub fn bind_blob(self, i: usize, v: List<u8>) ! SqliteError {
+        if unsafe { cx_sqlite_bind_blob(self.conn, self.stmt, i32.wrap(i), v.as_ptr(), v.len()) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Binds `NULL` to parameter `i`.
+    pub fn bind_null(self, i: usize) ! SqliteError {
+        if unsafe { cx_sqlite_bind_null(self.conn, self.stmt, i32.wrap(i)) } != 0 {
+            fail error(self.conn)
+        }
+    }
+
+    /// Runs it to its next row, and gives whether there's one to read. `false` means it's done,
+    /// and ready to run again from the start with the values bound, or with new ones.
+    pub fn step(self) -> bool ! SqliteError {
+        let r = unsafe { cx_sqlite_step(self.conn, self.stmt) }
+        if r < 0 {
+            fail error(self.conn)
+        }
+        return r == 1
+    }
+
+    /// Runs it to its end with the values bound, then makes it ready to run again, keeping them.
+    /// Gives the rows an `INSERT`, `UPDATE` or `DELETE` changed, or 0 for any other statement.
+    pub fn run(self) -> usize ! SqliteError {
+        let n = unsafe { cx_sqlite_run(self.conn, self.stmt) }
+        if n < 0 {
+            fail error(self.conn)
+        }
+        return usize.wrap(n)
+    }
+
+    /// Binds `params` and runs it to its end, as `Database.execute` does.
+    pub fn run_with(self, params: List<Value>) -> usize ! SqliteError {
+        return try run_with(self.conn, self.stmt, params)
+    }
+
+    /// Every row it gives from where it is, as `Database.query` gives them.
+    pub fn rows(self) -> List<List<Value>> ! SqliteError {
+        return try rows_of(self.conn, self.stmt)
+    }
+
+    /// Makes it ready to run again from the start, keeping the values bound.
+    pub fn reset(self) {
+        unsafe { cx_sqlite_reset(self.stmt) }
+    }
+
+    /// Unbinds every parameter, which are then `NULL`.
+    pub fn clear(self) {
+        unsafe { cx_sqlite_clear(self.stmt) }
+    }
+
+    /// How many columns its rows have.
+    pub fn columns(self) -> usize {
+        return usize.wrap(unsafe { cx_sqlite_column_count(self.stmt) })
+    }
+
+    /// The name of column `col`, as the SQL names it, such as `hp` or `count(*)`.
+    @track_caller
+    pub fn column_name(self, col: usize) -> String {
+        let at = self.check(col)
+        let n = unsafe { cx_sqlite_column_name_len(self.stmt, at) }
+        var bytes: List<u8> = []
+        bytes.reserve(n)
+        unsafe {
+            cx_sqlite_column_name_copy(self.stmt, at, bytes.as_mut_ptr())
+            bytes.set_len(n)
+        }
+        return String.from_utf8(bytes) ?? String()
+    }
+
+    /// Every column's name, in order.
+    pub fn column_names(self) -> List<String> {
+        var out: List<String> = []
+        for col in 0..self.columns() {
+            out.push(self.column_name(col))
+        }
+        return out
+    }
+
+    /// Column `col` of the row `step` reached.
+    @track_caller
+    pub fn value(self, col: usize) -> Value {
+        return column(self.stmt, self.check(col))
+    }
+
+    /// The row `step` reached, each column's value in order.
+    pub fn row(self) -> List<Value> {
+        let n = unsafe { cx_sqlite_column_count(self.stmt) }
+        var out: List<Value> = []
+        out.reserve(usize.wrap(n))
+        for col in 0..n {
+            out.push(column(self.stmt, col))
+        }
+        return out
+    }
+
+    /// Column `col` as an integer, converted as SQLite converts it: a number's whole part, the
+    /// number text starts with, or 0.
+    @track_caller
+    pub fn int(self, col: usize) -> i64 {
+        return unsafe { cx_sqlite_column_int(self.stmt, self.check(col)) }
+    }
+
+    /// Column `col` as a number, converted as SQLite converts it.
+    @track_caller
+    pub fn real(self, col: usize) -> f64 {
+        return unsafe { cx_sqlite_column_real(self.stmt, self.check(col)) }
+    }
+
+    /// Column `col` as text, converted as SQLite converts it: a number as SQL writes it, and
+    /// `NULL` as empty text.
+    @track_caller
+    pub fn text(self, col: usize) -> String {
+        return text(self.stmt, self.check(col))
+    }
+
+    /// Column `col` as bytes: text's UTF-8, and `NULL` as none.
+    @track_caller
+    pub fn blob(self, col: usize) -> List<u8> {
+        return blob(self.stmt, self.check(col))
+    }
+
+    /// Whether column `col` is `NULL`.
+    @track_caller
+    pub fn is_null(self, col: usize) -> bool {
+        return unsafe { cx_sqlite_column_type(self.stmt, self.check(col)) } == 5
+    }
+
+    /// Gives it back to the database, which keeps it prepared for the next time its SQL runs.
+    pub fn finish(own self) {
+        unsafe { cx_sqlite_release(self.conn, self.stmt) }
+    }
+
+    @track_caller
+    fn check(self, col: usize) -> i32 {
+        let n = self.columns()
+        if col >= n {
+            panic("column {col} is past the statement's {n} columns, which count from 0")
+        }
+        return i32.wrap(col)
+    }
+}

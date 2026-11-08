@@ -23,7 +23,7 @@ fn grow(xs: mut List<i32> = []) {    // error: a `mut` parameter can't have a de
     xs.push(1)
 }
 
-fn owned(xs: List<i32> = [1]) -> usize {    // error: a `List<i32>` parameter can't have a default; give it a `Copy` type, a `String` or an optional of one
+fn owned(xs: List<i32> = [1]) -> usize {    // error: a `List<i32>` parameter can't have a default; give it a `Copy` type, a `String`, an optional of one, or a list whose default is `[]`
     return xs.len()
 }
 

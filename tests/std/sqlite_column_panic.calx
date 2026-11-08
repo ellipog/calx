@@ -1,0 +1,11 @@
+// A column past a statement's last is a mistake in the program, so reading it panics at the call,
+// where SQLite would give NULL.
+
+import std.sqlite.{Database}
+
+fn main() {
+    let db = Database.open(String(":memory:"))!
+    let st = db.prepare(String("SELECT 1, 2"))!
+    _ = st.step()!
+    _ = st.int(2)    // panic: column 2 is past the statement's 2 columns, which count from 0
+}

@@ -7,3 +7,5 @@
 *.bin binary
 # The website's HTML, CSS and scripts don't count toward the repo's languages on GitHub.
 site/** linguist-documentation
+# SQLite's amalgamation is vendored, unchanged.
+runtime/sqlite/** linguist-vendored

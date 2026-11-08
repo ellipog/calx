@@ -163,7 +163,7 @@ fn main() {
 
 - A default is a constant: a literal, a [constant](variables.md#constants), `none`, an enum's variant without data, or an array or tuple of them. It sees only names at the module's top level, not the other parameters, and it's worked out where the function is declared, once.
 - The parameters with defaults come last.
-- A parameter with a default has a `Copy` type, a `String`, whose default points at the program's text, or an optional of one, so a call that passes the default allocates nothing.
+- A parameter with a default has a `Copy` type, a `String`, whose default points at the program's text, or an optional of one, or it's a list whose default is `[]`, which holds nothing. So a call that passes the default allocates nothing.
 - A `mut` parameter can't have a default, since it changes the caller's variable, and neither can one whose type is generic, nor an interface's functions.
 - A function value has no defaults: `let f = pad` takes all four arguments.
 

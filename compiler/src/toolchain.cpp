@@ -738,6 +738,16 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
 // release one about 7 MB, mostly the static C runtime's debug info.
 constexpr std::size_t kKeepPrograms = 64;
 constexpr std::uintmax_t kProgramBytes = 256u << 20;
+// Whether standard error is a terminal someone is watching.
+static bool stderr_is_terminal() {
+#ifdef _WIN32
+    DWORD mode;
+    return GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode) != 0;
+#else
+    return isatty(2) != 0;
+#endif
+}
+
 constexpr std::size_t kKeepObjects = 1024;
 constexpr std::uintmax_t kObjectBytes = 256u << 20;
 }  // namespace
@@ -1097,6 +1107,41 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                            "cx_sort_u32(", "cx_sort_u64(", "cx_sort_usize(", "cx_sort_char(", "cx_sort_rune(", "cx_sort_bool("})) {
         parts_ok = part("calx_sort.c");
     }
+    // SQLite, under std.sqlite (CLX-108), is its amalgamation: 9.6 MB of C that takes clang 12 s to
+    // optimize. So it's compiled once for each build mode, always with -O2, as SQLite advises, and
+    // never with ThinLTO, which would optimize it again in every release link. It's keyed by its
+    // size and time rather than its text, which would take each build that uses it 15 ms to hash.
+    // The options are SQLite's recommended ones (https://sqlite.org/compile.html#rcmd): strings
+    // only in single quotes, no memory statistics, and no deprecated, shared-cache, progress or
+    // extension-loading code. Then the full-text search, R-tree and math functions Python's builds
+    // have, and multi-thread mode, since a connection is only ever used by one thread at a time.
+    std::vector<std::string> sqlite_flags;
+    std::string sqlite_obj;
+    if (parts_ok && calls({"cx_sqlite_"})) {
+        parts_ok = part("calx_sqlite.c");
+        std::error_code ec;
+        fs::path src = runtime / "sqlite" / "sqlite3.c";
+        auto size = fs::file_size(src, ec);
+        auto time = ec ? 0 : fs::last_write_time(src, ec).time_since_epoch().count();
+        if (ec) parts_ok = false;
+        for (const std::string& f : flags) {
+            if (f != "-O0" && f != "-O3" && f != "-flto=thin" && f != "-DCX_DEBUG" && f != "-gline-tables-only") {
+                sqlite_flags.push_back(f);
+            }
+        }
+        for (const char* f : {"-O2", "-DSQLITE_DQS=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_DEFAULT_MEMSTATUS=0",
+                              "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1", "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS", "-DSQLITE_MAX_EXPR_DEPTH=0",
+                              "-DSQLITE_OMIT_DECLTYPE", "-DSQLITE_OMIT_DEPRECATED", "-DSQLITE_OMIT_PROGRESS_CALLBACK",
+                              "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_USE_ALLOCA",
+                              "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_MATH_FUNCTIONS"}) {
+            sqlite_flags.push_back(f);
+        }
+        std::string sqlite_text;
+        for (const std::string& f : sqlite_flags) sqlite_text += f + " ";
+        std::string key = hash_hex({"sqlite", std::to_string(size), std::to_string(time), sqlite_text, tc.identity});
+        sqlite_obj = (fs::path(obj_dir) / (key + ".o")).string();
+        all_keys += " " + key;
+    }
     if (!parts_ok) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
@@ -1190,10 +1235,12 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     auto make_objects = [&]() -> bool {
         std::vector<std::vector<std::string>> compiles;
         std::vector<std::pair<std::string, std::string>> renames;
-        auto compile = [&](const std::string& src_path, const std::string& obj, const std::vector<std::string>& extra) {
+        auto compile = [&](const std::string& src_path, const std::string& obj, const std::vector<std::string>& extra,
+                           const std::vector<std::string>* own_flags = nullptr) {
             std::string temp = obj + ".tmp" + unique_stamp();
             std::vector<std::string> cmd = {tc.clang, "-c"};
-            cmd.insert(cmd.end(), flags.begin(), flags.end());
+            const std::vector<std::string>& base = own_flags ? *own_flags : flags;
+            cmd.insert(cmd.end(), base.begin(), base.end());
             cmd.insert(cmd.end(), extra.begin(), extra.end());
             cmd.push_back("-I" + runtime.string());
             cmd.push_back(src_path);
@@ -1210,6 +1257,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             for (const auto& [file, obj] : parts) {
                 if (file_exists(obj)) touch(obj);
                 else compile((runtime / file).string(), obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+            }
+            if (!sqlite_obj.empty()) {
+                if (file_exists(sqlite_obj)) {
+                    touch(sqlite_obj);
+                } else {
+                    // Seconds of waiting with nothing said would look like a hang.
+                    if (stderr_is_terminal()) std::fprintf(stderr, "calx: compiling SQLite for std.sqlite, once (about 15 seconds)\n");
+                    compile((runtime / "sqlite" / "sqlite3.c").string(), sqlite_obj, {"-D_CRT_SECURE_NO_WARNINGS"}, &sqlite_flags);
+                }
             }
         }
         // Each build writes its C under a name of its own: two builds that need the same module, such
@@ -1274,6 +1330,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         inputs.push_back(rt_obj);
         inputs.push_back(alloc_obj);
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
+        if (!sqlite_obj.empty()) inputs.push_back(sqlite_obj);
     }
     bool linked = link_program(tc, inputs, temp_exe, link_flags, verbose);
     if (!linked && std::any_of(inputs.begin(), inputs.end(), [](const std::string& f) { return !file_exists(f); })) {

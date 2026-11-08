@@ -113,6 +113,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 42. [std.csv](std/csv.md): CSV read as Python's `csv.reader` and `DictReader` read it, quirks included, a row at a time or all at once, and written as `csv.writer` writes it
 43. [std.xml](std/xml.md): XML read into a tree as Python's ElementTree reads it, with the line and column of what isn't well-formed, elements found by ElementTree's paths, and trees written back plain or indented
 44. [std.html](std/html.md): HTML text escaped, and its character references read back with every name HTML5 has, exactly as Python's `html.escape` and `html.unescape` do
+45. [std.sqlite](std/sqlite.md): SQLite databases as Python's `sqlite3` reads and writes them, with SQLite built in: SQL with parameters, rows of typed values, transactions, and prepared statements kept for the next run
 
 ### Java compatibility
 

@@ -29,6 +29,15 @@ fn join(parts: [str; 3], sep: str = SEP, end: String = "!") -> String {
     return s
 }
 
+// A list's default can only be `[]`, which owns no memory.
+fn added(xs: List<i32> = [], names: own List<String> = []) -> String {
+    var n = 0
+    for x in xs {
+        n += x
+    }
+    return "{n} {names.len()}"
+}
+
 fn pick(mode: Mode = Mode.Fast, limit: i32? = none, scale: f64 = 1.5, sign: i32 = -2) -> String {
     let m = match mode {
         Mode.Fast => "fast",
@@ -66,6 +75,7 @@ fn main() {
     println(pick(limit: some(4)))                           // out: fast some(4) 1.5 -2
     println(pick(sign: 7, mode: Mode.Slow))                 // out: slow none 1.5 7
     println("{total()} {total([4, 5, 6])} {total(on: false)}")    // out: 6 15 -6
+    println("{added()} {added([1, 2])} {added(names: [String("a")])}")    // out: 0 0 3 0 0 1
     let xs: List<i32> = [1, 2, 3]
     println("{first(xs)} {first(xs, 1)}")                   // out: 3 2
     var c = Counter { n: 0 }

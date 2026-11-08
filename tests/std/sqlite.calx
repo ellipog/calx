@@ -1,0 +1,151 @@
+// std.sqlite runs SQL as Python's sqlite3 does (CLX-108): SQLite's five kinds of value both ways,
+// changes counted, transactions, the statement cache, prepared statements by hand, files opened to
+// write and to read, and SQLite's errors with their codes.
+import std.fs.{remove_dir_all, temp_dir}
+import std.sqlite.{Database, SqliteError, Value, version}
+
+fn attempt(db: Database, sql: str, params: List<Value> = []) {
+    match db.execute(String(sql), params) {
+        ok(n) => println("ok {n}"),
+        err(e) => println("error {e.code}: {e}"),
+    }
+}
+
+fn count(db: Database, sql: str) -> List<Value>? ! SqliteError {
+    return try db.query_one(String(sql))
+}
+
+fn main() ! SqliteError {
+    println("{version().starts_with("3.")}")    // out: true
+    let db = try Database.open(String(":memory:"))
+    try db.execute_script(String(#"
+        CREATE TABLE mobs (id INTEGER PRIMARY KEY, name TEXT UNIQUE, hp INTEGER, speed REAL, sound BLOB);
+        CREATE INDEX by_hp ON mobs (hp);
+        "#))
+
+    // Every kind of value, empty text and an empty blob included, which aren't NULL.
+    let added = try db.execute(String("INSERT INTO mobs (name, hp, speed, sound) VALUES (?, ?, ?, ?)"),
+                               [Value.Text(String("zombie")), Value.Int(20), Value.Real(0.25), Value.Blob([1, 2, 255])])
+    println("{added} {db.last_insert_id()}")    // out: 1 1
+    _ = try db.execute(String("INSERT INTO mobs (name, hp, sound) VALUES (?, ?, ?)"), [Value.Text(String("")), Value.Null, Value.Blob([])])
+    for row in try db.query(String("SELECT name, hp, speed, sound, typeof(name), typeof(sound) FROM mobs ORDER BY id")) {
+        println("{row}")
+    }
+    // out: [zombie, 20, 0.25, x'0102FF', text, blob]
+    // out: [, NULL, NULL, x'', text, blob]
+    _ = try db.execute(String("DELETE FROM mobs WHERE name = ''"))
+
+    // Many rows at once, in a transaction of their own, so a row that fails leaves none.
+    let sql = String("INSERT INTO mobs (name, hp) VALUES (?, ?)")
+    let many = try db.execute_many(sql.copy(), [[Value.Text(String("witch")), Value.Int(26)], [Value.Text(String("bat")), Value.Int(6)]])
+    println("{many} {db.last_insert_id()} {db.in_transaction()}")    // out: 2 3 false
+    match db.execute_many(sql.copy(), [[Value.Text(String("cow")), Value.Int(10)], [Value.Text(String("bat")), Value.Int(7)]]) {
+        ok(_) => println("?"),
+        err(e) => println("error {e.code}: {e}"),    // out: error 2067: UNIQUE constraint failed: mobs.name
+    }
+    println("{try count(db, "SELECT count(*) FROM mobs WHERE name = 'cow'")} {db.in_transaction()}")    // out: some([0]) false
+
+    // What changed: rows an INSERT, UPDATE or DELETE changed, and 0 for anything else.
+    let changed = try db.execute(String("UPDATE mobs SET hp = hp + 1 WHERE hp < 25"))
+    let created = try db.execute(String("CREATE TABLE empty (x)"))
+    let selected = try db.execute(String("SELECT * FROM mobs"))
+    println("{changed} {created} {selected} {try db.execute(String(""))} {(try db.query(String("  -- nothing"))).len()}")    // out: 2 0 0 0 0
+
+    // Transactions.
+    try db.begin()
+    _ = try db.execute(String("DELETE FROM mobs"))
+    println("{db.in_transaction()} {try count(db, "SELECT count(*) FROM mobs")}")    // out: true some([0])
+    try db.rollback()
+    println("{db.in_transaction()} {try count(db, "SELECT count(*) FROM mobs")}")    // out: false some([3])
+    try db.begin()
+    _ = try db.execute(String("UPDATE mobs SET speed = 0.5 WHERE name = 'bat'"))
+    try db.commit()
+    println("{try count(db, "SELECT speed FROM mobs WHERE name = 'bat'")}")    // out: some([0.5])
+
+    // Rows by name, and one row or none.
+    for r in try db.query_records(String("SELECT name, hp, hp * 2 AS hp FROM mobs WHERE hp > ? ORDER BY hp"), [Value.Int(20)]) {
+        println("{r.len()} {r["name"]} {r["hp"]}")
+    }
+    // out: 2 zombie 42
+    // out: 2 witch 52
+    println("{try db.query_one(String("SELECT name FROM mobs WHERE hp > 100"))}")    // out: none
+
+    // SQLite's errors, and the ones for calls that can't run.
+    attempt(db, "SELECT * FROM nope")    // out: error 1: no such table: nope
+    attempt(db, "SELECT \"hp\" FROM mobs WHERE \"nope\" = 1")    // out: error 1: no such column: "nope" - should this be a string literal in single-quotes?
+    attempt(db, "SELECT 1; SELECT 2")    // out: error 21: the SQL holds more than one statement; execute_script runs several
+    attempt(db, "SELECT ? + ?", [Value.Int(1)])    // out: error 25: the statement has 2 parameters, and 1 values were given for them
+    attempt(db, "INSERT INTO mobs (name) VALUES ('bat')")    // out: error 2067: UNIQUE constraint failed: mobs.name
+    attempt(db, "INSERT INTO mobs (id) VALUES (?)", [Value.Text(String("x"))])    // out: error 20: datatype mismatch
+    match db.prepare(String(" ")) {
+        ok(st) => st.finish(),
+        err(e) => println("error {e.code}: {e}"),    // out: error 21: the SQL holds no statement
+    }
+
+    // Text that isn't UTF-8, which SQLite keeps as it's given.
+    println("{try count(db, "SELECT CAST(x'41FF42' AS TEXT)")}")    // out: some([A�B])
+
+    // A statement by hand: parameters by name, columns read as each type, run again.
+    let st = try db.prepare(String("SELECT id, name, hp, speed FROM mobs WHERE hp >= :min AND name != @skip ORDER BY id"))
+    println("{st.parameters()} {st.parameter(String(":min"))} {st.parameter(String("@skip"))} {st.parameter(String(":none"))}")    // out: 2 some(1) some(2) none
+    try st.bind_int(1, 20)
+    try st.bind_text(2, String("witch"))
+    println("{st.columns()} {st.column_names()}")    // out: 4 [id, name, hp, speed]
+    while try st.step() {
+        println("{st.int(0)} {st.text(1)} {st.real(2)} {st.is_null(3)} {st.value(3)} [{st.text(3)}] {st.text(2)} {st.blob(1)}")
+    }
+    // out: 1 zombie 21.0 false 0.25 [0.25] 21 [122, 111, 109, 98, 105, 101]
+    st.reset()
+    println("{(try st.rows()).len()}")    // out: 1
+    st.clear()
+    println("{(try st.rows()).len()}")    // out: 0
+    try st.bind(1, Value.Int(0))
+    try st.bind_null(2)
+    println("{(try st.rows()).len()}")    // out: 0
+    try st.bind_all([Value.Int(0), Value.Text(String("zombie"))])
+    println("{try st.rows()}")    // out: [[2, witch, 26, NULL], [3, bat, 7, 0.5]]
+    st.finish()
+
+    // The same SQL twice at once: the second gets a statement of its own.
+    let outer = try db.prepare(String("SELECT name FROM mobs ORDER BY id"))
+    var pairs = 0
+    while try outer.step() {
+        let inner = try db.prepare(String("SELECT name FROM mobs ORDER BY id"))
+        while try inner.step() {
+            pairs += 1
+        }
+        inner.finish()
+    }
+    outer.finish()
+    println("{pairs}")    // out: 9
+
+    // Values.
+    let n = Value.Int(7)
+    println("{n.as_int()} {n.as_real()} {n.as_text()} {n.is_null()} {Value.Null.is_null()} {Value.Real(1.5).as_int()}")    // out: some(7) some(7.0) none false true none
+    println("{Value.Text(String("hi")).as_text()} {Value.Blob([1, 2]).as_blob()} {Value.Blob([202, 254])} {n == Value.Int(7)}")    // out: some(hi) some([1, 2]) x'CAFE' true
+
+    // A statement still out when the database closes fails, and only needs finishing.
+    let late = try db.prepare(String("SELECT 1"))
+    try db.close()
+    match late.step() {
+        ok(_) => println("?"),
+        err(e) => println("error {e.code}: {e}"),    // out: error 21: the database is closed
+    }
+    late.finish()
+
+    // A file: written, closed, opened again only to read.
+    let dir = temp_dir()!
+    let path = "{dir}/game.db"
+    let file = try Database.open(path.copy())
+    try file.execute_script(String("CREATE TABLE t (x); INSERT INTO t VALUES (1), (2);"))
+    try file.close()
+    let again = try Database.open_read(path.copy())
+    println("{try count(again, "SELECT sum(x) FROM t")}")    // out: some([3])
+    attempt(again, "INSERT INTO t VALUES (3)")    // out: error 8: attempt to write a readonly database
+    try again.close()
+    match Database.open_read("{dir}/missing.db") {
+        ok(d) => try d.close(),
+        err(e) => println("error {e.code}: {e}"),    // out: error 14: unable to open database file
+    }
+    remove_dir_all(dir)!
+}

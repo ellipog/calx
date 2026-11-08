@@ -3061,10 +3061,12 @@ private:
             return;
         }
         // Nothing a call passes for it owns memory: a literal's `String` points at the program's
-        // text.
+        // text, and an empty list, `[]`, has nothing to point at (CLX-108).
         const Type* inner = t->kind == TypeKind::optional ? t->elem : t;
-        if (!is_copy(inner) && inner != T.string) {
-            error(v->span, a_type(t) + " parameter can't have a default; give it a `Copy` type, a `String` or an optional of one");
+        bool empty_list = t->kind == TypeKind::list && v->kind == ExprKind::array_lit && v->elems.size() == 0 && !v->repeat;
+        if (!empty_list && !is_copy(inner) && inner != T.string) {
+            error(v->span, a_type(t) + " parameter can't have a default; give it a `Copy` type, a `String`, an optional of one, or a "
+                                       "list whose default is `[]`");
             return;
         }
         std::vector<Local*> saved_visible;
