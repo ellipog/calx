@@ -15,7 +15,7 @@ In reading order:
 
 Installing Calx, then learning it by building one small program, `stash`, which keeps count of items from commands it reads:
 
-1. [Install Calx](guide/install.md): one command on Windows or Linux, clang, checking that it runs a program, staying up to date, and building from source
+1. [Install Calx](guide/install.md): one command on Windows or Linux, clang, checking that it runs a program, staying up to date, completions, uninstalling, and building from source
 2. [Getting started](guide/getting-started.md): the program, the `calx` command, values and variables, functions, loops, and the checker's errors
 3. [Reading the commands](guide/reading-input.md): standard input a line at a time, optionals and `while let`, and splitting a line into words
 4. [What the commands mean](guide/commands.md): commands as an enum, parsing numbers, functions that fail, matching on text, and copying out of a list
@@ -26,7 +26,7 @@ Installing Calx, then learning it by building one small program, `stash`, which 
 
 What's built, one page per feature:
 
-1. [The calx command](reference/command.md): check, build, run, test, eval, emit-c, how builds stay fast, and errors for editors
+1. [The calx command](reference/command.md): check, build, run, test, eval, emit-c, how builds stay fast, cleaning, uninstalling, completions, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals, raw strings and operators
 4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are

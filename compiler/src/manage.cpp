@@ -1,0 +1,457 @@
+#include "manage.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "toolchain.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace fs = std::filesystem;
+
+namespace calx {
+
+namespace {
+
+// A size in bytes, as people read one: `412.3 MB`.
+std::string human(std::uintmax_t bytes) {
+    char buf[32];
+    if (bytes < 1000 * 1000) {
+        std::snprintf(buf, sizeof buf, "%.1f KB", static_cast<double>(bytes) / 1000.0);
+    } else if (bytes < 1000ull * 1000 * 1000) {
+        std::snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(bytes) / 1e6);
+    } else {
+        std::snprintf(buf, sizeof buf, "%.2f GB", static_cast<double>(bytes) / 1e9);
+    }
+    return buf;
+}
+
+// Removes everything in `dir`, and `dir` itself if it can, counting the bytes of the files it
+// removed and the files it couldn't, which on Windows are those a running program holds open.
+void remove_counting(const fs::path& dir, std::uintmax_t& freed, std::size_t& kept) {
+    std::error_code ec;
+    std::vector<fs::path> dirs;
+    for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code e;
+        if (it->is_directory(e) && !it->is_symlink(e)) {
+            dirs.push_back(it->path());
+            continue;
+        }
+        std::uintmax_t size = it->is_regular_file(e) ? it->file_size(e) : 0;
+        if (fs::remove(it->path(), e)) {
+            freed += size;
+        } else {
+            kept++;
+        }
+    }
+    // The deepest first, so each is empty when it's removed; one that still holds a kept file stays.
+    for (auto d = dirs.rbegin(); d != dirs.rend(); ++d) {
+        std::error_code e;
+        fs::remove(*d, e);
+    }
+    std::error_code e;
+    fs::remove(dir, e);
+}
+
+// Whether standard input is a terminal someone can answer in. On Windows `_isatty` says so for the
+// NUL device too, so it asks for the console's mode instead.
+bool stdin_is_terminal() {
+#ifdef _WIN32
+    DWORD mode;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
+bool has_flag(const std::vector<std::string>& args, const char* flag) {
+    for (const std::string& a : args) {
+        if (a == flag) return true;
+    }
+    return false;
+}
+
+#ifdef _WIN32
+std::wstring lower(std::wstring s) {
+    for (wchar_t& c : s) c = static_cast<wchar_t>(towlower(c));
+    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    return s;
+}
+
+// Takes `bin` out of the user's Path in the registry, where the install script put it, and tells
+// running programs the environment changed. Whether it was there.
+bool remove_from_path(const fs::path& bin) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) return false;
+    DWORD type = 0, size = 0;
+    bool removed = false;
+    if (RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && size > 0) {
+        std::wstring value(size / sizeof(wchar_t) + 1, L'\0');
+        if (RegQueryValueExW(key, L"Path", nullptr, &type, reinterpret_cast<BYTE*>(value.data()), &size) == ERROR_SUCCESS) {
+            value.resize(wcsnlen(value.c_str(), value.size()));
+            std::wstring target = lower(bin.wstring());
+            std::wstring kept;
+            std::size_t at = 0;
+            while (at <= value.size()) {
+                std::size_t end = value.find(L';', at);
+                if (end == std::wstring::npos) end = value.size();
+                std::wstring part = value.substr(at, end - at);
+                if (!part.empty()) {
+                    if (lower(part) == target) {
+                        removed = true;
+                    } else {
+                        if (!kept.empty()) kept += L';';
+                        kept += part;
+                    }
+                }
+                at = end + 1;
+            }
+            if (removed) {
+                RegSetValueExW(key, L"Path", 0, type == REG_EXPAND_SZ ? REG_EXPAND_SZ : REG_SZ,
+                               reinterpret_cast<const BYTE*>(kept.c_str()), static_cast<DWORD>((kept.size() + 1) * sizeof(wchar_t)));
+                DWORD_PTR result;
+                SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG,
+                                    2000, &result);
+            }
+        }
+    }
+    RegCloseKey(key);
+    return removed;
+}
+
+// Removes `home` once this program has ended, since Windows won't remove a running calx.exe or
+// the folder it's in: a batch file in the temporary folder waits two seconds, removes the folder,
+// then itself. Whether it started.
+bool remove_after_exit(const fs::path& home) {
+    wchar_t temp[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, temp);
+    if (n == 0 || n > MAX_PATH) return false;
+    fs::path script = fs::path(temp) / ("calx-uninstall-" + unique_stamp() + ".cmd");
+    // UTF-8, which `chcp 65001` makes cmd read the lines after it in, for a home with any name.
+    std::wstring w = home.wstring();
+    int len8 = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string home8(static_cast<std::size_t>(len8), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), home8.data(), len8, nullptr, nullptr);
+    std::string text = "@echo off\r\nchcp 65001 > nul\r\nping -n 3 127.0.0.1 > nul\r\nrmdir /s /q \"" + home8 + "\"\r\ndel \"%~f0\"\r\n";
+    if (!write_file_atomic(script.string(), text)) return false;
+    wchar_t system[MAX_PATH + 1];
+    UINT len = GetSystemDirectoryW(system, MAX_PATH + 1);
+    if (len == 0 || len > MAX_PATH) return false;
+    std::string cmd = (fs::path(system) / "cmd.exe").string();
+    return start_detached({cmd, "/d", "/c", script.string()});
+}
+#else
+// Takes the lines the install script added out of each shell startup file: `export PATH="BIN:$PATH"`,
+// with the `# Calx` line above it and the blank line above that. The files it changed.
+std::vector<std::string> remove_from_path(const fs::path& bin) {
+    std::vector<std::string> changed;
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return changed;
+    std::string line = "export PATH=\"" + bin.string() + ":$PATH\"";
+    for (const char* name : {".profile", ".bashrc", ".zshrc"}) {
+        fs::path rc = fs::path(home) / name;
+        std::string text;
+        if (!read_file(rc.string(), text)) continue;
+        std::vector<std::string> lines;
+        std::size_t at = 0;
+        while (at < text.size()) {
+            std::size_t end = text.find('\n', at);
+            if (end == std::string::npos) end = text.size();
+            lines.push_back(text.substr(at, end - at));
+            at = end + 1;
+        }
+        bool removed = false;
+        std::vector<std::string> out;
+        for (const std::string& l : lines) {
+            if (l != line) {
+                out.push_back(l);
+                continue;
+            }
+            removed = true;
+            if (!out.empty() && out.back() == "# Calx") out.pop_back();
+            if (!out.empty() && out.back().empty()) out.pop_back();
+        }
+        if (!removed) continue;
+        std::string joined;
+        for (const std::string& l : out) joined += l + "\n";
+        if (write_file_atomic(rc.string(), joined)) changed.push_back(rc.string());
+    }
+    return changed;
+}
+#endif
+
+}  // namespace
+
+int run_clean(const std::vector<std::string>& args) {
+    if (!args.empty()) {
+        std::fprintf(stderr, "calx clean: takes no arguments\n");
+        return 2;
+    }
+    fs::path dir = cache_dir();
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) {
+        std::printf("The build cache is empty: nothing is in %s.\n", dir.string().c_str());
+        return 0;
+    }
+    std::uintmax_t freed = 0;
+    std::size_t kept = 0;
+    remove_counting(dir, freed, kept);
+    std::printf("Removed %s of builds from %s.\n", human(freed).c_str(), dir.string().c_str());
+    if (kept) {
+        std::printf("%zu file%s held by programs that are running %s kept; `calx clean` again once they've ended removes %s.\n",
+                    kept, kept == 1 ? "" : "s", kept == 1 ? "was" : "were", kept == 1 ? "it" : "them");
+    }
+    return 0;
+}
+
+int run_uninstall(const std::vector<std::string>& args) {
+    for (const std::string& a : args) {
+        if (a != "--yes") {
+            std::fprintf(stderr, "calx uninstall: unknown option %s; `--yes` removes Calx without asking\n", a.c_str());
+            return 2;
+        }
+    }
+    fs::path exe = self_exe();
+    fs::path home = exe.parent_path().parent_path();
+    std::error_code ec;
+    // An installation is a bin/ with calx in it, beside runtime/ and std/, and no compiler/, which
+    // a source tree has.
+    bool installed = exe.parent_path().filename() == "bin" && fs::is_directory(home / "runtime", ec) &&
+                     fs::is_directory(home / "std", ec) && !fs::exists(home / "compiler", ec);
+    if (!installed) {
+        std::fprintf(stderr,
+                     "calx uninstall: this calx (%s) wasn't installed by the install script, so there's nothing for it to "
+                     "remove; delete the folder it's in, if that's what you want.\n",
+                     exe.string().c_str());
+        return 1;
+    }
+    fs::path bin = exe.parent_path();
+    fs::path cache = cache_dir();
+    bool path = std::getenv("CALX_NO_MODIFY_PATH") == nullptr || std::string(std::getenv("CALX_NO_MODIFY_PATH")) != "1";
+    std::printf("This removes Calx from %s, its build cache in %s%s.\n", home.string().c_str(), cache.string().c_str(),
+                path ? (", and " + bin.string() + " from your PATH").c_str() : "");
+    if (!has_flag(args, "--yes")) {
+        if (!stdin_is_terminal()) {
+            std::fprintf(stderr, "calx uninstall: give `--yes` to remove it without asking\n");
+            return 1;
+        }
+        std::printf("Remove it? [y/N] ");
+        std::fflush(stdout);
+        std::string answer;
+        std::getline(std::cin, answer);
+        if (answer != "y" && answer != "Y" && answer != "yes") {
+            std::printf("Nothing was removed.\n");
+            return 1;
+        }
+    }
+    if (path) {
+#ifdef _WIN32
+        if (remove_from_path(bin)) std::printf("Took %s out of your PATH.\n", bin.string().c_str());
+#else
+        for (const std::string& rc : remove_from_path(bin)) std::printf("Took %s out of your PATH in %s.\n", bin.string().c_str(), rc.c_str());
+#endif
+    }
+    std::uintmax_t freed = 0;
+    std::size_t kept = 0;
+    if (fs::exists(cache, ec)) remove_counting(cache, freed, kept);
+#ifdef _WIN32
+    if (!remove_after_exit(home)) {
+        std::fprintf(stderr, "calx uninstall: couldn't start removing %s; delete it once this ends\n", home.string().c_str());
+        return 1;
+    }
+    std::printf("Calx is removed; its folder goes in a moment, once this command has ended. Open a new terminal for PATH to change.\n");
+#else
+    fs::remove_all(home, ec);
+    if (ec) {
+        std::fprintf(stderr, "calx uninstall: couldn't remove %s: %s\n", home.string().c_str(), ec.message().c_str());
+        return 1;
+    }
+    std::printf("Calx is removed. Open a new terminal for PATH to change.\n");
+#endif
+    return 0;
+}
+
+namespace {
+
+struct Command {
+    const char* name;
+    const char* about;
+};
+
+// The commands, as `calx help` lists them, for the completions. No description has a `'`, which
+// would end the quotes each shell's script puts it in.
+const Command kCommands[] = {
+    {"check", "check a program without building it"},
+    {"build", "build a program"},
+    {"run", "build a program and run it"},
+    {"test", "run the @test functions of a file"},
+    {"eval", "run code given as one argument"},
+    {"emit-c", "print the C a program compiles to"},
+    {"expand", "print the code attributes generate"},
+    {"update", "install the newest release"},
+    {"doctor", "check that Calx can build and run programs"},
+    {"clean", "remove the build cache"},
+    {"uninstall", "remove Calx"},
+    {"completions", "print completions for a shell"},
+    {"version", "print the version of calx"},
+    {"help", "list the commands"},
+};
+
+const char* const kBuildOptions = "--release --lib -o --timings --verbose --no-line --json --stdin";
+const char* const kUpdateOptions = "--check --nightly --stable --to --rollback --force";
+const char* const kShells = "bash zsh fish powershell";
+
+std::string command_names() {
+    std::string out;
+    for (const Command& c : kCommands) out += std::string(out.empty() ? "" : " ") + c.name;
+    return out;
+}
+
+std::string bash() {
+    return "# calx completions for bash: add `eval \"$(calx completions bash)\"` to ~/.bashrc\n"
+           "_calx() {\n"
+           "    local cur=\"${COMP_WORDS[COMP_CWORD]}\"\n"
+           "    if [ \"$COMP_CWORD\" -eq 1 ]; then\n"
+           "        COMPREPLY=($(compgen -W \"" + command_names() + "\" -- \"$cur\") $(compgen -f -X '!*.calx' -- \"$cur\") $(compgen -d -- \"$cur\"))\n"
+           "        return\n"
+           "    fi\n"
+           "    case \"${COMP_WORDS[1]}\" in\n"
+           "        update) COMPREPLY=($(compgen -W \"" + std::string(kUpdateOptions) + "\" -- \"$cur\")) ;;\n"
+           "        completions) COMPREPLY=($(compgen -W \"" + std::string(kShells) + "\" -- \"$cur\")) ;;\n"
+           "        uninstall) COMPREPLY=($(compgen -W \"--yes\" -- \"$cur\")) ;;\n"
+           "        clean|doctor|version|help) COMPREPLY=() ;;\n"
+           "        *)\n"
+           "            if [[ \"$cur\" == -* ]]; then\n"
+           "                COMPREPLY=($(compgen -W \"" + std::string(kBuildOptions) + "\" -- \"$cur\"))\n"
+           "            else\n"
+           "                COMPREPLY=($(compgen -f -X '!*.calx' -- \"$cur\") $(compgen -d -- \"$cur\"))\n"
+           "            fi ;;\n"
+           "    esac\n"
+           "}\n"
+           "complete -o filenames -F _calx calx\n";
+}
+
+std::string zsh() {
+    std::string commands;
+    for (const Command& c : kCommands) commands += std::string("        '") + c.name + ":" + c.about + "'\n";
+    std::string options;
+    for (const char* o : {"--release[optimize]", "--lib[build a library]", "-o[where to write]:file:_files", "--timings[print how long each step took]",
+                          "--verbose[print the clang commands]", "--no-line[leave #line directives out]", "--json[print errors as JSON]",
+                          "--stdin[read the text from standard input]"}) {
+        options += std::string(" '") + o + "'";
+    }
+    return "#compdef calx\n"
+           "# calx completions for zsh: add `eval \"$(calx completions zsh)\"` to ~/.zshrc, after compinit\n"
+           "_calx() {\n"
+           "    local -a commands\n"
+           "    commands=(\n" + commands + "    )\n"
+           "    if (( CURRENT == 2 )); then\n"
+           "        _describe 'command' commands\n"
+           "        _files -g '*.calx'\n"
+           "        return\n"
+           "    fi\n"
+           "    case $words[2] in\n"
+           "        update) _values 'option' " + std::string(kUpdateOptions) + " ;;\n"
+           "        completions) _values 'shell' " + std::string(kShells) + " ;;\n"
+           "        uninstall) _values 'option' --yes ;;\n"
+           "        clean|doctor|version|help) ;;\n"
+           "        *) _arguments" + options + " '*:file:_files -g \"*.calx\"' ;;\n"
+           "    esac\n"
+           "}\n"
+           "compdef _calx calx\n";
+}
+
+std::string fish() {
+    std::string out = "# calx completions for fish: `calx completions fish > ~/.config/fish/completions/calx.fish`\n"
+                      "complete -c calx -f\n";
+    for (const Command& c : kCommands) {
+        out += std::string("complete -c calx -n __fish_use_subcommand -a ") + c.name + " -d '" + c.about + "'\n";
+    }
+    const char* builds = "check build run test emit-c expand";
+    out += std::string("complete -c calx -n '__fish_use_subcommand' -a '(__fish_complete_suffix .calx)'\n");
+    out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -a '(__fish_complete_suffix .calx)'\n";
+    for (const char* o : {"release", "lib", "timings", "verbose", "no-line", "json", "stdin"}) {
+        out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -l " + o + "\n";
+    }
+    out += std::string("complete -c calx -n '__fish_seen_subcommand_from ") + builds + "' -s o -r -F\n";
+    out += "complete -c calx -n '__fish_seen_subcommand_from eval' -l release\n";
+    for (const char* o : {"check", "nightly", "stable", "to", "rollback", "force"}) {
+        out += std::string("complete -c calx -n '__fish_seen_subcommand_from update' -l ") + o + "\n";
+    }
+    out += "complete -c calx -n '__fish_seen_subcommand_from uninstall' -l yes\n";
+    out += std::string("complete -c calx -n '__fish_seen_subcommand_from completions' -a '") + kShells + "'\n";
+    return out;
+}
+
+std::string powershell() {
+    std::string commands;
+    for (const Command& c : kCommands) commands += std::string("        '") + c.name + "' = '" + c.about + "'\n";
+    return "# calx completions for PowerShell: add `calx completions powershell | Out-String | Invoke-Expression` to $PROFILE\n"
+           "Register-ArgumentCompleter -Native -CommandName calx -ScriptBlock {\n"
+           "    param($wordToComplete, $commandAst, $cursorPosition)\n"
+           "    $commands = [ordered]@{\n" + commands + "    }\n"
+           "    $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })\n"
+           "    $first = $words.Count -le 1 -or ($words.Count -eq 2 -and $wordToComplete -ne '')\n"
+           "    $result = { param($text, $tip) [System.Management.Automation.CompletionResult]::new($text, $text, 'ParameterValue', $tip) }\n"
+           "    $files = {\n"
+           "        Get-ChildItem -Path \"$wordToComplete*\" -ErrorAction SilentlyContinue |\n"
+           "            Where-Object { $_.PSIsContainer -or $_.Extension -eq '.calx' } |\n"
+           "            ForEach-Object { $p = Resolve-Path -Relative $_.FullName; & $result $p $p }\n"
+           "    }\n"
+           "    if ($first) {\n"
+           "        $commands.Keys | Where-Object { $_ -like \"$wordToComplete*\" } | ForEach-Object { & $result $_ $commands[$_] }\n"
+           "        & $files\n"
+           "        return\n"
+           "    }\n"
+           "    $options = switch ($words[1]) {\n"
+           "        'update' { '" + std::string(kUpdateOptions) + "' }\n"
+           "        'completions' { '" + std::string(kShells) + "' }\n"
+           "        'uninstall' { '--yes' }\n"
+           "        { $_ -in 'clean', 'doctor', 'version', 'help' } { '' }\n"
+           "        default { if ($wordToComplete -like '-*') { '" + std::string(kBuildOptions) + "' } else { $null } }\n"
+           "    }\n"
+           "    if ($null -eq $options) { & $files; return }\n"
+           "    $options -split ' ' | Where-Object { $_ -and $_ -like \"$wordToComplete*\" } | ForEach-Object { & $result $_ $_ }\n"
+           "}\n";
+}
+
+}  // namespace
+
+int run_completions(const std::vector<std::string>& args) {
+    std::string shell = args.size() == 1 ? args[0] : "";
+    std::string text;
+    if (shell == "bash") {
+        text = bash();
+    } else if (shell == "zsh") {
+        text = zsh();
+    } else if (shell == "fish") {
+        text = fish();
+    } else if (shell == "powershell" || shell == "pwsh") {
+        text = powershell();
+    } else {
+        std::fprintf(stderr, "calx completions: name the shell: bash, zsh, fish or powershell\n");
+        return 2;
+    }
+#ifdef _WIN32
+    // `\n` as it is, since bash in Git Bash or WSL reads a `\r` as part of the line.
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    return 0;
+}
+
+}  // namespace calx

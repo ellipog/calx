@@ -1,0 +1,94 @@
+// `calx clean` removes the build cache, `calx uninstall` removes an installation the install script
+// made, and `calx completions` prints a shell's completions (CLX-85). Each runs here against
+// folders of its own: a cache named by CALX_CACHE, and a copy of calx laid out as an installation,
+// whose PATH entry is a line in a startup file under a HOME of its own on Linux. On Windows the
+// PATH is the user's own, so the test leaves it alone with CALX_NO_MODIFY_PATH.
+import std.env.{os, variable}
+import std.fs.{copy, exists, make_dir_all, read_text, temp_dir, write, write_text, remove_dir_all, separator}
+import std.process.{Command}
+import std.thread.{sleep}
+
+// What a calx printed, with `dir` as DIR and backslashes as slashes, and how it ended.
+fn calx(exe: String, args: List<String>, env: List<(String, String)>, dir: String) -> String {
+    var c = Command.new(exe).args(args)
+    for (name, value) in env {
+        c = c.env(name, value)
+    }
+    match c.output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".replace("\\", "/").replace(dir.replace("\\", "/"), "DIR")
+            return "{text.trim_end()} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+
+    // clean, twice.
+    let cache = "{dir}{s}cache"
+    make_dir_all("{cache}{s}objects")!
+    write("{cache}{s}objects{s}a.o", [0u8; 2500])!
+    let in_cache: List<(String, String)> = [(String("CALX_CACHE"), cache.copy())]
+    println(calx(exe, ["clean"], in_cache.copy(), dir))    // out: Removed 2.5 KB of builds from DIR/cache. [exited with status 0]
+    println(calx(exe, ["clean"], in_cache.copy(), dir))    // out: The build cache is empty: nothing is in DIR/cache. [exited with status 0]
+    println(calx(exe, ["clean", "now"], in_cache.copy(), dir))    // out: calx clean: takes no arguments [exited with status 2]
+
+    // completions: the first line of each, and a shell it doesn't know.
+    let shells: List<String> = ["bash", "zsh", "fish", "powershell"]
+    for shell in shells {
+        let all = calx(exe, ["completions", shell.copy()], List(), dir)
+        println(all.lines()[0])
+    }
+    // out: # calx completions for bash: add `eval "$(calx completions bash)"` to ~/.bashrc
+    // out: #compdef calx
+    // out: # calx completions for fish: `calx completions fish > ~/.config/fish/completions/calx.fish`
+    // out: # calx completions for PowerShell: add `calx completions powershell | Out-String | Invoke-Expression` to $PROFILE
+    println(calx(exe, ["completions", "tcsh"], List(), dir))    // out: calx completions: name the shell: bash, zsh, fish or powershell [exited with status 2]
+
+    // This calx was built from source, so it has nothing to uninstall.
+    let refused = calx(exe, ["uninstall", "--yes"], List(), dir)
+    println("{refused.contains("wasn't installed by the install script") and refused.ends_with("[exited with status 1]")}")    // out: true
+
+    // A copy laid out as the install script lays one out.
+    let home = "{dir}{s}install"
+    let bin = "{home}{s}bin"
+    make_dir_all(bin)!
+    make_dir_all("{home}{s}runtime")!
+    make_dir_all("{home}{s}std")!
+    let windows = os() == "windows"
+    let copied = if windows { "{bin}{s}calx.exe" } else { "{bin}{s}calx" }
+    copy(exe, copied)!
+    make_dir_all("{cache}{s}objects")!
+    write("{cache}{s}objects{s}b.o", [0u8; 1500])!
+    var env: List<(String, String)> = [(String("CALX_CACHE"), cache.copy())]
+    let profile = "{dir}{s}home{s}.profile"
+    if windows {
+        env.push((String("CALX_NO_MODIFY_PATH"), String("1")))
+    } else {
+        make_dir_all("{dir}{s}home")!
+        write_text(profile, "umask 022\n\n# Calx\nexport PATH=\"{bin}:$PATH\"\n")!
+        env.push((String("HOME"), "{dir}{s}home"))
+    }
+    println(calx(copied, ["uninstall"], env.copy(), dir).lines()[1])    // out: calx uninstall: give `--yes` to remove it without asking [exited with status 1]
+    let said = calx(copied, ["uninstall", "--yes"], env.copy(), dir)
+    println("{said.lines()[0].starts_with("This removes Calx from DIR/install, its build cache in DIR/cache")}")    // out: true
+    println("{said.ends_with("[exited with status 0]")}")    // out: true
+    // On Windows the folder goes once the command has ended.
+    var waited = 0
+    while exists(home) and waited < 100 {
+        unsafe { sleep(100000000) }
+        waited += 1
+    }
+    println("{exists(home)} {exists(cache)}")    // out: false false
+    if not windows {
+        print(read_text(profile)! ?? String())
+    } else {
+        println("umask 022")
+    }
+    // out: umask 022
+    remove_dir_all(dir)!
+}

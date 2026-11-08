@@ -20,6 +20,9 @@ calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
 calx update                    # install the newest release
 calx doctor                    # check that programs build and run, and say how to fix what doesn't
+calx clean                     # remove the build cache
+calx uninstall                 # remove Calx, its cache and its PATH entry
+calx completions bash          # print completions for bash, zsh, fish or powershell
 ```
 
 A program is its main file and the [modules](modules.md) it imports. The command takes the main file. A [library](libraries.md) is the same, without a `main`.
@@ -245,6 +248,26 @@ calx update --rollback     # put back what the last update replaced; again, to u
 - **A build from source** says to update with `git pull` and a rebuild, and how to install a release instead.
 
 `calx update` runs `calx-update`, a Calx program that ships beside `calx` in each release: [tools/update/update.calx](../../tools/update/update.calx). It's built on [`std.http`](../std/http.md), [`std.hash`](../std/hash.md), [`std.zip`](../std/zip.md) and [`std.tar`](../std/tar.md).
+
+### Cleaning, uninstalling and completions
+
+```sh
+calx clean                 # remove the build cache, and say how much that freed
+calx uninstall             # remove Calx, after asking
+calx uninstall --yes       # the same, without asking, for a script
+calx completions bash      # print the completions for a shell
+```
+
+- **`calx clean`** removes the [cache](#fast-builds): every compiled object and program, what attributes answered, and what the daily check found. The next build makes what it needs again, so it's always safe, though a build running at the same time may fail and need running again. On Windows a program that's running holds its file, which is kept, and `calx clean` says how many were.
+- **`calx uninstall`** removes what the install script made: the installation folder, its build cache, and its `bin` from your PATH. On Windows that's your user Path in the registry, and on Linux the `# Calx` lines the script added to `~/.profile`, `~/.bashrc` and `~/.zshrc`. It says what it will remove and asks first, unless given `--yes`; without a terminal to ask in, it needs `--yes`. `CALX_NO_MODIFY_PATH=1` leaves PATH alone, as it does for the install script. On Windows the folder is removed just after the command ends, since a running `calx.exe` can't remove itself. A Calx built from source has nothing to uninstall, and says so.
+- **`calx completions SHELL`** prints a completion script for `bash`, `zsh`, `fish` or `powershell`: the commands with what each does, their options, and `.calx` files. The script's first line says where it goes:
+
+| Shell | Add |
+| --- | --- |
+| bash | `eval "$(calx completions bash)"` to `~/.bashrc` |
+| zsh | `eval "$(calx completions zsh)"` to `~/.zshrc`, after `compinit` |
+| fish | `calx completions fish > ~/.config/fish/completions/calx.fish`, once |
+| PowerShell | `calx completions powershell \| Out-String \| Invoke-Expression` to `$PROFILE` |
 
 ### The daily check
 

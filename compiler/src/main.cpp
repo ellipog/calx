@@ -19,6 +19,7 @@
 #include "check.h"
 #include "emit.h"
 #include "expand.h"
+#include "manage.h"
 #include "modules.h"
 #include "parser.h"
 #include "source.h"
@@ -66,6 +67,10 @@ int usage() {
         "  expand    print the code a program's attributes generate\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
         "  doctor    check that Calx can build and run programs, and say how to fix what's wrong\n"
+        "  clean     remove the build cache, and say how much that freed\n"
+        "  uninstall remove Calx, its build cache and its PATH entry (--yes doesn't ask)\n"
+        "  completions SHELL\n"
+        "            print completions for bash, zsh, fish or powershell\n"
         "  version   print the compiler's version\n"
         "\n"
         "options:\n"
@@ -458,6 +463,10 @@ int main(int argc, char** argv) {
     }
     if (opt.command == "update") return run_update(std::vector<std::string>(argv + 2, argv + argc));
     if (opt.command == "doctor") return run_doctor();
+    std::vector<std::string> rest(argv + 2, argv + argc);
+    if (opt.command == "clean") return run_clean(rest);
+    if (opt.command == "uninstall") return run_uninstall(rest);
+    if (opt.command == "completions") return run_completions(rest);
     bool direct = !is_command(opt.command);
     if (direct) {
         if (int status = direct_run(argc, argv, opt)) return status;

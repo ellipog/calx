@@ -1,6 +1,6 @@
 ---
 title: Install Calx
-description: Install Calx with one command on Windows or Linux, keep it up to date with calx update, or build it from source.
+description: Install Calx with one command on Windows or Linux, keep it up to date with calx update, add completions, remove it with calx uninstall, or build it from source.
 ---
 
 # Install Calx
@@ -79,9 +79,27 @@ calx update
 
 installs the newest release, and `calx update --rollback` goes back. Once a day, a `calx` command checks for a newer release in the background and says when there is one. [The calx command](../reference/command.md#updating) has the details, and how to turn the check off.
 
+## Completions
+
+`calx completions` prints a script that completes `calx`'s commands, options and `.calx` files as you type. In PowerShell, add this line to your `$PROFILE`:
+
+```powershell
+calx completions powershell | Out-String | Invoke-Expression
+```
+
+In bash, add `eval "$(calx completions bash)"` to `~/.bashrc`. zsh and fish are in [the calx command](../reference/command.md#cleaning-uninstalling-and-completions).
+
 ## Where builds go
 
-The compiler caches what it builds. The cache is in `%LOCALAPPDATA%\calx\cache` on Windows, and in `~/.cache/calx` on Linux, or under `XDG_CACHE_HOME` if that's set. `CALX_CACHE` puts it somewhere else. Deleting it is always safe: the next build makes it again.
+The compiler caches what it builds. The cache is in `%LOCALAPPDATA%\calx\cache` on Windows, and in `~/.cache/calx` on Linux, or under `XDG_CACHE_HOME` if that's set. `CALX_CACHE` puts it somewhere else. Deleting it is always safe: the next build makes it again. `calx clean` deletes it and says how much room that gave back.
+
+## Uninstalling
+
+```sh
+calx uninstall
+```
+
+removes Calx: its folder, its build cache, and the PATH entry the install script added. It asks before it removes anything. clang and Visual Studio's Build Tools stay, since other programs may use them.
 
 ## Building from source
 
