@@ -1,0 +1,4458 @@
+/// YAML as Python's PyYAML reads and writes it: text parsed into a tree of `Yaml` values as
+/// `yaml.safe_load` reads it, YAML 1.1 with PyYAML's ways, with the line and column of what's
+/// wrong when it isn't YAML, and a tree written back as text, as `yaml.safe_dump` writes it.
+module std.yaml
+
+// The scanner, the parser, the resolver and the writer are a port of PyYAML 6.0.3's, step for
+// step, so that text reads as it does in Python, its quirks included: `yes` is a bool, a tab
+// can't start a value, and a key must fit on one line. PyYAML's license:
+//
+// Copyright (c) 2017-2021 Ingy döt Net
+// Copyright (c) 2006-2016 Kirill Simonov
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import std.bytes.{base64}
+import std.toml.{Moment}
+
+/// A YAML value, as PyYAML's `safe_load` makes it.
+pub enum Yaml {
+    /// `null`, `~` or nothing: Python's `None`.
+    Null
+    /// `true`, `yes` or `on`, and `false`, `no` or `off`, in lower case, capitalized or upper
+    /// case.
+    Bool(bool)
+    /// An integer: `12`, `0x1F`, `0o17` written `017`, `0b101`, `1_000`, or `1:30`, which is 90.
+    Int(i64)
+    /// A float: `1.5`, `1.0e+5`, `.inf` or `.nan`.
+    Float(f64)
+    Str(String)
+    /// `!!binary`, base64 in the text: Python's `bytes`.
+    Bytes(List<u8>)
+    /// A date: `2026-11-08`. Python's `date`.
+    Date(Moment)
+    /// A date and time without an offset: `2026-11-08 14:05:09`. Python's `datetime` without a
+    /// `tzinfo`.
+    DateTime(Moment)
+    /// A date and time with one: `2026-11-08T14:05:09+01:00`, or `Z` for UTC. Python's
+    /// `datetime` with a `tzinfo`.
+    OffsetDateTime(Moment)
+    /// A list.
+    Seq(List<Yaml>)
+    /// A mapping's keys and their values, in the order the text has the keys. Keys are scalars:
+    /// a list or a mapping can't be one, as in Python, where they can't be hashed.
+    Map(LinkedMap<Yaml, Yaml>)
+}
+
+// Floats compare as Python's do as keys: 0.0 is -0.0, and NaN is NaN, since PyYAML makes every
+// `.nan` the same object. Mappings compare as Python's dicts do, whatever their order.
+impl Equal for Yaml {
+    fn eq(self, other: Self) -> bool {
+        match self {
+            Yaml.Null => return match other {
+                Yaml.Null => true,
+                _ => false,
+            },
+            Yaml.Bool(a) => return match other {
+                Yaml.Bool(b) => a == b,
+                _ => false,
+            },
+            Yaml.Int(a) => return match other {
+                Yaml.Int(b) => a == b,
+                _ => false,
+            },
+            Yaml.Float(a) => return match other {
+                Yaml.Float(b) => a == b or (a.is_nan() and b.is_nan()),
+                _ => false,
+            },
+            Yaml.Str(a) => return match other {
+                Yaml.Str(b) => a == b,
+                _ => false,
+            },
+            Yaml.Bytes(a) => return match other {
+                Yaml.Bytes(b) => a == b,
+                _ => false,
+            },
+            Yaml.Date(a) => return match other {
+                Yaml.Date(b) => a == b,
+                _ => false,
+            },
+            Yaml.DateTime(a) => return match other {
+                Yaml.DateTime(b) => a == b,
+                _ => false,
+            },
+            Yaml.OffsetDateTime(a) => return match other {
+                Yaml.OffsetDateTime(b) => a == b,
+                _ => false,
+            },
+            Yaml.Seq(a) => return match other {
+                Yaml.Seq(b) => a == b,
+                _ => false,
+            },
+            Yaml.Map(a) => {
+                match other {
+                    Yaml.Map(b) => {
+                        if a.len() != b.len() {
+                            return false
+                        }
+                        for (k, v) in a {
+                            if not b.contains(k) or b[k] != v {
+                                return false
+                            }
+                        }
+                        return true
+                    },
+                    _ => return false,
+                }
+            },
+        }
+    }
+}
+
+impl Hash for Yaml {
+    fn hash(self, h: mut Hasher) {
+        match self {
+            Yaml.Null => h.add(0u8),
+            Yaml.Bool(b) => {
+                h.add(1u8)
+                h.add(b)
+            },
+            Yaml.Int(n) => {
+                h.add(2u8)
+                h.add(n)
+            },
+            Yaml.Float(f) => {
+                h.add(3u8)
+                if f.is_nan() {
+                    h.add(0x7FF8000000000000u64)
+                } else if f == 0.0 {
+                    h.add(0u64)
+                } else {
+                    h.add(f.to_bits())
+                }
+            },
+            Yaml.Str(s) => {
+                h.add(4u8)
+                h.add(s)
+            },
+            Yaml.Bytes(b) => {
+                h.add(5u8)
+                h.add(b)
+            },
+            Yaml.Date(m) => {
+                h.add(6u8)
+                h.add(m)
+            },
+            Yaml.DateTime(m) => {
+                h.add(7u8)
+                h.add(m)
+            },
+            Yaml.OffsetDateTime(m) => {
+                h.add(8u8)
+                h.add(m)
+            },
+            Yaml.Seq(xs) => {
+                h.add(9u8)
+                for x in xs {
+                    h.add(x)
+                }
+            },
+            Yaml.Map(m) => {
+                h.add(10u8)
+                h.add(m.len())
+            },
+        }
+    }
+}
+
+/// Why text isn't YAML, or isn't what `safe_load` can read.
+pub struct YamlError {
+    pub message: String
+    /// Where in the text, from 1.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for YamlError {
+    fn show(self) {
+        if self.line > 0 {
+            print("line {self.line}, column {self.column}: ")
+        }
+        print(self.message)
+    }
+}
+
+/// How deep collections may nest, so that hostile text can't run the stack out.
+const MAX_DEPTH: usize = 512
+
+// Past any place in a text this reads, for "nowhere".
+const FAR: usize = 0xFFFFFFFF
+
+// --- the scanner ---------------------------------------------------------------------------------
+
+const T_STREAM_START: u8 = 1
+const T_STREAM_END: u8 = 2
+const T_DIRECTIVE: u8 = 3
+const T_DOC_START: u8 = 4
+const T_DOC_END: u8 = 5
+const T_BLOCK_SEQ: u8 = 6
+const T_BLOCK_MAP: u8 = 7
+const T_BLOCK_END: u8 = 8
+const T_FLOW_SEQ: u8 = 9
+const T_FLOW_MAP: u8 = 10
+const T_FLOW_SEQ_END: u8 = 11
+const T_FLOW_MAP_END: u8 = 12
+const T_BLOCK_ENTRY: u8 = 13
+const T_FLOW_ENTRY: u8 = 14
+const T_KEY: u8 = 15
+const T_VALUE: u8 = 16
+const T_ALIAS: u8 = 17
+const T_ANCHOR: u8 = 18
+const T_TAG: u8 = 19
+const T_SCALAR: u8 = 20
+
+const PLAIN: u8 = 0
+const SINGLE: u8 = 1
+const DOUBLE: u8 = 2
+const LITERAL: u8 = 3
+const FOLDED: u8 = 4
+
+// A token, as PyYAML's scanner makes them. Its texts are taken out by the parser, so they're
+// optional.
+struct Tok {
+    kind: u8
+    // Where it starts, in bytes, for errors.
+    at: usize
+    // A scalar's value, an anchor's or an alias's name, a tag's suffix or a directive's name.
+    text: String?
+    // A tag's handle, `!` or `!!` or `!name!`, or none for `!<...>` and `!` alone; a TAG
+    // directive's handle.
+    handle: String?
+    // A TAG directive's prefix.
+    prefix: String?
+    // A scalar's style.
+    style: u8
+    // A YAML directive's version.
+    major: u64
+    minor: u64
+}
+
+fn tok(kind: u8, at: usize) -> Tok {
+    return Tok { kind: kind, at: at, text: none, handle: none, prefix: none, style: PLAIN, major: 0, minor: 0 }
+}
+
+// A token that could be a key, if a `:` comes after it on its line.
+struct SimpleKey {
+    live: bool
+    // Its number, counting every token from the start.
+    number: usize
+    // Whether it must be a key: a block mapping's key, at the mapping's indent.
+    required: bool
+    index: usize
+    line: usize
+    col: i64
+    at: usize
+}
+
+fn dead_key() -> SimpleKey {
+    return SimpleKey { live: false, number: 0, required: false, index: 0, line: 0, col: 0, at: 0 }
+}
+
+struct Scan {
+    // Where it's reading, in bytes, and on which line, at which column and at which rune of the
+    // text, counting as PyYAML does: runes, with a byte order mark not counted in a column.
+    pos: usize
+    line: usize
+    col: i64
+    idx: usize
+    // How deep in `[` and `{` it is.
+    flow: usize
+    // The tokens made and not yet read, from `head`.
+    toks: List<Tok>
+    head: usize
+    // How many tokens were read.
+    taken: usize
+    // The block indents, the current one and those it's inside.
+    indent: i64
+    indents: List<i64>
+    // Whether a simple key can start here.
+    allow_simple: bool
+    // The possible simple key at each level of flow.
+    keys: List<SimpleKey>
+    done: bool
+}
+
+fn new_scan() -> Scan {
+    var s = Scan {
+        pos: 0,
+        line: 0,
+        col: 0,
+        idx: 0,
+        flow: 0,
+        toks: [],
+        head: 0,
+        taken: 0,
+        indent: -1,
+        indents: [],
+        allow_simple: true,
+        keys: [],
+        done: false,
+    }
+    s.toks.push(tok(T_STREAM_START, 0))
+    return s
+}
+
+// The byte at `i`, or 0 past the end, which PyYAML's reader calls `\0`.
+fn ch(t: String, i: usize) -> u8 {
+    if i < t.len() {
+        return t.byte_at(i)
+    }
+    return 0
+}
+
+// Whether a NEL, LS or PS, the line breaks past ASCII, is at `i`.
+fn is_wide_break(t: String, i: usize) -> bool {
+    let b = t.byte_at(i)
+    if b == 0xC2 {
+        return i + 1 < t.len() and t.byte_at(i + 1) == 0x85
+    }
+    if b == 0xE2 {
+        return i + 2 < t.len() and t.byte_at(i + 1) == 0x80 and (t.byte_at(i + 2) == 0xA8 or t.byte_at(i + 2) == 0xA9)
+    }
+    return false
+}
+
+// Whether a line break is at `i`.
+fn is_break(t: String, i: usize) -> bool {
+    if i >= t.len() {
+        return false
+    }
+    let b = t.byte_at(i)
+    return b == 10 or b == 13 or (b >= 0xC2 and is_wide_break(t, i))
+}
+
+// A break or the end: PyYAML's `'\0\r\n\x85  '`.
+fn is_breakz(t: String, i: usize) -> bool {
+    return i >= t.len() or is_break(t, i)
+}
+
+// A blank, a break or the end: PyYAML's `'\0 \t\r\n\x85  '`.
+fn is_bz(t: String, i: usize) -> bool {
+    if i >= t.len() {
+        return true
+    }
+    let b = t.byte_at(i)
+    return b == 32 or b == 9 or b == 10 or b == 13 or (b >= 0xC2 and is_wide_break(t, i))
+}
+
+// A space, a break or the end: `'\0 \r\n\x85  '`, which leaves out the tab.
+fn is_sz(t: String, i: usize) -> bool {
+    return ch(t, i) == 32 or is_breakz(t, i)
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= b'0' and b <= b'9'
+}
+
+fn is_hex(b: u8) -> bool {
+    return (b >= b'0' and b <= b'9') or (b >= b'a' and b <= b'f') or (b >= b'A' and b <= b'F')
+}
+
+// A letter, a digit, `-` or `_`: what anchors, handles and directives are made of.
+fn is_word(b: u8) -> bool {
+    return (b >= b'0' and b <= b'9') or (b >= b'A' and b <= b'Z') or (b >= b'a' and b <= b'z') or b == b'-' or b == b'_'
+}
+
+// Where the line from `i` ends: the first break at or after it, or the end.
+fn line_end(t: String, i: usize) -> usize {
+    var j = i
+    let n = t.len()
+    while j < n {
+        let b = t.byte_at(j)
+        if b == 10 or b == 13 or (b >= 0xC2 and is_wide_break(t, j)) {
+            return j
+        }
+        j += 1
+    }
+    return n
+}
+
+// Moves past `n` bytes that hold no line break, counting their runes.
+fn fwd(t: String, s: mut Scan, n: usize) {
+    let end = s.pos + n
+    var i = s.pos
+    while i < end {
+        let b = t.byte_at(i)
+        if b < 0x80 {
+            s.idx += 1
+            s.col += 1
+        } else if (b & 0xC0) != 0x80 {
+            s.idx += 1
+            if not (b == 0xEF and i + 2 < t.len() and t.byte_at(i + 1) == 0xBB and t.byte_at(i + 2) == 0xBF) {
+                s.col += 1
+            }
+        }
+        i += 1
+    }
+    s.pos = end
+}
+
+// Moves to the end of the line.
+fn skip_line(t: String, s: mut Scan) {
+    let n = line_end(t, s.pos) - s.pos
+    fwd(t, mut s, n)
+}
+
+// Moves past one ASCII byte.
+fn fwd1(s: mut Scan) {
+    s.pos += 1
+    s.idx += 1
+    s.col += 1
+}
+
+const BREAK_NONE: u8 = 0
+const BREAK_LF: u8 = 1
+const BREAK_LS: u8 = 2
+const BREAK_PS: u8 = 3
+
+// Moves past the line break at `pos`, if there's one, and says which: `\r\n`, `\r`, `\n` and NEL
+// are all `\n`, as PyYAML reads them, and LS and PS stay as they are.
+fn line_break(t: String, s: mut Scan) -> u8 {
+    if s.pos >= t.len() {
+        return BREAK_NONE
+    }
+    let b = t.byte_at(s.pos)
+    if b == 13 {
+        if s.pos + 1 < t.len() and t.byte_at(s.pos + 1) == 10 {
+            s.pos += 2
+            s.idx += 2
+        } else {
+            s.pos += 1
+            s.idx += 1
+        }
+    } else if b == 10 {
+        s.pos += 1
+        s.idx += 1
+    } else if b >= 0xC2 and is_wide_break(t, s.pos) {
+        if b == 0xC2 {
+            s.pos += 2
+            s.idx += 1
+        } else {
+            let third = t.byte_at(s.pos + 2)
+            s.pos += 3
+            s.idx += 1
+            s.line += 1
+            s.col = 0
+            return if third == 0xA8 { BREAK_LS } else { BREAK_PS }
+        }
+    } else {
+        return BREAK_NONE
+    }
+    s.line += 1
+    s.col = 0
+    return BREAK_LF
+}
+
+fn push_break(out: mut String, b: u8) {
+    if b == BREAK_LF {
+        out.push('\n')
+    } else if b == BREAK_LS {
+        out.push('\u{2028}')
+    } else if b == BREAK_PS {
+        out.push('\u{2029}')
+    }
+}
+
+// The error at byte `at` of `text`, with its line and column, counted as PyYAML counts them.
+fn error_at(text: String, at: usize, message: own String) -> YamlError {
+    var line: usize = 1
+    var column: usize = 1
+    var i: usize = 0
+    let end = if at < text.len() { at } else { text.len() }
+    while i < end {
+        let b = text.byte_at(i)
+        if b == 10 or (b == 13 and ch(text, i + 1) != 10) or (b >= 0xC2 and is_wide_break(text, i)) {
+            line += 1
+            column = 1
+        } else if (b & 0xC0) != 0x80 {
+            column += 1
+        }
+        i += 1
+    }
+    return YamlError { message: message, line: line, column: column }
+}
+
+// What's at byte `at`, for an error: the rune in backquotes, a tab, the end of the line, or the end.
+fn found(text: String, at: usize) -> String {
+    if at >= text.len() {
+        return "the end"
+    }
+    let b = text.byte_at(at)
+    if is_break(text, at) {
+        return "the end of the line"
+    }
+    if b == 9 {
+        return "a tab"
+    }
+    if b == 32 {
+        return "a space"
+    }
+    let n: usize = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    let e = if at + n <= text.len() { at + n } else { text.len() }
+    return "`{text[at..e]}`"
+}
+
+// PyYAML's reader takes only printable text: the tab, the line breaks and the runes from the
+// space up, but for DEL, the C1 controls other than NEL, U+FFFE and U+FFFF.
+fn check_printable(t: String) ! YamlError {
+    let n = t.len()
+    var i: usize = 0
+    while i < n {
+        let b = t.byte_at(i)
+        if b < 0x80 {
+            if (b < 32 and b != 9 and b != 10 and b != 13) or b == 127 {
+                fail error_at(t, i, "a control character, {u32(b)}, which YAML doesn't allow in its text")
+            }
+            i += 1
+        } else if b == 0xC2 {
+            let c = t.byte_at(i + 1)
+            if c < 0xA0 and c != 0x85 {
+                fail error_at(t, i, "a control character, U+{hex4(u32(c))}, which YAML doesn't allow in its text")
+            }
+            i += 2
+        } else if b == 0xEF {
+            if t.byte_at(i + 1) == 0xBF and (t.byte_at(i + 2) == 0xBE or t.byte_at(i + 2) == 0xBF) {
+                fail error_at(t, i, "U+FFF{if t.byte_at(i + 2) == 0xBE { "E" } else { "F" }}, which isn't a character, in the text")
+            }
+            i += 3
+        } else if b >= 0xF0 {
+            i += 4
+        } else if b >= 0xE0 {
+            i += 3
+        } else {
+            i += 2
+        }
+    }
+}
+
+fn hex4(v: u32) -> String {
+    let digits = "0123456789ABCDEF"
+    var out = String()
+    var shift: u32 = 12
+    loop {
+        out.push(rune(digits.byte_at(usize((v >> shift) & 15))))
+        if shift == 0 {
+            break
+        }
+        shift -= 4
+    }
+    return out
+}
+
+// --- the scanner: simple keys and indents ------------------------------------------------------
+
+// Whether more tokens are needed before the next can be read: none are made, or the next might
+// turn out to be a key, which only a `:` later on its line can say.
+fn need_more(t: String, s: mut Scan) -> bool ! YamlError {
+    if s.done {
+        return false
+    }
+    if s.head == s.toks.len() {
+        return true
+    }
+    try stale_keys(t, mut s)
+    return next_key(s) == s.taken
+}
+
+// The number of the first possible simple key, or `FAR`.
+fn next_key(s: Scan) -> usize {
+    var best = FAR
+    for i in 0..s.keys.len() {
+        if s.keys[i].live and s.keys[i].number < best {
+            best = s.keys[i].number
+        }
+    }
+    return best
+}
+
+// A key must end on its line, within 1024 runes.
+fn stale_keys(t: String, s: mut Scan) ! YamlError {
+    for i in 0..s.keys.len() {
+        if s.keys[i].live and (s.keys[i].line != s.line or s.idx - s.keys[i].index > 1024) {
+            if s.keys[i].required {
+                fail error_at(t, s.keys[i].at, "a key without a `:` after it on its line")
+            }
+            s.keys[i].live = false
+        }
+    }
+}
+
+fn save_key(t: String, s: mut Scan) ! YamlError {
+    let required = s.flow == 0 and s.indent == s.col
+    if s.allow_simple {
+        try remove_key(t, mut s)
+        while s.keys.len() <= s.flow {
+            s.keys.push(dead_key())
+        }
+        s.keys[s.flow] = SimpleKey {
+            live: true,
+            number: s.taken + (s.toks.len() - s.head),
+            required: required,
+            index: s.idx,
+            line: s.line,
+            col: s.col,
+            at: s.pos,
+        }
+    }
+}
+
+fn remove_key(t: String, s: mut Scan) ! YamlError {
+    if s.flow < s.keys.len() and s.keys[s.flow].live {
+        if s.keys[s.flow].required {
+            fail error_at(t, s.keys[s.flow].at, "a key without a `:` after it on its line")
+        }
+        s.keys[s.flow].live = false
+    }
+}
+
+// Ends the blocks indented past `col`. Flow ignores indents.
+fn unwind(s: mut Scan, col: i64) {
+    if s.flow > 0 {
+        return
+    }
+    while s.indent > col {
+        s.indent = s.indents.pop() ?? -1
+        s.toks.push(tok(T_BLOCK_END, s.pos))
+    }
+}
+
+fn add_indent(s: mut Scan, col: i64) -> bool {
+    if s.indent < col {
+        s.indents.push(s.indent)
+        s.indent = col
+        return true
+    }
+    return false
+}
+
+// --- the scanner: tokens ---------------------------------------------------------------------
+
+fn fetch_more(t: String, s: mut Scan) ! YamlError {
+    to_next_token(t, mut s)
+    try stale_keys(t, mut s)
+    let col = s.col
+    unwind(mut s, col)
+    if s.pos >= t.len() {
+        unwind(mut s, -1)
+        try remove_key(t, mut s)
+        s.allow_simple = false
+        for i in 0..s.keys.len() {
+            s.keys[i].live = false
+        }
+        s.toks.push(tok(T_STREAM_END, s.pos))
+        s.done = true
+        return
+    }
+    let c = t.byte_at(s.pos)
+    if c == b'%' and s.col == 0 {
+        unwind(mut s, -1)
+        try remove_key(t, mut s)
+        s.allow_simple = false
+        let d = try scan_directive(t, mut s)
+        s.toks.push(d)
+        return
+    }
+    if (c == b'-' or c == b'.') and s.col == 0 and ch(t, s.pos + 1) == c and ch(t, s.pos + 2) == c and is_bz(t, s.pos + 3) {
+        unwind(mut s, -1)
+        try remove_key(t, mut s)
+        s.allow_simple = false
+        let at = s.pos
+        fwd(t, mut s, 3)
+        s.toks.push(tok(if c == b'-' { T_DOC_START } else { T_DOC_END }, at))
+        return
+    }
+    if c == b'[' or c == b'{' {
+        try save_key(t, mut s)
+        s.flow += 1
+        s.allow_simple = true
+        s.toks.push(tok(if c == b'[' { T_FLOW_SEQ } else { T_FLOW_MAP }, s.pos))
+        fwd1(mut s)
+        return
+    }
+    if c == b']' or c == b'}' {
+        if s.flow == 0 {
+            if c == b']' {
+                fail error_at(t, s.pos, "`]` without a `[` before it")
+            }
+            fail error_at(t, s.pos, "`\}` without a `\{` before it")
+        }
+        try remove_key(t, mut s)
+        s.flow -= 1
+        s.allow_simple = false
+        s.toks.push(tok(if c == b']' { T_FLOW_SEQ_END } else { T_FLOW_MAP_END }, s.pos))
+        fwd1(mut s)
+        return
+    }
+    if c == b',' {
+        s.allow_simple = true
+        try remove_key(t, mut s)
+        s.toks.push(tok(T_FLOW_ENTRY, s.pos))
+        fwd1(mut s)
+        return
+    }
+    if c == b'-' and is_bz(t, s.pos + 1) {
+        if s.flow == 0 {
+            if not s.allow_simple {
+                fail error_at(t, s.pos, "a `-` where a list's item can't start")
+            }
+            if add_indent(mut s, col) {
+                s.toks.push(tok(T_BLOCK_SEQ, s.pos))
+            }
+        }
+        s.allow_simple = true
+        try remove_key(t, mut s)
+        s.toks.push(tok(T_BLOCK_ENTRY, s.pos))
+        fwd1(mut s)
+        return
+    }
+    if c == b'?' and (s.flow > 0 or is_bz(t, s.pos + 1)) {
+        if s.flow == 0 {
+            if not s.allow_simple {
+                fail error_at(t, s.pos, "a `?` where a key can't start")
+            }
+            if add_indent(mut s, col) {
+                s.toks.push(tok(T_BLOCK_MAP, s.pos))
+            }
+        }
+        s.allow_simple = s.flow == 0
+        try remove_key(t, mut s)
+        s.toks.push(tok(T_KEY, s.pos))
+        fwd1(mut s)
+        return
+    }
+    if c == b':' and (s.flow > 0 or is_bz(t, s.pos + 1)) {
+        try fetch_value(t, mut s)
+        return
+    }
+    if c == b'*' or c == b'&' {
+        try save_key(t, mut s)
+        s.allow_simple = false
+        let a = try scan_anchor(t, mut s)
+        s.toks.push(a)
+        return
+    }
+    if c == b'!' {
+        try save_key(t, mut s)
+        s.allow_simple = false
+        let g = try scan_tag(t, mut s)
+        s.toks.push(g)
+        return
+    }
+    if (c == b'|' or c == b'>') and s.flow == 0 {
+        s.allow_simple = true
+        try remove_key(t, mut s)
+        let b = try scan_block_scalar(t, mut s, if c == b'|' { LITERAL } else { FOLDED })
+        s.toks.push(b)
+        return
+    }
+    if c == b'\'' or c == b'"' {
+        try save_key(t, mut s)
+        s.allow_simple = false
+        let q = try scan_flow_scalar(t, mut s, if c == b'"' { DOUBLE } else { SINGLE })
+        s.toks.push(q)
+        return
+    }
+    if check_plain(t, s) {
+        try save_key(t, mut s)
+        s.allow_simple = false
+        let p = try scan_plain(t, mut s)
+        s.toks.push(p)
+        return
+    }
+    if c == 9 {
+        fail error_at(t, s.pos, "a tab, which PyYAML doesn't allow here: indent with spaces, and put spaces before a value")
+    }
+    fail error_at(t, s.pos, "{found(t, s.pos)}, which can't start anything here")
+}
+
+fn fetch_value(t: String, s: mut Scan) ! YamlError {
+    if s.flow < s.keys.len() and s.keys[s.flow].live {
+        // The possible key was one: a KEY goes before it, and a block mapping starts there if
+        // it's indented past the block it's in.
+        s.keys[s.flow].live = false
+        let number = s.keys[s.flow].number
+        let col = s.keys[s.flow].col
+        let at = s.keys[s.flow].at
+        let i = s.head + (number - s.taken)
+        s.toks.insert(i, tok(T_KEY, at))
+        if s.flow == 0 and add_indent(mut s, col) {
+            s.toks.insert(i, tok(T_BLOCK_MAP, at))
+        }
+        s.allow_simple = false
+    } else {
+        if s.flow == 0 {
+            if not s.allow_simple {
+                fail error_at(t, s.pos, "a `:` where a value can't start; quote text that holds `: `")
+            }
+            let col = s.col
+            if add_indent(mut s, col) {
+                s.toks.push(tok(T_BLOCK_MAP, s.pos))
+            }
+        }
+        s.allow_simple = s.flow == 0
+        try remove_key(t, mut s)
+    }
+    s.toks.push(tok(T_VALUE, s.pos))
+    fwd1(mut s)
+}
+
+// Whether a plain scalar starts here: anything but an indicator, or `-`, `?` or `:` before
+// something that isn't a blank, `?` and `:` only outside flow.
+fn check_plain(t: String, s: Scan) -> bool {
+    let c = ch(t, s.pos)
+    if not is_bz(t, s.pos) and not is_indicator(c) {
+        return true
+    }
+    return not is_bz(t, s.pos + 1) and (c == b'-' or (s.flow == 0 and (c == b'?' or c == b':')))
+}
+
+fn is_indicator(c: u8) -> bool {
+    return c == b'-' or c == b'?' or c == b':' or c == b',' or c == b'[' or c == b']' or c == b'{' or c == b'}' or c == b'#' or c == b'&' or c == b'*' or c == b'!' or c == b'|' or c == b'>' or c == b'\'' or c == b'"' or c == b'%' or c == b'@' or c == b'`'
+}
+
+// Past spaces, comments and line breaks. A tab is a token's problem, as in PyYAML.
+fn to_next_token(t: String, s: mut Scan) {
+    if s.idx == 0 and ch(t, 0) == 0xEF and ch(t, 1) == 0xBB and ch(t, 2) == 0xBF {
+        fwd(t, mut s, 3)
+    }
+    loop {
+        while ch(t, s.pos) == 32 {
+            fwd1(mut s)
+        }
+        if ch(t, s.pos) == b'#' {
+            skip_line(t, mut s)
+        }
+        if line_break(t, mut s) == BREAK_NONE {
+            return
+        }
+        if s.flow == 0 {
+            s.allow_simple = true
+        }
+    }
+}
+
+fn scan_directive(t: String, s: mut Scan) -> Tok ! YamlError {
+    let start = s.pos
+    fwd1(mut s)
+    var len: usize = 0
+    while is_word(ch(t, s.pos + len)) {
+        len += 1
+    }
+    if len == 0 or not is_sz(t, s.pos + len) {
+        fail error_at(t, s.pos + len, "{found(t, s.pos + len)} in a directive's name, which takes letters, digits, `-` and `_`")
+    }
+    let name = t[s.pos..s.pos + len].copy()
+    fwd(t, mut s, len)
+    var d = tok(T_DIRECTIVE, start)
+    if name == "YAML" {
+        while ch(t, s.pos) == 32 {
+            fwd1(mut s)
+        }
+        d.major = try directive_number(t, mut s)
+        if ch(t, s.pos) != b'.' {
+            fail error_at(t, s.pos, "{found(t, s.pos)} in the YAML directive, where a digit or `.` should be")
+        }
+        fwd1(mut s)
+        d.minor = try directive_number(t, mut s)
+        if not is_sz(t, s.pos) {
+            fail error_at(t, s.pos, "{found(t, s.pos)} after the YAML directive's version")
+        }
+    } else if name == "TAG" {
+        while ch(t, s.pos) == 32 {
+            fwd1(mut s)
+        }
+        let handle = try scan_tag_handle(t, mut s)
+        if ch(t, s.pos) != 32 {
+            fail error_at(t, s.pos, "{found(t, s.pos)} after the TAG directive's handle, where a space should be")
+        }
+        while ch(t, s.pos) == 32 {
+            fwd1(mut s)
+        }
+        let prefix = try scan_tag_uri(t, mut s)
+        if not is_sz(t, s.pos) {
+            fail error_at(t, s.pos, "{found(t, s.pos)} after the TAG directive's prefix")
+        }
+        d.handle = some(handle)
+        d.prefix = some(prefix)
+    } else {
+        skip_line(t, mut s)
+    }
+    d.text = some(name)
+    while ch(t, s.pos) == 32 {
+        fwd1(mut s)
+    }
+    if ch(t, s.pos) == b'#' {
+        skip_line(t, mut s)
+    }
+    if not is_breakz(t, s.pos) {
+        fail error_at(t, s.pos, "{found(t, s.pos)} after a directive, where a comment or the end of the line should be")
+    }
+    _ = line_break(t, mut s)
+    return d
+}
+
+fn directive_number(t: String, s: mut Scan) -> u64 ! YamlError {
+    if not is_digit(ch(t, s.pos)) {
+        fail error_at(t, s.pos, "{found(t, s.pos)} in the YAML directive, where a digit should be")
+    }
+    var v: u64 = 0
+    while is_digit(ch(t, s.pos)) {
+        v = v.saturating_mul(10).saturating_add(u64(ch(t, s.pos) - b'0'))
+        fwd1(mut s)
+    }
+    return v
+}
+
+fn scan_anchor(t: String, s: mut Scan) -> Tok ! YamlError {
+    let start = s.pos
+    let kind = if t.byte_at(s.pos) == b'*' { T_ALIAS } else { T_ANCHOR }
+    let what = if kind == T_ALIAS { "an alias" } else { "an anchor" }
+    fwd1(mut s)
+    var len: usize = 0
+    while is_word(ch(t, s.pos + len)) {
+        len += 1
+    }
+    let after = ch(t, s.pos + len)
+    if len == 0 or not (is_bz(t, s.pos + len) or after == b'?' or after == b':' or after == b',' or after == b']' or after == b'}' or after == b'%' or after == b'@' or after == b'`') {
+        fail error_at(t, s.pos + len, "{found(t, s.pos + len)} in {what}'s name, which takes letters, digits, `-` and `_`")
+    }
+    var a = tok(kind, start)
+    a.text = some(t[s.pos..s.pos + len].copy())
+    fwd(t, mut s, len)
+    return a
+}
+
+fn scan_tag(t: String, s: mut Scan) -> Tok ! YamlError {
+    let start = s.pos
+    var g = tok(T_TAG, start)
+    let c = ch(t, s.pos + 1)
+    if c == b'<' {
+        fwd(t, mut s, 2)
+        g.text = some(try scan_tag_uri(t, mut s))
+        if ch(t, s.pos) != b'>' {
+            fail error_at(t, s.pos, "{found(t, s.pos)} in a verbatim tag, where `>` should end it")
+        }
+        fwd1(mut s)
+    } else if is_bz(t, s.pos + 1) {
+        g.text = some(String("!"))
+        fwd1(mut s)
+    } else {
+        var k = s.pos + 1
+        var use_handle = false
+        while not is_sz(t, k) {
+            if t.byte_at(k) == b'!' {
+                use_handle = true
+                break
+            }
+            k += 1
+        }
+        if use_handle {
+            g.handle = some(try scan_tag_handle(t, mut s))
+        } else {
+            g.handle = some(String("!"))
+            fwd1(mut s)
+        }
+        g.text = some(try scan_tag_uri(t, mut s))
+    }
+    if not is_sz(t, s.pos) {
+        fail error_at(t, s.pos, "{found(t, s.pos)} after a tag, where a space should be")
+    }
+    return g
+}
+
+fn scan_tag_handle(t: String, s: mut Scan) -> String ! YamlError {
+    if ch(t, s.pos) != b'!' {
+        fail error_at(t, s.pos, "{found(t, s.pos)} where a tag's handle should start with `!`")
+    }
+    var len: usize = 1
+    if ch(t, s.pos + 1) != 32 {
+        while is_word(ch(t, s.pos + len)) {
+            len += 1
+        }
+        if ch(t, s.pos + len) != b'!' {
+            let at = s.pos + len
+            fail error_at(t, at, "{found(t, at)} in a tag's handle, where `!` should end it")
+        }
+        len += 1
+    }
+    let h = t[s.pos..s.pos + len].copy()
+    fwd(t, mut s, len)
+    return h
+}
+
+fn is_uri_char(c: u8) -> bool {
+    return is_word(c) or c == b';' or c == b'/' or c == b'?' or c == b':' or c == b'@' or c == b'&' or c == b'=' or c == b'+' or c == b'$' or c == b',' or c == b'.' or c == b'!' or c == b'~' or c == b'*' or c == b'\'' or c == b'(' or c == b')' or c == b'[' or c == b']' or c == b'%'
+}
+
+fn scan_tag_uri(t: String, s: mut Scan) -> String ! YamlError {
+    var out = String()
+    var any = false
+    var len: usize = 0
+    while is_uri_char(ch(t, s.pos + len)) {
+        if ch(t, s.pos + len) == b'%' {
+            out.push_str(t[s.pos..s.pos + len])
+            fwd(t, mut s, len)
+            len = 0
+            let start = s.pos
+            var bytes: List<u8> = []
+            while ch(t, s.pos) == b'%' {
+                fwd1(mut s)
+                if not is_hex(ch(t, s.pos)) or not is_hex(ch(t, s.pos + 1)) {
+                    let at = if is_hex(ch(t, s.pos)) { s.pos + 1 } else { s.pos }
+                    fail error_at(t, at, "{found(t, at)} in a tag's `%` escape, which takes two hex digits")
+                }
+                bytes.push(u8.wrap(hex_value(t.byte_at(s.pos)) * 16 + hex_value(t.byte_at(s.pos + 1))))
+                fwd(t, mut s, 2)
+            }
+            match String.from_utf8(bytes) {
+                some(text) => out.push_str(text),
+                none => fail error_at(t, start, "a tag's `%` escapes that aren't UTF-8"),
+            }
+            any = true
+        } else {
+            len += 1
+        }
+    }
+    if len > 0 {
+        out.push_str(t[s.pos..s.pos + len])
+        fwd(t, mut s, len)
+        any = true
+    }
+    if not any {
+        fail error_at(t, s.pos, "{found(t, s.pos)} where a tag should be")
+    }
+    return out
+}
+
+fn hex_value(b: u8) -> u32 {
+    if b <= b'9' {
+        return u32(b - b'0')
+    }
+    if b <= b'F' {
+        return u32(b - b'A') + 10
+    }
+    return u32(b - b'a') + 10
+}
+
+fn scan_block_scalar(t: String, s: mut Scan, style: u8) -> Tok ! YamlError {
+    let folded = style == FOLDED
+    let start = s.pos
+    fwd1(mut s)
+    // The indicators: `+` keeps the breaks at the end, `-` strips them, and a digit says how far
+    // the text is indented past the block.
+    var chomp: i32 = 0
+    var increment: i64 = 0
+    var c = ch(t, s.pos)
+    if c == b'+' or c == b'-' {
+        chomp = if c == b'+' { 1 } else { -1 }
+        fwd1(mut s)
+        c = ch(t, s.pos)
+        if is_digit(c) {
+            increment = i64(c - b'0')
+            if increment == 0 {
+                fail error_at(t, s.pos, "`0` as a block scalar's indent, which goes from 1 to 9")
+            }
+            fwd1(mut s)
+        }
+    } else if is_digit(c) {
+        increment = i64(c - b'0')
+        if increment == 0 {
+            fail error_at(t, s.pos, "`0` as a block scalar's indent, which goes from 1 to 9")
+        }
+        fwd1(mut s)
+        c = ch(t, s.pos)
+        if c == b'+' or c == b'-' {
+            chomp = if c == b'+' { 1 } else { -1 }
+            fwd1(mut s)
+        }
+    }
+    if not is_sz(t, s.pos) {
+        fail error_at(t, s.pos, "{found(t, s.pos)} after `{if folded { ">" } else { "|" }}`, where `+`, `-`, an indent or the end of the line should be")
+    }
+    while ch(t, s.pos) == 32 {
+        fwd1(mut s)
+    }
+    if ch(t, s.pos) == b'#' {
+        skip_line(t, mut s)
+    }
+    if not is_breakz(t, s.pos) {
+        fail error_at(t, s.pos, "{found(t, s.pos)} after a block scalar's indicators, where a comment or the end of the line should be")
+    }
+    _ = line_break(t, mut s)
+    var min_indent = s.indent + 1
+    if min_indent < 1 {
+        min_indent = 1
+    }
+    var breaks = String()
+    var indent: i64 = 0
+    if increment == 0 {
+        var max_indent: i64 = 0
+        while ch(t, s.pos) == 32 or is_break(t, s.pos) {
+            if ch(t, s.pos) != 32 {
+                push_break(mut breaks, line_break(t, mut s))
+            } else {
+                fwd1(mut s)
+                if s.col > max_indent {
+                    max_indent = s.col
+                }
+            }
+        }
+        indent = if min_indent > max_indent { min_indent } else { max_indent }
+    } else {
+        indent = min_indent + increment - 1
+        block_breaks(t, mut s, indent, mut breaks)
+    }
+    var out = String()
+    var last = BREAK_NONE
+    while s.col == indent and s.pos < t.len() {
+        out.push_str(breaks)
+        breaks.clear()
+        let leading_non_space = ch(t, s.pos) != 32 and ch(t, s.pos) != 9
+        let e = line_end(t, s.pos)
+        out.push_str(t[s.pos..e])
+        let n = e - s.pos
+        fwd(t, mut s, n)
+        last = line_break(t, mut s)
+        block_breaks(t, mut s, indent, mut breaks)
+        if s.col == indent and s.pos < t.len() {
+            if folded and last == BREAK_LF and leading_non_space and ch(t, s.pos) != 32 and ch(t, s.pos) != 9 {
+                if breaks.is_empty() {
+                    out.push(' ')
+                }
+            } else {
+                push_break(mut out, last)
+            }
+        } else {
+            break
+        }
+    }
+    if chomp != -1 {
+        push_break(mut out, last)
+    }
+    if chomp == 1 {
+        out.push_str(breaks)
+    }
+    var b = tok(T_SCALAR, start)
+    b.text = some(out)
+    b.style = style
+    return b
+}
+
+// The empty lines in a block scalar, and the indent of the next.
+fn block_breaks(t: String, s: mut Scan, indent: i64, breaks: mut String) {
+    while s.col < indent and ch(t, s.pos) == 32 {
+        fwd1(mut s)
+    }
+    while is_break(t, s.pos) {
+        push_break(mut breaks, line_break(t, mut s))
+        while s.col < indent and ch(t, s.pos) == 32 {
+            fwd1(mut s)
+        }
+    }
+}
+
+fn scan_flow_scalar(t: String, s: mut Scan, style: u8) -> Tok ! YamlError {
+    let double = style == DOUBLE
+    let start = s.pos
+    let quote = t.byte_at(s.pos)
+    fwd1(mut s)
+    var out = String()
+    try flow_non_spaces(t, mut s, double, mut out)
+    while ch(t, s.pos) != quote or s.pos >= t.len() {
+        try flow_spaces(t, mut s, start, mut out)
+        try flow_non_spaces(t, mut s, double, mut out)
+    }
+    fwd1(mut s)
+    var q = tok(T_SCALAR, start)
+    q.text = some(out)
+    q.style = style
+    return q
+}
+
+fn flow_non_spaces(t: String, s: mut Scan, double: bool, out: mut String) ! YamlError {
+    loop {
+        var len: usize = 0
+        loop {
+            let c = ch(t, s.pos + len)
+            if c == b'\'' or c == b'"' or c == b'\\' or is_bz(t, s.pos + len) {
+                break
+            }
+            len += 1
+        }
+        if len > 0 {
+            out.push_str(t[s.pos..s.pos + len])
+            fwd(t, mut s, len)
+        }
+        let c = ch(t, s.pos)
+        if not double and c == b'\'' and ch(t, s.pos + 1) == b'\'' {
+            out.push('\'')
+            fwd(t, mut s, 2)
+        } else if (double and c == b'\'') or (not double and (c == b'"' or c == b'\\')) {
+            out.push(rune(c))
+            fwd1(mut s)
+        } else if double and c == b'\\' {
+            fwd1(mut s)
+            let e = ch(t, s.pos)
+            let simple = escape(e)
+            if simple != 0xFFFFFFFF {
+                out.push(rune.try_from(simple)!)
+                if e < 0x80 {
+                    fwd1(mut s)
+                } else {
+                    fwd(t, mut s, 1)
+                }
+            } else if e == b'x' or e == b'u' or e == b'U' {
+                let n: usize = if e == b'x' { 2 } else if e == b'u' { 4 } else { 8 }
+                fwd1(mut s)
+                var code: u32 = 0
+                for k in 0..n {
+                    let h = ch(t, s.pos + k)
+                    if not is_hex(h) {
+                        fail error_at(t, s.pos + k, "{found(t, s.pos + k)} in a `\\{rune(e)}` escape, which takes {n} hex digits")
+                    }
+                    code = code * 16 + hex_value(h)
+                }
+                match rune.try_from(code) {
+                    some(r) => out.push(r),
+                    none => fail error_at(t, s.pos - 2, "a `\\{rune(e)}` escape of U+{hex4(code)}, which isn't a character Calx's text can hold"),
+                }
+                fwd(t, mut s, n)
+            } else if is_break(t, s.pos) {
+                _ = line_break(t, mut s)
+                try flow_breaks(t, mut s, mut out)
+            } else {
+                fail error_at(t, s.pos, "{found(t, s.pos)} after `\\` in a string, which isn't an escape")
+            }
+        } else {
+            return
+        }
+    }
+}
+
+// The rune a one-letter escape stands for, or 0xFFFFFFFF.
+fn escape(e: u8) -> u32 {
+    if e == b'0' {
+        return 0
+    }
+    if e == b'a' {
+        return 7
+    }
+    if e == b'b' {
+        return 8
+    }
+    if e == b't' or e == 9 {
+        return 9
+    }
+    if e == b'n' {
+        return 10
+    }
+    if e == b'v' {
+        return 11
+    }
+    if e == b'f' {
+        return 12
+    }
+    if e == b'r' {
+        return 13
+    }
+    if e == b'e' {
+        return 27
+    }
+    if e == b' ' or e == b'"' or e == b'\\' or e == b'/' {
+        return u32(e)
+    }
+    if e == b'N' {
+        return 0x85
+    }
+    if e == b'_' {
+        return 0xA0
+    }
+    if e == b'L' {
+        return 0x2028
+    }
+    if e == b'P' {
+        return 0x2029
+    }
+    return 0xFFFFFFFF
+}
+
+fn flow_spaces(t: String, s: mut Scan, start: usize, out: mut String) ! YamlError {
+    var len: usize = 0
+    while ch(t, s.pos + len) == 32 or ch(t, s.pos + len) == 9 {
+        len += 1
+    }
+    let ws = s.pos
+    fwd(t, mut s, len)
+    if s.pos >= t.len() {
+        fail error_at(t, start, "a quoted string that doesn't end")
+    }
+    if is_break(t, s.pos) {
+        let b = line_break(t, mut s)
+        var breaks = String()
+        try flow_breaks(t, mut s, mut breaks)
+        if b != BREAK_LF {
+            push_break(mut out, b)
+        } else if breaks.is_empty() {
+            out.push(' ')
+        }
+        out.push_str(breaks)
+    } else {
+        out.push_str(t[ws..ws + len])
+    }
+}
+
+fn flow_breaks(t: String, s: mut Scan, out: mut String) ! YamlError {
+    loop {
+        let c = ch(t, s.pos)
+        if (c == b'-' or c == b'.') and ch(t, s.pos + 1) == c and ch(t, s.pos + 2) == c and is_bz(t, s.pos + 3) {
+            fail error_at(t, s.pos, "`{t[s.pos..s.pos + 3]}` inside a quoted string, which ends the document; indent the string's lines")
+        }
+        while ch(t, s.pos) == 32 or ch(t, s.pos) == 9 {
+            fwd1(mut s)
+        }
+        if not is_break(t, s.pos) {
+            return
+        }
+        push_break(mut out, line_break(t, mut s))
+    }
+}
+
+fn scan_plain(t: String, s: mut Scan) -> Tok ! YamlError {
+    let start = s.pos
+    let indent = s.indent + 1
+    var out = String()
+    var spaces = String()
+    loop {
+        if ch(t, s.pos) == b'#' {
+            break
+        }
+        var len: usize = 0
+        loop {
+            let at = s.pos + len
+            let c = ch(t, at)
+            if is_bz(t, at) {
+                break
+            }
+            if c == b':' {
+                let next = ch(t, at + 1)
+                if is_bz(t, at + 1) or (s.flow > 0 and (next == b',' or next == b'[' or next == b']' or next == b'{' or next == b'}')) {
+                    break
+                }
+            }
+            if s.flow > 0 and (c == b',' or c == b'?' or c == b'[' or c == b']' or c == b'{' or c == b'}') {
+                break
+            }
+            len += 1
+        }
+        if len == 0 {
+            break
+        }
+        s.allow_simple = false
+        out.push_str(spaces)
+        out.push_str(t[s.pos..s.pos + len])
+        fwd(t, mut s, len)
+        spaces.clear()
+        let more = plain_spaces(t, mut s, mut spaces)
+        if not more or ch(t, s.pos) == b'#' or (s.flow == 0 and s.col < indent) {
+            break
+        }
+    }
+    var p = tok(T_SCALAR, start)
+    p.text = some(out)
+    return p
+}
+
+// The blanks after a part of a plain scalar, folded as YAML folds them, into `out`, and whether
+// there were any. A line that starts a document ends the scalar.
+fn plain_spaces(t: String, s: mut Scan, out: mut String) -> bool {
+    var len: usize = 0
+    while ch(t, s.pos + len) == 32 {
+        len += 1
+    }
+    let ws = s.pos
+    fwd(t, mut s, len)
+    if is_break(t, s.pos) {
+        let b = line_break(t, mut s)
+        s.allow_simple = true
+        if document_marker(t, s.pos) {
+            return false
+        }
+        var breaks = String()
+        while ch(t, s.pos) == 32 or is_break(t, s.pos) {
+            if ch(t, s.pos) == 32 {
+                fwd1(mut s)
+            } else {
+                push_break(mut breaks, line_break(t, mut s))
+                if document_marker(t, s.pos) {
+                    return false
+                }
+            }
+        }
+        if b != BREAK_LF {
+            push_break(mut out, b)
+        } else if breaks.is_empty() {
+            out.push(' ')
+        }
+        out.push_str(breaks)
+        return true
+    }
+    if len > 0 {
+        out.push_str(t[ws..ws + len])
+        return true
+    }
+    return false
+}
+
+// Whether `---` or `...` and a blank are at `at`.
+fn document_marker(t: String, at: usize) -> bool {
+    let c = ch(t, at)
+    return (c == b'-' or c == b'.') and ch(t, at + 1) == c and ch(t, at + 2) == c and is_bz(t, at + 3)
+}
+
+// --- the parser ------------------------------------------------------------------------------
+
+// A value read, and whether it was `<<` or `=`, which mean something only as keys.
+struct Got {
+    value: Yaml
+    special: u8
+}
+
+const NORMAL: u8 = 0
+const MERGE: u8 = 1
+const VALUE: u8 = 2
+
+struct Anchored {
+    // The value, once it's read: an alias inside the node it names has none to copy.
+    value: Yaml?
+    // How many values it holds, counting itself.
+    size: usize
+}
+
+struct Parser {
+    s: Scan
+    handles: Map<String, String>
+    anchors: Map<String, Anchored>
+    depth: usize
+    // How many values aliases copied, and how many they may.
+    copied: usize
+    most_copied: usize
+}
+
+// The next token's kind, scanning as far as it takes to know it.
+fn peek(t: String, p: mut Parser) -> u8 ! YamlError {
+    if p.s.head == p.s.toks.len() and p.s.head > 0 {
+        p.s.toks.clear()
+        p.s.head = 0
+    }
+    while try need_more(t, mut p.s) {
+        try fetch_more(t, mut p.s)
+    }
+    return p.s.toks[p.s.head].kind
+}
+
+// Takes the next token, giving its place in `toks`, which stays good until the next `peek`.
+fn take(t: String, p: mut Parser) -> usize ! YamlError {
+    _ = try peek(t, mut p)
+    let i = p.s.head
+    p.s.head += 1
+    p.s.taken += 1
+    return i
+}
+
+fn token_name(kind: u8) -> String {
+    if kind == T_STREAM_END {
+        return "the end"
+    }
+    if kind == T_DIRECTIVE {
+        return "a directive"
+    }
+    if kind == T_DOC_START {
+        return "`---`"
+    }
+    if kind == T_DOC_END {
+        return "`...`"
+    }
+    if kind == T_BLOCK_SEQ {
+        return "a list"
+    }
+    if kind == T_BLOCK_MAP {
+        return "a mapping"
+    }
+    if kind == T_BLOCK_END {
+        return "the end of a block"
+    }
+    if kind == T_FLOW_SEQ {
+        return "`[`"
+    }
+    if kind == T_FLOW_MAP {
+        return "`\{`"
+    }
+    if kind == T_FLOW_SEQ_END {
+        return "`]`"
+    }
+    if kind == T_FLOW_MAP_END {
+        return "`\}`"
+    }
+    if kind == T_BLOCK_ENTRY {
+        return "`-`"
+    }
+    if kind == T_FLOW_ENTRY {
+        return "`,`"
+    }
+    if kind == T_KEY {
+        return "`?`"
+    }
+    if kind == T_VALUE {
+        return "`:`"
+    }
+    if kind == T_ALIAS {
+        return "an alias"
+    }
+    if kind == T_ANCHOR {
+        return "an anchor"
+    }
+    if kind == T_TAG {
+        return "a tag"
+    }
+    return "a scalar"
+}
+
+// The error at the next token.
+fn error_here(t: String, p: Parser, message: own String) -> YamlError {
+    let at = p.s.toks[p.s.head].at
+    return error_at(t, at, message)
+}
+
+fn new_parser(t: String) -> Parser {
+    return Parser {
+        s: new_scan(),
+        handles: Map<String, String>(),
+        anchors: Map<String, Anchored>(),
+        depth: 0,
+        copied: 0,
+        most_copied: 1000000 + 8 * t.len(),
+    }
+}
+
+/// The document in `text`, as Python's `yaml.safe_load(text)` reads it: `Null` if there's
+/// none, and an error if there's more than one, as in Python.
+pub fn parse(text: String) -> Yaml ! YamlError {
+    try check_printable(text)
+    var p = new_parser(text)
+    _ = try take(text, mut p)
+    let doc = try document(text, mut p, true) else return Yaml.Null
+    // PyYAML reads up to the next document's start to see there's none.
+    var kind = try peek(text, mut p)
+    while kind == T_DOC_END {
+        _ = try take(text, mut p)
+        kind = try peek(text, mut p)
+    }
+    if kind != T_STREAM_END {
+        fail error_here(text, p, "a second document, where `parse` reads one; `parse_all` reads them all")
+    }
+    return doc
+}
+
+/// Each document in `text`, as Python's `list(yaml.safe_load_all(text))` reads them.
+pub fn parse_all(text: String) -> List<Yaml> ! YamlError {
+    try check_printable(text)
+    var p = new_parser(text)
+    _ = try take(text, mut p)
+    var docs: List<Yaml> = []
+    var implicit = true
+    loop {
+        let got = try document(text, mut p, implicit)
+        implicit = false
+        match got {
+            some(d) => docs.push(d),
+            none => return docs,
+        }
+    }
+}
+
+// The next document, or none at the end. Only the first can start without `---`.
+fn document(t: String, p: mut Parser, implicit: bool) -> Yaml? ! YamlError {
+    var kind = try peek(t, mut p)
+    p.anchors.clear()
+    if implicit and kind != T_DIRECTIVE and kind != T_DOC_START and kind != T_STREAM_END {
+        default_handles(mut p)
+        let root = try node(t, mut p, true, false)
+        try document_end(t, mut p)
+        return some(try plain_value(t, root, 0))
+    }
+    while kind == T_DOC_END {
+        _ = try take(t, mut p)
+        kind = try peek(t, mut p)
+    }
+    if kind == T_STREAM_END {
+        _ = try take(t, mut p)
+        return none
+    }
+    try directives(t, mut p)
+    if try peek(t, mut p) != T_DOC_START {
+        let k = try peek(t, mut p)
+        fail error_here(t, p, "{token_name(k)} where `---` should start a document")
+    }
+    _ = try take(t, mut p)
+    let k = try peek(t, mut p)
+    var root = Got { value: Yaml.Null, special: NORMAL }
+    if k != T_DIRECTIVE and k != T_DOC_START and k != T_DOC_END and k != T_STREAM_END {
+        root = try node(t, mut p, true, false)
+    }
+    try document_end(t, mut p)
+    return some(try plain_value(t, root, 0))
+}
+
+fn document_end(t: String, p: mut Parser) ! YamlError {
+    if try peek(t, mut p) == T_DOC_END {
+        _ = try take(t, mut p)
+    }
+}
+
+fn default_handles(p: mut Parser) {
+    p.handles.clear()
+    p.handles.insert(String("!"), String("!"))
+    p.handles.insert(String("!!"), String("tag:yaml.org,2002:"))
+}
+
+fn directives(t: String, p: mut Parser) ! YamlError {
+    p.handles.clear()
+    var version = false
+    while try peek(t, mut p) == T_DIRECTIVE {
+        let i = try take(t, mut p)
+        let at = p.s.toks[i].at
+        let name = p.s.toks[i].text.take() ?? String()
+        if name == "YAML" {
+            if version {
+                fail error_at(t, at, "a second YAML directive for the same document")
+            }
+            if p.s.toks[i].major != 1 {
+                fail error_at(t, at, "YAML {p.s.toks[i].major}.{p.s.toks[i].minor}, where PyYAML reads version 1")
+            }
+            version = true
+        } else if name == "TAG" {
+            let handle = p.s.toks[i].handle.take() ?? String()
+            let prefix = p.s.toks[i].prefix.take() ?? String()
+            if p.handles.contains(handle) {
+                fail error_at(t, at, "a second TAG directive for `{handle}`")
+            }
+            p.handles.insert(handle, prefix)
+        }
+    }
+    if not p.handles.contains("!") {
+        p.handles.insert(String("!"), String("!"))
+    }
+    if not p.handles.contains("!!") {
+        p.handles.insert(String("!!"), String("tag:yaml.org,2002:"))
+    }
+}
+
+// A value read where `<<` and `=` mean nothing: as an element, a mapping's value, or a document.
+fn plain_value(t: String, got: own Got, at: usize) -> Yaml ! YamlError {
+    if got.special == MERGE {
+        fail error_at(t, at, "`<<` as a value; it merges a mapping only as a key")
+    }
+    if got.special == VALUE {
+        fail error_at(t, at, "`=` as a value, which PyYAML's safe_load has no reading for; quote it")
+    }
+    return got.value
+}
+
+fn empty() -> Got {
+    return Got { value: Yaml.Null, special: NORMAL }
+}
+
+// A node: an alias, or a scalar or collection with its anchor and tag if it has them.
+fn node(t: String, p: mut Parser, block: bool, indentless: bool) -> Got ! YamlError {
+    var kind = try peek(t, mut p)
+    let start = p.s.toks[p.s.head].at
+    if kind == T_ALIAS {
+        let i = try take(t, mut p)
+        let name = p.s.toks[i].text.take() ?? String()
+        if not p.anchors.contains(name) {
+            fail error_at(t, start, "`*{name}`, an alias to no anchor before it")
+        }
+        let size = p.anchors[name].size
+        if p.anchors[name].value == none {
+            fail error_at(t, start, "`*{name}` inside the node it names, a value that holds itself, which Calx can't make")
+        }
+        p.copied += size
+        if p.copied > p.most_copied {
+            fail error_at(t, start, "aliases that copy more than {p.most_copied} values, past what this text could need")
+        }
+        let v = p.anchors[name].value.copy() ?? Yaml.Null
+        return Got { value: v, special: NORMAL }
+    }
+    if p.depth >= MAX_DEPTH {
+        fail error_at(t, start, "collections nested more than {MAX_DEPTH} deep")
+    }
+    var anchor = String()
+    var anchored = false
+    var tag: String? = none
+    var tag_at: usize = 0
+    if kind == T_ANCHOR {
+        let i = try take(t, mut p)
+        anchor = p.s.toks[i].text.take() ?? String()
+        anchored = true
+        if try peek(t, mut p) == T_TAG {
+            tag_at = p.s.toks[p.s.head].at
+            tag = some(try tag_name(t, mut p))
+        }
+    } else if kind == T_TAG {
+        tag_at = start
+        tag = some(try tag_name(t, mut p))
+        if try peek(t, mut p) == T_ANCHOR {
+            let i = try take(t, mut p)
+            anchor = p.s.toks[i].text.take() ?? String()
+            anchored = true
+        }
+    }
+    if anchored {
+        if p.anchors.contains(anchor) {
+            fail error_at(t, start, "a second anchor `&{anchor}` in the same document")
+        }
+        p.anchors.insert(anchor.copy(), Anchored { value: none, size: 0 })
+    }
+    // Explicit tags are read once the node is: a `!` alone, or none, leaves it to the kind of
+    // node and, for a plain scalar, to its text.
+    let open = match tag {
+        some(g) => g == "!",
+        none => true,
+    }
+    kind = try peek(t, mut p)
+    p.depth += 1
+    var got = empty()
+    if indentless and kind == T_BLOCK_ENTRY {
+        let xs = try indentless_seq(t, mut p)
+        got = try tagged_seq(t, tag, tag_at, xs)
+    } else if kind == T_SCALAR {
+        let i = try take(t, mut p)
+        let text = p.s.toks[i].text.take() ?? String()
+        let plain = p.s.toks[i].style == PLAIN
+        got = try scalar(t, text, plain or tag != none, tag, if tag == none { start } else { tag_at })
+    } else if kind == T_FLOW_SEQ {
+        let xs = try flow_seq(t, mut p)
+        got = try tagged_seq(t, tag, tag_at, xs)
+    } else if kind == T_FLOW_MAP {
+        let m = try flow_map(t, mut p)
+        got = try tagged_map(t, tag, tag_at, m)
+    } else if block and kind == T_BLOCK_SEQ {
+        let xs = try block_seq(t, mut p)
+        got = try tagged_seq(t, tag, tag_at, xs)
+    } else if block and kind == T_BLOCK_MAP {
+        let m = try block_map(t, mut p)
+        got = try tagged_map(t, tag, tag_at, m)
+    } else if anchored or tag != none {
+        got = try scalar(t, String(), open, tag, tag_at)
+    } else {
+        fail error_here(t, p, "{token_name(kind)} where a value should be")
+    }
+    p.depth -= 1
+    if anchored {
+        let size = count(got.value)
+        p.anchors.insert(anchor, Anchored { value: some(got.value.copy()), size: size })
+    }
+    return got
+}
+
+// How many values `v` holds, counting itself.
+fn count(v: Yaml) -> usize {
+    match v {
+        Yaml.Seq(xs) => {
+            var n: usize = 1
+            for x in xs {
+                n += count(x)
+            }
+            return n
+        },
+        Yaml.Map(m) => {
+            var n: usize = 1
+            for (_k, x) in m {
+                n += 1 + count(x)
+            }
+            return n
+        },
+        _ => return 1,
+    }
+}
+
+// A tag's full name, its handle replaced by the prefix it stands for.
+fn tag_name(t: String, p: mut Parser) -> String ! YamlError {
+    let i = try take(t, mut p)
+    let at = p.s.toks[i].at
+    let suffix = p.s.toks[i].text.take() ?? String()
+    match p.s.toks[i].handle.take() {
+        some(h) => {
+            if not p.handles.contains(h) {
+                fail error_at(t, at, "the tag handle `{h}`, which no TAG directive names")
+            }
+            var full = p.handles[h].copy()
+            full.push_str(suffix)
+            return full
+        },
+        none => return suffix,
+    }
+}
+
+fn block_seq(t: String, p: mut Parser) -> List<Yaml> ! YamlError {
+    let start = p.s.toks[try take(t, mut p)].at
+    var xs: List<Yaml> = []
+    loop {
+        let k = try peek(t, mut p)
+        if k == T_BLOCK_ENTRY {
+            _ = try take(t, mut p)
+            let next = try peek(t, mut p)
+            if next != T_BLOCK_ENTRY and next != T_BLOCK_END {
+                let item_at = p.s.toks[p.s.head].at
+                let got = try node(t, mut p, true, false)
+                xs.push(try plain_value(t, got, item_at))
+            } else {
+                xs.push(Yaml.Null)
+            }
+            continue
+        }
+        if k != T_BLOCK_END {
+            fail error_here(t, p, "{token_name(k)} in a list, where `-` should start an item at the list's indent; the list starts at line {error_at(t, start, "").line}")
+        }
+        _ = try take(t, mut p)
+        return xs
+    }
+}
+
+fn indentless_seq(t: String, p: mut Parser) -> List<Yaml> ! YamlError {
+    var xs: List<Yaml> = []
+    while try peek(t, mut p) == T_BLOCK_ENTRY {
+        _ = try take(t, mut p)
+        let next = try peek(t, mut p)
+        if next != T_BLOCK_ENTRY and next != T_KEY and next != T_VALUE and next != T_BLOCK_END {
+            let item_at = p.s.toks[p.s.head].at
+            let got = try node(t, mut p, true, false)
+            xs.push(try plain_value(t, got, item_at))
+        } else {
+            xs.push(Yaml.Null)
+        }
+    }
+    return xs
+}
+
+// A mapping's keys and values as they're read, merges kept apart, made into a mapping at the end.
+struct MapBuild {
+    merges: List<Yaml>
+    merge_at: List<usize>
+    keys: List<Yaml>
+    values: List<Yaml>
+    key_at: List<usize>
+}
+
+fn new_build() -> MapBuild {
+    return MapBuild { merges: [], merge_at: [], keys: [], values: [], key_at: [] }
+}
+
+fn add_pair(t: String, b: mut MapBuild, key: own Got, key_at: usize, value: own Got, value_at: usize) ! YamlError {
+    let v = try plain_value(t, value, value_at)
+    if key.special == MERGE {
+        b.merges.push(v)
+        b.merge_at.push(value_at)
+        return
+    }
+    match key.value {
+        Yaml.Seq(_) => fail error_at(t, key_at, "a list as a key, which Python can't hash and PyYAML refuses"),
+        Yaml.Map(_) => fail error_at(t, key_at, "a mapping as a key, which Python can't hash and PyYAML refuses"),
+        _ => {},
+    }
+    b.keys.push(key.value)
+    b.values.push(v)
+    b.key_at.push(key_at)
+}
+
+// The mapping, as PyYAML builds it: what `<<` merges first, each mapping of a list of them in
+// turn from the last, then the mapping's own keys, with a later value for a key replacing an
+// earlier one where the earlier one was.
+fn finish_map(t: String, b: own MapBuild) -> LinkedMap<Yaml, Yaml> ! YamlError {
+    var m = LinkedMap<Yaml, Yaml>()
+    for j in 0..b.merges.len() {
+        match b.merges[j] {
+            Yaml.Map(mm) => {
+                for (k, v) in mm {
+                    put(mut m, k.copy(), v.copy())
+                }
+            },
+            Yaml.Seq(xs) => {
+                var i = xs.len()
+                while i > 0 {
+                    i -= 1
+                    match xs[i] {
+                        Yaml.Map(mm) => {
+                            for (k, v) in mm {
+                                put(mut m, k.copy(), v.copy())
+                            }
+                        },
+                        _ => fail error_at(t, b.merge_at[j], "a list to merge with `<<` that holds something other than mappings"),
+                    }
+                }
+            },
+            _ => fail error_at(t, b.merge_at[j], "a value for `<<`, which merges a mapping or a list of them, that's neither"),
+        }
+    }
+    var keys = b.keys
+    var values = b.values
+    keys.reverse()
+    values.reverse()
+    loop {
+        let k = keys.pop() else break
+        let v = values.pop() else break
+        put(mut m, k, v)
+    }
+    return m
+}
+
+// Puts a key and its value in `m` as a Python dict would. There `1`, `1.0` and `true` are one
+// key, and `0`, `0.0`, `-0.0` and `false` another, so a value for one replaces the value of
+// another that's in already, which keeps its place and its kind.
+fn put(m: mut LinkedMap<Yaml, Yaml>, k: own Yaml, v: own Yaml) {
+    if not m.contains(k) {
+        var twins: List<Yaml> = []
+        match k {
+            Yaml.Bool(b) => {
+                twins.push(Yaml.Int(if b { 1 } else { 0 }))
+                twins.push(Yaml.Float(if b { 1.0 } else { 0.0 }))
+            },
+            Yaml.Int(n) => {
+                if n == 0 or n == 1 {
+                    twins.push(Yaml.Bool(n == 1))
+                }
+                let f = f64.nearest(n)
+                if f < 9.223372036854775808e18 and i64.saturate(f) == n {
+                    twins.push(Yaml.Float(f))
+                }
+            },
+            Yaml.Float(f) => {
+                if f >= -9.223372036854775808e18 and f < 9.223372036854775808e18 {
+                    let n = i64.saturate(f)
+                    if f64.nearest(n) == f {
+                        twins.push(Yaml.Int(n))
+                        if n == 0 or n == 1 {
+                            twins.push(Yaml.Bool(n == 1))
+                        }
+                    }
+                }
+            },
+            _ => {},
+        }
+        for twin in twins {
+            if m.contains(twin) {
+                m[twin] = v
+                return
+            }
+        }
+    }
+    m.insert(k, v)
+}
+
+fn block_map(t: String, p: mut Parser) -> LinkedMap<Yaml, Yaml> ! YamlError {
+    let start = p.s.toks[try take(t, mut p)].at
+    var b = new_build()
+    loop {
+        let k = try peek(t, mut p)
+        if k == T_KEY {
+            let key_tok = try take(t, mut p)
+            var key_at = p.s.toks[key_tok].at
+            var key = empty()
+            let next = try peek(t, mut p)
+            if next != T_KEY and next != T_VALUE and next != T_BLOCK_END {
+                key_at = p.s.toks[p.s.head].at
+                key = try node(t, mut p, true, true)
+            }
+            var value = empty()
+            var value_at = key_at
+            if try peek(t, mut p) == T_VALUE {
+                let vt = try take(t, mut p)
+                value_at = p.s.toks[vt].at
+                let after = try peek(t, mut p)
+                if after != T_KEY and after != T_VALUE and after != T_BLOCK_END {
+                    value_at = p.s.toks[p.s.head].at
+                    value = try node(t, mut p, true, true)
+                }
+            }
+            try add_pair(t, mut b, key, key_at, value, value_at)
+            continue
+        }
+        if k != T_BLOCK_END {
+            fail error_here(t, p, "{token_name(k)} in a mapping, where a key should be at the mapping's indent; the mapping starts at line {error_at(t, start, "").line}")
+        }
+        _ = try take(t, mut p)
+        return try finish_map(t, b)
+    }
+}
+
+fn flow_seq(t: String, p: mut Parser) -> List<Yaml> ! YamlError {
+    let start = p.s.toks[try take(t, mut p)].at
+    var xs: List<Yaml> = []
+    var first = true
+    loop {
+        var k = try peek(t, mut p)
+        if k != T_FLOW_SEQ_END {
+            if not first {
+                if k != T_FLOW_ENTRY {
+                    fail error_here(t, p, "{token_name(k)} in a `[` list, where `,` or `]` should be; the list starts at line {error_at(t, start, "").line}")
+                }
+                _ = try take(t, mut p)
+                k = try peek(t, mut p)
+            }
+            first = false
+            if k == T_KEY {
+                // `[a: 1]`, a mapping of one pair.
+                let key_tok = try take(t, mut p)
+                var key_at = p.s.toks[key_tok].at
+                var key = empty()
+                let next = try peek(t, mut p)
+                if next != T_VALUE and next != T_FLOW_ENTRY and next != T_FLOW_SEQ_END {
+                    key_at = p.s.toks[p.s.head].at
+                    key = try node(t, mut p, false, false)
+                }
+                var value = empty()
+                var value_at = key_at
+                if try peek(t, mut p) == T_VALUE {
+                    let vt = try take(t, mut p)
+                    value_at = p.s.toks[vt].at
+                    let after = try peek(t, mut p)
+                    if after != T_FLOW_ENTRY and after != T_FLOW_SEQ_END {
+                        value_at = p.s.toks[p.s.head].at
+                        value = try node(t, mut p, false, false)
+                    }
+                }
+                var b = new_build()
+                try add_pair(t, mut b, key, key_at, value, value_at)
+                xs.push(Yaml.Map(try finish_map(t, b)))
+                continue
+            }
+            if k != T_FLOW_SEQ_END {
+                let item_at = p.s.toks[p.s.head].at
+                let got = try node(t, mut p, false, false)
+                xs.push(try plain_value(t, got, item_at))
+                continue
+            }
+        }
+        _ = try take(t, mut p)
+        return xs
+    }
+}
+
+fn flow_map(t: String, p: mut Parser) -> LinkedMap<Yaml, Yaml> ! YamlError {
+    let start = p.s.toks[try take(t, mut p)].at
+    var b = new_build()
+    var first = true
+    loop {
+        var k = try peek(t, mut p)
+        if k != T_FLOW_MAP_END {
+            if not first {
+                if k != T_FLOW_ENTRY {
+                    fail error_here(t, p, "{token_name(k)} in a `\{` mapping, where `,` or `\}` should be; the mapping starts at line {error_at(t, start, "").line}")
+                }
+                _ = try take(t, mut p)
+                k = try peek(t, mut p)
+            }
+            first = false
+            if k == T_KEY {
+                let key_tok = try take(t, mut p)
+                var key_at = p.s.toks[key_tok].at
+                var key = empty()
+                let next = try peek(t, mut p)
+                if next != T_VALUE and next != T_FLOW_ENTRY and next != T_FLOW_MAP_END {
+                    key_at = p.s.toks[p.s.head].at
+                    key = try node(t, mut p, false, false)
+                }
+                var value = empty()
+                var value_at = key_at
+                if try peek(t, mut p) == T_VALUE {
+                    let vt = try take(t, mut p)
+                    value_at = p.s.toks[vt].at
+                    let after = try peek(t, mut p)
+                    if after != T_FLOW_ENTRY and after != T_FLOW_MAP_END {
+                        value_at = p.s.toks[p.s.head].at
+                        value = try node(t, mut p, false, false)
+                    }
+                }
+                try add_pair(t, mut b, key, key_at, value, value_at)
+                continue
+            }
+            if k != T_FLOW_MAP_END {
+                let key_at = p.s.toks[p.s.head].at
+                let key = try node(t, mut p, false, false)
+                try add_pair(t, mut b, key, key_at, empty(), key_at)
+                continue
+            }
+        }
+        _ = try take(t, mut p)
+        return try finish_map(t, b)
+    }
+}
+
+// --- the constructors ------------------------------------------------------------------------
+
+const YAML_TAG: str = "tag:yaml.org,2002:"
+
+// What a scalar is, or what a tag makes: the kinds of PyYAML's resolver and of the tags its
+// safe_load reads.
+const K_NONE: u8 = 0
+const K_STR: u8 = 1
+const K_NULL: u8 = 2
+const K_BOOL: u8 = 3
+const K_INT: u8 = 4
+const K_FLOAT: u8 = 5
+const K_TIMESTAMP: u8 = 6
+const K_BINARY: u8 = 7
+const K_MERGE: u8 = 8
+const K_VALUE: u8 = 9
+const K_SEQ: u8 = 10
+const K_MAP: u8 = 11
+const K_SET: u8 = 12
+const K_OMAP: u8 = 13
+const K_PAIRS: u8 = 14
+
+// A kind's name, the tag's past `tag:yaml.org,2002:`.
+fn kind_name(k: u8) -> str {
+    if k == K_STR {
+        return "str"
+    }
+    if k == K_NULL {
+        return "null"
+    }
+    if k == K_BOOL {
+        return "bool"
+    }
+    if k == K_INT {
+        return "int"
+    }
+    if k == K_FLOAT {
+        return "float"
+    }
+    if k == K_TIMESTAMP {
+        return "timestamp"
+    }
+    if k == K_BINARY {
+        return "binary"
+    }
+    if k == K_MERGE {
+        return "merge"
+    }
+    if k == K_VALUE {
+        return "value"
+    }
+    if k == K_SEQ {
+        return "seq"
+    }
+    if k == K_MAP {
+        return "map"
+    }
+    if k == K_SET {
+        return "set"
+    }
+    if k == K_OMAP {
+        return "omap"
+    }
+    if k == K_PAIRS {
+        return "pairs"
+    }
+    return ""
+}
+
+// What a tag makes, by its name past `tag:yaml.org,2002:`, or `K_NONE` for one PyYAML's
+// safe_load has no reading for.
+fn core_tag(tag: String) -> u8 {
+    if not tag.starts_with(YAML_TAG) {
+        return K_NONE
+    }
+    let name = tag[YAML_TAG.len()..]
+    var k = K_STR
+    while k <= K_PAIRS {
+        if name == kind_name(k) {
+            return k
+        }
+        k += 1
+    }
+    return K_NONE
+}
+
+fn unknown_tag(t: String, at: usize, tag: String) -> YamlError {
+    return error_at(t, at, "the tag `{tag}`, which PyYAML's safe_load has no reading for")
+}
+
+// A scalar's value: what its tag says, or with no tag, or `!`, what a plain scalar's text
+// resolves to, as PyYAML's YAML 1.1 resolver says, and a string for any other.
+fn scalar(t: String, text: own String, resolve: bool, tag: String?, at: usize) -> Got ! YamlError {
+    var kind = K_STR
+    match tag {
+        some(g) => {
+            if g == "!" {
+                if resolve {
+                    kind = resolved(text)
+                }
+            } else {
+                kind = core_tag(g)
+                if kind == K_NONE {
+                    fail unknown_tag(t, at, g)
+                }
+            }
+        },
+        none => {
+            if resolve {
+                kind = resolved(text)
+            }
+        },
+    }
+    if kind == K_STR {
+        return Got { value: Yaml.Str(text), special: NORMAL }
+    }
+    if kind == K_NULL {
+        return Got { value: Yaml.Null, special: NORMAL }
+    }
+    if kind == K_BOOL {
+        let lower = text.to_lower_root()
+        if lower == "yes" or lower == "true" or lower == "on" {
+            return Got { value: Yaml.Bool(true), special: NORMAL }
+        }
+        if lower == "no" or lower == "false" or lower == "off" {
+            return Got { value: Yaml.Bool(false), special: NORMAL }
+        }
+        fail error_at(t, at, "`{text}` tagged a bool, which takes yes, no, true, false, on or off")
+    }
+    if kind == K_INT {
+        match yaml_int(text) {
+            ok(n) => return Got { value: Yaml.Int(n), special: NORMAL },
+            err(why) => fail error_at(t, at, why),
+        }
+    }
+    if kind == K_FLOAT {
+        match yaml_float(text) {
+            some(f) => return Got { value: Yaml.Float(f), special: NORMAL },
+            none => fail error_at(t, at, "`{text}` tagged a float, which it isn't"),
+        }
+    }
+    if kind == K_TIMESTAMP {
+        match yaml_timestamp(text) {
+            ok(v) => return Got { value: v, special: NORMAL },
+            err(why) => fail error_at(t, at, why),
+        }
+    }
+    if kind == K_BINARY {
+        match base64_lenient(text) {
+            ok(bytes) => return Got { value: Yaml.Bytes(bytes), special: NORMAL },
+            err(why) => fail error_at(t, at, why),
+        }
+    }
+    if kind == K_MERGE {
+        return Got { value: Yaml.Str(text), special: MERGE }
+    }
+    if kind == K_VALUE {
+        return Got { value: Yaml.Str(text), special: VALUE }
+    }
+    fail error_at(t, at, "a scalar tagged `!!{kind_name(kind)}`, which takes a {if kind == K_SEQ or kind == K_OMAP or kind == K_PAIRS { "list" } else { "mapping" }}")
+}
+
+fn tagged_seq(t: String, tag: String?, at: usize, xs: own List<Yaml>) -> Got ! YamlError {
+    match tag {
+        some(g) => {
+            if g != "!" {
+                let kind = core_tag(g)
+                if kind == K_NONE {
+                    fail unknown_tag(t, at, g)
+                }
+                if kind == K_OMAP or kind == K_PAIRS {
+                    // A list of single-pair mappings, which PyYAML makes a list of pairs.
+                    var pairs: List<Yaml> = []
+                    for x in xs {
+                        match x {
+                            Yaml.Map(m) => {
+                                if m.len() != 1 {
+                                    fail error_at(t, at, "`!!{kind_name(kind)}` with an item of {m.len()} pairs, where each has one")
+                                }
+                                for (k, v) in m {
+                                    pairs.push(Yaml.Seq([k.copy(), v.copy()]))
+                                }
+                            },
+                            _ => fail error_at(t, at, "`!!{kind_name(kind)}` with an item that isn't a mapping of one pair"),
+                        }
+                    }
+                    return Got { value: Yaml.Seq(pairs), special: NORMAL }
+                }
+                if kind != K_SEQ {
+                    fail error_at(t, at, "a list tagged `!!{kind_name(kind)}`, which takes a {if kind == K_MAP or kind == K_SET { "mapping" } else { "scalar" }}")
+                }
+            }
+        },
+        none => {},
+    }
+    return Got { value: Yaml.Seq(xs), special: NORMAL }
+}
+
+fn tagged_map(t: String, tag: String?, at: usize, m: own LinkedMap<Yaml, Yaml>) -> Got ! YamlError {
+    match tag {
+        some(g) => {
+            if g != "!" {
+                let kind = core_tag(g)
+                if kind == K_NONE {
+                    fail unknown_tag(t, at, g)
+                }
+                if kind == K_SET {
+                    // A set: its keys, which are what PyYAML keeps.
+                    var keys = LinkedMap<Yaml, Yaml>()
+                    for (k, _v) in m {
+                        keys.insert(k.copy(), Yaml.Null)
+                    }
+                    return Got { value: Yaml.Map(keys), special: NORMAL }
+                }
+                if kind != K_MAP {
+                    fail error_at(t, at, "a mapping tagged `!!{kind_name(kind)}`, which takes a {if kind == K_SEQ or kind == K_OMAP or kind == K_PAIRS { "list" } else { "scalar" }}")
+                }
+            }
+        },
+        none => {},
+    }
+    return Got { value: Yaml.Map(m), special: NORMAL }
+}
+
+// --- the resolver ----------------------------------------------------------------------------
+
+// What a plain scalar's text is, as PyYAML's resolver says: its patterns, tried by the first
+// rune, in the order PyYAML adds them.
+fn resolved(v: String) -> u8 {
+    if v.is_empty() {
+        return K_NULL
+    }
+    let c = v.byte_at(0)
+    if c == b'y' or c == b'Y' or c == b'n' or c == b'N' or c == b't' or c == b'T' or c == b'f' or c == b'F' or c == b'o' or c == b'O' {
+        if is_bool_word(v) {
+            return K_BOOL
+        }
+        if v == "null" or v == "Null" or v == "NULL" {
+            return K_NULL
+        }
+        return K_STR
+    }
+    if c == b'~' {
+        return if v.len() == 1 { K_NULL } else { K_STR }
+    }
+    if c == b'<' {
+        return if v == "<<" { K_MERGE } else { K_STR }
+    }
+    if c == b'=' {
+        return if v.len() == 1 { K_VALUE } else { K_STR }
+    }
+    if c == b'-' or c == b'+' or c == b'.' or is_digit(c) {
+        if is_float_text(v) {
+            return K_FLOAT
+        }
+        if c != b'.' and is_int_text(v) {
+            return K_INT
+        }
+        if is_digit(c) and is_timestamp_text(v) {
+            return K_TIMESTAMP
+        }
+    }
+    return K_STR
+}
+
+fn is_bool_word(v: String) -> bool {
+    return v == "yes" or v == "Yes" or v == "YES" or v == "no" or v == "No" or v == "NO" or v == "true" or v == "True" or v == "TRUE" or v == "false" or v == "False" or v == "FALSE" or v == "on" or v == "On" or v == "ON" or v == "off" or v == "Off" or v == "OFF"
+}
+
+// The digits and `_`s from `i`, how many.
+fn digits_(v: String, i: usize) -> usize {
+    var j = i
+    while j < v.len() and (is_digit(v.byte_at(j)) or v.byte_at(j) == b'_') {
+        j += 1
+    }
+    return j - i
+}
+
+fn sign_len(v: String) -> usize {
+    return if v.len() > 0 and (v.byte_at(0) == b'-' or v.byte_at(0) == b'+') { 1 } else { 0 }
+}
+
+// `(?:[eE][-+][0-9]+)?` at `i` to the end.
+fn exponent_to_end(v: String, i: usize) -> bool {
+    if i == v.len() {
+        return true
+    }
+    let c = v.byte_at(i)
+    if c != b'e' and c != b'E' {
+        return false
+    }
+    if i + 1 >= v.len() or (v.byte_at(i + 1) != b'-' and v.byte_at(i + 1) != b'+') {
+        return false
+    }
+    var j = i + 2
+    if j >= v.len() {
+        return false
+    }
+    while j < v.len() {
+        if not is_digit(v.byte_at(j)) {
+            return false
+        }
+        j += 1
+    }
+    return true
+}
+
+// `(?::[0-5]?[0-9])+` from `i`, where it ends, or `FAR` if it isn't there.
+fn sexagesimal_end(v: String, i: usize) -> usize {
+    var j = i
+    var parts: usize = 0
+    while j < v.len() and v.byte_at(j) == b':' {
+        var k = j + 1
+        if k + 1 < v.len() and v.byte_at(k) >= b'0' and v.byte_at(k) <= b'5' and is_digit(v.byte_at(k + 1)) {
+            k += 2
+        } else if k < v.len() and is_digit(v.byte_at(k)) {
+            k += 1
+        } else {
+            break
+        }
+        j = k
+        parts += 1
+    }
+    return if parts == 0 { FAR } else { j }
+}
+
+fn is_float_text(v: String) -> bool {
+    let n = v.len()
+    let sl = sign_len(v)
+    // `[-+]?\.(?:inf|Inf|INF)` and `\.(?:nan|NaN|NAN)`
+    let rest = v[sl..]
+    if rest == ".inf" or rest == ".Inf" or rest == ".INF" {
+        return true
+    }
+    if sl == 0 and (v == ".nan" or v == ".NaN" or v == ".NAN") {
+        return true
+    }
+    // `[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?`
+    if sl < n and is_digit(v.byte_at(sl)) {
+        let d = digits_(v, sl)
+        let i = sl + d
+        if i < n and v.byte_at(i) == b'.' {
+            let f = digits_(v, i + 1)
+            if exponent_to_end(v, i + 1 + f) {
+                return true
+            }
+        }
+        // `[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*`. The first part's `[0-9_]*` can give
+        // back digits to the `[0-5]?[0-9]`s only through a `:`, which it can't hold, so where
+        // it stops is where they start.
+        let e = sexagesimal_end(v, i)
+        if e != FAR and e < n and v.byte_at(e) == b'.' and e + 1 + digits_(v, e + 1) == n {
+            return true
+        }
+    }
+    // `\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?`, no sign
+    if sl == 0 and n >= 2 and v.byte_at(0) == b'.' and is_digit(v.byte_at(1)) {
+        let d = digits_(v, 1)
+        if exponent_to_end(v, 1 + d) {
+            return true
+        }
+    }
+    return false
+}
+
+fn is_int_text(v: String) -> bool {
+    let n = v.len()
+    let sl = sign_len(v)
+    if sl >= n {
+        return false
+    }
+    let r = v[sl..]
+    // `0b[0-1_]+`
+    if r.len() > 2 and r.byte_at(0) == b'0' and r.byte_at(1) == b'b' {
+        for i in 2..r.len() {
+            let c = r.byte_at(i)
+            if c != b'0' and c != b'1' and c != b'_' {
+                return false
+            }
+        }
+        return true
+    }
+    // `0x[0-9a-fA-F_]+`
+    if r.len() > 2 and r.byte_at(0) == b'0' and r.byte_at(1) == b'x' {
+        for i in 2..r.len() {
+            let c = r.byte_at(i)
+            if not is_hex(c) and c != b'_' {
+                return false
+            }
+        }
+        return true
+    }
+    // `0[0-7_]+` and `0`
+    if r.byte_at(0) == b'0' {
+        if r.len() == 1 {
+            return true
+        }
+        for i in 1..r.len() {
+            let c = r.byte_at(i)
+            if (c < b'0' or c > b'7') and c != b'_' {
+                return false
+            }
+        }
+        return true
+    }
+    // `[1-9][0-9_]*` and `[1-9][0-9_]*(?::[0-5]?[0-9])+`
+    if r.byte_at(0) >= b'1' and r.byte_at(0) <= b'9' {
+        let d = digits_(r, 0)
+        if d == r.len() {
+            return true
+        }
+        return sexagesimal_end(r, d) == r.len()
+    }
+    return false
+}
+
+fn is_timestamp_text(v: String) -> bool {
+    let n = v.len()
+    if n < 8 {
+        return false
+    }
+    for i in 0usize..4 {
+        if not is_digit(v.byte_at(i)) {
+            return false
+        }
+    }
+    if v.byte_at(4) != b'-' {
+        return false
+    }
+    // `[0-9]{4}-[0-9]{2}-[0-9]{2}`
+    if n == 10 and is_digit(v.byte_at(5)) and is_digit(v.byte_at(6)) and v.byte_at(7) == b'-' and is_digit(v.byte_at(8)) and is_digit(v.byte_at(9)) {
+        return true
+    }
+    // The date with a time: what the constructor's pattern takes, with the time not optional.
+    match timestamp_parts(v) {
+        some(parts) => return parts.has_time,
+        none => return false,
+    }
+}
+
+struct Stamp {
+    year: i32
+    month: i32
+    day: i32
+    has_time: bool
+    hour: i32
+    minute: i32
+    second: i32
+    nano: i32
+    // 0 for none, 1 for `Z`, 2 for an offset.
+    zone: u8
+    offset: i32
+}
+
+fn num(v: String, a: usize, b: usize) -> i32 {
+    var n: i32 = 0
+    for i in a..b {
+        n = n * 10 + i32(v.byte_at(i) - b'0')
+    }
+    return n
+}
+
+// Up to `most` digits from `i`, at least one: where they end, or `FAR`.
+fn some_digits(v: String, i: usize, most: usize) -> usize {
+    var j = i
+    while j < v.len() and j - i < most and is_digit(v.byte_at(j)) {
+        j += 1
+    }
+    return if j == i { FAR } else { j }
+}
+
+// The constructor's timestamp pattern:
+// `(\d{4})-(\d\d?)-(\d\d?)(?:(?:[Tt]|[ \t]+)(\d\d?):(\d\d):(\d\d)(?:\.(\d*))?(?:[ \t]*(Z|([-+])(\d\d?)(?::(\d\d))?))?)?`
+fn timestamp_parts(v: String) -> Stamp? {
+    let n = v.len()
+    var st = Stamp { year: 0, month: 0, day: 0, has_time: false, hour: 0, minute: 0, second: 0, nano: 0, zone: 0, offset: 0 }
+    if n < 8 {
+        return none
+    }
+    for i in 0usize..4 {
+        if not is_digit(v.byte_at(i)) {
+            return none
+        }
+    }
+    if v.byte_at(4) != b'-' {
+        return none
+    }
+    st.year = num(v, 0, 4)
+    let m_end = some_digits(v, 5, 2)
+    if m_end == FAR or m_end >= n or v.byte_at(m_end) != b'-' {
+        return none
+    }
+    st.month = num(v, 5, m_end)
+    let d_end = some_digits(v, m_end + 1, 2)
+    if d_end == FAR {
+        return none
+    }
+    st.day = num(v, m_end + 1, d_end)
+    if d_end == n {
+        return some(st)
+    }
+    var i = d_end
+    if v.byte_at(i) == b'T' or v.byte_at(i) == b't' {
+        i += 1
+    } else if v.byte_at(i) == b' ' or v.byte_at(i) == 9 {
+        while i < n and (v.byte_at(i) == b' ' or v.byte_at(i) == 9) {
+            i += 1
+        }
+    } else {
+        return none
+    }
+    let h_end = some_digits(v, i, 2)
+    if h_end == FAR or h_end + 6 > n or v.byte_at(h_end) != b':' or not is_digit(v.byte_at(h_end + 1)) or not is_digit(v.byte_at(h_end + 2)) or v.byte_at(h_end + 3) != b':' or not is_digit(v.byte_at(h_end + 4)) or not is_digit(v.byte_at(h_end + 5)) {
+        return none
+    }
+    st.has_time = true
+    st.hour = num(v, i, h_end)
+    st.minute = num(v, h_end + 1, h_end + 3)
+    st.second = num(v, h_end + 4, h_end + 6)
+    i = h_end + 6
+    if i < n and v.byte_at(i) == b'.' {
+        i += 1
+        var digits: usize = 0
+        var nano: i32 = 0
+        while i < n and is_digit(v.byte_at(i)) {
+            if digits < 9 {
+                nano = nano * 10 + i32(v.byte_at(i) - b'0')
+            }
+            digits += 1
+            i += 1
+        }
+        while digits < 9 {
+            nano *= 10
+            digits += 1
+        }
+        st.nano = nano
+    }
+    while i < n and (v.byte_at(i) == b' ' or v.byte_at(i) == 9) {
+        i += 1
+    }
+    if i == n {
+        return some(st)
+    }
+    if v.byte_at(i) == b'Z' {
+        st.zone = 1
+        return if i + 1 == n { some(st) } else { none }
+    }
+    if v.byte_at(i) != b'-' and v.byte_at(i) != b'+' {
+        return none
+    }
+    let negative = v.byte_at(i) == b'-'
+    let th_end = some_digits(v, i + 1, 2)
+    if th_end == FAR {
+        return none
+    }
+    let hours = num(v, i + 1, th_end)
+    var minutes: i32 = 0
+    if th_end < n {
+        if th_end + 3 != n or v.byte_at(th_end) != b':' or not is_digit(v.byte_at(th_end + 1)) or not is_digit(v.byte_at(th_end + 2)) {
+            return none
+        }
+        minutes = num(v, th_end + 1, th_end + 3)
+    }
+    st.zone = 2
+    st.offset = (hours * 3600 + minutes * 60) * (if negative { -1 } else { 1 })
+    return some(st)
+}
+
+fn days_in(year: i32, month: i32) -> i32 {
+    if month == 2 {
+        return if (year % 4 == 0 and year % 100 != 0) or year % 400 == 0 { 29 } else { 28 }
+    }
+    if month == 4 or month == 6 or month == 9 or month == 11 {
+        return 30
+    }
+    return 31
+}
+
+// A timestamp's value, a date or a date and time, checked as Python's `datetime` checks them.
+fn yaml_timestamp(v: String) -> Yaml ! String {
+    let st = timestamp_parts(v) else fail "`{v}` tagged a timestamp, which it isn't"
+    if st.year < 1 or st.month < 1 or st.month > 12 or st.day < 1 or st.day > days_in(st.year, st.month) {
+        fail "`{v}`, a date that isn't one"
+    }
+    let m = Moment { year: st.year, month: st.month, day: st.day, hour: st.hour, minute: st.minute, second: st.second, nano: st.nano, offset: st.offset }
+    if not st.has_time {
+        return Yaml.Date(m)
+    }
+    if st.hour > 23 or st.minute > 59 or st.second > 59 {
+        fail "`{v}`, a time of day that isn't one"
+    }
+    if st.zone == 0 {
+        return Yaml.DateTime(m)
+    }
+    if st.offset <= -86400 or st.offset >= 86400 {
+        fail "`{v}`, an offset of a day or more"
+    }
+    return Yaml.OffsetDateTime(m)
+}
+
+// Python's `int(text, base)` for the digits of a YAML integer: white space around it, a sign,
+// and the base's prefix if wanted. The `_`s are gone already. It gives the sign and the
+// magnitude, so that -2^63 fits.
+fn python_int(text: String, base: u64) -> (bool, u64) ! String {
+    let v = text.trim()
+    var i: usize = 0
+    var negative = false
+    if i < v.len() and (v.byte_at(i) == b'-' or v.byte_at(i) == b'+') {
+        negative = v.byte_at(i) == b'-'
+        i += 1
+    }
+    if i + 1 < v.len() and v.byte_at(i) == b'0' {
+        let p = v.byte_at(i + 1) | 0x20
+        if (base == 16 and p == b'x') or (base == 8 and p == b'o') or (base == 2 and p == b'b') {
+            i += 2
+        }
+    }
+    if i >= v.len() {
+        fail "`{text}` tagged an integer, which it isn't"
+    }
+    var n: u64 = 0
+    while i < v.len() {
+        let c = v.byte_at(i)
+        let d: u64 = if is_digit(c) { u64(c - b'0') } else if (c | 0x20) >= b'a' and (c | 0x20) <= b'z' { u64((c | 0x20) - b'a') + 10 } else { 99 }
+        if d >= base {
+            fail "`{text}` tagged an integer, which it isn't"
+        }
+        let times = n.checked_mul(base) else fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+        let plus = times.checked_add(d) else fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+        n = plus
+        i += 1
+    }
+    return (negative, n)
+}
+
+// A sign and a magnitude as an `i64`, if it fits.
+fn signed(negative: bool, n: u64, text: String) -> i64 ! String {
+    if negative {
+        if n > 0x8000000000000000 {
+            fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+        }
+        return i64.wrap(0u64 - n)
+    }
+    if n > 0x7FFFFFFFFFFFFFFF {
+        fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+    }
+    return i64.wrap(n)
+}
+
+// PyYAML's integer constructor: `_`s dropped, the sign, then `0b`, `0x`, a leading `0` for octal,
+// `:` for base 60, or decimal.
+fn yaml_int(text: String) -> i64 ! String {
+    var v = text.replace("_", "")
+    if v.is_empty() {
+        fail "an empty scalar tagged an integer"
+    }
+    var negative = false
+    if v.byte_at(0) == b'-' {
+        negative = true
+    }
+    if v.byte_at(0) == b'-' or v.byte_at(0) == b'+' {
+        v = v[1..].copy()
+    }
+    if v == "0" {
+        return 0
+    }
+    if v.contains(":") and not v.starts_with("0") {
+        var parts = v.split(":")
+        parts.reverse()
+        var base: i64 = 1
+        var n: i64 = 0
+        for part in parts {
+            let (neg, mag) = try python_int(part, 10)
+            let d = try signed(neg, mag, text)
+            let times = d.checked_mul(base) else fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+            let plus = n.checked_add(times) else fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+            n = plus
+            base = base.checked_mul(60) ?? 0x7FFFFFFFFFFFFFFF
+        }
+        if negative {
+            if n == i64.MIN {
+                fail "`{text}`, an integer past 64 bits, which Calx's YAML doesn't hold"
+            }
+            return -n
+        }
+        return n
+    }
+    let base: u64 = if v.starts_with("0b") { 2 } else if v.starts_with("0x") { 16 } else if v.starts_with("0") { 8 } else { 10 }
+    let digits = if base == 2 or base == 16 { v[2..] } else { v[..] }
+    let (inner, mag) = try python_int(digits, base)
+    return try signed(negative != inner, mag, text)
+}
+
+// Python's `float(text)`: white space around it, a sign, then `inf`, `infinity` or `nan` in any
+// case, or decimal digits with a `.` and an exponent if wanted.
+fn python_float(text: String) -> f64? {
+    let v = text.trim()
+    var i: usize = 0
+    var negative = false
+    if i < v.len() and (v.byte_at(i) == b'-' or v.byte_at(i) == b'+') {
+        negative = v.byte_at(i) == b'-'
+        i += 1
+    }
+    let word = v[i..].to_lower_root()
+    if word == "inf" or word == "infinity" {
+        return some(if negative { -f64.INFINITY } else { f64.INFINITY })
+    }
+    if word == "nan" {
+        return some(f64.NAN)
+    }
+    let start = i
+    var mantissa: usize = 0
+    while i < v.len() and is_digit(v.byte_at(i)) {
+        i += 1
+        mantissa += 1
+    }
+    if i < v.len() and v.byte_at(i) == b'.' {
+        i += 1
+        while i < v.len() and is_digit(v.byte_at(i)) {
+            i += 1
+            mantissa += 1
+        }
+    }
+    if mantissa == 0 {
+        return none
+    }
+    if i < v.len() and (v.byte_at(i) | 0x20) == b'e' {
+        i += 1
+        if i < v.len() and (v.byte_at(i) == b'-' or v.byte_at(i) == b'+') {
+            i += 1
+        }
+        let e = i
+        while i < v.len() and is_digit(v.byte_at(i)) {
+            i += 1
+        }
+        if i == e {
+            return none
+        }
+    }
+    if i != v.len() {
+        return none
+    }
+    let f = f64.parse(v[start..]) ?? 0.0
+    return some(if negative { -f } else { f })
+}
+
+// PyYAML's float constructor: `_`s dropped, lower case, the sign, then `.inf`, `.nan`, `:` for
+// base 60, or Python's `float`.
+fn yaml_float(text: String) -> f64? {
+    var v = text.replace("_", "").to_lower_root()
+    if v.is_empty() {
+        return none
+    }
+    var sign = 1.0
+    if v.byte_at(0) == b'-' {
+        sign = -1.0
+    }
+    if v.byte_at(0) == b'-' or v.byte_at(0) == b'+' {
+        v = v[1..].copy()
+    }
+    if v == ".inf" {
+        return some(sign * f64.INFINITY)
+    }
+    if v == ".nan" {
+        return some(f64.NAN)
+    }
+    if v.contains(":") {
+        var parts = v.split(":")
+        parts.reverse()
+        var base = 1.0
+        var total = 0.0
+        for part in parts {
+            let d = python_float(part) else return none
+            total += d * base
+            base *= 60.0
+        }
+        return some(sign * total)
+    }
+    let f = python_float(v) else return none
+    return some(sign * f)
+}
+
+// What Python 3.14's `base64.decodebytes` makes of text: what isn't in the alphabet is skipped,
+// and so is `=`, which counts as padding only after two characters of a group of four, until the
+// next character. Only the last group must be whole or padded.
+fn base64_lenient(text: String) -> List<u8> ! String {
+    var out: List<u8> = []
+    var quad: u32 = 0
+    var left: u32 = 0
+    var pads: u32 = 0
+    for i in 0..text.len() {
+        let c = text.byte_at(i)
+        if c >= 0x80 {
+            fail "`!!binary` text that isn't ASCII"
+        }
+        if c == b'=' {
+            if quad >= 2 {
+                pads += 1
+            }
+            continue
+        }
+        let d: u32 = if c >= b'A' and c <= b'Z' { u32(c - b'A') } else if c >= b'a' and c <= b'z' { u32(c - b'a') + 26 } else if c >= b'0' and c <= b'9' { u32(c - b'0') + 52 } else if c == b'+' { 62 } else if c == b'/' { 63 } else { 64 }
+        if d == 64 {
+            continue
+        }
+        pads = 0
+        if quad == 0 {
+            left = d
+            quad = 1
+        } else if quad == 1 {
+            out.push(u8.wrap((left << 2) | (d >> 4)))
+            left = d & 15
+            quad = 2
+        } else if quad == 2 {
+            out.push(u8.wrap((left << 4) | (d >> 2)))
+            left = d & 3
+            quad = 3
+        } else {
+            out.push(u8.wrap((left << 6) | d))
+            quad = 0
+        }
+    }
+    if quad == 1 {
+        fail "`!!binary` text whose base64 has one character too many"
+    }
+    if quad != 0 and quad + pads < 4 {
+        fail "`!!binary` text whose base64 isn't padded with `=`"
+    }
+    return out
+}
+
+// --- reading values --------------------------------------------------------------------------
+
+impl Yaml {
+    /// A copy of the value of the string key `key`, if this is a mapping that has it. A `match`
+    /// on the value reads it in place instead, without the copy.
+    pub fn get(self, key: String) -> Yaml? {
+        return match self {
+            Yaml.Map(m) => find_key(m, key),
+            _ => none,
+        }
+    }
+
+    /// A copy of element `i`, if this is a list that long.
+    pub fn at(self, i: usize) -> Yaml? {
+        return match self {
+            Yaml.Seq(xs) => if i < xs.len() { some(xs[i].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// A copy of the value the keys of `key` name in turn, between dots: `server.port`, with a
+    /// number for a list's element, `servers.0.name`, and quotes around a key with a dot in it,
+    /// `hosts."eu.west".port`. A number names an integer key too, where there's no string key
+    /// like it. `none` if something on the way isn't there. Only what's found is copied.
+    pub fn path(self, key: String) -> Yaml? {
+        var parts = List<String>()
+        var at: usize = 0
+        loop {
+            var part = String()
+            if at < key.len() and key.byte_at(at) == b'"' {
+                var close = at + 1
+                while close < key.len() and key.byte_at(close) != b'"' {
+                    close += 1
+                }
+                if close == key.len() {
+                    return none
+                }
+                part.push_str(key[at + 1..close])
+                at = close + 1
+            } else {
+                var dot = at
+                while dot < key.len() and key.byte_at(dot) != b'.' {
+                    dot += 1
+                }
+                part.push_str(key[at..dot])
+                at = dot
+            }
+            parts.push(part)
+            if at >= key.len() {
+                break
+            }
+            if key.byte_at(at) != b'.' {
+                return none
+            }
+            at += 1
+        }
+        return find_path(self, parts, 0)
+    }
+
+    /// The text, if this is a string.
+    pub fn as_str(self) -> String? {
+        return match self {
+            Yaml.Str(s) => some(s.copy()),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is an integer.
+    pub fn as_i64(self) -> i64? {
+        return match self {
+            Yaml.Int(n) => some(n),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is a float, or an integer as the nearest `f64`.
+    pub fn as_f64(self) -> f64? {
+        return match self {
+            Yaml.Int(n) => some(f64.nearest(n)),
+            Yaml.Float(f) => some(f),
+            _ => none,
+        }
+    }
+
+    /// The value, if this is a bool.
+    pub fn as_bool(self) -> bool? {
+        return match self {
+            Yaml.Bool(b) => some(b),
+            _ => none,
+        }
+    }
+
+    /// The bytes, if this is `!!binary`.
+    pub fn as_bytes(self) -> List<u8>? {
+        return match self {
+            Yaml.Bytes(b) => some(b.copy()),
+            _ => none,
+        }
+    }
+
+    /// The date and time, if this is a date, or a date and time with an offset or without.
+    pub fn as_moment(self) -> Moment? {
+        return match self {
+            Yaml.Date(m) => some(m),
+            Yaml.DateTime(m) => some(m),
+            Yaml.OffsetDateTime(m) => some(m),
+            _ => none,
+        }
+    }
+
+    /// Whether this is `null`, `~` or nothing.
+    pub fn is_null(self) -> bool {
+        return match self {
+            Yaml.Null => true,
+            _ => false,
+        }
+    }
+
+    /// How many elements a list has, or keys a mapping has. Anything else has none.
+    pub fn len(self) -> usize {
+        return match self {
+            Yaml.Seq(xs) => xs.len(),
+            Yaml.Map(m) => m.len(),
+            _ => 0,
+        }
+    }
+
+    /// A mapping's keys, in order, or none for anything else.
+    pub fn keys(self) -> List<Yaml> {
+        var out = List<Yaml>()
+        if let Yaml.Map(m) = self {
+            out.reserve(m.len())
+            for (k, _) in m {
+                out.push(k.copy())
+            }
+        }
+        return out
+    }
+
+    /// What kind of value this is, for messages: `null`, `a bool`, `an integer`, `a float`,
+    /// `a string`, `bytes`, `a date`, `a date and time`, `a date and time with an offset`,
+    /// `a list` or `a mapping`.
+    pub fn kind(self) -> String {
+        return match self {
+            Yaml.Null => "null",
+            Yaml.Bool(_) => "a bool",
+            Yaml.Int(_) => "an integer",
+            Yaml.Float(_) => "a float",
+            Yaml.Str(_) => "a string",
+            Yaml.Bytes(_) => "bytes",
+            Yaml.Date(_) => "a date",
+            Yaml.DateTime(_) => "a date and time",
+            Yaml.OffsetDateTime(_) => "a date and time with an offset",
+            Yaml.Seq(_) => "a list",
+            Yaml.Map(_) => "a mapping",
+        }
+    }
+}
+
+// The value of the string key `key` in `m`, copied.
+fn find_key(m: LinkedMap<Yaml, Yaml>, key: String) -> Yaml? {
+    let k = Yaml.Str(key.copy())
+    return if m.contains(k) { some(m[k].copy()) } else { none }
+}
+
+// The value that `parts`, from part `i`, name in `v`.
+fn find_path(v: Yaml, parts: List<String>, i: usize) -> Yaml? {
+    if i == parts.len() {
+        return some(v.copy())
+    }
+    let part = parts[i].copy()
+    match v {
+        Yaml.Map(m) => {
+            let k = Yaml.Str(part.copy())
+            if m.contains(k) {
+                return find_path(m[k], parts, i + 1)
+            }
+            let n = i64.parse(part) else return none
+            let ik = Yaml.Int(n)
+            if m.contains(ik) {
+                return find_path(m[ik], parts, i + 1)
+            }
+            return none
+        },
+        Yaml.Seq(xs) => {
+            let n = usize.parse(part) else return none
+            if n >= xs.len() {
+                return none
+            }
+            return find_path(xs[n], parts, i + 1)
+        },
+        _ => return none,
+    }
+}
+
+// --- the writer ------------------------------------------------------------------------------
+
+/// The text of `doc`, as `yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)` writes it:
+/// block style, two spaces a level, lines folded past 80 columns where a string allows, keys in
+/// the mapping's order, and a string quoted where it would read back as something else, as
+/// `'yes'` and `'1.5'`.
+///
+/// - `sort_keys` sorts each mapping's keys, as PyYAML does by default, when they can be compared:
+///   all numbers, all strings, all bytes, all dates, or all dates and times of one kind. A
+///   mapping with keys that can't, as a string and a number, keeps its order, as in Python.
+/// - `flow` writes every list and mapping in flow style, `[a, b]` and `\{a: 1\}`, as
+///   `default_flow_style=True` does.
+/// - `indent` is the spaces a level, from 2 to 9; `width` the column to fold at, past twice that.
+/// - `ascii` writes what isn't ASCII escaped in double quotes, as PyYAML does without
+///   `allow_unicode`.
+/// - `explicit_start` starts the document with `---`.
+pub fn write(doc: Yaml, sort_keys: bool = false, flow: bool = false, indent: usize = 2, width: usize = 80, ascii: bool = false, explicit_start: bool = false) -> String {
+    var e = emitter(sort_keys, flow, indent, width, ascii)
+    emit_document(mut e, doc, true, explicit_start)
+    end_stream(mut e)
+    return e.out
+}
+
+/// The text of `docs`, each a document, as `yaml.safe_dump_all` writes them: `---` before each
+/// but the first. It takes what `write` does.
+pub fn write_all(docs: List<Yaml>, sort_keys: bool = false, flow: bool = false, indent: usize = 2, width: usize = 80, ascii: bool = false, explicit_start: bool = false) -> String {
+    var e = emitter(sort_keys, flow, indent, width, ascii)
+    var first = true
+    for d in docs {
+        emit_document(mut e, d, first, explicit_start)
+        first = false
+    }
+    end_stream(mut e)
+    return e.out
+}
+
+/// `{v}` is the value in flow style on one line, as `\{a: 1, b: [x, 'yes']\}`: what `write` writes
+/// with `flow`, with no width to fold at, and a string with a line break in it in double quotes.
+impl Display for Yaml {
+    fn show(self) {
+        var e = emitter(false, true, 2, FAR, false)
+        e.one_line = true
+        emit_node(mut e, self, true, false, false)
+        print(e.out)
+    }
+}
+
+// What PyYAML's emitter keeps as it writes.
+struct Emitter {
+    out: String
+    // The rune on the line, from 0.
+    column: usize
+    // Whether what was written last was a space or a break, or an indicator that stands for one.
+    whitespace: bool
+    // Whether the line so far is only the indent and the indicators that start a block.
+    indention: bool
+    // Whether the document could end here without `...` being taken as part of it.
+    open_ended: bool
+    // The current indent, or `FAR` before the first.
+    indent: usize
+    indents: List<usize>
+    flow_level: usize
+    best_indent: usize
+    best_width: usize
+    unicode: bool
+    sort_keys: bool
+    flow: bool
+    one_line: bool
+}
+
+fn emitter(sort_keys: bool, flow: bool, indent: usize, width: usize, ascii: bool) -> Emitter {
+    let best_indent: usize = if indent > 1 and indent < 10 { indent } else { 2 }
+    let best_width: usize = if width > best_indent * 2 { width } else { 80 }
+    return Emitter {
+        out: String(),
+        column: 0,
+        whitespace: true,
+        indention: true,
+        open_ended: false,
+        indent: FAR,
+        indents: [],
+        flow_level: 0,
+        best_indent: best_indent,
+        best_width: best_width,
+        unicode: not ascii,
+        sort_keys: sort_keys,
+        flow: flow,
+        one_line: false,
+    }
+}
+
+fn emit_document(e: mut Emitter, doc: Yaml, first: bool, explicit_start: bool) {
+    if not first or explicit_start {
+        write_indent(mut e)
+        write_indicator(mut e, "---", true, false, false)
+    }
+    emit_node(mut e, doc, true, false, false)
+    write_indent(mut e)
+}
+
+fn end_stream(e: mut Emitter) {
+    if e.open_ended {
+        write_indicator(mut e, "...", true, false, false)
+        write_indent(mut e)
+    }
+}
+
+fn increase_indent(e: mut Emitter, flow: bool, indentless: bool) {
+    e.indents.push(e.indent)
+    if e.indent == FAR {
+        e.indent = if flow { e.best_indent } else { 0 }
+    } else if not indentless {
+        e.indent += e.best_indent
+    }
+}
+
+fn decrease_indent(e: mut Emitter) {
+    e.indent = e.indents.pop() ?? FAR
+}
+
+// A node, in its context: the document's root, a mapping's key or value, and a key PyYAML
+// writes on its line with no `?`.
+fn emit_node(e: mut Emitter, v: Yaml, root: bool, mapping: bool, simple: bool) {
+    match v {
+        Yaml.Seq(xs) => {
+            if e.flow_level > 0 or e.flow or xs.is_empty() {
+                emit_flow_seq(mut e, xs)
+            } else {
+                emit_block_seq(mut e, xs, mapping)
+            }
+        },
+        Yaml.Map(m) => {
+            if e.flow_level > 0 or e.flow or m.is_empty() {
+                emit_flow_map(mut e, m)
+            } else {
+                emit_block_map(mut e, m)
+            }
+        },
+        Yaml.Str(s) => scalar_node(mut e, K_STR, s, NO_STYLE, root, simple),
+        Yaml.Null => write_word(mut e, v, root),
+        Yaml.Bool(_) => write_word(mut e, v, root),
+        Yaml.Int(_) => write_word(mut e, v, root),
+        Yaml.Float(_) => write_word(mut e, v, root),
+        _ => {
+            var text = String()
+            let kind = represent(v, mut text)
+            scalar_node(mut e, kind, text, if kind == K_BINARY { LITERAL } else { NO_STYLE }, root, simple)
+        },
+    }
+}
+
+// What PyYAML's SafeRepresenter makes of a scalar that isn't a string: its kind, with its text
+// added to `text`.
+fn represent(v: Yaml, text: mut String) -> u8 {
+    match v {
+        Yaml.Null => {
+            text.push_str("null")
+            return K_NULL
+        },
+        Yaml.Bool(b) => {
+            text.push_str(if b { "true" } else { "false" })
+            return K_BOOL
+        },
+        Yaml.Int(n) => {
+            text.push_str("{n}")
+            return K_INT
+        },
+        Yaml.Float(f) => {
+            yaml_float_text(mut text, f)
+            return K_FLOAT
+        },
+        Yaml.Bytes(b) => {
+            // As `base64.encodebytes` writes it: lines of 76, each ending in a break.
+            let all = base64(b)
+            var i: usize = 0
+            while i < all.len() {
+                let j = if all.len() - i > 76 { i + 76 } else { all.len() }
+                text.push_str(all[i..j])
+                text.push('\n')
+                i = j
+            }
+            return K_BINARY
+        },
+        Yaml.Date(m) => {
+            write_date(mut text, m)
+            return K_TIMESTAMP
+        },
+        Yaml.DateTime(m) => {
+            write_date(mut text, m)
+            text.push(' ')
+            write_clock(mut text, m)
+            return K_TIMESTAMP
+        },
+        Yaml.OffsetDateTime(m) => {
+            write_date(mut text, m)
+            text.push(' ')
+            write_clock(mut text, m)
+            write_offset(mut text, m.offset)
+            return K_TIMESTAMP
+        },
+        _ => return K_STR,
+    }
+}
+
+// Adds a float as PyYAML writes one: Python's `repr`, with `.0` put before an exponent that has
+// no point before it, as `1.0e+16`, and `.inf`, `-.inf` and `.nan`.
+fn yaml_float_text(out: mut String, f: f64) {
+    if f.is_nan() {
+        out.push_str(".nan")
+        return
+    }
+    if f == f64.INFINITY {
+        out.push_str(".inf")
+        return
+    }
+    if f == -f64.INFINITY {
+        out.push_str("-.inf")
+        return
+    }
+    // `{f:e}` writes the shortest digits that read back, as Python's `repr` picks them: `1.5e3`.
+    let sci = "{f:e}"
+    var i: usize = 0
+    if sci.byte_at(0) == b'-' {
+        out.push('-')
+        i = 1
+    }
+    var digits = String()
+    while i < sci.len() and sci.byte_at(i) != b'e' {
+        if sci.byte_at(i) != b'.' {
+            digits.push(rune(sci.byte_at(i)))
+        }
+        i += 1
+    }
+    i += 1
+    var exp: i32 = 0
+    var negative = false
+    if i < sci.len() and sci.byte_at(i) == b'-' {
+        negative = true
+        i += 1
+    }
+    while i < sci.len() {
+        exp = exp * 10 + i32(sci.byte_at(i) - b'0')
+        i += 1
+    }
+    if negative {
+        exp = -exp
+    }
+    if digits == "0" {
+        out.push_str("0.0")
+        return
+    }
+    if exp >= -4 and exp < 16 {
+        if exp < 0 {
+            out.push_str("0.")
+            for _ in 0..usize.wrap(-exp - 1) {
+                out.push('0')
+            }
+            out.push_str(digits)
+            return
+        }
+        let whole = usize.wrap(exp + 1)
+        if digits.len() <= whole {
+            out.push_str(digits)
+            for _ in digits.len()..whole {
+                out.push('0')
+            }
+            out.push_str(".0")
+            return
+        }
+        out.push_str(digits[..whole])
+        out.push('.')
+        out.push_str(digits[whole..])
+        return
+    }
+    out.push(rune(digits.byte_at(0)))
+    out.push('.')
+    if digits.len() > 1 {
+        out.push_str(digits[1..])
+    } else {
+        out.push('0')
+    }
+    out.push_str(if exp < 0 { "e-" } else { "e+" })
+    let a = if exp < 0 { -exp } else { exp }
+    if a < 10 {
+        out.push('0')
+    }
+    out.push_str("{a}")
+}
+
+// Adds `v` with at least `width` digits, zeros before it.
+fn write_padded(out: mut String, v: i32, width: usize) {
+    let s = "{v}"
+    for _ in s.len()..width {
+        out.push('0')
+    }
+    out.push_str(s)
+}
+
+// Adds the date as Python's `isoformat` writes it: `2001-12-14`.
+fn write_date(out: mut String, m: Moment) {
+    write_padded(mut out, m.year, 4)
+    out.push('-')
+    write_padded(mut out, m.month, 2)
+    out.push('-')
+    write_padded(mut out, m.day, 2)
+}
+
+// Adds the time, `21:59:43`, with the fraction of a second if there's one: in 6 digits as Python
+// writes it, or in 9 if it's finer than a microsecond, which Python can't hold.
+fn write_clock(out: mut String, m: Moment) {
+    write_padded(mut out, m.hour, 2)
+    out.push(':')
+    write_padded(mut out, m.minute, 2)
+    out.push(':')
+    write_padded(mut out, m.second, 2)
+    if m.nano != 0 {
+        out.push('.')
+        if m.nano % 1000 == 0 {
+            write_padded(mut out, m.nano / 1000, 6)
+        } else {
+            write_padded(mut out, m.nano, 9)
+        }
+    }
+}
+
+// Adds an offset as Python writes one: `+00:00`, `-05:00`.
+fn write_offset(out: mut String, offset: i32) {
+    let a = if offset < 0 { -offset } else { offset }
+    out.push(if offset < 0 { '-' } else { '+' })
+    write_padded(mut out, a / 3600, 2)
+    out.push(':')
+    write_padded(mut out, a / 60 % 60, 2)
+}
+
+fn emit_flow_seq(e: mut Emitter, xs: List<Yaml>) {
+    write_indicator(mut e, "[", true, true, false)
+    e.flow_level += 1
+    increase_indent(mut e, true, false)
+    var first = true
+    for x in xs {
+        if not first {
+            write_indicator(mut e, ",", false, false, false)
+        }
+        first = false
+        if e.column > e.best_width {
+            write_indent(mut e)
+        }
+        emit_node(mut e, x, false, false, false)
+    }
+    decrease_indent(mut e)
+    e.flow_level -= 1
+    write_indicator(mut e, "]", false, false, false)
+}
+
+fn emit_block_seq(e: mut Emitter, xs: List<Yaml>, mapping: bool) {
+    // A list that's a mapping's value starts at the mapping's indent, `- ` and all.
+    let indentless = mapping and not e.indention
+    increase_indent(mut e, false, indentless)
+    for x in xs {
+        write_indent(mut e)
+        write_indicator(mut e, "-", true, false, true)
+        emit_node(mut e, x, false, false, false)
+    }
+    decrease_indent(mut e)
+}
+
+fn emit_flow_map(e: mut Emitter, m: LinkedMap<Yaml, Yaml>) {
+    write_indicator(mut e, "\{", true, true, false)
+    e.flow_level += 1
+    increase_indent(mut e, true, false)
+    var done = false
+    if e.sort_keys {
+        if let keys = sorted_keys(m) {
+            var first = true
+            for k in keys {
+                flow_pair(mut e, k, m[k], first)
+                first = false
+            }
+            done = true
+        }
+    }
+    if not done {
+        var first = true
+        for (k, v) in m {
+            flow_pair(mut e, k, v, first)
+            first = false
+        }
+    }
+    decrease_indent(mut e)
+    e.flow_level -= 1
+    write_indicator(mut e, "\}", false, false, false)
+}
+
+fn flow_pair(e: mut Emitter, k: Yaml, v: Yaml, first: bool) {
+    if not first {
+        write_indicator(mut e, ",", false, false, false)
+    }
+    if e.column > e.best_width {
+        write_indent(mut e)
+    }
+    emit_pair(mut e, k, v, false)
+}
+
+fn emit_block_map(e: mut Emitter, m: LinkedMap<Yaml, Yaml>) {
+    increase_indent(mut e, false, false)
+    var done = false
+    if e.sort_keys {
+        if let keys = sorted_keys(m) {
+            for k in keys {
+                block_pair(mut e, k, m[k])
+            }
+            done = true
+        }
+    }
+    if not done {
+        for (k, v) in m {
+            block_pair(mut e, k, v)
+        }
+    }
+    decrease_indent(mut e)
+}
+
+fn block_pair(e: mut Emitter, k: Yaml, v: Yaml) {
+    write_indent(mut e)
+    emit_pair(mut e, k, v, true)
+}
+
+// A key, on its line with no `?` where it can be, and its value. A string key's analysis is made
+// once, for both.
+fn emit_pair(e: mut Emitter, k: Yaml, v: Yaml, block: bool) {
+    var simple = false
+    match k {
+        Yaml.Str(s) => {
+            let a = analyze(s, e.unicode)
+            // `!!str`, written or not, counts toward the 128.
+            simple = not a.empty and not a.multiline and a.runes + 5 < 128
+            if not simple {
+                write_indicator(mut e, "?", true, false, block)
+            }
+            scalar_analyzed(mut e, K_STR, s, NO_STYLE, a, false, simple)
+        },
+        _ => {
+            simple = simple_key(k)
+            if not simple {
+                write_indicator(mut e, "?", true, false, block)
+            }
+            emit_node(mut e, k, false, true, simple)
+        },
+    }
+    if simple {
+        write_indicator(mut e, ":", false, false, false)
+    } else if block {
+        write_indent(mut e)
+        write_indicator(mut e, ":", true, false, true)
+    } else {
+        if e.column > e.best_width {
+            write_indent(mut e)
+        }
+        write_indicator(mut e, ":", true, false, false)
+    }
+    emit_node(mut e, v, false, true, false)
+}
+
+// Whether a key goes on its line with no `?`: a scalar on one line, which with its tag, written
+// or not, is under 128 runes, or an empty list or mapping.
+fn simple_key(k: Yaml) -> bool {
+    match k {
+        Yaml.Seq(xs) => return xs.is_empty(),
+        Yaml.Map(m) => return m.is_empty(),
+        Yaml.Str(s) => return short_line(s, K_STR),
+        Yaml.Null => return true,
+        Yaml.Bool(_) => return true,
+        Yaml.Int(_) => return true,
+        Yaml.Float(_) => return true,
+        _ => {
+            var text = String()
+            let kind = represent(k, mut text)
+            return short_line(text, kind)
+        },
+    }
+}
+
+fn short_line(text: String, kind: u8) -> bool {
+    if text.is_empty() {
+        return false
+    }
+    var n = 2 + kind_name(kind).len()
+    var i: usize = 0
+    while i < text.len() {
+        let b = text.byte_at(i)
+        if b == b'\n' {
+            return false
+        }
+        if b == 0xC2 and i + 1 < text.len() and text.byte_at(i + 1) == 0x85 {
+            return false
+        }
+        if b == 0xE2 and i + 2 < text.len() and text.byte_at(i + 1) == 0x80 and (text.byte_at(i + 2) == 0xA8 or text.byte_at(i + 2) == 0xA9) {
+            return false
+        }
+        if b & 0xC0 != 0x80 {
+            n += 1
+            if n >= 128 {
+                return false
+            }
+        }
+        i += 1
+    }
+    return true
+}
+
+// The keys of `m` in order, as Python's `sorted` puts them, or `none` where it can't compare
+// them and PyYAML keeps the mapping's order.
+fn sorted_keys(m: LinkedMap<Yaml, Yaml>) -> List<Yaml>? {
+    if m.len() < 2 {
+        return none
+    }
+    var class: u8 = 0
+    for (k, _v) in m {
+        let c = key_class(k)
+        if c == 0 or (class != 0 and c != class) {
+            return none
+        }
+        class = c
+    }
+    var keys = List<Yaml>()
+    keys.reserve(m.len())
+    for (k, _v) in m {
+        keys.push(k.copy())
+    }
+    keys.sort_by(|a, b| key_cmp(a, b))
+    return some(keys)
+}
+
+// Which keys Python can compare with which: numbers, bools among them; strings; bytes; dates;
+// dates and times without an offset; and with one. 0 for what it compares with nothing.
+fn key_class(k: Yaml) -> u8 {
+    return match k {
+        Yaml.Bool(_) => 1,
+        Yaml.Int(_) => 1,
+        Yaml.Float(_) => 1,
+        Yaml.Str(_) => 2,
+        Yaml.Bytes(_) => 3,
+        Yaml.Date(_) => 4,
+        Yaml.DateTime(_) => 5,
+        Yaml.OffsetDateTime(_) => 6,
+        _ => 0,
+    }
+}
+
+fn key_cmp(a: Yaml, b: Yaml) -> Ordering {
+    match a {
+        Yaml.Str(x) => return match b {
+            Yaml.Str(y) => x.cmp(y),
+            _ => Ordering.Equal,
+        },
+        Yaml.Bytes(x) => return match b {
+            Yaml.Bytes(y) => x.cmp(y),
+            _ => Ordering.Equal,
+        },
+        Yaml.Date(x) => return match b {
+            Yaml.Date(y) => instant(x, false).cmp(instant(y, false)),
+            _ => Ordering.Equal,
+        },
+        Yaml.DateTime(x) => return match b {
+            Yaml.DateTime(y) => instant(x, false).cmp(instant(y, false)),
+            _ => Ordering.Equal,
+        },
+        Yaml.OffsetDateTime(x) => return match b {
+            Yaml.OffsetDateTime(y) => instant(x, true).cmp(instant(y, true)),
+            _ => Ordering.Equal,
+        },
+        _ => {},
+    }
+    let (af, ai, ax) = as_number(a)
+    let (bf, bi, bx) = as_number(b)
+    if not af and not bf {
+        return ai.cmp(bi)
+    }
+    if af and bf {
+        return if ax < bx { Ordering.Less } else if ax > bx { Ordering.Greater } else { Ordering.Equal }
+    }
+    if af {
+        return match int_float_cmp(bi, ax) {
+            Ordering.Less => Ordering.Greater,
+            Ordering.Greater => Ordering.Less,
+            Ordering.Equal => Ordering.Equal,
+        }
+    }
+    return int_float_cmp(ai, bx)
+}
+
+// A number as Python compares it: whether it's a float, and its value as an integer or a float.
+fn as_number(v: Yaml) -> (bool, i64, f64) {
+    return match v {
+        Yaml.Bool(b) => (false, if b { 1 } else { 0 }, 0.0),
+        Yaml.Int(n) => (false, n, 0.0),
+        Yaml.Float(f) => (true, 0, f),
+        _ => (false, 0, 0.0),
+    }
+}
+
+// An integer and a float compared exactly, as Python does.
+fn int_float_cmp(i: i64, f: f64) -> Ordering {
+    if f.is_nan() {
+        return Ordering.Equal
+    }
+    if f >= 9.223372036854775808e18 {
+        return Ordering.Less
+    }
+    if f < -9.223372036854775808e18 {
+        return Ordering.Greater
+    }
+    let t = i64.saturate(f)
+    if i != t {
+        return i.cmp(t)
+    }
+    let whole = f64.nearest(t)
+    return if f > whole { Ordering.Less } else if f < whole { Ordering.Greater } else { Ordering.Equal }
+}
+
+// A moment as seconds and nanoseconds from 1970, at UTC when `offset` says to count its offset.
+fn instant(m: Moment, offset: bool) -> (i64, i64) {
+    var s = days_from_civil(i64(m.year), i64(m.month), i64(m.day)) * 86400 + i64(m.hour) * 3600 + i64(m.minute) * 60 + i64(m.second)
+    if offset {
+        s -= i64(m.offset)
+    }
+    return (s, i64(m.nano))
+}
+
+// The days from 1970-01-01 to a date, Howard Hinnant's way.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year }
+    let era = (if y >= 0 { y } else { y - 399 }) / 400
+    let yoe = y - era * 400
+    let mp = (month + 9) % 12
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// No style asked for: PyYAML picks one.
+const NO_STYLE: u8 = 255
+// No rune: past the end of the text.
+const END: u32 = 0xFFFFFFFF
+const SPACES: str = "                                                                "
+
+// What a scalar's text allows, as PyYAML's `analyze_scalar` works it out, with how many runes
+// it has and whether it has a space or a `'`, which the plain and single-quoted writers can skip
+// looking for.
+struct Analysis {
+    empty: bool
+    multiline: bool
+    flow_plain: bool
+    block_plain: bool
+    single: bool
+    block: bool
+    runes: usize
+    spaces: bool
+    quote: bool
+}
+
+// The rune at byte `i`, and how many bytes it takes.
+fn rune_at(s: String, i: usize) -> (u32, usize) {
+    let b = u32(s.byte_at(i))
+    if b < 0x80 {
+        return (b, 1)
+    }
+    if b < 0xE0 {
+        return (((b & 0x1F) << 6) | (u32(s.byte_at(i + 1)) & 0x3F), 2)
+    }
+    if b < 0xF0 {
+        return (((b & 0x0F) << 12) | ((u32(s.byte_at(i + 1)) & 0x3F) << 6) | (u32(s.byte_at(i + 2)) & 0x3F), 3)
+    }
+    return (((b & 0x07) << 18) | ((u32(s.byte_at(i + 1)) & 0x3F) << 12) | ((u32(s.byte_at(i + 2)) & 0x3F) << 6) | (u32(s.byte_at(i + 3)) & 0x3F), 4)
+}
+
+fn rune_len(b: u8) -> usize {
+    return if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+}
+
+fn is_break_rune(c: u32) -> bool {
+    return c == 10 or c == 0x85 or c == 0x2028 or c == 0x2029
+}
+
+fn is_space_rune(c: u32) -> bool {
+    return c == 0 or c == 32 or c == 9 or c == 13 or is_break_rune(c)
+}
+
+// Whether the rune at byte `j` is white space or the end of the text.
+fn space_or_end(s: String, j: usize) -> bool {
+    return j >= s.len() or is_space_rune(rune_at(s, j).0)
+}
+
+fn analyze(s: String, unicode: bool) -> Analysis {
+    if s.is_empty() {
+        return Analysis { empty: true, multiline: false, flow_plain: false, block_plain: true, single: true, block: false, runes: 0, spaces: false, quote: false }
+    }
+    var block_indicators = false
+    var flow_indicators = false
+    var line_breaks = false
+    var special = false
+    var leading_space = false
+    var leading_break = false
+    var trailing_space = false
+    var trailing_break = false
+    var break_space = false
+    var space_break = false
+    var spaces = false
+    var quote = false
+    var runes: usize = 0
+    if s.starts_with("---") or s.starts_with("...") {
+        block_indicators = true
+        flow_indicators = true
+    }
+    var preceded = true
+    var previous_space = false
+    var previous_break = false
+    var i: usize = 0
+    while i < s.len() {
+        let b = s.byte_at(i)
+        runes += 1
+        if (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') {
+            // A letter or a digit is no indicator, space or break, wherever it is.
+            previous_space = false
+            previous_break = false
+            preceded = false
+            i += 1
+            continue
+        }
+        let (r, n) = rune_at(s, i)
+        if i == 0 {
+            if r == 0x23 or r == 0x2C or r == 0x5B or r == 0x5D or r == 0x7B or r == 0x7D or r == 0x26 or r == 0x2A or r == 0x21 or r == 0x7C or r == 0x3E or r == 0x27 or r == 0x22 or r == 0x25 or r == 0x40 or r == 0x60 {
+                flow_indicators = true
+                block_indicators = true
+            }
+            if r == 0x3F or r == 0x3A {
+                flow_indicators = true
+                if space_or_end(s, i + n) {
+                    block_indicators = true
+                }
+            }
+            if r == 0x2D and space_or_end(s, i + n) {
+                flow_indicators = true
+                block_indicators = true
+            }
+        } else {
+            if r == 0x2C or r == 0x3F or r == 0x5B or r == 0x5D or r == 0x7B or r == 0x7D {
+                flow_indicators = true
+            }
+            if r == 0x3A {
+                flow_indicators = true
+                if space_or_end(s, i + n) {
+                    block_indicators = true
+                }
+            }
+            if r == 0x23 and preceded {
+                flow_indicators = true
+                block_indicators = true
+            }
+        }
+        if r == 0x27 {
+            quote = true
+        }
+        let brk = is_break_rune(r)
+        if brk {
+            line_breaks = true
+        }
+        if not (r == 10 or (r >= 0x20 and r <= 0x7E)) {
+            if (r == 0x85 or (r >= 0xA0 and r <= 0xD7FF) or (r >= 0xE000 and r <= 0xFFFD) or (r >= 0x10000 and r < 0x10FFFF)) and r != 0xFEFF {
+                if not unicode {
+                    special = true
+                }
+            } else {
+                special = true
+            }
+        }
+        let last = i + n >= s.len()
+        if r == 32 {
+            spaces = true
+            if i == 0 {
+                leading_space = true
+            }
+            if last {
+                trailing_space = true
+            }
+            if previous_break {
+                break_space = true
+            }
+            previous_space = true
+            previous_break = false
+        } else if brk {
+            if i == 0 {
+                leading_break = true
+            }
+            if last {
+                trailing_break = true
+            }
+            if previous_space {
+                space_break = true
+            }
+            previous_space = false
+            previous_break = true
+        } else {
+            previous_space = false
+            previous_break = false
+        }
+        i += n
+        preceded = is_space_rune(r)
+    }
+    var flow_plain = true
+    var block_plain = true
+    var single = true
+    var block = true
+    if leading_space or leading_break or trailing_space or trailing_break {
+        flow_plain = false
+        block_plain = false
+    }
+    if trailing_space {
+        block = false
+    }
+    if break_space {
+        flow_plain = false
+        block_plain = false
+        single = false
+    }
+    if space_break or special {
+        flow_plain = false
+        block_plain = false
+        single = false
+        block = false
+    }
+    if line_breaks {
+        flow_plain = false
+        block_plain = false
+    }
+    if flow_indicators {
+        flow_plain = false
+    }
+    if block_indicators {
+        block_plain = false
+    }
+    return Analysis { empty: false, multiline: line_breaks, flow_plain: flow_plain, block_plain: block_plain, single: single, block: block, runes: runes, spaces: spaces, quote: quote }
+}
+
+// A scalar of `kind` with `text`, in the style PyYAML picks, with its tag where the text would
+// read back as something else without it.
+fn scalar_node(e: mut Emitter, kind: u8, text: String, asked: u8, root: bool, simple: bool) {
+    let a = analyze(text, e.unicode)
+    scalar_analyzed(mut e, kind, text, asked, a, root, simple)
+}
+
+fn scalar_analyzed(e: mut Emitter, kind: u8, text: String, asked: u8, a: Analysis, root: bool, simple: bool) {
+    var style = DOUBLE
+    var implicit = false
+    var picked = false
+    if asked == NO_STYLE and not (simple and (a.empty or a.multiline)) and ((e.flow_level > 0 and a.flow_plain) or (e.flow_level == 0 and a.block_plain)) {
+        implicit = resolved(text) == kind
+        if implicit {
+            style = PLAIN
+            picked = true
+        }
+    }
+    if not picked and (asked == LITERAL or asked == FOLDED) and e.flow_level == 0 and not simple and a.block and not e.one_line {
+        style = asked
+        picked = true
+    }
+    if not picked and (asked == NO_STYLE or asked == SINGLE) and a.single and not ((simple or e.one_line) and a.multiline) {
+        style = SINGLE
+    }
+    if not ((style == PLAIN and implicit) or (style != PLAIN and kind == K_STR)) {
+        write_indicator(mut e, "!!{kind_name(kind)}", true, false, false)
+    }
+    // A word with no space or break in it is written whole, as the writers below would write it.
+    if style == PLAIN and not a.spaces {
+        start_word(mut e, root)
+        e.out.push_str(text)
+        e.column += a.runes
+        return
+    }
+    if style == SINGLE and not a.spaces and not a.multiline and not a.quote {
+        write_indicator(mut e, "'", true, false, false)
+        e.out.push_str(text)
+        e.column += a.runes
+        write_indicator(mut e, "'", false, false, false)
+        return
+    }
+    increase_indent(mut e, true, false)
+    if style == PLAIN {
+        write_plain(mut e, text, not simple, root)
+    } else if style == SINGLE {
+        write_single_quoted(mut e, text, not simple)
+    } else if style == LITERAL {
+        write_literal(mut e, text)
+    } else {
+        write_double_quoted(mut e, text, not simple)
+    }
+    decrease_indent(mut e)
+}
+
+// What `write_plain` does before the text: a document that's a plain scalar can end without `...`
+// only if `...` comes after it, and a space goes between the text and what's before it.
+fn start_word(e: mut Emitter, root: bool) {
+    if root {
+        e.open_ended = true
+    }
+    if not e.whitespace {
+        e.out.push(' ')
+        e.column += 1
+    }
+    e.whitespace = false
+    e.indention = false
+}
+
+// A null, a bool, an integer or a float: plain, with no tag, in any context, since its text reads
+// back as what it is and has no indicator, space or break in it.
+fn write_word(e: mut Emitter, v: Yaml, root: bool) {
+    start_word(mut e, root)
+    let before = e.out.len()
+    match v {
+        Yaml.Null => e.out.push_str("null"),
+        Yaml.Bool(b) => e.out.push_str(if b { "true" } else { "false" }),
+        Yaml.Int(n) => e.out.push_str("{n}"),
+        Yaml.Float(f) => yaml_float_text(mut e.out, f),
+        _ => {},
+    }
+    e.column += e.out.len() - before
+}
+
+fn write_indicator(e: mut Emitter, indicator: String, need_whitespace: bool, whitespace: bool, indention: bool) {
+    if not e.whitespace and need_whitespace {
+        e.out.push(' ')
+        e.column += 1
+    }
+    e.out.push_str(indicator)
+    e.column += indicator.len()
+    e.whitespace = whitespace
+    e.indention = e.indention and indention
+    e.open_ended = false
+}
+
+fn write_indent(e: mut Emitter) {
+    let indent: usize = if e.indent == FAR { 0 } else { e.indent }
+    if not e.indention or e.column > indent or (e.column == indent and not e.whitespace) {
+        emit_line_break(mut e)
+    }
+    if e.column < indent {
+        e.whitespace = true
+        var n = indent - e.column
+        while n > SPACES.len() {
+            e.out.push_str(SPACES)
+            n -= SPACES.len()
+        }
+        e.out.push_str(SPACES[..n])
+        e.column = indent
+    }
+}
+
+fn emit_line_break(e: mut Emitter) {
+    e.out.push('\n')
+    e.whitespace = true
+    e.indention = true
+    e.column = 0
+}
+
+// Writes the breaks in `text` from `start` to `end`, each as it is.
+fn write_breaks(e: mut Emitter, text: String, start: usize, end: usize) {
+    var i = start
+    while i < end {
+        let n = rune_len(text.byte_at(i))
+        e.out.push_str(text[i..i + n])
+        e.whitespace = true
+        e.indention = true
+        e.column = 0
+        i += n
+    }
+}
+
+// Writes `text` from `start` to `end`, `runes` runes.
+fn write_text(e: mut Emitter, text: String, start: usize, end: usize, runes: usize) {
+    e.out.push_str(text[start..end])
+    e.column += runes
+}
+
+fn write_plain(e: mut Emitter, text: String, split: bool, root: bool) {
+    if root {
+        e.open_ended = true
+    }
+    if text.is_empty() {
+        return
+    }
+    if not e.whitespace {
+        e.out.push(' ')
+        e.column += 1
+    }
+    e.whitespace = false
+    e.indention = false
+    var spaces = false
+    var breaks = false
+    var start: usize = 0
+    var start_r: usize = 0
+    var end: usize = 0
+    var end_r: usize = 0
+    loop {
+        var r = END
+        var n: usize = 0
+        if end < text.len() {
+            let (c, len) = rune_at(text, end)
+            r = c
+            n = len
+        }
+        if spaces {
+            if r != 32 {
+                if start_r + 1 == end_r and e.column > e.best_width and split {
+                    write_indent(mut e)
+                    e.whitespace = false
+                    e.indention = false
+                } else {
+                    write_text(mut e, text, start, end, end_r - start_r)
+                }
+                start = end
+                start_r = end_r
+            }
+        } else if breaks {
+            if not is_break_rune(r) {
+                if text.byte_at(start) == b'\n' {
+                    emit_line_break(mut e)
+                }
+                write_breaks(mut e, text, start, end)
+                write_indent(mut e)
+                e.whitespace = false
+                e.indention = false
+                start = end
+                start_r = end_r
+            }
+        } else if r == END or r == 32 or is_break_rune(r) {
+            write_text(mut e, text, start, end, end_r - start_r)
+            start = end
+            start_r = end_r
+        }
+        if r == END {
+            break
+        }
+        spaces = r == 32
+        breaks = is_break_rune(r)
+        end += n
+        end_r += 1
+    }
+}
+
+fn write_single_quoted(e: mut Emitter, text: String, split: bool) {
+    write_indicator(mut e, "'", true, false, false)
+    var spaces = false
+    var breaks = false
+    var start: usize = 0
+    var start_r: usize = 0
+    var end: usize = 0
+    var end_r: usize = 0
+    loop {
+        var r = END
+        var n: usize = 0
+        if end < text.len() {
+            let (c, len) = rune_at(text, end)
+            r = c
+            n = len
+        }
+        if spaces {
+            if r != 32 {
+                if start_r + 1 == end_r and e.column > e.best_width and split and start != 0 and end != text.len() {
+                    write_indent(mut e)
+                } else {
+                    write_text(mut e, text, start, end, end_r - start_r)
+                }
+                start = end
+                start_r = end_r
+            }
+        } else if breaks {
+            if not is_break_rune(r) {
+                if text.byte_at(start) == b'\n' {
+                    emit_line_break(mut e)
+                }
+                write_breaks(mut e, text, start, end)
+                write_indent(mut e)
+                start = end
+                start_r = end_r
+            }
+        } else if r == END or r == 32 or is_break_rune(r) or r == 0x27 {
+            if start < end {
+                write_text(mut e, text, start, end, end_r - start_r)
+                start = end
+                start_r = end_r
+            }
+        }
+        if r == 0x27 {
+            e.out.push_str("''")
+            e.column += 2
+            start = end + 1
+            start_r = end_r + 1
+        }
+        if r == END {
+            break
+        }
+        spaces = r == 32
+        breaks = is_break_rune(r)
+        end += n
+        end_r += 1
+    }
+    write_indicator(mut e, "'", false, false, false)
+}
+
+// The escape PyYAML writes after `\` for a rune it has a short one for, or 0.
+fn short_escape(c: u32) -> u8 {
+    if c == 0 {
+        return b'0'
+    }
+    if c == 7 {
+        return b'a'
+    }
+    if c == 8 {
+        return b'b'
+    }
+    if c == 9 {
+        return b't'
+    }
+    if c == 10 {
+        return b'n'
+    }
+    if c == 11 {
+        return b'v'
+    }
+    if c == 12 {
+        return b'f'
+    }
+    if c == 13 {
+        return b'r'
+    }
+    if c == 0x1B {
+        return b'e'
+    }
+    if c == 0x22 {
+        return b'"'
+    }
+    if c == 0x5C {
+        return b'\\'
+    }
+    if c == 0x85 {
+        return b'N'
+    }
+    if c == 0xA0 {
+        return b'_'
+    }
+    if c == 0x2028 {
+        return b'L'
+    }
+    if c == 0x2029 {
+        return b'P'
+    }
+    return 0
+}
+
+fn push_hex(out: mut String, v: u32, digits: u32) {
+    let hex = "0123456789ABCDEF"
+    var shift = (digits - 1) * 4
+    loop {
+        out.push(rune(hex.byte_at(usize((v >> shift) & 15))))
+        if shift == 0 {
+            break
+        }
+        shift -= 4
+    }
+}
+
+fn write_double_quoted(e: mut Emitter, text: String, split: bool) {
+    write_indicator(mut e, "\"", true, false, false)
+    var runes: usize = 0
+    for i in 0..text.len() {
+        if text.byte_at(i) & 0xC0 != 0x80 {
+            runes += 1
+        }
+    }
+    var start: usize = 0
+    var start_r: usize = 0
+    var end: usize = 0
+    var end_r: usize = 0
+    loop {
+        var r = END
+        var n: usize = 0
+        if end < text.len() {
+            let (c, len) = rune_at(text, end)
+            r = c
+            n = len
+        }
+        if r == END or r == 0x22 or r == 0x5C or r == 0x85 or r == 0x2028 or r == 0x2029 or r == 0xFEFF or not ((r >= 0x20 and r <= 0x7E) or (e.unicode and ((r >= 0xA0 and r <= 0xD7FF) or (r >= 0xE000 and r <= 0xFFFD)))) {
+            if start < end {
+                write_text(mut e, text, start, end, end_r - start_r)
+                start = end
+                start_r = end_r
+            }
+            if r != END {
+                let short = short_escape(r)
+                e.out.push('\\')
+                if short != 0 {
+                    e.out.push(rune(short))
+                    e.column += 2
+                } else if r <= 0xFF {
+                    e.out.push('x')
+                    push_hex(mut e.out, r, 2)
+                    e.column += 4
+                } else if r <= 0xFFFF {
+                    e.out.push('u')
+                    push_hex(mut e.out, r, 4)
+                    e.column += 6
+                } else {
+                    e.out.push('U')
+                    push_hex(mut e.out, r, 8)
+                    e.column += 10
+                }
+                start = end + n
+                start_r = end_r + 1
+            }
+        }
+        if end_r > 0 and end_r + 1 < runes and (r == 32 or start >= end) and e.column + end_r > e.best_width + start_r and split {
+            if start < end {
+                write_text(mut e, text, start, end, end_r - start_r)
+                start = end
+                start_r = end_r
+            }
+            e.out.push('\\')
+            e.column += 1
+            write_indent(mut e)
+            e.whitespace = false
+            e.indention = false
+            if text.byte_at(start) == b' ' {
+                e.out.push('\\')
+                e.column += 1
+            }
+        }
+        if r == END {
+            break
+        }
+        end += n
+        end_r += 1
+    }
+    write_indicator(mut e, "\"", false, false, false)
+}
+
+// The indicators after `|` that say how the text starts and ends: its indent when it starts with
+// a space or a break, and `-` when it doesn't end with a break or `+` when it ends with two.
+fn block_hints(e: Emitter, text: String) -> String {
+    var hints = String()
+    if text.is_empty() {
+        return hints
+    }
+    let (first, _) = rune_at(text, 0)
+    if first == 32 or is_break_rune(first) {
+        hints.push_str("{e.best_indent}")
+    }
+    var last_at = text.len() - 1
+    while text.byte_at(last_at) & 0xC0 == 0x80 {
+        last_at -= 1
+    }
+    let (last, _) = rune_at(text, last_at)
+    if not is_break_rune(last) {
+        hints.push('-')
+    } else if last_at == 0 {
+        hints.push('+')
+    } else {
+        var before_at = last_at - 1
+        while text.byte_at(before_at) & 0xC0 == 0x80 {
+            before_at -= 1
+        }
+        let (before, _) = rune_at(text, before_at)
+        if is_break_rune(before) {
+            hints.push('+')
+        }
+    }
+    return hints
+}
+
+fn write_literal(e: mut Emitter, text: String) {
+    let hints = block_hints(e, text)
+    write_indicator(mut e, "|{hints}", true, false, false)
+    if hints.ends_with("+") {
+        e.open_ended = true
+    }
+    emit_line_break(mut e)
+    var breaks = true
+    var start: usize = 0
+    var end: usize = 0
+    loop {
+        var r = END
+        var n: usize = 0
+        if end < text.len() {
+            let (c, len) = rune_at(text, end)
+            r = c
+            n = len
+        }
+        if breaks {
+            if r == END or not is_break_rune(r) {
+                write_breaks(mut e, text, start, end)
+                if r != END {
+                    write_indent(mut e)
+                }
+                start = end
+            }
+        } else if r == END or is_break_rune(r) {
+            e.out.push_str(text[start..end])
+            if r == END {
+                emit_line_break(mut e)
+            }
+            start = end
+        }
+        if r == END {
+            break
+        }
+        breaks = is_break_rune(r)
+        end += n
+    }
+}

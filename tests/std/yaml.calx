@@ -1,0 +1,207 @@
+// std.yaml reads YAML as PyYAML's safe_load does and writes it as safe_dump does (CLX-170): a
+// config read through its methods, YAML 1.1's scalars, anchors and merge keys, block and flow
+// styles, the documents PyYAML refuses and where it says they're wrong, and trees written back.
+import std.yaml.{Yaml, parse, parse_all, write, write_all}
+
+fn show(text: String) {
+    match parse(text.copy()) {
+        ok(v) => println("{v}"),
+        err(e) => println("error: {e}"),
+    }
+}
+
+fn main() {
+    let doc = parse(String(##"
+        # A server's config.
+        name: lobby
+        motd: "Welcome, \u00e9"
+        max-players: 50
+        network:
+          port: 25_565
+          address: 0.0.0.0
+          compression: {threshold: 256, level: 6}
+        servers:
+        - name: eu west
+          weight: 1.5
+          tags: [survival, hard]
+        - name: us east
+          weight: .5
+        "##))!
+    println("{doc.get("name")} {doc.get("max-players")} {doc.path("network.port")} {doc.path("network.compression.level")}")    // out: some(lobby) some(50) some(25565) some(6)
+    println("{doc.path("servers.0.tags")} {doc.path("servers.1.weight")} {doc.path("servers.2")} {doc.path("motd")}")    // out: some([survival, hard]) some(0.5) none some(Welcome, é)
+    println("{doc.keys()} {doc.len()} {(doc.get("servers") ?? Yaml.Null).kind()} {(doc.path("network.address") ?? Yaml.Null).as_str()}")    // out: [name, motd, max-players, network, servers] 5 a list some(0.0.0.0)
+
+    // YAML 1.1's scalars, as PyYAML resolves them: bools in three cases, ints in each base, with
+    // `_`s and base 60, floats with `.inf` and `.nan`, nulls, and what's left a string.
+    show("[yes, No, ON, off, y, n, True, fAlse]")    // out: [true, false, true, false, y, n, true, fAlse]
+    show("[0x1F, 0o17, 017, 0b101, 1_000, +12, -0, 190:20:30, 9223372036854775807, -9223372036854775808]")    // out: [31, 0o17, 15, 5, 1000, 12, 0, 685230, 9223372036854775807, -9223372036854775808]
+    show("[1.5, .5, 1., 1e3, 1.0e+3, -.inf, .NaN, 1:30.5, 6.8523015e+5]")    // out: [1.5, 0.5, 1.0, 1e3, 1000.0, -.inf, .nan, 90.5, 685230.15]
+    show("[~, null, Null, '', nUll, 'null']")    // out: [null, null, null, '', nUll, 'null']
+    show("[2001-12-14, 2001-12-14t21:59:43.10-05:00, 2001-12-14 21:59:43.10, 2002-12-14T00:00:00Z, '2001-12-14']")    // out: [2001-12-14, !!timestamp '2001-12-14 21:59:43.100000-05:00', !!timestamp '2001-12-14 21:59:43.100000', !!timestamp '2002-12-14 00:00:00+00:00', '2001-12-14']
+    show("plain: this is\n  folded plain\n  text\nurl: http://example.com/a:b#c\nhash: a #comment")    // out: {plain: this is folded plain text, url: 'http://example.com/a:b#c', hash: a}
+
+    // Quoted scalars, with escapes; block scalars, kept and folded, with their indicators.
+    show("single: 'it''s'\ndouble: \"tab\\there \\u00e9 \\x41 \\U0001F600\"\nmulti: \"a\n  b\n\n  c\"")    // out: {single: it's, double: "tab\there é A \U0001F600", multi: "a b\nc"}
+    show("literal: |\n  line one\n  line two\n\n  last\nfolded: >\n  folded\n  text\n\n  para\nkeep: |+\n  x\n\nstrip: >-\n  y\n")    // out: {literal: "line one\nline two\n\nlast\n", folded: "folded text\npara\n", keep: "x\n\n", strip: y}
+    show("a: |2\n   indented by the indicator\nb: !!binary |\n  aGVsbG8=")    // out: {a: " indented by the indicator\n", b: !!binary "aGVsbG8=\n"}
+
+    // Anchors and aliases copy a value; `<<` merges a mapping, or a list of them, the first first.
+    show("base: &b \{x: 1, y: 2\}\ncopy: *b\nmerged:\n  <<: *b\n  y: 3\nboth:\n  <<: [\{a: 1\}, \{a: 2, b: 2\}]")    // out: {base: {x: 1, y: 2}, copy: {x: 1, y: 2}, merged: {x: 1, y: 3}, both: {a: 1, b: 2}}
+    // Keys are any scalar, and keys Python holds equal are one: `1`, `1.0` and `true`.
+    show("1: int\n'1': str\n~: null\n2001-01-01: date\n1.0: float again\ntrue: bool again")    // out: {1: bool again, '1': str, null: null, 2001-01-01: date}
+    show("? complex key\n: value\n[a, b]: list key")    // out: error: line 3, column 1: a list as a key, which Python can't hash and PyYAML refuses
+    show("\{a: 1, b: [2, 3], c: \{d: e\}, f, g: \}")    // out: {a: 1, b: [2, 3], c: {d: e}, f: null, g: null}
+    show("[a, b: c, ? d : e, \{f: g\}, [h], ]")    // out: [a, {b: c}, {d: e}, {f: g}, [h]]
+    show("")    // out: null
+    show("--- |\n  a block at the top\n")    // out: "a block at the top\n"
+
+    // Several documents.
+    match parse_all(String("--- first\n--- second\n...\n---\nthird: 3\n")) {
+        ok(docs) => println("{docs.len()} {docs}"),
+        err(e) => println("error: {e}"),
+    }
+    // out: 3 [first, second, {third: 3}]
+    show("a: 1\n---\nb: 2")    // out: error: line 2, column 1: a second document, where `parse` reads one; `parse_all` reads them all
+
+    // What PyYAML refuses, with the line and column of the mistake.
+    show("a: b: c")    // out: error: line 1, column 5: a `:` where a value can't start; quote text that holds `: `
+    show("a:\tb")    // out: error: line 1, column 3: a tab, which PyYAML doesn't allow here: indent with spaces, and put spaces before a value
+    show("\ta: 1")    // out: error: line 1, column 1: a tab, which PyYAML doesn't allow here: indent with spaces, and put spaces before a value
+    show("key: [unclosed")    // out: error: line 1, column 15: the end in a `[` list, where `,` or `]` should be; the list starts at line 1
+    show("'unclosed")    // out: error: line 1, column 1: a quoted string that doesn't end
+    show("- *undefined")    // out: error: line 1, column 3: `*undefined`, an alias to no anchor before it
+    show("&a a: &a b")    // out: error: line 1, column 7: a second anchor `&a` in the same document
+    show("!foo bar")    // out: error: line 1, column 1: the tag `!foo`, which PyYAML's safe_load has no reading for
+    show("x: !!int nope")    // out: error: line 1, column 4: `nope` tagged an integer, which it isn't
+    show("a:\n  - b\n  c: d")    // out: error: line 3, column 3: `?` in a list, where `-` should start an item at the list's indent; the list starts at line 2
+    show("x: 9223372036854775808")    // out: error: line 1, column 4: `9223372036854775808`, an integer past 64 bits, which Calx's YAML doesn't hold
+    show("a: &x\n  b: *x")    // out: error: line 2, column 6: `*x` inside the node it names, a value that holds itself, which Calx can't make
+
+    // Writing, as safe_dump(v, sort_keys=False, allow_unicode=True) writes: block style, strings
+    // quoted where they'd read back as something else, lists in a mapping at its indent.
+    print(write(doc))
+    // out: name: lobby
+    // out: motd: Welcome, é
+    // out: max-players: 50
+    // out: network:
+    // out:   port: 25565
+    // out:   address: 0.0.0.0
+    // out:   compression:
+    // out:     threshold: 256
+    // out:     level: 6
+    // out: servers:
+    // out: - name: eu west
+    // out:   weight: 1.5
+    // out:   tags:
+    // out:   - survival
+    // out:   - hard
+    // out: - name: us east
+    // out:   weight: 0.5
+    print(write(parse(String("a: [1, 'yes', '1.5', '', ~, 2001-12-14, 'x: y', '#c', '- a', ' lead', 'trail ', \"it's\"]\nb: \"two\\nlines\"\nc: \"tab\\there\"\nd: []\ne: \{\}\nf: [[1, 2], \{g: h\}]"))!))
+    // out: a:
+    // out: - 1
+    // out: - 'yes'
+    // out: - '1.5'
+    // out: - ''
+    // out: - null
+    // out: - 2001-12-14
+    // out: - 'x: y'
+    // out: - '#c'
+    // out: - '- a'
+    // out: - ' lead'
+    // out: - 'trail '
+    // out: - it's
+    // out: b: 'two
+    // out:
+    // out:   lines'
+    // out: c: "tab\there"
+    // out: d: []
+    // out: e: {}
+    // out: f:
+    // out: - - 1
+    // out:   - 2
+    // out: - g: h
+    print(write(Yaml.Str(String("a root scalar"))))
+    // out: a root scalar
+    // out: ...
+    print(write(Yaml.Float(1e16)))
+    // out: 1.0e+16
+    // out: ...
+    print(write(parse(String("[1.5, 100.0, 0.0001, 1.0e-5, -0.0, 1e300, 5e-324, .inf, -.inf, .nan, 123456789012345678.0]"))!))
+    // out: - 1.5
+    // out: - 100.0
+    // out: - 0.0001
+    // out: - 1.0e-05
+    // out: - -0.0
+    // out: - 1e300
+    // out: - 5e-324
+    // out: - .inf
+    // out: - -.inf
+    // out: - .nan
+    // out: - 1.2345678901234568e+17
+    print(write(parse(String("b: !!binary aGVsbG8gd29ybGQ=\nd: 2001-12-14 21:59:43.10 -5\nt: 2001-12-14t21:59:43Z\nn: 2001-12-14 21:59:43.123456789"))!))
+    // out: b: !!binary |
+    // out:   aGVsbG8gd29ybGQ=
+    // out: d: 2001-12-14 21:59:43.100000-05:00
+    // out: t: 2001-12-14 21:59:43+00:00
+    // out: n: 2001-12-14 21:59:43.123456789
+    let long = parse(String("text: the quick brown fox jumps over the lazy dog, the quick brown fox jumps over the lazy dog again\nquoted: 'the quick brown fox jumps over the lazy dog, the quick brown fox jumps over the lazy dog: again'"))!
+    print(write(long))
+    // out: text: the quick brown fox jumps over the lazy dog, the quick brown fox jumps over
+    // out:   the lazy dog again
+    // out: quoted: 'the quick brown fox jumps over the lazy dog, the quick brown fox jumps over
+    // out:   the lazy dog: again'
+    print(write(long, width: 40, indent: 4))
+    // out: text: the quick brown fox jumps over the lazy
+    // out:     dog, the quick brown fox jumps over the
+    // out:     lazy dog again
+    // out: quoted: 'the quick brown fox jumps over the
+    // out:     lazy dog, the quick brown fox jumps over
+    // out:     the lazy dog: again'
+    let mixed = parse(String("b: 2\na: 1\nc: [z, y]\n10: x\n"))!
+    print(write(parse(String("b: 2\na: 1\nc: \{z: 1, y: 2\}"))!, sort_keys: true))
+    // out: a: 1
+    // out: b: 2
+    // out: c:
+    // out:   y: 2
+    // out:   z: 1
+    print(write(mixed, sort_keys: true))
+    // out: b: 2
+    // out: a: 1
+    // out: c:
+    // out: - z
+    // out: - y
+    // out: 10: x
+    print(write(doc, flow: true))
+    // out: {name: lobby, motd: 'Welcome, é', max-players: 50, network: {port: 25565, address: 0.0.0.0,
+    // out:     compression: {threshold: 256, level: 6}}, servers: [{name: eu west, weight: 1.5,
+    // out:       tags: [survival, hard]}, {name: us east, weight: 0.5}]}
+    print(write(parse(String("é: \"\\u00e9 \\U0001F600 \\x07\"\n"))!, ascii: true))    // out: "\xE9": "\xE9 \U0001F600 \a"
+    print(write(Yaml.Seq([Yaml.Int(1)]), explicit_start: true))
+    // out: ---
+    // out: - 1
+    print(write_all([Yaml.Int(1), parse(String("a: b"))!, Yaml.Str(String("end"))]))
+    // out: 1
+    // out: ---
+    // out: a: b
+    // out: --- end
+    // out: ...
+    println("[{write_all([])}]")    // out: []
+
+    // `{v}` is the value in flow style on one line.
+    println("{doc.get("network") ?? Yaml.Null} {Yaml.Str(String("two\nlines"))} {Yaml.Str(String("yes"))}")    // out: {port: 25565, address: 0.0.0.0, compression: {threshold: 256, level: 6}} "two\nlines" 'yes'
+
+    // What's written reads back as the same tree.
+    var same = 0
+    for text in ["a: [1, 'yes', 2.5, ~, 2001-12-14]\nb: \{c: \"x\\ny\", d: !!binary aGk=\}", "- - - deep\n  - [x, ' y']\n- z: 'it''s'", "? |\n  a block key\n: \"\\u2028 \\x85 \\t\""] {
+        match parse(String(text)) {
+            ok(v) => {
+                if parse(write(v))! == v and parse(write(v, flow: true))! == v and parse("{v}")! == v {
+                    same += 1
+                }
+            },
+            err(e) => println("error: {e}"),
+        }
+    }
+    println("{same} read back the same")    // out: 3 read back the same
+}
