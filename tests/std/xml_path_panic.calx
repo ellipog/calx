@@ -1,0 +1,9 @@
+// A path that isn't one is a mistake in the program, not in the XML, so std.xml panics on it, where
+// ElementTree raises SyntaxError.
+
+import std.xml.{parse}
+
+fn main() {
+    let doc = parse(String("<a><b/></a>"))!
+    _ = doc.find_all(String("b/../c"))    // panic: the path b/../c has `..`; an element doesn't know its parent, so find the parent instead
+}

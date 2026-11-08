@@ -1,0 +1,87 @@
+// std.xml reads XML as Python's ElementTree does (CLX-106): elements with text and tails, entities
+// and CDATA, paths, writing back plain and indented, and where text isn't well-formed.
+import std.xml.{Element, XmlError, escape, escape_attribute, format, parse, pretty}
+
+fn show(text: str) {
+    match parse(String(text)) {
+        ok(e) => println(format(e)),
+        err(e) => println("error: {e}"),
+    }
+}
+
+fn main() ! XmlError {
+    let doc = try parse(#"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!-- a catalog -->
+        <catalog lang="en">
+          <book id="b1" year="1965"><title>Dune &amp; more</title><author>Herbert</author></book>
+          <book id="b2"><title><![CDATA[<i>Emma</i> & co]]></title><?note x?><author>Austen</author></book>
+          <magazine id="m1"><title>Wired</title></magazine>
+        </catalog>
+        "#)
+    println("{doc.tag} {doc.get("lang")} {doc.get("missing")} {doc.children.len()}")    // out: catalog some(en) none 3
+    for b in doc.find_all("book") {
+        println("{b.get("id")} {b.find_text("title")} {b.find_text("author")}")
+    }
+    // out: some(b1) some(Dune & more) some(Herbert)
+    // out: some(b2) some(<i>Emma</i> & co) some(Austen)
+
+    // Text and tails, as ElementTree has them.
+    let mixed = try parse("<p>Hi <b>you</b>, there<br/>!</p>")
+    println("{mixed.text}|{mixed.children[0].text}|{mixed.children[0].tail}|{mixed.children[1].tail}")    // out: Hi |you|, there|!
+    println(mixed.all_text())    // out: Hi you, there!
+
+    // Paths.
+    let titles = doc.find_all(".//title")
+    println("{titles.len()} {titles[2].text}")    // out: 3 Wired
+    println("{doc.find("book[@year]") != none} {doc.find_all("*[@id='m1']").len()} {doc.find_all("book[2]")[0].get("id")}")    // out: true 1 some(b2)
+    println("{doc.find_all("*[title='Wired']")[0].tag} {doc.find("book[last()]") != none} {doc.find("nothing")}")    // out: magazine true none
+    println("{doc.find_all("*/title").len()} {doc.find(".").map(|e| e.tag.copy())} {doc.find_text("book/nope")}")    // out: 3 some(catalog) none
+    println("{doc.find_all(".//book/title[.='Wired']").len()} {doc.find_all("book[1]/author")[0].text}")    // out: 0 Herbert
+    println("{doc.find_all("*[@id!='b1']").len()} {doc.find_all("book[author!='Austen']").len()} {doc.find_all(".//title[.!='Wired']").len()} {doc.find_all("*[@year != '1965']").len()}")    // out: 2 1 2 0
+
+    // Building and writing.
+    var list = Element.new(String("list"))
+    var item = Element.new(String("item"))
+    item.set(String("name"), String("a \"b\"\n<c>"))
+    item.text = String("x & y")
+    list.add(item)
+    list.add(Element.new(String("empty")))
+    list.set(String("n"), String("2"))
+    println(format(list))    // out: <list n="2"><item name="a &quot;b&quot;&#10;&lt;c&gt;">x &amp; y</item><empty /></list>
+    println(pretty(list, 2))
+    // out: <list n="2">
+    // out:   <item name="a &quot;b&quot;&#10;&lt;c&gt;">x &amp; y</item>
+    // out:   <empty />
+    // out: </list>
+    println("{try parse(format(list)) == list}")    // out: true
+    println("{escape(String("<a & b>"))} {escape_attribute(String("\"q\"\t"))}")    // out: &lt;a &amp; b&gt; &quot;q&quot;&#09;
+    println("{list}")    // out: <list n="2"><item name="a &quot;b&quot;&#10;&lt;c&gt;">x &amp; y</item><empty /></list>
+
+    // Entities, line ends and attribute values.
+    show(#"<!DOCTYPE r [ <!ENTITY who "Ada &amp; co"> <!ENTITY hi "Hi, &who;!"> ]><r a="&hi;">&hi; &#233;&#x1F600;</r>"#)    // out: <r a="Hi, Ada &amp; co!">Hi, Ada &amp; co! é😀</r>
+    show("<r a=\"x\ty\r\nz\" b='&#10;'>1</r>")    // out: <r a="x y z" b="&#10;">1</r>
+    let ends = try parse("<r>1\r\n2\r3&#13;</r>")
+    println("{ends.text == String("1\n2\n3\r")}")    // out: true
+
+    // What isn't well-formed, and where.
+    show("<a><b></a>")    // out: error: line 1, column 7: </a> doesn't close <b>, which starts at line 1, column 4
+    show("<a>x &nbsp; y</a>")    // out: error: line 1, column 6: XML has no &nbsp;; write &#160;
+    show("<a>Tom & Jerry</a>")    // out: error: line 1, column 8: `&` starts a reference that has no `;`; write `&amp;` for an `&`
+    show("<a>Tom & Jerry;</a>")    // out: error: line 1, column 8: `&` starts a reference that isn't one; write `&amp;` for an `&`
+    show("<a b='1' b='2'/>")    // out: error: line 1, column 10: the attribute b is written twice
+    show("<a/><b/>")    // out: error: line 1, column 5: there's more after the root element
+    show("hello <a/>")    // out: error: line 1, column 1: text before the root element
+    show("<a>\n  <b>\n</a>")    // out: error: line 3, column 1: </a> doesn't close <b>, which starts at line 2, column 3
+    show("<a>")    // out: error: line 1, column 1: <a> isn't closed
+    show("")    // out: error: line 1, column 1: no element found
+    show("<a>]]></a>")    // out: error: line 1, column 4: text can't hold `]]>`; write `]]&gt;`
+    show("<a>\u{1}</a>")    // out: error: line 1, column 4: XML text can't hold the control character 0x01
+    show("<a><!-- x -- y --></a>")    // out: error: line 1, column 11: a comment can't hold `--`
+    show("<a v=\"<\"/>")    // out: error: line 1, column 7: an attribute's value can't hold `<`; write `&lt;`
+    show(" <?xml version=\"1.0\"?><a/>")    // out: error: line 1, column 2: the XML declaration goes at the very start
+    show("<?xml version=\"1.0\" standalone=\"maybe\"?><a/>")    // out: error: line 1, column 21: the XML declaration can't have standalone="maybe" there
+    show("<a>&#0;</a>")    // out: error: line 1, column 4: &#0; is a character XML doesn't allow
+    show("<!DOCTYPE r [ <!ENTITY e \"&e;\"> ]><r>&e;</r>")    // out: error: line 1, column 38: in &e;: references to entities nest too deep, or an entity refers to itself
+    show("<!DOCTYPE r [ <!ENTITY b \"<b/>\"> ]><r>&b;</r>")    // out: error: line 1, column 39: &b; holds markup, which isn't read from an entity; write the elements where it's used
+}

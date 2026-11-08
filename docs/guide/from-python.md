@@ -189,6 +189,8 @@ fn main() ! Error {
 | --- | --- |
 | `json.loads(t)`, `json.dumps(v, indent=2)` | `parse(t)`, `pretty(v, 2)` from [`std.json`](../std/json.md). `@json` on a struct reads and writes it from its fields' types, as a dataclass with pydantic would |
 | `csv.reader(f)`, `csv.DictReader(f)`, `csv.writer(f)` | `parse`, `parse_records` and `format` from [`std.csv`](../std/csv.md), or `Reader` for a row at a time |
+| `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |
+| `html.escape(t)`, `html.unescape(t)` | `escape(t)` and `unescape(t)` from [`std.html`](../std/html.md) |
 | `urllib.parse.quote`, `urlsplit`, `urljoin` | `encode`, `Url.parse`, `url.join` from [`std.url`](../std/url.md) |
 | `uuid.uuid4()` | `Uuid.random()` from [`std.uuid`](../std/uuid.md) |
 | `requests.get(url).text` | `fetch(url)` from [`std.http`](../std/http.md), then `String.from_utf8(resp.body)`, ready for `parse` |

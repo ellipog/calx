@@ -1,0 +1,244 @@
+/// HTML text: escaping it, so it shows as it is, and reading the character references in it back,
+/// exactly as Python's `html.escape` and `html.unescape` do, with every name HTML5 has.
+module std.html
+
+import std.text.entities.{LONGEST_BARE, NAMES, SLOTS, VALUES}
+
+/// `text` with `&`, `<` and `>` written as `&amp;`, `&lt;` and `&gt;`, and, with `quote`, `"` and
+/// `'` as `&quot;` and `&#x27;`, so it can go in an attribute's value, as Python's `html.escape`
+/// writes them.
+pub fn escape(text: String, quote: bool = true) -> String {
+    var first = text.len()
+    for i in 0..text.len() {
+        if escaped(text.byte_at(i), quote) {
+            first = i
+            break
+        }
+    }
+    if first == text.len() {
+        return text.copy()
+    }
+    var out = String()
+    out.reserve(text.len() + text.len() / 8 + 8)
+    out.push_str(text[..first])
+    var from = first
+    for i in first..text.len() {
+        let c = text.byte_at(i)
+        if not escaped(c, quote) {
+            continue
+        }
+        out.push_str(text[from..i])
+        out.push_str(match c {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => "&#x27;",
+        })
+        from = i + 1
+    }
+    out.push_str(text[from..])
+    return out
+}
+
+fn escaped(c: u8, quote: bool) -> bool {
+    return c == b'&' or c == b'<' or c == b'>' or (quote and (c == b'"' or c == b'\''))
+}
+
+/// `text` with each character reference read back, as Python's `html.unescape` reads them, which
+/// is as a browser reads text in an HTML page: `&amp;` and every other name HTML5 has, the old ones
+/// such as `&amp` and `&copy` without their `;` too, even before more letters, as in `&copy2024`;
+/// `&#233;` and `&#xE9;`, with what HTML5 puts for numbers that aren't characters: `&#150;` is
+/// Windows-1252's en dash, `&#0;`, a surrogate or past U+10FFFF is U+FFFD, and a control or
+/// noncharacter is dropped. Anything else after `&` is left as it is.
+pub fn unescape(text: String) -> String {
+    let amp = text.find("&") else return text.copy()
+    var out = String()
+    out.reserve(text.len())
+    out.push_str(text[..amp])
+    var i = amp
+    let n = text.len()
+    while i < n {
+        let c = text.byte_at(i)
+        if c != b'&' {
+            let next = match text[i..].find("&") {
+                some(k) => i + k,
+                none => n,
+            }
+            out.push_str(text[i..next])
+            i = next
+            continue
+        }
+        if i + 1 < n and text.byte_at(i + 1) == b'#' {
+            i = numeric(text, i, mut out)
+        } else {
+            i = named(text, i, mut out)
+        }
+    }
+    return out
+}
+
+// `&#...` at `at`: a decimal or `x` and hex number, then maybe `;`, read onto `out`, or just the `&`
+// if no digit follows. Gives where reading goes on.
+fn numeric(text: String, at: usize, out: mut String) -> usize {
+    let n = text.len()
+    var i = at + 2
+    let hex = i < n and (text.byte_at(i) == b'x' or text.byte_at(i) == b'X')
+    if hex {
+        i += 1
+    }
+    let digits = i
+    var value: u32 = 0
+    var big = false
+    while i < n {
+        let d = digit(text.byte_at(i), hex) else break
+        if not big {
+            value = value * (if hex { 16 } else { 10 }) + d
+            big = value > 0x10FFFF
+        }
+        i += 1
+    }
+    if i == digits {
+        out.push('&')
+        return at + 1
+    }
+    if i < n and text.byte_at(i) == b';' {
+        i += 1
+    }
+    if big {
+        out.push('\u{FFFD}')
+    } else {
+        reference(value, mut out)
+    }
+    return i
+}
+
+fn digit(c: u8, hex: bool) -> u32? {
+    if c >= b'0' and c <= b'9' {
+        return some(u32(c - b'0'))
+    }
+    if hex and c >= b'a' and c <= b'f' {
+        return some(u32(c - b'a') + 10)
+    }
+    if hex and c >= b'A' and c <= b'F' {
+        return some(u32(c - b'A') + 10)
+    }
+    return none
+}
+
+// What HTML5 puts for the number `c`: the character, or a stand-in for one that can't be.
+fn reference(c: u32, out: mut String) {
+    if c == 0 or (c >= 0xD800 and c <= 0xDFFF) {
+        out.push('\u{FFFD}')
+        return
+    }
+    if c == 0x0D {
+        out.push('\r')
+        return
+    }
+    if c >= 0x80 and c <= 0x9F {
+        // The C1 controls, as Windows-1252 has them, which is what pages that use them meant.
+        // The five it leaves out stand for themselves.
+        let w = WINDOWS_1252[usize(c - 0x80)]
+        out.push(rune.try_from(if w == 0 { c } else { u32(w) }) ?? '\u{FFFD}')
+        return
+    }
+    if (c >= 0x01 and c <= 0x08) or c == 0x0B or (c >= 0x0E and c <= 0x1F) or c == 0x7F or
+        (c >= 0xFDD0 and c <= 0xFDEF) or (c & 0xFFFE) == 0xFFFE {
+        return
+    }
+    out.push(rune.try_from(c) ?? '\u{FFFD}')
+}
+
+// Windows-1252's characters for 0x80 to 0x9F, or 0 where it has none.
+const WINDOWS_1252: [u16; 32] = [
+    0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0,
+    0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
+]
+
+// `&name` at `at`: up to 32 runes that aren't white space, `<`, `&`, `#` or `;`, then maybe `;`. The
+// whole of it if it's a name, or else the longest start of it, of two runes or more, that is, then
+// the rest as it is; or, if no start is, the text as it is. Gives where reading goes on.
+fn named(text: String, at: usize, out: mut String) -> usize {
+    let n = text.len()
+    let start = at + 1
+    var i = start
+    var runes: usize = 0
+    var ascii = n    // where the name's first byte that isn't ASCII is
+    while i < n and runes < 32 {
+        let c = text.byte_at(i)
+        if c == b'\t' or c == b'\n' or c == 0x0C or c == b' ' or c == b'<' or c == b'&' or c == b'#' or c == b';' {
+            break
+        }
+        if c >= 0x80 and ascii == n {
+            ascii = i
+        }
+        i += rune_length(c)
+        runes += 1
+    }
+    if i > n {
+        i = n
+    }
+    if runes == 0 {
+        out.push('&')
+        return start
+    }
+    if i < n and text.byte_at(i) == b';' {
+        i += 1
+        runes += 1
+    }
+    if let k = find(text[start..i]) {
+        out.push_str(VALUES[k])
+        return i
+    }
+    // The starts of two runes or more, the longest first, short of the whole. Only the old names
+    // are without `;`, and they're ASCII and LONGEST_BARE bytes at most, so only ASCII starts that
+    // long can be names.
+    var m = (runes - 1).min(LONGEST_BARE).min(ascii - start)
+    while m >= 2 {
+        if let k = find(text[start..start + m]) {
+            out.push_str(VALUES[k])
+            out.push_str(text[start + m..i])
+            return i
+        }
+        m -= 1
+    }
+    out.push_str(text[at..i])
+    return i
+}
+
+fn rune_length(c: u8) -> usize {
+    if c < 0x80 {
+        return 1
+    }
+    if c >= 0xF0 {
+        return 4
+    }
+    if c >= 0xE0 {
+        return 3
+    }
+    if c >= 0xC0 {
+        return 2
+    }
+    return 1
+}
+
+// Where `name` is in NAMES, if it's one, from the hash table: FNV-1a over its bytes, as
+// tools/html/gen_entities.calx hashes the names to build it.
+fn find(name: String) -> usize? {
+    var h: u32 = 2166136261
+    for i in 0..name.len() {
+        h = (h ^ u32(name.byte_at(i))) * 16777619
+    }
+    var s = usize(h >> 19)
+    loop {
+        let k = usize(SLOTS[s])
+        if k == 0 {
+            return none
+        }
+        if NAMES[k - 1] == name {
+            return some(k - 1)
+        }
+        s = (s + 1) % SLOTS.len()
+    }
+}

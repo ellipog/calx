@@ -1,0 +1,148 @@
+// Writes std/text/entities.calx, HTML's named character references, which std.html.unescape
+// reads, from the HTML Standard's entities.json, which it downloads into build/html the first time
+// and reads from there after.
+//
+//     calx run tools/html/gen_entities.calx
+//
+// The table has every name the standard lists, with its `;` and, for the old ones a browser takes
+// without it, without, in byte order, and the text each stands for, and a hash table of the names
+// that `std.html` looks them up in.
+import std.fs
+import std.http
+import std.json.{Json, parse}
+import std.process
+
+const URL: str = "https://html.spec.whatwg.org/entities.json"
+
+// The hash table's size, a power of two about four times the number of names, so a name is found
+// in one or two tries and one that isn't one gives up as soon.
+const SLOTS: usize = 8192
+
+// The name's slot: FNV-1a over its bytes, the top 13 bits. `find` in std/html.calx does the same.
+fn slot(name: String) -> usize {
+    var h: u32 = 2166136261
+    for i in 0..name.len() {
+        h = (h ^ u32(name.byte_at(i))) * 16777619
+    }
+    return usize(h >> 19)
+}
+
+fn stop(why: String) -> never {
+    eprintln("gen_entities: {why}")
+    process.exit(1)
+}
+
+// entities.json, downloaded once into build/html.
+fn entities_json() -> String {
+    let local = "build/html/entities.json"
+    if not fs.is_file(local) {
+        println("downloading {URL}")
+        var r = http.get(String(URL), [], 60000, 16777216)
+        match r.wait() {
+            ok(resp) => {
+                if resp.status != 200 {
+                    stop("{URL} gave status {resp.status}")
+                }
+                fs.make_dir_all("build/html")!
+                fs.write(local, resp.body)!
+            },
+            err(e) => stop("can't download {URL}: {e}"),
+        }
+    }
+    return fs.read_text(local)! ?? String()
+}
+
+// `text` as a Calx string literal's inside: letters and digits as they are, anything else as a
+// `\u{...}` escape, so no brace, quote or backslash needs thought.
+fn literal(text: String) -> String {
+    var out = String()
+    for r in text.runes() {
+        let c = u32(r)
+        if (c >= 0x30 and c <= 0x39) or (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A) {
+            out.push(r)
+        } else {
+            out.push_str("\\u\{{c:X}\}")
+        }
+    }
+    return out
+}
+
+fn main() {
+    let tree = match parse(entities_json()) {
+        ok(t) => t,
+        err(e) => stop("entities.json isn't JSON: {e}"),
+    }
+    var names = tree.keys()
+    names.sort()
+    var out = String()
+    out.push_str("/// HTML's named character references, for `std.html.unescape`: each name, with its `;` and, for\n")
+    out.push_str("/// the old ones a browser takes without it, without, and the text it stands for. Written by\n")
+    out.push_str("/// tools/html/gen_entities.calx from the HTML Standard's entities.json; don't edit by hand.\n")
+    out.push_str("module std.text.entities\n\n")
+    out.push_str("// The names and the text they stand for are from the HTML Standard, https://html.spec.whatwg.org/,\n")
+    out.push_str("// Copyright © WHATWG (Apple, Google, Mozilla, Microsoft), under the Creative Commons Attribution\n")
+    out.push_str("// 4.0 International License, https://creativecommons.org/licenses/by/4.0/.\n\n")
+    var bare: List<String> = []
+    var values: List<String> = []
+    for name in names {
+        let chars = (tree.get(name.copy()) ?? Json.Null).get(String("characters")) ?? Json.Null
+        let text = chars.as_str() ?? stop("{name} has no characters")
+        if not name.starts_with("&") {
+            stop("{name} doesn't start with &")
+        }
+        bare.push(name[1..])
+        values.push(literal(text))
+    }
+    // Byte order, which `sort` gives the names with their `&`, is the same without it.
+    out.push_str("/// The names, without their `&`, in byte order.\n")
+    out.push_str("pub const NAMES: [str; {bare.len()}] = [\n")
+    for b in bare {
+        out.push_str("    \"{b}\",\n")
+    }
+    out.push_str("]\n\n/// What each name stands for.\n")
+    out.push_str("pub const VALUES: [str; {values.len()}] = [\n")
+    for v in values {
+        out.push_str("    \"{v}\",\n")
+    }
+    out.push_str("]\n")
+
+    // Each name goes in its slot, or the next free one after it.
+    var slots: List<usize> = [0; SLOTS]
+    var tries: usize = 0
+    var longest_bare: usize = 0
+    for k in 0..bare.len() {
+        var s = slot(bare[k])
+        var t: usize = 1
+        while slots[s] != 0 {
+            s = (s + 1) % SLOTS
+            t += 1
+        }
+        slots[s] = k + 1
+        tries = tries.max(t)
+        if not bare[k].ends_with(";") {
+            for i in 0..bare[k].len() {
+                if bare[k].byte_at(i) >= 0x80 {
+                    stop("{bare[k]} has no `;` and isn't ASCII, which std.html.unescape counts on")
+                }
+            }
+            longest_bare = longest_bare.max(bare[k].len())
+        }
+    }
+    out.push_str("\n/// The longest name without its `;`. Those are the old names a browser takes without it, and\n")
+    out.push_str("/// they're all ASCII.\n")
+    out.push_str("pub const LONGEST_BARE: usize = {longest_bare}\n\n")
+    out.push_str("/// The names' hash table: in the slot FNV-1a gives a name, or the next one after it that isn't\n")
+    out.push_str("/// taken, the name's place in NAMES plus 1. An empty slot is 0. Every name is found within\n")
+    out.push_str("/// {tries} tries.\n")
+    out.push_str("pub const SLOTS: [u16; {SLOTS}] = [\n")
+    for row in 0..SLOTS / 16 {
+        out.push_str("   ")
+        for c in 0usize..16 {
+            out.push_str(" {slots[row * 16 + c]},")
+        }
+        out.push_str("\n")
+    }
+    out.push_str("]\n")
+    fs.write_text("std/text/entities.calx", out)!
+    println("wrote std/text/entities.calx: {bare.len()} names, found within {tries} tries, the longest without `;` {longest_bare} bytes")
+}

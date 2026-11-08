@@ -1,0 +1,23 @@
+// std.html escapes and unescapes as Python's html.escape and html.unescape do (CLX-106): every
+// HTML5 name, the old names without `;`, numbers HTML5 replaces, and what's left as it is.
+import std.html.{escape, unescape}
+
+fn main() {
+    let tag = String("<a href=\"x\">'Tom' & Jerry</a>")
+    println(escape(tag.copy()))    // out: &lt;a href=&quot;x&quot;&gt;&#x27;Tom&#x27; &amp; Jerry&lt;/a&gt;
+    println(escape(tag.copy(), quote: false))    // out: &lt;a href="x"&gt;'Tom' &amp; Jerry&lt;/a&gt;
+    println(escape(String("plain")))    // out: plain
+    println("{unescape(escape(tag.copy())) == tag}")    // out: true
+
+    // Names, with and without `;`.
+    println(unescape(String("caf&eacute; &copy2024 &amp;amp; &notin; &notit; &bogus; &AMP &Aacute")))    // out: café ©2024 &amp; ∉ ¬it; &bogus; & Á
+    println(unescape(String("&NotNestedGreaterGreater; &hearts;|&lt&gt &fjlig;")))    // out: ⪢̸ ♥|<> fj
+
+    // Numbers, and what HTML5 puts for those that aren't characters.
+    println(unescape(String("&#233;t&#xE9; &#65&#X42; &#128;&#150;&#159;")))    // out: été AB €–Ÿ
+    println(unescape(String("[&#0;] [&#xD800;] [&#x110000;] [&#99999999999999999999;] [&#1;] [&#xFFFF;] [&#127;]")))    // out: [�] [�] [�] [�] [] [] []
+
+    // What's left as it is.
+    println(unescape(String("& &; &# &#x; &#xg; a&b <b>")))    // out: & &; &# &#x; &#xg; a&b <b>
+    println(unescape(String("no references")))    // out: no references
+}

@@ -1,0 +1,1409 @@
+/// XML: text parsed into a tree of elements, as Python's `xml.etree.ElementTree` reads it, with
+/// the line and column of what's wrong when it isn't well-formed; elements found by ElementTree's
+/// paths; and trees written back as text.
+///
+/// An element has its tag, its attributes in the order they're written, the elements in it, the
+/// text before its first child, and its tail, the text after its end tag up to the next element.
+/// Comments and processing instructions are left out, as ElementTree leaves them out, and names
+/// are kept as written, prefixes and all.
+module std.xml
+
+// --- the tree ------------------------------------------------------------------------------------
+
+/// An element, as ElementTree has one: `<item id="7">a<b/>c</item>d` is an `item` with the
+/// attribute `id`, the text `a`, one child `b` whose tail is `c`, and the tail `d`.
+pub struct Element {
+    pub tag: String
+    /// The attributes, in the order they're written.
+    pub attributes: LinkedMap<String, String>
+    pub children: List<Element>
+    /// The text before the first child, or all of it when there are none.
+    pub text: String
+    /// The text after the end tag, up to the next element or the parent's end tag.
+    pub tail: String
+}
+
+/// Why text isn't well-formed XML, and where.
+pub struct XmlError {
+    pub message: String
+    /// The line, from 1.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for XmlError {
+    fn show(self) {
+        print("line {self.line}, column {self.column}: {self.message}")
+    }
+}
+
+impl Display for Element {
+    fn show(self) {
+        print(format(self))
+    }
+}
+
+impl Element {
+    /// An element with the tag `tag` and nothing else.
+    pub fn new(tag: own String) -> Element {
+        return Element { tag: tag, attributes: LinkedMap(), children: [], text: String(), tail: String() }
+    }
+
+    /// A copy of the attribute `name`'s value, if it has one.
+    pub fn get(self, name: String) -> String? {
+        if self.attributes.contains(name.copy()) {
+            return some(self.attributes[name].copy())
+        }
+        return none
+    }
+
+    /// Sets the attribute `name`. One it had keeps its place.
+    pub fn set(mut self, name: own String, value: own String) {
+        if self.attributes.contains(name.copy()) {
+            self.attributes[name] = value
+        } else {
+            self.attributes.insert(name, value)
+        }
+    }
+
+    /// Adds `child` after the children it has.
+    pub fn add(mut self, child: own Element) {
+        self.children.push(child)
+    }
+
+    /// A copy of the first element `path` finds, as ElementTree's `find` gives it ([paths](#paths)).
+    @track_caller
+    pub fn find(self, path: String) -> Element? {
+        var out: List<Element> = []
+        select(self, path_steps(path), 0, mut out, true)
+        return out.pop()
+    }
+
+    /// Copies of the elements `path` finds, in document order, as ElementTree's `findall` gives them.
+    @track_caller
+    pub fn find_all(self, path: String) -> List<Element> {
+        var out: List<Element> = []
+        select(self, path_steps(path), 0, mut out, false)
+        return out
+    }
+
+    /// The text of the first element `path` finds, as ElementTree's `findtext` gives it: its
+    /// `text`, which may be empty, or `none` if it finds nothing.
+    @track_caller
+    pub fn find_text(self, path: String) -> String? {
+        let e = self.find(path) else return none
+        return some(e.text)
+    }
+
+    /// All the text in it, without the tags: its text, then each child's text and tail in order,
+    /// as `"".join(e.itertext())` gives it. Its own tail isn't in it.
+    pub fn all_text(self) -> String {
+        var out = String()
+        gather_text(self, mut out)
+        return out
+    }
+}
+
+fn gather_text(e: Element, out: mut String) {
+    out.push_str(e.text)
+    for c in e.children {
+        gather_text(c, mut out)
+        out.push_str(c.tail)
+    }
+}
+
+// --- parsing -------------------------------------------------------------------------------------
+
+/// The root element of the XML document `text`, as ElementTree's `fromstring` reads it.
+///
+/// - Before the root element can come an XML declaration, a DOCTYPE, comments and processing
+///   instructions, and after it, comments and processing instructions; white space anywhere
+///   between them. Nothing else may come outside it.
+/// - `&lt;`, `&gt;`, `&amp;`, `&quot;` and `&apos;`, `&#233;` and `&#xE9;` are read, and so are the
+///   entities the DOCTYPE declares as text, `<!ENTITY name "text">`. Any other is an error, as
+///   `&nbsp;`, which XML doesn't have, is: write `&#160;`.
+/// - CDATA sections are text. Comments and processing instructions are left out.
+/// - Line ends are `\n`, and in an attribute's value, each tab and line end is a space, as XML
+///   says; a character reference to one stays what it is.
+/// - A start tag must be closed by its own end tag, an attribute written once, and the text hold
+///   only characters XML allows.
+pub fn parse(text: String) -> Element ! XmlError {
+    var r = Reader { at: 0, entities: LinkedMap(), outside: [], starts: [], expanded: 0, most: (text.len() * 100).max(16777216) }
+    let n = text.len()
+    if text.starts_with("\u{FEFF}") {
+        r.at = 3
+    }
+    if is_declaration(text, r.at) {
+        try declaration(text, mut r)
+    }
+    try misc(text, mut r, true)
+    if r.at >= n {
+        fail error_at(text, n, String("no element found"))
+    }
+    var stack: List<Element> = []
+    loop {
+        if r.at >= n {
+            let open = stack.len() - 1
+            fail error_at(text, r.starts[open], "<{stack[open].tag}> isn't closed")
+        }
+        if text.byte_at(r.at) != b'<' {
+            try content(text, mut r, mut stack)
+            continue
+        }
+        let next = if r.at + 1 < n { text.byte_at(r.at + 1) } else { 0 }
+        if next == b'/' {
+            let at = r.at
+            r.at += 2
+            let name = try r.name(text, "after `</`")
+            r.skip_space(text)
+            try r.expect(text, b'>', "to end the end tag")
+            let e = stack.pop() else fail error_at(text, at, "</{name}> closes nothing")
+            let start = r.starts.pop() ?? 0
+            if e.tag != name {
+                let (line, column) = position(text, start)
+                fail error_at(text, at, "</{name}> doesn't close <{e.tag}>, which starts at line {line}, column {column}")
+            }
+            if stack.is_empty() {
+                try misc(text, mut r, false)
+                if r.at < n {
+                    fail error_at(text, r.at, String("there's more after the root element"))
+                }
+                return e
+            }
+            let top = stack.len() - 1
+            stack[top].children.push(e)
+        } else if next == b'!' {
+            if text[r.at..].starts_with("<!--") {
+                try skip_comment(text, mut r)
+            } else if text[r.at..].starts_with("<![CDATA[") {
+                let end = text[r.at + 9..].find("]]>") else fail error_at(text, r.at, String("the CDATA section isn't closed"))
+                let from = r.at + 9
+                var cdata = String()
+                try r.add_text(text, from, from + end, mut cdata, Kind.Cdata, 0)
+                add(mut stack, cdata)
+                r.at = from + end + 3
+            } else if text[r.at..].starts_with("<!DOCTYPE") {
+                fail error_at(text, r.at, String("a DOCTYPE goes before the root element"))
+            } else {
+                fail error_at(text, r.at, String("`<!` starts nothing XML has here"))
+            }
+        } else if next == b'?' {
+            if is_declaration(text, r.at) {
+                fail error_at(text, r.at, String("the XML declaration goes at the very start"))
+            }
+            try skip_pi(text, mut r)
+        } else {
+            let start = r.at
+            r.at += 1
+            var e = Element.new(try r.name(text, "after `<`"))
+            let empty = try r.attributes(text, mut e)
+            if empty {
+                if stack.is_empty() {
+                    try misc(text, mut r, false)
+                    if r.at < n {
+                        fail error_at(text, r.at, String("there's more after the root element"))
+                    }
+                    return e
+                }
+                let top = stack.len() - 1
+                stack[top].children.push(e)
+            } else {
+                stack.push(e)
+                r.starts.push(start)
+            }
+        }
+    }
+}
+
+fn error_at(text: String, at: usize, message: own String) -> XmlError {
+    let (line, column) = position(text, at)
+    return XmlError { message: message, line: line, column: column }
+}
+
+// Where reading has got to, the entities the DOCTYPE declared, where each open element starts,
+// and how much text references to entities have given, which can't pass `most`, so a few lines
+// can't stand for gigabytes, as the "billion laughs" do.
+struct Reader {
+    at: usize
+    entities: LinkedMap<String, String>
+    outside: List<String>  // the entities declared as other files, which aren't read
+    starts: List<usize>
+    expanded: usize
+    most: usize
+}
+
+// What text is: an element's, a CDATA section's, whose `&` is an `&`, or an entity's as the
+// DOCTYPE declares it, whose character references are read there and the rest where it's used.
+enum Kind {
+    Text,
+    Cdata,
+    Declared,
+}
+
+// How deep references to entities can nest, which also stops one that refers to itself.
+const MOST_NESTED: usize = 16
+
+impl Reader {
+    fn skip_space(mut self, text: String) {
+        while self.at < text.len() and is_space(text.byte_at(self.at)) {
+            self.at += 1
+        }
+    }
+
+    fn expect(mut self, text: String, c: u8, why: str) ! XmlError {
+        if self.at >= text.len() or text.byte_at(self.at) != c {
+            fail error_at(text, self.at, "expected `{rune(c)}` {why}")
+        }
+        self.at += 1
+    }
+
+    // A name, as XML's are: a letter, `_` or `:`, then those, digits, `-` and `.`. Runes past ASCII
+    // are taken as letters.
+    fn name(mut self, text: String, after: str) -> String ! XmlError {
+        let start = self.at
+        if start >= text.len() or not name_start(text.byte_at(start)) {
+            fail error_at(text, start, "expected a name {after}")
+        }
+        self.at += 1
+        while self.at < text.len() and name_byte(text.byte_at(self.at)) {
+            self.at += 1
+        }
+        return text[start..self.at]
+    }
+
+    // The attributes of a start tag, up to its `>` or `/>`. Gives whether it was `/>`.
+    fn attributes(mut self, text: String, e: mut Element) -> bool ! XmlError {
+        let n = text.len()
+        loop {
+            let before = self.at
+            self.skip_space(text)
+            if self.at >= n {
+                fail error_at(text, self.at, "the start tag of <{e.tag}> isn't closed")
+            }
+            let c = text.byte_at(self.at)
+            if c == b'>' {
+                self.at += 1
+                return false
+            }
+            if c == b'/' {
+                self.at += 1
+                try self.expect(text, b'>', "after `/` in a start tag")
+                return true
+            }
+            if self.at == before {
+                fail error_at(text, self.at, String("expected white space before the attribute"))
+            }
+            let at = self.at
+            let name = try self.name(text, "for an attribute, or `>`")
+            self.skip_space(text)
+            try self.expect(text, b'=', "after the attribute's name")
+            self.skip_space(text)
+            if self.at >= n or (text.byte_at(self.at) != b'"' and text.byte_at(self.at) != b'\'') {
+                fail error_at(text, self.at, String("expected the attribute's value, in quotes"))
+            }
+            let quote = text.byte_at(self.at)
+            let from = self.at + 1
+            var end = from
+            while end < n and text.byte_at(end) != quote {
+                if text.byte_at(end) == b'<' {
+                    fail error_at(text, end, String("an attribute's value can't hold `<`; write `&lt;`"))
+                }
+                end += 1
+            }
+            if end >= n {
+                fail error_at(text, self.at, String("the attribute's value isn't closed"))
+            }
+            var value = String()
+            try self.add_value(text, from, end, mut value, 0)
+            self.at = end + 1
+            if e.attributes.contains(name.copy()) {
+                fail error_at(text, at, "the attribute {name} is written twice")
+            }
+            e.attributes.insert(name, value)
+        }
+    }
+
+    // Text between `from` and `to` of the kind `kind`, with its references read and its line ends
+    // made `\n`, added to `out`. Characters XML doesn't allow are an error, as is `]]>` in an
+    // element's text. `depth` is how many entities' text this is inside.
+    fn add_text(mut self, text: String, from: usize, to: usize, out: mut String, kind: Kind, depth: usize) ! XmlError {
+        var i = from
+        var run = from
+        while i < to {
+            let c = text.byte_at(i)
+            if c >= 0x20 and c != b'&' and c != b'>' and c != 0xEF {
+                i += 1
+                continue
+            }
+            if c == b'>' {
+                if kind == Kind.Text and i >= from + 2 and text.byte_at(i - 1) == b']' and text.byte_at(i - 2) == b']' {
+                    fail error_at(text, i - 2, String("text can't hold `]]>`; write `]]&gt;`"))
+                }
+                i += 1
+                continue
+            }
+            if c == 0xEF {
+                try not_a_character(text, i)
+                i += 1
+                continue
+            }
+            if c == b'&' and kind == Kind.Cdata {
+                i += 1
+                continue
+            }
+            out.push_str(text[run..i])
+            if c == b'&' {
+                i = try self.reference(text, i, to, mut out, kind, depth)
+            } else if c == b'\r' {
+                out.push('\n')
+                i += if i + 1 < to and text.byte_at(i + 1) == b'\n' { 2 } else { 1 }
+            } else if c == b'\n' or c == b'\t' {
+                out.push(rune(c))
+                i += 1
+            } else {
+                fail error_at(text, i, "XML text can't hold the control character {c:#04x}")
+            }
+            run = i
+        }
+        out.push_str(text[run..to])
+    }
+
+    // An attribute's value between `from` and `to`: as text, with each tab and line end a space,
+    // in the value and in the text of the entities it refers to.
+    fn add_value(mut self, text: String, from: usize, to: usize, out: mut String, depth: usize) ! XmlError {
+        var i = from
+        var run = from
+        while i < to {
+            let c = text.byte_at(i)
+            if c >= 0x20 and c != b'&' and c != 0xEF and c != b'<' {
+                i += 1
+                continue
+            }
+            if c == 0xEF {
+                try not_a_character(text, i)
+                i += 1
+                continue
+            }
+            if c == b'<' {
+                fail error_at(text, i, String("an attribute's value can't hold `<`; write `&lt;`"))
+            }
+            out.push_str(text[run..i])
+            if c == b'&' {
+                i = try self.attribute_reference(text, i, to, mut out, depth)
+            } else if c == b'\r' {
+                out.push(' ')
+                i += if i + 1 < to and text.byte_at(i + 1) == b'\n' { 2 } else { 1 }
+            } else if c == b'\n' or c == b'\t' {
+                out.push(' ')
+                i += 1
+            } else {
+                fail error_at(text, i, "XML text can't hold the control character {c:#04x}")
+            }
+            run = i
+        }
+        out.push_str(text[run..to])
+    }
+
+    // A reference in an attribute's value: an entity's text is read as a value is.
+    fn attribute_reference(mut self, text: String, at: usize, to: usize, out: mut String, depth: usize) -> usize ! XmlError {
+        let semi = text[at..to].find(";") else fail error_at(text, at, String("`&` starts a reference that has no `;`; write `&amp;` for an `&`"))
+        let body = text[at + 1..at + semi]
+        if body.starts_with("#") or predefined(body.copy()) != "" or not self.entities.contains(body.copy()) {
+            return try self.reference(text, at, to, mut out, Kind.Text, depth)
+        }
+        let raw = self.entities[body.copy()].copy()
+        try self.count(text, at, raw.len(), depth)
+        match self.add_value(raw, 0, raw.len(), mut out, depth + 1) {
+            ok => {},
+            err(e) => fail error_at(text, at, inside(body.copy(), e.message)),
+        }
+        return at + semi + 1
+    }
+
+    // Adds `n` bytes an entity gives to what entities have given, which can't pass `most`, at a
+    // depth that can't pass MOST_NESTED.
+    fn count(mut self, text: String, at: usize, n: usize, depth: usize) ! XmlError {
+        if depth >= MOST_NESTED {
+            fail error_at(text, at, String("references to entities nest too deep, or an entity refers to itself"))
+        }
+        self.expanded += n
+        if self.expanded > self.most {
+            fail error_at(text, at, String("the entities expand to too much text"))
+        }
+    }
+
+    // The reference at `at`, `&name;`, `&#N;` or `&#xH;`, added to `out`, as `kind` reads it.
+    // Gives where it ends.
+    fn reference(mut self, text: String, at: usize, to: usize, out: mut String, kind: Kind, depth: usize) -> usize ! XmlError {
+        let semi = text[at..to].find(";") else fail error_at(text, at, String("`&` starts a reference that has no `;`; write `&amp;` for an `&`"))
+        let body = text[at + 1..at + semi]
+        if not body.starts_with("#") and not is_name(body.copy()) {
+            fail error_at(text, at, String("`&` starts a reference that isn't one; write `&amp;` for an `&`"))
+        }
+        if kind == Kind.Declared and not body.starts_with("#") {
+            // Read where the entity is used, as XML says.
+            out.push_str(text[at..at + semi + 1])
+            return at + semi + 1
+        }
+        if body.starts_with("#") {
+            let hex = body.starts_with("#x")
+            let digits = if hex { body[2..] } else { body[1..] }
+            var value: u32 = 0
+            if digits.is_empty() {
+                fail error_at(text, at, "&{body}; has no number")
+            }
+            for k in 0..digits.len() {
+                let d = digit(digits.byte_at(k), hex) else fail error_at(text, at, "&{body}; isn't a number")
+                if value > 0x10FFFF {
+                    break
+                }
+                value = value * (if hex { 16 } else { 10 }) + d
+            }
+            if not xml_char(value) {
+                fail error_at(text, at, "&{body}; is a character XML doesn't allow")
+            }
+            out.push(rune.try_from(value) ?? '\u{FFFD}')
+            return at + semi + 1
+        }
+        let named = predefined(body.copy())
+        if not named.is_empty() {
+            out.push_str(named)
+            return at + semi + 1
+        }
+        if self.entities.contains(body.copy()) {
+            let raw = self.entities[body.copy()].copy()
+            if raw.contains("<") {
+                fail error_at(text, at, "&{body}; holds markup, which isn't read from an entity; write the elements where it's used")
+            }
+            try self.count(text, at, raw.len(), depth)
+            match self.add_text(raw, 0, raw.len(), mut out, Kind.Text, depth + 1) {
+                ok => {},
+                err(e) => fail error_at(text, at, inside(body.copy(), e.message)),
+            }
+            return at + semi + 1
+        }
+        if body == "nbsp" {
+            fail error_at(text, at, String("XML has no &nbsp;; write &#160;"))
+        }
+        if self.outside.contains(body.copy()) {
+            fail error_at(text, at, "&{body}; is an entity in another file, which isn't read")
+        }
+        fail error_at(text, at, "&{body}; is an entity this document doesn't declare")
+    }
+}
+
+// Text up to the next `<`, added to the open element: to its text if it has no children yet, or
+// to its last child's tail. Outside the root element, only white space can be.
+fn content(text: String, r: mut Reader, stack: mut List<Element>) ! XmlError {
+    // Most text has nothing to read in it, and is taken as it is, in one pass.
+    let from = r.at
+    let n = text.len()
+    var i = from
+    while i < n {
+        let c = text.byte_at(i)
+        if c < 0x20 or c == b'<' or c == b'&' or c == b'>' or c == 0xEF {
+            break
+        }
+        i += 1
+    }
+    if i == n or text.byte_at(i) == b'<' {
+        r.at = i
+        add(mut stack, text[from..i])
+        return
+    }
+    let end = match text[i..].find("<") {
+        some(k) => i + k,
+        none => n,
+    }
+    var s = String()
+    try r.add_text(text, from, end, mut s, Kind.Text, 0)
+    r.at = end
+    add(mut stack, s)
+}
+
+// Text for the open element: its text if it has no children yet, or else its last child's tail.
+fn add(stack: mut List<Element>, s: own String) {
+    let top = stack.len() - 1
+    let last = stack[top].children.len()
+    if last == 0 {
+        if stack[top].text.is_empty() {
+            stack[top].text = s
+        } else {
+            stack[top].text.push_str(s)
+        }
+    } else if stack[top].children[last - 1].tail.is_empty() {
+        stack[top].children[last - 1].tail = s
+    } else {
+        stack[top].children[last - 1].tail.push_str(s)
+    }
+}
+
+// White space, comments and processing instructions outside the root element, and before it, a
+// DOCTYPE.
+fn misc(text: String, r: mut Reader, before: bool) ! XmlError {
+    var doctype = false
+    loop {
+        r.skip_space(text)
+        if r.at >= text.len() {
+            return
+        }
+        if text[r.at..].starts_with("<!--") {
+            try skip_comment(text, mut r)
+        } else if text[r.at..].starts_with("<?") {
+            if is_declaration(text, r.at) {
+                fail error_at(text, r.at, String("the XML declaration goes at the very start"))
+            }
+            try skip_pi(text, mut r)
+        } else if before and not doctype and text[r.at..].starts_with("<!DOCTYPE") {
+            try doctype_(text, mut r)
+            doctype = true
+        } else if before and text.byte_at(r.at) != b'<' {
+            fail error_at(text, r.at, String("text before the root element"))
+        } else {
+            return
+        }
+    }
+}
+
+// What went wrong in an entity's text, said at the reference to it: the entity it was in, the
+// innermost if they nest.
+fn inside(name: String, message: own String) -> String {
+    if message.starts_with("in &") {
+        return message
+    }
+    return "in &{name};: {message}"
+}
+
+// The text of one of XML's five entities, or "".
+fn predefined(name: String) -> str {
+    if name == "lt" {
+        return "<"
+    }
+    if name == "gt" {
+        return ">"
+    }
+    if name == "amp" {
+        return "&"
+    }
+    if name == "quot" {
+        return "\""
+    }
+    if name == "apos" {
+        return "'"
+    }
+    return ""
+}
+
+fn is_name(s: String) -> bool {
+    if s.is_empty() or not name_start(s.byte_at(0)) {
+        return false
+    }
+    for i in 1..s.len() {
+        if not name_byte(s.byte_at(i)) {
+            return false
+        }
+    }
+    return true
+}
+
+// U+FFFE and U+FFFF, which XML doesn't allow, are EF BF BE and EF BF BF.
+fn not_a_character(text: String, at: usize) ! XmlError {
+    if at + 2 < text.len() and text.byte_at(at + 1) == 0xBF and (text.byte_at(at + 2) == 0xBE or text.byte_at(at + 2) == 0xBF) {
+        fail error_at(text, at, String("XML text can't hold U+FFFE or U+FFFF"))
+    }
+}
+
+// Whether text from `from` to `to` holds only characters XML allows.
+fn characters(text: String, from: usize, to: usize) ! XmlError {
+    for i in from..to {
+        let c = text.byte_at(i)
+        if c < 0x20 and c != b'\t' and c != b'\n' and c != b'\r' {
+            fail error_at(text, i, "XML text can't hold the control character {c:#04x}")
+        }
+        if c == 0xEF {
+            try not_a_character(text, i)
+        }
+    }
+}
+
+// `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`, as XML writes it: a version, then
+// maybe an encoding and `standalone`, in that order. The text is UTF-8 whatever it says.
+fn declaration(text: String, r: mut Reader) ! XmlError {
+    let start = r.at
+    let end = text[start..].find("?>") else fail error_at(text, start, String("the XML declaration isn't closed"))
+    let close = start + end
+    r.at = start + 5
+    var seen: List<String> = []
+    loop {
+        let before = r.at
+        r.skip_space(text)
+        if r.at >= close {
+            break
+        }
+        if r.at == before {
+            fail error_at(text, r.at, String("the XML declaration wants white space here"))
+        }
+        let at = r.at
+        let name = try r.name(text, "in the XML declaration")
+        r.skip_space(text)
+        try r.expect(text, b'=', "in the XML declaration")
+        r.skip_space(text)
+        if r.at >= close or (text.byte_at(r.at) != b'"' and text.byte_at(r.at) != b'\'') {
+            fail error_at(text, r.at, String("the XML declaration wants a value in quotes"))
+        }
+        let quote = text.byte_at(r.at)
+        let from = r.at + 1
+        var to = from
+        while to < close and text.byte_at(to) != quote {
+            to += 1
+        }
+        if to >= close {
+            fail error_at(text, r.at, String("a value in the XML declaration isn't closed"))
+        }
+        let value = text[from..to]
+        let fits = if name == "version" {
+            seen.is_empty() and version_text(value.copy())
+        } else if name == "encoding" {
+            seen.len() == 1 and seen[0] == "version" and is_encoding(value.copy())
+        } else if name == "standalone" {
+            not seen.contains(name.copy()) and seen.contains(String("version")) and (value == "yes" or value == "no")
+        } else {
+            false
+        }
+        if not fits {
+            fail error_at(text, at, "the XML declaration can't have {name}=\"{value}\" there")
+        }
+        seen.push(name)
+        r.at = to + 1
+    }
+    if seen.is_empty() or seen[0] != "version" {
+        fail error_at(text, start, String("the XML declaration has no version"))
+    }
+    r.at = close + 2
+}
+
+// A version as expat takes one: letters, digits, `.`, `_` and `-`. XML 1.0 has `1.` and digits,
+// and other versions are read as it.
+fn version_text(s: String) -> bool {
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if not ((b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'.' or b == b'_' or b == b'-') {
+            return false
+        }
+    }
+    return true
+}
+
+fn is_encoding(s: String) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    let c = s.byte_at(0)
+    if not ((c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z')) {
+        return false
+    }
+    for i in 1..s.len() {
+        let b = s.byte_at(i)
+        if not ((b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'.' or b == b'_' or b == b'-') {
+            return false
+        }
+    }
+    return true
+}
+
+fn is_declaration(text: String, at: usize) -> bool {
+    if not text[at..].starts_with("<?") or at + 5 > text.len() {
+        return false
+    }
+    let target = text[at + 2..at + 5].to_lower_root()
+    return target == "xml" and (at + 5 == text.len() or is_space(text.byte_at(at + 5)) or text.byte_at(at + 5) == b'?')
+}
+
+fn skip_comment(text: String, r: mut Reader) ! XmlError {
+    let from = r.at + 4
+    let end = text[from..].find("--") else fail error_at(text, r.at, String("the comment isn't closed"))
+    if from + end + 2 >= text.len() or text.byte_at(from + end + 2) != b'>' {
+        fail error_at(text, from + end, String("a comment can't hold `--`"))
+    }
+    try characters(text, from, from + end)
+    r.at = from + end + 3
+}
+
+fn skip_pi(text: String, r: mut Reader) ! XmlError {
+    let start = r.at
+    let end = text[start + 2..].find("?>") else fail error_at(text, start, String("the processing instruction isn't closed"))
+    r.at = start + 2
+    _ = try r.name(text, "after `<?`")
+    if r.at < start + 2 + end and not is_space(text.byte_at(r.at)) {
+        fail error_at(text, r.at, String("a processing instruction wants white space after its name"))
+    }
+    try characters(text, start, start + 2 + end)
+    r.at = start + 2 + end + 2
+}
+
+// `<!DOCTYPE root>`, with maybe an external ID and an internal subset in `[...]`: checked and
+// skipped, but for the entities the subset declares as text.
+fn doctype_(text: String, r: mut Reader) ! XmlError {
+    let start = r.at
+    r.at += 9
+    try space_after(text, mut r, "after `<!DOCTYPE`")
+    _ = try r.name(text, "for the DOCTYPE")
+    let before = r.at
+    r.skip_space(text)
+    if r.at > before and (text[r.at..].starts_with("SYSTEM") or text[r.at..].starts_with("PUBLIC")) {
+        try external_id(text, mut r, false)
+        r.skip_space(text)
+    }
+    if r.at < text.len() and text.byte_at(r.at) == b'[' {
+        r.at += 1
+        try subset(text, mut r)
+        r.skip_space(text)
+    }
+    if r.at >= text.len() {
+        fail error_at(text, start, String("the DOCTYPE isn't closed"))
+    }
+    try r.expect(text, b'>', "to end the DOCTYPE")
+}
+
+// White space, which must be there.
+fn space_after(text: String, r: mut Reader, why: String) ! XmlError {
+    if r.at >= text.len() or not is_space(text.byte_at(r.at)) {
+        fail error_at(text, r.at, "expected white space {why}")
+    }
+    r.skip_space(text)
+}
+
+// Text in quotes, as a DOCTYPE writes it: its inside.
+fn quoted_text(text: String, r: mut Reader) -> String ! XmlError {
+    if r.at >= text.len() or (text.byte_at(r.at) != b'"' and text.byte_at(r.at) != b'\'') {
+        fail error_at(text, r.at, String("expected text in quotes"))
+    }
+    let quote = text.byte_at(r.at)
+    let from = r.at + 1
+    var to = from
+    while to < text.len() and text.byte_at(to) != quote {
+        to += 1
+    }
+    if to >= text.len() {
+        fail error_at(text, r.at, String("the text in quotes isn't closed"))
+    }
+    r.at = to + 1
+    return text[from..to]
+}
+
+// `SYSTEM "uri"` or `PUBLIC "id" "uri"`, or, for a notation, `PUBLIC "id"` alone.
+fn external_id(text: String, r: mut Reader, notation: bool) ! XmlError {
+    let at = r.at
+    let word = try r.name(text, "for SYSTEM or PUBLIC")
+    if word != "SYSTEM" and word != "PUBLIC" {
+        fail error_at(text, at, "expected SYSTEM or PUBLIC, not {word}")
+    }
+    try space_after(text, mut r, "after {word}")
+    _ = try quoted_text(text, mut r)
+    if word == "SYSTEM" {
+        return
+    }
+    let before = r.at
+    r.skip_space(text)
+    if r.at < text.len() and (text.byte_at(r.at) == b'"' or text.byte_at(r.at) == b'\'') and r.at > before {
+        _ = try quoted_text(text, mut r)
+    } else if notation {
+        r.at = before
+    } else {
+        fail error_at(text, r.at, String("PUBLIC wants the file's address after its ID"))
+    }
+}
+
+// A DOCTYPE's internal subset, up to its `]`: its declarations are checked, and the entities it
+// declares as text remembered.
+fn subset(text: String, r: mut Reader) ! XmlError {
+    let n = text.len()
+    while r.at < n {
+        r.skip_space(text)
+        if r.at >= n {
+            break
+        }
+        if text.byte_at(r.at) == b']' {
+            r.at += 1
+            return
+        }
+        if text[r.at..].starts_with("<!--") {
+            try skip_comment(text, mut r)
+        } else if text[r.at..].starts_with("<?") {
+            try skip_pi(text, mut r)
+        } else if text[r.at..].starts_with("<!") {
+            try declaration_in_subset(text, mut r)
+        } else if text.byte_at(r.at) == b'%' {
+            // A parameter entity's reference, `%name;`, whose declarations this doesn't read.
+            r.at += 1
+            _ = try r.name(text, "after `%`")
+            try r.expect(text, b';', "after the parameter entity's name")
+        } else {
+            fail error_at(text, r.at, String("the DOCTYPE holds something XML doesn't have there"))
+        }
+    }
+    fail error_at(text, r.at, String("the DOCTYPE's `[` isn't closed"))
+}
+
+// `<!ELEMENT>`, `<!ATTLIST>`, `<!ENTITY>` or `<!NOTATION>`.
+fn declaration_in_subset(text: String, r: mut Reader) ! XmlError {
+    let start = r.at
+    r.at += 2
+    let keyword = try r.name(text, "after `<!`")
+    try space_after(text, mut r, "after <!{keyword}")
+    if keyword == "ENTITY" {
+        try entity(text, mut r)
+    } else if keyword == "ELEMENT" {
+        _ = try r.name(text, "for the element")
+        try space_after(text, mut r, "after the element's name")
+        if text[r.at..].starts_with("EMPTY") {
+            r.at += 5
+        } else if text[r.at..].starts_with("ANY") {
+            r.at += 3
+        } else if r.at < text.len() and text.byte_at(r.at) == b'(' {
+            try content_model(text, mut r)
+        } else {
+            fail error_at(text, r.at, String("expected EMPTY, ANY or `(` for what the element holds"))
+        }
+    } else if keyword == "ATTLIST" {
+        _ = try r.name(text, "for the element")
+        try attribute_definitions(text, mut r)
+    } else if keyword == "NOTATION" {
+        _ = try r.name(text, "for the notation")
+        try space_after(text, mut r, "after the notation's name")
+        try external_id(text, mut r, true)
+    } else {
+        fail error_at(text, start, "the DOCTYPE has <!{keyword}, which XML doesn't")
+    }
+    r.skip_space(text)
+    try r.expect(text, b'>', "to end the declaration")
+}
+
+// What an element holds, as `<!ELEMENT>` says it: `(#PCDATA | a)*`, `(a, (b | c)+, d?)` and so on.
+fn content_model(text: String, r: mut Reader) ! XmlError {
+    let start = r.at
+    var depth: usize = 0
+    loop {
+        r.skip_space(text)
+        if r.at >= text.len() {
+            fail error_at(text, start, String("the `(` of what the element holds isn't closed"))
+        }
+        let c = text.byte_at(r.at)
+        if c == b'(' {
+            depth += 1
+            r.at += 1
+        } else if c == b')' {
+            r.at += 1
+            if r.at < text.len() and (text.byte_at(r.at) == b'?' or text.byte_at(r.at) == b'*' or text.byte_at(r.at) == b'+') {
+                r.at += 1
+            }
+            depth -= 1
+            if depth == 0 {
+                return
+            }
+        } else if c == b'|' or c == b',' {
+            r.at += 1
+        } else if c == b'#' {
+            r.at += 1
+            let word = try r.name(text, "after `#`")
+            if word != "PCDATA" {
+                fail error_at(text, r.at, "what an element holds can have #PCDATA, not #{word}")
+            }
+        } else if name_start(c) {
+            _ = try r.name(text, "")
+            if r.at < text.len() and (text.byte_at(r.at) == b'?' or text.byte_at(r.at) == b'*' or text.byte_at(r.at) == b'+') {
+                r.at += 1
+            }
+        } else {
+            fail error_at(text, r.at, String("what an element holds is written with names, `|`, `,` and `( )`"))
+        }
+    }
+}
+
+// The attributes `<!ATTLIST element ...>` declares: each a name, a type and a default.
+fn attribute_definitions(text: String, r: mut Reader) ! XmlError {
+    loop {
+        let before = r.at
+        r.skip_space(text)
+        if r.at >= text.len() or text.byte_at(r.at) == b'>' {
+            return
+        }
+        if r.at == before {
+            fail error_at(text, r.at, String("expected white space before the attribute"))
+        }
+        _ = try r.name(text, "for the attribute")
+        try space_after(text, mut r, "after the attribute's name")
+        if r.at < text.len() and text.byte_at(r.at) == b'(' {
+            try choices(text, mut r)
+        } else {
+            let at = r.at
+            let kind = try r.name(text, "for the attribute's type")
+            let kinds: List<String> = ["CDATA", "ID", "IDREF", "IDREFS", "ENTITY", "ENTITIES", "NMTOKEN", "NMTOKENS", "NOTATION"]
+            if not kinds.contains(kind.copy()) {
+                fail error_at(text, at, "{kind} isn't a type an attribute can have")
+            }
+            if kind == "NOTATION" {
+                try space_after(text, mut r, "after NOTATION")
+                try choices(text, mut r)
+            }
+        }
+        try space_after(text, mut r, "after the attribute's type")
+        if r.at < text.len() and text.byte_at(r.at) == b'#' {
+            r.at += 1
+            let at = r.at
+            let word = try r.name(text, "after `#`")
+            if word == "FIXED" {
+                try space_after(text, mut r, "after #FIXED")
+                _ = try quoted_text(text, mut r)
+            } else if word != "REQUIRED" and word != "IMPLIED" {
+                fail error_at(text, at, "an attribute's default is #REQUIRED, #IMPLIED, #FIXED or a value, not #{word}")
+            }
+        } else {
+            _ = try quoted_text(text, mut r)
+        }
+    }
+}
+
+// `(a | b | c)`, the values an attribute can have.
+fn choices(text: String, r: mut Reader) ! XmlError {
+    try r.expect(text, b'(', "to start the choices")
+    loop {
+        r.skip_space(text)
+        let from = r.at
+        while r.at < text.len() and name_byte(text.byte_at(r.at)) {
+            r.at += 1
+        }
+        if r.at == from {
+            fail error_at(text, r.at, String("expected a value among the choices"))
+        }
+        r.skip_space(text)
+        if r.at < text.len() and text.byte_at(r.at) == b')' {
+            r.at += 1
+            return
+        }
+        try r.expect(text, b'|', "between the choices")
+    }
+}
+
+// What follows `<!ENTITY `: a name, after `%` for a parameter entity, then its text in quotes or
+// where it is, `SYSTEM "file"`, maybe with `NDATA`. The text of a general one is remembered.
+fn entity(text: String, r: mut Reader) ! XmlError {
+    let parameter = r.at < text.len() and text.byte_at(r.at) == b'%'
+    if parameter {
+        r.at += 1
+        try space_after(text, mut r, "after `%`")
+    }
+    let name = try r.name(text, "for the entity")
+    try space_after(text, mut r, "after the entity's name")
+    let n = text.len()
+    if r.at < n and (text.byte_at(r.at) == b'"' or text.byte_at(r.at) == b'\'') {
+        let quote = text.byte_at(r.at)
+        let from = r.at + 1
+        let end = text[from..].find(if quote == b'"' { "\"" } else { "'" }) else fail error_at(text, r.at, String("the entity's text isn't closed"))
+        var value = String()
+        try r.add_text(text, from, from + end, mut value, Kind.Declared, 0)
+        r.at = from + end + 1
+        if not parameter and not r.entities.contains(name.copy()) and not r.outside.contains(name.copy()) {
+            r.entities.insert(name, value)
+        }
+        return
+    }
+    try external_id(text, mut r, false)
+    let before = r.at
+    r.skip_space(text)
+    if text[r.at..].starts_with("NDATA") {
+        if parameter or r.at == before {
+            fail error_at(text, r.at, String("NDATA goes after white space, in a general entity"))
+        }
+        r.at += 5
+        try space_after(text, mut r, "after NDATA")
+        _ = try r.name(text, "after NDATA")
+    }
+    if not parameter and not r.entities.contains(name.copy()) and not r.outside.contains(name.copy()) {
+        r.outside.push(name)
+    }
+}
+
+// The line and column of byte `at`, from 1, the column in runes.
+fn position(text: String, at: usize) -> (usize, usize) {
+    var line: usize = 1
+    var start: usize = 0
+    let end = if at < text.len() { at } else { text.len() }
+    for i in 0..end {
+        if text.byte_at(i) == b'\n' {
+            line += 1
+            start = i + 1
+        }
+    }
+    var column: usize = 1
+    for i in start..end {
+        if (text.byte_at(i) & 0xC0) != 0x80 {
+            column += 1
+        }
+    }
+    return (line, column)
+}
+
+fn is_space(c: u8) -> bool {
+    return c == b' ' or c == b'\t' or c == b'\n' or c == b'\r'
+}
+
+fn name_start(c: u8) -> bool {
+    return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or c == b'_' or c == b':' or c >= 0x80
+}
+
+fn name_byte(c: u8) -> bool {
+    return name_start(c) or (c >= b'0' and c <= b'9') or c == b'-' or c == b'.'
+}
+
+fn digit(c: u8, hex: bool) -> u32? {
+    if c >= b'0' and c <= b'9' {
+        return some(u32(c - b'0'))
+    }
+    if hex and c >= b'a' and c <= b'f' {
+        return some(u32(c - b'a') + 10)
+    }
+    if hex and c >= b'A' and c <= b'F' {
+        return some(u32(c - b'A') + 10)
+    }
+    return none
+}
+
+// XML's Char: a tab, a line end, or any character from U+0020 but surrogates, U+FFFE and U+FFFF.
+fn xml_char(c: u32) -> bool {
+    return c == 0x09 or c == 0x0A or c == 0x0D or (c >= 0x20 and c <= 0xD7FF) or (c >= 0xE000 and c <= 0xFFFD) or
+        (c >= 0x10000 and c <= 0x10FFFF)
+}
+
+// --- paths ---------------------------------------------------------------------------------------
+
+// A step of a path: a tag or `*` with its conditions, `.`, or the `//` between two steps.
+struct Step {
+    kind: StepKind
+    tag: String
+    conditions: List<Condition>
+}
+
+enum StepKind {
+    Child,
+    Here,
+    Below,
+}
+
+enum Condition {
+    Has(String),
+    Is(String, String),
+    IsNot(String, String),
+    Child(String),
+    ChildIs(String, String),
+    ChildIsNot(String, String),
+    TextIs(String),
+    TextIsNot(String),
+    At(usize),
+    Last(usize),
+}
+
+// The steps of `path`, as ElementTree's paths have them. A path it doesn't read is a mistake in
+// the program, so it panics.
+@track_caller
+fn path_steps(path: String) -> List<Step> {
+    if path.starts_with("/") {
+        panic("the path {path} starts with `/`; a path is read from the element, so start it with `.//` to search all of it")
+    }
+    var out: List<Step> = []
+    let parts = path.split("/")
+    for k in 0..parts.len() {
+        let p = parts[k].copy()
+        if p.is_empty() {
+            if k == 0 or k == parts.len() - 1 {
+                panic("the path {path} has an empty step")
+            }
+            out.push(Step { kind: StepKind.Below, tag: String(), conditions: [] })
+            continue
+        }
+        if p == "." {
+            out.push(Step { kind: StepKind.Here, tag: String(), conditions: [] })
+            continue
+        }
+        if p == ".." {
+            panic("the path {path} has `..`; an element doesn't know its parent, so find the parent instead")
+        }
+        let open = p.find("[") ?? p.len()
+        let tag = p[..open]
+        if tag.is_empty() and open < p.len() {
+            panic("the path {path} has a condition without a tag; write `*[...]`")
+        }
+        var conditions: List<Condition> = []
+        var rest = p[open..]
+        while not rest.is_empty() {
+            if not rest.starts_with("[") {
+                panic("the path {path} has `{rest}` where a `[` was wanted")
+            }
+            let close = rest.find("]") ?? panic("the path {path} has a `[` without its `]`")
+            conditions.push(condition(path, rest[1..close]))
+            rest = rest[close + 1..]
+        }
+        out.push(Step { kind: StepKind.Child, tag: tag, conditions: conditions })
+    }
+    if out.is_empty() {
+        panic("the path is empty")
+    }
+    return out
+}
+
+@track_caller
+fn condition(path: String, written: String) -> Condition {
+    let c = written.trim()
+    // `=` or `!=`: where the name ends, and whether it's `!=`.
+    let eq = c.find("=") ?? c.len()
+    let negated = eq < c.len() and eq > 0 and c.byte_at(eq - 1) == b'!'
+    let name_end = if negated { eq - 1 } else { eq }
+    if c.starts_with("@") {
+        if eq == c.len() {
+            return Condition.Has(c[1..])
+        }
+        let value = quoted(path, c[eq + 1..].trim())
+        return if negated { Condition.IsNot(c[1..name_end].trim(), value) } else { Condition.Is(c[1..name_end].trim(), value) }
+    }
+    if c == "last()" {
+        return Condition.Last(0)
+    }
+    if c.starts_with("last()-") {
+        let back = usize.parse(c[7..].trim()) ?? panic("the path {path} has `[{c}]`, which isn't `[last()-N]`")
+        return Condition.Last(back)
+    }
+    if let n = usize.parse(c.copy()) {
+        if n == 0 {
+            panic("the path {path} has `[0]`; positions count from 1")
+        }
+        return Condition.At(n)
+    }
+    if c.starts_with("-") and usize.parse(c[1..]) != none {
+        panic("the path {path} has `[{c}]`; positions count from 1, and `[last()-N]` counts from the end")
+    }
+    if c.starts_with(".") {
+        if eq == c.len() or c[1..name_end].trim() != "" {
+            panic("the path {path} has `[{c}]`, which isn't `[.='text']` or `[.!='text']`")
+        }
+        let text = quoted(path, c[eq + 1..].trim())
+        return if negated { Condition.TextIsNot(text) } else { Condition.TextIs(text) }
+    }
+    if eq == c.len() {
+        return Condition.Child(c.copy())
+    }
+    let text = quoted(path, c[eq + 1..].trim())
+    return if negated { Condition.ChildIsNot(c[..name_end].trim(), text) } else { Condition.ChildIs(c[..name_end].trim(), text) }
+}
+
+@track_caller
+fn quoted(path: String, s: String) -> String {
+    if s.len() >= 2 and ((s.starts_with("'") and s.ends_with("'")) or (s.starts_with("\"") and s.ends_with("\""))) {
+        return s[1..s.len() - 1]
+    }
+    panic("the path {path} compares with {s}, which wants quotes around it")
+}
+
+// The elements the steps from `k` on find from `e`, copied onto `out`, or only the first.
+fn select(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
+    if first and not out.is_empty() {
+        return
+    }
+    if k == steps.len() {
+        out.push(e.copy())
+        return
+    }
+    match steps[k].kind {
+        StepKind.Here => select(e, steps, k + 1, mut out, first),
+        StepKind.Below => below(e, steps, k + 1, mut out, first),
+        StepKind.Child => children(e, steps, k, mut out, first),
+    }
+}
+
+// Step `k` on each element in `e`, at any depth, in document order.
+fn below(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
+    if k == steps.len() {
+        return
+    }
+    for i in 0..e.children.len() {
+        if first and not out.is_empty() {
+            return
+        }
+        if steps[k].kind == StepKind.Child {
+            if matches(e, i, steps[k]) {
+                select(e.children[i], steps, k + 1, mut out, first)
+            }
+        } else {
+            select(e.children[i], steps, k, mut out, first)
+        }
+        below(e.children[i], steps, k, mut out, first)
+    }
+}
+
+// Step `k`, a tag and its conditions, on each child of `e`.
+fn children(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
+    for i in 0..e.children.len() {
+        if first and not out.is_empty() {
+            return
+        }
+        if matches(e, i, steps[k]) {
+            select(e.children[i], steps, k + 1, mut out, first)
+        }
+    }
+}
+
+// Whether child `i` of `parent` has the step's tag and meets its conditions. A position counts
+// among the children with the same tag, as ElementTree counts it.
+fn matches(parent: Element, i: usize, step: Step) -> bool {
+    return meets(parent, i, parent.children[i], step)
+}
+
+fn meets(parent: Element, i: usize, c: Element, step: Step) -> bool {
+    if step.tag != "*" and c.tag != step.tag {
+        return false
+    }
+    for cond in step.conditions {
+        let met = match cond {
+            Condition.Has(name) => c.attributes.contains(name.copy()),
+            Condition.Is(name, value) => c.attributes.contains(name.copy()) and c.attributes[name.copy()] == value,
+            Condition.IsNot(name, value) => c.attributes.contains(name.copy()) and c.attributes[name.copy()] != value,
+            Condition.Child(tag) => c.children.any(|x| x.tag == tag),
+            Condition.ChildIs(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() == text),
+            Condition.ChildIsNot(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() != text),
+            Condition.TextIs(text) => c.all_text() == text,
+            Condition.TextIsNot(text) => c.all_text() != text,
+            Condition.At(n) => position_among(parent, i) == n,
+            Condition.Last(back) => same_tag(parent, c.tag.copy()) == position_among(parent, i) + back,
+        }
+        if not met {
+            return false
+        }
+    }
+    return true
+}
+
+// Child `i`'s position among the children of `parent` with its tag, from 1.
+fn position_among(parent: Element, i: usize) -> usize {
+    var n: usize = 0
+    for j in 0..=i {
+        if parent.children[j].tag == parent.children[i].tag {
+            n += 1
+        }
+    }
+    return n
+}
+
+fn same_tag(parent: Element, tag: String) -> usize {
+    return parent.children.count(|x| x.tag == tag)
+}
+
+// --- writing -------------------------------------------------------------------------------------
+
+/// `e` as XML text, as ElementTree's `tostring` writes it: its attributes in their order, `&`, `<`
+/// and `>` escaped in text, and quotes, tabs and line ends too in attributes, an element with
+/// nothing in it as `<tag />`, and its tail after it.
+pub fn format(e: Element) -> String {
+    var out = String()
+    write(e, mut out)
+    return out
+}
+
+/// `e` as XML text with each element on a line of its own, indented `indent` spaces for each
+/// level, as ElementTree's `indent` then `tostring` write it: text and tails that are only white
+/// space are replaced, and others, such as mixed content's, are kept.
+pub fn pretty(e: Element, indent: usize) -> String {
+    var copy = e.copy()
+    if not copy.children.is_empty() {
+        let space = " ".repeat(indent)
+        var levels: List<String> = [String("\n")]
+        indent_children(mut copy, 0, space, mut levels)
+    }
+    return format(copy)
+}
+
+fn indent_children(e: mut Element, level: usize, space: String, levels: mut List<String>) {
+    if levels.len() <= level + 1 {
+        let next = "{levels[level]}{space}"
+        levels.push(next)
+    }
+    let inner = levels[level + 1].copy()
+    if e.text.trim().is_empty() {
+        e.text = inner.copy()
+    }
+    for i in 0..e.children.len() {
+        if not e.children[i].children.is_empty() {
+            indent_children(mut e.children[i], level + 1, space, mut levels)
+        }
+        if e.children[i].tail.trim().is_empty() {
+            e.children[i].tail = inner.copy()
+        }
+    }
+    let last = e.children.len() - 1
+    if e.children[last].tail.trim().is_empty() {
+        e.children[last].tail = levels[level].copy()
+    }
+}
+
+fn write(e: Element, out: mut String) {
+    out.push('<')
+    out.push_str(e.tag)
+    for (name, value) in e.attributes {
+        out.push(' ')
+        out.push_str(name)
+        out.push_str("=\"")
+        add_escaped(value, true, mut out)
+        out.push('"')
+    }
+    if e.text.is_empty() and e.children.is_empty() {
+        out.push_str(" />")
+    } else {
+        out.push('>')
+        add_escaped(e.text, false, mut out)
+        for c in e.children {
+            write(c, mut out)
+        }
+        out.push_str("</")
+        out.push_str(e.tag)
+        out.push('>')
+    }
+    add_escaped(e.tail, false, mut out)
+}
+
+/// `text` for an element's text: `&`, `<` and `>` as `&amp;`, `&lt;` and `&gt;`.
+pub fn escape(text: String) -> String {
+    var out = String()
+    add_escaped(text, false, mut out)
+    return out
+}
+
+/// `text` for an attribute's value in double quotes: as `escape` writes it, with `"` as `&quot;`,
+/// and a tab or line end as a character reference, so reading it back keeps it.
+pub fn escape_attribute(text: String) -> String {
+    var out = String()
+    add_escaped(text, true, mut out)
+    return out
+}
+
+fn add_escaped(text: String, attribute: bool, out: mut String) {
+    var run: usize = 0
+    for i in 0..text.len() {
+        let c = text.byte_at(i)
+        let s = match c {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => if attribute { "&quot;" } else { "" },
+            b'\r' => if attribute { "&#13;" } else { "" },
+            b'\n' => if attribute { "&#10;" } else { "" },
+            b'\t' => if attribute { "&#09;" } else { "" },
+            _ => "",
+        }
+        if s.is_empty() {
+            continue
+        }
+        out.push_str(text[run..i])
+        out.push_str(s)
+        run = i + 1
+    }
+    out.push_str(text[run..])
+}
