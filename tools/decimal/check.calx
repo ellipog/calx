@@ -1,0 +1,403 @@
+// Checks std.decimal against CPython's decimal module on random values.
+//
+//     calx run --release tools/decimal/check.calx -- [--python PATH] [--seed N] [--count N]
+//
+// It makes `count` random cases of each operation, `op|prec|rounding|a|b` a line, with values of
+// every size, ties to round, values near 1 for the logarithms, perfect squares, and the edges of
+// the parser. reference.py works them out with Python's decimal, and this file's own copy, started
+// as `side`, with std.decimal; every line must be the same. Python is `py` on Windows and
+// `python3` elsewhere unless --python says.
+import std.decimal.{Context, Decimal, Rounding}
+import std.env
+import std.io.{Lines}
+import std.path
+import std.process
+import std.process.{Command, current_exe}
+import std.random.{Random}
+
+fn stop(why: String) {
+    eprintln("decimal check: {why}")
+    process.exit(2)
+}
+
+fn rounding_of(name: String) -> Rounding {
+    let all = [Rounding.HalfEven, Rounding.HalfUp, Rounding.HalfDown, Rounding.Up, Rounding.Down, Rounding.Ceiling, Rounding.Floor,
+               Rounding.ZeroFiveUp]
+    for m in all {
+        if "{m}" == name {
+            return m
+        }
+    }
+    return Rounding.HalfEven
+}
+
+// --- The side being checked -------------------------------------------------------------------
+
+fn sign_of(c: i32) -> String {
+    return String(if c < 0 { "-1" } else if c > 0 { "1" } else { "0" })
+}
+
+fn hex16(v: u64) -> String {
+    let hex = "0123456789abcdef"
+    var out = String()
+    var k: u64 = 64
+    while k > 0 {
+        k -= 4
+        let d = usize.wrap((v >> k) & 15)
+        out.push_str(hex[d..d + 1])
+    }
+    return out
+}
+
+fn work(op: String, ctx: Context, a: String, b: String) -> String {
+    if op == "fromfloat" {
+        let bits = u64.parse_radix(a, 16) ?? 0
+        return match ctx.from_f64(f64.from_bits(bits)) {
+            some(d) => "{d}",
+            none => String("error"),
+        }
+    }
+    let x = match ctx.parse(a) {
+        some(d) => d,
+        none => return String("error"),
+    }
+    if op == "str" {
+        return "{x}"
+    }
+    if op == "plain" {
+        return x.to_plain()
+    }
+    if op == "neg" {
+        return "{-x}"
+    }
+    if op == "abs" {
+        return "{x.abs()}"
+    }
+    if op == "integral" {
+        return "{x.to_integral()}"
+    }
+    if op == "normalize" {
+        return "{x.normalize()}"
+    }
+    if op == "float" {
+        return hex16(x.to_f64().to_bits())
+    }
+    if op == "int" {
+        return "{x.to_bigint()}"
+    }
+    if op == "sqrt" {
+        return if x.is_negative() { String("error") } else { "{x.sqrt()}" }
+    }
+    if op == "exp" {
+        return "{x.exp()}"
+    }
+    if op == "ln" {
+        return if x.is_zero() or x.is_negative() { String("error") } else { "{x.ln()}" }
+    }
+    if op == "log10" {
+        return if x.is_zero() or x.is_negative() { String("error") } else { "{x.log10()}" }
+    }
+    if op == "powi" {
+        let n = i64.parse(b) ?? 0
+        return if x.is_zero() and n <= 0 { String("error") } else { "{x.powi(n)}" }
+    }
+    if op == "round" {
+        let places = i64.parse(b) ?? 0
+        if x.is_zero() {
+            return "{x.round(places)}"
+        }
+        // What Python refuses: more digits than the precision.
+        let r = x.with_prec(1000).round(places)
+        return if r.digits() > u64(ctx.prec()) { String("error") } else { "{x.round(places)}" }
+    }
+    let y = match ctx.parse(b) {
+        some(d) => d,
+        none => return String("error"),
+    }
+    if op == "pow" {
+        let integral = y.to_integral() == y
+        if (x.is_zero() and (y.is_zero() or y.is_negative())) or (x.is_negative() and not integral) {
+            return String("error")
+        }
+        return "{x.pow(y)}"
+    }
+    if op == "quantize" {
+        if x.is_zero() {
+            return "{x.quantize(y)}"
+        }
+        let r = x.with_prec(1000).quantize(y)
+        return if r.digits() > u64(ctx.prec()) { String("error") } else { "{x.quantize(y)}" }
+    }
+    if op == "cmp" {
+        return "{sign_of(match x.cmp(y) { Less => -1, Equal => 0, Greater => 1 })} {x == y}"
+    }
+    if op == "add" {
+        return "{x + y}"
+    }
+    if op == "sub" {
+        return "{x - y}"
+    }
+    if op == "mul" {
+        return "{x * y}"
+    }
+    if op == "div" {
+        return if y.is_zero() { String("error") } else { "{x / y}" }
+    }
+    if op == "rem" {
+        if y.is_zero() {
+            return String("error")
+        }
+        // What Python refuses: an integer quotient with more digits than the precision.
+        let q = (x.with_prec(1000) / y).to_bigint()
+        return if q.abs().to_radix(10).len() > usize(ctx.prec()) { String("error") } else { "{x % y}" }
+    }
+    stop("no operation {op}")
+    return String()
+}
+
+fn side() {
+    var input = Lines()
+    while let line = input.next() {
+        let f = line.split("|")
+        let ctx = Context.new(u32.parse(f[1]) ?? 28).with_rounding(rounding_of(f[2]))
+        println(work(f[0].copy(), ctx, f[3].copy(), f[4].copy()))
+    }
+}
+
+// --- Cases ------------------------------------------------------------------------------------
+
+fn digits(r: mut Random, n: i64) -> String {
+    var out = String()
+    for k in 0..n {
+        let d = if k == 0 { r.range(1, 10) } else { r.range(0, 10) }
+        out.push_str("{d}")
+    }
+    return out
+}
+
+/// A random number of `n` digits at exponent `e`, written now and then with a point.
+fn number(r: mut Random, n: i64, e: i64, neg: bool) -> String {
+    let ds = digits(mut r, n)
+    let sign = if neg { "-" } else if r.chance(0.05) { "+" } else { "" }
+    if r.chance(0.3) and e < 0 and 0 - e <= n + 3 {
+        // As digits with a point.
+        let point = n + e
+        if point <= 0 {
+            return "{sign}0.{"0".repeat(usize.wrap(0 - point))}{ds}"
+        }
+        return "{sign}{ds[..usize.wrap(point)]}.{ds[usize.wrap(point)..]}"
+    }
+    return "{sign}{ds}E{e}"
+}
+
+fn size(r: mut Random) -> i64 {
+    let x = r.float()
+    return if x < 0.6 { r.range(1, 20) } else if x < 0.9 { r.range(20, 60) } else { r.range(60, 160) }
+}
+
+fn general(r: mut Random) -> String {
+    if r.chance(0.04) {
+        return "{if r.coin() { "-" } else { "" }}0E{r.range(-30, 30)}"
+    }
+    let n = size(mut r)
+    let e = if r.chance(0.9) { r.range(-40, 30) } else { r.range(-400, 400) }
+    let neg = r.coin()
+    return number(mut r, n, e, neg)
+}
+
+/// A value whose digits past `prec` are a tie, or nearly.
+fn tie(r: mut Random, prec: i64) -> String {
+    var ds = digits(mut r, prec)
+    let tail = match r.below(4) {
+        0 => "5",
+        1 => "50000",
+        2 => "49999",
+        _ => "50001",
+    }
+    ds.push_str(tail)
+    return "{if r.coin() { "-" } else { "" }}{ds}E{r.range(-20, 10)}"
+}
+
+fn positive(r: mut Random) -> String {
+    let n = size(mut r)
+    let e = r.range(-40, 30)
+    return number(mut r, n, e, false)
+}
+
+/// 1 plus or minus a little.
+fn near_one(r: mut Random) -> String {
+    let zeros = r.range(0, 40)
+    let n = r.range(1, 30)
+    let tail = digits(mut r, n)
+    if r.coin() {
+        return "1.{"0".repeat(usize.wrap(zeros))}{tail}"
+    }
+    return "0.{"9".repeat(usize.wrap(zeros))}{tail}"
+}
+
+fn case(r: mut Random, op: str) -> String {
+    let prec = if r.chance(0.6) { r.range(1, 40) } else if r.chance(0.5) { 28 } else { r.range(40, 100) }
+    let names = ["HalfEven", "HalfUp", "HalfDown", "Up", "Down", "Ceiling", "Floor", "ZeroFiveUp"]
+    let rounding = names[r.index(names.len())]
+    var a = general(mut r)
+    var b = general(mut r)
+    if op == "add" or op == "sub" or op == "neg" or op == "abs" or op == "mul" {
+        if r.chance(0.3) {
+            a = tie(mut r, prec)
+        }
+        if r.chance(0.2) {
+            // Far apart, or cancelling.
+            if r.coin() {
+                let n = size(mut r)
+                let e = r.range(-200, -100)
+                let neg = r.coin()
+                b = number(mut r, n, e, neg)
+            } else {
+                b = a.copy()
+            }
+        }
+    } else if op == "sqrt" {
+        if r.chance(0.3) {
+            let n = r.range(1, 15)
+            let k = digits(mut r, n)
+            let kk = (i64.parse(k) ?? 1)
+            a = "{i128_square(kk)}E{r.range(-20, 20)}"
+        } else {
+            a = positive(mut r)
+        }
+    } else if op == "exp" {
+        let n = r.range(1, 30)
+        let e = r.range(-40, 4) - n + 1
+        let neg = r.coin()
+        a = number(mut r, n, e, neg)
+    } else if op == "ln" or op == "log10" {
+        a = if r.chance(0.3) { near_one(mut r) } else if r.chance(0.1) { "1E{r.range(-50, 50)}" } else { positive(mut r) }
+    } else if op == "powi" {
+        let n = r.range(1, 20)
+        let e = r.range(-10, 10) - n + 1
+        let neg = r.coin()
+        a = number(mut r, n, e, neg)
+        b = "{if r.chance(0.9) { r.range(-30, 30) } else { r.range(-2000, 2000) }}"
+    } else if op == "pow" {
+        if r.chance(0.3) {
+            // Exact: a perfect square, fourth or fifth power to a power with that denominator.
+            let k = r.range(1, 1000)
+            let which = r.below(3)
+            let pw: i64 = if which == 0 { 2 } else if which == 1 { 4 } else { 5 }
+            var v: i64 = 1
+            for _ in 0..pw {
+                v *= k
+            }
+            a = "{v}E{pw * r.range(-3, 3)}"
+            let ys = if which == 0 { ["0.5", "1.5", "-0.5", "2.5"] } else if which == 1 { ["0.25", "0.75", "-0.25", "1.25"] } else { ["0.2", "0.4", "-0.6", "1.2"] }
+            b = String(ys[r.index(4)])
+        } else {
+            let n = r.range(1, 20)
+            let e = r.range(-5, 5) - n + 1
+            let xneg = r.chance(0.1)
+            a = number(mut r, n, e, xneg)
+            let m = r.range(1, 10)
+            let f = r.range(-3, 1) - m + 1
+            let neg = r.coin()
+            b = number(mut r, m, f, neg)
+        }
+    } else if op == "quantize" {
+        b = "1E{r.range(-40, 30)}"
+    } else if op == "round" {
+        b = "{r.range(-10, 40)}"
+    } else if op == "fromfloat" {
+        var bits = r.next_u64()
+        while (bits >> 52) & 0x7FF == 0x7FF {
+            bits = r.next_u64()
+        }
+        a = hex16(bits)
+    } else if op == "str" or op == "plain" {
+        if r.chance(0.2) {
+            a = "  {a}_ "
+            a = a.replace("_ ", " ")
+        }
+    }
+    return "{op}|{prec}|{rounding}|{a}|{b}\n"
+}
+
+/// The decimal digits of k², which can be beyond an i64.
+fn i128_square(k: i64) -> String {
+    let d = Decimal.from(k).with_prec(100)
+    return "{d * d}"
+}
+
+fn lines_of(bytes: own List<u8>) -> List<String> {
+    return (String.from_utf8(bytes) ?? String()).lines()
+}
+
+fn run(cmd: own Command, data: own List<u8>, who: str) -> List<String> {
+    let o = match cmd.input(data).output() {
+        ok(o) => o,
+        err(e) => {
+            stop("{who}: {e}")
+            return []
+        },
+    }
+    if not o.status.success() {
+        let got = lines_of(o.stdout.copy())
+        stop("{who} {o.status} after {got.len()} lines:\n{o.error_text()}")
+    }
+    return lines_of(o.stdout)
+}
+
+fn main() {
+    let a = env.args()
+    if a.len() > 0 and a[0] == "side" {
+        side()
+        return
+    }
+    var python = String(if env.os() == "windows" { "py" } else { "python3" })
+    var seed: u64 = 1
+    var count: usize = 3000
+    var k: usize = 0
+    while k < a.len() {
+        if a[k] == "--python" and k + 1 < a.len() {
+            python = a[k + 1].copy()
+            k += 2
+        } else if a[k] == "--seed" and k + 1 < a.len() {
+            seed = u64.parse(a[k + 1].copy()) ?? 1
+            k += 2
+        } else if a[k] == "--count" and k + 1 < a.len() {
+            count = usize.wrap(u64.parse(a[k + 1].copy()) ?? 3000)
+            k += 2
+        } else {
+            stop("usage: calx run --release tools/decimal/check.calx -- [--python PATH] [--seed N] [--count N]")
+        }
+    }
+    let here = path.parent_dir(env.script() ?? current_exe()) ?? String(".")
+    let ops = ["add", "sub", "mul", "div", "rem", "neg", "abs", "sqrt", "exp", "ln", "log10", "powi", "pow", "quantize", "round",
+               "integral", "normalize", "cmp", "str", "plain", "float", "int", "fromfloat"]
+    var r = Random.new(seed)
+    var cases = List<String>()
+    for op in ops {
+        for _ in 0..count {
+            cases.push(case(mut r, op))
+        }
+    }
+    var data = List<u8>()
+    for c in cases {
+        data.extend(c.to_bytes())
+    }
+    let want = run(Command.new(python.copy()).args([String("-I"), "{here}/reference.py"]), data.copy(), "Python")
+    let got = run(Command.new(current_exe()).arg("side"), data, "the Calx side")
+    var wrong: usize = 0
+    for i in 0..cases.len() {
+        let w = if i < want.len() { want[i].copy() } else { String("(nothing)") }
+        let g = if i < got.len() { got[i].copy() } else { String("(nothing)") }
+        if w != g {
+            wrong += 1
+            if wrong <= 30 {
+                println("{cases[i].trim()}\n    Python {w}\n    Calx   {g}")
+            }
+        }
+    }
+    println("{cases.len()} cases, {ops.len()} operations: {wrong} different")
+    if wrong > 0 {
+        process.exit(1)
+    }
+}

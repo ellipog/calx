@@ -1,0 +1,7 @@
+// The logarithm of 0 panics at the call: Python gives -Infinity, which a Decimal can't hold.
+
+import std.decimal.{Decimal}
+
+fn main() {
+    println("{Decimal.zero().ln()}")    // panic: ln(0) is undefined
+}

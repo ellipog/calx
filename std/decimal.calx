@@ -1,0 +1,2207 @@
+/// Decimal numbers of any size and precision, as Python's `decimal` module has them (CLX-146).
+///
+/// A `Decimal` is a sign, a coefficient and an exponent, the value being coefficient × 10^exponent,
+/// with the context its arithmetic rounds to: a precision in significant digits and a rounding.
+/// `+`, `-`, `*`, `/` and `%` round as Python's do in the same context, and `sqrt`, `exp`, `ln`,
+/// `log10`, `powi` and `pow` are correctly rounded.
+///
+/// The coefficient is kept in limbs of nine decimal digits, base 10^9, the lowest first, as
+/// libmpdec keeps it in base 10^19: rounding to a number of digits, and writing the digits out,
+/// need no change of base. The transcendental functions work in binary fixed point on `BigInt`s.
+module std.decimal
+
+import std.bigint.{BigInt}
+
+/// The limbs' base.
+const BASE: u64 = 1000000000
+const POW10: [u32; 10] = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000]
+/// The largest adjusted exponent, and the smallest is its negative, as libmpdec's MAX_EMAX.
+const EMAX: i64 = 999999999999999999
+/// ln 2 × 2^2048, rounded down, the top limb first, from its series; checked against Python's
+/// decimal at 800 digits.
+const LN2_LIMBS: [u64; 32] = [
+    0xb17217f7d1cf79ab, 0xc9e3b39803f2f6af, 0x40f343267298b62d, 0x8a0d175b8baafa2b,
+    0xe7b876206debac98, 0x559552fb4afa1b10, 0xed2eae35c1382144, 0x27573b291169b825,
+    0x3e96ca16224ae8c5, 0x1acbda11317c387e, 0xb9ea9bc3b136603b, 0x256fa0ec7657f74b,
+    0x72ce87b19d6548ca, 0xf5dfa6bd38303248, 0x655fa1872f20e3a2, 0xda2d97c50f3fd5c6,
+    0x07f4ca11fb5bfb90, 0x610d30f88fe551a2, 0xee569d6dfc1efa15, 0x7d2e23de1400b396,
+    0x17460775db8990e5, 0xc943e732b479cd33, 0xcccc4e659393514c, 0x4c1a1e0bd1d6095d,
+    0x25669b333564a337, 0x6a9c7f8a5e148e82, 0x074db6015cfe7aa3, 0x0c480a5417350d2c,
+    0x955d5179b1e17b9d, 0xae313cdb6c606cb1, 0x078f735d1b2db31b, 0x5f50b5185064c18b,
+]
+/// ln 10 × 2^2046, the same way.
+const LN10_LIMBS: [u64; 32] = [
+    0x935d8dddaaa8ac16, 0xea56d62b82d30a28, 0xe28fecf9da5df90e, 0x83c61e8201f02d72,
+    0x962f02d7b1a8105c, 0xcc70cbc02c5f0d68, 0x2c622418410be2da, 0xfb8f788402e516d6,
+    0x782cf8a28a8c911e, 0x765aa6c3b0d831fb, 0xef66ceb04ab3c6fa, 0x5161bb49d219c7bb,
+    0xca67b35b23605085, 0x8e93368d44789c4f, 0x5b08b057d5ede20f, 0x469ea58e9305e981,
+    0xe2478fcaad3aee98, 0x9cd5b42e6a271619, 0xa47ecb26978c5d4f, 0xdb1d28ea57d4fdc0,
+    0xe40bf3cc1e14126a, 0x45765cde268339db, 0xf47fa96deb271060, 0xaf88486ea9b7401e,
+    0x3dfd3c51748e6d6e, 0x3848c8d25faf1bca, 0xe88047f17b0d9b50, 0xa949eaaadf69e8a5,
+    0xf77e37604e943960, 0xe38a5700ffde2db1, 0xad6bfbffd821ba0a, 0x4cb0466d61ba648e,
+]
+
+/// How a result with more digits than the precision is rounded: Python's `ROUND_` constants.
+pub enum Rounding {
+    HalfEven
+    HalfUp
+    HalfDown
+    Up
+    Down
+    Ceiling
+    Floor
+    ZeroFiveUp
+}
+
+/// The precision, in significant digits, and the rounding that arithmetic rounds results to.
+pub struct Context {
+    digits: u32
+    mode: Rounding
+}
+
+impl Context {
+    /// 28 digits, ties to even: Python's default context, which `Decimal.parse` and the others
+    /// give.
+    pub fn default() -> Context {
+        return Context { digits: 28, mode: Rounding.HalfEven }
+    }
+
+    /// `prec` significant digits, ties to even. It panics for 0.
+    @track_caller
+    pub fn new(prec: u32) -> Context {
+        if prec == 0 {
+            panic("a precision is at least 1 digit")
+        }
+        return Context { digits: prec, mode: Rounding.HalfEven }
+    }
+
+    /// The same precision, with another rounding.
+    pub fn with_rounding(self, rounding: Rounding) -> Context {
+        return Context { digits: self.digits, mode: rounding }
+    }
+
+    /// The precision, in significant digits.
+    pub fn prec(self) -> u32 {
+        return self.digits
+    }
+
+    /// The rounding.
+    pub fn rounding(self) -> Rounding {
+        return self.mode
+    }
+
+    /// `n`, in this context.
+    pub fn from(self, n: i64) -> Decimal {
+        return of_i64(n, self)
+    }
+
+    /// The number in `text`, in this context: see `Decimal.parse`.
+    pub fn parse(self, text: String) -> Decimal? {
+        return parse_in(text, self)
+    }
+
+    /// The exact value of `x`, in this context: see `Decimal.from_f64`.
+    pub fn from_f64(self, x: f64) -> Decimal? {
+        return of_f64(x, self)
+    }
+
+    /// `n`, in this context.
+    pub fn from_bigint(self, n: BigInt) -> Decimal {
+        return of_big(n, self)
+    }
+}
+
+/// A decimal number: a sign, a coefficient of any size, and an exponent, with its context.
+pub struct Decimal {
+    negative: bool       // the sign, which a zero has too: Python writes -0
+    coef: List<u32>      // base 10^9 limbs, the lowest first, with no zero limb at the top; 0 has none
+    ex: i64              // the value is coef × 10^ex
+    ctx: Context         // what its arithmetic rounds to
+}
+
+impl From<i64> for Decimal {
+    fn from(value: own i64) -> Decimal {
+        return of_i64(value, Context.default())
+    }
+}
+
+impl From<i32> for Decimal {
+    fn from(value: own i32) -> Decimal {
+        return of_i64(i64(value), Context.default())
+    }
+}
+
+impl Decimal {
+    /// Zero, in the default context.
+    pub fn zero() -> Decimal {
+        return Decimal { negative: false, coef: [], ex: 0, ctx: Context.default() }
+    }
+
+    /// The number in decimal text, in the default context, as Python's `Decimal(text)` reads it:
+    /// spaces around it, an optional sign, digits with an optional point (`5.`, `.5`), and an
+    /// optional exponent (`1.5e-3`, `2E+10`). A `_` may stand between two digits. It keeps every
+    /// digit, and `none` is anything else, `NaN` and `Infinity` too.
+    pub fn parse(text: String) -> Decimal? {
+        return parse_in(text, Context.default())
+    }
+
+    /// The exact value of a float, in the default context, as Python's `Decimal(x)`: `0.1` is
+    /// `0.1000000000000000055511151231257827021181583404541015625`. `none` for NaN and the
+    /// infinities.
+    pub fn from_f64(x: f64) -> Decimal? {
+        return of_f64(x, Context.default())
+    }
+
+    /// `n`, in the default context.
+    pub fn from_bigint(n: BigInt) -> Decimal {
+        return of_big(n, Context.default())
+    }
+
+    /// `coefficient × 10^exponent`, exactly, in the default context: `Decimal.from_parts(BigInt.from(-15), -1)`
+    /// is -1.5.
+    pub fn from_parts(coefficient: BigInt, exponent: i64) -> Decimal {
+        var d = of_big(coefficient, Context.default())
+        d.ex = exponent
+        return d
+    }
+
+    /// The context its arithmetic rounds to.
+    pub fn context(self) -> Context {
+        return self.ctx
+    }
+
+    /// The same digits, rounding in `ctx` from now on. The digits aren't rounded until the next
+    /// operation.
+    pub fn with_context(self, ctx: Context) -> Decimal {
+        return Decimal { negative: self.negative, coef: self.coef.copy(), ex: self.ex, ctx: ctx }
+    }
+
+    /// The same digits, with `prec` digits of precision from now on. It panics for 0.
+    @track_caller
+    pub fn with_prec(self, prec: u32) -> Decimal {
+        return self.with_context(Context.new(prec).with_rounding(self.ctx.mode))
+    }
+
+    /// The same digits, rounding with `rounding` from now on.
+    pub fn with_rounding(self, rounding: Rounding) -> Decimal {
+        return self.with_context(self.ctx.with_rounding(rounding))
+    }
+
+    /// Whether it's 0 or -0.
+    pub fn is_zero(self) -> bool {
+        return self.coef.len() == 0
+    }
+
+    /// Whether it's below 0. -0 isn't.
+    pub fn is_negative(self) -> bool {
+        return self.negative and self.coef.len() > 0
+    }
+
+    /// Whether its sign is negative, as Python's `is_signed`: true for -0 too.
+    pub fn is_signed(self) -> bool {
+        return self.negative
+    }
+
+    /// -1, 0 or 1, as it's below, at or above 0.
+    pub fn sign(self) -> i32 {
+        return if self.coef.len() == 0 { 0 } else if self.negative { -1 } else { 1 }
+    }
+
+    /// The exponent: the value is the coefficient × 10^exponent.
+    pub fn exponent(self) -> i64 {
+        return self.ex
+    }
+
+    /// The coefficient, never negative: `1.50` has 150.
+    pub fn coefficient(self) -> BigInt {
+        return big_of(self.coef)
+    }
+
+    /// The number of digits in the coefficient, 1 for 0.
+    pub fn digits(self) -> u64 {
+        return u64.wrap(ndigits(self.coef))
+    }
+
+    /// The exponent of its first digit, as Python's `adjusted`: 2 for 123.4, -3 for 0.00123.
+    pub fn adjusted(self) -> i64 {
+        return self.ex + ndigits(self.coef) - 1
+    }
+
+    /// The smaller of the two, or `self` when they're equal, as Python's `min(a, b)`.
+    pub fn min(self, other: Decimal) -> Decimal {
+        return if compare(other, self) < 0 { other.copy() } else { self.copy() }
+    }
+
+    /// The larger of the two, or `self` when they're equal, as Python's `max(a, b)`.
+    pub fn max(self, other: Decimal) -> Decimal {
+        return if compare(other, self) > 0 { other.copy() } else { self.copy() }
+    }
+
+    /// The absolute value, rounded to the context, as Python's `abs`.
+    pub fn abs(self) -> Decimal {
+        return make(false, self.coef.copy(), self.ex, false, self.ctx)
+    }
+
+    /// The value with the exponent of `other`'s, rounded with the context's rounding, as Python's
+    /// `quantize`: `price.quantize(Decimal.parse("0.01")!)` gives cents. It panics when that needs
+    /// more digits than the precision.
+    @track_caller
+    pub fn quantize(self, other: Decimal) -> Decimal {
+        return rescale(self, other.ex, true)
+    }
+
+    /// The value rounded to `places` digits after the point, with the context's rounding, as
+    /// Python's `round(x, places)`: a negative `places` rounds to tens, hundreds and up. It
+    /// panics when that needs more digits than the precision.
+    @track_caller
+    pub fn round(self, places: i64) -> Decimal {
+        return rescale(self, 0 - places, true)
+    }
+
+    /// The value rounded to an integer with the context's rounding, as Python's
+    /// `to_integral_value`. A value with no digits after the point is kept as it is: `1E+5` stays
+    /// `1E+5`.
+    pub fn to_integral(self) -> Decimal {
+        if self.ex >= 0 {
+            return self.copy()
+        }
+        return rescale(self, 0, false)
+    }
+
+    /// The value rounded to the context, without the zeros at the end of the coefficient, as
+    /// Python's `normalize`: `1.500` is `1.5`, `1200` is `1.2E+3`, and `0.00` is `0`.
+    pub fn normalize(self) -> Decimal {
+        let r = make(self.negative, self.coef.copy(), self.ex, false, self.ctx)
+        if r.coef.len() == 0 {
+            return Decimal { negative: r.negative, coef: [], ex: 0, ctx: r.ctx }
+        }
+        let z = trailing_zeros(r.coef)
+        return Decimal { negative: r.negative, coef: shift_down(r.coef, z), ex: r.ex + z, ctx: r.ctx }
+    }
+
+    /// The integer part, rounded toward zero, as Python's `int(x)`.
+    pub fn to_bigint(self) -> BigInt {
+        let c = if self.ex >= 0 { shift_up(self.coef, self.ex) } else { shift_down(self.coef, 0 - self.ex) }
+        let n = big_of(c)
+        return if self.negative { -n } else { n }
+    }
+
+    /// The integer part, rounded toward zero, or `none` when it doesn't fit in an `i64`.
+    pub fn to_i64(self) -> i64? {
+        if self.coef.len() == 0 or self.ex + ndigits(self.coef) <= 0 {
+            return some(0)
+        }
+        if self.ex + ndigits(self.coef) > 19 {
+            return none
+        }
+        return self.to_bigint().to_i64()
+    }
+
+    /// The `f64` nearest the value, ties to even, as Python's `float(x)`: infinity past the
+    /// largest double, and 0 below the least.
+    pub fn to_f64(self) -> f64 {
+        let zero = if self.negative { -0.0 } else { 0.0 }
+        if self.coef.len() == 0 {
+            return zero
+        }
+        let adj = self.ex + ndigits(self.coef) - 1
+        if adj > 309 {
+            return if self.negative { -f64.INFINITY } else { f64.INFINITY }
+        }
+        if adj < -344 {
+            return zero
+        }
+        var x: f64 = 0.0
+        if self.coef.len() <= 2 and self.ex >= -22 and self.ex <= 22 and small_coef(self.coef) < 9007199254740992 {
+            // Both the coefficient and the power of ten are doubles, so one operation rounds once.
+            let c = f64.nearest(small_coef(self.coef))
+            let p = pow10_f64(if self.ex < 0 { 0 - self.ex } else { self.ex })
+            x = if self.ex < 0 { c / p } else { c * p }
+        } else if self.ex >= 0 {
+            x = big_of(shift_up(self.coef, self.ex)).to_f64()
+        } else {
+            x = big_of(self.coef).div_f64(BigInt.from(10).pow(u32.wrap(0 - self.ex)))
+        }
+        return if self.negative { -x } else { x }
+    }
+
+    /// The digits with no exponent, as Python's `format(x, "f")` writes them: `1.5E+3` is
+    /// `1500`, and `1E-7` is `0.0000001`.
+    pub fn to_plain(self) -> String {
+        let digits = coef_text(self.coef)
+        let len = i64.wrap(digits.len())
+        var out = String()
+        if self.negative {
+            out.push_str("-")
+        }
+        if self.ex >= 0 {
+            out.push_str(digits)
+            if self.coef.len() > 0 {
+                out.push_str("0".repeat(usize.wrap(self.ex)))
+            }
+            return out
+        }
+        let dot = len + self.ex
+        if dot <= 0 {
+            out.push_str("0.")
+            out.push_str("0".repeat(usize.wrap(0 - dot)))
+            out.push_str(digits)
+        } else {
+            out.push_str(digits[..usize.wrap(dot)])
+            out.push_str(".")
+            out.push_str(digits[usize.wrap(dot)..])
+        }
+        return out
+    }
+
+    /// The square root, correctly rounded, ties to even whatever the context's rounding, as
+    /// Python's `sqrt`. An exact root has the exponent nearest half the value's: `4.00` gives
+    /// `2.0`. It panics for a value below 0; `-0` gives `-0`.
+    @track_caller
+    pub fn sqrt(self) -> Decimal {
+        let ctx = self.ctx.with_rounding(Rounding.HalfEven)
+        if self.coef.len() == 0 {
+            return Decimal { negative: self.negative, coef: [], ex: floor_half(self.ex), ctx: self.ctx }
+        }
+        if self.negative {
+            panic("{self} has no square root")
+        }
+        return sqrt_of(self, ctx).with_context(self.ctx)
+    }
+
+    /// e to the power of the value, correctly rounded, ties to even, as Python's `exp`. It
+    /// panics when the value is 10^18 or more, or -10^18 or less.
+    @track_caller
+    pub fn exp(self) -> Decimal {
+        if self.coef.len() > 0 and self.ex + ndigits(self.coef) > 18 {
+            panic("exp({self}) is out of range")
+        }
+        return exp_of(self, self.ctx.with_rounding(Rounding.HalfEven)).with_context(self.ctx)
+    }
+
+    /// The natural logarithm, correctly rounded, ties to even, as Python's `ln`. It panics for a
+    /// value that isn't above 0.
+    @track_caller
+    pub fn ln(self) -> Decimal {
+        if self.coef.len() == 0 or self.negative {
+            panic("ln({self}) is undefined")
+        }
+        return log_of(self, false, self.ctx.with_rounding(Rounding.HalfEven)).with_context(self.ctx)
+    }
+
+    /// The logarithm to base 10, correctly rounded, ties to even, as Python's `log10`. A power of
+    /// ten gives its exponent exactly: `1000` gives `3`. It panics for a value that isn't above 0.
+    @track_caller
+    pub fn log10(self) -> Decimal {
+        if self.coef.len() == 0 or self.negative {
+            panic("log10({self}) is undefined")
+        }
+        return log_of(self, true, self.ctx.with_rounding(Rounding.HalfEven)).with_context(self.ctx)
+    }
+
+    /// The value to the power `n`, correctly rounded with the context's rounding, as Python's
+    /// `x ** n` with an integer `n`. An exact result is kept exact: `Decimal.parse("1.5")!.powi(2)`
+    /// is `2.25`. It panics for 0 to a power of 0 or less.
+    @track_caller
+    pub fn powi(self, n: i64) -> Decimal {
+        if self.coef.len() == 0 and n == 0 {
+            panic("0 to the power 0 is undefined")
+        }
+        if self.coef.len() == 0 and n < 0 {
+            panic("division by zero: 0 to the power {n}")
+        }
+        return pow_of(self, n)
+    }
+}
+
+impl Decimal {
+    /// The value to the power `y`, as Python's `x ** y`, correctly rounded with the context's
+    /// rounding, in the wider of the two contexts. An integer `y` is `powi`'s. Otherwise the result
+    /// has the precision's digits, exact or not: 4 to the power 0.5 is
+    /// `2.000000000000000000000000000`. It panics for a value below 0 to a power that isn't an
+    /// integer, and for 0 to a power of 0 or less.
+    @track_caller
+    pub fn pow(self, y: Decimal) -> Decimal {
+        let ctx = wider(self.ctx, y.ctx)
+        let x = self.with_context(ctx)
+        let integral = is_integral(y)
+        if integral {
+            if let n = y.to_i64() {
+                return x.powi(n)
+            }
+        }
+        let neg = x.negative and integral and odd(y)
+        if x.coef.len() == 0 {
+            if y.negative and y.coef.len() > 0 {
+                panic("division by zero: 0 to the power {y}")
+            }
+            if y.coef.len() == 0 {
+                panic("0 to the power 0 is undefined")
+            }
+            return Decimal { negative: neg, coef: [], ex: 0, ctx: ctx }
+        }
+        if integral {
+            // Too big for powi, which only 1 and -1 come through: as 1, or 1 with the
+            // precision's digits for a positive power of 1.00, as Python has them.
+            let z = trailing_zeros(x.coef)
+            let one: List<u32> = [1]
+            if x.ex + z == 0 and cmp_mag(shift_down(x.coef, z), one) == 0 {
+                if x.ex == 0 or y.negative {
+                    return Decimal { negative: neg, coef: [1], ex: 0, ctx: ctx }
+                }
+                let p = i64(ctx.digits)
+                return Decimal { negative: neg, coef: shift_up([1], p - 1), ex: 1 - p, ctx: ctx }
+            }
+        } else if x.negative {
+            panic("{self} to the power {y} is undefined")
+        }
+        let ax = Decimal { negative: false, coef: x.coef.copy(), ex: x.ex, ctx: ctx }
+        return pow_real(neg, ax, y, ctx)
+    }
+}
+
+impl Display for Decimal {
+    fn show(self) {
+        print(sci_text(self))
+    }
+}
+
+impl Equal for Decimal {
+    fn eq(self, other: Self) -> bool {
+        return compare(self, other) == 0
+    }
+}
+
+impl Order for Decimal {
+    fn cmp(self, other: Self) -> Ordering {
+        let c = compare(self, other)
+        return if c < 0 { Ordering.Less } else if c > 0 { Ordering.Greater } else { Ordering.Equal }
+    }
+}
+
+impl Hash for Decimal {
+    fn hash(self, h: mut Hasher) {
+        // Equal values hash the same: 1.50 as 1.5, and -0 as 0.
+        if self.coef.len() == 0 {
+            h.add(0u8)
+            return
+        }
+        let z = trailing_zeros(self.coef)
+        h.add(self.negative)
+        h.add(shift_down(self.coef, z))
+        h.add(self.ex + z)
+    }
+}
+
+impl Neg for Decimal {
+    fn neg(self) -> Decimal {
+        // As Python: -0 is 0, unless the rounding is toward negative infinity.
+        let neg = if self.coef.len() == 0 and self.ctx.mode != Rounding.Floor { false } else { not self.negative }
+        return make(neg, self.coef.copy(), self.ex, false, self.ctx)
+    }
+}
+
+impl Add<Decimal> for Decimal {
+    fn add(self, other: Decimal) -> Decimal {
+        return add_of(self, other, other.negative, wider(self.ctx, other.ctx))
+    }
+}
+
+impl Sub<Decimal> for Decimal {
+    fn sub(self, other: Decimal) -> Decimal {
+        return add_of(self, other, not other.negative, wider(self.ctx, other.ctx))
+    }
+}
+
+impl Mul<Decimal> for Decimal {
+    fn mul(self, other: Decimal) -> Decimal {
+        return mul_of(self, other, wider(self.ctx, other.ctx))
+    }
+}
+
+impl Div<Decimal> for Decimal {
+    fn div(self, other: Decimal) -> Decimal {
+        return div_of(self, other, wider(self.ctx, other.ctx))
+    }
+}
+
+impl Rem<Decimal> for Decimal {
+    fn rem(self, other: Decimal) -> Decimal {
+        return rem_of(self, other, wider(self.ctx, other.ctx))
+    }
+}
+
+impl Add<i64> for Decimal {
+    fn add(self, other: i64) -> Decimal {
+        let o = of_i64(other, self.ctx)
+        return add_of(self, o, o.negative, self.ctx)
+    }
+}
+
+impl Sub<i64> for Decimal {
+    fn sub(self, other: i64) -> Decimal {
+        let o = of_i64(other, self.ctx)
+        return add_of(self, o, not o.negative, self.ctx)
+    }
+}
+
+impl Mul<i64> for Decimal {
+    fn mul(self, other: i64) -> Decimal {
+        return mul_of(self, of_i64(other, self.ctx), self.ctx)
+    }
+}
+
+impl Div<i64> for Decimal {
+    fn div(self, other: i64) -> Decimal {
+        return div_of(self, of_i64(other, self.ctx), self.ctx)
+    }
+}
+
+impl Rem<i64> for Decimal {
+    fn rem(self, other: i64) -> Decimal {
+        return rem_of(self, of_i64(other, self.ctx), self.ctx)
+    }
+}
+
+impl Add<i32> for Decimal {
+    fn add(self, other: i32) -> Decimal {
+        let o = of_i64(i64(other), self.ctx)
+        return add_of(self, o, o.negative, self.ctx)
+    }
+}
+
+impl Sub<i32> for Decimal {
+    fn sub(self, other: i32) -> Decimal {
+        let o = of_i64(i64(other), self.ctx)
+        return add_of(self, o, not o.negative, self.ctx)
+    }
+}
+
+impl Mul<i32> for Decimal {
+    fn mul(self, other: i32) -> Decimal {
+        return mul_of(self, of_i64(i64(other), self.ctx), self.ctx)
+    }
+}
+
+impl Div<i32> for Decimal {
+    fn div(self, other: i32) -> Decimal {
+        return div_of(self, of_i64(i64(other), self.ctx), self.ctx)
+    }
+}
+
+impl Rem<i32> for Decimal {
+    fn rem(self, other: i32) -> Decimal {
+        return rem_of(self, of_i64(i64(other), self.ctx), self.ctx)
+    }
+}
+
+// --- Making one ------------------------------------------------------------------------------
+
+/// The context of a result from two operands: the one with more digits, or the left one's.
+fn wider(a: Context, b: Context) -> Context {
+    return if b.digits > a.digits { b } else { a }
+}
+
+fn of_i64(n: i64, ctx: Context) -> Decimal {
+    let bits = u64.wrap(n)
+    return Decimal { negative: n < 0, coef: limbs_of(if n < 0 { 0 - bits } else { bits }), ex: 0, ctx: ctx }
+}
+
+fn of_big(n: BigInt, ctx: Context) -> Decimal {
+    let text = n.abs().to_radix(10)
+    var coef = List<u32>()
+    var end = text.len()
+    while end > 0 {
+        let start = if end >= 9 { end - 9 } else { 0 }
+        var v: u32 = 0
+        for k in start..end {
+            v = v * 10 + u32(text.byte_at(k) - b'0')
+        }
+        coef.push(v)
+        end = start
+    }
+    trim(mut coef)
+    return Decimal { negative: n.is_negative(), coef: coef, ex: 0, ctx: ctx }
+}
+
+fn of_f64(x: f64, ctx: Context) -> Decimal? {
+    let bits = x.to_bits()
+    if (bits >> 52) & 0x7FF == 0x7FF {
+        return none
+    }
+    let neg = bits >> 63 == 1
+    let biased = i64.wrap((bits >> 52) & 0x7FF)
+    var m = bits & 0xFFFFFFFFFFFFF
+    var e: i64 = 0
+    if biased == 0 {
+        e = -1074
+    } else {
+        m = m | 0x10000000000000
+        e = biased - 1075
+    }
+    if m == 0 {
+        return some(Decimal { negative: neg, coef: [], ex: 0, ctx: ctx })
+    }
+    // m × 2^e, with m odd: an integer when e >= 0, and m × 5^-e × 10^e otherwise.
+    let tz = m.trailing_zeros()
+    m = m >> u64.wrap(tz)
+    e += i64(tz)
+    var d = of_big(BigInt.from(m), ctx)
+    if e >= 0 {
+        d = of_big(BigInt.from(m).shl(u64.wrap(e)), ctx)
+    } else {
+        d = of_big(BigInt.from(m) * BigInt.from(5).pow(u32.wrap(0 - e)), ctx)
+        d.ex = e
+    }
+    d.negative = neg
+    return some(d)
+}
+
+fn parse_in(text: String, ctx: Context) -> Decimal? {
+    let t = text.trim()
+    let n = t.len()
+    var i: usize = 0
+    var neg = false
+    if i < n and (t.byte_at(i) == b'+' or t.byte_at(i) == b'-') {
+        neg = t.byte_at(i) == b'-'
+        i += 1
+    }
+    var digits = List<u8>()
+    var frac: i64 = 0
+    var point = false
+    var any = false
+    while i < n {
+        let b = t.byte_at(i)
+        if b >= b'0' and b <= b'9' {
+            if digits.len() > 0 or b != b'0' {
+                digits.push(b - b'0')
+            }
+            any = true
+            if point {
+                frac += 1
+            }
+        } else if b == b'_' and i > 0 and is_digit(t.byte_at(i - 1)) and i + 1 < n and is_digit(t.byte_at(i + 1)) {
+            // between two digits
+        } else if b == b'.' and not point {
+            point = true
+        } else {
+            break
+        }
+        i += 1
+    }
+    if not any {
+        return none
+    }
+    var e: i64 = 0
+    if i < n and (t.byte_at(i) == b'e' or t.byte_at(i) == b'E') {
+        i += 1
+        var eneg = false
+        if i < n and (t.byte_at(i) == b'+' or t.byte_at(i) == b'-') {
+            eneg = t.byte_at(i) == b'-'
+            i += 1
+        }
+        var edigits = false
+        while i < n {
+            let b = t.byte_at(i)
+            if is_digit(b) {
+                if e > EMAX {
+                    return none
+                }
+                e = e * 10 + i64(b - b'0')
+                edigits = true
+            } else if b == b'_' and edigits and i + 1 < n and is_digit(t.byte_at(i + 1)) {
+                // between two digits
+            } else {
+                break
+            }
+            i += 1
+        }
+        if not edigits or e > EMAX {
+            return none
+        }
+        if eneg {
+            e = 0 - e
+        }
+    }
+    if i != n {
+        return none
+    }
+    var coef = List<u32>()
+    var end = digits.len()
+    while end > 0 {
+        let start = if end >= 9 { end - 9 } else { 0 }
+        var v: u32 = 0
+        for k in start..end {
+            v = v * 10 + u32(digits[k])
+        }
+        coef.push(v)
+        end = start
+    }
+    return some(Decimal { negative: neg, coef: coef, ex: e - frac, ctx: ctx })
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= b'0' and b <= b'9'
+}
+
+// --- Text ------------------------------------------------------------------------------------
+
+fn coef_text(c: List<u32>) -> String {
+    let n = c.len()
+    if n == 0 {
+        return String("0")
+    }
+    var out = String()
+    out.reserve(9 * n)
+    out.push_str("{c[n - 1]}")
+    var i = n - 1
+    while i > 0 {
+        i -= 1
+        out.push_str("{c[i]:09}")
+    }
+    return out
+}
+
+/// Python's `str`: the General Decimal Arithmetic's to-scientific-string.
+fn sci_text(d: Decimal) -> String {
+    let digits = coef_text(d.coef)
+    let len = i64.wrap(digits.len())
+    let left = d.ex + len
+    let dot = if d.ex <= 0 and left > -6 { left } else { 1 }
+    var out = String()
+    if d.negative {
+        out.push_str("-")
+    }
+    if dot <= 0 {
+        out.push_str("0.")
+        out.push_str("0".repeat(usize.wrap(0 - dot)))
+        out.push_str(digits)
+    } else if dot >= len {
+        out.push_str(digits)
+        out.push_str("0".repeat(usize.wrap(dot - len)))
+    } else {
+        out.push_str(digits[..usize.wrap(dot)])
+        out.push_str(".")
+        out.push_str(digits[usize.wrap(dot)..])
+    }
+    if left != dot {
+        let e = left - dot
+        if e >= 0 {
+            out.push_str("E+{e}")
+        } else {
+            out.push_str("E{e}")
+        }
+    }
+    return out
+}
+
+// --- Comparing -------------------------------------------------------------------------------
+
+fn compare(a: Decimal, b: Decimal) -> i32 {
+    let sa = a.sign()
+    let sb = b.sign()
+    if sa != sb {
+        return if sa < sb { -1 } else { 1 }
+    }
+    if sa == 0 {
+        return 0
+    }
+    let c = compare_abs(a, b)
+    return if sa > 0 { c } else { 0 - c }
+}
+
+/// The order of two nonzero magnitudes.
+fn compare_abs(a: Decimal, b: Decimal) -> i32 {
+    let aa = a.ex + ndigits(a.coef)
+    let ab = b.ex + ndigits(b.coef)
+    if aa != ab {
+        return if aa < ab { -1 } else { 1 }
+    }
+    // The same first place, so the exponents differ by no more than the digits do.
+    if a.ex == b.ex {
+        return cmp_mag(a.coef, b.coef)
+    }
+    if a.ex > b.ex {
+        return cmp_mag(shift_up(a.coef, a.ex - b.ex), b.coef)
+    }
+    return cmp_mag(a.coef, shift_up(b.coef, b.ex - a.ex))
+}
+
+// --- Rounding --------------------------------------------------------------------------------
+
+/// A result: `coef × 10^exp`, and something more below its last digit when `sticky`, rounded
+/// to the context. A sticky coefficient has more digits than the precision.
+fn make(neg: bool, coef: own List<u32>, exp: i64, sticky: bool, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    let d = ndigits(coef)
+    if d <= p {
+        check_range(coef, exp)
+        return Decimal { negative: neg, coef: coef, ex: exp, ctx: ctx }
+    }
+    let k = d - p
+    var rest = rest_after(coef, k)
+    if sticky {
+        if rest == 0 {
+            rest = 1
+        } else if rest == 2 {
+            rest = 3
+        }
+    }
+    var q = shift_down_own(coef, k)
+    var e = exp + k
+    if rest != 0 and away(neg, q, rest, ctx.mode) {
+        inc(mut q)
+        if ndigits(q) > p {
+            q = shift_down_own(q, 1)
+            e += 1
+        }
+    }
+    check_range(q, e)
+    return Decimal { negative: neg, coef: q, ex: e, ctx: ctx }
+}
+
+fn check_range(coef: List<u32>, exp: i64) {
+    let adj = exp + ndigits(coef) - 1
+    if adj > EMAX or adj < 0 - EMAX or exp < 0 - EMAX - EMAX {
+        panic("a Decimal's exponent is out of range, past 10^{EMAX}")
+    }
+}
+
+/// Whether a coefficient cut to `q`, with `rest` saying what was cut (1 below half, 2 half, 3
+/// above), rounds away from zero.
+fn away(neg: bool, q: List<u32>, rest: i32, mode: Rounding) -> bool {
+    let last: u32 = if q.len() == 0 { 0 } else { q[0] % 10 }
+    return match mode {
+        HalfEven => rest == 3 or (rest == 2 and last % 2 == 1),
+        HalfUp => rest >= 2,
+        HalfDown => rest == 3,
+        Up => true,
+        Down => false,
+        Ceiling => not neg,
+        Floor => neg,
+        ZeroFiveUp => last == 0 or last == 5,
+    }
+}
+
+/// What the last `k` digits of `a` are, against half of 10^k: 0 when they're all zero, 1 below
+/// half, 2 exactly half, 3 above.
+fn rest_after(a: List<u32>, k: i64) -> i32 {
+    let top = k - 1
+    let li = top / 9
+    if li >= i64.wrap(a.len()) {
+        return if a.len() == 0 { 0 } else { 1 }
+    }
+    let i = usize.wrap(li)
+    let p = POW10[usize.wrap(top % 9)]
+    let digit = (a[i] / p) % 10
+    var below = a[i] % p == 0
+    var j: usize = 0
+    while below and j < i {
+        if a[j] != 0 {
+            below = false
+        }
+        j += 1
+    }
+    if digit < 5 {
+        return if digit == 0 and below { 0 } else { 1 }
+    }
+    if digit == 5 {
+        return if below { 2 } else { 3 }
+    }
+    return 3
+}
+
+/// The value at exponent `e`, rounded with its context's rounding; with `check`, a panic when
+/// that's more digits than the precision.
+@track_caller
+fn rescale(d: Decimal, e: i64, check: bool) -> Decimal {
+    var c = List<u32>()
+    if e <= d.ex {
+        c = shift_up(d.coef, d.ex - e)
+    } else {
+        let k = e - d.ex
+        let rest = rest_after(d.coef, k)
+        c = shift_down(d.coef, k)
+        if rest != 0 and away(d.negative, c, rest, d.ctx.mode) {
+            inc(mut c)
+        }
+    }
+    if check and c.len() > 0 and ndigits(c) > i64(d.ctx.digits) {
+        panic("{d} at exponent {e} needs more than {d.ctx.digits} digits")
+    }
+    check_range(c, e)
+    return Decimal { negative: d.negative, coef: c, ex: e, ctx: d.ctx }
+}
+
+// --- Arithmetic ------------------------------------------------------------------------------
+
+/// `a + b`, with `bneg` as `b`'s sign, so subtraction is the same with it flipped.
+fn add_of(a: Decimal, b: Decimal, bneg: bool, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    let az = a.coef.len() == 0
+    let bz = b.coef.len() == 0
+    if az and bz {
+        let neg = if a.negative == bneg { bneg } else { ctx.mode == Rounding.Floor }
+        return make(neg, [], a.ex.min(b.ex), false, ctx)
+    }
+    if az or bz {
+        // The other one, at the lower exponent, but no lower than a digit past what can show.
+        let (neg, c, e, ze) = if az { (bneg, b.coef.copy(), b.ex, a.ex) } else { (a.negative, a.coef.copy(), a.ex, b.ex) }
+        let target = e.min(ze).max(e - p - 1)
+        return make(neg, shift_up(c, e - target), target, false, ctx)
+    }
+    if a.ex >= b.ex {
+        return add_parts(a.coef, a.ex, a.negative, b.coef, b.ex, bneg, ctx)
+    }
+    return add_parts(b.coef, b.ex, bneg, a.coef, a.ex, a.negative, ctx)
+}
+
+/// The sum of two nonzero values, `hi` with the higher exponent.
+fn add_parts(hi: List<u32>, hi_e: i64, hi_neg: bool, lo: List<u32>, lo_e: i64, lo_neg: bool, ctx: Context) -> Decimal {
+    // A value wholly below this place rounds the same as any other there, so it's taken as one
+    // unit at it, which keeps the shift small.
+    let lim = hi_e + (-1i64).min(ndigits(hi) - i64(ctx.digits) - 2)
+    if lo_e + ndigits(lo) - 1 < lim {
+        return add_aligned(hi, hi_e - lim, hi_neg, [1], lo_neg, lim, ctx)
+    }
+    return add_aligned(hi, hi_e - lo_e, hi_neg, lo, lo_neg, lo_e, ctx)
+}
+
+/// `hi × 10^shift` plus `lo`, with their signs, at exponent `e`.
+fn add_aligned(hi: List<u32>, shift: i64, hi_neg: bool, lo: List<u32>, lo_neg: bool, e: i64, ctx: Context) -> Decimal {
+    var c = shift_up(hi, shift)
+    if hi_neg == lo_neg {
+        add_into(mut c, lo)
+        return make(hi_neg, c, e, false, ctx)
+    }
+    let order = cmp_mag(c, lo)
+    if order == 0 {
+        return make(ctx.mode == Rounding.Floor, [], e, false, ctx)
+    }
+    if order > 0 {
+        sub_into(mut c, lo)
+        return make(hi_neg, c, e, false, ctx)
+    }
+    return make(lo_neg, sub_mag(lo, c), e, false, ctx)
+}
+
+fn mul_of(a: Decimal, b: Decimal, ctx: Context) -> Decimal {
+    return make(a.negative != b.negative, mul_mag(a.coef, b.coef), a.ex + b.ex, false, ctx)
+}
+
+fn div_of(a: Decimal, b: Decimal, ctx: Context) -> Decimal {
+    if b.coef.len() == 0 {
+        panic(if a.coef.len() == 0 { "0 / 0 is undefined" } else { "division by zero" })
+    }
+    let neg = a.negative != b.negative
+    let ideal = a.ex - b.ex
+    if a.coef.len() == 0 {
+        return make(neg, [], ideal, false, ctx)
+    }
+    // A quotient of p + 1 or p + 2 digits, and whether anything was left over.
+    let shift = ndigits(b.coef) - ndigits(a.coef) + i64(ctx.digits) + 1
+    let (q, r) = if shift >= 0 { divmod_mag(shift_up(a.coef, shift), b.coef, false) } else { divmod_mag(a.coef.copy(), shift_up(b.coef, 0 - shift), false) }
+    var exp = ideal - shift
+    if r.len() > 0 {
+        return make(neg, q, exp, true, ctx)
+    }
+    // Exact: as near the ideal exponent as the zeros at the end allow.
+    let z = trailing_zeros(q).min(ideal - exp).max(0)
+    exp += z
+    return make(neg, shift_down_own(q, z), exp, false, ctx)
+}
+
+/// Python's `%`: the remainder of the quotient rounded toward zero, with the sign of `a`.
+fn rem_of(a: Decimal, b: Decimal, ctx: Context) -> Decimal {
+    if b.coef.len() == 0 {
+        panic(if a.coef.len() == 0 { "0 % 0 is undefined" } else { "division by zero" })
+    }
+    let e = a.ex.min(b.ex)
+    if a.coef.len() == 0 {
+        return make(a.negative, [], e, false, ctx)
+    }
+    let gap = (a.ex + ndigits(a.coef)) - (b.ex + ndigits(b.coef))
+    if gap <= -2 {
+        return make(a.negative, shift_up(a.coef, a.ex - e), e, false, ctx)
+    }
+    if gap > i64(ctx.digits) {
+        panic("the integer quotient of {a} by {b} has more than {ctx.digits} digits")
+    }
+    let (q, r) = divmod_mag(shift_up(a.coef, a.ex - e), shift_up(b.coef, b.ex - e), true)
+    if q.len() > 0 and ndigits(q) > i64(ctx.digits) {
+        panic("the integer quotient of {a} by {b} has more than {ctx.digits} digits")
+    }
+    return make(a.negative, r, e, false, ctx)
+}
+
+fn floor_half(e: i64) -> i64 {
+    return if e >= 0 { e / 2 } else { 0 - (1 - e) / 2 }
+}
+
+fn sqrt_of(x: Decimal, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    var c = x.coef.copy()
+    var e = x.ex
+    if e % 2 != 0 {
+        c = shift_up(c, 1)
+        e -= 1
+    }
+    let ideal = e / 2
+    // Pairs of zeros so the root has p + 1 digits, and the exact root of the integer.
+    let k = (p + 1 - (ndigits(c) + 1) / 2).max(0)
+    let n = shift_up(c, 2 * k)
+    let r = isqrt_mag(n)
+    var exp = ideal - k
+    if cmp_mag(mul_mag(r, r), n) != 0 {
+        return make(false, r, exp, true, ctx)
+    }
+    let z = trailing_zeros(r).min(ideal - exp).max(0)
+    exp += z
+    return make(false, shift_down(r, z), exp, false, ctx)
+}
+
+// --- exp, ln and log10 -----------------------------------------------------------------------
+//
+// Each is worked out to w digits with an error under 2 in the last, in binary fixed point. When
+// the result rounds the same from 2 below as from 2 above, that's the correctly rounded result;
+// otherwise w grows and it's worked out again (Ziv's method). The results are never exact but
+// for the cases handled first, so this ends.
+
+/// The digits of `w` decimal digits as bits, and a margin.
+fn bits_for(w: i64) -> u64 {
+    return u64.wrap((w.max(1) * 3322) / 1000 + 48)
+}
+
+fn exp_of(x: Decimal, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    if x.coef.len() == 0 {
+        return Decimal { negative: false, coef: [1], ex: 0, ctx: ctx }
+    }
+    if x.ex + ndigits(x.coef) - 1 < 0 - p - 1 {
+        // Within a tenth of a unit in the last place of 1: 1 from above or below.
+        if x.negative {
+            return make(false, sub_mag(shift_up([1], p + 1), [1]), 0 - p - 1, true, ctx)
+        }
+        return make(false, shift_up([1], p), 0 - p, true, ctx)
+    }
+    var w = p + 12
+    loop {
+        let (d, e) = exp_approx(x, w)
+        let r = settle(false, d, e, ctx)
+        if r.len() > 0 {
+            return r[0].copy()
+        }
+        w += w
+    }
+}
+
+/// e^x as d × 10^e, with d of about w digits and an error under 2 in its last.
+fn exp_approx(x: Decimal, w: i64) -> (List<u32>, i64) {
+    let f = bits_for(w)
+    return exp_core(fixed(x, f), f, u64.wrap((x.ex + ndigits(x.coef)).max(0) * 4 + 8), w)
+}
+
+/// e^x from x × 2^f within a few units, where |x| / ln 10 is below 2^(mbits - 8).
+fn exp_core(xf: BigInt, f: u64, mbits: u64, w: i64) -> (List<u32>, i64) {
+    // x = m ln10 + r, with r from 0 to ln10, so e^x = 10^m e^r.
+    let g = f + mbits
+    let ln10 = ln10_fixed(g)
+    let m = xf.floor_div(ln10.shr(mbits))
+    let r = xf - (m * ln10).shr(mbits)
+    // e^r = (e^(r / 2^s))^(2^s), with the series for the small one at more bits.
+    let s = u64.wrap(isqrt_u64(f) + 2)
+    let f2 = f + s + 16
+    let t = r.shl(f2 - f).shr(s)
+    var sum = BigInt.from(1).shl(f2)
+    var term = BigInt.from(1).shl(f2)
+    var k: i64 = 1
+    loop {
+        term = (term * t).shr(f2) / k
+        if term.is_zero() {
+            break
+        }
+        sum = sum + term
+        k += 1
+    }
+    for _ in 0..s {
+        sum = (sum * sum).shr(f2)
+    }
+    let d = (sum * BigInt.from(10).pow(u32.wrap(w - 1))).shr(f2)
+    let mi = m.to_i64()!
+    return (of_big(d, Context.default()).coef, mi - (w - 1))
+}
+
+fn log_of(x: Decimal, ten: bool, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    let adj = x.ex + ndigits(x.coef) - 1
+    // A power of ten: 0 for ln of 1, and its exponent exactly for log10.
+    let pow10 = cmp_mag(x.coef, shift_up([1], ndigits(x.coef) - 1)) == 0
+    if pow10 and (ten or adj == 0) {
+        // Rounded to the precision, as any result is.
+        let v = of_i64(if ten { adj } else { 0 }, ctx)
+        return make(v.negative, v.coef, 0, false, ctx)
+    }
+    var w = p + 12
+    loop {
+        let (neg, d, e) = log_approx(x, ten, w)
+        let r = settle(neg, d, e, ctx)
+        if r.len() > 0 {
+            return r[0].copy()
+        }
+        w += w
+    }
+}
+
+/// ln(x), or log10(x), as a sign and d × 10^e, with d of about w digits and an error under 2 in
+/// its last.
+fn log_approx(x: Decimal, ten: bool, w: i64) -> (bool, List<u32>, i64) {
+    // x = 10^a y: a is 0 for x from 0.1 to 10, so that near 1 there's nothing to cancel.
+    let adj = x.ex + ndigits(x.coef) - 1
+    let a: i64 = if adj == 0 or adj == -1 { 0 } else { adj }
+    let y = Decimal { negative: false, coef: x.coef.copy(), ex: x.ex - a, ctx: x.ctx }
+    // The place of the result's first digit, near enough: from y - 1 when a is 0, and from a
+    // otherwise.
+    var place: i64 = 0
+    if a == 0 {
+        let one = of_i64(1, Context.new(1))
+        let delta = add_of(y, one, true, Context.new(u32.wrap(u64.wrap(ndigits(y.coef) + y.ex.abs() + 2).min(4000000000))))
+        place = (delta.ex + ndigits(delta.coef) - 1).min(0)
+    } else {
+        place = digits_i64(a.abs() * 23 / 10) - 1
+    }
+    let t10 = w - 1 - place
+    let f = bits_for(t10.max(1)) + 16 + u64.wrap(digits_i64(a.abs()) * 4)
+    var l = BigInt.zero()
+    if not ten {
+        l = ln_fixed(x, f)
+    } else if a != 0 {
+        let abits = u64.wrap(digits_i64(a.abs()) * 4 + 8)
+        l = BigInt.from(a).shl(f) + ln_small(y, f).shl(f) / ln10_fixed(f + abits).shr(abits)
+    } else {
+        l = ln_small(y, f).shl(f) / ln10_fixed(f)
+    }
+    let neg = l.is_negative()
+    let mag = l.abs()
+    let d = if t10 >= 0 { (mag * BigInt.from(10).pow(u32.wrap(t10))).shr(f) } else { mag.shr(f) / BigInt.from(10).pow(u32.wrap(0 - t10)) }
+    return (neg, of_big(d, Context.default()).coef, 0 - t10)
+}
+
+/// ln(x) × 2^f, within a few units: ln(y) + a ln 10, with x = 10^a y and y from 0.1 to 10.
+fn ln_fixed(x: Decimal, f: u64) -> BigInt {
+    let adj = x.ex + ndigits(x.coef) - 1
+    let a: i64 = if adj == 0 or adj == -1 { 0 } else { adj }
+    let y = Decimal { negative: false, coef: x.coef.copy(), ex: x.ex - a, ctx: x.ctx }
+    let l = ln_small(y, f)
+    if a == 0 {
+        return l
+    }
+    let abits = u64.wrap(digits_i64(a.abs()) * 4 + 8)
+    return l + (ln10_fixed(f + abits) * a).shr(abits)
+}
+
+/// ln(y) × 2^f, for y from 0.1 to 10: y = 2^j z, with z within a factor of √2 of 1, and
+/// ln z = 2 atanh((z - 1) / (z + 1)).
+fn ln_small(y: Decimal, f: u64) -> BigInt {
+    var yf = y.to_f64()
+    var j: i64 = 0
+    while yf > 1.4142135623730951 {
+        yf /= 2.0
+        j += 1
+    }
+    while yf < 0.7071067811865476 {
+        yf *= 2.0
+        j -= 1
+    }
+    let g = f + 16
+    let big_y = fixed(y, g)
+    let two_j = BigInt.from(1).shl(u64.wrap(i64.wrap(g) + j))
+    let u = (big_y - two_j).shl(g) / (big_y + two_j)
+    let u2 = (u * u).shr(g)
+    var pw = u.copy()
+    var sum = BigInt.zero()
+    var k: i64 = 0
+    loop {
+        let term = pw / (2 * k + 1)
+        if term.is_zero() {
+            break
+        }
+        sum = sum + term
+        pw = (pw * u2).shr(g)
+        k += 1
+    }
+    var l = sum.shl(1)
+    if j != 0 {
+        l = l + ln2_fixed(g) * j
+    }
+    return l.shr(16)
+}
+
+/// The rounded result when d - 2 and d + 2 round the same, or none.
+fn settle(neg: bool, d: List<u32>, e: i64, ctx: Context) -> List<Decimal> {
+    let lo = make(neg, sub_mag(d, [2]), e, false, ctx)
+    let hi = make(neg, add_mag(d, [2]), e, false, ctx)
+    if lo.ex == hi.ex and cmp_mag(lo.coef, hi.coef) == 0 {
+        return [lo]
+    }
+    return []
+}
+
+/// x × 2^bits, rounded toward zero.
+fn fixed(x: Decimal, bits: u64) -> BigInt {
+    var c = big_of(x.coef)
+    if x.ex >= 0 {
+        c = (c * BigInt.from(10).pow(u32.wrap(x.ex))).shl(bits)
+    } else {
+        c = c.shl(bits) / BigInt.from(10).pow(u32.wrap(0 - x.ex))
+    }
+    return if x.negative { -c } else { c }
+}
+
+/// atanh(1/n) × 2^bits, from its series, a little under.
+fn atanh_inv(n: i64, bits: u64) -> BigInt {
+    var p = BigInt.from(1).shl(bits) / n
+    let n2 = n * n
+    var sum = BigInt.zero()
+    var k: i64 = 0
+    loop {
+        let term = p / (2 * k + 1)
+        if term.is_zero() {
+            return sum
+        }
+        sum = sum + term
+        p = p / n2
+        k += 1
+    }
+}
+
+/// ln 2 × 2^bits, within 2: from the table up to 2048 bits, and from 4 atanh(1/7) + 2 atanh(1/17)
+/// past them.
+fn ln2_fixed(bits: u64) -> BigInt {
+    if bits <= 2048 {
+        return from_table(LN2_LIMBS, 2048, bits)
+    }
+    let b = bits + 16
+    return (atanh_inv(7, b) * 4 + atanh_inv(17, b) * 2).shr(16)
+}
+
+/// ln 10 × 2^bits, within 2: from the table, and past it from 3 ln 2 + 2 atanh(1/9).
+fn ln10_fixed(bits: u64) -> BigInt {
+    if bits <= 2046 {
+        return from_table(LN10_LIMBS, 2046, bits)
+    }
+    let b = bits + 16
+    return (atanh_inv(7, b) * 12 + atanh_inv(17, b) * 6 + atanh_inv(9, b) * 2).shr(16)
+}
+
+/// c × 2^bits rounded down, from a table of c × 2^top rounded down, of which it reads only the
+/// limbs it needs.
+fn from_table(t: [u64; 32], top: u64, bits: u64) -> BigInt {
+    // The first k limbs are c × 2^(top - 64 (32 - k)), rounded down.
+    var k: u64 = 1
+    while top - 64 * (32 - k) < bits {
+        k += 1
+    }
+    var bytes = List<u8>()
+    bytes.reserve(usize.wrap(8 * k))
+    for i in 0..usize.wrap(k) {
+        let limb = t[i]
+        var sh: u64 = 64
+        while sh > 0 {
+            sh -= 8
+            bytes.push(u8.wrap(limb >> sh))
+        }
+    }
+    return BigInt.from_bytes_be(bytes).shr(top - 64 * (32 - k) - bits)
+}
+
+// --- Powers that aren't integers -------------------------------------------------------------
+
+fn is_integral(y: Decimal) -> bool {
+    return y.coef.len() == 0 or y.ex >= 0 or trailing_zeros(y.coef) >= 0 - y.ex
+}
+
+/// Whether an integral value is odd: its last digit before the point is.
+fn odd(y: Decimal) -> bool {
+    if y.ex > 0 or y.coef.len() == 0 {
+        return false
+    }
+    let c = shift_down(y.coef, 0 - y.ex)
+    return c.len() > 0 and c[0] % 2 == 1
+}
+
+/// x^y for x above 0: exactly when it's a decimal of few digits, which would be a place the
+/// rounding changes, and otherwise from e^(y ln x), worked out until both ends of its error round
+/// the same.
+@track_caller
+fn pow_real(neg: bool, x: Decimal, y: Decimal, ctx: Context) -> Decimal {
+    let p = i64(ctx.digits)
+    let exact = exact_pow(x, y, p)
+    if exact.len() > 0 {
+        // Python writes these with the precision's digits, as if they weren't exact.
+        let v = exact[0].copy()
+        let pad = (p + 1 - ndigits(v.coef)).max(0)
+        return make(neg, shift_up(v.coef, pad), v.ex - pad, false, ctx)
+    }
+    var w = p + 12
+    loop {
+        let (d, e) = pow_approx(x, y, w)
+        let r = settle(neg, d, e, ctx)
+        if r.len() > 0 {
+            return r[0].copy()
+        }
+        w += w
+    }
+}
+
+/// x^y when it's a decimal of at most p + 1 significant digits, or nothing. With x = c × 10^e,
+/// c = 2^p2 5^p5 m, and y = a / b in lowest terms, x^y has a finite number of digits only when
+/// b divides p2 + e and p5 + e, and m is a perfect b-th power s^b (s = 1 for a negative a): then
+/// it's s^a 2^((p2 + e) a / b) 5^((p5 + e) a / b).
+fn exact_pow(x: Decimal, y: Decimal, p: i64) -> List<Decimal> {
+    let zx = trailing_zeros(x.coef)
+    let c = shift_down(x.coef, zx)
+    let e = x.ex + zx
+    let zy = trailing_zeros(y.coef)
+    let yc = big_of(shift_down(y.coef, zy))
+    let ye = y.ex + zy
+    // y = a / b, b dividing 10^-ye. An integer y is one too big for powi, which only 1 survives,
+    // and that's handled before.
+    if ye >= 0 or 0 - ye > 18 {
+        return []
+    }
+    let ten = BigInt.from(10).pow(u32.wrap(0 - ye))
+    let g = yc.gcd(ten)
+    let b = (ten / g).to_i64()!
+    let a_big = yc / g
+    var m = c.copy()
+    var p2: i64 = 0
+    var p5: i64 = 0
+    while rem_small(m, 2) == 0 {
+        m = div_small(m, 2)
+        p2 += 1
+    }
+    while rem_small(m, 5) == 0 {
+        m = div_small(m, 5)
+        p5 += 1
+    }
+    if (p2 + e) % b != 0 or (p5 + e) % b != 0 {
+        return []
+    }
+    let one: List<u32> = [1]
+    let m_one = cmp_mag(m, one) == 0
+    if y.negative and not m_one {
+        return []
+    }
+    let q2 = (p2 + e) / b
+    let q5 = (p5 + e) / b
+    let a_abs = match a_big.to_i64() {
+        some(v) => v,
+        none => {
+            // So big a power is a decimal of few digits only as a power of ten.
+            return []
+        },
+    }
+    let a = if y.negative { 0 - a_abs } else { a_abs }
+    var s = one.copy()
+    if not m_one {
+        // m = s^b needs m at least 2^b.
+        if f64(i32.wrap(b)) > 3.33 * f64(i32.wrap(ndigits(m))) + 1.0 {
+            return []
+        }
+        s = iroot_mag(m, u64.wrap(b))
+        if cmp_mag(pow_mag(s, u64.wrap(b)), m) != 0 {
+            return []
+        }
+    }
+    // 2^A2 5^A5 = 10^k 2^(A2 - k) 5^(A5 - k), with one of those two powers 1.
+    let a2 = mul_exp(q2, a)
+    let a5 = mul_exp(q5, a)
+    let k = a2.min(a5)
+    // Its digits are at least these, so past p + 1 it can't be a place the rounding changes.
+    let s_digits = if m_one { 0.0 } else { (f64(i32.wrap(ndigits(s))) - 1.0).max(0.47) }
+    let low = f64.nearest(a_abs) * s_digits + f64.nearest(a2 - k) * 0.30 + f64.nearest(a5 - k) * 0.69
+    if low > f64.nearest(p + 1) {
+        return []
+    }
+    var coef = if a > 0 { pow_mag(s, u64.wrap(a)) } else { one.copy() }
+    if a2 > k {
+        coef = mul_mag(coef, pow_mag([2], u64.wrap(a2 - k)))
+    }
+    if a5 > k {
+        coef = mul_mag(coef, pow_mag([5], u64.wrap(a5 - k)))
+    }
+    if ndigits(coef) > p + 1 {
+        return []
+    }
+    return [Decimal { negative: false, coef: coef, ex: k, ctx: x.ctx }]
+}
+
+/// The largest integer whose k-th power isn't more than m, by Newton's method from above.
+fn iroot_mag(m: List<u32>, k: u64) -> List<u32> {
+    var x = shift_up([1], (ndigits(m) + i64.wrap(k) - 1) / i64.wrap(k))
+    loop {
+        // ((k - 1) x + m / x^(k - 1)) / k
+        let (q, _) = divmod_mag(m.copy(), pow_mag(x, k - 1), false)
+        let y = div_small(add_mag(mul_1(x, k - 1), q), k)
+        if cmp_mag(y, x) >= 0 {
+            return x
+        }
+        x = y
+    }
+}
+
+/// e^(y ln x) as d × 10^e, with d of about w digits and an error under 2 in its last.
+@track_caller
+fn pow_approx(x: Decimal, y: Decimal, w: i64) -> (List<u32>, i64) {
+    let f = bits_for(w)
+    // y ln x at f bits, within a few units: ln x with bits to spare for y's size, and y with
+    // bits to spare for ln x's.
+    let ybits = u64.wrap((y.ex + ndigits(y.coef)).max(0) * 4 + 8)
+    let lbits = u64.wrap(digits_i64((x.ex + ndigits(x.coef)).abs() + 1) * 4 + 8)
+    let l = (ln_fixed(x, f + ybits) * fixed(y, f + lbits)).shr(f + ybits + lbits)
+    if l.bit_len() > f + 61 {
+        panic("{x} to the power {y} is out of range")
+    }
+    let mbits = u64.wrap((i64.wrap(l.bit_len()) - i64.wrap(f)).max(0) + 8)
+    return exp_core(l, f, mbits, w)
+}
+
+// --- Integer powers --------------------------------------------------------------------------
+
+fn pow_of(x: Decimal, n: i64) -> Decimal {
+    let ctx = x.ctx
+    let p = i64(ctx.digits)
+    let neg = x.negative and n % 2 != 0
+    if n == 0 {
+        return Decimal { negative: false, coef: [1], ex: 0, ctx: ctx }
+    }
+    if x.coef.len() == 0 {
+        return Decimal { negative: neg, coef: [], ex: 0, ctx: ctx }
+    }
+    if n < 0 and n > i64.MIN {
+        // 1/x is exact when the coefficient is 2^a 5^b, and then x^n is (1/x)^-n, exact where that
+        // is, as Python works it out.
+        let inv = exact_recip(x)
+        if inv.len() > 0 {
+            return pow_of(inv[0], 0 - n)
+        }
+    }
+    let m = if n < 0 { 0 - u64.wrap(n) } else { u64.wrap(n) }
+    let d = ndigits(x.coef)
+    let ideal = mul_exp(x.ex, n)
+    if n > 0 and u64.wrap(d) * m <= u64.wrap(4 * p + 100) {
+        // Exact, then rounded.
+        return make(neg, pow_mag(x.coef, m), ideal, false, ctx)
+    }
+    // Bounds at w digits, closer each time, until both round the same.
+    let z = trailing_zeros(x.coef)
+    let c = shift_down(x.coef, z)
+    let e = x.ex + z
+    var w = p + 10 + digits_i64(i64.wrap(m.min(1000000000000000000)))
+    loop {
+        var b = pow_bounds(c, m, w)
+        b.lo_e += mul_exp(e, i64.wrap(m))
+        b.hi_e = b.lo_e - b.hi_shift
+        if n < 0 {
+            let (rl, rle, rl_exact) = recip(b.hi, b.hi_e, w, false)
+            let (rh, rhe, _) = recip(b.lo, b.lo_e, w, true)
+            b.exact = b.exact and rl_exact
+            b.lo = rl
+            b.lo_e = rle
+            b.hi = rh
+            b.hi_e = rhe
+        }
+        if b.exact {
+            if n > 0 {
+                // Python's exact power keeps the ideal exponent where the precision allows.
+                let pad = (b.lo_e - ideal).min(p - ndigits(b.lo)).max(0)
+                return make(neg, shift_up(b.lo, pad), b.lo_e - pad, false, ctx)
+            }
+            return make(neg, b.lo, b.lo_e, false, ctx)
+        }
+        let lo = make(neg, b.lo, b.lo_e, false, ctx)
+        let hi = make(neg, b.hi, b.hi_e, false, ctx)
+        if lo.ex == hi.ex and cmp_mag(lo.coef, hi.coef) == 0 {
+            return lo
+        }
+        w += w
+    }
+}
+
+/// 1/x when it has a finite number of digits, without zeros at the end, or nothing.
+fn exact_recip(x: Decimal) -> List<Decimal> {
+    var rest = x.coef.copy()
+    var twos: u64 = 0
+    var fives: u64 = 0
+    while rem_small(rest, 2) == 0 {
+        rest = div_small(rest, 2)
+        twos += 1
+    }
+    while rem_small(rest, 5) == 0 {
+        rest = div_small(rest, 5)
+        fives += 1
+    }
+    if cmp_mag(rest, [1]) != 0 {
+        return []
+    }
+    // 1 / (2^a 5^b) = 5^a 2^b / 10^(a + b)
+    let c = mul_mag(pow_mag([5], twos), pow_mag([2], fives))
+    let z = trailing_zeros(c)
+    return [Decimal { negative: x.negative, coef: shift_down(c, z), ex: 0 - i64.wrap(twos + fives) - x.ex + z, ctx: x.ctx }]
+}
+
+/// e × n, with a panic when it's out of range.
+fn mul_exp(e: i64, n: i64) -> i64 {
+    let big = BigInt.from(e) * BigInt.from(n)
+    let r = big.to_i64() ?? (EMAX * 4)
+    if r > EMAX + EMAX or r < 0 - EMAX - EMAX {
+        panic("a Decimal's exponent is out of range, past 10^{EMAX}")
+    }
+    return r
+}
+
+struct Bounds {
+    lo: List<u32>
+    lo_e: i64
+    hi: List<u32>
+    hi_e: i64
+    hi_shift: i64     // lo_e - hi_e, while the exponents are kept apart from the power's
+    exact: bool
+}
+
+/// c^m between lo and hi, each cut to w digits, down and up.
+fn pow_bounds(c: List<u32>, m: u64, w: i64) -> Bounds {
+    var base_lo = c.copy()
+    var base_hi = c.copy()
+    var blo: i64 = 0
+    var bhi: i64 = 0
+    var lo: List<u32> = [1]
+    var hi: List<u32> = [1]
+    var lo_e: i64 = 0
+    var hi_e: i64 = 0
+    var exact = true
+    var k = m
+    loop {
+        if k & 1 == 1 {
+            let (a, ae, ax) = cut(mul_mag(lo, base_lo), lo_e + blo, w, false)
+            let (b, be, _) = cut(mul_mag(hi, base_hi), hi_e + bhi, w, true)
+            lo = a
+            lo_e = ae
+            hi = b
+            hi_e = be
+            exact = exact and ax
+        }
+        k = k >> 1
+        if k == 0 {
+            break
+        }
+        let (a, ae, ax) = cut(mul_mag(base_lo, base_lo), blo + blo, w, false)
+        let (b, be, _) = cut(mul_mag(base_hi, base_hi), bhi + bhi, w, true)
+        base_lo = a
+        blo = ae
+        base_hi = b
+        bhi = be
+        exact = exact and ax
+    }
+    return Bounds { lo: lo, lo_e: lo_e, hi: hi, hi_e: hi_e, hi_shift: lo_e - hi_e, exact: exact }
+}
+
+/// c × 10^e cut to w digits, down or up, and whether nothing was cut.
+fn cut(c: own List<u32>, e: i64, w: i64, up: bool) -> (List<u32>, i64, bool) {
+    let d = ndigits(c)
+    if d <= w {
+        return (c, e, true)
+    }
+    let k = d - w
+    let rest = rest_after(c, k)
+    var q = shift_down_own(c, k)
+    if up and rest != 0 {
+        inc(mut q)
+    }
+    return (q, e + k, rest == 0)
+}
+
+/// 1 / (c × 10^e) to at least w digits, down or up, and whether it's exact, with the zeros at
+/// the end taken off then.
+fn recip(c: List<u32>, e: i64, w: i64, up: bool) -> (List<u32>, i64, bool) {
+    let s = w + ndigits(c)
+    let (quot, r) = divmod_mag(shift_up([1], s), c, false)
+    var q = quot
+    if r.len() > 0 {
+        if up {
+            inc(mut q)
+        }
+        return (q, 0 - s - e, false)
+    }
+    let z = trailing_zeros(q)
+    return (shift_down_own(q, z), 0 - s - e + z, true)
+}
+
+fn pow_mag(c: List<u32>, m: u64) -> List<u32> {
+    var result: List<u32> = [1]
+    var base = c.copy()
+    var k = m
+    loop {
+        if k & 1 == 1 {
+            result = mul_mag(result, base)
+        }
+        k = k >> 1
+        if k == 0 {
+            return result
+        }
+        base = mul_mag(base, base)
+    }
+}
+
+// --- Limbs -----------------------------------------------------------------------------------
+
+fn limbs_of(m: u64) -> List<u32> {
+    var out = List<u32>()
+    var v = m
+    while v > 0 {
+        out.push(u32.wrap(v % BASE))
+        v /= BASE
+    }
+    return out
+}
+
+fn big_of(c: List<u32>) -> BigInt {
+    return BigInt.parse(coef_text(c))!
+}
+
+/// The coefficient as a `u64`, for one or two limbs.
+fn small_coef(c: List<u32>) -> u64 {
+    if c.len() == 0 {
+        return 0
+    }
+    if c.len() == 1 {
+        return u64(c[0])
+    }
+    return u64(c[1]) * BASE + u64(c[0])
+}
+
+fn pow10_f64(k: i64) -> f64 {
+    var p: f64 = 1.0
+    for _ in 0..k {
+        p *= 10.0
+    }
+    return p
+}
+
+fn digits_i64(v: i64) -> i64 {
+    var d: i64 = 1
+    var x = v
+    while x >= 10 {
+        x /= 10
+        d += 1
+    }
+    return d
+}
+
+fn isqrt_u64(v: u64) -> i64 {
+    var r: u64 = 0
+    while (r + 1) * (r + 1) <= v {
+        r += 1
+    }
+    return i64.wrap(r)
+}
+
+fn trim(xs: mut List<u32>) {
+    var n = xs.len()
+    while n > 0 and xs[n - 1] == 0 {
+        n -= 1
+    }
+    xs.truncate(n)
+}
+
+/// The number of digits, 1 for 0.
+fn ndigits(c: List<u32>) -> i64 {
+    let n = c.len()
+    if n == 0 {
+        return 1
+    }
+    let top = c[n - 1]
+    var d: usize = 1
+    while d < 10 and top >= POW10[d] {
+        d += 1
+    }
+    return i64.wrap(n - 1) * 9 + i64.wrap(d)
+}
+
+/// The number of zeros at the end of a nonzero coefficient.
+fn trailing_zeros(c: List<u32>) -> i64 {
+    var i: usize = 0
+    while i < c.len() and c[i] == 0 {
+        i += 1
+    }
+    if i == c.len() {
+        return 0
+    }
+    var z = i64.wrap(i) * 9
+    var x = c[i]
+    while x % 10 == 0 {
+        x /= 10
+        z += 1
+    }
+    return z
+}
+
+fn cmp_mag(a: List<u32>, b: List<u32>) -> i32 {
+    if a.len() != b.len() {
+        return if a.len() < b.len() { -1 } else { 1 }
+    }
+    var i = a.len()
+    while i > 0 {
+        i -= 1
+        if a[i] != b[i] {
+            return if a[i] < b[i] { -1 } else { 1 }
+        }
+    }
+    return 0
+}
+
+fn add_mag(a: List<u32>, b: List<u32>) -> List<u32> {
+    if a.len() < b.len() {
+        return add_mag(b, a)
+    }
+    var out = List<u32>()
+    out.reserve(a.len() + 1)
+    var carry: u32 = 0
+    for i in 0..a.len() {
+        var s = a[i] + carry
+        if i < b.len() {
+            s += b[i]
+        }
+        if s >= 1000000000 {
+            s -= 1000000000
+            carry = 1
+        } else {
+            carry = 0
+        }
+        out.push(s)
+    }
+    if carry != 0 {
+        out.push(1)
+    }
+    return out
+}
+
+/// `a + 1`, in place.
+fn inc(a: mut List<u32>) {
+    for i in 0..a.len() {
+        if a[i] < 999999999 {
+            a[i] += 1
+            return
+        }
+        a[i] = 0
+    }
+    a.push(1)
+}
+
+/// `a += b`, in place.
+fn add_into(a: mut List<u32>, b: List<u32>) {
+    while a.len() < b.len() {
+        a.push(0)
+    }
+    var carry: u32 = 0
+    var i: usize = 0
+    while i < b.len() or (carry != 0 and i < a.len()) {
+        var s = a[i] + carry
+        if i < b.len() {
+            s += b[i]
+        }
+        if s >= 1000000000 {
+            a[i] = s - 1000000000
+            carry = 1
+        } else {
+            a[i] = s
+            carry = 0
+        }
+        i += 1
+    }
+    if carry != 0 {
+        a.push(1)
+    }
+}
+
+/// `a -= b`, in place, where `a` is at least `b`.
+fn sub_into(a: mut List<u32>, b: List<u32>) {
+    var borrow: u32 = 0
+    var i: usize = 0
+    while i < b.len() or (borrow != 0 and i < a.len()) {
+        var y = borrow
+        if i < b.len() {
+            y += b[i]
+        }
+        let x = a[i]
+        if x >= y {
+            a[i] = x - y
+            borrow = 0
+        } else {
+            a[i] = x + 1000000000 - y
+            borrow = 1
+        }
+        i += 1
+    }
+    trim(mut a)
+}
+
+/// The remainder of `a` by `d`, below the base.
+fn rem_small(a: List<u32>, d: u64) -> u64 {
+    var r: u64 = 0
+    var i = a.len()
+    while i > 0 {
+        i -= 1
+        r = (r * BASE + u64(a[i])) % d
+    }
+    return r
+}
+
+/// `a / d`, rounded down, for `d` below the base, in place.
+fn div_small(a: own List<u32>, d: u64) -> List<u32> {
+    var x = a
+    var r: u64 = 0
+    var i = x.len()
+    while i > 0 {
+        i -= 1
+        let t = r * BASE + u64(x[i])
+        x[i] = u32.wrap(t / d)
+        r = t % d
+    }
+    trim(mut x)
+    return x
+}
+
+/// `a - b`, where `a` is at least `b`.
+fn sub_mag(a: List<u32>, b: List<u32>) -> List<u32> {
+    var out = List<u32>()
+    out.reserve(a.len())
+    var borrow: u32 = 0
+    for i in 0..a.len() {
+        var y = borrow
+        if i < b.len() {
+            y += b[i]
+        }
+        let x = a[i]
+        if x >= y {
+            out.push(x - y)
+            borrow = 0
+        } else {
+            out.push(x + 1000000000 - y)
+            borrow = 1
+        }
+    }
+    trim(mut out)
+    return out
+}
+
+/// `a × 10^k`.
+fn shift_up(a: List<u32>, k: i64) -> List<u32> {
+    if a.len() == 0 or k == 0 {
+        return a.copy()
+    }
+    let w = usize.wrap(k / 9)
+    let r = usize.wrap(k % 9)
+    var out: List<u32> = [0; w]
+    out.reserve(w + a.len() + 1)
+    if r == 0 {
+        for x in a {
+            out.push(x)
+        }
+        return out
+    }
+    let p = u64(POW10[r])
+    var carry: u64 = 0
+    for x in a {
+        let t = u64(x) * p + carry
+        out.push(u32.wrap(t % BASE))
+        carry = t / BASE
+    }
+    if carry != 0 {
+        out.push(u32.wrap(carry))
+    }
+    return out
+}
+
+/// `a / 10^k`, rounded down.
+fn shift_down(a: List<u32>, k: i64) -> List<u32> {
+    if k == 0 {
+        return a.copy()
+    }
+    let w = k / 9
+    if w >= i64.wrap(a.len()) {
+        return []
+    }
+    let wu = usize.wrap(w)
+    let r = usize.wrap(k % 9)
+    var out = List<u32>()
+    out.reserve(a.len() - wu)
+    if r == 0 {
+        for i in wu..a.len() {
+            out.push(a[i])
+        }
+        return out
+    }
+    let p = POW10[r]
+    let m = POW10[9 - r]
+    for i in wu..a.len() {
+        let hi = if i + 1 < a.len() { a[i + 1] % p } else { 0 }
+        out.push(a[i] / p + hi * m)
+    }
+    trim(mut out)
+    return out
+}
+
+/// `a / 10^k`, rounded down, in place.
+fn shift_down_own(a: own List<u32>, k: i64) -> List<u32> {
+    var x = a
+    if k == 0 {
+        return x
+    }
+    let w = k / 9
+    if w >= i64.wrap(x.len()) {
+        x.truncate(0)
+        return x
+    }
+    let wu = usize.wrap(w)
+    let r = usize.wrap(k % 9)
+    let n = x.len() - wu
+    if r == 0 {
+        for i in 0..n {
+            x[i] = x[i + wu]
+        }
+    } else {
+        let p = POW10[r]
+        let m = POW10[9 - r]
+        let last = x.len() - 1
+        for i in 0..n {
+            let at = i + wu
+            let hi = if at < last { x[at + 1] % p } else { 0 }
+            x[i] = x[at] / p + hi * m
+        }
+    }
+    x.truncate(n)
+    trim(mut x)
+    return x
+}
+
+/// `a × b`, a column of the product at a time, so each limb is written once: the column's
+/// products go into a 64-bit sum, which is carried into the next column every 16 products, before
+/// it could overflow.
+fn mul_mag(a: List<u32>, b: List<u32>) -> List<u32> {
+    let n = a.len()
+    let m = b.len()
+    if n == 0 or m == 0 {
+        return []
+    }
+    var out = List<u32>()
+    out.reserve(n + m)
+    unsafe {
+        let pa = a.as_ptr()
+        let pb = b.as_ptr()
+        let po = out.as_mut_ptr()
+        var carry: u64 = 0
+        var k: usize = 0
+        while k + 1 < n + m {
+            let lo = if k >= m { k - m + 1 } else { 0 }
+            let hi = if k < n { k } else { n - 1 }
+            var acc = carry
+            var over: u64 = 0
+            var i = lo
+            var count: u32 = 0
+            while i <= hi {
+                acc += u64(pa.add(i).read()) * u64(pb.add(k - i).read())
+                count += 1
+                if count == 16 {
+                    over += acc / BASE
+                    acc = acc % BASE
+                    count = 0
+                }
+                i += 1
+            }
+            over += acc / BASE
+            po.add(k).write(u32.wrap(acc % BASE))
+            carry = over
+            k += 1
+        }
+        po.add(n + m - 1).write(u32.wrap(carry))
+        out.set_len(n + m)
+    }
+    trim(mut out)
+    return out
+}
+
+/// `a × f`, for `f` below the base.
+fn mul_1(a: List<u32>, f: u64) -> List<u32> {
+    var out = List<u32>()
+    out.reserve(a.len() + 1)
+    var carry: u64 = 0
+    for x in a {
+        let t = u64(x) * f + carry
+        out.push(u32.wrap(t % BASE))
+        carry = t / BASE
+    }
+    if carry != 0 {
+        out.push(u32.wrap(carry))
+    }
+    return out
+}
+
+/// The quotient and the remainder of `a` by `b`, which isn't zero. `a`'s limbs become the
+/// remainder's. Without `rest`, the remainder is only right as to whether it's zero.
+fn divmod_mag(a: own List<u32>, b: List<u32>, rest: bool) -> (List<u32>, List<u32>) {
+    var u = a
+    if cmp_mag(u, b) < 0 {
+        return ([], u)
+    }
+    if b.len() == 1 {
+        let d = u64(b[0])
+        let r = rem_small(u, d)
+        let left: List<u32> = if r == 0 { [] } else { [u32.wrap(r)] }
+        return (div_small(u, d), left)
+    }
+    // Knuth's algorithm D (The Art of Computer Programming, 4.3.1) in base 10^9. Both are scaled
+    // so the divisor's top limb is at least half the base, which makes each guess at a quotient
+    // limb at most 2 too big.
+    let n = b.len()
+    let m = u.len() - n
+    let f = BASE / (u64(b[n - 1]) + 1)
+    let v = if f == 1 { b.copy() } else { mul_1(b, f) }
+    scale(mut u, f)
+    while u.len() < m + n + 1 {
+        u.push(0)
+    }
+    var q: List<u32> = [0; m + 1]
+    let vt = u64(v[n - 1])
+    let vs = u64(v[n - 2])
+    // Each guess divides by vt: a multiply by its reciprocal, within one of the quotient, then put
+    // right, in place of a 64-bit division.
+    let inv = 1.0 / f64(u32.wrap(vt))
+    unsafe {
+        let pu = u.as_mut_ptr()
+        let pv = v.as_ptr()
+        let pq = q.as_mut_ptr()
+        var j = m + 1
+        while j > 0 {
+            j -= 1
+            let num = u64(pu.add(j + n).read()) * BASE + u64(pu.add(j + n - 1).read())
+            var qhat = u64.wrap(i64.saturate(f64.nearest(num) * inv))
+            var r = i64.wrap(num) - i64.wrap(qhat * vt)
+            while r < 0 {
+                qhat -= 1
+                r += i64.wrap(vt)
+            }
+            while r >= i64.wrap(vt) {
+                qhat += 1
+                r -= i64.wrap(vt)
+            }
+            var rhat = u64.wrap(r)
+            while qhat >= BASE or qhat * vs > rhat * BASE + u64(pu.add(j + n - 2).read()) {
+                qhat -= 1
+                rhat += vt
+                if rhat >= BASE {
+                    break
+                }
+            }
+            // u[j..j + n] -= qhat × v
+            // Each product splits into its high and low limbs apart from the others, so only the
+            // borrow, a few additions and no division, passes from one limb to the next. Below
+            // zero, t borrows the base once or twice.
+            let pj = pu.add(j)
+            var prev: i64 = 0
+            var borrow: i64 = 0
+            var i: usize = 0
+            while i < n {
+                let prod = qhat * u64(pv.add(i).read())
+                let hi = prod / BASE
+                let lo = i64.wrap(prod - hi * BASE)
+                let t = i64(pj.add(i).read()) - lo - prev - borrow
+                borrow = (if t < 0 { 1 } else { 0 }) + (if t < -1000000000 { 1 } else { 0 })
+                pj.add(i).write(u32.wrap(t + borrow * 1000000000))
+                prev = i64.wrap(hi)
+                i += 1
+            }
+            let sub = u64.wrap(prev + borrow)
+            let x = u64(pj.add(n).read())
+            if x >= sub {
+                pj.add(n).write(u32.wrap(x - sub))
+            } else {
+                // One too many: add the divisor back.
+                pj.add(n).write(u32.wrap(x + BASE - sub))
+                qhat -= 1
+                var c: u64 = 0
+                var t: usize = 0
+                while t < n {
+                    let s = u64(pj.add(t).read()) + u64(pv.add(t).read()) + c
+                    if s >= BASE {
+                        pj.add(t).write(u32.wrap(s - BASE))
+                        c = 1
+                    } else {
+                        pj.add(t).write(u32.wrap(s))
+                        c = 0
+                    }
+                    t += 1
+                }
+                pj.add(n).write(u32.wrap((u64(pj.add(n).read()) + c) % BASE))
+            }
+            pq.add(j).write(u32.wrap(qhat))
+        }
+    }
+    trim(mut q)
+    // What's left in u's low limbs, scaled back, is the remainder.
+    u.truncate(n)
+    if not rest {
+        trim(mut u)
+        return (q, u)
+    }
+    return (q, div_small(u, f))
+}
+
+/// `a × f` in place, for `f` below the base.
+fn scale(a: mut List<u32>, f: u64) {
+    if f == 1 {
+        return
+    }
+    var carry: u64 = 0
+    for x in mut a {
+        let t = u64(x) * f + carry
+        carry = t / BASE
+        x = u32.wrap(t - carry * BASE)
+    }
+    if carry != 0 {
+        a.push(u32.wrap(carry))
+    }
+}
+
+/// The largest integer whose square isn't more than `n`, by Newton's method from just above it:
+/// from a double for up to 30 digits, and otherwise from the root of the top half of the digits,
+/// scaled up, which has half the root's digits right, so one step gets them all.
+fn isqrt_mag(n: List<u32>) -> List<u32> {
+    if n.len() == 0 {
+        return []
+    }
+    let d = ndigits(n)
+    var x = List<u32>()
+    if d <= 30 {
+        var f: f64 = 0.0
+        var i = n.len()
+        while i > 0 {
+            i -= 1
+            f = f * 1.0e9 + f64(n[i])
+        }
+        x = limbs_of(u64.wrap(i64.saturate(f.sqrt() * (1.0 + 1.0e-12) + 2.0)))
+    } else {
+        let h = d / 4
+        var r = isqrt_mag(shift_down(n, 2 * h))
+        inc(mut r)
+        x = shift_up(r, h)
+    }
+    loop {
+        let (q, _) = divmod_mag(n.copy(), x, false)
+        let y = div_small(add_mag(x, q), 2)
+        if cmp_mag(y, x) >= 0 {
+            return x
+        }
+        x = y
+    }
+}

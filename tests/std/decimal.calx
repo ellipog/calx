@@ -1,0 +1,101 @@
+// std.decimal: decimals of any precision, checked against Python's decimal (CLX-146).
+
+import std.bigint.{BigInt}
+import std.decimal.{Context, Decimal, Rounding}
+
+fn d(text: str) -> Decimal {
+    return Decimal.parse(String(text))!
+}
+
+fn main() {
+    // Exact money arithmetic, and Python's default of 28 digits for division.
+    let price = d("19.99")
+    println("{price * 3} {price + d("0.01")} {d("0.1") + d("0.2")} {d("1.30") - d("0.3")}")    // out: 59.97 20.00 0.3 1.00
+    println("{d("1") / d("3")} {d("2") / d("3")} {d("1") / d("8")} {d("6.0") / d("2")} {d("100") / d("4")}")    // out: 0.3333333333333333333333333333 0.6666666666666666666666666667 0.125 3.0 25
+    println("{d("7") % d("3")} {d("-7") % d("3")} {d("7.5") % d("2")} {-d("1.5")} {d("-2.50").abs()}")    // out: 1 -1 1.5 -1.5 2.50
+    println("{price * 2 + 1} {price / 4} {price - 20} {price % 7i64}")    // out: 40.98 4.9975 -0.01 5.99
+
+    // Text as Python writes it, and reads it.
+    println("{d("123E+3")} {d("1E-7")} {d("0.000001")} {d("1.230E-7")} {d("-0.00")} {d("12300")} {d("1E+1")}")    // out: 1.23E+5 1E-7 0.000001 1.230E-7 -0.00 12300 1E+1
+    println("{d(" +.5 ")} {d("5.")} {d("1_000.000_1")} {d("1e1_0")} {d("-0")} {d("0E-7")}")    // out: 0.5 5 1000.0001 1E+10 -0 0E-7
+    println("{Decimal.parse(String("1__0")) == none} {Decimal.parse(String("_1")) == none} {Decimal.parse(String(".")) == none} {Decimal.parse(String("NaN")) == none} {Decimal.parse(String("1e")) == none}")    // out: true true true true true
+    println("{d("1.5E+3").to_plain()} {d("1E-7").to_plain()} {d("-1.50").to_plain()} {d("0E+3").to_plain()}")    // out: 1500 0.0000001 -1.50 0
+
+    // Signed zeros, as Python has them.
+    println("{d("-0") + d("0")} {d("-0") + d("-0")} {d("-1") + d("1")} {d("0.00") * d("-5")} {-d("0")}")    // out: 0 -0 0 -0.00 0
+    let floor = d("-1").with_rounding(Rounding.Floor)
+    println("{floor + d("1")}")    // out: -0
+
+    // Comparing by value: 1.50 is 1.5, as a key too.
+    println("{d("1.50") == d("1.5")} {d("-0") == d("0")} {d("0.1") < d("0.25")} {d("-3") < d("-2.5")} {d("1E+3") > d("999.99")}")    // out: true true true true true
+    var keys = Set<Decimal>()
+    keys.insert(d("1.50"))
+    keys.insert(d("1.5"))
+    keys.insert(d("15E-1"))
+    keys.insert(d("2"))
+    println("{keys.len()}")    // out: 2
+    var xs: List<Decimal> = [d("3.1"), d("-2"), d("0.5"), d("3.10"), d("1E+1")]
+    xs.sort()
+    println("{xs}")    // out: [-2, 0.5, 3.1, 3.10, 1E+1]
+
+    // Contexts: more digits, and each rounding.
+    let c = Context.new(50)
+    println("{c.from(1) / 7}")    // out: 0.14285714285714285714285714285714285714285714285714
+    println("{c.from(2).sqrt()}")    // out: 1.4142135623730950488016887242096980785696718753769
+    let five = Context.new(5)
+    let roundings = [Rounding.HalfEven, Rounding.HalfUp, Rounding.HalfDown, Rounding.Up, Rounding.Down, Rounding.Ceiling, Rounding.Floor, Rounding.ZeroFiveUp]
+    var row = String()
+    for r in roundings {
+        let x = five.with_rounding(r).parse(String("-1.23450"))!
+        row.push_str("{x + 0} ")
+    }
+    println(row.trim())    // out: -1.2345 -1.2345 -1.2345 -1.2345 -1.2345 -1.2345 -1.2345 -1.2345
+    row = String()
+    for r in roundings {
+        let x = five.with_rounding(r).parse(String("-2.34565"))!
+        row.push_str("{x + 0} ")
+    }
+    println(row.trim())    // out: -2.3456 -2.3457 -2.3456 -2.3457 -2.3456 -2.3456 -2.3457 -2.3456
+    row = String()
+    for r in roundings {
+        let x = five.with_rounding(r).parse(String("1.00001"))!
+        row.push_str("{x + 0} ")
+    }
+    println(row.trim())    // out: 1.0000 1.0000 1.0000 1.0001 1.0000 1.0001 1.0000 1.0001
+    // The wider context wins, so a value from a 50-digit context carries its digits through.
+    println("{d("1") / c.from(3)}")    // out: 0.33333333333333333333333333333333333333333333333333
+    println("{five.prec()} {five.rounding()} {Context.default().prec()} {d("2").context().prec()} {d("2").with_prec(3).context().prec()}")    // out: 5 HalfEven 28 28 3
+
+    // Rounding to places, as quantize and round do.
+    println("{d("2.675").round(2)} {d("2.665").round(2)} {d("2.5").round(0)} {d("3.5").round(0)} {d("1234.5").round(-2)}")    // out: 2.68 2.66 2 4 1.2E+3
+    println("{d("2.675").with_rounding(Rounding.HalfUp).round(2)} {d("2.665").with_rounding(Rounding.HalfUp).round(2)}")    // out: 2.68 2.67
+    println("{d("1.5").quantize(d("0.001"))} {d("-0.001").quantize(d("0.01"))} {d("123.456").quantize(d("1E+1"))}")    // out: 1.500 -0.00 1.2E+2
+    println("{d("1.5").to_integral()} {d("2.5").to_integral()} {d("1E+5").to_integral()} {d("-7.9").to_bigint()} {d("1E+3").to_bigint()}")    // out: 2 2 1E+5 -7 1000
+    println("{d("123.4500").normalize()} {d("0.00").normalize()} {d("1200").normalize()} {d("-0.010").normalize()}")    // out: 123.45 0 1.2E+3 -0.01
+    println("{d("123.45").exponent()} {d("123.45").coefficient()} {d("123.45").digits()} {d("123.45").adjusted()} {d("0.00123").adjusted()}")    // out: -2 12345 5 2 -3
+    println("{d("-1.5").sign()} {d("0").sign()} {d("-0").is_signed()} {d("-0").is_negative()} {d("-0.1").is_negative()} {d("0E+5").is_zero()}")    // out: -1 0 true false true true
+
+    // Floats: exact in, nearest out.
+    println("{Decimal.from_f64(1.1)!}")    // out: 1.100000000000000088817841970012523233890533447265625
+    println("{Decimal.from_f64(0.5)!} {Decimal.from_f64(-0.0)!} {Decimal.from_f64(1.0e22)!} {Decimal.from_f64(f64.NAN) == none}")    // out: 0.5 -0 10000000000000000000000 true
+    println("{d("0.1").to_f64()} {d("1E-400").to_f64()} {d("1E+400").to_f64()} {d("-0").to_f64()} {d("123456789012345678901234567890").to_f64()}")    // out: 0.1 0.0 Infinity -0.0 1.2345678901234568E29
+    println("{d("9007199254740993").to_f64()} {d("2.2250738585072011E-308").to_f64().to_bits()}")    // out: 9.007199254740992E15 4503599627370495
+    println("{Decimal.from(i64.MIN)} {Decimal.from_bigint(BigInt.from(2).pow(100))} {Decimal.from_parts(BigInt.from(-15), -1)} {d("-7.9").to_i64() ?? 0} {d("1E+30").to_i64() == none}")    // out: -9223372036854775808 1267650600228229401496703205376 -1.5 -7 true
+
+    // The functions, correctly rounded.
+    println("{d("2").sqrt()} {d("4.00").sqrt()} {d("0.0400").sqrt()} {d("1E+4").sqrt()} {d("-0").sqrt()} {d("0E-3").sqrt()}")    // out: 1.414213562373095048801688724 2.0 0.20 1E+2 -0 0.00
+    println("{d("1").exp()} {d("-1").exp()} {d("0").exp()} {d("1E-30").exp()} {d("-1E-28").exp()}")    // out: 2.718281828459045235360287471 0.3678794411714423215955237702 1 1.000000000000000000000000000 0.9999999999999999999999999999
+    println("{d("2").ln()} {d("10").ln()} {d("1.000").ln()} {d("0.99999999999999999999").ln()}")    // out: 0.6931471805599453094172321215 2.302585092994045684017991455 0 -1.000000000000000000005000000E-20
+    println("{d("2").log10()} {d("1000.000").log10()} {d("0.001").log10()} {d("1E+100").ln()}")    // out: 0.3010299956639811952137388947 3 -3 230.2585092994045684017991455
+    println("{d("2").powi(10)} {d("0.5").powi(3)} {d("1.0").powi(2)} {d("2").powi(-3)} {d("3").powi(-1)} {d("-0").powi(3)} {d("7").powi(0)}")    // out: 1024 0.125 1.00 0.125 0.3333333333333333333333333333 -0 1
+    println("{d("10").powi(1000)} {d("-25E-8").powi(-22)}")    // out: 1.000000000000000000000000000E+1000 1.7592186044416E+145
+    // Python's ** gives 7E+8184 here, one off: std.decimal's powers are correctly rounded.
+    println("{Context.new(1).with_rounding(Rounding.Floor).parse(String("6652653121749245896E-24"))!.powi(-1581)}")    // out: 6E+8184
+    println("{d("4").pow(d("0.5"))} {d("2").pow(d("0.5"))} {d("9").pow(d("-0.5"))} {d("2").pow(d("2.0"))} {d("16").pow(d("-0.25"))}")    // out: 2.000000000000000000000000000 1.414213562373095048801688724 0.3333333333333333333333333333 4 0.5000000000000000000000000000
+    // Python gives 7.999999999999999999999999999: 4 to the power 1.5 is exactly 8.
+    println("{Context.new(28).with_rounding(Rounding.Down).from(4).pow(d("1.5"))}")    // out: 8.000000000000000000000000000
+    println("{d("1.00").pow(d("1E+30"))} {d("-1").pow(d("12345678901234567891"))} {d("-0").pow(d("0.5"))} {d("2").pow(d("10.5"))}")    // out: 1.000000000000000000000000000 -1 0 1448.154687870049329972929254
+    let wide = Context.new(80)
+    println("{wide.from(2).ln()}")    // out: 0.69314718055994530941723212145817656807550013436025525412068000949339362196969472
+    println("{wide.from(1).exp()}")    // out: 2.7182818284590452353602874713526624977572470936999595749669676277240766303535476
+}

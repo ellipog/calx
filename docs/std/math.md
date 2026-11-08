@@ -67,7 +67,7 @@ Nanoseconds per call on 2 million random arguments, best of 7 runs in each of tw
 
 ## How they work
 
-`exp`, `log` and `pow` follow Tang's table-driven method, with tables of 128 entries, and `sin`, `cos` and `tan` reduce by pi/2. [`tools/math_tables.py`](../../tools/math_tables.py) generates and checks every table and polynomial, at 80 digits.
+`exp`, `log` and `pow` follow Tang's table-driven method, with tables of 128 entries, and `sin`, `cos` and `tan` reduce by pi/2. [`tools/math_tables.calx`](../../tools/math_tables.calx) generates and checks every table and polynomial, at 80 digits, with [std.decimal](decimal.md).
 
 - **`exp`** writes `x` as k·ln2/128 + r, with |r| ≤ ln2/256. A table gives 2^(k/128) and a degree 5 polynomial gives e^r. Each table entry is laid out so that adding `k << 45` to its bits gives 2^(k/128), exponent and all, as in ARM's optimized-routines.
 - **`log`** writes `x` as 2^k·z and picks one of 128 values c near z, with log(x) = k·ln2 + log(c) + log1p(z/c - 1). Each 1/c is a multiple of 2^-7 or 2^-8, so z/c - 1 is exact in one fused multiply-add, and the two c next to 1 are 1 itself, so `log` needs no separate path near 1.

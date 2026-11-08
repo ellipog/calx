@@ -1,0 +1,8 @@
+// A context of no digits panics at the call.
+
+import std.decimal.{Context}
+
+fn main() {
+    let c = Context.new(0)    // panic: a precision is at least 1 digit
+    println("{c.prec()}")
+}

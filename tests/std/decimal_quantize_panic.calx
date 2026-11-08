@@ -1,0 +1,9 @@
+// Rounding to a place that needs more digits than the precision panics at the call, as Python's
+// quantize raises InvalidOperation.
+
+import std.decimal.{Decimal}
+
+fn main() {
+    let big = Decimal.parse(String("1E+30"))!
+    println("{big.round(2)}")    // panic: 1E+30 at exponent -2 needs more than 28 digits
+}

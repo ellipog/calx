@@ -1,0 +1,8 @@
+// The square root of a negative number panics at the call, as Python raises InvalidOperation.
+
+import std.decimal.{Decimal}
+
+fn main() {
+    let x = Decimal.from(-2)
+    println("{x.sqrt()}")    // panic: -2 has no square root
+}

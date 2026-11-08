@@ -175,6 +175,7 @@ private:
         std::vector<const Type*> eqs;      // the types it compares with a function of their own
         std::vector<const Type*> shows;    // the types it prints with a function of their own
         std::vector<const Type*> cmps;     // the types it orders with a function of their own
+        std::vector<const Type*> hashes;   // the types a hand-written `hash` adds with a function of their own
         std::vector<const Type*> sorts;    // the element types of the lists it sorts
         std::vector<const void*> sort_bys; // the closures, or the function types, `sort_by` calls (CLX-98)
         std::unordered_set<const void*> seen;
@@ -206,6 +207,9 @@ private:
         void add_sort(const Type* t) {
             if (seen.insert(reinterpret_cast<const char*>(t) + 5).second) sorts.push_back(t);
         }
+        void add_hash(const Type* t) {
+            if (seen.insert(reinterpret_cast<const char*>(t) + 7).second) hashes.push_back(t);
+        }
         void add_sort_by(const void* k) {
             if (seen.insert(static_cast<const char*>(k) + 6).second) sort_bys.push_back(k);
         }
@@ -219,6 +223,7 @@ private:
             for (const Type* t : o.cmps) add_cmp(t);
             for (const Type* t : o.sorts) add_sort(t);
             for (const void* k : o.sort_bys) add_sort_by(k);
+            for (const Type* t : o.hashes) add_hash(t);
         }
     };
 
@@ -308,6 +313,8 @@ private:
             while (k->kind == TypeKind::list) k = k->elem;
             if (hand(k, prop_java_hash) && java_seen.insert(k).second) java_order.push_back(k);
         }
+        // What a hand-written `hash` adds with `h.add` is hashed with its own glue too.
+        for (const Type* t : all.hashes) reach(t, true);
         p.glue[prop_equal] = std::move(eq_order);
         p.glue[prop_display] = all.shows;
         p.glue[prop_hash] = std::move(hash_order);
@@ -6127,6 +6134,7 @@ $dropall    m->len = 0;
         }
         if (e->bmethod == BMethod::hash_add) {
             Type* at = e->args[0].value->type;
+            if (uses_ && hash_glue(at)) uses_->add_hash(at);
             std::string decls;
             std::vector<std::string> v = sequence({{e->args[0].value, at}}, decls);
             std::string h = "(" + address(recv) + ")->" + member(t, 0).substr(1);

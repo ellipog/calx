@@ -155,6 +155,39 @@ impl Hash for Cached {
     }
 }
 
+// Hashes values of types it doesn't hold, a list and a tuple it makes, which need glue of their
+// own.
+struct Scaled {
+    digits: List<u32>,
+    at: BlockPos,
+}
+
+impl Equal for Scaled {
+    fn eq(self, other: Self) -> bool {
+        return widened(self.digits) == widened(other.digits) and self.at == other.at
+    }
+}
+
+impl Hash for Scaled {
+    fn hash(self, h: mut Hasher) {
+        h.add(widened(self.digits))
+        h.add((self.at.x, self.at.z))
+    }
+}
+
+// The digits without the zeros at the end, as `u64`s.
+fn widened(xs: List<u32>) -> List<u64> {
+    var n = xs.len()
+    while n > 0 and xs[n - 1] == 0 {
+        n -= 1
+    }
+    var out = List<u64>()
+    for i in 0..n {
+        out.push(u64(xs[i]))
+    }
+    return out
+}
+
 fn main() {
     let p = BlockPos { x: 1, y: -2, z: 3 }
     println("{p}")    // out: 1, -2, 3
@@ -248,4 +281,10 @@ fn main() {
     index[0].counts.insert(String("x"), 1)
     index.sort()
     println("{index[0].name} {index[1].name} {index[1].counts.len()}")    // out: a b 1
+
+    var scaled = Set<Scaled>()
+    scaled.insert(Scaled { digits: [1, 2, 0, 0], at: p })
+    scaled.insert(Scaled { digits: [1, 2], at: p })
+    scaled.insert(Scaled { digits: [1, 2], at: BlockPos { x: 0, y: 0, z: 0 } })
+    println("{scaled.len()}")    // out: 2
 }

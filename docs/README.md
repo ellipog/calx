@@ -103,6 +103,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 33. [std.bigint](std/bigint.md): integers of any size, with the arithmetic operators, powers, roots, gcd, and text in any base
 34. [std.stats](std/stats.md): means, medians, quantiles, modes, variances, standard deviations, correlation and linear regression, as Python's `statistics` gives them to the last bit
 35. [std.diff](std/diff.md): the fewest changes between two lists with Myers' algorithm, and unified diffs of text as `diff -u` writes them
+36. [std.decimal](std/decimal.md): decimals of any precision, as Python's `decimal` module has them, with exact money arithmetic, every rounding, and correctly rounded roots, exponentials, logarithms and powers
 
 ### Java compatibility
 

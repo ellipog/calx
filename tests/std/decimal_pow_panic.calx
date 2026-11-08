@@ -1,0 +1,9 @@
+// A negative number to a power that isn't an integer panics at the call, as Python raises
+// InvalidOperation.
+
+import std.decimal.{Decimal}
+
+fn main() {
+    let half = Decimal.parse(String("0.5"))!
+    println("{Decimal.from(-2).pow(half)}")    // panic: -2 to the power 0.5 is undefined
+}

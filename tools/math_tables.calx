@@ -1,0 +1,489 @@
+// Generates the tables and polynomials of std.math's exp, log and pow (std/math.calx).
+//
+//     calx run --release tools/math_tables.calx > tables.calx
+//
+// Everything is computed with std.decimal at 80 digits, then rounded to doubles. The polynomials
+// are minimax fits from a Remez exchange. It checks the properties the code relies on, listed with
+// each table, and stops if one doesn't hold.
+import std.decimal.{Context, Decimal}
+import std.math
+import std.process
+
+/// Entries in each table.
+const N: i64 = 128
+
+fn ctx() -> Context {
+    return Context.new(80)
+}
+
+fn int(n: i64) -> Decimal {
+    return ctx().from(n)
+}
+
+fn dec(text: str) -> Decimal {
+    return ctx().parse(String(text))!
+}
+
+fn of(f: f64) -> Decimal {
+    return ctx().from_f64(f)!
+}
+
+fn bits(f: f64) -> u64 {
+    return f.to_bits()
+}
+
+fn from_bits(b: u64) -> f64 {
+    return f64.from_bits(b)
+}
+
+fn check(holds: bool, what: String) {
+    if not holds {
+        eprintln("math_tables: {what} doesn't hold")
+        process.exit(1)
+    }
+}
+
+/// v rounded to the nearest multiple of 2^-g.
+fn to_grid(v: Decimal, g: i64) -> Decimal {
+    let s = int(2).powi(g)
+    return (v * s).to_integral() / s
+}
+
+/// Python's `repr` of a float: the shortest digits that read back, plainly from 1e-4 up to 1e16,
+/// and otherwise as `d.ddde-05`.
+fn repr(f: f64) -> String {
+    if f == 0.0 {
+        return String(if f.to_bits() >> 63 == 1 { "-0.0" } else { "0.0" })
+    }
+    // `{f:e}` is the shortest digits as d.ddd and an exponent, Rust's way: `1.5e3`, `-2e-7`.
+    let sci = "{f:e}"
+    let (mant, exp_text) = sci.split_once("e")!
+    let neg = mant.starts_with("-")
+    let body = if neg { mant[1..] } else { mant[..] }
+    let digits = body.replace(".", "")
+    let e = i64.parse(exp_text)!
+    let sign = if neg { "-" } else { "" }
+    let n = i64.wrap(digits.len())
+    if e < -4 or e >= 16 {
+        let m = if n == 1 { digits.copy() } else { "{digits[..1]}.{digits[1..]}" }
+        let es = if e < 0 { "-" } else { "+" }
+        let ea = e.abs()
+        return "{sign}{m}e{es}{if ea < 10 { "0" } else { "" }}{ea}"
+    }
+    if e < 0 {
+        return "{sign}0.{"0".repeat(usize.wrap(0 - e - 1))}{digits}"
+    }
+    if n <= e + 1 {
+        return "{sign}{digits}{"0".repeat(usize.wrap(e + 1 - n))}.0"
+    }
+    return "{sign}{digits[..usize.wrap(e + 1)]}.{digits[usize.wrap(e + 1)..]}"
+}
+
+/// A Calx literal that reads back as exactly f.
+fn lit(f: f64) -> String {
+    let r = repr(f)
+    if let (m, e) = r.split_once("e") {
+        if not m.contains(".") {
+            return "{m}.0e{e}"
+        }
+    }
+    return r
+}
+
+fn log2_of(v: Decimal, ln2: Decimal) -> f64 {
+    return (v.abs().ln() / ln2).to_f64()
+}
+
+// --- Remez -------------------------------------------------------------------------------------
+
+fn solve(a: List<List<Decimal>>, b: List<Decimal>) -> List<Decimal> {
+    let n = b.len()
+    var m = List<List<Decimal>>()
+    for i in 0..n {
+        var row = a[i].copy()
+        row.push(b[i].copy())
+        m.push(row)
+    }
+    for c in 0..n {
+        var p = c
+        for r in c + 1..n {
+            if m[r][c].abs() > m[p][c].abs() {
+                p = r
+            }
+        }
+        m.swap(c, p)
+        for r in 0..n {
+            if r != c and not m[r][c].is_zero() {
+                let f = m[r][c] / m[c][c]
+                for k in c..n + 1 {
+                    let t = f * m[c][k]
+                    m[r][k] = m[r][k] - t
+                }
+            }
+        }
+    }
+    var out = List<Decimal>()
+    for i in 0..n {
+        out.push(m[i][n] / m[i][i])
+    }
+    return out
+}
+
+fn horner(cs: List<Decimal>, x: Decimal) -> Decimal {
+    var s = int(0)
+    var i = cs.len()
+    while i > 0 {
+        i -= 1
+        s = s * x + cs[i]
+    }
+    return s
+}
+
+struct Fit {
+    coefs: List<f64>
+    worst: Decimal
+}
+
+/// The polynomial of degree deg with the least maximum absolute error from f on [lo, hi].
+fn remez(f: fn(Decimal) -> Decimal, lo: Decimal, hi: Decimal, deg: i64) -> Fit {
+    let iters = 12
+    let grid: i64 = 6000
+    let n = deg + 2
+    let one = int(1)
+    var xs = List<Decimal>()
+    for i in 0..n {
+        let angle = math.PI * f64(i32.wrap(n - 1 - i)) / f64(i32.wrap(n - 1))
+        xs.push((lo + hi) / 2 + (hi - lo) / 2 * of(math.cos(angle)))
+    }
+    var pts = List<Decimal>()
+    for i in 0..grid + 1 {
+        pts.push(lo + (hi - lo) * i / grid)
+    }
+    var fv = List<Decimal>()
+    for p in pts {
+        fv.push(f(p))
+    }
+    var cs = List<Decimal>()
+    var errs = List<Decimal>()
+    for _ in 0..iters {
+        var a = List<List<Decimal>>()
+        var b = List<Decimal>()
+        for i in 0..xs.len() {
+            var row = List<Decimal>()
+            for j in 0..deg + 1 {
+                row.push(if j == 0 { one.copy() } else { xs[i].powi(j) })
+            }
+            row.push(int(-1).powi(i64.wrap(i)))
+            a.push(row)
+            b.push(f(xs[i]))
+        }
+        cs = solve(a, b)
+        cs.truncate(usize.wrap(deg + 1))
+        errs = List<Decimal>()
+        for i in 0..pts.len() {
+            errs.push(fv[i] - horner(cs, pts[i]))
+        }
+        // The extreme error of each run of one sign.
+        var ext = List<usize>()
+        var i: usize = 0
+        while i < pts.len() {
+            var j = i
+            var best = i
+            let pos = not errs[i].is_negative()
+            while j < pts.len() and (not errs[j].is_negative()) == pos {
+                if errs[j].abs() > errs[best].abs() {
+                    best = j
+                }
+                j += 1
+            }
+            ext.push(best)
+            i = j
+        }
+        while i64.wrap(ext.len()) > n {
+            if errs[ext[0]].abs() < errs[ext[ext.len() - 1]].abs() {
+                _ = ext.remove(0)
+            } else {
+                _ = ext.pop()
+            }
+        }
+        if i64.wrap(ext.len()) < n {
+            break
+        }
+        xs = List<Decimal>()
+        for k in ext {
+            xs.push(pts[k].copy())
+        }
+    }
+    // The error of the coefficients as doubles, which is what the code evaluates.
+    var rounded = List<Decimal>()
+    var coefs = List<f64>()
+    for c in cs {
+        coefs.push(c.to_f64())
+        rounded.push(of(c.to_f64()))
+    }
+    var worst = int(0)
+    for i in 0..pts.len() {
+        let e = (fv[i] - horner(rounded, pts[i])).abs()
+        if e > worst {
+            worst = e
+        }
+    }
+    return Fit { coefs: coefs, worst: worst }
+}
+
+// --- The functions fitted ----------------------------------------------------------------------
+
+/// (e^r - 1 - r) / r^2 = sum r^(k-2) / k!
+fn exp_q(r: Decimal) -> Decimal {
+    var s = int(0)
+    var f = int(1)
+    var p = int(1)
+    for k in 2..30 {
+        f = f * k
+        s = s + p / f
+        p = p * r
+    }
+    return s
+}
+
+/// (log1p(r) - r + r^2/2) / r^3 = sum_{n>=3} (-1)^(n+1) r^(n-3) / n
+fn log_q(r: Decimal) -> Decimal {
+    var s = int(0)
+    var p = int(1)
+    for n in 3..80 {
+        s = if n % 2 == 1 { s + p / n } else { s + -(p / n) }
+        p = p * r
+    }
+    return s
+}
+
+/// atan(1/n) = sum (-1)^k / ((2k + 1) n^(2k + 1))
+fn atan_inv(n: i64) -> Decimal {
+    var s = int(0)
+    var p = int(1) / n
+    var k: i64 = 0
+    let tiny = int(10).powi(-85)
+    while p > tiny {
+        s = if k % 2 == 0 { s + p / (2 * k + 1) } else { s + -(p / (2 * k + 1)) }
+        p = p / (n * n)
+        k += 1
+    }
+    return s
+}
+
+/// (sin(r) - r + r^3/6) / r^5 = sum_{n>=2} (-1)^n z^(n-2) / (2n+1)!
+fn sin_q(z: Decimal) -> Decimal {
+    var s = int(0)
+    var f = int(120)
+    var p = int(1)
+    for n in 2..40 {
+        s = if n % 2 == 0 { s + p / f } else { s + -(p / f) }
+        p = p * z
+        f = f * ((2 * n + 2) * (2 * n + 3))
+    }
+    return s
+}
+
+/// (cos(r) - 1 + r^2/2) / r^4 = sum_{n>=2} (-1)^n z^(n-2) / (2n)!
+fn cos_q(z: Decimal) -> Decimal {
+    var s = int(0)
+    var f = int(24)
+    var p = int(1)
+    for n in 2..40 {
+        s = if n % 2 == 0 { s + p / f } else { s + -(p / f) }
+        p = p * z
+        f = f * ((2 * n + 1) * (2 * n + 2))
+    }
+    return s
+}
+
+fn hex(v: u64) -> String {
+    return "0x{v:016x}"
+}
+
+fn main() {
+    let one = int(1)
+    let ln2 = int(2).ln()
+
+    // --- exp -----------------------------------------------------------------------------------
+    //
+    // e^x = 2^(k/N) e^r, with k = round(x N / ln2) and |r| <= ln2 / 2N. EXP_T holds, for each
+    // j < N, the bits of 2^(j/N) as a double, less j << 45, and its relative tail: 2^(j/N) is
+    // T (1 + tail). Adding k << 45 to the first gives 2^(k/N), exponent and all.
+    var exp_t = List<u64>()
+    for j in 0..N {
+        let v = (int(j) / N * ln2).exp()
+        let t = v.to_f64()
+        exp_t.push(bits((v / of(t) - one).to_f64()))
+        exp_t.push(bits(t) - (u64.wrap(j) << 45))
+    }
+    let neg_ln2hi_n = (-ln2 / N).to_f64()
+    let neg_ln2lo_n = (-ln2 / N - of(neg_ln2hi_n)).to_f64()
+    let rmax = ln2 / (2 * N) * dec("1.0001")
+    let exp_fit = remez(exp_q, -rmax, rmax.copy(), 3)
+
+    // --- log -----------------------------------------------------------------------------------
+    //
+    // x = 2^k z, with z in [0x1.6p-1, 0x1.6p0) and the top 7 bits of z's mantissa, past LOG_OFF,
+    // choosing one of N subintervals. log(x) = k ln2 + log(c) + log1p(r), with r = z / c - 1.
+    // Each entry of LOG_T is 1/c, then -log(1/c) as hi + lo:
+    //
+    // - 1/c is a multiple of 2^-7 below 1 and of 2^-8 above, so z * (1/c) - 1 is exact in one
+    //   fused multiply-add for every z in the subinterval: |r| <= 2^-7 keeps it in 53 bits.
+    // - The two subintervals next to 1 have c = 1, so log(x) near 1 is r + log1p(r) - r with no
+    //   cancellation, and needs no path of its own.
+    // - hi is a multiple of 2^-42, like LOG_LN2_HI, so k ln2_hi + hi is exact for every k.
+    // - |hi| >= |r|, so hi + r can be split into a sum and its exact rounding error.
+    let off: u64 = 0x3fe6000000000000
+    var log_t = List<f64>()
+    var r_lo = int(0)
+    var r_hi = int(0)
+    let limit = int(2).powi(-7)
+    for i in 0..N {
+        let a = of(from_bits(off + (u64.wrap(i) << 45)))
+        let b = of(from_bits(off + (u64.wrap(i + 1) << 45)))    // the subinterval is [a, b)
+        let g: i64 = if a < one { 7 } else { 8 }
+        var invc = one.copy()
+        if a != one and b != one {
+            let near = to_grid(int(2) / (a + b), g)
+            var best_err = int(0)
+            for k in -3..4 {
+                let iv = near + int(i64(k)) / int(2).powi(g)
+                let miss = (a * iv - 1).abs().max((b * iv - 1).abs())
+                if k == -3 or miss < best_err {
+                    best_err = miss
+                    invc = iv
+                }
+            }
+        }
+        let lo_end = a * invc - 1
+        let hi_end = b * invc - 1
+        check(lo_end.abs().max(hi_end.abs()) <= limit, "|r| <= 2^-7 for entry {i}")
+        r_lo = r_lo.min(lo_end.copy())
+        r_hi = r_hi.max(hi_end.copy())
+        let logc = if invc != one { -invc.ln() } else { int(0) }
+        let logc_hi = to_grid(logc.copy(), 42)
+        check(invc == one or logc_hi.abs() >= lo_end.abs().max(hi_end.abs()), "|hi| >= |r| for entry {i}")
+        log_t.push(invc.to_f64())
+        log_t.push(logc_hi.to_f64())
+        log_t.push((logc - logc_hi).to_f64())
+        check(of(log_t[log_t.len() - 3]) == invc and of(log_t[log_t.len() - 2]) == logc_hi, "entry {i} is exact as doubles")
+    }
+    let ln2_hi = to_grid(ln2.copy(), 42)
+    let ln2_lo = (ln2 - ln2_hi).to_f64()
+    let qlo = r_lo * dec("1.001")
+    let qhi = r_hi * dec("1.001")
+    let log_fit = remez(log_q, qlo.copy(), qhi.copy(), 5)
+    let pow_fit = remez(log_q, qlo, qhi, 6)
+
+    // --- sin and cos ---------------------------------------------------------------------------
+    //
+    // x = k pi/2 + r, with k = round(x 2/pi) and |r| <= pi/4, for |x| < 2^20. pi/2 is split into
+    // three doubles, so x - k pio2_1 is exact in one fused multiply-add (it's a multiple of 2^-53
+    // under 1), and r is carried as hi + lo. The kernel works out sin(r) or cos(r), and its sign,
+    // from k mod 4, with no branch: TRIG_K has, for each quadrant, what the kernel multiplies by,
+    // then the polynomial. sin(r) = r - r^3/6 + r^5 Q(r^2), and cos(r) = 1 - r^2/2 + r^4 Q(r^2).
+    let pi = atan_inv(5) * 16 - atan_inv(239) * 4
+    let pio2 = pi / 2
+    let pio2_1 = pio2.to_f64()
+    let pio2_2 = (pio2 - of(pio2_1)).to_f64()
+    let pio2_3 = (pio2 - of(pio2_1) - of(pio2_2)).to_f64()
+    // in [1, 2), so k pio2_1 is a multiple of 2^-52
+    check(bits(pio2_1) & 0x7ff0000000000000 == 0x3ff0000000000000, "pio2_1 in [1, 2)")
+    let trig_zmax = (pi / 4).powi(2) * dec("1.0001")
+    let trig_deg: usize = 5
+    let sin_fit = remez(sin_q, int(0), trig_zmax.copy(), 5)
+    let cos_fit = remez(cos_q, int(0), trig_zmax, 5)
+    let sixth_hi = (-one / 6).to_f64()
+    let sixth_lo = (-one / 6 - of(sixth_hi)).to_f64()
+    // Each quadrant: a = AR r + AC is r or 1, signed; g = (GR r + GC)(1 + GZ r^2) approximates what
+    // r_lo is multiplied by, the derivative cos(r) or -sin(r), signed; then -1/6 or -1/2 as hi + lo,
+    // and Q; and zeros, so each row is 16 long.
+    var trig_k = List<f64>()
+    for q in 0..4 {
+        let sign = if q < 2 { 1.0 } else { -1.0 }
+        var row = List<f64>()
+        if q % 2 == 0 {
+            row = [sign, 0.0, 0.0, sign, -0.5, sixth_hi, sixth_lo]
+            row.extend(sin_fit.coefs.copy())
+        } else {
+            row = [0.0, sign, -sign, 0.0, (-one / 6).to_f64(), -0.5, 0.0]
+            row.extend(cos_fit.coefs.copy())
+        }
+        check(row.len() == 7 + trig_deg + 1, "a quadrant's row has its polynomial")
+        trig_k.extend(row.copy())
+        for _ in row.len()..16 {
+            trig_k.push(0.0)
+        }
+    }
+
+    // --- output --------------------------------------------------------------------------------
+    eprintln("r for log is in [{repr(r_lo.to_f64())}, {repr(r_hi.to_f64())}]")
+    eprintln("exp: (e^r - 1 - r) / r^2 within 2^{log2_of(exp_fit.worst.copy(), ln2.copy()):.1}")
+    eprintln("log: q within 2^{log2_of(log_fit.worst.copy(), ln2.copy()):.1}; pow: q within 2^{log2_of(pow_fit.worst.copy(), ln2.copy()):.1}")
+    eprintln("sin: Q within 2^{log2_of(sin_fit.worst.copy(), ln2.copy()):.1}; cos: Q within 2^{log2_of(cos_fit.worst.copy(), ln2.copy()):.1}")
+
+    var out = List<String>()
+    out.push(String("// Generated by tools/math_tables.calx."))
+    out.push(String())
+    out.push("const EXP_INVLN2N: f64 = {lit((int(N) / ln2).to_f64())}    // N / ln2")
+    out.push("const EXP_SHIFT: f64 = {lit(6755399441055744.0)}    // 0x1.8p52, for rounding to an integer")
+    out.push("const EXP_NEG_LN2HI_N: f64 = {lit(neg_ln2hi_n)}    // -ln2 / N, as hi + lo")
+    out.push("const EXP_NEG_LN2LO_N: f64 = {lit(neg_ln2lo_n)}")
+    out.push("// e^r - 1 - r = r^2 (c2 + c3 r + c4 r^2 + c5 r^3), within 2^{log2_of(exp_fit.worst.copy(), ln2.copy()):.1} r^2 for |r| <= ln2 / 256")
+    for k in 0..exp_fit.coefs.len() {
+        out.push("const EXP_C{k + 2}: f64 = {lit(exp_fit.coefs[k])}")
+    }
+    out.push(String("const EXP_T: [u64; 256] = ["))
+    var j: usize = 0
+    while j < exp_t.len() {
+        out.push("    {hex(exp_t[j])}, {hex(exp_t[j + 1])}, {hex(exp_t[j + 2])}, {hex(exp_t[j + 3])},")
+        j += 4
+    }
+    out.push(String("]"))
+    out.push(String())
+    out.push("const LOG_OFF: u64 = {hex(off)}    // 0x1.6p-1")
+    out.push("const LOG_LN2_HI: f64 = {lit(ln2_hi.to_f64())}    // ln2, as a multiple of 2^-42 + lo")
+    out.push("const LOG_LN2_LO: f64 = {lit(ln2_lo)}")
+    out.push("// (log1p(r) - r + r^2 / 2) / r^3, within 2^{log2_of(log_fit.worst.copy(), ln2.copy()):.1} for log's r, and to one more")
+    out.push("// degree, within 2^{log2_of(pow_fit.worst.copy(), ln2.copy()):.1}, for pow")
+    for k in 0..log_fit.coefs.len() {
+        out.push("const LOG_Q{k}: f64 = {lit(log_fit.coefs[k])}")
+    }
+    for k in 0..pow_fit.coefs.len() {
+        out.push("const POW_Q{k}: f64 = {lit(pow_fit.coefs[k])}")
+    }
+    out.push(String("// 1 / c, then log(c) as hi + lo"))
+    out.push("const LOG_T: [f64; {3 * N}] = [")
+    var i: usize = 0
+    while i < log_t.len() {
+        out.push("    {lit(log_t[i])}, {lit(log_t[i + 1])}, {lit(log_t[i + 2])},")
+        i += 3
+    }
+    out.push(String("]"))
+    out.push(String())
+    out.push("const TRIG_INV_PIO2: f64 = {lit((int(2) / pi).to_f64())}    // 2 / pi")
+    out.push("const TRIG_NEG_PIO2_1: f64 = {lit(-pio2_1)}    // pi / 2 as three doubles, the first negated")
+    out.push("const TRIG_PIO2_2: f64 = {lit(pio2_2)}")
+    out.push("const TRIG_PIO2_3: f64 = {lit(pio2_3)}")
+    out.push(String("// For each quadrant: AR, AC, GR, GC, GZ, then -1/6 or -1/2 as hi + lo, then Q, within"))
+    out.push("// 2^{log2_of(sin_fit.worst.copy(), ln2.copy()):.1} for sin and 2^{log2_of(cos_fit.worst.copy(), ln2.copy()):.1} for cos")
+    out.push(String("const TRIG_K: [f64; 64] = ["))
+    for q in 0..4 {
+        var first = List<String>()
+        var second = List<String>()
+        for k in 0..16 {
+            if k < 7 {
+                first.push(lit(trig_k[16 * usize.wrap(q) + usize.wrap(k)]))
+            } else {
+                second.push(lit(trig_k[16 * usize.wrap(q) + usize.wrap(k)]))
+            }
+        }
+        out.push("    {first.join(", ")},")
+        out.push("    {second.join(", ")},")
+    }
+    out.push(String("]"))
+    for line in out {
+        println(line)
+    }
+}
