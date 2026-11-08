@@ -1,0 +1,1577 @@
+/// Images in memory: read from PNG, JPEG and ICO files, changed, and written back, as Pillow
+/// does it. Resizing and blurring give Pillow's pixels, PNG and JPEG are read as libpng and
+/// libjpeg-turbo read them, and JPEGs are written byte for byte as Pillow writes them.
+///
+/// An `Image` holds its pixels 8 bits a channel, row by row from the top, in `pixels`.
+module std.image
+
+import std.fs.{read, write}
+import std.image.jpeg
+import std.image.jpeg.{Sampling}
+import std.image.png
+import std.math.{PI, cos, sin}
+
+/// What each pixel holds.
+pub enum Kind {
+    /// One byte, its brightness: Pillow's mode `L`.
+    Gray
+    /// Brightness, then alpha: Pillow's `LA`.
+    GrayAlpha
+    /// Red, green and blue: Pillow's `RGB`.
+    Rgb
+    /// Red, green, blue and alpha: Pillow's `RGBA`.
+    Rgba
+}
+
+impl Kind {
+    /// How many bytes a pixel takes: 1 for `Gray`, 2 for `GrayAlpha`, 3 for `Rgb` and 4 for
+    /// `Rgba`.
+    pub fn channels(self) -> usize {
+        return match self {
+            Gray => 1,
+            GrayAlpha => 2,
+            Rgb => 3,
+            Rgba => 4,
+        }
+    }
+
+    /// Whether its pixels have alpha.
+    pub fn has_alpha(self) -> bool {
+        return match self {
+            GrayAlpha | Rgba => true,
+            _ => false,
+        }
+    }
+}
+
+fn kind_of(channels: usize) -> Kind {
+    return match channels {
+        1 => Kind.Gray,
+        2 => Kind.GrayAlpha,
+        3 => Kind.Rgb,
+        _ => Kind.Rgba,
+    }
+}
+
+/// A color, 8 bits a channel, with its alpha: 255 is opaque and 0 clear.
+pub struct Color {
+    pub r: u8
+    pub g: u8
+    pub b: u8
+    pub a: u8
+}
+
+impl Color {
+    /// An opaque color.
+    pub fn rgb(r: u8, g: u8, b: u8) -> Color {
+        return Color { r, g, b, a: 255 }
+    }
+
+    /// A color and its alpha.
+    pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
+        return Color { r, g, b, a }
+    }
+
+    /// An opaque gray, `v` its brightness.
+    pub fn gray(v: u8) -> Color {
+        return Color { r: v, g: v, b: v, a: 255 }
+    }
+
+    /// The color a CSS hex code names, with or without its `#`: `#1838D0`, `#18d`, or with alpha
+    /// last, `#1838D080` and `#18d8`. `none` for anything else.
+    pub fn hex(text: String) -> Color? {
+        let all = text.to_bytes()
+        let skip: usize = if all.len() > 0 and all[0] == 35 { 1 } else { 0 }
+        let n = all.len() - skip
+        if n != 3 and n != 4 and n != 6 and n != 8 {
+            return none
+        }
+        var digits: List<u8> = []
+        for i in skip..all.len() {
+            let c = all[i]
+            let d = if c >= 48 and c <= 57 { c - 48 } else if c >= 97 and c <= 102 { c - 87 } else if c >= 65 and c <= 70 { c - 55 } else { 255u8 }
+            if d == 255 {
+                return none
+            }
+            digits.push(d)
+        }
+        if n <= 4 {
+            let a = if n == 4 { digits[3] * 17 } else { 255u8 }
+            return some(Color { r: digits[0] * 17, g: digits[1] * 17, b: digits[2] * 17, a })
+        }
+        let a = if n == 8 { digits[6] * 16 + digits[7] } else { 255u8 }
+        return some(Color { r: digits[0] * 16 + digits[1], g: digits[2] * 16 + digits[3], b: digits[4] * 16 + digits[5], a })
+    }
+
+    /// Its brightness, as Pillow turns RGB into gray: ITU-R 601's weights in 16-bit fixed point.
+    pub fn luma(self) -> u8 {
+        return luma(self.r, self.g, self.b)
+    }
+}
+
+fn luma(r: u8, g: u8, b: u8) -> u8 {
+    return u8.wrap((u32(r) * 19595 + u32(g) * 38470 + u32(b) * 7471 + 0x8000) >> 16)
+}
+
+/// `#1838d0`, as CSS writes it, with the alpha after when it isn't 255: `#1838d080`.
+impl Display for Color {
+    fn show(self) {
+        var s = String("#")
+        var parts: List<u8> = [self.r, self.g, self.b]
+        if self.a != 255 {
+            parts.push(self.a)
+        }
+        for p in parts {
+            s.push(hex_digit(p / 16))
+            s.push(hex_digit(p % 16))
+        }
+        print(s)
+    }
+}
+
+fn hex_digit(v: u8) -> rune {
+    return rune(if v < 10 { v + 48 } else { v + 87 })
+}
+
+impl Equal for Color {
+    fn eq(self, other: Self) -> bool {
+        return self.r == other.r and self.g == other.g and self.b == other.b and self.a == other.a
+    }
+}
+
+/// How `resize` works out each new pixel from the old ones near it, Pillow's filters.
+pub enum Filter {
+    /// The one nearest: fast, and blocky.
+    Nearest
+    /// The average of those it covers: the best for shrinking by a whole factor.
+    Box
+    /// Triangle weights over 2 pixels across each new one.
+    Bilinear
+    /// A Hamming-windowed sinc over 2: sharper than bilinear, as fast.
+    Hamming
+    /// Cubic weights over 4, Pillow's default.
+    Bicubic
+    /// A Lanczos-windowed sinc over 6: the sharpest.
+    Lanczos
+}
+
+/// An image: its size, what each pixel holds, and the pixels.
+pub struct Image {
+    w: usize
+    h: usize
+    form: Kind
+    /// The pixels, row by row from the top, each pixel's channels in turn, so pixel (x, y) starts
+    /// at `(y * width + x) * channels`. Its length is `width × height × channels`; the methods
+    /// panic if that's changed.
+    pub pixels: List<u8>
+}
+
+impl Equal for Image {
+    fn eq(self, other: Self) -> bool {
+        return self.w == other.w and self.h == other.h and self.form == other.form and self.pixels == other.pixels
+    }
+}
+
+/// `Image(640x480 Rgb)`.
+impl Display for Image {
+    fn show(self) {
+        print("Image({self.w}x{self.h} {self.form})")
+    }
+}
+
+impl Image {
+    /// An image filled with `color`, made gray or dropping alpha as `kind` holds it. Panics for
+    /// a width or height of 0.
+    @track_caller
+    pub fn new(width: usize, height: usize, kind: Kind, color: Color) -> Image {
+        if width == 0 or height == 0 {
+            panic("an image can't be {width} by {height}")
+        }
+        let ch = kind.channels()
+        let px = pixel_bytes(kind, color)
+        var pixels: List<u8> = []
+        pixels.reserve(width * height * ch)
+        for _ in 0usize..width * height {
+            for c in 0usize..ch {
+                pixels.push(px[c])
+            }
+        }
+        return Image { w: width, h: height, form: kind, pixels }
+    }
+
+    /// An image of these pixels, as `pixels` lays them out. Panics unless there are
+    /// `width × height × channels` of them, or for a width or height of 0.
+    @track_caller
+    pub fn from_pixels(width: usize, height: usize, kind: Kind, pixels: own List<u8>) -> Image {
+        if width == 0 or height == 0 {
+            panic("an image can't be {width} by {height}")
+        }
+        let want = width * height * kind.channels()
+        if pixels.len() != want {
+            panic("a {width} by {height} {kind} image is {want} bytes, not {pixels.len()}")
+        }
+        return Image { w: width, h: height, form: kind, pixels }
+    }
+
+    /// The image in a PNG, JPEG or ICO file, as `decode` reads it.
+    pub fn open(path: String) -> Image ! Error {
+        let bytes = try read(path.copy()).context("reading {path}")
+        return try Image.decode(bytes).context("reading {path}")
+    }
+
+    /// The image in a PNG, JPEG or ICO file's bytes, told apart by how they start, or why it
+    /// can't be read. A palette PNG comes out RGB, or RGBA if it has transparency, and a CMYK
+    /// JPEG RGB, so every image is one of the four kinds. An ICO gives its largest image.
+    pub fn decode(bytes: List<u8>) -> Image ! String {
+        if bytes.len() >= 8 and bytes[0] == 137 and bytes[1] == 80 and bytes[2] == 78 and bytes[3] == 71 {
+            let d = try png.decode(bytes)
+            return Image { w: d.width, h: d.height, form: kind_of(d.channels), pixels: d.pixels }
+        }
+        if bytes.len() >= 3 and bytes[0] == 0xFF and bytes[1] == 0xD8 and bytes[2] == 0xFF {
+            let d = try jpeg.decode(bytes)
+            return Image { w: d.width, h: d.height, form: kind_of(d.channels), pixels: d.pixels }
+        }
+        if bytes.len() >= 6 and bytes[0] == 0 and bytes[1] == 0 and bytes[2] == 1 and bytes[3] == 0 {
+            var images = try decode_ico(bytes)
+            var best: usize = 0
+            for i in 0usize..images.len() {
+                if images[i].w * images[i].h > images[best].w * images[best].h {
+                    best = i
+                }
+            }
+            return images.swap_remove(best)
+        }
+        fail String("not a PNG, JPEG or ICO file")
+    }
+
+    /// Writes the image to a file in the format its name ends with: `.png`, `.jpg` or `.jpeg` at
+    /// quality 75, or `.ico` with the sizes Pillow writes, 16 to 256 pixels, as many as fit in
+    /// the image. A JPEG holds no alpha, so an image with alpha can't be one; drop it first
+    /// with `to(Kind.Rgb)`.
+    pub fn save(self, path: String) ! Error {
+        let lower = path.to_lower_root()
+        var bytes: List<u8> = []
+        if lower.ends_with(".png") {
+            bytes = self.encode_png()
+        } else if lower.ends_with(".jpg") or lower.ends_with(".jpeg") {
+            if self.form.has_alpha() {
+                fail "can't write {path}: a JPEG holds no alpha, and the image is {self.form}"
+            }
+            bytes = self.encode_jpeg()
+        } else if lower.ends_with(".ico") {
+            var icons: List<Image> = []
+            for size in [16usize, 24, 32, 48, 64, 128, 256] {
+                if size <= self.w and size <= self.h {
+                    icons.push(self.thumbnail(size, size, Filter.Lanczos))
+                }
+            }
+            if icons.is_empty() {
+                fail "can't write {path}: an icon is at least 16 pixels a side"
+            }
+            bytes = encode_ico(icons)
+        } else {
+            fail "can't tell what format to write {path} in; end it with .png, .jpg or .ico"
+        }
+        try write(path.copy(), bytes).context("writing {path}")
+    }
+
+    /// The image as a PNG file, compressed at `level`, 0 to 9, as `std.image.png.encode` writes
+    /// it: 6, the default, is libpng's and Pillow's.
+    pub fn encode_png(self, level: u32 = 6) -> List<u8> {
+        return png.encode(self.w, self.h, self.form.channels(), self.pixels, level)
+    }
+
+    /// The image as a JPEG file, byte for byte as Pillow writes it with the same settings:
+    /// `quality` from 1 to 100, `sampling` how much color to keep, and `optimize` for Huffman
+    /// tables made for the image. Panics if the image has alpha, which a JPEG can't hold.
+    @track_caller
+    pub fn encode_jpeg(self, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false) -> List<u8> {
+        if self.form.has_alpha() {
+            panic("a JPEG holds no alpha, and the image is {self.form}; drop it first with to(Kind.Rgb)")
+        }
+        return jpeg.encode(self.w, self.h, self.form.channels(), self.pixels, quality, sampling, optimize)
+    }
+
+    /// How many pixels across.
+    pub fn width(self) -> usize {
+        return self.w
+    }
+
+    /// How many pixels down.
+    pub fn height(self) -> usize {
+        return self.h
+    }
+
+    /// What each pixel holds.
+    pub fn kind(self) -> Kind {
+        return self.form
+    }
+
+    /// How many bytes each pixel takes.
+    pub fn channels(self) -> usize {
+        return self.form.channels()
+    }
+
+    @track_caller
+    fn check(self) {
+        if self.pixels.len() != self.w * self.h * self.form.channels() {
+            panic("the image's pixels are {self.pixels.len()} bytes, not the {self.w * self.h * self.form.channels()} a {self.w} by {self.h} {self.form} image is")
+        }
+    }
+
+    /// The color of pixel (x, y), from the top left: gray as R, G and B alike, and alpha 255
+    /// without alpha. Panics if it's outside the image.
+    @track_caller
+    pub fn get(self, x: usize, y: usize) -> Color {
+        if x >= self.w or y >= self.h {
+            panic("pixel ({x}, {y}) is outside a {self.w} by {self.h} image")
+        }
+        let ch = self.form.channels()
+        let at = (y * self.w + x) * ch
+        let p = self.pixels[at..at + ch]
+        return match self.form {
+            Gray => Color.gray(p[0]),
+            GrayAlpha => Color { r: p[0], g: p[0], b: p[0], a: p[1] },
+            Rgb => Color.rgb(p[0], p[1], p[2]),
+            Rgba => Color { r: p[0], g: p[1], b: p[2], a: p[3] },
+        }
+    }
+
+    /// Sets pixel (x, y) to `color`: its brightness in a gray image, and without its alpha in
+    /// one without. Panics if it's outside the image.
+    @track_caller
+    pub fn set(mut self, x: usize, y: usize, color: Color) {
+        if x >= self.w or y >= self.h {
+            panic("pixel ({x}, {y}) is outside a {self.w} by {self.h} image")
+        }
+        let ch = self.form.channels()
+        let at = (y * self.w + x) * ch
+        let px = pixel_bytes(self.form, color)
+        for c in 0usize..ch {
+            self.pixels[at + c] = px[c]
+        }
+    }
+
+    /// The image with its pixels holding `kind`, as Pillow's `convert` makes them: gray from RGB
+    /// by ITU-R 601's weights, RGB from gray by repeating it, alpha dropped, or 255 where there
+    /// was none.
+    @track_caller
+    pub fn to(self, kind: Kind) -> Image {
+        self.check()
+        if kind == self.form {
+            return Image { w: self.w, h: self.h, form: kind, pixels: self.pixels.copy() }
+        }
+        let n = self.w * self.h
+        let from = self.form.channels()
+        let to = kind.channels()
+        var out: List<u8> = []
+        out.reserve(n * to)
+        unsafe {
+            out.set_len(n * to)
+            let s = self.pixels.as_ptr()
+            let d = out.as_mut_ptr()
+            if to == 1 and from >= 3 {
+                // Gray from color, the commonest: a loop with nothing else in it.
+                for i in 0usize..n {
+                    let p = s.add(i * from)
+                    let v = (u32(p.read()) * 19595 + u32(p.add(1).read()) * 38470 + u32(p.add(2).read()) * 7471 + 0x8000) >> 16
+                    d.add(i).write(u8.wrap(v))
+                }
+                return Image { w: self.w, h: self.h, form: kind, pixels: out }
+            }
+            for i in 0usize..n {
+                let p = s.add(i * from)
+                let (r, g, b) = if from >= 3 { (p.read(), p.add(1).read(), p.add(2).read()) } else { (p.read(), p.read(), p.read()) }
+                let a = if from == 2 { p.add(1).read() } else if from == 4 { p.add(3).read() } else { 255u8 }
+                let q = d.add(i * to)
+                if to <= 2 {
+                    q.write(if from >= 3 { luma(r, g, b) } else { r })
+                    if to == 2 {
+                        q.add(1).write(a)
+                    }
+                } else {
+                    q.write(r)
+                    q.add(1).write(g)
+                    q.add(2).write(b)
+                    if to == 4 {
+                        q.add(3).write(a)
+                    }
+                }
+            }
+        }
+        return Image { w: self.w, h: self.h, form: kind, pixels: out }
+    }
+
+    /// The rectangle `width` by `height` whose top left is (x, y). Panics unless it's inside the
+    /// image and not empty; `expand` adds a border instead.
+    @track_caller
+    pub fn crop(self, x: usize, y: usize, width: usize, height: usize) -> Image {
+        self.check()
+        if width == 0 or height == 0 or x + width > self.w or y + height > self.h {
+            panic("a {width} by {height} crop at ({x}, {y}) isn't inside a {self.w} by {self.h} image")
+        }
+        let ch = self.form.channels()
+        var out: List<u8> = []
+        out.reserve(width * height * ch)
+        for r in y..y + height {
+            let at = (r * self.w + x) * ch
+            out.extend(self.pixels[at..at + width * ch])
+        }
+        return Image { w: width, h: height, form: self.form, pixels: out }
+    }
+
+    /// The image with a border of `color` around it, as many pixels on each side as given.
+    @track_caller
+    pub fn expand(self, left: usize, top: usize, right: usize, bottom: usize, color: Color) -> Image {
+        self.check()
+        var out = Image.new(self.w + left + right, self.h + top + bottom, self.form, color)
+        out.paste(self, i64.wrap(left), i64.wrap(top))
+        return out
+    }
+
+    /// The image resized to `width` by `height` with `filter`, Pillow's `resize` to the pixel:
+    /// a pass across and a pass down, with weights in 22-bit fixed point. An image with alpha
+    /// is resized with each color weighted by its alpha, as Pillow does it, so clear pixels
+    /// don't bleed their color. Panics for a width or height of 0.
+    @track_caller
+    pub fn resize(self, width: usize, height: usize, filter: Filter = Filter.Bicubic) -> Image {
+        self.check()
+        if width == 0 or height == 0 {
+            panic("an image can't be resized to {width} by {height}")
+        }
+        if width == self.w and height == self.h {
+            return Image { w: width, h: height, form: self.form, pixels: self.pixels.copy() }
+        }
+        let ch = self.form.channels()
+        if filter == Filter.Nearest {
+            return Image { w: width, h: height, form: self.form, pixels: nearest(self.pixels, self.w, self.h, ch, width, height) }
+        }
+        let alpha = self.form.has_alpha()
+        var src: List<u8> = if alpha { premultiply(self.pixels, ch) } else { self.pixels.copy() }
+        let (support, kind) = filter_info(filter)
+        let (vb, vk, vsize) = coefficients(self.h, height, support, kind)
+        // Only the rows the vertical pass reads are resized across.
+        let first = vb[0]
+        let last = vb[(height - 1) * 2] + vb[(height - 1) * 2 + 1]
+        if width != self.w {
+            let (hb, hk, hsize) = coefficients(self.w, width, support, kind)
+            src = convolve_rows(src, self.w, ch, first, last, width, hb, hk, hsize)
+        }
+        var out = src
+        if height != self.h {
+            let start = if width != self.w { first } else { 0usize }
+            out = convolve_cols(out, width, ch, height, vb, vk, vsize, start)
+        }
+        if alpha {
+            out = unpremultiply(out, ch)
+        }
+        return Image { w: width, h: height, form: self.form, pixels: out }
+    }
+
+    /// The image made as big as fits in `width` by `height`, its proportions kept, as Pillow's
+    /// `thumbnail` works out the size, and no bigger than it was. Pillow first shrinks by a whole
+    /// factor before filtering; this filters in one step, which is a little sharper.
+    @track_caller
+    pub fn thumbnail(self, width: usize, height: usize, filter: Filter = Filter.Bicubic) -> Image {
+        if width >= self.w and height >= self.h {
+            return self.copy()
+        }
+        let aspect = f64.nearest(self.w) / f64.nearest(self.h)
+        var x = width
+        var y = height
+        let fx = f64.nearest(x)
+        let fy = f64.nearest(y)
+        if fx / fy >= aspect {
+            // The nearer of the whole numbers around y × aspect, by how close its proportions are.
+            let v = fy * aspect
+            let lo = v.floor()
+            let hi = v.ceil()
+            let pick = if (aspect - hi / fy).abs() < (aspect - lo / fy).abs() { hi } else { lo }
+            x = usize.wrap(i64.saturate(pick).max(1))
+        } else {
+            let v = fx / aspect
+            let lo = v.floor()
+            let hi = v.ceil()
+            let dl = if lo == 0.0 { 0.0 } else { (aspect - fx / lo).abs() }
+            let dh = if hi == 0.0 { 0.0 } else { (aspect - fx / hi).abs() }
+            let pick = if dh < dl { hi } else { lo }
+            y = usize.wrap(i64.saturate(pick).max(1))
+        }
+        return self.resize(x, y, filter)
+    }
+
+    /// A copy of the image.
+    pub fn copy(self) -> Image {
+        return Image { w: self.w, h: self.h, form: self.form, pixels: self.pixels.copy() }
+    }
+
+    /// The image blurred by a Gaussian of `radius` pixels, Pillow's `GaussianBlur(radius)` to the
+    /// pixel: three box blurs whose sizes make a Gaussian of that spread, across and down.
+    @track_caller
+    pub fn blur(self, radius: f64) -> Image {
+        self.check()
+        if radius < 0.0 {
+            panic("a blur's radius can't be negative, not {radius}")
+        }
+        let r = gaussian_box(f32.nearest(radius), 3)
+        return Image { w: self.w, h: self.h, form: self.form, pixels: box_blur(self.pixels, self.w, self.h, self.form.channels(), r, 3) }
+    }
+
+    /// The image blurred by averaging each pixel with those up to `radius` away, Pillow's
+    /// `BoxBlur(radius)`; a radius that isn't whole weights the farthest pixels by its fraction.
+    @track_caller
+    pub fn box_blur(self, radius: f64) -> Image {
+        self.check()
+        if radius < 0.0 {
+            panic("a blur's radius can't be negative, not {radius}")
+        }
+        return Image { w: self.w, h: self.h, form: self.form, pixels: box_blur(self.pixels, self.w, self.h, self.form.channels(), f32.nearest(radius), 1) }
+    }
+
+    /// The image mirrored left to right.
+    @track_caller
+    pub fn flip_horizontal(self) -> Image {
+        self.check()
+        let ch = self.form.channels()
+        var out: List<u8> = []
+        out.reserve(self.pixels.len())
+        for y in 0usize..self.h {
+            for x in 0usize..self.w {
+                let at = (y * self.w + self.w - 1 - x) * ch
+                for c in 0usize..ch {
+                    out.push(self.pixels[at + c])
+                }
+            }
+        }
+        return Image { w: self.w, h: self.h, form: self.form, pixels: out }
+    }
+
+    /// The image upside down.
+    @track_caller
+    pub fn flip_vertical(self) -> Image {
+        self.check()
+        let row = self.w * self.form.channels()
+        var out: List<u8> = []
+        out.reserve(self.pixels.len())
+        for y in 0usize..self.h {
+            let at = (self.h - 1 - y) * row
+            out.extend(self.pixels[at..at + row])
+        }
+        return Image { w: self.w, h: self.h, form: self.form, pixels: out }
+    }
+
+    /// The image turned a quarter turn to the left, counterclockwise, as Pillow's `ROTATE_90`.
+    @track_caller
+    pub fn rotate_left(self) -> Image {
+        return self.turn(true)
+    }
+
+    /// The image turned a quarter turn to the right, clockwise, as Pillow's `ROTATE_270`.
+    @track_caller
+    pub fn rotate_right(self) -> Image {
+        return self.turn(false)
+    }
+
+    /// The image turned half a turn, as Pillow's `ROTATE_180`.
+    @track_caller
+    pub fn rotate_180(self) -> Image {
+        return self.flip_horizontal().flip_vertical()
+    }
+
+    @track_caller
+    fn turn(self, left: bool) -> Image {
+        self.check()
+        let ch = self.form.channels()
+        var out: List<u8> = []
+        out.reserve(self.pixels.len())
+        // The new image is h wide and w high.
+        for ny in 0usize..self.w {
+            for nx in 0usize..self.h {
+                let (x, y) = if left { (self.w - 1 - ny, nx) } else { (ny, self.h - 1 - nx) }
+                let at = (y * self.w + x) * ch
+                for c in 0usize..ch {
+                    out.push(self.pixels[at + c])
+                }
+            }
+        }
+        return Image { w: self.h, h: self.w, form: self.form, pixels: out }
+    }
+
+    /// Copies `other` onto the image with its top left at (x, y), replacing what's there, alpha
+    /// too, as Pillow's `paste` without a mask: converted to this image's kind, and cut off at
+    /// the edges. (x, y) can be outside the image.
+    @track_caller
+    pub fn paste(mut self, other: Image, x: i64, y: i64) {
+        self.check()
+        let src = if other.form == self.form { other.copy() } else { other.to(self.form) }
+        let ch = self.form.channels()
+        let x0 = x.max(0)
+        let y0 = y.max(0)
+        let x1 = (x + i64.wrap(src.w)).min(i64.wrap(self.w))
+        let y1 = (y + i64.wrap(src.h)).min(i64.wrap(self.h))
+        if x0 >= x1 or y0 >= y1 {
+            return
+        }
+        let n = usize.wrap(x1 - x0) * ch
+        for row in y0..y1 {
+            let s = (usize.wrap(row - y) * src.w + usize.wrap(x0 - x)) * ch
+            let d = (usize.wrap(row) * self.w + usize.wrap(x0)) * ch
+            for i in 0usize..n {
+                self.pixels[d + i] = src.pixels[s + i]
+            }
+        }
+    }
+
+    /// Draws `other` over the image with its top left at (x, y), blended by its alpha as
+    /// Pillow's `alpha_composite` blends it, and cut off at the edges. The image gets alpha if
+    /// it had none.
+    @track_caller
+    pub fn overlay(mut self, other: Image, x: i64, y: i64) {
+        self.check()
+        if not self.form.has_alpha() {
+            let kind = if self.form == Kind.Gray { Kind.GrayAlpha } else { Kind.Rgba }
+            let changed = self.to(kind)
+            self.form = kind
+            self.pixels = changed.pixels
+        }
+        let src = other.to(Kind.Rgba)
+        let x0 = x.max(0)
+        let y0 = y.max(0)
+        let x1 = (x + i64.wrap(src.w)).min(i64.wrap(self.w))
+        let y1 = (y + i64.wrap(src.h)).min(i64.wrap(self.h))
+        let gray = self.form == Kind.GrayAlpha
+        let ch = self.form.channels()
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let s = (usize.wrap(row - y) * src.w + usize.wrap(col - x)) * 4
+                let d = (usize.wrap(row) * self.w + usize.wrap(col)) * ch
+                let sa = u32(src.pixels[s + 3])
+                if sa == 0 {
+                    continue
+                }
+                let (dr, dg, db, da) = if gray { (u32(self.pixels[d]), u32(self.pixels[d]), u32(self.pixels[d]), u32(self.pixels[d + 1])) } else { (u32(self.pixels[d]), u32(self.pixels[d + 1]), u32(self.pixels[d + 2]), u32(self.pixels[d + 3])) }
+                // Pillow's integer blend, with 7 more bits.
+                let blend = da * (255 - sa)
+                let outa255 = sa * 255 + blend
+                let coef1 = sa * 255 * 255 * 128 / outa255
+                let coef2 = 255u32 * 128 - coef1
+                let r = div255(u32(src.pixels[s]) * coef1 + dr * coef2 + (0x80 << 7)) >> 7
+                let g = div255(u32(src.pixels[s + 1]) * coef1 + dg * coef2 + (0x80 << 7)) >> 7
+                let b = div255(u32(src.pixels[s + 2]) * coef1 + db * coef2 + (0x80 << 7)) >> 7
+                let a = div255(outa255 + 0x80)
+                if gray {
+                    self.pixels[d] = luma(u8.wrap(r), u8.wrap(g), u8.wrap(b))
+                    self.pixels[d + 1] = u8.wrap(a)
+                } else {
+                    self.pixels[d] = u8.wrap(r)
+                    self.pixels[d + 1] = u8.wrap(g)
+                    self.pixels[d + 2] = u8.wrap(b)
+                    self.pixels[d + 3] = u8.wrap(a)
+                }
+            }
+        }
+    }
+
+    /// The image with its alpha taken from `mask`, a gray image the same size, as Pillow's
+    /// `putalpha`: a gray image becomes gray and alpha, and RGB becomes RGBA. Panics if `mask`
+    /// isn't gray or isn't the same size.
+    @track_caller
+    pub fn with_alpha(self, mask: Image) -> Image {
+        self.check()
+        if mask.form != Kind.Gray or mask.w != self.w or mask.h != self.h {
+            panic("an alpha mask is a gray image the same size, {self.w} by {self.h}, not {mask}")
+        }
+        let kind = if self.form == Kind.Gray or self.form == Kind.GrayAlpha { Kind.GrayAlpha } else { Kind.Rgba }
+        var out = self.to(kind)
+        let ch = kind.channels()
+        for i in 0usize..self.w * self.h {
+            out.pixels[i * ch + ch - 1] = mask.pixels[i]
+        }
+        return out
+    }
+
+    /// One channel as a gray image: 0 is the first, red or the brightness, and the last is the
+    /// alpha. Panics for a channel the image doesn't have.
+    @track_caller
+    pub fn channel(self, index: usize) -> Image {
+        self.check()
+        let ch = self.form.channels()
+        if index >= ch {
+            panic("a {self.form} image has channels 0 to {ch - 1}, not {index}")
+        }
+        var out: List<u8> = []
+        out.reserve(self.w * self.h)
+        for i in 0usize..self.w * self.h {
+            out.push(self.pixels[i * ch + index])
+        }
+        return Image { w: self.w, h: self.h, form: Kind.Gray, pixels: out }
+    }
+
+    /// Fills the rectangle `width` by `height` whose top left is (x, y) with `color`, as the
+    /// image holds it, cut off at the edges.
+    @track_caller
+    pub fn fill_rect(mut self, x: i64, y: i64, width: usize, height: usize, color: Color) {
+        self.check()
+        let ch = self.form.channels()
+        let px = pixel_bytes(self.form, color)
+        let x0 = usize.wrap(x.max(0))
+        let y0 = usize.wrap(y.max(0))
+        let x1 = usize.wrap((x + i64.wrap(width)).min(i64.wrap(self.w)).max(0))
+        let y1 = usize.wrap((y + i64.wrap(height)).min(i64.wrap(self.h)).max(0))
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let at = (row * self.w + col) * ch
+                for c in 0usize..ch {
+                    self.pixels[at + c] = px[c]
+                }
+            }
+        }
+    }
+
+    /// Fills the image with `color`.
+    @track_caller
+    pub fn fill(mut self, color: Color) {
+        let (w, h) = (self.w, self.h)
+        self.fill_rect(0, 0, w, h, color)
+    }
+
+    /// Fills the area around (x, y) that's the color it is there with `color`, as Pillow's
+    /// `ImageDraw.floodfill` does: pixels joined to it up, down, left or right, and no more
+    /// than `threshold` from its color in any channel. Does nothing if (x, y) is outside the
+    /// image, or already `color`.
+    @track_caller
+    pub fn flood_fill(mut self, x: usize, y: usize, color: Color, threshold: u8 = 0) {
+        self.check()
+        if x >= self.w or y >= self.h {
+            return
+        }
+        let ch = self.form.channels()
+        let fill = pixel_bytes(self.form, color)
+        let start = (y * self.w + x) * ch
+        let background = self.pixels[start..start + ch]
+        if close(fill.to_list()[..ch], background, threshold) {
+            return
+        }
+        // Each pixel is filled when it's reached, and its neighbors looked at once.
+        var seen: List<bool> = [false; self.w * self.h]
+        var todo: List<usize> = [y * self.w + x]
+        seen[y * self.w + x] = true
+        while todo.len() > 0 {
+            let i = todo.pop() ?? 0
+            for c in 0usize..ch {
+                self.pixels[i * ch + c] = fill[c]
+            }
+            let px = i % self.w
+            let py = i / self.w
+            // Neighbors past an edge are marked with the pixel itself, which is already seen.
+            let next: [usize; 4] = [
+                if px + 1 < self.w { i + 1 } else { i },
+                if px > 0 { i - 1 } else { i },
+                if py + 1 < self.h { i + self.w } else { i },
+                if py > 0 { i - self.w } else { i },
+            ]
+            for j in next {
+                if seen[j] {
+                    continue
+                }
+                seen[j] = true
+                if close(self.pixels[j * ch..j * ch + ch], background, threshold) {
+                    todo.push(j)
+                }
+            }
+        }
+    }
+
+    /// The image with each color channel turned to 255 minus itself, alpha kept, as Pillow's
+    /// `ImageOps.invert`.
+    @track_caller
+    pub fn invert(self) -> Image {
+        self.check()
+        var out = self.copy()
+        let ch = self.form.channels()
+        let colors = if self.form.has_alpha() { ch - 1 } else { ch }
+        for i in 0usize..self.w * self.h {
+            for c in 0usize..colors {
+                out.pixels[i * ch + c] = 255 - out.pixels[i * ch + c]
+            }
+        }
+        return out
+    }
+
+    /// The image in at most `colors` colors, 1 to 256, each pixel an index into a palette, for a
+    /// small PNG. An image with that few colors keeps them exactly; otherwise they're chosen by
+    /// median cut, refined by a few rounds of k-means, and each pixel takes the nearest. Alpha is
+    /// a channel like the others. Panics for 0 colors or more than 256.
+    @track_caller
+    pub fn quantize(self, colors: usize = 256) -> Paletted {
+        self.check()
+        if colors == 0 or colors > 256 {
+            panic("a palette holds 1 to 256 colors, not {colors}")
+        }
+        let rgba = self.to(Kind.Rgba)
+        return quantize_rgba(rgba.pixels, self.w, self.h, colors)
+    }
+}
+
+/// An image whose pixels are indexes into a palette of up to 256 colors, as `quantize` makes it,
+/// for a small PNG.
+pub struct Paletted {
+    w: usize
+    h: usize
+    /// Each pixel's index into `palette`, row by row from the top.
+    pub indexes: List<u8>
+    /// The colors.
+    pub palette: List<Color>
+}
+
+impl Paletted {
+    /// How many pixels across.
+    pub fn width(self) -> usize {
+        return self.w
+    }
+
+    /// How many pixels down.
+    pub fn height(self) -> usize {
+        return self.h
+    }
+
+    /// The image with each pixel its palette color: RGBA if any color isn't opaque, and RGB
+    /// otherwise.
+    @track_caller
+    pub fn to_image(self) -> Image {
+        let alpha = self.palette.any(|c| c.a != 255)
+        let kind = if alpha { Kind.Rgba } else { Kind.Rgb }
+        let ch = kind.channels()
+        var out: List<u8> = []
+        out.reserve(self.w * self.h * ch)
+        for i in self.indexes {
+            let c = self.palette[usize(i)]
+            out.push(c.r)
+            out.push(c.g)
+            out.push(c.b)
+            if alpha {
+                out.push(c.a)
+            }
+        }
+        return Image.from_pixels(self.w, self.h, kind, out)
+    }
+
+    /// The image as a palette PNG, its indexes in as few bits as the palette needs, as Pillow
+    /// writes one, at zlib `level`.
+    @track_caller
+    pub fn encode_png(self, level: u32 = 6) -> List<u8> {
+        var palette: List<u8> = []
+        for c in self.palette {
+            palette.push(c.r)
+            palette.push(c.g)
+            palette.push(c.b)
+            palette.push(c.a)
+        }
+        return png.encode_indexed(self.w, self.h, self.indexes, palette, level)
+    }
+
+    /// Writes the image to a PNG file.
+    pub fn save(self, path: String) ! Error {
+        if not path.to_lower_root().ends_with(".png") {
+            fail "can't write {path}: a palette image is written as a PNG"
+        }
+        try write(path.copy(), self.encode_png()).context("writing {path}")
+    }
+}
+
+// The bytes a pixel of `kind` holds for `color`.
+fn pixel_bytes(kind: Kind, c: Color) -> [u8; 4] {
+    return match kind {
+        Gray => [c.luma(), 0, 0, 0],
+        GrayAlpha => [c.luma(), c.a, 0, 0],
+        Rgb => [c.r, c.g, c.b, 0],
+        Rgba => [c.r, c.g, c.b, c.a],
+    }
+}
+
+fn close(a: List<u8>, b: List<u8>, threshold: u8) -> bool {
+    for i in 0usize..a.len() {
+        let d = if a[i] > b[i] { a[i] - b[i] } else { b[i] - a[i] }
+        if d > threshold {
+            return false
+        }
+    }
+    return true
+}
+
+fn div255(v: u32) -> u32 {
+    return ((v >> 8) + v) >> 8
+}
+
+// Colors weighted by alpha, as Pillow's RGBa, with its rounding.
+fn premultiply(pixels: List<u8>, ch: usize) -> List<u8> {
+    var out = pixels.copy()
+    let n = pixels.len() / ch
+    for i in 0usize..n {
+        let a = u32(pixels[i * ch + ch - 1])
+        for c in 0usize..ch - 1 {
+            let t = u32(pixels[i * ch + c]) * a + 128
+            out[i * ch + c] = u8.wrap(((t >> 8) + t) >> 8)
+        }
+    }
+    return out
+}
+
+fn unpremultiply(pixels: List<u8>, ch: usize) -> List<u8> {
+    var out = pixels.copy()
+    let n = pixels.len() / ch
+    for i in 0usize..n {
+        let a = u32(pixels[i * ch + ch - 1])
+        if a == 0 or a == 255 {
+            continue
+        }
+        for c in 0usize..ch - 1 {
+            out[i * ch + c] = u8.wrap((255 * u32(pixels[i * ch + c]) / a).min(255))
+        }
+    }
+    return out
+}
+
+// Pillow's nearest-neighbor resize: each new pixel's center mapped back, the position stepped
+// along by adding the scale, as Pillow steps it.
+fn nearest(pixels: List<u8>, w: usize, h: usize, ch: usize, nw: usize, nh: usize) -> List<u8> {
+    let sx = f64.nearest(w) / f64.nearest(nw)
+    let sy = f64.nearest(h) / f64.nearest(nh)
+    var xs: List<usize> = []
+    var xo = sx * 0.5
+    for _ in 0usize..nw {
+        xs.push(usize.wrap(i64.saturate(xo).min(i64.wrap(w) - 1)))
+        xo += sx
+    }
+    var out: List<u8> = []
+    out.reserve(nw * nh * ch)
+    var yo = sy * 0.5
+    for _ in 0usize..nh {
+        let y = usize.wrap(i64.saturate(yo).min(i64.wrap(h) - 1))
+        for x in xs {
+            let at = (y * w + x) * ch
+            for c in 0usize..ch {
+                out.push(pixels[at + c])
+            }
+        }
+        yo += sy
+    }
+    return out
+}
+
+// A filter's reach, in source pixels at full size, and which it is.
+fn filter_info(f: Filter) -> (f64, i32) {
+    return match f {
+        Box => (0.5, 0),
+        Bilinear => (1.0, 1),
+        Hamming => (1.0, 2),
+        Bicubic => (2.0, 3),
+        Lanczos => (3.0, 4),
+        Nearest => (0.5, 0),
+    }
+}
+
+fn sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0
+    }
+    let y = x * PI
+    return sin(y) / y
+}
+
+fn weight(kind: i32, x0: f64) -> f64 {
+    var x = x0
+    if kind == 0 {
+        return if x > -0.5 and x <= 0.5 { 1.0 } else { 0.0 }
+    }
+    if kind == 4 {
+        return if x >= -3.0 and x < 3.0 { sinc(x) * sinc(x / 3.0) } else { 0.0 }
+    }
+    if x < 0.0 {
+        x = -x
+    }
+    if kind == 1 {
+        return if x < 1.0 { 1.0 - x } else { 0.0 }
+    }
+    if kind == 2 {
+        if x == 0.0 {
+            return 1.0
+        }
+        if x >= 1.0 {
+            return 0.0
+        }
+        let y = x * PI
+        return sin(y) / y * (0.54 + 0.46 * cos(y))
+    }
+    // Bicubic, a = -0.5.
+    if x < 1.0 {
+        return ((-0.5 + 2.0) * x - (-0.5 + 3.0)) * x * x + 1.0
+    }
+    if x < 2.0 {
+        return (((x - 5.0) * x + 8.0) * x - 4.0) * -0.5
+    }
+    return 0.0
+}
+
+// Pillow's precompute_coeffs and normalize_coeffs_8bpc: for each new pixel, the first source
+// pixel and how many it takes, and their weights in 22-bit fixed point, `size` to a pixel.
+fn coefficients(in_size: usize, out_size: usize, support0: f64, kind: i32) -> (List<usize>, List<i32>, usize) {
+    let scale = f64.nearest(in_size) / f64.nearest(out_size)
+    let filterscale = if scale < 1.0 { 1.0 } else { scale }
+    let support = support0 * filterscale
+    let size = usize.wrap(i64.saturate(support.ceil())) * 2 + 1
+    var bounds: List<usize> = []
+    var kk: List<i32> = [0; out_size * size]
+    var w: List<f64> = [0.0; size]
+    for xx in 0usize..out_size {
+        let center = (f64.nearest(xx) + 0.5) * scale
+        let ss = 1.0 / filterscale
+        let xmin = i64.saturate(center - support + 0.5).max(0)
+        let xmax = i64.saturate(center + support + 0.5).min(i64.wrap(in_size))
+        let count = usize.wrap((xmax - xmin).max(0))
+        var ww = 0.0
+        for x in 0usize..count {
+            let v = weight(kind, (f64.nearest(x) + f64.nearest(xmin) - center + 0.5) * ss)
+            w[x] = v
+            ww += v
+        }
+        for x in 0usize..count {
+            let v = if ww != 0.0 { w[x] / ww } else { w[x] }
+            let scaled = v * 4194304.0
+            kk[xx * size + x] = i32.saturate(if v < 0.0 { scaled - 0.5 } else { scaled + 0.5 })
+        }
+        bounds.push(usize.wrap(xmin))
+        bounds.push(count)
+    }
+    return (bounds, kk, size)
+}
+
+fn clip8(v: i32) -> u8 {
+    return u8.wrap((v >> 22).max(0).min(255))
+}
+
+// Rows `first` to `last` resized across.
+fn convolve_rows(src: List<u8>, w: usize, ch: usize, first: usize, last: usize, nw: usize, bounds: List<usize>, kk: List<i32>, size: usize) -> List<u8> {
+    let rows = last - first
+    var out: List<u8> = []
+    out.reserve(rows * nw * ch)
+    unsafe {
+        out.set_len(rows * nw * ch)
+        let s = src.as_ptr()
+        let d = out.as_mut_ptr()
+        let k = kk.as_ptr()
+        for y in 0usize..rows {
+            let row = s.add((first + y) * w * ch)
+            for xx in 0usize..nw {
+                let xmin = bounds[xx * 2]
+                let count = bounds[xx * 2 + 1]
+                let kw = k.add(xx * size)
+                for c in 0usize..ch {
+                    var ss: i32 = 1 << 21
+                    for x in 0usize..count {
+                        ss += i32(row.add((xmin + x) * ch + c).read()) * kw.add(x).read()
+                    }
+                    d.add((y * nw + xx) * ch + c).write(clip8(ss))
+                }
+            }
+        }
+    }
+    return out
+}
+
+// Resized down: `bounds` count from row `start` of the original, which is row 0 of `src`.
+fn convolve_cols(src: List<u8>, w: usize, ch: usize, nh: usize, bounds: List<usize>, kk: List<i32>, size: usize, start: usize) -> List<u8> {
+    let row = w * ch
+    var out: List<u8> = []
+    out.reserve(nh * row)
+    var acc: List<i32> = [0; row]
+    unsafe {
+        out.set_len(nh * row)
+        let s = src.as_ptr()
+        let d = out.as_mut_ptr()
+        let a = acc.as_mut_ptr()
+        for yy in 0usize..nh {
+            let ymin = bounds[yy * 2] - start
+            let count = bounds[yy * 2 + 1]
+            for i in 0usize..row {
+                a.add(i).write(1 << 21)
+            }
+            for y in 0usize..count {
+                let kv = kk[yy * size + y]
+                let r = s.add((ymin + y) * row)
+                for i in 0usize..row {
+                    a.add(i).write(a.add(i).read() + i32(r.add(i).read()) * kv)
+                }
+            }
+            let o = d.add(yy * row)
+            for i in 0usize..row {
+                o.add(i).write(clip8(a.add(i).read()))
+            }
+        }
+    }
+    return out
+}
+
+// Pillow's _gaussian_blur_radius: the box radius whose `passes` box blurs spread as a Gaussian
+// of this radius does, in single precision as Pillow works it out.
+fn gaussian_box(radius: f32, passes: i32) -> f32 {
+    let sigma2 = radius * radius / f32.nearest(passes)
+    let big_l = f32.nearest((f64(sigma2 * 12.0f32 + 1.0f32)).sqrt())
+    let l = ((big_l - 1.0f32) / 2.0f32).floor()
+    var a = (2.0f32 * l + 1.0f32) * (l * (l + 1.0f32) - 3.0f32 * sigma2)
+    a /= 6.0f32 * (sigma2 - (l + 1.0f32) * (l + 1.0f32))
+    return l + a
+}
+
+// Pillow's ImagingBoxBlur: `passes` box blurs across, then the same down.
+fn box_blur(pixels: List<u8>, w: usize, h: usize, ch: usize, radius: f32, passes: i32) -> List<u8> {
+    var cur = pixels.copy()
+    if radius == 0.0f32 {
+        return cur
+    }
+    for _ in 0i32..passes {
+        cur = blur_rows(cur, w, h, ch, radius)
+    }
+    for _ in 0i32..passes {
+        cur = blur_cols(cur, w, h, ch, radius)
+    }
+    return cur
+}
+
+// A box blur's weights in 24-bit fixed point: each whole pixel's, and the two farthest's, the
+// radius's fraction of one, as Pillow's ImagingHorizontalBoxBlur works them out.
+fn box_weights(float_radius: f32) -> (usize, u32, u32) {
+    let radius = usize.wrap(i32.saturate(float_radius))
+    let ww = u32.wrap(i64.saturate(f64(16777216.0f32 / (float_radius * 2.0f32 + 1.0f32))))
+    let fw = (16777216 - u32.wrap(radius * 2 + 1) * ww) / 2
+    return (radius, ww, fw)
+}
+
+// One box blur of each row, the edges repeated, as Pillow's: a running sum, all channels of a
+// pixel at once. Past the first and last radius + 1 pixels, nothing is clamped.
+fn blur_rows(pixels: List<u8>, w: usize, h: usize, ch: usize, float_radius: f32) -> List<u8> {
+    let (radius, ww, fw) = box_weights(float_radius)
+    let last = w - 1
+    let edge_a = (radius + 1).min(w)
+    // The middle, from a to b: every position the sum reaches is inside the row.
+    let a = edge_a
+    let b = if w > radius + 1 { (w - radius - 1).max(a) } else { a }
+    var out: List<u8> = []
+    out.reserve(pixels.len())
+    unsafe {
+        out.set_len(pixels.len())
+        let s = pixels.as_ptr()
+        let d = out.as_mut_ptr()
+        for y in 0usize..h {
+            let line = s.add(y * w * ch)
+            let o = d.add(y * w * ch)
+            var acc: [u32; 4] = [0; 4]
+            for c in 0usize..ch {
+                var v = u32(line.add(c).read()) * u32.wrap(radius + 1)
+                for x in 0usize..edge_a - 1 {
+                    v += u32(line.add(x * ch + c).read())
+                }
+                v += u32(line.add(last * ch + c).read()) * u32.wrap(radius + 1 - edge_a)
+                acc[c] = v
+            }
+            for x in 0usize..w {
+                if x == a and b > a {
+                    // The middle.
+                    for m in a..b {
+                        let sub = line.add((m - radius - 1) * ch)
+                        let add = line.add((m + radius) * ch)
+                        let far = line.add((m + radius + 1) * ch)
+                        for c in 0usize..ch {
+                            let sv = u32(sub.add(c).read())
+                            acc[c] = acc[c] + u32(add.add(c).read()) - sv
+                            let bulk = acc[c] * ww + (sv + u32(far.add(c).read())) * fw
+                            o.add(m * ch + c).write(u8.wrap((bulk + (1u32 << 23)) >> 24))
+                        }
+                    }
+                }
+                if x >= a and x < b {
+                    continue
+                }
+                let sub = line.add((if x >= radius + 1 { x - radius - 1 } else { 0usize }) * ch)
+                let add = line.add((x + radius).min(last) * ch)
+                let far = line.add((x + radius + 1).min(last) * ch)
+                for c in 0usize..ch {
+                    let sv = u32(sub.add(c).read())
+                    acc[c] = acc[c] + u32(add.add(c).read()) - sv
+                    let bulk = acc[c] * ww + (sv + u32(far.add(c).read())) * fw
+                    o.add(x * ch + c).write(u8.wrap((bulk + (1u32 << 23)) >> 24))
+                }
+            }
+        }
+    }
+    return out
+}
+
+// One box blur of each column, as Pillow's blur of the image turned on its side gives, worked
+// out a row at a time, so every column's sum moves at once.
+fn blur_cols(pixels: List<u8>, w: usize, h: usize, ch: usize, float_radius: f32) -> List<u8> {
+    let (radius, ww, fw) = box_weights(float_radius)
+    let n = w * ch
+    let last = h - 1
+    let edge_a = (radius + 1).min(h)
+    var acc: List<u32> = [0; n]
+    var out: List<u8> = []
+    out.reserve(pixels.len())
+    unsafe {
+        out.set_len(pixels.len())
+        let s = pixels.as_ptr()
+        let d = out.as_mut_ptr()
+        let ap = acc.as_mut_ptr()
+        let first = s
+        let end = s.add(last * n)
+        for i in 0usize..n {
+            ap.add(i).write(u32(first.add(i).read()) * u32.wrap(radius + 1) + u32(end.add(i).read()) * u32.wrap(radius + 1 - edge_a))
+        }
+        for y in 0usize..edge_a - 1 {
+            let r = s.add(y * n)
+            for i in 0usize..n {
+                ap.add(i).write(ap.add(i).read() + u32(r.add(i).read()))
+            }
+        }
+        for y in 0usize..h {
+            let sub = s.add((if y >= radius + 1 { y - radius - 1 } else { 0usize }) * n)
+            let add = s.add((y + radius).min(last) * n)
+            let far = s.add((y + radius + 1).min(last) * n)
+            let o = d.add(y * n)
+            for i in 0usize..n {
+                let sv = u32(sub.add(i).read())
+                let v = ap.add(i).read() + u32(add.add(i).read()) - sv
+                ap.add(i).write(v)
+                let bulk = v * ww + (sv + u32(far.add(i).read())) * fw
+                o.add(i).write(u8.wrap((bulk + (1u32 << 23)) >> 24))
+            }
+        }
+    }
+    return out
+}
+
+// A color in the palette search: its channels, and how many pixels have it.
+struct Bucket {
+    from: usize
+    to: usize
+}
+
+// Median cut over the distinct colors, weighted by how often each comes, then a few rounds of
+// k-means; each pixel takes the nearest palette color.
+fn quantize_rgba(pixels: List<u8>, w: usize, h: usize, colors: usize) -> Paletted {
+    let n = w * h
+    // The distinct colors and their counts.
+    var counts = Map<u32, u32>()
+    for i in 0usize..n {
+        let key = u32(pixels[i * 4]) << 24 | u32(pixels[i * 4 + 1]) << 16 | u32(pixels[i * 4 + 2]) << 8 | u32(pixels[i * 4 + 3])
+        let c = counts.get(key) ?? 0
+        counts.insert(key, c + 1)
+    }
+    var keys: List<u32> = []
+    for (k, _) in counts {
+        keys.push(k)
+    }
+    keys.sort()
+    var palette: List<Color> = []
+    if keys.len() <= colors {
+        // Few enough to keep them all, exactly.
+        var index = Map<u32, u8>()
+        for i in 0usize..keys.len() {
+            index.insert(keys[i], u8.wrap(i))
+            palette.push(unpack(keys[i]))
+        }
+        var indexes: List<u8> = []
+        indexes.reserve(n)
+        for i in 0usize..n {
+            let key = u32(pixels[i * 4]) << 24 | u32(pixels[i * 4 + 1]) << 16 | u32(pixels[i * 4 + 2]) << 8 | u32(pixels[i * 4 + 3])
+            indexes.push(index.get(key) ?? 0)
+        }
+        return Paletted { w, h, indexes, palette }
+    }
+    var weights: List<u64> = []
+    for k in keys {
+        weights.push(u64(counts.get(k) ?? 0))
+    }
+    // Median cut: split the bucket with the widest channel, weighted by its pixels, at the
+    // weighted median of that channel.
+    var order: List<usize> = []
+    for i in 0usize..keys.len() {
+        order.push(i)
+    }
+    var buckets: List<Bucket> = [Bucket { from: 0, to: keys.len() }]
+    while buckets.len() < colors {
+        var best: usize = 0
+        var best_score: u64 = 0
+        var best_channel: u32 = 0
+        for b in 0usize..buckets.len() {
+            let (from, to) = (buckets[b].from, buckets[b].to)
+            if to - from < 2 {
+                continue
+            }
+            var total: u64 = 0
+            for i in from..to {
+                total += weights[order[i]]
+            }
+            for channel in 0u32..4 {
+                var lo: u32 = 255
+                var hi: u32 = 0
+                for i in from..to {
+                    let v = (keys[order[i]] >> (24 - channel * 8)) & 255
+                    lo = lo.min(v)
+                    hi = hi.max(v)
+                }
+                let score = u64(hi - lo) * u64(hi - lo) * total
+                if score > best_score {
+                    best_score = score
+                    best = b
+                    best_channel = channel
+                }
+            }
+        }
+        if best_score == 0 {
+            break
+        }
+        let (from, to) = (buckets[best].from, buckets[best].to)
+        let shift = 24 - best_channel * 8
+        var part = order[from..to]
+        part.sort_by_key(|i| (keys[i] >> shift) & 255)
+        var total: u64 = 0
+        for i in part {
+            total += weights[i]
+        }
+        var run: u64 = 0
+        var cut = from + 1
+        for j in 0usize..part.len() - 1 {
+            run += weights[part[j]]
+            cut = from + j + 1
+            if run * 2 >= total {
+                break
+            }
+        }
+        for j in 0usize..part.len() {
+            order[from + j] = part[j]
+        }
+        buckets[best] = Bucket { from, to: cut }
+        buckets.push(Bucket { from: cut, to })
+    }
+    // Each bucket's weighted mean, then k-means over the distinct colors.
+    var centers: List<[f64; 4]> = []
+    for b in buckets {
+        var sum: [f64; 4] = [0.0; 4]
+        var total = 0.0
+        for i in b.from..b.to {
+            let k = keys[order[i]]
+            let wt = f64.nearest(weights[order[i]])
+            for c in 0usize..4 {
+                sum[c] += f64((k >> u32.wrap(24 - c * 8)) & 255) * wt
+            }
+            total += wt
+        }
+        centers.push(sum.map(|s| s / total))
+    }
+    var assign: List<usize> = [0; keys.len()]
+    for _ in 0usize..4 {
+        for i in 0usize..keys.len() {
+            assign[i] = nearest_center(centers, keys[i])
+        }
+        var sums: List<[f64; 4]> = [[0.0; 4]; centers.len()]
+        var totals: List<f64> = [0.0; centers.len()]
+        for i in 0usize..keys.len() {
+            let wt = f64.nearest(weights[i])
+            for c in 0usize..4 {
+                sums[assign[i]][c] += f64((keys[i] >> u32.wrap(24 - c * 8)) & 255) * wt
+            }
+            totals[assign[i]] += wt
+        }
+        for j in 0usize..centers.len() {
+            if totals[j] > 0.0 {
+                centers[j] = sums[j].map(|s| s / totals[j])
+            }
+        }
+    }
+    for c in centers {
+        palette.push(Color { r: u8.wrap(i64.round(c[0]).max(0).min(255)), g: u8.wrap(i64.round(c[1]).max(0).min(255)), b: u8.wrap(i64.round(c[2]).max(0).min(255)), a: u8.wrap(i64.round(c[3]).max(0).min(255)) })
+    }
+    // Each distinct color's nearest palette color, then each pixel's.
+    var centers8: List<[f64; 4]> = []
+    for c in palette {
+        centers8.push([f64(c.r), f64(c.g), f64(c.b), f64(c.a)])
+    }
+    var index = Map<u32, u8>()
+    for k in keys {
+        index.insert(k, u8.wrap(nearest_center(centers8, k)))
+    }
+    var indexes: List<u8> = []
+    indexes.reserve(n)
+    for i in 0usize..n {
+        let key = u32(pixels[i * 4]) << 24 | u32(pixels[i * 4 + 1]) << 16 | u32(pixels[i * 4 + 2]) << 8 | u32(pixels[i * 4 + 3])
+        indexes.push(index.get(key) ?? 0)
+    }
+    return Paletted { w, h, indexes, palette }
+}
+
+fn unpack(k: u32) -> Color {
+    return Color { r: u8.wrap(k >> 24), g: u8.wrap(k >> 16), b: u8.wrap(k >> 8), a: u8.wrap(k) }
+}
+
+fn nearest_center(centers: List<[f64; 4]>, k: u32) -> usize {
+    let v: [f64; 4] = [f64((k >> 24) & 255), f64((k >> 16) & 255), f64((k >> 8) & 255), f64(k & 255)]
+    var best: usize = 0
+    var best_d = 1.0e30
+    for j in 0usize..centers.len() {
+        var d = 0.0
+        for c in 0usize..4 {
+            let e = centers[j][c] - v[c]
+            d += e * e
+        }
+        if d < best_d {
+            best_d = d
+            best = j
+        }
+    }
+    return best
+}
+
+/// Images as an ICO file, each stored as a PNG, smallest first, as Pillow writes one: a
+/// Windows icon, or a website's favicon.ico. Panics unless there's at least one image, each
+/// at most 256 pixels a side.
+@track_caller
+pub fn encode_ico(images: List<Image>) -> List<u8> {
+    if images.is_empty() {
+        panic("an icon holds at least one image")
+    }
+    var order: List<usize> = []
+    for i in 0usize..images.len() {
+        if images[i].w > 256 or images[i].h > 256 {
+            panic("an icon's images are at most 256 pixels a side, not {images[i].w} by {images[i].h}")
+        }
+        order.push(i)
+    }
+    order.sort_by_key(|i| images[i].w * images[i].h)
+    var out: List<u8> = [0, 0, 1, 0, u8.wrap(images.len() % 256), u8.wrap(images.len() / 256)]
+    var datas: List<List<u8>> = []
+    for i in order {
+        datas.push(images[i].encode_png())
+    }
+    var offset = 6 + 16 * images.len()
+    for j in 0usize..order.len() {
+        let (iw, ih) = (images[order[j]].w, images[order[j]].h)
+        out.push(if iw < 256 { u8.wrap(iw) } else { 0u8 })
+        out.push(if ih < 256 { u8.wrap(ih) } else { 0u8 })
+        out.extend([0, 0, 0, 0, 32, 0])
+        let len = datas[j].len()
+        for v in [len, offset] {
+            out.push(u8.wrap(v % 256))
+            out.push(u8.wrap(v / 256 % 256))
+            out.push(u8.wrap(v / 65536 % 256))
+            out.push(u8.wrap(v / 16777216 % 256))
+        }
+        offset += len
+    }
+    for d in datas {
+        out.extend(d)
+    }
+    return out
+}
+
+fn le16(b: List<u8>, at: usize) -> usize {
+    return usize(b[at]) | usize(b[at + 1]) * 256
+}
+
+fn le32(b: List<u8>, at: usize) -> usize {
+    return le16(b, at) | le16(b, at + 2) * 65536
+}
+
+/// The images in an ICO file, or why they can't be read: PNG entries as `Image.decode` reads
+/// them, and bitmap ones, of 1, 4, 8, 24 or 32 bits with their transparency mask, as RGBA.
+pub fn decode_ico(bytes: List<u8>) -> List<Image> ! String {
+    if bytes.len() < 6 or bytes[0] != 0 or bytes[1] != 0 or bytes[2] != 1 or bytes[3] != 0 {
+        fail String("not an ICO file")
+    }
+    let count = le16(bytes, 4)
+    if count == 0 or bytes.len() < 6 + 16 * count {
+        fail String("the ICO file's directory is cut short")
+    }
+    var images: List<Image> = []
+    for i in 0usize..count {
+        let e = 6 + 16 * i
+        let size = le32(bytes, e + 8)
+        let at = le32(bytes, e + 12)
+        if at > bytes.len() or size > bytes.len() - at {
+            fail "the ICO file's image {i} runs past its end"
+        }
+        let data = bytes[at..at + size]
+        if data.len() >= 8 and data[0] == 137 and data[1] == 80 {
+            images.push(try Image.decode(data))
+        } else {
+            images.push(try decode_dib(data))
+        }
+    }
+    return images
+}
+
+// A bitmap in an icon: its header, then the pixels bottom row first, then a 1-bit mask of the
+// clear pixels, twice the height counting both.
+fn decode_dib(d: List<u8>) -> Image ! String {
+    if d.len() < 40 {
+        fail String("the ICO file's bitmap is cut short")
+    }
+    let header = le32(d, 0)
+    let w = le32(d, 4)
+    let h2 = le32(d, 8)
+    let bits = le16(d, 14)
+    let compression = le32(d, 16)
+    if header < 40 or w == 0 or w > 256 or h2 < 2 or h2 > 512 or compression != 0 {
+        fail String("the ICO file has a bitmap it can't read")
+    }
+    let h = h2 / 2
+    let used = le32(d, 32)
+    let palette_size = if bits <= 8 { if used == 0 { usize(1u32 << u32.wrap(bits)) } else { used } } else { 0usize }
+    let pal = header
+    let start = pal + palette_size * 4
+    let stride = (w * bits + 31) / 32 * 4
+    let mask_stride = (w + 31) / 32 * 4
+    if bits != 1 and bits != 4 and bits != 8 and bits != 24 and bits != 32 {
+        fail "the ICO file has a {bits}-bit bitmap, which isn't read"
+    }
+    if start + stride * h > d.len() {
+        fail String("the ICO file's bitmap is cut short")
+    }
+    let mask_at = start + stride * h
+    let has_mask = mask_at + mask_stride * h <= d.len()
+    var out: List<u8> = []
+    out.reserve(w * h * 4)
+    for y in 0usize..h {
+        let row = start + (h - 1 - y) * stride
+        for x in 0usize..w {
+            var px: [u8; 4] = [0, 0, 0, 255]
+            if bits == 32 {
+                let p = row + x * 4
+                px = [d[p + 2], d[p + 1], d[p], d[p + 3]]
+            } else if bits == 24 {
+                let p = row + x * 3
+                px = [d[p + 2], d[p + 1], d[p], 255]
+            } else {
+                let per = 8 / bits
+                let byte = u32(d[row + x / per])
+                let shift = u32.wrap(8 - (x % per + 1) * bits)
+                let index = usize((byte >> shift) & ((1u32 << u32.wrap(bits)) - 1))
+                let p = pal + index * 4
+                if p + 3 < start {
+                    px = [d[p + 2], d[p + 1], d[p], 255]
+                }
+            }
+            if has_mask and bits != 32 {
+                let m = u32(d[mask_at + (h - 1 - y) * mask_stride + x / 8])
+                if (m >> u32.wrap(7 - x % 8)) & 1 == 1 {
+                    px[3] = 0
+                }
+            }
+            out.push(px[0])
+            out.push(px[1])
+            out.push(px[2])
+            out.push(px[3])
+        }
+    }
+    return Image { w, h, form: Kind.Rgba, pixels: out }
+}

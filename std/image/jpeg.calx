@@ -1,0 +1,1873 @@
+/// JPEG files, read as libjpeg-turbo reads them, so the pixels are the ones Pillow and Java's
+/// ImageIO give: baseline and progressive, any of the usual chroma subsamplings, restart
+/// markers, gray, YCbCr, RGB and CMYK. The inverse DCT, the smoothing of subsampled chroma and
+/// the conversion to RGB are libjpeg's own integer arithmetic. Baseline JPEGs are written byte
+/// for byte as Pillow writes them. Pixels come out and go in 8 bits a channel, as
+/// [std.image](image.md) holds them.
+///
+/// `std.image` reads and writes JPEGs with these, and most programs use it instead.
+module std.image.jpeg
+
+/// A JPEG's pixels, 8 bits a channel.
+pub struct Decoded {
+    /// How many pixels across.
+    pub width: usize
+    /// How many pixels down.
+    pub height: usize
+    /// How many bytes each pixel takes: 1 for gray and 3 for RGB.
+    pub channels: usize
+    /// The pixels, row by row from the top, each pixel's channels in turn.
+    pub pixels: List<u8>
+}
+
+// Where each coefficient, in the zigzag order the file has them, goes in a block, row by row.
+const NATURAL: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+]
+
+// The bits a Huffman lookup takes at once: codes up to this long are found in one step.
+const FAST: u32 = 9
+
+struct Huffman {
+    // For each FAST-bit prefix, the code's length times 256 plus its value, or 0 when the code
+    // is longer.
+    lut: List<u16>
+    // For an AC table, for each FAST-bit prefix whose code and the bits after it fit in FAST:
+    // the coefficient times 65536, plus the zeros before it times 256, plus the bits taken; or 0.
+    fast_ac: List<i32>
+    // For each length, the largest code of that length, or -1, and where its values start.
+    maxcode: [i32; 18]
+    offset: [i32; 17]
+    values: List<u8>
+    defined: bool
+}
+
+fn empty_table() -> Huffman {
+    return Huffman { lut: [], fast_ac: [], maxcode: [-1; 18], offset: [0; 17], values: [], defined: false }
+}
+
+struct Component {
+    id: u8
+    h: usize
+    v: usize
+    table: usize
+    // Its size once subsampled, in pixels and in blocks, and the blocks its plane holds, which a
+    // whole number of MCUs covers.
+    width: usize
+    height: usize
+    blocks_x: usize
+    blocks_y: usize
+    stride: usize
+    rows: usize
+    // Its coefficients: every block's, or, for a baseline JPEG read as it's decoded, one row of
+    // MCUs'.
+    coefs: List<i16>
+    // Its samples, stride × 8 by rows × 8.
+    plane: List<u8>
+    // The quantization table, row by row, taken when its first scan starts, as libjpeg takes it.
+    quant: [i32; 64]
+    latched: bool
+    dc: usize
+    ac: usize
+    pred: i32
+}
+
+struct Bits {
+    at: usize
+    acc: u64
+    n: u32
+    // A marker was reached: zeros are fed from here on.
+    marker: bool
+}
+
+impl Bits {
+    fn fill(mut self, data: List<u8>) {
+        let len = data.len()
+        unsafe {
+            let p = data.as_ptr()
+            while self.n <= 56 {
+                if not self.marker and self.at < len {
+                    let b = p.add(self.at).read()
+                    if b != 0xFF {
+                        self.acc |= u64(b) << (56 - self.n)
+                        self.at += 1
+                    } else if self.at + 1 < len and p.add(self.at + 1).read() == 0 {
+                        self.acc |= 0xFFu64 << (56 - self.n)
+                        self.at += 2
+                    } else {
+                        self.marker = true
+                    }
+                }
+                self.n += 8
+            }
+        }
+    }
+
+    fn get(mut self, data: List<u8>, count: u32) -> i32 {
+        if count == 0 {
+            return 0
+        }
+        if self.n < count {
+            self.fill(data)
+        }
+        let v = i32.wrap(self.acc >> (64 - count))
+        self.acc <<= count
+        self.n -= count
+        return v
+    }
+
+    fn bit(mut self, data: List<u8>) -> bool {
+        return self.get(data, 1) != 0
+    }
+
+    // The value of a `count`-bit difference, as JPEG's EXTEND makes it signed.
+    fn signed(mut self, data: List<u8>, count: u32) -> i32 {
+        if count == 0 {
+            return 0
+        }
+        let v = self.get(data, count)
+        return if v < 1 << (count - 1) { v - (1 << count) + 1 } else { v }
+    }
+
+    fn decode(mut self, data: List<u8>, t: Huffman) -> u32 ! String {
+        if self.n < 16 {
+            self.fill(data)
+        }
+        let peek = usize.wrap(self.acc >> (64 - FAST))
+        let e = u32(unsafe { t.lut.as_ptr().add(peek).read() })
+        if e != 0 {
+            let len = e >> 8
+            self.acc <<= len
+            self.n -= len
+            return e & 255
+        }
+        var len = FAST
+        while len < 16 {
+            len += 1
+            let code = i32.wrap(self.acc >> (64 - len))
+            if code <= t.maxcode[usize(len)] {
+                self.acc <<= len
+                self.n -= len
+                let i = code + t.offset[usize(len)]
+                if i < 0 or usize.wrap(i) >= t.values.len() {
+                    fail String("the JPEG's image data is corrupt: a Huffman code has no value")
+                }
+                return u32(t.values[usize.wrap(i)])
+            }
+        }
+        fail String("the JPEG's image data is corrupt: a Huffman code is longer than 16 bits")
+    }
+
+    // Starts again at a byte boundary after a restart marker, which must come next.
+    fn restart(mut self, data: List<u8>) ! String {
+        self.acc = 0
+        self.n = 0
+        self.marker = false
+        // Skip any fill bytes before the marker.
+        while self.at + 1 < data.len() and data[self.at] == 0xFF and data[self.at + 1] == 0xFF {
+            self.at += 1
+        }
+        if self.at + 1 < data.len() and data[self.at] == 0xFF and data[self.at + 1] >= 0xD0 and data[self.at + 1] <= 0xD7 {
+            self.at += 2
+            return
+        }
+        fail String("the JPEG's image data is corrupt: a restart marker is missing")
+    }
+}
+
+fn u16_at(data: List<u8>, at: usize) -> usize {
+    return usize(u32(data[at]) << 8 | u32(data[at + 1]))
+}
+
+// What a marker's segment holds, for errors.
+fn segment(m: u8) -> str {
+    return match m {
+        0xC4 => "Huffman tables",
+        0xDB => "quantization tables",
+        0xDA => "scan header",
+        0xDD => "restart interval",
+        0xFE => "comment",
+        _ => if m >= 0xC0 and m <= 0xCF { "frame header" } else if m >= 0xE0 and m <= 0xEF { "application data" } else { "marker segment" },
+    }
+}
+
+fn build_table(counts: [u8; 16], values: own List<u8>, ac: bool) -> Huffman ! String {
+    var t = empty_table()
+    t.defined = true
+    t.values = values
+    let size = usize(1u32 << FAST)
+    var lut: List<u16> = [0; size]
+    var code: i32 = 0
+    var k: i32 = 0
+    for len in 1usize..17 {
+        let count = i32(counts[len - 1])
+        t.offset[len] = k - code
+        if count > 0 {
+            for _ in 0i32..count {
+                if len <= usize(FAST) {
+                    // Every FAST-bit prefix that starts with this code.
+                    let shift = FAST - u32.wrap(len)
+                    let first = usize(u32.wrap(code) << shift)
+                    let entry = u16.wrap(u32.wrap(len) << 8 | u32(t.values[usize.wrap(k)]))
+                    for j in 0usize..usize(1u32 << shift) {
+                        lut[first + j] = entry
+                    }
+                }
+                code += 1
+                k += 1
+            }
+            t.maxcode[len] = code - 1
+        } else {
+            t.maxcode[len] = -1
+        }
+        if code > 1 << i32.wrap(len) {
+            fail String("the JPEG has a Huffman table with more codes than fit")
+        }
+        code <<= 1
+    }
+    t.maxcode[17] = 0x7fffffff
+    if ac {
+        // A coefficient whose code and magnitude bits together fit in FAST bits is read in one
+        // step, as stb_image reads it.
+        var fast: List<i32> = [0; size]
+        for i in 0usize..size {
+            let e = u32(lut[i])
+            if e == 0 {
+                continue
+            }
+            let len = e >> 8
+            let rs = e & 255
+            let run = rs >> 4
+            let bits = rs & 15
+            if bits == 0 {
+                // The end of the block is a run of 255, and sixteen zeros a zero after fifteen.
+                if run == 0 {
+                    fast[i] = 255 * 256 + i32.wrap(len)
+                } else if run == 15 {
+                    fast[i] = 15 * 256 + i32.wrap(len)
+                }
+                continue
+            }
+            if len + bits > FAST {
+                continue
+            }
+            let raw = i32.wrap((u32.wrap(i) << len) & ((1u32 << FAST) - 1)) >> i32.wrap(FAST - bits)
+            let value = if raw < 1 << i32.wrap(bits - 1) { raw - (1 << i32.wrap(bits)) + 1 } else { raw }
+            fast[i] = value * 65536 + i32.wrap(run) * 256 + i32.wrap(len + bits)
+        }
+        t.fast_ac = fast
+    }
+    t.lut = lut
+    return t
+}
+
+/// The pixels of a JPEG file, or why they can't be read: gray for one component, and RGB for
+/// three or four, converted from YCbCr, YCCK or CMYK as the file's markers say, as libjpeg
+/// decides. The pixels match libjpeg-turbo's with its default settings, the accurate integer
+/// inverse DCT and smooth chroma upsampling, which are what Pillow and Java use. Arithmetic
+/// coding, 12-bit samples and lossless and hierarchical JPEGs aren't read, as most decoders
+/// don't read them; a file that ends before its image does is an error.
+pub fn decode(data: List<u8>) -> Decoded ! String {
+    let n = data.len()
+    if n < 4 or data[0] != 0xFF or data[1] != 0xD8 {
+        fail String("not a JPEG file")
+    }
+    var quant: List<[i32; 64]> = [[0; 64], [0; 64], [0; 64], [0; 64]]
+    var have_quant: [bool; 4] = [false; 4]
+    var dc_tables: List<Huffman> = [empty_table(), empty_table(), empty_table(), empty_table()]
+    var ac_tables: List<Huffman> = [empty_table(), empty_table(), empty_table(), empty_table()]
+    var comps: List<Component> = []
+    var width: usize = 0
+    var height: usize = 0
+    var progressive = false
+    var frame = false
+    var scans: usize = 0
+    var stream = false
+    var restart_interval: usize = 0
+    var jfif = false
+    var adobe = false
+    var transform: u8 = 0
+    var hmax: usize = 1
+    var vmax: usize = 1
+    var mcus_x: usize = 0
+    var mcus_y: usize = 0
+    var at: usize = 2
+    loop {
+        // Find the next marker, skipping fill bytes.
+        if at >= n {
+            fail String("the JPEG file ends before its image does")
+        }
+        if data[at] != 0xFF {
+            // Junk between segments, which libjpeg skips with a warning.
+            at += 1
+            continue
+        }
+        while at < n and data[at] == 0xFF {
+            at += 1
+        }
+        if at >= n {
+            fail String("the JPEG file ends before its image does")
+        }
+        let m = data[at]
+        at += 1
+        if m == 0xD9 {
+            break
+        }
+        if m == 0x01 or (m >= 0xD0 and m <= 0xD7) {
+            continue
+        }
+        if at + 2 > n {
+            fail String("the JPEG file ends in the middle of a marker")
+        }
+        let len = u16_at(data, at)
+        if len < 2 or at + len > n {
+            fail "the JPEG file ends in the middle of its {segment(m)}"
+        }
+        let body = at + 2
+        let end = at + len
+        if m == 0xC0 or m == 0xC1 or m == 0xC2 {
+            if frame {
+                fail String("the JPEG has two frames")
+            }
+            frame = true
+            progressive = m == 0xC2
+            if len < 8 {
+                fail String("the JPEG's frame header is too short")
+            }
+            if data[body] != 8 {
+                fail "the JPEG has {data[body]}-bit samples, and only 8-bit ones are read"
+            }
+            height = u16_at(data, body + 1)
+            width = u16_at(data, body + 3)
+            let count = usize(data[body + 5])
+            if width == 0 or height == 0 {
+                fail "a JPEG can't be {width} by {height}"
+            }
+            if count != 1 and count != 3 and count != 4 {
+                fail "the JPEG has {count} components, not 1, 3 or 4"
+            }
+            if len != 8 + 3 * count {
+                fail String("the JPEG's frame header is the wrong length")
+            }
+            for i in 0usize..count {
+                let p = body + 6 + i * 3
+                let h = usize(u32(data[p + 1]) >> 4)
+                let v = usize(data[p + 1] & 15)
+                let tq = usize(data[p + 2])
+                if h == 0 or h > 4 or v == 0 or v > 4 or tq > 3 {
+                    fail String("the JPEG's frame header is corrupt")
+                }
+                hmax = hmax.max(h)
+                vmax = vmax.max(v)
+                comps.push(Component { id: data[p], h, v, table: tq, width: 0, height: 0, blocks_x: 0, blocks_y: 0, stride: 0, rows: 0, coefs: [], plane: [], quant: [0; 64], latched: false, dc: 0, ac: 0, pred: 0 })
+            }
+            mcus_x = (width + 8 * hmax - 1) / (8 * hmax)
+            mcus_y = (height + 8 * vmax - 1) / (8 * vmax)
+            for i in 0usize..comps.len() {
+                let c = comps[i].h
+                let r = comps[i].v
+                if hmax % c != 0 or vmax % r != 0 {
+                    fail String("the JPEG's subsampling isn't a whole ratio, which libjpeg doesn't read either")
+                }
+                comps[i].width = (width * c + hmax - 1) / hmax
+                comps[i].height = (height * r + vmax - 1) / vmax
+                comps[i].blocks_x = (comps[i].width + 7) / 8
+                comps[i].blocks_y = (comps[i].height + 7) / 8
+                comps[i].stride = mcus_x * c
+                comps[i].rows = mcus_y * r
+            }
+        } else if m == 0xC3 or (m >= 0xC5 and m <= 0xC7) or (m >= 0xC9 and m <= 0xCB) or (m >= 0xCD and m <= 0xCF) {
+            fail String("the JPEG is lossless, hierarchical or arithmetic-coded, which isn't read")
+        } else if m == 0xC4 {
+            var p = body
+            while p < end {
+                let class = u32(data[p]) >> 4
+                let id = usize(data[p] & 15)
+                if class > 1 or id > 3 or p + 17 > end {
+                    fail String("the JPEG's Huffman table is corrupt")
+                }
+                var counts: [u8; 16] = [0; 16]
+                var total: usize = 0
+                for i in 0usize..16 {
+                    counts[i] = data[p + 1 + i]
+                    total += usize(counts[i])
+                }
+                if total > 256 or p + 17 + total > end {
+                    fail String("the JPEG's Huffman table is corrupt")
+                }
+                let t = try build_table(counts, data[p + 17..p + 17 + total], class == 1)
+                if class == 0 {
+                    dc_tables[id] = t
+                } else {
+                    ac_tables[id] = t
+                }
+                p += 17 + total
+            }
+        } else if m == 0xDB {
+            var p = body
+            while p < end {
+                let precision = u32(data[p]) >> 4
+                let id = usize(data[p] & 15)
+                let size: usize = if precision == 0 { 64 } else { 128 }
+                if precision > 1 or id > 3 or p + 1 + size > end {
+                    fail String("the JPEG's quantization table is corrupt")
+                }
+                for k in 0usize..64 {
+                    let v = if precision == 0 { i32(data[p + 1 + k]) } else { i32(data[p + 1 + 2 * k]) << 8 | i32(data[p + 2 + 2 * k]) }
+                    quant[id][NATURAL[k]] = v
+                }
+                have_quant[id] = true
+                p += 1 + size
+            }
+        } else if m == 0xDD {
+            if len != 4 {
+                fail String("the JPEG's restart interval is corrupt")
+            }
+            restart_interval = u16_at(data, body)
+        } else if m == 0xE0 {
+            if len >= 7 and data[body] == 0x4A and data[body + 1] == 0x46 and data[body + 2] == 0x49 and data[body + 3] == 0x46 and data[body + 4] == 0 {
+                jfif = true
+            }
+        } else if m == 0xEE {
+            if len >= 14 and data[body] == 0x41 and data[body + 1] == 0x64 and data[body + 2] == 0x6F and data[body + 3] == 0x62 and data[body + 4] == 0x65 {
+                adobe = true
+                transform = data[body + 11]
+            }
+        } else if m == 0xDA {
+            if not frame {
+                fail String("the JPEG's image data starts before its frame header")
+            }
+            let count = usize(data[body])
+            if count == 0 or count > 4 or len != 6 + 2 * count {
+                fail String("the JPEG's scan header is corrupt")
+            }
+            if stream {
+                fail String("the JPEG has another scan after one that covered every component")
+            }
+            var scan: List<usize> = []
+            for i in 0usize..count {
+                let id = data[body + 1 + 2 * i]
+                let tables = data[body + 2 + 2 * i]
+                let index = comps.position(|c| c.id == id) else {
+                    fail "the JPEG's scan names component {id}, which its frame doesn't have"
+                }
+                let dc = usize(u32(tables) >> 4)
+                let ac = usize(tables & 15)
+                if dc > 3 or ac > 3 {
+                    fail String("the JPEG's scan header is corrupt")
+                }
+                comps[index].dc = dc
+                comps[index].ac = ac
+                if not comps[index].latched {
+                    let tq = comps[index].table
+                    if not have_quant[tq] {
+                        fail "the JPEG's component {id} uses quantization table {tq}, which it doesn't define"
+                    }
+                    comps[index].quant = quant[tq]
+                    comps[index].latched = true
+                }
+                scan.push(index)
+            }
+            if scans == 0 {
+                // A baseline JPEG whose one scan holds every component is turned into samples a
+                // row of MCUs at a time, while its coefficients are in the cache; otherwise
+                // every block's coefficients are kept until the last scan.
+                stream = not progressive and count == comps.len()
+                let pixels = u64(width) * u64(height)
+                if pixels > 0x40000000 {
+                    fail "a {width} by {height} JPEG is too big to hold"
+                }
+                for i in 0usize..comps.len() {
+                    let blocks = if stream { comps[i].stride * (if count == 1 { 1 } else { comps[i].v }) } else { comps[i].stride * comps[i].rows }
+                    let coefs: List<i16> = [0; blocks * 64]
+                    comps[i].coefs = coefs
+                    let size = comps[i].stride * comps[i].rows * 64
+                    var plane: List<u8> = []
+                    plane.reserve(size)
+                    unsafe {
+                        plane.set_len(size)
+                    }
+                    comps[i].plane = plane
+                }
+            }
+            scans += 1
+            let p = body + 1 + 2 * count
+            let ss = usize(data[p])
+            let se = usize(data[p + 1])
+            let ah = u32(data[p + 2]) >> 4
+            let al = u32(data[p + 2] & 15)
+            if progressive and (ss > se or se > 63 or (ss == 0 and se != 0) or (ss > 0 and count != 1) or al > 13) {
+                fail String("the JPEG's progressive scan header is corrupt")
+            }
+            // A sequential JPEG's spectral selection and approximation are ignored, as libjpeg
+            // ignores them.
+            let s = Scan { comps: scan, ss: if progressive { ss } else { 0 }, se: if progressive { se } else { 63 }, ah: if progressive { ah } else { 0 }, al: if progressive { al } else { 0 }, progressive, stream, restart: restart_interval, mcus_x, mcus_y }
+            at = try decode_scan(data, end, mut comps, dc_tables, ac_tables, s)
+            continue
+        }
+        at = end
+    }
+    if not frame {
+        fail String("the JPEG has no frame header")
+    }
+    for c in comps {
+        if not c.latched {
+            fail "the JPEG's image data doesn't cover component {c.id}"
+        }
+    }
+    let matrix = idct_matrix()
+    if not stream {
+        for i in 0usize..comps.len() {
+            let rows = comps[i].rows
+            idct_rows(mut comps[i], 0, rows, 0, matrix)
+            comps[i].coefs = []
+        }
+    }
+
+    let channels: usize = if comps.len() == 1 { 1 } else { 3 }
+    // libjpeg's rule for three components: JFIF means YCbCr, Adobe's marker says which, and
+    // otherwise the components' ids do, R, G and B being RGB. Four are CMYK, or YCCK when
+    // Adobe's transform says so; Adobe's files store CMYK inverted, as Photoshop writes it.
+    var mode = 0
+    if comps.len() == 3 {
+        var rgb = false
+        if jfif {
+            rgb = false
+        } else if adobe {
+            rgb = transform == 0
+        } else {
+            rgb = comps[0].id == 82 and comps[1].id == 71 and comps[2].id == 66
+        }
+        mode = if rgb { 1 } else { 2 }
+    } else if comps.len() == 4 {
+        mode = if adobe and transform == 2 { 3 } else { 4 }
+    }
+    var pixels: List<u8> = []
+    pixels.reserve(width * height * channels)
+    unsafe {
+        pixels.set_len(width * height * channels)
+    }
+    // Rows of subsampled components, brought up to the image's width.
+    var rows: List<List<u8>> = []
+    var sums: List<i32> = []
+    var widest: usize = 0
+    for c in comps {
+        rows.push([0; width + c.stride * 16 + 16])
+        widest = widest.max(c.stride * 8 + 8)
+    }
+    for _ in 0usize..widest {
+        sums.push(0)
+    }
+    for y in 0usize..height {
+        for i in 0usize..comps.len() {
+            if comps[i].h != hmax or comps[i].v != vmax {
+                upsample_row(comps[i], hmax / comps[i].h, vmax / comps[i].v, y, width, mut sums, mut rows[i])
+            }
+        }
+        convert_row(comps, rows, hmax, vmax, mode, adobe, y, width, mut pixels)
+    }
+    return Decoded { width, height, channels, pixels }
+}
+
+struct Scan {
+    comps: List<usize>
+    ss: usize
+    se: usize
+    ah: u32
+    al: u32
+    progressive: bool
+    stream: bool
+    restart: usize
+    mcus_x: usize
+    mcus_y: usize
+}
+
+// Decodes one scan's entropy-coded data, from `from`, into the components' coefficients, and
+// gives where the data ends: the marker after it.
+fn decode_scan(data: List<u8>, from: usize, comps: mut List<Component>, dc_tables: List<Huffman>, ac_tables: List<Huffman>, s: Scan) -> usize ! String {
+    var bits = Bits { at: from, acc: 0, n: 0, marker: false }
+    for i in s.comps {
+        comps[i].pred = 0
+        let (dc, ac) = (comps[i].dc, comps[i].ac)
+        if s.ss == 0 and s.ah == 0 and not dc_tables[dc].defined {
+            fail "the JPEG's scan uses DC Huffman table {dc}, which it doesn't define"
+        }
+        if s.se > 0 and (s.ah == 0 or not s.progressive) and not ac_tables[ac].defined {
+            fail "the JPEG's scan uses AC Huffman table {ac}, which it doesn't define"
+        }
+    }
+    let matrix = idct_matrix()
+    var eobrun: i32 = 0
+    // One component alone is coded block by block over just its own blocks; several are
+    // interleaved in MCUs.
+    let single = s.comps.len() == 1
+    let units_x = if single { comps[s.comps[0]].blocks_x } else { s.mcus_x }
+    let units_y = if single { comps[s.comps[0]].blocks_y } else { s.mcus_y }
+    var todo = s.restart
+    for uy in 0usize..units_y {
+        for ux in 0usize..units_x {
+            if s.restart > 0 {
+                if todo == 0 {
+                    try bits.restart(data)
+                    todo = s.restart
+                    eobrun = 0
+                    for i in s.comps {
+                        comps[i].pred = 0
+                    }
+                }
+                todo -= 1
+            }
+            for i in s.comps {
+                let (bh, bv) = if single { (1usize, 1usize) } else { (comps[i].h, comps[i].v) }
+                for by in 0usize..bv {
+                    for bx in 0usize..bh {
+                        let x = ux * bh + bx
+                        // A streamed component's buffer holds just this row of MCUs.
+                        let y = if s.stream { by } else { uy * bv + by }
+                        let at = (y * comps[i].stride + x) * 64
+                        if not s.progressive {
+                            let dci = comps[i].dc
+                            let aci = comps[i].ac
+                            try block_baseline(data, mut bits, mut comps[i], at, dc_tables[dci], ac_tables[aci])
+                        } else if s.ss == 0 {
+                            if s.ah == 0 {
+                                let d = try bits.decode(data, dc_tables[comps[i].dc])
+                                let diff = bits.signed(data, d)
+                                comps[i].pred += diff
+                                comps[i].coefs[at] = i16.wrap(comps[i].pred << s.al)
+                            } else if bits.bit(data) {
+                                comps[i].coefs[at] = comps[i].coefs[at] | i16.wrap(1i32 << s.al)
+                            }
+                        } else if s.ah == 0 {
+                            eobrun = try ac_first(data, mut bits, mut comps[i].coefs, at, ac_tables[comps[i].ac], s, eobrun)
+                        } else {
+                            eobrun = try ac_refine(data, mut bits, mut comps[i].coefs, at, ac_tables[comps[i].ac], s, eobrun)
+                        }
+                    }
+                }
+            }
+        }
+        if s.stream {
+            for i in s.comps {
+                let bv = if single { 1usize } else { comps[i].v }
+                idct_rows(mut comps[i], uy * bv, bv, uy * bv, matrix)
+                unsafe {
+                    let p = comps[i].coefs.as_mut_ptr()
+                    for k in 0usize..comps[i].coefs.len() {
+                        p.add(k).write(0)
+                    }
+                }
+            }
+        }
+    }
+    // The marker after the data: where the reader stopped, if it reached one, or the first
+    // after the bytes it read.
+    var at = bits.at
+    if not bits.marker {
+        loop {
+            if at + 1 >= data.len() {
+                fail String("the JPEG file ends before its image data does")
+            }
+            let next = data[at + 1]
+            if data[at] == 0xFF and next != 0 and next != 0xFF and not (next >= 0xD0 and next <= 0xD7) {
+                break
+            }
+            at += 1
+        }
+    }
+    return at
+}
+
+fn block_baseline(data: List<u8>, bits: mut Bits, c: mut Component, at: usize, dc: Huffman, ac: Huffman) ! String {
+    let t = try bits.decode(data, dc)
+    if t > 16 {
+        fail String("the JPEG's image data is corrupt")
+    }
+    c.pred += bits.signed(data, t)
+    unsafe {
+        let blk = c.coefs.as_mut_ptr().add(at)
+        blk.write(i16.wrap(c.pred))
+        let fast = ac.fast_ac.as_ptr()
+        var k: usize = 1
+        while k < 64 {
+            if bits.n < 16 {
+                bits.fill(data)
+            }
+            let e = fast.add(usize.wrap(bits.acc >> (64 - FAST))).read()
+            if e != 0 {
+                let used = u32.wrap(e & 255)
+                bits.acc <<= used
+                bits.n -= used
+                let run = usize.wrap((e >> 8) & 255)
+                if run == 255 {
+                    break
+                }
+                k += run
+                if k > 63 {
+                    fail String("the JPEG's image data is corrupt: a block has more than 64 coefficients")
+                }
+                blk.add(NATURAL[k]).write(i16.wrap(e >> 16))
+                k += 1
+                continue
+            }
+            let rs = try bits.decode(data, ac)
+            let r = usize(rs >> 4)
+            let size = rs & 15
+            if size == 0 {
+                if r != 15 {
+                    break
+                }
+                k += 16
+                continue
+            }
+            k += r
+            if k > 63 {
+                fail String("the JPEG's image data is corrupt: a block has more than 64 coefficients")
+            }
+            blk.add(NATURAL[k]).write(i16.wrap(bits.signed(data, size)))
+            k += 1
+        }
+    }
+}
+
+fn ac_first(data: List<u8>, bits: mut Bits, coefs: mut List<i16>, at: usize, ac: Huffman, s: Scan, eobrun: i32) -> i32 ! String {
+    if eobrun > 0 {
+        return eobrun - 1
+    }
+    var k = s.ss
+    unsafe {
+        let blk = coefs.as_mut_ptr().add(at)
+        let fast = ac.fast_ac.as_ptr()
+        while k <= s.se {
+            if bits.n < 16 {
+                bits.fill(data)
+            }
+            let e = fast.add(usize.wrap(bits.acc >> (64 - FAST))).read()
+            if e != 0 {
+                let used = u32.wrap(e & 255)
+                bits.acc <<= used
+                bits.n -= used
+                let run = usize.wrap((e >> 8) & 255)
+                if run == 255 {
+                    return 0
+                }
+                k += run
+                if k > 63 {
+                    fail String("the JPEG's image data is corrupt: a block has more than 64 coefficients")
+                }
+                blk.add(NATURAL[k]).write(i16.wrap((e >> 16) << s.al))
+                k += 1
+                continue
+            }
+            let rs = try bits.decode(data, ac)
+            let r = rs >> 4
+            let size = rs & 15
+            if size == 0 {
+                if r < 15 {
+                    // A run of blocks with nothing more in this band, this one included.
+                    var run = (1i32 << r) - 1
+                    if r > 0 {
+                        run += bits.get(data, r)
+                    }
+                    return run
+                }
+                k += 16
+                continue
+            }
+            k += usize(r)
+            if k > 63 {
+                fail String("the JPEG's image data is corrupt: a block has more than 64 coefficients")
+            }
+            blk.add(NATURAL[k]).write(i16.wrap(bits.signed(data, size) << s.al))
+            k += 1
+        }
+    }
+    return 0
+}
+
+fn ac_refine(data: List<u8>, bits: mut Bits, coefs: mut List<i16>, at: usize, ac: Huffman, s: Scan, eobrun: i32) -> i32 ! String {
+    let p1 = 1i32 << s.al
+    let m1 = -1i32 << s.al
+    var k = s.ss
+    var run = eobrun
+    unsafe {
+        let blk = coefs.as_mut_ptr().add(at)
+        if run == 0 {
+            while k <= s.se {
+                let rs = try bits.decode(data, ac)
+                var r = rs >> 4
+                let size = rs & 15
+                var value: i32 = 0
+                if size != 0 {
+                    if bits.n == 0 {
+                        bits.fill(data)
+                    }
+                    value = if bits.acc >> 63 != 0 { p1 } else { m1 }
+                    bits.acc <<= 1
+                    bits.n -= 1
+                } else if r != 15 {
+                    run = 1i32 << r
+                    if r > 0 {
+                        run += bits.get(data, r)
+                    }
+                    break
+                }
+                // Pass coefficients already nonzero, refining each, and r zero ones; the new
+                // coefficient goes at the zero after them.
+                while k <= s.se {
+                    let z = blk.add(NATURAL[k])
+                    let old = i32(z.read())
+                    if old != 0 {
+                        if bits.n == 0 {
+                            bits.fill(data)
+                        }
+                        let up = bits.acc >> 63 != 0
+                        bits.acc <<= 1
+                        bits.n -= 1
+                        if up and old & p1 == 0 {
+                            z.write(i16.wrap(if old >= 0 { old + p1 } else { old + m1 }))
+                        }
+                    } else {
+                        if r == 0 {
+                            break
+                        }
+                        r -= 1
+                    }
+                    k += 1
+                }
+                if value != 0 {
+                    if k > 63 {
+                        fail String("the JPEG's image data is corrupt: a block has more than 64 coefficients")
+                    }
+                    blk.add(NATURAL[k]).write(i16.wrap(value))
+                }
+                k += 1
+            }
+        }
+        if run > 0 {
+            // The band ends here for this block: refine what's already nonzero in the rest.
+            while k <= s.se {
+                let z = blk.add(NATURAL[k])
+                let old = i32(z.read())
+                if old != 0 {
+                    if bits.n == 0 {
+                        bits.fill(data)
+                    }
+                    let up = bits.acc >> 63 != 0
+                    bits.acc <<= 1
+                    bits.n -= 1
+                    if up and old & p1 == 0 {
+                        z.write(i16.wrap(if old >= 0 { old + p1 } else { old + m1 }))
+                    }
+                }
+                k += 1
+            }
+            run -= 1
+        }
+    }
+    return run
+}
+
+// libjpeg's accurate integer inverse DCT (jidctint.c), constants in 13 bits.
+const C0_298631336: i32 = 2446
+const C0_390180644: i32 = 3196
+const C0_541196100: i32 = 4433
+const C0_765366865: i32 = 6270
+const C0_899976223: i32 = 7373
+const C1_175875602: i32 = 9633
+const C1_501321110: i32 = 12299
+const C1_847759065: i32 = 15137
+const C1_961570560: i32 = 16069
+const C2_053119869: i32 = 16819
+const C2_562915447: i32 = 20995
+const C3_072711026: i32 = 25172
+
+// libjpeg's one-dimensional transform on eight values, before its final shift. It's exact
+// integer arithmetic, so it's a matrix: the same sums, in any order, give the same bits.
+fn idct8(x: [i32; 8]) -> [i32; 8] {
+    var z2 = x[2]
+    var z3 = x[6]
+    var z1 = (z2 + z3) * C0_541196100
+    var tmp2 = z1 + z3 * -C1_847759065
+    var tmp3 = z1 + z2 * C0_765366865
+    var tmp0 = (x[0] + x[4]) << 13
+    var tmp1 = (x[0] - x[4]) << 13
+    let tmp10 = tmp0 + tmp3
+    let tmp13 = tmp0 - tmp3
+    let tmp11 = tmp1 + tmp2
+    let tmp12 = tmp1 - tmp2
+    tmp0 = x[7]
+    tmp1 = x[5]
+    tmp2 = x[3]
+    tmp3 = x[1]
+    z1 = tmp0 + tmp3
+    z2 = tmp1 + tmp2
+    z3 = tmp0 + tmp2
+    var z4 = tmp1 + tmp3
+    let z5 = (z3 + z4) * C1_175875602
+    tmp0 = tmp0 * C0_298631336
+    tmp1 = tmp1 * C2_053119869
+    tmp2 = tmp2 * C3_072711026
+    tmp3 = tmp3 * C1_501321110
+    z1 = z1 * -C0_899976223
+    z2 = z2 * -C2_562915447
+    z3 = z3 * -C1_961570560 + z5
+    z4 = z4 * -C0_390180644 + z5
+    tmp0 += z1 + z3
+    tmp1 += z2 + z4
+    tmp2 += z2 + z3
+    tmp3 += z1 + z4
+    return [tmp10 + tmp3, tmp11 + tmp2, tmp12 + tmp1, tmp13 + tmp0, tmp13 - tmp0, tmp12 - tmp1, tmp11 - tmp2, tmp10 - tmp3]
+}
+
+// The transform as a matrix, input by output: element j * 8 + k is what input j adds to output k.
+fn idct_matrix() -> [i32; 64] {
+    var m: [i32; 64] = [0; 64]
+    for j in 0usize..8 {
+        var x: [i32; 8] = [0; 8]
+        x[j] = 1
+        let y = idct8(x)
+        for k in 0usize..8 {
+            m[j * 8 + k] = y[k]
+        }
+    }
+    return m
+}
+
+// Blocks rows `first` to `first + count` of a component through libjpeg's inverse DCT, into
+// its plane; block row `by` is row `by - from` of its coefficient buffer. Columns
+// go first, eight at once; then each row is a sum of the matrix's rows, eight outputs at once.
+// Both orders of the same integer sums, so the samples are libjpeg's to the bit.
+fn idct_rows(c: mut Component, first: usize, count: usize, from: usize, m: [i32; 64]) {
+    let w = c.stride * 8
+    var ws: [i32; 64] = [0; 64]
+    unsafe {
+        let q = c.quant.as_ptr()
+        let out0 = c.plane.as_mut_ptr()
+        let coefs = c.coefs.as_ptr()
+        let mp = m.as_ptr()
+        let wp = ws.as_mut_ptr()
+        for r in 0usize..count {
+            let by = first + r
+            for bx in 0usize..c.stride {
+                let blk = coefs.add(((by - from) * c.stride + bx) * 64)
+                let out = out0.add(by * 8 * w + bx * 8)
+                // A block of its average alone, as most of a smooth image is, is one value.
+                var any: i32 = 0
+                for k in 1usize..64 {
+                    any |= i32(blk.add(k).read())
+                }
+                if any == 0 {
+                    let v = limit((((i32(blk.read()) * q.read()) << 2) + 16) >> 5)
+                    for y in 0usize..8 {
+                        for x in 0usize..8 {
+                            out.add(y * w + x).write(v)
+                        }
+                    }
+                    continue
+                }
+                // Columns.
+                for col in 0usize..8 {
+                    let x0 = i32(blk.add(col).read()) * q.add(col).read()
+                    let x1 = i32(blk.add(8 + col).read()) * q.add(8 + col).read()
+                    let x2 = i32(blk.add(16 + col).read()) * q.add(16 + col).read()
+                    let x3 = i32(blk.add(24 + col).read()) * q.add(24 + col).read()
+                    let x4 = i32(blk.add(32 + col).read()) * q.add(32 + col).read()
+                    let x5 = i32(blk.add(40 + col).read()) * q.add(40 + col).read()
+                    let x6 = i32(blk.add(48 + col).read()) * q.add(48 + col).read()
+                    let x7 = i32(blk.add(56 + col).read()) * q.add(56 + col).read()
+                    let z1 = (x2 + x6) * C0_541196100
+                    let e2 = z1 + x6 * -C1_847759065
+                    let e3 = z1 + x2 * C0_765366865
+                    let e0 = (x0 + x4) << 13
+                    let e1 = (x0 - x4) << 13
+                    let t10 = e0 + e3
+                    let t13 = e0 - e3
+                    let t11 = e1 + e2
+                    let t12 = e1 - e2
+                    let z5 = (x7 + x3 + x5 + x1) * C1_175875602
+                    let o1 = (x7 + x1) * -C0_899976223
+                    let o2 = (x5 + x3) * -C2_562915447
+                    let o3 = (x7 + x3) * -C1_961570560 + z5
+                    let o4 = (x5 + x1) * -C0_390180644 + z5
+                    let a0 = x7 * C0_298631336 + o1 + o3
+                    let a1 = x5 * C2_053119869 + o2 + o4
+                    let a2 = x3 * C3_072711026 + o2 + o3
+                    let a3 = x1 * C1_501321110 + o1 + o4
+                    wp.add(col).write((t10 + a3 + 1024) >> 11)
+                    wp.add(56 + col).write((t10 - a3 + 1024) >> 11)
+                    wp.add(8 + col).write((t11 + a2 + 1024) >> 11)
+                    wp.add(48 + col).write((t11 - a2 + 1024) >> 11)
+                    wp.add(16 + col).write((t12 + a1 + 1024) >> 11)
+                    wp.add(40 + col).write((t12 - a1 + 1024) >> 11)
+                    wp.add(24 + col).write((t13 + a0 + 1024) >> 11)
+                    wp.add(32 + col).write((t13 - a0 + 1024) >> 11)
+                }
+                // Rows.
+                for y in 0usize..8 {
+                    var acc: [i32; 8] = [131072; 8]
+                    for j in 0usize..8 {
+                        let v = wp.add(y * 8 + j).read()
+                        for k in 0usize..8 {
+                            acc[k] += v * mp.add(j * 8 + k).read()
+                        }
+                    }
+                    let o = out.add(y * w)
+                    for k in 0usize..8 {
+                        o.add(k).write(limit(acc[k] >> 18))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A sample from the inverse DCT's output, centered on 0, as libjpeg's range-limit table
+// gives it: clamped to 0 to 255 within ±512, and wrapping past, which only corrupt data reaches.
+fn limit(v: i32) -> u8 {
+    let u = (v + 128) & 1023
+    let a = if u < 256 { u } else { 255 }
+    return u8.wrap(if u >= 640 { 0 } else { a })
+}
+
+// Row `y` of a subsampled component, brought up to the image's width: libjpeg's smooth "fancy"
+// upsampling for 2 across, and 2 across and down, and for 2 down as libjpeg-turbo does it;
+// otherwise each sample repeated, as libjpeg repeats it. Edges repeat their last sample.
+fn upsample_row(c: Component, fx: usize, fy: usize, y: usize, width: usize, sums: mut List<i32>, out: mut List<u8>) {
+    let stride = c.stride * 8
+    let cw = c.width
+    let fancy = cw > 2
+    unsafe {
+        let src = c.plane.as_ptr()
+        let d = out.as_mut_ptr()
+        if fancy and fx == 2 and fy == 1 {
+            let s = src.add(y * stride)
+            d.write(s.read())
+            d.add(1).write(u8.wrap((i32(s.read()) * 3 + i32(s.add(1).read()) + 2) >> 2))
+            for i in 1usize..cw - 1 {
+                let v = i32(s.add(i).read()) * 3
+                d.add(2 * i).write(u8.wrap((v + i32(s.add(i - 1).read()) + 1) >> 2))
+                d.add(2 * i + 1).write(u8.wrap((v + i32(s.add(i + 1).read()) + 2) >> 2))
+            }
+            let last = i32(s.add(cw - 1).read())
+            d.add(2 * cw - 2).write(u8.wrap((last * 3 + i32(s.add(cw - 2).read()) + 1) >> 2))
+            d.add(2 * cw - 1).write(u8.wrap(last))
+            return
+        }
+        if fy == 2 and (fx == 1 or fancy) {
+            // The nearer row three times, the other once: above for even rows, below for odd,
+            // the edge row repeated past the edges.
+            let near = y / 2
+            var far = near
+            if y % 2 == 0 {
+                if near > 0 {
+                    far = near - 1
+                }
+            } else if near + 1 < c.height {
+                far = near + 1
+            }
+            let a = src.add(near * stride)
+            let b = src.add(far * stride)
+            if fx == 1 {
+                let bias: i32 = if y % 2 == 0 { 1 } else { 2 }
+                for x in 0usize..width {
+                    d.add(x).write(u8.wrap((i32(a.add(x).read()) * 3 + i32(b.add(x).read()) + bias) >> 2))
+                }
+                return
+            }
+            if fx == 2 {
+                let cs = sums.as_mut_ptr()
+                for i in 0usize..cw {
+                    cs.add(i).write(i32(a.add(i).read()) * 3 + i32(b.add(i).read()))
+                }
+                d.write(u8.wrap((cs.read() * 4 + 8) >> 4))
+                d.add(1).write(u8.wrap((cs.read() * 3 + cs.add(1).read() + 7) >> 4))
+                for i in 1usize..cw - 1 {
+                    let v = cs.add(i).read() * 3
+                    d.add(2 * i).write(u8.wrap((v + cs.add(i - 1).read() + 8) >> 4))
+                    d.add(2 * i + 1).write(u8.wrap((v + cs.add(i + 1).read() + 7) >> 4))
+                }
+                let last = cs.add(cw - 1).read()
+                d.add(2 * cw - 2).write(u8.wrap((last * 3 + cs.add(cw - 2).read() + 8) >> 4))
+                d.add(2 * cw - 1).write(u8.wrap((last * 4 + 7) >> 4))
+                return
+            }
+        }
+        let s = src.add((y / fy) * stride)
+        for x in 0usize..width {
+            d.add(x).write(s.add(x / fx).read())
+        }
+    }
+}
+
+// Row `y` of the pixels, from each component's row: gray, RGB, YCbCr, YCCK or CMYK.
+fn convert_row(comps: List<Component>, rows: List<List<u8>>, hmax: usize, vmax: usize, mode: i32, inverted: bool, y: usize, width: usize, pixels: mut List<u8>) {
+    unsafe {
+        if mode == 0 {
+            let s = comps[0].plane.as_ptr().add(y * comps[0].stride * 8)
+            let d = pixels.as_mut_ptr().add(y * width)
+            for x in 0usize..width {
+                d.add(x).write(s.add(x).read())
+            }
+            return
+        }
+        let s0 = if comps[0].h == hmax and comps[0].v == vmax { comps[0].plane.as_ptr().add(y * comps[0].stride * 8) } else { rows[0].as_ptr() }
+        let s1 = if comps[1].h == hmax and comps[1].v == vmax { comps[1].plane.as_ptr().add(y * comps[1].stride * 8) } else { rows[1].as_ptr() }
+        let s2 = if comps[2].h == hmax and comps[2].v == vmax { comps[2].plane.as_ptr().add(y * comps[2].stride * 8) } else { rows[2].as_ptr() }
+        let d = pixels.as_mut_ptr().add(y * width * 3)
+        if mode == 1 {
+            for x in 0usize..width {
+                d.add(3 * x).write(s0.add(x).read())
+                d.add(3 * x + 1).write(s1.add(x).read())
+                d.add(3 * x + 2).write(s2.add(x).read())
+            }
+            return
+        }
+        if mode == 2 {
+            // libjpeg's YCbCr to RGB, its tables' 16-bit fixed point worked out inline.
+            for x in 0usize..width {
+                let l = i32(s0.add(x).read())
+                let cb = i32(s1.add(x).read()) - 128
+                let cr = i32(s2.add(x).read()) - 128
+                d.add(3 * x).write(clamp(l + ((91881 * cr + 32768) >> 16)))
+                d.add(3 * x + 1).write(clamp(l + ((-22554 * cb - 46802 * cr + 32768) >> 16)))
+                d.add(3 * x + 2).write(clamp(l + ((116130 * cb + 32768) >> 16)))
+            }
+            return
+        }
+        let s3 = if comps[3].h == hmax and comps[3].v == vmax { comps[3].plane.as_ptr().add(y * comps[3].stride * 8) } else { rows[3].as_ptr() }
+        for x in 0usize..width {
+            var c = i32(s0.add(x).read())
+            var m = i32(s1.add(x).read())
+            var ye = i32(s2.add(x).read())
+            var k = i32(s3.add(x).read())
+            if mode == 3 {
+                // YCCK: YCbCr of the inverted CMY, as libjpeg reads it.
+                let l = c
+                let cb = m - 128
+                let cr = ye - 128
+                c = 255 - i32(clamp(l + ((91881 * cr + 32768) >> 16)))
+                m = 255 - i32(clamp(l + ((-22554 * cb - 46802 * cr + 32768) >> 16)))
+                ye = 255 - i32(clamp(l + ((116130 * cb + 32768) >> 16)))
+            }
+            if inverted {
+                c = 255 - c
+                m = 255 - m
+                ye = 255 - ye
+                k = 255 - k
+            }
+            // Pillow's CMYK to RGB: each ink with the black.
+            d.add(3 * x).write(mul255(255 - c, 255 - k))
+            d.add(3 * x + 1).write(mul255(255 - m, 255 - k))
+            d.add(3 * x + 2).write(mul255(255 - ye, 255 - k))
+        }
+    }
+}
+
+fn clamp(v: i32) -> u8 {
+    return u8.wrap(v.max(0).min(255))
+}
+
+fn mul255(a: i32, b: i32) -> u8 {
+    let t = a * b + 128
+    return u8.wrap(((t >> 8) + t) >> 8)
+}
+
+/// How much of the color a JPEG keeps: its two chroma components at full size, half width, or
+/// half width and half height.
+pub enum Sampling {
+    /// 4:4:4, the chroma at full size: the sharpest color, and the biggest file.
+    S444
+    /// 4:2:2, the chroma at half width.
+    S422
+    /// 4:2:0, the chroma at half width and half height: libjpeg's and Pillow's default, and what
+    /// cameras write.
+    S420
+}
+
+// The quantization tables JPEG's Annex K gives, row by row, for quality 50.
+const LUMA_QUANT: [i32; 64] = [
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+]
+const CHROMA_QUANT: [i32; 64] = [
+    17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+]
+
+// The Huffman tables Annex K gives: how many codes of each length from 1 to 16, then the values.
+const DC_LUMA_BITS: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
+const DC_CHROMA_BITS: [u8; 16] = [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0]
+const DC_VALUES: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+const AC_LUMA_BITS: [u8; 16] = [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125]
+const AC_LUMA_VALUES: [u8; 162] = [
+    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
+    0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa,
+]
+const AC_CHROMA_BITS: [u8; 16] = [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119]
+const AC_CHROMA_VALUES: [u8; 162] = [
+    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
+    0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+    0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
+    0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+    0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+    0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa,
+]
+
+// A Huffman table to write with: its lengths and values as the file holds them, and each
+// value's code and length.
+struct Coder {
+    bits: [u8; 16]
+    values: List<u8>
+    code: [u32; 256]
+    size: [u32; 256]
+}
+
+fn coder(bits: [u8; 16], values: own List<u8>) -> Coder {
+    var c = Coder { bits, values, code: [0; 256], size: [0; 256] }
+    var code: u32 = 0
+    var k: usize = 0
+    for len in 1usize..17 {
+        for _ in 0usize..usize(bits[len - 1]) {
+            let v = usize(c.values[k])
+            c.code[v] = code
+            c.size[v] = u32.wrap(len)
+            code += 1
+            k += 1
+        }
+        code <<= 1
+    }
+    return c
+}
+
+// JPEG's Annex K.2: the code lengths Huffman's procedure gives the counts, then limited to 16
+// bits, as libjpeg's jpeg_gen_optimal_table makes them. A 257th symbol with a count of 1 keeps
+// any code from being all ones.
+fn optimal(counts: List<u64>) -> Coder {
+    var freq: List<u64> = counts.copy()
+    freq.push(1)
+    var codesize: List<usize> = [0; 257]
+    var others: List<i32> = [-1; 257]
+    loop {
+        // The two least counts, the larger symbol first on ties.
+        var c1: i32 = -1
+        var v: u64 = 1000000000000
+        for i in 0usize..257 {
+            if freq[i] != 0 and freq[i] <= v {
+                v = freq[i]
+                c1 = i32.wrap(i)
+            }
+        }
+        var c2: i32 = -1
+        v = 1000000000000
+        for i in 0usize..257 {
+            if freq[i] != 0 and freq[i] <= v and i32.wrap(i) != c1 {
+                v = freq[i]
+                c2 = i32.wrap(i)
+            }
+        }
+        if c2 < 0 {
+            break
+        }
+        let a = usize.wrap(c1)
+        let b = usize.wrap(c2)
+        freq[a] += freq[b]
+        freq[b] = 0
+        var x = a
+        codesize[x] += 1
+        while others[x] >= 0 {
+            x = usize.wrap(others[x])
+            codesize[x] += 1
+        }
+        others[x] = c2
+        x = b
+        codesize[x] += 1
+        while others[x] >= 0 {
+            x = usize.wrap(others[x])
+            codesize[x] += 1
+        }
+    }
+    var bits: List<usize> = [0; 33]
+    for i in 0usize..257 {
+        if codesize[i] > 0 {
+            bits[codesize[i].min(32)] += 1
+        }
+    }
+    // Codes longer than 16 bits: take two from the longest length, give one to the length
+    // below, and split a shorter code in two.
+    var i: usize = 32
+    while i > 16 {
+        while bits[i] > 0 {
+            var j = i - 2
+            while bits[j] == 0 {
+                j -= 1
+            }
+            bits[i] -= 2
+            bits[i - 1] += 1
+            bits[j + 1] += 2
+            bits[j] -= 1
+        }
+        i -= 1
+    }
+    while bits[i] == 0 {
+        i -= 1
+    }
+    bits[i] -= 1
+    var lengths: [u8; 16] = [0; 16]
+    for len in 1usize..17 {
+        lengths[len - 1] = u8.wrap(bits[len])
+    }
+    var values: List<u8> = []
+    for len in 1usize..33 {
+        for s in 0usize..256 {
+            if codesize[s] == len {
+                values.push(u8.wrap(s))
+            }
+        }
+    }
+    return coder(lengths, values)
+}
+
+// The bits of the entropy-coded data, a byte 0xFF followed by 0, as JPEG stuffs it.
+struct Writer {
+    out: List<u8>
+    acc: u64
+    n: u32
+}
+
+impl Writer {
+    // Adds `size` bits, at most 27, the low bits of `code`, which has no others set, writing
+    // them out four bytes at a time.
+    fn put(mut self, code: u32, size: u32) {
+        self.acc = self.acc << size | u64(code)
+        self.n += size
+        if self.n >= 32 {
+            self.n -= 32
+            let word = u32.wrap(self.acc >> self.n)
+            // Whether any byte is 0xFF: a zero byte in its complement.
+            let inv = ~word
+            if (inv - 0x01010101) & ~inv & 0x80808080 == 0 {
+                self.out.reserve(4)
+                unsafe {
+                    let at = self.out.len()
+                    let p = self.out.as_mut_ptr().add(at)
+                    p.write(u8.wrap(word >> 24))
+                    p.add(1).write(u8.wrap(word >> 16))
+                    p.add(2).write(u8.wrap(word >> 8))
+                    p.add(3).write(u8.wrap(word))
+                    self.out.set_len(at + 4)
+                }
+            } else {
+                for shift in [24u32, 16, 8, 0] {
+                    let b = u8.wrap(word >> shift)
+                    self.out.push(b)
+                    if b == 0xFF {
+                        self.out.push(0)
+                    }
+                }
+            }
+        }
+    }
+
+    // The last byte filled out with ones, as libjpeg pads it, and the bytes still held written.
+    fn flush(mut self) {
+        self.put(0x7F, 7)
+        while self.n >= 8 {
+            self.n -= 8
+            let b = u8.wrap(self.acc >> self.n)
+            self.out.push(b)
+            if b == 0xFF {
+                self.out.push(0)
+            }
+        }
+        self.n = 0
+        self.acc = 0
+    }
+}
+
+fn magnitude(v: i32) -> u32 {
+    let a = if v < 0 { -v } else { v }
+    return u32.wrap(32 - a.leading_zeros())
+}
+
+// One block of a plane through libjpeg's forward DCT and quantization, onto the end of `out`:
+// the rows as sums of the matrix's rows, eight outputs at once, then the columns as libjpeg
+// does them, eight at once. Each coefficient is divided by its quantizer times 8, rounding a
+// half away from zero, by a multiply and a shift that give the quotient exactly.
+fn fdct_block(plane: List<u8>, at: usize, stride: usize, divisor: [i32; 64], recip: [u32; 64], out: mut List<i16>) {
+    var ws: [i32; 64] = [0; 64]
+    let start = out.len()
+    out.reserve(64)
+    unsafe {
+        let src = plane.as_ptr().add(at)
+        let wp = ws.as_mut_ptr()
+        // The rows, eight at once: the samples are read across, so each row is a column here,
+        // and put back as rows after.
+        var tr: [i32; 64] = [0; 64]
+        let tp = tr.as_mut_ptr()
+        for r in 0usize..8 {
+            let row = src.add(r * stride)
+            for j in 0usize..8 {
+                tp.add(j * 8 + r).write(i32(row.add(j).read()) - 128)
+            }
+        }
+        for col in 0usize..8 {
+            let x0 = tp.add(col).read()
+            let x1 = tp.add(8 + col).read()
+            let x2 = tp.add(16 + col).read()
+            let x3 = tp.add(24 + col).read()
+            let x4 = tp.add(32 + col).read()
+            let x5 = tp.add(40 + col).read()
+            let x6 = tp.add(48 + col).read()
+            let x7 = tp.add(56 + col).read()
+            let tmp0 = x0 + x7
+            let tmp7 = x0 - x7
+            let tmp1 = x1 + x6
+            let tmp6 = x1 - x6
+            let tmp2 = x2 + x5
+            let tmp5 = x2 - x5
+            let tmp3 = x3 + x4
+            let tmp4 = x3 - x4
+            let tmp10 = tmp0 + tmp3
+            let tmp13 = tmp0 - tmp3
+            let tmp11 = tmp1 + tmp2
+            let tmp12 = tmp1 - tmp2
+            let z1 = (tmp12 + tmp13) * C0_541196100
+            let y1 = tmp4 + tmp7
+            let y2 = tmp5 + tmp6
+            let y3 = tmp4 + tmp6
+            let y4 = tmp5 + tmp7
+            let z5 = (y3 + y4) * C1_175875602
+            let w1 = y1 * -C0_899976223
+            let w2 = y2 * -C2_562915447
+            let w3 = y3 * -C1_961570560 + z5
+            let w4 = y4 * -C0_390180644 + z5
+            tp.add(col).write((tmp10 + tmp11) << 2)
+            tp.add(32 + col).write((tmp10 - tmp11) << 2)
+            tp.add(16 + col).write((z1 + tmp13 * C0_765366865 + 1024) >> 11)
+            tp.add(48 + col).write((z1 + tmp12 * -C1_847759065 + 1024) >> 11)
+            tp.add(56 + col).write((tmp4 * C0_298631336 + w1 + w3 + 1024) >> 11)
+            tp.add(40 + col).write((tmp5 * C2_053119869 + w2 + w4 + 1024) >> 11)
+            tp.add(24 + col).write((tmp6 * C3_072711026 + w2 + w3 + 1024) >> 11)
+            tp.add(8 + col).write((tmp7 * C1_501321110 + w1 + w4 + 1024) >> 11)
+        }
+        for r in 0usize..8 {
+            for k in 0usize..8 {
+                wp.add(r * 8 + k).write(tp.add(k * 8 + r).read())
+            }
+        }
+        for col in 0usize..8 {
+            let x0 = wp.add(col).read()
+            let x1 = wp.add(8 + col).read()
+            let x2 = wp.add(16 + col).read()
+            let x3 = wp.add(24 + col).read()
+            let x4 = wp.add(32 + col).read()
+            let x5 = wp.add(40 + col).read()
+            let x6 = wp.add(48 + col).read()
+            let x7 = wp.add(56 + col).read()
+            let tmp0 = x0 + x7
+            let tmp7 = x0 - x7
+            let tmp1 = x1 + x6
+            let tmp6 = x1 - x6
+            let tmp2 = x2 + x5
+            let tmp5 = x2 - x5
+            let tmp3 = x3 + x4
+            let tmp4 = x3 - x4
+            let tmp10 = tmp0 + tmp3
+            let tmp13 = tmp0 - tmp3
+            let tmp11 = tmp1 + tmp2
+            let tmp12 = tmp1 - tmp2
+            let z1 = (tmp12 + tmp13) * C0_541196100
+            let y1 = tmp4 + tmp7
+            let y2 = tmp5 + tmp6
+            let y3 = tmp4 + tmp6
+            let y4 = tmp5 + tmp7
+            let z5 = (y3 + y4) * C1_175875602
+            let w1 = y1 * -C0_899976223
+            let w2 = y2 * -C2_562915447
+            let w3 = y3 * -C1_961570560 + z5
+            let w4 = y4 * -C0_390180644 + z5
+            wp.add(col).write((tmp10 + tmp11 + 2) >> 2)
+            wp.add(32 + col).write((tmp10 - tmp11 + 2) >> 2)
+            wp.add(16 + col).write((z1 + tmp13 * C0_765366865 + 16384) >> 15)
+            wp.add(48 + col).write((z1 + tmp12 * -C1_847759065 + 16384) >> 15)
+            wp.add(56 + col).write((tmp4 * C0_298631336 + w1 + w3 + 16384) >> 15)
+            wp.add(40 + col).write((tmp5 * C2_053119869 + w2 + w4 + 16384) >> 15)
+            wp.add(24 + col).write((tmp6 * C3_072711026 + w2 + w3 + 16384) >> 15)
+            wp.add(8 + col).write((tmp7 * C1_501321110 + w1 + w4 + 16384) >> 15)
+        }
+        let dp = divisor.as_ptr()
+        let rp = recip.as_ptr()
+        var qs: [i16; 64] = [0; 64]
+        let qp = qs.as_mut_ptr()
+        for i in 0usize..64 {
+            let t = wp.add(i).read()
+            let a = u32.wrap((if t < 0 { -t } else { t }) + (dp.add(i).read() >> 1))
+            let q = i32.wrap(u32.wrap((u64(a) * u64(rp.add(i).read())) >> 32))
+            qp.add(i).write(i16.wrap(if t < 0 { -q } else { q }))
+        }
+        // In zigzag order, the order they're written.
+        let dst = out.as_mut_ptr().add(start)
+        for k in 0usize..64 {
+            dst.add(k).write(qp.add(NATURAL[k]).read())
+        }
+        out.set_len(start + 64)
+    }
+}
+
+/// The pixels as a baseline JPEG file, as libjpeg writes it with Pillow's settings, so the bytes
+/// are Pillow's: `channels` is 1 for gray or 3 for RGB, `quality` is 1 to 100 with libjpeg's
+/// scaling of the Annex K tables (75, the default, is libjpeg's and Pillow's), `sampling` how
+/// much of the color to keep, and `optimize` builds Huffman tables for this image, as Pillow's
+/// `optimize=True` does, a few percent smaller and slower to write. Panics unless `pixels` holds
+/// `width × height × channels` bytes, or if the image is bigger than 65,535 pixels a side,
+/// which a JPEG can't be.
+@track_caller
+pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false) -> List<u8> {
+    if channels != 1 and channels != 3 {
+        panic("a JPEG's pixels are gray or RGB, 1 or 3 channels, not {channels}")
+    }
+    if width == 0 or height == 0 or width > 65535 or height > 65535 {
+        panic("a JPEG can't be {width} by {height}")
+    }
+    if pixels.len() != width * height * channels {
+        panic("a {width} by {height} image of {channels} channels is {width * height * channels} bytes, not {pixels.len()}")
+    }
+    let q = i32.wrap(quality.max(1).min(100))
+    let scale = if q < 50 { 5000 / q } else { 200 - q * 2 }
+    var tables: List<[i32; 64]> = [[0; 64], [0; 64]]
+    for i in 0usize..64 {
+        tables[0][i] = ((LUMA_QUANT[i] * scale + 50) / 100).max(1).min(255)
+        tables[1][i] = ((CHROMA_QUANT[i] * scale + 50) / 100).max(1).min(255)
+    }
+    let ncomp = channels
+    var hmax: usize = 1
+    var vmax: usize = 1
+    if ncomp == 3 {
+        match sampling {
+            S444 => {},
+            S422 => {
+                hmax = 2
+            },
+            S420 => {
+                hmax = 2
+                vmax = 2
+            },
+        }
+    }
+    let mcus_x = (width + 8 * hmax - 1) / (8 * hmax)
+    let mcus_y = (height + 8 * vmax - 1) / (8 * vmax)
+    // Each component at full size, the edge repeated to fill whole MCUs.
+    let pw = mcus_x * hmax * 8
+    let ph = mcus_y * vmax * 8
+
+    var planes: List<List<u8>> = []
+    for _ in 0usize..ncomp {
+        var p: List<u8> = []
+        p.reserve(pw * ph)
+        unsafe {
+            p.set_len(pw * ph)
+        }
+        planes.push(p)
+    }
+    unsafe {
+        if ncomp == 1 {
+            let d = planes[0].as_mut_ptr()
+            let s = pixels.as_ptr()
+            for y in 0usize..height {
+                for x in 0usize..width {
+                    d.add(y * pw + x).write(s.add(y * width + x).read())
+                }
+            }
+        } else {
+            // libjpeg's RGB to YCbCr, in 16-bit fixed point; Cb and Cr round just under a half,
+            // so they never reach 256.
+            let d0 = planes[0].as_mut_ptr()
+            let d1 = planes[1].as_mut_ptr()
+            let d2 = planes[2].as_mut_ptr()
+            let s = pixels.as_ptr()
+            for y in 0usize..height {
+                let row = s.add(y * width * 3)
+                let o = y * pw
+                for x in 0usize..width {
+                    let r = i32(row.add(3 * x).read())
+                    let g = i32(row.add(3 * x + 1).read())
+                    let b = i32(row.add(3 * x + 2).read())
+                    d0.add(o + x).write(u8.wrap((19595 * r + 38470 * g + 7471 * b + 32768) >> 16))
+                    d1.add(o + x).write(u8.wrap((-11059 * r - 21709 * g + 32768 * b + 8421375) >> 16))
+                    d2.add(o + x).write(u8.wrap((32768 * r - 27439 * g - 5329 * b + 8421375) >> 16))
+                }
+            }
+        }
+        // The edges repeated out to whole MCUs.
+        for c in 0usize..ncomp {
+            let d = planes[c].as_mut_ptr()
+            for y in 0usize..height {
+                let edge = d.add(y * pw + width - 1).read()
+                for x in width..pw {
+                    d.add(y * pw + x).write(edge)
+                }
+            }
+            for y in height..ph {
+                for x in 0usize..pw {
+                    d.add(y * pw + x).write(d.add((height - 1) * pw + x).read())
+                }
+            }
+        }
+    }
+    // The chroma averaged down, as libjpeg's jcsample.c does it, the rounding alternating.
+    if hmax > 1 {
+        let cw = pw / hmax
+        let chh = ph / vmax
+        // Below the image, libjpeg repeats the last row it averaged, rather than averaging
+        // repeated rows.
+        let real = (height + vmax - 1) / vmax
+        for c in 1usize..3 {
+            var small: List<u8> = []
+            small.reserve(cw * chh)
+            unsafe {
+                small.set_len(cw * chh)
+                let s = planes[c].as_ptr()
+                let d = small.as_mut_ptr()
+                for y in 0usize..real {
+                    let a = s.add(y * vmax * pw)
+                    let o = d.add(y * cw)
+                    if vmax == 2 {
+                        for x in 0usize..cw {
+                            let sum = i32(a.add(2 * x).read()) + i32(a.add(2 * x + 1).read()) + i32(a.add(pw + 2 * x).read()) + i32(a.add(pw + 2 * x + 1).read())
+                            o.add(x).write(u8.wrap((sum + 1 + i32.wrap(x & 1)) >> 2))
+                        }
+                    } else {
+                        for x in 0usize..cw {
+                            let sum = i32(a.add(2 * x).read()) + i32(a.add(2 * x + 1).read())
+                            o.add(x).write(u8.wrap((sum + i32.wrap(x & 1)) >> 1))
+                        }
+                    }
+                }
+                for y in real..chh {
+                    for x in 0usize..cw {
+                        d.add(y * cw + x).write(d.add((real - 1) * cw + x).read())
+                    }
+                }
+            }
+            planes[c] = small
+        }
+    }
+    // Every block's quantized coefficients, in the order they're written: each MCU's blocks,
+    // component by component.
+    var divisors: List<[i32; 64]> = [[0; 64], [0; 64]]
+    var recips: List<[u32; 64]> = [[0; 64], [0; 64]]
+    for t in 0usize..2 {
+        for i in 0usize..64 {
+            let d = tables[t][i] << 3
+            divisors[t][i] = d
+            // Exact for every quotient here: the error, under d, times a dividend under 2^16, is
+            // under 2^32.
+            recips[t][i] = u32.wrap(4294967296 / u64.wrap(d) + 1)
+        }
+    }
+    var blocks: List<i16> = []
+    blocks.reserve(mcus_x * mcus_y * (hmax * vmax + ncomp - 1) * 64)
+    let luma_blocks_x = (width + 7) / 8
+    let luma_blocks_y = (height + 7) / 8
+    for my in 0usize..mcus_y {
+        for mx in 0usize..mcus_x {
+            for c in 0usize..ncomp {
+                let (h, v) = if c == 0 { (hmax, vmax) } else { (1usize, 1usize) }
+                let stride = if c == 0 { pw } else { pw / hmax }
+                let table = if c == 0 { 0usize } else { 1usize }
+                let mcu_start = blocks.len()
+                for by in 0usize..v {
+                    for bx in 0usize..h {
+                        let x = mx * h + bx
+                        let y = my * v + by
+                        if c == 0 and (x >= luma_blocks_x or y >= luma_blocks_y) {
+                            // A block past the image's edge in an MCU: zeros, with the average
+                            // of the last real block, as libjpeg makes it: the one to the left,
+                            // or for a row of them, the MCU's last in the row above.
+                            let from = if y >= luma_blocks_y { mcu_start + ((by - 1) * h + h - 1) * 64 } else { blocks.len() - 64 }
+                            let dc = blocks[from]
+                            blocks.push(dc)
+                            for _ in 1usize..64 {
+                                blocks.push(0)
+                            }
+                            continue
+                        }
+                        fdct_block(planes[c], y * 8 * stride + x * 8, stride, divisors[table], recips[table], mut blocks)
+                    }
+                }
+            }
+        }
+    }
+    // The Huffman tables: Annex K's, or ones made from how often each symbol comes.
+    var dc_coders: List<Coder> = []
+    var ac_coders: List<Coder> = []
+    if optimize {
+        var dc_counts: List<List<u64>> = [[0; 256], [0; 256]]
+        var ac_counts: List<List<u64>> = [[0; 256], [0; 256]]
+        walk_blocks(blocks, ncomp, hmax, vmax, mcus_x * mcus_y, mut dc_counts, mut ac_counts)
+        dc_coders.push(optimal(dc_counts[0]))
+        ac_coders.push(optimal(ac_counts[0]))
+        if ncomp > 1 {
+            dc_coders.push(optimal(dc_counts[1]))
+            ac_coders.push(optimal(ac_counts[1]))
+        }
+    } else {
+        dc_coders.push(coder(DC_LUMA_BITS, DC_VALUES.to_list()))
+        ac_coders.push(coder(AC_LUMA_BITS, AC_LUMA_VALUES.to_list()))
+        if ncomp > 1 {
+            dc_coders.push(coder(DC_CHROMA_BITS, DC_VALUES.to_list()))
+            ac_coders.push(coder(AC_CHROMA_BITS, AC_CHROMA_VALUES.to_list()))
+        }
+    }
+
+    var out: List<u8> = [0xFF, 0xD8]
+    // JFIF 1.01, no density.
+    out.extend([0xFF, 0xE0, 0, 16, 0x4A, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0])
+    let ntables = if ncomp == 1 { 1usize } else { 2usize }
+    for t in 0usize..ntables {
+        out.extend([0xFF, 0xDB, 0, 67, u8.wrap(t)])
+        for k in 0usize..64 {
+            out.push(u8.wrap(tables[t][NATURAL[k]]))
+        }
+    }
+    out.extend([0xFF, 0xC0, 0, u8.wrap(8 + 3 * ncomp), 8, u8.wrap(height / 256), u8.wrap(height % 256), u8.wrap(width / 256), u8.wrap(width % 256), u8.wrap(ncomp)])
+    for c in 0usize..ncomp {
+        let (h, v) = if c == 0 { (hmax, vmax) } else { (1usize, 1usize) }
+        out.push(u8.wrap(c + 1))
+        out.push(u8.wrap(h * 16 + v))
+        out.push(if c == 0 { 0u8 } else { 1u8 })
+    }
+    for t in 0usize..ntables {
+        write_table(mut out, 0, t, dc_coders[t])
+        write_table(mut out, 1, t, ac_coders[t])
+    }
+    out.extend([0xFF, 0xDA, 0, u8.wrap(6 + 2 * ncomp), u8.wrap(ncomp)])
+    for c in 0usize..ncomp {
+        out.push(u8.wrap(c + 1))
+        out.push(if c == 0 { 0x00u8 } else { 0x11u8 })
+    }
+    out.extend([0, 63, 0])
+    var w = Writer { out, acc: 0, n: 0 }
+    var preds: [i32; 3] = [0; 3]
+    var at: usize = 0
+    for _ in 0usize..mcus_x * mcus_y {
+        for c in 0usize..ncomp {
+            let count = if c == 0 { hmax * vmax } else { 1usize }
+            let t = if c == 0 { 0usize } else { 1usize }
+            for _ in 0usize..count {
+                let dc = i32(blocks[at])
+                let diff = dc - preds[c]
+                preds[c] = dc
+                let s = magnitude(diff)
+                // Each code and the bits after it go in at once: at most 27 bits.
+                let extra = u32.wrap(if diff < 0 { diff - 1 } else { diff }) & ((1u32 << s) - 1)
+                w.put(dc_coders[t].code[usize(s)] << s | extra, dc_coders[t].size[usize(s)] + s)
+                // The nonzero coefficients, found by a mask of them, as libjpeg-turbo finds them.
+                var mask = nonzero(blocks, at)
+                var last: u32 = 0
+                while mask != 0 {
+                    let k = u32.wrap(mask.trailing_zeros())
+                    mask &= mask - 1
+                    var run = k - last - 1
+                    while run > 15 {
+                        w.put(ac_coders[t].code[0xF0], ac_coders[t].size[0xF0])
+                        run -= 16
+                    }
+                    let v = i32(unsafe { blocks.as_ptr().add(at + usize(k)).read() })
+                    let m = magnitude(v)
+                    let sym = usize(run * 16 + m)
+                    let bits = u32.wrap(if v < 0 { v - 1 } else { v }) & ((1u32 << m) - 1)
+                    w.put(ac_coders[t].code[sym] << m | bits, ac_coders[t].size[sym] + m)
+                    last = k
+                }
+                if last < 63 {
+                    w.put(ac_coders[t].code[0], ac_coders[t].size[0])
+                }
+                at += 64
+            }
+        }
+    }
+    w.flush()
+    var bytes = w.out
+    bytes.extend([0xFF, 0xD9])
+    return bytes
+}
+
+// How often each DC and AC symbol comes, for tables made for the image.
+fn walk_blocks(blocks: List<i16>, ncomp: usize, hmax: usize, vmax: usize, mcus: usize, dc_counts: mut List<List<u64>>, ac_counts: mut List<List<u64>>) {
+    var preds: [i32; 3] = [0; 3]
+    var at: usize = 0
+    for _ in 0usize..mcus {
+        for c in 0usize..ncomp {
+            let count = if c == 0 { hmax * vmax } else { 1usize }
+            let t = if c == 0 { 0usize } else { 1usize }
+            for _ in 0usize..count {
+                let dc = i32(blocks[at])
+                let diff = dc - preds[c]
+                preds[c] = dc
+                dc_counts[t][usize(magnitude(diff))] += 1
+                var mask = nonzero(blocks, at)
+                var last: u32 = 0
+                while mask != 0 {
+                    let k = u32.wrap(mask.trailing_zeros())
+                    mask &= mask - 1
+                    var run = k - last - 1
+                    while run > 15 {
+                        ac_counts[t][0xF0] += 1
+                        run -= 16
+                    }
+                    let v = i32(blocks[at + usize(k)])
+                    ac_counts[t][usize(run * 16 + magnitude(v))] += 1
+                    last = k
+                }
+                if last < 63 {
+                    ac_counts[t][0] += 1
+                }
+                at += 64
+            }
+        }
+    }
+}
+
+// Which of a block's AC coefficients, in zigzag order from `at`, aren't zero: bit k for the k-th.
+fn nonzero(blocks: List<i16>, at: usize) -> u64 {
+    var mask: u64 = 0
+    unsafe {
+        let p = blocks.as_ptr().add(at)
+        for k in 1usize..64 {
+            mask |= (if p.add(k).read() != 0 { 1u64 } else { 0u64 }) << u64(k)
+        }
+    }
+    return mask
+}
+
+fn write_table(out: mut List<u8>, class: usize, id: usize, c: Coder) {
+    let len: usize = 2 + 1 + 16 + c.values.len()
+    out.extend([0xFF, 0xC4, u8.wrap(len / 256), u8.wrap(len % 256), u8.wrap(class * 16 + id)])
+    for i in 0usize..16 {
+        out.push(c.bits[i])
+    }
+    out.extend(c.values)
+}

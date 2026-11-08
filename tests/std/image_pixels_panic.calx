@@ -1,0 +1,9 @@
+// Pixels of the wrong length panic at the call, with the length an image of that size needs (CLX-105).
+
+import std.image.{Image, Kind}
+
+fn main() {
+    let im = Image.from_pixels(2, 1, Kind.Rgb, [1, 2, 3, 4, 5, 6])
+    println("{im.get(1, 0)}")    // out: #040506
+    _ = Image.from_pixels(2, 2, Kind.Rgba, [1, 2, 3])    // panic: a 2 by 2 Rgba image is 16 bytes, not 3
+}

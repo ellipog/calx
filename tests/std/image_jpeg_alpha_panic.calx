@@ -1,0 +1,9 @@
+// A JPEG has no alpha, so writing one from an image with alpha panics rather than dropping it silently (CLX-105).
+
+import std.image.{Color, Image, Kind}
+
+fn main() {
+    let im = Image.new(2, 2, Kind.Rgba, Color.rgba(1, 2, 3, 4))
+    println("{im.to(Kind.Rgb).encode_jpeg().len() > 0}")    // out: true
+    _ = im.encode_jpeg()    // panic: a JPEG holds no alpha, and the image is Rgba; drop it first with to(Kind.Rgb)
+}

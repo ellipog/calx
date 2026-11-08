@@ -104,6 +104,9 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 34. [std.stats](std/stats.md): means, medians, quantiles, modes, variances, standard deviations, correlation and linear regression, as Python's `statistics` gives them to the last bit
 35. [std.diff](std/diff.md): the fewest changes between two lists with Myers' algorithm, and unified diffs of text as `diff -u` writes them
 36. [std.decimal](std/decimal.md): decimals of any precision, as Python's `decimal` module has them, with exact money arithmetic, every rounding, and correctly rounded roots, exponentials, logarithms and powers
+37. [std.image](std/image.md): images read from PNG, JPEG and ICO files, resized, blurred, cropped, turned, drawn on, blended, quantized and written back, with Pillow's pixels and Pillow's JPEG bytes
+38. [std.image.png](std/image-png.md): PNG files read and written as libpng does it, every color type and bit depth, interlaced or not
+39. [std.image.jpeg](std/image-jpeg.md): JPEG files read as libjpeg-turbo reads them, baseline and progressive, and written byte for byte as Pillow writes them
 
 ### Java compatibility
 

@@ -55,6 +55,7 @@ fn main() {
 | `decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> bool ! Error` | Inflates `bytes[from..to]` onto the end of `out`, at most `limit` bytes. `true` if the stream ended, `false` if it stopped at the limit with more to come, as `Inflater.inflate` stops when its array is full |
 | `decompress_stream(bytes: List<u8>, from: usize, to: usize, format: Format, limit: usize, out: mut List<u8>) -> usize ! Error` | Inflates the one stream that starts at `from` onto the end of `out`, and gives the index just past its last byte, where whatever follows it starts: a zip entry's data descriptor, or another stream. Fails with `TooLong` past `limit` bytes |
 | `crc32(bytes: List<u8>) -> u32` | The CRC-32, as Java's `CRC32` gives it |
+| `crc32_range(bytes: List<u8>, from: usize, to: usize, crc: u32 = 0) -> u32` | The CRC-32 of the bytes from `from` up to `to`, carried on from `crc`, as Java's `CRC32.update(bytes, off, len)` carries it. Panics unless the range is in `bytes` |
 | `adler32(bytes: List<u8>) -> u32` | The Adler-32, as Java's `Adler32` gives it |
 
 Why bytes don't inflate, as `Error`:

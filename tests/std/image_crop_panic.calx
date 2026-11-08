@@ -1,0 +1,9 @@
+// A crop that leaves the image panics at the call, naming the crop and the image (CLX-105).
+
+import std.image.{Color, Image, Kind}
+
+fn main() {
+    let im = Image.new(4, 3, Kind.Rgb, Color.rgb(1, 2, 3))
+    println("{im.crop(1, 1, 3, 2)}")    // out: Image(3x2 Rgb)
+    _ = im.crop(2, 0, 3, 2)    // panic: a 3 by 2 crop at (2, 0) isn't inside a 4 by 3 image
+}

@@ -1,0 +1,129 @@
+// std.image: pixels, PNG, JPEG and ICO, resizing and blurring, checked against Pillow's (CLX-105).
+// The CRCs are of the bytes Pillow 12.3 writes, and of the pixels it decodes and resizes.
+
+import std.bytes.{from_hex}
+import std.image.jpeg
+import std.image.jpeg.{Sampling}
+import std.image.png
+import std.image.{Color, Filter, Image, Kind, decode_ico, encode_ico}
+import std.zlib.{crc32}
+
+// r = x * 17 + y * 3, g = y * 29 + x, b = x * y * 7, each mod 256.
+fn gradient(w: usize, h: usize) -> Image {
+    var im = Image.new(w, h, Kind.Rgb, Color.rgb(0, 0, 0))
+    for y in 0usize..h {
+        for x in 0usize..w {
+            im.set(x, y, Color.rgb(u8.wrap(x * 17 + y * 3), u8.wrap(y * 29 + x), u8.wrap(x * y * 7)))
+        }
+    }
+    return im
+}
+
+// What went wrong reading an image, or "read".
+fn why(bytes: List<u8>) -> String {
+    return match Image.decode(bytes) {
+        ok(_) => String("read"),
+        err(e) => e,
+    }
+}
+
+fn main() {
+    // Pixels, colors and kinds.
+    var im = Image.new(4, 3, Kind.Rgba, Color.rgba(10, 20, 30, 128))
+    im.set(1, 2, Color.hex("#1838D0") ?? Color.gray(0))
+    println("{im} {im.get(0, 0)} {im.get(1, 2)} {im.channels()} {im.pixels.len()}")    // out: Image(4x3 Rgba) #0a141e80 #1838d0 4 48
+    println("{Color.hex("18d") ?? Color.gray(0)} {Color.hex("#18d8") ?? Color.gray(0)} {Color.hex("#12345") == none} {Color.hex("#zzzzzz") == none}")    // out: #1188dd #1188dd88 true true
+    println("{Color.rgb(255, 0, 0).luma()} {Color.rgb(0, 255, 0).luma()} {Color.gray(77).luma()}")    // out: 76 150 77
+    let gray = im.to(Kind.Gray)
+    println("{gray} {gray.get(1, 2)} {im.to(Kind.Rgb).get(0, 0)} {gray.to(Kind.GrayAlpha).get(0, 0)}")    // out: Image(4x3 Gray) #404040 #0a141e #121212
+    println("{Kind.Rgba.channels()} {Kind.GrayAlpha.has_alpha()} {Kind.Rgb.has_alpha()}")    // out: 4 true false
+
+    // PNG: every kind round trips.
+    let g = gradient(16, 16)
+    var same = List<bool>()
+    for kind in [Kind.Gray, Kind.GrayAlpha, Kind.Rgb, Kind.Rgba] {
+        let k = g.to(kind)
+        same.push(Image.decode(k.encode_png())! == k)
+    }
+    println("{same}")    // out: [true, true, true, true]
+    // An interlaced palette PNG of 2 bits, basi3p02.png from Willem van Schaik's PngSuite.
+    let suite = from_hex(["89504e470d0a1a0a0000000d49484452000000200000002002030000017913a2f10000000467414d41000186a031e896",
+        "5f00000003734249540101017c2e77820000000c504c544500ff00ff0000ffff000000ff653f2bba0000005149444154",
+        "789c6378c7b09b01845d1804c1d8cc8c2139194adeb80162f4f6a2b3bf2ef8ba80813f8a3f8a01c8f8ca0064f0e31643",
+        "482064114a4852f73f74151823189842aba02c04032af11fc1a0923900b45a7de91f75e1030000000049454e44ae4260",
+        "82"].join("")) ?? List<u8>()
+    let p = png.decode(suite)!
+    println("{p.width}x{p.height}x{p.channels} {crc32(p.pixels)}")    // out: 32x32x3 664421946
+    println("{why([1, 2, 3, 4])} | {why([137, 80, 78, 71, 13, 10, 26, 10, 0])}")    // out: not a PNG, JPEG or ICO file | the PNG file ends in the middle of a chunk
+
+    // JPEG: written byte for byte as Pillow writes it, and read as it reads it.
+    let j = g.encode_jpeg()
+    println("{j.len()} {crc32(j)}")    // out: 733 2156158297
+    let dj = Image.decode(j)!
+    println("{dj} {crc32(dj.pixels)}")    // out: Image(16x16 Rgb) 601202745
+    let j2 = g.encode_jpeg(90, Sampling.S444, true)
+    println("{j2.len()} {crc32(j2)}")    // out: 636 4157681620
+    println("{crc32(g.to(Kind.Gray).encode_jpeg(50))}")    // out: 2668438060
+    // A progressive JPEG, as Pillow writes one.
+    let prog = from_hex(["ffd8ffe000104a46494600010100000100010000ffdb00430006040506050406060506070706080a100a0a09090a140e",
+        "0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707",
+        "070a080a130a0a13281a161a282828282828282828282828282828282828282828282828282828282828282828282828",
+        "2828282828282828282828282828ffc2001108000a000c03012200021101031101ffc400150001010000000000000000",
+        "0000000000000506ffc40014010100000000000000000000000000000003ffda000c0301000210031000000119c8f74d",
+        "7fffc4001b10000104030000000000000000000000000402030511000112ffda00080101000105021e37131daa1c97f9",
+        "412fd7ffc4001811000203000000000000000000000000000003051132ffda0008010301013f018f636b47ffc4001811",
+        "0100030100000000000000000000000001000211b1ffda0008010201013f0144a19c9fffc4001b100001040300000000",
+        "00000000000000000001032392313233ffda0008010100063f02c1a89339653b3963ffc4001a10000203010100000000",
+        "0000000000000000011121516181ffda0008010100013f215352e845d7d3b34a435d9fffda000c030100020003000000",
+        "10efffc400151101010000000000000000000000000000e100ffda0008010301013f1024dfffc4001911010101000300",
+        "000000000000000000000111410031f0ffda0008010201013f1059456550f62edf6e73ffc4001b100100020301010000",
+        "000000000000000001001121619131d1ffda0008010100013f1036307ad415c1792c0f2683f83b88459b99facfffd9"].join("")) ?? List<u8>()
+    let dp = jpeg.decode(prog)!
+    println("{dp.width}x{dp.height}x{dp.channels} {crc32(dp.pixels)}")    // out: 12x10x3 1240332074
+    println("{why(prog[..300])}")    // out: the JPEG file ends in the middle of its Huffman tables
+    println("{why(prog[..prog.len() - 10])}")    // out: the JPEG file ends before its image data does
+
+    // Resizing and blurring, Pillow's to the pixel.
+    let s = gradient(9, 7)
+    println("{crc32(s.resize(5, 4, Filter.Lanczos).pixels)} {crc32(s.resize(20, 13).pixels)}")    // out: 3002062027 2910378377
+    println("{s.resize(13, 11, Filter.Lanczos).get(3, 2)} {crc32(s.blur(1.5).pixels)} {crc32(s.to(Kind.Gray).pixels)}")    // out: #24220f 433576668 3807544387
+    println("{s.thumbnail(4, 4)} {s.resize(3, 3, Filter.Nearest).get(2, 2)} {s.box_blur(0.0) == s}")    // out: Image(4x3 Rgb) #8698f5 true
+
+    // Cropping, borders, turning, pasting and drawing.
+    let c = s.crop(2, 1, 3, 2)
+    println("{c} {c.get(0, 0) == s.get(2, 1)} {c.get(2, 1) == s.get(4, 2)}")    // out: Image(3x2 Rgb) true true
+    let e = c.expand(1, 2, 0, 0, Color.rgb(255, 255, 255))
+    println("{e} {e.get(0, 0)} {e.get(1, 2) == c.get(0, 0)}")    // out: Image(4x4 Rgb) #ffffff true
+    println("{s.rotate_left()} {s.rotate_left().get(0, 0) == s.get(8, 0)} {s.rotate_right().get(0, 0) == s.get(0, 6)}")    // out: Image(7x9 Rgb) true true
+    println("{s.flip_horizontal().get(0, 0) == s.get(8, 0)} {s.flip_vertical().get(0, 0) == s.get(0, 6)} {s.rotate_180().get(0, 0) == s.get(8, 6)}")    // out: true true true
+    var canvas = Image.new(4, 4, Kind.Rgb, Color.rgb(0, 0, 0))
+    canvas.paste(c, -1, 3)
+    canvas.fill_rect(2, 0, 9, 1, Color.rgb(9, 9, 9))
+    println("{canvas.get(0, 3) == c.get(1, 0)} {canvas.get(2, 3)} {canvas.get(3, 0)} {canvas.get(1, 0)}")    // out: true #000000 #090909 #000000
+    var over = Image.new(2, 2, Kind.Rgb, Color.rgb(200, 0, 0))
+    over.overlay(Image.new(2, 2, Kind.Rgba, Color.rgba(0, 0, 255, 128)), 1, 0)
+    println("{over} {over.get(0, 0)} {over.get(1, 1)}")    // out: Image(2x2 Rgba) #c80000 #640080
+    let masked = s.with_alpha(s.channel(0))
+    println("{masked.kind()} {masked.get(2, 1).a == s.get(2, 1).r} {s.invert().get(0, 0)}")    // out: Rgba true #ffffff
+
+    // Flood fill: what's joined to the point, up, down, left and right.
+    var m = Image.new(5, 3, Kind.Gray, Color.gray(0))
+    for y in 0usize..3 {
+        m.set(2, y, Color.gray(255))
+    }
+    m.flood_fill(0, 0, Color.gray(100))
+    println("{m.get(1, 2)} {m.get(2, 1)} {m.get(3, 0)}")    // out: #646464 #ffffff #000000
+
+    // A palette: few colors are kept exactly; more are chosen.
+    var few = Image.new(3, 2, Kind.Rgba, Color.rgba(1, 2, 3, 255))
+    few.set(1, 1, Color.rgba(9, 9, 9, 0))
+    let q = few.quantize(4)
+    println("{q.palette.len()} {q.to_image() == few} {q.encode_png().len() > 0}")    // out: 2 true true
+    let many = g.quantize(8)
+    println("{many.palette.len()} {many.indexes.len()} {many.to_image()}")    // out: 8 256 Image(16x16 Rgb)
+
+    // Icons: each image a PNG, smallest first.
+    let ico = encode_ico([g.copy(), s.resize(8, 8)])
+    let icons = decode_ico(ico)!
+    println("{icons.len()} {icons[0]} {icons[1] == g} {Image.decode(ico)!}")    // out: 2 Image(8x8 Rgb) true Image(16x16 Rgb)
+}

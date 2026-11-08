@@ -1,0 +1,682 @@
+/// PNG files, read and written as libpng reads and writes them: every color type and bit depth,
+/// interlaced or not, palettes and transparency, each chunk checked against its CRC. Pixels come
+/// out 8 bits a channel, as [std.image](image.md) holds them, and go in the same way.
+///
+/// `std.image` reads and writes PNGs with these, and most programs use it instead.
+module std.image.png
+
+import std.bytes.{put_u32_be, set_u32_be, u32_be}
+import std.zlib.{Format, compress_into, crc32_range, decompress_into}
+
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+    fn memset(to: *u8, byte: i32, n: usize) -> *u8
+}
+
+/// A PNG's pixels, 8 bits a channel.
+pub struct Decoded {
+    /// How many pixels across.
+    pub width: usize
+    /// How many pixels down.
+    pub height: usize
+    /// How many bytes each pixel takes: 1 for gray, 2 for gray and alpha, 3 for RGB and 4 for
+    /// RGBA.
+    pub channels: usize
+    /// The pixels, row by row from the top, each pixel's channels in turn.
+    pub pixels: List<u8>
+}
+
+const IHDR: u32 = 0x49484452
+const PLTE: u32 = 0x504c5445
+const IDAT: u32 = 0x49444154
+const IEND: u32 = 0x49454e44
+const TRNS: u32 = 0x74524e53
+
+// Where each of Adam7's passes starts, and how far apart its pixels are, across and down.
+const PASS_X: [usize; 7] = [0, 4, 0, 2, 0, 1, 0]
+const PASS_Y: [usize; 7] = [0, 0, 4, 0, 2, 0, 1]
+const PASS_DX: [usize; 7] = [8, 8, 4, 4, 2, 2, 1]
+const PASS_DY: [usize; 7] = [8, 8, 8, 4, 4, 2, 2]
+
+// What a header says, and what's needed to turn a row into 8-bit pixels.
+struct Layout {
+    width: usize
+    height: usize
+    depth: usize
+    color: u8
+    interlaced: bool
+    // Bits a pixel takes in the file.
+    bits: usize
+    // Channels a pixel has once read.
+    channels: usize
+    // A palette's colors as RGBA, 256 of them, black past the palette's end.
+    lut: List<u8>
+    // The one transparent gray or RGB, at the file's depth, if tRNS gives one.
+    key: (u32, u32, u32)?
+}
+
+fn chunk_name(kind: u32) -> String {
+    var s = String()
+    for shift in [24u32, 16, 8, 0] {
+        let c = u8.wrap(kind >> shift)
+        if c >= 32 and c < 127 {
+            s.push(rune(c))
+        } else {
+            s.push('?')
+        }
+    }
+    return s
+}
+
+/// The pixels of a PNG file, or why they can't be read. A palette becomes RGB, with alpha when
+/// its tRNS chunk makes any color transparent, and a gray or RGB image whose tRNS names a
+/// transparent color gets alpha. A gray image of 1, 2 or 4 bits is scaled to 8, so its white is
+/// 255, and one of 16 bits keeps the high byte of each value, as libpng's `png_set_strip_16`
+/// keeps it. A chunk whose CRC doesn't match is an error if it's one the image needs, and is
+/// skipped otherwise, as libpng skips it.
+pub fn decode(bytes: List<u8>) -> Decoded ! String {
+    let n = bytes.len()
+    if n < 8 or bytes[0] != 137 or bytes[1] != 80 or bytes[2] != 78 or bytes[3] != 71 or bytes[4] != 13 or bytes[5] != 10 or bytes[6] != 26 or bytes[7] != 10 {
+        fail String("not a PNG file")
+    }
+    var at: usize = 8
+    var header = false
+    var width: usize = 0
+    var height: usize = 0
+    var depth: usize = 0
+    var color: u8 = 0
+    var interlaced = false
+    var palette: List<u8> = []
+    var alpha: List<u8> = []
+    var key: (u32, u32, u32)? = none
+    var data: List<u8> = []
+    loop {
+        if at == n {
+            break
+        }
+        if n - at < 12 {
+            fail String("the PNG file ends in the middle of a chunk")
+        }
+        let len = usize(u32_be(bytes, at))
+        let kind = u32_be(bytes, at + 4)
+        if len > n - at - 12 {
+            fail "the PNG file ends in the middle of its {chunk_name(kind)} chunk"
+        }
+        let body = at + 8
+        let end = body + len
+        // A chunk is one the image needs when its name's first letter is a capital.
+        let critical = (kind >> 29) & 1 == 0
+        let next = end + 4
+        if crc32_range(bytes, at + 4, end) != u32_be(bytes, end) {
+            if critical {
+                fail "the PNG file's {chunk_name(kind)} chunk is corrupt: its CRC doesn't match"
+            }
+            at = next
+            continue
+        }
+        if not header and kind != IHDR {
+            fail "the PNG file starts with a {chunk_name(kind)} chunk, not IHDR"
+        }
+        if kind == IHDR {
+            if header {
+                fail String("the PNG file has two IHDR chunks")
+            }
+            if len != 13 {
+                fail "the PNG file's IHDR chunk is {len} bytes, not 13"
+            }
+            header = true
+            width = usize(u32_be(bytes, body))
+            height = usize(u32_be(bytes, body + 4))
+            depth = usize(bytes[body + 8])
+            color = bytes[body + 9]
+            if width == 0 or height == 0 or width > 0x7fffffff or height > 0x7fffffff {
+                fail "a PNG can't be {width} by {height}"
+            }
+            let fits = match color {
+                0 => depth == 1 or depth == 2 or depth == 4 or depth == 8 or depth == 16,
+                3 => depth == 1 or depth == 2 or depth == 4 or depth == 8,
+                2 | 4 | 6 => depth == 8 or depth == 16,
+                _ => false,
+            }
+            if not fits {
+                fail "a PNG can't be color type {color} at {depth} bits"
+            }
+            if bytes[body + 10] != 0 or bytes[body + 11] != 0 {
+                fail String("the PNG uses a compression or filter method other than 0")
+            }
+            if bytes[body + 12] > 1 {
+                fail "the PNG's interlace method is {bytes[body + 12]}, not 0 or 1"
+            }
+            interlaced = bytes[body + 12] == 1
+        } else if kind == PLTE {
+            if len % 3 != 0 or len == 0 or len > 768 {
+                fail "the PNG's palette is {len} bytes, not 3 for each of 1 to 256 colors"
+            }
+            palette = bytes[body..end]
+        } else if kind == TRNS {
+            if color == 3 {
+                alpha = bytes[body..end]
+            } else if color == 0 and len >= 2 {
+                let g = u32(bytes[body]) << 8 | u32(bytes[body + 1])
+                key = some((g, g, g))
+            } else if color == 2 and len >= 6 {
+                key = some((u32(bytes[body]) << 8 | u32(bytes[body + 1]), u32(bytes[body + 2]) << 8 | u32(bytes[body + 3]), u32(bytes[body + 4]) << 8 | u32(bytes[body + 5])))
+            }
+        } else if kind == IDAT {
+            data.extend(bytes[body..end])
+        } else if kind == IEND {
+            break
+        } else if critical {
+            fail "the PNG has a {chunk_name(kind)} chunk, which it needs but libpng doesn't know"
+        }
+        at = next
+    }
+    if not header {
+        fail String("the PNG file has no IHDR chunk")
+    }
+    if color == 3 and palette.is_empty() {
+        fail String("the PNG uses a palette but has no PLTE chunk")
+    }
+    if data.is_empty() {
+        fail String("the PNG file has no image data")
+    }
+    let samples: usize = match color {
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => 1,
+    }
+    // A palette with tRNS gets alpha if any color is transparent.
+    var lut: List<u8> = []
+    var see_through = false
+    if color == 3 {
+        lut.reserve(1024)
+        for i in 0usize..256 {
+            if i * 3 < palette.len() {
+                lut.push(palette[i * 3])
+                lut.push(palette[i * 3 + 1])
+                lut.push(palette[i * 3 + 2])
+                let a = if i < alpha.len() { alpha[i] } else { 255u8 }
+                if a != 255 {
+                    see_through = true
+                }
+                lut.push(a)
+            } else {
+                lut.push(0)
+                lut.push(0)
+                lut.push(0)
+                lut.push(255)
+            }
+        }
+    }
+    let channels: usize = match color {
+        0 => if key != none { 2 } else { 1 },
+        2 => if key != none { 4 } else { 3 },
+        3 => if see_through { 4 } else { 3 },
+        4 => 2,
+        _ => 4,
+    }
+    let layout = Layout { width, height, depth, color, interlaced, bits: samples * depth, channels, lut, key }
+
+    // The filtered rows of each pass, one after another.
+    var expected: usize = 0
+    for p in 0usize..7 {
+        let (pw, ph) = pass_size(layout, p)
+        if pw > 0 and ph > 0 {
+            expected += ph * (row_bytes(layout, pw) + 1)
+        }
+        if not interlaced {
+            break
+        }
+    }
+    var raw: List<u8> = []
+    raw.reserve(expected)
+    match decompress_into(data, 0, data.len(), Format.Zlib, expected, mut raw) {
+        ok(_) => {},
+        err(e) => {
+            // Data that stops after the last row is read, as libpng reads it.
+            if raw.len() < expected {
+                fail "the PNG's image data is corrupt: {e}"
+            }
+        },
+    }
+    if raw.len() < expected {
+        fail String("the PNG's image data ends before its last row")
+    }
+
+    let size = width.checked_mul(height) ?? 0
+    let total = size.checked_mul(channels) ?? 0
+    if total == 0 or u64(total) > 0x7fffffffffff {
+        fail "a {width} by {height} PNG is too big to hold"
+    }
+    var pixels: List<u8> = []
+    pixels.reserve(total)
+    unsafe {
+        if interlaced {
+            // Passes leave gaps until the last fills them.
+            _ = memset(pixels.as_mut_ptr(), 0, total)
+        }
+        pixels.set_len(total)
+    }
+    var from: usize = 0
+    for p in 0usize..7 {
+        let (pw, ph) = pass_size(layout, p)
+        let x0 = if interlaced { PASS_X[p] } else { 0 }
+        let y0 = if interlaced { PASS_Y[p] } else { 0 }
+        let dx = if interlaced { PASS_DX[p] } else { 1 }
+        let dy = if interlaced { PASS_DY[p] } else { 1 }
+        if pw > 0 and ph > 0 {
+            let len = row_bytes(layout, pw)
+            let bpp = if layout.bits >= 8 { layout.bits / 8 } else { 1 }
+            for r in 0usize..ph {
+                let row = from + r * (len + 1)
+                let f = raw[row]
+                if f > 4 {
+                    fail "the PNG's row {y0 + r * dy} has filter type {f}, not 0 to 4"
+                }
+                unfilter(mut raw, row + 1, len, bpp, f, r == 0)
+                expand(raw, row + 1, pw, layout, mut pixels, ((y0 + r * dy) * width + x0) * channels, dx * channels)
+            }
+            from += ph * (len + 1)
+        }
+        if not interlaced {
+            break
+        }
+    }
+    return Decoded { width, height, channels, pixels }
+}
+
+// How many pixels across and down a pass has: the whole image when it isn't interlaced.
+fn pass_size(layout: Layout, p: usize) -> (usize, usize) {
+    if not layout.interlaced {
+        return (layout.width, layout.height)
+    }
+    let w = if layout.width > PASS_X[p] { (layout.width - PASS_X[p] + PASS_DX[p] - 1) / PASS_DX[p] } else { 0 }
+    let h = if layout.height > PASS_Y[p] { (layout.height - PASS_Y[p] + PASS_DY[p] - 1) / PASS_DY[p] } else { 0 }
+    return (w, h)
+}
+
+fn row_bytes(layout: Layout, pixels: usize) -> usize {
+    return (pixels * layout.bits + 7) / 8
+}
+
+// Undoes a row's filter in place. The row before it, already undone, is just before its
+// filter byte; the first row of a pass has none, which filters take as zeros.
+fn unfilter(raw: mut List<u8>, row: usize, len: usize, bpp: usize, f: u8, first: bool) {
+    if f == 0 or (f == 2 and first) {
+        return
+    }
+    unsafe {
+        let cur = raw.as_mut_ptr().add(row)
+        if f == 1 {
+            var i = bpp
+            while i < len {
+                cur.add(i).write(cur.add(i).read() + cur.add(i - bpp).read())
+                i += 1
+            }
+            return
+        }
+        if first {
+            // With nothing above, Average halves the byte to the left, and Paeth picks it.
+            var i = bpp
+            while i < len {
+                let left = cur.add(i - bpp).read()
+                let add = if f == 3 { u8.wrap(u32(left) >> 1) } else { left }
+                cur.add(i).write(cur.add(i).read() + add)
+                i += 1
+            }
+            return
+        }
+        let up = raw.as_ptr().add(row - 1 - len)
+        if f == 2 {
+            var i: usize = 0
+            while i < len {
+                cur.add(i).write(cur.add(i).read() + up.add(i).read())
+                i += 1
+            }
+        } else if f == 3 {
+            var i: usize = 0
+            while i < bpp {
+                cur.add(i).write(cur.add(i).read() + u8.wrap(u32(up.add(i).read()) >> 1))
+                i += 1
+            }
+            while i < len {
+                let avg = u8.wrap((u32(cur.add(i - bpp).read()) + u32(up.add(i).read())) >> 1)
+                cur.add(i).write(cur.add(i).read() + avg)
+                i += 1
+            }
+        } else {
+            var i: usize = 0
+            while i < bpp {
+                cur.add(i).write(cur.add(i).read() + up.add(i).read())
+                i += 1
+            }
+            while i < len {
+                let a = i32(cur.add(i - bpp).read())
+                let b = i32(up.add(i).read())
+                let c = i32(up.add(i - bpp).read())
+                let pa = (b - c).abs()
+                let pb = (a - c).abs()
+                let pc = (a + b - c - c).abs()
+                let pred = if pa <= pb and pa <= pc { a } else if pb <= pc { b } else { c }
+                cur.add(i).write(cur.add(i).read() + u8.wrap(pred))
+                i += 1
+            }
+        }
+    }
+}
+
+// Turns `count` pixels of an undone row into 8-bit pixels, the first at `to` in `out` and each
+// `step` bytes after the one before.
+fn expand(raw: List<u8>, row: usize, count: usize, layout: Layout, out: mut List<u8>, to: usize, step: usize) {
+    let ch = layout.channels
+    unsafe {
+        let src = raw.as_ptr().add(row)
+        let dst = out.as_mut_ptr().add(to)
+        if layout.depth == 8 and layout.color != 3 and layout.key == none {
+            if step == ch {
+                _ = memcpy(dst, src, count * ch)
+                return
+            }
+            var i: usize = 0
+            while i < count {
+                var c: usize = 0
+                while c < ch {
+                    dst.add(i * step + c).write(src.add(i * ch + c).read())
+                    c += 1
+                }
+                i += 1
+            }
+            return
+        }
+        if layout.color == 3 {
+            let lut = layout.lut.as_ptr()
+            let per = 8 / layout.depth
+            let mask = (1u32 << u32.wrap(layout.depth)) - 1
+            var i: usize = 0
+            while i < count {
+                var index: usize = 0
+                if layout.depth == 8 {
+                    index = usize(src.add(i).read())
+                } else {
+                    let byte = u32(src.add(i / per).read())
+                    let shift = u32.wrap(8 - (i % per + 1) * layout.depth)
+                    index = usize((byte >> shift) & mask)
+                }
+                let d = dst.add(i * step)
+                d.write(lut.add(index * 4).read())
+                d.add(1).write(lut.add(index * 4 + 1).read())
+                d.add(2).write(lut.add(index * 4 + 2).read())
+                if ch == 4 {
+                    d.add(3).write(lut.add(index * 4 + 3).read())
+                }
+                i += 1
+            }
+            return
+        }
+        let samples = layout.bits / layout.depth
+        let (k0, k1, k2) = layout.key ?? (0x10000u32, 0u32, 0u32)
+        if layout.depth < 8 {
+            // Gray of 1, 2 or 4 bits.
+            let per = 8 / layout.depth
+            let mask = (1u32 << u32.wrap(layout.depth)) - 1
+            let scale = 255 / mask
+            var i: usize = 0
+            while i < count {
+                let byte = u32(src.add(i / per).read())
+                let shift = u32.wrap(8 - (i % per + 1) * layout.depth)
+                let v = (byte >> shift) & mask
+                let d = dst.add(i * step)
+                d.write(u8.wrap(v * scale))
+                if ch == 2 {
+                    d.add(1).write(if v == k0 { 0u8 } else { 255u8 })
+                }
+                i += 1
+            }
+            return
+        }
+        // 8 bits with a transparent color, or 16 bits, which keep their high bytes.
+        let wide = layout.depth == 16
+        let size = if wide { 2usize } else { 1usize }
+        var i: usize = 0
+        while i < count {
+            let s = src.add(i * samples * size)
+            let d = dst.add(i * step)
+            var c: usize = 0
+            while c < samples {
+                d.add(c).write(s.add(c * size).read())
+                c += 1
+            }
+            if layout.key != none {
+                let v0 = if wide { u32(s.read()) << 8 | u32(s.add(1).read()) } else { u32(s.read()) }
+                var clear = v0 == k0
+                if samples == 3 {
+                    let v1 = if wide { u32(s.add(2).read()) << 8 | u32(s.add(3).read()) } else { u32(s.add(1).read()) }
+                    let v2 = if wide { u32(s.add(4).read()) << 8 | u32(s.add(5).read()) } else { u32(s.add(2).read()) }
+                    clear = clear and v1 == k1 and v2 == k2
+                }
+                d.add(samples).write(if clear { 0u8 } else { 255u8 })
+            }
+            i += 1
+        }
+    }
+}
+
+/// The pixels as a PNG file, 8 bits a channel. `channels` is 1 for gray, 2 for gray and alpha, 3
+/// for RGB and 4 for RGBA. Each row is filtered with whichever of PNG's five filters leaves the
+/// smallest sum of its bytes taken as signed, as libpng chooses, and the rows are compressed
+/// with zlib at `level`: 0 stores them, 1 is the fastest, 9 the smallest, and 6, the default, is
+/// libpng's and Pillow's. Panics unless `pixels` holds `width × height × channels` bytes.
+@track_caller
+pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, level: u32 = 6) -> List<u8> {
+    if channels == 0 or channels > 4 {
+        panic("a PNG's pixels have 1 to 4 channels, not {channels}")
+    }
+    check_size(width, height)
+    let len = width * channels
+    if pixels.len() != len * height {
+        panic("a {width} by {height} image of {channels} channels is {len * height} bytes, not {pixels.len()}")
+    }
+    let color: u8 = match channels {
+        1 => 0,
+        2 => 4,
+        3 => 2,
+        _ => 6,
+    }
+    var filtered: List<u8> = []
+    filtered.reserve(height * (len + 1))
+    filter_rows(pixels, len, height, channels, mut filtered)
+    var out = start_file(width, height, 8, color)
+    finish_file(mut out, filtered, level)
+    return out
+}
+
+/// An image of palette indexes as a PNG file. `palette` holds each color's red, green, blue and
+/// alpha, 1 to 256 colors, and the file keeps the alpha in a tRNS chunk when any isn't 255.
+/// Each index takes as few bits as the palette's size allows, 1, 2, 4 or 8, as Pillow writes
+/// them, and rows aren't filtered, as libpng advises for palettes. Panics unless `indexes` holds
+/// `width × height` bytes, each less than the number of colors.
+@track_caller
+pub fn encode_indexed(width: usize, height: usize, indexes: List<u8>, palette: List<u8>, level: u32 = 6) -> List<u8> {
+    let colors = palette.len() / 4
+    if palette.len() % 4 != 0 or colors == 0 or colors > 256 {
+        panic("a palette holds 4 bytes for each of 1 to 256 colors, not {palette.len()} bytes")
+    }
+    check_size(width, height)
+    if indexes.len() != width * height {
+        panic("a {width} by {height} image of indexes is {width * height} bytes, not {indexes.len()}")
+    }
+    let depth: usize = if colors <= 2 { 1 } else if colors <= 4 { 2 } else if colors <= 16 { 4 } else { 8 }
+    for i in indexes {
+        if usize(i) >= colors {
+            panic("index {i} is past the palette's {colors} colors")
+        }
+    }
+    let len = (width * depth + 7) / 8
+    var filtered: List<u8> = []
+    filtered.reserve(height * (len + 1))
+    let per = 8 / depth
+    for y in 0usize..height {
+        filtered.push(0)
+        if depth == 8 {
+            filtered.extend(indexes[y * width..(y + 1) * width])
+        } else {
+            var byte: u32 = 0
+            var k: usize = 0
+            for x in 0usize..width {
+                byte = byte << u32.wrap(depth) | u32(indexes[y * width + x])
+                k += 1
+                if k == per {
+                    filtered.push(u8.wrap(byte))
+                    byte = 0
+                    k = 0
+                }
+            }
+            if k > 0 {
+                filtered.push(u8.wrap(byte << u32.wrap((per - k) * depth)))
+            }
+        }
+    }
+    var out = start_file(width, height, depth, 3)
+    var plte: List<u8> = []
+    var trns: List<u8> = []
+    var last_clear: usize = 0
+    for c in 0usize..colors {
+        plte.push(palette[c * 4])
+        plte.push(palette[c * 4 + 1])
+        plte.push(palette[c * 4 + 2])
+        trns.push(palette[c * 4 + 3])
+        if palette[c * 4 + 3] != 255 {
+            last_clear = c + 1
+        }
+    }
+    chunk(mut out, PLTE, plte)
+    if last_clear > 0 {
+        trns.truncate(last_clear)
+        chunk(mut out, TRNS, trns)
+    }
+    finish_file(mut out, filtered, level)
+    return out
+}
+
+@track_caller
+fn check_size(width: usize, height: usize) {
+    if width == 0 or height == 0 or width > 0x7fffffff or height > 0x7fffffff {
+        panic("a PNG can't be {width} by {height}")
+    }
+}
+
+fn start_file(width: usize, height: usize, depth: usize, color: u8) -> List<u8> {
+    var out: List<u8> = [137, 80, 78, 71, 13, 10, 26, 10]
+    var ihdr: List<u8> = []
+    put_u32_be(mut ihdr, u32.wrap(width))
+    put_u32_be(mut ihdr, u32.wrap(height))
+    ihdr.push(u8.wrap(depth))
+    ihdr.push(color)
+    ihdr.push(0)
+    ihdr.push(0)
+    ihdr.push(0)
+    chunk(mut out, IHDR, ihdr)
+    return out
+}
+
+fn finish_file(out: mut List<u8>, filtered: List<u8>, level: u32) {
+    // The compressed rows go straight into one IDAT chunk, whose length is filled in after.
+    let at = out.len()
+    put_u32_be(mut out, 0)
+    put_u32_be(mut out, IDAT)
+    compress_into(filtered, 0, filtered.len(), Format.Zlib, level, mut out)
+    let len = out.len() - at - 8
+    if len > 0x7fffffff {
+        // Too long for one chunk: split it, which a PNG this big can afford.
+        let body = out[at + 8..]
+        out.truncate(at)
+        var from: usize = 0
+        while from < body.len() {
+            let to = (from + 0x40000000).min(body.len())
+            chunk(mut out, IDAT, body[from..to])
+            from = to
+        }
+    } else {
+        set_u32_be(mut out, at, u32.wrap(len))
+        let crc = crc32_range(out, at + 4, out.len())
+        put_u32_be(mut out, crc)
+    }
+    chunk(mut out, IEND, [])
+}
+
+fn chunk(out: mut List<u8>, kind: u32, body: List<u8>) {
+    let at = out.len()
+    put_u32_be(mut out, u32.wrap(body.len()))
+    put_u32_be(mut out, kind)
+    out.extend(body)
+    let crc = crc32_range(out, at + 4, out.len())
+    put_u32_be(mut out, crc)
+}
+
+// Each row with its filter byte in front, the filter chosen by libpng's heuristic: the least
+// sum of the filtered bytes taken as signed.
+fn filter_rows(pixels: List<u8>, len: usize, height: usize, bpp: usize, out: mut List<u8>) {
+    let start = out.len()
+    unsafe {
+        let base = pixels.as_ptr()
+        let dst0 = out.as_mut_ptr().add(start)
+        for y in 0usize..height {
+            let cur = base.add(y * len)
+            let dst = dst0.add(y * (len + 1))
+            let have_up = y > 0
+            var sums: [u64; 5] = [0; 5]
+            var i: usize = 0
+            while i < len {
+                let x = cur.add(i).read()
+                let a = if i >= bpp { cur.add(i - bpp).read() } else { 0u8 }
+                let b = if have_up { cur.add(i - len).read() } else { 0u8 }
+                let c = if have_up and i >= bpp { cur.add(i - len - bpp).read() } else { 0u8 }
+                sums[0] += signed_size(x)
+                sums[1] += signed_size(x - a)
+                sums[2] += signed_size(x - b)
+                sums[3] += signed_size(x - u8.wrap((u32(a) + u32(b)) >> 1))
+                sums[4] += signed_size(x - paeth(a, b, c))
+                i += 1
+            }
+            var best: usize = 0
+            for f in 1usize..5 {
+                if sums[f] < sums[best] {
+                    best = f
+                }
+            }
+            dst.write(u8.wrap(best))
+            let row = dst.add(1)
+            i = 0
+            while i < len {
+                let x = cur.add(i).read()
+                let a = if i >= bpp { cur.add(i - bpp).read() } else { 0u8 }
+                let b = if have_up { cur.add(i - len).read() } else { 0u8 }
+                let v = match best {
+                    0 => x,
+                    1 => x - a,
+                    2 => x - b,
+                    3 => x - u8.wrap((u32(a) + u32(b)) >> 1),
+                    _ => x - paeth(a, b, if have_up and i >= bpp { cur.add(i - len - bpp).read() } else { 0u8 }),
+                }
+                row.add(i).write(v)
+                i += 1
+            }
+        }
+        out.set_len(start + height * (len + 1))
+    }
+}
+
+fn signed_size(v: u8) -> u64 {
+    return if v < 128 { u64(v) } else { u64(256 - u32(v)) }
+}
+
+fn paeth(a8: u8, b8: u8, c8: u8) -> u8 {
+    let a = i32(a8)
+    let b = i32(b8)
+    let c = i32(c8)
+    let pa = (b - c).abs()
+    let pb = (a - c).abs()
+    let pc = (a + b - c - c).abs()
+    return if pa <= pb and pa <= pc { a8 } else if pb <= pc { b8 } else { c8 }
+}

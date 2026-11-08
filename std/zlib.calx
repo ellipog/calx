@@ -211,6 +211,18 @@ pub fn crc32(bytes: List<u8>) -> u32 {
     return unsafe { cx_zlib_crc32(0, bytes.as_ptr(), bytes.len()) }
 }
 
+/// The CRC-32 of the bytes from `from` up to `to`, carried on from `crc`, the CRC of what came
+/// before them, as Java's `CRC32.update(bytes, off, len)` carries it: `crc32_range(b, 4, 9,
+/// crc32_range(b, 0, 4))` is `crc32_range(b, 0, 9)`. PNG checks each chunk with it. Panics unless
+/// the range is in `bytes`.
+@track_caller
+pub fn crc32_range(bytes: List<u8>, from: usize, to: usize, crc: u32 = 0) -> u32 {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    return unsafe { cx_zlib_crc32(crc, bytes.as_ptr().add(from), to - from) }
+}
+
 /// The Adler-32 of the bytes, as Java's `Adler32` gives it. zlib checks its data with it.
 pub fn adler32(bytes: List<u8>) -> u32 {
     return unsafe { cx_zlib_adler32(1, bytes.as_ptr(), bytes.len()) }
