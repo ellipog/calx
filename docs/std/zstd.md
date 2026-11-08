@@ -118,6 +118,7 @@ In WSL on the same machine:
 `std.zstd` was run on Python 3.14's `compression.zstd` with libzstd 1.5.7, on Windows and on Linux:
 
 - 90 files: text, random bytes, zeros, runs and a mix, from empty to 2.4 MB, compressed by Python at levels -5, 1, 3, 9 and 19, with checksums, without sizes as a stream writes them, with long-distance matching and a window of 16 MiB, and as two frames with a skippable one between. All gave the same bytes.
+- 11 big files, 18.3 MB of source and 40 MB of a program, compressed by libzstd's threads as `zstd -T` compresses, at levels -7, 3, 19 and 22, with jobs of 1 MiB, and with long-distance matching and a window of 128 MiB. All gave the same bytes, on all the processors.
 - 4,056 broken files made from those: cut at random and at the headers' edges, with bits flipped, bytes changed, added and removed, and with garbage, a magic number, a header and a skippable frame cut short after them; and frames made by hand with windows from 128 MiB to 8 GiB, sizes around 32 KiB, sizes that don't match, and blocks bigger than their window. All but the 27 above gave the same kind of error, or the same bytes.
 - 2,184 pairs of frames and dictionaries: frames compressed by Python with two trained dictionaries and a raw one, with checksums, without IDs, and streamed, each decompressed with no dictionary, the right one, the wrong one, as raw bytes, cut at six places, with bits flipped at seven, with an ID of 0, and of fewer than eight bytes. All gave what Python gave.
 
