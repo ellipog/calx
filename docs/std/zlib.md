@@ -88,7 +88,7 @@ Why bytes don't inflate, as `Error`:
 | --- | --- |
 | Inflating | Lookup tables of 10 bits for literals and lengths, and 8 for distances, with second tables under them for longer codes. A fast loop takes 64 bits of input at a time, and up to three literals for each read, while there are 16 bytes of input and 274 of room left. A slow loop takes the last bytes one code at a time |
 | Copying a match | 16 bytes at a time when the distance is 16 or more. For shorter distances, the pattern is built once and then copied 8 bytes at a time |
-| Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
+| Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. From level 4 the match at the last match's distance is tried too, which finds an image's row above when the chains are too full of commoner strings to reach it. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
 | Adler-32 | AVX2 where the processor has it, 32 bytes a step. Otherwise a byte at a time, 8 to a loop |
 | CRC-32 | 8 tables, 8 bytes a step |
 | The output | `decompress` guesses the length from how the first bytes inflated, and for gzip, from the length in its trailer, so most streams inflate in one call without copying |
@@ -115,5 +115,7 @@ Minecraft's region files, compressed again: 2,000 of the chunks vanilla 26.3 sav
 | 7 | 176 | 571 | 99.9% |
 | 8 | 261 | 1416 | 99.8% |
 | 9 | 339 | 3258 | 99.5% |
+
+Since then, levels 4 to 9 also try the last match's distance. On 2,000 of Calcite's Terralith chunks, that took about 2.5% longer at level 6, and the bytes changed by less than 0.02%. On a dithered palette image from [std.image](image.md), level 6 came out a third smaller: from 150% of zlib's bytes to 102%.
 
 `std.zlib` is written in Calx over those runtime calls: [std/zlib.calx](../../std/zlib.calx).

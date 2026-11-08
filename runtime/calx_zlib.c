@@ -13,9 +13,10 @@
  * Deflating takes the whole input too. It finds matches through chains of the earlier positions
  * whose first four bytes hash the same, comparing 8 bytes at a time. At levels 4 to 9 it also
  * finds matches of three bytes, through a table of the last position with each three bytes'
- * hash, and before taking a match it looks for a better one at the next position, as libdeflate
- * does: half as hard, and better by its length less what its distance costs. Those levels end a
- * block where the kinds of symbols change, as libdeflate's heuristic finds it. Each block of up
+ * hash, and the match at the last match's distance, and before taking a match it looks for a
+ * better one at the next position, as libdeflate does: half as hard, and better by its length
+ * less what its distance costs. Those levels end a block where the kinds of symbols change, as
+ * libdeflate's heuristic finds it. Each block of up
  * to BLOCK_SYMS symbols gets its own Huffman code, the fixed code, or no code, whichever is
  * shortest.
  *
@@ -832,6 +833,7 @@ typedef struct {
     cx_u32* syms;     /* a literal's byte, or 1 << 24 | distance << 8 | (length - 3) */
     cx_u32 nsyms;
     cx_u32 block;     /* the first input byte of the current block */
+    cx_u32 rep;       /* the last match's distance, or 0 */
     cx_u32 lfreq[286], dfreq[30];
     bitout w;
     /* The lazy levels' symbols by kind, the block's until it last looked and those since: a
@@ -878,6 +880,24 @@ static inline cx_u32 longest(const deflater* D, cx_u32 pos, cx_u32 cand, cx_u32 
         cand = next;
     }
     return best;
+}
+
+/* The lazy levels' match at the last match's distance. Rows of an image and records of a table
+ * repeat at one distance, and the chain may not reach it when it's full of commoner strings, as a
+ * dithered image's chains are: there it makes the stream a third shorter. It's tried wherever the
+ * chain is searched, stands in for the search when it's as long as `nice`, and wins only by being
+ * longer, since on a tie the chain's match is the nearer. On chunk data it costs about 2.5% of
+ * level 6's time, and the bytes come out within 0.02% of what they were. */
+static inline cx_u32 rep_match(const deflater* D, cx_u32 pos) {
+    const cx_u8* cur = D->in + pos;
+    cx_u32 rep = D->rep, max = D->n - pos < MAX_MATCH ? D->n - pos : MAX_MATCH;
+    /* rep is 0 or past the start only before the first match. Otherwise the first 8 bytes say
+     * how long it is without a branch that depends on the data, which in most data seldom
+     * repeats at one distance for long. */
+    if (rep - 1 >= pos || max < 8) return rep - 1 >= pos ? 0 : match_len(cur - rep, cur, max);
+    cx_u64 x = load64(cur - rep) ^ load64(cur);
+    if (x) return (cx_u32)(__builtin_ctzll(x) >> 3);
+    return match_len(cur - rep, cur, max);
 }
 
 static inline void insert(deflater* D, cx_u32 pos) {
@@ -1127,6 +1147,7 @@ static inline void emit_match(deflater* D, cx_u32 pos, cx_u32 len, cx_u32 dist) 
     D->new_kinds[8 + (len >= 9)]++;
     D->new_nkinds++;
     D->syms[D->nsyms++] = 1u << 24 | dist << 8 | (len - 3);
+    D->rep = dist;
     D->lfreq[257 + len_code[len - 3]]++;
     D->dfreq[dist_code(dist)]++;
     if (D->nsyms == BLOCK_SYMS) flush_block(D, pos + len, 0);
@@ -1198,10 +1219,14 @@ static void deflate_lazy(deflater* D, const level_cfg* c) {
             cx_u32 h = hash4(D->in + pos, D->hbits), cand = D->head[h];
             D->prev[pos & D->wmask] = cand;
             D->head[h] = pos;
-            if (cand < pos) {
+            cx_u32 rl = rep_match(D, pos);
+            if (cand < pos && rl < nice) {
                 cx_u32 got = longest(D, pos, cand, MIN_MATCH - 1, &dist, depth, nice);
                 if (got >= MIN_MATCH) len = got;
             }
+            cx_u32 take = (rl >= MIN_MATCH) & (rl > len);
+            len = take ? rl : len;
+            dist = take ? D->rep : dist;
             if (!len && c3 < pos && pos - c3 <= FAR3 && load32(D->in + c3) << 8 == load32(D->in + pos) << 8)
                 len = 3, dist = pos - c3;
         }
@@ -1218,10 +1243,14 @@ static void deflate_lazy(deflater* D, const level_cfg* c) {
             D->prev[at & D->wmask] = cand;
             D->head[h] = at;
             cx_u32 floor = len > MIN_MATCH ? len - 1 : MIN_MATCH - 1, next_len = 0, next_dist = 0;
-            if (cand < at) {
+            cx_u32 rl = rep_match(D, at);
+            if (cand < at && rl < nice) {
                 cx_u32 got = longest(D, at, cand, floor, &next_dist, half, nice);
                 if (got > floor) next_len = got;
             }
+            cx_u32 take = (rl > floor) & (rl > next_len);
+            next_len = take ? rl : next_len;
+            next_dist = take ? D->rep : next_dist;
             if (!(next_len >= len && 4 * (int)(next_len - len) + (log2_of(dist) - log2_of(next_dist)) > 2)) break;
             emit_literal(D, pos);
             pos = at, len = next_len, dist = next_dist;
