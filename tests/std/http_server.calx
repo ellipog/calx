@@ -34,7 +34,9 @@ fn exchange(server: mut Server, client: Net, raw: String, dir: String) -> String
     var closed = false
     var quiet = 0
     var rounds = 0
-    while not closed and quiet < 20 and rounds < 2000 {
+    // A response that keeps its connection open is over once nothing more comes for a while: about
+    // 400 ms, so that a busy machine, slow to write the rest, isn't taken for one that's done.
+    while not closed and quiet < 100 and rounds < 2000 {
         rounds += 1
         var busy = false
         client.poll(2, mut events)
