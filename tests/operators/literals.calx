@@ -1,0 +1,91 @@
+// A literal on the right takes the type of the one impl that can hold it (CLX-143).
+
+struct Money {
+    cents: i64
+}
+
+impl Add<Money> for Money {
+    fn add(self, other: Money) -> Money {
+        return Money { cents: self.cents + other.cents }
+    }
+}
+
+impl Add<i64> for Money {
+    fn add(self, other: i64) -> Money {
+        return Money { cents: self.cents + other }
+    }
+}
+
+impl Mul<i64> for Money {
+    fn mul(self, other: i64) -> Money {
+        return Money { cents: self.cents * other }
+    }
+}
+
+impl Div<i64> for Money {
+    fn div(self, other: i64) -> Money {
+        return Money { cents: self.cents / other }
+    }
+}
+
+impl Rem<i64> for Money {
+    fn rem(self, other: i64) -> Money {
+        return Money { cents: self.cents % other }
+    }
+}
+
+impl Sub<f64> for Money {
+    fn sub(self, other: f64) -> Money {
+        return Money { cents: self.cents - i64.round(other * 100.0) }
+    }
+}
+
+// Two impls that an integer literal fits: it's an `i32`, as it is anywhere else.
+struct Count {
+    n: i64
+}
+
+impl Add<i32> for Count {
+    fn add(self, other: i32) -> Count {
+        return Count { n: self.n + i64(other) * 10 }
+    }
+}
+
+impl Add<i64> for Count {
+    fn add(self, other: i64) -> Count {
+        return Count { n: self.n + other }
+    }
+}
+
+// The rule is for any generic interface, not only the operators'.
+interface Scale<T> {
+    fn scale(self, k: T) -> Self
+}
+
+impl Scale<i64> for Money {
+    fn scale(self, k: i64) -> Money {
+        return Money { cents: self.cents * k }
+    }
+}
+
+impl Scale<f64> for Money {
+    fn scale(self, k: f64) -> Money {
+        return Money { cents: i64.round(f64.nearest(self.cents) * k) }
+    }
+}
+
+fn main() {
+    let m = Money { cents: 250 }
+    let total = m + 50 + m * 2
+    println("{total.cents}")                                // out: 800
+    println("{(total / 3).cents} {(total % 300).cents}")    // out: 266 200
+    println("{(m - 0.5).cents} {(m + -50).cents}")          // out: 200 200
+    var wallet = Money { cents: 0 }
+    wallet += 100
+    wallet += m
+    wallet *= 3
+    println("{wallet.cents}")                               // out: 1050
+    let c = Count { n: 0 }
+    println("{(c + 1).n} {(c + 1i64).n}")                   // out: 10 1
+    println("{m.scale(2).cents} {m.scale(1.5).cents}")      // out: 500 375
+}

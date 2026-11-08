@@ -100,8 +100,17 @@ public:
         }
         for (const char* b : {"some", "ok", "err", "List", "Box", "Shared", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Library", "Equal", "Display",
-                              "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash", "Iterator"}) {
+                              "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash", "Iterator", "Add", "Sub", "Mul", "Div", "Rem",
+                              "Neg"}) {
             reserved_names_.push_back(ctx.names.intern(b));
+        }
+        {
+            const char* ifaces[kOperators] = {"Add", "Sub", "Mul", "Div", "Rem", "Neg"};
+            const char* fns[kOperators] = {"add", "sub", "mul", "div", "rem", "neg"};
+            for (int k = 0; k < kOperators; k++) {
+                n_op_iface_[k] = ctx.names.intern(ifaces[k]);
+                n_op_fn_[k] = ctx.names.intern(fns[k]);
+            }
         }
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
@@ -345,7 +354,7 @@ private:
         }
         // `std.core`'s names are reserved, so no module declares them, and every module sees them.
         if (core_scope_ && (n == n_Equal_ || n == n_Display_ || n == n_Hash_ || n == n_Order_ || n == n_Hasher_ || n == n_From_ ||
-                            n == n_JavaHash_ || n == n_Iterator_)) {
+                            n == n_JavaHash_ || n == n_Iterator_ || operator_named(n) >= 0)) {
             if (auto it = core_scope_->items.find(n); it != core_scope_->items.end()) return it->second;
         }
         // `Error` isn't reserved: a module's own, or one it imports, comes first (CLX-95).
@@ -364,6 +373,7 @@ private:
         prog_.hasher = hasher_type_;
         from_iface_ = core_scope_->items.at(n_From_);
         iterator_iface_ = core_scope_->items.at(n_Iterator_);
+        for (int k = 0; k < kOperators; k++) op_iface_[k] = core_scope_->items.at(n_op_iface_[k]);
         error_item_ = core_scope_->items.at(n_Error_);
         error_from_fn_ = core_scope_->items.at(ctx_.names.intern("error_from"));
         error_context_fn_ = core_scope_->items.at(ctx_.names.intern("error_context"));
@@ -379,6 +389,42 @@ private:
             if (iface && iface == prop_iface_[p]) return p;
         }
         return -1;
+    }
+
+    // CLX-143: which operator interface a name is, or -1.
+    int operator_named(Name n) const {
+        for (int k = 0; k < kOperators; k++) {
+            if (n == n_op_iface_[k]) return k;
+        }
+        return -1;
+    }
+
+    // Which operator interface `iface` is, or an instance of, or -1.
+    int operator_of(const Item* iface) const {
+        if (!iface) return -1;
+        const Item* g = iface_root(iface);
+        for (int k = 0; k < kOperators; k++) {
+            if (g == op_iface_[k]) return k;
+        }
+        return -1;
+    }
+
+    // The operator interface that `op` calls on a struct, an enum or a type parameter, or -1.
+    static int operator_index(Op op) {
+        switch (op) {
+            case Op::add: return 0;
+            case Op::sub: return 1;
+            case Op::mul: return 2;
+            case Op::div: return 3;
+            case Op::rem: return 4;
+            case Op::neg: return 5;
+            default: return -1;
+        }
+    }
+
+    // A type whose operators are an interface's functions, rather than the built-in ones.
+    static bool operator_type(const Type* t) {
+        return t->kind == TypeKind::struct_ || t->kind == TypeKind::enum_ || t->kind == TypeKind::param;
     }
 
     std::string module_name(const Module* m) const {
@@ -2068,6 +2114,12 @@ private:
             for (Item* b : t->bounds) if (b == iface) return true;
             return false;
         }
+        // Numbers have the operators with themselves, so generic code bound by `Add<T>` takes them,
+        // and its `+` is the number's own (CLX-143). `Neg` is for signed integers and floats.
+        if (int k = operator_of(iface); k >= 0 && is_numeric(t)) {
+            if (k == operator_index(Op::neg)) return is_float(t) || t->is_signed;
+            return !iface->type_args.empty() && iface->type_args[0] == t;
+        }
         auto it = impls_by_head_.find(head(t));
         if (it == impls_by_head_.end()) return false;
         for (ImplInfo* info : it->second) {
@@ -2507,6 +2559,17 @@ private:
         c->is_nan_const = false;
         c->loop_id = 0;
         c->let_unwraps = false;
+        // An operator the checker made a call of goes back to being one, so an instance works it
+        // out for its own types: a number's `+` is its own, a struct's calls `Add` (CLX-143).
+        if (e->from_operator) {
+            c->kind = e->args.empty() ? ExprKind::unary : ExprKind::binary;
+            c->lhs = c->callee->lhs;
+            c->rhs = e->args.empty() ? nullptr : c->args[0].value;
+            c->callee = nullptr;
+            c->args = {};
+            c->only_interface = nullptr;
+            c->from_operator = false;
+        }
         return c;
     }
 
@@ -3433,6 +3496,8 @@ private:
             if (t->kind == TypeKind::unit) error(s->value->span, "there's no value here to discard");
             return;
         }
+        // A copy of the place, read again if `a op= b` turns out to call an operator interface.
+        Expr* reread = s->compound && operator_index(s->op) >= 0 ? copy_place(target) : nullptr;
         Local* root = nullptr;
         Type* tt = check_place(target, &root);
         bool whole = target->kind == ExprKind::name || target->kind == ExprKind::self;
@@ -3451,6 +3516,28 @@ private:
             check(s->value, nullptr);
             return;
         }
+        // On a struct, an enum or a type parameter, `a += b` is `a = a + b`, through `Add` (CLX-143).
+        // The place is read again, so it can't hold a call, which would run twice.
+        if (operator_index(s->op) >= 0 && operator_type(tt)) {
+            if (!reread) {
+                error(target->span, q(std::string(op_text(s->op)) + "=") + " on " + a_type(tt) + " reads the place and then " +
+                                        "sets it, so the place can't hold a call, which would run twice; keep the call's " +
+                                        "result in a variable first");
+                if (root) root->used = true;  // one error is enough
+                check(s->value, nullptr);
+                return;
+            }
+            Expr* b = ctx_.arena.make<Expr>();
+            b->kind = ExprKind::binary;
+            b->op = s->op;
+            b->span = s->span;
+            b->lhs = reread;
+            b->rhs = s->value;
+            s->value = b;
+            s->compound = false;
+            check(s->value, tt);
+            return;
+        }
         // `a op= b` is `a = a op b`, with the same rules.
         Type* vt = check(s->value, is_shift(s->op) ? nullptr : tt);
         // `x += 1` doesn't count as reading `x`: a counter nobody reads is unused.
@@ -3458,6 +3545,36 @@ private:
     }
 
     static bool is_shift(Op op) { return op == Op::shl || op == Op::shr || op == Op::ushr; }
+
+    // An unchecked copy of a place such as `a.b[i]`, to read it as well as set it, or null if
+    // reading it again could do something: an index that's more than a variable, a field of one,
+    // or a literal.
+    Expr* copy_place(const Expr* e) {
+        switch (e->kind) {
+            case ExprKind::name:
+            case ExprKind::self:
+            case ExprKind::int_lit:
+                return ctx_.arena.make<Expr>(*e);
+            case ExprKind::field: {
+                Expr* base = copy_place(e->lhs);
+                if (!base) return nullptr;
+                Expr* c = ctx_.arena.make<Expr>(*e);
+                c->lhs = base;
+                return c;
+            }
+            case ExprKind::index: {
+                Expr* base = copy_place(e->lhs);
+                Expr* i = e->rhs ? copy_place(e->rhs) : nullptr;
+                if (!base || !i) return nullptr;
+                Expr* c = ctx_.arena.make<Expr>(*e);
+                c->lhs = base;
+                c->rhs = i;
+                return c;
+            }
+            default:
+                return nullptr;
+        }
+    }
 
     // The type of an assignment's target, without counting it as a read.
     Type* check_place(Expr* e, Local** root) {
@@ -5293,6 +5410,8 @@ private:
                 }
                 Type* t = check(x, expected && is_numeric(expected) ? expected : nullptr);
                 if (is_bad(t)) return t;
+                // `-a` on a struct, an enum or a type parameter calls `Neg` (CLX-143).
+                if (operator_type(t)) return operator_call(e, operator_index(Op::neg), t, expected);
                 if (is_int(t) && !t->is_signed) {
                     error(e->span, "an unsigned " + name_of(t) + " can't be negated");
                     return T.error;
@@ -5424,15 +5543,92 @@ private:
         Type* want = expected && is_numeric(expected) ? expected : nullptr;
         Type* lt;
         Type* rt;
+        int k = operator_index(op);
         if (is_shift(op)) {
             lt = check(e->lhs, want);
             rt = check(e->rhs, nullptr);
+        } else if (is_untyped_literal(e->lhs) && !is_untyped_literal(e->rhs)) {
+            // `1 + x` works like `x + 1`, as `check_pair` does, but `2.0 * v` can't call `v`'s `Mul`.
+            rt = check(e->rhs, want);
+            if (k >= 0 && operator_type(rt)) {
+                check(e->lhs, nullptr);
+                bool turns = op == Op::add || op == Op::mul;
+                error(e->span, q(op_text(op)) + " calls " + q(text(n_op_iface_[k])) + " on the value on its left, and a " +
+                                   "number can't implement it" +
+                                   (turns ? "; put " + a_type(rt) + " first: " + q("x " + std::string(op_text(op)) + " " + literal_text(e->lhs))
+                                          : std::string("")));
+                return T.error;
+            }
+            lt = check(e->lhs, is_bad(rt) ? want : rt);
+            if (is_bad(lt)) return T.error;
+            lt = rt;
         } else {
-            lt = check_pair(e->lhs, e->rhs, want);
+            lt = check(e->lhs, want);
+            // `a + b` on a struct, an enum or a type parameter calls `Add` (CLX-143).
+            if (k >= 0 && operator_type(lt)) return operator_call(e, k, lt, expected);
+            if (is_bad(lt)) {
+                check(e->rhs, nullptr);
+                return T.error;
+            }
+            rt = check(e->rhs, lt->kind == TypeKind::never ? nullptr : lt);
+            if (lt->kind == TypeKind::never) lt = rt;
+            if (is_bad(rt)) return T.error;
             rt = lt;
         }
         if (is_bad(lt) || is_bad(rt)) return T.error;
         return check_operands(op, e->span, lt, rt, e->rhs, e);
+    }
+
+    // An untyped number as it's written, for a message: `2.0`, `-1`.
+    static std::string literal_text(const Expr* e) {
+        if (e->kind == ExprKind::unary) return "-" + literal_text(e->lhs);
+        if (e->kind == ExprKind::int_lit || e->kind == ExprKind::float_lit) return std::string(e->literal.digits);
+        return "...";
+    }
+
+    // `a + b` or `-a` where `a` is a struct, an enum or a type parameter, already checked as `t`: a
+    // call of the function of `Add` (or another of `kOperators`) that `t` implements for `b`'s
+    // type. Both are passed as views, as any method's receiver and arguments are, so neither is
+    // moved, and the result is new. `e` becomes the call, so the passes after this see a call.
+    Type* operator_call(Expr* e, int k, Type* t, Type* expected) {
+        Expr* recv = e->lhs;
+        Expr* other = e->rhs;
+        Name name = n_op_fn_[k];
+        Expr* f = ctx_.arena.make<Expr>();
+        f->kind = ExprKind::field;
+        f->span = e->span;
+        f->lhs = recv;
+        f->member = name;
+        std::string sign = op_text(e->op);
+        e->kind = ExprKind::call;
+        e->from_operator = true;
+        e->callee = f;
+        e->lhs = e->rhs = nullptr;
+        if (other) {
+            Arg a;
+            a.value = other;
+            a.span = other->span;
+            e->args = ctx_.arena.copy(std::vector<Arg>{a});
+        }
+        Item* iface = op_iface_[k];
+        e->only_interface = iface;
+        Member mem = lookup(t, name, iface);
+        if (!mem.fn) {
+            if (t->kind == TypeKind::param) {
+                error(e->span, name_of(t) + " has no " + q(sign) + "; give it a bound that does, such as " +
+                                   q(std::string(t->name) + ": " + std::string(text(n_op_iface_[k])) + (other ? "<" + std::string(t->name) + ">" : "")));
+            } else if (other) {
+                error(e->span, name_of(t) + " has no " + q(sign) + "; implement " + q(std::string(text(n_op_iface_[k])) + "<T>") +
+                                   " for it, where `T` is the type on the right");
+            } else {
+                error(e->span, name_of(t) + " has no " + q(sign) + "; implement " + q(text(n_op_iface_[k])) + " for it");
+            }
+            check_args(e);
+            return T.error;
+        }
+        if (t->kind == TypeKind::param && !mem.ambiguous) e->only_interface = mem.iface;
+        use_item(mem.fn);
+        return fn_call(e, mem.fn, recv, expected, std::move(mem.s), {});
     }
 
     // The rules for `a op b` where `a` is a `lt` and `b` a `rt`, shared with compound assignment.
@@ -7449,7 +7645,7 @@ private:
                 check_args(e);
                 return T.error;
             }
-            if (mem.fn && prop_of(mem.iface) >= 0) {
+            if (mem.fn && (prop_of(mem.iface) >= 0 || operator_of(mem.iface) >= 0)) {
                 error(callee->span, called_by_name(mem.iface));
                 check_args(e);
                 return T.error;
@@ -7515,7 +7711,7 @@ private:
     Type* interface_call(Expr* e, Item* iface) {
         Expr* callee = e->callee;
         use_item(iface);
-        if (prop_of(iface) >= 0) {
+        if (prop_of(iface) >= 0 || operator_of(iface) >= 0) {
             error(callee->span, called_by_name(iface));
             check_args(e);
             return T.error;
@@ -7552,6 +7748,11 @@ private:
     // A derived property's function is called by what it's behind, so there's one way to compare,
     // show or hash a value whether its type writes its own or not.
     std::string called_by_name(const Item* iface) {
+        if (int k = operator_of(iface); k >= 0) {
+            static const char* const use[kOperators] = {"a + b", "a - b", "a * b", "a / b", "a % b", "-a"};
+            static const char* const sign[kOperators] = {"+", "-", "*", "/", "%", "-a"};
+            return q(text(n_op_fn_[k])) + " is what " + q(sign[k]) + " calls; write " + q(use[k]);
+        }
         switch (prop_of(iface)) {
             case p_equal: return "`eq` is what `==` calls; compare with `a == b`";
             case p_display: return "`show` is what `{x}` calls; show a value with `print(\"{x}\")`";
@@ -7869,6 +8070,9 @@ private:
             }
             // A second `none` that still can't tell its type would only repeat the first's error.
             if (bad_arg && v->kind == ExprKind::none_lit && unresolved(subst(want, s), vars, s)) continue;
+            if (in_interface(f) && want->kind == TypeKind::param && unresolved(subst(want, s), vars, s)) {
+                if (Type* only = literal_impl(f, want, v, s)) s[want] = only;
+            }
             if (is_bad(check_inferred(v, want, s, vars))) bad_arg = true;
         }
         // What a function or a closure passed for an `Fn` bound gives back says what the generic
@@ -7914,6 +8118,46 @@ private:
             e->item = inst;
         }
         return result;
+    }
+
+    // A call of a generic interface's function, where the impls chose (D103), with an untyped
+    // literal `v` for the interface's parameter `p`: the type of the one impl for `Self` that the
+    // literal can be, or null. So `n + 1` takes `Add<i64>` when that's the integer impl, and
+    // `m.scale(2)` takes `Scale<i64>` when that's the one (CLX-143).
+    Type* literal_impl(Item* f, Type* p, const Expr* v, const Subst& s) {
+        Item* g = f->interface_item;
+        auto self = s.find(g->type_params[0]);
+        if (self == s.end() || self->second->open) return nullptr;
+        std::size_t k = 1;
+        while (k < g->type_params.size() && g->type_params[k] != p) k++;
+        if (k == g->type_params.size()) return nullptr;
+        auto found = impls_by_head_.find(head(self->second));
+        if (found == impls_by_head_.end()) return nullptr;
+        Type* only = nullptr;
+        for (ImplInfo* info : found->second) {
+            if (!info->iface || iface_root(info->iface) != g || info->iface->type_args.size() < k) continue;
+            Subst u;
+            if (!unify(info->self, self->second, u, info->impl->type_params)) continue;
+            Type* a = info->iface->type_args[k - 1];
+            if (a->open || !literal_can_be(v, a)) continue;
+            if (only && only != a) return nullptr;
+            only = a;
+        }
+        return only;
+    }
+
+    // Whether an untyped literal can have type `t`.
+    bool literal_can_be(const Expr* v, const Type* t) const {
+        if (v->kind == ExprKind::unary && v->op == Op::neg) return (is_float(t) || t->is_signed) && literal_can_be(v->lhs, t);
+        switch (v->kind) {
+            case ExprKind::int_lit: return is_int(t);
+            case ExprKind::float_lit: return is_float(t);
+            case ExprKind::char_lit: return t->kind == TypeKind::char_ || t->kind == TypeKind::rune;
+            case ExprKind::none_lit: return t->kind == TypeKind::optional;
+            default:
+                if (is_some_call(v)) return t->kind == TypeKind::optional && literal_can_be(v->args[0].value, t->elem);
+                return false;
+        }
     }
 
     // Whether `f` is declared in an interface, rather than in an impl.
@@ -10364,6 +10608,12 @@ private:
     Item* from_iface_ = nullptr;
     Item* iterator_iface_ = nullptr;  // `Iterator<T>`, which a `for` loop calls `next` on (CLX-101)
     std::uint32_t held_iterators_ = 0;  // the loops that hold an iterator made for them
+    // CLX-143: `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`, which the operators call on a struct,
+    // an enum or a type parameter, and their functions' names, in the order of `kOperators`.
+    static constexpr int kOperators = 6;
+    Name n_op_iface_[kOperators] = {};
+    Name n_op_fn_[kOperators] = {};
+    Item* op_iface_[kOperators] = {};
     // CLX-95: `std.core`'s `Error`, and the functions that make one from another error.
     Item* error_item_ = nullptr;
     Item* error_from_fn_ = nullptr;

@@ -1,0 +1,63 @@
+// Operators on a type that owns heap memory: the operands are views and stay usable, the
+// results and temporaries are dropped, and `+=` drops the value it replaces (CLX-143).
+struct Poly {
+    c: List<i64>
+}
+
+impl Add<Poly> for Poly {
+    fn add(self, other: Poly) -> Poly {
+        var out: List<i64> = []
+        var i: usize = 0
+        while i < self.c.len() or i < other.c.len() {
+            let a = if i < self.c.len() { self.c[i] } else { 0 }
+            let b = if i < other.c.len() { other.c[i] } else { 0 }
+            out.push(a + b)
+            i += 1
+        }
+        return Poly { c: out }
+    }
+}
+
+impl Add<i64> for Poly {
+    fn add(self, other: i64) -> Poly {
+        var out = self.c.copy()
+        out[0] += other
+        return Poly { c: out }
+    }
+}
+
+impl Mul<Poly> for Poly {
+    fn mul(self, other: Poly) -> Poly {
+        var out: List<i64> = [0; self.c.len() + other.c.len() - 1]
+        for (i, a) in self.c.enumerate() {
+            for (j, b) in other.c.enumerate() {
+                out[i + j] += a * b
+            }
+        }
+        return Poly { c: out }
+    }
+}
+
+impl Neg for Poly {
+    fn neg(self) -> Poly {
+        return Poly { c: self.c.map(|x| -x) }
+    }
+}
+
+fn main() {
+    let p = Poly { c: [1, 1] }
+    let q = Poly { c: [0, 2, 3] }
+    let r = p * q + p + 5
+    println("{r.c} {p.c} {q.c}")      // out: [6, 3, 5, 3] [1, 1] [0, 2, 3]
+    var acc = Poly { c: [1] }
+    for _ in 0..4 {
+        acc *= p
+        acc += 1
+    }
+    println("{acc.c}")                // out: [5, 10, 10, 5, 1]
+    var ps: List<Poly> = [Poly { c: [1] }, Poly { c: [2] }]
+    let i: usize = 1
+    ps[i] += p
+    ps[0] = -ps[0]
+    println("{ps[0].c} {ps[1].c} {(-(p * p)).c}")  // out: [-1] [3, 1] [-1, -2, -1]
+}

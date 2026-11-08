@@ -1,0 +1,12 @@
+// The operator interfaces' names are std.core's, so a module can't declare its own.
+
+pub struct Add {                // error: `Add` is a built-in name
+    x: i32
+}
+
+pub enum Neg {                  // error: `Neg` is a built-in name
+    A
+}
+
+fn main() {
+}

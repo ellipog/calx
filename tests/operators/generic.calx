@@ -1,0 +1,54 @@
+// Operators in generic code: a bound such as `Add<T>` takes numbers, whose `+` is their own, and
+// types that implement it (CLX-143).
+
+struct V {
+    x: f64
+}
+
+impl Add<V> for V {
+    fn add(self, other: V) -> V {
+        return V { x: self.x + other.x }
+    }
+}
+
+impl Neg for V {
+    fn neg(self) -> V {
+        return V { x: -self.x }
+    }
+}
+
+struct Pair<T> {
+    a: T
+    b: T
+}
+
+impl<T: Add<T> + Copy> Add<Pair<T>> for Pair<T> {
+    fn add(self, other: Pair<T>) -> Pair<T> {
+        return Pair { a: self.a + other.a, b: self.b + other.b }
+    }
+}
+
+fn negated<T: Neg + Copy>(xs: List<T>) -> List<T> {
+    return xs.map(|x| -x)
+}
+
+fn total<T: Add<T> + Copy>(xs: List<T>, zero: T) -> T {
+    var acc = zero
+    for x in xs {
+        acc = acc + x
+    }
+    return acc
+}
+
+fn main() {
+    let ints: List<i32> = [1, -2, 3]
+    let floats: List<f64> = [0.5, 1.5]
+    println("{negated(ints)} {negated(floats)}")                       // out: [-1, 2, -3] [-0.5, -1.5]
+    let vs: List<V> = [V { x: 1.0 }, V { x: 2.0 }]
+    println("{negated(vs)[1].x} {total(vs, V { x: 0.5 }).x}")          // out: -2.0 3.5
+    let p = Pair { a: 1, b: 2 } + Pair { a: 10, b: 20 }
+    let q = Pair { a: V { x: 1.0 }, b: V { x: 2.0 } } + Pair { a: V { x: 3.0 }, b: V { x: 4.0 } }
+    println("{p.a} {p.b} {q.a.x} {q.b.x}")                             // out: 11 22 4.0 6.0
+    let bytes: List<u8> = [200, 100]
+    println("{total(bytes, 0)} {total(ints, 0)}")                      // out: 44 2
+}

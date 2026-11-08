@@ -275,6 +275,9 @@ struct Expr {
     // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
     // that interface. A copy for an instance keeps the rewrite.
     Item* only_interface = nullptr;
+    // call: `a + b` or `-a` on a struct, an enum or a type parameter, which the checker made a
+    // call of the operator interface's function. `op` is still the operator (CLX-143).
+    bool from_operator = false;
     // Filled in by the ownership pass (D76).
     bool moves = false;          // name: this use moves the local's value away
     bool temp = false;           // a new value that isn't `Copy`, only looked at: it's kept in a

@@ -51,7 +51,7 @@ pub fn same<T>(a: T, b: T) -> bool {
 }
 
 pub fn add<T>(a: T, b: T) -> T {
-    return a + b                                // error: `+` needs numbers, not `T`
+    return a + b                                // error: `T` has no `+`; give it a bound that does, such as `T: Add<T>`
 }
 
 pub fn show<T>(x: T) {

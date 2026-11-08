@@ -75,7 +75,7 @@ fn main() {
 
 ## Assignment
 
-`place = value` assigns to a variable, a field of one or an element of one. `place op= value` is `place = place op value`, for every arithmetic, bitwise and shift operator. Java's order holds: the place's parts, such as an index, are worked out first, then the value.
+`place = value` assigns to a variable, a field of one or an element of one. `place op= value` is `place = place op value`, for every arithmetic, bitwise and shift operator. Java's order holds: the place's parts, such as an index, are worked out first, then the value. On a struct or an enum, whose operator is an [interface's](interfaces.md#operators), the place is read and then set, so it can't hold a call.
 
 `_ = value` evaluates `value` and discards it, for a result that isn't needed.
 

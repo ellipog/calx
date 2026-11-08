@@ -223,12 +223,79 @@ fn main() {
 ```
 
 - When a type implements an interface for more than one list of arguments, a call chooses between the impls the way a generic function's call works out its types: from the arguments, then from where the result goes. `m.scale(2)` takes `Scale<i32>`, and `let a: i64 = m.into()` takes `Into<i64>`. A call that neither settles is an error, as a generic call is.
+- A literal argument such as `2` or `1.5` takes the type of the one impl it can be: if `Meters` had `Scale<i64>` and `Scale<Meters>`, `m.scale(2)` would take `Scale<i64>`. When two impls could take it, it's an `i32` or an `f64`, as a literal is anywhere else.
 - A generic interface is always written with its arguments: a bound `T: Into` is an error that asks for them.
 - An impl for a generic type can use its parameters in the arguments: `impl<A: Copy> Into<List<A>> for Pair<A>`.
 - Defaults can use the interface's parameters, as `twice` does.
 - Every parameter must be used by a member, or no use could tell what it is.
 - [`From<T>`](errors.md#converting-errors) is a built-in generic interface, which `try` converts errors with.
 - [`Iterator<T>`](control-flow.md#iterators) is another, with `fn next(mut self) -> T?`, which a `for` loop calls until it gives `none`.
+- So are the [operators'](#operators): `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>` and `Rem<T>`.
+
+## Operators
+
+`+`, `-`, `*`, `/` and `%` on a struct or an enum call its impl of `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>` or `Rem<T>`, where `T` is the type on the right, and a prefix `-` calls `Neg`. They're built in, as `Equal` is (CLX-143):
+
+```calx
+struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Add<Vec2> for Vec2 {
+    fn add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+impl Mul<f64> for Vec2 {
+    fn mul(self, other: f64) -> Vec2 {
+        return Vec2 { x: self.x * other, y: self.y * other }
+    }
+}
+
+impl Neg for Vec2 {
+    fn neg(self) -> Vec2 {
+        return Vec2 { x: -self.x, y: -self.y }
+    }
+}
+
+// Numbers have the operators with themselves, so this sums `i32`s and `Vec2`s alike.
+fn sum<T: Add<T> + Copy>(xs: List<T>, zero: T) -> T {
+    var acc = zero
+    for x in xs {
+        acc += x
+    }
+    return acc
+}
+
+fn main() {
+    let a = Vec2 { x: 1.0, y: 2.0 }
+    var b = a * 3.0 + -a
+    b += a
+    println("{b.x} {b.y}")                                  // out: 3.0 6.0
+    let vs: List<Vec2> = [a, b]
+    let ns: List<i32> = [1, 2, 3]
+    println("{sum(vs, Vec2 { x: 0.0, y: 0.0 }).x} {sum(ns, 0)}")  // out: 4.0 6
+}
+```
+
+| Interface | Function | Written |
+| --- | --- | --- |
+| `Add<T>` | `fn add(self, other: T) -> Self` | `a + b` |
+| `Sub<T>` | `fn sub(self, other: T) -> Self` | `a - b` |
+| `Mul<T>` | `fn mul(self, other: T) -> Self` | `a * b` |
+| `Div<T>` | `fn div(self, other: T) -> Self` | `a / b` |
+| `Rem<T>` | `fn rem(self, other: T) -> Self` | `a % b` |
+| `Neg` | `fn neg(self) -> Self` | `-a` |
+
+- Both sides are views, as a method's receiver and arguments are, so neither is moved, and the result is a new value. A type that owns memory, such as a big integer, keeps its operands: `a * b + a` reads `a` twice and makes two new values, and drops the one in between.
+- `a += b` is `a = a + b`, and the same for the others. The place is read and then set, so it can't hold a call, which would run twice: `xs[next()] += v` is an error, and `xs[i] += v` isn't.
+- A type can implement an operator for more than one type on the right, such as `Add<Money>` and `Add<i64>`, and the right side chooses, as for any [generic interface](#generic-interfaces). A literal there takes the type of the one impl it can be, so `m + 50` takes `Add<i64>`.
+- The value on the left is the one whose impl is called, and a number can't have one, so `2.0 * v` is an error that says to write `v * 2.0`.
+- In generic code, a bound such as `T: Add<T>` lets the body use `+` on `T`. Every number satisfies `Add`, `Sub`, `Mul`, `Div` and `Rem` with its own type, and signed integers and floats satisfy `Neg`, so an instance for numbers uses their own operators, which wrap, as they do anywhere.
+- `add` and the others are what the operators call, as `eq` is what `==` calls, so `a.add(b)` is an error that says to write `a + b`. A type's own `add`, in its own impl, is a method like any other.
+- Comparisons come from [`Equal` and `Order`](comparing.md), which a type usually gets without writing them. Bitwise operators, shifts and indexing don't call interfaces.
 
 ## Errors
 
@@ -241,6 +308,6 @@ Besides mismatched and missing members (D72):
 
 ## In C
 
-Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`, and for a generic interface's arguments too, such as `Meters__Into_i64__into`. Constants are inlined. Nothing is looked up at run time, even when a call chooses between impls: the checker chooses.
+Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`, and for a generic interface's arguments too, such as `Meters__Into_i64__into`. Constants are inlined. Nothing is looked up at run time, even when a call chooses between impls: the checker chooses. An operator is such a call too, `a + b` being `Vec2__Add_Vec2__add(&a, &b)`, and in a generic function's copy for a number, it's the number's own `+`.
 
-`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types and the operator interfaces ([spec](../CALX_SPEC.md#interfaces-and-generics)).
+`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types ([spec](../CALX_SPEC.md#interfaces-and-generics)).

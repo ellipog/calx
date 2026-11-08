@@ -54,7 +54,7 @@ What's built, one page per feature:
 27. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
 28. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
 29. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
-30. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, and naming the interface
+30. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, naming the interface, generic interfaces, and operators on a type of one's own
 31. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
 32. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
 33. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`

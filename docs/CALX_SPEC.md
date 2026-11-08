@@ -89,12 +89,12 @@ Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`,
 
 ### Interfaces and generics
 
-Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103). Still to build:
+Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103), and [operators](reference/interfaces.md#operators) from `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>`, `Rem<T>` and `Neg`. Their operands are views, so a type that owns memory, such as a big integer, can have them as a value type can, and numbers satisfy them in generic code (CLX-143). Still to build:
 
 - **`dyn Shape`:** an owned value of any type implementing `Shape`, called through a table, for the places that need it (the host's handler tables).
 - **Associated types** in interfaces.
 - **Generic functions in interfaces**, and **defaults for an interface's constants**.
-- **Operators** from standard interfaces (`Add`, `Sub`, `Mul`, `Neg`, `Index`, `Equal`, `Order`). Only value types should implement the arithmetic ones, such as `Vec3`. The sketches subtract positions this way.
+- **`Index`**, for `a[i]` on a type of one's own.
 
 ### Derived properties
 

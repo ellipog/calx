@@ -1,0 +1,68 @@
+// Operators on a type from another module, and a generic function there that uses them on the
+// caller's types (CLX-143).
+
+// file: main.calx
+import geo.{Vec2, sum}
+
+struct Cents {
+    n: i64
+}
+
+impl Add<Cents> for Cents {
+    fn add(self, other: Cents) -> Cents {
+        return Cents { n: self.n + other.n }
+    }
+}
+
+fn main() {
+    let a = Vec2.new(1.0, 2.0)
+    let b = a * 3.0 - a + -a
+    println("{b.x} {b.y}")                                      // out: 1.0 2.0
+    let vs: List<Vec2> = [a, b]
+    println("{sum(vs, Vec2.new(0.0, 0.0)).y}")                  // out: 4.0
+    let cs: List<Cents> = [Cents { n: 5 }, Cents { n: 7 }]
+    println("{sum(cs, Cents { n: 0 }).n}")                      // out: 12
+}
+// file: geo.calx
+pub struct Vec2 {
+    pub x: f64
+    pub y: f64
+}
+
+impl Vec2 {
+    pub fn new(x: f64, y: f64) -> Vec2 {
+        return Vec2 { x, y }
+    }
+}
+
+impl Add<Vec2> for Vec2 {
+    fn add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+impl Sub<Vec2> for Vec2 {
+    fn sub(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x - other.x, y: self.y - other.y }
+    }
+}
+
+impl Mul<f64> for Vec2 {
+    fn mul(self, other: f64) -> Vec2 {
+        return Vec2 { x: self.x * other, y: self.y * other }
+    }
+}
+
+impl Neg for Vec2 {
+    fn neg(self) -> Vec2 {
+        return Vec2 { x: -self.x, y: -self.y }
+    }
+}
+
+pub fn sum<T: Add<T> + Copy>(xs: List<T>, zero: T) -> T {
+    var acc = zero
+    for x in xs {
+        acc += x
+    }
+    return acc
+}

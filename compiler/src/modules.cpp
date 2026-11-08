@@ -56,6 +56,30 @@ pub interface Iterator<T> {
     fn next(mut self) -> T?
 }
 
+pub interface Add<T> {
+    fn add(self, other: T) -> Self
+}
+
+pub interface Sub<T> {
+    fn sub(self, other: T) -> Self
+}
+
+pub interface Mul<T> {
+    fn mul(self, other: T) -> Self
+}
+
+pub interface Div<T> {
+    fn div(self, other: T) -> Self
+}
+
+pub interface Rem<T> {
+    fn rem(self, other: T) -> Self
+}
+
+pub interface Neg {
+    fn neg(self) -> Self
+}
+
 pub struct Error {
     text: String
     doing: List<String>

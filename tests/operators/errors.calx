@@ -1,0 +1,40 @@
+// Operators on a type that doesn't implement their interface, and the other mistakes (CLX-143).
+
+struct Pt {
+    x: i32
+}
+
+struct V {
+    x: f64
+}
+
+impl Add<V> for V {
+    fn add(self, other: V) -> V {
+        return V { x: self.x + other.x }
+    }
+}
+
+fn twice<T: Copy>(a: T) -> T {
+    return a + a                // error: `T` has no `+`; give it a bound that does, such as `T: Add<T>`
+}
+
+fn pick() -> usize {
+    return 0
+}
+
+fn main() {
+    let p = Pt { x: 1 }
+    let _a = p + p              // error: `Pt` has no `+`; implement `Add<T>` for it, where `T` is the type on the right
+    let _b = -p                 // error: `Pt` has no `-`; implement `Neg` for it
+    let v = V { x: 1.0 }
+    let _c = 2.0 + v            // error: `+` calls `Add` on the value on its left, and a number can't implement it; put a `V` first: `x + 2.0`
+    let _d = 2.0 - v            // error: `-` calls `Sub` on the value on its left, and a number can't implement it
+    let _e = v.add(v)           // error: `add` is what `+` calls; write `a + b`
+    let _f = Add.add(v, v)      // error: `add` is what `+` calls; write `a + b`
+    let _g = v + 1.0            // error: expected `V`, found `f64`
+    let _h = v * v              // error: `V` has no `*`; implement `Mul<T>` for it, where `T` is the type on the right
+    var vs: List<V> = [v]
+    vs[pick()] += v             // error: the place can't hold a call, which would run twice
+    let _j = v & v              // error: `&` needs integers, not `V`
+    let _k = twice(v)
+}
