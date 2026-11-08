@@ -86,6 +86,10 @@ CX_FN(cx_u64, cx_clock_ns, (void));
  * at a moment, in seconds, behind std.time's `Timestamp`. */
 CX_FN(cx_i64, cx_clock_unix_ms, (void));
 CX_FN(cx_i32, cx_clock_local_offset, (cx_i64 unix_ms));
+/* The local time zone's abbreviation at a moment, such as `CET`, written to `out` if it fits in
+ * `cap` bytes: its length, more than `cap` if it didn't fit, or -1 where there's none, as on
+ * Windows. */
+CX_FN(cx_i64, cx_clock_zone_abbreviation, (cx_i64 unix_ms, cx_u8* out, cx_usize cap));
 
 /* Output. Standard output is buffered, and flushed at exit and before a panic. */
 CX_FN(void, cx_print_str, (cx_str s));
@@ -809,6 +813,91 @@ CX_FN(cx_u32, cx_lz4_xxh32, (const cx_u8* p, cx_usize n, cx_u32 seed));
 CX_FN(cx_usize, cx_lz4_bound, (cx_usize n));
 CX_FN(cx_usize, cx_lz4_compress, (const cx_u8* in, cx_usize n, cx_u8* out));
 CX_FN(cx_i32, cx_lz4_decode, (const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last));
+
+/* Files and directories, in calx_fs.c, behind std.fs. A handle is an `cx_i64`, negative when
+ * opening failed; a function that fails returns 0 or a negative number and leaves why for
+ * `cx_fs_error_kind` and `cx_fs_error_code`, and one that makes text or a list leaves it for
+ * `cx_fs_result_len` and `cx_fs_result_copy`, each per thread. They're declared here, as every
+ * function std calls is, so a library reaches them through the program (D123, CLX-154). */
+CX_FN(cx_i32, cx_fs_absolute, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_close, (cx_i64 h));
+CX_FN(cx_i32, cx_fs_copy, (const cx_u8* from, cx_usize from_len, const cx_u8* to, cx_usize to_len));
+CX_FN(cx_i32, cx_fs_current_dir, (void));
+CX_FN(cx_i32, cx_fs_error_code, (void));
+CX_FN(cx_u32, cx_fs_error_kind, (void));
+CX_FN(cx_u32, cx_fs_kind, (const cx_u8* path, cx_usize len, cx_u32 follow));
+CX_FN(cx_i32, cx_fs_list, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_list_typed, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i64, cx_fs_lock, (const cx_u8* path, cx_usize len, const cx_u8* bytes, cx_usize n));
+CX_FN(cx_i32, cx_fs_make_dir, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_make_link, (const cx_u8* target, cx_usize target_len, const cx_u8* path, cx_usize len));
+CX_FN(cx_i64, cx_fs_open, (const cx_u8* path, cx_usize len, cx_u32 write));
+CX_FN(cx_i64, cx_fs_read, (cx_i64 h, cx_u8* to, cx_usize n));
+CX_FN(cx_i32, cx_fs_read_link, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_real_path, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_remove_dir, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_remove_file, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_rename, (const cx_u8* from, cx_usize from_len, const cx_u8* to, cx_usize to_len, cx_u32 sync));
+CX_FN(void, cx_fs_result_copy, (cx_u8* to));
+CX_FN(cx_usize, cx_fs_result_len, (void));
+CX_FN(cx_i32, cx_fs_seek, (cx_i64 h, cx_u64 at));
+CX_FN(cx_u8, cx_fs_separator, (void));
+CX_FN(cx_i32, cx_fs_set_current_dir, (const cx_u8* path, cx_usize len));
+CX_FN(cx_i32, cx_fs_set_mode, (const cx_u8* path, cx_usize len, cx_u32 mode));
+CX_FN(cx_i32, cx_fs_set_modified, (const cx_u8* path, cx_usize len, cx_i64 ms));
+CX_FN(cx_i64, cx_fs_size, (cx_i64 h));
+CX_FN(cx_i32, cx_fs_stat, (const cx_u8* path, cx_usize len));
+CX_FN(cx_u32, cx_fs_stat_mode, (void));
+CX_FN(cx_i64, cx_fs_stat_modified, (void));
+CX_FN(cx_i64, cx_fs_stat_size, (void));
+CX_FN(cx_i32, cx_fs_sync, (cx_i64 h));
+CX_FN(cx_i32, cx_fs_temp_dir, (void));
+CX_FN(cx_i32, cx_fs_unlock, (cx_i64 h));
+CX_FN(cx_i32, cx_fs_write, (cx_i64 h, const cx_u8* from, cx_usize n));
+
+/* Other programs, in calx_proc.c, behind std.process: started in a group that ends with the
+ * program, talked to while they run, and waited for. Errors and results are left per thread, as
+ * calx_fs.c leaves them. */
+CX_FN(cx_usize, cx_proc_available, (cx_i64 h, cx_u32 i));
+CX_FN(void, cx_proc_close_input, (cx_i64 h));
+CX_FN(cx_i32, cx_proc_code, (cx_i64 h));
+CX_FN(cx_i32, cx_proc_error_code, (void));
+CX_FN(cx_u32, cx_proc_error_kind, (void));
+CX_FN(cx_i32, cx_proc_exe, (void));
+CX_FN(void, cx_proc_free, (cx_i64 h));
+CX_FN(cx_i64, cx_proc_group, (void));
+CX_FN(void, cx_proc_group_free, (cx_i64 g));
+CX_FN(cx_u32, cx_proc_id, (cx_i64 h));
+CX_FN(void, cx_proc_kill, (cx_i64 h));
+CX_FN(cx_i64, cx_proc_line, (cx_i64 h, cx_u64 until));
+CX_FN(cx_i32, cx_proc_poll, (cx_i64 h));
+CX_FN(void, cx_proc_result_copy, (cx_u8* to));
+CX_FN(cx_usize, cx_proc_result_len, (void));
+CX_FN(cx_i32, cx_proc_signal, (cx_i64 h));
+CX_FN(cx_i64, cx_proc_some, (cx_i64 h, cx_u64 until));
+CX_FN(cx_i64, cx_proc_spawn, (const cx_u8* spec_p, cx_usize spec_n, const cx_u8* input, cx_usize input_n, cx_i64 g));
+CX_FN(cx_u32, cx_proc_state, (cx_i64 h));
+CX_FN(void, cx_proc_take, (cx_i64 h, cx_u32 i, cx_u8* to, cx_usize n));
+CX_FN(void, cx_proc_wait, (cx_i64 h));
+CX_FN(cx_usize, cx_proc_wait_any, (const cx_i64* hs, cx_usize n));
+CX_FN(cx_i32, cx_proc_which, (const cx_u8* name, cx_usize n));
+CX_FN(cx_i32, cx_proc_write, (cx_i64 h, const cx_u8* d, cx_usize n));
+
+/* This process, the terminal and sleeping, in calx_rt.c: std.process's memory, CPU time,
+ * processors and `exit`, std.term's raw mode and size, whether standard output is a terminal, and
+ * `std.thread.sleep`. */
+CX_FN(cx_u64, cx_process_cpu_ns, (void));
+CX_FN(void, cx_process_exit, (cx_u8 code));
+CX_FN(cx_u64, cx_process_memory, (void));
+CX_FN(cx_u64, cx_process_memory_limit, (void));
+CX_FN(cx_u32, cx_process_processors, (void));
+CX_FN(cx_u32, cx_out_is_terminal, (void));
+CX_FN(void, cx_term_at_exit, (const cx_u8* p, cx_usize n));
+CX_FN(void, cx_term_cooked, (void));
+CX_FN(cx_u32, cx_term_raw, (void));
+CX_FN(cx_usize, cx_term_read, (cx_u8* p, cx_usize n));
+CX_FN(cx_u64, cx_term_size, (void));
+CX_FN(void, cx_thread_sleep, (cx_u64 ns));
 
 /* Hashing, for `Map` and `Set` (D94). The same value hashes the same on every platform and in
  * every run, so a table's layout, and the order a loop goes over it, depend only on what was

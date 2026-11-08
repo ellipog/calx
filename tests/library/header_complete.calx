@@ -1,0 +1,50 @@
+// Every C function a std module calls by a `cx_` name is one the runtime header declares with
+// `CX_FN`, so a library has a pointer to it from the program (D123). One declared only in a
+// module's own `extern "C"` would leave any library that uses the module unbuildable, as all of
+// std.fs and std.process once were (CLX-154).
+
+import std.env.{script}
+import std.fs.{glob, read_text}
+import std.path.{parent_dir}
+import std.regex.{Regex}
+
+fn main() ! Error {
+    let here = script() ?? String()
+    let root = parent_dir(parent_dir(parent_dir(here) ?? String()) ?? String()) ?? String()
+    let header = try read_text("{root}/runtime/calx_rt.h") ?? String()
+    var declared = Set<String>()
+    var cx_fn = try Regex.new(#"CX_FN\([^,]+,\s*(cx_\w+)\s*,"#)
+    for c in cx_fn.captures_all(header) {
+        declared.insert(c.get(1) ?? String())
+    }
+    // `extern "C" fn cx_...` on a line, or `fn cx_...(` inside an `extern "C" { ... }` block.
+    var one = try Regex.new(#"(?m)^\s*extern "C" fn (cx_\w+)\s*\("#)
+    var block = try Regex.new(#"(?s)extern "C" \{(.*?)\n\}"#)
+    var inside = try Regex.new(#"fn (cx_\w+)\s*\("#)
+    var missing = List<String>()
+    var seen: usize = 0
+    for path in try glob("{root}/std/**/*.calx") {
+        let text = try read_text(path) ?? String()
+        var names = List<String>()
+        for c in one.captures_all(text) {
+            names.push(c.get(1) ?? String())
+        }
+        for b in block.captures_all(text) {
+            for c in inside.captures_all(b.get(1) ?? String()) {
+                names.push(c.get(1) ?? String())
+            }
+        }
+        for name in names {
+            seen += 1
+            // Each program makes its own build ID; a library has none of its own to give.
+            if not declared.contains(name) and name != "cx_build_id" {
+                missing.push("{name} in {path[root.len() + 1..]}")
+            }
+        }
+    }
+    missing.sort()
+    for m in missing {
+        println("not in calx_rt.h: {m}")
+    }
+    println("{missing.len()} missing, {seen > 140}")    // out: 0 missing, true
+}

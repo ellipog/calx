@@ -1,0 +1,61 @@
+// A library uses the std modules whose runtime is in files of its own, through the program's
+// (D123, CLX-154): std.fs writes and reads a config, std.time reads the clocks, std.process runs
+// a program and finds one, and std.thread sleeps. The program uses none of them itself.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    let lib = unsafe { Library.open(given[0])! }
+    let config = lib.find<fn() -> String>("config")!
+    println(config())    // out: motd=hello from a plugin | 2 entries | missing: not found
+    let clocks = lib.find<fn() -> String>("clocks")!
+    println(clocks())    // out: forward true, after 2026 true, slept true
+    let run = lib.find<fn() -> String>("run")!
+    println(run())       // out: exit 0, said hi, found true
+}
+
+// file: plugin.calx
+import std.fs.{list, make_dir_all, read_text, remove_dir_all, temp_dir, write_text}
+import std.process.{Command, which}
+import std.thread.{sleep}
+import std.time.{Instant, Timestamp}
+
+@export
+fn config() -> String {
+    let dir = temp_dir()!
+    make_dir_all("{dir}/plugins/demo")!
+    write_text("{dir}/plugins/demo/config.properties", "motd=hello from a plugin\n")!
+    write_text("{dir}/plugins/demo/data.txt", "x")!
+    let text = read_text("{dir}/plugins/demo/config.properties")! ?? String()
+    let entries = list("{dir}/plugins/demo")!.len()
+    let missing = match read_text("{dir}/nothing.txt") {
+        ok(_) => String("found"),
+        err(e) => "{e}",
+    }
+    remove_dir_all(dir)!
+    return "{text.trim()} | {entries} entries | missing: {missing}"
+}
+
+@export
+fn clocks() -> String {
+    let start = unsafe { Instant.now() }
+    unsafe { sleep(2000000) }
+    let took = unsafe { Instant.now() }.secs_since(start)
+    let now = unsafe { Timestamp.now() }
+    return "forward {took > 0.0}, after 2026 {now.unix_ms > 1767225600000}, slept {took >= 0.001}"
+}
+
+@export
+fn run() -> String {
+    let exe = which("calx") ?? which("cmd") ?? which("sh") ?? String()
+    let found = not exe.is_empty()
+    let out = if which("cmd") != none {
+        Command.new("cmd").args(["/c", "echo hi"]).output()!
+    } else {
+        Command.new("sh").args(["-c", "echo hi"]).output()!
+    }
+    let said = String.from_utf8(out.stdout.copy()) ?? String()
+    return "exit {out.status.code ?? -1}, said {said.trim()}, found {found}"
+}

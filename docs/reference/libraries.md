@@ -168,6 +168,8 @@ fn pick(xs: List<i32>, i: usize) -> i32 {
 }
 ```
 
+Every std module works in a library, through the program's runtime, whether or not the program uses it: a plugin reads and writes its files with [std.fs](../std/fs.md), runs programs with [std.process](../std/process.md), reads the clocks with [std.time](../std/time.md) and sleeps with [std.thread](../std/thread.md), all in a program that imports none of them ([tests/library/std_modules.calx](../../tests/library/std_modules.calx)). `std.build`'s build ID is the one exception, since each program makes its own.
+
 The program and its libraries must be built by the same build of `calx`, since the compiler decides how values are laid out and passed, and the runtime's functions are listed in the order its header has them. `Library.open` refuses a library another build made. A debug build and a release build can open each other's.
 
 ## In C
@@ -182,6 +184,6 @@ CX_FN(void*, cx_alloc, (cx_usize size));
 
 The library exports one symbol, `cx_library`, which holds a hash of the compiler and the runtime header it was built with, how many runtime functions it takes, the function that fills in its pointers, and the function that lists its exports: each one's name, address, type as Calx writes it, and a hash of its shape, which is its type with the fields and variants of every struct and enum in it. `Library.open` checks the hash and fills in the pointers from the program's own, in the header's order. `find` compares the shape.
 
-So a call from a library into the runtime is one indirect call, as a call into a DLL is on Windows, and a program's own calls are direct: opening libraries costs the program nothing. A program that opens libraries links the whole runtime, so any library finds every function it needs. On Linux a library is compiled with `-fPIC -fvisibility=hidden`, so `cx_library` is the only symbol it shows.
+So a call from a library into the runtime is one indirect call, as a call into a DLL is on Windows, and a program's own calls are direct: opening libraries costs the program nothing. A program that opens libraries links the whole runtime, so any library finds every function it needs. Every C function a std module calls is declared in the header with `CX_FN` for this reason: one declared only in the module's own `extern "C"` block would have no pointer, and a library that called it wouldn't build (CLX-154). On Linux a library is compiled with `-fPIC -fvisibility=hidden`, so `cx_library` is the only symbol it shows.
 
 A path is from the current folder on both systems, and Windows loads the DLLs a library needs from the library's own folder, then the system's. Stack traces read each library's line tables as they read the program's: from the PDB beside it on Windows, which `calx build` puts there, and from the library itself on Linux.
