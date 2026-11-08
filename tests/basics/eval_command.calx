@@ -1,0 +1,53 @@
+// `calx eval CODE` runs code given on the command line, as `python -c` does, and prints its last
+// statement's value if it has one (CLX-88). Statements are split at line breaks and `;`s, a
+// standard module the code names is imported for it, and arguments after `--` reach it.
+import std.env.{variable}
+import std.process.{Command}
+
+// What `calx eval` printed, and how it ended if it failed.
+fn eval(args: List<String>) -> String {
+    let exe = variable("CALX") ?? String("calx")
+    var all: List<String> = ["eval"]
+    all.extend(args)
+    match Command.new(exe).args(all).output() {
+        ok(o) => {
+            var lines = List<String>()
+            for line in o.text().lines() {
+                lines.push(line.copy())
+            }
+            for line in o.error_text().lines() {
+                lines.push(line.copy())
+            }
+            if not o.status.success() {
+                lines.push("[{o.status}]")
+            }
+            return lines.join("\n")
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    println(eval(["1 << 20"]))    // out: 1048576
+    println(eval(["let x = 3; x * x"]))    // out: 9
+    println(eval(["-5 + 2"]))    // out: -3
+    println(eval([#""a,b;c".split(";")"#]))    // out: [a,b, c]
+    println(eval(["2.0.sqrt()"]))    // out: 1.4142135623730951
+    // Nothing to print: a statement, or a call that returns nothing.
+    println(eval([#"for i in 0..3 { print("{i},") }"#]))    // out: 0,1,2,
+    println(eval([#"println("hi")"#]))    // out: hi
+    // A module named is imported, and a variable named as one isn't taken for it.
+    println(eval(["env.args()", "--", "one", "two words"]))    // out: [one, two words]
+    println(eval([#"hex(hash.sha256("abc".to_bytes()))[..16]; import std.bytes.{hex}"#]))    // out: ba7816bf8f01cfea
+    println(eval([#"let path = "a/b"; path.len()"#]))    // out: 3
+    // Errors name the line of the program it built.
+    println(eval([#"1 + "a""#]))
+    // out: eval:2:17: error: expected `str`, found `i32`
+    // out:       let value = 1 + "a"
+    // out:                   ^
+    // out: 1 error
+    // out: [exited with status 1]
+    println(eval(["1", "2"]))
+    // out: calx: `calx eval` takes the code as one argument; put it in quotes, and give the program's arguments after --
+    // out: [exited with status 2]
+}

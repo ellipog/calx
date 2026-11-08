@@ -1,6 +1,7 @@
 // The `calx` command.
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -8,6 +9,8 @@
 #include <filesystem>
 #include <iostream>
 #include <iterator>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,6 +60,8 @@ int usage() {
         "  run       build a program and run it; arguments after -- go to the program\n"
         "  test      build a file's @test functions and run each, as many at once as there are\n"
         "            processors; names after the file pick the tests whose names hold one\n"
+        "  eval      run code given as one argument, and print its last expression's value:\n"
+        "            calx eval \"1 << 20\", or calx eval \"let x = 3; x * x\"\n"
         "  emit-c    print the C a program compiles to (-o names a file)\n"
         "  expand    print the code a program's attributes generate\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
@@ -96,7 +101,7 @@ double ms(std::chrono::steady_clock::time_point t) {
 }
 
 bool is_command(const std::string& c) {
-    return c == "check" || c == "build" || c == "run" || c == "test" || c == "emit-c" || c == "expand";
+    return c == "check" || c == "build" || c == "run" || c == "test" || c == "eval" || c == "emit-c" || c == "expand";
 }
 
 // `calx [options] file.calx args...` is `calx run [options] file.calx -- args...`, as `python
@@ -225,6 +230,218 @@ int run_tests(const std::string& exe, const std::vector<std::string>& names, con
     return failed ? 1 : 0;
 }
 
+// A program read and checked, with the names, arena and types the checked program points into,
+// which emitting it needs. A struct of its own, so `calx eval` can check two forms of its code
+// and keep the one that compiles.
+struct Front {
+    Sources sources;
+    Diagnostics diags{sources};
+    Names names;
+    Arena arena;
+    Types types{arena};
+    std::string home_error;
+    std::string home = find_home(home_error);
+    ParseContext pc{sources, names, arena, diags};
+    std::unique_ptr<ModuleLoader> loader;
+    Program program;
+    bool expanded = true;
+    std::vector<Expansion> shown;
+
+    // Reads `file` and the modules it imports, runs their attributes, since what they generate is
+    // checked with the rest (D124), and checks the program.
+    void check(std::uint32_t file, const Options& opt, bool color) {
+        loader = std::make_unique<ModuleLoader>(pc, sources, home, home_error);
+        loader->load(file);
+        if (!diags.has_errors()) {
+            ExpandOptions xo;
+            xo.home = home;
+            xo.home_error = home_error;
+            xo.verbose = opt.verbose;
+            xo.json = opt.json;
+            xo.color = color;
+            if (opt.command == "expand") xo.shown = &shown;
+            expanded = expand_attributes(pc, sources, *loader, xo);
+        }
+        std::vector<Module*> modules = loader->modules();
+        if (!diags.has_errors() && expanded && opt.command != "expand") {
+            check_program(CheckContext{sources, names, arena, diags, types}, modules, program,
+                          opt.command != "check" && opt.command != "test", opt.library);
+        }
+    }
+
+    bool ok() const { return !diags.has_errors() && expanded; }
+};
+
+// CLX-88: the code `calx eval` was given, taken apart: its imports, the standard modules it names
+// without importing them, its statements before the last, and the last, which is printed if it
+// has a value.
+struct EvalCode {
+    std::vector<std::string> imports;
+    std::vector<std::string> body;
+    std::string last;
+    bool printable = false;  // the last statement may be an expression
+};
+
+bool ident_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+
+// The statements of `code`: split at line breaks and at `;`s outside strings, raw strings,
+// brackets and comments, trimmed, without the empty ones.
+std::vector<std::string> eval_statements(const std::string& code) {
+    struct Ctx {
+        char kind;      // 'c' code, 's' a string, 'r' a raw string
+        int depth;      // in code, the brackets open
+        int hashes;     // in a raw string, the `#`s that close it
+    };
+    std::vector<Ctx> stack = {{'c', 0, 0}};
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        std::size_t a = cur.find_first_not_of(" \t\r");
+        std::size_t b = cur.find_last_not_of(" \t\r");
+        if (a != std::string::npos) out.push_back(cur.substr(a, b - a + 1));
+        cur.clear();
+    };
+    for (std::size_t i = 0; i < code.size(); i++) {
+        char c = code[i];
+        Ctx& top = stack.back();
+        if (top.kind == 's') {
+            cur += c;
+            if (c == '\\' && i + 1 < code.size()) {
+                cur += code[++i];
+            } else if (c == '"') {
+                stack.pop_back();
+            } else if (c == '{') {
+                stack.push_back({'c', 0, 0});
+            }
+            continue;
+        }
+        if (top.kind == 'r') {
+            cur += c;
+            if (c == '"' && code.compare(i + 1, top.hashes, std::string(top.hashes, '#')) == 0) {
+                cur += code.substr(i + 1, top.hashes);
+                i += top.hashes;
+                stack.pop_back();
+            }
+            continue;
+        }
+        if (c == '/' && i + 1 < code.size() && code[i + 1] == '/') {
+            while (i < code.size() && code[i] != '\n') i++;
+            i--;
+            continue;
+        }
+        if (c == '#') {
+            std::size_t j = i;
+            while (j < code.size() && code[j] == '#') j++;
+            if (j < code.size() && code[j] == '"') {
+                cur += code.substr(i, j - i + 1);
+                stack.push_back({'r', 0, static_cast<int>(j - i)});
+                i = j;
+                continue;
+            }
+        }
+        if (c == '"') {
+            cur += c;
+            stack.push_back({'s', 0, 0});
+            continue;
+        }
+        if (c == '(' || c == '[' || c == '{') top.depth++;
+        if (c == ')' || c == ']' || c == '}') {
+            if (top.depth == 0 && stack.size() > 1) {
+                cur += c;
+                stack.pop_back();  // the end of an interpolation
+                continue;
+            }
+            top.depth--;
+        }
+        if ((c == ';' || c == '\n') && stack.size() == 1 && top.depth <= 0) {
+            flush();
+            continue;
+        }
+        cur += c;
+    }
+    flush();
+    return out;
+}
+
+// Takes `code` apart for `calx eval`. A standard module it names, as `math.` in `math.sqrt(2.0)`,
+// is imported for it, unless the code imports it or names a variable so.
+EvalCode eval_code(const std::string& code, const std::string& home) {
+    EvalCode e;
+    std::vector<std::string> statements = eval_statements(code);
+    for (std::string& s : statements) {
+        if (s.rfind("import ", 0) == 0) {
+            e.imports.push_back(s);
+        } else {
+            e.body.push_back(s);
+        }
+    }
+    if (!e.body.empty()) {
+        e.last = e.body.back();
+        e.body.pop_back();
+        static const char* const statements_only[] = {"let ", "var ", "for ", "while ", "loop", "return", "fn ", "struct ", "enum "};
+        e.printable = true;
+        for (const char* k : statements_only) {
+            if (e.last.rfind(k, 0) == 0) e.printable = false;
+        }
+    }
+    if (home.empty()) return e;
+    // Each module's last name, as code names it, and the module: the one nearest `std` where two
+    // share a name, as `std.math` and `std.java.math` do.
+    std::map<std::string, std::pair<std::size_t, std::string>> modules;
+    std::error_code ec;
+    std::filesystem::path std_dir = std::filesystem::path(home) / "std";
+    for (auto it = std::filesystem::recursive_directory_iterator(std_dir, ec); !ec && it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+        if (it->path().extension() != ".calx") continue;
+        std::filesystem::path relative = std::filesystem::relative(it->path(), std_dir, ec);
+        relative.replace_extension();
+        std::string module = "std";
+        std::size_t depth = 0;
+        for (const auto& part : relative) {
+            module += "." + part.string();
+            depth++;
+        }
+        std::string name = it->path().stem().string();
+        auto [at, fresh] = modules.emplace(name, std::make_pair(depth, module));
+        if (!fresh && std::make_pair(depth, module) < at->second) at->second = std::make_pair(depth, module);
+    }
+    for (const auto& [name, found] : modules) {
+        // Named as a module: `name.` with no letter, digit, `_` or `.` before it.
+        bool named = false;
+        for (std::size_t at = code.find(name + "."); at != std::string::npos; at = code.find(name + ".", at + 1)) {
+            if (at == 0 || (!ident_char(code[at - 1]) && code[at - 1] != '.')) named = true;
+        }
+        if (!named) continue;
+        bool taken = false;
+        for (const std::string& s : e.imports) {
+            taken = taken || (s.size() > name.size() && s.compare(s.size() - name.size() - 1, std::string::npos, "." + name) == 0);
+        }
+        for (const char* k : {"let ", "var "}) {
+            for (const char* after : {" ", "=", ":"}) taken = taken || code.find(k + name + after) != std::string::npos;
+        }
+        if (!taken) e.imports.push_back("import " + found.second);
+    }
+    return e;
+}
+
+// The program `calx eval` builds: the imports, then a `main` of the statements, with the last
+// printed, if `print`, or as it is.
+std::string eval_program(const EvalCode& e, bool print) {
+    std::string out;
+    for (const std::string& s : e.imports) out += s + "\n";
+    out += "fn main() {\n";
+    for (const std::string& s : e.body) out += "    " + s + "\n";
+    if (!e.last.empty()) {
+        if (print && e.printable) {
+            out += "    let value = " + e.last + "\n    println(\"{value}\")\n";
+        } else {
+            out += "    " + e.last + "\n";
+        }
+    }
+    out += "}\n";
+    return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -266,13 +483,17 @@ int main(int argc, char** argv) {
             opt.stdin_text = true;
         } else if (a == "-o" && i + 1 < argc) {
             opt.output = argv[++i];
-        } else if (!a.empty() && a[0] == '-') {
+        } else if (!a.empty() && a[0] == '-' && !(opt.command == "eval" && opt.input.empty())) {
             std::fprintf(stderr, "calx: unknown option %s\n", a.c_str());
             return 2;
         } else if (opt.input.empty()) {
             opt.input = a;
         } else if (opt.command == "test") {
             opt.filters.push_back(a);
+        } else if (opt.command == "eval") {
+            std::fprintf(stderr, "calx: `calx eval` takes the code as one argument; put it in quotes, and give the program's "
+                                 "arguments after --\n");
+            return 2;
         } else {
             std::fprintf(stderr, "calx: only one input file is supported for now\n");
             return 2;
@@ -286,51 +507,43 @@ int main(int argc, char** argv) {
     }
 
     auto t0 = std::chrono::steady_clock::now();
-    Sources sources;
-    Diagnostics diags(sources);
-    std::uint32_t file;
-    if (opt.stdin_text) {
-        // An editor's unsaved text, checked as if it were the file.
-#ifdef _WIN32
-        _setmode(_fileno(stdin), _O_BINARY);
-#endif
-        std::string text((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
-        file = sources.add(opt.input, std::move(text));
-    } else {
-        file = sources.load(opt.input);
-    }
-    if (file == 0) {
-        std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
-        return 1;
-    }
-    Names names;
-    Arena arena;
-    Types types(arena);
-    std::string home_error;
-    std::string home = find_home(home_error);
     bool color = isatty(fileno(stderr)) != 0;
-    ParseContext pc{sources, names, arena, diags};
-    ModuleLoader loader(pc, sources, home, home_error);
-    loader.load(file);
-    // Attributes run first, since what they generate is checked with the rest (D124).
-    bool expanded = true;
-    std::vector<Expansion> shown;
-    if (!diags.has_errors()) {
-        ExpandOptions xo;
-        xo.home = home;
-        xo.home_error = home_error;
-        xo.verbose = opt.verbose;
-        xo.json = opt.json;
-        xo.color = color;
-        if (opt.command == "expand") xo.shown = &shown;
-        expanded = expand_attributes(pc, sources, loader, xo);
+    auto front = std::make_unique<Front>();
+    if (opt.command == "eval") {
+        // The code's last statement is printed if it has a value. If the program that prints it
+        // doesn't compile, the code as it is may: its last statement is a call that returns
+        // nothing, or an assignment.
+        EvalCode code = eval_code(opt.input, front->home);
+        front->check(front->sources.add("eval", eval_program(code, true)), opt, color);
+        if (!front->ok() && code.printable) {
+            auto plain = std::make_unique<Front>();
+            plain->check(plain->sources.add("eval", eval_program(code, false)), opt, color);
+            if (plain->ok()) front = std::move(plain);
+        }
+    } else {
+        std::uint32_t file;
+        if (opt.stdin_text) {
+            // An editor's unsaved text, checked as if it were the file.
+#ifdef _WIN32
+            _setmode(_fileno(stdin), _O_BINARY);
+#endif
+            std::string text((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+            file = front->sources.add(opt.input, std::move(text));
+        } else {
+            file = front->sources.load(opt.input);
+        }
+        if (file == 0) {
+            std::fprintf(stderr, "calx: can't read %s\n", opt.input.c_str());
+            return 1;
+        }
+        front->check(file, opt, color);
     }
-    std::vector<Module*> modules = loader.modules();
-    Program program;
-    if (!diags.has_errors() && expanded && opt.command != "expand") {
-        check_program(CheckContext{sources, names, arena, diags, types}, modules, program,
-                      opt.command != "check" && opt.command != "test", opt.library);
-    }
+    Sources& sources = front->sources;
+    Diagnostics& diags = front->diags;
+    Names& names = front->names;
+    Program& program = front->program;
+    bool expanded = front->expanded;
+    std::vector<Expansion>& shown = front->shown;
     if (opt.json) {
         diags.print_json(stdout);
         std::fflush(stdout);
@@ -437,6 +650,18 @@ int main(int argc, char** argv) {
     if (opt.command == "test") {
         set_run_environment(opt.input);
         return run_tests(b.exe, tests, opt.filters);
+    }
+    if (opt.command == "eval") {
+        std::vector<std::string> run = {b.exe};
+        run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
+        std::fflush(stdout);
+        std::fflush(stderr);
+        int status = run_process(run, "eval");
+        if (status < 0) {
+            std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());
+            return 1;
+        }
+        return status;
     }
     std::vector<std::string> run = {b.exe};
     run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());

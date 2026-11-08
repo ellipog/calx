@@ -1,6 +1,6 @@
 ---
 title: The calx command
-description: Checking, building, running and testing Calx programs, the build modes, and the object cache.
+description: Checking, building, running and testing Calx programs, running code from the command line, the build modes, and the object cache.
 ---
 
 # The `calx` command
@@ -14,6 +14,7 @@ calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
 calx test tool.calx           # run its @test functions, each in a process of its own
+calx eval "1 << 20"           # run code given on the command line, and print its value
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
@@ -107,6 +108,31 @@ ok    reads_a_number
 - `--release` builds the tests optimized, for tests that do a lot of work.
 - Each test is the built program run with a first argument naming it, which the runtime takes out, so `args()` in a test is empty. Run alone, the built program lists its tests.
 
+## Running code from the command line
+
+`calx eval` runs code given as one argument, as `python -c` does, and prints the value of its last statement, if it has one:
+
+```sh
+$ calx eval "1 << 20"
+1048576
+$ calx eval "let x = 3; x * x"
+9
+$ calx eval '"a,b;c".split(";")'
+[a,b, c]
+$ calx eval 'for i in 0..3 { print("{i} ") }'
+0 1 2
+$ calx eval "env.args()" -- one "two words"
+[one, two words]
+$ calx eval 'hex(hash.sha256("abc".to_bytes())); import std.bytes.{hex}'
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+```
+
+- The code is the body of a `main`. Statements are split at line breaks and at `;`s outside strings and brackets, and an `import` among them goes before the `main`, wherever it's written.
+- A standard module the code names is imported for it: `math.`, `env.`, `hash.` or `json.` brings in `std.math`, `std.env`, `std.hash` or `std.json`. A function on its own, as `hex`, needs its `import`. A variable named as a module, as `let path = ...`, is the variable.
+- The last statement is printed as `"{value}"` prints it. If it has no value, such as a loop or a call that returns nothing, it just runs.
+- Arguments after `--` are the program's, which `env.args()` gives. `--release` before the code builds it optimized.
+- An error names the line of the program `calx eval` built, which is shown with it. Like any program, the code is built once and reused while it's the same, so running it again starts at once.
+
 ## Exit status
 
 | Status | When |
@@ -115,6 +141,7 @@ ok    reads_a_number
 | 1 | The program has errors, or building it failed |
 | 2 | The command line is wrong, such as a name that's neither a command nor a file to run |
 | 1 | `calx test`: a test failed, no test's name held one of the names given, or the file has no tests |
+| *the code's* | `calx eval` exits with the status of the program its code became, or 1 if the code has errors |
 | *the program's* | `calx run`, and `calx file.calx`, exit with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
 
 ## Build modes
