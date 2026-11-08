@@ -863,6 +863,19 @@ CX_FN(cx_u64, cx_xz_crc64, (cx_u64 crc, const cx_u8* p, cx_usize n));
  * its size, with its padding and check right. */
 #define CX_XZ_BLOCK 14
 CX_FN(void, cx_xz_blocks, (const cx_u8* in, const cx_u64* desc, cx_usize n, cx_u8* out, cx_u8* ok));
+/* For std.xz's Decompressor, which takes a file a piece at a time (CLX-179). `cx_xz_resume` counts
+ * the input from 0 again and says whether more may come: then LZMA stops between symbols while a
+ * symbol's most input is left, giving 2, and LZMA2 at a chunk that isn't all there, giving -3, so
+ * each carries on when called again with more. `cx_xz_slide` moves what a decoder still needs to
+ * the front of its output, matches' reach and all from `keep` on, and gives how far. A chain of
+ * CX_XZ_CHAIN bytes undoes a block's filters before LZMA2 a piece at a time: `cx_xz_chain_start`
+ * takes their IDs and arguments in the header's order, and `cx_xz_chain` takes what's come out of
+ * LZMA2 and isn't through them all, from `at` into the block, and gives how much now is. */
+CX_FN(void, cx_xz_resume, (cx_u8* ctx, cx_i32 partial));
+CX_FN(cx_usize, cx_xz_slide, (cx_u8* ctx, cx_u8* buf, cx_usize keep));
+#define CX_XZ_CHAIN 1024
+CX_FN(void, cx_xz_chain_start, (cx_u8* ctx, const cx_u64* filters, cx_u32 count));
+CX_FN(cx_usize, cx_xz_chain, (cx_u8* ctx, cx_u8* buf, cx_usize n, cx_u64 at, cx_i32 last));
 /* LZMA2 and LZMA compression, in calx_xzenc.c, behind std.xz's `compress` (CLX-176).
  * `cx_xze_start` compresses `n` bytes in blocks, with the settings in `opt` that calx_xzenc.c
  * lists, on `parallel for`'s threads, and gives a handle: sizes[k] is how big block k's LZMA2 is,

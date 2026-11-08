@@ -62,6 +62,9 @@ typedef struct {
     /* For .lzma: where the text ends if the header said, or all ones. */
     cx_u64 end;
     cx_u32 phase;
+    /* Whether more input may come, for std.xz's Decompressor: LZMA stops while a symbol's most
+     * input is left, and LZMA2 at a chunk that isn't all there, so that each can carry on. */
+    cx_u32 partial;
 } dec_t;
 
 _Static_assert(sizeof(dec_t) <= CX_XZ_CTX, "CX_XZ_CTX is too small");
@@ -366,8 +369,9 @@ static inline __attribute__((always_inline)) void copy_match(cx_u8* out, cx_usiz
 /* Decodes LZMA symbols from in[d->at..n) into out from d->pos until it reaches `stop`. A match may
  * run past `stop` but not past `limit`, where the text ends, or it's corrupt. Gives 0 at `stop`; 1
  * at an end marker, if `eopm` allows one; -1 for data that's corrupt; -2 when the input ends first.
- * d->pos and d->at say how far it got. */
-static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_usize stop, cx_usize limit, int eopm) {
+ * With `partial`, it gives 2 instead where fewer than FAST_INPUT bytes are left, between symbols,
+ * with all it needs to carry on stored. d->pos and d->at say how far it got. */
+static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_usize stop, cx_usize limit, int eopm, int partial) {
     cx_u32 range = d->range, code = d->code;
     const cx_u8* in = in_base + d->at;
     const cx_u8* end = in_base + n;
@@ -385,6 +389,7 @@ static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_u
     for (;;) {
         while (upos < ustop && in < fast_end) SYMBOL(1)
         if (upos >= ustop) break;
+        if (partial) goto pause;
         SYMBOL(0)
     }
 finish:
@@ -400,6 +405,14 @@ finish:
     d->at = (cx_usize)(in - in_base);
     d->pos = d->start + upos;
     return status;
+pause:
+    /* Each bit takes in the byte it needs first, so the range decoder is as it would be before the
+     * next symbol. */
+    d->state = state, d->rep0 = rep0;
+    d->range = range, d->code = code;
+    d->at = (cx_usize)(in - in_base);
+    d->pos = d->start + upos;
+    return 2;
 marker:
     if (!eopm) goto corrupt;
     status = 1;
@@ -503,8 +516,10 @@ void cx_xz_lzma2_start(cx_u8* ctx, cx_u64 dict, cx_usize start) {
     d->dict = dict_reach(dict);
     d->lc = d->lp = 0;
     d->pos = d->start = start;
+    d->end = ~(cx_u64)0;
     d->at = 0;
     d->phase = 3; /* it needs properties, and a dictionary reset */
+    d->partial = 0;
 }
 
 cx_i32 cx_xz_lzma2(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize cap) {
@@ -531,6 +546,7 @@ cx_i32 cx_xz_lzma2(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize
             /* Nothing has changed yet that doing this chunk again would change. */
             if (cap - d->pos < un) return 1;
             at += 5;
+            if (d->partial && n - at < (cx_usize)(c >= 0xC0) + packed) return -3;
             if (c >= 0xC0) {
                 if (at >= n) return -2;
                 if (lzma_props(d, in[at++]) != 0) return -1;
@@ -543,7 +559,7 @@ cx_i32 cx_xz_lzma2(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize
             cx_usize avail = n - at < packed ? n - at : packed;
             d->at = at;
             int e = rc_init(d, in, at + avail);
-            if (e == 0) e = lzma_run(d, in, at + avail, out, d->pos + un, d->pos + un, 0);
+            if (e == 0) e = lzma_run(d, in, at + avail, out, d->pos + un, d->pos + un, 0, 0);
             /* When the chunk's bytes run out, the data was cut short, or the chunk is corrupt. */
             if (e == -2) return avail < packed ? -2 : -1;
             if (e != 0 || d->code != 0 || d->at != at + packed) return -1;
@@ -575,6 +591,7 @@ cx_i32 cx_xz_lzma1_start(cx_u8* ctx, cx_u32 props, cx_u64 dict, cx_u64 size, cx_
     d->end = size == ~(cx_u64)0 ? size : start + size;
     d->at = 0;
     d->phase = 0;
+    d->partial = 0;
     return 0;
 }
 
@@ -591,8 +608,8 @@ cx_i32 cx_xz_lzma1(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize
     cx_usize limit = whole ? (cx_usize)d->end : cap;
     cx_usize stop = whole ? limit : (cap - d->pos > MATCH_MAX ? cap - MATCH_MAX : d->pos);
     if (!whole && stop <= d->pos) return 1;
-    int e = lzma_run(d, in, n, out, stop, limit, 1);
-    if (e < 0) return e;
+    int e = lzma_run(d, in, n, out, stop, limit, 1, (int)d->partial);
+    if (e < 0 || e == 2) return e;
     if (e == 1) {
         /* The end marker, where the header's size says, if it gave one. */
         if (d->code != 0) return -1;
@@ -602,6 +619,7 @@ cx_i32 cx_xz_lzma1(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize
     if (!whole) return 1;
     /* At the size the header gave: done if the range decoder is, or an end marker follows. */
     if (d->code == 0) return 0;
+    if (d->partial && n - d->at < FAST_INPUT) return 2;
     e = lzma_marker(d, in, n);
     if (e < 0) return e;
     return d->code == 0 ? 0 : -1;
@@ -609,6 +627,35 @@ cx_i32 cx_xz_lzma1(cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize
 
 cx_usize cx_xz_len(const cx_u8* ctx) { return ((const dec_t*)ctx)->pos; }
 cx_usize cx_xz_used(const cx_u8* ctx) { return ((const dec_t*)ctx)->at; }
+
+/* --- a piece at a time ------------------------------------------------------------------------ */
+
+/* std.xz's Decompressor gives the decoders the input from where they stopped, so they count it
+ * from 0 again, and says whether more may come. */
+void cx_xz_resume(cx_u8* ctx, cx_i32 partial) {
+    dec_t* d = (dec_t*)ctx;
+    d->at = 0;
+    d->partial = partial != 0;
+}
+
+/* Moves what a decoder still needs to the front of its output, `buf`: the text matches can reach
+ * back to, and everything from `keep` on. Gives how far it moved. Positions count from the last
+ * dictionary reset, and only their low four bits pick probabilities, so once there's more text
+ * since the reset than matches reach, the reset may as well have been within 16 bytes of the
+ * front, which keeps the text that's left in the buffer. */
+cx_usize cx_xz_slide(cx_u8* ctx, cx_u8* buf, cx_usize keep) {
+    dec_t* d = (dec_t*)ctx;
+    const cx_usize upos = d->pos - d->start;
+    const cx_u64 need = d->dict + 16;
+    const cx_usize from = (cx_u64)upos <= need ? d->start : d->pos - (cx_usize)need;
+    const cx_usize shift = keep < from ? keep : from;
+    if (shift == 0) return 0;
+    memmove(buf, buf + shift, d->pos - shift);
+    d->pos -= shift;
+    d->start = shift <= d->start ? d->start - shift : (d->start - shift) & 15;
+    if (d->end != ~(cx_u64)0) d->end -= shift;
+    return shift;
+}
 
 /* --- the branch filters ------------------------------------------------------------------------ */
 
@@ -624,10 +671,10 @@ static cx_u32 get32be(const cx_u8* p) { return (cx_u32)p[0] << 24 | (cx_u32)p[1]
  * calls to one place look alike. */
 #define X86_MSBYTE(b) ((((b) + 1) & 0xFE) == 0)
 
-static void bcj_x86(cx_u8* buf, cx_usize n, cx_u32 now) {
+static cx_usize bcj_x86(cx_u8* buf, cx_usize n, cx_u32 now, cx_u32* st) {
     static const cx_u32 bit_number[8] = {0, 1, 2, 2, 3, 3, 3, 3};
-    cx_u32 prev_mask = 0, prev_pos = now - 5;
-    if (n < 5) return;
+    cx_u32 prev_mask = st[0], prev_pos = st[1];
+    if (n < 5) return 0;
     cx_usize i = 0;
     while (i <= n - 5) {
         cx_u8 b = buf[i];
@@ -669,10 +716,13 @@ static void bcj_x86(cx_u8* buf, cx_usize n, cx_u32 now) {
             if (X86_MSBYTE(b)) prev_mask |= 0x10;
         }
     }
+    st[0] = prev_mask, st[1] = prev_pos;
+    return i;
 }
 
-static void bcj_powerpc(cx_u8* buf, cx_usize n, cx_u32 now) {
-    for (cx_usize i = 0; i + 4 <= n; i += 4) {
+static cx_usize bcj_powerpc(cx_u8* buf, cx_usize n, cx_u32 now) {
+    cx_usize i = 0;
+    for (; i + 4 <= n; i += 4) {
         if ((buf[i] >> 2) == 0x12 && (buf[i + 3] & 3) == 1) {
             cx_u32 src = ((cx_u32)buf[i] & 3) << 24 | (cx_u32)buf[i + 1] << 16 | (cx_u32)buf[i + 2] << 8 | ((cx_u32)buf[i + 3] & ~3u);
             cx_u32 dest = src - (now + (cx_u32)i);
@@ -682,12 +732,14 @@ static void bcj_powerpc(cx_u8* buf, cx_usize n, cx_u32 now) {
             buf[i + 3] = (cx_u8)((buf[i + 3] & 3) | (cx_u8)dest);
         }
     }
+    return i;
 }
 
-static void bcj_ia64(cx_u8* buf, cx_usize n, cx_u32 now) {
+static cx_usize bcj_ia64(cx_u8* buf, cx_usize n, cx_u32 now) {
     static const cx_u32 branch_table[32] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                             4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4, 0, 0};
-    for (cx_usize i = 0; i + 16 <= n; i += 16) {
+    cx_usize i = 0;
+    for (; i + 16 <= n; i += 16) {
         cx_u32 mask = branch_table[buf[i] & 0x1F];
         cx_u32 bit_pos = 5;
         for (cx_u32 slot = 0; slot < 3; slot++, bit_pos += 41) {
@@ -712,10 +764,12 @@ static void bcj_ia64(cx_u8* buf, cx_usize n, cx_u32 now) {
             }
         }
     }
+    return i;
 }
 
-static void bcj_arm(cx_u8* buf, cx_usize n, cx_u32 now) {
-    for (cx_usize i = 0; i + 4 <= n; i += 4) {
+static cx_usize bcj_arm(cx_u8* buf, cx_usize n, cx_u32 now) {
+    cx_usize i = 0;
+    for (; i + 4 <= n; i += 4) {
         if (buf[i + 3] == 0xEB) {
             cx_u32 src = (cx_u32)buf[i + 2] << 16 | (cx_u32)buf[i + 1] << 8 | buf[i];
             src <<= 2;
@@ -726,10 +780,12 @@ static void bcj_arm(cx_u8* buf, cx_usize n, cx_u32 now) {
             buf[i] = (cx_u8)dest;
         }
     }
+    return i;
 }
 
-static void bcj_armthumb(cx_u8* buf, cx_usize n, cx_u32 now) {
-    for (cx_usize i = 0; i + 4 <= n; i += 2) {
+static cx_usize bcj_armthumb(cx_u8* buf, cx_usize n, cx_u32 now) {
+    cx_usize i = 0;
+    for (; i + 4 <= n; i += 2) {
         if ((buf[i + 1] & 0xF8) == 0xF0 && (buf[i + 3] & 0xF8) == 0xF8) {
             cx_u32 src = ((cx_u32)buf[i + 1] & 7) << 19 | (cx_u32)buf[i] << 11 | ((cx_u32)buf[i + 3] & 7) << 8 | buf[i + 2];
             src <<= 1;
@@ -742,10 +798,12 @@ static void bcj_armthumb(cx_u8* buf, cx_usize n, cx_u32 now) {
             i += 2;
         }
     }
+    return i;
 }
 
-static void bcj_sparc(cx_u8* buf, cx_usize n, cx_u32 now) {
-    for (cx_usize i = 0; i + 4 <= n; i += 4) {
+static cx_usize bcj_sparc(cx_u8* buf, cx_usize n, cx_u32 now) {
+    cx_usize i = 0;
+    for (; i + 4 <= n; i += 4) {
         if ((buf[i] == 0x40 && (buf[i + 1] & 0xC0) == 0) || (buf[i] == 0x7F && (buf[i + 1] & 0xC0) == 0xC0)) {
             cx_u32 src = get32be(buf + i);
             src <<= 2;
@@ -758,10 +816,12 @@ static void bcj_sparc(cx_u8* buf, cx_usize n, cx_u32 now) {
             buf[i + 3] = (cx_u8)dest;
         }
     }
+    return i;
 }
 
-static void bcj_arm64(cx_u8* buf, cx_usize n, cx_u32 now) {
-    for (cx_usize i = 0; i + 4 <= n; i += 4) {
+static cx_usize bcj_arm64(cx_u8* buf, cx_usize n, cx_u32 now) {
+    cx_usize i = 0;
+    for (; i + 4 <= n; i += 4) {
         cx_u32 pc = now + (cx_u32)i;
         cx_u32 instr = get32le(buf + i);
         if ((instr >> 26) == 0x25) {
@@ -786,13 +846,14 @@ static void bcj_arm64(cx_u8* buf, cx_usize n, cx_u32 now) {
             put32le(buf + i, instr);
         }
     }
+    return i;
 }
 
 /* RISC-V: JAL, and AUIPC with the instruction after it, which the encoder rewrote. */
-static void bcj_riscv(cx_u8* buf, cx_usize n, cx_u32 now) {
-    if (n < 8) return;
-    cx_usize last = n - 8;
-    for (cx_usize i = 0; i <= last; i += 2) {
+static cx_usize bcj_riscv(cx_u8* buf, cx_usize n, cx_u32 now) {
+    if (n < 8) return 0;
+    cx_usize last = n - 8, i = 0;
+    for (; i <= last; i += 2) {
         cx_u32 inst = buf[i];
         if (inst == 0xEF) {
             cx_u32 b1 = buf[i + 1];
@@ -838,20 +899,89 @@ static void bcj_riscv(cx_u8* buf, cx_usize n, cx_u32 now) {
             i += 8 - 2;
         }
     }
+    return i;
+}
+
+/* Each filter gives where it stopped: what's before that is done, and nothing from there on has
+ * changed, so it can carry on from there when more comes. x86 carries two numbers over too. */
+static int bcj_run(cx_u32 id, cx_u8* buf, cx_usize n, cx_u32 now, cx_u32* st, cx_usize* done) {
+    switch (id) {
+        case 4: *done = bcj_x86(buf, n, now, st); return 0;
+        case 5: *done = bcj_powerpc(buf, n, now); return 0;
+        case 6: *done = bcj_ia64(buf, n, now); return 0;
+        case 7: *done = bcj_arm(buf, n, now); return 0;
+        case 8: *done = bcj_armthumb(buf, n, now); return 0;
+        case 9: *done = bcj_sparc(buf, n, now); return 0;
+        case 10: *done = bcj_arm64(buf, n, now); return 0;
+        case 11: *done = bcj_riscv(buf, n, now); return 0;
+        default: return -1;
+    }
 }
 
 cx_i32 cx_xz_bcj(cx_u32 id, cx_u8* buf, cx_usize n, cx_u32 start) {
-    switch (id) {
-        case 4: bcj_x86(buf, n, start); return 0;
-        case 5: bcj_powerpc(buf, n, start); return 0;
-        case 6: bcj_ia64(buf, n, start); return 0;
-        case 7: bcj_arm(buf, n, start); return 0;
-        case 8: bcj_armthumb(buf, n, start); return 0;
-        case 9: bcj_sparc(buf, n, start); return 0;
-        case 10: bcj_arm64(buf, n, start); return 0;
-        case 11: bcj_riscv(buf, n, start); return 0;
-        default: return -1;
+    cx_u32 st[2] = {0, start - 5};
+    cx_usize done;
+    return bcj_run(id, buf, n, start, st, &done);
+}
+
+/* A block's filters before LZMA2, undone a piece at a time for std.xz's Decompressor, in the order
+ * they're undone: the one next to LZMA2 first. Each has its ID and its start offset or distance,
+ * how far into the block it has got, x86's two numbers, and the last 256 bytes delta gave. */
+typedef struct {
+    cx_u32 id, arg;
+    cx_u64 done;
+    cx_u32 st[2];
+    cx_u8 hist[256];
+} stage_t;
+
+typedef struct {
+    cx_u32 count;
+    stage_t s[3];
+} chain_t;
+
+_Static_assert(sizeof(chain_t) <= CX_XZ_CHAIN, "CX_XZ_CHAIN is too small");
+
+void cx_xz_chain_start(cx_u8* ctx, const cx_u64* filters, cx_u32 count) {
+    chain_t* c = (chain_t*)ctx;
+    memset(c, 0, sizeof *c);
+    c->count = count;
+    for (cx_u32 k = 0; k < count; k++) {
+        stage_t* s = &c->s[k];
+        s->id = (cx_u32)filters[2 * (count - 1 - k)];
+        s->arg = (cx_u32)filters[2 * (count - 1 - k) + 1];
+        s->st[1] = s->arg - 5;
     }
+}
+
+/* One filter over buf[0..n), from `at` into the block: gives how much of it is done, which is all
+ * of it at the block's end. Delta adds the byte `dist` back as it gave it, from its history. */
+static cx_usize stage_run(stage_t* s, cx_u8* buf, cx_usize n, cx_u64 at, int last) {
+    if (s->id == 3) {
+        const cx_u32 dist = s->arg;
+        for (cx_usize i = 0; i < n; i++) {
+            const cx_u8 v = (cx_u8)(buf[i] + s->hist[(cx_u8)(at + i - dist)]);
+            s->hist[(cx_u8)(at + i)] = v;
+            buf[i] = v;
+        }
+        return n;
+    }
+    cx_usize done = 0;
+    bcj_run(s->id, buf, n, s->arg + (cx_u32)at, s->st, &done);
+    return last ? n : done;
+}
+
+/* Undoes the chain over buf[0..n), which is from `at` into the block: what has come out of LZMA2
+ * and isn't through every filter yet. Each filter goes as far as the one before it has. Gives how
+ * much of buf is through them all; `last` says the block ends at n. */
+cx_usize cx_xz_chain(cx_u8* ctx, cx_u8* buf, cx_usize n, cx_u64 at, cx_i32 last) {
+    chain_t* c = (chain_t*)ctx;
+    cx_u64 end = at + n;
+    for (cx_u32 k = 0; k < c->count; k++) {
+        stage_t* s = &c->s[k];
+        if (end > s->done) s->done += stage_run(s, buf + (s->done - at), (cx_usize)(end - s->done), s->done, last != 0);
+        end = s->done;
+    }
+    return (cx_usize)(end - at);
 }
 
 /* --- CRC-64 ------------------------------------------------------------------------------------ */

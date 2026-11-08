@@ -1,0 +1,199 @@
+// std.xz's Decompressor and Compressor, which take a file a piece at a time (CLX-179): the
+// Decompressor gives what `decompress` gives, and fails where it fails, however the bytes are cut
+// into pieces, and the Compressor writes what `compress` writes. The hex is Python 3.14's
+// lzma.compress's, or xz 5.8.3's, as in xz.calx.
+
+import std.xz.{Check, Compressor, Decompressor, Error, Format, compress, decompress}
+
+fn nibble(c: u8) -> u8 {
+    return if c >= 97 { c - 87 } else { c - 48 }
+}
+
+fn unhex(s: str) -> List<u8> {
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < s.len() {
+        out.push(nibble(s.byte_at(i)) * 16 + nibble(s.byte_at(i + 1)))
+        i += 2
+    }
+    return out
+}
+
+fn text(bytes: own List<u8>) -> String {
+    return String.from_utf8(bytes) ?? "not UTF-8"
+}
+
+fn joined(a: List<u8>, b: List<u8>) -> List<u8> {
+    var out = a.copy()
+    out.extend(b)
+    return out
+}
+
+// Decompresses the bytes in pieces of `piece`, at most `most` at a time: what comes out, or the
+// error, with where it came.
+fn pieces(bytes: List<u8>, piece: usize, most: u64 = u64.MAX, format: Format = Format.Auto, limit: u64 = u64.MAX) -> String {
+    var d = Decompressor.new(format, limit)
+    var out = List<u8>()
+    var at: usize = 0
+    while at < bytes.len() {
+        let end = if at + piece < bytes.len() { at + piece } else { bytes.len() }
+        match d.add(bytes[at..end], most) {
+            ok(part) => out.extend(part),
+            err(e) => return "{e}, by byte {end}",
+        }
+        while not d.needs_input() {
+            match d.add([], most) {
+                ok(part) => out.extend(part),
+                err(e) => return "{e}, by byte {end}",
+            }
+        }
+        at = end
+    }
+    match d.finish() {
+        ok(part) => out.extend(part),
+        err(e) => return "{e}, at the end",
+    }
+    if out.len() >= 40 {
+        return "ok {out.len()} bytes"
+    }
+    let lines = text(out).trim_end().replace("\n", " / ")
+    return "ok {lines}"
+}
+
+// The same for pieces of 1, 3, 17 bytes and all at once, if they agree.
+fn all_ways(bytes: List<u8>) -> String {
+    let one = pieces(bytes, 1)
+    for piece in [3usize, 17, bytes.len() + 1] {
+        let got = pieces(bytes, piece)
+        if got != one {
+            return "pieces of 1 give {one}, of {piece} {got}"
+        }
+    }
+    return one
+}
+
+fn main() {
+    let hello = unhex("fd377a585a000004e6d6b4460200210116000000742fe5a301000968656c6c6f2c20787a0a000000eb12b68bfc71df280001220a151ae1671fb6f37d010000000004595a")
+    let alone = unhex("5d00008000ffffffffffffffff00341949ee8def8c6a5793f0c06f15ceabfffedf3800")
+    let lzip = unhex("4c5a4950011000341949ee8def8c6a5793bb880809717dffff07300000972e52d30c000000000000003100000000000000")
+    let sha = unhex("fd377a585a00000ae1fb0ca10200210116000000742fe5a3010007636865636b65640a0077c2ca150b61c7330da139378ffd3940d093f1bd74a1294689345d27e15b512400013808e281c239189b4b9a01000000000a595a")
+    println(all_ways(hello))    // out: ok hello, xz
+    println(all_ways(alone))    // out: ok hello, lzma
+    println(all_ways(lzip))    // out: ok hello, lzip
+    println(all_ways(sha))    // out: ok checked
+
+    // Delta, then x86 calls, then LZMA2, which the filters undo as the text comes.
+    let chain = unhex("fd377a585a000004e6d6b446030203010104002101160000809838cce0011a00835d0074013ee80c6291394e737327a1b45f801d8c4c807c28f9f5982d37897e96aead764339f814422b81d16024af64a7957fa535f6d748f656bc55d445d10ed740b73ed54537101822ffa86560c1452cd469b425f68c54a2818431fabaf7cf775598a681659e5993f3e6a83b0894232fba04525dd3e193b2288190db3fe67162f4b21f00000000d25e0b2757f58e260001a3019b020000e62c7808b1c467fb020000000004595a")
+    let whole = decompress(chain.copy())!
+    for piece in [1usize, 2, 5, 64] {
+        var d = Decompressor.new()
+        var out = List<u8>()
+        var at: usize = 0
+        while at < chain.len() {
+            let end = if at + piece < chain.len() { at + piece } else { chain.len() }
+            d.add_into(chain, at, end, u64.MAX, mut out)!
+            at = end
+        }
+        d.finish_into(mut out)!
+        println("{piece}: {out == whole}")
+        // out: 1: true
+        // out: 2: true
+        // out: 5: true
+        // out: 64: true
+    }
+
+    // `xz -T4 --block-size=1000`: six blocks with both sizes, which wait for each other and then
+    // decode at once.
+    let blocks = unhex("fd377a585a000004e6d6b44603c075e8072101160000000076df9f7be003e7006d5d00361a4a1f08a026564e0d6cb8a5ed639c8e7cdb4ef69e4b7818565cf71f3076d68a4e6e079d3caf701c64dbfc9a18571cfc220a143792e1f6890994eb137e0e2bccdee46eacb1572f5c2d1f7a4f5260827139f7b63793180871e4db80bbe5bd61fe57e3a8da499841486ddc230000000000b4d63009d736bf8b03c074e8072101160000000048b45d94e003e7006c5d00101989e7b8574c617fa0d713aeef3f47a7ab95a9bd77ce2cdc2929676b29d6f819c6bfac38cf98f5fc8a5d6c0f3b72e0e3c1ca671d47ab1ca79a9480d1be853c5229a31f9b774ea45c73e7d3f1943cf58df896ee02449fcd8cf136ed37415bab34760ebb71d436376ed71100005449258dfe514b6903c073e8072101160000000031af8176e003e7006b5d003a1a08ce76c7e5e9d60734c3d10ebfce55e1aabddbf1c6717f6e16cc571d8893c3c3f5837db96a453c73702c7ef217b0e6809015f551fad4e2c03c7170d282ddcec15b4406ac62441edaeaf2619d0112b4f75e28d9c309a87711943993c150cb22a4cd611f5bc1ca2d53900000ff82c2a9ce64438e03c071e807210116000000000c7f7472e003e700695d00311c8a2347fb3a878736f16b8ef301b2a95d59c19eb81ace2b491bc96df990e289400da3b545e1633521fc945085ad3ac710422d949fd16130490eaeb0de7a14e825968a9e21fe3f8e9335c5e2e5c96c2c486c8014dc75249398213283819a891cc7f015f59d8fae000000000000c6dfef2df9e87c03c073e8072101160000000031af8176e003e7006b5d00361a4a1f08a02bed90b2495186bcf99d13a4493bdff93757547006bc3366ce8521948112bde55c0681c2050743d61ca806d2f1d8b024b1c13ba17709c2e650c33fe39682022a84b869f98b2bdc15396465b1d0ae5a7c0f5b04fb77b450d1e1005082c92e3bc9f29bf3ac0000005fdd120b95a9bff603c069fa062101160000000079d49108e0037900615d003a1a08ce76c7e5e9d60734c3d10ebfce55e1aabddbf1c6717f6e14e8db17c8c5d78139a971cabb076de59c7000e10b51eeebe7aa87c12879e7568266903caf846e28ff0ed3c587b4afff9e2765603488955dd735ef51859abcca5e98e81c1b2c00000000000ebc5862e956934c00068d01e8078c01e8078b01e8078901e8078b01e8078101fa060000952576930255aaab070000000004595a")
+    println(all_ways(blocks))    // out: ok 5890 bytes
+    // At most 1000 bytes at a time, which is less than a block, so they decode one at a time.
+    println(pieces(blocks, 300, 1000))    // out: ok 5890 bytes
+    println(pieces(blocks, 300, 1))    // out: ok 5890 bytes
+    var broken = blocks.copy()
+    broken[400] = broken[400] ^ 0x10
+    println(pieces(broken, 1000))    // out: corrupt data, by byte 892
+    // Where it fails depends on how many blocks wait for each other, so on the processors.
+    println("{pieces(broken, 100).starts_with("corrupt data,")}")    // out: true
+
+    // At most 4 bytes from each `add`: it says when it has more without more input.
+    var d = Decompressor.new()
+    var got = text(d.add(hello, 4)!)
+    while not d.needs_input() {
+        got.push_str("|{text(d.add([], 4)!)}")
+    }
+    println("{got.trim_end()} {text(d.finish()!)}|")    // out: hell|o, x|z |
+
+    // Streams one after another, and what follows them.
+    println(all_ways(joined(hello, alone)))    // out: ok hello, xz / hello, lzma
+    var two = Decompressor.new()
+    let both = two.add(joined(hello, joined(alone, lzip)))!
+    println("{both.len()} {two.unused().len()} {two.finish()!.len()}")    // out: 34 0 0
+    var trail = Decompressor.new()
+    print(text(trail.add(joined(hello, "garbage!".to_bytes()))!))    // out: hello, xz
+    println("{text(trail.unused())}")    // out: garbage!
+    _ = trail.add("more".to_bytes())!
+    println("{text(trail.unused())} {trail.finish()!.len()}")    // out: garbage!more 0
+    println(pieces(joined(hello, [0u8, 0, 0, 0]), 5))    // out: the data ends early, at the end
+    println(pieces(joined(hello, alone), 1, u64.MAX, Format.Xz))    // out: ok hello, xz
+
+    // Broken files fail as `decompress` fails them, as soon as the bytes show it, but for one cut
+    // short, which only `finish` can tell.
+    println(pieces("not xz".to_bytes(), 1))    // out: not an .xz or .lzma file, by byte 5
+    println(pieces([], 1))    // out: the data ends early, at the end
+    var cut = hello.copy()
+    cut.truncate(hello.len() - 3)
+    println(pieces(cut, 7))    // out: the data ends early, at the end
+    var bad_check = hello.copy()
+    bad_check[40] = bad_check[40] ^ 1
+    println(pieces(bad_check, 1))    // out: checksum mismatch, by byte 48
+    var bad_chunk = hello.copy()
+    bad_chunk[24] = 3
+    println(pieces(bad_chunk, 1))    // out: corrupt data, by byte 25
+    println(pieces(alone, 4, u64.MAX, Format.Xz))    // out: not an .xz or .lzma file, by byte 12
+    println(pieces(hello, 10, u64.MAX, Format.Auto, 9))    // out: longer than the limit when decompressed, by byte 30
+    println(pieces(hello, 10, u64.MAX, Format.Auto, 10))    // out: ok hello, xz
+    // After failing, it fails the same way again.
+    var failed = Decompressor.new()
+    match failed.add(bad_chunk) {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: corrupt data
+    }
+    match failed.add(hello) {
+        ok(_) => println("ok"),
+        err(Error.Corrupt) => println("still corrupt"),    // out: still corrupt
+        err(e) => println("{e}"),
+    }
+
+    // The Compressor writes what `compress` writes, a block at a time.
+    var lines = String()
+    for i in 0..30000 {
+        lines.push_str("line {i}: the quick brown fox jumps over the lazy dog\n")
+    }
+    let source = lines.to_bytes()
+    for preset in [0u32, 6] {
+        for piece in [1000usize, 100000, source.len()] {
+            var c = Compressor.new(preset, Check.Crc32, Format.Xz, false, 200000)
+            var made = List<u8>()
+            var at: usize = 0
+            while at < source.len() {
+                let end = if at + piece < source.len() { at + piece } else { source.len() }
+                made.extend(c.add(source[at..end]))
+                at = end
+            }
+            made.extend(c.finish())
+            let same = made == compress(source.copy(), preset, Check.Crc32, Format.Xz, false, 200000)
+            println("{preset} {piece}: {same} {decompress(made)! == source}")
+            // out: 0 1000: true true
+            // out: 0 100000: true true
+            // out: 0 1668890: true true
+            // out: 6 1000: true true
+            // out: 6 100000: true true
+            // out: 6 1668890: true true
+        }
+    }
+    // Its first piece is the stream's header; nothing at all is an empty stream.
+    var first = Compressor.new()
+    println("{first.add("x".to_bytes()).len()} {Compressor.new().finish() == compress([])}")    // out: 12 true
+    var lzma = Compressor.new(6, Check.Crc64, Format.Alone)
+    println("{lzma.add(source[0..5000]).len()} {lzma.finish() == compress(source[0..5000], 6, Check.Crc64, Format.Alone)}")    // out: 0 true
+}

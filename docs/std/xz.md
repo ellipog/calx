@@ -1,6 +1,6 @@
 ---
 title: std.xz
-description: .xz, .lzma and .lz files decompressed as Python's lzma.decompress reads them, with every filter and check, and .xz and .lzma files compressed as xz and lzma.compress write them, both on all the processors.
+description: .xz, .lzma and .lz files decompressed as Python's lzma.decompress reads them, with every filter and check, and .xz and .lzma files compressed as xz and lzma.compress write them, both on all the processors, whole or a piece at a time.
 ---
 
 # `std.xz`
@@ -8,6 +8,8 @@ description: .xz, .lzma and .lz files decompressed as Python's lzma.decompress r
 `std.xz` decompresses .xz files, such as release archives in `.tar.xz`, and the older .lzma files and lzip's .lz files. It reads what `xz` and Python's `lzma` write, and it decompresses the same bytes as Python's `lzma.decompress` does. It fails on the same broken files, for the same reasons.
 
 It compresses too, at `xz`'s presets, into files that `xz` and Python read. On our benchmark they come out within about one percent of liblzma's size, and at the default preset a file of tens of megabytes is written 5 to 12 times as fast as liblzma writes it, on all the processors. [`std.tar`](tar.md) opens a `.tar.xz` with it, and writes one.
+
+Both also take a file [a piece at a time](#a-piece-at-a-time), for a file bigger than memory or bytes from a pipe, and give the same results.
 
 ```calx
 import std.bytes.{from_hex}
@@ -54,6 +56,8 @@ fn main() {
 | `decompress(bytes: List<u8>, format: Format = Format.Auto, limit: u64 = u64.MAX) -> List<u8> ! Error` | What the bytes decompress to, as `lzma.decompress(bytes)` gives it. Fails with `TooLong` if that's more than `limit` bytes, which is no limit unless it's given |
 | `decompress_into(bytes: List<u8>, from: usize, to: usize, format: Format, limit: u64, out: mut List<u8>) ! Error` | Decompresses `bytes[from..to]` onto the end of `out`, at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in `bytes` |
 | `compress(bytes: List<u8>, preset: u32 = 6, check: Check = Check.Crc64, format: Format = Format.Xz, extreme: bool = false, block_size: u64 = 0) -> List<u8>` | The bytes compressed, as `lzma.compress(bytes, preset=...)` and `xz -6` compress them. See [Compressing](#compressing) |
+| `Decompressor.new(format: Format = Format.Auto, limit: u64 = u64.MAX) -> Decompressor` | A decompressor that takes the bytes a piece at a time. See [A piece at a time](#a-piece-at-a-time) |
+| `Compressor.new(preset: u32 = 6, check: Check = Check.Crc64, format: Format = Format.Xz, extreme: bool = false, block_size: u64 = 0) -> Compressor` | A compressor that takes the text a piece at a time, and writes what `compress` writes |
 | `is_xz(bytes: List<u8>) -> bool` | Whether the bytes start as an .xz file does: `fd 37 7a 58 5a 00` |
 | `crc64(bytes: List<u8>) -> u64` | The CRC-64 .xz files check blocks with: ECMA-182's, reflected, as `lzma_crc64` gives it |
 
@@ -76,7 +80,7 @@ Why bytes don't decompress, as `Error`:
 | `Truncated` | They end before the file does | the data ends early |
 | `TooLong` | What they decompress to is more than the limit | longer than the limit when decompressed |
 
-Python raises an `LZMAError` for the first four, with "Input format not supported by decoder", "Invalid or unsupported options" or "Corrupt input data", and an `EOFError` for `Truncated`. A wrong check is "Corrupt input data" in Python. `std.xz` says which it is.
+Python's `lzma.decompress` raises an `LZMAError` for each: "Input format not supported by decoder", "Invalid or unsupported options", "Corrupt input data", and "Compressed data ended before the end-of-stream marker was reached" for `Truncated`, which a file from `lzma.open` raises as an `EOFError`. A wrong check is "Corrupt input data" in Python. `std.xz` says which it is.
 
 - Files one after another decompress one after another, as `xz` writes them with `xz -c a b`, and they don't have to be of one format. After the first file, `decompress` stops quietly at bytes that aren't the start of another, as Python does. It fails if they are the start of one, cut short. Null bytes after an .xz stream, padding in fours, are the start of one.
 - Every filter .xz has: LZMA2 last, and up to three of delta, x86, PowerPC, IA-64, ARM, ARM-Thumb, ARM64, SPARC and RISC-V before it, with their start offsets. Every check: none, CRC-32, CRC-64 and SHA-256. Checks of the IDs the format reserves for later aren't checked, as liblzma doesn't check them.
@@ -110,6 +114,113 @@ The fast parser takes the longest match unless a repeat of a recent distance is 
 - `compress` panics for a preset past 9, and for `Format.Auto`.
 
 On one thread, `xz` and liblzma write the whole text as one block without slices, as Python does. So what they write is up to about one percent smaller than what `std.xz` writes, and it decompresses on one thread only.
+
+## A piece at a time
+
+`Decompressor` takes a file a piece at a time, for a file bigger than memory, or bytes from a pipe or a socket, as Python's `LZMADecompressor` and `lzma.open` take them. `Compressor` takes text a piece at a time, as `LZMACompressor` does, and writes the same bytes `compress` writes for all of it.
+
+```calx
+import std.xz.{Compressor, Decompressor, compress}
+
+fn main() {
+    let text = "a line of text, and the same line again\n".repeat(100000).to_bytes()
+    let packed = compress(text.copy())
+
+    // In pieces of 64 KiB, as a file or a pipe would give them, onto one list.
+    var d = Decompressor.new()
+    var out = List<u8>()
+    var at: usize = 0
+    while at < packed.len() {
+        let end = if at + 65536 < packed.len() { at + 65536 } else { packed.len() }
+        d.add_into(packed, at, end, u64.MAX, mut out)!
+        at = end
+    }
+    d.finish_into(mut out)!
+    println("{out == text}")    // out: true
+
+    // The text in four pieces, compressed as it comes: the same bytes `compress` gives.
+    var c = Compressor.new()
+    var made = List<u8>()
+    for k in 0usize..4 {
+        made.extend(c.add(text[k * 1000000..(k + 1) * 1000000]))
+    }
+    made.extend(c.finish())
+    println("{made == packed}")    // out: true
+}
+```
+
+A file decompressed into another, a mebibyte at a time, holding neither:
+
+```calx
+import std.fs.{append, open_read, read, remove_file, temp_dir, write}
+import std.xz.{Decompressor, compress}
+
+fn main() {
+    let dir = temp_dir()!
+    let text = "some text, many times over\n".repeat(200000).to_bytes()
+    write("{dir}/calx_xz_doc.txt.xz", compress(text.copy()))!
+
+    let file = open_read("{dir}/calx_xz_doc.txt.xz")!
+    write("{dir}/calx_xz_doc.txt", [])!
+    var d = Decompressor.new()
+    var at: u64 = 0
+    loop {
+        let piece = file.read_part(at, 1048576)!
+        if piece.is_empty() {
+            break
+        }
+        at += u64(piece.len())
+        append("{dir}/calx_xz_doc.txt", d.add(piece)!)!
+    }
+    append("{dir}/calx_xz_doc.txt", d.finish()!)!
+    file.close()!
+    println("{read("{dir}/calx_xz_doc.txt")! == text}")    // out: true
+    remove_file("{dir}/calx_xz_doc.txt")!
+    remove_file("{dir}/calx_xz_doc.txt.xz")!
+}
+```
+
+| Item | Gives | Python's |
+| --- | --- | --- |
+| `Decompressor.new(format: Format = Format.Auto, limit: u64 = u64.MAX) -> Decompressor` | A decompressor for `format`, which fails with `TooLong` once more than `limit` bytes have come out | `LZMADecompressor(format)` |
+| `d.add(bytes: List<u8>, most: u64 = u64.MAX) -> List<u8> ! Error` | Takes the next piece, of any size, and gives what it and the pieces before decompress to that it hasn't given yet, at most `most` bytes | `d.decompress(data, max_length)` |
+| `d.add_into(bytes: List<u8>, from: usize, to: usize, most: u64, out: mut List<u8>) ! Error` | Takes `bytes[from..to]` as the next piece, and puts what it gives onto the end of `out`, which can be kept from one piece to the next. On an error, `out` is as it was | |
+| `d.needs_input() -> bool` | Whether the last `add` gave all it could, and wants the next piece. It's false when `add` stopped at `most` bytes; then `add` with no bytes gives more | `d.needs_input` |
+| `d.unused() -> List<u8>` | The bytes after the end of the data, which aren't another stream, once `add` comes to them | `d.unused_data` |
+| `d.finish() -> List<u8> ! Error`, `d.finish_into(out: mut List<u8>) ! Error` | Ends the data, and gives the rest. Fails with `Truncated` if the data ended early | `d.eof` |
+| `Compressor.new(preset: u32 = 6, check: Check = Check.Crc64, format: Format = Format.Xz, extreme: bool = false, block_size: u64 = 0) -> Compressor` | A compressor with `compress`'s settings, which panics as `compress` does | `LZMACompressor(format, check, preset)` |
+| `c.add(bytes: List<u8>) -> List<u8>` | Takes the next piece of text, and gives what's compressed that it hasn't given: the stream's header first, then blocks as they fill | `c.compress(data)` |
+| `c.finish() -> List<u8>` | Compresses the rest of the text, and gives it with the end of the file | `c.flush()` |
+
+- **The same results.** However the bytes come, from a byte at a time to all at once, `Decompressor` gives what `decompress` gives, and fails where it fails, with the same error. It fails as soon as the bytes show the error, but for `Truncated`, which only `finish` can tell. After an error it fails the same way again.
+- **What it holds** is the dictionary, the input it hasn't used, and what it hasn't given out. The dictionary is in a window with room for three of it and 2 MiB more, so that the window seldom slides to make room, and moves little when it does. LZMA2 decodes a chunk at a time, once the chunk is all there, and a chunk holds at most 64 KiB of input.
+- **Blocks at once.** `xz` writes both of a block's sizes into its header when it compresses on more than one thread, as it does by default since 5.6, and so does `compress`. The decompressor waits for several such blocks, as many as there are processors, up to 256 MiB of what they decompress to, and then decompresses them at once on all the processors, as `xz -T0 -d` does. That holds more: the blocks' input and their output. With `most` below what a block decompresses to, it decompresses them one at a time instead, holding no more than for any other file.
+- **Streams one after another** decompress one after another, as with `decompress` and `lzma.open`. Python's `LZMADecompressor` stops at the end of the first, with the rest in `unused_data`. After a stream, bytes that fail before they decompress to anything aren't another, as for `decompress`: the data ends quietly there, and `unused` gives them. A later stream that fails after it has decompressed something fails, where `decompress` stops quietly before it, since what came out of it has been given.
+- **The compressor** cuts the text into blocks by size, as `compress` does, so the same text makes the same file whatever the pieces were. It holds the text until as many blocks as there are processors have filled, up to 64 MiB of text, then compresses them at once and gives them out. A .lzma file has no blocks, so with `Format.Alone` it holds all the text until `finish`, and writes what `compress` writes, with the size in the header. Python's `LZMACompressor` writes a .lzma file as it goes, with the size unknown and an end marker.
+
+Decompressing the files from [How it's checked](#how-its-checked), in ms. Each time is the best of 3 rounds of 5 runs, with the programs taking turns, on the i9-13900K with other programs running, so the numbers are rough. `text` is 30 MB of Calx docs and source, changed a little here and there. `bin` is 15 MB of `calx`'s Linux program. `text.mt` is the 30 MB from `xz -T0 --block-size=4MiB`, in 8 blocks. The pieces are 64 KiB:
+
+| File | Calx | Calx, in pieces | Python 3.14 | Python, in pieces |
+| --- | --- | --- | --- | --- |
+| text, preset 6 (55:1) | 17.3 | 21.2 | 48.0 | 51.5 |
+| text, preset 1, SHA-256 | 127.5 | 132.6 | 243.1 | 256.1 |
+| bin, x86, preset 1 | 114.3 | 113.3 | 174.2 | 178.8 |
+| text, .lzma, preset 1 | 79.6 | 78.6 | 117.3 | 124.5 |
+| text.mt | 14.2 | 15.0 | 133.3 | 136.4 |
+
+In WSL on the same machine, with liblzma built by GCC:
+
+| File | Calx | Calx, in pieces | Python 3.14 | Python, in pieces |
+| --- | --- | --- | --- | --- |
+| text, preset 6 (55:1) | 18.4 | 21.2 | 34.7 | 24.5 |
+| text, preset 1, SHA-256 | 127.3 | 129.8 | 166.1 | 161.8 |
+| bin, x86, preset 1 | 108.2 | 107.9 | 106.5 | 102.7 |
+| text, .lzma, preset 1 | 74.8 | 77.3 | 71.8 | 69.2 |
+| text.mt | 12.1 | 12.9 | 85.1 | 71.3 |
+
+- In pieces, the text is copied out of the window into what `add` gives. A whole file doesn't need that copy, as `decompress` writes the text straight where it goes. The copy is most of the difference, and it shows most on text that compresses 55 to 1, where decoding takes least.
+- On one thread, GCC's liblzma is 3 to 10% ahead of `std.xz` on the program and on the .lzma file. Python decodes on one thread, so on `text.mt` it takes 6 to 9 times as long.
+- In pieces of 1 MiB, `Compressor` took 94 ms where `compress` took 88 for `text` at preset 0, and 1,458 ms where `compress` took 1,381 at preset 6. The bytes were the same.
 
 ## Speed
 
@@ -176,6 +287,10 @@ Finding the matches on all the processors takes more memory than one thread does
 
 The [tests](../../tests/std/xz.calx) hold Python's bytes and Python's outcomes.
 
+`Decompressor` was run on the same 67,772 files, and on 10 one-block files of 6 to 30 MB, with filters, checks, .lzma and .lz, long enough that its window slides many times. Each was given in pieces of 7, 61 and 4,096 bytes, of 1 byte for files up to 3 KB, and all at once; with at most 5, 777 and 1,000 bytes from each `add`; and with limits just under and at what it decompresses to. Each of the 457,138 runs gave what `decompress` gave, the same bytes or the same error, on Windows and on Linux, with 32 workers and with 1. The [tests](../../tests/std/xz_stream.calx) cut Python's files into pieces too.
+
+`Compressor` was run on text from empty to 5 MB, at presets 0, 1 and 6, in blocks of 64 KiB, of 300 KB and of the preset's size, with each check, in pieces of 1,000 bytes to all of it: 489 files, each the same as `compress` wrote.
+
 What `compress` writes was checked on 16 files: text, programs, random bytes, zeros, runs and repeats, from empty to 5 MB. Each was compressed at every preset, at presets 0, 3 and 6 with `extreme`, in blocks of 300 KB and of the preset's size, with every check, and as .lzma: 448 files. `std.xz`, Python 3.14's `lzma` and `xz` 5.8.3 each decompressed all 448 to what went in. Each file also came out the same on 1, 2, 5 and 32 workers. The [tests](../../tests/std/xz_compress.calx) compress at every preset, check that `std.xz` decompresses what they write, and that it's the same on 1 and 3 workers.
 
 ## How it's built
@@ -190,6 +305,7 @@ Decompressing is [runtime/calx_xz.c](../../runtime/calx_xz.c), linked only into 
 | Copying a match | 16 bytes at a time when the distance is at least the length, never past its end, so blocks next to each other can decode at the same time |
 | CRC-64 | Folded with the processor's carry-less multiply in four lanes, 64 bytes a step, at about 39 GB/s on bytes in the cache, with tables where it's missing |
 | CRC-32 and SHA-256 | `std.zlib`'s and `std.hash`'s |
+| A piece at a time | LZMA2 decodes a chunk once it's all there. LZMA stops between symbols while a symbol's most input is left, then tries to finish from what's there, going back to a copy of its state if that runs out. The window slides what matches can reach to its front: once the text since the dictionary was last reset is longer than they reach, only the low four bits of positions matter, which pick probabilities. The branch filters say where they stopped, and x86's two numbers and delta's last 256 bytes carry over |
 
 Compressing is [runtime/calx_xzenc.c](../../runtime/calx_xzenc.c), written from the same specification and the LZMA SDK's account of LZMA's encoder. It has no liblzma code.
 

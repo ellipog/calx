@@ -1,6 +1,7 @@
 /// .xz and .lzma files, decompressed as Python's `lzma.decompress` reads them (CLX-173), and
 /// compressed as `xz` and `lzma.compress` write them (CLX-176): release archives such as
-/// `.tar.xz`, and whatever `xz` or Python's `lzma` wrote.
+/// `.tar.xz`, and whatever `xz` or Python's `lzma` wrote. Whole, or a piece at a time, as
+/// `LZMADecompressor` and `LZMACompressor` take them (CLX-179).
 module std.xz
 
 import std.bytes.{put_u32_le, put_u64_le, set_u32_le, u32_le, u64_le}
@@ -25,6 +26,13 @@ extern "C" {
     fn cx_xze_blocks(n: u64, block: u64) -> u64
     fn cx_xze_take(h: u64, b: u64, dst: *u8)
     fn cx_xze_end(h: u64)
+    fn cx_xz_resume(ctx: *u8, partial: i32)
+    fn cx_xz_slide(ctx: *u8, buf: *u8, keep: usize) -> usize
+    fn cx_xz_chain_start(ctx: *u8, filters: *const u64, count: u32)
+    fn cx_xz_chain(ctx: *u8, buf: *u8, n: usize, at: u64, last: i32) -> usize
+    fn cx_workers() -> usize
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+    fn memmove(to: *u8, from: *const u8, n: usize) -> *u8
 }
 
 /// Which files `decompress` takes, and which `compress` writes.
@@ -38,8 +46,8 @@ pub enum Format {
     Alone
 }
 
-/// Why bytes didn't decompress. Python raises an `LZMAError` for all but `Truncated`, which is
-/// an `EOFError`.
+/// Why bytes didn't decompress. Python's `lzma.decompress` raises an `LZMAError` for each, and a
+/// file from `lzma.open` an `EOFError` for `Truncated`.
 pub enum Error {
     /// They're neither .xz nor .lzma. Python says "Input format not supported by decoder".
     Format
@@ -256,51 +264,71 @@ fn take(h: u64, b: u64, size: u64, out: mut List<u8>) {
 // The .xz stream around the blocks: the header, each block with its header, padding and check,
 // the index, and the footer.
 fn write_xz(bytes: List<u8>, dict: u64, each: u64, check: Check, h: u64, sizes: List<u64>, out: mut List<u8>) {
-    let id: u8 = match check {
-        None => 0,
-        Crc32 => 1,
-        Crc64 => 4,
-        Sha256 => 10,
-    }
-    let magic: List<u8> = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0]
-    out.extend(magic)
-    out.push(0)
-    out.push(id)
-    let flags = crc32(out, 6, 8)
-    put_u32_le(mut out, flags)
+    let id = check_id(check)
+    put_stream_header(id, mut out)
     let n = u64(bytes.len())
     var records = List<u8>()
     for b in 0u64..u64(sizes.len()) {
         let from = b * each
         let len = if n - from < each { n - from } else { each }
-        let packed = sizes[usize.wrap(b)]
-        // Both sizes, so the blocks can be decompressed at once, then LZMA2's filter flags.
-        let head = out.len()
-        out.push(0)
-        out.push(0xC0)
-        put_vli(mut out, packed)
-        put_vli(mut out, len)
-        out.push(0x21)
-        out.push(1)
-        out.push(dict_code(if len < dict { len } else { dict }))
-        while (out.len() - head) % 4 != 0 {
-            out.push(0)
-        }
-        out[head] = u8.wrap((out.len() - head) / 4)
-        let head_crc = crc32(out, head, out.len())
-        put_u32_le(mut out, head_crc)
-        let head_size = out.len() - head
-        take(h, b, packed, mut out)
-        while (out.len() - head) % 4 != 0 {
-            out.push(0)
-        }
-        put_check(id, bytes, usize.wrap(from), usize.wrap(from + len), mut out)
-        put_vli(mut records, u64(head_size) + packed + u64(check_size(id)))
-        put_vli(mut records, len)
+        put_block(h, b, sizes[usize.wrap(b)], bytes, usize.wrap(from), len, dict, id, mut out, mut records)
     }
+    put_index(records, u64(sizes.len()), id, mut out)
+}
+
+fn check_id(check: Check) -> u8 {
+    return match check {
+        None => 0,
+        Crc32 => 1,
+        Crc64 => 4,
+        Sha256 => 10,
+    }
+}
+
+fn put_stream_header(id: u8, out: mut List<u8>) {
+    let magic: List<u8> = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0]
+    let at = out.len()
+    out.extend(magic)
+    out.push(0)
+    out.push(id)
+    let flags = crc32(out, at + 6, at + 8)
+    put_u32_le(mut out, flags)
+}
+
+// Block b of the compressor's, which holds `len` bytes of text from bytes[from], onto `out`: its
+// header, which gives both sizes, so the blocks can be decompressed at once, then LZMA2's filter
+// flags; its LZMA2, which is `packed` bytes; its padding, and its check. Its record for the index
+// goes onto `records`.
+fn put_block(h: u64, b: u64, packed: u64, bytes: List<u8>, from: usize, len: u64, dict: u64, id: u8, out: mut List<u8>, records: mut List<u8>) {
+    let head = out.len()
+    out.push(0)
+    out.push(0xC0)
+    put_vli(mut out, packed)
+    put_vli(mut out, len)
+    out.push(0x21)
+    out.push(1)
+    out.push(dict_code(if len < dict { len } else { dict }))
+    while (out.len() - head) % 4 != 0 {
+        out.push(0)
+    }
+    out[head] = u8.wrap((out.len() - head) / 4)
+    let head_crc = crc32(out, head, out.len())
+    put_u32_le(mut out, head_crc)
+    let head_size = out.len() - head
+    take(h, b, packed, mut out)
+    while (out.len() - head) % 4 != 0 {
+        out.push(0)
+    }
+    put_check(id, bytes, from, from + usize.wrap(len), mut out)
+    put_vli(mut records, u64(head_size) + packed + u64(check_size(id)))
+    put_vli(mut records, len)
+}
+
+// The index of `count` blocks, whose records are `records`, and the stream footer.
+fn put_index(records: List<u8>, count: u64, id: u8, out: mut List<u8>) {
     let listed = out.len()
     out.push(0)
-    put_vli(mut out, u64(sizes.len()))
+    put_vli(mut out, count)
     out.extend(records)
     while (out.len() - listed) % 4 != 0 {
         out.push(0)
@@ -308,13 +336,13 @@ fn write_xz(bytes: List<u8>, dict: u64, each: u64, check: Check, h: u64, sizes: 
     let index_crc = crc32(out, listed, out.len())
     put_u32_le(mut out, index_crc)
     let backward = u32.wrap((out.len() - listed) / 4 - 1)
-    let footer = out.len()
+    let foot = out.len()
     put_u32_le(mut out, 0)
     put_u32_le(mut out, backward)
     out.push(0)
     out.push(id)
-    let footer_crc = crc32(out, footer + 4, footer + 10)
-    set_u32_le(mut out, footer, footer_crc)
+    let foot_crc = crc32(out, foot + 4, foot + 10)
+    set_u32_le(mut out, foot, foot_crc)
     out.push(0x59)
     out.push(0x5A)
 }
@@ -373,19 +401,7 @@ fn stream(bytes: List<u8>, at: usize, to: usize, format: Format, cap: u64, ctx: 
 // The stream header, its blocks, the index and the footer, checked as liblzma checks them and in
 // its order, so the same bytes fail the same way.
 fn xz(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
-    if to - at < 12 {
-        fail Error.Truncated
-    }
-    if not (bytes[at] == 0xFD and bytes[at + 1] == 0x37 and bytes[at + 2] == 0x7A and bytes[at + 3] == 0x58 and bytes[at + 4] == 0x5A and bytes[at + 5] == 0) {
-        fail Error.Format
-    }
-    if crc32(bytes, at + 6, at + 8) != u32_le(bytes, at + 8) {
-        fail Error.Corrupt
-    }
-    if bytes[at + 6] != 0 or bytes[at + 7] & 0xF0 != 0 {
-        fail Error.Options
-    }
-    let check = bytes[at + 7]
+    let check = try stream_header(bytes, at, to)
     // Each block's size without its padding, and what it decompresses to.
     var sizes = List<u64>()
     var p = at + 12
@@ -405,6 +421,31 @@ fn xz(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: m
     }
     let index_at = p
     p = try index(bytes, p, to, sizes)
+    try footer(bytes, p, to, index_at, check)
+    return p + 12
+}
+
+// The stream header at bytes[at..to): the magic bytes, the flags and their CRC-32. Gives the ID of
+// the check the blocks have.
+fn stream_header(bytes: List<u8>, at: usize, to: usize) -> u8 ! Error {
+    if to - at < 12 {
+        fail Error.Truncated
+    }
+    if not (bytes[at] == 0xFD and bytes[at + 1] == 0x37 and bytes[at + 2] == 0x7A and bytes[at + 3] == 0x58 and bytes[at + 4] == 0x5A and bytes[at + 5] == 0) {
+        fail Error.Format
+    }
+    if crc32(bytes, at + 6, at + 8) != u32_le(bytes, at + 8) {
+        fail Error.Corrupt
+    }
+    if bytes[at + 6] != 0 or bytes[at + 7] & 0xF0 != 0 {
+        fail Error.Options
+    }
+    return bytes[at + 7]
+}
+
+// The stream footer at bytes[p..to), after the index at `index_at`: its CRC-32, the index's size,
+// and the flags, which must be the header's.
+fn footer(bytes: List<u8>, p: usize, to: usize, index_at: usize, check: u8) ! Error {
     if to - p < 12 {
         fail Error.Truncated
     }
@@ -420,7 +461,6 @@ fn xz(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: m
     if (u64(u32_le(bytes, p + 4)) + 1) * 4 != u64(p - index_at) or bytes[p + 9] != check {
         fail Error.Corrupt
     }
-    return p + 12
 }
 
 // How many bytes a block's check takes, by its ID.
@@ -898,6 +938,19 @@ fn vli_size(v: u64) -> u64 {
 // liblzma's auto decoder, which takes only the dictionary sizes LZMA's tools write, and sizes
 // under 256 GiB, as so much else could pass for a header.
 fn alone(bytes: List<u8>, at: usize, to: usize, picky: bool, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    let h = try alone_header(bytes, at, to, picky)
+    return try lzma1(bytes, at + 13, to, h.props, h.dict, h.size, cap, mut ctx, mut out)
+}
+
+// What a .lzma file's header says: the properties byte, the dictionary size, and the size, or
+// UNKNOWN.
+struct Alone {
+    props: u32
+    dict: u32
+    size: u64
+}
+
+fn alone_header(bytes: List<u8>, at: usize, to: usize, picky: bool) -> Alone ! Error {
     let n = to - at
     if n < 1 {
         fail Error.Truncated
@@ -929,13 +982,29 @@ fn alone(bytes: List<u8>, at: usize, to: usize, picky: bool, cap: u64, ctx: mut 
     if picky and size != UNKNOWN and size >= 274877906944 {
         fail Error.Format
     }
-    return try lzma1(bytes, at + 13, to, props, dict, size, cap, mut ctx, mut out)
+    return Alone { props: props, dict: dict, size: size }
 }
 
 // A .lz file's member, as liblzma reads one since xz 5.4: `LZIP`, a version, the dictionary size,
 // LZMA data with an end marker, then the CRC-32 and size of what it holds, and for version 1 the
 // member's own size.
 fn lzip(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out: mut List<u8>) -> usize ! Error {
+    let h = try lzip_header(bytes, at, to)
+    let start = out.len()
+    // lc 3, lp 0, pb 2.
+    let end = try lzma1(bytes, at + 6, to, 93, h.dict, UNKNOWN, cap, mut ctx, mut out)
+    let made = out.len() - start
+    let crc = unsafe { cx_zlib_crc32(0, out.as_ptr().add(start), made) }
+    return try lzip_trailer(bytes, end, to, h.version, crc, u64(made), u64(end - at))
+}
+
+// What an .lz member's header says: its version, and the dictionary size.
+struct Lzip {
+    version: u8
+    dict: u32
+}
+
+fn lzip_header(bytes: List<u8>, at: usize, to: usize) -> Lzip ! Error {
     let magic: List<u8> = [0x4C, 0x5A, 0x49, 0x50]
     for k in 0usize..4 {
         if at + k >= to {
@@ -962,19 +1031,21 @@ fn lzip(bytes: List<u8>, at: usize, to: usize, cap: u64, ctx: mut List<u8>, out:
     if log < 12 or log > 29 or (log == 12 and frac > 0) {
         fail Error.Corrupt
     }
-    let dict = (1u32 << log) - (frac << (log - 4))
-    let start = out.len()
-    // lc 3, lp 0, pb 2.
-    let end = try lzma1(bytes, at + 6, to, 93, dict, UNKNOWN, cap, mut ctx, mut out)
+    return Lzip { version: version, dict: (1u32 << log) - (frac << (log - 4)) }
+}
+
+// The trailer of an .lz member at bytes[end..to), after its LZMA data: the CRC-32 and the size of
+// what it decompressed to, `crc` and `made`, and for version 1 the member's own size, which is
+// `before` bytes up to the trailer, and the trailer. Gives where the member ends.
+fn lzip_trailer(bytes: List<u8>, end: usize, to: usize, version: u8, crc: u32, made: u64, before: u64) -> usize ! Error {
     let size: usize = if version == 0 { 12 } else { 20 }
     if to - end < size {
         fail Error.Truncated
     }
-    let made = out.len() - start
-    if unsafe { cx_zlib_crc32(0, out.as_ptr().add(start), made) } != u32_le(bytes, end) {
+    if crc != u32_le(bytes, end) {
         fail Error.Checksum
     }
-    if u64_le(bytes, end + 4) != u64(made) or (version == 1 and u64_le(bytes, end + 12) != u64(end + 20 - at)) {
+    if u64_le(bytes, end + 4) != made or (version == 1 and u64_le(bytes, end + 12) != before + 20) {
         fail Error.Corrupt
     }
     return end + size
@@ -1014,6 +1085,900 @@ fn lzma1(bytes: List<u8>, data: usize, to: usize, props: u32, dict: u32, size: u
             fail Error.Truncated
         }
         fail Error.Corrupt
+    }
+}
+
+// --- a piece at a time ---------------------------------------------------------------------------
+
+// Where a Decompressor is in the data: at a stream's start; at an .xz block's header or the index;
+// in a block's data; at its padding and check; at the index and the footer; in .lzma or .lz data;
+// at an .lz member's trailer; or past the end, where the rest is unused.
+const AT_STREAM: u8 = 0
+const AT_BLOCK: u8 = 1
+const IN_BLOCK: u8 = 2
+const AT_CHECK: u8 = 3
+const AT_INDEX: u8 = 4
+const IN_LZMA: u8 = 5
+const AT_TRAILER: u8 = 6
+const ENDED: u8 = 7
+// The room a decoder has in its window before each call: an LZMA2 chunk's most text, and more.
+const ROOM: usize = 2101248
+// The runtime's filter chain, CX_XZ_CHAIN, and SHA-256's context, CX_DIGEST_CTX.
+const CHAIN: usize = 1024
+const DIGEST: usize = 224
+// The version a Decompressor gives .lzma, which isn't an .lz member.
+const NOT_LZIP: u8 = 255
+// The most a Decompressor waits to decompress at once: what blocks decompress to, and the input
+// they take.
+const AT_ONCE: u64 = 268435456
+
+/// .xz, .lzma and .lz data decompressed as it comes, a piece at a time, as `decompress` does with
+/// all of it at once: a file bigger than memory read a part at a time, or bytes from a pipe or a
+/// socket, as Python's `LZMADecompressor` and `lzma.open` take them. It holds the dictionary, the
+/// input it hasn't used, and what it hasn't given out yet. Blocks whose headers give both their
+/// sizes, as `xz -T` writes them, wait until several are here, and decompress at once.
+pub struct Decompressor {
+    format: Format
+    limit: u64
+    // What it has decompressed, and whether a stream has ended, so another may start. Where the
+    // stream it's in started in the input, and what had been decompressed then: a stream after the
+    // first that fails before it makes anything is where the data ends, as in `decompress`.
+    made: u64 = 0
+    later: bool = false
+    stream_at: usize = 0
+    stream_from: u64 = 0
+    // The input, which it has used up to `skip`, and where it is in the data.
+    input: List<u8>
+    skip: usize = 0
+    part: u8 = 0
+    // Whether the last call stopped for want of input, and the error it failed with. How many
+    // threads `parallel for` has, and the `most` of the call it's in.
+    hungry: bool = true
+    failed: Error? = none
+    workers: u64 = 1
+    most: u64 = 0
+    // An .xz stream's check and its blocks' sizes so far; the block's header's sizes, and how much
+    // of its data it has used, and what that made.
+    check: u8 = 0
+    sizes: List<u64>
+    packed: u64 = 0
+    unpacked: u64 = 0
+    head_size: u64 = 0
+    used: u64 = 0
+    block_made: u64 = 0
+    // An .lz member's version, or NOT_LZIP, and how much of the member it has used.
+    version: u8 = 0
+    member: u64 = 0
+    // The decoder, a copy to go back to, and its window: the dictionary, and from `given` on what
+    // hasn't gone out.
+    ctx: List<u8>
+    spare: List<u8>
+    window: List<u8>
+    given: usize = 0
+    // A block's filters before LZMA2, and what's come out of LZMA2 but isn't through them all and
+    // out: tail[tail_from..], which is `tail_at` into the block, with `ready` bytes through.
+    filtered: bool = false
+    chain: List<u8>
+    tail: List<u8>
+    tail_from: usize = 0
+    tail_at: u64 = 0
+    ready: usize = 0
+    // The check of what has gone out of the block or member, by the .xz check's ID: 0 for none, 1
+    // for CRC-32, 4 for CRC-64 and 10 for SHA-256.
+    sum: u8 = 0
+    crc32: u32 = 0
+    crc64: u64 = 0
+    sha: List<u8>
+}
+
+impl Decompressor {
+    /// A decompressor for `format`, which fails with `TooLong` once more than `limit` bytes have
+    /// come out, as `decompress` does.
+    pub fn new(format: Format = Format.Auto, limit: u64 = u64.MAX) -> Decompressor {
+        // How many threads there are changes when the output comes, not what it is.
+        let workers = u64(unsafe { cx_workers() })
+        return Decompressor { format: format, limit: limit, workers: workers, input: [], sizes: [], ctx: [0; CTX], spare: [], window: [], chain: [], tail: [], sha: [] }
+    }
+
+    /// Takes the next piece, and gives what it and the pieces before decompress to that hasn't
+    /// been given yet, at most `most` bytes. A piece can be any size, even empty. Fails as
+    /// `decompress` fails, but for `Truncated`, which only `finish` can tell, and fails the same
+    /// way again after that.
+    pub fn add(mut self, bytes: List<u8>, most: u64 = u64.MAX) -> List<u8> ! Error {
+        var out = List<u8>()
+        try self.add_into(bytes, 0, bytes.len(), most, mut out)
+        return out
+    }
+
+    /// Takes bytes[from..to] as the next piece, as `add` does, and puts what it gives onto the end
+    /// of `out`, which can be kept from one call to the next. On an error, `out` is as it was.
+    /// Panics unless the range is in `bytes`.
+    @track_caller
+    pub fn add_into(mut self, bytes: List<u8>, from: usize, to: usize, most: u64, out: mut List<u8>) ! Error {
+        if from > to or to > bytes.len() {
+            panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+        }
+        if let e = self.failed {
+            fail e
+        }
+        self.take(bytes, from, to)
+        if self.part == ENDED {
+            return
+        }
+        let mark = out.len()
+        match self.run(mut out, most, false) {
+            ok => return,
+            err(e) => {
+                out.truncate(mark)
+                self.failed = some(e)
+                fail e
+            }
+        }
+    }
+
+    /// Whether the last `add` gave all it could from what it has, so it wants the next piece.
+    /// It's false when `add` stopped at `most` bytes: then `add` with no bytes gives more.
+    pub fn needs_input(self) -> bool {
+        return self.hungry
+    }
+
+    /// What it was given after the end of the data: after a stream, bytes that aren't another,
+    /// which fail before they decompress to anything, as `decompress` stops quietly at them. Empty
+    /// until `add` comes to them.
+    pub fn unused(self) -> List<u8> {
+        if self.part != ENDED {
+            return []
+        }
+        return self.input[self.skip..]
+    }
+
+    /// Ends the data: gives all the rest of what it decompresses to, and fails with `Truncated` if
+    /// the data ended early, as `decompress` would.
+    pub fn finish(own self) -> List<u8> ! Error {
+        var out = List<u8>()
+        try self.finish_into(mut out)
+        return out
+    }
+
+    /// Ends the data as `finish` does, putting the rest onto the end of `out`. On an error, `out`
+    /// is as it was.
+    pub fn finish_into(own self, out: mut List<u8>) ! Error {
+        var d = self
+        if let e = d.failed {
+            fail e
+        }
+        if d.part != ENDED {
+            let mark = out.len()
+            match d.run(mut out, u64.MAX, true) {
+                ok => {},
+                err(e) => {
+                    out.truncate(mark)
+                    fail e
+                },
+            }
+        }
+    }
+
+    // Adds bytes[from..to] to the input, first dropping what's used when that's at least half of it,
+    // but for a stream after the first that hasn't made anything yet, which may turn out unused.
+    fn take(mut self, bytes: List<u8>, from: usize, to: usize) {
+        let drop = if self.later and self.made == self.stream_from and self.stream_at < self.skip { self.stream_at } else { self.skip }
+        if drop > 0 and drop >= self.input.len() / 2 {
+            let left = self.input.len() - drop
+            unsafe {
+                _ = memmove(self.input.as_mut_ptr(), self.input.as_ptr().add(drop), left)
+                self.input.set_len(left)
+            }
+            self.skip -= drop
+            self.stream_at = if self.stream_at > drop { self.stream_at - drop } else { 0 }
+        }
+        let at = self.input.len()
+        self.input.reserve(to - from)
+        unsafe {
+            _ = memcpy(self.input.as_mut_ptr().add(at), bytes.as_ptr().add(from), to - from)
+            self.input.set_len(at + to - from)
+        }
+    }
+
+    // Decompresses what it can onto `out`, at most `most` bytes, stopping when it wants more input.
+    // With `ending`, the input it has is all there is.
+    fn run(mut self, out: mut List<u8>, most: u64, ending: bool) ! Error {
+        let start = out.len()
+        self.most = most
+        loop {
+            let room = room_left(most, out.len() - start)
+            self.give(mut out, room)
+            let after = room_left(most, out.len() - start)
+            if after == 0 {
+                self.hungry = false
+                return
+            }
+            var moved = false
+            match self.step(mut out, after, ending) {
+                ok(m) => moved = m,
+                err(e) => {
+                    // After a stream, bytes that fail before they make anything aren't another,
+                    // and `decompress` stops quietly at them, unless they're one cut short.
+                    if not self.later or self.made != self.stream_from or e == Error.Truncated or e == Error.TooLong {
+                        fail e
+                    }
+                    self.part = ENDED
+                    self.skip = self.stream_at
+                }
+            }
+            if not moved {
+                self.hungry = true
+                return
+            }
+        }
+    }
+
+    // Takes a step through the data: gives whether it took one, or false when it wants more input.
+    fn step(mut self, out: mut List<u8>, room: usize, ending: bool) -> bool ! Error {
+        let part = self.part
+        if part == AT_STREAM {
+            return try self.at_stream(ending)
+        }
+        if part == AT_BLOCK {
+            return try self.at_block(mut out, room, ending)
+        }
+        if part == IN_BLOCK {
+            return try self.in_block(ending)
+        }
+        if part == AT_CHECK {
+            return try self.at_check(ending)
+        }
+        if part == AT_INDEX {
+            return try self.at_index(ending)
+        }
+        if part == IN_LZMA {
+            return try self.in_lzma(ending)
+        }
+        if part == AT_TRAILER {
+            return try self.at_trailer(ending)
+        }
+        return false
+    }
+
+    fn at_stream(mut self, ending: bool) -> bool ! Error {
+        if self.skip == self.input.len() {
+            if ending and not self.later {
+                fail Error.Truncated
+            }
+            return false
+        }
+        self.stream_at = self.skip
+        self.stream_from = self.made
+        match self.start_stream() {
+            ok => return true,
+            err(e) => {
+                if e == Error.Truncated {
+                    return try more(ending)
+                }
+                fail e
+            }
+        }
+    }
+
+    // Reads the header of the stream at `skip`, told apart as `stream` tells them, and sets out to
+    // decode it.
+    fn start_stream(mut self) ! Error {
+        let p = self.skip
+        let to = self.input.len()
+        var xz_file = self.format == Format.Xz
+        var lz = false
+        if self.format == Format.Auto {
+            xz_file = self.input[p] == 0xFD
+            lz = self.input[p] == 0x4C
+        }
+        if xz_file {
+            self.check = try stream_header(self.input, p, to)
+            self.sizes.clear()
+            self.skip = p + 12
+            self.part = AT_BLOCK
+            return
+        }
+        unsafe {
+            self.window.set_len(0)
+        }
+        self.given = 0
+        self.filtered = false
+        self.block_made = 0
+        if lz {
+            let h = try lzip_header(self.input, p, to)
+            unsafe {
+                // lc 3, lp 0, pb 2.
+                _ = cx_xz_lzma1_start(self.ctx.as_mut_ptr(), 93, u64(h.dict), UNKNOWN, 0)
+            }
+            self.size_window(u64(h.dict), UNKNOWN)
+            self.version = h.version
+            self.member = 6
+            self.start_sum(1)
+            self.skip = p + 6
+            self.part = IN_LZMA
+            return
+        }
+        let h = try alone_header(self.input, p, to, self.format == Format.Auto)
+        unsafe {
+            _ = cx_xz_lzma1_start(self.ctx.as_mut_ptr(), h.props, u64(h.dict), h.size, 0)
+        }
+        self.size_window(u64(h.dict), h.size)
+        self.version = NOT_LZIP
+        self.start_sum(0)
+        self.skip = p + 13
+        self.part = IN_LZMA
+    }
+
+    fn at_block(mut self, out: mut List<u8>, room: usize, ending: bool) -> bool ! Error {
+        let p = self.skip
+        let to = self.input.len()
+        if p >= to {
+            return try more(ending)
+        }
+        if self.input[p] == 0 {
+            self.part = AT_INDEX
+            return true
+        }
+        // Blocks with both their sizes in their headers, as `xz -T` writes them, decode at once, so
+        // it waits for several. Then those that are here decode straight onto `out`.
+        let most = if self.most < AT_ONCE { self.most } else { AT_ONCE }
+        if not ending and self.workers > 1 and worth_waiting(self.input, p, to, self.check, self.workers, most) {
+            return false
+        }
+        let mark = out.len()
+        let left = self.limit - self.made
+        let fits = if u64(room) < left { u64(room) } else { left }
+        let cap = if fits > u64.MAX - u64(mark) { u64.MAX } else { u64(mark) + fits }
+        let next = blocks_at_once(self.input, p, to, self.check, cap, mut out, mut self.sizes)
+        if next != p {
+            self.made += u64(out.len() - mark)
+            self.skip = next
+            return true
+        }
+        let h = match header(self.input, p, to, self.check) {
+            ok(h) => h,
+            err(e) => {
+                if e == Error.Truncated {
+                    return try more(ending)
+                }
+                fail e
+            }
+        }
+        self.packed = h.packed
+        self.unpacked = h.unpacked
+        self.head_size = u64(h.size)
+        self.used = 0
+        self.block_made = 0
+        self.skip = h.data
+        unsafe {
+            self.window.set_len(0)
+            cx_xz_lzma2_start(self.ctx.as_mut_ptr(), h.dict, 0)
+        }
+        self.given = 0
+        self.size_window(h.dict, h.unpacked)
+        let before = h.filters.len() - 1
+        self.filtered = before > 0
+        if self.filtered {
+            var list = List<u64>()
+            for k in 0..before {
+                list.push(h.filters[k].id)
+                list.push(u64(h.filters[k].arg))
+            }
+            if self.chain.len() < CHAIN {
+                self.chain = [0; CHAIN]
+            }
+            unsafe {
+                cx_xz_chain_start(self.chain.as_mut_ptr(), list.as_ptr(), u32.wrap(before))
+                self.tail.set_len(0)
+            }
+            self.tail_from = 0
+            self.tail_at = 0
+            self.ready = 0
+        }
+        let id = self.check
+        self.start_sum(id)
+        self.part = IN_BLOCK
+        return true
+    }
+
+    // Decodes the block's LZMA2 chunks that are here. When the header gave the data's size and all
+    // the rest of it is here, or there's no more to come, it's `decompress`'s call on the same bytes.
+    fn in_block(mut self, ending: bool) -> bool ! Error {
+        let avail = self.input.len() - self.skip
+        var n = avail
+        var partial = not ending
+        var bounded = false
+        if self.packed != UNKNOWN and self.packed - self.used <= u64(avail) {
+            n = usize.wrap(self.packed - self.used)
+            partial = false
+            bounded = true
+        }
+        self.make_room()
+        let len = self.window.len()
+        let free = u64(self.window.capacity() - len)
+        let left = self.limit - self.made
+        let cap = len + usize.wrap(if left < free { left } else { free })
+        var status: i32 = 0
+        unsafe {
+            cx_xz_resume(self.ctx.as_mut_ptr(), if partial { 1 } else { 0 })
+            status = cx_xz_lzma2(self.ctx.as_mut_ptr(), self.input.as_ptr().add(self.skip), n, self.window.as_mut_ptr(), cap)
+        }
+        self.took(len)
+        if status == 0 {
+            if (self.packed != UNKNOWN and self.used != self.packed) or (self.unpacked != UNKNOWN and self.block_made != self.unpacked) {
+                fail Error.Corrupt
+            }
+            self.part = AT_CHECK
+            return true
+        }
+        if status == 1 {
+            // There's always room for a chunk, so it's the limit.
+            if left <= free {
+                fail Error.TooLong
+            }
+            return true
+        }
+        if status == -3 or (status == -2 and partial) {
+            return self.window.len() > len
+        }
+        if status == -2 and not bounded {
+            fail Error.Truncated
+        }
+        fail Error.Corrupt
+    }
+
+    // The block's padding and check, once all it made has gone out.
+    fn at_check(mut self, ending: bool) -> bool ! Error {
+        let to = self.input.len()
+        var r = self.skip
+        var at = self.head_size + self.used
+        while at % 4 != 0 {
+            if r >= to {
+                return try more(ending)
+            }
+            if self.input[r] != 0 {
+                fail Error.Corrupt
+            }
+            r += 1
+            at += 1
+        }
+        let check_len = check_size(self.check)
+        if to - r < check_len {
+            return try more(ending)
+        }
+        if not self.check_ok(r) {
+            fail Error.Checksum
+        }
+        self.sizes.push(self.head_size + self.used + u64(check_len))
+        self.sizes.push(self.block_made)
+        self.skip = r + check_len
+        self.part = AT_BLOCK
+        return true
+    }
+
+    // Whether the check at input[r..] matches what went out of the block.
+    fn check_ok(mut self, r: usize) -> bool {
+        let id = self.check
+        if id == 1 {
+            return self.crc32 == u32_le(self.input, r)
+        }
+        if id == 4 {
+            return self.crc64 == u64_le(self.input, r)
+        }
+        if id == 10 {
+            var digest: List<u8> = [0; 64]
+            unsafe {
+                _ = cx_digest_finish(self.sha.as_mut_ptr(), digest.as_mut_ptr())
+            }
+            for i in 0usize..32 {
+                if digest[i] != self.input[r + i] {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    fn at_index(mut self, ending: bool) -> bool ! Error {
+        let p = self.skip
+        let to = self.input.len()
+        let q = match index(self.input, p, to, self.sizes) {
+            ok(q) => q,
+            err(e) => {
+                if e == Error.Truncated {
+                    return try more(ending)
+                }
+                fail e
+            }
+        }
+        match footer(self.input, q, to, p, self.check) {
+            ok => {},
+            err(e) => {
+                if e == Error.Truncated {
+                    return try more(ending)
+                }
+                fail e
+            }
+        }
+        self.skip = q + 12
+        self.part = AT_STREAM
+        self.later = true
+        return true
+    }
+
+    // Decodes .lzma or .lz data. While more may come, the decoder stops short of the input's end,
+    // where the next symbol might not all be here yet; then it tries to finish from what's here,
+    // going back if that needs more.
+    fn in_lzma(mut self, ending: bool) -> bool ! Error {
+        self.make_room()
+        let len = self.window.len()
+        let free = u64(self.window.capacity() - len)
+        let left = self.limit - self.made
+        let cap = len + usize.wrap(if left < free { left } else { free })
+        let made = self.made
+        let skip = self.skip
+        var status = self.lzma_call(cap, not ending)
+        if status == 2 or (status == -2 and not ending) {
+            if self.made != made or self.skip != skip {
+                return true
+            }
+            if self.spare.len() < CTX {
+                self.spare = [0; CTX]
+            }
+            unsafe {
+                _ = memcpy(self.spare.as_mut_ptr(), self.ctx.as_ptr(), CTX)
+            }
+            let member = self.member
+            let block_made = self.block_made
+            status = self.lzma_call(cap, false)
+            if status == -2 {
+                unsafe {
+                    _ = memcpy(self.ctx.as_mut_ptr(), self.spare.as_ptr(), CTX)
+                    self.window.set_len(len)
+                }
+                self.made = made
+                self.skip = skip
+                self.member = member
+                self.block_made = block_made
+                return false
+            }
+        }
+        if status == 0 {
+            if self.version == NOT_LZIP {
+                self.part = AT_STREAM
+                self.later = true
+            } else {
+                self.part = AT_TRAILER
+            }
+            return true
+        }
+        if status == 1 {
+            if left <= free {
+                fail Error.TooLong
+            }
+            return true
+        }
+        if status == -2 {
+            fail Error.Truncated
+        }
+        fail Error.Corrupt
+    }
+
+    // Runs the LZMA decoder on the input from `skip` into the window, as far as `cap`, and takes in
+    // what it used and made. `partial` says more input may come.
+    fn lzma_call(mut self, cap: usize, partial: bool) -> i32 {
+        let len = self.window.len()
+        var status: i32 = 0
+        unsafe {
+            cx_xz_resume(self.ctx.as_mut_ptr(), if partial { 1 } else { 0 })
+            status = cx_xz_lzma1(self.ctx.as_mut_ptr(), self.input.as_ptr().add(self.skip), self.input.len() - self.skip, self.window.as_mut_ptr(), cap)
+        }
+        self.took(len)
+        return status
+    }
+
+    fn at_trailer(mut self, ending: bool) -> bool ! Error {
+        match lzip_trailer(self.input, self.skip, self.input.len(), self.version, self.crc32, self.block_made, self.member) {
+            ok(next) => {
+                self.skip = next
+                self.part = AT_STREAM
+                self.later = true
+                return true
+            },
+            err(e) => {
+                if e == Error.Truncated {
+                    return try more(ending)
+                }
+                fail e
+            }
+        }
+    }
+
+    // Takes in what the decoder made since the window was `len` long, and the input it used.
+    fn took(mut self, len: usize) {
+        let now = unsafe { cx_xz_len(self.ctx.as_ptr()) }
+        let used = unsafe { cx_xz_used(self.ctx.as_ptr()) }
+        unsafe {
+            self.window.set_len(now)
+        }
+        self.made += u64(now - len)
+        self.block_made += u64(now - len)
+        self.skip += used
+        self.used += u64(used)
+        self.member += u64(used)
+    }
+
+    // Gives the empty window room for three dictionaries and a chunk, or for all the text if that's
+    // less, so that it seldom slides and moves little when it does: up to 64 MiB to start with,
+    // and more as it's needed.
+    fn size_window(mut self, dict: u64, text: u64) {
+        var want = 3 * dict
+        if text < want {
+            want = text
+        }
+        if want > 67108864 {
+            want = 67108864
+        }
+        let need = usize.wrap(want) + ROOM
+        if self.window.capacity() < need {
+            self.window.reserve(need)
+        }
+    }
+
+    // Makes ROOM free at the end of the window, by sliding what's still needed to the front, and
+    // growing it to twice that, so a slide moves no more than comes out between slides.
+    fn make_room(mut self) {
+        let len = self.window.len()
+        if self.window.capacity() - len >= ROOM {
+            return
+        }
+        let shift = unsafe { cx_xz_slide(self.ctx.as_mut_ptr(), self.window.as_mut_ptr(), self.given) }
+        self.given -= shift
+        let kept = len - shift
+        unsafe {
+            self.window.set_len(kept)
+        }
+        if self.window.capacity() < 2 * kept + ROOM {
+            self.window.reserve(kept + ROOM)
+        }
+    }
+
+    // Gives out what's decoded and through the filters, at most `room` bytes.
+    fn give(mut self, out: mut List<u8>, room: usize) {
+        if not self.filtered {
+            let n = if self.window.len() - self.given < room { self.window.len() - self.given } else { room }
+            if n > 0 {
+                let at = self.given
+                self.emit(false, at, n, mut out)
+                self.given += n
+            }
+            return
+        }
+        let fresh = self.window.len() - self.given
+        let last = self.part == AT_CHECK
+        if fresh > 0 or (last and self.ready < self.tail.len() - self.tail_from) {
+            // What's left of the tail to the front, then what LZMA2 made onto it.
+            let keep = self.tail.len() - self.tail_from
+            unsafe {
+                _ = memmove(self.tail.as_mut_ptr(), self.tail.as_ptr().add(self.tail_from), keep)
+                self.tail.set_len(keep)
+            }
+            self.tail_at += u64(self.tail_from)
+            self.tail_from = 0
+            self.tail.reserve(fresh)
+            unsafe {
+                _ = memcpy(self.tail.as_mut_ptr().add(keep), self.window.as_ptr().add(self.given), fresh)
+                self.tail.set_len(keep + fresh)
+            }
+            self.given += fresh
+            self.ready = unsafe { cx_xz_chain(self.chain.as_mut_ptr(), self.tail.as_mut_ptr(), self.tail.len(), self.tail_at, if last { 1 } else { 0 }) }
+        }
+        let n = if self.ready < room { self.ready } else { room }
+        if n > 0 {
+            let at = self.tail_from
+            self.emit(true, at, n, mut out)
+            self.tail_from += n
+            self.ready -= n
+        }
+    }
+
+    // Puts n bytes from the window or the tail, from `from`, onto `out`, and into the check.
+    fn emit(mut self, from_tail: bool, from: usize, n: usize, out: mut List<u8>) {
+        let at = out.len()
+        out.reserve(n)
+        unsafe {
+            let p = if from_tail { self.tail.as_ptr().add(from) } else { self.window.as_ptr().add(from) }
+            _ = memcpy(out.as_mut_ptr().add(at), p, n)
+            out.set_len(at + n)
+            let q = out.as_ptr().add(at)
+            if self.sum == 1 {
+                self.crc32 = cx_zlib_crc32(self.crc32, q, n)
+            } else if self.sum == 4 {
+                self.crc64 = cx_xz_crc64(self.crc64, q, n)
+            } else if self.sum == 10 {
+                cx_digest_add(self.sha.as_mut_ptr(), q, n)
+            }
+        }
+    }
+
+    // Starts the check of what goes out of a block or member.
+    fn start_sum(mut self, id: u8) {
+        self.sum = id
+        self.crc32 = 0
+        self.crc64 = 0
+        if id == 10 {
+            if self.sha.len() < DIGEST {
+                self.sha = [0; DIGEST]
+            }
+            unsafe {
+                cx_digest_start(self.sha.as_mut_ptr(), 2)
+            }
+        }
+    }
+}
+
+// What's left of `most` once `given` bytes have gone out, as a length.
+fn room_left(most: u64, given: usize) -> usize {
+    return usize.wrap(most - u64(given))
+}
+
+// Whether a Decompressor at the block at `p` should wait for more input before it decodes: while
+// the blocks from there on have both their sizes, and fewer than `workers` of them are here, which
+// decompress to no more than `most` and take no more than that of input, with the next to come.
+fn worth_waiting(bytes: List<u8>, p: usize, to: usize, check: u8, workers: u64, most: u64) -> bool {
+    let check_len = u64(check_size(check))
+    var q = p
+    var k: u64 = 0
+    var total: u64 = 0
+    loop {
+        if k >= workers {
+            return false
+        }
+        if q >= to {
+            return true
+        }
+        if bytes[q] == 0 {
+            return false
+        }
+        if to - q < (usize(bytes[q]) + 1) * 4 {
+            return true
+        }
+        let h = match header(bytes, q, to, check) {
+            ok(h) => h,
+            err(_) => return false,
+        }
+        let before = u64(h.data - p)
+        if h.packed == UNKNOWN or h.unpacked == UNKNOWN or h.unpacked > most - total or before > most or h.packed > most - before {
+            return false
+        }
+        // The data, its padding to 4 bytes from the block's start, and the check.
+        let data_end = u64(h.data) + h.packed
+        let next = data_end + (4 - (data_end - u64(q)) % 4) % 4 + check_len
+        if next > u64(to) {
+            return true
+        }
+        k += 1
+        total += h.unpacked
+        q = usize.wrap(next)
+    }
+}
+
+// Where a Decompressor wants more input: none comes once it's ending, so the data ended early.
+fn more(ending: bool) -> bool ! Error {
+    if ending {
+        fail Error.Truncated
+    }
+    return false
+}
+
+/// Text compressed as it comes, a piece at a time, into the same .xz file `compress` writes for all
+/// of it at once, as Python's `LZMACompressor` takes it. It holds the text until a few blocks of it
+/// are in, as many as there are processors, up to 64 MiB, then compresses them at once and gives
+/// them out. A .lzma file has no blocks, so for `Format.Alone` it holds all the text until `finish`.
+pub struct Compressor {
+    s: Settings
+    id: u8
+    each: u64
+    lzma: bool
+    preset: u32
+    check: Check
+    extreme: bool
+    block_size: u64
+    // How many blocks it compresses at once.
+    batch: u64
+    // The text it hasn't compressed yet, and the index's records so far.
+    text: List<u8>
+    records: List<u8>
+    blocks: u64 = 0
+    started: bool = false
+}
+
+impl Compressor {
+    /// A compressor with `compress`'s settings. Panics as `compress` does, for a preset past 9 or
+    /// for `Format.Auto`.
+    @track_caller
+    pub fn new(preset: u32 = 6, check: Check = Check.Crc64, format: Format = Format.Xz, extreme: bool = false, block_size: u64 = 0) -> Compressor {
+        if preset > 9 {
+            panic("the preset is 0 to 9, not {preset}")
+        }
+        if format == Format.Auto {
+            panic("`Compressor` writes `Format.Xz` or `Format.Alone`, not `Format.Auto`")
+        }
+        let s = preset_settings(preset, extreme)
+        var each = block_size
+        if each == 0 {
+            each = if 3 * s.dict > 1048576 { 3 * s.dict } else { 1048576 }
+        }
+        // The blocks are cut by size, so how many go at once changes when they come out, not what.
+        let workers = u64(unsafe { cx_workers() })
+        var batch = 67108864 / each
+        if batch > workers {
+            batch = workers
+        }
+        if batch == 0 {
+            batch = 1
+        }
+        return Compressor { s: s, id: check_id(check), each: each, lzma: format == Format.Alone, preset: preset, check: check, extreme: extreme, block_size: block_size, batch: batch, text: [], records: [] }
+    }
+
+    /// Takes the next piece of text, and gives what's compressed so far that it hasn't given: the
+    /// stream's header the first time, then blocks as they fill.
+    pub fn add(mut self, bytes: List<u8>) -> List<u8> {
+        var out = List<u8>()
+        if not self.lzma and not self.started {
+            put_stream_header(self.id, mut out)
+            self.started = true
+        }
+        self.text.extend(bytes)
+        if not self.lzma and u64(self.text.len()) >= self.batch * self.each {
+            let full = u64(self.text.len()) / self.each
+            self.put_blocks(full, mut out)
+        }
+        return out
+    }
+
+    /// Compresses the rest of the text, and gives it with the end of the file.
+    pub fn finish(own self) -> List<u8> {
+        var c = self
+        if c.lzma {
+            return compress(c.text, c.preset, c.check, Format.Alone, c.extreme, c.block_size)
+        }
+        var out = List<u8>()
+        if not c.started {
+            put_stream_header(c.id, mut out)
+        }
+        let n = u64(c.text.len())
+        if n > 0 {
+            let count = unsafe { cx_xze_blocks(n, c.each) }
+            c.put_blocks(count, mut out)
+        }
+        put_index(c.records, c.blocks, c.id, mut out)
+        return out
+    }
+
+    // Compresses the text's first `count` blocks, every one whole but the last, onto `out`, and
+    // drops them from the text.
+    fn put_blocks(mut self, count: u64, out: mut List<u8>) {
+        let all = u64(self.text.len())
+        let n = if count * self.each < all { count * self.each } else { all }
+        let s = self.s
+        let opt: List<u64> = [s.dict, 3, 0, 2, if s.fast { 1 } else { 0 }, s.nice, if s.bt { 1 } else { 0 }, s.depth, self.each, 0, 0, 0]
+        var sizes: List<u64> = [0; usize.wrap(count)]
+        let h = unsafe { cx_xze_start(self.text.as_ptr(), n, opt.as_ptr(), sizes.as_mut_ptr()) }
+        for b in 0u64..count {
+            let from = b * self.each
+            let len = if n - from < self.each { n - from } else { self.each }
+            put_block(h, b, sizes[usize.wrap(b)], self.text, usize.wrap(from), len, s.dict, self.id, mut out, mut self.records)
+        }
+        unsafe {
+            cx_xze_end(h)
+        }
+        self.blocks += count
+        let left = self.text.len() - usize.wrap(n)
+        unsafe {
+            _ = memmove(self.text.as_mut_ptr(), self.text.as_ptr().add(usize.wrap(n)), left)
+            self.text.set_len(left)
+        }
     }
 }
 
