@@ -1,25 +1,28 @@
 ---
 title: std.text.utf8
-description: Bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java's new String(bytes, UTF_8) gives them - decode_lossy.
+description: Bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java's new String(bytes, UTF_8) gives them, or as Python, Rust and browsers do - decode_lossy and decode_lossy_unicode.
 ---
 
 # `std.text.utf8`
 
-Bytes that may not be UTF-8, read as text the way Java reads them: with U+FFFD, the replacement character `�`, in place of each piece that isn't UTF-8. [`String.from_utf8`](../reference/strings.md) gives `none` for such bytes instead, which is right where they mean the data is broken; this is for text that must read whatever comes, as a console's lines and Java's strings do.
+Bytes that may not be UTF-8, read as text with U+FFFD, the replacement character `�`, in place of each piece that isn't UTF-8: the way Java reads them, or the way the Unicode Standard recommends and Python, Rust and browsers read them. [`String.from_utf8`](../reference/strings.md) gives `none` for such bytes instead, which is right where they mean the data is broken; this is for text that must read whatever comes, as a console's lines and Java's strings do.
 
 ```calx
-import std.text.utf8.{decode_lossy}
+import std.text.utf8.{decode_lossy, decode_lossy_unicode}
 
 fn main() {
     let bytes: List<u8> = [0x73, 0x74, 0xC3, 0xB6, 0x6E, 0x65, 0xFF, 0x21]
     println(decode_lossy(bytes, 0, bytes.len()))    // out: stöne�!
     println(decode_lossy(bytes, 0, 3))              // out: st�
+    let surrogate: List<u8> = [0xED, 0xA0, 0x80]
+    println("{decode_lossy(surrogate, 0, 3)} {decode_lossy_unicode(surrogate, 0, 3)}")    // out: � ���
 }
 ```
 
 | Function | Gives |
 | --- | --- |
 | `decode_lossy(bytes: List<u8>, from: usize, to: usize) -> String` | The bytes from offset `from` up to `to` as text, as Java's `new String(bytes, from, to - from, UTF_8)` gives it. Panics at the call if `from..to` isn't inside `bytes` |
+| `decode_lossy_unicode(bytes: List<u8>, from: usize, to: usize) -> String` | The same, as Python's `decode("utf-8", errors="replace")`, Rust's `String::from_utf8_lossy` and browsers give it: one U+FFFD for each longest piece that could still start a character, surrogates included |
 
 Valid UTF-8 comes through as it is. Which bytes one U+FFFD stands for follows Java's decoder, `sun.nio.cs.UTF_8`, which is mostly Unicode's practice of one for each longest piece that could still start a character, but not always:
 
@@ -32,8 +35,10 @@ Valid UTF-8 comes through as it is. Which bytes one U+FFFD stands for follows Ja
 
 So `ED A0 80` is one U+FFFD where `E0 80 80`, an overlong form, is three, as in Java.
 
+`decode_lossy_unicode` follows Unicode's practice all the way: after `ED`, only `80` to `9F` can come next, so a surrogate is three U+FFFD, one for each byte, as an overlong form is. Every other row above is the same for both.
+
 - Valid text costs one copy of its bytes and one check, the same as `String.from_utf8` of a copy. Only text that isn't valid is gone over again, a byte at a time.
-- It was compared with Java 25 on 200,000 random byte strings, made of the bytes where the rules change, characters whole and cut off, and surrogates, with none different: [tools/unicode/utf8_check.calx](../../tools/unicode/utf8_check.calx), with [Utf8Check.java](../../tools/unicode/Utf8Check.java) as Java's side.
-- [`std.io.Lines`](io.md#lines) decodes each line with it.
+- `decode_lossy` was compared with Java 25 on 200,000 random byte strings, made of the bytes where the rules change, characters whole and cut off, and surrogates, with none different: [tools/unicode/utf8_check.calx](../../tools/unicode/utf8_check.calx), with [Utf8Check.java](../../tools/unicode/Utf8Check.java) as Java's side. `decode_lossy_unicode` was compared with Python 3.14 on 500 such strings, with none different.
+- [`std.io.Lines`](io.md#lines) decodes each line with `decode_lossy`, and [`std.url.decode`](url.md) with `decode_lossy_unicode`.
 
 `std.text.utf8` is written in Calx: [std/text/utf8.calx](../../std/text/utf8.calx).

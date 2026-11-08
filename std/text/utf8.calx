@@ -1,5 +1,6 @@
-/// UTF-8 that may not be valid, read as Java reads it: with U+FFFD, the replacement character,
-/// in place of each piece that isn't UTF-8.
+/// UTF-8 that may not be valid, read with U+FFFD, the replacement character, in place of each
+/// piece that isn't UTF-8: as Java reads it, or as Unicode recommends and Python, Rust and browsers
+/// read it. The two differ only on surrogates.
 module std.text.utf8
 
 extern "C" {
@@ -19,6 +20,23 @@ extern "C" {
 /// Panics at the call if `from..to` isn't inside `bytes`.
 @track_caller
 pub fn decode_lossy(bytes: List<u8>, from: usize, to: usize) -> String {
+    return lossy(bytes, from, to, true)
+}
+
+/// The bytes in `bytes` from offset `from` up to `to` as text, with one U+FFFD for each
+/// maximal piece that isn't UTF-8, as the Unicode Standard recommends, and as Python's
+/// `decode("utf-8", errors="replace")`, Rust's `String::from_utf8_lossy` and browsers give it.
+/// It's `decode_lossy` but for surrogates: `ED` can't be followed by `A0` to `BF` here, so
+/// `ED A0 80` is three U+FFFD, not one.
+///
+/// Panics at the call if `from..to` isn't inside `bytes`.
+@track_caller
+pub fn decode_lossy_unicode(bytes: List<u8>, from: usize, to: usize) -> String {
+    return lossy(bytes, from, to, false)
+}
+
+@track_caller
+fn lossy(bytes: List<u8>, from: usize, to: usize, java: bool) -> String {
     if from > to or to > bytes.len() {
         panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
     }
@@ -51,10 +69,11 @@ pub fn decode_lossy(bytes: List<u8>, from: usize, to: usize) -> String {
         } else if b >= 0xE0 and b <= 0xEF {
             if i + 1 < to {
                 let b2 = bytes[i + 1]
-                if continues(b2) and not (b == 0xE0 and b2 < 0xA0) {
+                let surrogate = b == 0xED and b2 >= 0xA0
+                if continues(b2) and not (b == 0xE0 and b2 < 0xA0) and not (surrogate and not java) {
                     bad = 2
                     if i + 2 < to and continues(bytes[i + 2]) {
-                        if b == 0xED and b2 >= 0xA0 {
+                        if surrogate {
                             bad = 3
                         } else {
                             len = 3

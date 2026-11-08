@@ -64,7 +64,7 @@ fn main() {
 
 [runtime/calx_digest.c](../../runtime/calx_digest.c), written from RFC 1321 (MD5), FIPS 180-4 (SHA-1 and SHA-2) and RFC 2104 (HMAC). The constants are worked out from their definitions: MD5's from sines, SHA-2's from the square and cube roots of the first primes. It's linked only into programs that call it.
 
-- **SHA-1 and SHA-256** use the processor's SHA instructions where `cpuid` says it has them, which most x86-64 processors made since 2017 do: four rounds an instruction. The plain code is the fallback.
+- **SHA-1 and SHA-256** use the processor's SHA instructions where `cpuid` says it has them, which most x86-64 processors made since 2017 do: four rounds an instruction. The plain code is the fallback. `cpuid` is asked once per program, since under a hypervisor, as Windows with virtualization-based security runs, each one costs about a microsecond, which made hashing 50 bytes 8 times slower when it was asked every time.
 - **MD5** is written out round by round. Each round adds its message word and constant before the function of the round before's result, and an empty `asm` keeps clang from moving the constant back onto that chain.
 - **SHA-512 and SHA-384** compute the message schedule two words at a time in SSE2's 64-bit lanes, sixteen rounds ahead, inside the round loop, so it fills the gaps in the rounds' chain. Each round sums its parts in the order they're ready, and works out the majority function from the round before's `a ^ b`.
 - A `Digest` holds its state in a `List<u8>` of 224 bytes, which the runtime copies into a struct and back, so it needs no alignment and `std.hash` needs no unsafe types.

@@ -1,0 +1,39 @@
+// std.uuid: UUIDs as Python's uuid and Java's UUID make and write them (CLX-150). The name-based
+// ones are Python's uuid3 and uuid5; build/scratch's wider check matched 800 more.
+
+import std.uuid.{Uuid}
+
+fn main() {
+    let dns = Uuid.namespace_dns()
+    println("{dns} {Uuid.namespace_url()} {Uuid.nil()}")    // out: 6ba7b810-9dad-11d1-80b4-00c04fd430c8 6ba7b811-9dad-11d1-80b4-00c04fd430c8 00000000-0000-0000-0000-000000000000
+    println("{dns.v5("python.org")} {dns.v3("python.org")}")    // out: 886313e1-3b8a-5372-9b90-0c9aee199e5d 6fa459ea-ee8a-3ca4-894e-db77e160355e
+    println("{Uuid.namespace_oid().v5("")} {Uuid.namespace_x500().v3("é")}")    // out: 0a68eb57-c88a-5f34-9e9d-27f85e68af4f 20c22913-7363-3451-acc1-9a072290e0e5
+
+    // Java's nameUUIDFromBytes, as an offline player's UUID is made.
+    println("{Uuid.from_name("OfflinePlayer:Notch".to_bytes())}")    // out: b50ad385-829d-3141-a216-7e7d7539ba7f
+
+    // Text: dashed or not, either case; anything else is none.
+    let u = Uuid.parse("123E4567-E89B-12D3-A456-426614174000") ?? Uuid.nil()
+    println("{u} {u.simple()} {u.version()}")    // out: 123e4567-e89b-12d3-a456-426614174000 123e4567e89b12d3a456426614174000 1
+    println("{u.high} {u.low}")    // out: 1314564453825188563 11841725276408463360
+    println("{Uuid.parse("123e4567e89b12d3a456426614174000") == some(u)} {Uuid.new(u.high, u.low) == u}")    // out: true true
+    var rejected: List<bool> = []
+    for bad in ["", "123e4567-e89b-12d3-a456-42661417400", #"{123e4567-e89b-12d3-a456-426614174000}"#, "123e4567-e89b-12d3-a456-42661417400g", "123e4567e-89b-12d3-a456-426614174000", "urn:uuid:123e4567-e89b-12d3-a456-426614174000"] {
+        rejected.push(Uuid.parse(bad) == none)
+    }
+    println("{rejected}")    // out: [true, true, true, true, true, true]
+
+    // Bytes, first to last.
+    println("{u.to_bytes()}")    // out: [18, 62, 69, 103, 232, 155, 18, 211, 164, 86, 66, 102, 20, 23, 64, 0]
+    println("{Uuid.from_bytes(u.to_bytes()) == some(u)} {Uuid.from_bytes([1u8, 2]) == none}")    // out: true true
+
+    // Random ones are version 4 with RFC 9562's variant, and differ.
+    let a = Uuid.random()
+    let b = Uuid.random()
+    println("{a.version()} {(a.low >> 62) == 2} {a != b} {Uuid.parse("{a}") == some(a)}")    // out: 4 true true true
+
+    // They order as 128-bit numbers, as Python's do.
+    let low = Uuid.parse("00000000-0000-0000-ffff-ffffffffffff") ?? Uuid.nil()
+    let high = Uuid.parse("00000000-0000-0001-0000-000000000000") ?? Uuid.nil()
+    println("{low < high} {Uuid.nil() < low}")    // out: true true
+}

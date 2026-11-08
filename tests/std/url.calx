@@ -1,0 +1,87 @@
+// std.url: percent-encoding as Python's urllib.parse gives it, and URLs taken apart and joined as
+// RFC 3986 says (CLX-150). build/scratch's wider check matched Python on 5,106 random cases.
+
+import std.url.{Url, encode, encode_plus, decode, decode_plus, form_encode, form_decode}
+
+fn pairs(text: String) -> String {
+    var out: List<String> = []
+    for (k, v) in form_decode(text) {
+        out.push("[{k}]=[{v}]")
+    }
+    return out.join(" ")
+}
+
+fn main() ! String {
+    // quote, quote_plus, and the safe characters.
+    println(encode("a b/c?d=é&€~"))                // out: a%20b/c%3Fd%3D%C3%A9%26%E2%82%AC~
+    println(encode_plus("a b/c?d=é&€~"))           // out: a+b%2Fc%3Fd%3D%C3%A9%26%E2%82%AC~
+    println(encode("a b/c:d", safe: ""))           // out: a%20b%2Fc%3Ad
+    println(encode("a b/c:d", safe: "/: "))        // out: a b/c:d
+    println(encode_plus("a b+c", safe: " +"))      // out: a+b+c
+    println("[{encode("")}] {encode("😀")}")       // out: [] %F0%9F%98%80
+
+    // unquote: what isn't a whole %XX stays, and bytes that aren't UTF-8 are U+FFFD.
+    println(decode("a%20b%2fc%3F"))                // out: a b/c?
+    println(decode("100% %zz %4 %"))               // out: 100% %zz %4 %
+    println(decode("%C3%A9 %E2%82 %ED%A0%80"))     // out: é � ���
+    println(decode_plus("a+b%2B%20c"))             // out: a b+ c
+    println(decode("a+b"))                         // out: a+b
+
+    // urlencode and parse_qsl(keep_blank_values=True).
+    println(form_encode([(String("q"), String("hello world")), (String("x&y"), String("1=2/é"))]))    // out: q=hello+world&x%26y=1%3D2%2F%C3%A9
+    println(pairs("a=1&b=&c&&d=x%20y+z&e=1=2"))    // out: [a]=[1] [b]=[] [c]=[] [d]=[x y z] [e]=[1=2]
+    println("[{pairs("")}] [{form_encode([])}]")   // out: [] []
+
+    // Parts, with the scheme and host lowercased and nothing decoded.
+    let u = try Url.parse("HTTPS://us%40er:pw@Example.COM:8443/a%20b/c?x=1&y=%20#frag")
+    println("{u.scheme} {u.user.copy() ?? "-"} {u.password.copy() ?? "-"} {u.host.copy() ?? "-"} {u.port ?? 0} {u.path}")    // out: https us%40er pw example.com 8443 /a%20b/c
+    println("{u.query.copy() ?? "-"} {u.fragment.copy() ?? "-"} {u.query_pairs().len()}")    // out: x=1&y=%20 frag 2
+    println("{u}")                                 // out: https://us%40er:pw@example.com:8443/a%20b/c?x=1&y=%20#frag
+    let v6 = try Url.parse("http://[2001:DB8::1]:80/")
+    println("{v6.host.copy() ?? "-"} {v6.port ?? 0} {v6}")    // out: 2001:db8::1 80 http://[2001:db8::1]:80/
+    let mail = try Url.parse("mailto:someone@example.com")
+    println("{mail.host == none} {mail.path} {mail}")    // out: true someone@example.com mailto:someone@example.com
+    let file = try Url.parse("file:///etc/hosts")
+    println("[{file.host.copy() ?? "-"}] {file.path} {file}")    // out: [] /etc/hosts file:///etc/hosts
+    let bare = try Url.parse("http://h:/?#")
+    println("{bare.port == none} [{bare.query.copy() ?? "-"}] [{bare.fragment.copy() ?? "-"}] {bare}")    // out: true [] [] http://h/?#
+
+    // What isn't a URL says why.
+    for bad in ["no scheme", "/path", "http://h:x/", "http://h:65536/", "http://h:1:2/", "http://[::1/", "http://[::1]x/", "http://h]/"] {
+        match Url.parse(bad) {
+            ok(_) => println("parsed {bad}"),
+            err(e) => println(e),
+        }
+    }
+    // out: `no scheme` has no scheme, such as `https:`
+    // out: `/path` has no scheme, such as `https:`
+    // out: the port `x` isn't a number
+    // out: the port 65536 is more than 65535
+    // out: the port `1:2` isn't a number
+    // out: `[::1` opens an IPv6 address with `[` and doesn't close it
+    // out: `x` can't follow an IPv6 address; a port goes after `:`
+    // out: `h]` has a bracket that isn't around an IPv6 address
+    println("{(try Url.parse("http://h:65535")).port ?? 0} {(try Url.parse("http://h:0080")).port ?? 0}")    // out: 65535 80
+
+    // RFC 3986's examples in 5.4, normal and abnormal, each as urljoin gives it.
+    let base = try Url.parse("http://a/b/c/d;p?q")
+    var normal: List<String> = []
+    for r in ["g:h", "g", "./g", "g/", "/g", "//g", "?y", "g?y", "#s", "g#s", "g?y#s", ";x", "g;x", "g;x?y#s", "", ".", "./", "..", "../", "../g", "../..", "../../", "../../g"] {
+        normal.push("{try base.join(r)}")
+    }
+    println(normal.join(" "))    // out: g:h http://a/b/c/g http://a/b/c/g http://a/b/c/g/ http://a/g http://g http://a/b/c/d;p?y http://a/b/c/g?y http://a/b/c/d;p?q#s http://a/b/c/g#s http://a/b/c/g?y#s http://a/b/c/;x http://a/b/c/g;x http://a/b/c/g;x?y#s http://a/b/c/d;p?q http://a/b/c/ http://a/b/c/ http://a/b/ http://a/b/ http://a/b/g http://a/ http://a/ http://a/g
+    var abnormal: List<String> = []
+    for r in ["../../../g", "../../../../g", "/./g", "/../g", "g.", ".g", "g..", "..g", "./../g", "./g/.", "g/./h", "g/../h", "g;x=1/./y", "g;x=1/../y", "g?y/./x", "g?y/../x", "g#s/./x", "g#s/../x", "http:g"] {
+        abnormal.push("{try base.join(r)}")
+    }
+    println(abnormal.join(" "))    // out: http://a/g http://a/g http://a/g http://a/g http://a/b/c/g. http://a/b/c/.g http://a/b/c/g.. http://a/b/c/..g http://a/b/g http://a/b/c/g/ http://a/b/c/g/h http://a/b/c/h http://a/b/c/g;x=1/y http://a/b/c/y http://a/b/c/g?y/./x http://a/b/c/g?y/../x http://a/b/c/g#s/./x http://a/b/c/g#s/../x http:g
+
+    // A base without a path, a reference with its own authority, and one with a scheme.
+    let root = try Url.parse("https://u:p@h:81?k#f")
+    println("{try root.join("g")} {try root.join("//x.example/./y")} {try root.join("HTTPS://X/a/../b")}")    // out: https://u:p@h:81/g https://x.example/y https://x/b
+    println("{try root.join("")} {try root.join("#t")}")    // out: https://u:p@h:81?k https://u:p@h:81?k#t
+    match root.join("//h:x/") {
+        ok(_) => println("joined"),
+        err(e) => println(e),    // out: the port `x` isn't a number
+    }
+}

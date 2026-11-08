@@ -54,14 +54,26 @@ static inline cx_u64 load_be64(const cx_u8* p) {
     return __builtin_bswap64(v);
 }
 
-/* Whether the processor has the SHA extensions, and SSSE3 and SSE4.1 beside them. */
-static cx_u32 sha_ni(void) {
+/* Whether the processor has the SHA extensions, and SSSE3 and SSE4.1 beside them. It's asked
+   once: under a hypervisor, as Windows with virtualization-based security runs, each cpuid traps
+   out to it and costs about a microsecond, as much as hashing a kilobyte. */
+static cx_u32 sha_ni_ask(void) {
 #ifdef CX_X86
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c >> 9 & 1) || !(c >> 19 & 1)) return 0;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) return b >> 29 & 1;
 #endif
     return 0;
+}
+
+static cx_u32 sha_ni(void) {
+    static int known = -1; /* threads that race here store the same answer */
+    int k = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (k < 0) {
+        k = (int)sha_ni_ask();
+        __atomic_store_n(&known, k, __ATOMIC_RELAXED);
+    }
+    return (cx_u32)k;
 }
 
 /* --- MD5 ----------------------------------------------------------------------------------- */

@@ -1,0 +1,192 @@
+/// UUIDs, as RFC 9562 defines them and Java's `UUID` and Python's `uuid` make them: read from and
+/// written as text, made from and into 16 bytes, from a name, and at random.
+///
+/// A `Uuid` is two 64-bit halves, as Java holds one, and compares as the 128-bit number they make,
+/// as Python's does. It can be a map's key.
+module std.uuid
+
+import std.crypto.{random_bytes}
+import std.hash.{md5, sha1}
+
+/// A UUID: `high` holds its first 8 bytes and `low` its last 8, each big-endian, as Java's
+/// `getMostSignificantBits` and `getLeastSignificantBits` give them.
+pub struct Uuid {
+    pub high: u64
+    pub low: u64
+}
+
+impl Uuid {
+    /// The UUID of these halves, as Java's `new UUID(high, low)`.
+    pub fn new(high: u64, low: u64) -> Uuid {
+        return Uuid { high, low }
+    }
+
+    /// The UUID that's all zeros.
+    pub fn nil() -> Uuid {
+        return Uuid { high: 0, low: 0 }
+    }
+
+    /// The UUID these 16 bytes are, first to last, as Python's `UUID(bytes=...)`, or `none` for
+    /// any other number of bytes.
+    pub fn from_bytes(bytes: List<u8>) -> Uuid? {
+        if bytes.len() != 16 {
+            return none
+        }
+        var high: u64 = 0
+        var low: u64 = 0
+        for i in 0usize..8 {
+            high = high << 8 | u64(bytes[i])
+            low = low << 8 | u64(bytes[i + 8])
+        }
+        return some(Uuid { high, low })
+    }
+
+    /// Its 16 bytes, first to last, as Python's `u.bytes`.
+    pub fn to_bytes(self) -> List<u8> {
+        var out: List<u8> = []
+        for shift in [56u64, 48, 40, 32, 24, 16, 8, 0] {
+            out.push(u8.wrap(self.high >> shift))
+        }
+        for shift in [56u64, 48, 40, 32, 24, 16, 8, 0] {
+            out.push(u8.wrap(self.low >> shift))
+        }
+        return out
+    }
+
+    /// The UUID written as text: 32 hex digits in either case, either in groups of 8, 4, 4, 4 and
+    /// 12 with hyphens between, as `{u}` writes them, or with none, as Mojang's API writes them.
+    /// `none` for anything else, such as a missing digit, which Java's `fromString` would allow.
+    pub fn parse(text: String) -> Uuid? {
+        var bad: u64 = 0
+        var high: u64 = 0
+        var low: u64 = 0
+        if text.len() == 36 {
+            if text.byte_at(8) != b'-' or text.byte_at(13) != b'-' or text.byte_at(18) != b'-' or text.byte_at(23) != b'-' {
+                return none
+            }
+            high = shift_in(text, 0, 8, 0, mut bad)
+            high = shift_in(text, 9, 13, high, mut bad)
+            high = shift_in(text, 14, 18, high, mut bad)
+            low = shift_in(text, 19, 23, 0, mut bad)
+            low = shift_in(text, 24, 36, low, mut bad)
+        } else if text.len() == 32 {
+            high = shift_in(text, 0, 16, 0, mut bad)
+            low = shift_in(text, 16, 32, 0, mut bad)
+        } else {
+            return none
+        }
+        return if bad < 16 { some(Uuid { high, low }) } else { none }
+    }
+
+    /// The 32 hex digits without hyphens, in lowercase, as Python's `u.hex` and Mojang's API
+    /// write them.
+    pub fn simple(self) -> String {
+        var s = String()
+        push_hex(mut s, self.high, 16)
+        push_hex(mut s, self.low, 16)
+        return s
+    }
+
+    /// Its version, the four bits that say how it was made: 3 and 5 from a name, 4 at random.
+    pub fn version(self) -> u32 {
+        return u32.wrap(self.high >> 12 & 15)
+    }
+
+    /// A random UUID, version 4, as Java's `randomUUID` and Python's `uuid4` make it: 122 bits from
+    /// the system's generator, which is good for keys and tokens.
+    pub fn random() -> Uuid {
+        return stamp(random_bytes(16), 4)
+    }
+
+    /// The UUID Java's `UUID.nameUUIDFromBytes` makes from the bytes: their MD5, as version 3, with
+    /// no namespace. Minecraft makes an offline player's UUID from `OfflinePlayer:<name>` so.
+    pub fn from_name(name: List<u8>) -> Uuid {
+        return stamp(md5(name), 3)
+    }
+
+    /// The version 3 UUID of a name in this namespace, as Python's `uuid3(namespace, name)`: the
+    /// MD5 of the namespace's bytes and the name's UTF-8.
+    pub fn v3(self, name: String) -> Uuid {
+        var bytes = self.to_bytes()
+        bytes.extend(name.to_bytes())
+        return stamp(md5(bytes), 3)
+    }
+
+    /// The version 5 UUID of a name in this namespace, as Python's `uuid5(namespace, name)`: the
+    /// first 16 bytes of the SHA-1 of the namespace's bytes and the name's UTF-8.
+    pub fn v5(self, name: String) -> Uuid {
+        var bytes = self.to_bytes()
+        bytes.extend(name.to_bytes())
+        return stamp(sha1(bytes), 5)
+    }
+
+    /// The namespace for domain names, RFC 9562's, as Python's `NAMESPACE_DNS`.
+    pub fn namespace_dns() -> Uuid {
+        return Uuid { high: 0x6ba7b8109dad11d1, low: 0x80b400c04fd430c8 }
+    }
+
+    /// The namespace for URLs, as Python's `NAMESPACE_URL`.
+    pub fn namespace_url() -> Uuid {
+        return Uuid { high: 0x6ba7b8119dad11d1, low: 0x80b400c04fd430c8 }
+    }
+
+    /// The namespace for ISO object identifiers, as Python's `NAMESPACE_OID`.
+    pub fn namespace_oid() -> Uuid {
+        return Uuid { high: 0x6ba7b8129dad11d1, low: 0x80b400c04fd430c8 }
+    }
+
+    /// The namespace for X.500 distinguished names, as Python's `NAMESPACE_X500`.
+    pub fn namespace_x500() -> Uuid {
+        return Uuid { high: 0x6ba7b8149dad11d1, low: 0x80b400c04fd430c8 }
+    }
+}
+
+/// `123e4567-e89b-12d3-a456-426614174000`: lowercase, in groups of 8, 4, 4, 4 and 12, as Java's
+/// `toString` and Python's `str` write it.
+impl Display for Uuid {
+    fn show(self) {
+        var s = String()
+        push_hex(mut s, self.high >> 32, 8)
+        s.push('-')
+        push_hex(mut s, self.high >> 16, 4)
+        s.push('-')
+        push_hex(mut s, self.high, 4)
+        s.push('-')
+        push_hex(mut s, self.low >> 48, 4)
+        s.push('-')
+        push_hex(mut s, self.low, 12)
+        print(s)
+    }
+}
+
+// The first 16 bytes of a hash or random bytes, with the version in the top four bits of byte 6
+// and RFC 9562's variant, binary 10, in the top two of byte 8.
+fn stamp(bytes: List<u8>, version: u8) -> Uuid {
+    var b = bytes[..16].copy()
+    b[6] = (b[6] & 0x0F) | version * 16
+    b[8] = (b[8] & 0x3F) | 0x80
+    return Uuid.from_bytes(b) ?? Uuid.nil()
+}
+
+// The low `digits` hex digits of v, most significant first.
+fn push_hex(s: mut String, v: u64, digits: u64) {
+    for i in 0u64..digits {
+        let d = u8.wrap(v >> (4 * (digits - 1 - i)) & 15)
+        s.push(rune(if d < 10 { d + 48 } else { d + 87 }))
+    }
+}
+
+// `acc` with the hex digits from `from` up to `to` shifted in after it. A byte that isn't a digit
+// sets bit 4 of `bad`, so the caller checks once at the end rather than after each byte.
+fn shift_in(text: String, from: usize, to: usize, acc: u64, bad: mut u64) -> u64 {
+    var v = acc
+    for i in from..to {
+        let c = text.byte_at(i)
+        let d = c - b'0'
+        let l = (c | 0x20) - b'a'
+        let n: u64 = if d < 10 { u64(d) } else if l < 6 { u64(l) + 10 } else { 16 }
+        bad |= n
+        v = v << 4 | (n & 15)
+    }
+    return v
+}

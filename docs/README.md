@@ -89,7 +89,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 19. [std.build](std/build.md): the program's build ID, which changes exactly when its code does, for keying caches
 20. [std.term](std/term.md): the terminal's size, raw input a key at a time, and the text that puts it back however the program ends
 21. [std.process](std/process.md): starting other programs, with their arguments, folder, environment, input, output and timeouts, talking to one while it runs, several at once, and finding them; and this process's memory, CPU time and processors, and `exit`
-22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them
+22. [std.text.utf8](std/text-utf8.md): bytes that may not be UTF-8 as text, with U+FFFD in their place, as Java reads them or as Python, Rust and browsers do
 23. [std.palette](std/palette.md): Minecraft's paletted containers, a chunk section's block states and biomes, grown, sent, saved and loaded as Java Edition 26.3 does them
 24. [std.zip](std/zip.md): zip archives read and written in memory, with Zip64, file modes, and extracting that no path can climb out of
 25. [std.tar](std/tar.md): tar archives, plain or gzipped, read and written in memory: ustar, GNU long names and pax headers, links and modes
@@ -107,6 +107,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 37. [std.image](std/image.md): images read from PNG, JPEG and ICO files, resized, blurred, cropped, turned, drawn on, blended, quantized and written back, with Pillow's pixels and Pillow's JPEG bytes
 38. [std.image.png](std/image-png.md): PNG files read and written as libpng does it, every color type and bit depth, interlaced or not
 39. [std.image.jpeg](std/image-jpeg.md): JPEG files read as libjpeg-turbo reads them, baseline and progressive, and written byte for byte as Pillow writes them
+40. [std.url](std/url.md): percent-encoding and form bodies as Python's `urllib.parse` gives them, and URLs taken apart, put back together and joined as RFC 3986 says
+41. [std.uuid](std/uuid.md): UUIDs at random, from a name, and as Java's `nameUUIDFromBytes` makes them, read and written as text and bytes
 
 ### Java compatibility
 

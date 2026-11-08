@@ -1,0 +1,488 @@
+/// URLs as text: percent-encoding and decoding as Python's `urllib.parse` quotes and unquotes,
+/// form bodies as `urlencode` writes them and `parse_qsl` reads them, and URLs taken apart, put
+/// back together and resolved against a base, as RFC 3986 says and `urljoin` does.
+module std.url
+
+import std.text.utf8.{decode_lossy_unicode}
+
+/// The text percent-encoded, as Python's `quote`: each byte of its UTF-8 as `%XX`, in uppercase
+/// hex, except letters, digits, `_`, `.`, `-` and `~`, which are never encoded, and the ASCII
+/// characters in `safe`, which by default is `/`, so a path keeps its slashes.
+pub fn encode(text: String, safe: String = "/") -> String {
+    return quote(text, safe, false)
+}
+
+/// The text percent-encoded for a form or a query, as Python's `quote_plus`: a space as `+`,
+/// and `/` encoded too unless it's in `safe`.
+pub fn encode_plus(text: String, safe: String = "") -> String {
+    return quote(text, safe, true)
+}
+
+/// The text with each `%XX` turned back into its byte, as Python's `unquote`. A `%` without two
+/// hex digits after it stays as it is, and bytes that aren't UTF-8 become U+FFFD, as Python's
+/// `errors="replace"` makes them.
+pub fn decode(text: String) -> String {
+    return unquote(text, false)
+}
+
+/// The text decoded as `decode` does, with each `+` a space first, as Python's `unquote_plus`.
+pub fn decode_plus(text: String) -> String {
+    return unquote(text, true)
+}
+
+/// Names and values as a form body or a query, as Python's `urlencode`: each name `=` its value,
+/// both encoded with `encode_plus`, joined by `&`.
+pub fn form_encode(pairs: List<(String, String)>) -> String {
+    var out = String()
+    for (name, value) in pairs {
+        if not out.is_empty() {
+            out.push('&')
+        }
+        out.push_str(encode_plus(name))
+        out.push('=')
+        out.push_str(encode_plus(value))
+    }
+    return out
+}
+
+/// The names and values in a form body or a query, in order, as Python's
+/// `parse_qsl(text, keep_blank_values=True)`: the parts between `&`, each split at its first `=`
+/// and decoded with `decode_plus`. A part without `=` is a name with an empty value, and empty
+/// parts are skipped.
+pub fn form_decode(text: String) -> List<(String, String)> {
+    var out: List<(String, String)> = []
+    for part in text.split("&") {
+        if part.is_empty() {
+            continue
+        }
+        match part.split_once("=") {
+            some((name, value)) => out.push((decode_plus(name), decode_plus(value))),
+            none => out.push((decode_plus(part), String())),
+        }
+    }
+    return out
+}
+
+/// A URL taken apart, as RFC 3986 names its parts. `{url}` puts it back together.
+pub struct Url {
+    /// `https`, in lowercase.
+    pub scheme: String
+    /// The user name before the host, still percent-encoded, if there's one.
+    pub user: String?
+    /// The password after the user name, still percent-encoded, if there's one.
+    pub password: String?
+    /// The host, without the brackets around an IPv6 address, or `none` if the URL has no
+    /// authority, as `mailto:` ones don't. `file:///` has an empty one.
+    pub host: String?
+    /// The port, if one is written.
+    pub port: u16?
+    /// The path, still percent-encoded: `/a/b` or empty.
+    pub path: String
+    /// What follows the `?`, still encoded, if there's a `?`.
+    pub query: String?
+    /// What follows the `#`, if there's a `#`.
+    pub fragment: String?
+}
+
+impl Url {
+    /// The URL taken apart, or why it can't be: it needs a scheme, and a port has to be a number
+    /// up to 65535. Nothing is decoded, so `{url}` gives back the same text, except that the
+    /// scheme and host are lowercased.
+    pub fn parse(text: String) -> Url ! String {
+        let parts = split(text)
+        if parts.scheme == none {
+            fail "`{text}` has no scheme, such as `https:`"
+        }
+        return try from_parts(parts.scheme ?? String(), parts.authority, parts.path, parts.query, parts.fragment)
+    }
+
+    /// The URL `reference` names, read relative to this one, as RFC 3986's section 5.2 resolves it
+    /// and Python's `urljoin` does: `../b?x` from `https://h/a/c` is `https://h/b?x`. A reference
+    /// with a scheme stands for itself, less any `.` and `..` in its path.
+    pub fn join(self, reference: String) -> Url ! String {
+        let r = split(reference)
+        if r.scheme != none {
+            return try from_parts(r.scheme ?? String(), r.authority, remove_dot_segments(r.path), r.query, r.fragment)
+        }
+        if r.authority != none {
+            return try from_parts(self.scheme.copy(), r.authority, remove_dot_segments(r.path), r.query, r.fragment)
+        }
+        var path = String()
+        var query = r.query
+        if r.path.is_empty() {
+            path = self.path.copy()
+            if query == none {
+                query = self.query.copy()
+            }
+        } else if r.path.starts_with("/") {
+            path = remove_dot_segments(r.path)
+        } else {
+            path = remove_dot_segments(merge(self, r.path))
+        }
+        return Url {
+            scheme: self.scheme.copy(),
+            user: self.user.copy(),
+            password: self.password.copy(),
+            host: self.host.copy(),
+            port: self.port,
+            path,
+            query,
+            fragment: r.fragment,
+        }
+    }
+
+    /// The names and values in the query, as `form_decode` reads them; none if there's no query.
+    pub fn query_pairs(self) -> List<(String, String)> {
+        return match self.query {
+            some(q) => form_decode(q),
+            none => [],
+        }
+    }
+
+    // The authority as it's written: user, password, host and port.
+    fn authority(self) -> String? {
+        let host = self.host else {
+            return none
+        }
+        var s = String()
+        match self.user {
+            some(user) => {
+                s.push_str(user)
+                match self.password {
+                    some(password) => {
+                        s.push(':')
+                        s.push_str(password)
+                    }
+                    none => {}
+                }
+                s.push('@')
+            }
+            none => {}
+        }
+        if host.contains(":") {
+            s.push('[')
+            s.push_str(host)
+            s.push(']')
+        } else {
+            s.push_str(host)
+        }
+        if self.port != none {
+            s.push_str(":{self.port ?? 0}")
+        }
+        return some(s)
+    }
+}
+
+/// The URL as text, its parts put back as RFC 3986's section 5.3 joins them.
+impl Display for Url {
+    fn show(self) {
+        var s = String()
+        s.push_str(self.scheme)
+        s.push(':')
+        match self.authority() {
+            some(a) => {
+                s.push_str("//")
+                s.push_str(a)
+            }
+            none => {}
+        }
+        s.push_str(self.path)
+        match self.query {
+            some(q) => {
+                s.push('?')
+                s.push_str(q)
+            }
+            none => {}
+        }
+        match self.fragment {
+            some(f) => {
+                s.push('#')
+                s.push_str(f)
+            }
+            none => {}
+        }
+        print(s)
+    }
+}
+
+// A URL or a reference's five parts, as RFC 3986's Appendix B splits them.
+struct Parts {
+    scheme: String?
+    authority: String?
+    path: String
+    query: String?
+    fragment: String?
+}
+
+// The parts are found by their offsets, in one pass, so the only text made is the parts'.
+fn split(text: String) -> Parts {
+    let n = text.len()
+    let hash = index(text, b'#', 0, n)
+    let end = index(text, b'?', 0, hash)
+    var fragment: String? = none
+    if hash < n {
+        fragment = some(text[hash + 1..])
+    }
+    var query: String? = none
+    if end < hash {
+        query = some(text[end + 1..hash])
+    }
+    // A scheme is letters, digits, `+`, `-` and `.` after a letter, then `:`, before any `/`.
+    var scheme: String? = none
+    var start: usize = 0
+    let colon = index(text, b':', 0, end)
+    if colon > 0 and colon < end and is_scheme(text, colon) {
+        scheme = some(lower(text[..colon]))
+        start = colon + 1
+    }
+    var authority: String? = none
+    if start + 1 < end and text.byte_at(start) == b'/' and text.byte_at(start + 1) == b'/' {
+        let slash = index(text, b'/', start + 2, end)
+        authority = some(text[start + 2..slash])
+        start = slash
+    }
+    return Parts { scheme, authority, path: text[start..end], query, fragment }
+}
+
+// The first `byte` in `text` from `from` up to `to`, or `to` if there's none there.
+fn index(text: String, byte: u8, from: usize, to: usize) -> usize {
+    for i in from..to {
+        if text.byte_at(i) == byte {
+            return i
+        }
+    }
+    return to
+}
+
+// The text in lowercase, as Python lowercases a scheme and a host, made anew only when there's
+// something to lower, which there mostly isn't.
+fn lower(text: own String) -> String {
+    for i in 0usize..text.len() {
+        let c = text.byte_at(i)
+        if (c >= b'A' and c <= b'Z') or c >= 0x80 {
+            return text.to_lower_root()
+        }
+    }
+    return text
+}
+
+fn is_scheme(text: String, end: usize) -> bool {
+    for i in 0usize..end {
+        let c = text.byte_at(i)
+        let letter = (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z')
+        if i == 0 and not letter {
+            return false
+        }
+        if not letter and not (c >= b'0' and c <= b'9') and c != b'+' and c != b'-' and c != b'.' {
+            return false
+        }
+    }
+    return true
+}
+
+fn from_parts(scheme: own String, authority: String?, path: own String, query: own String?, fragment: own String?) -> Url ! String {
+    var user: String? = none
+    var password: String? = none
+    var host: String? = none
+    var port: u16? = none
+    match authority {
+        some(a) => {
+            // Offsets again: the host and port start after the last `@`, and the user name and
+            // password before it split at its first `:`.
+            let n = a.len()
+            var from: usize = 0
+            match a.find_last("@") {
+                some(at) => {
+                    let c = index(a, b':', 0, at)
+                    if c < at {
+                        user = some(a[..c])
+                        password = some(a[c + 1..at])
+                    } else {
+                        user = some(a[..at])
+                    }
+                    from = at + 1
+                }
+                none => {}
+            }
+            var start = from    // the host, from `start` up to `end`
+            var end = n
+            var digits = n      // and the port's digits, from here to the end
+            if from < n and a.byte_at(from) == b'[' {
+                let close = index(a, b']', from, n)
+                if close == n {
+                    fail "`{a[from..]}` opens an IPv6 address with `[` and doesn't close it"
+                }
+                start = from + 1
+                end = close
+                if close + 1 < n {
+                    if a.byte_at(close + 1) != b':' {
+                        fail "`{a[close + 1..]}` can't follow an IPv6 address; a port goes after `:`"
+                    }
+                    digits = close + 2
+                }
+            } else {
+                // The first `:`, as Python splits there, so `a:b:c` has the port `b:c`, which
+                // isn't one.
+                end = index(a, b':', from, n)
+                if end < n {
+                    digits = end + 1
+                }
+                if index(a, b'[', from, end) < end or index(a, b']', from, end) < end {
+                    fail "`{a[from..]}` has a bracket that isn't around an IPv6 address"
+                }
+            }
+            if digits < n {
+                var v: u32 = 0
+                for i in digits..n {
+                    let d = a.byte_at(i)
+                    if d < b'0' or d > b'9' {
+                        fail "the port `{a[digits..]}` isn't a number"
+                    }
+                    v = v * 10 + u32(d - b'0')
+                    if v > 65535 {
+                        fail "the port {a[digits..]} is more than 65535"
+                    }
+                }
+                port = some(u16.wrap(v))
+            }
+            host = some(lower(a[start..end]))
+        }
+        none => {}
+    }
+    return Url { scheme, user, password, host, port, path, query, fragment }
+}
+
+// RFC 3986's 5.2.3: the reference's path after the base's, up to and with its last `/`.
+fn merge(base: Url, path: String) -> String {
+    if base.host != none and base.path.is_empty() {
+        return "/{path}"
+    }
+    let cut = base.path.find_last("/") else {
+        return path.copy()
+    }
+    var out = base.path[..cut + 1]
+    out.push_str(path)
+    return out
+}
+
+// RFC 3986's 5.2.4: the path without its `.` and `..` segments, each `..` taking away the one
+// before it.
+fn remove_dot_segments(path: String) -> String {
+    if not has_dot_segment(path) {
+        return path.copy()
+    }
+    var out: List<String> = []
+    let segments = path.split("/")
+    let absolute = path.starts_with("/")
+    let n = segments.len()
+    for i in 0usize..n {
+        let s = segments[i].copy()
+        if i == 0 and absolute {
+            continue
+        }
+        if s == "." or s == ".." {
+            if s == ".." and out.len() > 0 {
+                _ = out.pop()
+            }
+            // A last `.` or `..` leaves the path ending in `/`.
+            if i == n - 1 {
+                out.push(String())
+            }
+            continue
+        }
+        out.push(s)
+    }
+    let joined = out.join("/")
+    return if absolute { "/{joined}" } else { joined }
+}
+
+// Whether a segment of the path is `.` or `..`, which most paths have none of.
+fn has_dot_segment(path: String) -> bool {
+    let n = path.len()
+    var start: usize = 0
+    while start <= n {
+        let end = index(path, b'/', start, n)
+        let len = end - start
+        if (len == 1 or len == 2) and path.byte_at(start) == b'.' and path.byte_at(end - 1) == b'.' {
+            return true
+        }
+        start = end + 1
+    }
+    return false
+}
+
+// Which ASCII bytes stay as they are: letters, digits, `_`, `.`, `-`, `~` and those in `safe`.
+// Python ignores what in `safe` isn't ASCII, and so does this.
+fn kept(safe: String) -> [bool; 128] {
+    var keep = [false; 128]
+    for i in 0usize..128 {
+        let c = u8.wrap(i)
+        keep[i] = (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or (c >= b'0' and c <= b'9') or c == b'_' or c == b'.' or c == b'-' or c == b'~'
+    }
+    for i in 0usize..safe.len() {
+        let c = safe.byte_at(i)
+        if c < 128 {
+            keep[usize(c)] = true
+        }
+    }
+    return keep
+}
+
+fn quote(text: String, safe: String, plus: bool) -> String {
+    let keep = kept(safe)
+    var out = String()
+    out.reserve(text.len())
+    for i in 0usize..text.len() {
+        let b = text.byte_at(i)
+        // `quote_plus` makes a space `+` even when `safe` holds a space.
+        if plus and b == b' ' {
+            out.push('+')
+        } else if b < 128 and keep[usize(b)] {
+            out.push(rune(b))
+        } else {
+            out.push('%')
+            out.push(hex_digit(b / 16))
+            out.push(hex_digit(b % 16))
+        }
+    }
+    return out
+}
+
+fn hex_digit(v: u8) -> rune {
+    return rune(if v < 10 { v + 48 } else { v + 55 })
+}
+
+fn hex_value(c: u8) -> u8? {
+    if c >= b'0' and c <= b'9' {
+        return some(c - b'0')
+    }
+    if c >= b'a' and c <= b'f' {
+        return some(c - b'a' + 10)
+    }
+    if c >= b'A' and c <= b'F' {
+        return some(c - b'A' + 10)
+    }
+    return none
+}
+
+fn unquote(text: String, plus: bool) -> String {
+    let n = text.len()
+    var out: List<u8> = []
+    out.reserve(n)
+    var i: usize = 0
+    while i < n {
+        let b = text.byte_at(i)
+        if b == b'%' and i + 2 < n {
+            let hi = hex_value(text.byte_at(i + 1))
+            let lo = hex_value(text.byte_at(i + 2))
+            if hi != none and lo != none {
+                out.push((hi ?? 0) * 16 + (lo ?? 0))
+                i += 3
+                continue
+            }
+        }
+        out.push(if plus and b == b'+' { b' ' } else { b })
+        i += 1
+    }
+    return decode_lossy_unicode(out, 0, out.len())
+}

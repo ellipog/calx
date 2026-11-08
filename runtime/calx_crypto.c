@@ -83,13 +83,19 @@ static const cx_u8 sbox[256] = {
 
 static cx_u8 xtime(cx_u8 x) { return (cx_u8)((x << 1) ^ ((x >> 7) * 0x1b)); }
 
-/* Whether the processor has AES-NI and SSE4.1. */
+/* Whether the processor has AES-NI and SSE4.1, asked once, since a cpuid under a hypervisor costs
+   about a microsecond. Threads that race to ask store the same answer. */
 static cx_u32 aes_ni(void) {
+    static int known = -1;
+    int k = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (k >= 0) return (cx_u32)k;
+    k = 0;
 #ifdef CX_X86
     unsigned a, b, c, d;
-    if (__get_cpuid(1, &a, &b, &c, &d)) return (c >> 25) & 1 && (c >> 19) & 1;
+    if (__get_cpuid(1, &a, &b, &c, &d)) k = (c >> 25) & 1 && (c >> 19) & 1;
 #endif
-    return 0;
+    __atomic_store_n(&known, k, __ATOMIC_RELAXED);
+    return (cx_u32)k;
 }
 
 static void expand_key(const cx_u8* key, cx_u8 rk[11][16]) {
