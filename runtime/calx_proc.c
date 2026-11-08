@@ -31,6 +31,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h> /* K32GetProcessMemoryInfo, which kernel32 has */
 #else
 #define _GNU_SOURCE
 #include <errno.h>
@@ -39,6 +40,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -164,6 +167,7 @@ struct proc {
     int exited, killed, timed_out, has_code;
     cx_i32 code, signal;
     cx_u64 deadline;    /* when its timeout runs out, on cx_clock_ns's clock, or 0 */
+    cx_u64 cpu_ns, peak_memory;   /* what it used in all, recorded as it exited */
     cx_u32 pid;
     group* g;
 #ifdef _WIN32
@@ -804,11 +808,31 @@ static void io_done(stream* s, DWORD n) {
     start_read(s);
 }
 
+/* What the process has used: its CPU time in ns, in the kernel and out, and its working set now
+ * and at its peak, in bytes. A handle to a process that has exited still says what it used. */
+static void usage_os(proc* p, cx_u64* out) {
+    FILETIME made, ended, kernel, user;
+    out[0] = 0;
+    if (GetProcessTimes(p->process, &made, &ended, &kernel, &user)) {
+        cx_u64 k = ((cx_u64)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+        cx_u64 u = ((cx_u64)user.dwHighDateTime << 32) | user.dwLowDateTime;
+        out[0] = (k + u) * 100;   /* in units of 100 ns */
+    }
+    PROCESS_MEMORY_COUNTERS c;
+    int known = K32GetProcessMemoryInfo(p->process, &c, sizeof c) != 0;
+    out[1] = known ? (cx_u64)c.WorkingSetSize : 0;
+    out[2] = known ? (cx_u64)c.PeakWorkingSetSize : 0;
+}
+
 /* The child has exited: what's in its pipes is all it wrote. */
 static void child_exited(proc* p) {
     if (p->exited) return;
     DWORD code = 0;
     GetExitCodeProcess(p->process, &code);
+    cx_u64 used[3];
+    usage_os(p, used);
+    p->cpu_ns = used[0];
+    p->peak_memory = used[2];
     p->exited = 1;
     p->deadline = 0;
     p->code = (cx_i32)code;
@@ -1173,9 +1197,47 @@ static void read_some(stream* s) {
     }
 }
 
-static void child_exited(proc* p, int status) {
+/* What the process has used while it runs: its CPU time in ns from /proc/<pid>/stat, and its
+ * resident set now and at its peak from /proc/<pid>/status, in bytes, each 0 where /proc can't
+ * say. */
+static void usage_os(proc* p, cx_u64* out) {
+    out[0] = out[1] = out[2] = 0;
+    char path[64], line[512];
+    snprintf(path, sizeof path, "/proc/%u/stat", (unsigned)p->pid);
+    FILE* f = fopen(path, "r");
+    if (f) {
+        /* The name, the second field, is in parentheses and may hold spaces, so the fields are
+         * counted from its last `)`: the state is the 3rd, user time the 14th, system time the 15th. */
+        size_t n = fread(line, 1, sizeof line - 1, f);
+        fclose(f);
+        line[n] = 0;
+        char* at = strrchr(line, ')');
+        unsigned long long user, sys;
+        long tick = sysconf(_SC_CLK_TCK);
+        if (at && tick > 0 && sscanf(at + 1, " %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %llu %llu", &user, &sys) == 2) {
+            out[0] = (cx_u64)(user + sys) * (1000000000ull / (cx_u64)tick);
+        }
+    }
+    snprintf(path, sizeof path, "/proc/%u/status", (unsigned)p->pid);
+    f = fopen(path, "r");
+    if (f) {
+        unsigned long long kb;
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "VmRSS: %llu", &kb) == 1) out[1] = (cx_u64)kb * 1024;
+            else if (sscanf(line, "VmHWM: %llu", &kb) == 1) out[2] = (cx_u64)kb * 1024;
+        }
+        fclose(f);
+    }
+}
+
+static void child_exited(proc* p, int status, const struct rusage* used) {
     p->exited = 1;
     p->deadline = 0;
+    if (used) {
+        p->cpu_ns = ((cx_u64)used->ru_utime.tv_sec + (cx_u64)used->ru_stime.tv_sec) * 1000000000ull +
+                    ((cx_u64)used->ru_utime.tv_usec + (cx_u64)used->ru_stime.tv_usec) * 1000ull;
+        p->peak_memory = (cx_u64)used->ru_maxrss * 1024;   /* in KiB on Linux */
+    }
     if (WIFEXITED(status)) {
         p->code = WEXITSTATUS(status);
         p->has_code = 1;
@@ -1230,16 +1292,18 @@ static void unlist_locked(proc* p) {
 
 static void reap(proc* p) {
     int status = 0;
+    struct rusage used;
     pid_t r;
-    /* Off the list as it's reaped, so a panic never kills another process given its ID. */
+    /* Off the list as it's reaped, so a panic never kills another process given its ID. wait4 says
+     * what it used as well as how it ended. */
     pthread_mutex_lock(&live_lock);
     do {
-        r = waitpid((pid_t)p->pid, &status, WNOHANG);
+        r = wait4((pid_t)p->pid, &status, WNOHANG, &used);
     } while (r < 0 && errno == EINTR);
     if (r == (pid_t)p->pid || r < 0) unlist_locked(p);
     pthread_mutex_unlock(&live_lock);
-    if (r == (pid_t)p->pid) child_exited(p, status);
-    else if (r < 0) child_exited(p, 0x7f00);   /* reaped elsewhere: say it exited with 127 */
+    if (r == (pid_t)p->pid) child_exited(p, status, &used);
+    else if (r < 0) child_exited(p, 0x7f00, NULL);   /* reaped elsewhere: say it exited with 127 */
 }
 
 static void kill_proc(proc* p) {
@@ -1754,6 +1818,21 @@ cx_u32 cx_proc_state(cx_i64 h) {
 
 cx_i32 cx_proc_code(cx_i64 h) { return P(h)->code; }
 cx_i32 cx_proc_signal(cx_i64 h) { return P(h)->signal; }
+
+/* What the child has used, into `out`: its CPU time in ns, and its memory in RAM now and at its
+ * peak, in bytes. Once it has exited, what it used in all, as recorded when it ended, with nothing
+ * in RAM now. It's looked at first, so a child that has just exited gives its totals. */
+void cx_proc_usage(cx_i64 h, cx_u64* out) {
+    proc* p = P(h);
+    if (!p->exited) pump(&p, 1, 1);
+    if (p->exited) {
+        out[0] = p->cpu_ns;
+        out[1] = 0;
+        out[2] = p->peak_memory;
+        return;
+    }
+    usage_os(p, out);
+}
 
 /* Lets the child go: its handles and buffers. One that hasn't exited runs on. */
 void cx_proc_free(cx_i64 h) {

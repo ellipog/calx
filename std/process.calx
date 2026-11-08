@@ -39,6 +39,7 @@ extern "C" {
     fn cx_proc_state(h: i64) -> u32
     fn cx_proc_code(h: i64) -> i32
     fn cx_proc_signal(h: i64) -> i32
+    fn cx_proc_usage(h: i64, out: *u64)
     fn cx_proc_free(h: i64)
     fn cx_proc_which(name: *const u8, n: usize) -> i32
     fn cx_proc_exe() -> i32
@@ -109,9 +110,32 @@ pub struct Status {
     pub signal: i32?,
     /// Whether its timeout ran out, so it was killed.
     pub timed_out: bool,
+    // What it used, which `usage` gives, since it differs from run to run.
+    used: Usage,
+}
+
+/// What a program used: the CPU time of all its threads and the memory it held in RAM. The
+/// numbers differ from one run to the next, as the clock's do, so they're read with `unsafe`.
+pub struct Usage {
+    /// The nanoseconds of CPU time its threads used, in the kernel and out. Windows adds to it at
+    /// each tick of its clock, about every 15.6 ms.
+    pub cpu_ns: u64,
+    /// The bytes of its memory in RAM now: its working set on Windows, its resident set on Linux,
+    /// `top`'s `RES`. 0 once it has ended.
+    pub memory: u64,
+    /// The most bytes of memory it held in RAM at once: its peak working set on Windows, its
+    /// `VmHWM` on Linux, `ru_maxrss` once it has ended.
+    pub peak_memory: u64,
 }
 
 impl Status {
+    /// What the program used in all: its CPU time and its peak memory, as the system recorded
+    /// them when it ended, with `memory` 0. On Linux they're `wait4`'s, so they count the
+    /// programs it started and waited for. `unsafe`, as reading the clock is.
+    pub unsafe fn usage(self) -> Usage {
+        return Usage { cpu_ns: self.used.cpu_ns, memory: 0, peak_memory: self.used.peak_memory }
+    }
+
     /// Whether it exited with status 0, which is how a program says it succeeded.
     pub fn success(self) -> bool {
         return match self.code {
@@ -527,6 +551,15 @@ impl Child {
         }
     }
 
+    /// What it has used so far: its CPU time and its memory in RAM now and at its peak, as the
+    /// system says while it runs, for sampling a server as it works. Once it has ended, what it
+    /// used in all, as `Status.usage` gives. `unsafe`, as reading the clock is. Panics if it was
+    /// waited for already.
+    @track_caller
+    pub unsafe fn usage(self) -> Usage {
+        return usage_of(self.live())
+    }
+
     /// Ends its input, waits for it to end, and gives how it ended with what it wrote to each
     /// stream that's a pipe and hasn't been read. Panics if it was waited for already.
     @track_caller
@@ -548,7 +581,7 @@ pub fn output_all(commands: List<Command>, at_once: usize) -> List<Output> ! Pro
     }
     var outputs = List<Output>()
     for _ in commands {
-        outputs.push(Output { status: Status { code: none, signal: none, timed_out: false }, stdout: List<u8>(), stderr: List<u8>() })
+        outputs.push(Output { status: Status { code: none, signal: none, timed_out: false, used: Usage { cpu_ns: 0, memory: 0, peak_memory: 0 } }, stdout: List<u8>(), stderr: List<u8>() })
     }
     let group = unsafe { cx_proc_group() }
     var running = List<i64>()
@@ -811,7 +844,16 @@ fn status_of(h: i64) -> Status {
         code: if state & 16 != 0 { some(unsafe { cx_proc_code(h) }) } else { none },
         signal: if signal != 0 { some(signal) } else { none },
         timed_out: state & 4 != 0,
+        used: usage_of(h),
     }
+}
+
+fn usage_of(h: i64) -> Usage {
+    var out: List<u64> = [0, 0, 0]
+    unsafe {
+        cx_proc_usage(h, out.as_mut_ptr())
+    }
+    return Usage { cpu_ns: out[0], memory: out[1], peak_memory: out[2] }
 }
 
 // The moment `ms` milliseconds from now on cx_clock_ns's clock, or 0, no limit, if that's past

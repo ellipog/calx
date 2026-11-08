@@ -1,6 +1,6 @@
 ---
 title: std.process
-description: Running other programs with their arguments, folder, environment, input, output and timeouts, and finding them; and this process's memory, CPU time and exit.
+description: Running other programs with their arguments, folder, environment, input, output and timeouts, finding them, and the CPU time and memory they used; and this process's memory, CPU time and exit.
 ---
 
 # `std.process`
@@ -119,6 +119,7 @@ fn main() {
 | `child.try_wait() -> Status?` | How it ended, if it has, without waiting |
 | `child.kill()` | Kills it, if it's running, without letting it clean up |
 | `child.id() -> u32` | Its process ID |
+| `unsafe child.usage() -> Usage` | What it has used so far, as the system says while it runs: see [What it used](#what-it-used) |
 | `child.wait() -> Output` | Ends its input, waits for it, and gives how it ended with what it wrote that wasn't read. Panics if it was waited for already |
 
 Reading its output panics if the output isn't `Stdio.Pipe`, and writing panics if the input isn't.
@@ -134,10 +135,45 @@ Reading its output panics if the output isn't `Stdio.Pipe`, and writing panics i
 | `status.signal: i32?` | On Linux, the signal that ended it, such as 9 for `SIGKILL` |
 | `status.timed_out: bool` | Whether its timeout ran out, so it was killed |
 | `status.success() -> bool` | Whether it exited with 0 |
+| `unsafe status.usage() -> Usage` | What it used in all, as the system recorded it when the program ended: see [What it used](#what-it-used) |
 
 A `Status` shows as `exited with status 3`, `was killed by signal 9`, `was killed`, or `ran out of time, and was killed`.
 
 A program has finished once it has exited and what it wrote has been read. Once it exits, its pipes are read until they're empty, not until every end is closed, since a program it started in the background may hold them open long after it.
+
+## What it used
+
+A benchmark that starts a server measures what the server used: its CPU time and its memory, sampled while it runs, and its totals once it ends. `child.usage()` gives what it has used so far, and `status.usage()` what it used in all. Both are `unsafe`, since the numbers differ from run to run, as the clock's do. The same `Usage` comes from both systems:
+
+| `Usage` | Is |
+| --- | --- |
+| `cpu_ns: u64` | The nanoseconds of CPU time all its threads used, in the kernel and out. Windows adds to it at each tick of its clock, about every 15.6 ms |
+| `memory: u64` | The bytes of its memory in RAM now: its working set on Windows, its resident set on Linux, `top`'s `RES`. 0 once it has ended |
+| `peak_memory: u64` | The most bytes it held in RAM at once: its peak working set on Windows, `VmHWM` on Linux while it runs, and `ru_maxrss` once it has ended |
+
+```calx
+import std.env.{args}
+import std.process.{Command, Stdio, current_exe}
+
+fn main() {
+    if args().len() > 0 {
+        let held: List<u64> = [7; 1000000]    // 8 MB, for the parent to see
+        println("ready {held.len()}")
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdout(Stdio.Pipe).spawn()!
+    _ = c.read_line(30000)
+    let now = unsafe { c.usage() }
+    let out = c.wait()
+    let total = unsafe { out.status.usage() }
+    println("{now.peak_memory >= now.memory} {total.peak_memory > 8000000} {total.memory}")    // out: true true 0
+}
+```
+
+- On Windows the numbers are `GetProcessTimes` and `GetProcessMemoryInfo`'s, from the handle to the process, which still says what it used after it ends. Python needs `ctypes` for them.
+- On Linux, while it runs, they're `/proc/<pid>/stat` and `/proc/<pid>/status`. Once it ends, they're `wait4`'s, as Python's `os.wait4` gives them, so they also count the programs it started and waited for.
+- Once it has ended, `child.usage()` gives what `status.usage()` will, so a sampler that's late still gets the totals.
+- [This process's](#this-process) own are `memory()` and `cpu_time()`.
 
 ## Errors
 

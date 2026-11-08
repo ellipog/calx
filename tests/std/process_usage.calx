@@ -1,0 +1,45 @@
+// What a child used: its memory sampled while it runs, and its CPU time and peak memory once it
+// has ended, as Calcite's bench scripts measure the servers they start (CLX-158). The child is
+// this program again: it fills 64 MiB, says so, and once its input ends, works for 100 ms of CPU.
+
+import std.env.{args}
+import std.hint.{black_box}
+import std.io.{Lines}
+import std.process.{Command, Stdio, cpu_time, current_exe}
+
+const HELD: u64 = 64 << 20
+const HELD_LEN: usize = 67108864
+
+fn child() {
+    var block = List<u8>()
+    block.reserve(HELD_LEN)
+    for i in 0usize..HELD_LEN {
+        block.push(u8.wrap(i))
+    }
+    println("ready")
+    var input = Lines()
+    while let _ = input.next() {}
+    var x = u64(black_box(block[HELD_LEN - 1]))
+    while unsafe { cpu_time() } < 100_000_000 {
+        for _ in 0..100000 {
+            x = x * 6364136223846793005 + 1442695040888963407
+        }
+    }
+    println("{black_box(x) != 7}")
+}
+
+fn main() {
+    if args().len() > 0 {
+        child()
+        return
+    }
+    var c = Command.new(current_exe()).arg("child").stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()!
+    println(c.read_line(30000) ?? String("no line"))    // out: ready
+    let running = unsafe { c.usage() }
+    println("{running.memory >= HELD} {running.peak_memory >= HELD} {running.peak_memory >= running.memory}")    // out: true true true
+    c.close_input()
+    let out = c.wait()
+    let used = unsafe { out.status.usage() }
+    println("{out.status} {(String.from_utf8(out.stdout) ?? String()).trim()}")    // out: exited with status 0 true
+    println("{used.cpu_ns >= 100_000_000} {used.cpu_ns < 60_000_000_000} {used.peak_memory >= HELD} {used.memory}")    // out: true true true 0
+}

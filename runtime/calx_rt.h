@@ -874,6 +874,7 @@ CX_FN(cx_i32, cx_proc_poll, (cx_i64 h));
 CX_FN(void, cx_proc_result_copy, (cx_u8* to));
 CX_FN(cx_usize, cx_proc_result_len, (void));
 CX_FN(cx_i32, cx_proc_signal, (cx_i64 h));
+CX_FN(void, cx_proc_usage, (cx_i64 h, cx_u64* out));
 CX_FN(cx_i64, cx_proc_some, (cx_i64 h, cx_u64 until));
 CX_FN(cx_i64, cx_proc_spawn, (const cx_u8* spec_p, cx_usize spec_n, const cx_u8* input, cx_usize input_n, cx_i64 g));
 CX_FN(cx_u32, cx_proc_state, (cx_i64 h));

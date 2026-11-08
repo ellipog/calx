@@ -156,6 +156,7 @@ fn main() ! Error {
 | `subprocess.run(["git", "status"], check=True)` | `Command.new("git").arg("status").run()` |
 | `subprocess.check_output(...)` | `Command.new(...).read()`, its output as text |
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
+| `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
 
 ```calx
 import std.fs.{temp_dir, write_text, make_dir_all, glob, remove_dir_all}
