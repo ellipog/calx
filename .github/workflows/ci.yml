@@ -39,7 +39,8 @@ jobs:
         shell: pwsh
         run: |
           $zip = "$env:RUNNER_TEMP\ninja-win.zip"
-          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+          # GitHub's release downloads time out now and then; a few tries ride over it.
+          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
           if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
           Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
@@ -111,7 +112,8 @@ jobs:
         shell: pwsh
         run: |
           $zip = "$env:RUNNER_TEMP\ninja-win.zip"
-          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+          # GitHub's release downloads time out now and then; a few tries ride over it.
+          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
           if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
           Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
