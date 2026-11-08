@@ -1196,7 +1196,7 @@ private:
             }
             case BMethod::pop: case BMethod::clear: case BMethod::remove: case BMethod::swap_remove:
             case BMethod::swap: case BMethod::truncate: case BMethod::reserve: case BMethod::push_str:
-            case BMethod::set_len: case BMethod::as_mut_ptr: case BMethod::sort: case BMethod::hash_add: case BMethod::trim:
+            case BMethod::set_len: case BMethod::as_mut_ptr: case BMethod::sort: case BMethod::reverse: case BMethod::hash_add: case BMethod::trim:
             case BMethod::pop_first: case BMethod::pop_last: case BMethod::move_to_first: case BMethod::move_to_last:
             case BMethod::remove_marked: case BMethod::extend: case BMethod::list_retain: case BMethod::sort_by:
             case BMethod::sort_by_key:

@@ -7820,6 +7820,7 @@ private:
             if (m == "round") return conversion(e, t, Conv::round);
             if (m == "try_from") return try_from(e, t);
             if (m == "parse" && is_numeric(t)) return static_builtin(e, t, PrimMethod::parse, nullptr, T.optional_of(t));
+            if (m == "parse_radix" && is_int(t)) return parse_radix(e, t);
             if (m == "div_wide" && is_int(t) && !t->is_signed && !t->is_usize) return div_wide(e, t);
             if (m == "from_bits" && is_float(t)) {
                 return static_builtin(e, t, PrimMethod::from_bits, t->bits == 32 ? T.u32 : T.u64, t);
@@ -9838,6 +9839,7 @@ private:
             else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
             else if (m == "sort") b = BMethod::sort, changes = true;
+            else if (m == "reverse") b = BMethod::reverse, changes = true;
             else if (m == "swap") b = BMethod::swap, changes = true, params = {T.usize, T.usize};
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
@@ -9877,6 +9879,7 @@ private:
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
             else if (m == "sort") b = BMethod::sort, changes = true;
+            else if (m == "reverse" && recv->kind == TypeKind::list && !recv->arena_list) b = BMethod::reverse, changes = true;
             else if (m == "extend" && recv->kind == TypeKind::list) return extend_call(e, recv);
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
@@ -10232,6 +10235,35 @@ private:
             if (is_bad(check(a.value, t))) ok = false;
         }
         return ok ? T.tuple_of({t, t}) : T.error;
+    }
+
+    // `T.parse_radix(text, radix)`: the text, a `str` or a `String`, and the base, a `u32`.
+    Type* parse_radix(Expr* e, Type* t) {
+        e->call = CallKind::prim_static;
+        e->prim = PrimMethod::parse_radix;
+        e->named_type = t;
+        std::string what = q(std::string(t->name) + ".parse_radix");
+        if (e->args.size() != 2) {
+            error(e->span, what + " takes two arguments: the text, and the base, from 2 to 36");
+            check_args(e);
+            return T.error;
+        }
+        bool ok = true;
+        for (Arg& a : e->args) {
+            if (a.name || a.is_mut) {
+                error(a.span, "this argument can't be named or `mut`");
+                ok = false;
+            }
+        }
+        Type* at = check(e->args[0].value, nullptr);
+        if (is_bad(at)) {
+            ok = false;
+        } else if (at->kind != TypeKind::str && at->kind != TypeKind::string) {
+            error(e->args[0].value->span, what + " takes a `str` or a `String` first, not " + a_type(at));
+            ok = false;
+        }
+        if (is_bad(check(e->args[1].value, T.u32))) ok = false;
+        return ok ? T.optional_of(t) : T.error;
     }
 
     Type* static_builtin(Expr* e, Type* t, PrimMethod pm, Type* param, Type* result) {

@@ -3,7 +3,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 
 /**
- * What Java does with bytes that may not be UTF-8, for utf8_check.py to compare with Calx.
+ * What Java does with bytes that may not be UTF-8, for utf8_check.calx to compare with Calx.
  *
  * java Utf8Check.java decode: each line of standard input is bytes in hex, and each line out is
  * what new String(bytes, UTF_8) gives, in hex as UTF-8 again.

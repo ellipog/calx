@@ -217,7 +217,7 @@ fn main() {
   - A capital sigma, `Σ`, lowercases to the final form `ς` when the word it's in has a cased letter before it and none after it, and to `σ` otherwise. Java finds that word with its word `BreakIterator`, so Calx splits the text into words by the same rules.
 - Text that doesn't change comes back without a copy when it's a literal's: a `str`, or a `String` that owns no memory.
 - ASCII goes eight bytes at a time. Each other code point is a lookup in a table of 30 KB, linked only into programs that change case.
-- The tables come from Java itself: [`tools/unicode/CaseDump.java`](../../tools/unicode/CaseDump.java) asks Java 25 about every code point, and [`gen_case.py`](../../tools/unicode/gen_case.py) writes them into [runtime/calx_case.c](../../runtime/calx_case.c). The result matched Java on 2.4 million random strings, weighted to sigmas, cased letters and every kind of code point the word rules treat differently.
+- The tables come from Java itself: [`tools/unicode/CaseDump.java`](../../tools/unicode/CaseDump.java) asks Java 25 about every code point, and [`gen_case.calx`](../../tools/unicode/gen_case.calx) writes them into [runtime/calx_case.c](../../runtime/calx_case.c). The result matched Java on 2.4 million random strings, weighted to sigmas, cased letters and every kind of code point the word rules treat differently.
 - Calx doesn't have the other locales' rules, such as Turkish's dotless `ı`: programs that need the same text everywhere use the root locale.
 
 ## Going over the text

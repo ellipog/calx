@@ -53,6 +53,7 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.clear()` | Frees every element, keeping the memory |
 | `xs.contains(x)` | Whether an element `== x`. The element type must have `==` |
 | `xs.sort()` | Puts the elements in order, from least to greatest. The element type must have [`Order`](comparing.md#order) ([sorting](#sorting)) |
+| `xs.reverse()` | Puts the elements in the opposite order, in place, swapping each pair from the ends in |
 | `xs.as_ptr()`, `xs.as_mut_ptr()`, `xs.set_len(n)` | A pointer to the elements, and setting the length, for [unsafe code](unsafe.md#pointers) |
 | `xs.map(\|x\| ...)`, `filter`, `retain`, `any`, `all`, `count`, `find`, `position`, `sort_by`, `sort_by_key` | Call a closure on the elements ([closures](closures.md#methods-that-take-one)) |
 

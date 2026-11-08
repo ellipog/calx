@@ -1,0 +1,33 @@
+// reverse() puts a list's or an array's elements in the opposite order, in place.
+struct Named {
+    name: String
+    n: i32
+}
+
+fn main() {
+    var xs = [1, 2, 3, 4, 5]
+    xs.reverse()
+    println("{xs}")    // out: [5, 4, 3, 2, 1]
+    var even: List<i32> = [1, 2, 3, 4]
+    even.reverse()
+    println("{even}")    // out: [4, 3, 2, 1]
+    var none_: List<i32> = []
+    none_.reverse()
+    var one: List<i32> = [7]
+    one.reverse()
+    println("{none_} {one}")    // out: [] [7]
+    // Elements that own memory move, and nothing is copied or freed.
+    var words: List<String> = ["alpha", "beta", "gamma"]
+    words.reverse()
+    println("{words}")    // out: [gamma, beta, alpha]
+    var people = [Named { name: "ann", n: 1 }, Named { name: "bo", n: 2 }]
+    people.reverse()
+    println("{people[0].name} {people[1].n}")    // out: bo 1
+    // An array keeps its length, so it has reverse too.
+    var arr = [1u8, 2, 3]
+    arr.reverse()
+    println("{arr}")    // out: [3, 2, 1]
+    var grid: [String; 2] = [String("a"), String("b")]
+    grid.reverse()
+    println("{grid}")    // out: [b, a]
+}

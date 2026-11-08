@@ -71,6 +71,7 @@ fn main() {
 | `contains(x)` | Whether an element is `== x` |
 | `sort()`, `sort_by(\|a, b\| ...)`, `sort_by_key(\|x\| ...)` | The elements in order, in place, as a list's are sorted |
 | `swap(i, j)` | Elements `i` and `j` swapped, panicking for an index out of bounds |
+| `reverse()` | The elements in the opposite order, in place |
 | `map(\|x\| ...)` | An array of the same length, of what the closure gives for each element. Nothing is allocated for it |
 | `filter(\|x\| ...)` | A list of copies of the elements the closure says `true` for |
 | `any`, `all`, `count`, `find`, `position` | As a list's ([closures](closures.md)) |

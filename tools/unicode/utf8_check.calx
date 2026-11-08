@@ -1,26 +1,41 @@
-// Calx's side of utf8_check.py: what Utf8Check.java does, with std.text.utf8 and std.io.Lines.
-import std.env.{args}
+// Checks std.text.utf8.decode_lossy and std.io.Lines against Java 25 on random bytes.
+//
+//     calx run --release tools/unicode/utf8_check.calx -- [--java PATH] [--seed N]
+//
+// It gives Utf8Check.java and itself the same input: random byte strings, one per line in hex, to
+// decode, and random streams of text with every kind of line end, bytes that aren't UTF-8 and
+// characters cut off, to split into lines. Its own copy gets each stream in random pieces, so
+// lines end at every place a read can, as `\r` before a `\n` that comes in the next read. Java is
+// JAVA_HOME's unless --java says.
+//
+// Started as `decode` or `lines`, it's that copy: what Utf8Check.java does, with std.text.utf8 and
+// std.io.Lines.
+import std.env
 import std.io.{Lines}
+import std.path
+import std.process
+import std.process.{Command, Stdio, current_exe}
+import std.random.{Random}
 import std.text.utf8.{decode_lossy}
+import std.thread.{sleep}
 
 fn digit(b: u8) -> u8 {
     return if b <= 0x39 { b - 0x30 } else { b - 0x61 + 10 }
 }
 
-fn print_hex(s: String) {
+fn hex_of(bytes: List<u8>) -> String {
     let digits = "0123456789abcdef"
     var out = String()
-    out.reserve(2 * s.len())
-    for i in 0usize..s.len() {
-        let b = usize(s.byte_at(i))
-        out.push_str(digits[b / 16..b / 16 + 1])
-        out.push_str(digits[b % 16..b % 16 + 1])
+    out.reserve(2 * bytes.len())
+    for b in bytes {
+        out.push_str(digits[usize(b / 16)..usize(b / 16) + 1])
+        out.push_str(digits[usize(b % 16)..usize(b % 16) + 1])
     }
-    println(out)
+    return out
 }
 
-fn main() {
-    let decode = args().len() > 0 and args()[0] == "decode"
+// The copy being checked: each line decoded from hex, or each line as it is, written in hex.
+fn check_side(decode: bool) {
     var input = Lines()
     while let line = input.next() {
         if decode {
@@ -30,9 +45,190 @@ fn main() {
                 bytes.push(digit(line.byte_at(i)) * 16 + digit(line.byte_at(i + 1)))
                 i += 2
             }
-            print_hex(decode_lossy(bytes, 0, bytes.len()))
+            println(hex_of(decode_lossy(bytes, 0, bytes.len()).to_bytes()))
         } else {
-            print_hex(line)
+            println(hex_of(line.to_bytes()))
         }
+    }
+}
+
+// Bytes where the rules change: continuations at their ends, every kind of lead, and bytes that
+// never appear in UTF-8.
+fn edges() -> List<u8> {
+    return [0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4,
+            0xF5, 0xF7, 0xF8, 0xFF]
+}
+
+// A code point's UTF-8.
+fn utf8(c: u32) -> List<u8> {
+    if c < 0x800 {
+        return [u8.wrap(0xC0 | (c >> 6)), u8.wrap(0x80 | (c & 0x3F))]
+    }
+    if c < 0x10000 {
+        return [u8.wrap(0xE0 | (c >> 12)), u8.wrap(0x80 | ((c >> 6) & 0x3F)), u8.wrap(0x80 | (c & 0x3F))]
+    }
+    return [u8.wrap(0xF0 | (c >> 18)), u8.wrap(0x80 | ((c >> 12) & 0x3F)), u8.wrap(0x80 | ((c >> 6) & 0x3F)), u8.wrap(0x80 | (c & 0x3F))]
+}
+
+fn piece(r: mut Random, edge: List<u8>, ends: bool) -> List<u8> {
+    let x = r.float()
+    if x < 0.25 {
+        return [edge[r.index(edge.len())]]
+    }
+    if x < 0.35 {
+        return [u8.wrap(r.range(0x80, 0xC0))]
+    }
+    if x < 0.6 {
+        let c = u32.wrap(match r.below(3) {
+            0 => r.range(0x80, 0x800),
+            1 => r.range(0x800, 0x10000),
+            _ => r.range(0x10000, 0x110000),
+        })
+        if c >= 0xD800 and c <= 0xDFFF {
+            // A surrogate, as UTF-8 can't hold it, with its three bytes as Java decodes them.
+            return [0xED, u8.wrap(0xA0 | ((c >> 6) & 0x1F)), u8.wrap(0x80 | (c & 0x3F))]
+        }
+        let b = utf8(c)
+        // Cut off, or whole.
+        if r.float() < 0.3 {
+            let keep = 1 + r.index(b.len() - 1)
+            return b[..keep]
+        }
+        return b
+    }
+    if ends and x < 0.75 {
+        return match r.below(4) {
+            0 => [10],
+            1 => [13],
+            2 => [13, 10],
+            _ => [10, 13],
+        }
+    }
+    return [u8.wrap(r.range(0x20, 0x7F))]
+}
+
+fn stop(why: String) {
+    eprintln("utf8_check: {why}")
+    process.exit(2)
+}
+
+fn lines_of(bytes: own List<u8>) -> List<String> {
+    return (String.from_utf8(bytes) ?? String()).lines()
+}
+
+// What the command writes with `data` as its input, line by line.
+fn run(cmd: own Command, data: own List<u8>) -> List<String> {
+    let o = match cmd.input(data).output() {
+        ok(o) => o,
+        err(e) => {
+            stop("{e}")
+            return []
+        },
+    }
+    if not o.status.success() {
+        stop("a check {o.status}:\n{o.error_text()}")
+    }
+    return lines_of(o.stdout)
+}
+
+// The same, with the input written a piece at a time, now and then after a pause.
+fn run_in_pieces(cmd: own Command, data: List<u8>, r: mut Random) -> List<String> {
+    var c = match cmd.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Pipe).spawn() {
+        ok(c) => c,
+        err(e) => {
+            stop("{e}")
+            return []
+        },
+    }
+    let sizes: List<usize> = [1, 1, 2, 3, 7, 50, 4000]
+    var i: usize = 0
+    while i < data.len() {
+        let end = (i + sizes[r.index(sizes.len())]).min(data.len())
+        c.write(data[i..end])!
+        i = end
+        if r.float() < 0.3 {
+            unsafe {
+                sleep(1000000)
+            }
+        }
+    }
+    let o = c.wait()
+    if not o.status.success() {
+        stop("the Calx side {o.status}:\n{o.error_text()}")
+    }
+    return lines_of(o.stdout)
+}
+
+fn compare(what: String, want: List<String>, got: List<String>) -> bool {
+    if want == got {
+        return true
+    }
+    let n = want.len().max(got.len())
+    for k in 0..n {
+        let w = if k < want.len() { want[k].copy() } else { String("(nothing)") }
+        let g = if k < got.len() { got[k].copy() } else { String("(nothing)") }
+        if w != g {
+            println("{what}: line {k + 1}: Java gives {w}, Calx {g}")
+            return false
+        }
+    }
+    return false
+}
+
+fn main() {
+    let a = env.args()
+    if a.len() > 0 and (a[0] == "decode" or a[0] == "lines") {
+        check_side(a[0] == "decode")
+        return
+    }
+    var java = "{env.variable("JAVA_HOME") ?? String()}/bin/java"
+    var seed: u64 = 1
+    var k: usize = 0
+    while k < a.len() {
+        if a[k] == "--java" and k + 1 < a.len() {
+            java = a[k + 1].copy()
+            k += 2
+        } else if a[k] == "--seed" and k + 1 < a.len() {
+            seed = u64.parse(a[k + 1].copy()) ?? 1
+            k += 2
+        } else {
+            stop("usage: calx run --release tools/unicode/utf8_check.calx -- [--java PATH] [--seed N]")
+        }
+    }
+    let here = path.parent_dir(env.script() ?? current_exe()) ?? String(".")
+    let checker = "{here}/Utf8Check.java"
+    let me = current_exe()
+    let edge = edges()
+    var r = Random.new(seed)
+
+    var data = List<u8>()
+    let count: usize = 200000
+    for _ in 0..count {
+        var s = List<u8>()
+        for _ in 0..r.index(8) {
+            s.extend(piece(mut r, edge, false))
+        }
+        data.extend(hex_of(s).to_bytes())
+        data.push(10)
+    }
+    var same = compare("decode", run(Command.new(java.copy()).args([checker.copy(), "decode"]), data.copy()),
+                       run(Command.new(me.copy()).arg("decode"), data))
+    println("decode: {count} strings")
+
+    var lines: usize = 0
+    for s in 0..40 {
+        var stream = List<u8>()
+        for _ in 0..r.index(4000) {
+            stream.extend(piece(mut r, edge, true))
+        }
+        let want = run(Command.new(java.copy()).args([checker.copy(), "lines"]), stream.copy())
+        let got = run_in_pieces(Command.new(me.copy()).arg("lines"), stream, mut r)
+        lines += want.len()
+        same = compare("stream {s + 1}", want, got) and same
+    }
+    println("lines: 40 streams, {lines} lines")
+    println(if same { "same as Java" } else { "different from Java" })
+    if not same {
+        process.exit(1)
     }
 }

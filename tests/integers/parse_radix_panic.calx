@@ -1,0 +1,8 @@
+// A base outside 2 to 36 is a mistake in the program, not in the text, so it panics, as Java's
+// parseInt throws for it before looking at the text.
+fn main() {
+    var base: u32 = 36
+    println("{i32.parse_radix("z", base)}")    // out: some(35)
+    base += 1
+    println("{i32.parse_radix("1", base)}")    // panic: a radix is from 2 to 36, not 37
+}

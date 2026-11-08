@@ -1,0 +1,13 @@
+// T.parse_radix(text, radix): an integer in base 2 to 36, as Java's Integer.parseInt(s, radix)
+// and Long.parseUnsignedLong(s, radix) read it, or none.
+fn main() {
+    println("{u32.parse_radix("ff", 16)} {u32.parse_radix("FF", 16)} {i32.parse_radix("-80000000", 16)}")    // out: some(255) some(255) some(-2147483648)
+    println("{i32.parse_radix("80000000", 16)} {u32.parse_radix("ffffffff", 16)} {u32.parse_radix("100000000", 16)}")    // out: none some(4294967295) none
+    println("{u8.parse_radix("11111111", 2)} {u8.parse_radix("100000000", 2)} {i8.parse_radix("-10000000", 2)}")    // out: some(255) none some(-128)
+    println("{u64.parse_radix("ffffffffffffffff", 16)} {i64.parse_radix("-8000000000000000", 16)} {i64.parse_radix("8000000000000000", 16)}")    // out: some(18446744073709551615) some(-9223372036854775808) none
+    println("{i32.parse_radix("zz", 36)} {i32.parse_radix("+777", 8)} {i32.parse_radix("8", 8)} {usize.parse_radix("1F600", 16)}")    // out: some(1295) some(511) none some(128512)
+    // No prefixes, spaces, empty text, signs alone or `-` on an unsigned type.
+    println("{u32.parse_radix("0xff", 16)} {u32.parse_radix(" 1", 10)} {u32.parse_radix("", 10)} {i32.parse_radix("-", 10)} {u32.parse_radix("-0", 16)}")    // out: none none none none none
+    let hex = String("1f")
+    println("{i64.parse_radix(hex, 16) ?? 0}")    // out: 31
+}

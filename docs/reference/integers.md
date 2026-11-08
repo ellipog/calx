@@ -112,6 +112,15 @@ fn main() {
 
 The digits are ASCII only. Java's `parseInt` also takes other scripts' digits, such as `"١٢"`; that's a deliberate difference, since no protocol or file format sends them.
 
+`T.parse_radix(text, radix)` reads an integer type's digits in a base from 2 to 36, `0` to `9` and then letters in either case, as Java's `Integer.parseInt(s, radix)` and Python's `int(s, 16)` do, with the same sign rules and no `0x` prefix. A base outside 2 to 36 is a mistake in the program, so it panics.
+
+```calx
+fn main() {
+    println("{u32.parse_radix("ff", 16) ?? 0} {i32.parse_radix("-101", 2) ?? 0} {u8.parse_radix("zz", 36) == none}")    // out: 255 -5 true
+    println("{u64.parse_radix("1F600", 16) ?? 0} {u32.parse_radix("0xff", 16) == none}")    // out: 128512 true
+}
+```
+
 ## Checked and saturating arithmetic
 
 Java's operators wrap, and so do Calx's. Code that wants to notice an overflow says so: the `checked_` methods return an [optional](optionals.md), and the `saturating_` methods stop at `MIN` or `MAX`. They work on every integer type, and compile to clang's overflow builtins, a single flag test.

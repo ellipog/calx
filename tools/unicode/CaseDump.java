@@ -3,7 +3,7 @@ import java.text.BreakIterator;
 import java.util.Locale;
 
 /**
- * What Java does to each code point when it changes case with Locale.ROOT, for gen_case.py.
+ * What Java does to each code point when it changes case with Locale.ROOT, for gen_case.calx.
  *
  * Each line is a code point, what toLowerCase and toUpperCase give for the string of it alone,
  * its word class, and whether it's cased, all in hex but the class. The class is how Java's
@@ -37,7 +37,7 @@ public class CaseDump {
                 bit(boundary(KANJI + c, 1)) + bit(boundary(c + KANJI, n));
         switch (sig) {
             // Format characters: no boundary on either side. Past U+FFFF, Java puts one after
-            // them inside a word, which gen_case.py's model does for every such code point.
+            // them inside a word, which gen_case.calx's model does for every such code point.
             case "00000000000": case "00010100000": return "XF";
             case "00000001011": case "00010101011": {
                 // A letter or a digit: only a letter carries a word on after an apostrophe.

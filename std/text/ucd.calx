@@ -1,5 +1,5 @@
 /// Tables from the Unicode Character Database, for `std.regex`: the runes `\w`, `\d` and `\s`
-/// match, and simple case folding. Written by tools/unicode/gen_ucd.py from Unicode 16.0.0; don't edit by hand.
+/// match, and simple case folding. Written by tools/unicode/gen_ucd.calx from Unicode 16.0.0; don't edit by hand.
 module std.text.ucd
 
 // The tables below are from the Unicode Character Database, under this notice:

@@ -1,0 +1,6 @@
+fn main() {
+    let a = i32.parse_radix("ff")    // error: takes two arguments
+    let b = i32.parse_radix(255, 16)    // error: takes a `str` or a `String` first
+    let c = f64.parse_radix("1", 10)    // error: `f64` has no function `parse_radix`
+    let d = i32.parse_radix("1", -2)    // error: can't be negative
+}

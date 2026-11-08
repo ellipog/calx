@@ -1,0 +1,351 @@
+// Writes std/text/ucd.calx, the Unicode tables std.regex reads, from the Unicode Character
+// Database's own files, which it downloads from unicode.org into build/ucd/<version> the first
+// time, and reads from there after.
+//
+//     calx run tools/unicode/gen_ucd.calx
+//
+// The tables are Unicode 16's, as Java 25 has it:
+//
+// - WORD, `\w` as UTS #18 defines it: Alphabetic, marks, decimal digits, connector punctuation and
+//   Join_Control. Alphabetic is the letters, letter numbers and Other_Alphabetic, whose runes are
+//   all marks, which WORD has anyway, except the circled and squared Latin letters.
+// - DIGIT, `\d`: the decimal digits, Nd.
+// - SPACE, `\s`: White_Space.
+// - FOLD, simple case folding, as orbits: each rune that folds with others, and the next one in its
+//   orbit, the smallest past it or else the smallest of all, as Go's unicode.SimpleFold gives. A
+//   rune folds with its full case folding when that's one rune, CaseFolding.txt's C entries, and
+//   otherwise with its full lowercase when that's one rune, as an S entry has it, so the dotless i,
+//   whose only folding is Turkic, folds with nothing.
+import std.env
+import std.fs
+import std.http
+import std.path
+import std.process
+
+const VERSION: str = "16.0.0"
+const MAX: u32 = 0x10FFFF
+
+fn notice() -> String {
+    let text = #"
+    // The tables below are from the Unicode Character Database, under this notice:
+    //
+    // UNICODE LICENSE V3
+    //
+    // COPYRIGHT AND PERMISSION NOTICE
+    //
+    // Copyright (c) 1991-2024 Unicode, Inc.
+    //
+    // NOTICE TO USER: Carefully read the following legal agreement. BY DOWNLOADING, INSTALLING,
+    // COPYING OR OTHERWISE USING DATA FILES, AND/OR SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE
+    // BOUND BY, ALL OF THE TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+    // DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a copy of data files and
+    // any associated documentation (the "Data Files") or software and any associated documentation
+    // (the "Software") to deal in the Data Files or Software without restriction, including without
+    // limitation the rights to use, copy, modify, merge, publish, distribute, and/or sell copies of
+    // the Data Files or Software, and to permit persons to whom the Data Files or Software are
+    // furnished to do so, provided that either (a) this copyright and permission notice appear with
+    // all copies of the Data Files or Software, or (b) this copyright and permission notice appear in
+    // associated Documentation.
+    //
+    // THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    // PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
+    //
+    // IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE BE LIABLE FOR ANY
+    // CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM
+    // LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+    // ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA FILES OR
+    // SOFTWARE.
+    //
+    // Except as contained in this notice, the name of a copyright holder shall not be used in
+    // advertising or otherwise to promote the sale, use or other dealings in these Data Files or
+    // Software without prior written authorization of the copyright holder.
+    "#
+    return "{text}\n"
+}
+
+fn stop(why: String) {
+    eprintln("gen_ucd: {why}")
+    process.exit(1)
+}
+
+// A file of the database, downloaded once into `cache`.
+fn ucd_file(cache: String, name: String) -> String {
+    let local = "{cache}/{name}"
+    if not fs.is_file(local.copy()) {
+        let url = "https://www.unicode.org/Public/{VERSION}/ucd/{name}"
+        println("downloading {url}")
+        var r = http.get(url.copy(), [], 60000, 16777216)
+        match r.wait() {
+            ok(resp) => {
+                if resp.status != 200 {
+                    stop("{url} gave status {resp.status}")
+                }
+                fs.make_dir_all(cache)!
+                fs.write(local.copy(), resp.body)!
+            },
+            err(e) => stop("can't download {url}: {e}"),
+        }
+    }
+    return fs.read_text(local)! ?? String()
+}
+
+fn hex(s: String) -> u32 {
+    return u32.parse_radix(s.trim(), 16) ?? panic("{s} isn't hex")
+}
+
+// The fields of each line that isn't a comment, split at `;`, without the comment at its end.
+fn rows(text: String) -> List<List<String>> {
+    var out: List<List<String>> = []
+    for line in text.lines() {
+        let data = (line.split_once("#") ?? (line.copy(), String())).0
+        if data.trim().is_empty() {
+            continue
+        }
+        out.push(data.split(";").map(|f| f.trim()))
+    }
+    return out
+}
+
+// The runes a property names in PropList.txt: its lines are `0009..000D ; White_Space`.
+fn property(lines: List<List<String>>, name: str) -> List<(u32, u32)> {
+    var out: List<(u32, u32)> = []
+    for r in lines {
+        if r[1] == name {
+            out.push(span(r[0]))
+        }
+    }
+    return out
+}
+
+fn span(s: String) -> (u32, u32) {
+    if let (lo, hi) = s.split_once("..") {
+        return (hex(lo), hex(hi))
+    }
+    let c = hex(s.copy())
+    return (c, c)
+}
+
+// Ranges of the runes for which `test` holds, joined across the surrogates, which no text has.
+fn ranges(test: List<bool>) -> List<(u32, u32)> {
+    var out: List<(u32, u32)> = []
+    for c in 0u32..(MAX + 1) {
+        if (c >= 0xD800 and c <= 0xDFFF) or not test[usize(c)] {
+            continue
+        }
+        let n = out.len()
+        if n > 0 and (out[n - 1].1 + 1 == c or (out[n - 1].1 == 0xD7FF and c == 0xE000)) {
+            out[n - 1].1 = c
+        } else {
+            out.push((c, c))
+        }
+    }
+    return out
+}
+
+fn merge(spans: own List<(u32, u32)>) -> List<(u32, u32)> {
+    var sorted = spans
+    sorted.sort()
+    var out: List<(u32, u32)> = []
+    for s in sorted {
+        let n = out.len()
+        if n > 0 and s.0 <= out[n - 1].1 + 1 {
+            out[n - 1].1 = out[n - 1].1.max(s.1)
+        } else {
+            out.push(s)
+        }
+    }
+    return out
+}
+
+fn find(parent: List<u32>, x: u32) -> u32 {
+    var r = x
+    while parent[usize(r)] != r {
+        r = parent[usize(r)]
+    }
+    return r
+}
+
+fn union(parent: mut List<u32>, a: u32, b: u32) {
+    let ra = find(parent, a)
+    let rb = find(parent, b)
+    if ra != rb {
+        parent[usize(ra.max(rb))] = ra.min(rb)
+    }
+}
+
+fn hex_upper(n: u32) -> String {
+    let digits = "0123456789ABCDEF"
+    if n == 0 {
+        return String("0")
+    }
+    var out = List<u8>()
+    var v = n
+    while v > 0 {
+        out.push(digits.byte_at(usize(v % 16)))
+        v /= 16
+    }
+    out.reverse()
+    return String.from_utf8(out) ?? String()
+}
+
+fn table(name: str, doc: str, values: List<u32>) -> String {
+    var lines: List<String> = ["/// {doc}", "pub const {name}: [u32; {values.len()}] = ["]
+    var i: usize = 0
+    while i < values.len() {
+        let end = (i + 8).min(values.len())
+        var parts: List<String> = []
+        for k in i..end {
+            parts.push("0x{hex_upper(values[k])}")
+        }
+        lines.push("    {parts.join(", ")},")
+        i = end
+    }
+    lines.push("]")
+    lines.push("/// How many numbers `{name}` holds.")
+    lines.push("pub const {name}_LEN: usize = {values.len()}")
+    return "{lines.join("\n")}\n"
+}
+
+fn flat(spans: List<(u32, u32)>) -> List<u32> {
+    var out: List<u32> = []
+    for s in spans {
+        out.push(s.0)
+        out.push(s.1)
+    }
+    return out
+}
+
+fn main() {
+    let here = path.parent_dir(env.script() ?? panic("run this with `calx run`")) ?? String()
+    let root = path.parent_dir(path.parent_dir(here) ?? String()) ?? String()
+    let cache = "{root}/build/ucd/{VERSION}"
+    let size = usize(MAX) + 1
+
+    // Each rune's general category and simple lowercase, from UnicodeData.txt, where a range of
+    // runes is two lines, its first and its last.
+    var category: List<String> = []
+    for _ in 0..size {
+        category.push(String("Cn"))
+    }
+    var lower: List<u32> = []
+    for c in 0u32..(MAX + 1) {
+        lower.push(c)
+    }
+    var first: u32? = none
+    for r in rows(ucd_file(cache.copy(), String("UnicodeData.txt"))) {
+        let c = hex(r[0].copy())
+        if r[1].ends_with(", First>") {
+            first = some(c)
+            continue
+        }
+        let lo = if r[1].ends_with(", Last>") { first ?? c } else { c }
+        for k in lo..(c + 1) {
+            category[usize(k)] = r[2].copy()
+        }
+        if not r[13].is_empty() {
+            lower[usize(c)] = hex(r[13].copy())
+        }
+    }
+    // Full lowercase that isn't one rune, from SpecialCasing.txt's lines without a condition.
+    var lower_many: List<bool> = [false; size]
+    for r in rows(ucd_file(cache.copy(), String("SpecialCasing.txt"))) {
+        if r.len() >= 5 and r[4].is_empty() {
+            let to = r[1].split_whitespace()
+            let c = hex(r[0].copy())
+            if to.len() == 1 {
+                lower[usize(c)] = hex(to[0].copy())
+            } else {
+                lower_many[usize(c)] = true
+            }
+        }
+    }
+    // Full case folding: C entries are one rune, F entries more.
+    var fold: List<u32> = []
+    for c in 0u32..(MAX + 1) {
+        fold.push(c)
+    }
+    var fold_many: List<bool> = [false; size]
+    for r in rows(ucd_file(cache.copy(), String("CaseFolding.txt"))) {
+        let c = hex(r[0].copy())
+        if r[1] == "C" {
+            fold[usize(c)] = hex(r[2].copy())
+        } else if r[1] == "F" {
+            fold_many[usize(c)] = true
+        }
+    }
+    let props = rows(ucd_file(cache.copy(), String("PropList.txt")))
+
+    var is_word: List<bool> = [false; size]
+    var is_digit: List<bool> = [false; size]
+    for c in 0..size {
+        let cat = category[c].copy()
+        is_word[c] = cat.starts_with("L") or cat.starts_with("M") or cat == "Nd" or cat == "Nl" or cat == "Pc"
+        is_digit[c] = cat == "Nd"
+    }
+    var word_spans = ranges(is_word)
+    for s in property(props, "Other_Alphabetic") {
+        for c in s.0..(s.1 + 1) {
+            if not category[usize(c)].starts_with("M") {
+                word_spans.push((c, c))
+            }
+        }
+    }
+    word_spans.extend(property(props, "Join_Control"))
+    let word = merge(word_spans)
+    let digit = ranges(is_digit)
+    let space = merge(property(props, "White_Space"))
+
+    // The orbits: each rune joined with its folding, or else its lowercase, when that's one rune.
+    var parent: List<u32> = []
+    for c in 0u32..(MAX + 1) {
+        parent.push(c)
+    }
+    var touched: List<bool> = [false; size]
+    for c in 0u32..(MAX + 1) {
+        if c >= 0xD800 and c <= 0xDFFF {
+            continue
+        }
+        let to = if not fold_many[usize(c)] { fold[usize(c)] } else if not lower_many[usize(c)] { lower[usize(c)] } else { c }
+        if to != c {
+            union(mut parent, c, to)
+            touched[usize(c)] = true
+            touched[usize(to)] = true
+        }
+    }
+    var members = Map<u32, List<u32>>()
+    for c in 0u32..(MAX + 1) {
+        if touched[usize(c)] {
+            let r = find(parent, c)
+            if not members.contains(r) {
+                members.insert(r, [])
+            }
+            members[r].push(c)
+        }
+    }
+    var pairs: List<(u32, u32)> = []
+    for (_, ms) in members {
+        for i in 0..ms.len() {
+            pairs.push((ms[i], ms[(i + 1) % ms.len()]))
+        }
+    }
+    pairs.sort()
+
+    let parts: List<String> = [
+        String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
+        "/// match, and simple case folding. Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
+        String("module std.text.ucd"),
+        String(),
+        notice(),
+        table("WORD", "`\\w`'s runes, as ranges: each first rune, then the last.", flat(word)),
+        table("DIGIT", "`\\d`'s runes, the decimal digits, as ranges.", flat(digit)),
+        table("SPACE", "`\\s`'s runes, White_Space, as ranges.", flat(space)),
+        table("FOLD_FROM", "Each rune that case folding puts with others, in order.", pairs.map(|p| p.0)),
+        table("FOLD_NEXT", "The next rune in `FOLD_FROM[i]`'s orbit: the smallest past it, or else the smallest.", pairs.map(|p| p.1)),
+    ]
+    let out = "{root}/std/text/ucd.calx"
+    fs.write_text(out.copy(), parts.join("\n"))!
+    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {pairs.len()} folds")
+}

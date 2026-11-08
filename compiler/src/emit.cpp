@@ -5573,6 +5573,23 @@ $dropall    m->len = 0;
             }
             return s + "(" + o + "){ (" + c + ")" + q + ", (" + c + ")" + r + " }; })";
         }
+        if (e->prim == PrimMethod::parse_radix) {
+            // The base is checked first, as Java's `parseInt` checks it before the text.
+            std::string text = text_view(a), b = tmp();
+            std::string s = "({ cx_u32 " + b + " = " + value(e->args[1].value, e->args[1].value->type) + "; if (__builtin_expect(" + b +
+                            " - 2 > 34, 0)) cx_panic_radix(" + b + ", " + location(e->span) + "); ";
+            if (t->is_signed) {
+                std::string lo = t->bits == 64 ? "(-9223372036854775807LL - 1)" : "(-" + std::to_string(1ull << (t->bits - 1)) + "LL)";
+                std::string hi = std::to_string((1ull << (t->bits - 1)) - 1) + "LL";
+                return s + "cx_i64 " + v + "; cx_bool " + r + " = cx_parse_i64_radix(" + text + ", " + b + ", " + lo + ", " + hi + ", &" +
+                       v + "); (" + o + "){ .v = (" + ctype(t) + ")" + v + ", .has = " + r + " }; })";
+            }
+            std::string hi = t->is_usize ? "(cx_u64)(cx_usize)-1"
+                             : t->bits == 64 ? "18446744073709551615ULL"
+                                             : std::to_string((1ull << t->bits) - 1) + "ULL";
+            return s + "cx_u64 " + v + "; cx_bool " + r + " = cx_parse_u64_radix(" + text + ", " + b + ", " + hi + ", &" + v + "); (" + o +
+                   "){ .v = (" + ctype(t) + ")" + v + ", .has = " + r + " }; })";
+        }
         switch (e->prim) {
             case PrimMethod::parse: {
                 std::string text = text_view(a);
@@ -6351,6 +6368,11 @@ $dropall    m->len = 0;
                        "); (void)cx_index(" + j + ", " + len + ", " + index_at(1) + "); " + el + " " + v + " = " + ptr + "[" + i +
                        "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " + ptr + "[" + j + "] = " + v + "; })";
             case BMethod::sort: return head + sort_call(et, ptr, len, location(e->span)) + "; })";
+            case BMethod::reverse:
+                // From both ends to the middle, each pair swapped once.
+                return head + "cx_usize " + i + " = 0, " + j + " = " + len + "; while (" + i + " + 1 < " + j + ") { " + j + "--; " + el +
+                       " " + v + " = " + ptr + "[" + i + "]; " + ptr + "[" + i + "] = " + ptr + "[" + j + "]; " + ptr + "[" + j + "] = " + v +
+                       "; " + i + "++; } })";
             case BMethod::join:
                 if (recv->kind == ExprKind::call && recv->call == CallKind::builtin_method &&
                     (recv->bmethod == BMethod::split || recv->bmethod == BMethod::lines || recv->bmethod == BMethod::split_whitespace)) {

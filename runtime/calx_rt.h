@@ -485,6 +485,9 @@ CX_INLINE cx_char cx_utf16_next(const cx_u8* p, cx_usize* i, cx_char* low) {
  * correctly. On failure they set `*out` to 0 and return 0. */
 CX_FN(cx_bool, cx_parse_i64, (cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out));
 CX_FN(cx_bool, cx_parse_u64, (cx_str s, cx_u64 hi, cx_u64* out));
+CX_FN(cx_bool, cx_parse_i64_radix, (cx_str s, cx_u32 radix, cx_i64 lo, cx_i64 hi, cx_i64* out));
+CX_FN(cx_bool, cx_parse_u64_radix, (cx_str s, cx_u32 radix, cx_u64 hi, cx_u64* out));
+CX_COLD CX_FN(void, cx_panic_radix, (cx_u32 radix, const char* at));
 
 /* Floats come from the runtime's own code, the same bits on every platform (calx_fparse.c,
  * CLX-137). A decimal written plainly, with a sign, a '.' and an exponent perhaps, and 19

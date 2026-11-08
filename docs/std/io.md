@@ -78,6 +78,6 @@ Lines are split and decoded as Java's `BufferedReader.readLine` gives them over 
 - Like `read`, `next()` writes out what's waiting in the output buffer before it waits for input, so a prompt printed with `print` shows.
 - It reads 64 KiB at a time, and a line is the only copy made of its bytes. A line can be as long as memory allows.
 
-`Lines` reads standard input itself, so a program that also calls `read` or `read_exact` gets bytes `Lines` hasn't taken yet only by chance: use one or the other. It was compared with Java 25 on 40 random streams of every kind of line end, bytes that aren't UTF-8 and characters cut off, which it read in random pieces, so lines ended at every place a read can: [tools/unicode/utf8_check.py](../../tools/unicode/utf8_check.py).
+`Lines` reads standard input itself, so a program that also calls `read` or `read_exact` gets bytes `Lines` hasn't taken yet only by chance: use one or the other. It was compared with Java 25 on 40 random streams of every kind of line end, bytes that aren't UTF-8 and characters cut off, which it read in random pieces, so lines ended at every place a read can: [tools/unicode/utf8_check.calx](../../tools/unicode/utf8_check.calx).
 
 `std.io` is written in Calx, over five runtime functions it declares as [C functions](../reference/unsafe.md#c-functions): [std/io.calx](../../std/io.calx).

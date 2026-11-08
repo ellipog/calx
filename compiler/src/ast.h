@@ -195,6 +195,7 @@ enum class BMethod : std::uint8_t {
     // (CLX-98).
     list_map, list_filter, list_retain, list_any, list_all, list_count, list_find, list_position, sort_by, sort_by_key,
     opt_map,
+    reverse,  // a list's or an array's elements, in place, the last first
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };
@@ -206,6 +207,7 @@ enum class PrimMethod : std::uint8_t {
     widening_mul,  // on an unsigned integer: the whole product, as its low and high halves (CLX-102)
     parse, from_bits, from_utf8,  // prim_static
     div_wide,  // prim_static: a number twice as wide as the type, divided by one of it (CLX-102)
+    parse_radix,  // prim_static: an integer in text in a base from 2 to 36, as Java's `parseInt(s, radix)`
 };
 
 struct Expr {

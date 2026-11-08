@@ -1414,6 +1414,48 @@ cx_bool cx_parse_u64(cx_str s, cx_u64 hi, cx_u64* out) {
     return parse_digits(s.ptr + skip, s.len - skip, hi, out);
 }
 
+/* The digits in base `radix`, from 2 to 36, after an optional sign, up to `limit`: `0` to `9`,
+ * then letters in either case, as Java's `Character.digit` takes ASCII. */
+static cx_bool parse_radix_digits(const cx_u8* p, cx_usize n, cx_u32 radix, cx_u64 limit, cx_u64* out) {
+    if (n == 0) return 0;
+    cx_u64 v = 0;
+    for (cx_usize i = 0; i < n; i++) {
+        unsigned b = p[i], d = b - '0';
+        if (d > 9) d = (b | 0x20) - 'a' < 26 ? (b | 0x20) - 'a' + 10 : 99;
+        if (d >= radix) return 0;
+        if (d > limit || v > (limit - d) / radix) return 0;
+        v = v * radix + d;
+    }
+    *out = v;
+    return 1;
+}
+
+cx_bool cx_parse_i64_radix(cx_str s, cx_u32 radix, cx_i64 lo, cx_i64 hi, cx_i64* out) {
+    *out = 0;
+    if (s.len == 0) return 0;
+    int neg = s.ptr[0] == '-';
+    cx_usize skip = neg || s.ptr[0] == '+';
+    cx_u64 v;
+    if (!parse_radix_digits(s.ptr + skip, s.len - skip, radix, neg ? (cx_u64)0 - (cx_u64)lo : (cx_u64)hi, &v)) return 0;
+    *out = neg ? (cx_i64)((cx_u64)0 - v) : (cx_i64)v;
+    return 1;
+}
+
+cx_bool cx_parse_u64_radix(cx_str s, cx_u32 radix, cx_u64 hi, cx_u64* out) {
+    *out = 0;
+    if (s.len == 0 || s.ptr[0] == '-') return 0;
+    cx_usize skip = s.ptr[0] == '+';
+    return parse_radix_digits(s.ptr + skip, s.len - skip, radix, hi, out);
+}
+
+void cx_panic_radix(cx_u32 radix, const char* at) {
+    char text[64];
+    cx_panic_begin(at);
+    snprintf(text, sizeof text, "a radix is from 2 to 36, not %u", (unsigned)radix);
+    panic_text(text);
+    cx_panic_end();
+}
+
 cx_bool cx_str_contains(cx_str hay, cx_str needle) { return cx_str_find(hay, needle) != CX_NOT_FOUND; }
 
 /* How often a byte turns up in text, roughly, from 0 for the rarest: spaces and lowercase letters

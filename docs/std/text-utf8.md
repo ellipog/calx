@@ -33,7 +33,7 @@ Valid UTF-8 comes through as it is. Which bytes one U+FFFD stands for follows Ja
 So `ED A0 80` is one U+FFFD where `E0 80 80`, an overlong form, is three, as in Java.
 
 - Valid text costs one copy of its bytes and one check, the same as `String.from_utf8` of a copy. Only text that isn't valid is gone over again, a byte at a time.
-- It was compared with Java 25 on 200,000 random byte strings, made of the bytes where the rules change, characters whole and cut off, and surrogates, with none different: [tools/unicode/utf8_check.py](../../tools/unicode/utf8_check.py), with [Utf8Check.java](../../tools/unicode/Utf8Check.java) as Java's side.
+- It was compared with Java 25 on 200,000 random byte strings, made of the bytes where the rules change, characters whole and cut off, and surrogates, with none different: [tools/unicode/utf8_check.calx](../../tools/unicode/utf8_check.calx), with [Utf8Check.java](../../tools/unicode/Utf8Check.java) as Java's side.
 - [`std.io.Lines`](io.md#lines) decodes each line with it.
 
 `std.text.utf8` is written in Calx: [std/text/utf8.calx](../../std/text/utf8.calx).
