@@ -308,9 +308,13 @@ private:
         for (const Type* t : all.cmps) all.add_type(t);
         std::unordered_set<const Type*> eqs(all.eqs.begin(), all.eqs.end()), hashes;
         std::vector<const Type*> eq_order(all.eqs.begin(), all.eqs.end()), hash_order;
+        // A type that writes its own `eq` or `hash` compares or hashes what it holds in that
+        // function, whose calls are found with the rest, so its glue reaches nothing it holds: an
+        // enum that holds a set of itself would reach the set, which has no hash glue.
         std::function<void(const Type*, bool)> reach = [&](const Type* x, bool hash) {
             if (!(hash ? hash_glue(x) : eq_glue(x)) || !(hash ? hashes : eqs).insert(x).second) return;
             (hash ? hash_order : eq_order).push_back(x);
+            if (hand(x, hash ? prop_hash : prop_equal)) return;
             for (const Type* h : held(x)) reach(h, hash);
         };
         // Java's and fastutil's tables hash their keys with `java_hash`, which a struct or an enum

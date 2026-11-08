@@ -1,0 +1,61 @@
+// An enum that holds a map and a set keyed by itself, with `Equal` and `Hash` of its own, as a
+// tree of values such as std.yaml's does. Its glue reaches nothing it holds, so the set, which has
+// no `Hash`, isn't asked for one; it crashed the compiler before.
+enum Value {
+    Num(f64)
+    Name(String)
+    Group(Set<Value>)
+    Table(LinkedMap<Value, Value>)
+}
+
+impl Equal for Value {
+    fn eq(self, other: Self) -> bool {
+        match self {
+            Value.Num(a) => return match other {
+                Value.Num(b) => a == b or (a.is_nan() and b.is_nan()),
+                _ => false,
+            },
+            Value.Name(a) => return match other {
+                Value.Name(b) => a == b,
+                _ => false,
+            },
+            Value.Group(a) => return match other {
+                Value.Group(b) => a.len() == b.len(),
+                _ => false,
+            },
+            Value.Table(a) => return match other {
+                Value.Table(b) => a.len() == b.len(),
+                _ => false,
+            },
+        }
+    }
+}
+
+impl Hash for Value {
+    fn hash(self, h: mut Hasher) {
+        match self {
+            Value.Num(f) => h.add(if f.is_nan() { 1u64 } else { f.to_bits() }),
+            Value.Name(s) => h.add(s),
+            Value.Group(g) => h.add(g.len()),
+            Value.Table(t) => h.add(t.len()),
+        }
+    }
+}
+
+fn main() {
+    var names = Set<Value>()
+    names.insert(Value.Name(String("ann")))
+    names.insert(Value.Num(f64.NAN))
+    names.insert(Value.Num(f64.NAN))
+    var t = LinkedMap<Value, Value>()
+    t.insert(Value.Name(String("group")), Value.Group(names))
+    t.insert(Value.Num(1.5), Value.Name(String("x")))
+    t.insert(Value.Num(1.5), Value.Name(String("y")))
+    println("{t.len()} {t.contains(Value.Num(1.5))} {t[Value.Num(1.5)] == Value.Name(String("y"))}")    // out: 2 true true
+    match t[Value.Name(String("group"))] {
+        Value.Group(g) => println("{g.len()}"),    // out: 2
+        _ => {},
+    }
+    let v = Value.Table(t)
+    println("{v == v.copy()}")    // out: true
+}
