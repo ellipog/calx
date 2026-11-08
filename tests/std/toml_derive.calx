@@ -1,0 +1,111 @@
+// @toml reads a struct from TOML and writes it back from its fields' types (CLX-168): numbers with
+// their ranges checked, strings, bools, optionals left out when they're `none`, defaults for keys
+// that aren't there, lists, maps, nested structs as tables and lists of them as arrays of tables,
+// keys renamed with @toml_key, and errors that say which key is wrong.
+import std.toml.{toml, Toml, TomlError}
+
+@toml
+struct Backup {
+    every: String
+    keep: u32 = 7
+}
+
+@toml
+struct Network {
+    port: u16 = 25565
+    address: String
+    @toml_key("compression-threshold")
+    compression: i32?
+}
+
+@toml
+struct Config {
+    name: String
+    @toml_key("max-players")
+    max_players: u32
+    ratio: f64
+    whitelist: bool = false
+    ops: List<String>
+    network: Network
+    backup: List<Backup>
+    weights: LinkedMap<String, f32>
+    motd: String?
+    extra: Toml?
+    count: usize = 0
+}
+
+fn read(text: str) {
+    match Config.from_toml_text(String(text)) {
+        ok(c) => println("{c.name} {c.max_players} {c.network.port} {c.network.compression} {c.backup.len()} {c.motd}"),
+        err(e) => println("error: {e}"),
+    }
+}
+
+fn main() ! TomlError {
+    let c = try Config.from_toml_text(##"
+        name = "lobby"
+        max-players = 50
+        ratio = 2
+        ops = ["ann", "bo"]
+        weights = { eu = 1.5, us = 0.5 }
+        extra = { anything = [1, "two"] }
+
+        [network]
+        address = "0.0.0.0"
+        compression-threshold = 256
+
+        [[backup]]
+        every = "6h"
+
+        [[backup]]
+        every = "1d"
+        keep = 30
+        "##)
+    println("{c.name} {c.max_players} {c.ratio} {c.whitelist} {c.ops} {c.network.port} {c.network.compression}")    // out: lobby 50 2.0 false [ann, bo] 25565 some(256)
+    println("{c.backup.len()} {c.backup[0].keep} {c.backup[1].keep} {c.weights} {c.motd} {c.extra}")    // out: 2 7 30 {eu: 1.5, us: 0.5} none some({ anything = [1, "two"] })
+    // A list of structs whose tables fit on a line is written inline, as tomli-w writes it, and a
+    // map or a nested struct is a table of its own.
+    print(c.to_toml_text())
+    // out: name = "lobby"
+    // out: max-players = 50
+    // out: ratio = 2.0
+    // out: whitelist = false
+    // out: ops = [
+    // out:     "ann",
+    // out:     "bo",
+    // out: ]
+    // out: backup = [
+    // out:     { every = "6h", keep = 7 },
+    // out:     { every = "1d", keep = 30 },
+    // out: ]
+    // out: count = 0
+    // out:
+    // out: [network]
+    // out: port = 25565
+    // out: address = "0.0.0.0"
+    // out: compression-threshold = 256
+    // out:
+    // out: [weights]
+    // out: eu = 1.5
+    // out: us = 0.5
+    // out:
+    // out: [extra]
+    // out: anything = [
+    // out:     1,
+    // out:     "two",
+    // out: ]
+    let back = try Config.from_toml_text(c.to_toml_text())
+    println("{back.to_toml() == c.to_toml()}")    // out: true
+
+    // What's wrong, by key.
+    read("name = 'x'\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.max-players` is missing
+    read("name = 'x'\nmax-players = -1\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.max-players` should be from 0 to 4294967295, not -1
+    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = [1]\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.ops[]` should be a string, not an integer
+    read("name = 'x'\nmax-players = 1\nratio = 1.0\nops = []\nbackup = []\nweights = \{\}\nnetwork = 5")    // out: error: `Network` should be a table, not an integer
+    read("name = 'x'\nmax-players = 1\nratio = 'fast'\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''")    // out: error: `Config.ratio` should be a number, not a string
+    read("name = 'x'\nmax-players = 1\nratio = 1\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''\nport = 70000")    // out: error: `Network.port` should be from 0 to 65535, not 70000
+    read("name = 'x'\nmax-players = 1\nratio = 1\nops = []\nbackup = []\nweights = \{\}\n[network]\naddress = ''\ncompression-threshold = 9\nmotd = 'hi'")    // out: x 1 25565 some(9) 0 none
+    read("name = 'x'\nmax-players = 1")    // out: error: `Config.ratio` is missing
+    read("name = 'x'\nname = 'y'")    // out: error: line 2, column 1: `name` is in this table already
+    return
+}

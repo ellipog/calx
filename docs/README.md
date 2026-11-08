@@ -115,7 +115,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 44. [std.html](std/html.md): HTML text escaped, and its character references read back with every name HTML5 has, exactly as Python's `html.escape` and `html.unescape` do
 45. [std.sqlite](std/sqlite.md): SQLite databases as Python's `sqlite3` reads and writes them, with SQLite built in: SQL with parameters, rows of typed values, transactions, and prepared statements kept for the next run
 46. [std.unicode](std/unicode.md): text normalized to NFC, NFD, NFKC or NFKD, as Python's `unicodedata.normalize` and `is_normalized` give it, with Unicode 16's tables, and combining classes
-47. [std.toml](std/toml.md): TOML 1.0 config files read as Python's `tomllib` reads them, with the line and column of any mistake, and written back byte for byte as tomli-w writes them
+47. [std.toml](std/toml.md): TOML 1.0 config files read as Python's `tomllib` reads them, with the line and column of any mistake, written back byte for byte as tomli-w writes them, and `@toml`, which reads a config straight into a struct
 
 ### Java compatibility
 

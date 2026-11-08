@@ -1,11 +1,11 @@
 ---
 title: std.toml
-description: TOML 1.0 config text parsed into a Toml tree as Python's tomllib reads it, with the line and column of any mistake, and written back byte for byte as tomli-w writes it.
+description: TOML 1.0 config text parsed into a Toml tree as Python's tomllib reads it, with the line and column of any mistake, written back byte for byte as tomli-w writes it, and @toml, which reads and writes a struct from its fields' types.
 ---
 
 # `std.toml`
 
-TOML 1.0, the config format of `pyproject.toml` and `Cargo.toml`: text parsed into a tree of `Toml` values as Python's `tomllib.loads` reads it, with the line and column of what's wrong when it isn't TOML, and a tree written back as text, byte for byte as [tomli-w](https://github.com/hukkin/tomli-w)'s `dumps` writes it.
+TOML 1.0, the config format of `pyproject.toml` and `Cargo.toml`: text parsed into a tree of `Toml` values as Python's `tomllib.loads` reads it, with the line and column of what's wrong when it isn't TOML, a tree written back as text, byte for byte as [tomli-w](https://github.com/hukkin/tomli-w)'s `dumps` writes it, and [`@toml`](#toml), which reads a config file straight into a struct and writes it back, from the struct's fields' types.
 
 ```calx
 import std.toml.{Toml, TomlError, parse, write}
@@ -48,7 +48,7 @@ fn main() ! TomlError {
 | --- | --- |
 | `Toml` | A TOML value. See [Values](#values) |
 | `Moment` | The date and time of a date-time, a date or a time. See [Dates and times](#dates-and-times) |
-| `TomlError` | Why text isn't TOML: `message`, and the `line` and `column` in the text, from 1. `{e}` is `line 3, column 5: ...` |
+| `TomlError` | Why text isn't TOML, or a value isn't what `from_toml` wants: `message`, and the `line` and `column` in the text, from 1, or 0 for an error in a value. `{e}` is `line 3, column 5: ...`, or the message alone |
 | `parse(text: String) -> Toml ! TomlError` | The document in `text`, a `Toml.Table`, as Python's `tomllib.loads(text)` reads it |
 | `write(doc: Toml) -> String` | The table `doc` as a document, as `tomli_w.dumps(doc)` writes it. See [Writing](#writing). It panics if `doc` isn't a table, since only a table is a document |
 | `{v}` | The value as TOML writes it after a key, on one line: `"text"`, `1.5`, `[1, 2]` or `{ a = 1 }` |
@@ -61,6 +61,7 @@ fn main() ! TomlError {
 | `v.len() -> usize` | An array's elements or a table's keys, and 0 for anything else |
 | `v.keys() -> List<String>` | A table's keys, in order |
 | `v.kind() -> String` | `a string`, `an integer`, `a float`, `a bool`, `a date-time`, `a local date-time`, `a date`, `a time`, `an array` or `a table`, for messages |
+| `@toml` | On a struct, writes its `to_toml`, `from_toml`, `to_toml_text` and `from_toml_text`. See [`@toml`](#toml) |
 
 A `match` reads a value in place, without the copy that `get` makes:
 
@@ -191,6 +192,84 @@ fn main() {
     // out: ]
 }
 ```
+
+## `@toml`
+
+`@toml` on a struct writes four functions for it, from its fields' types, as `@json` does for JSON ([std.json](json.md#json)):
+
+| Function | Does |
+| --- | --- |
+| `s.to_toml() -> Toml` | The struct as a table with a key for each field, in the fields' order |
+| `s.to_toml_text() -> String` | That, as a document, as `write` writes it |
+| `T.from_toml(value: Toml) -> T ! TomlError` | The struct a table describes. Keys it has no field for are passed over |
+| `T.from_toml_text(text: String) -> T ! TomlError` | The struct a TOML document describes |
+
+```calx
+import std.toml.{toml, TomlError}
+
+@toml
+struct Backup {
+    every: String
+    keep: u32 = 7
+}
+
+@toml
+struct Config {
+    name: String
+    @toml_key("max-players")
+    max_players: u32
+    motd: String?
+    port: u16 = 25565
+    backup: List<Backup>
+}
+
+fn main() ! TomlError {
+    let c = try Config.from_toml_text(##"
+        name = "lobby"
+        max-players = 50
+
+        [[backup]]
+        every = "6h"
+
+        [[backup]]
+        every = "1d"
+        keep = 30
+        "##)
+    println("{c.name} {c.max_players} {c.motd} {c.port} {c.backup[0].keep} {c.backup[1].keep}")    // out: lobby 50 none 25565 7 30
+    print(c.to_toml_text())
+    // out: name = "lobby"
+    // out: max-players = 50
+    // out: port = 25565
+    // out: backup = [
+    // out:     { every = "6h", keep = 7 },
+    // out:     { every = "1d", keep = 30 },
+    // out: ]
+    match Config.from_toml_text(String("name = 'x'\nmax-players = 300000000000\nbackup = []")) {
+        ok(_) => {},
+        err(e) => println("{e}"),    // out: `Config.max-players` should be from 0 to 4294967295, not 300000000000
+    }
+}
+```
+
+The fields can be of these types:
+
+| Field | In TOML |
+| --- | --- |
+| `bool` | `true` or `false` |
+| `i8` to `i64`, `u8` to `u64`, `usize` | An integer, checked against the type's range. `1.0` isn't one. Writing a `u64` or `usize` past `i64`'s range panics, since TOML's integers are 64-bit and signed |
+| `f64`, `f32` | A float, or an integer |
+| `String` | A string |
+| `Toml` | Anything, as it is: for a date or a time, or a value of more than one kind |
+| `T?` | What `T` is, or no key for `none`, since TOML has no null |
+| `List<T>` | An array of what `T` is. A list of structs is an array of tables |
+| `Map<String, T>`, `LinkedMap<String, T>`, `SortedMap<String, T>` | A table whose values are what `T` is, written in the map's order |
+| A struct with `@toml` of its own | A table, from its own module too, once it's imported |
+
+- **A key that isn't there** is `none` for an optional field, and the field's default if it has one, as `port` has above. For any other field it's an error, `` `Config.name` is missing ``.
+- **`@toml_key("...")` on a field** names its key in TOML, for a key that isn't a Calx name, such as `max-players`. A field is written under its own name otherwise.
+- **An error names what's wrong** as the struct's name and the key, with `[]` for an element of a list or a map: `` `Config.ops[]` should be a string, not an integer ``. An error in the text, before there's a table to read, has its line and column.
+- `@toml` refuses a generic struct, a map whose keys aren't `String`, and a field of any other type, such as a tuple, with why, at the `@toml`. A struct field whose type has no `@toml` of its own is an error in the code `@toml` writes, that the type has no `to_toml`; give that type `@toml` too.
+- `calx expand` prints the code `@toml` writes, which is ordinary Calx.
 
 ## How it's built
 

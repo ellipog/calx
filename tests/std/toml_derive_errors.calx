@@ -1,0 +1,25 @@
+// What `@toml` refuses, with why, at the use.
+import std.toml.{toml}
+
+@toml    // error: `@toml` can't write a generic struct's TOML yet
+struct Boxed<T> {
+    v: T
+}
+
+@toml    // error: `@toml` writes maps with `String` keys, since TOML's keys are text, not `Map<i32, String>`
+struct ById {
+    names: Map<i32, String>
+}
+
+@toml    // error: `@toml` can't write a `(i32, i32)` field yet: it writes numbers, `bool`, `String`, `Toml`, lists, maps with `String` keys, optionals, and types with `@toml` of their own
+struct Pair {
+    both: (i32, i32)
+}
+
+@toml    // error: `@toml_key` takes the key, as a string: `@toml_key("max-players")`
+struct Keyed {
+    @toml_key(port)
+    port: u16
+}
+
+fn main() {}

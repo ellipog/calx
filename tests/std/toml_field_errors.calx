@@ -1,0 +1,11 @@
+// `@toml` reads `@toml_key` on a field, and refuses any other attribute there, which is likely a
+// misspelling.
+import std.toml.{toml}
+
+@toml
+struct Named {
+    @toml_name("x")    // error: `@toml` doesn't read `@toml_name`; the attributes it reads on fields are `@toml_key`
+    x: i32
+}
+
+fn main() {}

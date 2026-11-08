@@ -1,8 +1,9 @@
 /// TOML 1.0: config text parsed into a tree of values, as Python's `tomllib` reads it, with the
-/// line and column of what's wrong when it isn't TOML, and a tree written back as text, as
-/// `tomli-w` writes it.
+/// line and column of what's wrong when it isn't TOML, a tree written back as text, as `tomli-w`
+/// writes it, and `@toml`, which writes a struct's `to_toml` and `from_toml`.
 module std.toml
 
+import std.meta.{Field, Generated, StructDecl, TypeKind, TypeRef}
 import std.time.{DateTime, Timestamp, days_in_month}
 
 /// A TOML value.
@@ -68,10 +69,10 @@ impl Moment {
     }
 }
 
-/// Why text isn't TOML.
+/// Why text isn't TOML, or a value isn't what `from_toml` wants.
 pub struct TomlError {
     pub message: String
-    /// Where in the text, from 1.
+    /// Where in the text, from 1, or 0 for an error in a value rather than in text.
     pub line: usize
     /// The rune on the line, from 1.
     pub column: usize
@@ -79,7 +80,10 @@ pub struct TomlError {
 
 impl Display for TomlError {
     fn show(self) {
-        print("line {self.line}, column {self.column}: {self.message}")
+        if self.line > 0 {
+            print("line {self.line}, column {self.column}: ")
+        }
+        print(self.message)
     }
 }
 
@@ -290,12 +294,12 @@ fn key_value(text: String, at: mut usize, d: mut Doc, t: u32) ! TomlError {
         var parts: List<String> = [first]
         try more_parts(text, mut at, mut parts)
         try equals(text, mut at)
-        let v = try value(text, mut at, mut d, 0)
+        let v = try read_value(text, mut at, mut d, 0)
         try put_dotted(text, start, mut d, t, parts, v, true)
         return
     }
     try equals(text, mut at)
-    let v = try value(text, mut at, mut d, 0)
+    let v = try read_value(text, mut at, mut d, 0)
     let ti = usize(t)
     if d.tables[ti].contains(first) {
         fail error_at(text, start, "{show_key(first)} is in this table already")
@@ -517,7 +521,7 @@ fn build(d: mut Doc, first: u32) -> LinkedMap<String, Toml> {
 }
 
 // A value at `at`, `depth` arrays and inline tables in.
-fn value(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlError {
+fn read_value(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlError {
     let n = text.len()
     if at >= n {
         fail error_at(text, at, "the end, where a value should be")
@@ -577,7 +581,7 @@ fn array(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlEr
         return Toml.Array(items)
     }
     loop {
-        items.push(try value(text, mut at, mut d, depth))
+        items.push(try read_value(text, mut at, mut d, depth))
         try array_space(text, mut at)
         if at < text.len() {
             let b = text.byte_at(at)
@@ -637,11 +641,11 @@ fn inline_table(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml !
             var parts: List<String> = [first]
             try more_parts(text, mut at, mut parts)
             try equals(text, mut at)
-            let v = try value(text, mut at, mut d, depth)
+            let v = try read_value(text, mut at, mut d, depth)
             try put_dotted(text, start, mut d, t, parts, v, false)
         } else {
             try equals(text, mut at)
-            let v = try value(text, mut at, mut d, depth)
+            let v = try read_value(text, mut at, mut d, depth)
             if d.tables[ti].contains(first) {
                 fail error_at(text, start, "{show_key(first)} is in this inline table already")
             }
@@ -1766,5 +1770,370 @@ impl Toml {
             Toml.Array(_) => "an array",
             Toml.Table(_) => "a table",
         }
+    }
+}
+
+// --- what @toml's code calls ---------------------------------------------------------------------
+
+/// The error for `what`, which should be `wanted` but is `value`. `@toml`'s code calls it.
+pub fn toml_expected(value: Toml, wanted: String, what: String) -> TomlError {
+    return TomlError { message: "`{what}` should be {wanted}, not {value.kind()}", line: 0, column: 0 }
+}
+
+/// The error for a key that isn't there. `@toml`'s code calls it.
+pub fn toml_missing(what: String) -> TomlError {
+    return TomlError { message: "`{what}` is missing", line: 0, column: 0 }
+}
+
+/// `value` as a `bool`, for `what`. `@toml`'s code calls it.
+pub fn toml_bool(value: Toml, what: String) -> bool ! TomlError {
+    if let Toml.Bool(b) = value {
+        return b
+    }
+    fail toml_expected(value, "true or false", what)
+}
+
+/// `value` as an integer from `min` to `max`, for `what`. `@toml`'s code calls it.
+pub fn toml_int(value: Toml, what: String, min: i64, max: i64) -> i64 ! TomlError {
+    if let Toml.Int(n) = value {
+        if n < min or n > max {
+            fail TomlError { message: "`{what}` should be from {min} to {max}, not {n}", line: 0, column: 0 }
+        }
+        return n
+    }
+    fail toml_expected(value, "an integer", what)
+}
+
+/// `n` as a TOML integer. `@toml`'s code calls it for a `u64` or `usize` field. It panics for one
+/// past `i64`'s range, since TOML's integers are 64-bit and signed.
+@track_caller
+pub fn toml_from_u64(n: u64) -> Toml {
+    if n > 9223372036854775807 {
+        panic("{n} is past the 64-bit signed integers TOML has")
+    }
+    return Toml.Int(i64.wrap(n))
+}
+
+/// `value` as an `f64`, for `what`: a float, or an integer as the nearest `f64`. `@toml`'s code
+/// calls it.
+pub fn toml_f64(value: Toml, what: String) -> f64 ! TomlError {
+    return match value {
+        Toml.Int(n) => f64.nearest(n),
+        Toml.Float(f) => f,
+        _ => {
+            fail toml_expected(value, "a number", what)
+        },
+    }
+}
+
+/// `value` as a `String`, for `what`. `@toml`'s code calls it.
+pub fn toml_string(value: Toml, what: String) -> String ! TomlError {
+    if let Toml.Str(s) = value {
+        return s.copy()
+    }
+    fail toml_expected(value, "a string", what)
+}
+
+// --- @toml ---------------------------------------------------------------------------------------
+
+/// Writes `to_toml(self) -> Toml` and `from_toml(value: Toml) -> Self ! TomlError` for a struct,
+/// and `to_toml_text` and `from_toml_text` beside them, from its fields' types. See
+/// docs/std/toml.md.
+@attribute("toml_key")
+pub fn toml(decl: StructDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@toml` can't write a generic struct's TOML yet"
+    }
+    var w = Writer { owner: decl.name.copy(), helpers: String(), next: 0, uses: List<String>() }
+    var to = String()
+    var from = String()
+    for f in decl.fields {
+        let key = try toml_key(f)
+        let what = "{decl.name}.{key}"
+        // TOML has no null, so a field that's `none` is left out, as tomli-w can't write `None`.
+        if f.ty.kind == TypeKind.Optional {
+            let put = try w.to_toml(f.ty.args[0], "x")
+            to.push_str(#"        if let x = self.#{f.name} { out.insert("#{key}", #{put}) }"#)
+        } else {
+            let put = try w.to_toml(f.ty, "self.{f.name}")
+            to.push_str(#"        out.insert("#{key}", #{put})"#)
+        }
+        to.push('\n')
+        // A missing key is `none` for an optional, the field's default if it has one, and an
+        // error otherwise.
+        var get = String()
+        var missing = String()
+        if f.ty.kind == TypeKind.Optional {
+            let inner = try w.from_toml(f.ty.args[0], #"members["#{key}"]"#, what)
+            get.push_str("some({inner})")
+            missing.push_str("none")
+        } else {
+            get.push_str(try w.from_toml(f.ty, #"members["#{key}"]"#, what))
+            if not f.default.is_empty() {
+                missing.push_str(f.default)
+            } else {
+                w.use_name("toml_missing")
+                missing.push_str(#"
+                    fail toml_missing("#{what}")
+                "#)
+            }
+        }
+        from.push_str(#"            #{f.name}: if members.contains("#{key}") { #{get} } else { #{missing} },"#)
+        from.push('\n')
+    }
+    w.use_name("Toml")
+    w.use_name("TomlError")
+    w.use_name("toml_expected")
+    w.use_name("parse as toml_parse")
+    w.use_name("write as toml_write")
+    var g = Generated.new()
+    g.add(w.imports())
+    g.add(#"
+        impl #{decl.name} {
+            /// This, as a TOML table, as `@toml` writes it.
+            pub fn to_toml(self) -> Toml {
+                var out = LinkedMap<String, Toml>()
+        #{to}        return Toml.Table(out)
+            }
+
+            /// This, as a TOML document, as `write` writes it.
+            pub fn to_toml_text(self) -> String {
+                return toml_write(self.to_toml())
+            }
+
+            /// The value a TOML table describes, as `@toml` reads it: a key for each field, whose
+            /// others are passed over.
+            pub fn from_toml(value: Toml) -> #{decl.name} ! TomlError {
+                if let Toml.Table(members) = value {
+                    return #{decl.name} {
+        #{from}            }
+                }
+                fail toml_expected(value, "a table", "#{decl.name}")
+            }
+
+            /// The value a TOML document describes, as `from_toml` reads it.
+            pub fn from_toml_text(text: String) -> #{decl.name} ! TomlError {
+                let value = try toml_parse(text)
+                return try #{decl.name}.from_toml(value)
+            }
+        }
+        "#)
+    if not w.helpers.is_empty() {
+        g.add(w.helpers.copy())
+    }
+    return g
+}
+
+// The key a field is written under: its name, or what `@toml_key("...")` says.
+fn toml_key(f: Field) -> String ! String {
+    for a in f.attributes {
+        if a.name == "toml_key" {
+            if a.args.len() != 1 or not a.args[0].starts_with("\"") {
+                fail "`@toml_key` takes the key, as a string: `@toml_key(\"max-players\")`"
+            }
+            return a.args[0][1..a.args[0].len() - 1]
+        }
+    }
+    return f.name.copy()
+}
+
+// What `@toml` has written so far for one declaration: helper functions for lists and maps, and
+// the names it needs from `std.toml`.
+struct Writer {
+    owner: String
+    helpers: String
+    next: usize
+    uses: List<String>
+}
+
+impl Writer {
+    fn use_name(mut self, name: String) {
+        for u in self.uses {
+            if u == name {
+                return
+            }
+        }
+        self.uses.push(name.copy())
+    }
+
+    // Adds a helper function, on lines of its own.
+    fn add_helper(mut self, code: own String) {
+        self.helpers.push_str(code)
+        self.helpers.push('\n')
+    }
+
+    fn imports(self) -> String {
+        return "import std.toml.\{{self.uses.join(", ")}\}"
+    }
+
+    fn fresh(mut self) -> String {
+        self.next += 1
+        return "toml_{self.owner.to_lower_root()}_{self.next}"
+    }
+
+    // An expression that's `value`, of type `t`, as a `Toml`.
+    fn to_toml(mut self, t: TypeRef, value: String) -> String ! String {
+        if t.kind != TypeKind.Named {
+            fail "`@toml` can't write a `{t.text}` field yet: it writes numbers, `bool`, `String`, `Toml`, lists, maps with `String` keys, optionals, and types with `@toml` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            return "Toml.Bool({value})"
+        }
+        if n == "i64" {
+            return "Toml.Int({value})"
+        }
+        if n == "i8" or n == "i16" or n == "i32" or n == "u8" or n == "u16" or n == "u32" {
+            return "Toml.Int(i64({value}))"
+        }
+        if n == "u64" or n == "usize" {
+            self.use_name("toml_from_u64")
+            return if n == "u64" { "toml_from_u64({value})" } else { "toml_from_u64(u64({value}))" }
+        }
+        if n == "f64" {
+            return "Toml.Float({value})"
+        }
+        if n == "f32" {
+            return "Toml.Float(f64({value}))"
+        }
+        if n == "String" {
+            return "Toml.Str({value}.copy())"
+        }
+        if n == "Toml" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.to_toml(t.args[0], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Toml {
+                    var out = List<Toml>()
+                    out.reserve(v.len())
+                    for x in v {
+                        out.push(#{inner})
+                    }
+                    return Toml.Array(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@toml` writes maps with `String` keys, since TOML's keys are text, not `{t.text}`"
+            }
+            let inner = try self.to_toml(t.args[1], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Toml {
+                    var out = LinkedMap<String, Toml>()
+                    out.reserve(v.len())
+                    for (k, x) in v {
+                        out.insert(k.copy(), #{inner})
+                    }
+                    return Toml.Table(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if not t.args.is_empty() {
+            fail "`@toml` can't write a `{t.text}` field yet"
+        }
+        // A type with `@toml` of its own.
+        return "{value}.to_toml()"
+    }
+
+    // An expression that's the `Toml` `value` as a `t`, failing with a `TomlError` for `what`.
+    fn from_toml(mut self, t: TypeRef, value: String, what: String) -> String ! String {
+        if t.kind != TypeKind.Named {
+            fail "`@toml` can't read a `{t.text}` field yet: it reads numbers, `bool`, `String`, `Toml`, lists, maps with `String` keys, optionals, and types with `@toml` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            self.use_name("toml_bool")
+            return #"try toml_bool(#{value}, "#{what}")"#
+        }
+        let range = int_range(n)
+        if let (lo, hi) = range {
+            self.use_name("toml_int")
+            if n == "i64" {
+                return #"try toml_int(#{value}, "#{what}", #{lo}, #{hi})"#
+            }
+            return #"#{n}.wrap(try toml_int(#{value}, "#{what}", #{lo}, #{hi}))"#
+        }
+        if n == "u64" or n == "usize" {
+            self.use_name("toml_int")
+            return #"#{n}.wrap(try toml_int(#{value}, "#{what}", 0, 9223372036854775807))"#
+        }
+        if n == "f64" {
+            self.use_name("toml_f64")
+            return #"try toml_f64(#{value}, "#{what}")"#
+        }
+        if n == "f32" {
+            self.use_name("toml_f64")
+            return #"f32.nearest(try toml_f64(#{value}, "#{what}"))"#
+        }
+        if n == "String" {
+            self.use_name("toml_string")
+            return #"try toml_string(#{value}, "#{what}")"#
+        }
+        if n == "Toml" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.from_toml(t.args[0], "x", "{what}[]")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Toml) -> #{t.text} ! TomlError {
+                    if let Toml.Array(items) = v {
+                        var out = #{t.text}()
+                        out.reserve(items.len())
+                        for x in items {
+                            out.push(#{inner})
+                        }
+                        return out
+                    }
+                    fail toml_expected(v, "an array", "#{what}")
+                }
+                "#)
+            return "try {name}({value})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@toml` reads maps with `String` keys, since TOML's keys are text, not `{t.text}`"
+            }
+            let inner = try self.from_toml(t.args[1], "x", "{what}[]")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Toml) -> #{t.text} ! TomlError {
+                    if let Toml.Table(members) = v {
+                        var out = #{t.text}()
+                        for (k, x) in members {
+                            out.insert(k.copy(), #{inner})
+                        }
+                        return out
+                    }
+                    fail toml_expected(v, "a table", "#{what}")
+                }
+                "#)
+            return "try {name}({value})"
+        }
+        if not t.args.is_empty() {
+            fail "`@toml` can't read a `{t.text}` field yet"
+        }
+        return "try {n}.from_toml({value})"
+    }
+}
+
+// The range of an integer type up to `i64`'s, as the literals `@toml`'s code checks against.
+fn int_range(n: String) -> (String, String)? {
+    return match n {
+        "i8" => some(("-128", "127")),
+        "i16" => some(("-32768", "32767")),
+        "i32" => some(("-2147483648", "2147483647")),
+        "i64" => some(("-9223372036854775807 - 1", "9223372036854775807")),
+        "u8" => some(("0", "255")),
+        "u16" => some(("0", "65535")),
+        "u32" => some(("0", "4294967295")),
+        _ => none,
     }
 }
