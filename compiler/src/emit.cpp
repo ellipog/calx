@@ -6410,6 +6410,59 @@ $dropall    m->len = 0;
                        "; cx_bool " + r + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i + "++) if (" +
                        equal(et, ptr + "[" + i + "]", v) + ") { " + r + " = 1; break; } " + r + "; })";
             }
+            case BMethod::list_sum: {
+                std::string s = tmp(), look = "({ const " + l + "* " + p + " = " + address(recv) + "; ";
+                if (et->kind != TypeKind::float_) {
+                    // Integers wrap, as `+` does, and clang adds several at a time.
+                    return look + el + " " + s + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i + "++) " + s +
+                           " += " + ptr + "[" + i + "]; " + s + "; })";
+                }
+                // Neumaier's compensated sum, as Python's `sum` adds floats since 3.12: what each
+                // addition rounds off is kept in `c` and added at the end, unless it isn't finite.
+                std::string c = tmp(), x = tmp(), u = tmp(), abs = helper(et) == "f32" ? "__builtin_fabsf(" : "__builtin_fabs(";
+                return look + el + " " + s + " = 0, " + c + " = 0; for (cx_usize " + i + " = 0; " + i + " < " + len + "; " + i +
+                       "++) { " + el + " " + x + " = " + ptr + "[" + i + "]; " + el + " " + u + " = " + s + " + " + x + "; " + c +
+                       " += " + abs + s + ") >= " + abs + x + ") ? (" + s + " - " + u + ") + " + x + " : (" + x + " - " + u + ") + " +
+                       s + "; " + s + " = " + u + "; } if (" + c + " != 0 && __builtin_isfinite(" + c + ")) " + s + " += " + c +
+                       "; " + s + "; })";
+            }
+            case BMethod::list_min: case BMethod::list_max: {
+                bool most = e->bmethod == BMethod::list_max;
+                std::string o = ctype(e->type), r = tmp(), b = tmp();
+                std::string look = "({ const " + l + "* " + p + " = " + address(recv) + "; " + o + " " + r + " = {0}; if (" + len + ") { ";
+                std::string here = ptr + "[" + i + "]";
+                if (et->kind == TypeKind::float_) {
+                    // Java's `Math.min` and `Math.max` over them all: NaN if any is NaN, and `-0.0`
+                    // less than `0.0`. Each float's bits, with a negative one's other bits flipped,
+                    // order as an integer as the floats do, zeros included, so the loop is an
+                    // integer `max` and an or of `x != x`, which clang does several at a time. A
+                    // float `max` it won't, since that needs leave to reorder what NaN does.
+                    bool wide = helper(et) == "f64";
+                    std::string it = wide ? "cx_i64" : "cx_i32", mask = wide ? "0x7FFFFFFFFFFFFFFFll" : "0x7FFFFFFF";
+                    std::string sh = wide ? "63" : "31", k = tmp(), x = tmp(), w = tmp(), nan = tmp();
+                    auto key = [&](const std::string& bits) { return "(" + bits + " ^ ((" + bits + " >> " + sh + ") & " + mask + "))"; };
+                    return look + it + " " + b + "; " + el + " " + x + " = " + ptr + "[0]; __builtin_memcpy(&" + b + ", &" + x + ", sizeof " +
+                           b + "); " + b + " = " + key(b) + "; cx_bool " + nan + " = " + x + " != " + x + "; for (cx_usize " + i + " = 1; " +
+                           i + " < " + len + "; " + i + "++) { " + el + " " + w + " = " + here + "; " + it + " " + k + "; __builtin_memcpy(&" +
+                           k + ", &" + w + ", sizeof " + k + "); " + k + " = " + key(k) + "; " + b + " = " + k + (most ? " > " : " < ") + b +
+                           " ? " + k + " : " + b + "; " + nan + " |= " + w + " != " + w + "; } " + b + " = " + key(b) +
+                           "; __builtin_memcpy(&" + x + ", &" + b + ", sizeof " + x + "); " + r + ".v = " + nan + " ? (" + el +
+                           ")__builtin_nan(\"\") : " + x + "; " + r + ".has = 1; } " + r + "; })";
+                }
+                if (scalar_order(et) && is_copy(et)) {
+                    // Equal integers are the same integer, so the loop keeps the value, not where
+                    // it was, and clang compares several at a time.
+                    return look + el + " " + b + " = " + ptr + "[0]; for (cx_usize " + i + " = 1; " + i + " < " + len + "; " + i + "++) " +
+                           b + " = " + here + (most ? " > " : " < ") + b + " ? " + here + " : " + b + "; " + r + ".v = " + b + "; " + r +
+                           ".has = 1; } " + r + "; })";
+                }
+                // The first of the least or the greatest, as Python's `min` and `max` give it.
+                std::string at = ptr + "[" + b + "]";
+                std::string better = most ? less(et, at, here) : less(et, here, at);
+                std::string take = is_copy(et) ? at : copy_fn(et) + "(&" + at + ")";
+                return look + "cx_usize " + b + " = 0; for (cx_usize " + i + " = 1; " + i + " < " + len + "; " + i + "++) if (" + better +
+                       ") " + b + " = " + i + "; " + r + ".v = " + take + "; " + r + ".has = 1; } " + r + "; })";
+            }
             default: return "0";
         }
     }

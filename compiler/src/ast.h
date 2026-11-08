@@ -196,6 +196,8 @@ enum class BMethod : std::uint8_t {
     list_map, list_filter, list_retain, list_any, list_all, list_count, list_find, list_position, sort_by, sort_by_key,
     opt_map,
     reverse,  // a list's or an array's elements, in place, the last first
+    // On a list or an array: its numbers added up, and its least and greatest element.
+    list_sum, list_min, list_max,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };

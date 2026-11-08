@@ -54,6 +54,8 @@ A literal is a list only where a list is wanted, such as `let xs: List<i32> = [1
 | `xs.contains(x)` | Whether an element `== x`. The element type must have `==` |
 | `xs.sort()` | Puts the elements in order, from least to greatest. The element type must have [`Order`](comparing.md#order) ([sorting](#sorting)) |
 | `xs.reverse()` | Puts the elements in the opposite order, in place, swapping each pair from the ends in |
+| `xs.sum()` | The numbers added up, as Python's `sum`: integers wrap as `+` does, and floats are added with Neumaier's compensation, as Python adds them since 3.12, so `[0.1; 10].sum()` is `1.0`. 0 for none ([sum, min and max](#sum-min-and-max)) |
+| `xs.min()`, `xs.max()` | A copy of the least or greatest element, the first of equal ones, or `none` when there are none. The element type must have [`Order`](comparing.md#order), or be a float |
 | `xs.as_ptr()`, `xs.as_mut_ptr()`, `xs.set_len(n)` | A pointer to the elements, and setting the length, for [unsafe code](unsafe.md#pointers) |
 | `xs.map(\|x\| ...)`, `filter`, `retain`, `any`, `all`, `count`, `find`, `position`, `sort_by`, `sort_by_key` | Call a closure on the elements ([closures](closures.md#methods-that-take-one)) |
 
@@ -188,6 +190,37 @@ Against Rust's `sort_by` on a `key` field, its stable sort, in the same setup, f
 | 1,000,000 of 16 values | 6.6 | 10.8 |
 | 1,000,000 in order | 0.76 | 1.02 |
 | 1,000,000 in reverse | 1.44 | 1.64 |
+
+## Sum, min and max
+
+`xs.sum()`, `xs.min()` and `xs.max()` are Python's `sum`, `min` and `max` on a list or an array:
+
+```calx
+fn main() {
+    let times: List<f64> = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    println("{times.sum()} {times.max()}")    // out: 1.0 some(0.1)
+    let words: List<String> = ["pear", "apple", "fig"]
+    println("{words.min() ?? "none"} {[3, 9, 4].max() ?? 0}")    // out: apple 9
+    let none_: List<i32> = []
+    println("{none_.sum()} {none_.min()}")    // out: 0 none
+}
+```
+
+- **Floats are added as Python adds them.** What each addition rounds off is kept and added at the end, Neumaier's improvement of Kahan's sum, as Python's `sum` does since 3.12, so a sum is Python's to the last bit: `[0.1, 0.2, 0.3, 1e16, 1.0, -1e16].sum()` is `1.6`, where adding them one after another gives `0.0`. An overflow stays `Infinity`.
+- **Integers wrap**, as `+` does, so `[i32.MAX, 1].sum()` is `i32.MIN`. Add them as `i64` when they might not fit.
+- **`min` and `max` give a copy**, `none` for no elements, and the first of equal ones, as Python's do, so a struct ordered by one field gives back the first that has the least.
+- **Floats have no `Order`**, so their `min` and `max` are Java's `Math.min` and `Math.max` over them all: NaN if any is NaN, as numpy's are, and `-0.0` less than `0.0`. Python's `max` gives an answer that depends on where a NaN is.
+
+On our benchmark, 10,000,000 random elements on an i9-13900K that had other work running, so rough, the best of five runs, in milliseconds:
+
+| | Calx | Python 3.14 | numpy 2.5 |
+| --- | --- | --- | --- |
+| `f64` sum | 10.6 | 46.6 | 5.7 |
+| `f64` max | 5.5 | 51.3 | 3.7 |
+| `i64` sum | 3.4 | 117 | 5.6 |
+| `i64` max | 4.0 | 53.8 | 3.9 |
+
+numpy adds floats in pairs, which is faster and differs from Python's sum in the last bits; Calx gives Python's. A float `max` is worked out as an integer `max` of the floats' bits, which orders them the same way and lets clang compare several at a time, where a float `max` that keeps NaN's rules it won't.
 
 ## Printing
 

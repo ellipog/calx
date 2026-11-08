@@ -9840,6 +9840,9 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
             else if (m == "sort") b = BMethod::sort, changes = true;
             else if (m == "reverse") b = BMethod::reverse, changes = true;
+            else if (m == "sum") b = BMethod::list_sum, result = el;
+            else if (m == "min") b = BMethod::list_min, result = T.optional_of(el);
+            else if (m == "max") b = BMethod::list_max, result = T.optional_of(el);
             else if (m == "swap") b = BMethod::swap, changes = true, params = {T.usize, T.usize};
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
@@ -9880,6 +9883,9 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {el}, result = T.bool_;
             else if (m == "sort") b = BMethod::sort, changes = true;
             else if (m == "reverse" && recv->kind == TypeKind::list && !recv->arena_list) b = BMethod::reverse, changes = true;
+            else if (m == "sum" && recv->kind == TypeKind::list && !recv->arena_list) b = BMethod::list_sum, result = el;
+            else if (m == "min" && recv->kind == TypeKind::list && !recv->arena_list) b = BMethod::list_min, result = T.optional_of(el);
+            else if (m == "max" && recv->kind == TypeKind::list && !recv->arena_list) b = BMethod::list_max, result = T.optional_of(el);
             else if (m == "extend" && recv->kind == TypeKind::list) return extend_call(e, recv);
             else if (m == "as_ptr") b = BMethod::as_ptr, result = T.pointer_of(el, true);
             else if (m == "as_mut_ptr") b = BMethod::as_mut_ptr, changes = true, result = T.pointer_of(el, false);
@@ -9933,6 +9939,25 @@ private:
             error(e->callee->span, "`sort` compares with `<`, which " + name_of(recv->elem) + " doesn't have" +
                                        lacking(recv->elem, p_order));
             result = T.error;
+        }
+        if (b == BMethod::list_sum && recv->elem->kind != TypeKind::int_ && recv->elem->kind != TypeKind::float_ &&
+            !is_bad(recv->elem)) {
+            error(e->callee->span, "`sum` adds numbers, and " + name_of(recv) + " holds " + name_of(recv->elem));
+            return T.error;
+        }
+        // Floats have no `Order`, but `min` and `max` are Java's `Math.min` and `Math.max` on them.
+        if ((b == BMethod::list_min || b == BMethod::list_max) && recv->elem->kind != TypeKind::float_ &&
+            !orderable(recv->elem) && !is_bad(recv->elem)) {
+            error(e->callee->span, q(m) + " compares with `<`, which " + name_of(recv->elem) + " doesn't have" +
+                                       lacking(recv->elem, p_order));
+            return T.error;
+        }
+        if (b == BMethod::list_min || b == BMethod::list_max) {
+            if (const Type* h = handle_inside(recv->elem)) {
+                error(e->callee->span, q(m) + " gives a copy of the element, and " + name_of(h) + " can't be copied; find its index with " +
+                                           q("position"));
+                return T.error;
+            }
         }
         if (b == BMethod::contains && (recv->kind == TypeKind::list || recv->kind == TypeKind::deque) && !equatable(recv->elem) &&
             !is_bad(recv->elem)) {

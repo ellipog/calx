@@ -1,0 +1,21 @@
+// What sum, min and max don't take: sum adds numbers, and min and max need `<` or floats, and
+// give a copy.
+struct Mob {
+    hp: f64
+}
+
+fn main() {
+    let words: List<String> = ["a"]
+    _ = words.sum()    // error: `sum` adds numbers, and `List<String>` holds `String`
+    let flags: List<bool> = [true]
+    _ = flags.sum()    // error: `sum` adds numbers, and `List<bool>` holds `bool`
+    let mobs: List<Mob> = [Mob { hp: 1.0 }]
+    _ = mobs.max()    // error: `max` compares with `<`, which `Mob` doesn't have, since it holds `f64`, and floats have no `Order`, since `NaN` is neither less than nor greater than anything; compare them with `total_cmp`
+    let queues: List<Receiver<i32>> = []
+    _ = queues.min()    // error: `min` compares with `<`, which `Receiver<i32>` doesn't have
+    _ = ints().sum(1)    // error: `sum` takes no arguments
+}
+
+fn ints() -> List<i32> {
+    return [1]
+}

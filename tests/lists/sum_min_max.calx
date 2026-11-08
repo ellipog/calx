@@ -1,0 +1,42 @@
+// sum, min and max on a list or an array, as Python's built-ins give them: floats are added with
+// Neumaier's compensation, as Python's `sum` does since 3.12, so the results below are Python's;
+// integers wrap, as `+` does; and a tie goes to the first. Floats have no `Order`, so their min
+// and max are Java's `Math.min` and `Math.max`: NaN if any is NaN, and `-0.0` below `0.0`.
+struct P {
+    x: i32
+    y: i32
+}
+
+fn main() {
+    let ints: List<i32> = [3, -1, 4, 1, 5, -9, 2, 6]
+    println("{ints.sum()} {ints.min()} {ints.max()}")    // out: 11 some(-9) some(6)
+    let empty: List<i64> = []
+    println("{empty.sum()} {empty.min()} {empty.max()}")    // out: 0 none none
+    let wrap: List<i32> = [2147483647, 1]
+    let bytes: [u8; 4] = [250, 3, 4, 1]
+    println("{wrap.sum()} {bytes.sum()} {bytes.min()} {bytes.max()}")    // out: -2147483648 2 some(1) some(250)
+
+    // Python: sum([0.1] * 10) == 1.0, and sum([0.1, 0.2, 0.3, 1e16, 1.0, -1e16]) == 1.6.
+    let tenths: List<f64> = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    let big: List<f64> = [0.1, 0.2, 0.3, 1e16, 1.0, -1e16]
+    println("{tenths.sum()} {big.sum()} {big.min()} {big.max()}")    // out: 1.0 1.6 some(-1.0E16) some(1.0E16)
+    // An overflow stays infinite rather than becoming NaN, and the sum of no floats is 0.0.
+    let huge: List<f64> = [1e308, 1e308, -1e308]
+    let nothing: List<f64> = []
+    println("{huge.sum()} {nothing.sum()} {[-0.0, -0.0].sum()} {nothing.max()}")    // out: Infinity 0.0 0.0 none
+    let nan: List<f64> = [1.0, 0.0 / 0.0, 2.0]
+    let zeros: List<f64> = [0.0, -0.0]
+    println("{nan.sum()} {nan.min()} {nan.max()} {zeros.min()} {zeros.max()}")    // out: NaN some(NaN) some(NaN) some(-0.0) some(0.0)
+    let small: List<f32> = [0.1, 0.2, 0.3, -2.5]
+    println("{small.sum()} {small.min()} {small.max()}")    // out: -1.9 some(-2.5) some(0.3)
+
+    // Anything with `Order`: text, and structs by their fields in order, copied out.
+    let words: List<String> = ["pear", "apple", "fig", "apple"]
+    println("{words.min()} {words.max()}")    // out: some(apple) some(pear)
+    let ps: List<P> = [P { x: 1, y: 5 }, P { x: 0, y: 9 }, P { x: 1, y: 2 }]
+    let lo = ps.min() ?? P { x: 0, y: 0 }
+    let hi = ps.max() ?? P { x: 0, y: 0 }
+    println("{lo.x},{lo.y} {hi.x},{hi.y}")    // out: 0,9 1,5
+    let runes = ['q', 'b', 'z']
+    println("{runes.min()} {runes.max()} {[true, false].min()}")    // out: some(b) some(z) some(false)
+}
