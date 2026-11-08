@@ -1,0 +1,1770 @@
+/// TOML 1.0: config text parsed into a tree of values, as Python's `tomllib` reads it, with the
+/// line and column of what's wrong when it isn't TOML, and a tree written back as text, as
+/// `tomli-w` writes it.
+module std.toml
+
+import std.time.{DateTime, Timestamp, days_in_month}
+
+/// A TOML value.
+pub enum Toml {
+    Str(String)
+    /// An integer. TOML's are 64-bit, so text with one past an `i64` isn't TOML.
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    /// A date and time with its offset from UTC: `1979-05-27T07:32:00-08:00`. Python's
+    /// `datetime` with a `tzinfo`.
+    OffsetDateTime(Moment)
+    /// A date and time without one: `1979-05-27T07:32:00`. Python's `datetime` without a
+    /// `tzinfo`.
+    LocalDateTime(Moment)
+    /// A date: `1979-05-27`. Python's `date`.
+    LocalDate(Moment)
+    /// A time of day: `07:32:00`. Python's `time`.
+    LocalTime(Moment)
+    Array(List<Toml>)
+    /// A table's keys and their values, in the order the text has the keys.
+    Table(LinkedMap<String, Toml>)
+}
+
+/// The date and time of a TOML value. The parts a value doesn't have are 0: a local date's time,
+/// a local time's date, and the offset of everything but an offset date-time.
+pub struct Moment {
+    pub year: i32 = 0
+    /// 1 to 12.
+    pub month: i32 = 0
+    /// 1 to 31.
+    pub day: i32 = 0
+    /// 0 to 23.
+    pub hour: i32 = 0
+    pub minute: i32 = 0
+    pub second: i32 = 0
+    /// The fraction of the second, in nanoseconds: 0 to 999,999,999. Digits past the ninth are
+    /// dropped, as TOML says.
+    pub nano: i32 = 0
+    /// The seconds the time is ahead of UTC, as std.time counts them: -28,800 for `-08:00`, and 0
+    /// for `Z`.
+    pub offset: i32 = 0
+}
+
+impl Moment {
+    /// The date and time as std.time's `DateTime`, to the millisecond.
+    pub fn date_time(self) -> DateTime {
+        return DateTime {
+            year: self.year,
+            month: self.month,
+            day: self.day,
+            hour: self.hour,
+            minute: self.minute,
+            second: self.second,
+            milli: self.nano / 1000000,
+        }
+    }
+
+    /// The moment as a `Timestamp`, to the millisecond, at its offset. A local date-time's
+    /// offset is 0, so it's read as UTC.
+    pub fn timestamp(self) -> Timestamp {
+        return self.date_time().timestamp(self.offset)
+    }
+}
+
+/// Why text isn't TOML.
+pub struct TomlError {
+    pub message: String
+    /// Where in the text, from 1.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for TomlError {
+    fn show(self) {
+        print("line {self.line}, column {self.column}: {self.message}")
+    }
+}
+
+/// How deep arrays and inline tables may nest, so that hostile text can't run the stack out.
+const MAX_DEPTH: usize = 512
+
+// --- parsing -------------------------------------------------------------------------------------
+
+// A header can add to a table that's already there, and so can a dotted key, so tables are built
+// in `Doc`, where each has a number, and made into `Toml` values at the end. A table holds its
+// values, with an empty table or array in the place of each table or array of tables it holds,
+// which `kids` numbers.
+struct Doc {
+    tables: List<LinkedMap<String, Toml>>
+    // For each table, the keys of the tables it holds, to their numbers, and of its arrays of
+    // tables, to theirs in `arrays` with AOT added.
+    kids: List<Map<String, u32>>
+    // For each table: EXPLICIT if a header named it, and otherwise the section whose dotted keys
+    // made it or went through it, or 0. A header can't name a table twice, nor one that dotted
+    // keys made, and dotted keys can't add to a table a header named or another section's dotted
+    // keys made.
+    marks: List<u32>
+    // The tables of each array of tables, in order.
+    arrays: List<List<u32>>
+    // The section being read: 1 for the keys before the first header, and one more after each.
+    section: u32
+}
+
+const AOT: u32 = 0x80000000
+const EXPLICIT: u32 = 0x80000000
+
+fn new_table(d: mut Doc, mark: u32) -> u32 {
+    let t = u32.wrap(d.tables.len())
+    d.tables.push(LinkedMap<String, Toml>())
+    d.kids.push(Map<String, u32>())
+    d.marks.push(mark)
+    return t
+}
+
+/// The document in `text`, a `Toml.Table`, as Python's `tomllib.loads` reads it.
+pub fn parse(text: String) -> Toml ! TomlError {
+    if text.contains("\r") {
+        // TOML's newlines are `\n` and `\r\n`. With each `\r\n` read as `\n`, they're alike in
+        // multi-line strings too, as in tomllib, and any other `\r` is an error.
+        return try parse_text(text.replace("\r\n", "\n"))
+    }
+    return try parse_text(text)
+}
+
+fn parse_text(text: String) -> Toml ! TomlError {
+    if text.starts_with("\u{FEFF}") {
+        fail error_at(text, 0, "a byte order mark, U+FEFF, which TOML doesn't start with; save the file as UTF-8 without one")
+    }
+    var d = Doc { tables: [], kids: [], marks: [], arrays: [], section: 1 }
+    var at: usize = 0
+    var t = new_table(mut d, 0)
+    loop {
+        try body(text, mut at, mut d, t)
+        if at >= text.len() {
+            break
+        }
+        d.section += 1
+        t = try header(text, mut at, mut d)
+        skip_space(text, mut at)
+        try end_line(text, mut at)
+    }
+    return Toml.Table(build(mut d, 0))
+}
+
+// The error at byte `at` of `text`, with its line and column.
+fn error_at(text: String, at: usize, message: own String) -> TomlError {
+    var line: usize = 1
+    var start: usize = 0
+    for i in 0..at {
+        if text.byte_at(i) == 10 {
+            line += 1
+            start = i + 1
+        }
+    }
+    var column: usize = 1
+    for i in start..at {
+        if (text.byte_at(i) & 0xC0) != 0x80 {
+            column += 1
+        }
+    }
+    return TomlError { message: message, line: line, column: column }
+}
+
+// What's at byte `at`, for an error: the rune in backquotes, the end of the line, or the end.
+fn found(text: String, at: usize) -> String {
+    if at >= text.len() {
+        return "the end"
+    }
+    let b = text.byte_at(at)
+    if b == 10 {
+        return "the end of the line"
+    }
+    if b < 32 or b == 127 {
+        return "a control character, {b}"
+    }
+    let n: usize = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    return "`{text[at..at + n]}`"
+}
+
+// Whether `w` is at byte `at`.
+fn word(text: String, at: usize, w: str) -> bool {
+    if at + w.len() > text.len() {
+        return false
+    }
+    for i in 0..w.len() {
+        if text.byte_at(at + i) != w.byte_at(i) {
+            return false
+        }
+    }
+    return true
+}
+
+fn skip_space(text: String, at: mut usize) {
+    while at < text.len() {
+        let b = text.byte_at(at)
+        if b != 32 and b != 9 {
+            return
+        }
+        at += 1
+    }
+}
+
+fn is_bare(b: u8) -> bool {
+    return (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'_' or b == b'-'
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= b'0' and b <= b'9'
+}
+
+// Whether `b` is a control character, which TOML doesn't allow as itself in strings and
+// comments: all but the tab, and `\n` where `newline` lets it be.
+fn is_control(b: u8, newline: bool) -> bool {
+    return (b < 32 and b != 9 and (b != 10 or not newline)) or b == 127
+}
+
+// A comment, from its `#` at `at` to the end of its line.
+fn comment(text: String, at: mut usize) ! TomlError {
+    at += 1
+    let n = text.len()
+    while at < n {
+        let b = text.byte_at(at)
+        if b == 10 {
+            return
+        }
+        if is_control(b, false) {
+            fail error_at(text, at, "{found(text, at)} in a comment, which TOML doesn't allow")
+        }
+        at += 1
+    }
+}
+
+// The end of a statement: a comment if there's one, then the end of the line or of the text.
+fn end_line(text: String, at: mut usize) ! TomlError {
+    if at >= text.len() {
+        return
+    }
+    if text.byte_at(at) == b'#' {
+        try comment(text, mut at)
+        if at >= text.len() {
+            return
+        }
+    }
+    if text.byte_at(at) != 10 {
+        fail error_at(text, at, "{found(text, at)} after a statement, where the line should end")
+    }
+    at += 1
+}
+
+// The key/value pairs from `at` up to the next header or the end, into table `t`.
+fn body(text: String, at: mut usize, d: mut Doc, t: u32) ! TomlError {
+    let n = text.len()
+    loop {
+        skip_space(text, mut at)
+        if at >= n {
+            return
+        }
+        let b = text.byte_at(at)
+        if b == 10 {
+            at += 1
+            continue
+        }
+        if b == b'[' {
+            return
+        }
+        if b != b'#' {
+            if not is_bare(b) and b != b'"' and b != b'\'' {
+                fail error_at(text, at, "{found(text, at)} where a key, a header or a comment should be")
+            }
+            try key_value(text, mut at, mut d, t)
+            skip_space(text, mut at)
+        }
+        try end_line(text, mut at)
+    }
+}
+
+// A key and its value, at `at`, into table `t`.
+fn key_value(text: String, at: mut usize, d: mut Doc, t: u32) ! TomlError {
+    let start = at
+    let first = try key_part(text, mut at)
+    skip_space(text, mut at)
+    if at < text.len() and text.byte_at(at) == b'.' {
+        var parts: List<String> = [first]
+        try more_parts(text, mut at, mut parts)
+        try equals(text, mut at)
+        let v = try value(text, mut at, mut d, 0)
+        try put_dotted(text, start, mut d, t, parts, v, true)
+        return
+    }
+    try equals(text, mut at)
+    let v = try value(text, mut at, mut d, 0)
+    let ti = usize(t)
+    if d.tables[ti].contains(first) {
+        fail error_at(text, start, "{show_key(first)} is in this table already")
+    }
+    d.tables[ti].insert(first, v)
+}
+
+// One part of a key at `at`: bare, or a basic or literal string.
+fn key_part(text: String, at: mut usize) -> String ! TomlError {
+    if at < text.len() {
+        let b = text.byte_at(at)
+        if is_bare(b) {
+            let start = at
+            at += 1
+            while at < text.len() and is_bare(text.byte_at(at)) {
+                at += 1
+            }
+            return text[start..at].copy()
+        }
+        if b == b'"' {
+            return try basic(text, mut at)
+        }
+        if b == b'\'' {
+            return try literal(text, mut at)
+        }
+    }
+    fail error_at(text, at, "{found(text, at)} where a key should be")
+}
+
+// The rest of a dotted key, from the `.` at `at`, with white space around each dot allowed.
+fn more_parts(text: String, at: mut usize, parts: mut List<String>) ! TomlError {
+    while at < text.len() and text.byte_at(at) == b'.' {
+        at += 1
+        skip_space(text, mut at)
+        parts.push(try key_part(text, mut at))
+        skip_space(text, mut at)
+    }
+}
+
+fn equals(text: String, at: mut usize) ! TomlError {
+    if at >= text.len() or text.byte_at(at) != b'=' {
+        fail error_at(text, at, "{found(text, at)} after a key, where `=` should be")
+    }
+    at += 1
+    skip_space(text, mut at)
+}
+
+// Puts `v` at the dotted key `parts` in table `t`, making the tables on the way. In the document,
+// `doc`, they're marked as this section's; in an inline table, there's nothing to mark.
+fn put_dotted(text: String, start: usize, d: mut Doc, t: u32, parts: own List<String>, v: own Toml, doc: bool) ! TomlError {
+    var keys = parts
+    let stem = keys.pop() ?? String()
+    var at = t
+    for k in keys {
+        at = try into(text, start, mut d, at, k, doc)
+    }
+    let ti = usize(at)
+    if d.tables[ti].contains(stem) {
+        fail error_at(text, start, "{show_key(stem)} is in this table already")
+    }
+    d.tables[ti].insert(stem, v)
+}
+
+// The table `k` in table `t`, for a dotted key, made if it isn't there.
+fn into(text: String, start: usize, d: mut Doc, t: u32, k: String, doc: bool) -> u32 ! TomlError {
+    let ti = usize(t)
+    if d.kids[ti].contains(k) {
+        let kid = d.kids[ti][k]
+        if kid >= AOT {
+            fail error_at(text, start, "{show_key(k)} is an array of tables, which a dotted key can't add to")
+        }
+        if doc {
+            let m = d.marks[usize(kid)]
+            if m == EXPLICIT {
+                fail error_at(text, start, "{show_key(k)} is a table with a header of its own, which a dotted key can't add to")
+            }
+            if m != d.section {
+                if m != 0 {
+                    fail error_at(text, start, "{show_key(k)} is a table an earlier section's dotted keys made, which these can't add to")
+                }
+                d.marks[usize(kid)] = d.section
+            }
+        }
+        return kid
+    }
+    if d.tables[ti].contains(k) {
+        fail error_at(text, start, "{show_key(k)} has a value already, which isn't a table that can hold keys")
+    }
+    let mark = if doc { d.section } else { 0 }
+    let kid = new_table(mut d, mark)
+    d.tables[ti].insert(k.copy(), Toml.Table(LinkedMap<String, Toml>()))
+    d.kids[ti].insert(k.copy(), kid)
+    return kid
+}
+
+// A header at `at`, a table's, `[a.b]`, or an array of tables', `[[a.b]]`: gives the table the
+// keys after it go in.
+fn header(text: String, at: mut usize, d: mut Doc) -> u32 ! TomlError {
+    let start = at
+    let aot = at + 1 < text.len() and text.byte_at(at + 1) == b'['
+    at += if aot { 2 } else { 1 }
+    skip_space(text, mut at)
+    var parts: List<String> = [try key_part(text, mut at)]
+    skip_space(text, mut at)
+    try more_parts(text, mut at, mut parts)
+    if aot {
+        if not word(text, at, "]]") {
+            fail error_at(text, at, "{found(text, at)} after an array of tables' name, where `]]` should be")
+        }
+        at += 2
+    } else {
+        if at >= text.len() or text.byte_at(at) != b']' {
+            fail error_at(text, at, "{found(text, at)} after a table's name, where `]` should be")
+        }
+        at += 1
+    }
+    let stem = parts.pop() ?? String()
+    var t: u32 = 0
+    for k in parts {
+        t = try down(text, start, mut d, t, k)
+    }
+    let ti = usize(t)
+    if d.kids[ti].contains(stem) {
+        let kid = d.kids[ti][stem]
+        if aot {
+            if kid < AOT {
+                fail error_at(text, start, "{show_name(parts, stem, true)} names a table, not an array of tables")
+            }
+            let e = new_table(mut d, 0)
+            d.arrays[usize(kid - AOT)].push(e)
+            return e
+        }
+        if kid >= AOT {
+            fail error_at(text, start, "{show_name(parts, stem, false)} names an array of tables, which takes `[[`")
+        }
+        let m = d.marks[usize(kid)]
+        if m == EXPLICIT {
+            fail error_at(text, start, "{show_name(parts, stem, false)} is a second header for the same table")
+        }
+        if m != 0 {
+            fail error_at(text, start, "{show_name(parts, stem, false)} names a table dotted keys made, which a header can't add to")
+        }
+        d.marks[usize(kid)] = EXPLICIT
+        return kid
+    }
+    if d.tables[ti].contains(stem) {
+        fail error_at(text, start, "{show_name(parts, stem, aot)} names a key with a value already")
+    }
+    if aot {
+        let e = new_table(mut d, 0)
+        let a = u32.wrap(d.arrays.len())
+        d.arrays.push([e])
+        d.tables[ti].insert(stem.copy(), Toml.Array([]))
+        d.kids[ti].insert(stem, a + AOT)
+        return e
+    }
+    let kid = new_table(mut d, EXPLICIT)
+    d.tables[ti].insert(stem.copy(), Toml.Table(LinkedMap<String, Toml>()))
+    d.kids[ti].insert(stem, kid)
+    return kid
+}
+
+// The table `k` in table `t`, on the way to a header's table: made if it isn't there, and the
+// last table of an array of tables.
+fn down(text: String, start: usize, d: mut Doc, t: u32, k: String) -> u32 ! TomlError {
+    let ti = usize(t)
+    if d.kids[ti].contains(k) {
+        let kid = d.kids[ti][k]
+        if kid >= AOT {
+            let a = usize(kid - AOT)
+            return d.arrays[a][d.arrays[a].len() - 1]
+        }
+        return kid
+    }
+    if d.tables[ti].contains(k) {
+        fail error_at(text, start, "{show_key(k)} has a value already, which isn't a table a header can go into")
+    }
+    let kid = new_table(mut d, 0)
+    d.tables[ti].insert(k.copy(), Toml.Table(LinkedMap<String, Toml>()))
+    d.kids[ti].insert(k.copy(), kid)
+    return kid
+}
+
+// Tables `first` on, made into values from the last back, since each table's own tables come
+// after it. Gives table `first`, and leaves the tables before it.
+fn build(d: mut Doc, first: u32) -> LinkedMap<String, Toml> {
+    let f = usize(first)
+    let n = d.tables.len()
+    if n == f + 1 and d.kids[f].is_empty() {
+        _ = d.kids.pop()
+        _ = d.marks.pop()
+        return d.tables.pop() ?? LinkedMap<String, Toml>()
+    }
+    var done = List<LinkedMap<String, Toml>?>()
+    done.reserve(n - f)
+    for _ in f..n {
+        done.push(none)
+    }
+    var i = n
+    while i > f {
+        i -= 1
+        var t = d.tables.pop() ?? LinkedMap<String, Toml>()
+        let kids = d.kids.pop() ?? Map<String, u32>()
+        _ = d.marks.pop()
+        for (k, kid) in kids {
+            if kid >= AOT {
+                var items = List<Toml>()
+                for e in d.arrays[usize(kid - AOT)] {
+                    items.push(Toml.Table(done[usize(e) - f].take() ?? LinkedMap<String, Toml>()))
+                }
+                t[k] = Toml.Array(items)
+            } else {
+                t[k] = Toml.Table(done[usize(kid) - f].take() ?? LinkedMap<String, Toml>())
+            }
+        }
+        done[i - f] = some(t)
+    }
+    return done[0].take() ?? LinkedMap<String, Toml>()
+}
+
+// A value at `at`, `depth` arrays and inline tables in.
+fn value(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlError {
+    let n = text.len()
+    if at >= n {
+        fail error_at(text, at, "the end, where a value should be")
+    }
+    let b = text.byte_at(at)
+    if b == b'"' {
+        if word(text, at, "\"\"\"") {
+            return Toml.Str(try multi_basic(text, mut at))
+        }
+        return Toml.Str(try basic(text, mut at))
+    }
+    if b == b'\'' {
+        if word(text, at, "'''") {
+            return Toml.Str(try multi_literal(text, mut at))
+        }
+        return Toml.Str(try literal(text, mut at))
+    }
+    if b == b't' and word(text, at, "true") {
+        at += 4
+        return Toml.Bool(true)
+    }
+    if b == b'f' and word(text, at, "false") {
+        at += 5
+        return Toml.Bool(false)
+    }
+    if b == b'[' or b == b'{' {
+        if depth >= MAX_DEPTH {
+            fail error_at(text, at, "arrays and inline tables nested more than {MAX_DEPTH} deep")
+        }
+        if b == b'[' {
+            return try array(text, mut at, mut d, depth + 1)
+        }
+        return try inline_table(text, mut at, mut d, depth + 1)
+    }
+    if is_digit(b) {
+        if at + 4 < n and text.byte_at(at + 4) == b'-' and is_digit(text.byte_at(at + 1)) and is_digit(text.byte_at(at + 2)) and
+            is_digit(text.byte_at(at + 3)) {
+            return try date_time(text, mut at)
+        }
+        if at + 2 < n and text.byte_at(at + 2) == b':' and is_digit(text.byte_at(at + 1)) {
+            var m = Moment {}
+            try clock(text, mut at, mut m)
+            return Toml.LocalTime(m)
+        }
+    }
+    return try number(text, mut at)
+}
+
+// An array, from its `[` at `at`: values with commas between them, and one after the last if
+// it's wanted, across lines, with comments.
+fn array(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlError {
+    at += 1
+    var items = List<Toml>()
+    try array_space(text, mut at)
+    if at < text.len() and text.byte_at(at) == b']' {
+        at += 1
+        return Toml.Array(items)
+    }
+    loop {
+        items.push(try value(text, mut at, mut d, depth))
+        try array_space(text, mut at)
+        if at < text.len() {
+            let b = text.byte_at(at)
+            if b == b',' {
+                at += 1
+                try array_space(text, mut at)
+                if at < text.len() and text.byte_at(at) == b']' {
+                    at += 1
+                    return Toml.Array(items)
+                }
+                continue
+            }
+            if b == b']' {
+                at += 1
+                return Toml.Array(items)
+            }
+        }
+        fail error_at(text, at, "{found(text, at)} in an array, where `,` or `]` should be")
+    }
+}
+
+// White space, newlines and comments, which an array can have between its values.
+fn array_space(text: String, at: mut usize) ! TomlError {
+    let n = text.len()
+    loop {
+        while at < n {
+            let b = text.byte_at(at)
+            if b != 32 and b != 9 and b != 10 {
+                break
+            }
+            at += 1
+        }
+        if at < n and text.byte_at(at) == b'#' {
+            try comment(text, mut at)
+        } else {
+            return
+        }
+    }
+}
+
+// An inline table, from its `{` at `at`: keys and values on one line, with commas between them
+// and none after the last.
+fn inline_table(text: String, at: mut usize, d: mut Doc, depth: usize) -> Toml ! TomlError {
+    at += 1
+    let t = new_table(mut d, 0)
+    let ti = usize(t)
+    skip_space(text, mut at)
+    if at < text.len() and text.byte_at(at) == b'}' {
+        at += 1
+        return Toml.Table(build(mut d, t))
+    }
+    loop {
+        let start = at
+        let first = try key_part(text, mut at)
+        skip_space(text, mut at)
+        if at < text.len() and text.byte_at(at) == b'.' {
+            var parts: List<String> = [first]
+            try more_parts(text, mut at, mut parts)
+            try equals(text, mut at)
+            let v = try value(text, mut at, mut d, depth)
+            try put_dotted(text, start, mut d, t, parts, v, false)
+        } else {
+            try equals(text, mut at)
+            let v = try value(text, mut at, mut d, depth)
+            if d.tables[ti].contains(first) {
+                fail error_at(text, start, "{show_key(first)} is in this inline table already")
+            }
+            d.tables[ti].insert(first, v)
+        }
+        skip_space(text, mut at)
+        if at < text.len() {
+            let b = text.byte_at(at)
+            if b == b',' {
+                at += 1
+                skip_space(text, mut at)
+                continue
+            }
+            if b == b'}' {
+                at += 1
+                return Toml.Table(build(mut d, t))
+            }
+        }
+        fail error_at(text, at, "{found(text, at)} in an inline table, where `,` or `\}` should be")
+    }
+}
+
+// A basic string, from its `"` at `at`, on one line, with its escapes read.
+fn basic(text: String, at: mut usize) -> String ! TomlError {
+    let open = at
+    let n = text.len()
+    at += 1
+    var start = at
+    var out = String()
+    loop {
+        if at >= n {
+            fail error_at(text, open, "a string that doesn't end")
+        }
+        let b = text.byte_at(at)
+        if b == b'"' {
+            out.push_str(text[start..at])
+            at += 1
+            return out
+        }
+        if b == b'\\' {
+            out.push_str(text[start..at])
+            try escape(text, mut at, mut out)
+            start = at
+            continue
+        }
+        if is_control(b, false) {
+            if b == 10 {
+                fail error_at(text, open, "a string that doesn't end on its line; `\"\"\"` starts one that can")
+            }
+            fail error_at(text, at, "{found(text, at)} in a string, which TOML writes as an escape, such as `\\u0007`")
+        }
+        at += 1
+    }
+}
+
+// A multi-line basic string, from its `"""` at `at`, with its escapes read, and without a newline
+// right after the `"""` or a `\` at the end of a line, the newline and the white space after it.
+fn multi_basic(text: String, at: mut usize) -> String ! TomlError {
+    let open = at
+    let n = text.len()
+    at += 3
+    if at < n and text.byte_at(at) == 10 {
+        at += 1
+    }
+    var start = at
+    var out = String()
+    loop {
+        if at >= n {
+            fail error_at(text, open, "a multi-line string that doesn't end")
+        }
+        let b = text.byte_at(at)
+        if b == b'"' {
+            if word(text, at, "\"\"\"") {
+                out.push_str(text[start..at])
+                at += 3
+                // One or two more are quotes at the string's end.
+                if at < n and text.byte_at(at) == b'"' {
+                    out.push('"')
+                    at += 1
+                    if at < n and text.byte_at(at) == b'"' {
+                        out.push('"')
+                        at += 1
+                    }
+                }
+                return out
+            }
+            at += 1
+            continue
+        }
+        if b == b'\\' {
+            out.push_str(text[start..at])
+            let e = if at + 1 < n { text.byte_at(at + 1) } else { 0 }
+            if e == 32 or e == 9 or e == 10 {
+                var p = at + 1
+                while p < n and (text.byte_at(p) == 32 or text.byte_at(p) == 9) {
+                    p += 1
+                }
+                if p < n and text.byte_at(p) != 10 {
+                    fail error_at(text, at, "a `\\` with white space after it, in a string, that isn't at the end of its line")
+                }
+                while p < n and (text.byte_at(p) == 32 or text.byte_at(p) == 9 or text.byte_at(p) == 10) {
+                    p += 1
+                }
+                at = p
+            } else {
+                try escape(text, mut at, mut out)
+            }
+            start = at
+            continue
+        }
+        if is_control(b, true) {
+            fail error_at(text, at, "{found(text, at)} in a string, which TOML writes as an escape, such as `\\u0007`")
+        }
+        at += 1
+    }
+}
+
+// The escape at `at`, its `\` first, added to `out`.
+fn escape(text: String, at: mut usize, out: mut String) ! TomlError {
+    let slash = at
+    if at + 1 >= text.len() {
+        fail error_at(text, slash, "a string that doesn't end")
+    }
+    let e = text.byte_at(at + 1)
+    at += 2
+    if e == b'"' {
+        out.push('"')
+    } else if e == b'\\' {
+        out.push('\\')
+    } else if e == b'n' {
+        out.push('\n')
+    } else if e == b't' {
+        out.push('\t')
+    } else if e == b'r' {
+        out.push('\r')
+    } else if e == b'b' {
+        out.push('\u{8}')
+    } else if e == b'f' {
+        out.push('\u{c}')
+    } else if e == b'u' or e == b'U' {
+        let k: usize = if e == b'u' { 4 } else { 8 }
+        var cp: u32 = 0
+        for i in 0..k {
+            let h = if at + i < text.len() { u32(text.byte_at(at + i)) } else { 0 }
+            let v = if h >= 48 and h <= 57 {
+                h - 48
+            } else if h >= 97 and h <= 102 {
+                h - 87
+            } else if h >= 65 and h <= 70 {
+                h - 55
+            } else {
+                fail error_at(text, slash, "`\\{text[slash + 1..slash + 2]}` without {k} hex digits after it")
+            }
+            cp = cp * 16 + v
+        }
+        at += k
+        if (cp >= 0xD800 and cp < 0xE000) or cp > 0x10FFFF {
+            fail error_at(text, slash, "`{text[slash..at]}`, which isn't a Unicode scalar value")
+        }
+        out.push(rune.try_from(cp) ?? '\u{FFFD}')
+    } else {
+        fail error_at(text, slash, "{found(text, slash + 1)} after `\\` in a string, which isn't an escape")
+    }
+}
+
+// A literal string, from its `'` at `at`, on one line, as it is.
+fn literal(text: String, at: mut usize) -> String ! TomlError {
+    let open = at
+    let n = text.len()
+    at += 1
+    let start = at
+    while at < n {
+        let b = text.byte_at(at)
+        if b == b'\'' {
+            let s = text[start..at].copy()
+            at += 1
+            return s
+        }
+        if is_control(b, false) {
+            if b == 10 {
+                fail error_at(text, open, "a string that doesn't end on its line; `'''` starts one that can")
+            }
+            fail error_at(text, at, "{found(text, at)} in a literal string, which can't have one")
+        }
+        at += 1
+    }
+    fail error_at(text, open, "a string that doesn't end")
+}
+
+// A multi-line literal string, from its `'''` at `at`, as it is, without a newline right after
+// the `'''`.
+fn multi_literal(text: String, at: mut usize) -> String ! TomlError {
+    let open = at
+    let n = text.len()
+    at += 3
+    if at < n and text.byte_at(at) == 10 {
+        at += 1
+    }
+    let start = at
+    while at < n {
+        let b = text.byte_at(at)
+        if b == b'\'' and word(text, at, "'''") {
+            var s = text[start..at].copy()
+            at += 3
+            if at < n and text.byte_at(at) == b'\'' {
+                s.push('\'')
+                at += 1
+                if at < n and text.byte_at(at) == b'\'' {
+                    s.push('\'')
+                    at += 1
+                }
+            }
+            return s
+        }
+        if is_control(b, true) {
+            fail error_at(text, at, "{found(text, at)} in a literal string, which can't have one")
+        }
+        at += 1
+    }
+    fail error_at(text, open, "a multi-line string that doesn't end")
+}
+
+// The two digits at `at` as a number, or -1 if they aren't two digits.
+fn two(text: String, at: usize) -> i32 {
+    if at + 2 > text.len() {
+        return -1
+    }
+    let a = text.byte_at(at)
+    let b = text.byte_at(at + 1)
+    if not is_digit(a) or not is_digit(b) {
+        return -1
+    }
+    return i32(a - b'0') * 10 + i32(b - b'0')
+}
+
+// Whether a time of day, `07:32:00`, is at `at`.
+fn is_clock(text: String, at: usize) -> bool {
+    if at + 8 > text.len() or text.byte_at(at + 2) != b':' or text.byte_at(at + 5) != b':' {
+        return false
+    }
+    let h = two(text, at)
+    let m = two(text, at + 3)
+    let s = two(text, at + 6)
+    return h >= 0 and h <= 23 and m >= 0 and m <= 59 and s >= 0 and s <= 59
+}
+
+// A time of day at `at`, with its fraction of a second if it has one, into `m`.
+fn clock(text: String, at: mut usize, m: mut Moment) ! TomlError {
+    if not is_clock(text, at) {
+        fail error_at(text, at, "a time that isn't one; TOML writes them `07:32:00`, with the seconds")
+    }
+    m.hour = two(text, at)
+    m.minute = two(text, at + 3)
+    m.second = two(text, at + 6)
+    at += 8
+    let n = text.len()
+    if at + 1 < n and text.byte_at(at) == b'.' and is_digit(text.byte_at(at + 1)) {
+        at += 1
+        var nano: i32 = 0
+        var k = 0
+        while at < n and is_digit(text.byte_at(at)) {
+            if k < 9 {
+                nano = nano * 10 + i32(text.byte_at(at) - b'0')
+                k += 1
+            }
+            at += 1
+        }
+        while k < 9 {
+            nano *= 10
+            k += 1
+        }
+        m.nano = nano
+    }
+}
+
+// A date at `at`, `1979-05-27`, and the time after it if there's one, past a `T` or a space, and
+// that time's offset if it has one.
+fn date_time(text: String, at: mut usize) -> Toml ! TomlError {
+    let start = at
+    let n = text.len()
+    let century = two(text, at)
+    let year = two(text, at + 2)
+    let month = two(text, at + 5)
+    let day = if at + 7 < n and text.byte_at(at + 7) == b'-' { two(text, at + 8) } else { -1 }
+    if century < 0 or year < 0 or month < 1 or month > 12 or day < 1 or day > days_in_month(century * 100 + year, month) {
+        fail error_at(text, start, "a date that isn't one; TOML writes them `1979-05-27`")
+    }
+    var m = Moment { year: century * 100 + year, month: month, day: day }
+    at += 10
+    if at < n {
+        let sep = text.byte_at(at)
+        if (sep == b'T' or sep == b't' or sep == b' ') and is_clock(text, at + 1) {
+            at += 1
+            try clock(text, mut at, mut m)
+            if at < n {
+                let z = text.byte_at(at)
+                if z == b'Z' or z == b'z' {
+                    at += 1
+                    return Toml.OffsetDateTime(m)
+                }
+                if (z == b'+' or z == b'-') and at + 6 <= n and text.byte_at(at + 3) == b':' {
+                    let h = two(text, at + 1)
+                    let mi = two(text, at + 4)
+                    if h >= 0 and h <= 23 and mi >= 0 and mi <= 59 {
+                        m.offset = if z == b'-' { -(h * 3600 + mi * 60) } else { h * 3600 + mi * 60 }
+                        at += 6
+                        return Toml.OffsetDateTime(m)
+                    }
+                }
+            }
+            return Toml.LocalDateTime(m)
+        }
+    }
+    return Toml.LocalDate(m)
+}
+
+// Digits from `at`, the first already known to be one, with single `_`s between them: gives
+// whether there was a `_`.
+fn digits(text: String, at: mut usize) -> bool ! TomlError {
+    let n = text.len()
+    var under = false
+    at += 1
+    while at < n {
+        let b = text.byte_at(at)
+        if is_digit(b) {
+            at += 1
+            continue
+        }
+        if b != b'_' {
+            break
+        }
+        if at + 1 >= n or not is_digit(text.byte_at(at + 1)) {
+            fail error_at(text, at, "a `_` in a number that isn't between two digits")
+        }
+        under = true
+        at += 1
+    }
+    return under
+}
+
+// A number at `at`: an integer, in decimal, or in hex, octal or binary after `0x`, `0o` or `0b`,
+// with single `_`s between digits; a float, with a fraction or an exponent or both; or `inf` or
+// `nan`, with a sign or not.
+fn number(text: String, at: mut usize) -> Toml ! TomlError {
+    let start = at
+    let n = text.len()
+    var b = text.byte_at(at)
+    var negative = false
+    if b == b'+' or b == b'-' {
+        negative = b == b'-'
+        at += 1
+        b = if at < n { text.byte_at(at) } else { 0 }
+    }
+    if b == b'i' and word(text, at, "inf") {
+        at += 3
+        return Toml.Float(if negative { -f64.INFINITY } else { f64.INFINITY })
+    }
+    if b == b'n' and word(text, at, "nan") {
+        at += 3
+        return Toml.Float(f64.NAN)
+    }
+    if not is_digit(b) {
+        fail error_at(text, start, "{found(text, start)} where a value should be")
+    }
+    if b == b'0' and at == start and at + 1 < n {
+        let r = text.byte_at(at + 1)
+        if r == b'x' {
+            return try radix(text, mut at, 16)
+        }
+        if r == b'o' {
+            return try radix(text, mut at, 8)
+        }
+        if r == b'b' {
+            return try radix(text, mut at, 2)
+        }
+    }
+    let whole = at
+    var under = try digits(text, mut at)
+    if b == b'0' and at > whole + 1 {
+        fail error_at(text, start, "a number that starts with `0` and goes on, which TOML doesn't allow")
+    }
+    var float = false
+    if at < n and text.byte_at(at) == b'.' {
+        float = true
+        at += 1
+        if at >= n or not is_digit(text.byte_at(at)) {
+            fail error_at(text, start, "a number with no digits after its `.`")
+        }
+        if try digits(text, mut at) {
+            under = true
+        }
+    }
+    if at < n and (text.byte_at(at) == b'e' or text.byte_at(at) == b'E') {
+        float = true
+        at += 1
+        if at < n and (text.byte_at(at) == b'+' or text.byte_at(at) == b'-') {
+            at += 1
+        }
+        if at >= n or not is_digit(text.byte_at(at)) {
+            fail error_at(text, start, "a number with no digits in its exponent")
+        }
+        if try digits(text, mut at) {
+            under = true
+        }
+    }
+    if float {
+        let f = if under { f64.parse(text[start..at].replace("_", "")) } else { f64.parse(text[start..at]) }
+        return Toml.Float(f ?? 0.0)
+    }
+    // The magnitude, which can be 2^63 for the most negative `i64`.
+    var mag: u64 = 0
+    for i in whole..at {
+        let c = text.byte_at(i)
+        if c == b'_' {
+            continue
+        }
+        let v = u64(c - b'0')
+        if mag > 922337203685477580 or (mag == 922337203685477580 and v > 8) {
+            fail error_at(text, start, "an integer past the 64 bits TOML's have")
+        }
+        mag = mag * 10 + v
+    }
+    if negative {
+        if mag == 9223372036854775808 {
+            return Toml.Int(-9223372036854775807 - 1)
+        }
+        return Toml.Int(-i64.wrap(mag))
+    }
+    if mag > 9223372036854775807 {
+        fail error_at(text, start, "an integer past the 64 bits TOML's have")
+    }
+    return Toml.Int(i64.wrap(mag))
+}
+
+// An integer in base `base`, from its `0x`, `0o` or `0b` at `at`.
+fn radix(text: String, at: mut usize, base: u64) -> Toml ! TomlError {
+    let start = at
+    let n = text.len()
+    at += 2
+    var mag: u64 = 0
+    var count = 0
+    while at < n {
+        let c = u64(text.byte_at(at))
+        let v = if c >= 48 and c <= 57 {
+            c - 48
+        } else if c >= 97 and c <= 102 {
+            c - 87
+        } else if c >= 65 and c <= 70 {
+            c - 55
+        } else {
+            99
+        }
+        if v < base {
+            if mag > (9223372036854775807 - v) / base {
+                fail error_at(text, start, "an integer past the 64 bits TOML's have")
+            }
+            mag = mag * base + v
+            count += 1
+            at += 1
+            continue
+        }
+        if c != 95 or count == 0 {
+            break
+        }
+        // A `_` between two digits.
+        let next = if at + 1 < n { u64(text.byte_at(at + 1)) } else { 0 }
+        let nv = if next >= 48 and next <= 57 {
+            next - 48
+        } else if next >= 97 and next <= 102 {
+            next - 87
+        } else if next >= 65 and next <= 70 {
+            next - 55
+        } else {
+            99
+        }
+        if nv >= base {
+            fail error_at(text, at, "a `_` in a number that isn't between two digits")
+        }
+        at += 1
+    }
+    if count == 0 {
+        fail error_at(text, start, "`{text[start..start + 2]}` with no digits after it")
+    }
+    return Toml.Int(i64.wrap(mag))
+}
+
+// A key as TOML writes it: bare if it can be, and otherwise as a basic string.
+fn show_key(k: String) -> String {
+    var out = String("`")
+    write_key(mut out, k)
+    out.push('`')
+    return out
+}
+
+// A header's name, for an error: `[a.b]`, or `[[a.b]]` for an array of tables.
+fn show_name(parts: List<String>, stem: String, aot: bool) -> String {
+    var out = String(if aot { "`[[" } else { "`[" })
+    for k in parts {
+        write_key(mut out, k)
+        out.push('.')
+    }
+    write_key(mut out, stem)
+    out.push_str(if aot { "]]`" } else { "]`" })
+    return out
+}
+
+// --- writing -------------------------------------------------------------------------------------
+
+/// The table `doc` as a TOML document, as tomli-w's `dumps` writes it. Each table is a section
+/// under a header of its own, after the values of the table it's in, and so is each table of an
+/// array of tables, unless all of them fit on a line as inline tables. Arrays are written with
+/// each element on a line of its own, indented by 4 spaces. It panics if `doc` isn't a table,
+/// since only a table is a document.
+@track_caller
+pub fn write(doc: Toml) -> String {
+    var out = String()
+    match doc {
+        Toml.Table(t) => write_table(mut out, t, "", false),
+        _ => panic("std.toml's write takes a table, which a document is, not {doc.kind()}"),
+    }
+    return out
+}
+
+// Adds table `t` as a section, named `name`, with its own tables as sections after its other
+// values. In an array of tables, `aot`, its header is `[[name]]`.
+fn write_table(out: mut String, t: LinkedMap<String, Toml>, name: String, aot: bool) {
+    // For each value: 0 if it's written after its key, 1 if it's a table, and 2 if it's an array
+    // of tables, which are sections.
+    var kinds = List<u8>()
+    kinds.reserve(t.len())
+    var values = false
+    var tables = false
+    for (_, v) in t {
+        let kind = section_kind(v)
+        if kind == 0 {
+            values = true
+        } else {
+            tables = true
+        }
+        kinds.push(kind)
+    }
+    var started = false
+    if aot or (not name.is_empty() and (values or not tables)) {
+        started = true
+        out.push_str(if aot { "[[" } else { "[" })
+        out.push_str(name)
+        out.push_str(if aot { "]]\n" } else { "]\n" })
+    }
+    if values {
+        started = true
+        var i: usize = 0
+        for (k, v) in t {
+            if kinds[i] == 0 {
+                write_key(mut out, k)
+                out.push_str(" = ")
+                write_value(mut out, v, 0)
+                out.push('\n')
+            }
+            i += 1
+        }
+    }
+    if not tables {
+        return
+    }
+    var i: usize = 0
+    for (k, v) in t {
+        let kind = kinds[i]
+        i += 1
+        if kind == 0 {
+            continue
+        }
+        var sub = String()
+        if not name.is_empty() {
+            sub.push_str(name)
+            sub.push('.')
+        }
+        write_key(mut sub, k)
+        match v {
+            Toml.Table(inner) => {
+                if started {
+                    out.push('\n')
+                }
+                started = true
+                write_table(mut out, inner, sub, false)
+            },
+            Toml.Array(items) => {
+                for item in items {
+                    if let Toml.Table(inner) = item {
+                        if started {
+                            out.push('\n')
+                        }
+                        started = true
+                        write_table(mut out, inner, sub, true)
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+// 1 for a table, 2 for an array of tables one of which doesn't fit on a line when it's written
+// inline, and 0 for the rest, which are written after their keys.
+fn section_kind(v: Toml) -> u8 {
+    match v {
+        Toml.Table(_) => return 1,
+        Toml.Array(items) => {
+            if items.is_empty() {
+                return 0
+            }
+            for item in items {
+                if let Toml.Table(_) = item {
+                } else {
+                    return 0
+                }
+            }
+            for item in items {
+                if let Toml.Table(t) = item {
+                    if not fits_inline(t) {
+                        return 2
+                    }
+                }
+            }
+            return 0
+        },
+        _ => return 0,
+    }
+}
+
+// Whether table `t`, written inline as an element of an array, with its indent and comma, is on
+// one line of 100 runes or fewer.
+fn fits_inline(t: LinkedMap<String, Toml>) -> bool {
+    var s = String()
+    write_inline_table(mut s, t)
+    if s.contains("\n") {
+        return false
+    }
+    var runes: usize = 0
+    for i in 0..s.len() {
+        if (s.byte_at(i) & 0xC0) != 0x80 {
+            runes += 1
+        }
+    }
+    return runes + 5 <= 100
+}
+
+// Adds `v` as tomli-w writes a value after its key, `level` arrays in.
+fn write_value(out: mut String, v: Toml, level: usize) {
+    match v {
+        Toml.Str(s) => write_string(mut out, s),
+        Toml.Int(n) => out.push_str("{n}"),
+        Toml.Float(f) => write_float(mut out, f),
+        Toml.Bool(b) => out.push_str(if b { "true" } else { "false" }),
+        Toml.OffsetDateTime(m) => {
+            write_date(mut out, m)
+            out.push(' ')
+            write_clock(mut out, m)
+            write_offset(mut out, m.offset)
+        },
+        Toml.LocalDateTime(m) => {
+            write_date(mut out, m)
+            out.push(' ')
+            write_clock(mut out, m)
+        },
+        Toml.LocalDate(m) => write_date(mut out, m),
+        Toml.LocalTime(m) => write_clock(mut out, m),
+        Toml.Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]")
+                return
+            }
+            out.push_str("[\n")
+            for item in items {
+                for _ in 0..4 * (level + 1) {
+                    out.push(' ')
+                }
+                write_value(mut out, item, level + 1)
+                out.push_str(",\n")
+            }
+            for _ in 0..4 * level {
+                out.push(' ')
+            }
+            out.push(']')
+        },
+        Toml.Table(t) => write_inline_table(mut out, t),
+    }
+}
+
+// Adds table `t` inline, `{ a = 1, b = 2 }`, or `{}`.
+fn write_inline_table(out: mut String, t: LinkedMap<String, Toml>) {
+    if t.is_empty() {
+        out.push_str("\{\}")
+        return
+    }
+    out.push_str("\{ ")
+    var first = true
+    for (k, v) in t {
+        if not first {
+            out.push_str(", ")
+        }
+        first = false
+        write_key(mut out, k)
+        out.push_str(" = ")
+        write_value(mut out, v, 0)
+    }
+    out.push_str(" \}")
+}
+
+// Adds `v` on one line, for `{v}`: as `write_value` does, but with an array's elements after one
+// another.
+fn write_short(out: mut String, v: Toml) {
+    match v {
+        Toml.Array(items) => {
+            out.push('[')
+            var first = true
+            for item in items {
+                if not first {
+                    out.push_str(", ")
+                }
+                first = false
+                write_short(mut out, item)
+            }
+            out.push(']')
+        },
+        Toml.Table(t) => {
+            if t.is_empty() {
+                out.push_str("\{\}")
+                return
+            }
+            out.push_str("\{ ")
+            var first = true
+            for (k, item) in t {
+                if not first {
+                    out.push_str(", ")
+                }
+                first = false
+                write_key(mut out, k)
+                out.push_str(" = ")
+                write_short(mut out, item)
+            }
+            out.push_str(" \}")
+        },
+        _ => write_value(mut out, v, 0),
+    }
+}
+
+// Adds key `k`: bare if it's only letters, digits, `_` and `-`, and otherwise as a basic string.
+fn write_key(out: mut String, k: String) {
+    var bare = not k.is_empty()
+    for i in 0..k.len() {
+        if not is_bare(k.byte_at(i)) {
+            bare = false
+            break
+        }
+    }
+    if bare {
+        out.push_str(k)
+    } else {
+        write_string(mut out, k)
+    }
+}
+
+// Adds `s` as a basic string: `"` and `\` escaped, and each control character but the tab, as
+// `\n` and the like or `\u001b`. The rest is written as itself.
+fn write_string(out: mut String, s: String) {
+    out.reserve(s.len() + 2)
+    out.push('"')
+    var start: usize = 0
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b >= 0x20 and b != b'"' and b != b'\\' and b != 127 {
+            continue
+        }
+        if b == 9 {
+            continue
+        }
+        out.push_str(s[start..i])
+        start = i + 1
+        if b == b'"' {
+            out.push_str("\\\"")
+        } else if b == b'\\' {
+            out.push_str("\\\\")
+        } else if b == 10 {
+            out.push_str("\\n")
+        } else if b == 13 {
+            out.push_str("\\r")
+        } else if b == 8 {
+            out.push_str("\\b")
+        } else if b == 12 {
+            out.push_str("\\f")
+        } else {
+            let hex = "0123456789abcdef"
+            out.push_str("\\u00")
+            out.push(rune(hex.byte_at(usize(u32(b) >> 4))))
+            out.push(rune(hex.byte_at(usize(u32(b) & 15))))
+        }
+    }
+    out.push_str(s[start..])
+    out.push('"')
+}
+
+// Adds `f` as Python's `repr` writes it, which tomli-w writes: the shortest digits that read back
+// as `f`, as `1.5`, `100.0` and `0.0001`, and with an exponent from 1e16 up and below 1e-4, as
+// `1e+16` and `1.5e-05`; `inf`, `-inf` and `nan`.
+fn write_float(out: mut String, f: f64) {
+    if f.is_nan() {
+        out.push_str("nan")
+        return
+    }
+    if f == f64.INFINITY {
+        out.push_str("inf")
+        return
+    }
+    if f == -f64.INFINITY {
+        out.push_str("-inf")
+        return
+    }
+    // `{f}` writes Java's shortest digits, with an exponent outside 1e-3 to 1e7.
+    let java = "{f}"
+    var ds = String()
+    var before: i32 = 0
+    var point = false
+    var exp: i32 = 0
+    var negative = false
+    var i: usize = 0
+    while i < java.len() {
+        let b = java.byte_at(i)
+        if b == b'-' {
+            negative = true
+        } else if b == b'.' {
+            point = true
+        } else if b == b'E' {
+            var e_neg = false
+            i += 1
+            if i < java.len() and java.byte_at(i) == b'-' {
+                e_neg = true
+                i += 1
+            }
+            while i < java.len() {
+                exp = exp * 10 + i32(java.byte_at(i) - b'0')
+                i += 1
+            }
+            if e_neg {
+                exp = -exp
+            }
+            break
+        } else {
+            ds.push(rune(b))
+            if not point {
+                before += 1
+            }
+        }
+        i += 1
+    }
+    // The significant digits, and the power of ten of the first.
+    var first: usize = 0
+    while first < ds.len() and ds.byte_at(first) == b'0' {
+        first += 1
+    }
+    if negative {
+        out.push('-')
+    }
+    if first == ds.len() {
+        out.push_str("0.0")
+        return
+    }
+    var last = ds.len()
+    while ds.byte_at(last - 1) == b'0' {
+        last -= 1
+    }
+    var sig = ds[first..last].copy()
+    var power = before - 1 - i32.wrap(first) + exp
+    // Java writes at least two digits, so it can give two where one reads back as `f`, as for the
+    // smallest subnormals. Python writes the one.
+    if sig.len() == 2 {
+        var d = i32(sig.byte_at(0) - b'0')
+        var p = power
+        if sig.byte_at(1) >= b'5' {
+            d += 1
+        }
+        if d == 10 {
+            d = 1
+            p += 1
+        }
+        let one = "{d}e{p}"
+        if let g = f64.parse(one) {
+            if g == f or g == -f {
+                sig = "{d}"
+                power = p
+            }
+        }
+    }
+    if power >= -4 and power < 16 {
+        if power < 0 {
+            out.push_str("0.")
+            for _ in 0..usize.wrap(-power - 1) {
+                out.push('0')
+            }
+            out.push_str(sig)
+            return
+        }
+        let whole = usize.wrap(power + 1)
+        if sig.len() <= whole {
+            out.push_str(sig)
+            for _ in sig.len()..whole {
+                out.push('0')
+            }
+            out.push_str(".0")
+            return
+        }
+        out.push_str(sig[..whole])
+        out.push('.')
+        out.push_str(sig[whole..])
+        return
+    }
+    out.push(rune(sig.byte_at(0)))
+    if sig.len() > 1 {
+        out.push('.')
+        out.push_str(sig[1..])
+    }
+    out.push_str(if power < 0 { "e-" } else { "e+" })
+    let e = if power < 0 { -power } else { power }
+    if e < 10 {
+        out.push('0')
+    }
+    out.push_str("{e}")
+}
+
+// Adds `v` with at least `width` digits, zeros before it.
+fn write_padded(out: mut String, v: i32, width: usize) {
+    let s = "{v}"
+    for _ in s.len()..width {
+        out.push('0')
+    }
+    out.push_str(s)
+}
+
+// Adds the date, `1979-05-27`, as Python's `str` writes one.
+fn write_date(out: mut String, m: Moment) {
+    write_padded(mut out, m.year, 4)
+    out.push('-')
+    write_padded(mut out, m.month, 2)
+    out.push('-')
+    write_padded(mut out, m.day, 2)
+}
+
+// Adds the time, `07:32:00`, with the fraction of a second after it if there's one: in 6 digits
+// as Python writes it, or in 9 if it's finer than a microsecond.
+fn write_clock(out: mut String, m: Moment) {
+    write_padded(mut out, m.hour, 2)
+    out.push(':')
+    write_padded(mut out, m.minute, 2)
+    out.push(':')
+    write_padded(mut out, m.second, 2)
+    if m.nano != 0 {
+        out.push('.')
+        if m.nano % 1000 == 0 {
+            write_padded(mut out, m.nano / 1000, 6)
+        } else {
+            write_padded(mut out, m.nano, 9)
+        }
+    }
+}
+
+// Adds an offset, `+00:00` or `-08:00`, as Python's `str` writes one.
+fn write_offset(out: mut String, offset: i32) {
+    let a = if offset < 0 { -offset } else { offset }
+    out.push(if offset < 0 { '-' } else { '+' })
+    write_padded(mut out, a / 3600, 2)
+    out.push(':')
+    write_padded(mut out, a / 60 % 60, 2)
+}
+
+/// `{v}` is the value as TOML writes it after a key, on one line: `"text"`, `1.5`, `[1, 2]` and
+/// `\{ a = 1 \}`.
+impl Display for Toml {
+    fn show(self) {
+        var out = String()
+        write_short(mut out, self)
+        print(out)
+    }
+}
+
+// --- reading values ------------------------------------------------------------------------------
+
+// The value at the dotted key `parts`, from part `i`, in `v`.
+fn find(v: Toml, parts: List<String>, i: usize) -> Toml? {
+    match v {
+        Toml.Table(t) => {
+            if not t.contains(parts[i]) {
+                return none
+            }
+            if i + 1 == parts.len() {
+                return some(t[parts[i]].copy())
+            }
+            return find(t[parts[i]], parts, i + 1)
+        },
+        _ => return none,
+    }
+}
+
+impl Toml {
+    /// A copy of key `key`'s value, if this is a table that has it. A `match` on the value reads
+    /// it in place instead, without the copy.
+    pub fn get(self, key: String) -> Toml? {
+        return match self {
+            Toml.Table(t) => if t.contains(key) { some(t[key].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// A copy of element `i`, if this is an array that long.
+    pub fn at(self, i: usize) -> Toml? {
+        return match self {
+            Toml.Array(items) => if i < items.len() { some(items[i].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// A copy of the value a dotted key names, written as TOML writes keys: `tool.black.line-length`,
+    /// with quotes around a part that has a dot or a space, as in `servers."eu west".port`. `none` if
+    /// something on the way isn't there or isn't a table, or `key` isn't a key. Only what's found
+    /// is copied.
+    pub fn path(self, key: String) -> Toml? {
+        var at: usize = 0
+        var parts = List<String>()
+        loop {
+            skip_space(key, mut at)
+            match key_part(key, mut at) {
+                ok(p) => parts.push(p),
+                err(_) => return none,
+            }
+            skip_space(key, mut at)
+            if at >= key.len() {
+                break
+            }
+            if key.byte_at(at) != b'.' {
+                return none
+            }
+            at += 1
+        }
+        return find(self, parts, 0)
+    }
+
+    /// The text, if this is a string.
+    pub fn as_str(self) -> String? {
+        return match self {
+            Toml.Str(s) => some(s.copy()),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is an integer.
+    pub fn as_i64(self) -> i64? {
+        return match self {
+            Toml.Int(n) => some(n),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is a float, or an integer as the nearest `f64`.
+    pub fn as_f64(self) -> f64? {
+        return match self {
+            Toml.Int(n) => some(f64.nearest(n)),
+            Toml.Float(f) => some(f),
+            _ => none,
+        }
+    }
+
+    /// The value, if this is `true` or `false`.
+    pub fn as_bool(self) -> bool? {
+        return match self {
+            Toml.Bool(b) => some(b),
+            _ => none,
+        }
+    }
+
+    /// The date and time, if this is a date-time, a date or a time.
+    pub fn as_moment(self) -> Moment? {
+        return match self {
+            Toml.OffsetDateTime(m) => some(m),
+            Toml.LocalDateTime(m) => some(m),
+            Toml.LocalDate(m) => some(m),
+            Toml.LocalTime(m) => some(m),
+            _ => none,
+        }
+    }
+
+    /// How many elements an array has, or keys a table has. Anything else has none.
+    pub fn len(self) -> usize {
+        return match self {
+            Toml.Array(items) => items.len(),
+            Toml.Table(t) => t.len(),
+            _ => 0,
+        }
+    }
+
+    /// A table's keys, in order, or none for anything else.
+    pub fn keys(self) -> List<String> {
+        var out = List<String>()
+        if let Toml.Table(t) = self {
+            out.reserve(t.len())
+            for (k, _) in t {
+                out.push(k.copy())
+            }
+        }
+        return out
+    }
+
+    /// What kind of value this is, for messages: `a string`, `an integer`, `a float`, `a bool`,
+    /// `a date-time`, `a local date-time`, `a date`, `a time`, `an array` or `a table`.
+    pub fn kind(self) -> String {
+        return match self {
+            Toml.Str(_) => "a string",
+            Toml.Int(_) => "an integer",
+            Toml.Float(_) => "a float",
+            Toml.Bool(_) => "a bool",
+            Toml.OffsetDateTime(_) => "a date-time",
+            Toml.LocalDateTime(_) => "a local date-time",
+            Toml.LocalDate(_) => "a date",
+            Toml.LocalTime(_) => "a time",
+            Toml.Array(_) => "an array",
+            Toml.Table(_) => "a table",
+        }
+    }
+}

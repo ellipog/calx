@@ -188,6 +188,7 @@ fn main() ! Error {
 | Python | Calx |
 | --- | --- |
 | `json.loads(t)`, `json.dumps(v, indent=2)` | `parse(t)`, `pretty(v, 2)` from [`std.json`](../std/json.md). `@json` on a struct reads and writes it from its fields' types, as a dataclass with pydantic would |
+| `tomllib.loads(t)`, `tomli_w.dumps(d)` | `parse(t)` and `write(d)` from [`std.toml`](../std/toml.md), with `doc.path("tool.black.line-length")` for a dotted key |
 | `csv.reader(f)`, `csv.DictReader(f)`, `csv.writer(f)` | `parse`, `parse_records` and `format` from [`std.csv`](../std/csv.md), or `Reader` for a row at a time |
 | `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |
 | `html.escape(t)`, `html.unescape(t)` | `escape(t)` and `unescape(t)` from [`std.html`](../std/html.md) |

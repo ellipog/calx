@@ -1,0 +1,8 @@
+// Only a table is a TOML document, so writing anything else is a mistake in the program, and
+// std.toml's write panics on it, where tomli-w raises AttributeError.
+
+import std.toml.{Toml, write}
+
+fn main() {
+    _ = write(Toml.Array([Toml.Int(1)]))    // panic: std.toml's write takes a table, which a document is, not an array
+}

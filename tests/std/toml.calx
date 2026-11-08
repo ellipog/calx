@@ -1,0 +1,168 @@
+// std.toml reads TOML 1.0 as Python's tomllib does and writes it as tomli-w does (CLX-163): a
+// config read through its methods, every kind of value, tables made by headers, dotted keys and
+// arrays of tables, the documents TOML doesn't allow and where it says they're wrong, dates and
+// times, and text written back.
+import std.toml.{Moment, Toml, parse, write}
+
+fn show(text: String) {
+    match parse(text.copy()) {
+        ok(v) => println("{v}"),
+        err(e) => println("error: {e}"),
+    }
+}
+
+fn main() {
+    let doc = parse(String(##"
+        # A server's config.
+        name = "lobby"
+        motd = 'Welcome, \o/'
+        max-players = 50
+
+        [network]
+        port = 25_565
+        address = "0.0.0.0"
+        compression.threshold = 256
+        compression.level = 6
+
+        [servers."eu west"]
+        weight = 1.5
+        tags = ["survival", "hard",]
+
+        [[backup]]
+        every = 07:30:00
+        keep = 7
+
+        [[backup]]
+        every = 19:30:00
+        "##))!
+    println("{doc.get("name")} {doc.get("max-players")} {doc.path("network.port")} {doc.path("network.compression.level")}")    // out: some("lobby") some(50) some(25565) some(6)
+    println("{doc.path("servers.\"eu west\".weight")} {doc.path("servers.'eu west'.tags")} {doc.path("servers.eu west")}")    // out: some(1.5) some(["survival", "hard"]) none
+    println("{(doc.get("motd") ?? Toml.Bool(false)).as_str()} {doc.keys()} {(doc.get("backup") ?? Toml.Bool(false)).len()}")    // out: some(Welcome, \o/) [name, motd, max-players, network, servers, backup] 2
+    let every = (doc.get("backup") ?? Toml.Bool(false)).at(1) ?? Toml.Bool(false)
+    println("{every.get("every")} {every.get("keep")} {(every.get("every") ?? Toml.Bool(false)).kind()}")    // out: some(19:30:00) none a time
+
+    // Strings: basic with escapes, literal as they are, and both multi-line, without the newline
+    // after the opening quotes, with a `\` that ends a line, and with quotes at the end.
+    show(##"a = "line\nquote\" \u00E9 \U0001F600 back\\slash""##)    // out: { a = "line\nquote\" é 😀 back\\slash" }
+    show("a = '''\nC:\\path\\ ''it''s'''''")    // out: { a = "C:\\path\\ ''it''s''" }
+    show("a = \"\"\"\nRoses \\\n    are red\\n\"\"\"\"\"")    // out: { a = "Roses are red\n\"\"" }
+    show("a = \"\"\n'b' = 'x'\n\"\" = 1")    // out: { a = "", b = "x", "" = 1 }
+    // Integers in each base, with `_`s, and the ends of an i64; floats, with `inf` and `nan`.
+    show("a = [0xDEAD_beef, 0o755, 0b1010, +1_000, -0, 9223372036854775807, -9223372036854775808]")    // out: { a = [3735928559, 493, 10, 1000, 0, 9223372036854775807, -9223372036854775808] }
+    show("a = [1.5, -0.0, 1e3, 6.02E+23, 1_000.000_1, 5e-324, -inf, +nan, 1e400]")    // out: { a = [1.5, -0.0, 1000.0, 6.02e+23, 1000.0001, 5e-324, -inf, nan, inf] }
+    show("a = [true, false, [], [[1], ['x']], \{\}, \{ b = 1, c.d = 2 \}]")    // out: { a = [true, false, [], [[1], ["x"]], {}, { b = 1, c = { d = 2 } }] }
+    // Arrays across lines, with comments and a comma after the last value.
+    show("a = [\n  1, # one\n  2,\n\n]")    // out: { a = [1, 2] }
+
+    // Dates and times: an offset date-time, a local one with `t` or a space, a date and a time,
+    // with fractions of a second kept to the nanosecond.
+    show("a = 1979-05-27T07:32:00Z\nb = 1979-05-27t00:32:00.999999999-07:00\nc = 1979-05-27 07:32:00.5\nd = 1979-05-27\ne = 00:32:00.123")
+    // out: { a = 1979-05-27 07:32:00+00:00, b = 1979-05-27 00:32:00.999999999-07:00, c = 1979-05-27 07:32:00.500000, d = 1979-05-27, e = 00:32:00.123000 }
+    let m = (parse(String("t = 2026-11-08T14:05:09.250+01:00"))!.get("t") ?? Toml.Bool(false)).as_moment() ?? Moment {}
+    println("{m.year} {m.month} {m.day} {m.hour} {m.nano} {m.offset} {m.date_time().iso()} {m.timestamp().unix_ms}")    // out: 2026 11 8 14 250000000 3600 2026-11-08T14:05:09.250 1794143109250
+    show("a = 2024-02-29\nb = 1979-05-27T07:32:00\nc = 0000-01-01")    // out: { a = 2024-02-29, b = 1979-05-27 07:32:00, c = 0000-01-01 }
+
+    // Tables: a header's table can come after its own tables, an array of tables' tables go in its
+    // last table, and keys keep the order the text has them in.
+    show("[a.b.c]\nx = 1\n[a]\ny = 2\n[a.b]\nz = 3")    // out: { a = { b = { c = { x = 1 }, z = 3 }, y = 2 } }
+    show("[[fruit]]\nname = 'apple'\n[fruit.physical]\ncolor = 'red'\n[[fruit.variety]]\nname = 'fuji'\n[[fruit]]\nname = 'kiwi'")
+    // out: { fruit = [{ name = "apple", physical = { color = "red" }, variety = [{ name = "fuji" }] }, { name = "kiwi" }] }
+    show("x.y.z = 1\nx.y.w = 2\nv = 3\nx.u = 4")    // out: { x = { y = { z = 1, w = 2 }, u = 4 }, v = 3 }
+    show("[ a . \"b.c\" . 'd' ]  # spaces\nk = 1")    // out: { a = { "b.c" = { d = { k = 1 } } } }
+    show("a = 1\r\nb = \"\"\"x\r\ny\"\"\"\r\n")    // out: { a = 1, b = "x\ny" }
+    show("")    // out: {}
+
+    // What TOML doesn't allow, with the line and column of the mistake.
+    show("a = 1\na = 2")    // out: error: line 2, column 1: `a` is in this table already
+    show("[t]\n[t]")    // out: error: line 2, column 1: `[t]` is a second header for the same table
+    show("[a]\nb.c = 1\n[a.b]")    // out: error: line 3, column 1: `[a.b]` names a table dotted keys made, which a header can't add to
+    show("[a.b]\n[a]\nb.c = 1")    // out: error: line 3, column 1: `b` is a table with a header of its own, which a dotted key can't add to
+    show("a = \{ b = 1 \}\na.c = 2")    // out: error: line 2, column 1: `a` has a value already, which isn't a table that can hold keys
+    show("a = [1]\n[[a]]")    // out: error: line 2, column 1: `[[a]]` names a key with a value already
+    show("[a]\n[[a]]")    // out: error: line 2, column 1: `[[a]]` names a table, not an array of tables
+    show("a = \{ b = 1, \}")    // out: error: line 1, column 14: `}` where a key should be
+    show("a = \{ b = 1\n\}")    // out: error: line 1, column 12: the end of the line in an inline table, where `,` or `}` should be
+    show("a = 9223372036854775808")    // out: error: line 1, column 5: an integer past the 64 bits TOML's have
+    show("a = [01, 1__0]")    // out: error: line 1, column 6: a number that starts with `0` and goes on, which TOML doesn't allow
+    show("a = 1.")    // out: error: line 1, column 5: a number with no digits after its `.`
+    show("a = 2023-02-29")    // out: error: line 1, column 5: a date that isn't one; TOML writes them `1979-05-27`
+    show("a = 07:32")    // out: error: line 1, column 5: a time that isn't one; TOML writes them `07:32:00`, with the seconds
+    show("a = 1979-05-27T07:32Z")    // out: error: line 1, column 15: `T` after a statement, where the line should end
+    show("a = \"\\x41\"")    // out: error: line 1, column 6: `x` after `\` in a string, which isn't an escape
+    show("a = \"\\uD800\"")    // out: error: line 1, column 6: `\uD800`, which isn't a Unicode scalar value
+    show("a = \"one\ntwo\"")    // out: error: line 1, column 5: a string that doesn't end on its line; `"""` starts one that can
+    show("a = 'x\u{7}'")    // out: error: line 1, column 7: a control character, 7 in a literal string, which can't have one
+    show("a = 1 # bell\u{7}")    // out: error: line 1, column 13: a control character, 7 in a comment, which TOML doesn't allow
+    show("a = 1\rb = 2")    // out: error: line 1, column 6: a control character, 13 after a statement, where the line should end
+    show("\u{FEFF}a = 1")    // out: error: line 1, column 1: a byte order mark, U+FEFF, which TOML doesn't start with; save the file as UTF-8 without one
+    show("a = tru")    // out: error: line 1, column 5: `t` where a value should be
+    show("a = ")    // out: error: line 1, column 5: the end, where a value should be
+    show("é = 1")    // out: error: line 1, column 1: `é` where a key, a header or a comment should be
+    show("[a]]")    // out: error: line 1, column 4: `]` after a statement, where the line should end
+    show("a = [")    // out: error: line 1, column 6: the end, where a value should be
+    show("a = {"[".repeat(600)}")    // out: error: line 1, column 517: arrays and inline tables nested more than 512 deep
+
+    // Written back, as tomli-w writes it: the arrays of tables fit on a line each, so they're
+    // inline, with the other values before the tables.
+    print(write(doc))
+    // out: name = "lobby"
+    // out: motd = "Welcome, \\o/"
+    // out: max-players = 50
+    // out: backup = [
+    // out:     { every = 07:30:00, keep = 7 },
+    // out:     { every = 19:30:00 },
+    // out: ]
+    // out:
+    // out: [network]
+    // out: port = 25565
+    // out: address = "0.0.0.0"
+    // out:
+    // out: [network.compression]
+    // out: threshold = 256
+    // out: level = 6
+    // out:
+    // out: [servers."eu west"]
+    // out: weight = 1.5
+    // out: tags = [
+    // out:     "survival",
+    // out:     "hard",
+    // out: ]
+    // An array of tables that fit on a line is written inline; one that doesn't, as sections.
+    var t = LinkedMap<String, Toml>()
+    var short = LinkedMap<String, Toml>()
+    short.insert(String("x"), Toml.Int(1))
+    t.insert(String("points"), Toml.Array([Toml.Table(short.copy()), Toml.Table(short.copy())]))
+    var long = LinkedMap<String, Toml>()
+    long.insert(String("text"), Toml.Str("word ".repeat(20)))
+    t.insert(String("notes"), Toml.Array([Toml.Table(long)]))
+    t.insert(String("weird key\n"), Toml.Float(1e16))
+    t.insert(String("empty"), Toml.Table(LinkedMap<String, Toml>()))
+    print(write(Toml.Table(t)))
+    // out: points = [
+    // out:     { x = 1 },
+    // out:     { x = 1 },
+    // out: ]
+    // out: "weird key\n" = 1e+16
+    // out:
+    // out: [[notes]]
+    // out: text = "word word word word word word word word word word word word word word word word word word word word "
+    // out:
+    // out: [empty]
+    var floats = LinkedMap<String, Toml>()
+    var i = 0
+    for f in [100.0, 0.1, 1e15, 1.5e-5, 0.0001, 1.2345678901234568e20, 5e-324, f64.NAN] {
+        floats.insert("f{i}", Toml.Float(f))
+        i += 1
+    }
+    print(write(Toml.Table(floats)))
+    // out: f0 = 100.0
+    // out: f1 = 0.1
+    // out: f2 = 1000000000000000.0
+    // out: f3 = 1.5e-05
+    // out: f4 = 0.0001
+    // out: f5 = 1.2345678901234568e+20
+    // out: f6 = 5e-324
+    // out: f7 = nan
+    let back = parse(write(doc))!
+    println("{back == doc}")    // out: true
+}
