@@ -453,8 +453,10 @@ cx_i32 cx_fs_set_modified(const cx_u8* path, size_t len, cx_i64 ms) {
     return ok;
 }
 
-/* The names in a directory, each followed by a NUL, in the result buffer. */
-cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
+/* The names in a directory, each followed by a NUL, in the result buffer. With `typed`, each
+ * name comes after a byte that says what's there without following a link, as `cx_fs_kind`
+ * does: the find data has the attributes and the reparse tag, so nothing more is asked. */
+static cx_i32 list_dir(const cx_u8* path, size_t len, int typed) {
     fs_len = 0;
     if (!path_ok(path, len)) return 0;
     /* `path\*`, with no separator doubled. */
@@ -481,6 +483,16 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
     do {
         const wchar_t* name = d.cFileName;
         if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+        if (typed) {
+            DWORD a = d.dwFileAttributes;
+            int link = (a & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                       (d.dwReserved0 == IO_REPARSE_TAG_SYMLINK || d.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+            char k = (char)(link                              ? KIND_LINK
+                            : (a & FILE_ATTRIBUTE_DIRECTORY) ? KIND_DIR
+                            : (a & FILE_ATTRIBUTE_DEVICE)    ? KIND_OTHER
+                                                             : KIND_FILE);
+            buf_add(&k, 1);
+        }
         buf_add_wide(name, (int)wcslen(name));
         buf_add("", 1);
     } while (FindNextFileW(f, &d));
@@ -492,6 +504,9 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
     }
     return 1;
 }
+
+cx_i32 cx_fs_list(const cx_u8* path, size_t len) { return list_dir(path, len, 0); }
+cx_i32 cx_fs_list_typed(const cx_u8* path, size_t len) { return list_dir(path, len, 1); }
 
 /* Whether `a` and `b` name one file, by its volume and its index on it. */
 static int same_file(const wchar_t* a, const wchar_t* b) {
@@ -1177,7 +1192,10 @@ static void buf_add_name(const unsigned char* s, size_t n) {
     }
 }
 
-cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
+/* With `typed`, each name comes after a byte that says what's there without following a link,
+ * from the entry's type, or 0 where the file system doesn't say, as some don't, for the caller
+ * to look. */
+static cx_i32 list_dir(const cx_u8* path, size_t len, int typed) {
     fs_len = 0;
     char* s = cpath(path, len);
     if (!s) return 0;
@@ -1193,6 +1211,11 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
         if (!e) break;
         const char* name = e->d_name;
         if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+        if (typed) {
+            unsigned char t = e->d_type;
+            char k = (char)(t == DT_REG ? KIND_FILE : t == DT_DIR ? KIND_DIR : t == DT_LNK ? KIND_LINK : t == DT_UNKNOWN ? 0 : KIND_OTHER);
+            buf_add(&k, 1);
+        }
         buf_add_name((const unsigned char*)name, strlen(name));
         buf_add("", 1);
     }
@@ -1204,6 +1227,9 @@ cx_i32 cx_fs_list(const cx_u8* path, size_t len) {
     }
     return 1;
 }
+
+cx_i32 cx_fs_list(const cx_u8* path, size_t len) { return list_dir(path, len, 0); }
+cx_i32 cx_fs_list_typed(const cx_u8* path, size_t len) { return list_dir(path, len, 1); }
 
 /* Copies the file at `from` to `to`, replacing a file there, keeping its permission bits and
  * modified time, as Windows' own copy keeps them. The kernel copies the bytes, with

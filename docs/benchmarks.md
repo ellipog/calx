@@ -182,7 +182,7 @@ The benchmark lives in [`bench/`](../bench/README.md):
 | --- | --- |
 | `bench/rust/` | The Rust reference: idiomatic, safe Rust, standard library only |
 | `bench/calx/` | The Calx version, the same algorithms in Calx |
-| `bench/run.py` | Builds and runs a version, checks its checksum, and records the result |
+| `bench/run.calx` | Builds and runs a version, checks its checksum, and records the result |
 | `bench/expected.json` | The checksum every version must print |
 | `bench/results/` | Recorded results, one file per version and platform, naming the commit, the machine and the toolchain |
 

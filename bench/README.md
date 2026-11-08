@@ -8,14 +8,14 @@ description: How to build, run and record the tick-loop benchmark, and where its
 The tick-loop benchmark behind the Phase 3 performance gate. [`docs/benchmarks.md`](../docs/benchmarks.md) defines the workload, how it's measured and the gate. This folder holds the implementations, the runner and the recorded results.
 
 ```sh
-py -I bench/run.py rust                 # 10 runs each at 1 worker and one per physical core
-py -I bench/run.py rust --record        # the same, written to bench/results/rust-<platform>.json
-py -I bench/run.py rust --threads 1,8 --runs 3 --warmup 20 --ticks 100    # a quick look
-py -I bench/run.py calx                 # the Calx version, built with build/compiler/<platform>/calx
-py -I bench/build.py --record           # how fast Calx builds, written to bench/results/build-<platform>.json
+calx run bench/run.calx -- rust             # 10 runs each at 1 worker and one per physical core
+calx run bench/run.calx -- rust --record    # the same, written to bench/results/rust-<os>.json
+calx run bench/run.calx -- rust --threads 1,8 --runs 3 --warmup 20 --ticks 100    # a quick look
+calx run bench/run.calx -- calx             # the Calx version, built by the calx that runs this
+calx run bench/build.calx -- --record       # how fast that calx builds, written to bench/results/build-<os>.json
 ```
 
-On Linux, use `python3` for `py`. The runner builds the version first, into `build/bench/<platform>/`. Every run of the full 200 + 1,000 ticks must print the checksum in [`expected.json`](expected.json), and every run of a configuration must agree, or the runner stops. Only full runs can be recorded.
+`calx` there is the compiler to measure, such as `build/compiler/calx`. The runner builds the version first, into `build/bench/<os>/`. Every run of the full 200 + 1,000 ticks must print the checksum in [`expected.json`](expected.json), and every run of a configuration must agree, or the runner stops. Only full runs can be recorded.
 
 ## The Rust reference (`P3.1`)
 
@@ -47,7 +47,7 @@ Each pass is a `parallel for` over the regions, on the runtime's pool, and `--th
 | `results/rust-linux.json` | The Rust reference on Ubuntu under WSL2, on the same machine |
 | `results/calx-windows.json` | The Calx version on Windows 11 |
 | `results/calx-linux.json` | The Calx version on Ubuntu under WSL2 |
-| `results/build-windows.json`, `results/build-linux.json` | How fast Calx builds, from [`build.py`](build.py) |
+| `results/build-windows.json`, `results/build-linux.json` | How fast Calx builds, from [`build.calx`](build.calx) |
 
 Each file names the commit, the machine (CPU, cores, memory, OS), the toolchain (rustc and its LLVM), and every run's mean tick time. The numbers in the gate are the medians.
 
@@ -73,7 +73,7 @@ Every run printed the same checksum as the Rust reference. D89 lists the compile
 
 ## Build times (D64)
 
-[`build.py`](build.py) times the compiler the way G3.4 measures it. It generates a program of 64 modules, each importing the one before, about 9,900 lines in all, and builds it. It also builds a one-line program and the tick benchmark. Each time is the median of 5, from a fresh process.
+[`build.calx`](build.calx) times the compiler the way G3.4 measures it. It generates a program of 64 modules, each importing the one before, about 9,900 lines in all, and builds it. It also builds a one-line program and the tick benchmark. Each time is the median of 5, from a fresh process.
 
 | Measure | Windows 11 | Linux (WSL2) | G3.4 |
 | --- | --- | --- | --- |

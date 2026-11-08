@@ -352,12 +352,15 @@ static void* must_alloc(size_t n) {
  * outside quotes. Backslashes are literal unless they come before a quote: then each pair gives
  * one backslash, and an odd one left over makes the quote literal. Inside quotes, `""` is a
  * literal quote. Converting to UTF-8 turns an unpaired surrogate into U+FFFD. */
-static void add_wide_arg(const wchar_t* w, int n) {
+static arg_text wide_text(const wchar_t* w, int n) {
     int bytes = n ? WideCharToMultiByte(CP_UTF8, 0, w, n, NULL, 0, NULL, NULL) : 0;
-    arg_text* a = &args[arg_count++];
-    a->ptr = must_alloc((size_t)bytes);
-    a->len = (cx_usize)(bytes ? WideCharToMultiByte(CP_UTF8, 0, w, n, (char*)a->ptr, bytes, NULL, NULL) : 0);
+    arg_text a;
+    a.ptr = must_alloc((size_t)bytes);
+    a.len = (cx_usize)(bytes ? WideCharToMultiByte(CP_UTF8, 0, w, n, (char*)a.ptr, bytes, NULL, NULL) : 0);
+    return a;
 }
+
+static void add_wide_arg(const wchar_t* w, int n) { args[arg_count++] = wide_text(w, n); }
 
 static void read_args(void) {
     const wchar_t* p = GetCommandLineW();
@@ -405,31 +408,58 @@ static void read_args(void) {
 #else
 /* Linux passes bytes. Any that aren't UTF-8 become U+FFFD, one for each byte that doesn't start
  * a valid sequence, so every argument is a valid `String`. */
+static arg_text byte_text(const char* text) {
+    const cx_u8* s = (const cx_u8*)text;
+    size_t n = strlen(text);
+    cx_u8* out = must_alloc(n * 3);
+    size_t len = 0;
+    for (size_t at = 0; at < n;) {
+        cx_u8 b = s[at];
+        size_t w = b < 0x80 ? 1 : b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+        if (w && at + w <= n && cx_utf8_valid(s + at, w)) {
+            memcpy(out + len, s + at, w);
+            len += w;
+            at += w;
+        } else {
+            memcpy(out + len, "\xEF\xBF\xBD", 3);
+            len += 3;
+            at++;
+        }
+    }
+    return (arg_text){out, len};
+}
+
 static void read_args(int argc, char** argv) {
     args = must_alloc((size_t)(argc > 0 ? argc : 1) * sizeof(arg_text));
-    for (int i = 0; i < argc; i++) {
-        const cx_u8* s = (const cx_u8*)argv[i];
-        size_t n = strlen(argv[i]);
-        cx_u8* out = must_alloc(n * 3);
-        size_t len = 0;
-        for (size_t at = 0; at < n;) {
-            cx_u8 b = s[at];
-            size_t w = b < 0x80 ? 1 : b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
-            if (w && at + w <= n && cx_utf8_valid(s + at, w)) {
-                memcpy(out + len, s + at, w);
-                len += w;
-                at += w;
-            } else {
-                memcpy(out + len, "\xEF\xBF\xBD", 3);
-                len += 3;
-                at++;
-            }
-        }
-        args[arg_count].ptr = out;
-        args[arg_count++].len = len;
-    }
+    for (int i = 0; i < argc; i++) args[arg_count++] = byte_text(argv[i]);
 }
 #endif
+
+/* `calx run` puts the full path of the file it built the program from in CALX_SCRIPT, which is
+ * taken out of the environment here, before anything else runs, so a program this one starts
+ * doesn't see it, unless `calx run` started that one too and gave it its own. */
+static arg_text script;
+
+static void take_script(void) {
+#ifdef _WIN32
+    DWORD size = GetEnvironmentVariableW(L"CALX_SCRIPT", NULL, 0);
+    if (size == 0) return;
+    wchar_t* w = must_alloc((size_t)size * sizeof(wchar_t));
+    DWORD len = GetEnvironmentVariableW(L"CALX_SCRIPT", w, size);
+    if (len > 0 && len < size) script = wide_text(w, (int)len);
+    free(w);
+    SetEnvironmentVariableW(L"CALX_SCRIPT", NULL);
+#else
+    const char* s = getenv("CALX_SCRIPT");
+    if (!s) return;
+    if (*s) script = byte_text(s);
+    unsetenv("CALX_SCRIPT");
+#endif
+}
+
+/* Declared by std/env.calx: the script's path, with no bytes when there's none. */
+const cx_u8* cx_script(void) { return script.ptr; }
+cx_usize cx_script_len(void) { return script.len; }
 
 /* Declared by std/env.calx. Argument 0 is the program's name. */
 cx_usize cx_arg_count(void) { return arg_count; }
@@ -598,6 +628,7 @@ void cx_start(int argc, char** argv) {
 #else
     read_args(argc, argv);
 #endif
+    take_script();
     overflow_start();
 }
 

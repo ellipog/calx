@@ -12,7 +12,7 @@ Support for the [Calx](https://calxlang.com) language:
 The extension isn't on the Marketplace yet. Package it from a checkout of the calx repo and install it:
 
 ```sh
-py -I tools/vscode/package.py --install     # python3 on Linux
+calx run tools/vscode/package.calx -- --install
 ```
 
 That writes `build/vscode/calx-<version>.vsix` and installs it with VS Code's `code` command. Reload VS Code's window afterwards. You can also install the `.vsix` from the Extensions view: **...** > **Install from VSIX...**.
@@ -22,7 +22,7 @@ That writes `build/vscode/calx-<version>.vsix` and installs it with VS Code's `c
 Errors need the `calx` compiler. The extension uses the first of these that exists:
 
 1. The `calx.compilerPath` setting.
-2. `build/compiler/<platform>/calx`, which `tests/run.py` builds, in a checkout of the calx repo that contains the file, or in a `calx` folder next to one of the folders the file is in. So files in the calx repo and in a calcite checkout beside it both find it.
+2. `build/compiler/<platform>/calx`, as compiler/README.md builds it, in a checkout of the calx repo that contains the file, or in a `calx` folder next to one of the folders the file is in. So files in the calx repo and in a calcite checkout beside it both find it.
 3. The same path under `$CALX_HOME`.
 4. `calx` on `PATH`.
 

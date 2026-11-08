@@ -46,7 +46,7 @@ calx tool.calx --release -o out.txt   # tool.calx gets --release, -o and out.txt
 calx --release tool.calx input.txt    # built optimized; tool.calx gets input.txt
 ```
 
-The program sees the file as its `argv[0]`, as a Python script sees `sys.argv[0]`, rather than the path of the program built from it, so [`std.env.program()`](../std/env.md) names it after the file, as `calx run` does too. The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
+The program sees the file as its `argv[0]`, as a Python script sees `sys.argv[0]`, rather than the path of the program built from it, so [`std.env.program()`](../std/env.md) names it after the file, as `calx run` does too, and [`std.env.script()`](../std/env.md) gives its full path, as Python's `__file__` does. The options before the file are `--release`, `--timings` and `--verbose`. The file is one whose name ends in `.calx`, or any file that's there, for a script without the extension. A name that's neither a command nor a file is an error, with status 2, so `calx biuld x.calx` says so instead of running anything.
 
 A first line that starts with `#!` is the system's, and the compiler skips it, so on Linux and macOS a program runs by its own name, as a shell or Python script does:
 
@@ -125,6 +125,8 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_NO_UPDATE_CHECK` | Set to anything, turns off the [daily check](#updating) for a newer release |
 | `CALX_PROFILE` | Set to `1`, builds keep every function's frame pointer, so a sampling profiler such as `perf record -g` sees the calls that led to each sample. It costs a register, a few percent of speed, so it's off otherwise |
 | `CALX_RELEASES` | Where `calx update` finds releases. Otherwise `https://github.com/ellipog/calx/releases`. For a mirror, or a test |
+
+`calx run` sets two for the program it runs. `CALX` is the path of the `calx` that runs it, as Python's `sys.executable` is, so a script that builds or checks other programs, such as [the test suite](../../tests/run.calx), uses the same compiler, and so do the programs it starts. `CALX_SCRIPT` is the full path of the file, which [`std.env.script()`](../std/env.md) gives; the program's runtime takes it out of the environment as it starts, so a program it starts doesn't see it.
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 

@@ -30,10 +30,26 @@ fn main() {
 | --- | --- |
 | `args() -> List<String>` | The arguments the program was started with, after its own name, in order |
 | `program() -> String` | The program's name, for its help and messages: the last part of the path it was started as, without `.exe` or `.calx`. `calx run tools/count.calx` starts it as `tools/count.calx`, so it's `count`, and so is a program built as `count.exe` or started by a `#!` line as `./count` |
+| `script() -> String?` | The `.calx` file `calx run` built the program from, as a full path, as Python's `__file__` is for the script it runs: for finding the files that go with a script, beside it, from wherever it's run. `none` for a program started another way, such as one `calx build` made, whose own path is [`std.process.current_exe()`](process.md) |
 | `variable(name: String) -> String?` | The value of the environment variable `name`, or `none` if it isn't set or `name` can't be one: empty, or with `=` or a zero byte in it. Windows matches names without regard to case |
 | `os() -> String` | The system the program runs on, `"windows"` or `"linux"`, as Rust's `std::env::consts::OS` names them, for the few things a script does differently on each. A program is built for one system, so it's the same on every call |
 
 Run a program with arguments by putting them after `--`: `calx run tool.calx -- --threads 24` ([the calx command](../reference/command.md)). [`std.cli`](cli.md) reads them into a struct, as options, flags and arguments by place, with `--help`.
+
+A script finds what goes with it by `script()`, as a Python script does by `__file__`:
+
+```calx
+import std.env
+import std.path
+
+fn main() {
+    // The folder this file is in, wherever it was started from.
+    let here = path.parent_dir(env.script() ?? String()) ?? String(".")
+    println("{path.is_absolute(here)}")    // out: true
+}
+```
+
+`calx run` passes the path in the environment variable `CALX_SCRIPT`, which the program's runtime takes out of its environment as it starts, so a program it starts doesn't see it.
 
 ## Text
 

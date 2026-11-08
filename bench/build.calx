@@ -1,0 +1,336 @@
+// Times how fast Calx builds, the way D64 and the G3.4 gate measure it.
+//
+//     calx run bench/build.calx -- [--modules 64] [--runs 5] [--record]
+//
+// It generates a large program, `--modules` modules of about 150 lines each, each importing the
+// one before it, and times the compiler on it and on a small program and the tick benchmark:
+//
+// - check: `calx check` on the large program, which runs the whole front end.
+// - cold: a debug build of the large program into an empty cache, so every module, the runtime
+//   and the link happen, and the same in release mode.
+// - one module: a debug build of the large program after changing one module, and a release
+//   build, which also optimizes the program as a whole when it links (D99).
+// - small cold, small unchanged: `calx run` on a small program with an empty cache, then again
+//   with nothing changed (G3.4: under 0.5 s and 50 ms).
+// - bench one module: a debug build of the tick benchmark after changing its own module, with the
+//   standard library's cached (G3.4: under 1 s).
+//
+// Everything it makes is in a folder of its own in the temp folder, removed at the end; under WSL
+// that's on Linux's own file system, since reading the Windows one through /mnt/c is about ten
+// times slower and would be most of what's measured. Each time is the median of `--runs`.
+// --record writes bench/results/build-<os>.json, with the machine and the commit (D34).
+import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
+import std.cli.{cli}
+import std.env
+import std.fs
+import std.json.{Json, pretty}
+import std.process
+import std.process.{Command}
+import std.stats
+import std.time.{Instant}
+
+/// Times how fast Calx builds, the way D64 and the G3.4 gate measure it.
+@cli(name: "bench/build.calx")
+struct Args {
+    /// Modules in the generated program, each about 150 lines.
+    modules: u32 = 64
+    /// Times each measure is taken; the median counts.
+    runs: u32 = 5
+    /// Write bench/results/build-<os>.json.
+    record: bool
+}
+
+// Module m<i>: a struct with methods, an enum and a match, lists, strings and loops.
+fn module_text(i: u32, tweak: u32) -> String {
+    var s = String()
+    if i > 0 {
+        s.push_str(#"import m#{i - 1}.{score#{i - 1}}"#)
+        s.push_str("\n\n")
+    }
+    let head = #"
+        pub struct Thing#{i} {
+            pub id: i32,
+            pub weight: f64,
+            pub tags: List<String>,
+        }
+
+        enum Kind#{i} {
+            Small
+            Large(i32)
+            Named(String)
+        }
+
+        impl Thing#{i} {
+            pub fn new(id: i32) -> Thing#{i} {
+                var tags = List<String>()
+                tags.push("t{id}")
+                return Thing#{i} { id: id, weight: f64(id) * 1.5, tags: tags }
+            }
+
+            pub fn heavier(self, other: Thing#{i}) -> bool {
+                return self.weight > other.weight
+            }
+        }
+
+        fn kind_of(n: i32) -> Kind#{i} {
+            if n < 10 {
+                return Kind#{i}.Small
+            }
+            if n < 100 {
+                return Kind#{i}.Large(n)
+            }
+            return Kind#{i}.Named("n{n}")
+        }
+
+        fn rank(k: Kind#{i}) -> i32 {
+            return match k {
+                Small => 1,
+                Large(n) => n % 7,
+                Named(s) => i32.wrap(s.len()),
+            }
+        }
+
+        "#
+    // A block ends without the newline of its last line.
+    s.push_str(head)
+    s.push_str("\n")
+    for j in 0u32..8 {
+        if j > 0 {
+            s.push_str("\n")
+        }
+        let helper = #"
+            fn mix#{j}(x: i64, k: i64) -> i64 {
+                var h = x
+                for r in 0i64..k {
+                    h = (h ^ (r + #{j + tweak})) * 1099511628211
+                    if h % 3 == 0 {
+                        h += r
+                    }
+                }
+                return h
+            }
+            "#
+        s.push_str(helper)
+        s.push_str("\n")
+    }
+    let score = #"
+        pub fn score#{i}(n: i32) -> i64 {
+            var total: i64 = 0
+            var things = List<Thing#{i}>()
+            for j in 0..n {
+                things.push(Thing#{i}.new(j))
+            }
+            for j in 0usize..things.len() {
+                total += i64(rank(kind_of(things[j].id))) + i64.saturate(things[j].weight)
+                if j > 0 and things[j].heavier(things[j - 1]) {
+                    total += i64.wrap(things[j].tags.len())
+                }
+            }
+        "#
+    s.push_str("\n")
+    s.push_str(score)
+    s.push_str("\n")
+    if i > 0 {
+        s.push_str("    total += score{i - 1}(n / 2)\n")
+    }
+    for j in 0u32..8 {
+        s.push_str("    total = mix{j}(total, i64(n))\n")
+    }
+    s.push_str("    return total\n\}\n")
+    return s
+}
+
+// Writes the program into `folder`, and gives its main file and its lines.
+fn generate(n: u32, folder: String) -> (String, usize) {
+    fs.make_dir_all(folder.copy())!
+    var lines: usize = 0
+    for i in 0..n {
+        let text = module_text(i, 0)
+        lines += text.lines().len()
+        fs.write_text("{folder}/m{i}.calx", text)!
+    }
+    let main_text = #"
+        import m#{n - 1}.{score#{n - 1}}
+
+        fn main() {
+            println("{score#{n - 1}(40)}")
+        }
+        "#
+    lines += main_text.lines().len()
+    fs.write_text("{folder}/main.calx", "{main_text}\n")!
+    return ("{folder}/main.calx", lines)
+}
+
+// Seconds that `calx args` takes with its cache at `cache`. A failure ends the benchmark.
+fn timed(calx: String, root: String, args: List<String>, cache: String) -> f64 {
+    let start = unsafe { Instant.now() }
+    let o = match Command.new(calx).args(args).dir(root).env("CALX_CACHE", cache).output() {
+        ok(o) => o,
+        err(e) => {
+            eprintln("build: can't run the compiler: {e}")
+            process.exit(1)
+            return 0.0
+        },
+    }
+    let took = unsafe { Instant.now() }.secs_since(start)
+    if not o.status.success() {
+        eprintln("build: {args.join(" ")} failed:\n{o.text()}{o.error_text()}")
+        process.exit(1)
+    }
+    return took
+}
+
+fn median(xs: List<f64>) -> f64 {
+    return stats.median(xs) ?? 0.0
+}
+
+fn main() {
+    let a = Args.parse()
+    if a.modules == 0 or a.runs == 0 {
+        eprintln("build: --modules and --runs are at least 1")
+        process.exit(2)
+    }
+    let root = repo_root()
+    let calx = compiler(root.copy())
+    let work = fs.temp_dir()!.replace("\\", "/")
+    let generated = generate(a.modules, "{work}/big")
+    let big = generated.0.copy()
+    let small = "{work}/small.calx"
+    fs.write_text(small.copy(), "fn main() \{\n    println(\"hello\")\n\}\n")!
+    let out = "{work}/out{exe()}"
+    let warm = "{work}/warm"
+    var names: List<String> = []
+    var times: List<f64> = []
+    var fresh: u32 = 0
+
+    var check: List<f64> = []
+    for _ in 0..a.runs {
+        check.push(timed(calx.copy(), root.copy(), ["check", big.copy()], warm.copy()))
+    }
+    names.push("check")
+    times.push(median(check))
+
+    for mode in ["debug", "release"] {
+        var cold: List<f64> = []
+        for _ in 0..a.runs {
+            fresh += 1
+            let cache = "{work}/cold{fresh}"
+            var args: List<String> = ["build"]
+            if mode == "release" {
+                args.push("--release")
+            }
+            args.push(big.copy())
+            args.push("-o")
+            args.push(out.copy())
+            cold.push(timed(calx.copy(), root.copy(), args, cache.copy()))
+            fs.remove_dir_all(cache)!
+        }
+        names.push("cold_{mode}")
+        times.push(median(cold))
+    }
+
+    // One module changed: m0, which everything imports through the chain, so the change must not
+    // ripple into the others' C.
+    var tweak: u32 = 0
+    for mode in ["debug", "release"] {
+        var args: List<String> = ["build"]
+        if mode == "release" {
+            args.push("--release")
+        }
+        args.push(big.copy())
+        args.push("-o")
+        args.push(out.copy())
+        _ = timed(calx.copy(), root.copy(), args.copy(), warm.copy())
+        var one: List<f64> = []
+        for _ in 0..a.runs {
+            tweak += 1
+            fs.write_text("{work}/big/m0.calx", module_text(0, tweak))!
+            one.push(timed(calx.copy(), root.copy(), args.copy(), warm.copy()))
+        }
+        names.push("one_module_{mode}")
+        times.push(median(one))
+    }
+
+    var small_cold: List<f64> = []
+    for _ in 0..a.runs {
+        fresh += 1
+        let cache = "{work}/small{fresh}"
+        small_cold.push(timed(calx.copy(), root.copy(), ["run", small.copy()], cache.copy()))
+        fs.remove_dir_all(cache)!
+    }
+    names.push("small_cold")
+    times.push(median(small_cold))
+    _ = timed(calx.copy(), root.copy(), ["run", small.copy()], warm.copy())
+    var unchanged: List<f64> = []
+    for _ in 0..a.runs {
+        unchanged.push(timed(calx.copy(), root.copy(), ["run", small.copy()], warm.copy()))
+    }
+    names.push("small_unchanged")
+    times.push(median(unchanged))
+
+    // The tick benchmark with its own module changed: a copy whose warmup default differs.
+    let bench_src = fs.read_text("{root}/bench/calx/tickbench.calx")! ?? String()
+    let bench_copy = "{work}/tickbench.calx"
+    fs.write_text(bench_copy.copy(), bench_src.copy())!
+    _ = timed(calx.copy(), root.copy(), ["build", bench_copy.copy(), "-o", out.copy()], warm.copy())
+    var bench: List<f64> = []
+    for _ in 0..a.runs {
+        tweak += 1
+        fs.write_text(bench_copy.copy(), bench_src.replace("warmup: 200,", "warmup: {200 + tweak},"))!
+        bench.push(timed(calx.copy(), root.copy(), ["build", bench_copy.copy(), "-o", out.copy()], warm.copy()))
+    }
+    names.push("bench_one_module")
+    times.push(median(bench))
+    fs.remove_dir_all(work)!
+
+    println("calx builds on {env.os()}, {a.modules} generated modules ({generated.1} lines), median of {a.runs}:")
+    println("| Measure | Time | G3.4 |")
+    println("| --- | --- | --- |")
+    var seconds = LinkedMap<String, Json>()
+    var goals = LinkedMap<String, Json>()
+    for i in 0..names.len() {
+        let goal = goal_of(names[i])
+        var mark = String()
+        if let g = goal {
+            mark = "under {ms(g)} ms: {if times[i] < g { "yes" } else { "NO" }}"
+            goals.insert(names[i].copy(), Json.Bool(times[i] < g))
+        }
+        println("| {names[i].replace("_", " ")} | {ms(times[i])} ms | {mark} |")
+        seconds.insert(names[i].copy(), Json.Float(round_to(times[i], 4)))
+    }
+
+    if a.record {
+        var doc = LinkedMap<String, Json>()
+        doc.insert("recorded", Json.Str(now_utc()))
+        doc.insert("commit", commit(root.copy()))
+        doc.insert("machine", machine())
+        doc.insert("calx", Json.Str(output_of(Command.new(calx).arg("version")) ?? String()))
+        doc.insert("modules", Json.Int(i64(a.modules)))
+        doc.insert("lines", Json.Int(i64.wrap(generated.1)))
+        doc.insert("runs", Json.Int(i64(a.runs)))
+        doc.insert("seconds", Json.Object(seconds))
+        doc.insert("g3_4", Json.Object(goals))
+        let path = "{root}/bench/results/build-{env.os()}.json"
+        fs.write_text(path.copy(), "{pretty(Json.Object(doc), 2)}\n")!
+        println("build: wrote {path}")
+    }
+}
+
+// G3.4's limit for a measure, in seconds, if it has one.
+fn goal_of(name: String) -> f64? {
+    if name == "small_cold" {
+        return some(0.5)
+    }
+    if name == "small_unchanged" {
+        return some(0.05)
+    }
+    if name == "bench_one_module" {
+        return some(1.0)
+    }
+    return none
+}
+
+// Seconds as whole milliseconds.
+fn ms(s: f64) -> String {
+    return "{i64.saturate((s * 1000.0).rint())}"
+}

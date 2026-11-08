@@ -12,45 +12,73 @@ on:
       - 'site/**'
 
 jobs:
+  # Nothing here needs Python: the compiler is built with CMake and Ninja, and the test runner,
+  # the benchmarks and the VS Code packager are Calx programs it runs (CLX-104).
   test:
     name: tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            calx: build/compiler/windows/calx.exe
+          - os: ubuntu-latest
+            calx: build/compiler/linux/calx
     runs-on: ${{ matrix.os }}
     env:
       CXX: clang++
+      CALX_BIN: ${{ matrix.calx }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
       - name: Install clang, lld and Ninja
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang lld ninja-build
+      # Ninja's own release, pinned and checked.
       - name: Install Ninja
         if: runner.os == 'Windows'
-        run: python -m pip install ninja
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\ninja-win.zip"
+          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
+          "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       # Puts the MSVC libraries the linker needs on the environment.
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Toolchain
         run: clang --version
-      - name: Tests
-        run: python -I tests/run.py --modes debug,release
-      - name: Check the release tools
+      - name: Build the compiler
         shell: bash
         run: |
-          calx=build/compiler/linux/calx
-          [[ "$RUNNER_OS" == Windows ]] && calx=build/compiler/windows/calx.exe
-          for f in tools/update/update.calx tools/release/package.calx; do "$calx" check "$f"; done
+          dir=$(dirname "$CALX_BIN")
+          cmake -S compiler -B "$dir" -G Ninja -DCMAKE_CXX_COMPILER=clang++ > /dev/null
+          ninja -C "$dir"
+      - name: Tests
+        shell: bash
+        run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
+      - name: Check the release tools
+        shell: bash
+        run: for f in tools/update/update.calx tools/release/package.calx; do "$CALX_BIN" check "$f"; done
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
-        run: python -I bench/run.py calx --threads 1,4 --runs 1
+        shell: bash
+        run: '"$CALX_BIN" run bench/run.calx -- calx --threads 1,4 --runs 1'
       - name: Build times
-        run: python -I bench/build.py --runs 3
+        shell: bash
+        run: '"$CALX_BIN" run bench/build.calx -- --runs 3'
+      # The VS Code extension, packaged as a .vsix, kept as an artifact, so it can be installed
+      # without a checkout. The vscode job tests it.
+      - name: Package the VS Code extension
+        if: runner.os == 'Linux'
+        run: '"$CALX_BIN" run tools/vscode/package.calx'
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: calx-vscode
+          path: build/vscode/*.vsix
 
   # A release of every push to main that passes, as the nightly, and of every v* tag, which must
   # match VERSION, as a stable release (CLX-81). Each platform builds the compiler with its
@@ -80,7 +108,14 @@ jobs:
           echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
       - name: Install Ninja
         if: runner.os == 'Windows'
-        run: python -m pip install ninja
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\ninja-win.zip"
+          Invoke-WebRequest https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($hash -ne "F550FEC705B6D6FF58F2DB3C374C2277A37691678D6ABA463ADCBB129108467A") { throw "ninja-win.zip's SHA-256 is $hash" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ninja"
+          "$env:RUNNER_TEMP\ninja" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Version
@@ -190,8 +225,8 @@ jobs:
             fi
           done
 
-  # The VS Code extension: its grammar on every example in the repo, and its helpers. The
-  # packaged .vsix is kept as an artifact, so it can be installed without a checkout.
+  # The VS Code extension: its grammar on every example in the repo, and its helpers. The test
+  # job on Linux packages it.
   vscode:
     name: VS Code extension
     runs-on: ubuntu-latest
@@ -208,9 +243,3 @@ jobs:
       - name: Tests
         working-directory: tools/vscode
         run: npm test
-      - name: Package
-        run: python3 -I tools/vscode/package.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: calx-vscode
-          path: build/vscode/*.vsix

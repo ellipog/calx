@@ -1,0 +1,786 @@
+// The compiler test suite (P3.9, CLX-104): small Calx programs with their expected results.
+//
+//     calx run tests/run.calx                                # every test, in debug mode
+//     calx run tests/run.calx -- --modes debug,release
+//     calx run tests/run.calx -- tests/integers docs/std     # the tests under folders, or single files
+//
+// It tests the compiler in build/compiler/<os>, so build that first, with
+// `ninja -C build/compiler/windows` or `.../linux`.
+//
+// A test is a `.calx` file under `tests/`, or a fenced `calx` block in `docs/reference/`,
+// `docs/std/` or `docs/guide/` (D41). It says what should happen in comments:
+//
+//     println("{1 + 2}")    // out: 3
+//     let x: u8 = 300       // error: doesn't fit in `u8`
+//     panic("no")           // panic: no
+//
+// - `// out: TEXT` is one line of expected output. All of them together, in order, must be exactly
+//   what the program prints. A program with no `out` lines must print nothing.
+// - `// error: TEXT` expects an error on that line whose message contains TEXT. A test with any
+//   `error` lines must fail to compile, with exactly those errors and no others.
+// - `// panic: TEXT` expects the program to panic on that line, with TEXT in the message. A
+//   panic that isn't at a line, as a stack overflow's, is `// panic: <stack>: TEXT`, anywhere.
+// - `// trace: NAME:LINE` is one frame of the panic's stack trace, innermost first, like `out`:
+//   all of them together must be the trace's functions and lines, which leave out the file, since
+//   a module from the standard library is shown by its whole path. `// trace: repeated N` is the
+//   line that says the frame before it came N more times.
+// - `// stderr: TEXT` is one line of expected standard error, like `out`. A program that doesn't
+//   panic must write exactly those lines there, so one with none must write nothing. In a test of
+//   several files, their paths in it are just their names.
+// - `// stdin: TEXT` is one line of the program's input, each followed by a newline. Without any,
+//   the input is empty.
+// - `// args: TEXT` is one command-line argument, passed after `--`, so it can hold spaces. The
+//   program finds the compiler running it in the environment variable `CALX`, for tests of the
+//   command itself.
+// - `// status: N` is the exit status the program must end with, which is 0 without one.
+// - `// lib: NAME.calx` builds that file of the test, or that file next to it, with
+//   `calx build --lib` in the same mode, before the program runs. The path of each library it built,
+//   in order, goes to the program as its first arguments, before those `// args:` gives (D123).
+// - `// kind: library` checks a test that expects errors as a library, with `calx check --lib`.
+// - `// firewall: TEXT` marks a test that listens on every address, not just loopback, which makes
+//   Windows' firewall ask the person at the desktop whether to allow it, each time the program is
+//   new, as every build's is. On Windows such a test runs only in CI, whose runners don't ask, and
+//   is skipped elsewhere, saying so.
+//
+// A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
+// main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
+// expected the same way.
+//
+// Each test that expects errors is also checked with `calx check --json --stdin`, the form editors
+// use, which must report the same errors at the same places.
+//
+// A test that runs longer than two minutes (RUN_SECONDS) fails, and its program is stopped.
+//
+// It runs in three rounds, each command of a round at once up to `--jobs`: the libraries tests
+// build, then every test's program or check, then the comparisons.
+
+import std.cli.{cli}
+import std.env
+import std.fs
+import std.json
+import std.path
+import std.process
+import std.process.{Command, Output, output_all}
+import std.regex.{Regex}
+
+const RUN_SECONDS: u64 = 120
+
+/// Runs the compiler's tests: the files under tests/ and the examples in the docs.
+@cli(name: "tests/run.calx")
+struct Args {
+    /// Test files or folders; all of them if none.
+    @positional
+    paths: List<String>
+    /// The build modes, with commas between: debug, release.
+    modes: String = "debug"
+    /// How many commands to run at once; as many as there are processors if 0.
+    @short("j")
+    jobs: u32 = 0
+    /// Ignored: the compiler is built beforehand, by ninja.
+    no_build: bool
+}
+
+struct Patterns {
+    expect: Regex
+    file: Regex
+    diag: Regex
+    panic_line: Regex
+    panic_at: Regex
+    place: Regex
+    frame: Regex
+    repeated: Regex
+    generated: Regex
+    generated_json: Regex
+}
+
+fn patterns() -> Patterns {
+    return Patterns {
+        expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall):(.*)$")!,
+        file: Regex.new("^// file: (\\S+\\.calx)\\s*$")!,
+        diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
+        panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
+        panic_at: Regex.new("^panic at (<[^>]+>): (.*)$")!,
+        place: Regex.new("^(<[^>]+>):\\s*(.*)$")!,
+        frame: Regex.new("^\\tat (.*)\\((.*):(\\d+)\\)$")!,
+        repeated: Regex.new("^\\t\\.\\.\\. repeated (\\d+) more times$")!,
+        generated: Regex.new("^(.*?):(\\d+):(\\d+): note: in the code ")!,
+        generated_json: Regex.new("(?s)^in the code .*?, at .*?:\\d+:\\d+: (.*)$")!,
+    }
+}
+
+struct Test {
+    name: String
+    source: String
+    file_path: String?            // a file on disk, or none for a docs example
+    out: List<String>
+    errors: List<(usize, String)>
+    panics: (usize, String)?
+    trace: List<String>           // "name:line", innermost first
+    stderr: List<String>
+    stdin: List<String>
+    args: List<String>
+    status: i32
+    libs: List<String>            // files to build as libraries first
+    library: bool                 // checked as a library
+    firewall: String?             // why it listens on every address
+    files: List<(String, String)> // (name, text) for a test of several modules, the main one first
+}
+
+fn parse_test(name: own String, source: String, file_path: own String?, p: mut Patterns) -> Test {
+    var t = Test {
+        name: name, source: source.copy(), file_path: file_path, out: [], errors: [], panics: none, trace: [], stderr: [],
+        stdin: [], args: [], status: 0, libs: [], library: false, firewall: none, files: [],
+    }
+    let lines = source.lines()
+    var starts: List<(usize, String)> = []
+    for i in 0..lines.len() {
+        if let c = p.file.captures(lines[i]) {
+            starts.push((i, c.get(1) ?? String()))
+        }
+    }
+    for k in 0..starts.len() {
+        let at = starts[k].0
+        let end = if k + 1 < starts.len() { starts[k + 1].0 } else { lines.len() }
+        // Blank lines first, so each file's line numbers are the test's.
+        var text = "\n".repeat(at + 1)
+        for j in (at + 1)..end {
+            text.push_str(lines[j])
+            text.push('\n')
+        }
+        t.files.push((starts[k].1.copy(), text))
+    }
+    for i in 0..lines.len() {
+        if let c = p.expect.captures(lines[i]) {
+            let kind = c.get(1) ?? String()
+            let raw = c.get(2) ?? String()
+            let text = if raw.starts_with(" ") { raw[1..] } else { raw }
+            let n = i + 1
+            if kind == "out" {
+                t.out.push(text)
+            } else if kind == "stderr" {
+                t.stderr.push(text)
+            } else if kind == "stdin" {
+                t.stdin.push(text)
+            } else if kind == "args" {
+                t.args.push(text)
+            } else if kind == "status" {
+                t.status = i32.parse(text.trim()) ?? 0
+            } else if kind == "lib" {
+                t.libs.push(text.trim())
+            } else if kind == "kind" {
+                t.library = text.trim() == "library"
+            } else if kind == "firewall" {
+                t.firewall = some(text.trim())
+            } else if kind == "trace" {
+                t.trace.push(text.trim())
+            } else if kind == "error" {
+                t.errors.push((n, text.trim()))
+            } else {
+                t.panics = some((n, text.trim()))
+            }
+        }
+    }
+    return t
+}
+
+// Paths with `/` only, which every system's calls take.
+fn slashes(s: String) -> String {
+    return s.replace("\\", "/")
+}
+
+fn find_tests(root: String, selected: List<String>, p: mut Patterns) -> List<Test> {
+    let doc_dirs = ["{root}/docs/reference", "{root}/docs/std", "{root}/docs/guide"]
+    var roots: List<String> = []
+    if selected.is_empty() {
+        roots.push("{root}/tests")
+        for d in doc_dirs {
+            roots.push(d.copy())
+        }
+    } else {
+        let here = slashes(fs.current_dir()!)
+        for s in selected {
+            let full = if path.is_absolute(s.copy()) { s.copy() } else { path.join(here.copy(), s.copy()) }
+            roots.push(slashes(path.normalize(full)))
+        }
+    }
+    var found: List<Found> = []
+    for r in roots {
+        var paths: List<String> = []
+        if fs.is_file(r.copy()) {
+            paths.push(r.copy())
+        } else if fs.is_dir(r.copy()) {
+            for f in fs.glob("{r}/**/*.calx")! {
+                paths.push(slashes(f))
+            }
+            for f in fs.glob("{r}/**/*.md")! {
+                paths.push(slashes(f))
+            }
+        }
+        for f in paths {
+            let rel = if f.starts_with("{root}/") { f[(root.len() + 1)..] } else { f.copy() }
+            let doc = f.ends_with(".md") and doc_dirs.any(|d| f.starts_with("{d}/"))
+            // Not this runner, and only the docs' pages.
+            if rel != "tests/run.calx" and (f.ends_with(".calx") or doc) {
+                found.push(Found { path: f.copy(), rel: rel, doc: doc, text: String() })
+            }
+        }
+    }
+    // Read at once: each read waits on the disk, or under WSL on Windows' files through /mnt/c.
+    parallel for f in mut found {
+        f.text = fs.read_text(f.path.copy())! ?? String()
+    }
+    var tests: List<Test> = []
+    for f in found {
+        if f.doc {
+            doc_examples(f.rel, f.text, mut p, mut tests)
+        } else {
+            tests.push(parse_test(f.rel.copy(), f.text, some(f.path.copy()), mut p))
+        }
+    }
+    return tests
+}
+
+// A job's folder, and the files written into it: (path, text).
+struct Folder {
+    dir: String
+    files: List<(String, String)>
+}
+
+// A test file or a docs page, and its text.
+struct Found {
+    path: String
+    rel: String
+    doc: bool
+    text: String
+}
+
+// Every ```calx block in a docs page is a test. Other fences (```text, ```sh) aren't.
+fn doc_examples(rel: String, text: String, p: mut Patterns, tests: mut List<Test>) {
+    let lines = text.lines()
+    var i: usize = 0
+    while i < lines.len() {
+        if lines[i].trim() == "```calx" {
+            let start = i + 1
+            var j = start
+            while j < lines.len() and lines[j].trim() != "```" {
+                j += 1
+            }
+            // Blank lines first, so error line numbers in the example match the page.
+            var source = "\n".repeat(start)
+            for k in start..j {
+                source.push_str(lines[k])
+                source.push('\n')
+            }
+            tests.push(parse_test("{rel}:{start + 1}", source, none, mut p))
+            i = j
+        }
+        i += 1
+    }
+}
+
+// One test in one mode, and what it needs from each round.
+struct Job {
+    test: usize
+    release: bool
+    dir: String          // its own folder, for files it writes and libraries it builds
+    source: String       // what's compiled
+    libs: List<String>   // the libraries it builds, in order
+    lib_cmds: List<usize>
+    main_cmd: usize
+    json_cmd: usize
+    problems: List<String>
+}
+
+fn calx_cmd(calx: String, root: String, words: List<String>) -> Command {
+    return Command.new(calx).args(words).dir(root)
+}
+
+fn main() {
+    let a = Args.parse()
+    var p = patterns()
+    let root = find_root()
+    let windows = env.os() == "windows"
+    // The compiler that runs this, which `calx run` says in CALX, or for a build of this, the one
+    // built in the repository.
+    let built = "{root}/build/compiler/{env.os()}/calx{if windows { ".exe" } else { "" }}"
+    let calx = slashes(env.variable("CALX") ?? built)
+    if not fs.is_file(calx.copy()) {
+        eprintln("no compiler at {calx}; build one, as compiler/README.md says, and run this with it")
+        process.exit(2)
+    }
+    var modes: List<String> = []
+    for m in a.modes.split(",") {
+        if not m.trim().is_empty() {
+            modes.push(m.trim())
+        }
+    }
+    let all = find_tests(root.copy(), a.paths.copy(), mut p)
+    // No firewall prompts at a Windows desktop: those tests run there only in CI.
+    let asks = windows and env.variable("CI") == none
+    var tests = all
+    var skipped: usize = 0
+    for t in tests {
+        if let why = t.firewall {
+            if asks {
+                println("skipped {t.name}: it {why}, which Windows' firewall would ask about; CI runs it")
+                skipped += 1
+            }
+        }
+    }
+    tests.retain(|t| t.firewall == none or not asks)
+    let tmp = slashes(fs.temp_dir()!)
+
+    // The jobs, each test's files written into its folder, and the commands of each round.
+    var jobs: List<Job> = []
+    var lib_cmds: List<Command> = []
+    var cmds: List<Command> = []
+    var folders: List<Folder> = []
+    var ti: usize = 0
+    for t in tests {
+        let count = if t.errors.is_empty() { modes.len() } else { 1 }
+        for mi in 0..count {
+            let dir = "{tmp}/{jobs.len()}"
+            var folder = Folder { dir: dir.copy(), files: [] }
+            var source = String()
+            if not t.files.is_empty() {
+                for f in t.files {
+                    folder.files.push(("{dir}/{f.0}", f.1.copy()))
+                }
+                source = "{dir}/{t.files[0].0}"
+            } else if let fp = t.file_path {
+                source = fp.copy()
+            } else {
+                source = "{dir}/example.calx"
+                folder.files.push((source.copy(), t.source.copy()))
+            }
+            folders.push(folder)
+            var job = Job {
+                test: ti, release: modes[mi] == "release", dir: dir.copy(), source: source.copy(), libs: [], lib_cmds: [],
+                main_cmd: 0, json_cmd: 0, problems: [],
+            }
+            let lib_flag: List<String> = if t.library { ["--lib"] } else { [] }
+            if not t.errors.is_empty() {
+                var check: List<String> = ["check"]
+                check.extend(lib_flag)
+                check.push(source.copy())
+                job.main_cmd = cmds.len()
+                cmds.push(calx_cmd(calx.copy(), root.copy(), check))
+                var json_words: List<String> = ["check"]
+                json_words.extend(lib_flag)
+                json_words.push("--json")
+                json_words.push("--stdin")
+                json_words.push(source.copy())
+                // The main file's text, as an editor would send it, from what was read already.
+                let text = if t.files.is_empty() { t.source.copy() } else { t.files[0].1.copy() }
+                job.json_cmd = cmds.len()
+                cmds.push(calx_cmd(calx.copy(), root.copy(), json_words).input(text.to_bytes()))
+            } else {
+                for name in t.libs {
+                    let lib_source = path.join(path.parent_dir(source.copy()) ?? String("."), name.copy())
+                    let stem = path.file_stem(name.copy()) ?? name.copy()
+                    let lib_out = "{dir}/libs/{stem}{if windows { ".dll" } else { ".so" }}"
+                    var words: List<String> = ["build"]
+                    if job.release {
+                        words.push("--release")
+                    }
+                    words.push("--lib")
+                    words.push(lib_source)
+                    words.push("-o")
+                    words.push(lib_out.copy())
+                    job.lib_cmds.push(lib_cmds.len())
+                    lib_cmds.push(calx_cmd(calx.copy(), root.copy(), words))
+                    job.libs.push(lib_out)
+                }
+                var words: List<String> = ["run"]
+                if job.release {
+                    words.push("--release")
+                }
+                words.push(source.copy())
+                if not t.args.is_empty() or not job.libs.is_empty() {
+                    words.push("--")
+                    words.extend(job.libs)
+                    words.extend(t.args)
+                }
+                var input = String()
+                for line in t.stdin {
+                    input.push_str(line)
+                    input.push('\n')
+                }
+                job.main_cmd = cmds.len()
+                cmds.push(calx_cmd(calx.copy(), root.copy(), words).env("CALX", calx.copy()).input_text(input).timeout(RUN_SECONDS * 1000))
+            }
+            jobs.push(job)
+        }
+        ti += 1
+    }
+    // Written at once, as making files is slow on Windows, where each new one is scanned.
+    parallel for f in folders {
+        fs.make_dir_all(f.dir.copy())!
+        for w in f.files {
+            if let parent = path.parent_dir(w.0.copy()) {
+                fs.make_dir_all(parent)!
+            }
+            fs.write_text(w.0.copy(), w.1.copy())!
+        }
+    }
+    let at_once = if a.jobs > 0 { usize(a.jobs) } else { usize(unsafe { process.processors() }) }
+
+    // Round one: the libraries. A test whose library didn't build doesn't run.
+    let lib_outs = output_all(lib_cmds, at_once)!
+    var broken: List<bool> = []
+    for job in mut jobs {
+        var failed = false
+        for k in 0..job.libs.len() {
+            let ix = job.lib_cmds[k]
+            if not lib_outs[ix].status.success() {
+                let name = tests[job.test].libs[k].copy()
+                let said = "{lib_outs[ix].text()}{lib_outs[ix].error_text()}"
+                job.problems.push("building the library {name} failed:\n{indent(said.trim_end())}")
+                failed = true
+            }
+        }
+        broken.push(failed)
+    }
+
+    // Round two: every program and check.
+    let outs = output_all(cmds, at_once)!
+
+    // Round three: what each did against what its test expects.
+    var failed: usize = 0
+    var k: usize = 0
+    for job in jobs {
+        var problems = job.problems.copy()
+        if not broken[k] {
+            if not tests[job.test].errors.is_empty() {
+                check_errors(tests[job.test], job, outs[job.main_cmd], outs[job.json_cmd], mut p, mut problems)
+            } else {
+                check_run(tests[job.test], job, outs[job.main_cmd], mut p, mut problems)
+            }
+        }
+        k += 1
+        if not problems.is_empty() {
+            failed += 1
+            println("FAIL {tests[job.test].name} [{if job.release { "release" } else { "debug" }}]")
+            for pr in problems {
+                println(indent(pr))
+            }
+        }
+    }
+    parallel for f in folders {
+        fs.remove_dir_all(f.dir.copy())!
+    }
+    fs.remove_dir_all(tmp)!
+    let skips = if skipped > 0 { ", {skipped} skipped" } else { "" }
+    let system = if windows { "Windows" } else { "Linux" }
+    println("{jobs.len() - failed} passed, {failed} failed{skips} ({tests.len()} tests, modes: {modes.join(", ")}, {system})")
+    if failed > 0 {
+        process.exit(1)
+    }
+}
+
+// The repository this file is in, or for a build of it, the one the current folder is in: the
+// folder with `tests/run.calx` and `compiler/` in it, from there up.
+fn find_root() -> String {
+    if let s = env.script() {
+        if let root = path.parent_dir(path.parent_dir(s) ?? String()) {
+            return slashes(root)
+        }
+    }
+    var dir = slashes(fs.current_dir()!)
+    loop {
+        if fs.is_file("{dir}/tests/run.calx") and fs.is_dir("{dir}/compiler") {
+            return dir
+        }
+        if let up = path.parent_dir(dir.copy()) {
+            if up == dir {
+                break
+            }
+            dir = slashes(up)
+        } else {
+            break
+        }
+    }
+    eprintln("run this from the Calx repository, which has tests/run.calx and compiler/ in it")
+    process.exit(2)
+    return String()
+}
+
+fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {
+    if o.status.timed_out {
+        problems.push("still running after {RUN_SECONDS} seconds, so it was stopped")
+        return
+    }
+    let code = o.status.code ?? -1
+    let stdout = o.text()
+    var stderr = o.error_text()
+    if not t.files.is_empty() {
+        // The test's own files by their names, as it was written, not in the folder it's run in.
+        stderr = stderr.replace("{job.dir}/", "").replace("{job.dir.replace("/", "\\")}\\", "")
+    }
+    let err_lines = stderr.lines()
+    if let pan = t.panics {
+        if code != 101 {
+            problems.push("expected a panic (status 101), got status {code}")
+        }
+        if let place = p.place.captures(pan.1) {
+            let want_place = place.get(1) ?? String()
+            let want_text = place.get(2) ?? String()
+            var found: (String, String)? = none
+            for line in err_lines {
+                if found == none {
+                    if let m = p.panic_at.captures(line) {
+                        found = some((m.get(1) ?? String(), m.get(2) ?? String()))
+                    }
+                }
+            }
+            if let f = found {
+                if f.0 != want_place {
+                    problems.push("no panic at {want_place} on stderr")
+                } else if not f.1.contains(want_text) {
+                    problems.push("panic message {repr(f.1)} doesn't contain {repr(want_text)}")
+                }
+            } else {
+                problems.push("no panic at {want_place} on stderr")
+            }
+        } else {
+            var found: (usize, String)? = none
+            for line in err_lines {
+                if found == none {
+                    if let m = p.panic_line.captures(line) {
+                        found = some((usize.parse(m.get(2) ?? String()) ?? 0, m.get(4) ?? String()))
+                    }
+                }
+            }
+            if let f = found {
+                if f.0 != pan.0 {
+                    problems.push("panicked on line {f.0}, expected line {pan.0}")
+                }
+                if not f.1.contains(pan.1) {
+                    problems.push("panic message {repr(f.1)} doesn't contain {repr(pan.1)}")
+                }
+            } else {
+                problems.push("no panic message on stderr")
+            }
+        }
+        if not t.trace.is_empty() {
+            var frames: List<String> = []
+            for line in err_lines {
+                if let f = p.frame.captures(line) {
+                    frames.push("{f.get(1) ?? String()}:{f.get(3) ?? String()}")
+                } else if let r = p.repeated.captures(line) {
+                    frames.push("repeated {r.get(1) ?? String()}")
+                }
+            }
+            if frames != t.trace {
+                problems.push("stack trace {diff(t.trace, frames)}")
+            }
+        }
+    } else if code != t.status {
+        let expected = if t.status != 0 { ", expected {t.status}" } else { String() }
+        problems.push("exit status {code}{expected}")
+    }
+    let got = stdout.lines()
+    if got != t.out {
+        problems.push(diff(t.out, got))
+    }
+    if t.panics == none and code == t.status and err_lines != t.stderr {
+        problems.push("standard error {diff(t.stderr, err_lines)}")
+    } else if not problems.is_empty() and not stderr.trim().is_empty() and (t.panics == none or code != 101) {
+        problems.push("stderr:\n{indent(stderr.trim_end())}")
+    }
+}
+
+fn check_errors(t: Test, job: Job, o: Output, js: Output, p: mut Patterns, problems: mut List<String>) {
+    if o.status.success() {
+        problems.push("expected compile errors, but it compiled")
+        return
+    }
+    var actual: List<(usize, String)> = []
+    var columns: List<(usize, usize, String)> = []
+    let out = o.error_text().lines()
+    for i in 0..out.len() {
+        if let m = p.diag.captures(out[i]) {
+            var line = usize.parse(m.get(2) ?? String()) ?? 0
+            var col = usize.parse(m.get(3) ?? String()) ?? 0
+            let message = m.get(4) ?? String()
+            // An error in code an attribute generated is expected on the attribute, which its note
+            // names, as editors are shown it (D124).
+            if slashes(m.get(1) ?? String()).contains("/expand/") {
+                var j = i + 1
+                while j < out.len() {
+                    if let n = p.generated.captures(out[j]) {
+                        line = usize.parse(n.get(2) ?? String()) ?? 0
+                        col = usize.parse(n.get(3) ?? String()) ?? 0
+                        break
+                    }
+                    j += 1
+                }
+            }
+            actual.push((line, message.copy()))
+            columns.push((line, col, message))
+        }
+    }
+    check_json(t, job, js, columns, mut p, mut problems)
+    var remaining = actual.copy()
+    for e in t.errors {
+        var hit: usize? = none
+        for k in 0..remaining.len() {
+            if hit == none and remaining[k].0 == e.0 and remaining[k].1.contains(e.1) {
+                hit = some(k)
+            }
+        }
+        if let k = hit {
+            let _gone = remaining.remove(k)
+        } else {
+            var on_line: List<String> = []
+            for x in actual {
+                if x.0 == e.0 {
+                    on_line.push(repr(x.1))
+                }
+            }
+            let got = if on_line.is_empty() { String("; got none there") } else { "; got [{on_line.join(", ")}]" }
+            problems.push("line {e.0}: expected an error containing {repr(e.1)}{got}")
+        }
+    }
+    for x in remaining {
+        problems.push("line {x.0}: unexpected error: {x.1}")
+    }
+}
+
+// `calx check --json --stdin` must report the errors the text output does, at the same places
+// (docs/reference/command.md). `expected` holds (line, byte column, message), both from 1.
+fn check_json(t: Test, job: Job, js: Output, expected: List<(usize, usize, String)>, p: mut Patterns, problems: mut List<String>) {
+    if js.status.code != some(1) {
+        problems.push("--json: exit status {js.status.code ?? -1}, expected 1")
+    }
+    // The test's text has the main file's lines where they are in the file.
+    let lines = t.source.lines()
+    var got: List<String> = []
+    for raw in js.text().lines() {
+        if let d = diagnostic(raw.copy()) {
+            if d.severity != "error" {
+                continue
+            }
+            if d.end_line < d.line or (d.end_line == d.line and d.end_col < d.col) {
+                problems.push("--json: the range of {repr(d.message)} ends before it starts")
+            }
+            let f = slashes(d.file.copy())
+            let same = if t.files.is_empty() { f == slashes(job.source.copy()) } else { f.starts_with("{job.dir}/") }
+            if not same {
+                problems.push("--json: {repr(d.message)} is in {repr(d.file)}, expected {repr(job.source)}")
+            }
+            var message = d.message.copy()
+            if let g = p.generated_json.captures(d.message) {
+                message = g.get(1) ?? String()
+            }
+            got.push(key(usize.wrap(d.line + 1), usize.wrap(d.col), message, lines))
+        } else {
+            problems.push("--json printed a line that isn't a diagnostic: {repr(raw)}")
+        }
+    }
+    // Columns agree where a line is ASCII: editors count UTF-16 units from 0, the text form bytes from 1.
+    var want: List<String> = []
+    for x in expected {
+        want.push(key(x.0, if x.1 > 0 { x.1 - 1 } else { 0 }, x.2.copy(), lines))
+    }
+    got.sort()
+    want.sort()
+    if got != want {
+        let both = indent("text: [{want.join(", ")}]\njson: [{got.join(", ")}]")
+        problems.push("--json reports different errors from the text output:\n{both}")
+    }
+}
+
+// One line of `calx check --json`, as its fields are named there (docs/reference/command.md).
+struct Diagnostic {
+    severity: String
+    file: String
+    message: String
+    line: i64
+    col: i64
+    end_line: i64
+    end_col: i64
+}
+
+fn diagnostic(raw: String) -> Diagnostic? {
+    let d = match json.parse(raw) {
+        ok(v) => v,
+        err(_) => return none,
+    }
+    let range = d.get("range") else return none
+    let start = range.get("start") else return none
+    let end = range.get("end") else return none
+    let severity = text_of(d, "severity") else return none
+    let file = text_of(d, "file") else return none
+    let message = text_of(d, "message") else return none
+    let line = number_of(start, "line") else return none
+    let col = number_of(start, "character") else return none
+    let end_line = number_of(end, "line") else return none
+    let end_col = number_of(end, "character") else return none
+    return some(Diagnostic { severity, file, message, line, col, end_line, end_col })
+}
+
+fn text_of(v: json.Json, name: str) -> String? {
+    let m = v.get(String(name)) else return none
+    return m.as_str()
+}
+
+fn number_of(v: json.Json, name: str) -> i64? {
+    let m = v.get(String(name)) else return none
+    return m.as_i64()
+}
+
+// How an error is compared: its line, its column where the line is ASCII, and its message.
+fn key(line: usize, col: usize, message: String, lines: List<String>) -> String {
+    let ascii = line > 0 and line <= lines.len() and is_ascii(lines[line - 1])
+    return if ascii { "({line}, {col}, {repr(message)})" } else { "({line}, None, {repr(message)})" }
+}
+
+fn is_ascii(s: String) -> bool {
+    for i in 0..s.len() {
+        if s.byte_at(i) >= 0x80 {
+            return false
+        }
+    }
+    return true
+}
+
+fn diff(want: List<String>, got: List<String>) -> String {
+    var lines: List<String> = ["output differs:"]
+    let n = if want.len() > got.len() { want.len() } else { got.len() }
+    for i in 0..n {
+        let w = if i < want.len() { want[i].copy() } else { String("<nothing>") }
+        let g = if i < got.len() { got[i].copy() } else { String("<nothing>") }
+        let mark = if w == g { "  " } else { "! " }
+        let rest = if w == g { String() } else { ", got {repr(g)}" }
+        lines.push("  {mark}line {i + 1}: expected {repr(w)}{rest}")
+    }
+    return lines.join("\n")
+}
+
+fn indent(text: String) -> String {
+    return text.lines().map(|l| "    {l}").join("\n")
+}
+
+// Text in quotes, as Python's repr writes it, so failures read as they did.
+fn repr(s: String) -> String {
+    let q = if s.contains("'") and not s.contains("\"") { "\"" } else { "'" }
+    var out = String(q)
+    for r in s.runes() {
+        if r == '\\' {
+            out.push_str("\\\\")
+        } else if r == '\n' {
+            out.push_str("\\n")
+        } else if r == '\r' {
+            out.push_str("\\r")
+        } else if r == '\t' {
+            out.push_str("\\t")
+        } else if q == "'" and r == '\'' {
+            out.push_str("\\'")
+        } else {
+            out.push(r)
+        }
+    }
+    out.push_str(q)
+    return out
+}

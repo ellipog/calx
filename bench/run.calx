@@ -1,0 +1,200 @@
+// Builds and runs the tick-loop benchmark the way docs/benchmarks.md measures it.
+//
+//     calx run bench/run.calx -- rust|calx [--threads 1,24] [--runs 10] [--warmup 200] [--ticks 1000] [--record]
+//
+// Each run is a fresh process. The result for a configuration is the median, over its runs, of the
+// mean time per measured tick. Every run must print the checksum in bench/expected.json, or the
+// result doesn't count. --record writes bench/results/<impl>-<os>.json, with the machine, the
+// toolchain and the commit beside the numbers (D34).
+import machine.{commit, compiler, exe, machine, now_utc, output_of, physical_cores, repo_root, round_to}
+import std.cli.{cli}
+import std.env
+import std.fs
+import std.json
+import std.json.{Json, pretty}
+import std.process
+import std.process.{Command}
+import std.stats
+
+/// Builds and runs the tick-loop benchmark the way docs/benchmarks.md measures it.
+@cli(name: "bench/run.calx")
+struct Args {
+    /// Which one to run: rust or calx.
+    @positional
+    which: String
+    /// The thread counts, with commas between; 1 and the number of physical cores if empty.
+    threads: String = ""
+    /// Fresh processes for each thread count.
+    runs: u32 = 10
+    /// Ticks run before the measured ones.
+    warmup: u32 = 200
+    /// Ticks measured.
+    ticks: u32 = 1000
+    /// Write bench/results/<which>-<os>.json; only the full 200 + 1000 tick run.
+    record: bool
+}
+
+fn stop(why: String) {
+    eprintln("run: {why}")
+    process.exit(1)
+}
+
+// Builds the Rust version with cargo, into build/bench/<os>/rust: the program and the toolchain.
+fn build_rust(root: String, build: String) -> (String, Json) {
+    let target = "{build}/rust"
+    match Command.new("cargo").args(["build", "--release", "--quiet"]).dir("{root}/bench/rust").env("CARGO_TARGET_DIR", target.copy()).status() {
+        ok(s) => {
+            if not s.success() {
+                stop("cargo build failed: {s}")
+            }
+        },
+        err(e) => stop("can't run cargo: {e}"),
+    }
+    var tc = LinkedMap<String, Json>()
+    tc.insert("rustc", Json.Null)
+    tc.insert("llvm", Json.Null)
+    for line in (output_of(Command.new("rustc").arg("-vV")) ?? String()).lines() {
+        if let (k, v) = line.split_once(": ") {
+            if k == "release" {
+                tc.insert("rustc", Json.Str(v))
+            } else if k == "LLVM version" {
+                tc.insert("llvm", Json.Str(v))
+            }
+        }
+    }
+    return ("{target}/release/tickbench{exe()}", Json.Object(tc))
+}
+
+// Builds the Calx version in release mode, into build/bench/<os>/calx.
+fn build_calx(root: String, build: String) -> (String, Json) {
+    let calx = compiler(root.copy())
+    let out = "{build}/calx/tickbench{exe()}"
+    fs.make_dir_all("{build}/calx")!
+    match Command.new(calx.copy()).args(["build", "--release", "{root}/bench/calx/tickbench.calx", "-o", out.copy()]).dir(root.copy()).status() {
+        ok(s) => {
+            if not s.success() {
+                stop("calx build failed: {s}")
+            }
+        },
+        err(e) => stop("can't run {calx}: {e}"),
+    }
+    // What the driver compiles with.
+    let clang = env.variable("CALX_CC") ?? String("clang")
+    var tc = LinkedMap<String, Json>()
+    tc.insert("calx", Json.Str(output_of(Command.new(calx).arg("version")) ?? String()))
+    tc.insert("commit", commit(root))
+    tc.insert("clang", match output_of(Command.new(clang).arg("--version")) {
+        some(v) => Json.Str(v.lines()[0].copy()),
+        none => Json.Null,
+    })
+    return (out, Json.Object(tc))
+}
+
+fn main() {
+    let a = Args.parse()
+    if a.which != "rust" and a.which != "calx" {
+        eprintln("run: say which to run, rust or calx, not `{a.which}`")
+        process.exit(2)
+    }
+    let root = repo_root()
+    let build = "{root}/build/bench/{env.os()}"
+    let built = if a.which == "rust" { build_rust(root.copy(), build) } else { build_calx(root.copy(), build) }
+    let program = built.0.copy()
+    var threads: List<u32> = []
+    for t in a.threads.split(",") {
+        if not t.trim().is_empty() {
+            threads.push(u32.parse(t.trim()) ?? 0)
+        }
+    }
+    if threads.is_empty() {
+        threads = [1, physical_cores()]
+    }
+    if threads.contains(0) {
+        eprintln("run: --threads is a list of numbers above 0, with commas between")
+        process.exit(2)
+    }
+    let expected_doc = json.parse(fs.read_text("{root}/bench/expected.json")! ?? String())!
+    let expected = (expected_doc.get("checksum") ?? Json.Null).as_str() ?? String()
+    let full = a.warmup == 200 and a.ticks == 1000
+
+    var configs: List<Json> = []
+    var table: List<String> = []
+    for n in threads {
+        var means: List<f64> = []
+        var p99s: List<f64> = []
+        var sums: List<String> = []
+        for i in 0..a.runs {
+            let args: List<String> = ["--threads", "{n}", "--warmup", "{a.warmup}", "--ticks", "{a.ticks}"]
+            let text = match Command.new(program.copy()).args(args).read() {
+                ok(t) => t,
+                err(e) => {
+                    stop("{program} failed: {e}")
+                    String()
+                },
+            }
+            let lines = text.trim().lines()
+            let run = match json.parse(lines[lines.len() - 1].copy()) {
+                ok(v) => v,
+                err(_) => Json.Null,
+            }
+            let sum = (run.get("checksum") ?? Json.Null).as_str() ?? String()
+            if full and sum != expected {
+                stop("checksum {sum} isn't the expected {expected}; the result doesn't count")
+            }
+            let mean = (run.get("mean_tick_us") ?? Json.Null).as_f64() ?? 0.0
+            means.push(mean)
+            p99s.push((run.get("p99_tick_us") ?? Json.Null).as_f64() ?? 0.0)
+            sums.push(sum)
+            println("  {a.which} threads={n} run {i + 1}/{a.runs}: {round_to(mean, 1)} us/tick")
+        }
+        if not sums.all(|s| s == sums[0]) {
+            stop("runs disagree on the checksum")
+        }
+        let median_mean = round_to(stats.median(means.copy()) ?? 0.0, 3)
+        let median_p99 = round_to(stats.median(p99s) ?? 0.0, 3)
+        var c = LinkedMap<String, Json>()
+        c.insert("threads", Json.Int(i64(n)))
+        c.insert("median_mean_tick_us", Json.Float(median_mean))
+        c.insert("median_p99_tick_us", Json.Float(median_p99))
+        c.insert("runs_mean_tick_us", Json.Array(means.map(|m| Json.Float(m))))
+        c.insert("checksum", Json.Str(sums[0].copy()))
+        configs.push(Json.Object(c))
+        table.push("| {n} | {ms(median_mean)} ms | {ms(median_p99)} ms |")
+    }
+
+    println("")
+    println("{a.which} on {env.os()}, {a.warmup} warmup + {a.ticks} measured ticks, {a.runs} runs each:")
+    println("| Threads | Median of mean tick | Median p99 |")
+    println("| --- | --- | --- |")
+    for row in table {
+        println(row)
+    }
+
+    if a.record {
+        if not full {
+            stop("only the full 200 + 1000 tick run is recorded")
+        }
+        var r = LinkedMap<String, Json>()
+        r.insert("impl", Json.Str(a.which.copy()))
+        r.insert("recorded", Json.Str(now_utc()))
+        r.insert("commit", commit(root.copy()))
+        r.insert("machine", machine())
+        r.insert("toolchain", built.1.copy())
+        r.insert("warmup", Json.Int(i64(a.warmup)))
+        r.insert("ticks", Json.Int(i64(a.ticks)))
+        r.insert("runs", Json.Int(i64(a.runs)))
+        r.insert("configs", Json.Array(configs))
+        let out = "{root}/bench/results/{a.which}-{env.os()}.json"
+        fs.make_dir_all("{root}/bench/results")!
+        fs.write_text(out.copy(), "{pretty(Json.Object(r), 2)}\n")!
+        println("")
+        println("run: wrote {out}")
+    }
+}
+
+// Microseconds as milliseconds, with three decimals.
+fn ms(us: f64) -> String {
+    let whole = i64.saturate((us).rint())
+    let frac = "{whole % 1000}".pad_start(3, '0')
+    return "{whole / 1000}.{frac}"
+}

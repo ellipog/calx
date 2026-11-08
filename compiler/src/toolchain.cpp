@@ -18,6 +18,10 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <csignal>
+#include <sys/prctl.h>
+#endif
 extern char** environ;
 #endif
 
@@ -241,6 +245,28 @@ pid_t start(const std::vector<std::string>& argv, Redirect r = {}, const std::st
     return rc == 0 ? pid : -1;
 }
 
+// Starts the program `calx run` stands for, which the system kills when this process ends, however
+// it ends, as the job does on Windows: a test runner that stops `calx run` stops the program, which
+// would otherwise keep the runner's pipes open. The death signal follows the thread that forks,
+// which is the main one, there till the end.
+pid_t start_bound(const std::vector<std::string>& argv, const std::string& name) {
+    std::vector<char*> args;
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    if (!name.empty()) args[0] = const_cast<char*>(name.c_str());
+    args.push_back(nullptr);
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+#ifdef __linux__
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() != parent) _exit(127);  // this process ended before the signal was set
+#endif
+        execvp(argv[0].c_str(), args.data());
+        _exit(127);
+    }
+    return pid;
+}
+
 int finish(pid_t pid) {
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
@@ -372,6 +398,24 @@ std::string hash_hex(const std::vector<std::string_view>& parts) {
     return buf;
 }
 
+void set_run_environment(const std::string& source) {
+    fs::path self = self_exe();
+#ifdef _WIN32
+    if (!self.empty()) SetEnvironmentVariableW(L"CALX", self.c_str());
+#else
+    if (!self.empty()) setenv("CALX", self.c_str(), 1);
+#endif
+    std::error_code ec;
+    fs::path full = fs::absolute(fs::path(source), ec);
+    if (ec) return;
+    std::string text = full.lexically_normal().string();
+#ifdef _WIN32
+    SetEnvironmentVariableW(L"CALX_SCRIPT", widen(text).c_str());
+#else
+    setenv("CALX_SCRIPT", text.c_str(), 1);
+#endif
+}
+
 int run_process(const std::vector<std::string>& argv, const std::string& name) {
 #ifdef _WIN32
     // `calx run` stands for the program: if it's killed, as a test runner stops one that ran too
@@ -388,7 +432,7 @@ int run_process(const std::vector<std::string>& argv, const std::string& name) {
     if (job) let_go(job);
     return status;
 #else
-    auto h = start(argv, {}, name);
+    auto h = start_bound(argv, name);
     if (h < 0) return -1;
 #endif
     return finish(h);

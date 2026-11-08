@@ -77,6 +77,8 @@ CX_FN(const cx_u8*, cx_arg, (cx_usize i));
 CX_FN(cx_usize, cx_arg_len, (cx_usize i));
 CX_FN(cx_i64, cx_env_get, (const cx_u8* name, cx_usize n, cx_u8* out, cx_usize cap));
 CX_FN(cx_u32, cx_env_os, (void));
+CX_FN(const cx_u8*, cx_script, (void));
+CX_FN(cx_usize, cx_script_len, (void));
 
 /* Nanoseconds from a clock that only goes forward, behind std.time (D88). */
 CX_FN(cx_u64, cx_clock_ns, (void));

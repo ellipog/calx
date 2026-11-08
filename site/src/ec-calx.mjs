@@ -1,7 +1,7 @@
 // The docs' code blocks on the site: a bar over each one with what it is, a badge for the examples
 // CI tests, and a copy button. A tested Calx example gets a tab for what it prints, from its
 // "// out:" comments, which come out of the code, and one that must fail to compile shows its error
-// under the line instead of as a comment at its end (tests/run.py, D41). The docs files stay as
+// under the line instead of as a comment at its end (tests/run.calx, D41). The docs files stay as
 // they are.
 import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ import { DOCS } from './paths.mjs';
 const docsDir = fileURLToPath(DOCS);
 const LABELS = { calx: 'Calx', c: 'C', sh: 'Shell', text: 'Text', json: 'JSON' };
 
-// run.py tests every block whose fence is exactly ```calx in these folders, and nothing else.
+// run.calx tests every block whose fence is exactly ```calx in these folders, and nothing else.
 const TESTED = ['guide/', 'reference/', 'std/'];
 
 /** Where in docs/ the block is, as "reference/parallel.md", or null for a block outside docs/. */

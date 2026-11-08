@@ -1,0 +1,19 @@
+// std.env.script: the file `calx run` built the program from, as a full path, and none for a
+// program started another way, here this one started again as the program it is. And CALX, the
+// compiler that ran it.
+import std.env
+import std.fs
+import std.path
+import std.process.{Command, current_exe}
+
+fn main() {
+    if env.args().len() > 0 {
+        println("started again: {env.script()}")
+        return
+    }
+    let s = env.script() ?? String()
+    println("{path.file_name(s.copy())} {path.is_absolute(s.copy())} {s.ends_with("env_script.calx")}")    // out: some(env_script.calx) true true
+    println(Command.new(current_exe()).arg("again").read()!)    // out: started again: none
+    let calx = env.variable("CALX") ?? String()
+    println("{fs.is_file(calx.copy())} {path.file_stem(calx) ?? String()}")    // out: true calx
+}

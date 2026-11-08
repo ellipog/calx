@@ -176,7 +176,11 @@ A program that ends without meaning to takes the programs it started with it, so
 - **On Linux**, a panic kills the programs the Calx program started. What those started runs on, since Linux has no job to hold them, but stopping the process group, as a terminal's Ctrl+C or a test runner does, reaches them all.
 - **A program that ends as it means to**, by returning from `main` or calling `exit`, leaves what it started running, as in other languages. A `Child` that's never waited for keeps running until it ends.
 
-`calx run` stands for the program the same way: on Windows, killing `calx run` kills the program and everything it started.
+`calx run` stands for the program the same way:
+- **On Windows**, killing `calx run` kills the program and everything it started.
+- **On Linux**, killing `calx run` kills the program, which the system sends `SIGKILL` when `calx run` ends, however it ends.
+
+So a test runner that stops a `calx run` that ran too long stops the program too, and it doesn't keep the runner's pipes open.
 
 ## Speed
 

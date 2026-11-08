@@ -334,6 +334,9 @@ int main(int argc, char** argv) {
     std::fflush(stderr);
     // The program sees the file it was built from as its `argv[0]`, as a Python script sees
     // `sys.argv[0]`, rather than the cached program's path, so `std.env.program()` names it.
+    // Its full path is `std.env.script()`, as Python's `__file__` is, and this compiler's is in
+    // CALX, as Python's `sys.executable` is.
+    set_run_environment(opt.input);
     int status = run_process(run, opt.input);
     if (status < 0) {
         std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());

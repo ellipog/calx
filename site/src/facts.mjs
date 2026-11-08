@@ -78,11 +78,11 @@ export function editUrl(entry) {
 	return `${GITHUB}/edit/main/${repoPath(entry)}`;
 }
 
-// tests/run.py tests every ```calx block in these folders, in debug and release, on Windows and
+// tests/run.calx tests every ```calx block in these folders, in debug and release, on Windows and
 // Linux (D41). The rest of docs/, the spec and the benchmark notes, isn't tested.
 const TESTED = ['docs/guide/', 'docs/reference/', 'docs/std/'];
 
-/** How many of the page's examples CI tests: run.py's count, a line that is exactly ```calx. */
+/** How many of the page's examples CI tests: run.calx's count, a line that is exactly ```calx. */
 export function testedExamples(entry) {
 	if (!TESTED.some((d) => repoPath(entry).startsWith(d))) return 0;
 	return (entry.body ?? '').split(/\r?\n/).filter((l) => l.trim() === '```calx').length;

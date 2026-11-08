@@ -65,7 +65,7 @@ export default defineEcConfig({
 	// Expressive Code darkens any color with less than 5.5:1 contrast, which takes the light colors
 	// back toward the ink. 4.5:1 is what WCAG asks of text.
 	minSyntaxHighlightingColorContrast: 4.5,
-	// A "// file: main.calx" line is part of a test of several modules (tests/run.py). Expressive
+	// A "// file: main.calx" line is part of a test of several modules (tests/run.calx). Expressive
 	// Code would take it out of the code and make it the block's title.
 	frames: { extractFileNameFromCode: false },
 	// Code blocks scroll with the site's own scrollbars (src/styles/tokens.css).

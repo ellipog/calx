@@ -324,7 +324,7 @@ Building and running Calx code has to be fast. The design choices that make it s
 - **Lean C.** Emitted code includes only Calx's small runtime header, never `windows.h` or other large system headers.
 - **`calx run` reuses the last executable** when nothing changed.
 
-Build time is tracked like run time (D34): [`bench/build.py`](../bench/build.py) times checking and building a large generated program, `calx run` on a small one, and rebuilding the tick benchmark after a change. CI runs it on every push, and the results on the reference machine are in `bench/results/`.
+Build time is tracked like run time (D34): [`bench/build.calx`](../bench/build.calx) times checking and building a large generated program, `calx run` on a small one, and rebuilding the tick benchmark after a change. CI runs it on every push, and the results on the reference machine are in `bench/results/`.
 
 ## FFI
 

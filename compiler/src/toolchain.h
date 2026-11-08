@@ -53,6 +53,13 @@ std::string hash_hex(const std::vector<std::string_view>& parts);
 // `name`, the program sees that as its `argv[0]`, rather than its path.
 int run_process(const std::vector<std::string>& argv, const std::string& name = "");
 
+// Sets this process's environment for the program `calx run` starts next: CALX, this compiler's
+// path, for a script that builds or checks with the compiler that ran it, as Python's
+// `sys.executable`, and CALX_SCRIPT, the full path of `source`, which is `std.env.script()`. The
+// program's runtime takes CALX_SCRIPT out of its own environment as it starts, so what that
+// program starts doesn't inherit it; CALX it does.
+void set_run_environment(const std::string& source);
+
 // Runs a program with its standard output and error going to the file `output`.
 int run_to_file(const std::vector<std::string>& argv, const std::string& output);
 

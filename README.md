@@ -65,11 +65,11 @@ ninja -C build/compiler
 build/compiler/calx run tests/basics/hello.calx
 ```
 
-`python tests/run.py` builds the compiler and runs the test suite, which includes every example in the docs. CI runs it in debug and release on Windows and Linux.
+`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in the docs. CI runs it in debug and release on Windows and Linux.
 
 ## Editors
 
-The VS Code extension in [tools/vscode](tools/vscode/README.md) highlights Calx, shows the compiler's errors as you type, and runs files. Install it with `python tools/vscode/package.py --install`. Other editors can use its TextMate grammar and `calx check --json` ([editor support](docs/reference/editors.md)).
+The VS Code extension in [tools/vscode](tools/vscode/README.md) highlights Calx, shows the compiler's errors as you type, and runs files. Install it with `calx run tools/vscode/package.calx -- --install`. Other editors can use its TextMate grammar and `calx check --json` ([editor support](docs/reference/editors.md)).
 
 Acta board: aaen-studios/clx ([open](https://acta.aaenz.no/aaen-studios/clx)). The phase gates are on Calcite's board, aaen-studios/calcite.
 

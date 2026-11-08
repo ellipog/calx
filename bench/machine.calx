@@ -1,0 +1,150 @@
+// What bench/run.calx and bench/build.calx record beside their numbers (D34): the machine, the
+// commit and the compiler, and where things are.
+import std.env
+import std.fs
+import std.json.{Json}
+import std.path
+import std.process
+import std.process.{Command}
+import std.time.{Timestamp}
+
+/// The repository, the folder above the one this file is in.
+pub fn repo_root() -> String {
+    let s = env.script() ?? String()
+    if let bench = path.parent_dir(s) {
+        if let up = path.parent_dir(bench) {
+            return up.replace("\\", "/")
+        }
+    }
+    eprintln("run this with `calx run`, from anywhere: it finds the repository from where it is")
+    process.exit(2)
+    return String()
+}
+
+/// `.exe` on Windows, and nothing on Linux.
+pub fn exe() -> String {
+    return if env.os() == "windows" { ".exe" } else { "" }
+}
+
+/// The compiler that runs this, which `calx run` says in CALX, or the one built into
+/// build/compiler/<os>, or an error that says to build one.
+pub fn compiler(root: String) -> String {
+    let calx = (env.variable("CALX") ?? "{root}/build/compiler/{env.os()}/calx{exe()}").replace("\\", "/")
+    if not fs.is_file(calx.copy()) {
+        eprintln("no compiler at {calx}; build one, as compiler/README.md says, and run this with it")
+        process.exit(2)
+    }
+    return calx
+}
+
+/// What a command prints, trimmed, or none if it can't start or fails.
+pub fn output_of(cmd: Command) -> String? {
+    return match cmd.read() {
+        ok(text) => some(text.trim()),
+        err(_) => none,
+    }
+}
+
+/// The commit checked out, or null outside a git checkout.
+pub fn commit(root: String) -> Json {
+    return match output_of(Command.new("git").args(["rev-parse", "HEAD"]).dir(root)) {
+        some(c) => Json.Str(c),
+        none => Json.Null,
+    }
+}
+
+/// The processor's physical cores: hyperthreads aren't counted, so a benchmark's default thread
+/// counts are 1 and this.
+pub fn physical_cores() -> u32 {
+    if env.os() == "windows" {
+        let ps = String("(Get-CimInstance Win32_Processor | Measure-Object NumberOfCores -Sum).Sum")
+        let text = output_of(Command.new("powershell").args(["-NoProfile", "-Command", ps])) ?? String()
+        return u32.parse(text) ?? unsafe { process.processors() }
+    }
+    // A core is a pair of `physical id` and `core id`, in /proc/cpuinfo's block for each thread.
+    var cores = List<String>()
+    var physical = String()
+    for line in (fs.read_text("/proc/cpuinfo")! ?? String()).lines() {
+        let parts = line.split_once(":") ?? (String(), String())
+        let k = parts.0.trim()
+        if k == "physical id" {
+            physical = parts.1.trim()
+        } else if k == "core id" {
+            let core = "{physical}/{parts.1.trim()}"
+            if not cores.contains(core) {
+                cores.push(core)
+            }
+        }
+    }
+    return if cores.is_empty() { unsafe { process.processors() } } else { u32.wrap(cores.len()) }
+}
+
+/// The machine, as an object: the system, the processor, its cores and threads, and the memory.
+pub fn machine() -> Json {
+    var m = LinkedMap<String, Json>()
+    m.insert("platform", Json.Str(env.os()))
+    if env.os() == "windows" {
+        let ps = String(#"$c = Get-CimInstance Win32_Processor; $m = Get-CimInstance Win32_ComputerSystem; $o = Get-CimInstance Win32_OperatingSystem; "$($o.Caption) $($o.Version)|$($c.Name)|$(($c | Measure-Object NumberOfCores -Sum).Sum)|$(($c | Measure-Object NumberOfLogicalProcessors -Sum).Sum)|$($m.TotalPhysicalMemory)""#)
+        let text = output_of(Command.new("powershell").args(["-NoProfile", "-Command", ps])) ?? String()
+        let f = text.split("|")
+        if f.len() == 5 {
+            m.insert("os", Json.Str(f[0].trim()))
+            m.insert("cpu", Json.Str(f[1].trim()))
+            m.insert("cores", Json.Int(i64.parse(f[2].trim()) ?? 0))
+            m.insert("threads", Json.Int(i64.parse(f[3].trim()) ?? 0))
+            m.insert("memory_gib", Json.Float(gib(u64.parse(f[4].trim()) ?? 0, 1)))
+        }
+        return Json.Object(m)
+    }
+    var os = String("Linux")
+    for line in (fs.read_text("/etc/os-release")! ?? String()).lines() {
+        if line.starts_with("PRETTY_NAME=") {
+            os = line["PRETTY_NAME=".len()..].replace("\"", "")
+        }
+    }
+    let cpuinfo = fs.read_text("/proc/cpuinfo")! ?? String()
+    var cpu = String()
+    for line in cpuinfo.lines() {
+        if line.starts_with("model name") and cpu.is_empty() {
+            cpu = (line.split_once(":") ?? (String(), String())).1.trim()
+        }
+    }
+    var kb: u64 = 0
+    for line in (fs.read_text("/proc/meminfo")! ?? String()).lines() {
+        if line.starts_with("MemTotal:") {
+            let words = line.split_whitespace()
+            kb = u64.parse(words[1].copy()) ?? 0
+        }
+    }
+    let kernel = (fs.read_text("/proc/sys/kernel/osrelease")! ?? String()).trim()
+    m.insert("os", Json.Str(os))
+    m.insert("cpu", Json.Str(cpu))
+    m.insert("cores", Json.Int(i64(physical_cores())))
+    m.insert("threads", Json.Int(i64(unsafe { process.processors() })))
+    m.insert("memory_gib", Json.Float(gib(kb, 1024)))
+    m.insert("kernel", Json.Str(kernel.copy()))
+    if kernel.to_lower_root().contains("microsoft") {
+        m.insert("note", Json.Str("WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"))
+    }
+    return Json.Object(m)
+}
+
+// `n` of `unit` bytes as GiB, to one decimal place.
+fn gib(n: u64, unit: u64) -> f64 {
+    let bytes = f64.nearest(n) * f64.nearest(unit)
+    return (bytes / 1073741824.0 * 10.0).rint() / 10.0
+}
+
+/// `x` to `places` decimal places, as Python's `round(x, places)`.
+pub fn round_to(x: f64, places: u32) -> f64 {
+    var scale = 1.0
+    for _ in 0..places {
+        scale *= 10.0
+    }
+    return (x * scale).rint() / scale
+}
+
+/// The time now in UTC, as `2026-11-08T14:05:09Z`.
+pub fn now_utc() -> String {
+    return unsafe { Timestamp.now() }.format("%Y-%m-%dT%H:%M:%SZ", 0)
+}

@@ -1,5 +1,5 @@
 build/
-# Cargo output, if the benchmark is built outside bench/run.py
+# Cargo output, if the benchmark is built outside bench/run.calx
 bench/rust/target/
 bench/json/rust/target/
 # The VS Code extension's test dependencies

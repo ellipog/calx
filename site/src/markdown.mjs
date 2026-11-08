@@ -65,7 +65,7 @@ export function lineHtml(text, { links = true } = {}) {
 // The ways the docs cite decisions, and what each leaves on the site:
 // "(D21)" or "(D59, D60)" goes with the space before it; "(ThinLTO, D99)" keeps "(ThinLTO)",
 // which "([lists](lists.md), D159)" is too, its ", D159)" being a text node of its own after the
-// link; and "(D41, run.py)" keeps "(run.py)". A decision named in a sentence, as in "until D89",
+// link; and "(D41, run.calx)" keeps "(run.calx)". A decision named in a sentence, as in "until D89",
 // is reworded in the docs instead, so nothing here guesses at the words around it.
 const CITES = [
 	[/\s*\(D\d+(?:,\s*D\d+)*\)/g, ''],

@@ -27,6 +27,7 @@ extern "C" {
     fn cx_fs_make_dir(path: *const u8, len: usize) -> i32
     fn cx_fs_kind(path: *const u8, len: usize, follow: u32) -> u32
     fn cx_fs_list(path: *const u8, len: usize) -> i32
+    fn cx_fs_list_typed(path: *const u8, len: usize) -> i32
     fn cx_fs_temp_dir() -> i32
     fn cx_fs_real_path(path: *const u8, len: usize) -> i32
     fn cx_fs_read_link(path: *const u8, len: usize) -> i32
@@ -623,6 +624,42 @@ pub fn list(path: String) -> List<String> ! FsError {
     return names
 }
 
+// The names in the directory at `path` with what each is, without following links, sorted as
+// `list` sorts them. What each is comes with the listing, as Python's `os.scandir` gives it, so
+// nothing more is asked of the system, except where a file system doesn't say: then it's looked
+// at, and a name gone by then is left out.
+fn list_typed(path: String) -> List<(String, Kind)> ! FsError {
+    if unsafe { cx_fs_list_typed(path.as_ptr(), path.len()) } == 0 {
+        fail last_error()
+    }
+    let all = result()
+    var out = List<(String, Kind)>()
+    let n = all.len()
+    var at: usize = 0
+    // Each entry is a byte for what it is, the name, and a zero byte.
+    while at < n {
+        let code = all.byte_at(at)
+        var end = at + 1
+        while all.byte_at(end) != 0 {
+            end += 1
+        }
+        let name: String = all[at + 1..end]
+        at = end + 1
+        let k = match code {
+            1 => some(Kind.File),
+            2 => some(Kind.Dir),
+            3 => some(Kind.Link),
+            4 => some(Kind.Other),
+            _ => try kind(join(path, name)),
+        }
+        if let found = k {
+            out.push((name, found))
+        }
+    }
+    out.sort()
+    return out
+}
+
 /// The absolute path of what `path` names, with every link followed and each `.` and `..`
 /// resolved, as Java's `Path.toRealPath` gives it: such as `/srv/world` or `C:\srv\world`.
 /// What isn't there is `NotFound`.
@@ -740,18 +777,11 @@ pub fn walk(dir: String) -> List<Entry> ! FsError {
 }
 
 fn walk_into(dir: String, out: mut List<Entry>) ! FsError {
-    for name in try list(dir) {
-        let inner = join(dir, name)
-        // What went between the listing and the look is passed over.
-        if let k = try kind(inner) {
-            let deeper = match k {
-                Kind.Dir => true,
-                _ => false,
-            }
-            out.push(Entry { path: inner.copy(), kind: k })
-            if deeper {
-                try walk_into(inner, mut out)
-            }
+    for e in try list_typed(dir) {
+        let inner = join(dir, e.0)
+        out.push(Entry { path: inner.copy(), kind: e.1 })
+        if e.1 == Kind.Dir {
+            try walk_into(inner, mut out)
         }
     }
 }
@@ -797,7 +827,11 @@ pub fn glob(pattern: String) -> List<String> ! FsError {
     if let w = wild {
         let names = path_parts(pattern[w..])
         let suffix = if dirs_only { pattern[n - 1..] } else { String() }
-        try glob_in(pattern[..fixed], names, 0, suffix, mut out)
+        let base: String = pattern[..fixed]
+        // Each directory under it is known to be one from its listing.
+        if is_dir(if base.is_empty() { String(".") } else { base.copy() }) {
+            try glob_in(base, names, 0, suffix, mut out)
+        }
     } else {
         if n == 0 {
             return out
@@ -835,17 +869,14 @@ fn has_wildcard(name: String) -> bool {
     return name.contains("*") or name.contains("?") or name.contains("[")
 }
 
-// The names in the directory `at`, the current folder if it's empty, or none if it's missing or
-// the program may not list it.
-fn glob_list(at: String) -> List<String> ! FsError {
+// The names in the directory `at`, the current folder if it's empty, with what each is, or none
+// if it's missing or the program may not list it.
+fn glob_list(at: String) -> List<(String, Kind)> ! FsError {
     let here = if at.is_empty() { String(".") } else { at.copy() }
-    if not is_dir(here) {
-        return List<String>()
-    }
-    return match list(here) {
-        ok(names) => names,
-        err(FsError.NotFound) => List<String>(),
-        err(FsError.Denied) => List<String>(),
+    return match list_typed(here) {
+        ok(entries) => entries,
+        err(FsError.NotFound) => List<(String, Kind)>(),
+        err(FsError.Denied) => List<(String, Kind)>(),
         err(e) => {
             fail e
         },
@@ -865,20 +896,47 @@ fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut L
         return
     }
     let name = names[i].copy()
+    if name != "**" and not has_wildcard(name) {
+        // A name without wildcards is looked for, not listed: it can be hidden.
+        let inner = join(at, name)
+        let there = if i + 1 == names.len() {
+            match try kind(inner) {
+                some(_) => true,
+                none => false,
+            }
+        } else {
+            is_dir(inner)
+        }
+        if there {
+            try glob_in(inner, names, i + 1, suffix, mut out)
+        }
+        return
+    }
+    let entries = try glob_list(at)
+    try glob_listed(at, entries, names, i, suffix, mut out)
+}
+
+// The same for a name `i` that's `**` or has a wildcard, with `entries` the listing of `at`, which
+// what follows a `**` is matched in too, so each directory is listed once, and what each entry
+// is comes with it: only a link is looked at, where `*` follows it.
+fn glob_listed(at: String, entries: List<(String, Kind)>, names: List<String>, i: usize, suffix: String, out: mut List<String>) ! FsError {
+    let name = names[i].copy()
     let last = i + 1 == names.len()
     if name == "**" {
         if not last {
-            try glob_in(at, names, i + 1, suffix, mut out)
+            let next = names[i + 1].copy()
+            if next == "**" or has_wildcard(next) {
+                try glob_listed(at, entries, names, i + 1, suffix, mut out)
+            } else {
+                try glob_in(at, names, i + 1, suffix, mut out)
+            }
         }
-        for n in try glob_list(at) {
-            if n.starts_with(".") {
+        for e in entries {
+            if e.0.starts_with(".") {
                 continue
             }
-            let inner = join(at, n)
-            let dir = match try kind(inner) {
-                some(Kind.Dir) => true,
-                _ => false,
-            }
+            let inner = join(at, e.0)
+            let dir = e.1 == Kind.Dir
             if last {
                 if suffix.is_empty() {
                     out.push(inner.copy())
@@ -892,26 +950,15 @@ fn glob_in(at: String, names: List<String>, i: usize, suffix: String, out: mut L
         }
         return
     }
-    if not has_wildcard(name) {
-        // A name without wildcards is looked for, not listed: it can be hidden.
-        let inner = join(at, name)
-        let there = if last {
-            match try kind(inner) {
-                some(_) => true,
-                none => false,
+    for e in entries {
+        if glob_matches_name(e.0, name) {
+            let inner = join(at, e.0)
+            let deeper = last or match e.1 {
+                Kind.Dir => true,
+                Kind.Link => is_dir(inner),
+                _ => false,
             }
-        } else {
-            is_dir(inner)
-        }
-        if there {
-            try glob_in(inner, names, i + 1, suffix, mut out)
-        }
-        return
-    }
-    for n in try glob_list(at) {
-        if glob_matches_name(n, name) {
-            let inner = join(at, n)
-            if last or is_dir(inner) {
+            if deeper {
                 try glob_in(inner, names, i + 1, suffix, mut out)
             }
         }

@@ -29,7 +29,7 @@ cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++
 ninja -C build/compiler
 ```
 
-`python tests/run.py` builds the compiler into `build/compiler/<platform>` and runs the tests. `--modes debug,release` runs each test in both build modes, `--no-build` skips building, and a path runs one test.
+`calx run tests/run.calx` runs the tests with the compiler that runs it, so `build/compiler/calx run tests/run.calx` tests the one just built. After `--`, `--modes debug,release` runs each test in both build modes, a path runs the tests in a folder or one file, and `-j N` runs N commands at once, where it's as many as there are processors otherwise.
 
 ## Tests
 

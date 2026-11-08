@@ -17,10 +17,10 @@ The extension in [`tools/vscode`](../../tools/vscode/README.md) gives VS Code:
 Install it from a checkout of this repo, then reload VS Code's window:
 
 ```sh
-py -I tools/vscode/package.py --install     # python3 on Linux
+calx run tools/vscode/package.calx -- --install
 ```
 
-It finds the compiler that `tests/run.py` builds when the file is in this repo or in a checkout next to it, such as calcite's. Elsewhere, set `calx.compilerPath`, or put `calx` on `PATH`. The [extension's README](../../tools/vscode/README.md) has the details and its settings.
+It finds the compiler built into `build/compiler/<platform>` when the file is in this repo or in a checkout next to it, such as calcite's. Elsewhere, set `calx.compilerPath`, or put `calx` on `PATH`. The [extension's README](../../tools/vscode/README.md) has the details and its settings.
 
 ## Other editors
 

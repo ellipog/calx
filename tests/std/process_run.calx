@@ -220,6 +220,13 @@ fn main() {
         said.push_str(o.text())
     }
     println("{outs.len()} {said.starts_with("child 0\nchild 1\n")} {said.ends_with("child 11\n")}")    // out: 12 true true
+    // Each one's input ends after what it was given, so one that reads to the end goes on.
+    var cats = List<Command>()
+    for i in 0..6 {
+        cats.push(Command.new(me).arg("cat").input_text("cat {i}"))
+    }
+    let meows = output_all(cats, 3)!
+    println("{meows[0].text()} {meows[5].text()} {meows.all(|o| o.status.success())}")    // out: cat 0 cat 5 true
 
     // Folders.
     let tmp = temp_dir()!

@@ -558,6 +558,11 @@ pub fn output_all(commands: List<Command>, at_once: usize) -> List<Output> ! Pro
         while next < commands.len() and running.len() < at_once {
             match start(commands[next], Stdio.Null, Stdio.Pipe, Stdio.Pipe, group) {
                 ok(h) => {
+                    // Its input ends once what `input` gave has gone, as `output`'s does, so a
+                    // program that reads it to the end goes on rather than waiting for more.
+                    unsafe {
+                        cx_proc_close_input(h)
+                    }
                     running.push(h)
                     places.push(next)
                 },

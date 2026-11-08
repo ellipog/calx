@@ -289,6 +289,8 @@ To keep a file whole through a power cut, write the new bytes with `write_parts`
 
 `read` asks for the file's size and reads it whole in one call, so the list never grows, and a second call sees the end. A file can still grow as it's read, and `read` keeps going until the end.
 
+`walk` and `glob` list each directory once and know what each entry is from the listing, as Python's `os.scandir` does: the find data on Windows has its attributes and its reparse tag, and on Linux `readdir` gives its type. Only an entry whose file system doesn't say is looked at, and in a glob a link where `*` follows it. So `src/**/*.calx` costs one listing a directory and nothing a file, which matters most where each call is slow, as Windows' files are from WSL: there it globs this repository's tests and docs in 0.23 s, where looking at each file took 2.9 s, and Python's `rglob` takes 0.41 s.
+
 A program that doesn't import `std.fs` doesn't link it.
 
 `std.fs` is written in Calx: [std/fs.calx](../../std/fs.calx). The calls to the system are in the runtime, [runtime/calx_fs.c](../../runtime/calx_fs.c).

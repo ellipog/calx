@@ -37,8 +37,8 @@ function diagnosticsFor(diags, file, platform = process.platform) {
     return diags.filter((d) => d.file === null || d.file === undefined || samePath(d.file, file, platform));
 }
 
-// Where the compiler is. A configured path wins. Otherwise it's the one tests/run.py builds in a
-// checkout of the calx repo: one containing a start folder, or next to it as D38 lays the repos
+// Where the compiler is. A configured path wins. Otherwise it's the one built into
+// build/compiler/<platform> in a checkout of the calx repo: one containing a start folder, or next to it as D38 lays the repos
 // out. Then `$CALX_HOME`, then `calx` on PATH.
 function findCompiler({ configured, starts, env = process.env, platform = process.platform, exists = fs.existsSync }) {
     const p = platform === 'win32' ? path.win32 : path.posix;

@@ -98,7 +98,7 @@ On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the
 
 That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place. `calx version` says `0.1.0-dev (built from source)`, where a release names its commit and date. `calx update` doesn't update a build from source: `git pull` and `ninja` do.
 
-`python tests/run.py` builds the compiler and runs the test suite, which includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux.
+`build/compiler/calx run tests/run.calx` runs the test suite with that compiler, and it includes every example in these docs. CI runs it in debug and release builds, on Windows and Linux.
 
 ## Next
 
