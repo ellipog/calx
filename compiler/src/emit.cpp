@@ -2940,6 +2940,8 @@ $dropall    m->len = 0;
         out_ = " {\n";
         indent_ = 1;
         copies_.clear();
+        copying_ = false;
+        loop_depth_ = 0;
         for (const Param& p : f->params) {
             if (!p.local->is_view) continue;
             std::vector<std::string> paths = copied(f, p.local);
@@ -2947,13 +2949,13 @@ $dropall    m->len = 0;
                 line("CX_VIEW(" + local_name(p.local) + ");");
                 continue;
             }
+            // The view's name points at the caller's value, and at the copy while a loop runs
+            // (CLX-162).
             std::string v = local_name(p.local), t = ctype(p.local->type);
             line("CX_VIEW(cx_in_" + v + ");");
-            std::string s = t + " cx_cp_" + v + ";";
-            for (const std::string& q : paths) s += " cx_cp_" + v + q + " = cx_in_" + v + "->" + q.substr(1) + ";";
-            line(s);
-            line(t + "* const " + v + " = &cx_cp_" + v + ";");
-            copies_.push_back({v, std::move(paths)});
+            line(t + " cx_cp_" + v + ";");
+            line(t + "* " + v + " = cx_in_" + v + ";");
+            copies_.push_back({p.local, v, std::move(paths)});
         }
         // A closure's captures, as pointers to the code around it's locals (CLX-98).
         std::vector<const Local*> pointed;
@@ -2985,14 +2987,14 @@ $dropall    m->len = 0;
         return o;
     }
 
-    // What `f` copies of its `mut` view `l` into a local, which it works on and writes back as it
-    // returns: the paths of the scalars it copies, or none. A function with a loop copies a view
-    // of a list, a deque or a `String`, or the fields it names of a struct, up to 8 scalars, when
-    // they hold one, so clang keeps the list's pointer, length and capacity in registers:
-    // through the view, it reads them back after every store of a byte or an `i64`, since either
-    // could be one of them, even though the view is `restrict` (D159). Nothing else sees the
-    // value until the function returns, since `mut` views never overlap (D48) and a panic ends
-    // the program.
+    // What `f` copies of its `mut` view `l` into a local, which its loops work on, each written
+    // back as it ends (`around_loop`): the paths of the scalars it copies, or none. A function
+    // with a loop copies a view of a list, a deque or a `String`, or the fields it names of a
+    // struct, up to 8 scalars, when they hold one, so clang keeps the list's pointer, length and
+    // capacity in registers: through the view, it reads them back after every store of a byte or
+    // an `i64`, since either could be one of them, even though the view is `restrict` (D159).
+    // Nothing else sees the value until the loop ends, since `mut` views never overlap (D48) and
+    // a panic ends the program.
     //
     // A function without a loop reads a field back at most once for each store, which costs
     // about what writing the copy back does, so it isn't copied. The copy is made a scalar at a
@@ -3115,14 +3117,86 @@ $dropall    m->len = 0;
         }
     }
 
-    // Writes each copied view back, as the function returns.
+    // Writes each copied view back, as the function returns from inside a loop that works on the
+    // copies.
     void write_back() {
-        if (in_par_body_) return;
+        if (in_par_body_ || !copying_) return;
         for (const Copy& c : copies_) {
+            if (!c.live) continue;
             std::string s;
             for (const std::string& p : c.paths) s += (s.empty() ? "" : " ") + ("cx_in_" + c.name + "->" + p.substr(1)) + " = cx_cp_" + c.name + p + ";";
             line(s);
         }
+    }
+
+    // CLX-162: a function copies its views just before the loops that aren't inside another,
+    // the first of a block's to its last, and writes them back just after, rather than as it
+    // starts and returns. So a small helper
+    // whose loop is in a branch it seldom takes, called once for each rune or row, doesn't pay
+    // for the copies on the paths that skip the loop, and a loop gets the copies it needs. Between
+    // loops the view's name points at the caller's value, which a few reads and stores outside a
+    // loop cost no more through. Only the views the loops name, as `names` says, are copied for
+    // them. A loop inside an expression, which a statement can't be put around, works on the
+    // caller's value, as the loops inside it do.
+    template <typename N, typename F>
+    void around_loop(N&& names, F&& emit) {
+        if (copies_.empty() || copying_ || loop_depth_ > 0 || in_par_body_) {
+            emit();
+            return;
+        }
+        for (Copy& c : copies_) {
+            c.live = names(c.local);
+            if (!c.live) continue;
+            std::string text;
+            for (const std::string& p : c.paths) text += ("cx_cp_" + c.name + p) + " = cx_in_" + c.name + "->" + p.substr(1) + "; ";
+            line(text + c.name + " = &cx_cp_" + c.name + ";");
+        }
+        copying_ = true;
+        emit();
+        copying_ = false;
+        for (Copy& c : copies_) {
+            if (!c.live) continue;
+            std::string text;
+            for (const std::string& p : c.paths) text += ("cx_in_" + c.name + "->" + p.substr(1)) + " = cx_cp_" + c.name + p + "; ";
+            line(text + c.name + " = cx_in_" + c.name + ";");
+            c.live = false;
+        }
+    }
+
+    // Whether a statement or an expression names the view `l` anywhere in it.
+    bool expr_names(Expr* e, const Local* l) const {
+        ViewUse u;
+        view_use(e, l, u);
+        return u.whole || std::find(u.fields.begin(), u.fields.end(), true) != u.fields.end();
+    }
+
+    bool stmt_names(Stmt* s, const Local* l) const {
+        for (Expr* x : {s->value, s->cond, s->target, s->else_, s->pool, s->range_of, s->text_sep, s->zip_with, s->step, s->iter_next}) {
+            if (x && expr_names(x, l)) return true;
+        }
+        for (Block* b : {s->body, s->else_block}) {
+            if (!b) continue;
+            ViewUse u;
+            view_use(b, l, u);
+            if (u.whole || std::find(u.fields.begin(), u.fields.end(), true) != u.fields.end()) return true;
+        }
+        return false;
+    }
+
+    // Whether a statement is a loop, or a loop given to a name, so a copy can go around it.
+    static bool loop_stmt(const Stmt* s) {
+        if (s->kind == StmtKind::while_ || s->kind == StmtKind::for_) return true;
+        bool takes = s->kind == StmtKind::expr || s->kind == StmtKind::let || s->kind == StmtKind::assign;
+        return takes && s->value && s->value->kind == ExprKind::loop;
+    }
+
+    // Counts the loops being emitted, for the time `f` runs, so a copy goes only around the
+    // outermost.
+    template <typename F>
+    void in_loop(F&& f) {
+        loop_depth_++;
+        f();
+        loop_depth_--;
     }
 
     // `std.hint.black_box`, or an instance of it. Its Calx body says what it gives back; the
@@ -3137,10 +3211,39 @@ $dropall    m->len = 0;
     // A block's statements, and its tail as a statement. With `value`, the tail is left out for
     // the caller.
     void stmts(Block* b, bool value) {
-        for (Stmt* s : b->stmts) stmt(s);
-        if (b->tail && !value) {
+        // The copies go around the statements from the block's first loop to its last, once, since
+        // whatever reaches a later loop has been through the first.
+        std::size_t n = b->stmts.size(), first = n, last = n;
+        for (std::size_t i = 0; i < n; i++) {
+            if (!loop_stmt(b->stmts[i])) continue;
+            if (first == n) first = i;
+            last = i;
+        }
+        bool tail = b->tail && !value;
+        bool tail_loop = tail && b->tail->kind == ExprKind::loop;
+        if (tail_loop) last = n;
+        if (tail_loop && first == n) first = n;
+        auto emit_tail = [&] {
             directive(b->tail->span);
             full([&] { expr_stmt(b->tail); });
+        };
+        if (first > last || (first == n && !tail_loop)) {
+            for (Stmt* s : b->stmts) stmt(s);
+            if (tail) emit_tail();
+        } else {
+            for (std::size_t i = 0; i < first; i++) stmt(b->stmts[i]);
+            auto names = [&](const Local* l) {
+                for (std::size_t i = first; i < n && i <= last; i++) {
+                    if (stmt_names(b->stmts[i], l)) return true;
+                }
+                return tail_loop && expr_names(b->tail, l);
+            };
+            around_loop(names, [&] {
+                for (std::size_t i = first; i < n && i <= last; i++) stmt(b->stmts[i]);
+                if (tail_loop) emit_tail();
+            });
+            for (std::size_t i = last + 1; i < n; i++) stmt(b->stmts[i]);
+            if (tail && !tail_loop) emit_tail();
         }
         if (!value) drops(b->drops);
     }
@@ -3281,7 +3384,7 @@ $dropall    m->len = 0;
                 line("while (" + condition_expr(s->cond) + ") {");
                 indent_++;
                 loop_frames_[s->loop_id] = frames_.size();
-                stmts(s->body, false);
+                in_loop([&] { stmts(s->body, false); });
                 line("cx_cont" + id + ":;");
                 indent_--;
                 line("}");
@@ -3290,7 +3393,7 @@ $dropall    m->len = 0;
                 line("}");
                 break;
             }
-            case StmtKind::for_: full([&] { s->is_parallel ? parallel_loop(s) : for_loop(s); }); break;
+            case StmtKind::for_: full([&] { in_loop([&] { s->is_parallel ? parallel_loop(s) : for_loop(s); }); }); break;
             default: line("/* unsupported statement */"); break;
         }
     }
@@ -3329,7 +3432,7 @@ $dropall    m->len = 0;
                 }
                 // The value is worked out before a copied view is written back, since it can
                 // change the copy.
-                if (exit_needs_drops(0, s->drops) || !copies_.empty()) {
+                if (exit_needs_drops(0, s->drops) || (copying_ && !in_par_body_)) {
                     std::string r = tmp();
                     line(ctype(fn_->result_type) + " " + r + " = " + v + ";");
                     exit_drops(0, s->drops);
@@ -3877,7 +3980,7 @@ $dropall    m->len = 0;
                 line("for (;;) {");
                 indent_++;
                 loop_frames_[e->loop_id] = frames_.size();
-                stmts(e->block, false);
+                in_loop([&] { stmts(e->block, false); });
                 line("cx_cont" + id + ":;");
                 indent_--;
                 line("}");
@@ -5455,7 +5558,7 @@ $dropall    m->len = 0;
             line("for (;;) {");
             indent_++;
             loop_frames_[e->loop_id] = frames_.size();
-            stmts(e->block, false);
+            in_loop([&] { stmts(e->block, false); });
             line("cx_cont" + id + ":;");
             indent_--;
             line("}");
@@ -6529,10 +6632,14 @@ $dropall    m->len = 0;
     Item* fn_ = nullptr;
     bool in_par_body_ = false;  // emitting a `parallel for` body's own C function
     struct Copy {
+        const Local* local;
         std::string name;                // the view's, which is the copy's pointer's
         std::vector<std::string> paths;  // its scalars, from `copied`
+        bool live = false;               // the loop being emitted works on the copy
     };
-    std::vector<Copy> copies_;  // the function's copied `mut` views, written back as it returns
+    std::vector<Copy> copies_;  // the function's copied `mut` views, copied around each outer loop
+    bool copying_ = false;      // emitting a loop that works on the copies, which are written back as it ends
+    int loop_depth_ = 0;        // the loops around what's being emitted
     std::unordered_map<std::uint32_t, std::string> abs_paths_;
     std::unordered_map<const Item*, FnOut> fns_;
     std::unordered_map<const Item*, ConstOut> consts_;

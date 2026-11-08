@@ -1,0 +1,170 @@
+// A function given views to change copies them around its loops, the first of a block's to its
+// last, and writes them back after, not as it starts and returns (CLX-162). So what it changes
+// before, between and after its loops, inside a loop it seldom runs, through a loop that gives
+// a value, from a loop at its end, and out of a loop by `return` and `try`, is all kept, and a
+// view the loops don't name is left as the function changed it.
+
+struct Pending {
+    marks: List<u32>
+    count: usize
+}
+
+// The loop is in a branch most calls skip.
+fn add(p: mut Pending, c: u32, out: mut List<u8>) {
+    if c >= 100 {
+        var i = p.marks.len()
+        while i > 0 and p.marks[i - 1] > c {
+            i -= 1
+        }
+        p.marks.insert(i, c)
+        out.push(0)
+        return
+    }
+    p.count += 1
+    out.push(u8.wrap(c))
+}
+
+// Changes before, between and after two loops, and a `return` out of the second.
+fn around(xs: mut List<i32>, stop: i32) -> i32 {
+    xs.push(-1)
+    for i in 0..2 {
+        xs.push(i)
+    }
+    xs.push(-2)
+    var n = 0
+    while n < 5 {
+        if n == stop {
+            xs.push(100 + n)
+            return n
+        }
+        xs.push(10 + n)
+        n += 1
+    }
+    xs.push(-3)
+    return -1
+}
+
+// A loop that gives a value, and a loop at the end of the function.
+fn found(xs: mut List<i32>, want: i32) -> i32 {
+    var i = 0
+    let at = loop {
+        if i >= 3 {
+            break -1
+        }
+        xs.push(i)
+        if i == want {
+            break i
+        }
+        i += 1
+    }
+    xs.push(at * 10)
+    var k = 0
+    loop {
+        xs.push(50 + k)
+        k += 1
+        if k == 2 {
+            return at
+        }
+    }
+}
+
+// Only `a` is named in the loop; `b` is changed around it.
+fn only_one(a: mut List<i32>, b: mut List<i32>) {
+    b.push(1)
+    for i in 0..3 {
+        a.push(i)
+    }
+    b.push(2)
+}
+
+fn digit(b: u8) -> u8 ! String {
+    if b < 48 or b > 57 {
+        fail "not a digit: {b}"
+    }
+    return b - 48
+}
+
+// `try` out of a loop in a branch.
+fn digits(out: mut List<u8>, s: str, check: bool) ! String {
+    out.push(200)
+    if check {
+        for i in 0..s.len() {
+            out.push(try digit(s.byte_at(i)))
+        }
+    }
+    out.push(201)
+}
+
+// A loop inside a value.
+fn inside(xs: mut List<i32>, go: bool) -> i32 {
+    let n = if go {
+        for i in 0..3 {
+            xs.push(i)
+        }
+        3
+    } else {
+        xs.push(-9)
+        0
+    }
+    xs.push(n)
+    return n
+}
+
+fn apply(f: Fn(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+// A closure that reads the view sees what the loop has changed, and so does one after it.
+fn with_closure(xs: mut List<i32>) {
+    for i in 0..3 {
+        let n = apply(|k| k + i32.wrap(xs.len()), i * 10)
+        xs.push(n)
+    }
+    xs.push(apply(|k| k + i32.wrap(xs.len()), 100))
+}
+
+fn main() {
+    var p = Pending { marks: List<u32>(), count: 0 }
+    var out = List<u8>()
+    for c in [5u32, 150, 7, 120, 9, 300] {
+        add(mut p, c, mut out)
+    }
+    println("{p.marks} {p.count} {out}")    // out: [120, 150, 300] 3 [5, 0, 7, 0, 9, 0]
+
+    var a = List<i32>()
+    let r1 = around(mut a, 2)
+    println("{r1} {a}")    // out: 2 [-1, 0, 1, -2, 10, 11, 102]
+    var b = List<i32>()
+    let r2 = around(mut b, 9)
+    println("{r2} {b}")    // out: -1 [-1, 0, 1, -2, 10, 11, 12, 13, 14, -3]
+
+    var c = List<i32>()
+    let f1 = found(mut c, 1)
+    println("{f1} {c}")    // out: 1 [0, 1, 10, 50, 51]
+    var d = List<i32>()
+    let f2 = found(mut d, 7)
+    println("{f2} {d}")    // out: -1 [0, 1, 2, -10, 50, 51]
+
+    var x = List<i32>()
+    var y = List<i32>()
+    only_one(mut x, mut y)
+    println("{x} {y}")    // out: [0, 1, 2] [1, 2]
+
+    var g = List<u8>()
+    match digits(mut g, "12x", true) {
+        ok => println("ok {g}"),
+        err(e) => println("{e}: {g}"),    // out: not a digit: 120: [200, 1, 2]
+    }
+    var h = List<u8>()
+    match digits(mut h, "12x", false) {
+        ok => println("ok {h}"),    // out: ok [200, 201]
+        err(e) => println("{e}: {h}"),
+    }
+
+    var i = List<i32>()
+    println("{inside(mut i, true)} {inside(mut i, false)} {i}")    // out: 3 0 [0, 1, 2, 3, -9, 0]
+
+    var j = List<i32>()
+    with_closure(mut j)
+    println("{j}")    // out: [0, 11, 22, 103]
+}
