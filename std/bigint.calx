@@ -217,6 +217,59 @@ impl BigInt {
         return if self.negative { -x } else { x }
     }
 
+    /// The `f64` nearest the value divided by `other`, ties to even, as Python's `/` on two
+    /// `int`s, however big they are. It's infinity past the largest `f64`, and rounds to the
+    /// nearest subnormal or zero near zero. It panics when `other` is 0.
+    @track_caller
+    pub fn div_f64(self, other: BigInt) -> f64 {
+        if other.mag.len() == 0 {
+            panic("division by zero")
+        }
+        if self.mag.len() == 0 {
+            return 0.0
+        }
+        // A quotient of 55 or 56 bits, and whether anything was left over, are enough to round
+        // to 53 bits as the exact quotient would.
+        let nb = i64.wrap(self.bit_len())
+        let db = i64.wrap(other.bit_len())
+        let shift = 55 - (nb - db)
+        let n = if shift > 0 { shl_mag(self.mag, u64.wrap(shift)) } else { self.mag.copy() }
+        let d = if shift < 0 { shl_mag(other.mag, u64.wrap(0 - shift)) } else { other.mag.copy() }
+        let (qm, rm) = divmod_mag(n, d)
+        let q = qm[0]
+        let sticky = rm.len() > 0
+        // The quotient is q / 2^shift, and its top bit is worth 2^top.
+        let qbits = 64 - i64(q.leading_zeros())
+        let top = qbits - 1 - shift
+        // Keep 53 bits, or fewer for a subnormal, whose lowest bit is worth 2^-1074.
+        let drop = if top < -1022 { shift - 1074 } else { qbits - 53 }
+        var r: u64 = 0
+        if drop >= 64 {
+            r = 0  // less than half the least subnormal
+        } else if drop > 0 {
+            let by = u64.wrap(drop)
+            r = q >> by
+            let rest = q & ((1u64 << by) - 1)
+            let half = 1u64 << (by - 1)
+            if rest > half or (rest == half and (sticky or r & 1 == 1)) {
+                r += 1
+            }
+        } else {
+            r = q << u64.wrap(0 - drop)
+        }
+        // r times 2^k, exactly, since the rounding left a number an `f64` holds.
+        let k = drop - shift
+        var x = f64.nearest(r)
+        if k > 971 {
+            x = f64.INFINITY
+        } else if k >= -1022 {
+            x *= f64.from_bits(u64.wrap(k + 1023) << 52)
+        } else {
+            x *= f64.from_bits(1u64 << u64.wrap(k + 1074))
+        }
+        return if self.negative != other.negative { -x } else { x }
+    }
+
     /// The value to the power `exp`, by squaring: `BigInt.from(2).pow(100)`.
     pub fn pow(self, exp: u32) -> BigInt {
         var result = BigInt.from(1)

@@ -1,0 +1,43 @@
+// std.stats: the same values as Python 3.14's statistics module, to the last bit (CLX-103).
+
+import std.stats
+
+fn main() {
+    let xs: List<f64> = [2.5, 3.25, 5.5, 11.25, 11.75]
+    println("{stats.mean(xs)} {stats.median(xs)} {stats.variance(xs)} {stats.stdev(xs)}")  // out: some(6.85) some(5.5) some(19.26875) some(4.389618434442793)
+    // Exact and rounded once: a sum and a quotient in floats would give 15.415000000000001.
+    println("{stats.pvariance(xs)} {stats.pstdev(xs)}")         // out: some(15.415) some(3.926194085880116)
+
+    let lopsided: List<f64> = [1.0e100, 1.0, -1.0e100, 1.0e-100]
+    let tenths: List<f64> = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    println("{stats.fsum(lopsided)} {stats.fsum(tenths)} {stats.mean(tenths)}")  // out: 1.0 1.0 some(0.1)
+
+    let data: List<f64> = [105.0, 129.0, 87.0, 86.0, 111.0, 111.0, 89.0, 81.0, 108.0, 92.0, 110.0, 100.0, 75.0, 105.0, 103.0, 109.0, 76.0, 119.0, 99.0, 91.0, 103.0, 129.0, 106.0, 101.0, 84.0, 111.0, 74.0, 87.0, 86.0, 103.0, 103.0, 106.0, 86.0, 111.0, 75.0, 87.0, 102.0, 121.0, 111.0, 88.0, 89.0, 101.0, 106.0, 95.0, 103.0, 107.0, 101.0, 81.0, 109.0, 104.0]
+    println("{stats.quantiles(data, 10)}")                      // out: some([81.0, 86.2, 89.0, 99.4, 102.5, 103.6, 106.0, 109.8, 111.0])
+    println("{stats.quantiles(data, inclusive: true)}")         // out: some([87.25, 102.5, 107.75])
+
+    let words: List<str> = ["red", "blue", "blue", "red", "green"]
+    let ints: List<i32> = [1, 1, 2, 3, 3, 3, 3, 4]
+    println("{stats.mode(words)} {stats.mode(ints)}")           // out: some(red) some(3)
+
+    let x: List<f64> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+    let y: List<f64> = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+    let down: List<f64> = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+    println("{stats.covariance(x, y)} {stats.correlation(x, down)} {stats.correlation(x, x)} {stats.linear_regression(x, y)}")  // out: some(0.75) some(-1.0) some(1.0) some((0.1, 1.5))
+
+    let sizes: List<f64> = [54.0, 24.0, 36.0]
+    let speeds: List<f64> = [40.0, 60.0]
+    let with_zero: List<f64> = [3.0, 0.0]
+    let negative: List<f64> = [3.0, -1.0]
+    println("{stats.geometric_mean(sizes)} {stats.harmonic_mean(speeds)} {stats.harmonic_mean(with_zero)} {stats.geometric_mean(with_zero)} {stats.harmonic_mean(negative)}")  // out: some(36.000000000000014) some(48.0) some(0.0) some(0.0) none
+
+    // Too few values, a constant list, and values that aren't finite.
+    let empty: List<f64> = []
+    let one: List<f64> = [3.0]
+    let same: List<f64> = [2.0, 2.0, 2.0]
+    println("{stats.mean(empty)} {stats.median(empty)} {stats.variance(one)} {stats.pvariance(one)} {stats.quantiles(one, 4)} {stats.quantiles(empty)}")  // out: none none none some(0.0) some([3.0, 3.0, 3.0]) none
+    println("{stats.correlation(same, same)} {stats.linear_regression(same, x[..3])} {stats.stdev(same)}")  // out: none none some(0.0)
+    let inf: List<f64> = [1.0, f64.INFINITY]
+    println("{stats.mean(inf)} {stats.fsum(inf)} {stats.variance(inf)}")  // out: some(Infinity) Infinity some(NaN)
+    println("{stats.covariance(x, y[..2])}")                    // panic: the lists have 9 and 2 values
+}

@@ -101,6 +101,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 31. [std.random](std/random.md): random numbers from a seed, the same on every system, or seeded from the system: integers, floats, normal values, shuffles, picks and samples
 32. [std.bytes](std/bytes.md): bytes as hex and base64 and back, finding bytes in bytes, and numbers read from and written to bytes in either byte order
 33. [std.bigint](std/bigint.md): integers of any size, with the arithmetic operators, powers, roots, gcd, and text in any base
+34. [std.stats](std/stats.md): means, medians, quantiles, modes, variances, standard deviations, correlation and linear regression, as Python's `statistics` gives them to the last bit
 
 ### Java compatibility
 

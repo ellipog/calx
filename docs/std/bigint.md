@@ -61,6 +61,7 @@ fn main() {
 | `n.to_radix(radix)` | Digits in base `radix`, from 2 to 36, lowercase: `n.to_radix(16)` is Python's `format(n, "x")` |
 | `n.to_i64()`, `n.to_u64()` | `some` of the value, or `none` when it doesn't fit |
 | `n.to_f64()` | The nearest `f64`, ties to even, as Python's `float(n)`, or infinity past the largest |
+| `n.div_f64(d)` | The `f64` nearest `n / d`, ties to even, as Python's `/` on two `int`s, however big: `BigInt.from(1).div_f64(BigInt.from(3))` is `0.3333333333333333`. Past the largest `f64` it's infinity, where Python raises `OverflowError` |
 | `n.to_bytes_be()` | The magnitude's bytes, the most significant first, with no zero bytes before them. Zero has none |
 
 ## How it works

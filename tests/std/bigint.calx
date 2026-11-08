@@ -31,6 +31,11 @@ fn main() {
     let big = two.pow(64)
     println("{(two.pow(53) + 1).to_f64() == 9007199254740992.0} {(big + 2048).to_f64() == 18446744073709551616.0} {(big + 2049).to_f64() == 18446744073709555712.0}")  // out: true true true
     println("{two.pow(1024).to_f64()} {-two.pow(5000).to_f64()} {BigInt.from(-12).to_f64()}")  // out: Infinity -Infinity -12.0
+    // Python's `/` on two ints: the nearest f64, ties to even, down into the subnormals.
+    let one = BigInt.from(1)
+    let three = BigInt.from(3)
+    println("{one.div_f64(three)} {one.div_f64(two.pow(1074))} {one.div_f64(two.pow(1075))} {three.div_f64(two.pow(1076))} {three.div_f64(two.pow(1075))} {BigInt.from(-7).div_f64(two)}")  // out: 0.3333333333333333 4.9E-324 0.0 4.9E-324 9.9E-324 -3.5
+    println("{(two.pow(54) + 3).div_f64(one) == 18014398509481988.0} {BigInt.parse("12345678901234567890123")!.div_f64(BigInt.from(10).pow(10))} {(two.pow(1023) * 3 / 2).div_f64(one)} {BigInt.from(10).pow(400).div_f64(BigInt.from(10).pow(90))}")  // out: true 1.2345678901234568E12 1.348269851146737E308 Infinity
     let n = two.pow(200) - 1
     println("{n.to_bytes_be().len()} {BigInt.from_bytes_be(n.to_bytes_be()) == n} {BigInt.from_bytes_be([1u8, 0])} {BigInt.zero().to_bytes_be()}")  // out: 25 true 256 []
 
