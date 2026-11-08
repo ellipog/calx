@@ -722,10 +722,10 @@ CX_INLINE cx_str cx_text_trim_suffix(cx_str s, cx_str p) {
     return cx_str_ends_with(s, p) ? (cx_str){s.ptr, s.len - p.len} : s;
 }
 
-/* MD5, SHA-1 and SHA-256 (kind 0, 1 and 2) and HMAC-SHA256, in calx_digest.c (D118). A context is
- * CX_DIGEST_CTX bytes, with no alignment needed. `cx_digest_finish` writes the digest, 16, 20 or
- * 32 bytes, and returns its length. */
-#define CX_DIGEST_CTX 112
+/* MD5, SHA-1, SHA-256, SHA-512 and SHA-384 (kind 0 to 4) and HMAC-SHA256, in calx_digest.c (D118).
+ * A context is CX_DIGEST_CTX bytes, with no alignment needed. `cx_digest_finish` writes the
+ * digest, 16 to 64 bytes, and returns its length. */
+#define CX_DIGEST_CTX 224
 CX_FN(void, cx_digest_start, (cx_u8* ctx, cx_u32 kind));
 CX_FN(void, cx_digest_add, (cx_u8* ctx, const cx_u8* p, cx_usize n));
 CX_FN(cx_usize, cx_digest_finish, (cx_u8* ctx, cx_u8* out));

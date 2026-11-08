@@ -1,8 +1,10 @@
-// std.hash gives what Java 25's MessageDigest and Mac give. The hashes below are Java's, for the
-// lengths around a block's padding (55, 56 and 64 bytes) and for more than one block.
-// build/scratch's wider check compared 3000 random inputs.
+// std.hash gives what Java 25's MessageDigest and Mac give, and Python's hashlib and hmac. The
+// MD5, SHA-1 and SHA-256 hashes below are Java's, and the SHA-384, SHA-512 and hmac ones Python's,
+// for the lengths around a block's padding (55, 56 and 64 bytes, or 111, 112 and 128) and for more
+// than one block. build/scratch's wider checks compared 3000 random inputs with Java, and 2510 of
+// every hash and HMAC with Python, whole and in two pieces (CLX-149).
 
-import std.hash.{Algorithm, Digest, hmac_sha256, md5, sha1, sha256}
+import std.hash.{Algorithm, Digest, hmac, hmac_sha256, md5, sha1, sha256, sha384, sha512}
 
 fn hex(bytes: List<u8>) -> String {
     let digits = "0123456789abcdef"
@@ -60,10 +62,38 @@ fn main() {
     println(hex(hmac_sha256(seq(65, 5), seq(64, 11))))    // out: b7e5b4101533a34209cf04aba20358a3718ee44e77e1863f3b4015ce7dfe6e38
     println(hex(hmac_sha256(seq(200, 5), seq(1000, 11))))    // out: a6f4955e4abb114244d96c70e55311b168de68819559245e7f00776882e47653
 
+    println(hex(sha384([])))    // out: 38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b
+    println(hex(sha384(text("abc"))))    // out: cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+    println(hex(sha384(seq(111, 7))))    // out: 341388a9dc2275074e90cf394323761919761c805fd9e370977c9966a0e8c81a52135f02577670b0071638a4a26dbc31
+    println(hex(sha384(seq(112, 7))))    // out: 619cc5d06138526d70659eccf602d197e63e1050e22039a7feb40a30a5b2b08fb03729e291df12f8c576e6f1cd8af22a
+    println(hex(sha384(seq(128, 7))))    // out: e8480e9c4dd90f88104a79cbaccec48edbd798a142b4f241d726dc252f1502350e824c7d18dadd59d7d716919fb8f9bf
+    println(hex(sha384(seq(1000, 13))))    // out: 0974559b9a661811aa6b18f147b8e624acffbf8a7a1bc82e729e20611cdb7d0cbab1836b7c7083ed47813512d488218f
+    println(hex(sha384(text("Grüße, 世界"))))    // out: 564416edef858f974f99dbc4f2fa65e63dd6b4dfd7b8ea1389b45e9e0e678375a5d5daa8d6f818997725271a737d4d57
+
+    println(hex(sha512([])))    // out: cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e
+    println(hex(sha512(text("abc"))))    // out: ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+    println(hex(sha512(seq(111, 7))))    // out: 68cffa6d0d76f309c9ce0d35280939f8e25990c43b7b086ccdf709be35b07d4ddba599541ff2b1c19d34ea49aeafb9659adb7ac3c0b078bb30a22d57fc6687ef
+    println(hex(sha512(seq(112, 7))))    // out: d0865c524d1dddf7c23b799c413f5adcd7caefd3f66a9b49750ec81066012c25a8bcf94ddea6dc525691673097ca40e0101e897fc97218cfdb0704084e2bef4b
+    println(hex(sha512(seq(128, 7))))    // out: 99b16f17aa0b969a5b8f08f367719d516e330ccd2660b6f0688ec031dbc783de50a1cd185a2568dba75070a2403d17d4741d163578515dfd2ff756ddfe4d47b1
+    println(hex(sha512(seq(1000, 13))))    // out: bfdca439cfd22ae838a02346abf89bb132d44a90d8fda779675665934cd89e9c144ac35e85f1a6a758ca9bd815535afc236006e3222e1688047ee556b1c8a961
+    println(hex(sha512(text("Grüße, 世界"))))    // out: 0d79353f8f649ab846f0231c291e5da4c97e6ac88ab8583074ba69b94aef85f33eba3e12f34ce718f826dc88bb6489a5823d1c7159d07918c274c0ed45f00ac3
+
+    // Keys shorter than a block, a block long, and longer, which are hashed first: 128 bytes for
+    // SHA-384 and SHA-512, and 64 for the others.
+    println(hex(hmac(Algorithm.Sha512, seq(100, 5), seq(100, 11))))    // out: 8054a1c48cfb860f4420078444bfba4bfcf432fb64d830ffd09764f0e6ddc01358d82c2ee9c4a4be79b9224d17e425de2b0e9de8d2f944cb6dac1260235cc51d
+    println(hex(hmac(Algorithm.Sha512, seq(128, 5), seq(3, 11))))    // out: e7a3324dae49f55b377445257ab638ffdfb732677aa6aa8bbf006cf489cab0555ed14cb9527a204bfea9028a79bdb2d4a10f855d9025e7c53c5bda593f25449d
+    println(hex(hmac(Algorithm.Sha512, seq(129, 5), seq(128, 11))))    // out: 77cae02ecc73af90afc9dde85d8507090f26ce8f9d12c15d09cb66117e678344dce1eafb3f43f6e94c543293cc07a8d4e33cbb7c3d32a7455d9b4676704416ec
+    println(hex(hmac(Algorithm.Sha384, seq(200, 5), seq(1000, 11))))    // out: 5f24d28b4daa22028d9a3c1216dd228e7513885fea50cc8505e40b6cec78722fd8257c4f4098ead54c14dee36374d106
+    println(hex(hmac(Algorithm.Md5, seq(65, 5), seq(64, 11))))    // out: 6c79a88aa97733b4e0ed011fcdfabc93
+    println(hex(hmac(Algorithm.Sha1, seq(16, 5), seq(100, 11))))    // out: 8ff0d19694155526368c488f60c00846a31313fe
+    println(hex(hmac(Algorithm.Sha256, seq(65, 5), seq(64, 11))))    // out: b7e5b4101533a34209cf04aba20358a3718ee44e77e1863f3b4015ce7dfe6e38
+    println("{Algorithm.Md5.len()} {Algorithm.Sha384.len()} {Algorithm.Sha512.block_len()} {Algorithm.Sha1.block_len()}")    // out: 16 48 128 64
+
     // Pieces of every size give the hash of the whole, across block edges.
     let whole = seq(1000, 13)
-    let sizes: List<usize> = [1, 3, 63, 64, 65, 999]
+    let sizes: List<usize> = [1, 3, 63, 64, 65, 127, 128, 129, 999]
     for size in sizes {
+        var big = Digest.new(Algorithm.Sha512)
         var d = Digest.new(Algorithm.Sha256)
         var at: usize = 0
         while at < whole.len() {
@@ -72,11 +102,15 @@ fn main() {
             for i in at..end {
                 piece.push(whole[i])
             }
+            big.add(piece.copy())
             d.add(piece)
             at = end
         }
         if hex(d.finish()) != "169f388674ddef9a71d2bf97e62d6fa07b83a8fd96ed37349544af086d4f57c9" {
             panic("pieces of {size} give another hash")
+        }
+        if big.finish() != sha512(whole) {
+            panic("pieces of {size} give another SHA-512")
         }
     }
 

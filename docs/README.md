@@ -78,7 +78,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 8. [std.hint](std/hint.md): `black_box`, which hides a value from the optimizer, for benchmarks
 9. [std.text.mutf8](std/text-mutf8.md): Java's Modified UTF-8, as `DataOutputStream.writeUTF` writes it
 10. [std.mail](std/mail.md): messages between actors, delivered at the barrier in order of sender, then of sending
-11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256 and HMAC-SHA256, as Java's `MessageDigest` and `Mac` give them
+11. [std.hash](std/hash.md): MD5, SHA-1, SHA-256, SHA-384, SHA-512 and HMAC with any of them, as Java's `MessageDigest` and `Mac` and Python's `hashlib` give them, with SHA-1 and SHA-256 on the processor's SHA instructions
 12. [std.crypto](std/crypto.md): random bytes from the system, AES-CFB8 and RSA
 13. [std.zlib](std/zlib.md): zlib, gzip and raw deflate, as Java's `Deflater`, `Inflater` and GZIP streams write and read them
 14. [std.http](std/http.md): HTTP and HTTPS requests on the system's own client, each on a thread of its own

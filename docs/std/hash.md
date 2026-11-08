@@ -1,31 +1,22 @@
 ---
 title: std.hash
-description: MD5, SHA-1 and SHA-256, at once or in pieces, and HMAC-SHA256, giving what Java's MessageDigest and Mac give.
+description: MD5, SHA-1, SHA-256, SHA-384 and SHA-512, at once or in pieces, and HMAC with any of them, giving what Java's MessageDigest and Mac and Python's hashlib and hmac give, at or near OpenSSL's speed.
 ---
 
 # `std.hash`
 
-Common hashes, giving the bytes Java's `MessageDigest` and `Mac` give:
+Common hashes, giving the bytes Java's `MessageDigest` and `Mac` and Python's `hashlib` and `hmac` give:
 
 - MD5, for an offline player's UUID, which `UUID.nameUUIDFromBytes` makes from `OfflinePlayer:<name>`.
 - SHA-1, for the server hash a login sends the session server.
-- SHA-256, for the hashed seed in the join packet.
-- HMAC-SHA256, which Velocity signs the player data it forwards with.
+- SHA-256, for the hashed seed in the join packet, and with SHA-512 for checking what a script downloads.
+- HMAC-SHA256, which Velocity signs the player data it forwards with, and HMAC with any of the others.
+
+On a modern x86-64 processor SHA-1 and SHA-256 run on its SHA instructions, as OpenSSL's do, and every hash is as fast as Python's or close ([below](#speed)).
 
 ```calx
-import std.hash.{Algorithm, Digest, hmac_sha256, md5, sha256}
-
-fn hex(bytes: List<u8>) -> String {
-    let digits = "0123456789abcdef"
-    var s = String()
-    for b in bytes {
-        let hi = usize(b / 16)
-        let lo = usize(b % 16)
-        s.push_str(digits[hi..hi + 1])
-        s.push_str(digits[lo..lo + 1])
-    }
-    return s
-}
+import std.bytes.{hex}
+import std.hash.{Algorithm, Digest, hmac, hmac_sha256, md5, sha256, sha512}
 
 fn main() {
     println(hex(md5("OfflinePlayer:Notch".to_bytes())))    // out: b50ad385829da141a2167e7d7539ba7f
@@ -39,6 +30,10 @@ fn main() {
 
     let mac = hmac_sha256("key".to_bytes(), "The quick brown fox jumps over the lazy dog".to_bytes())
     println(hex(mac))    // out: f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+    println(hex(hmac(Algorithm.Sha1, "key".to_bytes(), "The quick brown fox jumps over the lazy dog".to_bytes())))    // out: de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9
+
+    // What a download should hash to, as a release lists it.
+    println(hex(sha512("abc".to_bytes()))[..32])    // out: ddaf35a193617abacc417349ae204131
 }
 ```
 
@@ -47,22 +42,46 @@ fn main() {
 | `md5(bytes: List<u8>) -> List<u8>` | The MD5 of the bytes, 16 of them |
 | `sha1(bytes: List<u8>) -> List<u8>` | The SHA-1, 20 bytes |
 | `sha256(bytes: List<u8>) -> List<u8>` | The SHA-256, 32 bytes |
+| `sha384(bytes: List<u8>) -> List<u8>` | The SHA-384, 48 bytes |
+| `sha512(bytes: List<u8>) -> List<u8>` | The SHA-512, 64 bytes |
+| `digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8>` | The hash with any of them, as Python's `hashlib.new(name, data).digest()` |
+| `hmac(algorithm: Algorithm, key: List<u8>, message: List<u8>) -> List<u8>` | The HMAC of the message under the key, as RFC 2104 makes it and Java's `Mac` and Python's `hmac.digest` give it. A key longer than a block is hashed first |
 | `hmac_sha256(key: List<u8>, message: List<u8>) -> List<u8>` | The HMAC-SHA256 of the message under the key, 32 bytes, as Java's `Mac.getInstance("HmacSHA256")` gives. A key longer than 64 bytes is hashed first, as the RFC says |
-| `Algorithm` | `Md5`, `Sha1` or `Sha256` |
+| `Algorithm` | `Md5`, `Sha1`, `Sha256`, `Sha384` or `Sha512` |
+| `a.len() -> usize`, `a.block_len() -> usize` | How many bytes its hash is, and how many it hashes at a time: 128 for SHA-384 and SHA-512, 64 for the others |
 | `Digest.new(algorithm: Algorithm) -> Digest` | A hash to work out in pieces |
 | `d.add(bytes: List<u8>)` | Adds the bytes |
 | `d.add_text(text: String)` | Adds the text's UTF-8 bytes, which is what Java's `getBytes(UTF_8)` gives |
 | `d.finish() -> List<u8>` | The hash of everything added. It takes the `Digest`, which can't be used after |
 
 - MD5 and SHA-1 are broken as protection against someone choosing what's hashed. `std.hash` has them for matching programs and protocols that use them where that doesn't matter, not for keeping anything safe.
-- They gave the same bytes as Java 25's `MessageDigest` and `Mac` for 3000 random inputs of up to 300 bytes, with keys of 1 to 200 bytes, and with each input also added in two pieces cut at a random place. The [tests](../../tests/std/hash.calx) hold Java's hashes for the lengths around where the padding takes another block.
+- MD5, SHA-1 and SHA-256 gave the same bytes as Java 25's `MessageDigest` and `Mac` for 3000 random inputs of up to 300 bytes, with keys of 1 to 200 bytes, and with each input also added in two pieces cut at a random place.
+- All five gave the same bytes, and the same HMACs, as Python 3.14's `hashlib` and `hmac` for 502 random inputs: every length up to 300 bytes, 200 up to 5000, and two of a MiB, each also in two pieces, with the first piece as the key. The SHA instructions and the plain code were each checked.
+- The [tests](../../tests/std/hash.calx) hold Java's and Python's hashes for the lengths around where the padding takes another block.
 - To turn a hash into the hex Mojang's session server takes, which is the hash as a signed number, a program does what Java's `new BigInteger(hash).toString(16)` does: the bytes are two's complement, so a hash whose first byte is 0x80 or more is written as `-` and its negation.
 
 ## How it's built
 
-[runtime/calx_digest.c](../../runtime/calx_digest.c), written from RFC 1321 (MD5), FIPS 180-4 (SHA-1 and SHA-256) and RFC 2104 (HMAC). The constants are worked out from their definitions: MD5's from sines, SHA-256's from the square and cube roots of the first primes. It's linked only into programs that call it.
+[runtime/calx_digest.c](../../runtime/calx_digest.c), written from RFC 1321 (MD5), FIPS 180-4 (SHA-1 and SHA-2) and RFC 2104 (HMAC). The constants are worked out from their definitions: MD5's from sines, SHA-2's from the square and cube roots of the first primes. It's linked only into programs that call it.
 
-- A `Digest` holds its state in a `List<u8>` of 112 bytes, which the runtime copies into a struct and back, so it needs no alignment and `std.hash` needs no unsafe types.
-- Each 64-byte block is hashed straight from the caller's bytes. Only a part block at the end of an `add` is copied, to wait for the next.
+- **SHA-1 and SHA-256** use the processor's SHA instructions where `cpuid` says it has them, which most x86-64 processors made since 2017 do: four rounds an instruction. The plain code is the fallback.
+- **MD5** is written out round by round. Each round adds its message word and constant before the function of the round before's result, and an empty `asm` keeps clang from moving the constant back onto that chain.
+- **SHA-512 and SHA-384** compute the message schedule two words at a time in SSE2's 64-bit lanes, sixteen rounds ahead, inside the round loop, so it fills the gaps in the rounds' chain. Each round sums its parts in the order they're ready, and works out the majority function from the round before's `a ^ b`.
+- A `Digest` holds its state in a `List<u8>` of 224 bytes, which the runtime copies into a struct and back, so it needs no alignment and `std.hash` needs no unsafe types.
+- Whole blocks are hashed straight from the caller's bytes. Only a part block at the end of an `add` is copied, to wait for the next.
+- `hmac` is written in Calx over `Digest`. `hmac_sha256`, which Calcite checks Velocity's forwarding with, is one runtime call.
+
+## Speed
+
+On our benchmark, hashing 64 MiB at once on an i9-13900K, the best of three runs, against Python 3.14's `hashlib`, which is OpenSSL 3. The desktop had other work running, so the numbers are rough.
+
+| Hash | Calx | Python |
+| --- | --- | --- |
+| MD5 | 1090 MiB/s | 1136 MiB/s |
+| SHA-1 | 2770 MiB/s | 2728 MiB/s |
+| SHA-256 | 2505 MiB/s | 2441 MiB/s |
+| SHA-512 | 962 MiB/s | 1097 MiB/s |
+
+SHA-512 is the one Python is ahead on: OpenSSL works out the schedule for two blocks at once in AVX2. Before CLX-149, Calx did MD5 at 635 MiB/s, SHA-1 at 600 and SHA-256 at 400.
 
 `std.hash` is written in Calx over those runtime calls: [std/hash.calx](../../std/hash.calx).

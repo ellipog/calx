@@ -129,6 +129,10 @@ fn main() {
     println("{big.size()} {big_der.len()}")    // out: 256 294
     let msg = "a shared secret".to_bytes()
     println(String.from_utf8(big.decrypt(big.encrypt(msg)!)!) ?? "bad")    // out: a shared secret
+    // SHA-384 and SHA-512 signatures, which openssl verified (CLX-149), check only with their own hash.
+    let s512 = big.sign(Algorithm.Sha512, msg.copy())
+    let pub_big = big.public_key()
+    println("{pub_big.verify(Algorithm.Sha512, msg.copy(), s512.copy())} {pub_big.verify(Algorithm.Sha384, msg.copy(), s512)} {pub_big.verify(Algorithm.Sha384, msg.copy(), big.sign(Algorithm.Sha384, msg.copy()))}")    // out: true false true
 
     // A key pair made again from its primes is the same key pair: the same public key, and it
     // opens what the first sealed and signs the same.

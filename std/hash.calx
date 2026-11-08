@@ -1,8 +1,9 @@
-/// MD5, SHA-1 and SHA-256, and HMAC-SHA256 (D118).
+/// MD5, SHA-1, SHA-256, SHA-384 and SHA-512, and HMAC with any of them (D118).
 ///
 /// Vanilla uses MD5 for an offline player's UUID, SHA-1 for the server hash the session server
 /// checks a login by, and SHA-256 for the seed it sends a joining player. Velocity signs the
-/// player data it forwards with HMAC-SHA256. They give what Java's `MessageDigest` and `Mac` give.
+/// player data it forwards with HMAC-SHA256. Scripts check what they download with SHA-256 and
+/// SHA-512. They give what Java's `MessageDigest` and `Mac` and Python's `hashlib` and `hmac` give.
 module std.hash
 
 extern "C" {
@@ -16,10 +17,36 @@ extern "C" {
 pub enum Algorithm {
     /// 16 bytes. Broken for security, but what `UUID.nameUUIDFromBytes` uses.
     Md5
-    /// 20 bytes.
+    /// 20 bytes. Broken for security, but what Mojang's session server uses.
     Sha1
     /// 32 bytes.
     Sha256
+    /// 48 bytes: SHA-512 cut short, from other starting values.
+    Sha384
+    /// 64 bytes.
+    Sha512
+}
+
+impl Algorithm {
+    /// How many bytes its hash is: 16, 20, 32, 48 or 64.
+    pub fn len(self) -> usize {
+        return match self {
+            Md5 => 16,
+            Sha1 => 20,
+            Sha256 => 32,
+            Sha384 => 48,
+            Sha512 => 64,
+        }
+    }
+
+    /// How many bytes it hashes at a time, which HMAC pads its key to: 128 for SHA-384 and
+    /// SHA-512, and 64 for the others.
+    pub fn block_len(self) -> usize {
+        return match self {
+            Sha384 | Sha512 => 128,
+            _ => 64,
+        }
+    }
 }
 
 /// A hash being worked out: add bytes and text in any number of pieces, then `finish`. The pieces
@@ -30,11 +57,13 @@ pub struct Digest {
 
 impl Digest {
     pub fn new(algorithm: Algorithm) -> Digest {
-        var ctx: List<u8> = [0; 112]
+        var ctx: List<u8> = [0; 224]
         let kind: u32 = match algorithm {
             Algorithm.Md5 => 0,
             Algorithm.Sha1 => 1,
             Algorithm.Sha256 => 2,
+            Algorithm.Sha512 => 3,
+            Algorithm.Sha384 => 4,
         }
         unsafe {
             cx_digest_start(ctx.as_mut_ptr(), kind)
@@ -59,7 +88,7 @@ impl Digest {
     /// The hash of everything added.
     pub fn finish(own self) -> List<u8> {
         var ctx = self.ctx
-        var out: List<u8> = [0; 32]
+        var out: List<u8> = [0; 64]
         unsafe {
             let n = cx_digest_finish(ctx.as_mut_ptr(), out.as_mut_ptr())
             out.truncate(n)
@@ -68,7 +97,8 @@ impl Digest {
     }
 }
 
-fn digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8> {
+/// The hash of the bytes with `algorithm`.
+pub fn digest(algorithm: Algorithm, bytes: List<u8>) -> List<u8> {
     var d = Digest.new(algorithm)
     d.add(bytes)
     return d.finish()
@@ -87,6 +117,34 @@ pub fn sha1(bytes: List<u8>) -> List<u8> {
 /// The SHA-256 of the bytes, 32 of them.
 pub fn sha256(bytes: List<u8>) -> List<u8> {
     return digest(Algorithm.Sha256, bytes)
+}
+
+/// The SHA-384 of the bytes, 48 of them.
+pub fn sha384(bytes: List<u8>) -> List<u8> {
+    return digest(Algorithm.Sha384, bytes)
+}
+
+/// The SHA-512 of the bytes, 64 of them.
+pub fn sha512(bytes: List<u8>) -> List<u8> {
+    return digest(Algorithm.Sha512, bytes)
+}
+
+/// The HMAC of the message under the key, with `algorithm`, as RFC 2104 makes it and Java's `Mac`
+/// and Python's `hmac` give it: the hash of the key padded and xored with 0x5c, then of the key
+/// padded and xored with 0x36 and the message. A key longer than a block is hashed first.
+pub fn hmac(algorithm: Algorithm, key: List<u8>, message: List<u8>) -> List<u8> {
+    let block = algorithm.block_len()
+    var k = if key.len() > block { digest(algorithm, key) } else { key.copy() }
+    while k.len() < block {
+        k.push(0)
+    }
+    var inner = Digest.new(algorithm)
+    inner.add(k.map(|b| b ^ 0x36))
+    inner.add(message)
+    var outer = Digest.new(algorithm)
+    outer.add(k.map(|b| b ^ 0x5c))
+    outer.add(inner.finish())
+    return outer.finish()
 }
 
 /// The HMAC-SHA256 of the message under the key, 32 bytes, as Java's `Mac` "HmacSHA256" gives.

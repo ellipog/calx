@@ -67,7 +67,7 @@ fn main() {
 | `k.encrypt(message: List<u8>) -> List<u8>?` | The message encrypted with the public key and random padding, as Java's `"RSA/ECB/PKCS1Padding"`: `k.size()` bytes. `none` if the message is longer than `k.size() - 11` |
 | `k.decrypt(bytes: List<u8>) -> List<u8>?` | The message inside, or `none` if the bytes aren't `k.size()` long or their padding is wrong |
 | `k.size() -> usize` | The modulus's length in bytes: 128 for 1024 bits |
-| `k.sign(hash: Algorithm, message: List<u8>) -> List<u8>` | The PKCS#1 v1.5 signature of the message with its `hash`, as Java's `Signature` signs with `"SHA256withRSA"` for `Algorithm.Sha256`, `"SHA1withRSA"` for `Sha1` and `"MD5withRSA"` for `Md5`: `k.size()` bytes, the same each time |
+| `k.sign(hash: Algorithm, message: List<u8>) -> List<u8>` | The PKCS#1 v1.5 signature of the message with its `hash`, as Java's `Signature` signs with `"SHA256withRSA"` for `Algorithm.Sha256`, `"SHA1withRSA"` for `Sha1`, `"MD5withRSA"` for `Md5`, and `"SHA384withRSA"` and `"SHA512withRSA"` for `Sha384` and `Sha512`: `k.size()` bytes, the same each time |
 | `k.public_key() -> RsaPublicKey` | The public key, which checks what `k` signs |
 | `RsaPublicKey.from_der(der: List<u8>) -> RsaPublicKey?` | The key in X.509 DER, as Java's `getEncoded()` writes one, or `none` if it isn't one: every length and number in its shortest form, nothing after it, `rsaEncryption` with no parameters, an odd modulus of 512 to 4096 bits, and an exponent from 3 to below the modulus |
 | `p.verify(hash: Algorithm, message: List<u8>, signature: List<u8>) -> bool` | Whether the signature is the key's PKCS#1 v1.5 signature of the message with its `hash`, as Java's `Signature.verify` decides. One that's the modulus or more is no signature, as Java decides too, and nor is one that isn't `p.size()` bytes, where Java throws a `SignatureException`: `Bad signature length: got 255 but was expecting 256` |
@@ -82,7 +82,7 @@ fn main() {
 
 - AES-CFB8: 300 random streams of up to 699 bytes, encrypted in random pieces, gave the same bytes as Java 25's `Cipher` gave for each whole stream, and decrypting them in other random pieces gave them back. The portable version gave the same as AES-NI on 2000 more.
 - RSA: Java decoded `public_der` with `KeyFactory`, encrypted 200 random messages of 0 to 117 bytes with `Cipher`, and `decrypt` opened every one, for 1024 and 2048 bits. Java encoded the key it decoded to the same bytes. Bytes with broken padding gave `none`.
-- Signatures: Java 25 made 1024-, 2048- and 4096-bit keys and signed a message with `SHA1withRSA` and `SHA256withRSA`; `verify` takes each, and not with the other hash, another message, or a bit flipped. Java verified what `sign` signed with both, for 1024 and 2048 bits.
+- Signatures: Java 25 made 1024-, 2048- and 4096-bit keys and signed a message with `SHA1withRSA` and `SHA256withRSA`; `verify` takes each, and not with the other hash, another message, or a bit flipped. Java verified what `sign` signed with both, for 1024 and 2048 bits. openssl verified 2048-bit `SHA384withRSA` and `SHA512withRSA` signatures from `sign`, and `verify` took openssl's.
 - The [tests](../../tests/std/crypto.calx) hold Java's bytes for one AES stream, and check the rest by round trips and shapes. [Those of signatures](../../tests/std/signatures.calx) hold Java's keys and signatures.
 
 ## How it's built
