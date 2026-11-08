@@ -49,6 +49,8 @@ static _Thread_local cx_i64 stat_size, stat_modified;
 /* And its permission bits, as Unix gives them: read, write and run for the owner, the group and
  * others. */
 static _Thread_local cx_u32 stat_mode;
+/* And what it is, following links: KIND_FILE, KIND_DIR or KIND_OTHER. */
+static _Thread_local cx_u32 stat_kind;
 
 static CX_COLD void fs_out_of_memory(void) { cx_panic_text("<memory>", "out of memory"); }
 
@@ -406,14 +408,13 @@ static HANDLE open_attributes(const cx_u8* path, size_t len, DWORD access) {
     return h;
 }
 
-cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
-    HANDLE h = open_attributes(path, len, 0);
-    if (h == INVALID_HANDLE_VALUE) return 0;
+/* Fills what the last stat found from an open handle's information. */
+static int stat_handle(HANDLE h) {
     BY_HANDLE_FILE_INFORMATION info;
-    int ok = GetFileInformationByHandle(h, &info);
-    if (!ok) fail_win(GetLastError());
-    CloseHandle(h);
-    if (!ok) return 0;
+    if (!GetFileInformationByHandle(h, &info)) {
+        fail_win(GetLastError());
+        return 0;
+    }
     stat_size = (cx_i64)(((cx_u64)info.nFileSizeHigh << 32) | info.nFileSizeLow);
     cx_i64 ticks = (cx_i64)(((cx_u64)info.ftLastWriteTime.dwHighDateTime << 32) | info.ftLastWriteTime.dwLowDateTime);
     ticks -= TICKS_TO_1970;
@@ -422,8 +423,23 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
     /* Windows has only a read-only flag, which these bits say as Python's `os.stat` does. */
     stat_mode = (info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
     if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) stat_mode |= 0111;
+    stat_kind = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? KIND_DIR
+              : (info.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) ? KIND_OTHER
+                                                                : KIND_FILE;
     return 1;
 }
+
+cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
+    HANDLE h = open_attributes(path, len, 0);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int ok = stat_handle(h);
+    CloseHandle(h);
+    return ok;
+}
+
+/* The stat of a file kept open, which on Windows saves opening it again: a file opened right
+ * after it was closed waits for the antivirus to look at it again. */
+cx_i32 cx_fs_handle_stat(cx_i64 h) { return stat_handle((HANDLE)(intptr_t)h); }
 
 cx_i32 cx_fs_set_mode(const cx_u8* path, size_t len, cx_u32 mode) {
     wchar_t* w = wide(path, len);
@@ -1100,6 +1116,15 @@ cx_u32 cx_fs_kind(const cx_u8* path, size_t len, cx_u32 follow) {
     return KIND_OTHER;
 }
 
+/* Fills what the last stat found from what `stat` or `fstat` gave. */
+static void stat_from(const struct stat* st) {
+    stat_size = (cx_i64)st->st_size;
+    /* tv_nsec is never negative, so this rounds down, as Java's `lastModified` does. */
+    stat_modified = (cx_i64)st->st_mtim.tv_sec * 1000 + st->st_mtim.tv_nsec / 1000000;
+    stat_mode = (cx_u32)(st->st_mode & 07777);
+    stat_kind = S_ISREG(st->st_mode) ? KIND_FILE : S_ISDIR(st->st_mode) ? KIND_DIR : KIND_OTHER;
+}
+
 cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
     char* s = cpath(path, len);
     if (!s) return 0;
@@ -1111,10 +1136,17 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
         fail_errno(e);
         return 0;
     }
-    stat_size = (cx_i64)st.st_size;
-    /* tv_nsec is never negative, so this rounds down, as Java's `lastModified` does. */
-    stat_modified = (cx_i64)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
-    stat_mode = (cx_u32)(st.st_mode & 07777);
+    stat_from(&st);
+    return 1;
+}
+
+cx_i32 cx_fs_handle_stat(cx_i64 h) {
+    struct stat st;
+    if (fstat((int)h, &st) != 0) {
+        fail_errno(errno);
+        return 0;
+    }
+    stat_from(&st);
     return 1;
 }
 
@@ -1445,6 +1477,7 @@ cx_i32 cx_fs_make_link(const cx_u8* target, size_t target_len, const cx_u8* path
 cx_i64 cx_fs_stat_size(void) { return stat_size; }
 cx_i64 cx_fs_stat_modified(void) { return stat_modified; }
 cx_u32 cx_fs_stat_mode(void) { return stat_mode; }
+cx_u32 cx_fs_stat_kind(void) { return stat_kind; }
 
 size_t cx_fs_result_len(void) { return fs_len; }
 void cx_fs_result_copy(cx_u8* to) {

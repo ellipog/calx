@@ -890,6 +890,8 @@ CX_FN(cx_i32, cx_fs_set_modified, (const cx_u8* path, cx_usize len, cx_i64 ms));
 CX_FN(cx_i64, cx_fs_size, (cx_i64 h));
 CX_FN(cx_i32, cx_fs_stat, (const cx_u8* path, cx_usize len));
 CX_FN(cx_u32, cx_fs_stat_mode, (void));
+CX_FN(cx_u32, cx_fs_stat_kind, (void));
+CX_FN(cx_i32, cx_fs_handle_stat, (cx_i64 h));
 CX_FN(cx_i64, cx_fs_stat_modified, (void));
 CX_FN(cx_i64, cx_fs_stat_size, (void));
 CX_FN(cx_i32, cx_fs_sync, (cx_i64 h));

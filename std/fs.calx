@@ -38,6 +38,8 @@ extern "C" {
     fn cx_fs_stat_modified() -> i64
     fn cx_fs_set_modified(path: *const u8, len: usize, ms: i64) -> i32
     fn cx_fs_stat_mode() -> u32
+    fn cx_fs_stat_kind() -> u32
+    fn cx_fs_handle_stat(h: i64) -> i32
     fn cx_fs_set_mode(path: *const u8, len: usize, mode: u32) -> i32
     fn cx_fs_result_len() -> usize
     fn cx_fs_result_copy(to: *u8)
@@ -91,6 +93,9 @@ pub struct Metadata {
     /// owner, its group and everyone else. On Windows, which has only a read-only flag, they're
     /// `0o666`, or `0o444` when it's read-only, with `0o111` added for a directory.
     pub mode: u32
+    /// What it is, following links: a `File`, a `Dir` or `Other`, so one `metadata` says what
+    /// `is_file` or `is_dir` would, without asking the system again.
+    pub kind: Kind
 }
 
 /// What a link points to, as `read_link` reads it.
@@ -363,6 +368,15 @@ impl File {
         return self.named.copy()
     }
 
+    /// Its size, modified time, permission bits and kind, as `metadata` reads them, from the
+    /// file already open, which on Windows is quicker than opening it again by its path.
+    pub fn metadata(self) -> Metadata ! FsError {
+        if unsafe { cx_fs_handle_stat(self.handle) } == 0 {
+            fail last_error()
+        }
+        return stat_result()
+    }
+
     /// Its length in bytes.
     pub fn size(self) -> u64 ! FsError {
         let size = unsafe { cx_fs_size(self.handle) }
@@ -593,10 +607,20 @@ pub fn metadata(path: String) -> Metadata ! FsError {
     if unsafe { cx_fs_stat(path.as_ptr(), path.len()) } == 0 {
         fail last_error()
     }
+    return stat_result()
+}
+
+// What the last stat on this thread found.
+fn stat_result() -> Metadata {
     let size = unsafe { cx_fs_stat_size() }
     let modified = unsafe { cx_fs_stat_modified() }
     let mode = unsafe { cx_fs_stat_mode() }
-    return Metadata { size: u64.wrap(size), modified: Timestamp { unix_ms: modified }, mode: mode }
+    let k = match unsafe { cx_fs_stat_kind() } {
+        1 => Kind.File,
+        2 => Kind.Dir,
+        _ => Kind.Other,
+    }
+    return Metadata { size: u64.wrap(size), modified: Timestamp { unix_ms: modified }, mode: mode, kind: k }
 }
 
 /// Sets when what's at `path` was last modified, following links, as Java's

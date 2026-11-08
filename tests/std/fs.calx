@@ -102,6 +102,12 @@ fn main() {
     append(a, [33])!
     let m = metadata(a)!
     println("{m.size} {m.modified.unix_ms > 1761609600123}")    // out: 7 true
+    // What it is, from the same look, and the same from a file kept open.
+    println("{m.kind} {metadata(dir)!.kind}")    // out: File Dir
+    let open_a = open_read(a)!
+    let hm = open_a.metadata()!
+    println("{hm.size} {hm.modified.unix_ms == m.modified.unix_ms} {hm.kind}")    // out: 7 true File
+    open_a.close()!
     match metadata("{dir}/missing") {
         ok(_) => println("found"),
         err(e) => println(describe(e)),    // out: not found
