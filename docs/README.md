@@ -119,6 +119,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 48. [std.textwrap](std/textwrap.md): text wrapped and filled to a width, shortened, dedented and indented, exactly as Python's `textwrap` does it, with its settings
 49. [std.shell](std/shell.md): command lines split into words as a POSIX shell reads their quotes and escapes, and words quoted and joined back, exactly as Python's `shlex.split`, `quote` and `join` do it
 50. [std.ini](std/ini.md): INI files read, given and written exactly as Python's `configparser` does it, with sections, comments, values on several lines, `[DEFAULT]`, `%(name)s`, and the line of any mistake
+51. [std.http.server](std/http-server.md): a small HTTP/1.1 server for scripts, as Python's `http.server` is, with each request handed to the program in turn, and a folder served as `python -m http.server` serves it
 
 ### Java compatibility
 

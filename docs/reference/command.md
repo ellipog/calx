@@ -1,6 +1,6 @@
 ---
 title: The calx command
-description: Starting, checking, building, running, testing and formatting Calx programs, running code from the command line, the build modes, and the object cache.
+description: Starting, checking, building, running, testing and formatting Calx programs, running code from the command line, serving a folder, the build modes, and the object cache.
 ---
 
 # The `calx` command
@@ -17,6 +17,7 @@ calx build --lib plugin.calx   # build a library, which a program opens while it
 calx test tool.calx           # run its @test functions, each in a process of its own
 calx eval "1 << 20"           # run code given on the command line, and print its value
 calx fmt                       # format the .calx files here, in Calx's one format
+calx serve                     # serve this folder's files at http://127.0.0.1:8000/
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
@@ -178,6 +179,31 @@ Calx has one format, with no settings, so code reads the same wherever it's from
 It doesn't wrap long lines or join short ones, and a string that spans lines keeps its lines, since they're its text.
 
 It checks what it writes: the result must have the same tokens and comments, with the same statement ends and operators, and formatting it again must change nothing. A file that doesn't parse, or that fails the check, is left as it was, with the error on standard error, and `calx fmt` exits with status 1. `--check` exits with status 1 when a file isn't formatted, for CI. Folders whose names start with `.` are skipped. Format Document in VS Code runs it too ([editor support](editors.md)).
+
+## Serving a folder
+
+`calx serve` serves a folder's files over HTTP, as `python -m http.server` does, until Ctrl+C stops it:
+
+```sh
+calx serve                  # this folder, at http://127.0.0.1:8000/
+calx serve site             # the folder site
+calx serve --port 9000      # on port 9000; 0 lets the system pick one
+calx serve --bind ""        # on every address, so other machines can reach it
+```
+
+```text
+$ calx serve site
+Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
+127.0.0.1 - - [08/Nov/2026 12:55:25] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [08/Nov/2026 12:55:25] "GET /style.css HTTP/1.1" 200 -
+```
+
+- A folder's `index.html` or `index.htm` is served for it, and a folder without one gets a page listing what's in it. The rest is as [std.http.server](../std/http-server.md#serving-a-folder)'s `serve_dir` serves it, which is what `calx serve` runs.
+- It listens on `127.0.0.1` unless `--bind` (`-b`) gives another address, so only this machine reaches it, and Windows' firewall doesn't ask about it. Python listens on every address unless it's told otherwise.
+- `--port` (`-p`) gives the port. Without it, `calx serve` takes 8000, or the next free one up to 8010 if 8000 is taken, and says which on its first line. A port that's given and taken is an error.
+- Each request is logged to standard error, as Python logs it.
+- The program that serves is built the first time, optimized, and reused after that, so it starts at once.
+- `calx serve` exits with status 2 for arguments it can't use, and 1 for a folder that isn't there or a port it can't listen on.
 
 ## Exit status
 

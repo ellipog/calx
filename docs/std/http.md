@@ -7,7 +7,7 @@ description: HTTP and HTTPS requests on the system's own client, WinHTTP on Wind
 
 GET and POST over HTTP and HTTPS. An online-mode server uses it to ask Mojang's session server whether a player who's logging in has joined.
 
-Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, and libcurl on Linux.
+Requests go through the system's own client, so the system checks certificates against the roots it trusts, as browsers do: WinHTTP on Windows, and libcurl on Linux. To answer requests rather than make them, there's [std.http.server](http-server.md).
 
 A script that only wants what's at a URL calls `fetch`, which waits for the answer:
 

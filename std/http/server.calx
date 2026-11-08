@@ -1,0 +1,1049 @@
+/// A small HTTP/1.1 server for scripts, as Python's `http.server` is: requests from as many
+/// connections as come, handed to the program one at a time by `next`, on std.net's event loop,
+/// and `serve_dir`, which serves a folder's files as `python -m http.server` does.
+///
+/// It listens on loopback, `127.0.0.1`, unless it's given another address, so only programs on
+/// the same machine reach it, and Windows' firewall never asks about it.
+module std.http.server
+
+import std.env.{os}
+import std.fs.{File, Kind, Metadata, is_dir, kind, list, open_read}
+import std.html.{escape}
+import std.io.{flush}
+import std.http.{Header}
+import std.net.{Conn, Event, Net, NetError}
+import std.time.{DateTime, Instant, Timestamp}
+import std.url.{decode, encode}
+
+/// A request, as `next` gives it.
+pub struct Request {
+    /// `GET`, `POST` or another method, as it was sent.
+    pub method: String
+    /// The path and query as they were sent, still percent-encoded: `/find?q=a%20b`.
+    pub target: String
+    /// The path, percent-decoded, without the query: `/find`.
+    pub path: String
+    /// What's after the `?`, as it was sent, or `""`.
+    pub query: String
+    /// `HTTP/1.1` or `HTTP/1.0`.
+    pub version: String
+    /// The headers, in the order they came.
+    pub headers: List<Header>
+    /// The body, as `Content-Length` or chunks gave it, or empty.
+    pub body: List<u8>
+    /// The client's address: `127.0.0.1`.
+    pub client: String
+    conn: Conn
+    keep: bool
+    line: String
+}
+
+impl Request {
+    /// The value of the first header named `name`, in any case, or `none`.
+    pub fn header(self, name: String) -> String? {
+        for h in self.headers {
+            if same_name(h.name, name) {
+                return some(h.value.copy())
+            }
+        }
+        return none
+    }
+
+    /// The body as text, or `none` if it isn't UTF-8.
+    pub fn text(self) -> String? {
+        return String.from_utf8(self.body.copy())
+    }
+}
+
+/// A response to a request: its status, headers and body. `respond` adds `Content-Length`,
+/// `Date` and `Server` headers.
+pub struct Response {
+    pub status: u16
+    pub headers: List<Header>
+    pub body: List<u8>
+}
+
+impl Response {
+    /// A response with `body`, whose `Content-Type` is `type_name`.
+    pub fn new(status: u16, type_name: String, body: own List<u8>) -> Response {
+        var headers = List<Header>()
+        headers.push(Header { name: "Content-Type", value: type_name.copy() })
+        return Response { status: status, headers: headers, body: body }
+    }
+
+    /// Plain text, as `text/plain; charset=utf-8`.
+    pub fn text(body: String, status: u16 = 200) -> Response {
+        return Response.new(status, "text/plain; charset=utf-8", body.to_bytes())
+    }
+
+    /// A page, as `text/html; charset=utf-8`.
+    pub fn html(body: String, status: u16 = 200) -> Response {
+        return Response.new(status, "text/html; charset=utf-8", body.to_bytes())
+    }
+
+    /// JSON, as `application/json`.
+    pub fn json(body: String, status: u16 = 200) -> Response {
+        return Response.new(status, "application/json", body.to_bytes())
+    }
+
+    /// A short page that says what went wrong: `404 Not Found`, and `message` if there is one.
+    pub fn error(status: u16, message: String = "") -> Response {
+        let what = "{status} {reason(status)}"
+        var page = String("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>")
+        page.push_str(what)
+        page.push_str("</title>\n</head>\n<body>\n<h1>")
+        page.push_str(what)
+        page.push_str("</h1>\n")
+        if not message.is_empty() {
+            page.push_str("<p>")
+            page.push_str(escape(message, false))
+            page.push_str("</p>\n")
+        }
+        page.push_str("</body>\n</html>\n")
+        return Response.html(page, status)
+    }
+
+    /// A redirect to `location`, `302 Found` unless another status is given.
+    pub fn redirect(location: String, status: u16 = 302) -> Response {
+        var headers = List<Header>()
+        headers.push(Header { name: "Location", value: location.copy() })
+        return Response { status: status, headers: headers, body: List<u8>() }
+    }
+
+    /// The response with one more header.
+    pub fn with_header(own self, name: String, value: String) -> Response {
+        var r = self
+        r.headers.push(Header { name: name.copy(), value: value.copy() })
+        return r
+    }
+}
+
+// A connection and what's come on it that isn't a request yet.
+struct Client {
+    conn: Conn
+    buf: List<u8>
+    // A request was handed out and has no response yet, or the connection is closing.
+    busy: bool
+    // `100 Continue` went out for the request coming in.
+    continued: bool
+}
+
+/// A server listening on a port, whose `next` gives the requests that come to it.
+pub struct Server {
+    /// The port it listens on, which the system picked if `listen` was given 0.
+    pub port: u16
+    /// The address it listens on.
+    pub host: String
+    /// The longest body it takes, in bytes. A longer one gets `413 Content Too Large`. 64 MB to
+    /// start with.
+    pub max_body: usize
+    net: Net
+    clients: Map<u32, Client>
+    ready: Deque<u32>
+    events: List<Event>
+    date: String
+    date_second: i64
+}
+
+impl Server {
+    /// A server listening on `port` of `host`: loopback unless another address is given, and a
+    /// port the system picks for 0. `""` listens on every address, IPv4 and IPv6, as
+    /// `python -m http.server` does.
+    pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
+        let net = try Net.new()
+        let p = try net.listen(host, port)
+        return Server { port: p, host: host.copy(), max_body: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1 }
+    }
+
+    /// The address to open in a browser: `http://127.0.0.1:8000/`.
+    pub fn url(self) -> String {
+        var h = if self.host.is_empty() { String("localhost") } else { self.host.copy() }
+        if h.contains(":") {
+            h = "[{h}]"
+        }
+        return "http://{h}:{self.port}/"
+    }
+
+    /// The next request, from whichever connection has one, waiting for it up to `timeout_ms`
+    /// milliseconds, or forever if it's negative, and `none` if none came in that time. Each
+    /// request gets one `respond`; until it does, the next request on the same connection waits,
+    /// while other connections' come.
+    pub fn next(mut self, timeout_ms: i64 = -1) -> Request? {
+        let start = unsafe { Instant.now() }
+        loop {
+            while let id = self.ready.pop_first() {
+                if let r = self.take(id) {
+                    return some(r)
+                }
+            }
+            var wait = timeout_ms
+            if timeout_ms >= 0 {
+                let spent = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+                if spent >= timeout_ms {
+                    return none
+                }
+                wait = timeout_ms - spent
+            }
+            self.net.poll(wait, mut self.events)
+            for e in self.events {
+                match e {
+                    Accepted(c) => {
+                        self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false })
+                    }
+                    Received(c) => {
+                        let id = c.id()
+                        if self.clients.contains(id) {
+                            _ = self.net.read(c, mut self.clients[id].buf)
+                            self.ready.push_last(id)
+                        } else {
+                            var junk = List<u8>()
+                            _ = self.net.read(c, mut junk)
+                        }
+                    }
+                    Closed(c) => {
+                        _ = self.clients.remove(c.id())
+                    }
+                    Connected(_) => {}
+                    Woken => {}
+                }
+            }
+        }
+    }
+
+    // The request in a connection's bytes, if they hold one yet. A request that's wrong gets its
+    // error, and the connection is closed.
+    fn take(mut self, id: u32) -> Request? {
+        if not self.clients.contains(id) or self.clients[id].busy {
+            return none
+        }
+        let c = self.clients[id].conn
+        var req = Request { method: String(), target: String(), path: String(), query: String(), version: String(), headers: List<Header>(), body: List<u8>(), client: String(), conn: c, keep: false, line: String() }
+        var p = Parse { status: 0, message: String(), used: 0, expect: false }
+        let state = parse_request(self.clients[id].buf, self.max_body, mut req, mut p)
+        if state == 0 {
+            if p.expect and not self.clients[id].continued {
+                let cont = "HTTP/1.1 100 Continue\r\n\r\n"
+                self.net.write(c, cont.to_bytes())
+                self.clients[id].continued = true
+            }
+            return none
+        }
+        if state == 2 {
+            self.clients[id].busy = true
+            let res = Response.error(p.status, p.message)
+            self.send(c, String("GET"), false, res)
+            return none
+        }
+        let rest = self.clients[id].buf[p.used..]
+        self.clients[id].buf = rest
+        self.clients[id].busy = true
+        self.clients[id].continued = false
+        if let a = self.net.peer(c) {
+            req.client = a.ip.to_string()
+        }
+        return some(req)
+    }
+
+    /// `res` sent as the response to `req`, with `Content-Length`, `Date` and `Server` headers
+    /// added, and no body for a `HEAD` request. The connection is closed after it if the request
+    /// asked for that, came by HTTP/1.0 without `keep-alive`, or `res` has `Connection: close`.
+    pub fn respond(mut self, req: Request, res: Response) {
+        let id = req.conn.id()
+        if not self.clients.contains(id) or not self.clients[id].busy {
+            return
+        }
+        var keep = req.keep
+        for h in res.headers {
+            if same_name(h.name, "connection") and has_token(h.value, "close") {
+                keep = false
+            }
+        }
+        self.send(req.conn, req.method, keep, res)
+        if keep {
+            self.clients[id].busy = false
+            self.ready.push_last(id)
+        }
+    }
+
+    /// The folder `dir` served until the program is stopped, as `serve_dir` serves it, after a
+    /// line saying where to find it, for a server that's already listening.
+    pub fn serve(mut self, dir: String) {
+        let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
+        println("Serving HTTP on {shown} port {self.port} ({self.url()}) ...")
+        flush()
+        loop {
+            if let req = self.next() {
+                let res = from_dir(dir, req)
+                log_request(req, res.status)
+                self.respond(req, res)
+            }
+        }
+    }
+
+    fn send(mut self, c: Conn, method: String, keep: bool, res: Response) {
+        let now = unsafe { Timestamp.now() }.unix_ms
+        let second = now / 1000
+        if second != self.date_second {
+            self.date = http_date(second * 1000)
+            self.date_second = second
+        }
+        var head = String()
+        head.reserve(160 + 40 * res.headers.len())
+        head.push_str("HTTP/1.1 {res.status} {reason(res.status)}\r\nServer: Calx\r\nDate: ")
+        head.push_str(self.date)
+        head.push_str("\r\n")
+        var has_length = false
+        for h in res.headers {
+            if same_name(h.name, "content-length") {
+                has_length = true
+            }
+            head.push_str(clean(h.name))
+            head.push_str(": ")
+            head.push_str(clean(h.value))
+            head.push_str("\r\n")
+        }
+        let no_body = res.status < 200 or res.status == 204 or res.status == 304
+        if not has_length and not no_body {
+            head.push_str("Content-Length: {res.body.len()}\r\n")
+        }
+        if not keep {
+            head.push_str("Connection: close\r\n")
+        }
+        head.push_str("\r\n")
+        self.net.write(c, head.to_bytes())
+        if method != "HEAD" and not no_body and not res.body.is_empty() {
+            self.net.write(c, res.body)
+        }
+        if not keep {
+            self.net.close(c)
+        } else {
+            // Sent now, not at the next poll, which a program might not come back to soon.
+            self.net.flush()
+        }
+    }
+}
+
+// What reading a request found wrong, and how far it got.
+struct Parse {
+    status: u16
+    message: String
+    used: usize
+    expect: bool
+}
+
+// The request at the start of `buf`, into `req`: 0 if it isn't all there yet, 1 if it is, and 2
+// if it's wrong, with the status to answer in `p`.
+fn parse_request(buf: List<u8>, max_body: usize, req: mut Request, p: mut Parse) -> u8 {
+    let n = buf.len()
+    var at: usize = 0
+    // Blank lines before a request are left out, as RFC 9112 says a server should.
+    while at < n and (buf[at] == 13 or buf[at] == 10) {
+        at += 1
+    }
+    let e = line_end(buf, at)
+    if e == n {
+        if n - at > 65536 {
+            return refuse(mut p, 414, String())
+        }
+        return 0
+    }
+    if e - at > 65536 {
+        return refuse(mut p, 414, String())
+    }
+    let first = text_of(buf, at, trim_cr(buf, at, e))
+    if first == none {
+        return refuse(mut p, 400, String("The request line isn't UTF-8."))
+    }
+    let line = first ?? String()
+    let words = line.split_whitespace()
+    var keep = false
+    if words.len() >= 3 {
+        let v = words[words.len() - 1].copy()
+        let numbers = version_of(v)
+        if numbers == none {
+            return refuse(mut p, 400, "Bad request version ({v})")
+        }
+        let (major, minor) = numbers ?? (0u64, 0u64)
+        if major >= 2 {
+            return refuse(mut p, 505, "Invalid HTTP version ({v})")
+        }
+        keep = major == 1 and minor >= 1
+        req.version = v
+    }
+    if words.len() == 2 {
+        return refuse(mut p, 400, String("HTTP/0.9 requests aren't served."))
+    }
+    if words.len() != 3 {
+        return refuse(mut p, 400, "Bad request syntax ({line})")
+    }
+    req.method = words[0].copy()
+    var target = words[1].copy()
+    // `//` at the start would read as a host, as in `//evil.example/`, so it's one `/`.
+    if target.starts_with("//") {
+        var k: usize = 0
+        while k < target.len() and target.byte_at(k) == 47 {
+            k += 1
+        }
+        let fixed = "/{target[k..]}"
+        target = fixed
+    }
+    req.line = line.copy()
+    // The headers, to a blank line.
+    var pos = e + 1
+    var count = 0
+    loop {
+        let le = line_end(buf, pos)
+        if le == n {
+            if n - pos > 65536 or n - at > 100 * 65536 {
+                return refuse(mut p, 431, String("Line too long"))
+            }
+            return 0
+        }
+        if le - pos > 65536 {
+            return refuse(mut p, 431, String("Line too long"))
+        }
+        let end = trim_cr(buf, pos, le)
+        if end == pos {
+            pos = le + 1
+            break
+        }
+        if (buf[pos] == 32 or buf[pos] == 9) and not req.headers.is_empty() {
+            // A line that goes on from the one before.
+            let more = text_of(buf, pos, end) ?? String()
+            let last = req.headers.len() - 1
+            req.headers[last].value.push(' ')
+            req.headers[last].value.push_str(more.trim())
+            pos = le + 1
+            continue
+        }
+        count += 1
+        if count > 100 {
+            return refuse(mut p, 431, String("Too many headers"))
+        }
+        var colon = pos
+        while colon < end and buf[colon] != 58 {
+            colon += 1
+        }
+        if colon == end or colon == pos {
+            let what = text_of(buf, pos, end) ?? String("?")
+            return refuse(mut p, 400, "Bad header line ({what})")
+        }
+        let name = text_of(buf, pos, colon) ?? String()
+        let value = text_of(buf, colon + 1, end) ?? String()
+        req.headers.push(Header { name: name.trim().copy(), value: value.trim().copy() })
+        pos = le + 1
+    }
+    var chunked = false
+    var length: usize? = none
+    var expect = false
+    for h in req.headers {
+        if same_name(h.name, "connection") {
+            if has_token(h.value, "close") {
+                keep = false
+            } else if has_token(h.value, "keep-alive") {
+                keep = true
+            }
+        } else if same_name(h.name, "transfer-encoding") {
+            if has_token(h.value, "chunked") {
+                chunked = true
+            }
+        } else if same_name(h.name, "content-length") {
+            let digits = h.value.trim().copy()
+            if digits.is_empty() {
+                return refuse(mut p, 400, String("Bad Content-Length"))
+            }
+            var x: u64 = 0
+            for i in 0..digits.len() {
+                let b = digits.byte_at(i)
+                if b < 48 or b > 57 {
+                    return refuse(mut p, 400, String("Bad Content-Length"))
+                }
+                // Past the most a body can be, the rest of the digits don't matter.
+                if x <= u64(max_body) {
+                    x = x * 10 + u64(b - 48)
+                }
+            }
+            if x > u64(max_body) {
+                return refuse(mut p, 413, String())
+            }
+            length = some(usize.wrap(x))
+        } else if same_name(h.name, "expect") and h.value.trim().to_lower_root() == "100-continue" {
+            expect = req.version != "HTTP/1.0"
+        }
+    }
+    req.keep = keep
+    if chunked {
+        var body = List<u8>()
+        var q = pos
+        loop {
+            let le = line_end(buf, q)
+            if le == n {
+                p.expect = expect
+                return 0
+            }
+            var size: usize = 0
+            var digits = 0
+            var k = q
+            let stop = trim_cr(buf, q, le)
+            while k < stop and buf[k] != 59 {
+                let b = buf[k]
+                var dv: usize = 99
+                if b >= 48 and b <= 57 {
+                    dv = usize(b - 48)
+                } else if b >= 97 and b <= 102 {
+                    dv = usize(b - 87)
+                } else if b >= 65 and b <= 70 {
+                    dv = usize(b - 55)
+                } else if b == 32 or b == 9 {
+                    k += 1
+                    continue
+                }
+                if dv == 99 or digits >= 15 {
+                    return refuse(mut p, 400, String("Bad chunk size"))
+                }
+                size = size * 16 + dv
+                digits += 1
+                k += 1
+            }
+            if digits == 0 {
+                return refuse(mut p, 400, String("Bad chunk size"))
+            }
+            q = le + 1
+            if size == 0 {
+                // The trailers, to a blank line.
+                loop {
+                    let te = line_end(buf, q)
+                    if te == n {
+                        return 0
+                    }
+                    let blank = trim_cr(buf, q, te) == q
+                    q = te + 1
+                    if blank {
+                        break
+                    }
+                }
+                break
+            }
+            if body.len() + size > max_body {
+                return refuse(mut p, 413, String())
+            }
+            if n < q + size + 1 {
+                p.expect = expect
+                return 0
+            }
+            body.extend(buf[q..q + size])
+            q += size
+            if buf[q] == 13 {
+                if q + 1 >= n {
+                    return 0
+                }
+                q += 1
+            }
+            if buf[q] != 10 {
+                return refuse(mut p, 400, String("Bad chunk end"))
+            }
+            q += 1
+        }
+        req.body = body
+        pos = q
+    } else if let len = length {
+        if len > max_body {
+            return refuse(mut p, 413, String())
+        }
+        if n < pos + len {
+            p.expect = expect
+            return 0
+        }
+        req.body = buf[pos..pos + len]
+        pos += len
+    }
+    // The target's parts: the path, decoded, and the query.
+    var path_end = target.len()
+    var query = String()
+    if let qm = target.find("?") {
+        path_end = qm
+        var qe = target.len()
+        if let h = target.find("#") {
+            if h > qm {
+                qe = h
+            }
+        }
+        query = target[qm + 1..qe].copy()
+    }
+    if let h = target.find("#") {
+        if h < path_end {
+            path_end = h
+        }
+    }
+    req.path = decode(target[0..path_end].copy())
+    req.query = query
+    req.target = target
+    p.used = pos
+    return 1
+}
+
+fn refuse(p: mut Parse, status: u16, message: String) -> u8 {
+    p.status = status
+    p.message = message.copy()
+    return 2
+}
+
+// The index of the `\n` that ends the line from `from`, or the end of `buf`.
+fn line_end(buf: List<u8>, from: usize) -> usize {
+    var i = from
+    let n = buf.len()
+    while i < n and buf[i] != 10 {
+        i += 1
+    }
+    return i
+}
+
+// The end of the line before its `\r`, if it has one.
+fn trim_cr(buf: List<u8>, from: usize, to: usize) -> usize {
+    if to > from and buf[to - 1] == 13 {
+        return to - 1
+    }
+    return to
+}
+
+fn text_of(buf: List<u8>, from: usize, to: usize) -> String? {
+    return String.from_utf8(buf[from..to])
+}
+
+// `HTTP/1.1` as (1, 1), or `none` if it isn't `HTTP/` and two numbers, as Python reads it.
+fn version_of(v: String) -> (u64, u64)? {
+    if not v.starts_with("HTTP/") {
+        return none
+    }
+    let rest = v[5..].copy()
+    let parts = rest.split(".")
+    if parts.len() != 2 {
+        return none
+    }
+    var nums = List<u64>()
+    for part in parts {
+        if part.is_empty() or part.len() > 10 {
+            return none
+        }
+        var x: u64 = 0
+        for i in 0..part.len() {
+            let b = part.byte_at(i)
+            if b < 48 or b > 57 {
+                return none
+            }
+            x = x * 10 + u64(b - 48)
+        }
+        nums.push(x)
+    }
+    return some((nums[0], nums[1]))
+}
+
+// Whether two header names are the same, in any case.
+fn same_name(a: String, b: String) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    for i in 0..a.len() {
+        var x = a.byte_at(i)
+        var y = b.byte_at(i)
+        if x >= 65 and x <= 90 {
+            x += 32
+        }
+        if y >= 65 and y <= 90 {
+            y += 32
+        }
+        if x != y {
+            return false
+        }
+    }
+    return true
+}
+
+// Whether a list of tokens, such as `keep-alive, Upgrade`, has `token`, in any case.
+fn has_token(value: String, token: String) -> bool {
+    for part in value.split(",") {
+        if same_name(part.trim().copy(), token) {
+            return true
+        }
+    }
+    return false
+}
+
+// A header's name or value without the line breaks that would end it early.
+fn clean(s: String) -> String {
+    if not s.contains("\r") and not s.contains("\n") {
+        return s.copy()
+    }
+    return s.replace("\r", " ").replace("\n", " ")
+}
+
+const WEEKDAYS: [str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+const MONTHS: [str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+// A time as HTTP's headers write it: `Sun, 08 Nov 2026 11:30:00 GMT`.
+fn http_date(ms: i64) -> String {
+    let d = Timestamp { unix_ms: ms }.date_time(0)
+    let wd = WEEKDAYS[usize.wrap(d.weekday())]
+    let mon = MONTHS[usize.wrap(d.month - 1)]
+    return "{wd}, {d.day:02} {mon} {d.year} {d.hour:02}:{d.minute:02}:{d.second:02} GMT"
+}
+
+// A date as `If-Modified-Since` gives it, `Sun, 08 Nov 2026 11:30:00 GMT`, in milliseconds, or
+// `none` if it isn't one.
+fn parse_http_date(s: String) -> i64? {
+    let words = s.trim().copy().split_whitespace()
+    if words.len() != 6 or words[5] != "GMT" {
+        return none
+    }
+    let day = small_number(words[1]) ?? 0
+    var month = 0
+    for i in 0usize..12 {
+        if words[2] == MONTHS[i] {
+            month = i32.wrap(i) + 1
+        }
+    }
+    let year = small_number(words[3]) ?? 0
+    let clock = words[4].split(":")
+    if day == 0 or month == 0 or year == 0 or clock.len() != 3 {
+        return none
+    }
+    let hour = small_number(clock[0]) ?? 99
+    let minute = small_number(clock[1]) ?? 99
+    let second = small_number(clock[2]) ?? 99
+    if let d = DateTime.new(year, month, day, hour, minute, second) {
+        return some(d.timestamp(0).unix_ms)
+    }
+    return none
+}
+
+fn small_number(s: String) -> i32? {
+    if s.is_empty() or s.len() > 4 {
+        return none
+    }
+    var x: i32 = 0
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b < 48 or b > 57 {
+            return none
+        }
+        x = x * 10 + i32(b - 48)
+    }
+    return some(x)
+}
+
+/// The reason phrase that goes with a status: `Not Found` for 404, as RFC 9110 names it, or
+/// `""` for one it doesn't name.
+pub fn reason(status: u16) -> str {
+    return match status {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        204 => "No Content",
+        205 => "Reset Content",
+        206 => "Partial Content",
+        300 => "Multiple Choices",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        421 => "Misdirected Request",
+        422 => "Unprocessable Content",
+        425 => "Too Early",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        _ => "",
+    }
+}
+
+/// The response Python's `SimpleHTTPRequestHandler` gives for `req` from the folder `dir`:
+///
+/// - The file at the request's path under `dir`, decoded, with `.` and `..` resolved and any
+///   part that isn't a plain name left out, so nothing outside `dir` is served.
+/// - For a folder, a redirect to the path with a `/` at its end if it hasn't one, then its
+///   `index.html` or `index.htm` if it has one, and otherwise a page listing what's in it.
+/// - `304 Not Modified` for an `If-Modified-Since` the file hasn't changed since, `404` for a
+///   file that isn't there, and `501` for a method other than `GET` and `HEAD`.
+pub fn from_dir(dir: String, req: Request) -> Response {
+    if req.method != "GET" and req.method != "HEAD" {
+        return Response.error(501, "Unsupported method ({req.method})")
+    }
+    let trailing = req.path.ends_with("/")
+    let windows = os() == "windows"
+    var path = dir.copy()
+    var parts = List<String>()
+    for w in req.path.split("/") {
+        if w.is_empty() or w == "." {
+            continue
+        }
+        if w == ".." {
+            _ = parts.pop()
+            continue
+        }
+        parts.push(w.copy())
+    }
+    for w in parts {
+        // No file has a NUL in its name.
+        if w.contains("\u{0}") {
+            return Response.error(404, "File not found")
+        }
+        // A part with a drive or a `\` would name another place on Windows.
+        if windows and (w.contains("\\") or w.contains(":")) {
+            continue
+        }
+        if not path.ends_with("/") and not path.ends_with("\\") {
+            path.push('/')
+        }
+        path.push_str(w)
+    }
+    // A file is opened once, and asked what it is, how long and when it changed, since each call
+    // costs, and on Windows opening a file just after it was closed waits for the antivirus.
+    match open_read(path) {
+        ok(f) => {
+            if trailing {
+                close_quietly(f)
+                return Response.error(404, "File not found")
+            }
+            return serve_file(f, path, req)
+        }
+        err(e) => {
+            match e {
+                IsDirectory => {}
+                _ => return Response.error(404, "File not found"),
+            }
+        }
+    }
+    var raw = req.target.copy()
+    var tail = String()
+    if let q = raw.find("?") {
+        tail = raw[q..].copy()
+        raw = raw[0..q].copy()
+    } else if let h = raw.find("#") {
+        tail = raw[h..].copy()
+        raw = raw[0..h].copy()
+    }
+    if not raw.ends_with("/") and not raw.ends_with("%2f") and not raw.ends_with("%2F") {
+        return Response.redirect("{raw}/{tail}", 301)
+    }
+    for index in ["index.html", "index.htm"] {
+        let candidate = join_path(path, index)
+        match open_read(candidate) {
+            ok(f) => return serve_file(f, candidate, req),
+            err(_) => {}
+        }
+    }
+    return listing(path, req)
+}
+
+// The file `f`, open at `path`, as the response to `req`, closed after it's read.
+fn serve_file(f: own File, path: String, req: Request) -> Response {
+    var meta = Metadata { size: 0, modified: Timestamp { unix_ms: 0 }, mode: 0, kind: Kind.Other }
+    match f.metadata() {
+        ok(m) => meta = m,
+        err(_) => {}
+    }
+    if not is_plain_file(meta.kind) {
+        close_quietly(f)
+        return Response.error(404, "File not found")
+    }
+    let modified = meta.modified.unix_ms
+    let seconds = if modified >= 0 { modified / 1000 } else { -((-modified + 999) / 1000) }
+    if req.header("if-none-match") == none {
+        if let since = req.header("if-modified-since") {
+            if let ims = parse_http_date(since) {
+                if seconds * 1000 <= ims {
+                    close_quietly(f)
+                    return Response { status: 304, headers: List<Header>(), body: List<u8>() }
+                }
+            }
+        }
+    }
+    match f.read_part(0, usize.wrap(meta.size)) {
+        ok(bytes) => {
+            close_quietly(f)
+            var res = Response.new(200, content_type(path), bytes)
+            res.headers.push(Header { name: "Last-Modified", value: http_date(seconds * 1000) })
+            return res
+        }
+        err(_) => {
+            close_quietly(f)
+            return Response.error(404, "File not found")
+        }
+    }
+}
+
+// Closes a file only read from, where closing can't lose anything.
+fn close_quietly(f: own File) {
+    match f.close() {
+        ok => {},
+        err(_) => {},
+    }
+}
+
+fn is_plain_file(k: Kind) -> bool {
+    return match k {
+        File => true,
+        _ => false,
+    }
+}
+
+fn join_path(dir: String, name: str) -> String {
+    if dir.ends_with("/") or dir.ends_with("\\") {
+        return "{dir}{name}"
+    }
+    return "{dir}/{name}"
+}
+
+// A page listing a folder, for a request whose path is the folder's.
+fn listing(path: String, req: Request) -> Response {
+    var names = List<String>()
+    match list(path) {
+        ok(ns) => names = ns,
+        err(_) => return Response.error(404, "No permission to list directory"),
+    }
+    // In the order Python's `sort(key=str.lower)` gives.
+    names.sort_by(|a, b| a.to_lower_root().cmp(b.to_lower_root()))
+    let shown = escape(req.path, false)
+    var page = String("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"color-scheme\" content=\"light dark\">\n<title>Directory listing for ")
+    page.push_str(shown)
+    page.push_str("</title>\n</head>\n<body>\n<h1>Directory listing for ")
+    page.push_str(shown)
+    page.push_str("</h1>\n<hr>\n<ul>\n")
+    for name in names {
+        let full = join_path(path, "")
+        let entry = "{full}{name}"
+        var link = name.copy()
+        var label = name.copy()
+        if is_dir(entry) {
+            link.push('/')
+            label.push('/')
+        }
+        match kind(entry) {
+            ok(k) => {
+                if let what = k {
+                    match what {
+                        Link => label = "{name}@",
+                        _ => {}
+                    }
+                }
+            }
+            err(_) => {}
+        }
+        page.push_str("<li><a href=\"")
+        page.push_str(encode(link))
+        page.push_str("\">")
+        page.push_str(escape(label, false))
+        page.push_str("</a></li>\n")
+    }
+    page.push_str("</ul>\n<hr>\n</body>\n</html>\n")
+    return Response.html(page)
+}
+
+/// The type of a file from its name's extension, as a `Content-Type` header gives it:
+/// `text/html; charset=utf-8` for `.html`, `image/png` for `.png`, and
+/// `application/octet-stream` for one it doesn't know.
+pub fn content_type(name: String) -> String {
+    var dot = name.len()
+    var i = name.len()
+    while i > 0 {
+        i -= 1
+        let b = name.byte_at(i)
+        if b == 46 {
+            dot = i
+            break
+        }
+        if b == 47 or b == 92 {
+            break
+        }
+    }
+    if dot == name.len() or dot == 0 {
+        return String("application/octet-stream")
+    }
+    let ext = name[dot + 1..].to_lower_root()
+    for j in 0..TYPES.len() / 2 {
+        if ext == TYPES[2 * j] {
+            let t = TYPES[2 * j + 1]
+            if t.starts_with("text/") {
+                return "{t}; charset=utf-8"
+            }
+            return String(t)
+        }
+    }
+    return String("application/octet-stream")
+}
+
+const TYPES: [str; 104] = [
+    "html", "text/html", "htm", "text/html", "css", "text/css", "js", "text/javascript",
+    "mjs", "text/javascript", "json", "application/json", "txt", "text/plain", "text", "text/plain",
+    "log", "text/plain", "md", "text/markdown", "csv", "text/csv", "tsv", "text/tab-separated-values",
+    "xml", "text/xml", "svg", "image/svg+xml", "png", "image/png", "jpg", "image/jpeg",
+    "jpeg", "image/jpeg", "gif", "image/gif", "webp", "image/webp", "avif", "image/avif",
+    "ico", "image/vnd.microsoft.icon", "bmp", "image/bmp", "tif", "image/tiff", "tiff", "image/tiff",
+    "pdf", "application/pdf", "zip", "application/zip", "gz", "application/gzip", "tar", "application/x-tar",
+    "bz2", "application/x-bzip2", "xz", "application/x-xz", "wasm", "application/wasm", "woff", "font/woff",
+    "woff2", "font/woff2", "ttf", "font/ttf", "otf", "font/otf", "mp3", "audio/mpeg",
+    "wav", "audio/wav", "ogg", "audio/ogg", "flac", "audio/flac", "mp4", "video/mp4",
+    "webm", "video/webm", "mov", "video/quicktime", "py", "text/x-python", "c", "text/plain",
+    "h", "text/plain", "sh", "application/x-sh", "toml", "application/toml", "yaml", "application/yaml",
+    "yml", "application/yaml", "calx", "text/plain", "ini", "text/plain", "rss", "application/rss+xml",
+]
+
+/// The folder `dir` served on `port` of `host` until the program is stopped, as
+/// `python -m http.server` serves the folder it's started in: each request answered as `from_dir`
+/// answers it, and logged to standard error as Python logs it, after a line saying where to find
+/// it. Loopback unless another address is given.
+pub fn serve_dir(dir: String, port: u16 = 8000, host: String = "127.0.0.1") ! NetError {
+    var server = try Server.listen(port, host)
+    server.serve(dir)
+}
+
+// A line about a request, as Python's `log_message` writes it to standard error:
+// `127.0.0.1 - - [08/Nov/2026 11:30:00] "GET / HTTP/1.1" 200 -`.
+fn log_request(req: Request, status: u16) {
+    let now = unsafe { Timestamp.now() }
+    let d = now.date_time(unsafe { now.local_offset() })
+    let mon = MONTHS[usize.wrap(d.month - 1)]
+    var line = String()
+    for r in req.line.runes() {
+        let c = u32(r)
+        if c < 0x20 or (c >= 0x7F and c < 0xA0) {
+            line.push_str("\\x{c:02x}")
+        } else if c == 92 {
+            line.push_str("\\\\")
+        } else {
+            line.push(r)
+        }
+    }
+    eprintln("{req.client} - - [{d.day:02}/{mon}/{d.year:04} {d.hour:02}:{d.minute:02}:{d.second:02}] \"{line}\" {status} -")
+}

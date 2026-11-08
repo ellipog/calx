@@ -305,6 +305,7 @@ const Command kCommands[] = {
     {"emit-c", "print the C a program compiles to"},
     {"expand", "print the code attributes generate"},
     {"fmt", "format files in the one Calx format"},
+    {"serve", "serve a folder over HTTP"},
     {"update", "install the newest release"},
     {"doctor", "check that Calx can build and run programs"},
     {"clean", "remove the build cache"},
@@ -316,6 +317,7 @@ const Command kCommands[] = {
 
 const char* const kBuildOptions = "--release --lib -o --timings --verbose --no-line --json --stdin";
 const char* const kUpdateOptions = "--check --nightly --stable --to --rollback --force";
+const char* const kServeOptions = "--port --bind";
 const char* const kShells = "bash zsh fish powershell";
 
 std::string command_names() {
@@ -336,6 +338,12 @@ std::string bash() {
            "        update) COMPREPLY=($(compgen -W \"" + std::string(kUpdateOptions) + "\" -- \"$cur\")) ;;\n"
            "        completions) COMPREPLY=($(compgen -W \"" + std::string(kShells) + "\" -- \"$cur\")) ;;\n"
            "        uninstall) COMPREPLY=($(compgen -W \"--yes\" -- \"$cur\")) ;;\n"
+           "        serve)\n"
+           "            if [[ \"$cur\" == -* ]]; then\n"
+           "                COMPREPLY=($(compgen -W \"" + std::string(kServeOptions) + "\" -- \"$cur\"))\n"
+           "            else\n"
+           "                COMPREPLY=($(compgen -d -- \"$cur\"))\n"
+           "            fi ;;\n"
            "        clean|doctor|version|help) COMPREPLY=() ;;\n"
            "        *)\n"
            "            if [[ \"$cur\" == -* ]]; then\n"
@@ -371,6 +379,7 @@ std::string zsh() {
            "        update) _values 'option' " + std::string(kUpdateOptions) + " ;;\n"
            "        completions) _values 'shell' " + std::string(kShells) + " ;;\n"
            "        uninstall) _values 'option' --yes ;;\n"
+           "        serve) _arguments '--port[the port]:port:' '--bind[the address to listen on]:address:' '*:folder:_files -/' ;;\n"
            "        clean|doctor|version|help) ;;\n"
            "        *) _arguments" + options + " '*:file:_files -g \"*.calx\"' ;;\n"
            "    esac\n"
@@ -396,6 +405,9 @@ std::string fish() {
         out += std::string("complete -c calx -n '__fish_seen_subcommand_from update' -l ") + o + "\n";
     }
     out += "complete -c calx -n '__fish_seen_subcommand_from uninstall' -l yes\n";
+    out += "complete -c calx -n '__fish_seen_subcommand_from serve' -a '(__fish_complete_directories)'\n";
+    out += "complete -c calx -n '__fish_seen_subcommand_from serve' -s p -l port -r\n";
+    out += "complete -c calx -n '__fish_seen_subcommand_from serve' -s b -l bind -r\n";
     out += std::string("complete -c calx -n '__fish_seen_subcommand_from completions' -a '") + kShells + "'\n";
     return out;
 }
@@ -424,6 +436,7 @@ std::string powershell() {
            "        'update' { '" + std::string(kUpdateOptions) + "' }\n"
            "        'completions' { '" + std::string(kShells) + "' }\n"
            "        'uninstall' { '--yes' }\n"
+           "        'serve' { if ($wordToComplete -like '-*') { '" + std::string(kServeOptions) + "' } else { $null } }\n"
            "        { $_ -in 'clean', 'doctor', 'version', 'help' } { '' }\n"
            "        default { if ($wordToComplete -like '-*') { '" + std::string(kBuildOptions) + "' } else { $null } }\n"
            "    }\n"

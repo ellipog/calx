@@ -1,0 +1,158 @@
+// std.http.server answers requests that a std.net client sends it on loopback (CLX-167): a body
+// by Content-Length and by chunks, 100-continue, keep-alive, two requests in one write, HEAD,
+// HTTP/1.0, the requests it refuses, and from_dir on a folder of its own. The Date header is
+// left out of what's shown.
+import std.fs.{make_dir_all, remove_dir_all, temp_dir, write_text}
+import std.http.server.{Request, Response, Server, content_type, from_dir, reason}
+import std.net.{Event, Net}
+
+fn answer(req: Request, dir: String) -> Response {
+    if req.path.starts_with("/files") {
+        var r = req.copy()
+        r.path = req.path[6..].copy()
+        r.target = req.target[6..].copy()
+        return from_dir(dir, r)
+    }
+    if req.path == "/missing" {
+        return Response.error(404, "No <such> page")
+    }
+    if req.path == "/go" {
+        return Response.redirect("/there")
+    }
+    let body = req.text() ?? String("?")
+    let agent = req.header("X-Test") ?? String("-")
+    return Response.text("{req.method} {req.path} q={req.query} {req.version} body={body} x={agent}").with_header("X-Seen", "yes")
+}
+
+// `raw` sent on a new connection, the requests it makes answered, and what came back, without
+// the Date line, until the server closes the connection or nothing more comes.
+fn exchange(server: mut Server, client: Net, raw: String, dir: String) -> String {
+    let c = client.connect("127.0.0.1", server.port)!
+    client.write(c, raw.to_bytes())
+    var got = List<u8>()
+    var events = List<Event>()
+    var closed = false
+    var quiet = 0
+    var rounds = 0
+    while not closed and quiet < 20 and rounds < 2000 {
+        rounds += 1
+        var busy = false
+        client.poll(2, mut events)
+        for e in events {
+            match e {
+                // An earlier exchange's connection can still close here.
+                Received(x) => {
+                    if x.id() == c.id() {
+                        _ = client.read(x, mut got)
+                        busy = true
+                    }
+                }
+                Closed(x) => {
+                    if x.id() == c.id() {
+                        closed = true
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let req = server.next(2) {
+            server.respond(req, answer(req, dir))
+            busy = true
+        }
+        quiet = if busy or got.is_empty() { 0 } else { quiet + 1 }
+    }
+    if not closed {
+        client.close(c)
+    }
+    let text = String.from_utf8(got) ?? String("<not UTF-8>")
+    var out = List<String>()
+    for line in text.split("\r\n") {
+        if not line.starts_with("Date: ") {
+            out.push(line.copy())
+        }
+    }
+    var shown = out.join("|")
+    if closed {
+        shown.push_str(" [closed]")
+    }
+    return shown
+}
+
+fn main() {
+    let dir = "{temp_dir()!}/calx_http_server_test"
+    match remove_dir_all(dir.copy()) {
+        ok => {},
+        err(_) => {},
+    }
+    make_dir_all("{dir}/sub")!
+    write_text("{dir}/hello.txt", "hello")!
+    write_text("{dir}/sub/index.html", "<p>sub</p>\n")!
+    var server = Server.listen(0)!
+    let client = Net.new()!
+    println("{server.url().starts_with("http://127.0.0.1:")}")    // out: true
+
+    println(exchange(mut server, client, "GET /a%20b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nX-Test: 7\r\nConnection: close\r\n\r\n", dir))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 37|Connection: close||GET /a b q=x=1&y=2 HTTP/1.1 body= x=7 [closed]
+    println(exchange(mut server, client, "POST /p HTTP/1.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", dir))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 34|Connection: close||POST /p q= HTTP/1.1 body=hello x=- [closed]
+    println(exchange(mut server, client, "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n2;ext=1\r\nde\r\n0\r\nTrailer: t\r\n\r\n", dir))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 34|Connection: close||POST /c q= HTTP/1.1 body=abcde x=- [closed]
+    // Two requests in one write, on a connection kept open, answered in order.
+    println(exchange(mut server, client, "GET /one HTTP/1.1\r\n\r\nHEAD /two HTTP/1.1\r\n\r\n", dir))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 30||GET /one q= HTTP/1.1 body= x=-HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 31||
+    println(exchange(mut server, client, "GET /old HTTP/1.0\r\n\r\n", dir))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|X-Seen: yes|Content-Length: 30|Connection: close||GET /old q= HTTP/1.0 body= x=- [closed]
+    println(exchange(mut server, client, "POST /e HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", dir))
+    // out: HTTP/1.1 100 Continue||
+    let missing = exchange(mut server, client, "GET /missing HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+    println("{missing[0..missing.find("||") ?? 0]} {missing.contains("<p>No &lt;such&gt; page</p>")}")
+    // out: HTTP/1.1 404 Not Found|Server: Calx|Content-Type: text/html; charset=utf-8|Content-Length: 174|Connection: close true
+    println(exchange(mut server, client, "GET /go HTTP/1.1\r\nConnection: close\r\n\r\n", dir))
+    // out: HTTP/1.1 302 Found|Server: Calx|Location: /there|Content-Length: 0|Connection: close|| [closed]
+
+    // What it refuses, closing the connection after the error.
+    for raw in ["GARBAGE\r\n\r\n", "GET / HTTP/2.0\r\n\r\n", "GET / HTTP/1.x\r\n\r\n", "GET /\r\n\r\n", "GET / HTTP/1.1\r\nno colon\r\n\r\n", "POST / HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n", "POST / HTTP/1.1\r\nContent-Length: 1x\r\n\r\n", "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"] {
+        let first = exchange(mut server, client, String(raw), dir)
+        println(first[0..first.find("|") ?? first.len()])
+    }
+    // out: HTTP/1.1 400 Bad Request
+    // out: HTTP/1.1 505 HTTP Version Not Supported
+    // out: HTTP/1.1 400 Bad Request
+    // out: HTTP/1.1 400 Bad Request
+    // out: HTTP/1.1 400 Bad Request
+    // out: HTTP/1.1 413 Content Too Large
+    // out: HTTP/1.1 400 Bad Request
+    // out: HTTP/1.1 400 Bad Request
+    let long = "GET /{"a".repeat(70000)} HTTP/1.1\r\n\r\n"
+    let got = exchange(mut server, client, long, dir)
+    println(got[0..got.find("|") ?? got.len()])    // out: HTTP/1.1 414 URI Too Long
+
+    // Files, as from_dir serves them.
+    let files = exchange(mut server, client, "GET /files/hello.txt HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+    println(files.replace(files[files.find("Last-Modified: ") ?? 0..(files.find("Last-Modified: ") ?? 0) + 44], "Last-Modified: ..."))
+    // out: HTTP/1.1 200 OK|Server: Calx|Content-Type: text/plain; charset=utf-8|Last-Modified: ...|Content-Length: 5|Connection: close||hello [closed]
+    println(exchange(mut server, client, "GET /files/sub HTTP/1.1\r\nConnection: close\r\n\r\n", dir))
+    // out: HTTP/1.1 301 Moved Permanently|Server: Calx|Location: /sub/|Content-Length: 0|Connection: close|| [closed]
+    let page = exchange(mut server, client, "GET /files/sub/ HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+    println("{page.ends_with("<p>sub</p>\n [closed]")}")    // out: true
+    let listed = exchange(mut server, client, "GET /files/ HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+    let both = listed.contains("<li><a href=\"hello.txt\">hello.txt</a></li>") and listed.contains("<li><a href=\"sub/\">sub/</a></li>")
+    println("{both}")    // out: true
+    for path in ["/files/nope.txt", "/files/hello.txt/", "/files/../hello.txt", "/files/%2e%2e/%2e%2e/x"] {
+        let status = exchange(mut server, client, "GET {path} HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+        println("{path}: {status[0..status.find("|") ?? status.len()]}")
+    }
+    // out: /files/nope.txt: HTTP/1.1 404 Not Found
+    // out: /files/hello.txt/: HTTP/1.1 404 Not Found
+    // out: /files/../hello.txt: HTTP/1.1 200 OK
+    // out: /files/%2e%2e/%2e%2e/x: HTTP/1.1 404 Not Found
+    let since = exchange(mut server, client, "GET /files/hello.txt HTTP/1.1\r\nIf-Modified-Since: Fri, 01 Jan 2100 00:00:00 GMT\r\nConnection: close\r\n\r\n", dir)
+    println(since)    // out: HTTP/1.1 304 Not Modified|Server: Calx|Connection: close|| [closed]
+    let refused = exchange(mut server, client, "DELETE /files/hello.txt HTTP/1.1\r\nConnection: close\r\n\r\n", dir)
+    println("{refused.contains("501 Not Implemented")}")    // out: true
+
+    println("{content_type("a.HTML")} {content_type("b.png")} {content_type("c.tar.gz")} {content_type("noext")} {content_type(".hidden")}")
+    // out: text/html; charset=utf-8 image/png application/gzip application/octet-stream application/octet-stream
+    println("{reason(200)}|{reason(418)}|{reason(431)}")    // out: OK||Request Header Fields Too Large
+    remove_dir_all(dir.copy())!
+}

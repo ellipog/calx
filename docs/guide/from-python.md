@@ -29,6 +29,7 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | `unittest`, `pytest` | `@test` on a function, and `calx test tool.calx`, which runs each test in a process of its own ([testing](../reference/command.md#testing)) |
 | `assert x == 1, "why"` | `assert(x == 1, "why")` |
 | `pip install requests` | Nothing: `std.http` comes with Calx |
+| `python -m http.server` | `calx serve`, on loopback unless `--bind` says otherwise ([serving a folder](../reference/command.md#serving-a-folder)) |
 
 The first run builds the script. Later runs reuse that build until the file changes, so the script starts in milliseconds. `calx run --release` builds it optimized, for scripts that do a lot of work.
 
@@ -200,6 +201,7 @@ fn main() ! Error {
 | `urllib.parse.quote`, `urlsplit`, `urljoin` | `encode`, `Url.parse`, `url.join` from [`std.url`](../std/url.md) |
 | `uuid.uuid4()` | `Uuid.random()` from [`std.uuid`](../std/uuid.md) |
 | `requests.get(url).text` | `fetch(url)` from [`std.http`](../std/http.md), then `String.from_utf8(resp.body)`, ready for `parse` |
+| `http.server.HTTPServer`, `BaseHTTPRequestHandler`, `do_GET` | `Server.listen(port)`, then `next()` for each request and `respond(req, res)` from [`std.http.server`](../std/http-server.md) |
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |

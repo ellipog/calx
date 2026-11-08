@@ -69,6 +69,8 @@ int usage() {
         "  expand    print the code a program's attributes generate\n"
         "  fmt       format .calx files in place, or those under a folder (--check changes nothing,\n"
         "            --stdin formats standard input to standard output)\n"
+        "  serve     serve a folder's files over HTTP on this machine, as python -m http.server\n"
+        "            does: calx serve [folder] [--port N] [--bind ADDRESS]\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
         "  doctor    check that Calx can build and run programs, and say how to fix what's wrong\n"
         "  clean     remove the build cache, and say how much that freed\n"
@@ -451,6 +453,108 @@ std::string eval_program(const EvalCode& e, bool print) {
     return out;
 }
 
+// CLX-167: the program `calx serve` builds, which serves a folder as `python -m http.server`
+// does. It takes the folder, the port, the address and whether the port was given, and when
+// the port wasn't and 8000 is taken, it tries the next ones up to 8010.
+const char* const kServeProgram = R"(import std.env.{args}
+import std.http.server.{Server}
+import std.process.{exit}
+
+fn main() {
+    let a = args()
+    let given = a[3] == "1"
+    let first = u16.parse(a[1].copy()) ?? 8000
+    var port = first
+    loop {
+        match Server.listen(port, a[2].copy()) {
+            ok(s) => {
+                var server = s
+                server.serve(a[0].copy())
+            }
+            err(e) => {
+                var busy = false
+                match e {
+                    AddressInUse => busy = true,
+                    _ => {}
+                }
+                if busy and not given and port < 8010 {
+                    port += 1
+                    continue
+                }
+                let host = if a[2].is_empty() { String("every address") } else { a[2].copy() }
+                if busy and not given {
+                    eprintln("calx serve: ports {first} to {port} on {host} are all in use; --port picks another, or 0 any free one")
+                } else {
+                    eprintln("calx serve: can't listen on {host} port {port}: {e}")
+                }
+                exit(1)
+            }
+        }
+    }
+}
+)";
+
+int serve_usage(FILE* to) {
+    std::fputs("usage: calx serve [folder] [--port N] [--bind ADDRESS]\n"
+               "\n"
+               "Serves the folder's files over HTTP, this folder's if none is given, as\n"
+               "python -m http.server does, until it's stopped with Ctrl+C.\n"
+               "\n"
+               "  -p, --port N        the port, 8000 unless given; if 8000 is taken, the next\n"
+               "                      free one up to 8010. 0 lets the system pick one\n"
+               "  -b, --bind ADDRESS  the address to listen on: 127.0.0.1 unless given, so only\n"
+               "                      this machine reaches it. \"\" listens on every address\n",
+               to);
+    return to == stdout ? 0 : 2;
+}
+
+// Reads `calx serve`'s arguments into the arguments of the program it builds, which is built
+// optimized, since it serves for as long as it runs. -1 when it's set up, or the status to stop
+// with.
+int serve_options(const std::vector<std::string>& rest, Options& opt) {
+    std::string dir;
+    std::string port = "8000";
+    std::string host = "127.0.0.1";
+    bool given = false;
+    for (std::size_t i = 0; i < rest.size(); i++) {
+        const std::string& a = rest[i];
+        if (a == "--help" || a == "-h") return serve_usage(stdout);
+        if ((a == "--port" || a == "-p" || a == "--bind" || a == "-b") && i + 1 == rest.size()) {
+            std::fprintf(stderr, "calx serve: %s needs a value after it\n", a.c_str());
+            return 2;
+        }
+        if (a == "--port" || a == "-p") {
+            port = rest[++i];
+            given = true;
+        } else if (a == "--bind" || a == "-b") {
+            host = rest[++i];
+        } else if (!a.empty() && a[0] == '-') {
+            std::fprintf(stderr, "calx serve: unknown option %s\n\n", a.c_str());
+            return serve_usage(stderr);
+        } else if (dir.empty()) {
+            dir = a;
+        } else {
+            std::fprintf(stderr, "calx serve: it serves one folder, and was given `%s` and `%s`\n", dir.c_str(), a.c_str());
+            return 2;
+        }
+    }
+    bool number = !port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos;
+    if (!number || std::stol(port) > 65535) {
+        std::fprintf(stderr, "calx serve: the port is a number from 0 to 65535, not `%s`\n", port.c_str());
+        return 2;
+    }
+    if (dir.empty()) dir = ".";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) {
+        std::fprintf(stderr, "calx serve: `%s` isn't a folder\n", dir.c_str());
+        return 1;
+    }
+    opt.mode = BuildMode::release;
+    opt.input = "serve";
+    opt.program_args = {dir, std::to_string(std::stol(port)), host, given ? "1" : "0"};
+    return -1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -473,11 +577,16 @@ int main(int argc, char** argv) {
     if (opt.command == "completions") return run_completions(rest);
     if (opt.command == "new") return run_new(rest);
     if (opt.command == "fmt") return run_fmt(rest);
-    bool direct = !is_command(opt.command);
+    bool serve = opt.command == "serve";
+    if (serve) {
+        int status = serve_options(rest, opt);
+        if (status >= 0) return status;
+    }
+    bool direct = !is_command(opt.command) && !serve;
     if (direct) {
         if (int status = direct_run(argc, argv, opt)) return status;
     }
-    for (int i = 2; i < argc && !direct; i++) {
+    for (int i = 2; i < argc && !direct && !serve; i++) {
         std::string a = argv[i];
         if (a == "--") {
             for (int j = i + 1; j < argc; j++) opt.program_args.push_back(argv[j]);
@@ -535,6 +644,8 @@ int main(int argc, char** argv) {
             plain->check(plain->sources.add("eval", eval_program(code, false)), opt, color);
             if (plain->ok()) front = std::move(plain);
         }
+    } else if (serve) {
+        front->check(front->sources.add("serve", kServeProgram), opt, color);
     } else {
         std::uint32_t file;
         if (opt.stdin_text) {
@@ -666,12 +777,12 @@ int main(int argc, char** argv) {
         set_run_environment(opt.input);
         return run_tests(b.exe, tests, opt.filters);
     }
-    if (opt.command == "eval") {
+    if (opt.command == "eval" || serve) {
         std::vector<std::string> run = {b.exe};
         run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
         std::fflush(stdout);
         std::fflush(stderr);
-        int status = run_process(run, "eval");
+        int status = run_process(run, opt.command);
         if (status < 0) {
             std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());
             return 1;

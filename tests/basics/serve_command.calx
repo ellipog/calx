@@ -1,0 +1,64 @@
+// `calx serve FOLDER` serves a folder over HTTP on loopback, as `python -m http.server` does
+// (CLX-167): it says where, answers as std.http.server's `from_dir` does, logs each request as
+// Python does, and refuses arguments it can't use before it builds anything.
+import std.env.{variable}
+import std.fs.{make_dir_all, remove_dir_all, temp_dir, write_text}
+import std.http.{fetch}
+import std.process.{Command, Stdio}
+
+fn calx() -> String {
+    return variable("CALX") ?? String("calx")
+}
+
+// The first line `calx serve` wrote to standard error, and how it ended.
+fn refused(args: List<String>) -> String {
+    var all: List<String> = ["serve"]
+    all.extend(args)
+    match Command.new(calx()).args(all).output() {
+        ok(o) => {
+            let text = o.error_text()
+            let lines = text.lines()
+            let first = if lines.is_empty() { String() } else { lines[0].copy() }
+            return "{first} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let dir = "{temp_dir()!}/served"
+    make_dir_all("{dir}/sub")!
+    write_text("{dir}/hi.txt", "hi there\n")!
+    let child = Command.new(calx()).args(["serve", dir.copy(), "--port", "0"]).stdout(Stdio.Pipe).stderr(Stdio.Pipe).spawn()!
+    // The first time, the program that serves is built, optimized, which takes a moment.
+    let line = child.read_line(120000) ?? String("no line")
+    let open = line.find("(") ?? 0
+    let close = line.find(")") ?? 0
+    let url = line[open + 1..close].copy()
+    println("{line.starts_with("Serving HTTP on 127.0.0.1 port ")} {url.starts_with("http://127.0.0.1:")} {line.ends_with(") ...")}")    // out: true true true
+    let file = fetch("{url}hi.txt")!
+    println("{file.status} {(String.from_utf8(file.body) ?? String("?")).trim()}")    // out: 200 hi there
+    let page = fetch(url)!
+    let listing = String.from_utf8(page.body) ?? String()
+    println("{page.status} {listing.contains("<a href=\"sub/\">sub/</a>")} {listing.contains("hi.txt")}")    // out: 200 true true
+    let missing = fetch("{url}nothing")!
+    println("{missing.status}")    // out: 404
+    child.kill()
+    var c = child
+    let out = c.wait()
+    // Each request logged as Python logs it, after the address and the time.
+    for log in out.error_text().lines() {
+        let at = log.find("] ") ?? 0
+        println("{log.starts_with("127.0.0.1 - - [")} {log[at + 2..]}")
+    }
+    // out: true "GET /hi.txt HTTP/1.1" 200 -
+    // out: true "GET / HTTP/1.1" 200 -
+    // out: true "GET /nothing HTTP/1.1" 404 -
+    remove_dir_all(dir)!
+
+    println(refused(["--port"]))    // out: calx serve: --port needs a value after it [exited with status 2]
+    println(refused(["--port", "70000"]))    // out: calx serve: the port is a number from 0 to 65535, not `70000` [exited with status 2]
+    println(refused(["{dir}/not-there"]).replace(dir, "DIR"))    // out: calx serve: `DIR/not-there` isn't a folder [exited with status 1]
+    println(refused(["a", "b"]))    // out: calx serve: it serves one folder, and was given `a` and `b` [exited with status 2]
+    println(refused(["--wat"]))    // out: calx serve: unknown option --wat [exited with status 2]
+}
