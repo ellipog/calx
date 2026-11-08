@@ -26,6 +26,7 @@ module std.yaml
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import std.bytes.{base64}
+import std.meta.{EnumDecl, Field, Generated, StructDecl, TypeKind, TypeRef}
 import std.toml.{Moment}
 
 /// A YAML value, as PyYAML's `safe_load` makes it.
@@ -2242,7 +2243,7 @@ fn scalar(t: String, text: own String, resolve: bool, tag: String?, at: usize) -
         fail error_at(t, at, "`{text}` tagged a bool, which takes yes, no, true, false, on or off")
     }
     if kind == K_INT {
-        match yaml_int(text) {
+        match int_value(text) {
             ok(n) => return Got { value: Yaml.Int(n), special: NORMAL },
             err(why) => fail error_at(t, at, why),
         }
@@ -2763,7 +2764,7 @@ fn signed(negative: bool, n: u64, text: String) -> i64 ! String {
 
 // PyYAML's integer constructor: `_`s dropped, the sign, then `0b`, `0x`, a leading `0` for octal,
 // `:` for base 60, or decimal.
-fn yaml_int(text: String) -> i64 ! String {
+fn int_value(text: String) -> i64 ! String {
     var v = text.replace("_", "")
     if v.is_empty() {
         fail "an empty scalar tagged an integer"
@@ -4454,5 +4455,462 @@ fn write_literal(e: mut Emitter, text: String) {
         }
         breaks = is_break_rune(r)
         end += n
+    }
+}
+
+// --- what @yaml's code calls -----------------------------------------------------------------
+
+/// The error for the value at `path`, which should be `wanted` but is `value`. `@yaml`'s code
+/// calls it.
+pub fn yaml_expected(value: Yaml, wanted: String, path: String) -> YamlError {
+    return YamlError { message: "`{path}` should be {wanted}, not {value.kind()}", line: 0, column: 0 }
+}
+
+/// The error for a key that isn't there. `@yaml`'s code calls it.
+pub fn yaml_missing(path: String) -> YamlError {
+    return YamlError { message: "`{path}` is missing", line: 0, column: 0 }
+}
+
+/// `value` as a `bool`, for `path`. `@yaml`'s code calls it.
+pub fn yaml_bool(value: Yaml, path: String) -> bool ! YamlError {
+    if let Yaml.Bool(b) = value {
+        return b
+    }
+    fail yaml_expected(value, "true or false", path)
+}
+
+/// `value` as an integer from `min` to `max`, for `path`. `@yaml`'s code calls it.
+pub fn yaml_int(value: Yaml, path: String, min: i64, max: i64) -> i64 ! YamlError {
+    if let Yaml.Int(n) = value {
+        if n < min or n > max {
+            fail YamlError { message: "`{path}` should be from {min} to {max}, not {n}", line: 0, column: 0 }
+        }
+        return n
+    }
+    fail yaml_expected(value, "an integer", path)
+}
+
+/// `n` as a YAML integer. `@yaml`'s code calls it for a `u64` or `usize` field. It panics for one
+/// past `i64`'s range, which std.yaml's integers are.
+@track_caller
+pub fn yaml_from_u64(n: u64) -> Yaml {
+    if n > 9223372036854775807 {
+        panic("{n} is past the 64-bit signed integers std.yaml has")
+    }
+    return Yaml.Int(i64.wrap(n))
+}
+
+/// `value` as an `f64`, for `path`: a float, or an integer as the nearest `f64`. `@yaml`'s code
+/// calls it.
+pub fn yaml_f64(value: Yaml, path: String) -> f64 ! YamlError {
+    return match value {
+        Yaml.Int(n) => f64.nearest(n),
+        Yaml.Float(f) => f,
+        _ => {
+            fail yaml_expected(value, "a number", path)
+        },
+    }
+}
+
+/// `value` as a `String`, for `path`. `@yaml`'s code calls it.
+pub fn yaml_string(value: Yaml, path: String) -> String ! YamlError {
+    if let Yaml.Str(s) = value {
+        return s.copy()
+    }
+    fail yaml_expected(value, "a string", path)
+}
+
+/// The error for a string at `path` that names none of an enum's variants, `names`. `@yaml_enum`'s
+/// code calls it.
+pub fn yaml_not_one_of(value: Yaml, names: String, path: String) -> YamlError {
+    if let Yaml.Str(s) = value {
+        return YamlError { message: "`{path}` should be one of {names}, not `{s}`", line: 0, column: 0 }
+    }
+    return yaml_expected(value, "one of {names}", path)
+}
+
+// --- @yaml -----------------------------------------------------------------------------------
+
+/// Writes `to_yaml(self) -> Yaml` and `from_yaml(value: Yaml) -> Self ! YamlError` for a struct,
+/// and `to_yaml_text` and `from_yaml_text` beside them, from its fields' types. See
+/// docs/std/yaml.md.
+@attribute("yaml_key")
+pub fn yaml(decl: StructDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@yaml` can't write a generic struct's YAML yet"
+    }
+    var w = YamlWriter { owner: decl.name.copy(), helpers: String(), next: 0, uses: List<String>() }
+    var to = String()
+    var keys = String()
+    var from = String()
+    var k: usize = 0
+    for f in decl.fields {
+        let key = try yaml_key(f)
+        let at = #""{path}.#{key}""#
+        let value = try w.to_yaml(f.ty, "self.{f.name}")
+        to.push_str(#"        out.insert(Yaml.Str("#{key}"), #{value})"#)
+        to.push('\n')
+        keys.push_str(#"                let key_#{k} = Yaml.Str("#{key}")"#)
+        keys.push('\n')
+        // A key that isn't there is `none` for an optional, the field's default if it has one,
+        // and an error otherwise. So is null, which is `none` for an optional too.
+        var missing = String()
+        if f.ty.kind == TypeKind.Optional {
+            missing.push_str("none")
+        } else if not f.default.is_empty() {
+            missing.push_str(f.default)
+        } else {
+            w.use_name("yaml_missing")
+            missing.push_str(#"
+                    fail yaml_missing(#{at})
+                "#)
+        }
+        let get = try w.from_yaml(f.ty, "members[key_{k}]", at)
+        from.push_str(#"                    #{f.name}: if members.contains(key_#{k}) { #{get} } else { #{missing} },"#)
+        from.push('\n')
+        k += 1
+    }
+    w.use_name("Yaml")
+    w.use_name("YamlError")
+    w.use_name("yaml_expected")
+    w.use_name("parse as yaml_parse")
+    w.use_name("write as yaml_write")
+    var g = Generated.new()
+    g.add(w.imports())
+    g.add(#"
+        impl #{decl.name} {
+            /// This, as a YAML mapping, as `@yaml` writes it.
+            pub fn to_yaml(self) -> Yaml {
+                var out = LinkedMap<Yaml, Yaml>()
+        #{to}        return Yaml.Map(out)
+            }
+
+            /// This, as a YAML document, as `write` writes it.
+            pub fn to_yaml_text(self) -> String {
+                return yaml_write(self.to_yaml())
+            }
+
+            /// The value a YAML mapping describes, as `@yaml` reads it: a key for each field,
+            /// whose others are passed over.
+            pub fn from_yaml(value: Yaml) -> #{decl.name} ! YamlError {
+                return try #{decl.name}.from_yaml_at(value, "#{decl.name}")
+            }
+
+            /// The same, for the value at `path` in a bigger document, which errors name.
+            pub fn from_yaml_at(value: Yaml, path: String) -> #{decl.name} ! YamlError {
+                if let Yaml.Map(members) = value {
+        #{keys}                return #{decl.name} {
+        #{from}                }
+                }
+                fail yaml_expected(value, "a mapping", path)
+            }
+
+            /// The value a YAML document describes, as `from_yaml` reads it.
+            pub fn from_yaml_text(text: String) -> #{decl.name} ! YamlError {
+                let value = try yaml_parse(text)
+                return try #{decl.name}.from_yaml(value)
+            }
+        }
+        "#)
+    if not w.helpers.is_empty() {
+        g.add(w.helpers.copy())
+    }
+    return g
+}
+
+/// Writes `to_yaml` and `from_yaml` for an enum whose variants hold nothing, as their names, so a
+/// field of the enum's type can be in a struct with `@yaml`. See docs/std/yaml.md.
+@attribute
+pub fn yaml_enum(decl: EnumDecl) -> Generated ! String {
+    if not decl.generics.is_empty() {
+        fail "`@yaml_enum` can't write a generic enum's YAML"
+    }
+    if decl.variants.is_empty() {
+        fail "`@yaml_enum` writes an enum as the name of its variant, and `{decl.name}` has none"
+    }
+    var to = String()
+    var from = String()
+    var names = String()
+    for v in decl.variants {
+        if not v.payload.is_empty() or not v.fields.is_empty() {
+            fail "`@yaml_enum` writes an enum as the name of its variant, so its variants can't hold anything, as `{v.name}` does"
+        }
+        to.push_str(#"                    #{decl.name}.#{v.name} => "#{v.name}","#)
+        to.push('\n')
+        from.push_str(#"                    if s == "#{v.name}" { return #{decl.name}.#{v.name} }"#)
+        from.push('\n')
+        if not names.is_empty() {
+            names.push_str(", ")
+        }
+        names.push_str("`{v.name}`")
+    }
+    var g = Generated.new()
+    g.add("import std.yaml.\{Yaml, YamlError, yaml_not_one_of\}")
+    g.add(#"
+        impl #{decl.name} {
+            /// This, as the name of its variant.
+            pub fn to_yaml(self) -> Yaml {
+                return Yaml.Str(match self {
+        #{to}            })
+            }
+
+            /// The variant a YAML string names.
+            pub fn from_yaml(value: Yaml) -> #{decl.name} ! YamlError {
+                return try #{decl.name}.from_yaml_at(value, "#{decl.name}")
+            }
+
+            /// The same, for the value at `path` in a bigger document, which errors name.
+            pub fn from_yaml_at(value: Yaml, path: String) -> #{decl.name} ! YamlError {
+                if let Yaml.Str(s) = value {
+        #{from}        }
+                fail yaml_not_one_of(value, "#{names}", path)
+            }
+        }
+        "#)
+    return g
+}
+
+// The key a field is written under: its name, or what `@yaml_key("...")` says.
+fn yaml_key(f: Field) -> String ! String {
+    for a in f.attributes {
+        if a.name == "yaml_key" {
+            if a.args.len() != 1 or not a.args[0].starts_with("\"") {
+                fail "`@yaml_key` takes the key, as a string: `@yaml_key(\"max-players\")`"
+            }
+            return a.args[0][1..a.args[0].len() - 1]
+        }
+    }
+    return f.name.copy()
+}
+
+// What `@yaml` has written so far for one declaration: helper functions for lists, maps and
+// optionals, and the names it needs from `std.yaml`.
+struct YamlWriter {
+    owner: String
+    helpers: String
+    next: usize
+    uses: List<String>
+}
+
+impl YamlWriter {
+    fn use_name(mut self, name: String) {
+        for u in self.uses {
+            if u == name {
+                return
+            }
+        }
+        self.uses.push(name.copy())
+    }
+
+    // Adds a helper function, on lines of its own.
+    fn add_helper(mut self, code: own String) {
+        self.helpers.push_str(code)
+        self.helpers.push('\n')
+    }
+
+    fn imports(self) -> String {
+        return "import std.yaml.\{{self.uses.join(", ")}\}"
+    }
+
+    fn fresh(mut self) -> String {
+        self.next += 1
+        return "yaml_{self.owner.to_lower_root()}_{self.next}"
+    }
+
+    // An expression that's `value`, of type `t`, as a `Yaml`.
+    fn to_yaml(mut self, t: TypeRef, value: String) -> String ! String {
+        if t.kind == TypeKind.Optional {
+            let inner = try self.to_yaml(t.args[0], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Yaml {
+                    return match v {
+                        some(x) => #{inner},
+                        none => Yaml.Null,
+                    }
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if t.kind != TypeKind.Named {
+            fail "`@yaml` can't write a `{t.text}` field yet: it writes numbers, `bool`, `String`, `Yaml`, lists, maps with `String` keys, optionals, and types with `@yaml` or `@yaml_enum` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            return "Yaml.Bool({value})"
+        }
+        if n == "i64" {
+            return "Yaml.Int({value})"
+        }
+        if n == "i8" or n == "i16" or n == "i32" or n == "u8" or n == "u16" or n == "u32" {
+            return "Yaml.Int(i64({value}))"
+        }
+        if n == "u64" or n == "usize" {
+            self.use_name("yaml_from_u64")
+            return if n == "u64" { "yaml_from_u64({value})" } else { "yaml_from_u64(u64({value}))" }
+        }
+        if n == "f64" {
+            return "Yaml.Float({value})"
+        }
+        if n == "f32" {
+            return "Yaml.Float(f64({value}))"
+        }
+        if n == "String" {
+            return "Yaml.Str({value}.copy())"
+        }
+        if n == "Yaml" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.to_yaml(t.args[0], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Yaml {
+                    var out = List<Yaml>()
+                    out.reserve(v.len())
+                    for x in v {
+                        out.push(#{inner})
+                    }
+                    return Yaml.Seq(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@yaml` writes maps with `String` keys, as a struct's fields are, not `{t.text}`"
+            }
+            let inner = try self.to_yaml(t.args[1], "x")
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: #{t.text}) -> Yaml {
+                    var out = LinkedMap<Yaml, Yaml>()
+                    out.reserve(v.len())
+                    for (k, x) in v {
+                        out.insert(Yaml.Str(k.copy()), #{inner})
+                    }
+                    return Yaml.Map(out)
+                }
+                "#)
+            return "{name}({value})"
+        }
+        if not t.args.is_empty() {
+            fail "`@yaml` can't write a `{t.text}` field yet"
+        }
+        // A type with `@yaml` or `@yaml_enum` of its own.
+        return "{value}.to_yaml()"
+    }
+
+    // An expression that's the `Yaml` `value` as a `t`, failing with a `YamlError` for the place
+    // `path`, an expression that's a `String`.
+    fn from_yaml(mut self, t: TypeRef, value: String, path: String) -> String ! String {
+        if t.kind == TypeKind.Optional {
+            let inner = try self.from_yaml(t.args[0], "v", "path")
+            let name = self.fresh()
+            // A `Yaml?` reads anything, so it has no place to name.
+            let param = if inner.contains("path") { "path" } else { "_path" }
+            self.add_helper(#"
+                fn #{name}(v: Yaml, #{param}: String) -> #{t.text} ! YamlError {
+                    if let Yaml.Null = v {
+                        return none
+                    }
+                    return some(#{inner})
+                }
+                "#)
+            return "try {name}({value}, {path})"
+        }
+        if t.kind != TypeKind.Named {
+            fail "`@yaml` can't read a `{t.text}` field yet: it reads numbers, `bool`, `String`, `Yaml`, lists, maps with `String` keys, optionals, and types with `@yaml` or `@yaml_enum` of their own"
+        }
+        let n = t.name.copy()
+        if n == "bool" {
+            self.use_name("yaml_bool")
+            return "try yaml_bool({value}, {path})"
+        }
+        let range = yaml_int_range(n)
+        if let (lo, hi) = range {
+            self.use_name("yaml_int")
+            if n == "i64" {
+                return "try yaml_int({value}, {path}, {lo}, {hi})"
+            }
+            return "{n}.wrap(try yaml_int({value}, {path}, {lo}, {hi}))"
+        }
+        if n == "u64" or n == "usize" {
+            self.use_name("yaml_int")
+            return "{n}.wrap(try yaml_int({value}, {path}, 0, 9223372036854775807))"
+        }
+        if n == "f64" {
+            self.use_name("yaml_f64")
+            return "try yaml_f64({value}, {path})"
+        }
+        if n == "f32" {
+            self.use_name("yaml_f64")
+            return "f32.nearest(try yaml_f64({value}, {path}))"
+        }
+        if n == "String" {
+            self.use_name("yaml_string")
+            return "try yaml_string({value}, {path})"
+        }
+        if n == "Yaml" {
+            return "{value}.copy()"
+        }
+        if n == "List" {
+            let inner = try self.from_yaml(t.args[0], "x", #""{path}[{i}]""#)
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Yaml, path: String) -> #{t.text} ! YamlError {
+                    if let Yaml.Seq(items) = v {
+                        var out = #{t.text}()
+                        out.reserve(items.len())
+                        for (i, x) in items.enumerate() {
+                            out.push(#{inner})
+                        }
+                        return out
+                    }
+                    fail yaml_expected(v, "a list", path)
+                }
+                "#)
+            return "try {name}({value}, {path})"
+        }
+        if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            if t.args[0].text != "String" {
+                fail "`@yaml` reads maps with `String` keys, as a struct's fields are, not `{t.text}`"
+            }
+            self.use_name("yaml_string")
+            let inner = try self.from_yaml(t.args[1], "x", #""{path}.{key}""#)
+            let name = self.fresh()
+            self.add_helper(#"
+                fn #{name}(v: Yaml, path: String) -> #{t.text} ! YamlError {
+                    if let Yaml.Map(members) = v {
+                        var out = #{t.text}()
+                        for (k, x) in members {
+                            let key = try yaml_string(k, "{path} key")
+                            out.insert(key.copy(), #{inner})
+                        }
+                        return out
+                    }
+                    fail yaml_expected(v, "a mapping", path)
+                }
+                "#)
+            return "try {name}({value}, {path})"
+        }
+        if not t.args.is_empty() {
+            fail "`@yaml` can't read a `{t.text}` field yet"
+        }
+        return "try {n}.from_yaml_at({value}, {path})"
+    }
+}
+
+// The range of an integer type up to `i64`'s, as the literals `@yaml`'s code checks against.
+fn yaml_int_range(n: String) -> (String, String)? {
+    return match n {
+        "i8" => some(("-128", "127")),
+        "i16" => some(("-32768", "32767")),
+        "i32" => some(("-2147483648", "2147483647")),
+        "i64" => some(("-9223372036854775807 - 1", "9223372036854775807")),
+        "u8" => some(("0", "255")),
+        "u16" => some(("0", "65535")),
+        "u32" => some(("0", "4294967295")),
+        _ => none,
     }
 }

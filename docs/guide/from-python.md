@@ -193,6 +193,7 @@ fn main() ! Error {
 | `json.loads(t)`, `json.dumps(v, indent=2)` | `parse(t)`, `pretty(v, 2)` from [`std.json`](../std/json.md). `@json` on a struct reads and writes it from its fields' types, as a dataclass with pydantic would |
 | `tomllib.loads(t)`, `tomli_w.dumps(d)` | `parse(t)` and `write(d)` from [`std.toml`](../std/toml.md), with `doc.path("tool.black.line-length")` for a dotted key. `@toml` on a struct reads a config file straight into it |
 | `yaml.safe_load(t)`, `yaml.safe_load_all(t)`, `yaml.safe_dump(v, sort_keys=False)` | `parse(t)`, `parse_all(t)` and `write(v)` from [`std.yaml`](../std/yaml.md), PyYAML's YAML 1.1 with its quirks, written byte for byte as PyYAML writes it, with `doc.path("servers.0.port")` for a value deep in |
+| A dataclass read from YAML, `Config(**yaml.safe_load(t))` | `@yaml struct Config { ... }`, then `Config.from_yaml_text(t)`, which checks each field's type and names the path to what's wrong ([`@yaml`](../std/yaml.md#yaml)) |
 | `ConfigParser().read_string(t)`, `config.get(s, k)`, `getint`, `config.write(f)` | `parse(t)`, `ini.get(s, k)`, `get_int` and `ini.write()` from [`std.ini`](../std/ini.md) |
 | `csv.reader(f)`, `csv.DictReader(f)`, `csv.writer(f)` | `parse`, `parse_records` and `format` from [`std.csv`](../std/csv.md), or `Reader` for a row at a time |
 | `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |

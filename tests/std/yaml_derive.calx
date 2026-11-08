@@ -1,0 +1,114 @@
+// @yaml reads a struct from YAML and writes it back from its fields' types (CLX-171): numbers with
+// their ranges checked, strings, bools, optionals as null, defaults for keys that aren't there,
+// lists, maps, nested structs, enums as their variants' names with @yaml_enum, keys renamed with
+// @yaml_key, and errors that name the path to what's wrong. The text written is what PyYAML 6.0.3's
+// `safe_dump(d, sort_keys=False)` writes for the same values.
+import std.yaml.{yaml, yaml_enum, Yaml, YamlError}
+
+@yaml_enum
+enum Mode {
+    Survival
+    Creative
+}
+
+@yaml
+struct Backup {
+    every: String
+    keep: u32 = 7
+}
+
+@yaml
+struct Network {
+    port: u16 = 25565
+    address: String
+    @yaml_key("compression-threshold")
+    compression: i32?
+}
+
+@yaml
+struct Config {
+    name: String
+    @yaml_key("max-players")
+    max_players: u32
+    ratio: f64
+    mode: Mode
+    whitelist: bool = false
+    ops: List<String>
+    network: Network
+    backup: List<Backup>
+    weights: LinkedMap<String, f32>
+    motd: String?
+    extra: Yaml?
+    count: usize = 0
+}
+
+fn read(text: str) {
+    match Config.from_yaml_text(String(text)) {
+        ok(c) => println("{c.name} {c.max_players} {c.network.port} {c.network.compression} {c.backup.len()} {c.motd}"),
+        err(e) => println("error: {e}"),
+    }
+}
+
+fn main() ! YamlError {
+    let c = try Config.from_yaml_text(##"
+name: lobby
+max-players: 50
+ratio: 2
+mode: Creative
+ops: [ann, bo]
+weights: {eu: 1.5, us: 0.5}
+extra: {anything: [1, two]}
+network:
+  address: 0.0.0.0
+  compression-threshold: 256
+backup:
+  - every: 6h
+  - every: 1d
+    keep: 30
+motd: null
+"##)
+    println("{c.name} {c.max_players} {c.ratio} {c.whitelist} {c.ops} {c.network.port} {c.network.compression}")    // out: lobby 50 2.0 false [ann, bo] 25565 some(256)
+    println("{c.backup.len()} {c.backup[0].keep} {c.backup[1].keep} {c.weights} {c.motd} {c.extra} {c.mode.to_yaml()}")    // out: 2 7 30 {eu: 1.5, us: 0.5} none some({anything: [1, two]}) Creative
+    print(c.to_yaml_text())
+    // out: name: lobby
+    // out: max-players: 50
+    // out: ratio: 2.0
+    // out: mode: Creative
+    // out: whitelist: false
+    // out: ops:
+    // out: - ann
+    // out: - bo
+    // out: network:
+    // out:   port: 25565
+    // out:   address: 0.0.0.0
+    // out:   compression-threshold: 256
+    // out: backup:
+    // out: - every: 6h
+    // out:   keep: 7
+    // out: - every: 1d
+    // out:   keep: 30
+    // out: weights:
+    // out:   eu: 1.5
+    // out:   us: 0.5
+    // out: motd: null
+    // out: extra:
+    // out:   anything:
+    // out:   - 1
+    // out:   - two
+    // out: count: 0
+    let back = try Config.from_yaml_text(c.to_yaml_text())
+    println("{back.to_yaml() == c.to_yaml()}")    // out: true
+    read("name: x\nratio: 1.0\nmode: Survival\nops: []\nbackup: []\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.max-players` is missing
+    read("name: x\nmax-players: -1\nratio: 1.0\nmode: Survival\nops: []\nbackup: []\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.max-players` should be from 0 to 4294967295, not -1
+    read("name: x\nmax-players: 1\nratio: 1.0\nmode: Survival\nops: [a, 1]\nbackup: []\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.ops[1]` should be a string, not an integer
+    read("name: x\nmax-players: 1\nratio: 1.0\nmode: Survival\nops: []\nbackup: []\nweights: \{\}\nnetwork: 5")    // out: error: `Config.network` should be a mapping, not an integer
+    read("name: x\nmax-players: 1\nratio: fast\nmode: Survival\nops: []\nbackup: []\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.ratio` should be a number, not a string
+    read("name: x\nmax-players: 1\nratio: 1\nmode: Survival\nops: []\nbackup: [\{every: 1h\}, \{every: 2h, keep: no\}]\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.backup[1].keep` should be an integer, not a bool
+    read("name: x\nmax-players: 1\nratio: 1\nmode: Adventure\nops: []\nbackup: []\nweights: \{\}\nnetwork: \{address: ''\}")    // out: error: `Config.mode` should be one of `Survival`, `Creative`, not `Adventure`
+    read("name: x\nmax-players: 1\nratio: 1\nmode: 3\nops: []\nbackup: []\nweights: \{eu: x\}\nnetwork: \{address: ''\}")    // out: error: `Config.mode` should be one of `Survival`, `Creative`, not an integer
+    read("name: x\nmax-players: 1\nratio: 1\nmode: Survival\nops: []\nbackup: []\nweights: \{eu: x\}\nnetwork: \{address: ''\}")    // out: error: `Config.weights.eu` should be a number, not a string
+    read("name: x\nmax-players: 1")    // out: error: `Config.ratio` is missing
+    read("- not a mapping")    // out: error: `Config` should be a mapping, not a list
+    read("name: [unclosed")    // out: error: line 1, column 16: the end in a `[` list, where `,` or `]` should be; the list starts at line 1
+    return
+}

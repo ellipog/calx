@@ -1,6 +1,6 @@
 ---
 title: std.yaml
-description: YAML text parsed into a Yaml tree as PyYAML's safe_load reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and trees written back byte for byte as safe_dump writes them.
+description: YAML text parsed into a Yaml tree as PyYAML's safe_load reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and trees written back byte for byte as safe_dump writes them, and @yaml, which reads a struct from its fields' types.
 ---
 
 # `std.yaml`
@@ -188,6 +188,96 @@ fn main() {
 ```
 
 `{v}` writes the value as `write` does with `flow`, with no width to fold at and with a string that has a break in it in double quotes, so that it's one line.
+
+## `@yaml`
+
+`@yaml` on a struct writes five functions for it, from its fields' types, as [`@toml`](toml.md#toml) and [`@json`](json.md#json) do, so a config file reads straight into a struct (CLX-171):
+
+| Function | Does |
+| --- | --- |
+| `s.to_yaml() -> Yaml` | The struct as a mapping with a key for each field, in the fields' order |
+| `s.to_yaml_text() -> String` | That, as a document, as `write` writes it, which is what PyYAML's `safe_dump(d, sort_keys=False)` writes |
+| `T.from_yaml(value: Yaml) -> T ! YamlError` | The struct a mapping describes. Keys it has no field for are passed over |
+| `T.from_yaml_at(value: Yaml, path: String) -> T ! YamlError` | The same for a value deep in a document, whose errors start with `path` |
+| `T.from_yaml_text(text: String) -> T ! YamlError` | The struct a YAML document describes |
+
+`@yaml_enum` on an enum whose variants hold nothing writes `to_yaml`, `from_yaml` and `from_yaml_at` for it, as the names of its variants, so a struct with `@yaml` can have a field of its type.
+
+```calx
+import std.yaml.{yaml, yaml_enum, YamlError}
+
+@yaml_enum
+enum Mode {
+    Survival
+    Creative
+}
+
+@yaml
+struct Backup {
+    every: String
+    keep: u32 = 7
+}
+
+@yaml
+struct Config {
+    name: String
+    @yaml_key("max-players")
+    max_players: u32
+    mode: Mode
+    motd: String?
+    port: u16 = 25565
+    backup: List<Backup>
+}
+
+fn main() ! YamlError {
+    let c = try Config.from_yaml_text(##"
+        name: lobby
+        max-players: 50
+        mode: Creative
+        backup:
+        - every: 6h
+        - every: 1d
+          keep: 30
+        "##)
+    println("{c.name} {c.max_players} {c.motd} {c.port} {c.backup[0].keep} {c.backup[1].keep}")    // out: lobby 50 none 25565 7 30
+    print(c.to_yaml_text())
+    // out: name: lobby
+    // out: max-players: 50
+    // out: mode: Creative
+    // out: motd: null
+    // out: port: 25565
+    // out: backup:
+    // out: - every: 6h
+    // out:   keep: 7
+    // out: - every: 1d
+    // out:   keep: 30
+    match Config.from_yaml_text(String("name: x\nmax-players: 1\nmode: Survival\nbackup:\n- every: 1h\n  keep: forever")) {
+        ok(_) => {},
+        err(e) => println("{e}"),    // out: `Config.backup[0].keep` should be an integer, not a string
+    }
+}
+```
+
+The fields can be of these types:
+
+| Field | In YAML |
+| --- | --- |
+| `bool` | `true` or `false`, or any of YAML 1.1's other bools, such as `yes` and `off` |
+| `i8` to `i64`, `u8` to `u64`, `usize` | An integer, checked against the type's range. `1.0` isn't one. Writing a `u64` or `usize` past `i64`'s range panics, since std.yaml's integers are 64-bit and signed |
+| `f64`, `f32` | A float, or an integer |
+| `String` | A string |
+| `Yaml` | Anything, as it is: for a date, or a value of more than one kind |
+| `T?` | What `T` is, or `null` for `none` |
+| `List<T>` | A list of what `T` is |
+| `Map<String, T>`, `LinkedMap<String, T>`, `SortedMap<String, T>` | A mapping with string keys whose values are what `T` is, written in the map's order |
+| A struct with `@yaml`, or an enum with `@yaml_enum`, of its own | A mapping, or the name of a variant, from its own module too, once it's imported |
+
+- **A key that isn't there** is `none` for an optional field, and the field's default if it has one, as `port` has above. For any other field it's an error, `` `Config.name` is missing ``. `null` is `none` for an optional field too.
+- **`@yaml_key("...")` on a field** names its key in YAML, for a key that isn't a Calx name, such as `max-players`. A field is written under its own name otherwise.
+- **An error names the path to what's wrong**: the struct's name, then a key after a `.` and a list's index in `[]`, as `` `Config.backup[0].keep` `` above. An enum's error says what it should be: `` `Config.mode` should be one of `Survival`, `Creative`, not `Adventure` ``. An error in the text, before there's a mapping to read, has its line and column.
+- A variant's name is as it's written in Calx, `Survival`, not `survival`.
+- `@yaml` refuses a generic struct, a map whose keys aren't `String`, and a field of any other type, such as a tuple, with why, at the `@yaml`. `@yaml_enum` refuses a variant that holds something. A field whose type has neither of its own is an error in the code `@yaml` writes, that the type has no `to_yaml`.
+- `calx expand` prints the code they write, which is ordinary Calx.
 
 ## How it's checked
 

@@ -1,0 +1,31 @@
+// What `@yaml` and `@yaml_enum` refuse, with why, at the use.
+import std.yaml.{yaml, yaml_enum}
+
+@yaml    // error: `@yaml` can't write a generic struct's YAML yet
+struct Boxed<T> {
+    v: T
+}
+
+@yaml    // error: `@yaml` writes maps with `String` keys, as a struct's fields are, not `Map<i32, String>`
+struct ById {
+    names: Map<i32, String>
+}
+
+@yaml    // error: `@yaml` can't write a `(i32, i32)` field yet: it writes numbers, `bool`, `String`, `Yaml`, lists, maps with `String` keys, optionals, and types with `@yaml` or `@yaml_enum` of their own
+struct Pair {
+    both: (i32, i32)
+}
+
+@yaml    // error: `@yaml_key` takes the key, as a string: `@yaml_key("max-players")`
+struct Keyed {
+    @yaml_key(port)
+    port: u16
+}
+
+@yaml_enum    // error: `@yaml_enum` writes an enum as the name of its variant, so its variants can't hold anything, as `Circle` does
+enum Shape {
+    Dot
+    Circle(f64)
+}
+
+fn main() {}

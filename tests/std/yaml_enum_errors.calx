@@ -1,0 +1,11 @@
+// `@yaml` is for a struct. An enum whose variants hold nothing takes `@yaml_enum`, which writes it
+// as the names of its variants.
+import std.yaml.{yaml}
+
+@yaml    // error: `@yaml` is for a struct, since its first parameter is a `StructDecl`
+enum Mode {
+    On
+    Off
+}
+
+fn main() {}
