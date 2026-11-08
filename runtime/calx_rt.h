@@ -483,8 +483,114 @@ CX_INLINE cx_char cx_utf16_next(const cx_u8* p, cx_usize* i, cx_char* low) {
  * correctly. On failure they set `*out` to 0 and return 0. */
 CX_FN(cx_bool, cx_parse_i64, (cx_str s, cx_i64 lo, cx_i64 hi, cx_i64* out));
 CX_FN(cx_bool, cx_parse_u64, (cx_str s, cx_u64 hi, cx_u64* out));
-CX_FN(cx_bool, cx_parse_f64, (cx_str s, cx_f64* out));
-CX_FN(cx_bool, cx_parse_f32, (cx_str s, cx_f32* out));
+
+/* Floats come from the runtime's own code, the same bits on every platform (calx_fparse.c,
+ * CLX-137). A decimal written plainly, with a sign, a '.' and an exponent perhaps, and 19
+ * significant digits or fewer, which is most of them, is read here, inline, in one pass, eight
+ * digits at a time; with a significand of up to 2^53 (2^24 for f32) and a power of ten up to
+ * 10^22 (10^10), both exact, it's one rounding. The rest go to the runtime: the bits of
+ * w * 10^q from a product with a table, and everything else, as `cx_parse_float_rest`. */
+CX_FN(cx_u64, cx_parse_float_wq, (cx_u64 w, cx_i64 q, const cx_u8* sig, cx_usize n, cx_i64 exp10, int f32));
+CX_FN(cx_bool, cx_parse_float_rest, (cx_str s, int f32, cx_u64* bits));
+static const double cx_exact_pow10[23] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+                                          1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+static const float cx_exact_pow10f[11] = {1e0f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f, 1e6f, 1e7f, 1e8f, 1e9f, 1e10f};
+CX_INLINE cx_u64 cx_read8(const cx_u8* p) {
+    cx_u64 v;
+    __builtin_memcpy(&v, p, 8);  /* little-endian, as every platform Calx runs on is */
+    return v;
+}
+/* Whether all 8 bytes are digits: none above '9' once 0x46 is added, and none below '0'. */
+CX_INLINE int cx_eight_digits(cx_u64 v) {
+    return (((v + 0x4646464646464646ull) | (v - 0x3030303030303030ull)) & 0x8080808080808080ull) == 0;
+}
+/* The number 8 digit bytes write, the first most significant: pairs, then fours, then all eight,
+ * each step one multiply. */
+CX_INLINE cx_u64 cx_eight_value(cx_u64 v) {
+    v -= 0x3030303030303030ull;
+    v = v * 10 + (v >> 8);
+    v = (((v & 0x000000FF000000FFull) * 0x000F424000000064ull) + (((v >> 16) & 0x000000FF000000FFull) * 0x0000271000000001ull)) >> 32;
+    return (cx_u32)v;
+}
+CX_INLINE cx_bool cx_parse_float(cx_str s, int f32, cx_u64* bits) {
+    const cx_u8 *p = s.ptr, *end = s.ptr + s.len;
+    cx_u64 sign = 0;
+    if (p < end && (*p == '-' || *p == '+')) sign = *p++ == '-';
+    const cx_u8* start = p;
+    cx_u64 w = 0;
+    while (end - p >= 8 && cx_eight_digits(cx_read8(p))) {
+        w = w * 100000000 + cx_eight_value(cx_read8(p));
+        p += 8;
+    }
+    while (p < end && (cx_u8)(*p - '0') < 10) w = w * 10 + (cx_u64)(*p++ - '0');
+    cx_i64 digits = p - start, q = 0;
+    if (p < end && *p == '.') {
+        const cx_u8* frac = ++p;
+        while (end - p >= 8 && cx_eight_digits(cx_read8(p))) {
+            w = w * 100000000 + cx_eight_value(cx_read8(p));
+            p += 8;
+        }
+        while (p < end && (cx_u8)(*p - '0') < 10) w = w * 10 + (cx_u64)(*p++ - '0');
+        q = frac - p;
+        digits -= q;
+    }
+    const cx_u8* sig_end = p;
+    cx_i64 exp10 = 0;
+    if (p < end && (*p | 0x20) == 'e') {
+        p++;
+        int neg = 0;
+        if (p < end && (*p == '-' || *p == '+')) neg = *p++ == '-';
+        if (p == end || (cx_u8)(*p - '0') >= 10) return cx_parse_float_rest(s, f32, bits);
+        while (p < end && (cx_u8)(*p - '0') < 10) {
+            if (exp10 < 100000000) exp10 = exp10 * 10 + (*p - '0');
+            p++;
+        }
+        if (neg) exp10 = -exp10;
+    }
+    if (p != end || digits == 0) return cx_parse_float_rest(s, f32, bits);
+    if (digits > 19) {
+        /* Leading zeros don't count, and w is right if what's left is 19 digits or fewer. */
+        const cx_u8* z = start;
+        while (z < sig_end && (*z == '0' || *z == '.')) digits -= *z++ == '0';
+        if (digits > 19) return cx_parse_float_rest(s, f32, bits);
+    }
+    q += exp10;
+    cx_u64 r;
+    if (w == 0 || q + 19 <= (f32 ? -46 : -324)) {
+        r = 0;  /* nearer 0 than the least subnormal */
+    } else if (q >= (f32 ? 39 : 309)) {
+        r = f32 ? 0x7f800000u : 0x7ff0000000000000ull;  /* past the greatest float */
+    } else if (!f32 && w <= ((cx_u64)1 << 53) && q >= -22 && q <= 22) {
+        double v = (double)w;
+        if (q < 0) v /= cx_exact_pow10[-q];
+        else if (q > 0) v *= cx_exact_pow10[q];
+        __builtin_memcpy(&r, &v, 8);
+    } else if (f32 && w <= ((cx_u64)1 << 24) && q >= -10 && q <= 10) {
+        float v = (float)w;
+        if (q < 0) v /= cx_exact_pow10f[-q];
+        else if (q > 0) v *= cx_exact_pow10f[q];
+        cx_u32 b;
+        __builtin_memcpy(&b, &v, 4);
+        r = b;
+    } else {
+        r = cx_parse_float_wq(w, q, start, (cx_usize)(sig_end - start), exp10, f32);
+    }
+    *bits = r | sign << (f32 ? 31 : 63);
+    return 1;
+}
+CX_INLINE cx_bool cx_parse_f64(cx_str s, cx_f64* out) {
+    cx_u64 bits = 0;
+    cx_bool ok = cx_parse_float(s, 0, &bits);
+    __builtin_memcpy(out, &bits, 8);
+    return ok;
+}
+CX_INLINE cx_bool cx_parse_f32(cx_str s, cx_f32* out) {
+    cx_u64 bits = 0;
+    cx_bool ok = cx_parse_float(s, 1, &bits);
+    cx_u32 b = (cx_u32)bits;
+    __builtin_memcpy(out, &b, 4);
+    return ok;
+}
 CX_INLINE cx_bool cx_str_starts_with(cx_str s, cx_str p) {
     return p.len <= s.len && (p.len == 0 || __builtin_memcmp(s.ptr, p.ptr, p.len) == 0);
 }

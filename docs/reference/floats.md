@@ -104,6 +104,16 @@ fn main() {
 
 The result is correctly rounded. `f32.parse` rounds once, straight from the text, as `Float.parseFloat` does, so it can differ from parsing an `f64` and rounding that to `f32`.
 
+The text is read by Calx's own code, so the bits are the same on every platform: no C library's `strtod` is involved.
+- **Plain decimals.** A decimal written plainly with 19 significant digits or fewer, which is most, is read in one pass, eight digits at a time.
+- **One exact operation.** When the digits and the power of ten are both exact floats, one multiply or divide rounds the result.
+- **A product with a table.** Otherwise the result comes from one 64 × 128-bit product with a table of powers of five, checked against the product's error bound.
+- **Exact comparison.** Where the bound can't decide, near a point halfway between two floats, the text is compared with that point exactly, with big integers.
+
+On 5 million strings, `f64.parse` and `f32.parse` gave Java's bits for every one. The strings were random digits, halfway points and their neighbours, subnormals, inputs of up to 1,200 digits, and hex floats.
+
+On our benchmark of a million each of shortest doubles, short decimals and integers, it was about as fast as Rust's `str::parse::<f64>`: level on the first two and 10% faster on integers. It was 3 to 7 times faster than the C library's `strtod`, which Calx used before.
+
 ```calx
 fn main() {
     println("{f64.parse(" 1.5e3 ") ?? 0.0} {f64.parse("-Infinity") ?? 0.0} {f64.parse("0x1p-2") ?? 0.0}")    // out: 1500.0 -Infinity 0.25

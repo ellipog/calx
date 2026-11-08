@@ -1,0 +1,61 @@
+// f64.parse and f32.parse on the hard cases: ties, the ends of the range, more than 19 and more
+// than 768 digits, hex floats that round, and f32's own halfway points (CLX-137). Each line is the
+// f64's bits and the f32's, which are Java's Double.parseDouble's and Float.parseFloat's.
+
+import std.bigint.{BigInt}
+
+fn show(text: String) {
+    let d = f64.parse(text) ?? -1.0
+    let f = f32.parse(text) ?? -1.0f32
+    println("{d.to_bits()} {f.to_bits()}")
+}
+
+fn main() {
+    // Ties to even at 2^53, and just either side.
+    show("9007199254740993")    // out: 4845873199050653696 1509949440
+    show("9007199254740993.0000000000000000001")    // out: 4845873199050653697 1509949440
+    show("9007199254740992.9999999999999999999")    // out: 4845873199050653696 1509949440
+    // Half the least subnormal, exactly: a tie, to 0; and a digit more either way.
+    show("{BigInt.from(5).pow(1075)}e-1075")    // out: 0 0
+    show("{BigInt.from(5).pow(1075) - BigInt.from(1)}e-1075")    // out: 0 0
+    show("{BigInt.from(5).pow(1075)}1e-1076")    // out: 1 0
+    // Halfway between the greatest double and 2^1024: a tie, up to infinity; and just below.
+    show("{(BigInt.from(2).pow(54) - BigInt.from(1)) * BigInt.from(2).pow(970)}")    // out: 9218868437227405312 2139095040
+    show("{(BigInt.from(2).pow(54) - BigInt.from(1)) * BigInt.from(2).pow(970) - BigInt.from(1)}")    // out: 9218868437227405311 2139095040
+    // The least normal double and the greatest subnormal.
+    show("2.2250738585072014e-308")    // out: 4503599627370496 0
+    show("2.2250738585072011e-308")    // out: 4503599627370495 0
+    // 19 and 20 significant digits, and leading zeros that don't count.
+    show("1234567890123456789")    // out: 4877717327635671425 1569263752
+    show("12345678901234567890")    // out: 4892433759222981601 1596675242
+    show("0.00000000000000000001234567890123456789")    // out: 4309142755150069754 510211082
+    show("99999999999999999999e-20")    // out: 4607182418800017408 1065353216
+    // Past 768 digits, where what's left counts only by not being all 0.
+    show("1.{"0".repeat(800)}1")    // out: 4607182418800017408 1065353216
+    show("0.{"9".repeat(900)}")    // out: 4607182418800017408 1065353216
+    show("{BigInt.from(5).pow(1075)}{"0".repeat(100)}1e-1176")    // out: 1 0
+    show("{BigInt.from(5).pow(1075)}{"0".repeat(100)}e-1176")    // out: 0 0
+    // Hex floats that round.
+    show("0x1p-1075")    // out: 0 0
+    show("0x1.0000000000001p-1075")    // out: 1 0
+    show("0x1.fffffffffffff8p1023")    // out: 9218868437227405312 2139095040
+    show("0x1.fffffffffffff7ffp1023")    // out: 9218868437227405311 2139095040
+    show("0x1.00000000000008p0")    // out: 4607182418800017408 1065353216
+    show("0x1.00000000000008000001p0")    // out: 4607182418800017409 1065353216
+    show("0x1.00000000000018p0")    // out: 4607182418800017410 1065353216
+    // F32 halfway points, rounded once from the text.
+    show("1.000000178813934326171875")    // out: 4607182419605323776 1065353218
+    show("1.00000017881393432617187501")    // out: 4607182419605323776 1065353218
+    show("3.4028235677973366e38")    // out: 5183643170835005440 2139095039
+    show("7.006492321624085e-46")    // out: 3931642474694443008 0
+    show("7.006492321624086e-46")    // out: 3931642474694443008 1
+    show("16777217")    // out: 4715268810125344768 1266679808
+    show("33554435")    // out: 4719772409886932992 1275068417
+    // Java's grammar around the number, and exponents far out.
+    show(" \t1.5e3d ")    // out: 4654311885213007872 1153138688
+    show("-0x1.8P1f")    // out: 13837309855095848960 3225419776
+    show("+.5")    // out: 4602678819172646912 1056964608
+    show("0e999999999")    // out: 0 0
+    show("1e-999999999")    // out: 0 0
+    show("-1e999999999")    // out: 18442240474082181120 4286578688
+}
