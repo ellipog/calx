@@ -817,6 +817,19 @@ CX_FN(cx_usize, cx_lz4_bound, (cx_usize n));
 CX_FN(cx_usize, cx_lz4_compress, (const cx_u8* in, cx_usize n, cx_u8* out));
 CX_FN(cx_i32, cx_lz4_decode, (const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last));
 
+/* std.log's shared settings, in calx_log.c (CLX-172): the root logger's level, format, date format
+ * and log file, which the whole program shares, as Python's logging module's root logger. */
+CX_FN(cx_i32, cx_log_config, (cx_i32 level, const cx_u8* format, cx_usize format_len, const cx_u8* datefmt, cx_usize datefmt_len,
+                              const cx_u8* path, cx_usize path_len, cx_bool append));
+CX_FN(cx_bool, cx_log_ready, (void));
+CX_FN(cx_i32, cx_log_level, (void));
+CX_FN(void, cx_log_set_level, (cx_i32 level));
+CX_FN(cx_usize, cx_log_text, (cx_u32 which, cx_u8* out, cx_usize cap));
+CX_FN(cx_bool, cx_log_to_file, (void));
+CX_FN(void, cx_log_write, (const cx_u8* p, cx_usize n));
+CX_FN(cx_i64, cx_log_start_ms, (cx_i64 now));
+CX_FN(cx_u32, cx_log_pid, (void));
+
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's
  * extended result code and a copy of its message in the connection, for `cx_sqlite_error_code`,

@@ -1,0 +1,75 @@
+// std.log logs as Python's logging does (CLX-172): before any config, a named logger writes a
+// warning alone, as Python's handler of last resort does, and the root logger's first message
+// sets logging up as basicConfig() does; then levels, loggers and their children, Python's `%`
+// formats with widths and flags, a log file appended to and started again, and the formats and
+// files config refuses.
+import std.fs.{read_text, remove_file, temp_dir}
+import std.log.{Level, config, critical, debug, enabled, error, info, log, logger, set_level, warning}
+
+fn main() {
+    let net = logger("net")
+    net.warning("before any config")    // stderr: before any config
+    net.info("left out")
+    info("left out too")
+    warning("the root logger's first")    // stderr: WARNING:root:the root logger's first
+    net.warning("set up now")    // stderr: WARNING:net:set up now
+    println("{enabled(Level.Info)} {enabled(Level.Warning)} {net.enabled(Level.Debug)}")    // out: false true false
+
+    // Levels: the root logger's, and a logger's own, which its children take.
+    set_level(Level.Debug)
+    debug("debug")    // stderr: DEBUG:root:debug
+    var quiet = logger("quiet")
+    quiet.set_level(Level.Error)
+    quiet.warning("left out")
+    quiet.child("deeper").critical("kept")    // stderr: CRITICAL:quiet.deeper:kept
+    log(Level.Error, "by level")    // stderr: ERROR:root:by level
+    println("{Level.Warning} {Level.Critical.value()}")    // out: WARNING 50
+
+    // Formats: widths, `-` to pad on the right, `0` for zeros, precision, and `%%`.
+    config(level: Level.Info, format: "%(levelname)-8s|%(name)8s|%(levelno)03d|%(levelname).1s|100%% %(message)s")!
+    info("formatted")    // stderr: INFO    |    root|020|I|100% formatted
+    net.error("again")    // stderr: ERROR   |     net|040|E|100% again
+    debug("left out")
+    config(format: "%(processName)s %(message)s")!
+    critical("names")    // stderr: MainProcess names
+
+    // A log file, appended to, or started again with `append: false`.
+    let path = "{temp_dir()!}/test.log"
+    config(level: Level.Info, file: path, append: false)!
+    info("one")
+    logger("app").warning("two")
+    config(file: path, format: "%(name)s: %(message)s")!
+    error("three")
+    print(read_text(path)! ?? String())
+    // out: INFO:root:one
+    // out: WARNING:app:two
+    // out: root: three
+    config(file: path, append: false)!
+    warning("fresh")
+    config()!
+    print(read_text(path)! ?? String())    // out: WARNING:root:fresh
+    remove_file(path)!
+    warning("back on standard error")    // stderr: WARNING:root:back on standard error
+
+    // What config refuses, which leaves logging as it was.
+    for format in ["%(lineno)d %(message)s", "100% %(message)s", "%(nope)s", "%(message)", "%(levelname)d", "%(created)x", "no fields", "%(message)r", "%(threadName)s"] {
+        match config(format: format) {
+            ok => println("set up"),
+            err(e) => println("{e}"),
+        }
+    }
+    // out: `%(lineno)` in the format, a field of Python's records that Calx's don't have
+    // out: a `%` in the format `100% %(message)s` that starts no `%(field)s`; write `%%` for a `%`
+    // out: `%(nope)` in the format, which names no field of a record
+    // out: `%(message)` with no conversion after it, as `s` or `d` in the format `%(message)`
+    // out: `%(levelname)` is text, which `d` doesn't write; use `s`
+    // out: `%(created)` is a float, which `x` doesn't write
+    // out: the format `no fields` has no field, as `%(message)s`
+    // out: `%(message)` with the conversion `r`, where std.log writes `s`, `d`, `i`, `u`, `f`, `F`, `x`, `X` and `o`
+    // out: `%(threadName)` in the format, a field of Python's records that Calx's don't have
+    match config(file: "{path}/not/a/folder/x.log") {
+        ok => println("opened"),
+        err(_) => println("can't open it"),    // out: can't open it
+    }
+    warning("still")    // stderr: WARNING:root:still
+}

@@ -1,0 +1,632 @@
+/// Logging as Python's `logging` module does it, for scripts: messages at a level, `debug` to
+/// `critical`, written with the time, the level and the logger's name in a format, to standard
+/// error or to a file, once `config` says how, as `logging.basicConfig` does.
+///
+/// The settings are the program's, shared by every thread, as Python's root logger is, so `info`
+/// can be called anywhere without a logger being passed around. They're kept in the runtime, in
+/// calx_log.c, as Calx has no global state of its own. The functions are safe, though they read
+/// the clock and those settings, since what they read goes only to the log.
+module std.log
+
+import std.time.{Timestamp}
+
+extern "C" {
+    fn cx_log_config(level: i32, format: *const u8, format_len: usize, datefmt: *const u8, datefmt_len: usize, path: *const u8, path_len: usize, append: bool) -> i32
+    fn cx_log_ready() -> bool
+    fn cx_log_level() -> i32
+    fn cx_log_set_level(level: i32)
+    fn cx_log_text(which: u32, out: *u8, cap: usize) -> usize
+    fn cx_log_to_file() -> bool
+    fn cx_log_write(p: *const u8, n: usize)
+    fn cx_log_start_ms(now: i64) -> i64
+    fn cx_log_pid() -> u32
+}
+
+/// How much a message matters, as Python's levels: `Debug` is 10, `Info` 20, `Warning` 30,
+/// `Error` 40 and `Critical` 50.
+pub enum Level {
+    Debug
+    Info
+    Warning
+    Error
+    Critical
+}
+
+impl Level {
+    /// The level's number, as Python's `logging.INFO` is 20.
+    pub fn value(self) -> i32 {
+        return match self {
+            Level.Debug => 10,
+            Level.Info => 20,
+            Level.Warning => 30,
+            Level.Error => 40,
+            Level.Critical => 50,
+        }
+    }
+
+    /// The level's name, as a record's `levelname` is: `DEBUG`, `INFO`, `WARNING`, `ERROR` or
+    /// `CRITICAL`.
+    pub fn name(self) -> String {
+        return match self {
+            Level.Debug => "DEBUG",
+            Level.Info => "INFO",
+            Level.Warning => "WARNING",
+            Level.Error => "ERROR",
+            Level.Critical => "CRITICAL",
+        }
+    }
+}
+
+/// `{level}` is its name, `WARNING`.
+impl Display for Level {
+    fn show(self) {
+        print(self.name())
+    }
+}
+
+/// Why `config` couldn't set logging up: a format it can't read, or a file it can't open.
+pub struct LogError {
+    pub message: String
+}
+
+impl Display for LogError {
+    fn show(self) {
+        print(self.message)
+    }
+}
+
+/// Python's default format, `WARNING:root:the message`.
+pub const BASIC_FORMAT: str = "%(levelname)s:%(name)s:%(message)s"
+
+/// Sets logging up, as `logging.basicConfig(force=True, ...)` does: the level below which the
+/// root logger leaves messages out, the format of a record's line, the format of its `asctime`,
+/// and the file it goes to, appended to unless `append` is `false`, or standard error when `file`
+/// is empty. Each call replaces what the last set up; Python's basicConfig does nothing the second
+/// time unless it's forced.
+///
+/// The format is Python's `%` style: `%(name)s` for a field, with a width and flags, as in
+/// `%(levelname)-8s` and `%(msecs)03d`, and `%%` for a `%`. The fields are in the table in
+/// [std.log's page](../docs/std/log.md#formats). `datefmt` has strftime's codes, as
+/// `Timestamp.format`'s; empty, `asctime` is `2026-11-08 14:05:09,250`, as Python writes it.
+pub fn config(level: Level = Level.Warning, format: String = BASIC_FORMAT, datefmt: String = "", file: String = "", append: bool = true) ! LogError {
+    try check_format(format)
+    let f = format.to_bytes()
+    let d = datefmt.to_bytes()
+    let p = file.to_bytes()
+    let r = unsafe { cx_log_config(level.value(), f.as_ptr(), f.len(), d.as_ptr(), d.len(), p.as_ptr(), p.len(), append) }
+    if r != 0 {
+        fail LogError { message: "can't open `{file}` to log to" }
+    }
+}
+
+/// Sets the root logger's level, as `logging.getLogger().setLevel(level)` does.
+pub fn set_level(level: Level) {
+    ready()
+    unsafe {
+        cx_log_set_level(level.value())
+    }
+}
+
+/// Whether the root logger writes messages at `level`, for a message that costs something to put
+/// together: `if enabled(Level.Debug) { debug(...) }`.
+pub fn enabled(level: Level) -> bool {
+    return level.value() >= root_level()
+}
+
+/// Logs `message` at `Debug` on the root logger, as `logging.debug(message)` does.
+pub fn debug(message: String) {
+    log(Level.Debug, message)
+}
+
+/// Logs `message` at `Info` on the root logger, as `logging.info(message)` does.
+pub fn info(message: String) {
+    log(Level.Info, message)
+}
+
+/// Logs `message` at `Warning` on the root logger, as `logging.warning(message)` does.
+pub fn warning(message: String) {
+    log(Level.Warning, message)
+}
+
+/// Logs `message` at `Error` on the root logger, as `logging.error(message)` does.
+pub fn error(message: String) {
+    log(Level.Error, message)
+}
+
+/// Logs `message` at `Critical` on the root logger, as `logging.critical(message)` does.
+pub fn critical(message: String) {
+    log(Level.Critical, message)
+}
+
+/// Logs `message` at `level` on the root logger, as `logging.log(level, message)` does. Before
+/// `config`, the first message sets logging up as `config()` would, as Python's module functions
+/// call basicConfig.
+pub fn log(level: Level, message: String) {
+    ready()
+    if level.value() >= root_level() {
+        emit("root", level, message)
+    }
+}
+
+/// A logger by name, as `logging.getLogger(name)` gives, for the part of a program it names:
+/// its records have the name, and it can have a level of its own.
+pub struct Logger {
+    pub name: String
+    // Its own level, or 0 for the root logger's.
+    level: i32 = 0
+}
+
+/// The logger named `name`, with the root logger's level until `set_level` gives it one.
+pub fn logger(name: String) -> Logger {
+    return Logger { name: name.copy() }
+}
+
+impl Logger {
+    /// A logger below this one, named `name.suffix`, with this one's level, as `getChild` gives.
+    pub fn child(self, suffix: String) -> Logger {
+        return Logger { name: "{self.name}.{suffix}", level: self.level }
+    }
+
+    /// Gives this logger a level of its own, as `setLevel` does.
+    pub fn set_level(mut self, level: Level) {
+        self.level = level.value()
+    }
+
+    /// Whether this logger writes messages at `level`: at its own level and above, or the root
+    /// logger's if it has none.
+    pub fn enabled(self, level: Level) -> bool {
+        let at = if self.level > 0 { self.level } else { root_level() }
+        return level.value() >= at
+    }
+
+    pub fn debug(self, message: String) {
+        self.log(Level.Debug, message)
+    }
+
+    pub fn info(self, message: String) {
+        self.log(Level.Info, message)
+    }
+
+    pub fn warning(self, message: String) {
+        self.log(Level.Warning, message)
+    }
+
+    pub fn error(self, message: String) {
+        self.log(Level.Error, message)
+    }
+
+    pub fn critical(self, message: String) {
+        self.log(Level.Critical, message)
+    }
+
+    /// Logs `message` at `level`, if this logger writes that level. Before anything sets logging
+    /// up, a message at `Warning` or above is written alone to standard error, as Python's
+    /// handler of last resort writes it.
+    pub fn log(self, level: Level, message: String) {
+        if not self.enabled(level) {
+            return
+        }
+        if not unsafe { cx_log_ready() } {
+            if level.value() >= 30 {
+                eprintln(message)
+            }
+            return
+        }
+        emit(self.name, level, message)
+    }
+}
+
+fn ready() {
+    if not unsafe { cx_log_ready() } {
+        let f = BASIC_FORMAT.to_bytes()
+        _ = unsafe { cx_log_config(30, f.as_ptr(), f.len(), f.as_ptr(), 0, f.as_ptr(), 0, true) }
+    }
+}
+
+fn root_level() -> i32 {
+    return unsafe { cx_log_level() }
+}
+
+// The format or the date format as they're set now.
+fn setting(which: u32) -> String {
+    var cap: usize = 64
+    loop {
+        var out = List<u8>()
+        out.reserve(cap)
+        let n = unsafe { cx_log_text(which, out.as_mut_ptr(), cap) }
+        if n <= cap {
+            unsafe {
+                out.set_len(n)
+            }
+            return String.from_utf8(out) ?? String()
+        }
+        cap = n
+    }
+}
+
+// Writes a record's line where logging goes.
+fn emit(name: String, level: Level, message: String) {
+    let now = unsafe { Timestamp.now() }
+    var line = String()
+    write_record(mut line, setting(0), setting(1), name, level, message, now)
+    line.push('\n')
+    if unsafe { cx_log_to_file() } {
+        let b = line.to_bytes()
+        unsafe {
+            cx_log_write(b.as_ptr(), b.len())
+        }
+    } else {
+        eprint(line)
+    }
+}
+
+// --- formats ---------------------------------------------------------------------------------
+
+// What a field holds: text, a whole number, or a number of thousandths, as `created`, which is
+// seconds to the millisecond.
+const TEXT: u8 = 0
+const WHOLE: u8 = 1
+const MILLI: u8 = 2
+
+// A field's kind, or 255 for a name Python's records have that Calx's don't, and 254 for none.
+fn field_kind(key: String) -> u8 {
+    if key == "name" or key == "levelname" or key == "message" or key == "asctime" or key == "processName" {
+        return TEXT
+    }
+    if key == "levelno" or key == "process" {
+        return WHOLE
+    }
+    if key == "created" or key == "msecs" or key == "relativeCreated" {
+        return MILLI
+    }
+    if key == "pathname" or key == "filename" or key == "module" or key == "lineno" or key == "funcName" or key == "thread" or key == "threadName" or key == "taskName" or key == "exc_info" or key == "exc_text" or key == "stack_info" or key == "args" or key == "msg" {
+        return 255
+    }
+    return 254
+}
+
+// One `%(key)spec`: its flags, width, precision and conversion.
+struct Spec {
+    key: String
+    left: bool
+    zero: bool
+    plus: bool
+    space: bool
+    alt: bool
+    width: usize
+    precision: i64
+    conv: u8
+}
+
+// The spec at byte `i`, just after a `%(`, and the byte after it; or why it's wrong.
+fn read_spec(f: String, i: usize) -> (Spec, usize) ! String {
+    var j = i
+    while j < f.len() and f.byte_at(j) != b')' {
+        j += 1
+    }
+    if j == f.len() {
+        fail "a `%(` with no `)` after it"
+    }
+    var s = Spec { key: f[i..j].copy(), left: false, zero: false, plus: false, space: false, alt: false, width: 0, precision: -1, conv: 0 }
+    j += 1
+    loop {
+        if j >= f.len() {
+            break
+        }
+        let c = f.byte_at(j)
+        if c == b'-' {
+            s.left = true
+        } else if c == b'0' {
+            s.zero = true
+        } else if c == b'+' {
+            s.plus = true
+        } else if c == b' ' {
+            s.space = true
+        } else if c == b'#' {
+            s.alt = true
+        } else {
+            break
+        }
+        j += 1
+    }
+    while j < f.len() and f.byte_at(j) >= b'0' and f.byte_at(j) <= b'9' {
+        s.width = s.width * 10 + usize(f.byte_at(j) - b'0')
+        j += 1
+    }
+    if j < f.len() and f.byte_at(j) == b'.' {
+        j += 1
+        s.precision = 0
+        while j < f.len() and f.byte_at(j) >= b'0' and f.byte_at(j) <= b'9' {
+            s.precision = s.precision * 10 + i64(f.byte_at(j) - b'0')
+            j += 1
+        }
+    }
+    if j >= f.len() {
+        fail "`%({s.key})` with no conversion after it, as `s` or `d`"
+    }
+    s.conv = f.byte_at(j)
+    return (s, j + 1)
+}
+
+// Checks a format as Python's Formatter does, and for what Calx's records don't have.
+fn check_format(f: String) ! LogError {
+    var fields = 0
+    var i: usize = 0
+    while i < f.len() {
+        if f.byte_at(i) != b'%' {
+            i += 1
+            continue
+        }
+        if i + 1 < f.len() and f.byte_at(i + 1) == b'%' {
+            i += 2
+            continue
+        }
+        if i + 1 >= f.len() or f.byte_at(i + 1) != b'(' {
+            fail LogError { message: "a `%` in the format `{f}` that starts no `%(field)s`; write `%%` for a `%`" }
+        }
+        match read_spec(f, i + 2) {
+            ok((s, next)) => {
+                let kind = field_kind(s.key)
+                if kind == 255 {
+                    fail LogError { message: "`%({s.key})` in the format, a field of Python's records that Calx's don't have" }
+                }
+                if kind == 254 {
+                    fail LogError { message: "`%({s.key})` in the format, which names no field of a record" }
+                }
+                let c = s.conv
+                let number = c == b'd' or c == b'i' or c == b'u' or c == b'f' or c == b'F'
+                let whole = c == b'x' or c == b'X' or c == b'o'
+                if not (c == b's' or number or whole) {
+                    fail LogError { message: "`%({s.key})` with the conversion `{rune(c)}`, where std.log writes `s`, `d`, `i`, `u`, `f`, `F`, `x`, `X` and `o`" }
+                }
+                if kind == TEXT and c != b's' {
+                    fail LogError { message: "`%({s.key})` is text, which `{rune(c)}` doesn't write; use `s`" }
+                }
+                if whole and kind != WHOLE {
+                    fail LogError { message: "`%({s.key})` is a float, which `{rune(c)}` doesn't write" }
+                }
+                fields += 1
+                i = next
+            },
+            err(why) => fail LogError { message: "{why} in the format `{f}`" },
+        }
+    }
+    if fields == 0 {
+        fail LogError { message: "the format `{f}` has no field, as `%(message)s`" }
+    }
+}
+
+// Adds a record's line, without its line break.
+fn write_record(out: mut String, f: String, datefmt: String, name: String, level: Level, message: String, now: Timestamp) {
+    let start = unsafe { cx_log_start_ms(now.unix_ms) }
+    var i: usize = 0
+    var plain: usize = 0
+    while i < f.len() {
+        if f.byte_at(i) != b'%' {
+            i += 1
+            continue
+        }
+        out.push_str(f[plain..i])
+        if i + 1 < f.len() and f.byte_at(i + 1) == b'%' {
+            out.push('%')
+            i += 2
+            plain = i
+            continue
+        }
+        // `config` checked the format, so a spec that isn't one is written as it is.
+        var spec: Spec? = none
+        var next = i + 1
+        if i + 1 < f.len() and f.byte_at(i + 1) == b'(' {
+            match read_spec(f, i + 2) {
+                ok((sp, n)) => {
+                    spec = some(sp)
+                    next = n
+                },
+                err(_) => {},
+            }
+        }
+        let s = spec else {
+            i += 1
+            continue
+        }
+        let kind = field_kind(s.key)
+        if kind == TEXT {
+            var text = String()
+            if s.key == "name" {
+                text.push_str(name)
+            } else if s.key == "levelname" {
+                text.push_str(level.name())
+            } else if s.key == "message" {
+                text.push_str(message)
+            } else if s.key == "asctime" {
+                asctime(mut text, now, datefmt)
+            } else {
+                text.push_str("MainProcess")
+            }
+            write_text(mut out, s, text)
+        } else if kind == WHOLE {
+            let n = if s.key == "levelno" { i64(level.value()) } else { i64(unsafe { cx_log_pid() }) }
+            write_number(mut out, s, n * 1000)
+        } else {
+            let milli = if s.key == "created" {
+                now.unix_ms
+            } else if s.key == "msecs" {
+                (now.unix_ms % 1000) * 1000
+            } else {
+                (now.unix_ms - start) * 1000
+            }
+            write_number(mut out, s, milli)
+        }
+        i = next
+        plain = i
+    }
+    out.push_str(f[plain..])
+}
+
+// `asctime`: the local time by `datefmt`, or as Python writes it without one,
+// `2026-11-08 14:05:09,250`.
+fn asctime(out: mut String, now: Timestamp, datefmt: String) {
+    let offset = unsafe { now.local_offset() }
+    if datefmt.is_empty() {
+        out.push_str(now.format("%Y-%m-%d %H:%M:%S", offset))
+        let ms = now.unix_ms % 1000
+        out.push(',')
+        if ms < 100 {
+            out.push('0')
+        }
+        if ms < 10 {
+            out.push('0')
+        }
+        out.push_str("{ms}")
+        return
+    }
+    out.push_str(now.format(datefmt, offset))
+}
+
+// Pads `body` to the spec's width, after `sign`, as `%` does: on the left, or on the right with
+// `-`, with zeros after the sign for a number with `0`.
+fn pad(out: mut String, s: Spec, sign: String, body: String, number: bool) {
+    var runes: usize = sign.len()
+    for _ in body.runes() {
+        runes += 1
+    }
+    let fill = if s.width > runes { s.width - runes } else { 0 }
+    if s.left {
+        out.push_str(sign)
+        out.push_str(body)
+        for _ in 0..fill {
+            out.push(' ')
+        }
+        return
+    }
+    if s.zero and number {
+        out.push_str(sign)
+        for _ in 0..fill {
+            out.push('0')
+        }
+        out.push_str(body)
+        return
+    }
+    for _ in 0..fill {
+        out.push(' ')
+    }
+    out.push_str(sign)
+    out.push_str(body)
+}
+
+fn write_text(out: mut String, s: Spec, text: String) {
+    if s.precision < 0 {
+        pad(mut out, s, "", text, false)
+        return
+    }
+    var cut = String()
+    var n: i64 = 0
+    for r in text.runes() {
+        if n == s.precision {
+            break
+        }
+        cut.push(r)
+        n += 1
+    }
+    pad(mut out, s, "", cut, false)
+}
+
+// A number of thousandths, `milli`, as the spec writes it: `s` as Python's `str` writes a float,
+// `d` its whole part, `f` with the spec's digits after the point, 6 by default, and `x` and `o`
+// a whole number in hex and octal.
+fn write_number(out: mut String, s: Spec, milli: i64) {
+    let negative = milli < 0
+    let m = if negative { -milli } else { milli }
+    var body = String()
+    let c = s.conv
+    if c == b's' {
+        // As Python's `str` of the float: the shortest digits, here the thousandths without the
+        // zeros after them, and `.0` for a whole number.
+        body.push_str("{m / 1000}.")
+        var frac = m % 1000
+        if frac == 0 {
+            body.push('0')
+        } else {
+            var digits: i64 = 100
+            while frac > 0 {
+                body.push_str("{frac / digits}")
+                frac = frac % digits
+                digits /= 10
+            }
+        }
+        pad(mut out, s, if negative { "-" } else { "" }, body, false)
+        return
+    }
+    if c == b'f' or c == b'F' {
+        let p: i64 = if s.precision < 0 { 6 } else { s.precision }
+        // Rounded half to even, at `p` digits, from the exact thousandths.
+        var whole = m / 1000
+        var frac = m % 1000
+        if p < 3 {
+            var unit: i64 = 1
+            for _ in 0..usize.wrap(3 - p) {
+                unit *= 10
+            }
+            let q = frac / unit
+            let r = frac % unit
+            var up = q
+            if r * 2 > unit or (r * 2 == unit and q % 2 == 1) {
+                up += 1
+            }
+            frac = up
+            var limit: i64 = 1
+            for _ in 0..usize.wrap(p) {
+                limit *= 10
+            }
+            if frac == limit {
+                frac = 0
+                whole += 1
+            }
+            body.push_str("{whole}")
+            if p > 0 or s.alt {
+                body.push('.')
+            }
+            if p > 0 {
+                let digits = "{frac}"
+                for _ in digits.len()..usize.wrap(p) {
+                    body.push('0')
+                }
+                body.push_str(digits)
+            }
+        } else {
+            body.push_str("{whole}.")
+            let digits = "{frac}"
+            for _ in digits.len()..3 {
+                body.push('0')
+            }
+            body.push_str(digits)
+            for _ in 3..usize.wrap(p) {
+                body.push('0')
+            }
+        }
+    } else {
+        let n = m / 1000
+        if c == b'x' or c == b'X' {
+            if s.alt {
+                body.push_str(if c == b'x' { "0x" } else { "0X" })
+            }
+            body.push_str(if c == b'x' { "{n:x}" } else { "{n:X}" })
+        } else if c == b'o' {
+            if s.alt {
+                body.push_str("0o")
+            }
+            body.push_str("{n:o}")
+        } else {
+            let digits = "{n}"
+            // `%.3d` pads with zeros to three digits.
+            if s.precision > 0 {
+                for _ in digits.len()..usize.wrap(s.precision) {
+                    body.push('0')
+                }
+            }
+            body.push_str(digits)
+        }
+    }
+    let sign = if negative { "-" } else if s.plus { "+" } else if s.space { " " } else { "" }
+    pad(mut out, s, sign, body, true)
+}

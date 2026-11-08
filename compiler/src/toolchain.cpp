@@ -1100,6 +1100,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     if (parts_ok && calls({"cx_zlib_", "cx_inflate", "cx_deflate"})) parts_ok = part("calx_zlib.c");
     if (parts_ok && calls({"cx_http_"})) parts_ok = part("calx_http.c");
     if (parts_ok && calls({"cx_lz4_"})) parts_ok = part("calx_lz4.c");
+    if (parts_ok && calls({"cx_log_"})) parts_ok = part("calx_log.c");
     if (parts_ok && calls({"cx_fs_"})) parts_ok = part("calx_fs.c");
     if (parts_ok && calls({"cx_proc_"})) parts_ok = part("calx_proc.c");
     if (parts_ok && calls({"cx_queue_", "cx_thread_", "cx_Sender", "cx_Receiver", "cx_Thread"})) parts_ok = part("calx_thread.c");

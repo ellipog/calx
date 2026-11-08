@@ -165,6 +165,7 @@ fn main() ! Error {
 | `subprocess.run(..., capture_output=True)` | `Command.new(...).output()`, with the status and both streams |
 | `shlex.split(line)`, `shlex.quote(w)`, `shlex.join(words)` | `split(line)`, `quote(w)` and `join(words)` from [`std.shell`](../std/shell.md) |
 | `os.wait4(pid, 0)`, `psutil.Process(pid).memory_info()` | `unsafe { status.usage() }`, `unsafe { child.usage() }`: CPU time and memory, the same on both systems, without `ctypes` |
+| `logging.basicConfig(level=logging.INFO, filename=p)`, `logging.info(m)`, `logging.getLogger(n)` | `config(level: Level.Info, file: p)`, `info(m)` and `logger(n)` from [`std.log`](../std/log.md), with Python's formats |
 
 ```calx
 import std.fs.{temp_dir, write_text, make_dir_all, glob, remove_dir_all}

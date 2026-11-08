@@ -121,6 +121,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 50. [std.ini](std/ini.md): INI files read, given and written exactly as Python's `configparser` does it, with sections, comments, values on several lines, `[DEFAULT]`, `%(name)s`, and the line of any mistake
 51. [std.http.server](std/http-server.md): a small HTTP/1.1 server for scripts, as Python's `http.server` is, with each request handed to the program in turn, and a folder served as `python -m http.server` serves it
 52. [std.yaml](std/yaml.md): YAML read into a tree as PyYAML's `safe_load` reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and written back byte for byte as `safe_dump` writes it
+53. [std.log](std/log.md): logging as Python's `logging` module does it, messages at a level written in Python's formats with the time, the level and the logger's name, to standard error or a file, set up once with `config`
 
 ### Java compatibility
 
