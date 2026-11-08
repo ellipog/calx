@@ -1,0 +1,9 @@
+// A line end holding the delimiter couldn't be read back, so it panics, as Python's csv.writer
+// refuses it.
+
+import std.csv.{format}
+
+fn main() {
+    let rows: List<List<String>> = [["a", "b"]]
+    _ = format(rows, ';', ";\n")    // panic: a CSV line end can't hold the delimiter or a quote, as Python's can't
+}

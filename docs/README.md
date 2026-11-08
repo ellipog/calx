@@ -109,6 +109,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 39. [std.image.jpeg](std/image-jpeg.md): JPEG files read as libjpeg-turbo reads them, baseline and progressive, and written byte for byte as Pillow writes them
 40. [std.url](std/url.md): percent-encoding and form bodies as Python's `urllib.parse` gives them, and URLs taken apart, put back together and joined as RFC 3986 says
 41. [std.uuid](std/uuid.md): UUIDs at random, from a name, and as Java's `nameUUIDFromBytes` makes them, read and written as text and bytes
+42. [std.csv](std/csv.md): CSV read as Python's `csv.reader` and `DictReader` read it, quirks included, a row at a time or all at once, and written as `csv.writer` writes it
 
 ### Java compatibility
 

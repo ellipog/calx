@@ -1,0 +1,8 @@
+// A CSV delimiter is one ASCII character that isn't a quote or a line break, as Python's must
+// be one character other than those.
+
+import std.csv.{parse}
+
+fn main() {
+    _ = parse("a\"b", '"')    // panic: a CSV delimiter is an ASCII character other than a quote or a line break, not "
+}

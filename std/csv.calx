@@ -1,0 +1,319 @@
+/// CSV text, read and written as Python's `csv` module does with its default dialect, which is
+/// Excel's and RFC 4180's: fields between delimiters, a field in quotes holding delimiters, line
+/// breaks and doubled quotes, and rows written with `\r\n` after them.
+///
+/// Reading is Python's default, which never fails: what isn't quite CSV is read as Python reads
+/// it, so a file gives the rows here that it gives there.
+module std.csv
+
+// The byte of a delimiter, which is ASCII and isn't a quote or a line break.
+@track_caller
+fn delimiter_byte(delimiter: rune) -> u8 {
+    let c = u32(delimiter)
+    if c >= 128 or c == 34 or c == 10 or c == 13 {
+        panic("a CSV delimiter is an ASCII character other than a quote or a line break, not {delimiter}")
+    }
+    return u8.wrap(c)
+}
+
+// Where the line break at `i` ends: after `\r\n`, or after a lone `\r` or `\n`.
+fn after_break(text: String, i: usize) -> usize {
+    if text.byte_at(i) == b'\r' and i + 1 < text.len() and text.byte_at(i + 1) == b'\n' {
+        return i + 2
+    }
+    return i + 1
+}
+
+/// The rows of CSV text, each a list of its fields, as Python's `csv.reader` reads them with its
+/// default dialect, or with `delimiter` in place of `,`, as `csv.reader(f, delimiter="\t")`.
+///
+/// - A field in quotes can hold the delimiter, line breaks, and a quote written twice.
+/// - A row ends at `\n`, `\r\n` or a lone `\r`, so an empty line is an empty row.
+/// - What isn't quite CSV is read as Python reads it: a quote inside a field that didn't start
+///   with one is text; text after a field's closing quote is added to the field; and a quote
+///   that's never closed takes the rest of the text.
+@track_caller
+pub fn parse(text: String, delimiter: rune = ',') -> List<List<String>> {
+    let d = delimiter_byte(delimiter)
+    var rows = List<List<String>>()
+    var at: usize = 0
+    var width: usize = 0
+    while at < text.len() {
+        // A row likely has as many fields as the one before, so it starts with room for them.
+        var row = List<String>()
+        row.reserve(width)
+        at = read_row(text, at, d, mut row)
+        width = row.len()
+        rows.push(row)
+    }
+    return rows
+}
+
+/// The rows of CSV text whose first row names the fields, each a map from those names to its
+/// fields, in the header's order, as Python's `csv.DictReader` reads them. Empty rows are passed
+/// over. A row shorter than the header has no entry for the names it has no field for, where
+/// Python gives `None`; a field past the header's is left out, where Python puts it under
+/// `None`. A name the header has twice keeps its first place and the later field.
+@track_caller
+pub fn parse_records(text: String, delimiter: rune = ',') -> List<LinkedMap<String, String>> {
+    let d = delimiter_byte(delimiter)
+    var out = List<LinkedMap<String, String>>()
+    if text.is_empty() {
+        return out
+    }
+    var header = List<String>()
+    var at = read_row(text, 0, d, mut header)
+    while at < text.len() {
+        var fields = List<String>()
+        fields.reserve(header.len())
+        at = read_row(text, at, d, mut fields)
+        if fields.is_empty() {
+            continue
+        }
+        // The fields are taken from the end, so each moves into the record rather than being
+        // copied.
+        fields.reverse()
+        var record = LinkedMap<String, String>()
+        record.reserve(header.len())
+        var f: usize = 0
+        while f < header.len() {
+            let field = fields.pop() else break
+            record.insert(header[f].copy(), field)
+            f += 1
+        }
+        // Python gives `None` for the names past a short row, which may have had a field earlier.
+        while f < header.len() {
+            _ = record.remove(header[f])
+            f += 1
+        }
+        out.push(record)
+    }
+    return out
+}
+
+/// CSV text read a row at a time into one list of fields, whose strings are reused from row to
+/// row, so reading allocates almost nothing once the first rows are in: the way to go through a
+/// large file, as `for row in csv.reader(f)` does in Python. The rows are `parse`'s:
+/// `while reader.read(mut row) { ... }`.
+pub struct Reader {
+    text: String
+    at: usize
+    delimiter: u8
+}
+
+impl Reader {
+    /// A reader of `text`, whose fields are separated by `delimiter`.
+    @track_caller
+    pub fn new(text: own String, delimiter: rune = ',') -> Reader {
+        return Reader { text, at: 0, delimiter: delimiter_byte(delimiter) }
+    }
+
+    /// Reads the next row into `row`, replacing what it held, and gives `true`, or empties `row`
+    /// and gives `false` once there are no more.
+    pub fn read(mut self, row: mut List<String>) -> bool {
+        if self.at >= self.text.len() {
+            row.clear()
+            return false
+        }
+        self.at = read_row(self.text, self.at, self.delimiter, mut row)
+        return true
+    }
+}
+
+// Reads the row that starts at `at`, before the end of the text, into `row`, reusing the strings
+// it holds, and gives where the next row starts.
+fn read_row(text: String, at: usize, d: u8, row: mut List<String>) -> usize {
+    let n = text.len()
+    var used: usize = 0
+    var i = at
+    if text.byte_at(i) == b'\r' or text.byte_at(i) == b'\n' {
+        // An empty line is a row with no fields.
+        row.clear()
+        return after_break(text, i)
+    }
+    loop {
+        // The next field, which may be empty: after a delimiter there's always one more.
+        if used < row.len() {
+            row[used].clear()
+        } else {
+            row.push(String())
+        }
+        used += 1
+        if i == n {
+            break
+        }
+        var end = i
+        if text.byte_at(i) != b'"' {
+            // Without quotes, a field runs to the delimiter or the line's end; a quote in it is text.
+            end = field_end(text, i, d)
+            row[used - 1].push_str(text[i..end])
+        } else {
+            // In quotes, a field runs to the closing quote, a doubled quote being one.
+            var j = i + 1
+            var start = j
+            var closed = false
+            while j < n {
+                if text.byte_at(j) != b'"' {
+                    j += 1
+                    continue
+                }
+                row[used - 1].push_str(text[start..j])
+                if j + 1 < n and text.byte_at(j + 1) == b'"' {
+                    row[used - 1].push('"')
+                    j += 2
+                    start = j
+                    continue
+                }
+                closed = true
+                j += 1
+                break
+            }
+            if not closed {
+                // Never closed: the rest of the text is the field, as Python reads it.
+                row[used - 1].push_str(text[start..n])
+                end = n
+            } else {
+                // After the closing quote, anything before the delimiter or the line's end is added.
+                end = field_end(text, j, d)
+                row[used - 1].push_str(text[j..end])
+            }
+        }
+        if end == n {
+            i = n
+            break
+        }
+        if text.byte_at(end) != d {
+            i = after_break(text, end)
+            break
+        }
+        i = end + 1
+    }
+    row.truncate(used)
+    return i
+}
+
+// Where an unquoted stretch from `i` ends: at the delimiter, a line break or the end of the text.
+fn field_end(text: String, i: usize, d: u8) -> usize {
+    var j = i
+    let n = text.len()
+    while j < n {
+        let b = text.byte_at(j)
+        if b == d or b == b'\r' or b == b'\n' {
+            return j
+        }
+        j += 1
+    }
+    return n
+}
+
+/// The rows as CSV text, as Python's `csv.writer` writes them: each row's fields with `delimiter`
+/// between them and `line_end` after, quoting a field only when it holds the delimiter, a quote,
+/// a line break or a character of `line_end`, with each quote in it doubled, or when it's a row's
+/// only field and empty, so it reads back as one empty field rather than an empty row. `\r\n` is
+/// Python's and RFC 4180's line end; give `"\n"` for Unix's.
+@track_caller
+pub fn format(rows: List<List<String>>, delimiter: rune = ',', line_end: String = "\r\n") -> String {
+    let q = Quoting.new(delimiter_byte(delimiter), line_end)
+    var out = String()
+    for row in rows {
+        q.push_row(mut out, row)
+        out.push_str(line_end)
+    }
+    return out
+}
+
+/// One row as CSV, as `format` writes it with its default line end, but without the line end, for
+/// writing rows one at a time.
+@track_caller
+pub fn format_row(fields: List<String>, delimiter: rune = ',') -> String {
+    var out = String()
+    Quoting.new(delimiter_byte(delimiter), "\r\n").push_row(mut out, fields)
+    return out
+}
+
+// What gets a field quoted: the delimiter, a quote, a line break, or a character of the line end,
+// which are ASCII bytes in `bytes` or, past ASCII, whole characters in `wide`.
+struct Quoting {
+    delimiter: u8
+    bytes: [bool; 256]
+    wide: List<String>
+}
+
+impl Quoting {
+    @track_caller
+    fn new(d: u8, line_end: String) -> Quoting {
+        var bytes = [false; 256]
+        bytes[usize(d)] = true
+        bytes[34] = true
+        bytes[10] = true
+        bytes[13] = true
+        var wide = List<String>()
+        var i: usize = 0
+        while i < line_end.len() {
+            let b = line_end.byte_at(i)
+            if b < 128 {
+                if b == d or b == b'"' {
+                    panic("a CSV line end can't hold the delimiter or a quote, as Python's can't")
+                }
+                bytes[usize(b)] = true
+                i += 1
+                continue
+            }
+            var j = i + 1
+            while j < line_end.len() and line_end.byte_at(j) >= 0x80 and line_end.byte_at(j) < 0xC0 {
+                j += 1
+            }
+            wide.push(line_end[i..j])
+            i = j
+        }
+        return Quoting { delimiter: d, bytes, wide }
+    }
+
+    fn quotes(self, f: String) -> bool {
+        for i in 0usize..f.len() {
+            if self.bytes[usize(f.byte_at(i))] {
+                return true
+            }
+        }
+        for w in self.wide {
+            if f.contains(w) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fn push_row(self, out: mut String, fields: List<String>) {
+        if fields.len() == 1 and fields[0].is_empty() {
+            out.push_str("\"\"")
+            return
+        }
+        var first = true
+        for f in fields {
+            if not first {
+                out.push(rune(self.delimiter))
+            }
+            first = false
+            push_field(mut out, f, self.quotes(f))
+        }
+    }
+}
+
+// A field as written: as it is, or in quotes with each quote in it doubled.
+fn push_field(out: mut String, f: String, quote: bool) {
+    if not quote {
+        out.push_str(f)
+        return
+    }
+    out.push('"')
+    var start: usize = 0
+    for i in 0usize..f.len() {
+        if f.byte_at(i) == b'"' {
+            out.push_str(f[start..i + 1])
+            out.push('"')
+            start = i + 1
+        }
+    }
+    out.push_str(f[start..])
+    out.push('"')
+}

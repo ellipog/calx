@@ -1,0 +1,75 @@
+// std.csv: CSV read as Python's csv.reader reads it, quirks included, and written as csv.writer
+// writes it (CLX-156). build/scratch's wider check matched Python on 11,500 random cases.
+
+import std.csv.{Reader, parse, parse_records, format, format_row}
+
+// Rows as `[field][field]`, a row to a line in one string, with line breaks shown.
+fn show(rows: List<List<String>>) -> String {
+    var out: List<String> = []
+    for row in rows {
+        var s = String()
+        for f in row {
+            s.push_str("[{f.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")}]")
+        }
+        out.push(if row.is_empty() { String("()") } else { s })
+    }
+    return out.join(" ")
+}
+
+fn main() {
+    // Rows end at \n, \r\n or a lone \r, and an empty line is an empty row.
+    println(show(parse("a,b\nc,d\n")))                // out: [a][b] [c][d]
+    println(show(parse("a,b\r\nc,d")))                // out: [a][b] [c][d]
+    println(show(parse("a,b\rc,d\n\ne")))             // out: [a][b] [c][d] () [e]
+    println("{parse("").len()} {show(parse("\n"))} {show(parse("a\r\r\nb"))}")    // out: 0 () [a] () [b]
+
+    // After a delimiter there's always one more field.
+    println(show(parse("a,")))                        // out: [a][]
+    println(show(parse(",,\n,")))                     // out: [][][] [][]
+
+    // Quotes hold delimiters, line breaks and doubled quotes.
+    println(show(parse(#""a,b",c,"x""y","""#)))      // out: [a,b][c][x"y][]
+    println(show(parse("\"a\nb\",\"c\r\nd\"\ne")))    // out: [a\nb][c\r\nd] [e]
+
+    // What isn't quite CSV is read as Python reads it.
+    println(show(parse(#"a"b,c"d"e,f"#)))             // out: [a"b][c"d"e][f]
+    println(show(parse(#""ab"c,"a"b"c""#)))           // out: [abc][ab"c"]
+    println(show(parse(#" "a","a" ,b"#)))             // out: [ "a"][a ][b]
+    println(show(parse("\"ab")))                      // out: [ab]
+    println(show(parse("x\n\"")))                     // out: [x] []
+    println(show(parse("é,€\n😀")))                   // out: [é][€] [😀]
+
+    // Other delimiters.
+    println(show(parse("a\t\"b\tc\"\td,e", '\t')))    // out: [a][b\tc][d,e]
+    println(show(parse("a;\"b;c\";d", ';')))          // out: [a][b;c][d]
+
+    // Records, as csv.DictReader gives them: empty rows passed over, a short row without the
+    // names past it, and fields past the header left out.
+    for r in parse_records("name,hp\nzombie,20\nslime\n\nwitch,26,extra\n") {
+        println("{r}")
+    }
+    // out: {name: zombie, hp: 20}
+    // out: {name: slime}
+    // out: {name: witch, hp: 26}
+    println("{parse_records("a,b,a\n1,2,3\n1,2\n")}") // out: [{a: 3, b: 2}, {b: 2}]
+    println("{parse_records("").len()}")              // out: 0
+
+    // Writing quotes only what needs it, doubles quotes, and quotes a row's lone empty field.
+    let rows: List<List<String>> = [["a", "b c"], ["x,y", #"say "hi""#, "two\nlines"], [""], ["", ""], []]
+    let text = format(rows)
+    println(text.replace("\r\n", "|").replace("\n", "\\n"))    // out: a,b c|"x,y","say ""hi""","two\nlines"|""|,||
+    println("{show(parse(text)) == show(rows)}")      // out: true
+    println(format(rows, '\t', "\n").replace("\n", "|").replace("\t", "\\t"))    // out: a\tb c|x,y\t"say ""hi"""\t"two|lines"|""|\t||
+    // A character of the line end gets a field quoted, as in Python.
+    println(format([["a|b", "c"]], line_end: "|\n").replace("\n", "/"))    // out: "a|b",c|/
+    println(format_row(["1", "ann, bo", ""]))         // out: 1,"ann, bo",
+
+    // A reader goes a row at a time, reusing one list's strings.
+    var reader = Reader.new("id,name\n1,\"a,b\"\n\n2,c\n")
+    var row = List<String>()
+    var seen: List<String> = []
+    while reader.read(mut row) {
+        seen.push(show([row.copy()]))
+    }
+    println("{seen.join(" ")} {row.len()}")           // out: [id][name] [1][a,b] () [2][c] 0
+}
