@@ -1,6 +1,6 @@
 ---
 title: The calx command
-description: Checking, building and running Calx programs, the build modes, and the object cache.
+description: Checking, building, running and testing Calx programs, the build modes, and the object cache.
 ---
 
 # The `calx` command
@@ -13,6 +13,7 @@ calx hello.calx a b            # the same, as `python hello.py a b` is
 calx build hello.calx -o hello # build an executable
 calx build --release hello.calx
 calx build --lib plugin.calx   # build a library, which a program opens while it runs
+calx test tool.calx           # run its @test functions, each in a process of its own
 calx emit-c hello.calx         # print the C it compiles to
 calx expand hello.calx         # print the code its attributes generate
 calx version                   # print the version, the commit and the date
@@ -63,6 +64,49 @@ chmod +x tool.calx
 
 `calx run` stands for the program it runs. Its exit status is the program's, and on Windows, killing `calx run`, as a test runner stops one that ran too long, kills the program and every program it started, which `taskkill /T` can't reach once their parents have gone. A program that ends by itself leaves what it started running ([std.process](../std/process.md#when-this-program-ends)).
 
+## Testing
+
+`calx test` runs the tests in a file: its functions marked `@test`. Each test runs in a process of its own, as many at once as there are processors, so a panic or a crash fails only that test. They're reported in the order they're written, each as soon as those before it are done:
+
+```calx
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+@test
+fn doubles() {
+    assert(double(21) == 42)
+}
+
+@test
+fn reads_a_number() ! String {
+    let n = i32.parse("12") else {
+        fail "not a number"
+    }
+    assert(double(n) == 24, "12 doubled is {double(n)}")
+}
+
+fn main() {
+    println("{double(4)}")    // out: 8
+}
+```
+
+```text
+$ calx test tool.calx
+ok    doubles
+ok    reads_a_number
+2 passed, 0 failed (0.02 s)
+```
+
+- A test takes nothing and returns nothing. It fails by panicking, which is what a failed `assert` does, or by failing with an error, as a `main` can: `fn reads_a_number() ! String`.
+- What a test prints is shown only if it fails, under its name, with its panic or its error and where it happened.
+- Names after the file run only the tests whose names hold one of them: `calx test tool.calx parse` runs `parses_ints` and `parse_errors`.
+- `calx test` exits with 0 when every test passed, and 1 otherwise, or if the file has no tests.
+- The file needn't have a `main`. If it does, `calx run` runs that, and `calx test` runs the tests instead. The tests are checked with the rest of the program, so a test that no longer compiles is an error under `calx run` too.
+- The tests are the file's own. A test in a module the file imports runs when that module's file is tested.
+- `--release` builds the tests optimized, for tests that do a lot of work.
+- Each test is the built program run with a first argument naming it, which the runtime takes out, so `args()` in a test is empty. Run alone, the built program lists its tests.
+
 ## Exit status
 
 | Status | When |
@@ -70,6 +114,7 @@ chmod +x tool.calx
 | 0 | Success |
 | 1 | The program has errors, or building it failed |
 | 2 | The command line is wrong, such as a name that's neither a command nor a file to run |
+| 1 | `calx test`: a test failed, no test's name held one of the names given, or the file has no tests |
 | *the program's* | `calx run`, and `calx file.calx`, exit with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
 
 ## Build modes

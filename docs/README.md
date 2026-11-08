@@ -26,7 +26,7 @@ Installing Calx, then learning it by building one small program, `stash`, which 
 
 What's built, one page per feature:
 
-1. [The calx command](reference/command.md): check, build, run, emit-c, how builds stay fast, and errors for editors
+1. [The calx command](reference/command.md): check, build, run, test, emit-c, how builds stay fast, and errors for editors
 2. [Editor support](reference/editors.md): the VS Code extension, and the grammar and error format other editors can use
 3. [Syntax](reference/syntax.md): files, comments, names, keywords, literals, raw strings and operators
 4. [Types](reference/types.md): the primitive types, arrays, `Copy`, and where the other types are

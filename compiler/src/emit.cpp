@@ -65,7 +65,7 @@ public:
         for (Module* m : prog_.modules) {
             Plan p;
             p.module = m;
-            p.has_main = m == main_module && prog_.main;
+            p.has_main = m == main_module && (prog_.main || opt_.tests);
             p.has_exports = m == main_module && opt_.library && !prog_.exports.empty();
             std::unordered_set<const Item*> seen;
             auto take = [&](Item* g) {
@@ -140,23 +140,21 @@ public:
                 const char* keep = f == prog_.main ? "__attribute__((noinline)) " : "";
                 out_ += o.helpers + o.directive + keep + linkage(f, external) + o.sig + o.body;
             }
-            if (has_main) {
-                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    ";
-                const Type* rt = prog_.main->result_type;
-                if (rt->is_result) {
-                    // A `main` that fails shows its error on standard error, and the program
-                    // exits with status 1.
-                    std::string e = "r.u.v1." + variant_field(rt, 1, 0);
-                    const Type* et = rt->args[1];
-                    out_ += ctype(rt) + " r = " + std::string(prog_.main->c_name) + "();\n";
-                    out_ += "    if (r.tag != 0) {\n        cx_out_to was = cx_err_begin();\n        cx_print_str(" + str_const("error: ") +
-                            ");\n        " + show_value(et, e) + "\n        cx_print_newline();\n        cx_err_end(was);\n";
-                    if (!is_copy(et)) out_ += "        " + drop_fn(et) + "(&" + e + ");\n";
-                    out_ += "        int status = cx_finish();\n        return status ? status : 1;\n    }\n    ";
-                } else {
-                    out_ += std::string(prog_.main->c_name) + "();\n    ";
+            if (has_main && opt_.tests) {
+                // CLX-87: `calx test` runs this program once for each test, naming it with a first
+                // argument the runtime takes out. Without one, it lists its tests.
+                out_ += "int main(int argc, char** argv) {\n    switch (cx_test_start(argc, argv)) {\n";
+                for (std::size_t i = 0; i < prog_.tests.size(); i++) {
+                    out_ += "    case " + std::to_string(i) + ": {\n    " + call_entry(prog_.tests[i]) + "break;\n    }\n";
                 }
-                out_ += "return cx_finish();\n}\n";
+                out_ += "    default:\n";
+                for (const Item* t : prog_.tests) {
+                    out_ += "        cx_print_str(" + str_const(names_.text(t->name)) + ");\n        cx_print_newline();\n";
+                }
+                out_ += "        break;\n    }\n    return cx_finish();\n}\n";
+            } else if (has_main) {
+                out_ += "int main(int argc, char** argv) {\n    cx_start(argc, argv);\n    " + call_entry(prog_.main) +
+                        "return cx_finish();\n}\n";
             }
             if (p.has_exports) out_ += exports();
             files.push_back({std::string(p.module->prefix) + ".c", std::move(out_)});
@@ -166,6 +164,21 @@ public:
     }
 
 private:
+    // The C that calls `f`, a `main` or a test, which takes nothing and returns nothing, though it
+    // can fail: then it shows its error on standard error, and the program exits with status 1.
+    std::string call_entry(const Item* f) {
+        const Type* rt = f->result_type;
+        if (!rt->is_result) return std::string(f->c_name) + "();\n    ";
+        std::string e = "r.u.v1." + variant_field(rt, 1, 0);
+        const Type* et = rt->args[1];
+        std::string out = ctype(rt) + " r = " + std::string(f->c_name) + "();\n";
+        out += "    if (r.tag != 0) {\n        cx_out_to was = cx_err_begin();\n        cx_print_str(" + str_const("error: ") +
+               ");\n        " + show_value(et, e) + "\n        cx_print_newline();\n        cx_err_end(was);\n";
+        if (!is_copy(et)) out += "        " + drop_fn(et) + "(&" + e + ");\n";
+        out += "        int status = cx_finish();\n        return status ? status : 1;\n    }\n    ";
+        return out;
+    }
+
     // What a function's or constant's C names, so each file can declare exactly that.
     struct Uses {
         std::vector<const Type*> types;    // structs, enums, arrays, optionals and tuples

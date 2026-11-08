@@ -1,0 +1,49 @@
+// `@test` marks a function `calx test` runs: one on its own, written in Calx, that takes nothing
+// and returns nothing, though it can fail with an error that can be shown (CLX-87).
+
+struct Counter {
+    n: i32
+}
+
+impl Counter {
+    @test    // error: `@test` is for a function on its own, not one in an `impl`
+    fn check(self) {
+        _ = self.n
+    }
+}
+
+@test    // error: `@test` is for a function written in Calx
+struct Case {
+    n: i32
+}
+
+@test("name")    // error: `@test` takes no arguments: a test is named by its function
+fn named() {}
+
+@test
+fn takes(n: i32) {    // error: the test `takes` takes no parameters and returns nothing, though it can fail: `fn takes() ! E`
+    _ = n
+}
+
+@test
+fn gives() -> i32 {    // error: the test `gives` takes no parameters and returns nothing, though it can fail: `fn gives() ! E`
+    return 1
+}
+
+@test
+fn generic<T>(x: T) {    // error: the test `generic` can't be generic
+    _ = x
+}
+
+@test
+unsafe fn risky() {}    // error: the test `risky` can't be `unsafe`; use `unsafe { }` inside it
+
+@test
+@test    // error: `@test` is already on `twice`
+fn twice() {}
+
+fn main() {
+    let c = Counter { n: 0 }
+    _ = c.n
+    _ = Case { n: 1 }.n
+}

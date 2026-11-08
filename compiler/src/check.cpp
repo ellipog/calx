@@ -201,6 +201,7 @@ public:
         for (Type* t : pending_defaults_) check_instance_defaults(t);
         for (Item* f : all_fns_) check_signature(f);
         collect_exports();
+        collect_tests();
         for (Item* f : all_fns_) {
             if (f->is_attribute) check_attribute_fn(f);
         }
@@ -948,6 +949,22 @@ private:
                     error(a.span, "`@export` is already on " + q(text(it->name)));
                 } else {
                     it->exported = true;
+                }
+                continue;
+            }
+            if (name == "test") {
+                it->used = true;  // `calx test` runs it
+                if (!a.args.empty()) {
+                    error(a.span, "`@test` takes no arguments: a test is named by its function");
+                } else if (it->kind != ItemKind::fn || it->is_extern) {
+                    error(a.span, "`@test` is for a function written in Calx");
+                } else if (owner) {
+                    error(a.span, "`@test` is for a function on its own, not one in " +
+                                      std::string(owner->kind == ItemKind::impl ? "an `impl`" : "an interface"));
+                } else if (it->is_test) {
+                    error(a.span, "`@test` is already on " + q(text(it->name)));
+                } else {
+                    it->is_test = true;
                 }
                 continue;
             }
@@ -10686,6 +10703,35 @@ private:
                 if (bad) continue;
                 prog_.exports.push_back({f, T.fn_of(params, modes, f->result_type, f->is_unsafe)});
             }
+        }
+    }
+
+    // CLX-87: the main module's tests, which take nothing and return nothing, though they can
+    // fail as `main` can. A test elsewhere is checked, and runs when its own file is tested.
+    void collect_tests() {
+        if (prog_.modules.empty()) return;
+        Module* m = prog_.modules.back();
+        for (Item* f : m->items) {
+            if (f->kind != ItemKind::fn || !f->is_test) continue;
+            std::string name = q(text(f->name));
+            if (!f->type_params.empty()) {
+                error(f->name_span, "the test " + name + " can't be generic");
+                continue;
+            }
+            if (f->is_unsafe) error(f->name_span, "the test " + name + " can't be `unsafe`; use `unsafe { }` inside it");
+            if (f->track_caller) error(f->name_span, "the test " + name + " can't be `@track_caller`, since no Calx code calls it");
+            Type* rt = f->result_type;
+            if (!f->params.empty() || (rt && rt->kind != TypeKind::unit && !(rt->is_result && ok_type(rt) == T.unit))) {
+                error(f->name_span, "the test " + name + " takes no parameters and returns nothing, though it can fail: `fn " +
+                                        std::string(text(f->name)) + "() ! E`");
+                continue;
+            }
+            if (rt && rt->is_result && !is_bad(err_type(rt)) && !printable(err_type(rt))) {
+                error(f->name_span, "the test " + name + " fails with " + a_type(err_type(rt)) +
+                                        ", which can't be shown in a string" + lacking(err_type(rt), true));
+                continue;
+            }
+            prog_.tests.push_back(f);
         }
     }
 

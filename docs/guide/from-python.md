@@ -22,6 +22,8 @@ This page puts the Python you know next to the Calx that does the same. It assum
 | `os.environ.get("HOME")` | `variable("HOME")` from [`std.env`](../std/env.md), a `String?` |
 | `input()`, `for line in sys.stdin:` | `Lines()` from [`std.io`](../std/io.md), whose `next()` gives each line, then `none` |
 | `print(s)`, `print(s, end="")`, `print(s, file=sys.stderr)` | `println(s)`, `print(s)`, `eprintln(s)` ([printing](../reference/printing.md)) |
+| `unittest`, `pytest` | `@test` on a function, and `calx test tool.calx`, which runs each test in a process of its own ([testing](../reference/command.md#testing)) |
+| `assert x == 1, "why"` | `assert(x == 1, "why")` |
 | `pip install requests` | Nothing: `std.http` comes with Calx |
 
 The first run builds the script. Later runs reuse that build until the file changes, so the script starts in milliseconds. `calx run --release` builds it optimized, for scripts that do a lot of work.

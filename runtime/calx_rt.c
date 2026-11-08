@@ -461,6 +461,26 @@ static void take_script(void) {
 const cx_u8* cx_script(void) { return script.ptr; }
 cx_usize cx_script_len(void) { return script.len; }
 
+/* A test program's start, for `calx test` (CLX-87): `cx_start`, then the number of the test to
+ * run, which `calx test` gives as the first argument, `--calx-test=N`. That's taken out of the
+ * arguments, so a test sees them as a program run by itself would. -1 when there's none, and the
+ * program lists its tests. */
+cx_i64 cx_test_start(int argc, char** argv) {
+    cx_start(argc, argv);
+    static const char flag[] = "--calx-test=";
+    const cx_usize n = sizeof flag - 1;
+    if (arg_count < 2 || args[1].len <= n || memcmp(args[1].ptr, flag, n) != 0) return -1;
+    cx_i64 which = 0;
+    for (cx_usize i = n; i < args[1].len; i++) {
+        cx_u8 c = args[1].ptr[i];
+        if (c < '0' || c > '9' || which > 100000000) return -1;
+        which = which * 10 + (c - '0');
+    }
+    memmove(&args[1], &args[2], (arg_count - 2) * sizeof(arg_text));
+    arg_count--;
+    return which;
+}
+
 /* Declared by std/env.calx. Argument 0 is the program's name. */
 cx_usize cx_arg_count(void) { return arg_count; }
 const cx_u8* cx_arg(cx_usize i) { return args[i].ptr; }

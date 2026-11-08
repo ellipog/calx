@@ -1,0 +1,100 @@
+// `calx test file.calx` builds the file's `@test` functions and runs each in a process of its
+// own, so a panic fails only its test, and reports them in the order they're written (CLX-87).
+// Names after the file pick the tests whose names hold one. The test it runs is named by a first
+// argument the runtime takes out, so a test sees no arguments, and `calx run` still runs `main`.
+import std.env.{variable}
+import std.fs.{temp_dir, write_text, remove_dir_all, separator}
+import std.process.{Command}
+
+// What `calx` printed, without the time the tests took or the lines of a stack trace, which differ
+// between builds and systems, and how it ended.
+fn calx(args: List<String>) -> String {
+    let exe = variable("CALX") ?? String("calx")
+    match Command.new(exe).args(args).output() {
+        ok(o) => {
+            var lines = List<String>()
+            for line in o.text().lines() {
+                if line.trim_start().starts_with("at ") {
+                    continue
+                }
+                let cut = line.find(" (") ?? line.len()
+                lines.push(if line.ends_with(" s)") { line[..cut] } else { line.copy() })
+            }
+            for line in o.error_text().lines() {
+                lines.push(line.copy())
+            }
+            lines.push("[{o.status}]")
+            return lines.join("\n")
+        },
+        err(e) => return "{e}",
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let s = separator()
+    let file = "{dir}{s}tool.calx"
+    let program = #"
+        import std.env.{args}
+
+        fn double(x: i32) -> i32 {
+            return x * 2
+        }
+
+        @test
+        fn doubles() {
+            assert(double(21) == 42)
+        }
+
+        @test
+        fn sees_no_arguments() {
+            assert(args().is_empty(), "the test was given {args()}")
+        }
+
+        @test
+        fn fails() {
+            println("before the check")
+            assert(double(2) == 5, "2 doubled is {double(2)}")
+        }
+
+        @test
+        fn errors() ! String {
+            fail "it went wrong"
+        }
+
+        fn main() {
+            println("main: {double(4)}")
+        }
+
+        "#
+    write_text(file, program)!
+    println(calx(["test", file.copy()]).replace("\\", "/").replace(dir.replace("\\", "/"), "DIR"))
+    // out: ok    doubles
+    // out: ok    sees_no_arguments
+    // out: FAIL  fails: exit status 101
+    // out:     before the check
+    // out:     panic at DIR/tool.calx:20:5: assertion failed: 2 doubled is 4
+    // out: FAIL  errors: exit status 1
+    // out:     error: it went wrong
+    // out: 2 passed, 2 failed
+    // out: [exited with status 1]
+    println(calx(["test", file.copy(), "doub", "argu"]))
+    // out: ok    doubles
+    // out: ok    sees_no_arguments
+    // out: 2 passed, 0 failed
+    // out: [exited with status 0]
+    println(calx(["test", file.copy(), "nothing"]))
+    // out: calx: no test's name holds `nothing`
+    // out: [exited with status 1]
+    println(calx(["run", file.copy()]))
+    // out: main: 8
+    // out: [exited with status 0]
+
+    // A file with no tests.
+    let empty = "{dir}{s}empty.calx"
+    write_text(empty, "fn main() \{\}\n")!
+    println(calx(["test", empty.copy()]).replace("\\", "/").replace(dir.replace("\\", "/"), "DIR"))
+    // out: calx: DIR/empty.calx has no tests; a test is a function marked `@test`
+    // out: [exited with status 1]
+    remove_dir_all(dir)!
+}

@@ -5,7 +5,7 @@ description: Attributes a library defines as Calx functions the compiler runs - 
 
 # Attributes
 
-An attribute is `@name` or `@name(...)` before a declaration. The compiler knows four itself: [`@track_caller`](printing.md#panics-that-name-the-caller), [`@export`](libraries.md#building-a-library), [`@handle`](ownership.md#handles) and `@attribute`. Any other comes from a library, and is a Calx function that the compiler runs while it compiles (D124). The function reads the declaration it's on and gives back code to add beside it. For example, a network library's `@packet` can write a packet's reader and writer from its fields, and the standard library's [`@json`](../std/json.md#json) writes a struct's JSON reader and writer.
+An attribute is `@name` or `@name(...)` before a declaration. The compiler knows five itself: [`@track_caller`](printing.md#panics-that-name-the-caller), [`@export`](libraries.md#building-a-library), [`@handle`](ownership.md#handles), [`@test`](command.md#testing) and `@attribute`. Any other comes from a library, and is a Calx function that the compiler runs while it compiles (D124). The function reads the declaration it's on and gives back code to add beside it. For example, a network library's `@packet` can write a packet's reader and writer from its fields, and the standard library's [`@json`](../std/json.md#json) writes a struct's JSON reader and writer.
 
 ```calx
 // file: main.calx

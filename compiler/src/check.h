@@ -44,6 +44,9 @@ struct Program {
         Type* type;
     };
     std::vector<Export> exports;
+    // CLX-87: the functions marked `@test` in the main module, in the order they're written,
+    // which `calx test` runs.
+    std::vector<Item*> tests;
 };
 
 // Checks a program: its modules, from `load_program`, as one. With `need_main`, the main module

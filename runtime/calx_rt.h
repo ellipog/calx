@@ -70,6 +70,8 @@ typedef struct {
 /* Startup and exit, called by the generated `main`. */
 CX_FN(void, cx_start, (int argc, char** argv));
 CX_FN(int, cx_finish, (void));
+/* A test program's start, for `calx test`: `cx_start`, then the test it's asked to run, or -1. */
+CX_FN(cx_i64, cx_test_start, (int argc, char** argv));
 
 /* The command line, in UTF-8, behind std.env. */
 CX_FN(cx_usize, cx_arg_count, (void));

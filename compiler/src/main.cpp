@@ -1,11 +1,16 @@
 // The `calx` command.
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "check.h"
@@ -50,6 +55,8 @@ int usage() {
         "  check     check a program without building it\n"
         "  build     build a program (-o names the output)\n"
         "  run       build a program and run it; arguments after -- go to the program\n"
+        "  test      build a file's @test functions and run each, as many at once as there are\n"
+        "            processors; names after the file pick the tests whose names hold one\n"
         "  emit-c    print the C a program compiles to (-o names a file)\n"
         "  expand    print the code a program's attributes generate\n"
         "  update    install the newest release (--check, --nightly, --stable, --to V, --rollback)\n"
@@ -74,6 +81,7 @@ struct Options {
     std::string input;
     std::string output;
     std::vector<std::string> program_args;
+    std::vector<std::string> filters;  // `calx test`: the tests to run are those whose names hold one
     BuildMode mode = BuildMode::debug;
     bool library = false;
     bool timings = false;
@@ -88,7 +96,7 @@ double ms(std::chrono::steady_clock::time_point t) {
 }
 
 bool is_command(const std::string& c) {
-    return c == "check" || c == "build" || c == "run" || c == "emit-c" || c == "expand";
+    return c == "check" || c == "build" || c == "run" || c == "test" || c == "emit-c" || c == "expand";
 }
 
 // `calx [options] file.calx args...` is `calx run [options] file.calx -- args...`, as `python
@@ -126,6 +134,95 @@ int direct_run(int argc, char** argv, Options& opt) {
     opt.input = file;
     for (int j = i + 1; j < argc; j++) opt.program_args.push_back(argv[j]);
     return 0;
+}
+
+// CLX-87: runs each test the program was built with in a process of its own, so a panic or a
+// crash fails only that test, as many at once as there are processors, and reports them in the
+// order they're written, each as soon as those before it have. What a test wrote is shown only
+// if it failed. 0 if every test passed.
+int run_tests(const std::string& exe, const std::vector<std::string>& names, const std::vector<std::string>& filters) {
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<std::size_t> chosen;
+    for (std::size_t i = 0; i < names.size(); i++) {
+        bool picked = filters.empty();
+        for (const std::string& f : filters) picked = picked || names[i].find(f) != std::string::npos;
+        if (picked) chosen.push_back(i);
+    }
+    if (chosen.empty()) {
+        std::string list;
+        for (const std::string& f : filters) list += (list.empty() ? "`" : ", `") + f + "`";
+        std::fprintf(stderr, "calx: no test's name holds %s\n", list.c_str());
+        return 1;
+    }
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(cache_dir()) / "tests" / unique_stamp();
+    std::filesystem::create_directories(dir, ec);
+    struct Result {
+        bool done = false;
+        int status = 0;
+        std::string output;
+    };
+    std::vector<Result> results(chosen.size());
+    std::mutex mu;
+    std::condition_variable ready;
+    std::atomic<std::size_t> next{0};
+    auto work = [&] {
+        for (;;) {
+            std::size_t k = next++;
+            if (k >= chosen.size()) return;
+            std::string out = (dir / (std::to_string(k) + ".txt")).string();
+            int status = run_to_file({exe, "--calx-test=" + std::to_string(chosen[k])}, out);
+            std::string text;
+            read_file(out, text);
+            std::error_code rm;
+            std::filesystem::remove(out, rm);
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                results[k] = Result{true, status, std::move(text)};
+            }
+            ready.notify_all();
+        }
+    };
+    unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    std::size_t workers = std::min<std::size_t>(cores, chosen.size());
+    std::vector<std::thread> pool;
+    for (std::size_t w = 0; w < workers; w++) pool.emplace_back(work);
+    std::size_t passed = 0, failed = 0;
+    for (std::size_t k = 0; k < chosen.size(); k++) {
+        Result r;
+        {
+            std::unique_lock<std::mutex> lock(mu);
+            ready.wait(lock, [&] { return results[k].done; });
+            r = std::move(results[k]);
+        }
+        const std::string& name = names[chosen[k]];
+        if (r.status == 0) {
+            passed++;
+            std::printf("ok    %s\n", name.c_str());
+        } else {
+            failed++;
+            if (r.status < 0) {
+                std::printf("FAIL  %s: it couldn't start\n", name.c_str());
+            } else {
+                std::printf("FAIL  %s: exit status %d\n", name.c_str(), r.status);
+            }
+            // What it wrote, indented, so each failure reads apart from the next.
+            std::size_t at = 0;
+            while (at < r.output.size()) {
+                std::size_t end = r.output.find('\n', at);
+                if (end == std::string::npos) end = r.output.size();
+                std::string line = r.output.substr(at, end - at);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::printf("    %s\n", line.c_str());
+                at = end + 1;
+            }
+        }
+        std::fflush(stdout);
+    }
+    for (std::thread& t : pool) t.join();
+    std::filesystem::remove_all(dir, ec);
+    std::printf("%zu passed, %zu failed (%.2f s)\n", passed, failed, ms(t0) / 1000.0);
+    return failed ? 1 : 0;
 }
 
 }  // namespace
@@ -174,6 +271,8 @@ int main(int argc, char** argv) {
             return 2;
         } else if (opt.input.empty()) {
             opt.input = a;
+        } else if (opt.command == "test") {
+            opt.filters.push_back(a);
         } else {
             std::fprintf(stderr, "calx: only one input file is supported for now\n");
             return 2;
@@ -229,8 +328,8 @@ int main(int argc, char** argv) {
     std::vector<Module*> modules = loader.modules();
     Program program;
     if (!diags.has_errors() && expanded && opt.command != "expand") {
-        check_program(CheckContext{sources, names, arena, diags, types}, modules, program, opt.command != "check",
-                      opt.library);
+        check_program(CheckContext{sources, names, arena, diags, types}, modules, program,
+                      opt.command != "check" && opt.command != "test", opt.library);
     }
     if (opt.json) {
         diags.print_json(stdout);
@@ -254,6 +353,12 @@ int main(int argc, char** argv) {
         return 0;
     }
     double front_ms = ms(t0);
+    std::vector<std::string> tests;
+    for (const Item* t : program.tests) tests.emplace_back(names.text(t->name));
+    if (opt.command == "test" && tests.empty()) {
+        std::fprintf(stderr, "calx: %s has no tests; a test is a function marked `@test`\n", opt.input.c_str());
+        return 1;
+    }
     if (opt.command == "check") {
         if (opt.timings) std::fprintf(stderr, "check: %.1f ms\n", front_ms);
         return 0;
@@ -263,6 +368,7 @@ int main(int argc, char** argv) {
     EmitOptions eo;
     eo.line_directives = opt.line_directives;
     eo.library = opt.library;
+    eo.tests = opt.command == "test";
     std::vector<CFile> files = emit_c(program, sources, names, eo);
     double emit_ms = ms(t1);
     if (opt.command == "emit-c") {
@@ -327,6 +433,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         return 0;
+    }
+    if (opt.command == "test") {
+        set_run_environment(opt.input);
+        return run_tests(b.exe, tests, opt.filters);
     }
     std::vector<std::string> run = {b.exe};
     run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());

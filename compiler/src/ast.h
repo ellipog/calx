@@ -495,6 +495,7 @@ struct Item {
     bool generated = false;      // an attribute generated it (D124), so "never used" isn't the program's mistake
     bool is_attribute = false;   // `@attribute`: a function the compiler runs while compiling (D57, D124)
     bool is_handle = false;      // `@handle`: a struct that stands for something of the system's, which can't be copied
+    bool is_test = false;        // `@test`: a test, which `calx test` runs in a process of its own (CLX-87)
     // A closure's body, as a function of its own (CLX-98), which each C file that reaches it
     // copies, as instances are. It reads `captures`, the locals of the code around it that it
     // names, through their addresses; one that captures nothing and is a `fn(...)` value takes

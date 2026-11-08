@@ -205,4 +205,4 @@ fn main() {
 - It's for functions and a type's own methods. A method of an interface's impl can't have it, since the interface's callers don't pass a place, and neither can `main`, since no Calx code calls it.
 - In C, the function takes the place as a last parameter, a string such as `"src/main.calx:20:16"`, and its panics use that string, so it costs one pointer per call.
 
-`@track_caller`, [`@export`](libraries.md#building-a-library) and `@attribute` are the attributes the compiler knows. Any other is a function a library marks `@attribute` ([attributes](attributes.md)), and one that's neither is an error.
+`@track_caller`, [`@export`](libraries.md#building-a-library), [`@handle`](ownership.md#handles), [`@test`](command.md#testing) and `@attribute` are the attributes the compiler knows. Any other is a function a library marks `@attribute` ([attributes](attributes.md)), and one that's neither is an error.
