@@ -1265,18 +1265,20 @@ static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
  * each one's hash beside them in a row of tags. Comparing that byte across the whole row at once
  * picks out the few positions worth reading the text at, nearly always just the right ones. Slot
  * 0 of the tags holds the head, so it comes into the cache with them. */
-#define ROW_SKIP 512 /* a match longer than this leaves most of its positions out */
+#define ROW_SKIP 384 /* a match longer than this leaves out all but its first 96 and last 32 positions */
 #define LAZY_SKIP 8  /* a step on a miss longer than this leaves the positions skipped out */
 
 static inline cx_u32 row_log(cx_u32 slog) { return slog < 4 ? 4 : slog > 6 ? 6 : slog; }
 
-/* The row's positions whose byte is tag: bit k for the k-th position. */
+/* The row's positions whose byte is tag: bit k for the k-th position. A row of 16 is compared in
+ * 16 bytes: 32 would reach into the next row, which a quarter of the time is in the next cache
+ * line, one not fetched ahead. */
 static inline cx_u64 row_tags(const cx_u8* tags, cx_u32 tag, cx_u32 rlog) {
 #if defined(__AVX2__)
+    if (rlog == 4) return (cx_u32)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)tags), _mm_set1_epi8((char)tag)));
     const __m256i t = _mm256_set1_epi8((char)tag);
     cx_u64 m = (cx_u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)tags), t));
     if (rlog == 6) m |= (cx_u64)(cx_u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)(tags + 32)), t)) << 32;
-    else if (rlog == 4) m &= 0xFFFF;
     return m;
 #elif defined(__SSE2__)
     const __m128i t = _mm_set1_epi8((char)tag);
@@ -1297,7 +1299,6 @@ typedef struct {
     cx_u32* pos;
     cx_u8* tags;
     cx_u32 rlog, rmask, hb, mls;
-    cx_u32 last;    /* the last position READ bytes from the job's end, the last one hashed */
     cx_u32 next_up; /* the rows have every position before this */
     cx_u32 wsize, tries;
     cx_u32 hc[8]; /* the hashes of the eight positions from next_up, by position mod 8 */
@@ -1312,7 +1313,6 @@ static inline void rw_load(rw_t* w, const job_t* J) {
     w->rmask = (1u << J->rlog) - 1;
     w->hb = J->p.hlog - J->rlog + 8;
     w->mls = J->p.mml;
-    w->last = J->to - READ;
     w->next_up = J->next_up;
     w->wsize = J->wsize;
     w->tries = 1u << J->p.slog;
@@ -1332,9 +1332,9 @@ static inline void row_put(rw_t* w, cx_u32 i, cx_u32 h) {
 }
 
 /* The next eight positions' hashes are kept, and their rows fetched into the cache, so a row is
- * there by the time its position comes to be looked up or put in. */
+ * there by the time its position comes to be looked up or put in. The parse stops 16 bytes before
+ * the job's end, so the eight bytes hashed are always in. */
 static inline void row_ahead(rw_t* w, cx_u32 i) {
-    if (i > w->last) return;
     const cx_u32 h = row_hash(w, i), at = (h >> 8) << w->rlog;
     w->hc[i & 7] = h;
     __builtin_prefetch(w->pos + at);
@@ -1351,11 +1351,11 @@ static inline void row_refill(rw_t* w, cx_u32 from) {
 static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target) {
     cx_u32 i = w->next_up;
     if (target - i > ROW_SKIP) {
-        for (const cx_u32 e = i + ROW_SKIP / 4; i < e; i++) {
+        for (const cx_u32 e = i + 96; i < e; i++) {
             row_put(w, i, w->hc[i & 7]);
             row_ahead(w, i + 8);
         }
-        i = target - ROW_SKIP / 4;
+        i = target - 32;
         row_refill(w, i);
     }
     for (; i < target; i++) {
@@ -1421,18 +1421,21 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
 
 /* The parse for the hash-row levels: the longest match at a position, unless the next one or,
  * for lazy2, the one after has one that's worth more by its length and offset. */
-static void mf_lazy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, int depth) {
+static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const int depth, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     const cx_u32 start = J->start;
     ss_t* const ss = &J->ss;
     const cx_u8* ip = base + at;
     const cx_u8* anchor = ip;
     const cx_u8* const iend = base + end;
-    const cx_u8* const ilimit = iend - READ;
+    /* Positions are hashed eight ahead of the one looked at, eight bytes each: the job's last 16
+     * have no match looked for, so that stays in its text. */
+    const cx_u8* const ilimit = end - READ <= J->to - 16 ? iend - READ : base + J->to - 16;
     if (J->next_up < start) J->next_up = start;
-    if (end - at <= READ + 1) goto tail;
+    if (ilimit <= ip + 1) goto tail;
     rw_t w;
     rw_load(&w, J);
+    w.mls = mls;
     row_refill(&w, w.next_up);
     while (ip < ilimit) {
         cx_u32 ml = 0, off = 0;
@@ -1529,6 +1532,15 @@ static void mf_lazy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, int depth) {
 tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
 }
+
+/* A copy of the parse for each depth, and for the shortest match of 5 the row levels have, so the
+ * looking ahead and the hash's length are worked out when it's compiled. */
+#define ZSE_LAZY(J, at, end, r, depth) \
+    if ((J)->p.mml == 5) mf_lazy_with(J, at, end, r, depth, 5); \
+    else mf_lazy_with(J, at, end, r, depth, (J)->p.mml)
+static void mf_greedy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 0); }
+static void mf_lazy1(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 1); }
+static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 2); }
 
 /* Binary trees: the positions with the same hash of their first bytes, kept sorted by the text that
  * follows them, two links a position, so a search goes down one path and each step agrees with
@@ -2827,9 +2839,9 @@ static cx_usize block(job_t* J, cx_u32 at, cx_u32 n, int last, cx_u8* out, cx_us
     switch (J->p.strat) {
     case S_FAST: mf_fast(J, at, at + n, r); break;
     case S_DFAST: mf_dfast(J, at, at + n, r); break;
-    case S_GREEDY: mf_lazy(J, at, at + n, r, 0); break;
-    case S_LAZY: mf_lazy(J, at, at + n, r, 1); break;
-    case S_LAZY2: mf_lazy(J, at, at + n, r, 2); break;
+    case S_GREEDY: mf_greedy(J, at, at + n, r); break;
+    case S_LAZY: mf_lazy1(J, at, at + n, r); break;
+    case S_LAZY2: mf_lazy2(J, at, at + n, r); break;
     case S_BTLAZY2: mf_btlazy(J, at, at + n, r); break;
     default:
         if (J->p.strat == S_BTULTRA2 && !J->st->ready) {
