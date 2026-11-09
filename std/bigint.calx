@@ -10,6 +10,13 @@ module std.bigint
 const TEN19: u64 = 10000000000000000000
 /// From this many limbs in each factor, Karatsuba's three half-size products beat schoolbook's four.
 const KARATSUBA: usize = 32
+/// From this many limbs in the divisor, and as many more in the dividend, Burnikel and Ziegler's
+/// recursive division beats Knuth's.
+const BZ: usize = 64
+/// From this many limbs, text is written by halves.
+const TEXT_DC: usize = 30
+/// From this many limbs' worth of digits, groups of them, text is read by halves.
+const PARSE_DC: usize = 2000
 const DIGITS: str = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 /// An integer of any size.
@@ -66,32 +73,26 @@ impl BigInt {
         if i == n {
             return none
         }
-        // Digits a group at a time, as many as fit in a limb.
-        let (group, big) = radix_group(radix)
-        var mag: List<u64> = []
-        var chunk: u64 = 0
-        var count: u32 = 0
-        var scale: u64 = 1
-        while i < n {
-            let d = digit_value(text.byte_at(i))
-            if d >= radix {
+        var k = i
+        while k < n {
+            if digit_value(text.byte_at(k)) >= radix {
                 return none
             }
-            chunk = chunk * u64(radix) + u64(d)
-            scale *= u64(radix)
-            count += 1
-            if count == group {
-                mul_add_1(mut mag, big, chunk)
-                chunk = 0
-                count = 0
-                scale = 1
-            }
-            i += 1
+            k += 1
         }
-        if count > 0 {
-            mul_add_1(mut mag, scale, chunk)
+        let (group, big) = radix_group(radix)
+        if n - i <= usize(group) * PARSE_DC {
+            return some(make(neg, parse_groups(text, i, n, radix, group, big)))
         }
-        return some(make(neg, mag))
+        // big^(2^j), for the halves' lengths of digits, group 2^j.
+        var pows: List<List<u64>> = [[big]]
+        var width = usize(group)
+        while width * 2 < n - i {
+            let next = mul_mag(pows[pows.len() - 1], pows[pows.len() - 1])
+            pows.push(next)
+            width *= 2
+        }
+        return some(make(neg, parse_halves(text, i, n, radix, group, big, pows)))
     }
 
     /// The integer whose bytes, the most significant first, are `bytes`, as Python's
@@ -753,6 +754,14 @@ fn add_at(out: mut List<u64>, x: List<u64>, at: usize) {
 
 /// The quotient and the remainder of `a` by `b`, which isn't zero.
 fn divmod_mag(a: List<u64>, b: List<u64>) -> (List<u64>, List<u64>) {
+    if b.len() >= BZ and a.len() >= b.len() + BZ {
+        return bz_divmod(a, b)
+    }
+    return knuth_divmod(a, b)
+}
+
+/// `divmod_mag` by Knuth's algorithm D, which takes time as the two lengths multiplied.
+fn knuth_divmod(a: List<u64>, b: List<u64>) -> (List<u64>, List<u64>) {
     if cmp_mag(a, b) < 0 {
         return ([], a.copy())
     }
@@ -862,6 +871,102 @@ fn add_back(u: mut List<u64>, j: usize, v: List<u64>) {
         i += 1
     }
     u[j + n] = u[j + n] + carry
+}
+
+// Burnikel and Ziegler's recursive division ("Fast Recursive Division", 1998). The divisor is
+// shifted to n = m 2^k limbs, with m below BZ and its top bit set, and the dividend by as much.
+// Then the dividend is divided n limbs at a time, each step 2n limbs by n, which is two steps of
+// 3n/2 limbs by n, each of them one of n limbs by n/2 and a multiply. So a division costs what
+// a multiply does, times log n, where Knuth's costs the two lengths multiplied.
+fn bz_divmod(a: List<u64>, b: List<u64>) -> (List<u64>, List<u64>) {
+    let r0 = b.len()
+    var m = r0
+    var n: usize = 1
+    while m >= BZ {
+        m = (m + 1) / 2
+        n *= 2
+    }
+    n *= m
+    let shift = u64(n - r0) * 64 + u64.wrap(b[r0 - 1].leading_zeros())
+    let bn = shl_mag(b, shift)
+    let an = shl_mag(a, shift)
+    // Blocks of n limbs, the top one below the divisor. A whole top block might not be, so a zero
+    // block goes above it.
+    var t = (an.len() + n - 1) / n
+    if an.len() % n == 0 {
+        t += 1
+    }
+    t = t.max(2)
+    var q: List<u64> = [0; (t - 1) * n + 1]
+    var z = limbs_from(an, (t - 2) * n)
+    var i = t - 2
+    loop {
+        let (qi, ri) = d2n1n(z, bn, n)
+        add_at(mut q, qi, i * n)
+        if i == 0 {
+            trim(mut q)
+            return (q, shr_mag(ri, shift))
+        }
+        i -= 1
+        z = add_mag(shl_mag(ri, u64(n) * 64), part(an, i * n, (i + 1) * n))
+    }
+}
+
+// `a` by `b`, where `b` has n limbs with its top bit set and `a` is below b 2^(64 n).
+fn d2n1n(a: List<u64>, b: List<u64>, n: usize) -> (List<u64>, List<u64>) {
+    if n % 2 == 1 or n < BZ {
+        return knuth_divmod(a, b)
+    }
+    let h = n / 2
+    let (q1, r1) = d3n2n(limbs_from(a, h), b, h)
+    let (q2, r2) = d3n2n(add_mag(shl_mag(r1, u64(h) * 64), part(a, 0, h)), b, h)
+    return (add_mag(shl_mag(q1, u64(h) * 64), q2), r2)
+}
+
+// `a` by `b`, where `b` has 2h limbs with its top bit set and `a` is below b 2^(64 h).
+fn d3n2n(a: List<u64>, b: List<u64>, h: usize) -> (List<u64>, List<u64>) {
+    let b1 = limbs_from(b, h)
+    let b2 = part(b, 0, h)
+    let a12 = limbs_from(a, h)
+    var q: List<u64> = []
+    var r1: List<u64> = []
+    if cmp_mag(limbs_from(a, 2 * h), b1) < 0 {
+        let (qq, rr) = d2n1n(a12, b1, h)
+        q = qq
+        r1 = rr
+    } else {
+        // `a`'s top h limbs are `b1`, so the guess is 2^(64 h) - 1, and what's left of the top
+        // 2h limbs is a12 - b1 2^(64 h) + b1.
+        q = [u64.MAX; h]
+        r1 = sub_mag(add_mag(a12, b1), shl_mag(b1, u64(h) * 64))
+    }
+    let d = mul_mag(q, b2)
+    var rest = add_mag(shl_mag(r1, u64(h) * 64), part(a, 0, h))
+    // With the top bit of `b` set, the guess is at most 2 too big.
+    while cmp_mag(rest, d) < 0 {
+        q = sub_mag(q, [1u64])
+        rest = add_mag(rest, b)
+    }
+    return (q, sub_mag(rest, d))
+}
+
+/// `x` divided by 2^(64 k): its limbs from `k` up.
+fn limbs_from(x: List<u64>, k: usize) -> List<u64> {
+    if x.len() <= k {
+        return []
+    }
+    return x[k..]
+}
+
+/// The limbs of `x` from `from` up to `to`, without the zero limbs at the top.
+fn part(x: List<u64>, from: usize, to: usize) -> List<u64> {
+    let end = to.min(x.len())
+    if from >= end {
+        return []
+    }
+    var out = x[from..end]
+    trim(mut out)
+    return out
 }
 
 /// Divides `xs` by `d`, which isn't zero, in place, and gives the remainder.
@@ -974,25 +1079,130 @@ fn text_of(x: BigInt, radix: u32) -> String {
     if x.mag.len() == 0 {
         return String("0")
     }
-    // Groups of digits from the lowest, by dividing by the largest power of the radix in a limb.
     let (group, big) = radix_group(radix)
-    var groups: List<u64> = []
-    var w = x.mag.copy()
-    while w.len() > 0 {
-        groups.push(div_1(mut w, big))
-    }
     var out: List<u8> = []
-    out.reserve(groups.len() * usize(group) + 1)
+    // Each limb is at most a group's digits and one more.
+    out.reserve((x.mag.len() + 1) * (usize(group) + 1))
     if x.negative {
         out.push(b'-')
     }
+    if x.mag.len() < TEXT_DC {
+        put_groups(mut out, x.mag, radix, group, big, 0)
+    } else {
+        // big^(2^j), up to one with about as many limbs as `x`.
+        var pows: List<List<u64>> = [[big]]
+        while pows[pows.len() - 1].len() * 2 <= x.mag.len() {
+            let next = mul_mag(pows[pows.len() - 1], pows[pows.len() - 1])
+            pows.push(next)
+        }
+        put_halves(mut out, x.mag, pows, pows.len() - 1, radix, group, big, 0)
+    }
+    return String.from_utf8(out)!
+}
+
+/// The digits of `x`, `width` of them with zeros before, or as many as it takes where `width` is
+/// 0: the digits of x / p, then the group 2^j digits of x % p, where p is big^(2^j), with about
+/// half the limbs of `x`, from `pows` up to `k`.
+fn put_halves(out: mut List<u8>, x: List<u64>, pows: List<List<u64>>, k: usize, radix: u32, group: u32, big: u64, width: usize) {
+    if x.len() < TEXT_DC {
+        put_groups(mut out, x, radix, group, big, width)
+        return
+    }
+    var j = k
+    while j > 0 and pows[j].len() * 2 > x.len() + 1 {
+        j -= 1
+    }
+    var low = usize(group)
+    for _ in 0..j {
+        low *= 2
+    }
+    let (q, r) = divmod_mag(x, pows[j])
+    if q.len() == 0 {
+        put_halves(mut out, r, pows, j, radix, group, big, width)
+        return
+    }
+    put_halves(mut out, q, pows, j, radix, group, big, if width == 0 { 0 } else { width - low })
+    put_halves(mut out, r, pows, j, radix, group, big, low)
+}
+
+/// The digits of `x`, `width` of them with zeros before, or as many as it takes where `width` is
+/// 0: groups of digits from the lowest, by dividing by `big`, the largest power of the radix in
+/// a limb.
+fn put_groups(out: mut List<u8>, x: List<u64>, radix: u32, group: u32, big: u64, width: usize) {
+    var groups: List<u64> = []
+    var w = x.copy()
+    while w.len() > 0 {
+        groups.push(div_1(mut w, big))
+    }
+    if groups.is_empty() {
+        for _ in 0..width.max(1) {
+            out.push(b'0')
+        }
+        return
+    }
     var i = groups.len() - 1
+    var top_digits: usize = 0
+    var v = groups[i]
+    while v > 0 {
+        v /= u64(radix)
+        top_digits += 1
+    }
+    let digits = i * usize(group) + top_digits
+    if width > digits {
+        for _ in 0..width - digits {
+            out.push(b'0')
+        }
+    }
     put_digits(mut out, groups[i], radix, 0)
     while i > 0 {
         i -= 1
         put_digits(mut out, groups[i], radix, group)
     }
-    return String.from_utf8(out)!
+}
+
+/// The digits of `text` from `from` up to `to`, which are all digits in base `radix`, read a
+/// group at a time, as many as fit in a limb.
+fn parse_groups(text: String, from: usize, to: usize, radix: u32, group: u32, big: u64) -> List<u64> {
+    var mag: List<u64> = []
+    var chunk: u64 = 0
+    var count: u32 = 0
+    var scale: u64 = 1
+    var i = from
+    while i < to {
+        chunk = chunk * u64(radix) + u64(digit_value(text.byte_at(i)))
+        scale *= u64(radix)
+        count += 1
+        if count == group {
+            mul_add_1(mut mag, big, chunk)
+            chunk = 0
+            count = 0
+            scale = 1
+        }
+        i += 1
+    }
+    if count > 0 {
+        mul_add_1(mut mag, scale, chunk)
+    }
+    trim(mut mag)
+    return mag
+}
+
+/// The digits of `text` from `from` up to `to` by halves: the low group 2^j digits, the most
+/// that leave some above them, and the digits above them times big^(2^j), from `pows`.
+fn parse_halves(text: String, from: usize, to: usize, radix: u32, group: u32, big: u64, pows: List<List<u64>>) -> List<u64> {
+    let len = to - from
+    if len <= usize(group) * PARSE_DC {
+        return parse_groups(text, from, to, radix, group, big)
+    }
+    var j: usize = 0
+    var low = usize(group)
+    while low * 2 < len {
+        low *= 2
+        j += 1
+    }
+    let above = parse_halves(text, from, to - low, radix, group, big, pows)
+    let below = parse_halves(text, to - low, to, radix, group, big, pows)
+    return add_mag(mul_mag(above, pows[j]), below)
 }
 
 /// Adds the digits of `v` to `out`, with zeros before them up to `width` digits.

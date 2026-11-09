@@ -69,7 +69,19 @@ fn main() {
 A `BigInt` is a sign and a list of 64-bit limbs, the lowest first, with no zero limb at the top, so each number has one form. Python's `int` has 30-bit digits, so each step of Calx's arithmetic does about four times as much.
 
 - Multiplying takes each limb's whole 128-bit product, from [`widening_mul`](../reference/integers.md#methods). From 32 limbs in each factor, about 600 decimal digits, it's Karatsuba's method, which makes three products of half the size instead of four, as Python and Java do.
-- Dividing is Knuth's algorithm D, which works out each limb of the quotient from the top two limbs of what's left with one [`div_wide`](../reference/integers.md#methods), a single `div` instruction on x86-64. Python 3.12 and later switch to a recursive method for numbers of tens of thousands of digits, which is faster at those sizes.
-- Decimal text is read and written 19 digits at a time, the most that fit in a limb.
+- Dividing is Knuth's algorithm D, which works out each limb of the quotient from the top two limbs of what's left with one [`div_wide`](../reference/integers.md#methods), a single `div` instruction on x86-64. From 64 limbs in the divisor, and as many more in the dividend, it's Burnikel and Ziegler's recursive division, which splits a division of 2n limbs by n into two of 3n/2 by n, each of them one of n by n/2 and a multiply. A division then costs what a multiply does times log n, where Knuth's costs the two lengths multiplied.
+- Text is read and written 19 decimal digits at a time, the most that fit in a limb. From 30 limbs, about 570 digits, it's written by halves: the number is divided by 10^(19·2^k) with about half its limbs, and each half written the same way, with the powers worked out once. From 2,000 limbs' worth of digits, about 38,000, it's read by halves too, the upper half's value times the power, plus the lower half's. Below those sizes the plain loops are faster.
 - The inner loops read and write the limbs through pointers, with the bounds checked once for the whole loop.
 - Dividing by zero, with `/`, `%`, `div_rem`, `floor_div` or `floor_mod`, panics, naming the line that divides ([`@track_caller`](../reference/printing.md#panics-that-name-the-caller)).
+
+On our benchmark, an i9-13900K pinned to its performance cores with other work running, so rough, the best of 20 runs, or of 3 from 5,000 limbs, against CPython 3.14 with no limit on the digits it converts. The dividend has 2n limbs and the divisor n, and the text is the dividend's:
+
+| n limbs | Dividing, Calx | Python | Writing text, Calx | Python | Reading text, Calx | Python |
+| --- | --- | --- | --- | --- | --- | --- |
+| 50 | 2 µs | 10 µs | 9 µs | 37 µs | 3 µs | 10 µs |
+| 200 | 23 µs | 107 µs | 84 µs | 596 µs | 28 µs | 127 µs |
+| 1,000 | 0.35 ms | 1.39 ms | 1.16 ms | 3.93 ms | 0.52 ms | 1.80 ms |
+| 5,000 | 4.75 ms | 16.6 ms | 16.3 ms | 41.4 ms | 8.71 ms | 23.0 ms |
+| 20,000 | 44.7 ms | 146 ms | 152 ms | 211 ms | 81.3 ms | 214 ms |
+
+At 20,000 limbs the text is 770,619 digits. Before the recursive division and the halves, the same numbers took 290 ms to divide, 2.76 s to write and 237 ms to read.

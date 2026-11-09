@@ -1,0 +1,79 @@
+// std.bigint at the sizes where division is recursive and text is written and read by halves
+// (CLX-144): values CPython gives, and identities on numbers from a seeded generator.
+
+import std.bigint.{BigInt}
+import std.random.{Random}
+
+fn number(r: mut Random, bytes: usize) -> BigInt {
+    let n = BigInt.from_bytes_be(r.bytes(bytes))
+    return if r.coin() { -n } else { n }
+}
+
+fn main() {
+    let x = BigInt.from(3).pow(300000)
+    let s = x.to_radix(10)
+    var sum: usize = 0
+    for i in 0..s.len() {
+        sum += usize(s.byte_at(i) - b'0')
+    }
+    println("{s.len()} {s[..20]} {s[s.len() - 20..]} {sum}")    // out: 143137 23791175394529790432 63749461596566000001 644202
+    let (q, r) = BigInt.from(3).pow(400000).div_rem(BigInt.from(7).pow(100000))
+    let qs = q.to_radix(10)
+    let rs = r.to_radix(10)
+    println("{qs.len()} {qs[..20]} {rs[rs.len() - 20..]}")    // out: 106339 49875405460466509065 09536261755568648205
+
+    // 100,000 digits from a generator, read by halves.
+    var seed: u64 = 1
+    var digits = String()
+    for _ in 0..100000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+        digits.push_str("{(seed >> 33) % 10}")
+    }
+    let v = BigInt.parse(digits)!
+    let hex = v.to_radix(16)
+    println("{(v % BigInt.from(1000000007)).to_i64()} {hex[..16]} {v.bit_len()}")    // out: some(850401638) c3a3272822c492c7 332192
+
+    // Negative, in hex, and divided rounding down.
+    let neg = -BigInt.from(7).pow(150000)
+    let d = BigInt.from(13).pow(20000)
+    let nh = neg.to_radix(16)
+    let fd = neg.floor_div(d).to_radix(10)
+    let fm = neg.floor_mod(d).to_radix(10)
+    println("{nh[..12]} {nh.len()} {fd[..15]} {fm[fm.len() - 15..]}")    // out: -96fd6cd9251 105277 -69016987944713 014703965081726
+
+    // Halves whose low part is all zeros, and zeros before the digits.
+    let p10 = BigInt.from(10).pow(50000)
+    var want = String("1")
+    want.push_str("0".repeat(50000))
+    var padded = String("0000")
+    padded.push_str(want)
+    println("{p10.to_radix(10) == want} {BigInt.parse(padded)! == p10} {BigInt.parse("-{want}")! == -p10}")    // out: true true true
+
+    // Identities from 65 to 5000 limbs.
+    var rng = Random.new(144)
+    let sizes: List<usize> = [520, 1030, 4100, 17000, 40000]
+    var checked = 0
+    var failed = 0
+    for sa in sizes {
+        for sb in sizes {
+            if sb > sa {
+                continue
+            }
+            let a = number(mut rng, sa)
+            var b = number(mut rng, sb)
+            if b.is_zero() {
+                b = BigInt.from(3)
+            }
+            let (qq, m) = a.div_rem(b)
+            let holds = qq * b + m == a and m.abs() < b.abs() and (m.is_zero() or m.is_negative() == a.is_negative()) and
+                        (a * b).div_rem(b).0 == a and BigInt.parse(a.to_radix(10))! == a and
+                        BigInt.parse_radix(a.to_radix(36), 36)! == a and BigInt.parse_radix(b.to_radix(7), 7)! == b
+            checked += 1
+            if not holds {
+                failed += 1
+                println("failed at {sa} and {sb} bytes")
+            }
+        }
+    }
+    println("{checked} {failed}")    // out: 15 0
+}
