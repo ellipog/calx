@@ -1,7 +1,8 @@
 // std.net's send_file: a range of a file sent after what was written before it, with what's
 // written after it following it, from a handle the runtime keeps after the program closes the
-// file; one file at a time on a connection; and a range past the end of the file closing the
-// connection where the file ends.
+// file; one file at a time on a connection; a range past the end of the file closing the
+// connection where the file ends; and a client that goes while a file is sent to it, which ends
+// the connection, not the program, as Linux's SIGPIPE would.
 import std.fs.{open_read, remove_dir_all, temp_dir, write}
 import std.net.{Event, Net}
 
@@ -34,7 +35,8 @@ fn main() {
 
     let net = Net.new()!
     let port = net.listen("127.0.0.1", 0)!
-    // Per slot: 0 unused, 1 the whole range's client, 2 the short range's, 3 a server's end.
+    // Per slot: 0 unused, 1 the whole range's client, 2 the short range's, 3 a server's end, 4 a
+    // client that goes at once.
     var role = [0; 16]
     var got = [0usize; 16]
     var wrong = 0
@@ -43,11 +45,12 @@ fn main() {
     var accepted = 0
     var empty = false
     var short = false
+    var left = false
     var closed = 0
     var events = List<Event>()
     var buf = List<u8>()
     var polls = 0
-    while closed < 4 and polls < 100000 {
+    while closed < 6 and polls < 100000 {
         net.poll(1000, mut events)
         polls += 1
         for e in events {
@@ -65,14 +68,23 @@ fn main() {
                         // The runtime has a handle of its own, so the program's can go.
                         f.close()!
                         net.close(c)
-                    } else {
+                    } else if accepted == 2 {
                         // Printed when its client has closed, after the first connection's lines.
                         empty = net.send_file(c, f, 0, 0)
                         short = net.send_file(c, f, u64(SIZE - 1000), 5000)
                         f.close()!
+                    } else {
+                        // More than the system holds for a connection, so it's still being sent
+                        // when the client has gone.
+                        left = net.send_file(c, f, 0, u64(SIZE))
+                        f.close()!
                     }
                 }
-                Connected(_) => {}
+                Connected(c) => {
+                    if role[c.slot()] == 4 {
+                        net.close(c)
+                    }
+                }
                 Received(c) => {
                     buf.clear()
                     _ = net.read(c, mut buf)
@@ -100,12 +112,15 @@ fn main() {
                         println("empty: {empty}")                                            // out: empty: true
                         println("short: {short}")                                            // out: short: true
                         println("short range: at most 1000 bytes: {got[c.slot()] <= 1000}") // out: short range: at most 1000 bytes: true
+                        let gone = net.connect("127.0.0.1", port)!
+                        role[gone.slot()] = 4
                     }
                 }
                 Woken => {}
             }
         }
     }
-    println("{wrong} wrong bytes, {closed} closed")    // out: 0 wrong bytes, 4 closed
+    println("sent to a client that went: {left}")    // out: sent to a client that went: true
+    println("{wrong} wrong bytes, {closed} closed")    // out: 0 wrong bytes, 6 closed
     remove_dir_all(dir)!
 }

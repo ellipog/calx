@@ -36,6 +36,8 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/sendfile.h>
@@ -772,6 +774,30 @@ static void lost(net* n, net_slot* s) {
     emit(n, EV_CLOSED, s);
 }
 
+/* sendfile, giving EPIPE where the other end has gone rather than SIGPIPE, which would end the
+ * program without a word: send's MSG_NOSIGNAL has no sendfile form, so the signal is blocked
+ * around it, and taken if the call raised it, as calx_proc.c's write_quiet does. sendfile sends
+ * in pieces, and one that sent some before the other end went gives back what it sent with the
+ * signal raised all the same, so a short count is looked at too. */
+static ssize_t sendfile_quiet(int out, int in, off_t* at, size_t n) {
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_set, &old);
+    sigpending(&pending);
+    int was = sigismember(&pending, SIGPIPE);
+    ssize_t r = sendfile(out, in, at, n);
+    int e = errno;
+    if (!was && (r < 0 ? e == EPIPE : (size_t)r < n)) {
+        struct timespec zero = {0, 0};
+        while (sigtimedwait(&pipe_set, NULL, &zero) < 0 && errno == EINTR) {
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    errno = e;
+    return r;
+}
+
 static void flush(net* n, net_slot* s) {
     if (s->state == CONN_CONNECTING || s->state == CONN_CLOSED) return;
     for (;;) {
@@ -793,7 +819,7 @@ static void flush(net* n, net_slot* s) {
         while (s->writable && s->file_left) {
             off_t at = (off_t)s->file_at;
             size_t want = s->file_left > ((cx_u64)1 << 30) ? (size_t)1 << 30 : (size_t)s->file_left;
-            ssize_t r = sendfile(s->fd, s->file, &at, want);
+            ssize_t r = sendfile_quiet(s->fd, s->file, &at, want);
             if (r > 0) {
                 s->file_at += (cx_u64)r;
                 s->file_left -= (cx_u64)r;

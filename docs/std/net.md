@@ -264,7 +264,7 @@ The runtime keeps each connection's bytes: what arrived and hasn't been read, an
 
 What's written is queued, and handed to the system at the next poll or flush: one `WSASend` or `send` a connection, however many writes there were. A wake is a completion posted to the port with `PostQueuedCompletionStatus` on Windows, and a write to an `eventfd` that epoll watches on Linux, made with the first `waker`. A flag set and cleared atomically makes the wakes before a poll one.
 
-A file goes once what was queued before it has gone, at most 1 GiB a call, from a handle copied with `DuplicateHandle` or `dup`; what's written meanwhile is kept apart and goes after it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
+A file goes once what was queued before it has gone, at most 1 GiB a call, from a handle copied with `DuplicateHandle` or `dup`; what's written meanwhile is kept apart and goes after it. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
 

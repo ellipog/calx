@@ -1135,7 +1135,9 @@ static void close_stream(stream* s) {
 static int queued(const stream* s) { return s->open && s->b.start < s->b.len; }
 
 /* A write that gives EPIPE where the child has closed its end, rather than SIGPIPE, which would
- * end this program: the signal is blocked around it, and taken if the write raised it. */
+ * end this program: the signal is blocked around it, and taken if the write raised it. A write
+ * that put some bytes in the pipe before the child closed it gives back how many, with the signal
+ * raised all the same, so a short count is looked at too. */
 static ssize_t write_quiet(int fd, const void* d, size_t n) {
     sigset_t pipe_set, old, pending;
     sigemptyset(&pipe_set);
@@ -1145,7 +1147,7 @@ static ssize_t write_quiet(int fd, const void* d, size_t n) {
     int was = sigismember(&pending, SIGPIPE);
     ssize_t r = write(fd, d, n);
     int e = errno;
-    if (r < 0 && e == EPIPE && !was) {
+    if (!was && (r < 0 ? e == EPIPE : (size_t)r < n)) {
         struct timespec zero = {0, 0};
         while (sigtimedwait(&pipe_set, NULL, &zero) < 0 && errno == EINTR) {
         }
