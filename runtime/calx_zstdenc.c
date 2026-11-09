@@ -239,26 +239,42 @@ typedef struct {
 
 /* Builds the encoding table for norm[0..max] at accuracy `log`, as the decoder spreads it. */
 static void build_ct(ct_t* ct, const cx_i16* norm, cx_u32 max, cx_u32 log) {
-    const cx_u32 size = 1u << log, mask = size - 1;
+    const cx_u32 size = 1u << log, mask = size - 1, half = size >> 1;
     cx_u8 sym[1 << LL_LOG];
-    cx_u32 cumul[65], at[64];
+    /* Each symbol's states go in st in order, from cumul[s]: those in the table's first half from
+     * at[s], and those in its second from at2[s], past the first half's, so the two halves fill
+     * side by side rather than each state waiting on the count before. */
+    cx_u32 cumul[65], at[64], at2[64];
     cx_u32 high = size - 1;
     cumul[0] = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         cumul[s + 1] = cumul[s] + (norm[s] == -1 ? 1 : (cx_u32)norm[s]);
-        if (norm[s] == -1) sym[high--] = (cx_u8)s;
+        at2[s] = 0;
+        if (norm[s] == -1) {
+            at2[s] = high < half;
+            sym[high--] = (cx_u8)s;
+        }
     }
     const cx_u32 step = (size >> 1) + (size >> 3) + 3;
     cx_u32 pos = 0;
     for (cx_u32 s = 0; s <= max; s++) {
+        cx_u32 first = 0;
         for (int i = 0; i < norm[s]; i++) {
             sym[pos] = (cx_u8)s;
+            first += pos < half;
             do pos = (pos + step) & mask;
             while (pos > high);
         }
+        at2[s] += first;
     }
-    for (cx_u32 s = 0; s <= max; s++) at[s] = cumul[s];
-    for (cx_u32 u = 0; u < size; u++) ct->st[at[sym[u]]++] = (cx_u16)(size + u);
+    for (cx_u32 s = 0; s <= max; s++) {
+        at[s] = cumul[s];
+        at2[s] += cumul[s];
+    }
+    for (cx_u32 u = 0; u < half; u++) {
+        ct->st[at[sym[u]]++] = (cx_u16)(size + u);
+        ct->st[at2[sym[u + half]]++] = (cx_u16)(size + u + half);
+    }
     for (cx_u32 s = 0; s <= max; s++) {
         const int c = norm[s];
         if (c == 0) {
@@ -461,7 +477,8 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
     int n = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         len[s] = 0;
-        if (count[s]) sym[n++] = s;
+        sym[n] = s;
+        n += count[s] != 0;
     }
     /* In order of count, rarest first, and by symbol where counts are the same: a stable counting
      * sort, by the whole count when they're all below 512, as a small block's are, and otherwise
@@ -557,57 +574,99 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
  * out: each weight's symbols in order, the longest codes first. Each is code | bits << 16. */
 static void huf_codes(const cx_u8* len, cx_u32 max, cx_u32 log, cx_u32* ct) {
     /* Where each length's codes start: the longest first, each length's symbols in order. */
-    cx_u32 n[HUF_LOG + 2] = {0}, pos[HUF_LOG + 2];
-    for (cx_u32 s = 0; s <= max; s++) n[len[s]]++;
+    cx_u32 n4[4][HUF_LOG + 2] = {{0}}, n[HUF_LOG + 2], pos[HUF_LOG + 2];
+    {
+        /* Counted four ways, as for fse_weights. */
+        cx_u32 s = 0;
+        for (; s + 4 <= max + 1; s += 4) {
+            n4[0][len[s]]++;
+            n4[1][len[s + 1]]++;
+            n4[2][len[s + 2]]++;
+            n4[3][len[s + 3]]++;
+        }
+        for (; s <= max; s++) n4[0][len[s]]++;
+        for (cx_u32 l = 0; l < HUF_LOG + 2; l++) n[l] = n4[0][l] + n4[1][l] + n4[2][l] + n4[3][l];
+    }
     pos[log] = 0;
     for (cx_u32 l = log; l > 1; l--) pos[l - 1] = pos[l] + (n[l] << (log - l));
-    memset(ct, 0, 256 * sizeof(cx_u32));
+    /* Without a branch, as which symbols have codes is a coin toss: one without moves pos[0] on,
+     * which nothing reads. */
+    pos[0] = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         const cx_u32 l = len[s];
-        if (!l) continue;
-        ct[s] = (pos[l] >> (log - l)) | (l << 16);
+        const cx_u32 code = (pos[l] >> (log - l)) | (l << 16);
+        ct[s] = l ? code : 0;
         pos[l] += 1u << (log - l);
     }
+    if (max < 255) memset(ct + max + 1, 0, (255 - max) * sizeof(cx_u32));
 }
 
 /* Writes the weights w[0..n), n of 2 or more with two different weights at least, FSE-coded by two
- * states taking turns, as the decoder reads them: gives the bytes, or 0 if it's over 127. */
+ * states taking turns, as the decoder reads them, into out's 160 bytes: gives the bytes, or 0 if
+ * it's over 127. */
 static cx_usize fse_weights(const cx_u8* w, cx_u32 n, cx_u8* out) {
-    cx_u32 count[16] = {0}, max = 0;
-    for (cx_u32 i = 0; i < n; i++) {
-        count[w[i]]++;
-        if (w[i] > max) max = w[i];
+    /* Counted four ways, so a run of one weight, as of 0 for the symbols without codes, doesn't
+     * wait on each count before. */
+    cx_u32 c4[4][16] = {{0}}, count[16], max = 0;
+    cx_u32 j = 0;
+    for (; j + 4 <= n; j += 4) {
+        c4[0][w[j]]++;
+        c4[1][w[j + 1]]++;
+        c4[2][w[j + 2]]++;
+        c4[3][w[j + 3]]++;
     }
-    cx_u8 best[160];
-    cx_usize best_n = 0;
-    for (cx_u32 log = 5; log <= 6; log++) {
+    for (; j < n; j++) c4[0][w[j]]++;
+    for (cx_u32 v = 0; v < 16; v++) {
+        count[v] = c4[0][v] + c4[1][v] + c4[2][v] + c4[3][v];
+        max = count[v] ? v : max;
+    }
+    /* At accuracies 5 and 6, the description, and the bits the stream takes, from the states alone:
+     * each state's bits on the way are what it gives up, and both end states take `log` and the
+     * mark 1. The smaller, 6 only if it's strictly smaller, has its stream written. */
+    cx_u8 desc[2][32];
+    cx_usize dn[2], total[2];
+    ct_t ct[2];
+    for (cx_u32 i = 0; i < 2; i++) {
+        const cx_u32 log = 5 + i;
         cx_i16 norm[16];
         normalize(count, max, n, log, norm);
-        cx_u8 tmp[160];
-        cx_usize at = write_counts(norm, max, log, tmp);
-        ct_t ct;
-        build_ct(&ct, norm, max, log);
-        bw_t b;
-        bw_init(&b, tmp + at, sizeof tmp - at);
-        cx_u32 x[2];
-        x[(n - 1) & 1] = ct.first[w[n - 1]];
-        x[(n - 2) & 1] = ct.first[w[n - 2]];
-        for (int k = (int)n - 3; k >= 0; k--) {
-            ct_put(&b, &ct, &x[k & 1], w[k]);
-            bw_flush(&b);
+        dn[i] = write_counts(norm, max, log, desc[i]);
+        const ct_t* const c = &ct[i];
+        build_ct(&ct[i], norm, max, log);
+        /* The weights from the last, the two states taking turns: k and k - 1 are on different ones,
+         * so their steps don't wait on each other. */
+        cx_u32 xa = c->first[w[n - 1]], xb = c->first[w[n - 2]];
+        cx_u64 bits = 2 * log + 1;
+        int k = (int)n - 3;
+        for (; k >= 1; k -= 2) {
+            const cx_u32 sa = w[k], sb = w[k - 1];
+            const cx_u32 na = (xa + c->dnb[sa]) >> 16, nb = (xb + c->dnb[sb]) >> 16;
+            bits += na + nb;
+            xa = c->st[(cx_i32)(xa >> na) + c->dfs[sa]];
+            xb = c->st[(cx_i32)(xb >> nb) + c->dfs[sb]];
         }
-        bw_add(&b, x[1] - (1u << log), log);
-        bw_add(&b, x[0] - (1u << log), log);
-        const cx_usize bits = bw_close(&b);
-        if (!bits) continue;
-        const cx_usize total = at + bits;
-        if (total < 128 && (!best_n || total < best_n)) {
-            memcpy(best, tmp, total);
-            best_n = total;
-        }
+        if (k == 0) bits += (xa + c->dnb[w[0]]) >> 16;
+        total[i] = dn[i] + (cx_usize)((bits + 7) >> 3);
     }
-    if (best_n) memcpy(out, best, best_n);
-    return best_n;
+    const cx_u32 i = total[1] < total[0] ? 1 : 0;
+    if (total[i] >= 128) return 0;
+    const cx_u32 log = 5 + i;
+    const ct_t* const c = &ct[i];
+    memcpy(out, desc[i], dn[i]);
+    bw_t b;
+    bw_init(&b, out + dn[i], 160 - dn[i]);
+    cx_u32 x[2];
+    x[(n - 1) & 1] = c->first[w[n - 1]];
+    x[(n - 2) & 1] = c->first[w[n - 2]];
+    /* At most 6 bits a weight, and 7 left after a flush: 8 go in before the next. */
+    for (int k = (int)n - 3; k >= 0; k--) {
+        ct_put(&b, c, &x[k & 1], w[k]);
+        if ((k & 7) == 0) bw_flush(&b);
+    }
+    bw_add(&b, x[1] - (1u << log), log);
+    bw_add(&b, x[0] - (1u << log), log);
+    const cx_usize got = bw_close(&b);
+    return got ? dn[i] + got : 0;
 }
 
 /* Writes the tree for lengths len[0..max], max being the last symbol with a code, longest `log`:
