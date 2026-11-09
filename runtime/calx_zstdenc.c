@@ -1228,13 +1228,23 @@ typedef struct job_s {
 
 /* --- the match finders ----------------------------------------------------------------------- */
 
-#define PRIME64 0x9E3779B185EBCA87ull
 #define PRIME32 2654435761u
 
-/* The hash of the first `mls` bytes at p, 4 to 8, in hl bits. */
+/* What the first `mls` bytes are multiplied by for their hash: from 5 to 8 libzstd's primes, as
+ * PRIME32 is for 4; 3, for the optimal parser's short matches, keeps a constant of our own. */
+static const cx_u64 HASH_K[9] = {0, 0, 0, 0x9E3779B185EBCA87ull, 0, 889523592379ull, 227718039650203ull, 58295818150454627ull, 0xCF1BBCDCB7A56463ull};
+
+/* The hash of the first `mls` bytes at p, 3 to 8, in hl bits: the top bits of their product with
+ * a constant for the length. With libzstd's, the fast levels, which parse as libzstd does, find
+ * what it finds. Text that repeats from further back than a small table remembers is found only
+ * where an entry happens to last, and the parse goes the same way through each repeat: with a
+ * constant of our own, a 3 MB text repeating every 425 KB never found the repeat at -1, 1.15 MB
+ * to libzstd's 282 KB, and on 10 such texts at -1 and -5 came out up to 30% bigger from a period
+ * of 333 KB. With libzstd's they're at most 0.5% bigger than its at -5 to 1, and at -5 to 4 our 60
+ * files come out within 0.2% of what they did. */
 static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
     if (mls == 4) return (ld32(p) * PRIME32) >> (32 - hl);
-    return (cx_u32)(((ld64(p) << (64 - 8 * mls)) * PRIME64) >> (64 - hl));
+    return (cx_u32)(((ld64(p) << (64 - 8 * mls)) * HASH_K[mls]) >> (64 - hl));
 }
 
 /* Whether a repeated offset r reaches back from position cur into the window: it isn't 0, and
@@ -2730,9 +2740,10 @@ static tab_t PRE_LL, PRE_OF, PRE_ML;
 /* Picks a table for one of the sequences' codes, count[0..max] of n: the predefined one, one symbol
  * repeated, the last block's, or one of its own at the accuracy that comes out smallest, made in
  * `fresh`. Points *t at it, writes its description at out, and gives the mode; *took is the
- * bytes. Below the lazy levels most are picked without pricing them, as libzstd picks there. */
+ * bytes. own is whether prev was made by a block before rather than taken from a dictionary. Below
+ * the lazy levels most are picked without pricing them, as libzstd picks there. */
 static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const tab_t* pre, const cx_u32* count, cx_u32 max, cx_u32 n, cx_u32 log_max, cx_u8* out,
-                         cx_usize* took, cx_u32 strat) {
+                         cx_usize* took, cx_u32 strat, int own) {
     cx_u32 distinct = 0, one = 0, most = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         distinct += count[s] != 0;
@@ -2747,13 +2758,15 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
     if (strat < S_LAZY) {
         /* Below the lazy levels, as libzstd picks there, a table of the block's own is seldom
          * priced. One symbol is that symbol repeated, but for one or two codes, which the
-         * predefined table codes in less than its byte. With a table to keep, a dictionary's or
-         * the last block's, and fewer than 1000 codes, it's kept or the predefined one taken,
-         * whichever codes them in fewer bits: libzstd keeps it, which from a trained dictionary
-         * comes out 8 to 24% bigger on our samples than pricing all of them, and this 2 to 4%, for
-         * a level 1 to 5 call 8 to 19% faster. With none, the predefined one is taken for fewer
-         * codes than a table of their own pays for, from 28 offsets to 72 lengths, or for ones
-         * spread too evenly for one. The rest are priced. */
+         * predefined table codes in less than its byte. With a dictionary's table and fewer than
+         * 1000 codes, it's kept or the predefined one taken, whichever codes them in fewer bits:
+         * libzstd keeps it, which on our small samples comes out 8 to 24% bigger than pricing all
+         * of them, and this 2 to 4%, for a level 1 to 5 call 8 to 19% faster. A table a block
+         * before made is priced with the rest, as libzstd never keeps one there: picked as a
+         * dictionary's is, one block of a 400 KB text that repeats with noise came out 26% bigger
+         * than libzstd's, which made a table of its own. With no table to keep, the predefined one
+         * is taken for fewer codes than a table of their own pays for, from 28 offsets to 72
+         * lengths, or for ones spread too evenly for one. The rest are priced. */
         const int pre_ok = max <= pre->max;
         if (distinct == 1) {
             if (pre_ok && n <= 2) {
@@ -2762,17 +2775,17 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
             }
             goto rle;
         }
-        if (prev->kind == T_FSE) {
-            if (n < 1000) {
-                const cx_u64 cp = tab_cost(prev, count, max), cq = tab_cost(pre, count, max);
-                if (cp != ~(cx_u64)0 || cq != ~(cx_u64)0) {
-                    *t = cp <= cq ? prev : pre;
-                    return cp <= cq ? 3 : 0;
-                }
+        if (prev->kind != T_FSE) {
+            if (pre_ok && (n < (((1u << pre->log) * (10 - strat)) >> 3) || most < (n >> (pre->log - 1)))) {
+                *t = pre;
+                return 0;
             }
-        } else if (pre_ok && (n < (((1u << pre->log) * (10 - strat)) >> 3) || most < (n >> (pre->log - 1)))) {
-            *t = pre;
-            return 0;
+        } else if (!own && n < 1000) {
+            const cx_u64 cp = tab_cost(prev, count, max), cq = tab_cost(pre, count, max);
+            if (cp != ~(cx_u64)0 || cq != ~(cx_u64)0) {
+                *t = cp <= cq ? prev : pre;
+                return cp <= cq ? 3 : 0;
+            }
         }
     }
     /* In 1/256 bits. */
@@ -2956,11 +2969,15 @@ static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J,
 #ifdef ZSE_CYCLES
     const cx_u64 c0 = __rdtsc();
 #endif
-    const cx_u32 lm = pick_table(&next->ll, fl, prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took, J->p.strat);
+    /* A table in one of the job's slots was made by a block before; a dictionary's is in its copy. */
+    const int own_l = prev->ll == &J->tabs[0][0] || prev->ll == &J->tabs[0][1];
+    const int own_o = prev->of == &J->tabs[1][0] || prev->of == &J->tabs[1][1];
+    const int own_m = prev->ml == &J->tabs[2][0] || prev->ml == &J->tabs[2][1];
+    const cx_u32 lm = pick_table(&next->ll, fl, prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took, J->p.strat, own_l);
     op += took;
-    const cx_u32 om = pick_table(&next->of, fo, prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took, J->p.strat);
+    const cx_u32 om = pick_table(&next->of, fo, prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took, J->p.strat, own_o);
     op += took;
-    const cx_u32 mm = pick_table(&next->ml, fm, prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took, J->p.strat);
+    const cx_u32 mm = pick_table(&next->ml, fm, prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took, J->p.strat, own_m);
     op += took;
 #ifdef ZSE_CYCLES
     zse_cycles[4] += __rdtsc() - c0;

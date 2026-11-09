@@ -107,7 +107,7 @@ fn main() {
     for level in [1, 3, 5, 9, 16, 19] {
         hashes.push_str("{xxh64(trained.compress(text, level)) >> 40:06x} ")
     }
-    println(hashes.trim())    // out: 8f2823 4277c4 370585 b6fc32 345f55 c369c5
+    println(hashes.trim())    // out: 385e90 59db26 9319a4 b6fc32 345f55 c369c5
 
     // 3 MB in two jobs, compressed at once: the same bytes on eight threads and on one.
     var big: List<u8> = []
@@ -167,7 +167,7 @@ fn main() {
     }
     set_workers(1)
     println("{unlike} unlike")    // out: 0 unlike
-    println(hashes2.trim())    // out: 6c1369 990770 73b9b5 4ed943 33a55e 23de86 cf5971 cf5971
+    println(hashes2.trim())    // out: 752180 990770 73b9b5 4ed943 33a55e 23de86 cf5971 cf5971
 
     // Part of a list, onto the end of another.
     var out = "> ".to_bytes()
