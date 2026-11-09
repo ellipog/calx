@@ -25,7 +25,9 @@ Search works only in a build: Pagefind indexes the pages as `npm run build` writ
 
 ## Publishing it
 
-Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site at https://calxlang.com. The project's `vercel.app` address serves the same pages, and their canonical links send search engines to calxlang.com. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
+Vercel builds and deploys the site from this repo. Its project's root directory is `site/`, and it runs `npm run build` and serves `dist/`. A push to main updates the live site at https://calxlang.com.
+
+Vercel builds a push only if it changes what the site is made from: this folder, `docs/`, the README, `assets/logo/`, `tools/install/` and `tools/vscode/syntaxes/`. [`skip-build.sh`](skip-build.sh), `vercel.json`'s `ignoreCommand`, compares the push with the branch's last deployment, `VERCEL_GIT_PREVIOUS_SHA`, so a push that changes only the compiler, the runtime, std or the tests isn't built, and the live site stays as it was. When there's nothing to compare with, as on a branch's first push, or when the last deployment is older than Vercel's shallow clone holds, it builds. A new file the site reads from elsewhere in the repo goes in its list. The project's `vercel.app` address serves the same pages, and their canonical links send search engines to calxlang.com. A push to another branch, or a pull request, gets a preview of its own, and its build shows as a check on GitHub, so a change that breaks the site shows there before it merges.
 
 [`vercel.json`](vercel.json) sends an address without its closing slash, `/reference/parallel`, to the one with it, and one ending in `index.html` to the page's own, so each page has one address.
 
