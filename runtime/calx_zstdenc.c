@@ -1252,8 +1252,10 @@ static inline void row_insert(rw_t* w, cx_u32 target) {
 }
 
 /* The longest match at ip in its row, at most 2^slog tries, newest first: its length, or 0 if it's
- * shorter than mml, and its distance in *off. */
-static inline cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off) {
+ * shorter than mml, and its distance in *off. Always inlined, so `w` is the caller's local, which
+ * the tags' byte stores can't touch: called through a pointer, it had its fields read again after
+ * each store. */
+static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off) {
     const cx_u8* const base = w->base;
     const cx_u32 cur = (cx_u32)(ip - base);
     row_insert(w, cur);
@@ -1274,6 +1276,11 @@ static inline cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u3
         __builtin_prefetch(base + cand);
         cands[nc++] = cand;
     }
+    /* This position goes into its row now, while the row is at hand, rather than with the next
+     * search's. The candidates are taken already, so this search doesn't find it. */
+    row_put(w, cur, h);
+    w->next_up = cur + 1;
+    row_ahead(w, cur + 8);
     for (cx_u32 k = 0; k < nc; k++) {
         const cx_u32 cand = cands[k];
         const cx_u8* mp = base + cand;
