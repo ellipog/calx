@@ -283,6 +283,9 @@ private:
             bool generated = false;
         };
         std::unordered_map<Name, ModuleImport> modules;
+        // Names an import couldn't bring in, which has said why, so their uses say nothing more
+        // (CLX-207).
+        std::unordered_set<Name> failed;
     };
 
     // `fs.read`, written where `fs` names a module, is reached through a hidden import named
@@ -561,17 +564,27 @@ private:
                 if (n.alias == n.name) {
                     error(n.alias_span, q(std::string(text(n.name)) + " as " + std::string(text(n.name))) +
                                             " doesn't rename anything; import it as " + q(text(n.name)));
+                    here->failed.insert(local);
                     continue;
                 }
                 auto found = from->items.find(n.name);
                 if (found == from->items.end()) {
-                    error(n.span, q(from_name) + " has no " + q(text(n.name)));
+                    here->failed.insert(local);
+                    // A built-in name the module declares has its error there, which says what's
+                    // wrong; `has no` here would only mislead (CLX-207).
+                    bool declared = false;
+                    if (is_builtin_name(n.name)) {
+                        for (const Item* d : it->imported->items) declared |= d->kind != ItemKind::import && d->name == n.name;
+                    }
+                    if (!declared) error(n.span, q(from_name) + " has no " + q(text(n.name)));
                     continue;
                 }
                 Item* target = found->second;
                 if (!target->is_pub) {
                     error(n.span, q(text(n.name)) + " isn't `pub` in " + q(from_name));
                     note(target->name_span, "it's declared here");
+                    here->failed.insert(local);
+                    target->used = true;  // that it's never used, as it may not be, would only add to this
                     continue;
                 }
                 if (auto own = here->items.find(local); own != here->items.end()) {
@@ -602,7 +615,10 @@ private:
                     twice = true;
                     break;
                 }
-                if (twice) continue;
+                if (twice) {
+                    here->failed.insert(local);
+                    continue;
+                }
                 here->imports.emplace(local, Scope::Import{target, local_span, it->generated, it->generated});
             }
         }
@@ -2856,7 +2872,7 @@ private:
                         error(t->span, q(text(n)) + " isn't a type");
                         return T.error;
                     } else {
-                        if (!module_item_error(t->span, n) && !module_name_error(t->span, n, "a type")) {
+                        if (!failed_import(n) && !module_item_error(t->span, n) && !module_name_error(t->span, n, "a type")) {
                             error(t->span, "unknown type " + q(text(n)));
                         }
                         return T.error;
@@ -5145,6 +5161,8 @@ private:
 
     enum class NameKind { none, local, item, type, builtin };
 
+    bool failed_import(Name n) const { return scope_ && scope_->failed.count(n); }
+
     struct Resolved {
         NameKind kind = NameKind::none;
         Local* local = nullptr;
@@ -5176,6 +5194,9 @@ private:
             }
             return r;
         }
+        // A name an import meant to bring in means nothing, even one that's built in, as `f32` is:
+        // the import said what's wrong (CLX-207).
+        if (failed_import(n)) return r;
         if (n == n_Self_ && current_impl_type_) {
             r.kind = NameKind::type;
             r.type = current_impl_type_;
@@ -5300,7 +5321,7 @@ private:
                 return T.error;
             case NameKind::none:
                 if (e->kind == ExprKind::self) error(e->span, "`self` only exists in a method");
-                else if (!module_item_error(e->span, n) && !module_name_error(e->span, n, "a value")) {
+                else if (!failed_import(n) && !module_item_error(e->span, n) && !module_name_error(e->span, n, "a value")) {
                     error(e->span, "unknown name " + q(text(n)));
                 }
                 return T.error;
@@ -7701,7 +7722,8 @@ private:
                     return T.error;
                 }
                 case NameKind::none:
-                    if (!module_item_error(callee->span, n) && !module_name_error(callee->span, n, "a function")) {
+                    if (!failed_import(n) && !module_item_error(callee->span, n) &&
+                        !module_name_error(callee->span, n, "a function")) {
                         error(callee->span, "unknown function " + q(text(n)));
                     }
                     check_args(e);

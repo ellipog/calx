@@ -1,0 +1,29 @@
+// An import that can't bring a name in says why, once: its uses say nothing more, and a built-in
+// name a module tried to define has just that module's error, not a `has no` here (CLX-207).
+// file: main.calx
+import nums.{f32, twice, missing}    // error: `nums` has no `missing`
+import nums.{hidden}    // error: `hidden` isn't `pub` in `nums`
+
+fn main() {
+    println("{f32(1)}")
+    let g = missing(2)
+    let h: missing = 3
+    let k = hidden(4)
+    let x: f32 = 1.5
+    println("{twice(5)} {g} {h} {k} {x}")
+}
+
+// file: nums.calx
+module nums
+
+pub fn f32(x: i64) -> i64 {    // error: `f32` is a built-in name
+    return x + 1
+}
+
+pub fn twice(x: i64) -> i64 {
+    return x * 2
+}
+
+fn hidden(x: i64) -> i64 {
+    return x
+}
