@@ -1,0 +1,32 @@
+# Deploys calxlang.com when a push to main changes what the site is made from (site/README.md,
+# CLX-204). Vercel's own deploys from main are off in site/vercel.json, so a push that changes only
+# the compiler, the runtime or the tests makes no deployment, and doesn't count toward Vercel's
+# deployments a day. VERCEL_DEPLOY_HOOK is the project's deploy hook for main, from Vercel's project
+# settings (Git, Deploy Hooks). Run it by hand to deploy main as it is.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'assets/logo/**'
+      - 'tools/install/**'
+      - 'tools/vscode/syntaxes/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Ask Vercel to deploy main
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::The repo has no VERCEL_DEPLOY_HOOK secret, so the site wasn't deployed."
+            exit 1
+          fi
+          curl -fsS --retry 3 -X POST "$HOOK"

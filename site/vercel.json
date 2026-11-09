@@ -1,5 +1,6 @@
 {
 	"$schema": "https://openapi.vercel.sh/vercel.json",
+	"git": { "deploymentEnabled": { "main": false } },
 	"ignoreCommand": "sh skip-build.sh",
 	"trailingSlash": true,
 	"cleanUrls": true,
