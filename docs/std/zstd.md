@@ -173,7 +173,7 @@ fn main() {
 Python's `train_dict` on those samples makes a dictionary that compresses the record to 27 bytes too.
 
 - **What it holds.** The first three quarters of the samples train it and the last quarter tests it. Its content is stretches of the training samples, one from each part of them in turn: the stretch whose 8-byte strings come up most often in all the samples, each counted once, after which they count for nothing, so the next stretch adds what the content doesn't have yet. The stretches fill the content from its end, so the best are nearest the text that follows. Its tables are for what the training samples' parses at level 3 take with that content before them, each literal, length and offset code counted from one, so that every byte can be coded. Five lengths of stretch are tried, 50 to 1,998 bytes, at once on five processors, and the one kept is the one whose dictionary and test samples, a frame each at level 3, come to the fewest bytes.
-- **Where it differs from libzstd's.** When the content and the tables are more than `size`, libzstd leaves out the end of the content, where the best stretches are, and `std.zstd` its start. The literals' Huffman code is the shortest of at most 11 bits for their counts: the encoder's own way of fitting a code to 11 bits took 10% more bits than that on those literals, where most bytes never come up but still need a code. The ID is a hash of the content, from 32,768 up as libzstd's are, but not libzstd's hash.
+- **Where it differs from libzstd's.** When the content and the tables are more than `size`, libzstd leaves out the end of the content, where the best stretches are, and `std.zstd` its start. The literals' Huffman code is the shortest of at most 11 bits for their counts, by package-merge: pushing the deepest leaves down, as the encoder does in a small block, took 10% more bits on those literals, where most bytes never come up but still need a code. The ID is a hash of the content, from 32,768 up as libzstd's are, but not libzstd's hash.
 - **Sizes.** On four sets of samples, JSON records, pieces of the repository's source, a server's log in pieces of 3 to 25 lines, and the small files of [Dictionaries](#dictionaries), each trained at 4 KB, 16 KB and 110 KB, with the samples held out compressed a frame each at levels 1, 3, 9 and 19: compressed by Python, they come out from 1.5% smaller to 1.8% bigger with `std.zstd`'s dictionary than with Python's, 0.1% bigger on average, and over 1% bigger in one case of 48. Compressed by `std.zstd`, they come out from 2.5% smaller to 1.1% bigger, 0.5% smaller on average. The same content made into a dictionary by both `finalize_dict`s comes out within 1.2% either way compressed by Python, and 0.4% compressed by `std.zstd`.
 - **Speed.** On an i9-13900K on Windows, training from those sets, 0.3 to 3.3 MB, at 16 KB and 110 KB, took 9 to 34 ms, where Python's took 25 to 166 ms: 2.9 to 5.2 times as fast. Picking the content takes most of it, and is about 3 ns a byte of samples for each length of stretch.
 - The same samples give the same dictionary, on any machine with any number of processors.
@@ -212,62 +212,62 @@ In WSL on the same machine:
 | Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- |
 | -1 | 31.7 ms | 36.9 ms | 34.3 ms | 6,308,516 | 6,306,781 |
-| 1 | 33.9 ms | 37.8 ms | 34.7 ms | 5,344,041 | 5,347,922 |
-| 2 | 38.0 ms | 42.6 ms | 38.7 ms | 5,078,735 | 5,078,988 |
-| 3 | 45.6 ms | 47.9 ms | 46.4 ms | 4,767,836 | 4,753,525 |
-| 4 | 49.6 ms | 53.1 ms | 50.8 ms | 4,739,407 | 4,723,978 |
-| 5 | 87.8 ms | 100 ms | 93.0 ms | 4,428,239 | 4,455,092 |
-| 6 | 123 ms | 137 ms | 128 ms | 4,261,547 | 4,282,647 |
-| 7 | 143 ms | 160 ms | 151 ms | 4,177,269 | 4,202,757 |
-| 8 | 191 ms | 210 ms | 200 ms | 4,125,301 | 4,152,012 |
-| 9 | 217 ms | 225 ms | 214 ms | 4,090,200 | 4,120,710 |
-| 10 | 307 ms | 334 ms | 316 ms | 4,028,337 | 4,067,118 |
-| 11 | 362 ms | 480 ms | 472 ms | 3,989,559 | 4,035,545 |
-| 12 | 409 ms | 544 ms | 535 ms | 3,986,131 | 4,033,230 |
-| 13 | 1,351 ms | 1,492 ms | 1,389 ms | 3,978,445 | 3,985,152 |
-| 14 | 1,714 ms | 1,943 ms | 1,821 ms | 3,938,160 | 3,944,077 |
-| 15 | 2,234 ms | 2,538 ms | 2,463 ms | 3,912,317 | 3,917,800 |
-| 16 | 2,791 ms | 3,141 ms | 2,956 ms | 3,700,122 | 3,704,873 |
-| 17 | 3,213 ms | 4,078 ms | 3,628 ms | 3,631,993 | 3,647,661 |
+| 1 | 33.9 ms | 37.8 ms | 34.7 ms | 5,343,443 | 5,347,922 |
+| 2 | 38.0 ms | 42.6 ms | 38.7 ms | 5,078,498 | 5,078,988 |
+| 3 | 45.6 ms | 47.9 ms | 46.4 ms | 4,767,812 | 4,753,525 |
+| 4 | 49.6 ms | 53.1 ms | 50.8 ms | 4,739,376 | 4,723,978 |
+| 5 | 87.8 ms | 100 ms | 93.0 ms | 4,428,186 | 4,455,092 |
+| 6 | 123 ms | 137 ms | 128 ms | 4,261,545 | 4,282,647 |
+| 7 | 143 ms | 160 ms | 151 ms | 4,177,287 | 4,202,757 |
+| 8 | 191 ms | 210 ms | 200 ms | 4,125,282 | 4,152,012 |
+| 9 | 217 ms | 225 ms | 214 ms | 4,090,182 | 4,120,710 |
+| 10 | 307 ms | 334 ms | 316 ms | 4,028,309 | 4,067,118 |
+| 11 | 362 ms | 480 ms | 472 ms | 3,989,583 | 4,035,545 |
+| 12 | 409 ms | 544 ms | 535 ms | 3,986,144 | 4,033,230 |
+| 13 | 1,351 ms | 1,492 ms | 1,389 ms | 3,978,444 | 3,985,152 |
+| 14 | 1,714 ms | 1,943 ms | 1,821 ms | 3,938,167 | 3,944,077 |
+| 15 | 2,234 ms | 2,538 ms | 2,463 ms | 3,912,323 | 3,917,800 |
+| 16 | 2,791 ms | 3,141 ms | 2,956 ms | 3,700,064 | 3,704,873 |
+| 17 | 3,213 ms | 4,078 ms | 3,628 ms | 3,631,974 | 3,647,661 |
 | 18 | 3,339 ms | 4,996 ms | 4,516 ms | 3,625,404 | 3,613,289 |
-| 19 | 3,981 ms | 5,759 ms | 5,265 ms | 3,602,926 | 3,593,426 |
+| 19 | 3,981 ms | 5,759 ms | 5,265 ms | 3,602,925 | 3,593,426 |
 | 20 | 3,984 ms | 5,774 ms | 5,444 ms | 3,427,231 | 3,420,656 |
-| 21 | 4,156 ms | 6,381 ms | 6,040 ms | 3,424,774 | 3,418,755 |
-| 22 | 4,284 ms | 6,692 ms | 6,275 ms | 3,424,841 | 3,418,181 |
+| 21 | 4,156 ms | 6,381 ms | 6,040 ms | 3,424,772 | 3,418,755 |
+| 22 | 4,284 ms | 6,692 ms | 6,275 ms | 3,424,842 | 3,418,181 |
 
 `clang40` on one thread:
 
 | Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 69.8 ms | 84.9 ms | 75.7 ms | 20,265,378 | 20,256,662 |
+| 1 | 69.8 ms | 84.9 ms | 75.7 ms | 20,265,339 | 20,256,662 |
 | 3 | 126 ms | 130 ms | 119 ms | 17,629,230 | 17,556,416 |
-| 5 | 223 ms | 263 ms | 236 ms | 16,682,422 | 16,654,722 |
-| 9 | 546 ms | 608 ms | 564 ms | 15,490,602 | 15,518,610 |
+| 5 | 223 ms | 263 ms | 236 ms | 16,682,415 | 16,654,722 |
+| 9 | 546 ms | 608 ms | 564 ms | 15,490,587 | 15,518,610 |
 | 13 | 3,770 ms | 3,804 ms | 3,830 ms | 15,174,079 | 15,293,478 |
-| 16 | 4,628 ms | 7,463 ms | 7,306 ms | 14,802,311 | 14,828,491 |
-| 19 | 12,321 ms | 15,787 ms | 15,033 ms | 13,886,093 | 13,888,852 |
-| 22 | 13,371 ms | 19,752 ms | 20,398 ms | 13,611,938 | 13,616,304 |
+| 16 | 4,628 ms | 7,463 ms | 7,306 ms | 14,802,322 | 14,828,491 |
+| 19 | 12,321 ms | 15,787 ms | 15,033 ms | 13,886,044 | 13,888,852 |
+| 22 | 13,371 ms | 19,752 ms | 20,398 ms | 13,611,895 | 13,616,304 |
 
 On all the processors: `std.zstd` as a program runs it, and libzstd with a worker for each of the 32 processors, as `zstd -T0` runs it:
 
 | File | Level | Calx | Python 3.14, 32 workers | Rust: zstd 0.13, 32 workers | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- | --- |
-| src.tar | 1 | 6.5 ms | 12.6 ms | 10.0 ms | 5,344,041 | 5,352,731 |
-| src.tar | 3 | 22.7 ms | 28.5 ms | 27.2 ms | 4,767,836 | 4,757,456 |
-| src.tar | 5 | 39.6 ms | 51.4 ms | 48.7 ms | 4,428,239 | 4,461,129 |
-| src.tar | 9 | 198 ms | 236 ms | 216 ms | 4,090,200 | 4,127,791 |
-| src.tar | 13 | 1,317 ms | 1,461 ms | 1,422 ms | 3,978,445 | 3,992,533 |
-| src.tar | 16 | 2,341 ms | 3,172 ms | 2,852 ms | 3,700,122 | 3,705,752 |
-| src.tar | 19 | 4,023 ms | 6,230 ms | 5,425 ms | 3,602,926 | 3,592,062 |
-| src.tar | 22 | 4,374 ms | 7,291 ms | 6,280 ms | 3,424,841 | 3,418,367 |
-| clang40 | 1 | 10.1 ms | 21.5 ms | 16.8 ms | 20,265,378 | 20,259,344 |
+| src.tar | 1 | 6.5 ms | 12.6 ms | 10.0 ms | 5,343,443 | 5,352,731 |
+| src.tar | 3 | 22.7 ms | 28.5 ms | 27.2 ms | 4,767,812 | 4,757,456 |
+| src.tar | 5 | 39.6 ms | 51.4 ms | 48.7 ms | 4,428,186 | 4,461,129 |
+| src.tar | 9 | 198 ms | 236 ms | 216 ms | 4,090,182 | 4,127,791 |
+| src.tar | 13 | 1,317 ms | 1,461 ms | 1,422 ms | 3,978,444 | 3,992,533 |
+| src.tar | 16 | 2,341 ms | 3,172 ms | 2,852 ms | 3,700,064 | 3,705,752 |
+| src.tar | 19 | 4,023 ms | 6,230 ms | 5,425 ms | 3,602,925 | 3,592,062 |
+| src.tar | 22 | 4,374 ms | 7,291 ms | 6,280 ms | 3,424,842 | 3,418,367 |
+| clang40 | 1 | 10.1 ms | 21.5 ms | 16.8 ms | 20,265,339 | 20,259,344 |
 | clang40 | 3 | 31.3 ms | 42.7 ms | 38.1 ms | 17,629,230 | 17,601,328 |
-| clang40 | 5 | 56.2 ms | 70.9 ms | 64.8 ms | 16,682,422 | 16,733,050 |
-| clang40 | 9 | 289 ms | 301 ms | 295 ms | 15,490,602 | 15,558,830 |
+| clang40 | 5 | 56.2 ms | 70.9 ms | 64.8 ms | 16,682,415 | 16,733,050 |
+| clang40 | 9 | 289 ms | 301 ms | 295 ms | 15,490,587 | 15,558,830 |
 | clang40 | 13 | 1,810 ms | 1,899 ms | 1,863 ms | 15,174,079 | 15,338,409 |
-| clang40 | 16 | 2,580 ms | 4,026 ms | 3,369 ms | 14,802,311 | 14,842,998 |
-| clang40 | 19 | 8,970 ms | 13,858 ms | 13,366 ms | 13,886,093 | 13,892,293 |
-| clang40 | 22 | 14,412 ms | 21,228 ms | 20,676 ms | 13,611,938 | 13,619,791 |
+| clang40 | 16 | 2,580 ms | 4,026 ms | 3,369 ms | 14,802,322 | 14,842,998 |
+| clang40 | 19 | 8,970 ms | 13,858 ms | 13,366 ms | 13,886,044 | 13,892,293 |
+| clang40 | 22 | 14,412 ms | 21,228 ms | 20,676 ms | 13,611,895 | 13,619,791 |
 
 In WSL on the same machine, where Python's libzstd is Ubuntu 26.04's and the crate's is built by GCC, the sizes are the same and the times are these. On one thread, `src.tar`:
 
@@ -334,7 +334,7 @@ On all the processors:
 - Python and the `zstd` crate run libzstd 1.5.7. On Windows both are built by MSVC, and the crate's is 5 to 8% faster. GCC's, in WSL, is faster again: by up to 7% to level 10, and 13 to 18% at 11 and 12. The Rust programs were built as above, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
 - `ruzstd` 0.8 compresses only at its level 1, "Fastest": 164 ms and 7,054,586 bytes for `src.tar`, and 457 ms and 23,917,712 bytes for `clang40`, on Windows, and 148 and 408 ms in WSL.
 - On one thread, against the faster libzstd, on our two files: on Windows `std.zstd` is 2 to 8% faster on `src.tar` from level -1 to 8, 2% slower at 9 and 3% faster at 10, 1.3 times as fast at 11 and 12, and 1.03 to 1.46 times as fast from 13. On `clang40` it's 6% slower at 3 and faster at the rest. In WSL, against GCC's, it takes 2 to 13% longer on `src.tar` from -1 to 12 and is 1.03 to 1.4 times as fast from 13; on `clang40` 1 to 11% longer to level 9, and faster from 13. WSL's numbers are the rougher: it can't be held to the performance cores.
-- What `std.zstd` writes is at most 0.4% bigger than libzstd's at every level timed, and up to 1.1% smaller. On `src.tar` it's within 0.07% at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.2% smaller from 5 to 12, 0.1 to 0.4% smaller from 13 to 17, and 0.2 to 0.3% bigger from 18 to 22. The most is `clang40` at level 3, 0.4% bigger.
+- What `std.zstd` writes is at most 0.4% bigger than libzstd's at every level timed, and up to 1.1% smaller. On `src.tar` it's within 0.08% at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.2% smaller from 5 to 12, 0.1 to 0.4% smaller from 13 to 17, and 0.2 to 0.3% bigger from 18 to 22. The most is `clang40` at level 3, 0.4% bigger.
 - On all the processors, `std.zstd` is 1.5 to 2.2 times as fast as the faster libzstd at level 1, 1.1 to 1.2 times at 3 and 5, and 1.2 to 1.6 times from 16. At 9 and 13 it's 1.02 to 1.1 times as fast on Windows, and within 4% either way in WSL. Both cut the same jobs, four windows long. That's 2 MiB at level 1, so `src.tar` makes 9 jobs. From 9 on the jobs are 16 MiB or more, so the files make 3 at most, and most of the processors wait.
 - On many small files, our 1,143 of [Dictionaries](#dictionaries) at one call each, on Windows on a performance core, `compress` takes 2.8 µs a file at level 1, 8.3 µs at 9 and 37 µs at 19. Python's `compress` takes 5.7, 10.6 and 49 µs, and a `ZstdCompressor` kept from one file to the next 3.5, 8.4 and 47 µs.
 - On those files without a dictionary, what `compress` writes is smaller than Python's at every level: 0.05 to 0.2% at -5, -1 and 1, 0.35 to 0.5% from 2 to 10, and 0.3 to 0.45% from 11.
@@ -379,7 +379,7 @@ Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked on
 | Picking matches | From level 5 to 15, by what they're worth: four times the length, less the bits of the distance, so a match a byte longer but much further back loses |
 | The optimal parser | Every match and literal from each place, priced from how often each literal, length and distance has come up, carried over from block to block. Without a dictionary, as in libzstd, the first block's literals start from a 256th of how often each byte comes up in it, plus 1 for each it has and nothing for a byte it doesn't have. After a dictionary, whose matches are cheap, every byte starts with 1 and a 16th of its count: libzstd's way comes out 0.25 to 0.45% bigger there on our small files. After that, as in libzstd, the counts stay as they are from block to block until they add up to more than twice 4,096 for the literals or 2,048 for the rest, and are then shifted down to about that. Without a dictionary, on our small files, a count for every byte made the output 0.25 to 0.5% bigger from level 11, and halving every count at each block 0.6% bigger from 16, where a first parse's counts carry over. A price is worked out where it's looked up, from each count's log and its sum's as they were after the last stretch the parser took, so after each stretch only the counts that changed are taken up again, as libzstd sets its base prices, rather than every price made again. From 19, or 18 or 16 for some smaller inputs, a job's first block is parsed twice, the second time with prices from the first, except after a dictionary, as in libzstd |
 | Splitting blocks | A block's sequences cut into pieces of 2 to 32 KiB, smaller at the higher levels, with the counts of their literals and codes summed from the block's start, so any run of pieces' counts is one subtraction. A run is split in two where an estimate of the parts' sizes saves the most, then each part again. A block too short for two pieces, as every small input is, has its counts made once for the sections, without the running sums. The negative levels don't split |
-| Huffman | Code lengths by Moffat and Katajainen's method from the counts, sorted by a counting sort, in one pass when they're all below 512, as a small block's are. They're at most as long as libzstd lets them be for that many literals, as low as 7 to 9 bits for a few hundred, up to 11: a shallower code's tree can be shorter by more than its data grows, and on our small files that's 0.16% smaller from level 1 to 12. With libzstd's btultra settings, from level 18, or 16 up to 256 KiB and 13 up to 16 KiB, each limit on a code's length is tried instead, as libzstd does there, from the least with room for the symbols up to the code's own depth, and the code whose tree and data come out smallest is kept. On our small files that's 1 to 1.4% smaller, and 0.3% after a dictionary. A new code isn't made for fewer than 32 literals, nor when the last block's, or a dictionary's, can't lose to it: no code takes fewer bits than the literals' entropy, and a tree takes 2 bytes at least. From 6 literals, as in libzstd, the last block's code or a dictionary's codes them if it has every one and comes out smaller than raw: after a trained dictionary most small inputs have fewer than 32, and on our small files that's 0.4 to 1.1% smaller from level 1 to 11. The tree's weights are FSE-coded at accuracies 5 and 6, where libzstd tries one: the bytes each takes are worked out from its states alone, and only the smaller one's stream is written. Four streams written at once, side by side |
+| Huffman | Code lengths by Moffat and Katajainen's method from the counts, sorted by a counting sort, in one pass when they're all below 512, as a small block's are. They're at most as long as libzstd lets them be for that many literals, as low as 7 to 9 bits for a few hundred, up to 11: a shallower code's tree can be shorter by more than its data grows, and on our small files that's 0.16% smaller from level 1 to 12. A code deeper than its limit is fitted to it, in a block of 4,096 literals or more, by package-merge, the shortest code within the limit: on the 60 test files that's 0.03% smaller at every level. In a smaller block its deepest leaves are lifted and others pushed down until it fits, which leaves the weights more alike and the tree shorter: package-merge there made our small files 0.03% bigger to level 12 and 0.43% from 13. With libzstd's btultra settings, from level 18, or 16 up to 256 KiB and 13 up to 16 KiB, each limit on a code's length is tried instead, as libzstd does there, from the least with room for the symbols up to the code's own depth, and the code whose tree and data come out smallest is kept. On our small files that's 1 to 1.4% smaller, and 0.3% after a dictionary. A new code isn't made for fewer than 32 literals, nor when the last block's, or a dictionary's, can't lose to it: no code takes fewer bits than the literals' entropy, and a tree takes 2 bytes at least. From 6 literals, as in libzstd, the last block's code or a dictionary's codes them if it has every one and comes out smaller than raw: after a trained dictionary most small inputs have fewer than 32, and on our small files that's 0.4 to 1.1% smaller from level 1 to 11. The tree's weights are FSE-coded at accuracies 5 and 6, where libzstd tries one: the bytes each takes are worked out from its states alone, and only the smaller one's stream is written. Four streams written at once, side by side |
 | FSE | Probabilities rounded, then nudged where they cost least, at two accuracies: libzstd's for that many codes, about 2 bits under their number's, and the one above. For a few thousand codes or more those are the two largest; for a few hundred, 6 and 7 rather than 8 and 9, whose descriptions took more than their bits saved, and on our small files that's 0.2% smaller at every level. The better is kept if it beats the predefined table, one symbol repeated, and the last block's. Below the lazy levels, as libzstd picks there, one symbol is that symbol repeated; with a dictionary's table to keep and fewer than 1000 codes, it's kept or the predefined one taken, whichever costs less, and none of the block's own is made; a table the block before made is priced with the rest, as libzstd never keeps one there; and with none to keep, the predefined one is taken for fewer codes than a table of their own pays for, 28 offsets to 72 lengths, or for counts spread too evenly. libzstd keeps a dictionary's for any it codes: on our small files after a trained dictionary that's 8 to 24% bigger than pricing every table, and this 2 to 4% bigger, for a call 10 to 25% faster from level -1 to 5. A table spread from counts of 1 or more, as every table the encoder makes is, is laid out 8 slots a time and spread with no slot skipped. Each table keeps what each code costs with it, so pricing one is a loop without branches. A table of the block's own isn't made when no table could cost less than the codes' entropy plus the shortest description one could have, which after a dictionary is most of the time on small inputs, nor at an accuracy where the counts rounded to it leave too many slots for each count's description to be short enough; the bytes are the same. Each sequence's bits go into the stream in two writes, from a loop in a function of its own, so its states and bits stay in registers |
 | All the processors | Jobs of four windows, each on a thread of [`parallel for`](../reference/parallel.md), joined in order |
 | Small frames | A frame of up to 256 KiB takes a job kept from the frames before, with its buffers and tables, rather than allocating and freeing a job's ten blocks for each call. Up to 16 are kept, from the system's allocator as they last as long as the program, and a kept job's tables are let go when they're over 1 MiB. A block's Huffman code and FSE tables stay where they were made, in one of the job's two places for each kind, so a block that keeps them takes only where they are, rather than copying 7 KiB; a job keeps a copy of the last trained dictionary's tables, so its next frame with that dictionary starts from them where they are |

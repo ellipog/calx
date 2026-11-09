@@ -573,53 +573,11 @@ static int huf_depths(const cx_u32* count, cx_u32 max, cx_u32* sym, cx_i64* a) {
     return n;
 }
 
-/* Code lengths from huf_depths' sym[0..n) and a, none longer than lim, which leaves room for n: if
- * the code is deeper, the deepest leaves lifted and others pushed down until it fits. Sets only the
- * symbols in sym. Gives the longest. */
-static cx_u32 huf_limit(const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, cx_u8* len) {
-    if (a[0] <= lim) {
-        for (int i = 0; i < n; i++) len[sym[i]] = (cx_u8)a[i];
-        return (cx_u32)a[0];
-    }
-    cx_u32 bl[HUF_LOG + 1] = {0};
-    for (int i = 0; i < n; i++) bl[a[i] > lim ? lim : a[i]]++;
-    const cx_i64 target = (cx_i64)1 << lim;
-    cx_i64 k = 0;
-    for (cx_u32 d = 1; d <= lim; d++) k += (cx_i64)bl[d] << (lim - d);
-    while (k > target) {
-        cx_u32 d = lim - 1;
-        while (bl[d] == 0) d--;
-        bl[d]--;
-        bl[d + 1]++;
-        k -= (cx_i64)1 << (lim - d - 1);
-    }
-    while (k < target) {
-        cx_u32 d = lim;
-        while (bl[d] == 0) d--;
-        bl[d]--;
-        bl[d - 1]++;
-        k += (cx_i64)1 << (lim - d);
-    }
-    int i = 0;
-    cx_u32 longest = 0;
-    for (cx_u32 d = lim; d >= 1; d--) {
-        for (cx_u32 c = 0; c < bl[d]; c++) len[sym[i++]] = (cx_u8)d;
-        if (bl[d] && !longest) longest = d;
-    }
-    return longest;
-}
-
-/* The shortest code lengths for count[0..max], two symbols or more, none longer than lim, which has
- * room for them: package-merge. Gives the longest. huf_limit's way of fitting a deep code is far
- * from this when most of the symbols are lifted, as a trained dictionary's are, every byte having
- * a code: 10% more bits on its literals there. */
-static cx_u32 huf_optimal(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
-    cx_u32 sym[256];
-    cx_i64 a[256];
-    memset(len, 0, max + 1);
-    const int n = huf_depths(count, max, sym, a);
-    cx_u64 w[256], cur[512], next[512];
-    for (int i = 0; i < n; i++) w[i] = count[sym[i]];
+/* The shortest code lengths for sym[0..n), in order of count, rarest first, with counts w, none
+ * longer than lim, which has room for them: package-merge. Sets len for those symbols; gives the
+ * longest. */
+static cx_u32 huf_merge(const cx_u32* sym, const cx_u64* w, int n, cx_u32 lim, cx_u8* len) {
+    cx_u64 cur[512], next[512];
     /* Each list in order of weight: the symbols' and the packages of pairs from the list before.
      * Whether each item is a symbol's is all the walk back needs, as the symbols in a list are in
      * order of weight too, and its packages are of the list before's first items, in pairs. */
@@ -664,6 +622,67 @@ static cx_u32 huf_optimal(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* le
     return longest;
 }
 
+/* A block's literals from which a code too deep for its limit is fitted by package-merge, the
+ * shortest code for the counts: below this, the tree's weights, which the pushing down below
+ * leaves more alike, cost more than the data saves. On the 60 test files that's 0.03% smaller at
+ * every level, and small files are as they were; with every block, small files came out 0.03%
+ * bigger to level 12 and 0.43% from 13. */
+#define HUF_MERGE_MIN 4096
+
+/* Code lengths for count[0..max] from huf_depths' sym[0..n) and a, none longer than lim, which
+ * leaves room for n. If the code is deeper: for a block of HUF_MERGE_MIN literals or more, the
+ * shortest code that fits; for fewer, the deepest leaves lifted and others pushed down until it
+ * fits. Sets only the symbols in sym. Gives the longest. */
+static cx_u32 huf_limit(const cx_u32* count, const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, cx_u8* len) {
+    if (a[0] <= lim) {
+        for (int i = 0; i < n; i++) len[sym[i]] = (cx_u8)a[i];
+        return (cx_u32)a[0];
+    }
+    {
+        cx_u64 w[256], total = 0;
+        for (int i = 0; i < n; i++) total += w[i] = count[sym[i]];
+        if (total >= HUF_MERGE_MIN) return huf_merge(sym, w, n, lim, len);
+    }
+    cx_u32 bl[HUF_LOG + 1] = {0};
+    for (int i = 0; i < n; i++) bl[a[i] > lim ? lim : a[i]]++;
+    const cx_i64 target = (cx_i64)1 << lim;
+    cx_i64 k = 0;
+    for (cx_u32 d = 1; d <= lim; d++) k += (cx_i64)bl[d] << (lim - d);
+    while (k > target) {
+        cx_u32 d = lim - 1;
+        while (bl[d] == 0) d--;
+        bl[d]--;
+        bl[d + 1]++;
+        k -= (cx_i64)1 << (lim - d - 1);
+    }
+    while (k < target) {
+        cx_u32 d = lim;
+        while (bl[d] == 0) d--;
+        bl[d]--;
+        bl[d - 1]++;
+        k += (cx_i64)1 << (lim - d);
+    }
+    int i = 0;
+    cx_u32 longest = 0;
+    for (cx_u32 d = lim; d >= 1; d--) {
+        for (cx_u32 c = 0; c < bl[d]; c++) len[sym[i++]] = (cx_u8)d;
+        if (bl[d] && !longest) longest = d;
+    }
+    return longest;
+}
+
+/* The shortest code lengths for count[0..max], two symbols or more, none longer than lim, which has
+ * room for them: huf_merge on huf_depths' order. Gives the longest. */
+static cx_u32 huf_optimal(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
+    cx_u32 sym[256];
+    cx_i64 a[256];
+    cx_u64 w[256];
+    memset(len, 0, max + 1);
+    const int n = huf_depths(count, max, sym, a);
+    for (int i = 0; i < n; i++) w[i] = count[sym[i]];
+    return huf_merge(sym, w, n, lim, len);
+}
+
 /* Code lengths for count[0..max], two symbols or more, none longer than lim, which has room for
  * them. Gives the longest. */
 static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
@@ -671,7 +690,7 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* le
     cx_i64 a[256];
     memset(len, 0, max + 1);
     const int n = huf_depths(count, max, sym, a);
-    return huf_limit(sym, a, n, lim, len);
+    return huf_limit(count, sym, a, n, lim, len);
 }
 
 /* The codes for lengths len[0..max] with the longest `log`, laid out as the decoder lays its table
@@ -2852,7 +2871,7 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
             memset(tlen, 0, max + 1);
             const cx_u32 least = high_bit((cx_u32)k) + 1;
             for (cx_u32 lim = least; lim <= HUF_LOG; lim++) {
-                const cx_u32 got = huf_limit(sym, a, k, lim, tlen);
+                const cx_u32 got = huf_limit(count, sym, a, k, lim, tlen);
                 if (got < lim && lim > least) break;
                 cx_u64 bits = 0;
                 for (int i = 0; i < k; i++) bits += (cx_u64)count[sym[i]] * tlen[sym[i]];
