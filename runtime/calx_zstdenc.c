@@ -1020,7 +1020,7 @@ typedef struct {
 /* A job: a stretch of the text compressed into blocks of its own, with the text before it to match
  * into. Positions count from `base`, the first byte at START, which is past what a window reaches,
  * so a table's empty 0 is always too far back. */
-typedef struct {
+typedef struct job_s {
     cp_t p;
     const cx_u8* base;
     cx_u32 from, to; /* the job's own text, base[from..to); before it, from START, is what it matches into */
@@ -1033,6 +1033,10 @@ typedef struct {
     cx_u64 dkey;          /* for the first job, its dictionary's key, or 0 */
     struct digest_s* dg;  /* for the first job, its dictionary's kept tables, held, or 0 */
     struct work_s* dw;    /* and a working copy of them it uses where it is, or 0 */
+    /* Whether its memory is the system's, as for a job kept between frames (job_take), which
+     * debug builds would otherwise find still allocated at exit. */
+    int sys;
+    struct job_s* kept_next;
     /* the match finder's tables */
     cx_u32* hash;
     cx_u32* chain;
@@ -3279,6 +3283,18 @@ static cx_u64 job_reach(const cp_t* p) {
 }
 
 /* Empties the match finder's tables. */
+static void* job_mem(const job_t* J, cx_usize n) {
+    if (!J->sys) return cx_alloc(n);
+    void* const p = malloc(n);
+    if (!p) cx_panic_capacity();
+    return p;
+}
+
+static void job_unmem(const job_t* J, void* p, cx_usize n) {
+    if (J->sys) free(p);
+    else cx_free(p, n);
+}
+
 static void job_clear(job_t* J) {
     if (J->hash) memset(J->hash, 0, J->hash_n * 4);
     if (J->chain) memset(J->chain, 0, J->chain_n * 4);
@@ -3311,13 +3327,13 @@ static void job_tables(job_t* J) {
     /* With a working copy of a dictionary's, the job uses that instead. */
     if (J->dw) hn = cn = 0;
     if (J->hash_n != hn) {
-        if (J->hash) cx_free(J->hash, J->hash_n * 4);
-        J->hash = hn ? (cx_u32*)cx_alloc(hn * 4) : 0;
+        if (J->hash) job_unmem(J, J->hash, J->hash_n * 4);
+        J->hash = hn ? (cx_u32*)job_mem(J, hn * 4) : 0;
         J->hash_n = hn;
     }
     if (J->chain_n != cn) {
-        if (J->chain) cx_free(J->chain, J->chain_n * 4);
-        J->chain = cn ? (cx_u32*)cx_alloc(cn * 4) : 0;
+        if (J->chain) job_unmem(J, J->chain, J->chain_n * 4);
+        J->chain = cn ? (cx_u32*)job_mem(J, cn * 4) : 0;
         J->chain_n = cn;
     }
     if (J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2) J->tags = (cx_u8*)J->chain;
@@ -3328,17 +3344,17 @@ static void job_tables(job_t* J) {
     if (!J->bt_up) J->bt_up = 1;
 #endif
     const int three = J->p.strat >= S_BTLAZY2 && J->p.mml == 3;
-    if (three && !J->hash3 && !J->dw) J->hash3 = (cx_u32*)cx_alloc((cx_usize)4 << HASH3_LOG);
+    if (three && !J->hash3 && !J->dw) J->hash3 = (cx_u32*)job_mem(J, (cx_usize)4 << HASH3_LOG);
     if (!three && J->hash3) {
-        cx_free(J->hash3, (cx_usize)4 << HASH3_LOG);
+        job_unmem(J, J->hash3, (cx_usize)4 << HASH3_LOG);
         J->hash3 = 0;
     }
-    if (J->p.strat >= S_BTLAZY2 && !J->mt) J->mt = (match_t*)cx_alloc(MATCHES_MAX * sizeof(match_t));
+    if (J->p.strat >= S_BTLAZY2 && !J->mt) J->mt = (match_t*)job_mem(J, MATCHES_MAX * sizeof(match_t));
     if (J->p.strat >= S_BTOPT && !J->opt) {
-        J->st = (stats_t*)cx_alloc(sizeof(stats_t));
-        J->opt = (node_t*)cx_alloc((OPT_NUM + 8) * sizeof(node_t));
-        J->path = (match_t*)cx_alloc(OPT_NUM * sizeof(match_t));
-        J->path_at = (cx_u32*)cx_alloc(OPT_NUM * sizeof(cx_u32));
+        J->st = (stats_t*)job_mem(J, sizeof(stats_t));
+        J->opt = (node_t*)job_mem(J, (OPT_NUM + 8) * sizeof(node_t));
+        J->path = (match_t*)job_mem(J, OPT_NUM * sizeof(match_t));
+        J->path_at = (cx_u32*)job_mem(J, OPT_NUM * sizeof(cx_u32));
     }
     if (J->st) J->st->ready = 0;
 }
@@ -3861,20 +3877,20 @@ static void job_blocks(job_t* J) {
 }
 
 static void job_free(job_t* J) {
-    if (J->hash) cx_free(J->hash, J->hash_n * 4);
-    if (J->chain) cx_free(J->chain, J->chain_n * 4);
-    if (J->ss.seq) cx_free(J->ss.seq, SEQ_MAX * sizeof(seq_t));
-    if (J->ss.lit) cx_free(J->ss.lit, BLOCK_MAX + 32);
-    if (J->blk) cx_free(J->blk, BLOCK_ROOM);
-    if (J->split) cx_free(J->split, SPLIT_BYTES);
-    if (J->htmp) cx_free(J->htmp, 4 * HUF_ROOM);
-    if (J->hash3) cx_free(J->hash3, (cx_usize)4 << HASH3_LOG);
-    if (J->mt) cx_free(J->mt, MATCHES_MAX * sizeof(match_t));
+    if (J->hash) job_unmem(J, J->hash, J->hash_n * 4);
+    if (J->chain) job_unmem(J, J->chain, J->chain_n * 4);
+    if (J->ss.seq) job_unmem(J, J->ss.seq, SEQ_MAX * sizeof(seq_t));
+    if (J->ss.lit) job_unmem(J, J->ss.lit, BLOCK_MAX + 32);
+    if (J->blk) job_unmem(J, J->blk, BLOCK_ROOM);
+    if (J->split) job_unmem(J, J->split, SPLIT_BYTES);
+    if (J->htmp) job_unmem(J, J->htmp, 4 * HUF_ROOM);
+    if (J->hash3) job_unmem(J, J->hash3, (cx_usize)4 << HASH3_LOG);
+    if (J->mt) job_unmem(J, J->mt, MATCHES_MAX * sizeof(match_t));
     if (J->opt) {
-        cx_free(J->st, sizeof(stats_t));
-        cx_free(J->opt, (OPT_NUM + 8) * sizeof(node_t));
-        cx_free(J->path, OPT_NUM * sizeof(match_t));
-        cx_free(J->path_at, OPT_NUM * sizeof(cx_u32));
+        job_unmem(J, J->st, sizeof(stats_t));
+        job_unmem(J, J->opt, (OPT_NUM + 8) * sizeof(node_t));
+        job_unmem(J, J->path, OPT_NUM * sizeof(match_t));
+        job_unmem(J, J->path_at, OPT_NUM * sizeof(cx_u32));
     }
     J->hash = J->chain = J->hash3 = 0;
     J->hash_n = J->chain_n = 0;
@@ -3890,11 +3906,11 @@ static void job_free(job_t* J) {
 }
 
 static void job_ready(job_t* J) {
-    if (!J->ss.seq) J->ss.seq = (seq_t*)cx_alloc(SEQ_MAX * sizeof(seq_t));
-    if (!J->ss.lit) J->ss.lit = (cx_u8*)cx_alloc(BLOCK_MAX + 32);
-    if (!J->blk) J->blk = (cx_u8*)cx_alloc(BLOCK_ROOM);
-    if (!J->split) J->split = (cx_u32*)cx_alloc(SPLIT_BYTES);
-    if (!J->htmp) J->htmp = (cx_u8*)cx_alloc(4 * HUF_ROOM);
+    if (!J->ss.seq) J->ss.seq = (seq_t*)job_mem(J, SEQ_MAX * sizeof(seq_t));
+    if (!J->ss.lit) J->ss.lit = (cx_u8*)job_mem(J, BLOCK_MAX + 32);
+    if (!J->blk) J->blk = (cx_u8*)job_mem(J, BLOCK_ROOM);
+    if (!J->split) J->split = (cx_u32*)job_mem(J, SPLIT_BYTES);
+    if (!J->htmp) J->htmp = (cx_u8*)job_mem(J, 4 * HUF_ROOM);
 }
 
 /* The most a frame of n bytes takes: its header and checksum, and each block stored. Blocks split
@@ -3970,12 +3986,73 @@ static void job_place(frame_t* F, job_t* J, cx_u64 k) {
     J->cut = 0;
 }
 
+/* Jobs kept for the frames after, up to JOB_KEPT of them, for frames of up to JOB_KEPT_N bytes,
+ * whose jobs have touched little of their buffers: a small frame's call would otherwise allocate
+ * and free a job's ten blocks, most of them sized for a whole block. A kept job's tables go if
+ * they're over JOB_KEPT_TABLES. */
+#define JOB_KEPT 16
+#define JOB_KEPT_N ((cx_u64)256 << 10)
+#define JOB_KEPT_TABLES ((cx_usize)1 << 20)
+
+static job_t* jobs_kept;
+static cx_u32 jobs_kept_n;
+
+static void digest_lock(void);
+static void digest_unlock(void);
+
+/* A job for a frame of n bytes: a kept one, or a new one. */
+static job_t* job_take(cx_u64 n) {
+    job_t* J = 0;
+    if (n <= JOB_KEPT_N && __atomic_load_n(&jobs_kept, __ATOMIC_RELAXED)) {
+        digest_lock();
+        J = jobs_kept;
+        if (J) {
+            jobs_kept = J->kept_next;
+            jobs_kept_n--;
+        }
+        digest_unlock();
+    }
+    if (!J) {
+        const int sys = n <= JOB_KEPT_N;
+        J = sys ? (job_t*)malloc(sizeof(job_t)) : (job_t*)cx_alloc(sizeof(job_t));
+        if (!J) cx_panic_capacity();
+        memset(J, 0, __builtin_offsetof(job_t, llc));
+        J->sys = sys;
+    }
+    job_ready(J);
+    return J;
+}
+
+static void job_free(job_t* J);
+
+/* Done with J: kept if there's room, or let go. */
+static void job_give(job_t* J) {
+    if (J->sys) {
+        if ((J->hash_n + J->chain_n) * 4 > JOB_KEPT_TABLES) {
+            if (J->hash) job_unmem(J, J->hash, J->hash_n * 4);
+            if (J->chain) job_unmem(J, J->chain, J->chain_n * 4);
+            J->hash = J->chain = 0;
+            J->hash_n = J->chain_n = 0;
+        }
+        digest_lock();
+        const int keep = jobs_kept_n < JOB_KEPT;
+        if (keep) {
+            J->kept_next = jobs_kept;
+            jobs_kept = J;
+            jobs_kept_n++;
+        }
+        digest_unlock();
+        if (keep) return;
+    }
+    job_free(J);
+    if (J->sys) free(J);
+    else cx_free(J, sizeof(job_t));
+}
+
 static void group_body(void* v, cx_u64 begin, cx_u64 end) {
     frame_t* F = (frame_t*)v;
     for (cx_u64 g = begin; g < end; g++) {
-        job_t* J = (job_t*)cx_alloc(sizeof(job_t));
-        memset(J, 0, __builtin_offsetof(job_t, llc));
-        job_ready(J);
+        job_t* J = job_take(F->n);
         for (cx_u64 k = g; k < F->jobs; k += F->groups) {
             made_t* slot = &F->made[k];
             job_place(F, J, k);
@@ -3998,8 +4075,7 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
             slot->cap = placed ? 0 : J->out_cap;
             if (F->direct) F->direct_n += J->out_n;
         }
-        job_free(J);
-        cx_free(J, sizeof(job_t));
+        job_give(J);
     }
 }
 
