@@ -960,10 +960,10 @@ static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
  * two lookups overlap, and the round moves on by `step`: 2 looks at every position, and the
  * negative levels look at fewer. On a miss it moves on further the longer it's been since the last
  * match. */
-static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const ht = J->hash;
-    const cx_u32 hl = J->p.hlog, mls = J->p.mml, start = J->start, wsize = J->wsize;
+    const cx_u32 hl = J->p.hlog, start = J->start, wsize = J->wsize;
     ss_t* const ss = &J->ss;
     const cx_u8* ip = base + at;
     const cx_u8* anchor = ip;
@@ -1025,13 +1025,28 @@ tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
 }
 
+/* The finders are built once for each length the levels hash, so the hash's shift is a constant
+ * and the loop holds no test of the length. */
+#define ZSE_BY_MML(f, J, ...)               \
+    switch ((J)->p.mml) {                   \
+    case 4: f(J, __VA_ARGS__, 4); break;    \
+    case 5: f(J, __VA_ARGS__, 5); break;    \
+    case 6: f(J, __VA_ARGS__, 6); break;    \
+    case 7: f(J, __VA_ARGS__, 7); break;    \
+    default: f(J, __VA_ARGS__, (J)->p.mml); \
+    }
+
+static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+    ZSE_BY_MML(mf_fast_with, J, at, end, r);
+}
+
 /* Two hash tables: one of eight bytes, for long matches, and one of `mml`, for short ones; a short
  * one is taken only if the next position has no long one. */
-static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const hl8 = J->hash;
     cx_u32* const hs = J->chain;
-    const cx_u32 bl = J->p.hlog, bs = J->p.clog, mls = J->p.mml, start = J->start, wsize = J->wsize;
+    const cx_u32 bl = J->p.hlog, bs = J->p.clog, start = J->start, wsize = J->wsize;
     ss_t* const ss = &J->ss;
     const cx_u8* ip = base + at;
     const cx_u8* anchor = ip;
@@ -1129,6 +1144,10 @@ static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
     }
 tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
+}
+
+static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+    ZSE_BY_MML(mf_dfast_with, J, at, end, r);
 }
 
 /* Hash rows, for the greedy and lazy levels: each row keeps the last 2^rlog - 1 positions whose
@@ -2288,18 +2307,26 @@ static cx_usize seq_section(job_t* J, const ent_t* prev, ent_t* next, const seq_
     }
     while (i-- > 0) {
         /* The three states' bits and the literals' length go in as one value, put together off
-         * the accumulator's path, as do the match's length and offset after. */
+         * the accumulator's path, as do the match's length and offset. Most sequences' bits come
+         * to 56 or fewer, which fit beside the 7 a flush leaves, so both go in with one flush. */
         const cx_u32 l = llc[i], m = mlc[i], o = ofc[i];
         const cx_u32 ko = (xo + O->dnb[o]) >> 16, km = (xm + M->dnb[m]) >> 16, kl = (xl + L->dnb[l]) >> 16;
+        const cx_u32 kv = ko + km + kl + LL_EXTRA[l], kw = ML_EXTRA[m] + o;
         const cx_u64 v = (cx_u64)(xo & ((1u << ko) - 1)) | (cx_u64)(xm & ((1u << km) - 1)) << ko | (cx_u64)(xl & ((1u << kl) - 1)) << (ko + km) |
                          (cx_u64)(seq[i].ll - LL_BASE[l]) << (ko + km + kl);
-        ADD(v, ko + km + kl + LL_EXTRA[l]);
+        const cx_u64 w = (cx_u64)(seq[i].ml - ML_BASE[m]) | (cx_u64)(ofb[(cx_usize)i * ofb_step] - (1u << o)) << ML_EXTRA[m];
         xo = O->st[(cx_i32)(xo >> ko) + O->dfs[o]];
         xm = M->st[(cx_i32)(xm >> km) + M->dfs[m]];
         xl = L->st[(cx_i32)(xl >> kl) + L->dfs[l]];
-        FLUSH();
-        ADD((cx_u64)(seq[i].ml - ML_BASE[m]) | (cx_u64)(ofb[(cx_usize)i * ofb_step] - (1u << o)) << ML_EXTRA[m], ML_EXTRA[m] + o);
-        FLUSH();
+        if (__builtin_expect(kv + kw <= 56, 1)) {
+            ADD(v | w << kv, kv + kw);
+            FLUSH();
+        } else {
+            ADD(v, kv);
+            FLUSH();
+            ADD(w, kw);
+            FLUSH();
+        }
         if (__builtin_expect(p > pend, 0)) return 0;
     }
     ADD(xm - (1u << next->ml.log), next->ml.log);
@@ -2356,7 +2383,9 @@ static cx_usize emit(job_t* J, const seq_t* seq, cx_u32 ns, const cx_u32* fin, c
         /* The literals for negative levels go raw, as libzstd sends them, which is what makes those
          * levels fast to decompress too. */
         const int huf = J->p.strat != S_FAST || J->p.tlen == 0;
-        cx_u8* const tmp = J->blk;
+        /* Into the output when a block's room is there, as it nearly always is, so it isn't
+         * copied there after. */
+        cx_u8* const tmp = cap >= 3 + BLOCK_ROOM ? out + 3 : J->blk;
 #ifdef ZSE_CYCLES
         const cx_u64 c0 = __rdtsc();
 #endif
@@ -2375,7 +2404,7 @@ static cx_usize emit(job_t* J, const seq_t* seq, cx_u32 ns, const cx_u32* fin, c
         zse_cycles[5] += ns;
 #endif
         if (size >= n || cap < 3 + size) size = 0;
-        if (size) memcpy(out + 3, tmp, size);
+        if (size && tmp != out + 3) memcpy(out + 3, tmp, size);
     }
     if (size && !(size < 16 && n > 1 && all_same(src, n))) {
         st24(out, (cx_u32)last | (2u << 1) | ((cx_u32)size << 3));
@@ -2991,8 +3020,9 @@ typedef struct {
     cx_u64 jobs, groups;
     cp_t p;
     made_t* made;
-    cx_u8* direct; /* with one job, where it writes */
+    cx_u8* direct; /* where the blocks go, for jobs that run one at a time */
     cx_usize direct_cap;
+    cx_usize direct_n; /* how much the jobs before have written */
 } frame_t;
 
 #define START_OF(p) (((cx_u32)1 << (p).wlog) + 1)
@@ -3018,17 +3048,24 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
         for (cx_u64 k = g; k < F->jobs; k += F->groups) {
             made_t* slot = &F->made[k];
             job_place(F, J, k);
-            if (F->jobs == 1 && F->direct) {
-                J->out = F->direct;
-                J->out_cap = F->direct_cap;
+            /* Jobs that run one at a time, in order, write in their place in the frame, which saves
+             * a buffer for each and copying out of it. One goes in a buffer of its own only if the
+             * room left is less than its blocks could take, stored, as for bytes that don't
+             * compress; those that come after it still know their place. */
+            const cx_usize len = J->to - J->from, most = len + (len >> 8) + 3;
+            const int placed = F->direct && F->direct_cap - F->direct_n >= most;
+            if (placed) {
+                J->out = F->direct + F->direct_n;
+                J->out_cap = F->direct_cap - F->direct_n;
             } else {
-                J->out_cap = (cx_usize)cx_zse_bound(J->to - J->from);
+                J->out_cap = (cx_usize)cx_zse_bound(len);
                 J->out = (cx_u8*)cx_alloc(J->out_cap);
             }
             job_run(J);
-            slot->out = J->out;
+            slot->out = placed ? 0 : J->out;
             slot->n = J->out_n;
-            slot->cap = J->out_cap;
+            slot->cap = placed ? 0 : J->out_cap;
+            if (F->direct) F->direct_n += J->out_n;
         }
         job_free(J);
         cx_free(J, sizeof(job_t));
@@ -3083,18 +3120,20 @@ cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u
         if (groups > fit) groups = fit;
     }
     F.groups = groups ? groups : 1;
-    if (F.jobs == 1) {
+    if (F.groups == 1) {
         F.direct = op;
         F.direct_cap = (cx_usize)(cx_zse_bound(n) - (cx_u64)(op - out));
         group_body(&F, 0, 1);
-        op += F.made[0].n;
     } else {
         cx_parallel(F.groups, group_body, &F);
-        for (cx_u64 k = 0; k < F.jobs; k++) {
+    }
+    /* Each job's blocks, after the ones before: those written in place are there already. */
+    for (cx_u64 k = 0; k < F.jobs; k++) {
+        if (F.made[k].out) {
             memcpy(op, F.made[k].out, F.made[k].n);
-            op += F.made[k].n;
             cx_free(F.made[k].out, F.made[k].cap);
         }
+        op += F.made[k].n;
     }
     cx_free(F.made, F.jobs * sizeof(made_t));
     return (cx_u64)(op - out);

@@ -95,6 +95,14 @@ fn main() {
     set_workers(1)
     let b = compress(big, 1)
     println("{a == b} {decompress(a)! == big}")    // out: true true
+    // And 3 MB of noise, stored, in two pieces: on one thread each is written in its place in the
+    // frame, on eight in a buffer of its own.
+    let rough = noise(3000000, 11)
+    set_workers(8)
+    let c = compress(rough, 1)
+    set_workers(1)
+    let d = compress(rough, 1)
+    println("{c == d} {decompress(c)! == rough} {c.len() - rough.len()}")    // out: true true 79
 
     // Part of a list, onto the end of another.
     var out = "> ".to_bytes()
