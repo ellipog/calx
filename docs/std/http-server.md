@@ -162,11 +162,11 @@ These numbers are from our benchmark, so take them as rough:
 
 | Windows | Calx | Python | Rust |
 | --- | --- | --- | --- |
-| A 1 KB file, requests a second | 42,700 | 3,680 | 21,200 |
-| A 1 MB file | 10,100 | 3,540 | 5,320 |
-| A 64 MB file | 59 | 95 | 76 |
-| Most memory: working set | 8.4 MB | 59.2 MB | 18.1 MB |
-| Most memory: private | 8.7 MB | 54.2 MB | 17.3 MB |
+| A 1 KB file, requests a second | 41,000 | 3,620 | 20,200 |
+| A 1 MB file | 9,730 | 3,230 | 5,670 |
+| A 64 MB file | 83 | 87 | 72 |
+| Most memory: working set | 8.2 MB | 59.2 MB | 13.7 MB |
+| Most memory: private | 9.4 MB | 53.6 MB | 13.6 MB |
 
 | Linux | Calx | Python | Rust |
 | --- | --- | --- | --- |
@@ -177,4 +177,4 @@ These numbers are from our benchmark, so take them as rough:
 
 - **Big files** go from the file to the connection by the system, so they cost Calx no copies and no memory. Python and Rust read each one through buffers of their own. Before `serve` sent files this way, it did 2,660 1 MB requests a second on Windows, and held 157 MB.
 - **A small file** costs its open, its look and its close, which on Windows take most of the time. Each file is opened once, and asked its size and time.
-- **The 64 MB file on Windows** is slower than Python's and Rust's, which read and send it on 16 threads and 8. Windows editions for desktops run only two `TransmitFile` calls at once, and queue the rest. Linux's `sendfile` has no such limit. This row varied the most between runs, from 49 to 76 for Calx.
+- **Many big files at once on Windows for desktops.** Those editions run only two `TransmitFile` calls at once, and queue the rest. So while two clients read slowly, the rest would wait for them. [`send_file`](net.md#sending-files) reads a file a part at a time for those connections and sends that, so none of them waits: the 64 MB row was 59 before it did. Python reads and sends on 16 threads, which is slower on 1 MB files and about as fast on 64 MB ones. Linux's `sendfile` has no such limit.

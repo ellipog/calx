@@ -151,6 +151,7 @@ fn main() {
 - **Queued like writes.** Files queue behind each other on a connection, each after what was queued before it, and what's written between them goes between them. [`queued`](#items) counts what's left of each.
 - **Its own handle.** The runtime opens the file again for itself, so the program can close the `File` as soon as `send_file` returns, and can send one `File` to many connections at once.
 - **A short file.** The length is the program's to know. If the file ends before `at + n`, the connection closes where it ends, since the other side would wait for the rest forever.
+- **Never stuck behind a slow client.** Windows for desktops sends only two files at once in the whole system. While both are slow, the runtime reads the others 256 KiB at a time and sends that, so it holds a part per connection but no one waits. See [How it works](#how-it-works).
 
 ## Addresses
 
@@ -259,12 +260,13 @@ The runtime keeps each connection's bytes: what arrived and hasn't been read, an
 
 | Platform | Source |
 | --- | --- |
-| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend` and `TransmitFile`, gathered with `GetQueuedCompletionStatusEx` |
+| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `TransmitFile` and `ReadFile`, gathered with `GetQueuedCompletionStatusEx` |
 | Linux | Edge-triggered `epoll`, with `accept4`, and non-blocking `recv`, `send` and `sendfile` |
 
 What's written is queued, and handed to the system at the next poll or flush: one `WSASend` or `send` a connection, however many writes there were. A wake is a completion posted to the port with `PostQueuedCompletionStatus` on Windows, and a write to an `eventfd` that epoll watches on Linux, made with the first `waker`. A flag set and cleared atomically makes the wakes before a poll one.
 
-A file goes once what was queued before it has gone, at most 1 GiB a call. On Windows the runtime opens it again with `ReOpenFile`, overlapped, so the offset it gives is the one used: a handle copied with `DuplicateHandle` would share the program's file position, which `TransmitFile` reads from, and two connections sent one file at once cut each other short. On Linux a `dup` does, since `sendfile` is given its own offset. What's written while a file goes, and files queued behind it, wait in the runtime and take their turns. On Windows they often have to: `TransmitFile` can say it's done after the other end has every byte and has asked for more. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
+A file goes once what was queued before it has gone, at most 1 GiB a call. On Windows the runtime opens it again with `ReOpenFile`, overlapped, so the offset it gives is the one used: a handle copied with `DuplicateHandle` would share the program's file position, which `TransmitFile` reads from, and two connections sent one file at once cut each other short. On Linux a `dup` does, since `sendfile` is given its own offset. What's written while a file goes, and files queued behind it, wait in the runtime and take their turns. On Windows they often have to: `TransmitFile` can say it's done after the other end has every byte and has asked for more. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it.
+Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once in the whole system and queue the rest, so a connection queued behind two slow clients would get nothing until they were done. There the runtime takes turns: two calls at a time, each of at most 4 MiB. A connection that finds both turns taken reads 256 KiB of its file with an overlapped `ReadFile`, sends that with `WSASend`, and asks for a turn again before the next part. It takes a third turn anyway when the last call took at most 50 ms and ended in the last 100 ms, since a call that short won't wait long. Editions for servers and Linux never use parts. `CALX_NET_FILE_PARTS=1` in the environment makes Windows send every file in parts, so tests can run that path on any edition.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
 

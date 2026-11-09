@@ -2,9 +2,14 @@
 // written after it following it, from a handle the runtime keeps after the program closes the
 // file; a second file queued behind the first, with what's written between them between them; a range past the end of the file closing the
 // connection where the file ends; and a client that goes while a file is sent to it, which ends
-// the connection, not the program, as Linux's SIGPIPE would.
+// the connection, not the program, as Linux's SIGPIPE would. Then all of it again in a copy of the
+// program with CALX_NET_FILE_PARTS=1, which makes Windows read each file a part at a time and
+// send that, as Windows for desktops does when its TransmitFile calls are taken, and editions for
+// servers, such as CI's, never do (CLX-199). Linux takes no notice of it.
+import std.env.{variable}
 import std.fs.{open_read, remove_dir_all, temp_dir, write}
 import std.net.{Event, Net}
+import std.process.{Command, current_exe}
 
 const SIZE: usize = 3000000
 const FROM: usize = 1000
@@ -14,7 +19,7 @@ fn pattern(i: usize) -> u8 {
     return u8.wrap(i * 7 + i / 1000)
 }
 
-fn main() {
+fn check() {
     let dir = temp_dir()!
     let path = "{dir}/data.bin"
     var data = List<u8>()
@@ -131,4 +136,25 @@ fn main() {
     println("sent to a client that went: {left}")    // out: sent to a client that went: true
     println("{wrong} wrong bytes, {closed} closed")    // out: 0 wrong bytes, 6 closed
     remove_dir_all(dir)!
+}
+
+fn main() {
+    check()
+    if variable("CALX_NET_FILE_PARTS") != none {
+        return
+    }
+    let o = Command.new(current_exe()).env("CALX_NET_FILE_PARTS", "1").output()!
+    for line in o.text().lines() {
+        println("parts: {line}")
+    }
+    // out: parts: first: true
+    // out: parts: second: true
+    // out: parts: queued: 2500023
+    // out: parts: whole range: 2500023 bytes
+    // out: parts: empty: true
+    // out: parts: short: true
+    // out: parts: short range: at most 1000 bytes: true
+    // out: parts: sent to a client that went: true
+    // out: parts: 0 wrong bytes, 6 closed
+    println("{o.status}")    // out: exited with status 0
 }

@@ -129,7 +129,10 @@ typedef struct net_wait {
 } net_wait;
 
 #ifdef _WIN32
-enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE };
+/* OP_FILE is a TransmitFile; OP_FREAD and OP_FSEND read a part of a file and send it, where
+ * TransmitFile is limited (see post_file). */
+enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE, OP_FREAD, OP_FSEND };
+#define NET_FILE_CHUNK (256 * 1024) /* bytes of a file read and sent at a time, without TransmitFile */
 typedef struct {
     OVERLAPPED ov;
     net_slot* slot;
@@ -164,6 +167,10 @@ struct net_slot {
     int receiving;  /* a receive is pending */
     net_op rop, sop, cop;
     net_buf fly;  /* what the send in flight is sending */
+    cx_u8* fbuf;  /* the part of the file read and being sent, [fbuf_at, fbuf_len), without TransmitFile */
+    DWORD fbuf_len, fbuf_at;
+    int tf_turn;  /* its TransmitFile in flight counts in tf_busy */
+    ULONGLONG tf_since;  /* when that TransmitFile started, in GetTickCount64's milliseconds */
     SOCKET accept_s;
     int family;
     cx_u8 abuf[2 * (sizeof(SOCKADDR_STORAGE) + 16)];
@@ -201,6 +208,10 @@ typedef struct {
 } net;
 
 static cx_u32 slot_id(const net_slot* s) { return ((cx_u32)s->gen << NET_INDEX_BITS) | s->index; }
+
+#ifdef _WIN32
+static void tf_release(net_slot* s);
+#endif
 
 static void emit(net* n, cx_u32 kind, net_slot* s) {
     n->ev = net_grow(n->ev, &n->ev_cap, n->nev + 2, sizeof(cx_u32));
@@ -305,6 +316,10 @@ static void release_slot(net* n, net_slot* s) {
     buf_free(&s->out);
 #ifdef _WIN32
     buf_free(&s->fly);
+    free(s->fbuf);
+    s->fbuf = NULL;
+    s->fbuf_at = s->fbuf_len = 0;
+    tf_release(s);
 #endif
     s->kind = SLOT_FREE;
     n->free_ids = net_grow(n->free_ids, &n->free_cap, n->nfree + 1, sizeof(cx_u32));
@@ -430,6 +445,23 @@ static size_t deliver(net* n) {
 static LPFN_ACCEPTEX accept_ex;
 static LPFN_CONNECTEX connect_ex;
 static LPFN_TRANSMITFILE transmit_file;
+/* Windows for desktops runs only two TransmitFile calls at once, system-wide, and queues the
+ * rest, so a third connection sent a big file got nothing until one of the first two was done
+ * (CLX-199). There each call sends at most 4 MiB, so a slow reader gives its turn back between
+ * calls. Past two in flight, a connection still queues a TransmitFile while the calls are going
+ * quickly: the last to finish took at most NET_TF_FAST_MS and finished within NET_TF_RECENT_MS,
+ * as on a fast network, where waiting for a turn costs less than copying. Otherwise it reads the
+ * file a part at a time and sends that, which copies each byte twice on this thread but waits
+ * for no one. Server editions have no such limit. */
+static int transmit_limited;
+static int parts_only; /* CALX_NET_FILE_PARTS=1: always parts, to test them where TransmitFile isn't limited */
+static volatile LONG tf_busy;       /* this program's TransmitFile calls in flight, where limited */
+static volatile LONG tf_fast;       /* the last to finish was quick */
+static volatile LONG64 tf_done_at;  /* when it finished */
+#define NET_TF_TURNS 2
+#define NET_TF_LIMITED_PART ((cx_u64)4 << 20)
+#define NET_TF_FAST_MS 50
+#define NET_TF_RECENT_MS 100
 static volatile LONG wsa_ready; /* 0, 1 while starting, 2 when started */
 
 static int net_start(void) {
@@ -446,6 +478,13 @@ static int net_start(void) {
         WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &c, sizeof c, &connect_ex, sizeof connect_ex, &got, NULL, NULL);
         WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &t, sizeof t, &transmit_file, sizeof transmit_file, &got, NULL, NULL);
         closesocket(s);
+        OSVERSIONINFOEXW v = {0};
+        v.dwOSVersionInfoSize = sizeof v;
+        v.wProductType = VER_NT_WORKSTATION;
+        transmit_limited = VerifyVersionInfoW(&v, VER_PRODUCT_TYPE, VerSetConditionMask(0, VER_PRODUCT_TYPE, VER_EQUAL)) != 0;
+        char parts[4];
+        parts_only = GetEnvironmentVariableA("CALX_NET_FILE_PARTS", parts, sizeof parts) == 1 && parts[0] == '1';
+        if (parts_only) transmit_limited = 1;
         InterlockedExchange(&wsa_ready, 2);
     }
     while (wsa_ready == 1) SwitchToThread();
@@ -462,6 +501,43 @@ static void op_reset(net_op* op, net_slot* s, int kind) {
     memset(&op->ov, 0, sizeof op->ov);
     op->slot = s;
     op->op = kind;
+}
+
+/* Whether the next part goes by TransmitFile: if one of NET_TF_TURNS is free, or the calls are
+ * going quickly. The turn is given back when the call finishes, with tf_release. */
+static int tf_take(net_slot* s) {
+    if (parts_only) return 0;
+    ULONGLONG now = GetTickCount64();
+    if (InterlockedIncrement(&tf_busy) > NET_TF_TURNS &&
+        !(tf_fast && now - (ULONGLONG)InterlockedCompareExchange64(&tf_done_at, 0, 0) <= NET_TF_RECENT_MS)) {
+        InterlockedDecrement(&tf_busy);
+        return 0;
+    }
+    s->tf_turn = 1;
+    s->tf_since = now;
+    return 1;
+}
+
+static void tf_release(net_slot* s) {
+    if (!s->tf_turn) return;
+    s->tf_turn = 0;
+    InterlockedDecrement(&tf_busy);
+}
+
+/* A TransmitFile finished, how quickly. */
+static void tf_finished(net_slot* s) {
+    if (!s->tf_turn) return;
+    ULONGLONG now = GetTickCount64();
+    InterlockedExchange(&tf_fast, now - s->tf_since <= NET_TF_FAST_MS);
+    InterlockedExchange64(&tf_done_at, (LONG64)now);
+}
+
+/* The memory for a file's parts goes once no file is left to send, so a connection that sent
+ * one holds nothing for it. */
+static void parts_done(net_slot* s) {
+    if (s->has_file || !s->fbuf) return;
+    free(s->fbuf);
+    s->fbuf = NULL;
 }
 
 static void lost(net* n, net_slot* s) {
@@ -499,13 +575,45 @@ static void post_recv(net* n, net_slot* s) {
     s->receiving = 1;
 }
 
-/* The next part of the file being sent, at its offset, at most 1 GiB at a time. */
+/* The next part of the file being sent, at its offset: with TransmitFile, at most 1 GiB at a
+ * time, or 4 MiB where it's limited. Where it's limited and both turns are taken, or a part read
+ * is still being sent, the rest of that part is sent, or the next part read, NET_FILE_CHUNK
+ * bytes, into `fbuf`. The file stays the one being sent until its last part has gone, so what's
+ * written after it still waits. */
 static void post_file(net* n, net_slot* s) {
-    DWORD want = s->file_left > ((cx_u64)1 << 30) ? (DWORD)1 << 30 : (DWORD)s->file_left;
+    if (transmit_limited && (s->fbuf_at < s->fbuf_len || !tf_take(s))) {
+        if (s->fbuf_at < s->fbuf_len) {
+            WSABUF b = {s->fbuf_len - s->fbuf_at, (char*)s->fbuf + s->fbuf_at};
+            op_reset(&s->sop, s, OP_FSEND);
+            if (WSASend(s->s, &b, 1, NULL, 0, &s->sop.ov, NULL) == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+                lost(n, s);
+                return;
+            }
+        } else {
+            if (!s->fbuf) {
+                s->fbuf = malloc(NET_FILE_CHUNK);
+                if (!s->fbuf) net_out_of_memory();
+            }
+            DWORD part = s->file_left > NET_FILE_CHUNK ? NET_FILE_CHUNK : (DWORD)s->file_left;
+            op_reset(&s->sop, s, OP_FREAD);
+            s->sop.ov.Offset = (DWORD)s->file_at;
+            s->sop.ov.OffsetHigh = (DWORD)(s->file_at >> 32);
+            if (!ReadFile(s->file, s->fbuf, part, NULL, &s->sop.ov) && GetLastError() != ERROR_IO_PENDING) {
+                lost(n, s);
+                return;
+            }
+        }
+        s->pending++;
+        s->sending = 1;
+        return;
+    }
+    cx_u64 most = transmit_limited ? NET_TF_LIMITED_PART : (cx_u64)1 << 30;
+    DWORD want = (DWORD)(s->file_left > most ? most : s->file_left);
     op_reset(&s->sop, s, OP_FILE);
     s->sop.ov.Offset = (DWORD)s->file_at;
     s->sop.ov.OffsetHigh = (DWORD)(s->file_at >> 32);
     if (!transmit_file(s->s, s->file, want, 0, &s->sop.ov, NULL, 0) && WSAGetLastError() != WSA_IO_PENDING) {
+        tf_release(s);
         lost(n, s);
         return;
     }
@@ -632,6 +740,8 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             break;
         case OP_FILE:
             s->sending = 0;
+            if (ok && bytes) tf_finished(s);
+            tf_release(s);
             if (s->state == CONN_CLOSED) break;
             /* A file shorter than the range would leave the other end waiting for the rest. */
             if (!ok || bytes == 0) {
@@ -640,7 +750,42 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             }
             s->file_at += bytes;
             s->file_left -= bytes < s->file_left ? bytes : s->file_left;
-            if (!s->file_left) file_done(s);
+            if (!s->file_left) {
+                file_done(s);
+                parts_done(s);
+            }
+            post_send(n, s);
+            if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
+            break;
+        case OP_FREAD:
+            s->sending = 0;
+            if (s->state == CONN_CLOSED) break;
+            /* A file shorter than the range, as with TransmitFile. */
+            if (!ok || bytes == 0) {
+                lost(n, s);
+                break;
+            }
+            s->fbuf_at = 0;
+            s->fbuf_len = bytes;
+            s->file_at += bytes;
+            s->file_left -= bytes < s->file_left ? bytes : s->file_left;
+            post_file(n, s);
+            break;
+        case OP_FSEND:
+            s->sending = 0;
+            if (s->state == CONN_CLOSED) break;
+            if (!ok) {
+                lost(n, s);
+                break;
+            }
+            s->fbuf_at += bytes;
+            if (s->fbuf_at >= s->fbuf_len) {
+                s->fbuf_at = s->fbuf_len = 0;
+                if (!s->file_left) {
+                    file_done(s);
+                    parts_done(s);
+                }
+            }
             post_send(n, s);
             if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
             break;
@@ -798,7 +943,10 @@ static void close_all(net* n) {
         ULONG got = 0;
         if (!GetQueuedCompletionStatusEx(n->iocp, entries, 64, &got, 1000, FALSE)) break;
         for (ULONG i = 0; i < got; i++) {
-            if (entries[i].lpOverlapped) ((net_op*)entries[i].lpOverlapped)->slot->pending--;
+            net_op* op = (net_op*)entries[i].lpOverlapped;
+            if (!op) continue;
+            if (op->op == OP_FILE) tf_release(op->slot);
+            op->slot->pending--;
         }
     }
     CloseHandle(n->iocp);
@@ -1142,6 +1290,8 @@ void cx_net_free(cx_u64 h) {
         buf_free(&s->out);
 #ifdef _WIN32
         buf_free(&s->fly);
+        free(s->fbuf);
+        tf_release(s);
 #endif
         free(s);
     }
@@ -1194,7 +1344,7 @@ cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
     cx_u64 left = buf_live(&s->out) + buf_live(&s->after) + s->file_left;
     for (const net_wait* w = s->waiting; w; w = w->next) left += w->left + buf_live(&w->after);
 #ifdef _WIN32
-    left += buf_live(&s->fly);
+    left += buf_live(&s->fly) + (s->fbuf_len - s->fbuf_at);
 #endif
     return (cx_usize)left;
 }
@@ -1230,6 +1380,11 @@ cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len
     HANDLE copy = ReOpenFile((HANDLE)(intptr_t)file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                              FILE_FLAG_OVERLAPPED | FILE_FLAG_SEQUENTIAL_SCAN);
     if (copy == INVALID_HANDLE_VALUE) return 0;
+    /* Where its parts may be read, those reads finish on the connections' completion port. */
+    if (transmit_limited && !CreateIoCompletionPort(copy, n->iocp, 0, 0)) {
+        CloseHandle(copy);
+        return 0;
+    }
 #else
     int copy = dup((int)file);
     if (copy < 0) return 0;
