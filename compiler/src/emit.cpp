@@ -3810,8 +3810,19 @@ $dropall    m->len = 0;
                 if (s->enumerate == 2) count = i;
                 indent_++;
             }
+            // An element that owns memory is a view in the body, which can't change the list it's
+            // in, so the name points at it where it is rather than copying it each pass, as a
+            // view parameter does: a struct of several fields copied to the stack each pass cost a
+            // tree walk a third of its time (CLX-197).
+            bool in_place = !var.empty() && !s->iter_mut && !s->zip_with && !s->enumerate && !is_copy(elem) &&
+                            is_view_type(elem) &&
+                            (at->kind == TypeKind::list || at->kind == TypeKind::array || at->kind == TypeKind::deque);
             if (!var.empty() && s->iter_mut) {
                 line(ctype(elem) + "* " + var + " = &" + elem_at + ";");
+            } else if (in_place) {
+                s->local->is_view = true;
+                s->local->mode = ParamMode::read;
+                line("const " + ctype(elem) + "* " + var + " = &" + elem_at + ";");
             } else {
                 bind_item(elem_at, false);
             }

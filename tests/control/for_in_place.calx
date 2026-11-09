@@ -1,0 +1,82 @@
+// A `for` loop over elements that own memory names each one where it is in the list, array or
+// deque, not a copy of it each pass (CLX-197). Reading it, passing it on, a closure that captures
+// it, a loop inside over its own list, and `break` and `continue` all see the element.
+
+struct Book {
+    title: String
+    tags: List<String>
+}
+
+fn title_of(b: Book) -> String {
+    return b.title.copy()
+}
+
+fn tag_count(b: Book) -> usize {
+    return b.tags.len()
+}
+
+fn call<F: Fn() -> usize>(f: F) -> usize {
+    return f()
+}
+
+fn main() {
+    let books = [
+        Book { title: String("Fjord"), tags: [String("no")] },
+        Book { title: String("River"), tags: [String("en"), String("de")] },
+        Book { title: String("Night"), tags: [] },
+    ]
+    var titles = List<String>()
+    for b in books {
+        titles.push(title_of(b))
+        var joined = String()
+        for t in b.tags {
+            joined.push_str(t)
+            joined.push_str(" ")
+        }
+        println("{b.title}: {call(|| tag_count(b))} tags: {joined}|")
+    }
+    // out: Fjord: 1 tags: no |
+    // out: River: 2 tags: en de |
+    // out: Night: 0 tags: |
+    println("{titles.len()} {titles[2]}")    // out: 3 Night
+
+    // `continue` and `break` with the element named where it is.
+    for b in books {
+        if b.tags.is_empty() {
+            break
+        }
+        if b.title == "Fjord" {
+            continue
+        }
+        println("past Fjord: {b.title}")    // out: past Fjord: River
+    }
+
+    // Backwards over the list.
+    for b in books.rev() {
+        println("back: {b.title}")
+    }
+    // out: back: Night
+    // out: back: River
+    // out: back: Fjord
+
+    // A fixed array, and a deque that's wrapped around its buffer.
+    let fixed: [Book; 2] = [Book { title: String("A"), tags: [String("x")] }, Book { title: String("B"), tags: [] }]
+    for b in fixed {
+        println("array: {b.title} {b.tags.len()}")
+    }
+    // out: array: A 1
+    // out: array: B 0
+    var d = Deque<Book>()
+    d.push_last(Book { title: String("one"), tags: [] })
+    d.push_last(Book { title: String("two"), tags: [String("t")] })
+    d.push_first(Book { title: String("zero"), tags: [] })
+    for b in d {
+        println("deque: {b.title} {tag_count(b)}")
+    }
+    // out: deque: zero 0
+    // out: deque: one 0
+    // out: deque: two 1
+
+    // The list is still whole after the loops.
+    println("{books[1].title} {books[1].tags[1]}")    // out: River de
+}

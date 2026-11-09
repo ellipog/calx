@@ -87,6 +87,7 @@ fn main() {
 - `for i in a..b` counts from `a` up to but not including `b`, and `a..=b` includes `b`. Both ends are integers of the same type, and are evaluated once. `a..=MAX` stops at `MAX` without overflowing.
 - `for x in array` goes over an array's elements in order. The array can't be changed during the loop.
 - The loop variable can't be assigned. `for _ in 0..n` needs no variable. To change the elements, loop with `in mut` ([below](#changing-the-elements)).
+- Over a list, an array or a deque, the loop variable names each element where it is, as a [parameter](functions.md#parameter-modes) names the caller's value. An element that owns memory, such as a struct with a `String` in it, isn't copied each pass.
 - `parallel for i in a..b` runs the iterations at once, on several threads, and so does `parallel for x in xs` over a list's or an array's elements: see [Parallel loops](parallel.md).
 
 ### Looping over a field
