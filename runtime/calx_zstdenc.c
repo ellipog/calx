@@ -1240,6 +1240,7 @@ typedef struct job_s {
     /* what comes out */
     cx_u8* out;
     cx_usize out_n, out_cap;
+    cx_i64 saved; /* the bytes the job's blocks before this one saved */
     /* A block's codes, written before they're read, and the places for its tables: last, so a new
      * job clears only what's before them, under 1 KiB rather than 313. */
     cx_u8 llc[SEQ_MAX], mlc[SEQ_MAX], ofc[SEQ_MAX];
@@ -1455,13 +1456,18 @@ static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
  * one is taken only if the next position has no long one. The long table runs a position ahead:
  * the next position's entry is loaded before this one's candidates are compared, and it's the
  * one a short match looks at. On a miss the search moves on by a step, 1 to start with and one
- * more for each DSTEP_RUN bytes without a match. A table entry is taken only if it's in the
- * window from all of the block, so one bound serves every position. */
+ * more for each DSTEP_RUN bytes without a match. Once the job has saved bytes, the step also
+ * starts over at each DSTEP_PIECE bytes of the block, as libzstd 1.5.7's 8 KB pieces restart its
+ * step: else, after a stretch of random bytes, the step had grown so long that most of the text
+ * repeated after it was skipped, and rand_repeats came out 7% bigger than libzstd's, where it's
+ * now within 0.3%. Random bytes alone save nothing and keep the long step. A table entry is taken
+ * only if it's in the window from all of the block, so one bound serves every position. */
 #ifdef ZSE_TUNE
 #define DSTEP_RUN (getenv("ZSE_DS") ? (cx_usize)atoi(getenv("ZSE_DS")) : 256)
 #else
 #define DSTEP_RUN 256
 #endif
+#define DSTEP_PIECE 16384
 
 static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls, const int undo) {
     const cx_u8* const base = J->base;
@@ -1495,6 +1501,8 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
     const cx_usize run = DSTEP_RUN;
     /* The repeated offset tried, as in mf_fast. */
     cx_u32 rt = REP_OK(r[0], at, start) ? r[0] : 0;
+    /* Where the step next starts over: never, if the job hasn't saved bytes yet. */
+    const cx_u8* piece = J->saved >= 3 ? ip + DSTEP_PIECE : iend + 1;
     for (;;) {
         cx_usize step = 1;
         const cx_u8* grow = ip + run;
@@ -1525,8 +1533,14 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
             m8n = hl8[h8n];
             if (ld32(entry_at(base, m, low, nt)) == ld32(ip) && entry_at(base, m, low, nt) == base + m) goto shorter;
             if (ip1 >= grow) {
-                step++;
-                grow += run;
+                if (ip1 >= piece) {
+                    step = 1;
+                    grow = ip1 + run;
+                    while (piece <= ip1) piece += DSTEP_PIECE;
+                } else {
+                    step++;
+                    grow += run;
+                }
             }
             ip = ip1;
             ip1 += step;
@@ -4340,6 +4354,7 @@ static void job_blocks(job_t* J) {
     while (at < J->to) {
         const cx_u32 n = J->to - at < BLOCK_MAX ? J->to - at : BLOCK_MAX;
         const int last = J->last && at + n == J->to;
+        J->saved = (cx_i64)(at - J->from) - (cx_i64)J->out_n;
         J->out_n += block(J, at, n, last, J->out + J->out_n, J->out_cap - J->out_n);
         at += n;
     }
