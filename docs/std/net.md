@@ -63,6 +63,7 @@ fn main() {
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go to the system at the next poll or `flush`, with everything else queued on the connection since the last, then as soon as the socket takes them |
 | `net.flush()` | Sends what was queued on every connection now, rather than at the next poll |
+| `net.queued(conn: Conn) -> usize` | How many bytes queued on the connection the system hasn't taken yet, so something big can be sent in parts, the next queued once most of the last has gone. 0 once it's closed |
 | `net.close(conn: Conn)` | Sends what was queued on the connection, then closes it |
 | `net.waker() -> Waker ! NetError` | A `Waker` for the `Net`'s polls |
 | `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net` |

@@ -1014,6 +1014,19 @@ cx_usize cx_net_read(cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max) {
     return k;
 }
 
+/* What was queued on a connection that the system hasn't taken yet: on Windows, with what the
+ * send in flight still holds. */
+cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
+    net_check_thread();
+    net_slot* s = conn_of((net*)(uintptr_t)h, id);
+    if (!s) return 0;
+#ifdef _WIN32
+    return buf_live(&s->out) + buf_live(&s->fly);
+#else
+    return buf_live(&s->out);
+#endif
+}
+
 void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
     net_check_thread();
     net* n = (net*)(uintptr_t)h;

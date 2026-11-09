@@ -798,6 +798,7 @@ CX_FN(cx_u32, cx_net_event_conn, (cx_u64 h, cx_usize i));
 CX_FN(cx_usize, cx_net_available, (cx_u64 h, cx_u32 id));
 CX_FN(cx_usize, cx_net_read, (cx_u64 h, cx_u32 id, cx_u8* to, cx_usize max));
 CX_FN(void, cx_net_send, (cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len));
+CX_FN(cx_usize, cx_net_queued, (cx_u64 h, cx_u32 id));
 CX_FN(void, cx_net_close, (cx_u64 h, cx_u32 id));
 CX_FN(void, cx_net_flush, (cx_u64 h));
 CX_FN(cx_bool, cx_net_waker, (cx_u64 h));

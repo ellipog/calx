@@ -16,6 +16,7 @@ extern "C" {
     fn cx_net_available(net: u64, conn: u32) -> usize
     fn cx_net_read(net: u64, conn: u32, to: *u8, n: usize) -> usize
     fn cx_net_send(net: u64, conn: u32, from: *const u8, n: usize)
+    fn cx_net_queued(net: u64, conn: u32) -> usize
     fn cx_net_close(net: u64, conn: u32)
     fn cx_net_flush(net: u64)
     fn cx_net_waker(net: u64) -> bool
@@ -290,6 +291,13 @@ impl Net {
             buf.set_len(start + got)
             return got
         }
+    }
+
+    /// How many bytes queued on the connection the system hasn't taken yet, so a program sending
+    /// something big can queue the next part once most of the last has gone. 0 for a connection
+    /// that has closed.
+    pub fn queued(self, conn: Conn) -> usize {
+        return unsafe { cx_net_queued(self.handle, conn.number) }
     }
 
     /// Queues the bytes to send on the connection. They go to the system at the next poll or

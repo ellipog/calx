@@ -11,7 +11,9 @@ import std.fs.{File, Kind, Metadata, is_dir, kind, list, open_read}
 import std.html.{escape}
 import std.io.{flush}
 import std.http.{Header}
-import std.net.{Conn, Event, Net, NetError}
+import std.net.{Conn, Event, Net, NetError, Waker}
+import std.process.{processors}
+import std.thread.{Task}
 import std.time.{DateTime, Instant, Timestamp}
 import std.url.{decode, encode}
 
@@ -128,6 +130,12 @@ struct Client {
     continued: bool
 }
 
+/// A file bigger than this, 4 MiB, `serve` sends in parts rather than reading it whole.
+const STREAM_FROM: u64 = 4194304
+/// A part of a file `serve` sends, 1 MiB, and how much it keeps queued on a connection, 4 MiB.
+const STREAM_PART: u64 = 1048576
+const STREAM_QUEUED: usize = 4194304
+
 /// A server listening on a port, whose `next` gives the requests that come to it.
 pub struct Server {
     /// The port it listens on, which the system picked if `listen` was given 0.
@@ -137,12 +145,60 @@ pub struct Server {
     /// The longest body it takes, in bytes. A longer one gets `413 Content Too Large`. 64 MB to
     /// start with.
     pub max_body: usize
+    /// Whether `serve` says where it's serving and logs each request to standard error, as
+    /// Python does. It does to start with.
+    pub log: bool
     net: Net
     clients: Map<u32, Client>
     ready: Deque<u32>
     events: List<Event>
     date: String
     date_second: i64
+    streams: List<Stream>
+}
+
+// A file `serve` is sending in parts after its response's head: where the next part starts, how
+// much is left, and whether the connection stays open after it.
+struct Stream {
+    conn: Conn
+    file: File
+    at: u64
+    left: u64
+    keep: bool
+}
+
+// The answer to a request from a folder: the whole response, or its head and an open file whose
+// bytes, as many as the `u64`, go after it.
+enum Answer {
+    Whole(Response)
+    Head(Response, File, u64)
+}
+
+// A worker's answer, with the request it answers.
+enum Served {
+    Whole(Request, Response)
+    Head(Request, Response, File, u64)
+}
+
+// A thread that answers requests from the folder `dir`, as `from_dir` does but for big files,
+// which it opens and leaves to be sent in parts, and hands each answer back, waking the poll.
+struct FileWorker {
+    jobs: Receiver<Request>
+    out: Sender<Served>
+    waker: Waker
+    dir: String
+}
+
+impl Task for FileWorker {
+    fn run(own self) {
+        while let req = self.jobs.wait() {
+            match answer_dir(self.dir, req, STREAM_FROM) {
+                Whole(res) => self.out.send(Served.Whole(req, res)),
+                Head(res, f, size) => self.out.send(Served.Head(req, res, f, size)),
+            }
+            self.waker.wake()
+        }
+    }
 }
 
 impl Server {
@@ -152,7 +208,7 @@ impl Server {
     pub fn listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError {
         let net = try Net.new()
         let p = try net.listen(host, port)
-        return Server { port: p, host: host.copy(), max_body: 67108864, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1 }
+        return Server { port: p, host: host.copy(), max_body: 67108864, log: true, net: net, clients: Map<u32, Client>(), ready: Deque<u32>(), events: List<Event>(), date: String(), date_second: -1, streams: List<Stream>() }
     }
 
     /// The address to open in a browser: `http://127.0.0.1:8000/`.
@@ -171,10 +227,8 @@ impl Server {
     pub fn next(mut self, timeout_ms: i64 = -1) -> Request? {
         let start = unsafe { Instant.now() }
         loop {
-            while let id = self.ready.pop_first() {
-                if let r = self.take(id) {
-                    return some(r)
-                }
+            if let r = self.take_ready() {
+                return some(r)
             }
             var wait = timeout_ms
             if timeout_ms >= 0 {
@@ -184,8 +238,25 @@ impl Server {
                 }
                 wait = timeout_ms - spent
             }
-            self.net.poll(wait, mut self.events)
-            for e in self.events {
+            self.poll_events(wait)
+        }
+    }
+
+    // The next request a connection has ready, if one has.
+    fn take_ready(mut self) -> Request? {
+        while let id = self.ready.pop_first() {
+            if let r = self.take(id) {
+                return some(r)
+            }
+        }
+        return none
+    }
+
+    // Waits up to `wait` milliseconds for the network, or forever if it's negative, and takes in
+    // what came: new connections, bytes, and connections that closed.
+    fn poll_events(mut self, wait: i64) {
+        self.net.poll(wait, mut self.events)
+        for e in self.events {
                 match e {
                     Accepted(c) => {
                         self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false })
@@ -206,7 +277,6 @@ impl Server {
                     Connected(_) => {}
                     Woken => {}
                 }
-            }
         }
     }
 
@@ -252,12 +322,7 @@ impl Server {
         if not self.clients.contains(id) or not self.clients[id].busy {
             return
         }
-        var keep = req.keep
-        for h in res.headers {
-            if same_name(h.name, "connection") and has_token(h.value, "close") {
-                keep = false
-            }
-        }
+        let keep = keeps_open(req, res)
         self.send(req.conn, req.method, keep, res)
         if keep {
             self.clients[id].busy = false
@@ -266,21 +331,143 @@ impl Server {
     }
 
     /// The folder `dir` served until the program is stopped, as `serve_dir` serves it, after a
-    /// line saying where to find it, for a server that's already listening.
+    /// line saying where to find it, for a server that's already listening. Files are opened and
+    /// read on worker threads, one for each processor up to 8, so many are served at once, and a
+    /// file bigger than 4 MiB is sent in parts as the connection takes them, so the memory it
+    /// takes doesn't grow with the file. Each request is logged to standard error, unless `log` is
+    /// false, which leaves out the line too.
     pub fn serve(mut self, dir: String) {
-        let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
-        println("Serving HTTP on {shown} port {self.port} ({self.url()}) ...")
-        flush()
+        if self.log {
+            let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
+            println("Serving HTTP on {shown} port {self.port} ({self.url()}) ...")
+            flush()
+        }
+        let waker = match self.net.waker() {
+            ok(w) => w,
+            err(_) => {
+                // Without a waker, nothing can hand answers back, so they're made here.
+                loop {
+                    if let req = self.next() {
+                        let res = from_dir(dir, req)
+                        if self.log {
+                            log_request(req, res.status)
+                        }
+                        self.respond(req, res)
+                    }
+                }
+            },
+        }
+        let jobs = Receiver<Request>()
+        var done = Receiver<Served>()
+        var to_workers = jobs.sender()
+        let count = usize(unsafe { processors() }).min(8).max(2)
+        for _ in 0..count {
+            // Each runs as long as the program does.
+            _ = unsafe { Thread.spawn(FileWorker { jobs: jobs.share(), out: done.sender(), waker: waker, dir: dir.copy() }) }
+        }
         loop {
-            if let req = self.next() {
-                let res = from_dir(dir, req)
-                log_request(req, res.status)
+            while let req = self.take_ready() {
+                to_workers.send(req)
+            }
+            while let d = done.next() {
+                self.finish(d)
+            }
+            self.pump()
+            // An answer just sent may have let a request that came behind it through.
+            if self.ready.is_empty() {
+                // Files being sent are topped up as their connections take them.
+                let wait: i64 = if self.streams.is_empty() { -1 } else { 1 }
+                self.poll_events(wait)
+            }
+        }
+    }
+
+    // A worker's answer sent, and logged.
+    fn finish(mut self, d: own Served) {
+        match d {
+            Whole(req, res) => {
+                if self.log {
+                    log_request(req, res.status)
+                }
                 self.respond(req, res)
+            },
+            Head(req, res, f, size) => {
+                if self.log {
+                    log_request(req, res.status)
+                }
+                self.start_stream(req, res, f, size)
+            },
+        }
+    }
+
+    // The head of `res`, the response to `req`, sent, then the file `f`'s `size` bytes in parts.
+    fn start_stream(mut self, req: Request, res: Response, f: own File, size: u64) {
+        let id = req.conn.id()
+        if not self.clients.contains(id) or not self.clients[id].busy {
+            close_quietly(f)
+            return
+        }
+        let keep = keeps_open(req, res)
+        let head = self.head_of(res, keep)
+        self.net.write(req.conn, head.to_bytes())
+        self.streams.push(Stream { conn: req.conn, file: f, at: 0, left: size, keep: keep })
+    }
+
+    // The next parts of each file being sent, for each connection that has taken most of what was
+    // queued on it. A file that's done, or can't be read, or whose connection closed, is closed.
+    fn pump(mut self) {
+        var i: usize = 0
+        while i < self.streams.len() {
+            let c = self.streams[i].conn
+            var failed = not self.clients.contains(c.id())
+            while not failed and self.streams[i].left > 0 and self.net.queued(c) < STREAM_QUEUED {
+                let want = usize.wrap(self.streams[i].left.min(STREAM_PART))
+                match self.streams[i].file.read_part(self.streams[i].at, want) {
+                    ok(bytes) => {
+                        let got = bytes.len()
+                        self.net.write(c, bytes)
+                        self.streams[i].at += u64(got)
+                        self.streams[i].left -= u64(got)
+                        // The file got shorter than the length its head said.
+                        failed = got < want
+                    },
+                    err(_) => failed = true,
+                }
+            }
+            if failed or self.streams[i].left == 0 {
+                let done = self.streams.swap_remove(i)
+                let keep = done.keep and not failed
+                close_quietly(done.file)
+                if not keep {
+                    self.net.close(c)
+                } else if self.clients.contains(c.id()) {
+                    self.clients[c.id()].busy = false
+                    self.ready.push_last(c.id())
+                }
+            } else {
+                i += 1
             }
         }
     }
 
     fn send(mut self, c: Conn, method: String, keep: bool, res: Response) {
+        let head = self.head_of(res, keep)
+        self.net.write(c, head.to_bytes())
+        let no_body = res.status < 200 or res.status == 204 or res.status == 304
+        if method != "HEAD" and not no_body and not res.body.is_empty() {
+            self.net.write(c, res.body)
+        }
+        if not keep {
+            self.net.close(c)
+        } else {
+            // Sent now, not at the next poll, which a program might not come back to soon.
+            self.net.flush()
+        }
+    }
+
+    // The status line and headers of `res`, with `Server`, `Date`, `Content-Length` where it has
+    // none, and `Connection: close` unless the connection stays open.
+    fn head_of(mut self, res: Response, keep: bool) -> String {
         let now = unsafe { Timestamp.now() }.unix_ms
         let second = now / 1000
         if second != self.date_second {
@@ -310,17 +497,20 @@ impl Server {
             head.push_str("Connection: close\r\n")
         }
         head.push_str("\r\n")
-        self.net.write(c, head.to_bytes())
-        if method != "HEAD" and not no_body and not res.body.is_empty() {
-            self.net.write(c, res.body)
-        }
-        if not keep {
-            self.net.close(c)
-        } else {
-            // Sent now, not at the next poll, which a program might not come back to soon.
-            self.net.flush()
+        return head
+    }
+}
+
+// Whether the connection stays open after `res`: the request asked for that, and `res` has no
+// `Connection: close`.
+fn keeps_open(req: Request, res: Response) -> bool {
+    var keep = req.keep
+    for h in res.headers {
+        if same_name(h.name, "connection") and has_token(h.value, "close") {
+            keep = false
         }
     }
+    return keep
 }
 
 // What reading a request found wrong, and how far it got.
@@ -796,8 +986,19 @@ pub fn reason(status: u16) -> str {
 /// - `304 Not Modified` for an `If-Modified-Since` the file hasn't changed since, `404` for a
 ///   file that isn't there, and `501` for a method other than `GET` and `HEAD`.
 pub fn from_dir(dir: String, req: Request) -> Response {
+    return match answer_dir(dir, req, u64.MAX) {
+        Whole(res) => res,
+        Head(res, f, _) => {
+            close_quietly(f)
+            res
+        },
+    }
+}
+
+// `from_dir`'s answer, with a file bigger than `stream_from` bytes left open to be sent in parts.
+fn answer_dir(dir: String, req: Request, stream_from: u64) -> Answer {
     if req.method != "GET" and req.method != "HEAD" {
-        return Response.error(501, "Unsupported method ({req.method})")
+        return Answer.Whole(Response.error(501, "Unsupported method ({req.method})"))
     }
     let trailing = req.path.ends_with("/")
     let windows = os() == "windows"
@@ -816,7 +1017,7 @@ pub fn from_dir(dir: String, req: Request) -> Response {
     for w in parts {
         // No file has a NUL in its name.
         if w.contains("\u{0}") {
-            return Response.error(404, "File not found")
+            return Answer.Whole(Response.error(404, "File not found"))
         }
         // A part with a drive or a `\` would name another place on Windows.
         if windows and (w.contains("\\") or w.contains(":")) {
@@ -833,14 +1034,14 @@ pub fn from_dir(dir: String, req: Request) -> Response {
         ok(f) => {
             if trailing {
                 close_quietly(f)
-                return Response.error(404, "File not found")
+                return Answer.Whole(Response.error(404, "File not found"))
             }
-            return serve_file(f, path, req)
+            return serve_file(f, path, req, stream_from)
         }
         err(e) => {
             match e {
                 IsDirectory => {}
-                _ => return Response.error(404, "File not found"),
+                _ => return Answer.Whole(Response.error(404, "File not found")),
             }
         }
     }
@@ -854,20 +1055,22 @@ pub fn from_dir(dir: String, req: Request) -> Response {
         raw = raw[0..h].copy()
     }
     if not raw.ends_with("/") and not raw.ends_with("%2f") and not raw.ends_with("%2F") {
-        return Response.redirect("{raw}/{tail}", 301)
+        return Answer.Whole(Response.redirect("{raw}/{tail}", 301))
     }
     for index in ["index.html", "index.htm"] {
         let candidate = join_path(path, index)
         match open_read(candidate) {
-            ok(f) => return serve_file(f, candidate, req),
+            ok(f) => return serve_file(f, candidate, req, stream_from),
             err(_) => {}
         }
     }
-    return listing(path, req)
+    return Answer.Whole(listing(path, req))
 }
 
-// The file `f`, open at `path`, as the response to `req`, closed after it's read.
-fn serve_file(f: own File, path: String, req: Request) -> Response {
+// The file `f`, open at `path`, as the answer to `req`, closed after it's read. A `HEAD` request
+// gets its length without its bytes being read, and one bigger than `stream_from` bytes is left
+// open to be sent in parts after the head.
+fn serve_file(f: own File, path: String, req: Request, stream_from: u64) -> Answer {
     var meta = Metadata { size: 0, modified: Timestamp { unix_ms: 0 }, mode: 0, kind: Kind.Other }
     match f.metadata() {
         ok(m) => meta = m,
@@ -875,7 +1078,7 @@ fn serve_file(f: own File, path: String, req: Request) -> Response {
     }
     if not is_plain_file(meta.kind) {
         close_quietly(f)
-        return Response.error(404, "File not found")
+        return Answer.Whole(Response.error(404, "File not found"))
     }
     let modified = meta.modified.unix_ms
     let seconds = if modified >= 0 { modified / 1000 } else { -((-modified + 999) / 1000) }
@@ -884,21 +1087,31 @@ fn serve_file(f: own File, path: String, req: Request) -> Response {
             if let ims = parse_http_date(since) {
                 if seconds * 1000 <= ims {
                     close_quietly(f)
-                    return Response { status: 304, headers: List<Header>(), body: List<u8>() }
+                    return Answer.Whole(Response { status: 304, headers: List<Header>(), body: List<u8>() })
                 }
             }
         }
+    }
+    if req.method == "HEAD" or meta.size > stream_from {
+        var res = Response.new(200, content_type(path), List<u8>())
+        res.headers.push(Header { name: "Content-Length", value: "{meta.size}" })
+        res.headers.push(Header { name: "Last-Modified", value: http_date(seconds * 1000) })
+        if req.method == "HEAD" {
+            close_quietly(f)
+            return Answer.Whole(res)
+        }
+        return Answer.Head(res, f, meta.size)
     }
     match f.read_part(0, usize.wrap(meta.size)) {
         ok(bytes) => {
             close_quietly(f)
             var res = Response.new(200, content_type(path), bytes)
             res.headers.push(Header { name: "Last-Modified", value: http_date(seconds * 1000) })
-            return res
+            return Answer.Whole(res)
         }
         err(_) => {
             close_quietly(f)
-            return Response.error(404, "File not found")
+            return Answer.Whole(Response.error(404, "File not found"))
         }
     }
 }

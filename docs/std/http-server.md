@@ -59,10 +59,11 @@ fn main() ! Error {
 | `Server.listen(port: u16, host: String = "127.0.0.1") -> Server ! NetError` | A server listening on `port` of `host`. 0 lets the system pick a port, and `""` listens on every address, IPv4 and IPv6, as `python -m http.server` does |
 | `server.port: u16`, `server.host: String` | The port and address it listens on |
 | `server.max_body: usize` | The longest body it takes, in bytes: 64 MB to start with. A longer one gets `413 Content Too Large` |
+| `server.log: bool` | Whether `serve` prints where it's serving and logs each request to standard error, as Python does: `true` to start with |
 | `server.url() -> String` | The address to open in a browser: `http://127.0.0.1:8000/` |
 | `server.next(timeout_ms: i64 = -1) -> Request?` | The next request, from whichever connection has one, waiting up to `timeout_ms` milliseconds for it, or forever if it's negative. `none` if none came in that time |
 | `server.respond(req: Request, res: Response)` | Sends `res` as the answer to `req` |
-| `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it |
+| `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files read on worker threads and big ones sent in parts ([below](#serving-a-folder)) |
 | `Request` | `method`, `GET` or `POST` or another, as it was sent. `target`, the path and query still percent-encoded: `/find?q=a%20b`. `path`, decoded, without the query: `/find`. `query`, what's after the `?`, as it was sent. `version`, `HTTP/1.1` or `HTTP/1.0`. `headers: List<Header>`, in the order they came. `body: List<u8>`. And `client`, the address it came from |
 | `req.header(name: String) -> String?` | The first header named `name`, in any case |
 | `req.text() -> String?` | The body as text, or `none` if it isn't UTF-8 |
@@ -107,7 +108,12 @@ Some requests are answered by the server itself, without coming from `next`, and
 - **Headers.** A file comes with its `Content-Type`, from `content_type`, and its `Last-Modified` time. It gets `304 Not Modified` if the request's `If-Modified-Since` is the same or later, unless the request has an `If-None-Match`.
 - **Errors.** A file or folder that isn't there gets `404 File not found`. A method other than `GET` and `HEAD` gets `501`.
 
-`serve_dir` serves `from_dir`'s answers, after a first line saying where, and logs each request to standard error as Python's `log_message` does:
+`serve_dir`, and `serve` on a server of the program's own, answer as `from_dir` does, but not one at a time:
+
+- **Worker threads.** Files are opened, looked at and read on worker threads, one for each processor up to 8, which hand each answer back to the event loop. So many requests are answered at once, and a slow disk holds up only the requests waiting on it.
+- **Big files in parts.** A file bigger than 4 MiB isn't read whole. Its headers go first, then its bytes 1 MiB at a time, topped up as the connection takes them, with at most 4 MiB queued on each connection. So the memory a download takes doesn't grow with the file, and a request that comes behind it on the same connection is answered after it. A `HEAD` request gets the file's length without its bytes being read, from `from_dir` too.
+
+They print a first line saying where, and log each request to standard error as Python's `log_message` does, unless `log` is `false`:
 
 ```text
 Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
@@ -117,10 +123,10 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 ## Where it differs from Python
 
 - **Loopback.** It listens on `127.0.0.1` unless it's given another address, where `python -m http.server` listens on every address.
-- **One thread.** Requests are answered one at a time, in the thread that calls `next`, so a slow answer holds up the rest. Python's `ThreadingHTTPServer`, which `python -m http.server` runs, gives each connection a thread.
+- **Threads.** A program's own loop gets requests one at a time, in the thread that calls `next`, so a slow answer holds up the rest. `serve_dir` reads files on up to 8 worker threads. Python's `ThreadingHTTPServer`, which `python -m http.server` runs, gives each connection a thread.
 - **Kept open.** It speaks HTTP/1.1 and keeps connections open. Python's handler speaks HTTP/1.0 unless it's set otherwise, and closes each connection after one answer.
 - **Types.** They come from a table of 52 extensions, the same on every machine, and text types are given with `; charset=utf-8`. Python's come from `mimetypes`, which on Windows also reads the registry, so they can differ from machine to machine.
-- **Whole files.** A file is read whole before it's sent, so a file of several gigabytes needs that much memory. Python sends it in parts as it reads it.
+- **Whole files from `from_dir`.** `from_dir` reads a file whole, so a program's own loop needs a file's size in memory to send it. `serve_dir` sends files bigger than 4 MiB in parts, as Python does.
 - **No HTTPS.** Python 3.14's `--tls-cert` has no match here yet.
 - **A zero byte.** A path with `%00` in it gets `404`. Python's handler raises an error at it and closes the connection without an answer.
 - **Pages.** Error pages and folder listings are its own short HTML, with the same statuses, links and names as Python's.
@@ -146,17 +152,20 @@ They answered the same to all but `/%00`, where Python's handler fails.
 
 These numbers are from our benchmark, so take them as rough:
 
-- **Machine:** an i9-13900K with other work running, the best of three runs.
-- **Load:** 16 connections kept open at once, from a small load tool written in Rust, on loopback.
-- **Requests:** `/hello` answers `hello` from the program, and the files are served from a folder.
+- **Machine:** an i9-13900K with other work running, the server pinned to its performance cores and the load tool to its efficiency cores, the better of two rounds taken in turn.
+- **Load:** 16 connections kept open at once, from a small load tool written in Rust, on loopback, for 5 seconds.
+- **Requests:** files served from a folder by `serve`, with logging off.
 - **Comparisons:**
   - Python 3.14's `ThreadingHTTPServer` with `SimpleHTTPRequestHandler`, set to HTTP/1.1 so connections stay open, and logging off;
-  - Rust 1.91 with axum 0.8.9 and tower-http 0.6.11's `ServeDir`, built for release on tokio's one-thread runtime, as Calx's server runs on one thread.
+  - Rust 1.91 with axum 0.8.9 and tower-http 0.6.11's `ServeDir`, built for release on tokio's multi-thread runtime with 8 threads.
 
-| Requests a second | Calx | Python | Rust |
-| --- | --- | --- | --- |
-| `/hello` | 89,400 | 9,400 | 71,000 |
-| A 1 KB file | 7,670 | 1,880 | 7,140 |
-| A 1 MB file | 1,260 | 954 | 1,340 |
+| Requests a second | Calx | Calx before | Python | Rust |
+| --- | --- | --- | --- | --- |
+| A 1 KB file | 39,400 | 20,500 | 3,630 | 20,400 |
+| A 1 MB file | 2,370 | 2,250 | 3,300 | 5,410 |
+| A 64 MB file | 30 | 33 | 87 | 75 |
+| Most memory, all three | 152 MB | 2,120 MB | 60 MB | 17 MB |
 
-Serving a file costs more than answering from the program, as each one is opened, looked at, read and closed. On Windows that's most of the time, and Calx opens each file once, asking the open file its size and time.
+- *Calx before* is the same requests answered one at a time on the event loop's thread, each file read whole, as `serve` did before it had workers. Its 64 MB file needed 64 MB for each connection.
+- A small file costs its open, its look and its close, which on Windows take most of the time, so the workers serve twice as many. Each file is opened once, and asked its size and time.
+- Big files are bounded by the event loop's thread, which copies each byte into the connection's queue before the system sends it: about 2.4 GB a second. Python's threads and tokio's each copy their own connections' bytes, and send faster.

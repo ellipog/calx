@@ -1,0 +1,119 @@
+// std.http.server's serve, on a thread of its own, answers from its worker threads (CLX-169): a
+// file bigger than 4 MiB sent in parts, byte for byte, its length for HEAD, a request that came
+// behind it on the same connection, and several connections at once.
+import std.fs.{make_dir_all, remove_dir_all, temp_dir, write}
+import std.http.server.{Server}
+import std.net.{Event, Net}
+import std.thread.{Task}
+
+struct Serving {
+    dir: String
+    port: Sender<u16>
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var server = Server.listen(0)!
+        server.log = false
+        self.port.send(server.port)
+        server.serve(self.dir)
+    }
+}
+
+// What comes back for `raw` on a new connection, until `want` bytes have come, the server closes
+// it, or nothing comes for 5 seconds.
+fn fetch(net: Net, port: u16, raw: String, want: usize) -> List<u8> {
+    let c = net.connect("127.0.0.1", port)!
+    net.write(c, raw.to_bytes())
+    var got = List<u8>()
+    var events = List<Event>()
+    while got.len() < want {
+        net.poll(5000, mut events)
+        if events.is_empty() {
+            break
+        }
+        for e in events {
+            match e {
+                Received(x) => {
+                    _ = net.read(x, mut got)
+                },
+                Closed(_) => return got,
+                _ => {},
+            }
+        }
+    }
+    net.close(c)
+    return got
+}
+
+// Where the head that starts at `from` ends, after its blank line.
+fn head_end(bytes: List<u8>, from: usize) -> usize {
+    var i = from
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'\r' and bytes[i + 1] == b'\n' and bytes[i + 2] == b'\r' and bytes[i + 3] == b'\n' {
+            return i + 4
+        }
+        i += 1
+    }
+    return bytes.len()
+}
+
+// The status line and the Content-Length of the head in `bytes` from `from` to `to`.
+fn status_and_length(bytes: List<u8>, from: usize, to: usize) -> (String, usize) {
+    let head = String.from_utf8(bytes[from..to]) ?? String()
+    var length: usize = 0
+    for line in head.lines() {
+        if line.starts_with("Content-Length: ") {
+            length = usize.parse(line[16..]) ?? 0
+        }
+    }
+    return (head.lines()[0].copy(), length)
+}
+
+fn main() {
+    let dir = "{temp_dir()!}/calx_http_serve_test"
+    make_dir_all(dir)!
+    var big = List<u8>()
+    big.reserve(9437184)
+    for i in 0..9437184 {
+        big.push(u8.wrap((i * 7 + i / 1000) % 251))
+    }
+    write("{dir}/big.bin", big)!
+    write("{dir}/small.txt", "small".to_bytes())!
+
+    var ports = Receiver<u16>()
+    _ = unsafe { Thread.spawn(Serving { dir: dir.copy(), port: ports.sender() }) }
+    let port = ports.wait()!
+    let net = Net.new()!
+
+    // The big file, sent in parts.
+    let got = fetch(net, port, "GET /big.bin HTTP/1.1\r\nConnection: close\r\n\r\n", 9437184 + 1000)
+    let end = head_end(got, 0)
+    let (status, length) = status_and_length(got, 0, end)
+    println("{status} {length} {got[end..] == big}")    // out: HTTP/1.1 200 OK 9437184 true
+
+    // HEAD: the length, without the bytes.
+    let head = fetch(net, port, "HEAD /big.bin HTTP/1.1\r\nConnection: close\r\n\r\n", 1048576)
+    let head_stop = head_end(head, 0)
+    let (head_status, head_length) = status_and_length(head, 0, head_stop)
+    println("{head_status} {head_length} {head.len() - head_stop}")    // out: HTTP/1.1 200 OK 9437184 0
+
+    // A request behind the big file on the same connection is answered after it.
+    let two = fetch(net, port, "GET /big.bin HTTP/1.1\r\n\r\nGET /small.txt HTTP/1.1\r\nConnection: close\r\n\r\n", 9437184 + 2000)
+    let e1 = head_end(two, 0)
+    let (s1, l1) = status_and_length(two, 0, e1)
+    let e2 = head_end(two, e1 + l1)
+    let (s2, l2) = status_and_length(two, e1 + l1, e2)
+    println("{s1} {two[e1..e1 + l1] == big} {s2} {String.from_utf8(two[e2..e2 + l2]) ?? String()}")    // out: HTTP/1.1 200 OK true HTTP/1.1 200 OK small
+
+    // Several connections at once.
+    var answered = 0
+    for _ in 0..6 {
+        let one = fetch(net, port, "GET /small.txt HTTP/1.1\r\nConnection: close\r\n\r\n", 1000)
+        if one.len() > 5 and String.from_utf8(one[one.len() - 5..]) == some(String("small")) {
+            answered += 1
+        }
+    }
+    println("{answered}")    // out: 6
+    remove_dir_all(dir)!
+}
