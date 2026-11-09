@@ -89,8 +89,11 @@ static cx_u64 zse_cycles[8];
 #define OF_LOG 8
 #define HUF_LOG 11
 #define MAGIC 0xFD2FB528u
-/* Literals fewer than this go raw: a tree costs more than it saves. */
+/* Literals fewer than this get no new Huffman code: a tree costs more than it saves. */
 #define HUF_MIN 32
+/* Literals fewer than this go raw even when the last block's code, or a dictionary's, could code
+ * them without a tree, as in libzstd. */
+#define HUF_KEPT_MIN 6
 /* How many bytes a hash or a match's first check reads past where it starts. */
 #define READ 8
 
@@ -2717,24 +2720,36 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
         out[raw_head] = lit[0];
         return raw_head + 1;
     }
-    if (huf_allowed && n >= HUF_MIN && distinct >= 2) {
+    /* From 6 literals with a code to keep: after a trained dictionary most small inputs have fewer
+     * than 32, which went raw at 8 bits each; on our small files coding them with the dictionary's
+     * is 0.4 to 1.1% smaller from level 1 to 11. */
+    if (huf_allowed && distinct >= 2 && (n >= HUF_MIN || (prev->huf_ok && n >= HUF_KEPT_MIN))) {
         const int four = n >= 256;
         const cx_usize streams = four ? 6 : 0;
         /* The last block's code, if it has every symbol there is. */
         cx_u64 bits_old = 0;
         int old_ok = prev->huf_ok;
-        for (cx_u32 s = 0; s <= max; s++) {
-            const cx_u32 ol = prev->huf[s] >> 16;
-            old_ok &= count[s] == 0 || ol != 0;
-            bits_old += (cx_u64)count[s] * ol;
+        if (n < HUF_MIN) {
+            /* Fewer literals than symbols, most likely: each one's length. */
+            for (cx_usize i = 0; i < n; i++) {
+                const cx_u32 ol = prev->huf[lit[i]] >> 16;
+                old_ok &= ol != 0;
+                bits_old += ol;
+            }
+        } else {
+            for (cx_u32 s = 0; s <= max; s++) {
+                const cx_u32 ol = prev->huf[s] >> 16;
+                old_ok &= count[s] == 0 || ol != 0;
+                bits_old += (cx_u64)count[s] * ol;
+            }
         }
         const cx_usize est_old = old_ok ? streams + (bits_old + 7) / 8 + (four ? 3 : 0) : ~(cx_usize)0;
         /* A new code takes no fewer bits than the literals' entropy, worked out with lg8 and 3/256
          * bits a literal taken off for its error, as pick_table does, and its tree 2 bytes at least.
          * When that's no less than the last block's, as after a dictionary on most small inputs,
          * it isn't made: the last block's would be chosen all the same. */
-        int skip_new = 0;
-        if (old_ok) {
+        int skip_new = n < HUF_MIN;
+        if (old_ok && !skip_new) {
             cx_i64 low = (cx_i64)n * lg8((cx_u32)n) - 3 * (cx_i64)n;
             for (cx_u32 s = 0; s <= max; s++) low -= count[s] < CLG_N ? CLG[count[s]] : (cx_i64)count[s] * lg8(count[s]);
             const cx_u64 low_bits = low > 0 ? ((cx_u64)low + 255) >> 8 : 0;
