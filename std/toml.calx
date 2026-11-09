@@ -307,7 +307,8 @@ fn key_value(text: String, at: mut usize, d: mut Doc, t: u32) ! TomlError {
     d.tables[ti].insert(first, v)
 }
 
-// One part of a key at `at`: bare, or a basic or literal string.
+// One part of a key at `at`: bare, or a basic or literal string. It's interned, since an array
+// of tables, such as a lock file's, repeats the same keys, which then share one copy (CLX-202).
 fn key_part(text: String, at: mut usize) -> String ! TomlError {
     if at < text.len() {
         let b = text.byte_at(at)
@@ -317,13 +318,15 @@ fn key_part(text: String, at: mut usize) -> String ! TomlError {
             while at < text.len() and is_bare(text.byte_at(at)) {
                 at += 1
             }
-            return text[start..at].copy()
+            return text[start..at].interned()
         }
         if b == b'"' {
-            return try basic(text, mut at)
+            let key = try basic(text, mut at)
+            return key.interned()
         }
         if b == b'\'' {
-            return try literal(text, mut at)
+            let key = try literal(text, mut at)
+            return key.interned()
         }
     }
     fail error_at(text, at, "{found(text, at)} where a key should be")

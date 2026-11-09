@@ -279,7 +279,7 @@ The fields can be of these types:
 
 [std/toml.calx](../../std/toml.calx) is written in Calx from TOML 1.0's spec. A header can add to a table that's already there, as can a dotted key, so `parse` builds tables by number, each with its values and the numbers of the tables it holds. At the end it makes them into `Toml` values from the last back, since each table's own tables come after it. A table remembers whether a header named it, or which section's dotted keys made it, which is how it knows what TOML lets add to it. An inline table is made into a value at its `}`.
 
-The text is read a byte at a time, and the runs of a string between its escapes are copied whole.
+The text is read a byte at a time, and the runs of a string between its escapes are copied whole. Keys are [interned](../reference/strings.md#interned-strings), so an array of tables, such as a lock file's, shares one copy of each key.
 
 ## Checked against Python
 
