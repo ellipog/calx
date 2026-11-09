@@ -148,6 +148,10 @@ static inline cx_u32 lg8(cx_u32 x) {
     return (hb << 8) + FRAC[m - 256];
 }
 
+/* c lg c, in 1/256 bits, for the counts most often met. */
+#define CLG_N 4096
+static cx_u32 CLG[CLG_N];
+
 /* --- tables ---------------------------------------------------------------------------------- */
 
 static const cx_u32 LL_BASE[LL_MAX + 1] = {0,  1,  2,  3,  4,  5,  6,   7,   8,   9,   10,   11,   12,   13,   14,    15,    16,    18,
@@ -290,68 +294,61 @@ static inline void ct_put(bw_t* w, const ct_t* ct, cx_u32* x, cx_u32 s) {
 }
 
 /* Probabilities for count[0..max] over `total`, summing to 2^log, each symbol that's there at least
- * 1: each rounded, then nudged a slot at a time where it costs least, by count / slots. */
-static void normalize(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 log, cx_i16* norm) {
+ * 1: each rounded, then nudged a slot at a time where it costs least, by count / slots. Gives what
+ * the counts cost with them. */
+static cx_u64 normalize(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 log, cx_i16* norm) {
     const cx_u32 size = 1u << log;
+    /* The symbols there are, in order, so the passes below go over only them, and ties go to the
+     * first as before. A count is at most 2^17 and size 2^9, so the rounding fits in 32 bits. */
+    cx_u32 sym[64], cnt[64], nv[64];
+    cx_u32 k = 0;
     cx_i32 sum = 0;
     for (cx_u32 s = 0; s <= max; s++) {
-        if (count[s] == 0) {
-            norm[s] = 0;
-            continue;
-        }
-        cx_u32 n = (cx_u32)(((cx_u64)count[s] * size + total / 2) / total);
+        norm[s] = 0;
+        if (count[s] == 0) continue;
+        cx_u32 n = (count[s] * size + total / 2) / total;
         if (n < 1) n = 1;
-        norm[s] = (cx_i16)n;
+        sym[k] = s;
+        cnt[k] = count[s];
+        nv[k++] = n;
         sum += (cx_i32)n;
     }
     while (sum > (cx_i32)size) {
-        /* Take a slot from the symbol it costs least, count / (n - 1/2). */
+        /* Take a slot from the symbol it costs least, count / (n - 1/2), starting from 1/0. There's
+         * always one with more than 1, as there are no more symbols than slots. */
         cx_u32 best = 0;
-        cx_u64 bc = 0, bn = 0;
-        int found = 0;
-        for (cx_u32 s = 0; s <= max; s++) {
-            if (norm[s] <= 1) continue;
-            const cx_u64 c = count[s], n = 2 * (cx_u64)norm[s] - 1;
-            if (!found || c * bn < bc * n) {
-                best = s;
-                bc = c;
-                bn = n;
-                found = 1;
-            }
+        cx_u64 bc = 1, bn = 0;
+        for (cx_u32 j = 0; j < k; j++) {
+            const cx_u64 c = cnt[j], n = 2 * (cx_u64)nv[j] - 1;
+            const int take = nv[j] > 1 && c * bn < bc * n;
+            best = take ? j : best;
+            bc = take ? c : bc;
+            bn = take ? n : bn;
         }
-        norm[best]--;
+        nv[best]--;
         sum--;
     }
     while (sum < (cx_i32)size) {
         /* Give one to the symbol it helps most, count / (n + 1/2). */
         cx_u32 best = 0;
         cx_u64 bc = 0, bn = 1;
-        for (cx_u32 s = 0; s <= max; s++) {
-            if (count[s] == 0) continue;
-            const cx_u64 c = count[s], n = 2 * (cx_u64)norm[s] + 1;
-            if (c * bn > bc * n) {
-                best = s;
-                bc = c;
-                bn = n;
-            }
+        for (cx_u32 j = 0; j < k; j++) {
+            const cx_u64 c = cnt[j], n = 2 * (cx_u64)nv[j] + 1;
+            const int give = c * bn > bc * n;
+            best = give ? j : best;
+            bc = give ? c : bc;
+            bn = give ? n : bn;
         }
-        norm[best]++;
+        nv[best]++;
         sum++;
     }
-}
-
-/* What a stream of count[0..max] costs in 1/256 bits with norm at accuracy `log`, or ~0 if norm
- * lacks a symbol there is. */
-static cx_u64 fse_cost(const cx_u32* count, cx_u32 max, const cx_i16* norm, cx_u32 norm_max, cx_u32 log) {
-    if (max > norm_max) return ~(cx_u64)0;
-    cx_u64 c = 0;
-    for (cx_u32 s = 0; s <= max; s++) {
-        if (!count[s]) continue;
-        if (norm[s] == 0) return ~(cx_u64)0;
-        const cx_u32 n = norm[s] == -1 ? 1 : (cx_u32)norm[s];
-        c += (cx_u64)count[s] * ((log << 8) - lg8(n));
+    /* And what the counts cost with them, in 1/256 bits. */
+    cx_u64 cost = 0;
+    for (cx_u32 j = 0; j < k; j++) {
+        norm[sym[j]] = (cx_i16)nv[j];
+        cost += (cx_u64)cnt[j] * ((log << 8) - lg8(nv[j]));
     }
-    return c;
+    return cost;
 }
 
 /* Writes norm[0..max] as the decoder reads a table's description: gives the bytes. */
@@ -714,12 +711,33 @@ static cx_usize huf_streams(const cx_u32* ct, const cx_u8* src, cx_usize n, int 
 
 enum { T_NONE, T_PRE, T_RLE, T_FSE };
 
-/* A table the sequences were coded with, which the next block may repeat. */
+/* A table the sequences were coded with, which the next block may repeat. cost[s] is what a code
+ * s costs with it in 1/256 bits, or COST_BAD for one it can't code. */
 typedef struct {
     cx_u32 kind, log, max, rle;
     cx_i16 norm[64];
+    cx_u32 cost[64];
     ct_t ct;
 } tab_t;
+
+/* Above what any block's codes can cost: 2^17 of them at 9 bits each is under 2^29. */
+#define COST_BAD (1u << 31)
+
+static void tab_costs(tab_t* t) {
+    for (cx_u32 s = 0; s < 64; s++) {
+        const cx_i32 c = s <= t->max ? t->norm[s] : 0;
+        t->cost[s] = c == 0 ? COST_BAD : (t->log << 8) - lg8(c < 0 ? 1 : (cx_u32)c);
+    }
+}
+
+/* What count[0..max] costs with t, in 1/256 bits, or ~0 if t lacks a symbol there is: without a
+ * branch for each symbol, as most counts are 0. */
+static cx_u64 tab_cost(const tab_t* t, const cx_u32* count, cx_u32 max) {
+    if (max > t->max) return ~(cx_u64)0;
+    cx_u64 c = 0;
+    for (cx_u32 s = 0; s <= max; s++) c += (cx_u64)count[s] * t->cost[s];
+    return c >= COST_BAD ? ~(cx_u64)0 : c;
+}
 
 /* What a block leaves for the next: its Huffman codes, its three tables, its repeated offsets. */
 typedef struct {
@@ -2387,10 +2405,8 @@ static tab_t PRE_LL, PRE_OF, PRE_ML;
 static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx_u32* count, cx_u32 max, cx_u32 n, cx_u32 log_max, cx_u8* out, cx_usize* took) {
     cx_u32 distinct = 0, one = 0;
     for (cx_u32 s = 0; s <= max; s++) {
-        if (count[s]) {
-            distinct++;
-            one = s;
-        }
+        distinct += count[s] != 0;
+        one = count[s] ? s : one;
     }
     *took = 0;
     if (distinct == 1 && prev->kind == T_RLE && prev->rle == one) {
@@ -2400,13 +2416,13 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     /* In 1/256 bits. */
     cx_u64 best = ~(cx_u64)0;
     cx_u32 mode = 0;
-    const cx_u64 pre_cost = fse_cost(count, max, pre->norm, pre->max, pre->log);
+    const cx_u64 pre_cost = tab_cost(pre, count, max);
     if (pre_cost != ~(cx_u64)0) {
         best = pre_cost;
         mode = 0;
     }
     if (prev->kind == T_FSE || prev->kind == T_PRE) {
-        const cx_u64 c = fse_cost(count, max, prev->norm, prev->max, prev->log);
+        const cx_u64 c = tab_cost(prev, count, max);
         if (c < best) {
             best = c;
             mode = 3;
@@ -2433,6 +2449,21 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     if (hi < lo) hi = lo;
     /* The two largest: a smaller table seldom pays for what its description saves. */
     if (hi - lo > 1) lo = hi - 1;
+    /* No table of its own codes the counts in fewer bits than their entropy, and its description
+     * takes at least `lo` bits for the first count and, for each symbol after, as many as the slots
+     * left have below their highest. When that's no less than the best, as on most small inputs
+     * after a dictionary, it isn't made. lg8 is from 1.874/256 bits below log2 to 0.494 above, so
+     * the entropy computed with it is at most 2.862/256 bits a code over what a table's cost
+     * computed with it can come to: 3 a code are taken off. */
+    /* The k-th symbol from the last has at least k + 1 slots left when it's written. */
+    cx_u32 after = 0;
+    for (cx_u32 k = 2; k <= distinct; k++) after += high_bit(k);
+    if (best != ~(cx_u64)0) {
+        cx_i64 low = (cx_i64)n * lg8(n) - 3 * (cx_i64)n;
+        for (cx_u32 s = 0; s <= max; s++) low -= count[s] < CLG_N ? CLG[count[s]] : (cx_i64)count[s] * lg8(count[s]);
+        low += (cx_i64)((4 + lo + after + 7) >> 3) << 11;
+        if (low >= (cx_i64)best) goto chosen;
+    }
     cx_i16 bnorm[64];
     cx_u32 blog = 0;
     cx_u8 bdesc[128];
@@ -2440,10 +2471,12 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     int fresh = 0;
     for (cx_u32 log = lo; log <= hi && log <= log_max; log++) {
         cx_i16 norm[64];
-        normalize(count, max, n, log, norm);
+        const cx_u64 fc = normalize(count, max, n, log, norm);
+        /* Not described if even the shortest description wouldn't make it the best. */
+        if (fc + ((cx_u64)((4 + log + after + 7) >> 3) << 11) >= best) continue;
         cx_u8 desc[128];
         const cx_usize dn = write_counts(norm, max, log, desc);
-        const cx_u64 c = fse_cost(count, max, norm, max, log) + ((cx_u64)dn << 11);
+        const cx_u64 c = fc + ((cx_u64)dn << 11);
         if (c < best) {
             best = c;
             mode = 2;
@@ -2460,6 +2493,7 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
         t->max = max;
         memcpy(t->norm, bnorm, sizeof bnorm);
         build_ct(&t->ct, t->norm, max, blog);
+        tab_costs(t);
         memcpy(out, bdesc, bdesc_n);
         *took = bdesc_n;
         return 2;
@@ -2748,9 +2782,6 @@ typedef struct {
 
 /* What a symbol costs under the predefined tables, in 1/256 bits, or 1 << 16 if they lack it. */
 static cx_u32 PRE_COST[3][64];
-/* c lg c, in 1/256 bits, for the counts most often met. */
-#define CLG_N 4096
-static cx_u32 CLG[CLG_N];
 
 /* lg8's fractions, 32 bits each, for gathering. */
 static cx_u32 FRAC32[256];
@@ -3055,6 +3086,9 @@ static void tables_init(void) {
     PRE_OF.max = 28;
     memcpy(PRE_OF.norm, OF_NORM, sizeof OF_NORM);
     build_ct(&PRE_OF.ct, PRE_OF.norm, 28, 5);
+    tab_costs(&PRE_LL);
+    tab_costs(&PRE_ML);
+    tab_costs(&PRE_OF);
     for (cx_u32 c = 1; c < CLG_N; c++) CLG[c] = c * lg8(c);
     for (int i = 0; i < 256; i++) FRAC32[i] = FRAC[i];
     const tab_t* pre[3] = {&PRE_LL, &PRE_ML, &PRE_OF};
@@ -3248,6 +3282,7 @@ static void dict_build(ent_t* e, const cx_u8* P) {
         memset(x->norm, 0, sizeof x->norm);
         for (cx_u32 s = 0; s <= x->max; s++) x->norm[s] = (cx_i16)(cx_u16)(q[2 + 2 * s] | (cx_u32)q[3 + 2 * s] << 8);
         build_ct(&x->ct, x->norm, x->max, x->log);
+        tab_costs(x);
     }
     for (int i = 0; i < 3; i++) e->rep[i] = ld32(P + DP_REP + 4 * i);
 }
@@ -3394,20 +3429,28 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
         }
         break;
     default: {
-        /* Hash rows: each row's positions, and its tags with its head first. */
+        /* Hash rows: each row's positions, and its tags with its head first, copied whole with
+         * the row's size known, so the copies are a few vector moves. */
         const cx_u32 rlog = J->rlog, hb = J->p.hlog - rlog + 8;
+        cx_u32* const pos = w->hash;
         cx_u8* const tags = (cx_u8*)w->chain;
-        const cx_u8* const from = (const cx_u8*)d->chain;
+        const cx_u32* const dpos = d->hash;
+        const cx_u8* const dtags = (const cx_u8*)d->chain;
         if ((n << rlog) * 2 > d->hash_n) {
             memcpy(w->hash, d->hash, d->hash_n * 4);
             memcpy(w->chain, d->chain, d->chain_n * 4);
             break;
         }
-        for (cx_u32 i = lo; i < hi; i++) {
-            const cx_u32 at = (hash_at(base + i, mml, hb) >> 8) << rlog;
-            memcpy(w->hash + at, d->hash + at, (cx_usize)4 << rlog);
-            memcpy(tags + at, from + at, (cx_usize)1 << rlog);
-        }
+#define ROWS_BACK(R)                                                      \
+    for (cx_u32 i = lo; i < hi; i++) {                                    \
+        const cx_u32 at = (hash_at(base + i, mml, hb) >> 8) << (R);       \
+        memcpy(pos + at, dpos + at, (cx_usize)4 << (R));                  \
+        memcpy(tags + at, dtags + at, (cx_usize)1 << (R));                \
+    }
+        if (rlog == 4) ROWS_BACK(4)
+        else if (rlog == 5) ROWS_BACK(5)
+        else ROWS_BACK(6)
+#undef ROWS_BACK
         break;
     }
     }
