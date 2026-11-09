@@ -1,7 +1,7 @@
 // std.http.server's serve, on a thread of its own, answers from its worker threads (CLX-169): a
 // big file sent by the system from the file (CLX-198), byte for byte, its length for HEAD, a
-// request that came behind it on the same connection, a second big file behind the first, which
-// goes in parts, and several connections at once.
+// request that came behind it on the same connection, a second big file behind the first, queued
+// behind it in the runtime, and several connections at once.
 import std.fs.{make_dir_all, remove_dir_all, temp_dir, write}
 import std.http.server.{Server}
 import std.net.{Event, Net}
@@ -108,7 +108,7 @@ fn main() {
     println("{s1} {two[e1..e1 + l1] == big} {s2} {String.from_utf8(two[e2..e2 + l2]) ?? String()}")    // out: HTTP/1.1 200 OK true HTTP/1.1 200 OK small
 
     // Two big files on one connection: the second is asked for while the system sends the first,
-    // so it goes in parts after it.
+    // so the runtime queues it behind the first.
     let three = fetch(net, port, "GET /big.bin HTTP/1.1\r\n\r\nGET /big.bin HTTP/1.1\r\n\r\nGET /small.txt HTTP/1.1\r\nConnection: close\r\n\r\n", 2 * 9437184 + 3000)
     let f1 = head_end(three, 0)
     let (_, m1) = status_and_length(three, 0, f1)

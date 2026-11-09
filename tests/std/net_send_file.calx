@@ -1,6 +1,6 @@
 // std.net's send_file: a range of a file sent after what was written before it, with what's
 // written after it following it, from a handle the runtime keeps after the program closes the
-// file; one file at a time on a connection; a range past the end of the file closing the
+// file; a second file queued behind the first, with what's written between them between them; a range past the end of the file closing the
 // connection where the file ends; and a client that goes while a file is sent to it, which ends
 // the connection, not the program, as Linux's SIGPIPE would.
 import std.fs.{open_read, remove_dir_all, temp_dir, write}
@@ -24,9 +24,16 @@ fn main() {
     write(path, data)!
 
     let head = "head:".to_bytes()
+    let mid = "mid:".to_bytes()
     let tail = "tail".to_bytes()
     var expect = head.copy()
     for i in FROM..FROM + COUNT {
+        expect.push(pattern(i))
+    }
+    for b in mid {
+        expect.push(b)
+    }
+    for i in 0usize..10 {
         expect.push(pattern(i))
     }
     for b in tail {
@@ -62,9 +69,10 @@ fn main() {
                     if accepted == 1 {
                         net.write(c, head)
                         println("first: {net.send_file(c, f, u64(FROM), u64(COUNT))}")    // out: first: true
-                        println("second: {net.send_file(c, f, 0, 10)}")                   // out: second: false
+                        net.write(c, mid)
+                        println("second: {net.send_file(c, f, 0, 10)}")                   // out: second: true
                         net.write(c, tail)
-                        println("queued: {net.queued(c)}")                                 // out: queued: 2500009
+                        println("queued: {net.queued(c)}")                                 // out: queued: 2500023
                         // The runtime has a handle of its own, so the program's can go.
                         f.close()!
                         net.close(c)
@@ -105,7 +113,7 @@ fn main() {
                 Closed(c) => {
                     closed += 1
                     if role[c.slot()] == 1 {
-                        println("whole range: {got[c.slot()]} bytes")                     // out: whole range: 2500009 bytes
+                        println("whole range: {got[c.slot()]} bytes")                     // out: whole range: 2500023 bytes
                         let again = net.connect("127.0.0.1", port)!
                         role[again.slot()] = 2
                     } else if role[c.slot()] == 2 {

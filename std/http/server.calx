@@ -131,8 +131,7 @@ struct Client {
 }
 
 /// A file of this size or more, 64 KiB, `serve` doesn't read: it leaves the system to send it
-/// from the file, with `Net.send_file`, or sends it in parts if the connection is sending a file
-/// already.
+/// from the file, with `Net.send_file`, or sends it in parts if the system can't open it again.
 const SEND_FROM: u64 = 65536
 /// A part of a file `serve` sends, 1 MiB, and how much it keeps queued on a connection, 4 MiB.
 const STREAM_PART: u64 = 1048576
@@ -403,9 +402,9 @@ impl Server {
     }
 
     // The head of `res`, the response to `req`, sent, then the file `f`'s `size` bytes: by the
-    // system from the file, or in parts if the connection is sending a file already. The system's
-    // way, the runtime keeps what's written after the file behind it, so the connection's next
-    // request can be answered at once.
+    // system from the file, or in parts if it can't open the file again. The system's way, the
+    // runtime queues the file, and what's written after it, behind what the connection is sending
+    // already, so the connection's next request can be answered at once.
     fn start_stream(mut self, req: Request, res: Response, f: own File, size: u64) {
         let id = req.conn.id()
         if not self.clients.contains(id) or not self.clients[id].busy {

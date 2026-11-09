@@ -13,8 +13,11 @@
  *
  * `send_file` queues a range of an open file after what's queued: the system sends it from the
  * file without it passing through the program, with TransmitFile on Windows and sendfile on
- * Linux, from a copy of the file's handle. What's written while it goes waits in `after`, and goes
- * once the file has. A connection sends one file at a time.
+ * Linux, from a handle of its own to the file. What's written while it goes waits in `after`, and
+ * goes once the file has. Files queued while one goes wait in `waiting`, each with what's written
+ * after it, and take their turns: on Windows a file's TransmitFile can complete after the other
+ * end has every byte and asked for the next, so a server's next file often comes while one is
+ * still going.
  *
  * A connection's id is its slot in the poller and the slot's generation, so a stale id never
  * reaches a newer connection in the same slot. A slot is reused only after the poll that
@@ -112,6 +115,19 @@ static void buf_free(net_buf* b) {
 
 typedef struct net_slot net_slot;
 
+/* A file queued while another is being sent, from `at`, `left` bytes, with what's written after
+ * it, which goes once it has. */
+typedef struct net_wait {
+#ifdef _WIN32
+    HANDLE file;
+#else
+    int file;
+#endif
+    cx_u64 at, left;
+    net_buf after;
+    struct net_wait* next;
+} net_wait;
+
 #ifdef _WIN32
 enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE };
 typedef struct {
@@ -137,6 +153,8 @@ struct net_slot {
 #else
     int file;
 #endif
+    struct net_wait* waiting;  /* files queued after the one being sent, first to last */
+    struct net_wait* waiting_last;
     struct sockaddr_storage peer;  /* the other end, from when it opened */
     int has_peer;
 #ifdef _WIN32
@@ -229,19 +247,34 @@ static net_slot* new_slot(net* n, int kind) {
     return s;
 }
 
-/* Closes the copy of the handle of the file a connection was sending, if it was. */
+#ifdef _WIN32
+static void close_file(HANDLE f) { CloseHandle(f); }
+#else
+static void close_file(int f) { close(f); }
+#endif
+
+/* Closes the runtime's handle of the file a connection was sending, if it was. */
 static void drop_file(net_slot* s) {
     if (!s->has_file) return;
-#ifdef _WIN32
-    CloseHandle(s->file);
-#else
-    close(s->file);
-#endif
+    close_file(s->file);
     s->has_file = 0;
     s->file_left = 0;
 }
 
-/* The file is sent: what was queued while it went goes next. `out` is empty then, since the file
+/* Closes the files waiting their turns, and frees what was written after them. */
+static void drop_waiting(net_slot* s) {
+    while (s->waiting) {
+        net_wait* w = s->waiting;
+        s->waiting = w->next;
+        close_file(w->file);
+        buf_free(&w->after);
+        free(w);
+    }
+    s->waiting_last = NULL;
+}
+
+/* The file is sent: what was queued while it went goes next, then the next file waiting, if one
+ * is, with what was written after it waiting behind that. `out` is empty then, since the file
  * only starts once it is. */
 static void file_done(net_slot* s) {
     drop_file(s);
@@ -249,10 +282,24 @@ static void file_done(net_slot* s) {
     s->out = s->after;
     s->after = t;
     s->after.len = s->after.at = 0;
+    net_wait* w = s->waiting;
+    if (!w) return;
+    s->waiting = w->next;
+    if (!s->waiting) s->waiting_last = NULL;
+    s->has_file = 1;
+    s->file = w->file;
+    s->file_at = w->at;
+    s->file_left = w->left;
+    t = s->after;
+    s->after = w->after;
+    w->after = t;
+    buf_free(&w->after);
+    free(w);
 }
 
 static void release_slot(net* n, net_slot* s) {
     drop_file(s);
+    drop_waiting(s);
     buf_free(&s->after);
     buf_free(&s->in);
     buf_free(&s->out);
@@ -1089,6 +1136,7 @@ void cx_net_free(cx_u64 h) {
     for (size_t i = 0; i < n->nslots; i++) {
         net_slot* s = n->slots[i];
         drop_file(s);
+        drop_waiting(s);
         buf_free(&s->after);
         buf_free(&s->in);
         buf_free(&s->out);
@@ -1144,6 +1192,7 @@ cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
     net_slot* s = conn_of((net*)(uintptr_t)h, id);
     if (!s) return 0;
     cx_u64 left = buf_live(&s->out) + buf_live(&s->after) + s->file_left;
+    for (const net_wait* w = s->waiting; w; w = w->next) left += w->left + buf_live(&w->after);
 #ifdef _WIN32
     left += buf_live(&s->fly);
 #endif
@@ -1155,7 +1204,7 @@ void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
     net* n = (net*)(uintptr_t)h;
     net_slot* s = conn_of(n, id);
     if (!s || len == 0 || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
-    buf_append(s->has_file ? &s->after : &s->out, p, len);
+    buf_append(s->waiting_last ? &s->waiting_last->after : s->has_file ? &s->after : &s->out, p, len);
     if (!s->dirty) {
         s->dirty = 1;
         n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
@@ -1163,27 +1212,45 @@ void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
     }
 }
 
-/* Queues `n` bytes of the open file `file`, from `at`, after what's queued: 0 if the connection is
- * sending a file already, is closing, or the handle can't be copied. The copy is the runtime's,
- * so the program may close its own at once. */
+/* Queues `n` bytes of the open file `file`, from `at`, after what's queued, files too: 0 if the
+ * connection is closing or closed, or the file can't be opened again. The runtime's handle is its
+ * own, so the program may close its own at once. */
 cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len) {
     net_check_thread();
     net* n = (net*)(uintptr_t)h;
     net_slot* s = conn_of(n, id);
-    if (!s || s->has_file || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return 0;
+    if (!s || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return 0;
     if (len == 0) return 1;
 #ifdef _WIN32
     if (!transmit_file) return 0;
-    HANDLE copy;
-    if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)(intptr_t)file, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        return 0;
-    }
-    s->file = copy;
+    /* The file opened again, not its handle copied: a copy shares the program's file object,
+     * whose position TransmitFile reads from, so two connections sent the same file at once, or
+     * the program reading it meanwhile, cut each other short at the end of the file. Opened
+     * overlapped, it has no position, and the offset given is the one used. */
+    HANDLE copy = ReOpenFile((HANDLE)(intptr_t)file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             FILE_FLAG_OVERLAPPED | FILE_FLAG_SEQUENTIAL_SCAN);
+    if (copy == INVALID_HANDLE_VALUE) return 0;
 #else
     int copy = dup((int)file);
     if (copy < 0) return 0;
-    s->file = copy;
 #endif
+    if (s->has_file) {
+        /* Its turn comes after the file being sent, what's written after that, and any files
+         * already waiting. */
+        net_wait* w = (net_wait*)calloc(1, sizeof *w);
+        if (!w) {
+            close_file(copy);
+            return 0;
+        }
+        w->file = copy;
+        w->at = at;
+        w->left = len;
+        if (s->waiting_last) s->waiting_last->next = w;
+        else s->waiting = w;
+        s->waiting_last = w;
+        return 1;
+    }
+    s->file = copy;
     s->has_file = 1;
     s->file_at = at;
     s->file_left = len;

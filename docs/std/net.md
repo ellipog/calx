@@ -62,7 +62,7 @@ fn main() {
 | `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened. It returns as soon as there's an event, so `events` is empty only once the time is up: the runtime's own work, such as finishing a send or a close, doesn't end the wait |
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go to the system at the next poll or `flush`, with everything else queued on the connection since the last, then as soon as the socket takes them |
-| `net.send_file(conn: Conn, file: File, at: u64, n: u64) -> bool` | Queues `n` bytes of the open [`File`](fs.md), from byte `at`, after what's queued. The system sends them from the file, without them passing through the program ([below](#sending-files)). `false` if the connection is sending a file already, or is closing |
+| `net.send_file(conn: Conn, file: File, at: u64, n: u64) -> bool` | Queues `n` bytes of the open [`File`](fs.md), from byte `at`, after what's queued, files too. The system sends them from the file, without them passing through the program ([below](#sending-files)). `false` if the connection is closing, or the file can't be opened again |
 | `net.flush()` | Sends what was queued on every connection now, rather than at the next poll |
 | `net.queued(conn: Conn) -> usize` | How many bytes queued on the connection the system hasn't taken yet, a file's too, so something big can be sent in parts, the next queued once most of the last has gone. 0 once it's closed |
 | `net.close(conn: Conn)` | Sends what was queued on the connection, then closes it |
@@ -148,8 +148,8 @@ fn main() {
 ```
 
 - **In order.** The file goes after what was written before it, and what's written while it goes waits in the runtime and follows it.
-- **One at a time.** A connection sends one file at a time, and `send_file` is `false` while it's sending one, so a second file has to wait, or go another way. [`queued`](#items) counts what's left of it.
-- **Its own handle.** The runtime sends from a copy of the file's handle, so the program can close the `File` as soon as `send_file` returns.
+- **Queued like writes.** Files queue behind each other on a connection, each after what was queued before it, and what's written between them goes between them. [`queued`](#items) counts what's left of each.
+- **Its own handle.** The runtime opens the file again for itself, so the program can close the `File` as soon as `send_file` returns, and can send one `File` to many connections at once.
 - **A short file.** The length is the program's to know. If the file ends before `at + n`, the connection closes where it ends, since the other side would wait for the rest forever.
 
 ## Addresses
@@ -264,7 +264,7 @@ The runtime keeps each connection's bytes: what arrived and hasn't been read, an
 
 What's written is queued, and handed to the system at the next poll or flush: one `WSASend` or `send` a connection, however many writes there were. A wake is a completion posted to the port with `PostQueuedCompletionStatus` on Windows, and a write to an `eventfd` that epoll watches on Linux, made with the first `waker`. A flag set and cleared atomically makes the wakes before a poll one.
 
-A file goes once what was queued before it has gone, at most 1 GiB a call, from a handle copied with `DuplicateHandle` or `dup`; what's written meanwhile is kept apart and goes after it. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
+A file goes once what was queued before it has gone, at most 1 GiB a call. On Windows the runtime opens it again with `ReOpenFile`, overlapped, so the offset it gives is the one used: a handle copied with `DuplicateHandle` would share the program's file position, which `TransmitFile` reads from, and two connections sent one file at once cut each other short. On Linux a `dup` does, since `sendfile` is given its own offset. What's written while a file goes, and files queued behind it, wait in the runtime and take their turns. On Windows they often have to: `TransmitFile` can say it's done after the other end has every byte and has asked for more. A connection whose other end has gone ends with a `Closed` event, never the program: `send` is given `MSG_NOSIGNAL`, and `sendfile`, which has no such flag, runs with `SIGPIPE` blocked, which it takes if the call raised it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
 

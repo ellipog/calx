@@ -111,7 +111,7 @@ Some requests are answered by the server itself, without coming from `next`, and
 `serve_dir`, and `serve` on a server of the program's own, answer as `from_dir` does, but not one at a time:
 
 - **Worker threads.** Files are opened, looked at and read on worker threads, one for each processor up to 8, which hand each answer back to the event loop. So many requests are answered at once, and a slow disk holds up only the requests waiting on it.
-- **Big files from the file.** A file of 64 KiB or more isn't read. Its headers go first, then the system sends its bytes from the file, with [`Net.send_file`](net.md#sending-files), so the memory a download takes doesn't grow with the file. A request that comes behind it on the same connection is answered after it, and if that's a big file too, it's read and sent 1 MiB at a time, with at most 4 MiB queued on the connection. A `HEAD` request gets the file's length without its bytes being read, from `from_dir` too.
+- **Big files from the file.** A file of 64 KiB or more isn't read. Its headers go first, then the system sends its bytes from the file, with [`Net.send_file`](net.md#sending-files), so the memory a download takes doesn't grow with the file. A request that comes behind it on the same connection is answered after it, its file queued behind the first. A `HEAD` request gets the file's length without its bytes being read, from `from_dir` too.
 
 They print a first line saying where, and log each request to standard error as Python's `log_message` does, unless `log` is `false`:
 
