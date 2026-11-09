@@ -3695,24 +3695,13 @@ private:
 
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
-        if (captured(l)) {
-            // Passed to an `FnMut` bound, a closure can change what it captures, which the call then
-            // takes as a `mut` argument (CLX-161): each closure it's captured by must be one. It's
-            // changed where it is, so the rest is checked as for the code around them.
-            std::size_t at = visible_index(l);
-            bool may = true;
-            for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) may = may && closures_[k].may_change;
-            if (!may) {
-                error(place->span, "a closure reads what it captures where it is, so it can't change " + q(text(l->name)) +
-                                       " unless it's passed to a parameter with an `FnMut` bound; change a copy in its body, "
-                                       "or use a `for` loop");
-                l->used = l->mutated = true;
-                return;
-            }
-            for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) {
-                std::vector<Local*>& ch = closures_[k].changed;
-                if (std::find(ch.begin(), ch.end(), l) == ch.end()) ch.push_back(l);
-            }
+        // It's changed where it is, so the rest is checked as for the code around the closures.
+        if (captured(l) && !change_capture(l)) {
+            error(place->span, "a closure reads what it captures where it is, so it can't change " + q(text(l->name)) +
+                                   " unless it's passed to a parameter with an `FnMut` bound; change a copy in its body, "
+                                   "or use a `for` loop");
+            l->used = l->mutated = true;
+            return;
         }
         for (const Expr* p = place; p->kind == ExprKind::field || p->kind == ExprKind::index || p->kind == ExprKind::unwrap; p = p->lhs) {
             if (p->kind == ExprKind::index && p->box_value && p->lhs->type && p->lhs->type->shared) {
@@ -5287,10 +5276,15 @@ private:
                 r.local->used = true;
                 note_capture(r.local);
                 // What it stands for can change what it captures, so it's called one call at a time
-                // (CLX-161).
-                if (!par_.empty() && r.local->type && r.local->type->kind == TypeKind::param && r.local->type->call_mut) {
-                    error(e->span, q(text(n)) + " can change what it captures, so it's called one call at a time, and a "
-                                   "`parallel for` runs its iterations at once; use it outside the loop, or take it as `Fn`");
+                // (CLX-161), and a closure that names it changes what it changes.
+                if (r.local->type && r.local->type->kind == TypeKind::param && r.local->type->call_mut) {
+                    if (!par_.empty()) {
+                        error(e->span, q(text(n)) + " can change what it captures, so it's called one call at a time, and a "
+                                       "`parallel for` runs its iterations at once; use it outside the loop, or take it as `Fn`");
+                    } else if (captured(r.local) && !change_capture(r.local)) {
+                        error(e->span, q(text(n)) + " can change what it captures, so a closure that uses it changes it too, "
+                                       "and can only be passed to a parameter with an `FnMut` bound");
+                    }
                 }
                 return r.local->type;
             case NameKind::item:
@@ -7372,6 +7366,22 @@ private:
         if (closures_.empty()) return false;
         std::size_t at = visible_index(l);
         return at < closures_.back().mark;
+    }
+
+    // `l`, captured, is changed in the closures being checked. Passed to an `FnMut` bound, a
+    // closure can change what it captures, which the call then takes as a `mut` argument
+    // (CLX-161), so each closure that captures it must be one: false if one isn't. Otherwise each
+    // records that it changes it.
+    bool change_capture(Local* l) {
+        std::size_t at = visible_index(l);
+        for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) {
+            if (!closures_[k].may_change) return false;
+        }
+        for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) {
+            std::vector<Local*>& ch = closures_[k].changed;
+            if (std::find(ch.begin(), ch.end(), l) == ch.end()) ch.push_back(l);
+        }
+        return true;
     }
 
     // `|a, b| body`, the closure `e`, given what its parameters are, and what it gives back, or

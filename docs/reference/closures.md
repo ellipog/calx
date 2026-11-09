@@ -149,7 +149,7 @@ fn main() {
 - It still can't move what it captures.
 - A function calls what an `FnMut` parameter holds one call at a time. It can't call it in a `parallel for`, or give it to a parameter with an `Fn` bound or to the list methods below, whose closures only read. It can pass it on to another `FnMut` parameter.
 - A closure that only reads can be given to an `FnMut` bound, and so can a function or an `Fn` parameter.
-- A closure inside one changes what the outer one captures only where both are passed to `FnMut` bounds.
+- A closure inside one changes what the outer one captures only where both are passed to `FnMut` bounds. One that calls an `FnMut` parameter changes what that changes, so it must be passed to an `FnMut` bound too.
 - Take `Fn` where reading is enough, so the function can call it from a `parallel for`, and `FnMut` where callers will want to gather what it's given into their own variables.
 
 ```calx

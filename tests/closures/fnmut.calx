@@ -39,6 +39,11 @@ fn walk(words: List<String>, visit: FnMut(String) -> bool) -> usize {
     return kept
 }
 
+// A closure that calls an `FnMut` can be given to one.
+fn doubled(xs: List<i32>, f: FnMut(i32)) {
+    each(xs, |x| f(x * 2))
+}
+
 fn add_into(total: mut i32, xs: List<i32>) {
     each(xs, |x| { total += x })
 }
@@ -111,6 +116,10 @@ fn main() {
         }
     }
     println("{count}")    // out: 10
+
+    var twice = 0
+    doubled(xs, |x| { twice += x })
+    println("{twice}")    // out: 28
 
     // A method can take one too.
     let bag = Bag { xs: [2, 7], n: 3 }

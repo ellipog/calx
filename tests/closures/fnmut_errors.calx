@@ -27,6 +27,13 @@ fn to_fn(xs: List<i32>, f: FnMut(i32)) {
     _ = xs.map(f)                           // error: `map` takes an `Fn`, whose closures only read what they capture
 }
 
+// A closure that calls one can change what it changes, so it's one too.
+fn wrap(xs: List<i32>, f: FnMut(i32)) {
+    read_each(xs, |x| f(x))                 // error: `f` can change what it captures, so a closure that uses it changes it too, and can only be passed to a parameter with an `FnMut` bound
+    _ = xs.map(|x| { f(x); x })             // error: `f` can change what it captures, so a closure that uses it changes it too
+    each(xs, |x| f(x))
+}
+
 struct Bag {
     xs: List<i32>
     n: i32
@@ -69,6 +76,7 @@ fn main() {
     })
     var bag = Bag { xs: [1, 2], n: 0 }
     bag.each(|x| { bag.n += x })            // error: `bag` is changed by the closure, so it can't be used again in the same call
+    wrap(xs, |_x| {})
     in_parallel(2, |_i| {})
     to_fn(xs, |_x| {})
     change_param(xs, 1)
