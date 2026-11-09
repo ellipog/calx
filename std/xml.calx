@@ -52,7 +52,7 @@ impl Element {
 
     /// A copy of the attribute `name`'s value, if it has one.
     pub fn get(self, name: String) -> String? {
-        if self.attributes.contains(name.copy()) {
+        if self.attributes.contains(name) {
             return some(self.attributes[name].copy())
         }
         return none
@@ -60,7 +60,7 @@ impl Element {
 
     /// Sets the attribute `name`. One it had keeps its place.
     pub fn set(mut self, name: own String, value: own String) {
-        if self.attributes.contains(name.copy()) {
+        if self.attributes.contains(name) {
             self.attributes[name] = value
         } else {
             self.attributes.insert(name, value)
@@ -75,17 +75,33 @@ impl Element {
     /// A copy of the first element `path` finds, as ElementTree's `find` gives it ([paths](#paths)).
     @track_caller
     pub fn find(self, path: String) -> Element? {
-        var out: List<Element> = []
-        select(self, path_steps(path), 0, mut out, true)
-        return out.pop()
+        var first: Element? = none
+        _ = walk(self, path_steps(path), 0, |e| {
+            first = some(e.copy())
+            true
+        })
+        return first
     }
 
     /// Copies of the elements `path` finds, in document order, as ElementTree's `findall` gives them.
     @track_caller
     pub fn find_all(self, path: String) -> List<Element> {
         var out: List<Element> = []
-        select(self, path_steps(path), 0, mut out, false)
+        _ = walk(self, path_steps(path), 0, |e| {
+            out.push(e.copy())
+            false
+        })
         return out
+    }
+
+    /// Calls `f` with each element `path` finds, in document order, as ElementTree's `iterfind`
+    /// gives them: the elements where they are in the tree, not copies.
+    @track_caller
+    pub fn find_each(self, path: String, f: FnMut(Element)) {
+        _ = walk(self, path_steps(path), 0, |e| {
+            f(e)
+            false
+        })
     }
 
     /// The text of the first element `path` finds, as ElementTree's `findtext` gives it: its
@@ -317,7 +333,7 @@ impl Reader {
             var value = String()
             try self.add_value(text, from, end, mut value, 0)
             self.at = end + 1
-            if e.attributes.contains(name.copy()) {
+            if e.attributes.contains(name) {
                 fail error_at(text, at, "the attribute {name} is written twice")
             }
             e.attributes.insert(name, value)
@@ -409,7 +425,7 @@ impl Reader {
     fn attribute_reference(mut self, text: String, at: usize, to: usize, out: mut String, depth: usize) -> usize ! XmlError {
         let semi = text[at..to].find(";") else fail error_at(text, at, String("`&` starts a reference that has no `;`; write `&amp;` for an `&`"))
         let body = text[at + 1..at + semi]
-        if body.starts_with("#") or predefined(body.copy()) != "" or not self.entities.contains(body.copy()) {
+        if body.starts_with("#") or predefined(body) != "" or not self.entities.contains(body) {
             return try self.reference(text, at, to, mut out, Kind.Text, depth)
         }
         let raw = self.entities[body.copy()].copy()
@@ -471,8 +487,8 @@ impl Reader {
             out.push_str(named)
             return at + semi + 1
         }
-        if self.entities.contains(body.copy()) {
-            let raw = self.entities[body.copy()].copy()
+        if self.entities.contains(body) {
+            let raw = self.entities[body].copy()
             if raw.contains("<") {
                 fail error_at(text, at, "&{body}; holds markup, which isn't read from an entity; write the elements where it's used")
             }
@@ -486,7 +502,7 @@ impl Reader {
         if body == "nbsp" {
             fail error_at(text, at, String("XML has no &nbsp;; write &#160;"))
         }
-        if self.outside.contains(body.copy()) {
+        if self.outside.contains(body) {
             fail error_at(text, at, "&{body}; is an entity in another file, which isn't read")
         }
         fail error_at(text, at, "&{body}; is an entity this document doesn't declare")
@@ -667,7 +683,7 @@ fn declaration(text: String, r: mut Reader) ! XmlError {
         } else if name == "encoding" {
             seen.len() == 1 and seen[0] == "version" and is_encoding(value.copy())
         } else if name == "standalone" {
-            not seen.contains(name.copy()) and seen.contains(String("version")) and (value == "yes" or value == "no")
+            not seen.contains(name) and seen.contains(String("version")) and (value == "yes" or value == "no")
         } else {
             false
         }
@@ -1004,7 +1020,7 @@ fn entity(text: String, r: mut Reader) ! XmlError {
         var value = String()
         try r.add_text(text, from, from + end, mut value, Kind.Declared, 0)
         r.at = from + end + 1
-        if not parameter and not r.entities.contains(name.copy()) and not r.outside.contains(name.copy()) {
+        if not parameter and not r.entities.contains(name) and not r.outside.contains(name) {
             r.entities.insert(name, value)
         }
         return
@@ -1020,7 +1036,7 @@ fn entity(text: String, r: mut Reader) ! XmlError {
         try space_after(text, mut r, "after NDATA")
         _ = try r.name(text, "after NDATA")
     }
-    if not parameter and not r.entities.contains(name.copy()) and not r.outside.contains(name.copy()) {
+    if not parameter and not r.entities.contains(name) and not r.outside.contains(name) {
         r.outside.push(name)
     }
 }
@@ -1204,52 +1220,47 @@ fn quoted(path: String, s: String) -> String {
     panic("the path {path} compares with {s}, which wants quotes around it")
 }
 
-// The elements the steps from `k` on find from `e`, copied onto `out`, or only the first.
-fn select(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
-    if first and not out.is_empty() {
-        return
-    }
+// The elements the steps from `k` on find from `e`, each given to `found` where it is, in
+// document order, until it gives back `true`; whether it did.
+fn walk<F: FnMut(Element) -> bool>(e: Element, steps: List<Step>, k: usize, found: F) -> bool {
     if k == steps.len() {
-        out.push(e.copy())
-        return
+        return found(e)
     }
-    match steps[k].kind {
-        StepKind.Here => select(e, steps, k + 1, mut out, first),
-        StepKind.Below => below(e, steps, k + 1, mut out, first),
-        StepKind.Child => children(e, steps, k, mut out, first),
+    return match steps[k].kind {
+        StepKind.Here => walk(e, steps, k + 1, found),
+        StepKind.Below => below(e, steps, k + 1, found),
+        StepKind.Child => children(e, steps, k, found),
     }
 }
 
 // Step `k` on each element in `e`, at any depth, in document order.
-fn below(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
+fn below<F: FnMut(Element) -> bool>(e: Element, steps: List<Step>, k: usize, found: F) -> bool {
     if k == steps.len() {
-        return
+        return false
     }
     for i in 0..e.children.len() {
-        if first and not out.is_empty() {
-            return
-        }
         if steps[k].kind == StepKind.Child {
-            if matches(e, i, steps[k]) {
-                select(e.children[i], steps, k + 1, mut out, first)
+            if matches(e, i, steps[k]) and walk(e.children[i], steps, k + 1, found) {
+                return true
             }
-        } else {
-            select(e.children[i], steps, k, mut out, first)
+        } else if walk(e.children[i], steps, k, found) {
+            return true
         }
-        below(e.children[i], steps, k, mut out, first)
+        if below(e.children[i], steps, k, found) {
+            return true
+        }
     }
+    return false
 }
 
 // Step `k`, a tag and its conditions, on each child of `e`.
-fn children(e: Element, steps: List<Step>, k: usize, out: mut List<Element>, first: bool) {
+fn children<F: FnMut(Element) -> bool>(e: Element, steps: List<Step>, k: usize, found: F) -> bool {
     for i in 0..e.children.len() {
-        if first and not out.is_empty() {
-            return
-        }
-        if matches(e, i, steps[k]) {
-            select(e.children[i], steps, k + 1, mut out, first)
+        if matches(e, i, steps[k]) and walk(e.children[i], steps, k + 1, found) {
+            return true
         }
     }
+    return false
 }
 
 // Whether child `i` of `parent` has the step's tag and meets its conditions. A position counts
@@ -1264,16 +1275,16 @@ fn meets(parent: Element, i: usize, c: Element, step: Step) -> bool {
     }
     for cond in step.conditions {
         let met = match cond {
-            Condition.Has(name) => c.attributes.contains(name.copy()),
-            Condition.Is(name, value) => c.attributes.contains(name.copy()) and c.attributes[name.copy()] == value,
-            Condition.IsNot(name, value) => c.attributes.contains(name.copy()) and c.attributes[name.copy()] != value,
+            Condition.Has(name) => c.attributes.contains(name),
+            Condition.Is(name, value) => c.attributes.contains(name) and c.attributes[name] == value,
+            Condition.IsNot(name, value) => c.attributes.contains(name) and c.attributes[name] != value,
             Condition.Child(tag) => c.children.any(|x| x.tag == tag),
             Condition.ChildIs(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() == text),
             Condition.ChildIsNot(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() != text),
             Condition.TextIs(text) => c.all_text() == text,
             Condition.TextIsNot(text) => c.all_text() != text,
             Condition.At(n) => position_among(parent, i) == n,
-            Condition.Last(back) => same_tag(parent, c.tag.copy()) == position_among(parent, i) + back,
+            Condition.Last(back) => same_tag(parent, c.tag) == position_among(parent, i) + back,
         }
         if not met {
             return false

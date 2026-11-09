@@ -1,6 +1,6 @@
 ---
 title: std.xml
-description: XML read into a tree as Python's ElementTree reads it, with the line and column of what isn't well-formed, elements found by ElementTree's paths, and trees written back plain or indented - parse, Element, find_all, format, pretty.
+description: XML read into a tree as Python's ElementTree reads it, with the line and column of what isn't well-formed, elements found by ElementTree's paths, and trees written back plain or indented - parse, Element, find_all, find_each, format, pretty.
 ---
 
 # `std.xml`
@@ -52,12 +52,13 @@ fn main() ! XmlError {
 | `e.add(child)` | Adds a child after the others |
 | `e.find(path) -> Element?` | A copy of the first element the [path](#paths) finds |
 | `e.find_all(path) -> List<Element>` | Copies of the elements the path finds, in document order |
+| `e.find_each(path, f)` | Calls `f` with each element the path finds, in document order, where it is in the tree |
 | `e.find_text(path) -> String?` | The text of the first element the path finds, which may be empty, or `none` if it finds nothing |
 | `e.all_text() -> String` | All the text in it, without the tags: its text, then each child's text and tail in order. Its own tail isn't in it |
 
 `==` compares whole trees: tags, attributes in order, text, tails and children. `println("{e}")` writes `e` as `format` does.
 
-`find` and `find_all` give copies, since a function gives nothing back that points into its arguments. Changing a copy doesn't change the tree. To change elements in place, go through `children` by index, and to go through a large tree without copying, loop over `children` yourself:
+`find` and `find_all` give copies, since a function gives nothing back that points into its arguments. Changing a copy doesn't change the tree. `find_each` copies nothing: it gives each element to a closure where it is, and the closure, passed to an `FnMut` bound, can add to the variables around it ([closures](../reference/closures.md#closures-that-change-what-they-capture)). On a large tree it takes about half the time `find_all` does ([speed](#speed)). To change elements in place, go through `children` by index:
 
 ```calx
 import std.xml.{XmlError, parse}
@@ -65,9 +66,9 @@ import std.xml.{XmlError, parse}
 fn main() ! XmlError {
     var doc = try parse("<list><n>1</n><n>2</n><n>3</n></list>")
     var sum = 0
-    for c in doc.children {
-        sum += i32.parse(c.text) ?? 0
-    }
+    doc.find_each("n", |n| {
+        sum += i32.parse(n.text) ?? 0
+    })
     for i in 0..doc.children.len() {
         doc.children[i].set(String("seen"), String("yes"))
     }
@@ -114,7 +115,7 @@ It differs from ElementTree in these places:
 
 ## Paths
 
-`find`, `find_all` and `find_text` take ElementTree's paths, read from the element they're called on. A path is steps between `/`, and each step can have conditions in `[...]`:
+`find`, `find_all`, `find_each` and `find_text` take ElementTree's paths, read from the element they're called on. A path is steps between `/`, and each step can have conditions in `[...]`:
 
 | Path | Finds |
 | --- | --- |
@@ -172,6 +173,7 @@ fn main() {
 | `e.get(k)`, `e.set(k, v)`, `e.append(c)` | `e.get(k)`, `e.set(k, v)`, `e.add(c)` |
 | `list(e)`, `len(e)` | `e.children`, `e.children.len()` |
 | `e.find(p)`, `e.findall(p)`, `e.findtext(p)` | `e.find(p)`, `e.find_all(p)`, `e.find_text(p)` |
+| `for x in e.iterfind(p): ...` | `e.find_each(p, \|x\| ...)` |
 | `"".join(e.itertext())` | `e.all_text()` |
 | `ET.ParseError` | `XmlError` |
 
@@ -183,14 +185,16 @@ The parser goes through the text once, without recursion, keeping where each ope
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs. The file is 31.0 MB of XML: 120,000 `book` elements with 3 attributes and 4 children each, with references and non-ASCII text. The comparisons are Python 3.14's ElementTree, whose parser is expat in C, and Rust 1.91 with roxmltree 0.20 and quick-xml 0.37, built for release with `x86-64-v3`:
+On our benchmark, an i9-13900K pinned to its performance cores with other work running, so rough: the best of 9 runs, over rounds taken in turn. The file is 30.3 MB of XML: 120,000 `book` elements with 3 attributes and 4 children each, with references and non-ASCII text. The comparisons are Python 3.14's ElementTree, whose parser is expat in C, and Rust 1.91 with roxmltree 0.20 and quick-xml 0.37, built for release with `x86-64-v3`:
 
 | Work | Calx | Python | Rust |
 | --- | --- | --- | --- |
-| `parse`, the text to a tree | 100 ms | 453 ms | 177 ms with roxmltree, 178 ms with quick-xml |
-| `format`, the tree back to text | 24.9 ms | 643 ms | 36.4 ms |
-| `find_all(".//book[@lang='no']")`, 39,978 found | 22.7 ms | 21.4 ms | 6.2 ms |
+| `parse`, the text to a tree | 104 ms | 457 ms | 192 ms with roxmltree, 200 ms with quick-xml |
+| `format`, the tree back to text | 35.3 ms | 692 ms | 39.1 ms |
+| `find_all(".//book[@lang='no']")`, 40,140 found | 13.9 ms | 19.9 ms | 43.1 ms, copies |
+| `find_each(".//book[@lang='no']", ...)` | 7.8 ms | 20.6 ms, `iterfind` | 8.8 ms with roxmltree, 5.8 ms by hand |
 
-- Python's times are `ET.fromstring`, `ET.tostring(root, encoding="unicode")` and `root.findall`.
+- Python's times are `ET.fromstring`, `ET.tostring(root, encoding="unicode")`, `root.findall` and a loop over `root.iterfind`.
 - roxmltree builds a read-only tree whose text points into the document where it can. quick-xml reads events, which the benchmark builds into a tree of owned strings like `std.xml`'s. Rust's `format` is a writer like `std.xml`'s over that tree.
-- `find_all` here copies each element it finds, with its children, while Python and Rust give references to the elements in the tree. Rust's copies take 47.9 ms. Looping over `children` copies nothing.
+- `find_all` here copies each element it finds, with its children, while Python's `findall` gives references to the elements in the tree. Rust's `find_all` row is copies of what a loop over quick-xml's tree finds.
+- `find_each` copies nothing, as `iterfind` and Rust's references don't. roxmltree's is `descendants()` filtered by tag and attribute. By hand is a loop over quick-xml's tree with the tag and the attribute written into it, so it reads no path.

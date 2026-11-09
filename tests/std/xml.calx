@@ -40,6 +40,23 @@ fn main() ! XmlError {
     println("{doc.find_all(".//book/title[.='Wired']").len()} {doc.find_all("book[1]/author")[0].text}")    // out: 0 Herbert
     println("{doc.find_all("*[@id!='b1']").len()} {doc.find_all("book[author!='Austen']").len()} {doc.find_all(".//title[.!='Wired']").len()} {doc.find_all("*[@year != '1965']").len()}")    // out: 2 1 2 0
 
+    // find_each gives each element find_all copies, where it is, in the same order (CLX-161).
+    let paths: List<String> = [".//title", "book", "*[@id!='b1']", ".", ".//book/title[.='Wired']", "book[last()]/author", "*/title", "nothing"]
+    var same = 0
+    for p in paths {
+        var each: List<Element> = []
+        doc.find_each(p, |e| { each.push(e.copy()) })
+        if each == doc.find_all(p) {
+            same += 1
+        }
+    }
+    var titled = String()
+    doc.find_each(".//title", |t| {
+        titled.push_str(t.all_text())
+        titled.push_str(";")
+    })
+    println("{same} {titled}")    // out: 8 Dune & more;<i>Emma</i> & co;Wired;
+
     // Building and writing.
     var list = Element.new(String("list"))
     var item = Element.new(String("item"))

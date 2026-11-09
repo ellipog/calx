@@ -196,7 +196,7 @@ fn main() ! Error {
 | A dataclass read from YAML, `Config(**yaml.safe_load(t))` | `@yaml struct Config { ... }`, then `Config.from_yaml_text(t)`, which checks each field's type and names the path to what's wrong ([`@yaml`](../std/yaml.md#yaml)) |
 | `ConfigParser().read_string(t)`, `config.get(s, k)`, `getint`, `config.write(f)` | `parse(t)`, `ini.get(s, k)`, `get_int` and `ini.write()` from [`std.ini`](../std/ini.md) |
 | `csv.reader(f)`, `csv.DictReader(f)`, `csv.writer(f)` | `parse`, `parse_records` and `format` from [`std.csv`](../std/csv.md), or `Reader` for a row at a time |
-| `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |
+| `xml.etree.ElementTree.fromstring(t)`, `e.findall(p)`, `e.iterfind(p)`, `ET.tostring(e)` | `parse(t)`, `e.find_all(p)`, `e.find_each(p, \|x\| ...)` and `format(e)` from [`std.xml`](../std/xml.md), with ElementTree's paths |
 | `html.escape(t)`, `html.unescape(t)` | `escape(t)` and `unescape(t)` from [`std.html`](../std/html.md) |
 | `textwrap.fill(t, 70)`, `textwrap.dedent(t)`, `TextWrapper(width=40, ...)` | `fill(t, 70)`, `dedent(t)` and `Wrapper { width: 40, ... }` from [`std.textwrap`](../std/textwrap.md) |
 | `unicodedata.normalize("NFC", t)`, `unicodedata.is_normalized` | `normalize(t, Form.NFC)` and `is_normalized` from [`std.unicode`](../std/unicode.md) |
