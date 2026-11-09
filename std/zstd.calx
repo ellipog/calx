@@ -16,7 +16,7 @@ extern "C" {
     fn cx_zstd_dict_params(d: *const u8, n: usize, out: *u8) -> i32
     fn cx_zse_bound(n: u64) -> u64
     fn cx_zse_compress(input: *const u8, n: u64, out: *u8, level: i32, flags: u32) -> u64
-    fn cx_zse_compress_dict(input: *const u8, n: u64, out: *u8, level: i32, flags: u32, content: *const u8, content_n: u64, dict_id: u32, params: *const u8, has_params: u32, key: u64) -> u64
+    fn cx_zse_compress_dict(input: *const u8, n: u64, out: *u8, level: i32, flags: u32, content: *const u8, content_n: u64, dict_n: u64, dict_id: u32, params: *const u8, has_params: u32, key: u64) -> u64
     fn cx_zse_dict_key() -> u64
     fn cx_zse_train(samples: *const u8, sizes: *const u64, count: u64, out: *u8, cap: u64, level: i32) -> u64
     fn cx_zse_finalize(content: *const u8, cn: u64, samples: *const u8, sizes: *const u64, count: u64, out: *u8, cap: u64, level: i32) -> u64
@@ -313,7 +313,7 @@ fn encode(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, d
         let made = if dict.is_empty() {
             cx_zse_compress(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, flags)
         } else {
-            cx_zse_compress_dict(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, flags, dict.as_ptr().add(content), u64(dict.len() - content), dict_id, params.as_ptr(), if params.is_empty() { 0u32 } else { 1u32 }, key)
+            cx_zse_compress_dict(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, flags, dict.as_ptr().add(content), u64(dict.len() - content), u64(dict.len()), dict_id, params.as_ptr(), if params.is_empty() { 0u32 } else { 1u32 }, key)
         }
         out.set_len(at + usize.wrap(made))
     }

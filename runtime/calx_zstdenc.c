@@ -3787,10 +3787,10 @@ static void tables_init(void) {
     __atomic_store_n(&tables_ready, 1, __ATOMIC_RELEASE);
 }
 
-/* The settings for a level and an input of n bytes: the window and the tables no bigger than the
- * input needs. */
-static cp_t params_for(cx_i32 level, cx_u64 n) {
-    const cp_t* const t = LEVELS[(n <= 256 * 1024) + (n <= 128 * 1024) + (n <= 16 * 1024)];
+/* The settings for a level from the table for `pick` bytes, with the window and the tables no
+ * bigger than an input of n bytes needs. */
+static cp_t params_for(cx_i32 level, cx_u64 pick, cx_u64 n) {
+    const cp_t* const t = LEVELS[(pick <= 256 * 1024) + (pick <= 128 * 1024) + (pick <= 16 * 1024)];
     cp_t p;
     if (level < 0) {
         p = t[0];
@@ -4497,8 +4497,10 @@ static void job_blocks(job_t* J) {
         J->out_n = 3;
         return;
     }
+    /* A block is at most the window, if that's smaller than 128 KiB (RFC 8878, 3.1.1.2.4). */
+    const cx_u32 most = J->p.wlog < 17 ? (cx_u32)1 << J->p.wlog : BLOCK_MAX;
     while (at < J->to) {
-        const cx_u32 n = J->to - at < BLOCK_MAX ? J->to - at : BLOCK_MAX;
+        const cx_u32 n = J->to - at < most ? J->to - at : most;
         const int last = J->last && at + n == J->to;
         J->saved = (cx_i64)(at - J->from) - (cx_i64)J->out_n;
         J->out_n += block(J, at, n, last, J->out + J->out_n, J->out_cap - J->out_n);
@@ -4715,19 +4717,32 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
 
 /* Writes the frame for in[0..n) at the given level into out, which has cx_zse_bound(n) bytes,
  * with a dictionary's content[0..content_n) as the text before it, its ID if that isn't 0, and if
- * params isn't 0 its tables: gives its size. flags: 1 for a checksum, which std.zstd appends. With
- * a sink, the first job counts its parses into it and writes nothing, for a trained dictionary's
- * tables: the input is a block at most. */
-static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
-                          const cx_u8* params, cx_u64 key, sink_t* sink) {
+ * params isn't 0 its tables: gives its size. dict_n is the whole dictionary's size, which picks
+ * the settings for a small input as libzstd does, or 0 to pick them by the input and content.
+ * flags: 1 for a checksum, which std.zstd appends. With a sink, the first job counts its parses
+ * into it and writes nothing, for a trained dictionary's tables: the input is a block at most. */
+static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u64 dict_n,
+                          cx_u32 dict_id, const cx_u8* params, cx_u64 key, sink_t* sink) {
     if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
     frame_t F;
     memset(&F, 0, sizeof F);
     F.in = in;
     F.n = n;
-    /* With a dictionary the settings are for it and the input together, as libzstd picks them, so
-     * the window takes in what it can of both. */
-    F.p = params_for(level, n + content_n);
+    /* With a dictionary the window and tables are for it and the input together, so the window
+     * takes in what it can of both. The level's settings come from the table for the two as well,
+     * but for an input under 128 KiB, or under six times the dictionary, from the table for the
+     * dictionary and 499 bytes: libzstd compresses those with the settings it digested the
+     * dictionary with, for an input of unknown size (ZSTD_createCDict). Python's ZstdDict and
+     * `zstd -D` do. Otherwise a small enough input would take the table for 16 KiB, which at
+     * level 13 searches four times as deep: 12% more time for 0.7% less on 1,144 small files with
+     * a 16 KB dictionary (CLX-189). The window still grows to the input and content's, as
+     * libzstd's grows to the input's: a block can't be bigger than the window. */
+    const cx_u64 pick = dict_n && (n < ((cx_u64)128 << 10) || n < 6 * dict_n) ? dict_n + 499 : n + content_n;
+    F.p = params_for(level, pick, n + content_n);
+    if (pick != n + content_n) {
+        const cx_u32 wlog = params_for(level, n + content_n, n + content_n).wlog;
+        if (F.p.wlog < wlog) F.p.wlog = wlog;
+    }
     F.each = job_size(&F.p);
     F.reach = job_reach(&F.p);
     F.jobs = n ? (n + F.each - 1) / F.each : 1;
@@ -4810,15 +4825,15 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
 }
 
 cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags) {
-    return frame_write(in, n, out, level, flags, 0, 0, 0, 0, 0, 0);
+    return frame_write(in, n, out, level, flags, 0, 0, 0, 0, 0, 0, 0);
 }
 
-/* As cx_zse_compress, with a dictionary: its content[0..content_n), its ID, 0 for none, its tables
- * from calx_zstd.c's cx_zstd_dict_params if has_params is set, and its key from cx_zse_dict_key,
- * or 0 to have its kept tables found by its content. */
-cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
-                            const cx_u8* params, cx_u32 has_params, cx_u64 key) {
-    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0, key, 0);
+/* As cx_zse_compress, with a dictionary of dict_n bytes: its content[0..content_n), its ID, 0 for
+ * none, its tables from calx_zstd.c's cx_zstd_dict_params if has_params is set, and its key from
+ * cx_zse_dict_key, or 0 to have its kept tables found by its content. */
+cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u64 dict_n,
+                            cx_u32 dict_id, const cx_u8* params, cx_u32 has_params, cx_u64 key) {
+    return frame_write(in, n, out, level, flags, content, content_n, dict_n, dict_id, has_params ? params : 0, key, 0);
 }
 
 /* A key for a new dictionary, which no other has had. */
@@ -4998,9 +5013,9 @@ static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* con
         cx_u64 len = T->at[i + 1] - T->at[i];
         if (sink) {
             len = len < TR_STATS ? len : TR_STATS;
-            if (len) frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, 0, key, sink);
+            if (len) frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, 0, 0, key, sink);
         } else {
-            sum += frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, id, dp, key, 0);
+            sum += frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, id, dp, key, 0);
         }
     }
     digest_forget(key);
