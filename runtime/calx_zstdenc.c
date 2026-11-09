@@ -1040,6 +1040,11 @@ typedef struct {
     cx_u32 rlog;    /* a hash row's 2^rlog positions */
     cx_u8* tags;    /* each row position's byte more of hash, and each row's head */
     cx_u32* hash3;
+    /* With a working copy of a dictionary's trees: each write into a node of a position before ulo,
+     * the ones it came with, as its slot and what it held, up to ulog_cap of them; ulog_n is
+     * ulog_cap + 1 once there were more. ulo is 0 otherwise, and nothing is noted. */
+    cx_u32* ulog;
+    cx_u32 ulog_n, ulog_cap, ulo;
     /* the optimal parser's */
     stats_t* st;
     node_t* opt;
@@ -1715,18 +1720,39 @@ static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, a
  * A dictionary's content goes in with the comparisons stopping at its end, J->lim, so the trees
  * are the same whatever text follows it, and kept ones can be used again (digest_take). Text that
  * agrees to there can't be put in order, so, as libzstd does, cur goes in with nothing below it. */
-static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
+static inline __attribute__((always_inline)) cx_u32 bt_place_with(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m,
+                                                                  cx_u32* longest, cx_u32 depth, const int undo) {
     const cx_u32 left = J->lim - cur;
     const cx_u32 limit = left < BT_CMP ? left : BT_CMP;
     const cx_u32 mask = (1u << (J->p.clog - 1)) - 1;
     cx_u32* const son = J->chain;
     cx_u32* ptr0 = son + 2 * (cur & mask) + 1;
     cx_u32* ptr1 = son + 2 * (cur & mask);
+    /* The positions whose nodes ptr0 and ptr1 are in, and the log, in locals: through J they'd be
+     * read again after each store into the trees. */
+    cx_u32 own0 = cur, own1 = cur;
+    cx_u32* const ulog = J->ulog;
+    const cx_u32 ulo = J->ulo, ucap = J->ulog_cap;
+    cx_u32 un = J->ulog_n;
+#define BT_W(ptr, own, v)                                   \
+    do {                                                    \
+        if (undo && (own) < ulo) {                          \
+            if (un < ucap) {                                \
+                ulog[2 * un] = (cx_u32)((ptr) - son);       \
+                ulog[2 * un + 1] = *(ptr);                  \
+                un++;                                       \
+            } else {                                        \
+                un = ucap + 1;                              \
+            }                                               \
+        }                                                   \
+        *(ptr) = (v);                                       \
+    } while (0)
     cx_u32 len0 = 0, len1 = 0, noted = 0, top = 0;
     for (;;) {
         const cx_u32 delta = cur - cand;
         if (depth-- == 0 || cand < low) {
-            *ptr0 = *ptr1 = 0;
+            BT_W(ptr1, own1, 0);
+            BT_W(ptr0, own0, 0);
             break;
         }
         cx_u32* const pair = son + 2 * (cand & mask);
@@ -1751,28 +1777,38 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
             }
             if (len >= limit) {
                 if (J->cut) {
-                    *ptr0 = *ptr1 = 0;
+                    BT_W(ptr1, own1, 0);
+                    BT_W(ptr0, own0, 0);
                     break;
                 }
-                *ptr1 = pair[0];
-                *ptr0 = pair[1];
+                BT_W(ptr1, own1, pair[0]);
+                BT_W(ptr0, own0, pair[1]);
                 break;
             }
         }
         if (pb[len] < ip[len]) {
-            *ptr1 = cand;
+            BT_W(ptr1, own1, cand);
             ptr1 = pair + 1;
+            own1 = cand;
             cand = *ptr1;
             len1 = len;
         } else {
-            *ptr0 = cand;
+            BT_W(ptr0, own0, cand);
             ptr0 = pair;
+            own0 = cand;
             cand = *ptr0;
             len0 = len;
         }
     }
+#undef BT_W
+    if (undo) J->ulog_n = un;
     *longest = top;
     return noted;
+}
+
+static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
+    if (J->ulo) return bt_place_with(J, ip, cur, cand, low, room, best, m, longest, depth, 1);
+    return bt_place_with(J, ip, cur, cand, low, room, best, m, longest, depth, 0);
 }
 
 #define BT_AHEAD 8
@@ -3203,7 +3239,7 @@ static void job_tables(job_t* J) {
     if (!J->bt_up) J->bt_up = 1;
 #endif
     const int three = J->p.strat >= S_BTLAZY2 && J->p.mml == 3;
-    if (three && !J->hash3) J->hash3 = (cx_u32*)cx_alloc((cx_usize)4 << HASH3_LOG);
+    if (three && !J->hash3 && !J->dw) J->hash3 = (cx_u32*)cx_alloc((cx_usize)4 << HASH3_LOG);
     if (!three && J->hash3) {
         cx_free(J->hash3, (cx_usize)4 << HASH3_LOG);
         J->hash3 = 0;
@@ -3313,8 +3349,16 @@ typedef struct work_s {
     cx_usize bytes;
     cx_u32* hash;
     cx_u32* chain;
+    cx_u32* hash3;
+    cx_u32* log; /* at the tree levels, where the job notes its writes into the copy's nodes */
+    cx_u32 log_cap;
     cx_u8* text; /* the content, then room for WORK_TEXT bytes of a frame's text */
 } work_t;
+
+/* The writes into a working copy's nodes a frame at the tree levels notes, to undo them: past
+ * these, the trees are copied back whole. A position of a small input notes about as many as the
+ * levels search deep. */
+#define WORK_LOG ((cx_u32)32 << 10)
 
 /* A first job with no more text than this has it after the working copy's content, rather than
  * the content and its text copied into a buffer of their own. */
@@ -3399,15 +3443,20 @@ static digest_t* digest_find(const cp_t* p, cx_u32 pre, const cx_u8* text, cx_u6
 
 /* A new working copy of d's tables and content, or 0 if there's no memory for one. */
 static work_t* work_new(digest_t* d) {
-    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n) + d->pre + WORK_TEXT;
+    const cx_u32 log_cap = d->p.strat >= S_BTLAZY2 ? WORK_LOG : 0;
+    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n + d->hash3_n + 2 * (cx_usize)log_cap) + d->pre + WORK_TEXT;
     work_t* const w = (work_t*)malloc(bytes);
     if (!w) return 0;
     w->bytes = bytes;
     w->hash = (cx_u32*)(w + 1);
     w->chain = w->hash + d->hash_n;
-    w->text = (cx_u8*)(w->chain + d->chain_n);
+    w->hash3 = d->hash3_n ? w->chain + d->chain_n : 0;
+    w->log = w->chain + d->chain_n + d->hash3_n;
+    w->log_cap = log_cap;
+    w->text = (cx_u8*)(w->log + 2 * (cx_usize)log_cap);
     memcpy(w->hash, d->hash, d->hash_n * 4);
     if (d->chain_n) memcpy(w->chain, d->chain, d->chain_n * 4);
+    if (d->hash3_n) memcpy(w->hash3, d->hash3, d->hash3_n * 4);
     memcpy(w->text, d->text, d->pre);
     digest_lock();
     d->bytes += bytes;
@@ -3446,7 +3495,9 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
             w->chain[c] = d->chain[c];
         }
         break;
-    default: {
+    case S_GREEDY:
+    case S_LAZY:
+    case S_LAZY2: {
         /* Hash rows: each row's positions, and its tags with its head first, copied whole with
          * the row's size known, so the copies are a few vector moves. */
         const cx_u32 rlog = J->rlog, hb = J->p.hlog - rlog + 8;
@@ -3469,6 +3520,39 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
         else if (rlog == 5) ROWS_BACK(5)
         else ROWS_BACK(6)
 #undef ROWS_BACK
+        break;
+    }
+    default: {
+        /* Trees. The nodes the copy came with, of the positions before d->next_up, are as they
+         * were once the writes into them are undone, newest first. The frame's own nodes, and the
+         * hash tables' entries for its positions, are put back from d after, as positions far
+         * enough on take the slots of ones out of the window. */
+        const cx_u32 mask = (1u << (J->p.clog - 1)) - 1, blo = d->next_up;
+        const cx_u32 end = J->to - J->from >= READ ? J->to - READ + 1 : blo;
+        const cx_u32 bhi = J->next_up < end ? J->next_up : end;
+        const cx_usize bn = bhi > blo ? bhi - blo : 0;
+        if (J->ulog_n > J->ulog_cap || bn * 64 > d->chain_n) {
+            memcpy(w->hash, d->hash, d->hash_n * 4);
+            memcpy(w->chain, d->chain, d->chain_n * 4);
+            if (d->hash3_n) memcpy(w->hash3, d->hash3, d->hash3_n * 4);
+            break;
+        }
+        for (cx_u32 k = J->ulog_n; k-- > 0;) w->chain[J->ulog[2 * k]] = J->ulog[2 * k + 1];
+        for (cx_u32 a = blo; a < bhi;) {
+            const cx_u32 at = a & mask, run = bhi - a < mask + 1 - at ? bhi - a : mask + 1 - at;
+            memcpy(w->chain + 2 * (cx_usize)at, d->chain + 2 * (cx_usize)at, (cx_usize)run * 8);
+            a += run;
+        }
+        for (cx_u32 i = blo; i < bhi; i++) {
+            const cx_u32 h = hash_at(base + i, J->bt_mls, J->p.hlog);
+            w->hash[h] = d->hash[h];
+        }
+        if (d->hash3_n) {
+            for (cx_u32 i = blo; i < bhi; i++) {
+                const cx_u32 h = hash_at(base + i, 3, HASH3_LOG);
+                w->hash3[h] = d->hash3[h];
+            }
+        }
         break;
     }
     }
@@ -3615,13 +3699,21 @@ static void job_run(job_t* J) {
     work_t* const w = J->dw;
     cx_u32* const own_hash = J->hash;
     cx_u32* const own_chain = J->chain;
+    cx_u32* const own_hash3 = J->hash3;
     cx_u8* const own_tags = J->tags;
     if (d) {
         J->next_up = d->next_up;
         if (w) {
             J->hash = w->hash;
             J->chain = w->chain;
-            if (J->p.strat >= S_GREEDY) J->tags = (cx_u8*)w->chain;
+            if (J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2) J->tags = (cx_u8*)w->chain;
+            if (J->p.strat >= S_BTLAZY2) {
+                J->hash3 = w->hash3;
+                J->ulog = w->log;
+                J->ulog_n = 0;
+                J->ulog_cap = w->log_cap;
+                J->ulo = d->next_up;
+            }
         } else {
             memcpy(J->hash, d->hash, d->hash_n * 4);
             if (d->chain_n) memcpy(J->chain, d->chain, d->chain_n * 4);
@@ -3639,7 +3731,9 @@ static void job_run(job_t* J) {
         work_clean(J, d, w);
         J->hash = own_hash;
         J->chain = own_chain;
+        J->hash3 = own_hash3;
         J->tags = own_tags;
+        J->ulo = 0;
         work_give(d, w);
     }
 }
@@ -3842,9 +3936,9 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
         const cx_u64 w = (cx_u64)1 << F.p.wlog, len = n < F.each ? n : F.each;
         F.first_pre = (cx_u32)(content_n < w ? content_n : w);
         const cx_u8* const tail = content + content_n - F.first_pre;
-        /* The content's tables kept for these settings, if they are; up to the lazy levels, in a
-         * working copy, after whose content a small first job's text goes. */
-        F.dg = digest_find(&F.p, F.first_pre, tail, key, F.p.strat <= S_LAZY2 ? &F.dw : 0);
+        /* The content's tables kept for these settings, if they are, in a working copy, after
+         * whose content a small first job's text goes. */
+        F.dg = digest_find(&F.p, F.first_pre, tail, key, &F.dw);
         if (F.dw && len <= WORK_TEXT) {
             F.first = F.dw->text;
         } else {
