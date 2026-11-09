@@ -136,4 +136,20 @@ fn main() {
     // out:     }
     // out:   ]
     // out: }
+
+    // A walk gives each value and the pointer that finds it, in order, without copies (CLX-161).
+    let w = parse(#"{"a": [1, {"b/c": true, "~d": "x"}], "": null, "e": {}}"#)!
+    var seen = List<String>()
+    var resolved = 0
+    w.walk(|path, x| {
+        seen.push("{path}:{x.kind()}")
+        if w.pointer(path) != none {
+            resolved += 1
+        }
+    })
+    println(seen.join(" "))    // out: :an object /a:an array /a/0:a number /a/1:an object /a/1/b~1c:a bool /a/1/~0d:a string /:null /e:an object
+    println("{resolved} {seen.len()}")    // out: 8 8
+    var leaves: usize = 0
+    Json.Int(3).walk(|path, _x| { leaves += 1 + path.len() })
+    println("{leaves}")    // out: 1
 }

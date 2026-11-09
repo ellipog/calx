@@ -691,6 +691,15 @@ impl Json {
         return out
     }
 
+    /// Calls `f` with each value in this one and its JSON Pointer, as `pointer` reads one: this
+    /// value first, with the empty pointer, then each element's or member's, depth first, in
+    /// order. The values are given where they are, not copied, and the pointers are one string
+    /// that the walk adds to and takes back, so `f` copies one it keeps.
+    pub fn walk(self, f: FnMut(String, Json)) {
+        var path = String()
+        walk_from(self, mut path, f)
+    }
+
     /// What kind of value this is, for messages: `null`, `a bool`, `a number`, `a string`, `an
     /// array` or `an object`.
     pub fn kind(self) -> String {
@@ -703,6 +712,47 @@ impl Json {
             Json.Str(_) => "a string",
             Json.Array(_) => "an array",
             Json.Object(_) => "an object",
+        }
+    }
+}
+
+// `v.walk(f)`: `v`, at `path`, then what's in it.
+fn walk_from<F: FnMut(String, Json)>(v: Json, path: mut String, f: F) {
+    f(path, v)
+    let at = path.len()
+    match v {
+        Json.Array(items) => {
+            for i in 0..items.len() {
+                path.push_str("/{i}")
+                walk_from(items[i], mut path, f)
+                path.truncate(at)
+            }
+        },
+        Json.Object(members) => {
+            for (k, x) in members {
+                path.push('/')
+                add_token(k, mut path)
+                walk_from(x, mut path, f)
+                path.truncate(at)
+            }
+        },
+        _ => {},
+    }
+}
+
+// A member's name in a pointer, with `~` as `~0` and `/` as `~1`.
+fn add_token(k: String, path: mut String) {
+    if not k.contains("~") and not k.contains("/") {
+        path.push_str(k)
+        return
+    }
+    for r in k.runes() {
+        if r == '~' {
+            path.push_str("~0")
+        } else if r == '/' {
+            path.push_str("~1")
+        } else {
+            path.push(r)
         }
     }
 }
