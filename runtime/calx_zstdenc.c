@@ -1346,8 +1346,9 @@ static inline void row_refill(rw_t* w, cx_u32 from) {
 }
 
 /* Puts the positions before target into their rows. Of a long match's, only the first few and the
- * last go in: the ones between would find the same text the match did. */
-static inline void row_insert(rw_t* w, cx_u32 target) {
+ * last go in: the ones between would find the same text the match did. Always inlined, as row_best
+ * is, for the same reason. */
+static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target) {
     cx_u32 i = w->next_up;
     if (target - i > ROW_SKIP) {
         for (const cx_u32 e = i + ROW_SKIP / 4; i < e; i++) {
@@ -1402,8 +1403,10 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
     for (cx_u32 k = 0; k < nc; k++) {
         const cx_u32 cand = cands[k];
         const cx_u8* mp = base + cand;
-        if (mp[best] == ip[best] && ld32(mp) == ld32(ip)) {
-            const cx_u32 len = count(ip + 4, mp + 4, iend) + 4;
+        /* Only a match longer than the best has the four bytes up to the best's length, so one
+         * compare of them, and one branch, passes all the candidates worth counting. */
+        if (ld32(mp + best - 3) == ld32(ip + best - 3)) {
+            const cx_u32 len = count(ip, mp, iend);
             /* Further back costs more bits: a longer match has to make up for them. */
             if (len > best && (!best_off || (int)(len - best) * 4 > (int)high_bit(cur - cand + 3) - (int)high_bit(best_off + 3))) {
                 best = len;
