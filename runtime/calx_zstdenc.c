@@ -2361,8 +2361,8 @@ static cx_u32 histogram(const cx_u8* s, cx_u32 n, cx_u32* count) {
  * bitstream. ofb[i] is each one's offset as coded. Their codes go in J->llc and the rest from s0;
  * if known, the splitter has put them there already, and known is their counts. Gives its size, or
  * 0 if it doesn't fit. */
-static cx_usize seq_section(job_t* J, const ent_t* prev, ent_t* next, const seq_t* seq, const cx_u32* ofb, cx_u32 ofb_step, cx_u32 n, const cx_u32* known, cx_u32 s0,
-                            cx_u8* out, cx_usize cap) {
+static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J, const ent_t* prev, ent_t* next, const seq_t* seq, const cx_u32* ofb, const cx_u32 ofb_step,
+                                                                     cx_u32 n, const cx_u32* known, cx_u32 s0, cx_u8* out, cx_usize cap) {
     cx_u8* op = out;
     if (cap < 4 + 3 * 128 + 16) return 0;
     if (n < 128) {
@@ -2490,6 +2490,16 @@ static cx_usize seq_section(job_t* J, const ent_t* prev, ent_t* next, const seq_
 #undef ADD
     if (p > pend) return 0;
     return (cx_usize)(p - out) + (nb > 0);
+}
+
+/* Built for the offsets in the sequences, as they nearly always are, and for ones coded again apart:
+ * in the first the offset is read off the same pointer as the lengths. Never inlined: in block(),
+ * with everything else, the loop had its states and bits on the stack, stored and loaded again for
+ * each sequence. */
+static __attribute__((noinline)) cx_usize seq_section(job_t* J, const ent_t* prev, ent_t* next, const seq_t* seq, const cx_u32* ofb, cx_u32 ofb_step, cx_u32 n,
+                                                      const cx_u32* known, cx_u32 s0, cx_u8* out, cx_usize cap) {
+    if (ofb_step != 1) return seq_section_with(J, prev, next, seq, &seq[0].ofb, sizeof(seq_t) / sizeof(cx_u32), n, known, s0, out, cap);
+    return seq_section_with(J, prev, next, seq, ofb, 1, n, known, s0, out, cap);
 }
 
 /* Whether src[0..n) is one byte repeated. */
