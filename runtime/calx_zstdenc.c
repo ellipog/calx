@@ -489,15 +489,12 @@ static cx_usize write_counts(const cx_i16* norm, cx_u32 max, cx_u32 log, cx_u8* 
 
 /* --- Huffman --------------------------------------------------------------------------------- */
 
-/* Code lengths for count[0..max], two symbols or more, none longer than HUF_LOG: a Huffman code,
- * by Moffat and Katajainen's way of working it out in place from the counts in order, and then, if
- * it's too deep, the deepest leaves lifted and others pushed down until it fits. Gives the longest. */
-static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
-    cx_u32 sym[256];
-    cx_i64 a[256];
+/* A Huffman code for count[0..max], two symbols or more, by Moffat and Katajainen's way of working
+ * it out in place from the counts in order: the symbols with a count in sym, rarest first, and
+ * each one's depth in a, so a[0] is the deepest. Gives how many. */
+static int huf_depths(const cx_u32* count, cx_u32 max, cx_u32* sym, cx_i64* a) {
     int n = 0;
     for (cx_u32 s = 0; s <= max; s++) {
-        len[s] = 0;
         sym[n] = s;
         n += count[s] != 0;
     }
@@ -558,37 +555,53 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
             used = 0;
         }
     }
-    /* a[0] is the rarest and so the deepest. */
-    if (a[0] <= HUF_LOG) {
+    return n;
+}
+
+/* Code lengths from huf_depths' sym[0..n) and a, none longer than lim, which leaves room for n: if
+ * the code is deeper, the deepest leaves lifted and others pushed down until it fits. Sets only the
+ * symbols in sym. Gives the longest. */
+static cx_u32 huf_limit(const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, cx_u8* len) {
+    if (a[0] <= lim) {
         for (int i = 0; i < n; i++) len[sym[i]] = (cx_u8)a[i];
         return (cx_u32)a[0];
     }
     cx_u32 bl[HUF_LOG + 1] = {0};
-    for (int i = 0; i < n; i++) bl[a[i] > HUF_LOG ? HUF_LOG : a[i]]++;
-    const cx_i64 target = (cx_i64)1 << HUF_LOG;
+    for (int i = 0; i < n; i++) bl[a[i] > lim ? lim : a[i]]++;
+    const cx_i64 target = (cx_i64)1 << lim;
     cx_i64 k = 0;
-    for (cx_u32 d = 1; d <= HUF_LOG; d++) k += (cx_i64)bl[d] << (HUF_LOG - d);
+    for (cx_u32 d = 1; d <= lim; d++) k += (cx_i64)bl[d] << (lim - d);
     while (k > target) {
-        cx_u32 d = HUF_LOG - 1;
+        cx_u32 d = lim - 1;
         while (bl[d] == 0) d--;
         bl[d]--;
         bl[d + 1]++;
-        k -= (cx_i64)1 << (HUF_LOG - d - 1);
+        k -= (cx_i64)1 << (lim - d - 1);
     }
     while (k < target) {
-        cx_u32 d = HUF_LOG;
+        cx_u32 d = lim;
         while (bl[d] == 0) d--;
         bl[d]--;
         bl[d - 1]++;
-        k += (cx_i64)1 << (HUF_LOG - d);
+        k += (cx_i64)1 << (lim - d);
     }
     int i = 0;
     cx_u32 longest = 0;
-    for (cx_u32 d = HUF_LOG; d >= 1; d--) {
+    for (cx_u32 d = lim; d >= 1; d--) {
         for (cx_u32 c = 0; c < bl[d]; c++) len[sym[i++]] = (cx_u8)d;
         if (bl[d] && !longest) longest = d;
     }
     return longest;
+}
+
+/* Code lengths for count[0..max], two symbols or more, none longer than HUF_LOG. Gives the
+ * longest. */
+static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
+    cx_u32 sym[256];
+    cx_i64 a[256];
+    memset(len, 0, max + 1);
+    const int n = huf_depths(count, max, sym, a);
+    return huf_limit(sym, a, n, HUF_LOG, len);
 }
 
 /* The codes for lengths len[0..max] with the longest `log`, laid out as the decoder lays its table
@@ -2294,7 +2307,7 @@ static void prices_set(stats_t* s) {
 
 /* Every count's, when they've all changed. */
 static void prices_all(stats_t* s) {
-    for (cx_u32 i = 0; i < 256; i++) s->lit_w[i] = lg8(s->lit[i]);
+    for (cx_u32 i = 0; i < 256; i++) s->lit_w[i] = lg8(s->lit[i] ? s->lit[i] : 1);
     for (cx_u32 i = 0; i <= LL_MAX; i++) s->ll_w[i] = ll_w_of(s, i);
     for (cx_u32 i = 0; i <= ML_MAX; i++) s->ml_w[i] = ml_w_of(s, i);
     for (cx_u32 i = 0; i <= OF_MAX; i++) s->of_w[i] = of_w_of(s, i);
@@ -2309,22 +2322,38 @@ static cx_u32 sum_of(const cx_u32* f, int n) {
     return s;
 }
 
+/* Counts f[0..n) brought down to about 2^lg in all, as libzstd does between blocks: kept as they
+ * are if they're no more than twice that, else shifted, with 1 for each. */
+static void scale_down(cx_u32* f, int n, cx_u32 lg) {
+    const cx_u32 factor = sum_of(f, n) >> lg;
+    if (factor <= 1) return;
+    const cx_u32 sh = high_bit(factor);
+    for (int i = 0; i < n; i++) f[i] = 1 + (f[i] >> sh);
+}
+
 /* At a block's start: the first block's counts from its bytes and the predefined distributions,
- * the others' halved. */
-static void stats_start(stats_t* s, const cx_u8* src, cx_u32 n) {
+ * the others' brought down. Without a dictionary, as libzstd starts them, a byte the block doesn't
+ * have counts for nothing and one it has for 1 and a 256th of how often: on our small files that's
+ * 0.25 to 0.5% smaller from level 11 than a count for every byte. After a dictionary, whose matches
+ * are cheap, every byte keeps a count and a 16th: libzstd's way is 0.25 to 0.45% bigger there. */
+static void stats_start(stats_t* s, const cx_u8* src, cx_u32 n, int dict) {
     if (!s->ready) {
         cx_u32 c[256] = {0};
         for (cx_u32 i = 0; i < n; i++) c[src[i]]++;
-        for (int i = 0; i < 256; i++) s->lit[i] = 1 + (c[i] >> 4);
+        if (dict) {
+            for (int i = 0; i < 256; i++) s->lit[i] = 1 + (c[i] >> 4);
+        } else {
+            for (int i = 0; i < 256; i++) s->lit[i] = (c[i] != 0) + (c[i] >> 8);
+        }
         for (int i = 0; i <= LL_MAX; i++) s->ll[i] = LL_NORM[i] > 0 ? (cx_u32)LL_NORM[i] : 1;
         for (int i = 0; i <= ML_MAX; i++) s->ml[i] = ML_NORM[i] > 0 ? (cx_u32)ML_NORM[i] : 1;
         for (int i = 0; i <= OF_MAX; i++) s->of[i] = i <= 28 && OF_NORM[i] > 0 ? (cx_u32)OF_NORM[i] : 1;
         s->ready = 1;
     } else {
-        for (int i = 0; i < 256; i++) s->lit[i] = 1 + (s->lit[i] >> 1);
-        for (int i = 0; i <= LL_MAX; i++) s->ll[i] = 1 + (s->ll[i] >> 1);
-        for (int i = 0; i <= ML_MAX; i++) s->ml[i] = 1 + (s->ml[i] >> 1);
-        for (int i = 0; i <= OF_MAX; i++) s->of[i] = 1 + (s->of[i] >> 1);
+        scale_down(s->lit, 256, 12);
+        scale_down(s->ll, LL_MAX + 1, 11);
+        scale_down(s->ml, ML_MAX + 1, 11);
+        scale_down(s->of, OF_MAX + 1, 11);
     }
     s->lit_sum = sum_of(s->lit, 256);
     s->ll_sum = sum_of(s->ll, LL_MAX + 1);
@@ -2378,7 +2407,7 @@ static void mf_opt(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
     const cx_u32 mml = J->p.mml;
     const cx_u32 enough = J->p.tlen < OPT_NUM ? J->p.tlen : OPT_NUM - 1;
     if (J->next_up < J->start) J->next_up = J->start;
-    stats_start(st, base + at, end - at);
+    stats_start(st, base + at, end - at, J->dict != 0);
     if (end - at <= READ + 1) goto tail;
     while (ip < ilimit) {
         const cx_u32 lit0 = (cx_u32)(ip - anchor);
@@ -2689,12 +2718,42 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
         cx_u32 log = 0;
         cx_u8 tree[160];
         cx_usize tree_n = 0, est_new = ~(cx_usize)0;
-        if (!skip_new) {
+        if (!skip_new && huf_allowed < 2) {
             log = huf_lengths(count, max, len);
             cx_u64 bits_new = 0;
             for (cx_u32 s = 0; s <= max; s++) bits_new += (cx_u64)count[s] * len[s];
             tree_n = huf_tree(len, max, log, tree);
             if (tree_n) est_new = tree_n + streams + (bits_new + 7) / 8 + (four ? 3 : 0);
+        } else if (!skip_new) {
+            /* From btultra up, as libzstd does there, each limit on the code's length from the
+             * least that has room for the symbols up to the code's own depth, keeping the one whose
+             * tree and data are smallest: a shallower code's tree can take fewer bytes than its
+             * data takes more, which on a block of a few hundred literals can be a few bytes. It
+             * stops once a limit does worse by more than a byte. */
+            cx_u32 sym[256];
+            cx_i64 a[256];
+            const int k = huf_depths(count, max, sym, a);
+            memset(len, 0, max + 1);
+            cx_u8 tlen[256], ttree[160];
+            memset(tlen, 0, max + 1);
+            const cx_u32 least = high_bit((cx_u32)k) + 1;
+            for (cx_u32 lim = least; lim <= HUF_LOG; lim++) {
+                const cx_u32 got = huf_limit(sym, a, k, lim, tlen);
+                if (got < lim && lim > least) break;
+                cx_u64 bits = 0;
+                for (int i = 0; i < k; i++) bits += (cx_u64)count[sym[i]] * tlen[sym[i]];
+                const cx_usize tn = huf_tree(tlen, max, got, ttree);
+                if (!tn) continue;
+                const cx_usize e = tn + streams + (bits + 7) / 8 + (four ? 3 : 0);
+                if (est_new != ~(cx_usize)0 && e > est_new + 1) break;
+                if (e < est_new) {
+                    est_new = e;
+                    log = got;
+                    tree_n = tn;
+                    memcpy(len, tlen, max + 1);
+                    memcpy(tree, ttree, tn);
+                }
+            }
         }
         const int use_old = old_ok && est_old <= est_new;
         const cx_usize est = use_old ? est_old : est_new;
@@ -3126,7 +3185,7 @@ static cx_usize emit(job_t* J, const seq_t* seq, cx_u32 ns, const cx_u32* fin, c
     {
         /* The literals for negative levels go raw, as libzstd sends them, which is what makes those
          * levels fast to decompress too. */
-        const int huf = J->p.strat != S_FAST || J->p.tlen == 0;
+        const int huf = J->p.strat != S_FAST || J->p.tlen == 0 ? 1 + (J->p.strat >= S_BTULTRA) : 0;
         /* Into the output when a block's room is there, as it nearly always is, so it isn't
          * copied there after. */
         cx_u8* const tmp = cap >= 3 + BLOCK_ROOM ? out + 3 : J->blk;
