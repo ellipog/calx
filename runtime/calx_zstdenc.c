@@ -14,11 +14,11 @@
  * once on `parallel for`'s threads: each matches into the text before it, and starts with tables
  * and repeated offsets of its own, so the frame is the same however many threads made it.
  *
- * Each level's settings, in LEVELS below, are those of libzstd's table of levels for big inputs
- * (lib/compress/clevels.h in zstd 1.5.7), so that a level means what it means to `zstd`: the same
- * window, so the same memory to decompress, and searches about as deep. Levels 13 and 14 take
- * matches of 4 bytes rather than 5, which on our files was smaller and faster with our trees. The
- * table's notice follows:
+ * Each level's settings, in LEVELS below, are those of libzstd's tables of levels, for inputs over
+ * 256 KiB and for those up to 256, 128 and 16 KiB (lib/compress/clevels.h in zstd 1.5.7), so that
+ * a level means what it means to `zstd`: the same window, so the same memory to decompress, and
+ * searches about as deep. For big inputs, levels 13 and 14 take matches of 4 bytes rather than 5,
+ * which on our files was smaller and faster with our trees. The tables' notice follows:
  *
  * BSD License
  *
@@ -855,7 +855,9 @@ typedef struct {
     cx_u32 wlog, clog, hlog, slog, mml, tlen, strat;
 } cp_t;
 
-static const cp_t LEVELS[23] = {
+/* By the input's size, with a dictionary's content counted in, as libzstd picks: over 256 KiB, up
+ * to 256 KiB, up to 128 KiB and up to 16 KiB. */
+static const cp_t LEVELS[4][23] = {{
     {19, 12, 13, 1, 6, 1, S_FAST},       /* the negative levels, with tlen their speed */
     {19, 13, 14, 1, 7, 0, S_FAST},       /* 1 */
     {20, 15, 16, 1, 6, 0, S_FAST},       /* 2 */
@@ -879,7 +881,79 @@ static const cp_t LEVELS[23] = {
     {25, 25, 23, 7, 3, 256, S_BTULTRA2}, /* 20 */
     {26, 26, 24, 7, 3, 512, S_BTULTRA2}, /* 21 */
     {27, 27, 25, 9, 3, 999, S_BTULTRA2}, /* 22 */
-};
+}, {
+    {18, 12, 13, 1, 5, 1, S_FAST},
+    {18, 13, 14, 1, 6, 0, S_FAST},
+    {18, 14, 14, 1, 5, 0, S_DFAST},
+    {18, 16, 16, 1, 4, 0, S_DFAST},
+    {18, 16, 17, 3, 5, 2, S_GREEDY},
+    {18, 17, 18, 5, 5, 2, S_GREEDY},
+    {18, 18, 19, 3, 5, 4, S_LAZY},
+    {18, 18, 19, 4, 4, 4, S_LAZY},
+    {18, 18, 19, 4, 4, 8, S_LAZY2},
+    {18, 18, 19, 5, 4, 8, S_LAZY2},
+    {18, 18, 19, 6, 4, 8, S_LAZY2},
+    {18, 18, 19, 5, 4, 12, S_BTLAZY2},
+    {18, 19, 19, 7, 4, 12, S_BTLAZY2},
+    {18, 18, 19, 4, 4, 16, S_BTOPT},
+    {18, 18, 19, 4, 3, 32, S_BTOPT},
+    {18, 18, 19, 6, 3, 128, S_BTOPT},
+    {18, 19, 19, 6, 3, 128, S_BTULTRA},
+    {18, 19, 19, 8, 3, 256, S_BTULTRA},
+    {18, 19, 19, 6, 3, 128, S_BTULTRA2},
+    {18, 19, 19, 8, 3, 256, S_BTULTRA2},
+    {18, 19, 19, 10, 3, 512, S_BTULTRA2},
+    {18, 19, 19, 12, 3, 512, S_BTULTRA2},
+    {18, 19, 19, 13, 3, 999, S_BTULTRA2},
+}, {
+    {17, 12, 12, 1, 5, 1, S_FAST},
+    {17, 12, 13, 1, 6, 0, S_FAST},
+    {17, 13, 15, 1, 5, 0, S_FAST},
+    {17, 15, 16, 2, 5, 0, S_DFAST},
+    {17, 17, 17, 2, 4, 0, S_DFAST},
+    {17, 16, 17, 3, 4, 2, S_GREEDY},
+    {17, 16, 17, 3, 4, 4, S_LAZY},
+    {17, 16, 17, 3, 4, 8, S_LAZY2},
+    {17, 16, 17, 4, 4, 8, S_LAZY2},
+    {17, 16, 17, 5, 4, 8, S_LAZY2},
+    {17, 16, 17, 6, 4, 8, S_LAZY2},
+    {17, 17, 17, 5, 4, 8, S_BTLAZY2},
+    {17, 18, 17, 7, 4, 12, S_BTLAZY2},
+    {17, 18, 17, 3, 4, 12, S_BTOPT},
+    {17, 18, 17, 4, 3, 32, S_BTOPT},
+    {17, 18, 17, 6, 3, 256, S_BTOPT},
+    {17, 18, 17, 6, 3, 128, S_BTULTRA},
+    {17, 18, 17, 8, 3, 256, S_BTULTRA},
+    {17, 18, 17, 10, 3, 512, S_BTULTRA},
+    {17, 18, 17, 5, 3, 256, S_BTULTRA2},
+    {17, 18, 17, 7, 3, 512, S_BTULTRA2},
+    {17, 18, 17, 9, 3, 512, S_BTULTRA2},
+    {17, 18, 17, 11, 3, 999, S_BTULTRA2},
+}, {
+    {14, 12, 13, 1, 5, 1, S_FAST},
+    {14, 14, 15, 1, 5, 0, S_FAST},
+    {14, 14, 15, 1, 4, 0, S_FAST},
+    {14, 14, 15, 2, 4, 0, S_DFAST},
+    {14, 14, 14, 4, 4, 2, S_GREEDY},
+    {14, 14, 14, 3, 4, 4, S_LAZY},
+    {14, 14, 14, 4, 4, 8, S_LAZY2},
+    {14, 14, 14, 6, 4, 8, S_LAZY2},
+    {14, 14, 14, 8, 4, 8, S_LAZY2},
+    {14, 15, 14, 5, 4, 8, S_BTLAZY2},
+    {14, 15, 14, 9, 4, 8, S_BTLAZY2},
+    {14, 15, 14, 3, 4, 12, S_BTOPT},
+    {14, 15, 14, 4, 3, 24, S_BTOPT},
+    {14, 15, 14, 5, 3, 32, S_BTULTRA},
+    {14, 15, 15, 6, 3, 64, S_BTULTRA},
+    {14, 15, 15, 7, 3, 256, S_BTULTRA},
+    {14, 15, 15, 5, 3, 48, S_BTULTRA2},
+    {14, 15, 15, 6, 3, 128, S_BTULTRA2},
+    {14, 15, 15, 7, 3, 256, S_BTULTRA2},
+    {14, 15, 15, 8, 3, 256, S_BTULTRA2},
+    {14, 15, 15, 8, 3, 512, S_BTULTRA2},
+    {14, 15, 15, 9, 3, 512, S_BTULTRA2},
+    {14, 15, 15, 10, 3, 999, S_BTULTRA2},
+}};
 
 /* A match: its length and how far back. */
 typedef struct {
@@ -918,7 +992,10 @@ typedef struct {
     cx_u32 from, to; /* the job's own text, base[from..to); before it, from START, is what it matches into */
     cx_u32 start;    /* START */
     cx_u32 wsize;
-    int last; /* whether its last block ends the frame */
+    int last;  /* whether its last block ends the frame */
+    int first; /* whether its first block starts it */
+    int dict;  /* whether its text before it is a dictionary's content */
+    const cx_u8* dparams; /* for the first job, a trained dictionary's tables, or 0 */
     /* the match finder's tables */
     cx_u32* hash;
     cx_u32* chain;
@@ -1347,20 +1424,21 @@ static inline void row_refill(rw_t* w, cx_u32 from) {
 
 /* Puts the positions before target into their rows. Of a long match's, only the first few and the
  * last go in: the ones between would find the same text the match did. Always inlined, as row_best
- * is, for the same reason. */
-static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target) {
+ * is, for the same reason. With `safe`, each hash is worked out where it's needed, not eight ahead,
+ * for a job's last bytes. */
+static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target, const int safe) {
     cx_u32 i = w->next_up;
     if (target - i > ROW_SKIP) {
         for (const cx_u32 e = i + 96; i < e; i++) {
-            row_put(w, i, w->hc[i & 7]);
-            row_ahead(w, i + 8);
+            row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7]);
+            if (!safe) row_ahead(w, i + 8);
         }
         i = target - 32;
-        row_refill(w, i);
+        if (!safe) row_refill(w, i);
     }
     for (; i < target; i++) {
-        row_put(w, i, w->hc[i & 7]);
-        row_ahead(w, i + 8);
+        row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7]);
+        if (!safe) row_ahead(w, i + 8);
     }
     w->next_up = target;
 }
@@ -1368,15 +1446,16 @@ static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 tar
 /* The longest match at ip in its row, at most 2^slog tries, newest first: its length, or 0 if it's
  * shorter than mml, and its distance in *off. Always inlined, so `w` is the caller's local, which
  * the tags' byte stores can't touch: called through a pointer, it had its fields read again after
- * each store. */
-static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off) {
+ * each store. `safe` as for row_insert. */
+static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off, const int safe) {
     const cx_u8* const base = w->base;
     const cx_u32 cur = (cx_u32)(ip - base);
     if (w->skipping) {
         w->next_up = cur;
         w->hc[cur & 7] = row_hash(w, cur);
     } else {
-        row_insert(w, cur);
+        row_insert(w, cur, safe);
+        if (safe) w->hc[cur & 7] = row_hash(w, cur);
     }
     const cx_u32 rlog = w->rlog, rmask = w->rmask;
     const cx_u32 h = w->hc[cur & 7], at = (h >> 8) << rlog, hd = w->tags[at];
@@ -1399,7 +1478,7 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
      * search's. The candidates are taken already, so this search doesn't find it. */
     row_put(w, cur, h);
     w->next_up = cur + 1;
-    if (!w->skipping) row_ahead(w, cur + 8);
+    if (!safe && !w->skipping) row_ahead(w, cur + 8);
     for (cx_u32 k = 0; k < nc; k++) {
         const cx_u32 cand = cands[k];
         const cx_u8* mp = base + cand;
@@ -1429,14 +1508,14 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
     const cx_u8* anchor = ip;
     const cx_u8* const iend = base + end;
     /* Positions are hashed eight ahead of the one looked at, eight bytes each: the job's last 16
-     * have no match looked for, so that stays in its text. */
+     * get the plainer search after this loop, so that stays in its text. */
     const cx_u8* const ilimit = end - READ <= J->to - 16 ? iend - READ : base + J->to - 16;
     if (J->next_up < start) J->next_up = start;
-    if (ilimit <= ip + 1) goto tail;
+    if (iend - READ <= ip + 1) goto tail;
     rw_t w;
     rw_load(&w, J);
     w.mls = mls;
-    row_refill(&w, w.next_up);
+    if (ilimit > ip + 1) row_refill(&w, w.next_up);
     while (ip < ilimit) {
         cx_u32 ml = 0, off = 0;
         const cx_u8* mstart = ip;
@@ -1451,7 +1530,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
         }
         {
             cx_u32 o;
-            const cx_u32 l = row_best(&w, ip, iend, &o);
+            const cx_u32 l = row_best(&w, ip, iend, &o, 0);
             if (l > ml) {
                 ml = l;
                 off = o;
@@ -1492,7 +1571,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
                     }
                 }
                 cx_u32 o;
-                const cx_u32 l = row_best(&w, ip, iend, &o);
+                const cx_u32 l = row_best(&w, ip, iend, &o, 0);
                 if (l && (int)l * 4 - (int)high_bit(o + 3) > worth) {
                     ml = l;
                     off = o;
@@ -1527,6 +1606,41 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
             ip += ml;
             anchor = ip;
         }
+    }
+    /* A job's last bytes, to READ before its end: the first match at each, the repeated offset's
+     * or the row's, with no hashing ahead. A small input's end, which a dictionary often has, is a
+     * good part of it. */
+    for (const cx_u8* const tlimit = iend - READ; ip < tlimit;) {
+        cx_u32 ml = 0, off = 0;
+        const cx_u8* mstart = ip;
+        const cx_u32 c1 = (cx_u32)(ip + 1 - base);
+        if (REP_OK(r[0], c1, start) && ld32(ip + 1) == ld32(ip + 1 - r[0])) {
+            ml = count(ip + 5, ip + 5 - r[0], iend) + 4;
+            off = r[0];
+            mstart = ip + 1;
+        }
+        cx_u32 o;
+        const cx_u32 l = row_best(&w, ip, iend, &o, 1);
+        if (l > ml) {
+            ml = l;
+            off = o;
+            mstart = ip;
+        }
+        if (ml == 0) {
+            ip++;
+            continue;
+        }
+        if (off != r[0]) {
+            const cx_u8* mp = mstart - off;
+            while (mstart > anchor && mp > base + start && mstart[-1] == mp[-1]) {
+                mstart--;
+                mp--;
+                ml++;
+            }
+        }
+        ss_put(ss, r, anchor, (cx_u32)(mstart - anchor), off, ml);
+        ip = mstart + ml;
+        anchor = ip;
     }
     J->next_up = w.next_up;
 tail:
@@ -2854,10 +2968,11 @@ static cx_usize block(job_t* J, cx_u32 at, cx_u32 n, int last, cx_u8* out, cx_us
     case S_LAZY2: mf_lazy2(J, at, at + n, r); break;
     case S_BTLAZY2: mf_btlazy(J, at, at + n, r); break;
     default:
-        if (J->p.strat == S_BTULTRA2 && !J->st->ready) {
+        if (J->p.strat == S_BTULTRA2 && !J->st->ready && !J->dict) {
             /* The job's first block is parsed once just for the counts, which then price the parse
              * that's kept; the trees forget the first parse, as their positions would be ahead of
-             * the second's. */
+             * the second's. Not after a dictionary, as libzstd doesn't: the trees would take its
+             * content in again, which on a small input is most of the work. */
             cx_u32 r1[3] = {fin[0], fin[1], fin[2]};
             mf_opt(J, at, at + n, r1);
             J->ss.n = 0;
@@ -2932,12 +3047,13 @@ static void tables_init(void) {
 /* The settings for a level and an input of n bytes: the window and the tables no bigger than the
  * input needs. */
 static cp_t params_for(cx_i32 level, cx_u64 n) {
+    const cp_t* const t = LEVELS[(n <= 256 * 1024) + (n <= 128 * 1024) + (n <= 16 * 1024)];
     cp_t p;
     if (level < 0) {
-        p = LEVELS[0];
+        p = t[0];
         p.tlen = (cx_u32)(-(cx_i64)level);
     } else {
-        p = LEVELS[level == 0 ? 3 : level > 22 ? 22 : level];
+        p = t[level == 0 ? 3 : level > 22 ? 22 : level];
     }
 #ifdef ZSE_TUNE
     {
@@ -3077,6 +3193,32 @@ static void job_prefix(job_t* J) {
     }
 }
 
+/* A trained dictionary's tables and repeated offsets, which the decoder starts the frame with, so
+ * the first block may repeat them: from calx_zstd.c's cx_zstd_dict_params, which says how they're
+ * laid out. */
+#define DP_HUF 256
+#define DP_FSE 258
+#define DP_REP (258 + 3 * 130)
+
+static void dict_tables(ent_t* e, const cx_u8* P) {
+    huf_codes(P, P[DP_HUF + 1], P[DP_HUF], e->huf);
+    e->huf_log = P[DP_HUF];
+    e->huf_ok = 1;
+    tab_t* const t[3] = {&e->of, &e->ml, &e->ll};
+    for (int k = 0; k < 3; k++) {
+        const cx_u8* const q = P + DP_FSE + 130 * k;
+        tab_t* const x = t[k];
+        x->kind = T_FSE;
+        x->log = q[0];
+        x->max = q[1];
+        x->rle = 0;
+        memset(x->norm, 0, sizeof x->norm);
+        for (cx_u32 s = 0; s <= x->max; s++) x->norm[s] = (cx_i16)(cx_u16)(q[2 + 2 * s] | (cx_u32)q[3 + 2 * s] << 8);
+        build_ct(&x->ct, x->norm, x->max, x->log);
+    }
+    for (int i = 0; i < 3; i++) e->rep[i] = ld32(P + DP_REP + 4 * i);
+}
+
 /* Compresses the job's text into its blocks. */
 static void job_run(job_t* J) {
     job_tables(J);
@@ -3086,12 +3228,14 @@ static void job_run(job_t* J) {
     J->cur = 0;
     e->huf_ok = 0;
     e->ll.kind = e->of.kind = e->ml.kind = T_NONE;
-    /* The first job starts with the frame's repeated offsets; the others can't know the ones the
-     * job before left, so they have none until their matches make them. */
-    if (J->from == J->start) {
+    /* The first job starts with the frame's repeated offsets, and a trained dictionary's tables and
+     * offsets; the others can't know the ones the job before left, so they have none until their
+     * matches make them. */
+    if (J->first) {
         e->rep[0] = 1;
         e->rep[1] = 4;
         e->rep[2] = 8;
+        if (J->dparams) dict_tables(e, J->dparams);
     } else {
         e->rep[0] = e->rep[1] = e->rep[2] = 0;
     }
@@ -3184,6 +3328,12 @@ typedef struct {
     cx_u8* direct; /* where the blocks go, for jobs that run one at a time */
     cx_usize direct_cap;
     cx_usize direct_n; /* how much the jobs before have written */
+    /* With a dictionary, the first job's text after as much of the dictionary's content as the
+     * window holds, first_pre bytes, so its matches can reach back into it. */
+    cx_u8* first;
+    cx_u32 first_pre;
+    cx_usize first_cap;
+    const cx_u8* dparams;
 } frame_t;
 
 #define START_OF(p) (((cx_u32)1 << (p).wlog) + 1)
@@ -3198,6 +3348,14 @@ static void job_place(frame_t* F, job_t* J, cx_u64 k) {
     J->from = J->start + (cx_u32)(from - pre);
     J->to = J->start + (cx_u32)(to - pre);
     J->last = k + 1 == F->jobs;
+    J->first = k == 0;
+    J->dparams = k == 0 ? F->dparams : 0;
+    J->dict = k == 0 && F->first;
+    if (k == 0 && F->first) {
+        J->base = F->first - J->start;
+        J->from = J->start + F->first_pre;
+        J->to = J->from + (cx_u32)to;
+    }
 }
 
 static void group_body(void* v, cx_u64 begin, cx_u64 end) {
@@ -3233,19 +3391,33 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
     }
 }
 
-/* Writes the frame for in[0..n) at the given level into out, which has cx_zse_bound(n) bytes:
- * gives its size. flags: 1 for a checksum, which std.zstd appends. */
-cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags) {
+/* Writes the frame for in[0..n) at the given level into out, which has cx_zse_bound(n) bytes,
+ * with a dictionary's content[0..content_n) as the text before it, its ID if that isn't 0, and if
+ * params isn't 0 its tables: gives its size. flags: 1 for a checksum, which std.zstd appends. */
+static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
+                          const cx_u8* params) {
     if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
     frame_t F;
     memset(&F, 0, sizeof F);
     F.in = in;
     F.n = n;
-    F.p = params_for(level, n);
+    /* With a dictionary the settings are for it and the input together, as libzstd picks them, so
+     * the window takes in what it can of both. */
+    F.p = params_for(level, n + content_n);
     F.each = job_size(&F.p);
     F.reach = job_reach(&F.p);
     F.jobs = n ? (n + F.each - 1) / F.each : 1;
-    /* The frame's header: no dictionary, its size, and a window unless it's one segment. */
+    F.dparams = params;
+    if (content_n) {
+        const cx_u64 w = (cx_u64)1 << F.p.wlog, len = n < F.each ? n : F.each;
+        F.first_pre = (cx_u32)(content_n < w ? content_n : w);
+        F.first_cap = F.first_pre + (cx_usize)len;
+        F.first = (cx_u8*)cx_alloc(F.first_cap ? F.first_cap : 1);
+        memcpy(F.first, content + content_n - F.first_pre, F.first_pre);
+        if (len) memcpy(F.first + F.first_pre, in, (cx_usize)len);
+    }
+    /* The frame's header: the dictionary's ID if it has one, the size, and a window unless it's
+     * one segment. */
     cx_u8* op = out;
     st32(op, MAGIC);
     op += 4;
@@ -3253,8 +3425,10 @@ cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u
     cx_u32 fcs;
     if (single) fcs = n < 256 ? 0 : n < 65536 + 256 ? 1 : n < ((cx_u64)1 << 32) ? 2 : 3;
     else fcs = n < 65536 + 256 ? 1 : n < ((cx_u64)1 << 32) ? 2 : 3;
-    *op++ = (cx_u8)((fcs << 6) | ((cx_u32)single << 5) | ((flags & 1) << 2));
+    const cx_u32 did = dict_id == 0 ? 0 : dict_id < 256 ? 1 : dict_id < 65536 ? 2 : 3;
+    *op++ = (cx_u8)((fcs << 6) | ((cx_u32)single << 5) | ((flags & 1) << 2) | did);
     if (!single) *op++ = (cx_u8)((F.p.wlog - 10) << 3);
+    for (cx_u32 k = 0; k < (did == 3 ? 4u : did); k++) *op++ = (cx_u8)(dict_id >> (8 * k));
     switch (fcs) {
     case 0: *op++ = (cx_u8)n; break;
     case 1:
@@ -3297,5 +3471,17 @@ cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u
         op += F.made[k].n;
     }
     cx_free(F.made, F.jobs * sizeof(made_t));
+    if (F.first) cx_free(F.first, F.first_cap ? F.first_cap : 1);
     return (cx_u64)(op - out);
+}
+
+cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags) {
+    return frame_write(in, n, out, level, flags, 0, 0, 0, 0);
+}
+
+/* As cx_zse_compress, with a dictionary: its content[0..content_n), its ID, 0 for none, and its
+ * tables from calx_zstd.c's cx_zstd_dict_params if has_params is set. */
+cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
+                            const cx_u8* params, cx_u32 has_params) {
+    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0);
 }

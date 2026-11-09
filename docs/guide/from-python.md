@@ -213,7 +213,7 @@ fn main() ! Error {
 | `LZMADecompressor()`, `lzma.open(path)` to read | `Decompressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `d.add(piece)`, then `d.finish()`, which reads every stream as `lzma.open` does |
 | `LZMACompressor()`, `lzma.open(path, "w")` | `Compressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `c.add(piece)`, then `c.finish()`, the same bytes as `compress` |
 | `compression.zstd.decompress(b)`, `ZstdDict(d)` | `decompress(b)` and `Dictionary.new(d)` from [`std.zstd`](../std/zstd.md), with the same errors, big frames on all the processors |
-| `compression.zstd.compress(b, 19)` | `compress(b, 19)` from [`std.zstd`](../std/zstd.md#compressing), big inputs on all the processors, the same bytes on any machine |
+| `compression.zstd.compress(b, 19)`, `compress(b, 19, zstd_dict=d)` | `compress(b, 19)` and `d.compress(b, 19)` from [`std.zstd`](../std/zstd.md#compressing), big inputs on all the processors, the same bytes on any machine |
 | `datetime.now()`, `strftime`, `strptime` | `unsafe { Timestamp.now() }`, `format` and `parse` from [`std.time`](../std/time.md), with Python's codes |
 | `time.perf_counter()` | `unsafe { Instant.now() }` from [`std.time`](../std/time.md) |
 | `time.sleep(0.5)` | `unsafe { sleep(500_000_000) }`, in nanoseconds, from [`std.thread`](../std/thread.md) |

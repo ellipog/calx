@@ -12,8 +12,11 @@ extern "C" {
     fn cx_zstd_frame(ctx: *u8, input: *const u8, n: usize, at: usize, ent: *const u8, dict_id: u32, window_max: u64, info: *u64) -> i32
     fn cx_zstd_blocks(ctx: *u8, input: *const u8, n: usize, out: *u8, start: usize, len: *usize, cap: usize, limit: usize, dict: *const u8, dict_n: usize, info: *u64) -> i32
     fn cx_zstd_xxh64(p: *const u8, n: usize, seed: u64) -> u64
+    fn cx_zstd_dict_params_size() -> usize
+    fn cx_zstd_dict_params(d: *const u8, n: usize, out: *u8) -> i32
     fn cx_zse_bound(n: u64) -> u64
     fn cx_zse_compress(input: *const u8, n: u64, out: *u8, level: i32, flags: u32) -> u64
+    fn cx_zse_compress_dict(input: *const u8, n: u64, out: *u8, level: i32, flags: u32, content: *const u8, content_n: u64, dict_id: u32, params: *const u8, has_params: u32) -> u64
 }
 
 /// Why bytes didn't decompress. Python raises a `ZstdError` for each, and a `ValueError` for a
@@ -61,7 +64,7 @@ impl Display for Error {
 }
 
 /// A dictionary, which small files compressed with it need to decompress, as Python's `ZstdDict`
-/// holds one.
+/// holds one. Files compressed with one come out smaller, if they're like what it was made from.
 pub struct Dictionary {
     bytes: List<u8>
     // Its entropy tables and repeated offsets, as the runtime reads them.
@@ -69,6 +72,8 @@ pub struct Dictionary {
     dict_id: u32
     // Where its content starts after the tables, or 0 for bytes that are all content.
     content: usize
+    // For one with tables, those tables as the compressor takes them; empty for content alone.
+    params: List<u8>
 }
 
 impl Dictionary {
@@ -99,7 +104,7 @@ impl Dictionary {
         if bytes.len() < 8 {
             fail Error.BadDictionary
         }
-        var d = Dictionary { bytes: bytes, tables: tables_for(), dict_id: 0, content: 0 }
+        var d = Dictionary { bytes: bytes, tables: tables_for(), dict_id: 0, content: 0, params: [] }
         var info: List<u64> = [0; 2]
         let r = unsafe { cx_zstd_dict(d.bytes.as_ptr(), d.bytes.len(), d.tables.as_mut_ptr(), info.as_mut_ptr()) }
         if r != 0 {
@@ -107,12 +112,21 @@ impl Dictionary {
         }
         d.dict_id = u32.wrap(info[0])
         d.content = usize.wrap(info[1])
+        if d.content != 0 {
+            let n = unsafe { cx_zstd_dict_params_size() }
+            var p: List<u8> = [0; n]
+            let pr = unsafe { cx_zstd_dict_params(d.bytes.as_ptr(), d.bytes.len(), p.as_mut_ptr()) }
+            if pr != 0 {
+                fail Error.BadDictionary
+            }
+            d.params = p
+        }
         return d
     }
 
     // No dictionary at all.
     fn empty() -> Dictionary {
-        var d = Dictionary { bytes: [], tables: tables_for(), dict_id: 0, content: 0 }
+        var d = Dictionary { bytes: [], tables: tables_for(), dict_id: 0, content: 0, params: [] }
         var info: List<u64> = [0; 2]
         _ = unsafe { cx_zstd_dict(d.bytes.as_ptr(), 0, d.tables.as_mut_ptr(), info.as_mut_ptr()) }
         return d
@@ -136,6 +150,25 @@ impl Dictionary {
     @track_caller
     pub fn decompress_into(self, bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error {
         try decode(bytes, from, to, limit, self, mut out)
+    }
+
+    /// The bytes compressed as one frame with this dictionary, as `compress(bytes, level,
+    /// zstd_dict=d)` writes one: matches reach back into its content, a trained one's tables and
+    /// repeated offsets start the first block, and the frame gives its ID, which only content
+    /// alone doesn't have. Otherwise as `compress`. Python, `zstd -D` and `decompress` here read
+    /// it back with the same dictionary.
+    @track_caller
+    pub fn compress(self, bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List<u8> {
+        var out: List<u8> = []
+        encode(bytes, 0, bytes.len(), level, checksum, self.bytes, self.content, self.dict_id, self.params, mut out)
+        return out
+    }
+
+    /// Compresses `bytes[from..to]` with this dictionary, as `compress` does, onto the end of
+    /// `out`. Panics unless the range is in `bytes`, and for a level outside -131072 to 22.
+    @track_caller
+    pub fn compress_into(self, bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>) {
+        encode(bytes, from, to, level, checksum, self.bytes, self.content, self.dict_id, self.params, mut out)
     }
 }
 
@@ -185,6 +218,13 @@ pub fn compress(bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List
 /// is in `bytes`, and for a level outside -131072 to 22.
 @track_caller
 pub fn compress_into(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>) {
+    encode(bytes, from, to, level, checksum, [], 0, 0, [], mut out)
+}
+
+// Compresses bytes[from..to] onto the end of out, with dict[content..] as the text before them if
+// there's a dictionary, its ID if that isn't 0, and its tables if params has them.
+@track_caller
+fn encode(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, dict: List<u8>, content: usize, dict_id: u32, params: List<u8>, out: mut List<u8>) {
     if from > to or to > bytes.len() {
         panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
     }
@@ -195,8 +235,13 @@ pub fn compress_into(bytes: List<u8>, from: usize, to: usize, level: i32, checks
     let at = out.len()
     let room = unsafe { cx_zse_bound(n) }
     out.reserve(usize.wrap(room))
+    let flags = if checksum { 1u32 } else { 0u32 }
     unsafe {
-        let made = cx_zse_compress(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, if checksum { 1u32 } else { 0u32 })
+        let made = if dict.is_empty() {
+            cx_zse_compress(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, flags)
+        } else {
+            cx_zse_compress_dict(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, flags, dict.as_ptr().add(content), u64(dict.len() - content), dict_id, params.as_ptr(), if params.is_empty() { 0u32 } else { 1u32 })
+        }
         out.set_len(at + usize.wrap(made))
     }
     if checksum {

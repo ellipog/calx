@@ -123,7 +123,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 52. [std.yaml](std/yaml.md): YAML read into a tree as PyYAML's `safe_load` reads it, YAML 1.1 and PyYAML's quirks included, with the line and column of any mistake, and written back byte for byte as `safe_dump` writes it, and `@yaml`, which reads a config straight into a struct
 53. [std.log](std/log.md): logging as Python's `logging` module does it, messages at a level written in Python's formats with the time, the level and the logger's name, to standard error or a file, set up once with `config`
 54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, and .xz and .lzma files compressed at `xz`'s presets, both on all the processors, whole or a piece at a time
-55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, and compressed at `zstd`'s levels, big ones on all the processors
+55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, and compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors
 
 ### Java compatibility
 

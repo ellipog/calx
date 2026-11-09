@@ -404,9 +404,10 @@ static void ent_reset(ent_t* e) {
 
 /* --- Huffman --------------------------------------------------------------------------------- */
 
-/* Reads a Huffman tree's description from p[0..n) into e's table. Gives the bytes it took, or 0. */
-static cx_usize read_huffman(ent_t* e, const cx_u8* p, cx_usize n) {
-    cx_u8 w[256];
+/* Reads a Huffman tree's description from p[0..n): each symbol's weight into w, *count of them
+ * with the last one worked out, and the longest code's length into *log. Gives the bytes it took,
+ * or 0. */
+static inline cx_usize read_weights(const cx_u8* p, cx_usize n, cx_u8* w, cx_u32* count_out, cx_u32* log_out, cx_u32* ranks) {
     cx_u32 count;
     cx_usize used;
     if (n < 1) return 0;
@@ -454,7 +455,8 @@ static cx_usize read_huffman(ent_t* e, const cx_u8* p, cx_usize n) {
         }
     }
     /* The last symbol's weight is what makes the total a power of two. */
-    cx_u32 total = 0, ranks[HUF_LOG_MAX + 2] = {0};
+    cx_u32 total = 0;
+    memset(ranks, 0, (HUF_LOG_MAX + 2) * sizeof(cx_u32));
     for (cx_u32 i = 0; i < count; i++) {
         if (w[i] > HUF_LOG_MAX) return 0;
         ranks[w[i]]++;
@@ -470,6 +472,17 @@ static cx_usize read_huffman(ent_t* e, const cx_u8* p, cx_usize n) {
     w[count++] = (cx_u8)last;
     ranks[last]++;
     if (ranks[1] < 2 || (ranks[1] & 1)) return 0;
+    *count_out = count;
+    *log_out = log;
+    return used;
+}
+
+/* Reads a Huffman tree's description from p[0..n) into e's table. Gives the bytes it took, or 0. */
+static cx_usize read_huffman(ent_t* e, const cx_u8* p, cx_usize n) {
+    cx_u8 w[256];
+    cx_u32 count, log, ranks[HUF_LOG_MAX + 2];
+    const cx_usize used = read_weights(p, n, w, &count, &log, ranks);
+    if (used == 0) return 0;
     /* The longest codes first: each weight's symbols in order, 2^(weight-1) entries each. The
      * weights add up to the table, so it's filled exactly. One pass over the symbols, each
      * weight's entries starting where the lighter ones' end. */
@@ -1205,6 +1218,52 @@ cx_i32 cx_zstd_dict(const cx_u8* d, cx_usize n, cx_u8* ent_bytes, cx_u64* info) 
         e->rep[i] = r;
     }
     info[1] = at + 12;
+    return ZS_DONE;
+}
+
+/* A dictionary's tables as numbers, for the compressor, which starts its first block with them:
+ * each byte's Huffman code length, 0 for none (256 bytes); the longest, and the highest byte with
+ * one (a byte each); the offsets', match lengths' and literal lengths' tables, each its accuracy
+ * and highest symbol (a byte each) and 64 counts (two bytes each, little-endian); and the three
+ * repeated offsets (four bytes each). calx_zstdenc.c reads them. */
+#define DP_BYTES (258 + 3 * 130 + 12)
+
+cx_usize cx_zstd_dict_params_size(void) { return DP_BYTES; }
+
+/* Writes a dictionary's tables into out, DP_BYTES of them, for one cx_zstd_dict read without an
+ * error and gave an ID: gives ZS_DONE, or ZS_DICT_BAD for bytes that aren't such a dictionary. */
+cx_i32 cx_zstd_dict_params(const cx_u8* d, cx_usize n, cx_u8* out) {
+    if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
+    memset(out, 0, DP_BYTES);
+    if (n < 8 || ld32(d) != DICT_MAGIC) return ZS_DICT_BAD;
+    cx_usize at = 8;
+    cx_u8 w[256];
+    cx_u32 count, log, ranks[HUF_LOG_MAX + 2];
+    const cx_usize used = read_weights(d + at, n - at, w, &count, &log, ranks);
+    if (used == 0) return ZS_DICT_BAD;
+    at += used;
+    for (cx_u32 s = 0; s < count; s++) {
+        out[s] = w[s] ? (cx_u8)(log + 1 - w[s]) : 0;
+        if (w[s]) out[257] = (cx_u8)s;
+    }
+    out[256] = (cx_u8)log;
+    const cx_u32 maxes[3] = {OF_MAX, ML_MAX, LL_MAX}, logs[3] = {OF_LOG, ML_LOG, LL_LOG};
+    for (int k = 0; k < 3; k++) {
+        cx_i16 norm[64];
+        cx_u32 m = maxes[k], l;
+        const cx_usize took = read_counts(d + at, n - at, norm, &m, &l, logs[k]);
+        if (took == 0) return ZS_DICT_BAD;
+        at += took;
+        cx_u8* t = out + 258 + 130 * k;
+        t[0] = (cx_u8)l;
+        t[1] = (cx_u8)m;
+        for (cx_u32 s = 0; s <= m; s++) {
+            t[2 + 2 * s] = (cx_u8)((cx_u16)norm[s] & 0xFF);
+            t[3 + 2 * s] = (cx_u8)((cx_u16)norm[s] >> 8);
+        }
+    }
+    if (n - at < 12) return ZS_DICT_BAD;
+    memcpy(out + 258 + 390, d + at, 12);
     return ZS_DONE;
 }
 
