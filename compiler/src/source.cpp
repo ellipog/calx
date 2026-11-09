@@ -7,8 +7,12 @@
 
 namespace calx {
 
+bool has_bom(std::string_view text) { return text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0; }
+
 SourceFile::SourceFile(std::string p, std::string t) : path(std::move(p)), text(std::move(t)) {
-    line_starts.push_back(0);
+    // The first line starts after a byte order mark, which the lexer skips, so its columns are
+    // counted as editors count them, which don't show one.
+    line_starts.push_back(has_bom(text) ? 3 : 0);
     for (std::uint32_t i = 0; i < text.size(); i++) {
         if (text[i] == '\n') line_starts.push_back(i + 1);
     }
@@ -17,10 +21,12 @@ SourceFile::SourceFile(std::string p, std::string t) : path(std::move(p)), text(
 std::pair<std::uint32_t, std::uint32_t> SourceFile::position(std::uint32_t offset) const {
     auto it = std::upper_bound(line_starts.begin(), line_starts.end(), offset);
     auto line = static_cast<std::uint32_t>(it - line_starts.begin());
+    if (line == 0) return {1, 1};  // in the byte order mark
     return {line, offset - line_starts[line - 1] + 1};
 }
 
 std::pair<std::uint32_t, std::uint32_t> SourceFile::editor_position(std::uint32_t offset) const {
+    if (offset < line_starts[0]) return {0, 0};
     auto [line, col] = position(offset);
     std::uint32_t units = 0;
     for (std::uint32_t i = line_starts[line - 1]; i < offset && i < text.size(); i++) {
@@ -83,12 +89,19 @@ std::string Diagnostics::excerpt(Span span, bool color) const {
     std::string out = "  ";
     out += text;
     out += "\n  ";
-    for (std::uint32_t i = 1; i < col && i <= text.size(); i++) out += text[i - 1] == '\t' ? '\t' : ' ';
+    // A column for each character, not each byte, so the caret is under what it points at after
+    // letters outside ASCII.
+    auto lead = [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; };
+    for (std::uint32_t i = 1; i < col && i <= text.size(); i++) {
+        if (lead(text[i - 1])) out += text[i - 1] == '\t' ? '\t' : ' ';
+    }
     // Underline to the end of the span, but no further than the end of its first line.
     std::uint32_t width = 1;
     if (span.end > span.begin) {
         std::uint32_t line_end = f.line_starts[line - 1] + static_cast<std::uint32_t>(text.size());
-        width = std::max<std::uint32_t>(1, std::min(span.end, line_end) - span.begin);
+        std::uint32_t chars = 0;
+        for (std::uint32_t i = span.begin; i < std::min(span.end, line_end); i++) chars += lead(f.text[i]);
+        width = std::max<std::uint32_t>(1, chars);
     }
     if (color) out += "\x1b[1;32m";
     out += '^';

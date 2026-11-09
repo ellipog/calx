@@ -18,7 +18,7 @@ fn main() {
 
 ## Files
 
-A source file is UTF-8, and its name ends in `.calx`. A first line that starts with `#!`, such as `#!/usr/bin/env calx`, is skipped, so the file can run as a script by its own name ([running a file](command.md#running-a-file)). Each file is a [module](modules.md). It can start with `module a.b.c`, which must match its place: `module game.world` is `game/world.calx` under the source root. A file at the root can leave the line out, and is then named after the file.
+A source file is UTF-8, and its name ends in `.calx`. It may start with a byte order mark, as some Windows editors and PowerShell 5's `Set-Content -Encoding utf8` write: the compiler skips it, and `calx fmt` keeps it. One anywhere else is an error. A first line that starts with `#!`, such as `#!/usr/bin/env calx`, is skipped, so the file can run as a script by its own name ([running a file](command.md#running-a-file)). Each file is a [module](modules.md). It can start with `module a.b.c`, which must match its place: `module game.world` is `game/world.calx` under the source root. A file at the root can leave the line out, and is then named after the file.
 
 ## Lines and statements
 

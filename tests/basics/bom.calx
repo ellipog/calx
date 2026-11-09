@@ -1,0 +1,7 @@
+﻿// This file starts with a UTF-8 byte order mark, which some Windows editors and PowerShell 5's
+// `Set-Content -Encoding utf8` write, and the compiler skips it (CLX-206). Errors after it are on
+// the lines they're on, as bom_errors.calx checks.
+
+fn main() {
+    println("ran")    // out: ran
+}

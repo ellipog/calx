@@ -1,5 +1,6 @@
 #include "lexer.h"
 
+#include <cstdio>
 #include <string>
 
 namespace calx {
@@ -69,9 +70,12 @@ public:
     Lexer(const SourceFile& file, std::uint32_t file_id, std::uint32_t begin, std::uint32_t end, Names& names,
           Arena& arena, Diagnostics& diags)
         : src_(file.text), file_(file_id), pos_(begin), end_(end), names_(names), arena_(arena), diags_(diags) {
+        // A UTF-8 byte order mark, which some Windows editors and PowerShell 5's `-Encoding utf8`
+        // write, says nothing a source file needs (CLX-206).
+        if (begin == 0 && end >= 3 && has_bom(src_)) pos_ = 3;
         // A `#!` line, such as `#!/usr/bin/env calx`, which runs the file as a script, is the
         // system's, not Calx's. Its line end stays, so the lines after it keep their numbers.
-        if (begin == 0 && end >= 2 && src_[0] == '#' && src_[1] == '!') {
+        if (pos_ == 0 && end >= 2 && src_[0] == '#' && src_[1] == '!') {
             while (pos_ < end_ && src_[pos_] != '\n') pos_++;
         }
     }
@@ -289,7 +293,17 @@ private:
         else if (b >= 0xE0) len = 3;
         else if (b >= 0xC0) len = 2;
         pos_ = std::min(pos_ + len, end_);
-        diags_.error(span(start, pos_), "unexpected character `" + std::string(src_.substr(start, pos_ - start)) + "`");
+        std::string what = "unexpected character `" + std::string(src_.substr(start, pos_ - start)) + "`";
+        // Outside ASCII, its code point too, since some are blank, and others look like ASCII.
+        if (len > 1 && pos_ - start == len) {
+            std::uint32_t cp = b & (0x7F >> len);
+            for (std::uint32_t i = 1; i < len; i++) cp = cp << 6 | (static_cast<unsigned char>(src_[start + i]) & 0x3F);
+            char hex[16];
+            std::snprintf(hex, sizeof hex, "U+%04X", static_cast<unsigned>(cp));
+            what += std::string(" (") + hex + ")";
+            if (cp == 0xFEFF) what += ", a byte order mark, which only the start of a file may have";
+        }
+        diags_.error(span(start, pos_), what);
     }
 
     void lex_number() {

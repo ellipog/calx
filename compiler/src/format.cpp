@@ -432,6 +432,12 @@ std::vector<std::size_t> statement_ends(const std::string& path, const std::stri
 }  // namespace
 
 bool format_source(const std::string& path, const std::string& text, std::string& out, std::string& error) {
+    // A byte order mark stays where it is, and what follows it is formatted as a file (CLX-206).
+    if (has_bom(text)) {
+        if (!format_source(path, text.substr(3), out, error)) return false;
+        out.insert(0, "\xEF\xBB\xBF");
+        return true;
+    }
     Scanned s = scan(path, text);
     if (!s.ok) {
         error = s.error;

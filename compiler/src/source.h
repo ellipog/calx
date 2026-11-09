@@ -11,10 +11,13 @@
 
 namespace calx {
 
+// Whether text starts with a UTF-8 byte order mark, which a source file may (CLX-206).
+bool has_bom(std::string_view text);
+
 struct SourceFile {
     std::string path;       // as given on the command line or found by the module loader
     std::string text;       // the whole file, with a NUL after it
-    std::vector<std::uint32_t> line_starts;
+    std::vector<std::uint32_t> line_starts;  // the first is after a byte order mark
     // Code an attribute generated (D124): the attribute it came from, and what to say about it.
     Span generated_at;
     std::string generated_by;

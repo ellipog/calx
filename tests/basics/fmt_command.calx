@@ -93,6 +93,8 @@ fn main() {
     let crlf = messy.replace("\n", "   \r\n")
     println("{calx(exe, ["fmt", "--stdin"], crlf, dir.copy()) == tidy}")    // out: true
     println("{calx(exe, ["fmt", "--stdin"], formatted.copy(), dir.copy()) == tidy}")    // out: true
+    // A byte order mark at the start stays, and the rest is formatted as without it (CLX-206).
+    println("{calx(exe, ["fmt", "--stdin"], "\u{FEFF}{messy}", dir.copy()) == "\u{FEFF}{tidy}"}")    // out: true
 
     // What it made runs as what it was given did.
     write_text("{dir}{s}messy.calx", String(messy))!

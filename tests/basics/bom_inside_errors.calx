@@ -1,0 +1,8 @@
+// A byte order mark anywhere but the start of a file is an error, which names it, since it can't
+// be seen.
+
+fn main() {
+    let x = 1﻿    // error: unexpected character `﻿` (U+FEFF), a byte order mark, which only the start of a file may have
+    let q = 2 “    // error: (U+201C)
+    println("{x}")
+}

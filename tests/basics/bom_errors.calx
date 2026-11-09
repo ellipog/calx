@@ -1,0 +1,4 @@
+﻿fn main() {    // starts with a byte order mark
+    let x: i32 = "no"    // error: expected `i32`, found `str`
+    println("{x}")
+}
