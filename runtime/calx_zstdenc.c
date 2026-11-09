@@ -964,6 +964,29 @@ static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
  * there's that much text before. */
 #define REP_OK(r, cur, start) ((r) - 1 < (cur) - (start))
 
+/* A table entry m's text, or, if m is out of the window, bytes the text rarely has at `nt`, one of
+ * NOT_TEXT's halves: picked without a branch, as whether an entry is in is a coin toss while a
+ * table fills, which is all of a small input. The finders compare what it gives with the text
+ * first, which seldom agrees and so is a branch that guesses right, and then whether it's
+ * base + m, for the text that has NOT_TEXT's bytes; the compiler keeps the two in one branch. An
+ * entry out of the window is 0, whose base + m is base, or before the window in the text, where
+ * NOT_TEXT isn't, so not_text takes the half that isn't base. On x86-64 the move is written out,
+ * as the compiler would otherwise see that an entry out of the window fails the whole test and
+ * make the window a branch of its own again. */
+static const cx_u8 NOT_TEXT[16] = {0xa5, 0x3c, 0xe7, 0x19, 0x5b, 0xd2, 0x86, 0x4f, 0x3a, 0xc5, 0x7e, 0x91, 0xb5, 0x2d, 0x68, 0xf4};
+
+static inline const cx_u8* not_text(const cx_u8* base) { return base == NOT_TEXT ? NOT_TEXT + 8 : NOT_TEXT; }
+
+static inline const cx_u8* entry_at(const cx_u8* base, cx_u32 m, cx_u32 low, const cx_u8* nt) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    const cx_u8* q = base + m;
+    __asm__("cmpl %2, %1\n\tcmovbq %3, %0" : "+r"(q) : "r"(m), "r"(low), "r"(nt) : "cc");
+    return q;
+#else
+    return __builtin_unpredictable(m >= low) ? base + m : nt;
+#endif
+}
+
 /* One hash table of positions by their first bytes. The search runs a position ahead of itself:
  * the next position's table entry is loaded, and the one after's hash taken, before this one's
  * candidate is compared, so the loads overlap the comparisons. It looks at positions in pairs, a
@@ -973,12 +996,20 @@ static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
  * taken only if it's in the window from all of the block, so one bound serves every position. */
 #define STEP_RUN 128
 
-static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls) {
+/* Whether table entry m's first four bytes are ip's. With `cmov` the window is tested without a
+ * branch, by entry_at; without, by a branch, which guesses right once the table is full and costs
+ * the load less waiting. */
+#define CAND4(m, ip)                                                                                \
+    (cmov ? (ld32(entry_at(base, (m), low, nt)) == ld32(ip) && entry_at(base, (m), low, nt) == base + (m)) \
+          : ((m) >= low && ld32(base + (m)) == ld32(ip)))
+
+static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const int cmov, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const ht = J->hash;
     const cx_u32 hl = J->p.hlog, start = J->start;
     const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
     const cx_u8* const prefix = base + start;
+    const cx_u8* const nt = not_text(base);
     /* The repeated offsets and the sequence store are copies of the job's, which nothing the loop
      * stores to the table or the literals can be, so they needn't be read again after each. */
     cx_u32 r[3] = {rp[0], rp[1], rp[2]};
@@ -1016,7 +1047,7 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
                 off = rt;
                 goto found;
             }
-            if (m >= low && ld32(base + m) == ld32(ip0)) {
+            if (CAND4(m, ip0)) {
                 ht[h1] = c0 + 1;
                 goto fresh;
             }
@@ -1028,7 +1059,7 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
             ip2 = ip3;
             c0 = (cx_u32)(ip0 - base);
             ht[h0] = c0;
-            if (m >= low && ld32(base + m) == ld32(ip0)) {
+            if (CAND4(m, ip0)) {
                 /* ip1 is ip0 + step - 1, which the match reaches past only if the step is 4 or
                  * less: the table mustn't hold a position after where the next search starts. */
                 if (step <= 4) ht[h1] = (cx_u32)(ip1 - base);
@@ -1095,8 +1126,17 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
     default: f(J, __VA_ARGS__, (J)->p.mml); \
     }
 
+#undef CAND4
+
+/* The one table fills within the first few blocks, so for most inputs its window test is a branch
+ * that guesses right; for a window under 512 KiB, an input of 256 KiB or less, filling it is much
+ * of the work, and the test goes without a branch, as libzstd 1.5.7 also has it. */
 static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
-    ZSE_BY_MML(mf_fast_with, J, at, end, r);
+    if (J->p.wlog < 19) {
+        ZSE_BY_MML(mf_fast_with, J, at, end, r, 1);
+    } else {
+        ZSE_BY_MML(mf_fast_with, J, at, end, r, 0);
+    }
 }
 
 /* Two hash tables: one of eight bytes, for long matches, and one of `mml`, for short ones; a short
@@ -1118,6 +1158,7 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
     const cx_u32 bl = J->p.hlog, bs = J->p.clog, start = J->start;
     const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
     const cx_u8* const prefix = base + start;
+    const cx_u8* const nt = not_text(base);
     cx_u32 r[3] = {rp[0], rp[1], rp[2]};
     ss_t sl = J->ss;
     ss_t* const ss = &sl;
@@ -1149,13 +1190,13 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
                 goto found;
             }
             h8n = hash_at(ip1, 8, bl);
-            if (m8 >= low && ld64(base + m8) == ld64(ip)) {
+            if (ld64(entry_at(base, m8, low, nt)) == ld64(ip) && entry_at(base, m8, low, nt) == base + m8) {
                 mp = base + m8;
                 ml = count(ip + 8, mp + 8, iend) + 8;
                 goto back;
             }
             m8n = hl8[h8n];
-            if (m >= low && ld32(base + m) == ld32(ip)) goto shorter;
+            if (ld32(entry_at(base, m, low, nt)) == ld32(ip) && entry_at(base, m, low, nt) == base + m) goto shorter;
             if (ip1 >= grow) {
                 step++;
                 grow += run;
@@ -1167,7 +1208,7 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
         } while (ip1 <= ilimit);
         break;
     shorter:
-        if (m8n >= low && ld64(base + m8n) == ld64(ip1)) {
+        if (ld64(entry_at(base, m8n, low, nt)) == ld64(ip1) && entry_at(base, m8n, low, nt) == base + m8n) {
             ip = ip1;
             mp = base + m8n;
             ml = count(ip + 8, mp + 8, iend) + 8;
