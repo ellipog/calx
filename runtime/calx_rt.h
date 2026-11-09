@@ -897,6 +897,12 @@ CX_FN(cx_i32, cx_zstd_frame, (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_usize 
 CX_FN(cx_i32, cx_zstd_blocks,
       (cx_u8* ctx, const cx_u8* in, cx_usize n, cx_u8* out, cx_usize start, cx_usize* len, cx_usize cap, cx_usize limit, const cx_u8* dict, cx_usize dict_n, cx_u64* info));
 CX_FN(cx_u64, cx_zstd_xxh64, (const cx_u8* p, cx_usize n, cx_u64 seed));
+/* Zstandard compression, in calx_zstdenc.c, behind std.zstd's `compress` (CLX-183).
+ * `cx_zse_compress` writes the frame for in[0..n) at `level` into out, which has
+ * `cx_zse_bound(n)` bytes, and gives its size; flags 1 asks for a checksum, which std.zstd
+ * appends. */
+CX_FN(cx_u64, cx_zse_bound, (cx_u64 n));
+CX_FN(cx_u64, cx_zse_compress, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags));
 
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's

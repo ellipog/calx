@@ -194,8 +194,8 @@ impl Tar {
     }
 }
 
-/// Builds an archive in memory: add entries, then `finish` it, or `finish_gz` for a `.tar.gz`, or
-/// `finish_xz` for a `.tar.xz`.
+/// Builds an archive in memory: add entries, then `finish` it, or `finish_gz` for a `.tar.gz`,
+/// `finish_xz` for a `.tar.xz` or `finish_zst` for a `.tar.zst`.
 /// Paths too long for ustar's fields, and files of 8 GiB or more, get a pax header, as GNU tar
 /// and bsdtar write them.
 pub struct Writer {
@@ -255,6 +255,14 @@ impl Writer {
     pub fn finish_xz(own self, preset: u32 = 6) -> List<u8> {
         let tar = self.finish()
         return xz.compress(tar, preset)
+    }
+
+    /// The archive compressed by std.zstd at `level`, from 1 to 22 or negative for faster, 3 as
+    /// `zstd` and Python default to: a `.tar.zst`. Panics for a level std.zstd doesn't have.
+    @track_caller
+    pub fn finish_zst(own self, level: i32 = 3) -> List<u8> {
+        let tar = self.finish()
+        return zstd.compress(tar, level)
     }
 
     // Pads the last entry's data to a whole block.

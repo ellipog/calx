@@ -1,11 +1,11 @@
 ---
 title: std.zstd
-description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, on all the processors for big frames.
+description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, and compressed at zstd's levels, on all the processors for big ones.
 ---
 
 # `std.zstd`
 
-`std.zstd` decompresses Zstandard files, such as release archives in `.tar.zst` and what `zstd` and Python's `compression.zstd` write. It gives the same bytes as Python 3.14's `compression.zstd.decompress`, and on broken files it fails where Python fails, with the same kind of error but for one case, below. Big frames are decoded on all the processors. [`std.tar`](tar.md) opens a `.tar.zst` with it.
+`std.zstd` decompresses Zstandard files, such as release archives in `.tar.zst` and what `zstd` and Python's `compression.zstd` write. It gives the same bytes as Python 3.14's `compression.zstd.decompress`, and on broken files it fails where Python fails, with the same kind of error but for one case, below. It also compresses, at `zstd`'s levels, into frames that `zstd` and Python read: see [Compressing](#compressing). Big frames are decoded, and big inputs compressed, on all the processors. [`std.tar`](tar.md) opens and writes a `.tar.zst` with it.
 
 ```calx
 import std.bytes.{from_hex}
@@ -34,6 +34,8 @@ fn main() {
 | --- | --- |
 | `decompress(bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error` | What the bytes decompress to, every frame in them one after another, as `compression.zstd.decompress(bytes)` gives it. Fails with `TooLong` if that's more than `limit` bytes, which is no limit unless it's given |
 | `decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error` | Decompresses `bytes[from..to]` onto the end of `out`, at most `limit` bytes. On an error, `out` is as it was. Panics unless the range is in `bytes` |
+| `compress(bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List<u8>` | The bytes compressed into one frame, as `compression.zstd.compress(bytes, level)` writes one, with a checksum if `checksum` is set. Panics for a level outside -131072 to 22. See [Compressing](#compressing) |
+| `compress_into(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>)` | Compresses `bytes[from..to]` onto the end of `out`, as `compress` does. Panics unless the range is in `bytes` |
 | `is_zstd(bytes: List<u8>) -> bool` | Whether the bytes start as a Zstandard frame does: `28 b5 2f fd` |
 | `xxh64(bytes: List<u8>, seed: u64 = 0) -> u64` | The XXH64 hash, as the `xxhash` package's `xxh64_intdigest` gives it. A frame's checksum is its low 32 bits |
 | `Dictionary.new(bytes: own List<u8>) -> Dictionary ! Error` | A dictionary that `zstd --train` or `train_dict` made, as `ZstdDict(bytes)` takes it. See [Dictionaries](#dictionaries) |
@@ -64,9 +66,54 @@ Python raises a `ZstdError` for all but `BadDictionary`, with the message above 
 - The limit counts what comes out, so a few bytes that would decompress to gigabytes fail without the memory. Python has no limit for `decompress`; `std.zstd` has none by default either.
 - One difference: Huffman-coded literals in four streams must each end where the stream does, as RFC 8878 asks. libzstd's fast decoder on x86-64 only counts what comes out of them, so for a few broken files Python gives wrong bytes, or a checksum mismatch, where `std.zstd` says `Corrupt`. In the 4,056 broken files below, that was 27.
 
+## Compressing
+
+`compress` takes `zstd`'s levels, as Python's `compression.zstd.compress` does: 1, the fastest, to 22, the smallest, with 0 for the default, 3, and negative levels down to -131072 for faster still. `zstd` asks for `--ultra` past 19; Python and `std.zstd` don't. Each level has the settings libzstd gives it, so a frame needs as much memory to decompress as `zstd`'s at the same level, and the search is about as thorough:
+
+| Level | Window | Matches found with | Parser |
+| --- | --- | --- | --- |
+| -131072 to -1 | 512 KiB | A hash table, looking at fewer places the lower the level | The first match, with the literals left uncoded, so they decompress fast too |
+| 1, 2 | 512 KiB, 1 MiB | A hash table | The first match |
+| 3, 4 | 2 MiB | Two hash tables, of 8 bytes and of 5 | The first match, or a longer one at the next place |
+| 5 | 2 MiB | Rows of 16 in a hash table | The best match |
+| 6, 7 | 2 MiB | Rows of 16 | The best match, or a better one a place on |
+| 8 | 2 MiB | Rows of 16 | The best, or a better one one or two places on |
+| 9 to 12 | 4 MiB | Rows of 16, 32, 64 and 64 | The same |
+| 13 to 15 | 4 MiB | Binary trees, 16, 32 and 64 deep, sorted as they're searched | The same |
+| 16, 17 | 4 MiB, 8 MiB | Binary trees, 32 deep | Optimal |
+| 18 | 8 MiB | Binary trees, 64 deep, and matches of 3 bytes | Optimal |
+| 19 to 22 | 8, 32, 64 and 128 MiB | Binary trees, 128 deep, or 512 at 22, and matches of 3 bytes | Optimal, with prices from a first parse |
+
+The optimal parser prices every way through the next few thousand bytes, from how often each literal, length and distance has come up, and takes the cheapest. A window is never bigger than the input needs.
+
+```calx
+import std.zstd.{compress, decompress}
+
+fn main() {
+    var text = String()
+    for i in 0..2000 {
+        text.push_str("{i}: {i * i % 977} green bottles, hanging on the wall\n")
+    }
+    let bytes = text.to_bytes()
+    let fast = compress(bytes, 1)
+    let small = compress(bytes, 19, true)
+    println("{bytes.len()} {fast.len()} {small.len()}")    // out: 88638 8616 6689
+    println("{decompress(small)! == bytes}")    // out: true
+}
+```
+
+Python writes 8,865 bytes for that text at level 1, and 6,770 at 19 without the checksum's 4.
+
+- **One frame**, with the size it decompresses to, as Python writes it, and with no window size when the input fits in the window, as libzstd leaves it out. A checksum only when `checksum` is set: Python leaves it out by default too, and `zstd` puts one in. A short input comes out as Python writes it, byte for byte; a longer one is a little bigger or smaller than Python's, as [Speed](#speed) shows.
+- **Blocks.** The text is cut into blocks of 128 KiB. Each block's literals are Huffman-coded and its sequences' codes FSE-coded, with whichever tables come out smallest: the block's own, the ones the block before used, or the predefined ones. A block that doesn't get smaller is stored as it is, and one byte over and over as a run. A block whose text changes partway, as in a tar of text and programs, is cut where the two parts come out smaller apart, from an estimate of each part's size.
+- **On all the processors.** An input longer than four windows, 2 MiB at level 1, 8 MiB at level 3 and 32 MiB at 19, is cut into jobs of that size, as `zstd -T0` cuts them, and the jobs compress at once. Each job's matches reach back into the text before it, an eighth of the window up to level 7, half from 8 to 15, and the whole window from 16, and each job starts with tables of its own. On our files the cuts cost at most 0.4% of the size, and under 0.1% at most levels.
+- **The same bytes make the same frame**, on any machine with any number of processors, with AVX2, with SSE2 alone or with neither: the jobs are cut by size and level alone, and the encoder works in integers. So a `.tar.zst` built twice is the same file.
+- Each thread compressing a job needs the level's tables, from 32 KiB at the negative levels to 640 MiB at 22, or less for an input smaller than the window, and room for what its job compresses to. `compress` puts no more threads on the jobs than a quarter of the machine's memory has room for, and writes the same bytes with fewer.
+- `compress` panics for a level outside -131072 to 22, where Python raises a `ValueError`. It doesn't take a dictionary yet.
+
 ## Dictionaries
 
-Small files compress much better with a dictionary, and need it to decompress. `Dictionary.new` takes one that `zstd --train` or Python's `train_dict` made: it starts with the magic number `37 a4 30 ec` and an ID that isn't 0, then the tables and the content. `Dictionary.raw` takes any bytes as content alone, which matches reach back into, as `ZstdDict(bytes, is_raw=True)` does.
+Small files compress much better with a dictionary, and need it to decompress. `Dictionary.new` takes one that `zstd --train` or Python's `train_dict` made: it starts with the magic number `37 a4 30 ec` and an ID that isn't 0, then the tables and the content. `Dictionary.raw` takes any bytes as content alone, which matches reach back into, as `ZstdDict(bytes, is_raw=True)` does. `std.zstd` decompresses with them; it doesn't compress with them yet.
 
 ```calx
 import std.bytes.{from_hex}
@@ -113,6 +160,74 @@ In WSL on the same machine:
 - On one thread, GCC's libzstd is faster than `std.zstd` on text: 8.8 ms to 10.5 on src.tar.3, and 8.9 to 10.0 on src.tar.19. On clang40 it's the other way round, and on Windows `std.zstd` is faster on all four.
 - The Rust programs were built with `lto = "fat"` and one codegen unit, once as they are and once with `target-cpu=x86-64-v3`, as Calx builds for x86-64-v3, and in WSL with libzstd built for it too. Each Rust time is the faster of the two builds' best. Each had the room for its output reserved before it started, and checked that both crates gave the same bytes.
 
+`compress` was timed on the same machine with little else running, `std.zstd`, Python and the Rust programs taking turns for three rounds, best of 3 runs in each up to level 9 and of 1 from 10, on the same two files before they were compressed. On one thread, each program on the performance cores and out of power throttling, `src.tar` at every level, on Windows:
+
+| Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
+| --- | --- | --- | --- | --- | --- |
+| -1 | 34.4 ms | 36.3 ms | 33.7 ms | 6,309,762 | 6,306,781 |
+| 1 | 36.3 ms | 37.2 ms | 34.6 ms | 5,357,880 | 5,347,922 |
+| 2 | 39.8 ms | 41.1 ms | 38.7 ms | 5,089,301 | 5,078,988 |
+| 3 | 46.7 ms | 48.1 ms | 45.4 ms | 4,800,393 | 4,753,525 |
+| 4 | 55.7 ms | 53.6 ms | 50.6 ms | 4,774,137 | 4,723,978 |
+| 5 | 102 ms | 96.4 ms | 90.3 ms | 4,428,574 | 4,455,092 |
+| 6 | 136 ms | 137 ms | 129 ms | 4,261,751 | 4,282,647 |
+| 7 | 160 ms | 159 ms | 150 ms | 4,177,473 | 4,202,757 |
+| 8 | 206 ms | 204 ms | 192 ms | 4,124,699 | 4,152,012 |
+| 9 | 230 ms | 216 ms | 207 ms | 4,089,446 | 4,120,710 |
+| 10 | 311 ms | 330 ms | 313 ms | 4,027,116 | 4,067,118 |
+| 11 | 401 ms | 484 ms | 463 ms | 3,989,297 | 4,035,545 |
+| 12 | 453 ms | 518 ms | 508 ms | 3,985,765 | 4,033,230 |
+| 13 | 1,432 ms | 1,246 ms | 1,231 ms | 3,984,004 | 3,985,152 |
+| 14 | 1,860 ms | 1,811 ms | 1,666 ms | 3,943,434 | 3,944,077 |
+| 15 | 2,329 ms | 2,358 ms | 2,361 ms | 3,912,630 | 3,917,800 |
+| 16 | 2,619 ms | 2,970 ms | 2,681 ms | 3,714,554 | 3,704,873 |
+| 17 | 3,174 ms | 3,518 ms | 3,373 ms | 3,642,793 | 3,647,661 |
+| 18 | 3,470 ms | 4,636 ms | 4,379 ms | 3,636,289 | 3,613,289 |
+| 19 | 3,966 ms | 5,547 ms | 5,097 ms | 3,604,786 | 3,593,426 |
+| 20 | 4,083 ms | 5,507 ms | 5,175 ms | 3,428,953 | 3,420,656 |
+| 21 | 4,279 ms | 6,126 ms | 5,747 ms | 3,426,683 | 3,418,755 |
+| 22 | 4,445 ms | 6,313 ms | 6,131 ms | 3,425,473 | 3,418,181 |
+
+`clang40` on one thread:
+
+| Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 81.5 ms | 84.9 ms | 76.0 ms | 20,417,622 | 20,256,662 |
+| 3 | 130 ms | 129 ms | 119 ms | 17,647,408 | 17,556,416 |
+| 5 | 265 ms | 252 ms | 239 ms | 16,682,499 | 16,654,722 |
+| 9 | 563 ms | 569 ms | 525 ms | 15,490,195 | 15,518,610 |
+| 13 | 3,668 ms | 3,524 ms | 3,459 ms | 15,281,703 | 15,293,478 |
+| 16 | 5,299 ms | 6,951 ms | 6,542 ms | 15,019,394 | 14,828,491 |
+| 19 | 13,028 ms | 14,554 ms | 13,859 ms | 13,890,651 | 13,888,852 |
+| 22 | 13,550 ms | 18,439 ms | 17,970 ms | 13,617,004 | 13,616,304 |
+
+On all the processors: `std.zstd` as a program runs it, and libzstd with a worker for each of the 32 processors, as `zstd -T0` runs it:
+
+| File | Level | Calx | Python 3.14, 32 workers | Rust: zstd 0.13, 32 workers | Calx's size | libzstd's size |
+| --- | --- | --- | --- | --- | --- | --- |
+| src.tar | 1 | 5.5 ms | 11.8 ms | 9.4 ms | 5,357,880 | 5,352,731 |
+| src.tar | 3 | 22.5 ms | 28.4 ms | 26.3 ms | 4,800,393 | 4,757,456 |
+| src.tar | 5 | 47.6 ms | 51.0 ms | 47.3 ms | 4,428,574 | 4,461,129 |
+| src.tar | 9 | 205 ms | 208 ms | 196 ms | 4,089,446 | 4,127,791 |
+| src.tar | 13 | 1,277 ms | 1,207 ms | 1,128 ms | 3,984,004 | 3,992,533 |
+| src.tar | 16 | 2,103 ms | 2,511 ms | 2,494 ms | 3,714,554 | 3,705,752 |
+| src.tar | 19 | 3,816 ms | 5,240 ms | 4,820 ms | 3,604,786 | 3,592,062 |
+| src.tar | 22 | 4,217 ms | 6,225 ms | 5,823 ms | 3,425,473 | 3,418,367 |
+| clang40 | 1 | 9.4 ms | 23.1 ms | 15.8 ms | 20,417,622 | 20,259,344 |
+| clang40 | 3 | 30.5 ms | 39.7 ms | 35.2 ms | 17,647,408 | 17,601,328 |
+| clang40 | 5 | 60.5 ms | 67.5 ms | 61.5 ms | 16,682,499 | 16,733,050 |
+| clang40 | 9 | 274 ms | 290 ms | 276 ms | 15,490,195 | 15,558,830 |
+| clang40 | 13 | 1,876 ms | 1,825 ms | 1,714 ms | 15,281,703 | 15,338,409 |
+| clang40 | 16 | 2,360 ms | 3,263 ms | 3,004 ms | 15,019,394 | 14,842,998 |
+| clang40 | 19 | 8,999 ms | 12,012 ms | 11,747 ms | 13,890,651 | 13,892,293 |
+| clang40 | 22 | 13,599 ms | 17,936 ms | 17,239 ms | 13,617,004 | 13,619,791 |
+
+- Python and the `zstd` crate run libzstd 1.5.7, both built by MSVC; the crate's is about 5% faster. The Rust programs were built as above, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
+- `ruzstd` 0.8 compresses only at its level 1, "Fastest": 162 ms and 7,054,586 bytes for `src.tar`, and 433 ms and 23,917,712 bytes for `clang40`.
+- On one thread, against the crate, `std.zstd` takes 2 to 13% longer at levels -1 to 9 and 12 to 16% longer at 13 and 14. It takes about as long at 10, 15 and 16, and less at the rest: 1.1 times as fast at 11 and 12, and 1.3 to 1.4 times from 18 to 22. On `clang40` it takes 6 to 11% longer up to level 13, and less from 16.
+- What `std.zstd` writes is within 1.3% of libzstd's size at every level timed. On `src.tar` it's 0.2 to 1.1% bigger at levels 1 to 4, 0.5 to 1.2% smaller from 5 to 12, within 0.3% from 13 to 17, and 0.2 to 0.6% bigger from 18 to 22. The most is `clang40` at level 16, 1.3% bigger.
+- On all the processors, `std.zstd` is 1.7 times as fast as the crate at level 1, 1.15 times at 3, and 1.2 to 1.4 times from 16. It's about as fast at 5, up to 5% slower at 9, and 10 to 13% slower at 13. Both cut the same jobs, four windows long. That's 2 MiB at level 1, so `src.tar` makes 9 jobs. From 9 on the jobs are 16 MiB or more, so the files make 3 at most, and most of the processors wait.
+
 ## How it's checked
 
 `std.zstd` was run on Python 3.14's `compression.zstd` with libzstd 1.5.7, on Windows and on Linux:
@@ -124,9 +239,11 @@ In WSL on the same machine:
 
 The [tests](../../tests/std/zstd.calx) hold Python's bytes and Python's outcomes.
 
+What `compress` writes was checked on 70 files: text, a program, random bytes, zeros, runs, text that repeats every 1 to 70,000 bytes with and without noise, a mix of kinds, and slices of `src.tar` cut a byte either side of the block size and its multiples, from empty to 2.5 MB. Each was compressed at every level from 1 to 22 and at -1, -3, -7 and -50: 1,820 frames, by an encoder built to check every match it takes against the text. Python 3.14's `compression.zstd`, `zstd` 1.5.7 and `std.zstd` each decompressed all 1,820 to what went in. The same files at 18 levels came out the same from the encoder built for AVX2, for SSE2 alone and for neither, as on Arm. The [tests](../../tests/std/zstd_compress.calx) compress at every level and check that what comes back is what went in. They hold Python's bytes for a short text, and hashes of frames that every machine must match, and check that 6 MB compressed on 8 threads and on 1 is the same.
+
 ## How it's built
 
-`std.zstd` is [runtime/calx_zstd.c](../../runtime/calx_zstd.c), linked only into programs that call it, written from RFC 8878 and the XXH64 specification, with no libzstd code. The frames are read in Calx over it: [std/zstd.calx](../../std/zstd.calx).
+Decompressing is [runtime/calx_zstd.c](../../runtime/calx_zstd.c), linked only into programs that call it, written from RFC 8878 and the XXH64 specification, with no libzstd code. The frames are read in Calx over it: [std/zstd.calx](../../std/zstd.calx).
 
 | Part | How |
 | --- | --- |
@@ -136,3 +253,17 @@ The [tests](../../tests/std/zstd.calx) hold Python's bytes and Python's outcomes
 | Literals and matches | Copied 32 bytes at a time when the match is 32 or more back, 16 when it's 16 or more, and 8 at a time after its first 8 bytes when it repeats a shorter pattern. The output keeps 64 bytes of room past the end for these |
 | XXH64 | Four lanes, 32 bytes a step |
 | All the processors | For a frame of 1 MiB or more, or without a size: the next run of blocks' headers and tables are read in order while the run before has its literals and sequences decoded on every processor, and the one before that has its matches carried out in order, with the offsets worked out 8 sequences ahead so their bytes are fetched first, while the checksum is worked on over what's done |
+
+Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked only into programs that compress, written from RFC 8878. It has no libzstd code, but it has libzstd's table of each level's settings, whose BSD notice is in the file.
+
+| Part | How |
+| --- | --- |
+| Hash tables | At levels 1 and 2, two positions looked up at once, so the loads overlap. At 3 and 4, the next position's lookups are started before the current match is worked out |
+| Hash rows | Each row holds the last 15, 31 or 63 positions with its hash, and beside each a byte more of its hash. That byte is compared across the whole row at once, 32 at a time with AVX2, so the text is read only where it's likely to match. The next eight positions' rows are fetched into the cache ahead |
+| Binary trees | The positions with each hash, sorted by the text after them, so a search goes down one path to the longest matches. At levels 13 to 15 a position goes on its hash's list unsorted, and is sorted into the tree only when a search comes to it, since the parse passes over most positions |
+| Picking matches | From level 5 to 15, by what they're worth: four times the length, less the bits of the distance, so a match a byte longer but much further back loses |
+| The optimal parser | Every match and literal from each place, priced from how often each literal, length and distance has come up, carried over from block to block and halved at each. From 19, a job's first block is parsed twice, the second time with prices from the first |
+| Splitting blocks | A block's sequences cut into pieces of 2 to 32 KiB, smaller at the higher levels, with the counts of their literals and codes summed from the block's start, so any run of pieces' counts is one subtraction. A run is split in two where an estimate of the parts' sizes saves the most, then each part again. The negative levels don't split |
+| Huffman | Code lengths of at most 11 bits, by Moffat and Katajainen's method from the counts, sorted by a radix sort. Four streams written at once, side by side |
+| FSE | Probabilities rounded, then nudged where they cost least, at the two largest accuracies; kept if they beat the predefined table, one symbol repeated, and the last block's. Each sequence's bits go into the stream in two writes |
+| All the processors | Jobs of four windows, each on a thread of [`parallel for`](../reference/parallel.md), joined in order |

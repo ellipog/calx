@@ -1,0 +1,112 @@
+// std.zstd's compress writes frames that std.zstd, Python 3.14's compression.zstd and zstd read
+// back: docs/std/zstd.md says how the last two were checked on many files at every level. Here:
+// what comes back is what went in, at every level, for text, zeros, noise and the edges, and the
+// same bytes on every machine and with any number of threads.
+
+import std.zstd.{compress, compress_into, decompress, decompress_into, xxh64}
+import std.pool.{set_workers}
+import std.tar.{Tar, Writer}
+
+fn hex(bytes: List<u8>) -> String {
+    var s = String()
+    for b in bytes {
+        s.push_str("{b:02x}")
+    }
+    return s
+}
+
+// Bytes from a fixed seed: they don't compress.
+fn noise(n: usize, seed: u64) -> List<u8> {
+    var out: List<u8> = []
+    var x = seed
+    for _ in 0..n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        out.push(u8.wrap(x >> 56))
+    }
+    return out
+}
+
+fn back(bytes: List<u8>, level: i32) -> bool {
+    return match decompress(compress(bytes, level)) {
+        ok(b) => b == bytes,
+        err(_) => false,
+    }
+}
+
+fn main() {
+    // A short text is stored as it is, in the frame Python writes for it.
+    let hello = "hello, zstd\n".to_bytes()
+    println(hex(compress(hello)))    // out: 28b52ffd200c61000068656c6c6f2c207a7374640a
+    let checked = compress(hello, 3, true)
+    println("{hex(checked)} {decompress(checked.copy())! == hello}")    // out: 28b52ffd240c61000068656c6c6f2c207a7374640a84585ca0 true
+    var broken = checked.copy()
+    let last = broken.len() - 1
+    broken[last] = broken[last] ^ 1
+    match decompress(broken) {
+        ok(_) => println("ok"),
+        err(e) => println("{e}"),    // out: checksum mismatch
+    }
+
+    // Lines of text, zeros, noise, nothing and one byte, at every level and some negative ones.
+    var lines = String()
+    for i in 0..3000 {
+        lines.push_str("line {i}: the quick brown fox {i * i % 977}\n")
+    }
+    let text = lines.to_bytes()
+    var zeros: List<u8> = []
+    for _ in 0..70000 {
+        zeros.push(0)
+    }
+    let rand = noise(50000, 7)
+    var mixed = text.copy()
+    mixed.extend(rand.copy())
+    mixed.extend(zeros.copy())
+    var bad: List<String> = []
+    for level in [-50, -5, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] {
+        for (name, bytes) in [("text", text.copy()), ("zeros", zeros.copy()), ("noise", rand.copy()), ("mixed", mixed.copy()), ("empty", []), ("one", [42u8])] {
+            if not back(bytes, level) {
+                bad.push("{name} at {level}")
+            }
+        }
+    }
+    println("{bad.len()} wrong")    // out: 0 wrong
+
+    // Smaller at higher levels, and noise stored rather than grown by much.
+    let sizes = [compress(text, 1).len(), compress(text, 3).len(), compress(text, 19).len()]
+    println("{sizes[0] > sizes[1]} {sizes[1] > sizes[2]} {sizes[2] < text.len() / 4}")    // out: true true true
+    println("{compress(rand, 3).len() <= rand.len() + 20}")    // out: true
+
+    // The same bytes on any machine, with AVX2, with SSE2 alone and with neither: the frames'
+    // hashes, from a build for x86-64-v3, which a debug build isn't.
+    var hashes = String()
+    for level in [-5, 1, 3, 4, 5, 7, 9, 13, 16, 19] {
+        hashes.push_str("{xxh64(compress(mixed, level)) >> 40:06x} ")
+    }
+    println(hashes.trim())    // out: 73d3f6 96fc45 6e82b6 4cb8e5 f16a90 f61de4 9f9a23 3da677 647164 07ff2f
+
+    // 6 MB at level 1, in three pieces compressed at once: the same bytes on eight threads and
+    // on one.
+    var big: List<u8> = []
+    for i in 0..150000 {
+        big.extend("{i % 1000} bottles of {i % 7} kinds on the wall\n".to_bytes())
+    }
+    set_workers(8)
+    let a = compress(big, 1)
+    set_workers(1)
+    let b = compress(big, 1)
+    println("{a == b} {decompress(a)! == big}")    // out: true true
+
+    // Part of a list, onto the end of another.
+    var out = "> ".to_bytes()
+    compress_into(hello, 0, 5, 3, false, mut out)
+    var got: List<u8> = []
+    decompress_into(out, 2, out.len(), u64.MAX, mut got)!
+    println("{out[0] == 62} {got == "hello".to_bytes()}")    // out: true true
+
+    // std.tar writes a .tar.zst.
+    var w = Writer.new()
+    w.add("notes/a.txt", "hi\n".to_bytes())
+    w.add("notes/b.txt", text.copy())
+    let tar = Tar.open(w.finish_zst(19))!
+    println("{tar.len()} {tar.read_named("notes/a.txt")! == "hi\n".to_bytes()} {tar.read_named("notes/b.txt")! == text}")    // out: 2 true true
+}

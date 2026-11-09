@@ -1,0 +1,8 @@
+// A level std.zstd doesn't have panics at the call: 22 is the highest, as in zstd and Python.
+
+import std.zstd
+
+fn main() {
+    println("{zstd.compress([1u8, 2, 3], 22).len() > 0}")    // out: true
+    println("{zstd.compress([1u8, 2, 3], 23).len()}")        // panic: the level 23 isn't one: levels go from -131072 to 22
+}

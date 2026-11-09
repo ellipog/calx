@@ -1,5 +1,6 @@
 /// Zstandard files, decompressed as Python's `compression.zstd.decompress` reads them (CLX-181):
-/// release archives such as `.tar.zst`, and whatever `zstd` or Python wrote.
+/// release archives such as `.tar.zst`, and whatever `zstd` or Python wrote. And compressed into
+/// frames that both read, at `zstd`'s levels (CLX-183).
 module std.zstd
 
 extern "C" {
@@ -11,6 +12,8 @@ extern "C" {
     fn cx_zstd_frame(ctx: *u8, input: *const u8, n: usize, at: usize, ent: *const u8, dict_id: u32, window_max: u64, info: *u64) -> i32
     fn cx_zstd_blocks(ctx: *u8, input: *const u8, n: usize, out: *u8, start: usize, len: *usize, cap: usize, limit: usize, dict: *const u8, dict_n: usize, info: *u64) -> i32
     fn cx_zstd_xxh64(p: *const u8, n: usize, seed: u64) -> u64
+    fn cx_zse_bound(n: u64) -> u64
+    fn cx_zse_compress(input: *const u8, n: u64, out: *u8, level: i32, flags: u32) -> u64
 }
 
 /// Why bytes didn't decompress. Python raises a `ZstdError` for each, and a `ValueError` for a
@@ -163,6 +166,46 @@ pub fn decompress(bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error {
 @track_caller
 pub fn decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error {
     try decode(bytes, from, to, limit, Dictionary.empty(), mut out)
+}
+
+/// The bytes compressed as one Zstandard frame, as Python's `compression.zstd.compress(bytes,
+/// level)` writes one: with the size it decompresses to, and with a checksum if `checksum` is set,
+/// as zstd's `checksum_flag` adds one. Levels go from 1, the fastest, to 22, the smallest, and 0 is
+/// the default, 3; the negative ones, down to -131072, are faster still and compress less. Big
+/// inputs are compressed on all the processors, into the same bytes however many there are.
+/// Panics for a level outside -131072 to 22, where Python raises a `ValueError`.
+@track_caller
+pub fn compress(bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List<u8> {
+    var out: List<u8> = []
+    compress_into(bytes, 0, bytes.len(), level, checksum, mut out)
+    return out
+}
+
+/// Compresses `bytes[from..to]` as `compress` does, onto the end of `out`. Panics unless the range
+/// is in `bytes`, and for a level outside -131072 to 22.
+@track_caller
+pub fn compress_into(bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>) {
+    if from > to or to > bytes.len() {
+        panic("the range {from}..{to} is out of bounds for {bytes.len()} bytes")
+    }
+    if level < -131072 or level > 22 {
+        panic("the level {level} isn't one: levels go from -131072 to 22")
+    }
+    let n = u64(to - from)
+    let at = out.len()
+    let room = unsafe { cx_zse_bound(n) }
+    out.reserve(usize.wrap(room))
+    unsafe {
+        let made = cx_zse_compress(bytes.as_ptr().add(from), n, out.as_mut_ptr().add(at), level, if checksum { 1u32 } else { 0u32 })
+        out.set_len(at + usize.wrap(made))
+    }
+    if checksum {
+        // The low 32 bits of the text's XXH64, which cx_zse_bound leaves room for.
+        let h = unsafe { cx_zstd_xxh64(bytes.as_ptr().add(from), to - from, 0) }
+        for k in 0u64..4 {
+            out.push(u8.wrap(h >> (8 * k)))
+        }
+    }
 }
 
 /// Whether the bytes start as a Zstandard frame does: `28 b5 2f fd`.
