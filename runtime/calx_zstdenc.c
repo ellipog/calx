@@ -256,16 +256,37 @@ static void build_ct(ct_t* ct, const cx_i16* norm, cx_u32 max, cx_u32 log) {
         }
     }
     const cx_u32 step = (size >> 1) + (size >> 3) + 3;
-    cx_u32 pos = 0;
-    for (cx_u32 s = 0; s <= max; s++) {
-        cx_u32 first = 0;
-        for (int i = 0; i < norm[s]; i++) {
-            sym[pos] = (cx_u8)s;
-            first += pos < half;
-            do pos = (pos + step) & mask;
-            while (pos > high);
+    if (high == size - 1) {
+        /* No symbol below 1, as with every table the encoder makes: the k-th slot in symbol order
+         * goes to k steps on, none skipped. The symbols are laid out in order 8 at a time, so a
+         * symbol's slots cost a branch only for every 8 of them, and then spread two a time; the
+         * first half's are counted after. */
+        cx_u8 lay[(1 << LL_LOG) + 8];
+        cx_u32 p = 0;
+        for (cx_u32 s = 0; s <= max; s++) {
+            const cx_u64 v = 0x0101010101010101ull * s;
+            for (cx_i32 i = 0; i < norm[s]; i += 8) st64(lay + p + (cx_u32)i, v);
+            p += (cx_u32)norm[s];
         }
-        at2[s] += first;
+        cx_u32 pos = 0;
+        for (cx_u32 k = 0; k < size; k += 2) {
+            sym[pos] = lay[k];
+            sym[(pos + step) & mask] = lay[k + 1];
+            pos = (pos + 2 * step) & mask;
+        }
+        for (cx_u32 u = 0; u < half; u++) at2[sym[u]]++;
+    } else {
+        cx_u32 pos = 0;
+        for (cx_u32 s = 0; s <= max; s++) {
+            cx_u32 first = 0;
+            for (int i = 0; i < norm[s]; i++) {
+                sym[pos] = (cx_u8)s;
+                first += pos < half;
+                do pos = (pos + step) & mask;
+                while (pos > high);
+            }
+            at2[s] += first;
+        }
     }
     for (cx_u32 s = 0; s <= max; s++) {
         at[s] = cumul[s];
@@ -2709,18 +2730,50 @@ static tab_t PRE_LL, PRE_OF, PRE_ML;
 /* Picks a table for one of the sequences' codes, count[0..max] of n: the predefined one, one symbol
  * repeated, the last block's, or one of its own at the accuracy that comes out smallest, made in
  * `fresh`. Points *t at it, writes its description at out, and gives the mode; *took is the
- * bytes. */
+ * bytes. Below the lazy levels most are picked without pricing them, as libzstd picks there. */
 static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const tab_t* pre, const cx_u32* count, cx_u32 max, cx_u32 n, cx_u32 log_max, cx_u8* out,
-                         cx_usize* took) {
-    cx_u32 distinct = 0, one = 0;
+                         cx_usize* took, cx_u32 strat) {
+    cx_u32 distinct = 0, one = 0, most = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         distinct += count[s] != 0;
         one = count[s] ? s : one;
+        most = count[s] > most ? count[s] : most;
     }
     *took = 0;
     if (distinct == 1 && prev->kind == T_RLE && prev->rle == one) {
         *t = prev;
         return 3;
+    }
+    if (strat < S_LAZY) {
+        /* Below the lazy levels, as libzstd picks there, a table of the block's own is seldom
+         * priced. One symbol is that symbol repeated, but for one or two codes, which the
+         * predefined table codes in less than its byte. With a table to keep, a dictionary's or
+         * the last block's, and fewer than 1000 codes, it's kept or the predefined one taken,
+         * whichever codes them in fewer bits: libzstd keeps it, which from a trained dictionary
+         * comes out 8 to 24% bigger on our samples than pricing all of them, and this 2 to 4%, for
+         * a level 1 to 5 call 8 to 19% faster. With none, the predefined one is taken for fewer
+         * codes than a table of their own pays for, from 28 offsets to 72 lengths, or for ones
+         * spread too evenly for one. The rest are priced. */
+        const int pre_ok = max <= pre->max;
+        if (distinct == 1) {
+            if (pre_ok && n <= 2) {
+                *t = pre;
+                return 0;
+            }
+            goto rle;
+        }
+        if (prev->kind == T_FSE) {
+            if (n < 1000) {
+                const cx_u64 cp = tab_cost(prev, count, max), cq = tab_cost(pre, count, max);
+                if (cp != ~(cx_u64)0 || cq != ~(cx_u64)0) {
+                    *t = cp <= cq ? prev : pre;
+                    return cp <= cq ? 3 : 0;
+                }
+            }
+        } else if (pre_ok && (n < (((1u << pre->log) * (10 - strat)) >> 3) || most < (n >> (pre->log - 1)))) {
+            *t = pre;
+            return 0;
+        }
     }
     /* In 1/256 bits. */
     cx_u64 best = ~(cx_u64)0;
@@ -2740,6 +2793,7 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
     if (distinct == 1) {
         /* One symbol: a byte, and no bits for any of them. */
         if (8 * 256 < best) {
+        rle:
             fresh->kind = T_RLE;
             fresh->rle = one;
             fresh->log = 0;
@@ -2902,11 +2956,11 @@ static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J,
 #ifdef ZSE_CYCLES
     const cx_u64 c0 = __rdtsc();
 #endif
-    const cx_u32 lm = pick_table(&next->ll, fl, prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took);
+    const cx_u32 lm = pick_table(&next->ll, fl, prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took, J->p.strat);
     op += took;
-    const cx_u32 om = pick_table(&next->of, fo, prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took);
+    const cx_u32 om = pick_table(&next->of, fo, prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took, J->p.strat);
     op += took;
-    const cx_u32 mm = pick_table(&next->ml, fm, prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took);
+    const cx_u32 mm = pick_table(&next->ml, fm, prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took, J->p.strat);
     op += took;
 #ifdef ZSE_CYCLES
     zse_cycles[4] += __rdtsc() - c0;
@@ -3483,6 +3537,11 @@ static cp_t params_for(cx_i32 level, cx_u64 n) {
     if (p.wlog > need) p.wlog = need;
     const cx_u32 bt = p.strat >= S_BTLAZY2;
     if (p.hlog > p.wlog + 1) p.hlog = p.wlog + 1;
+    /* The double hash's long table and the hash rows, no more slots than the window has positions,
+     * one less than libzstd allows: for a small input after a dictionary, half the tables to miss
+     * the cache in and put back, 3 to 5% faster on our samples at levels 3 and 5 for at most 0.13%
+     * more. */
+    if (p.strat >= S_DFAST && p.strat <= S_LAZY2 && p.hlog > p.wlog) p.hlog = p.wlog;
     if (p.clog > p.wlog + bt) p.clog = p.wlog + bt;
     if (p.hlog < 6) p.hlog = 6;
     if (p.clog < 6) p.clog = 6;

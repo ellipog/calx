@@ -101,7 +101,7 @@ fn main() {
     for level in [-5, 1, 3, 4, 5, 7, 9, 13, 16, 19] {
         hashes.push_str("{xxh64(compress(mixed, level)) >> 40:06x} ")
     }
-    println(hashes.trim())    // out: 4f0df1 6d9152 d7cf6c 28ca79 cb13b4 5b18ef ef30e5 775f9d 8a8f8e 07ff2f
+    println(hashes.trim())    // out: 4f0df1 6d9152 b1ddba 842881 6776bc b4ef2e e1a629 775f9d 8a8f8e 07ff2f
 
     // 6 MB at level 1, in three pieces compressed at once: the same bytes on eight threads and
     // on one.
