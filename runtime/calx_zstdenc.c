@@ -1556,7 +1556,9 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
     rw_t w;
     rw_load(&w, J);
     w.mls = mls;
-    if (ilimit > ip + 1) row_refill(&w, w.next_up);
+    /* Whenever the loop runs at all: with ilimit at ip + 1 it runs once, and the hashes it would
+     * look up rows by were never worked out (CLX-190). */
+    if (ilimit > ip) row_refill(&w, w.next_up);
     while (ip < ilimit) {
         cx_u32 ml = 0, off = 0;
         const cx_u8* mstart = ip;

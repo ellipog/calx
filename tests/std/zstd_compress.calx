@@ -71,6 +71,24 @@ fn main() {
     }
     println("{bad.len()} wrong")    // out: 0 wrong
 
+    // Every short length at every level, and a block of 128 KiB with a few bytes after: the hash
+    // rows once looked rows up by hashes never worked out, for a block that ended 17 bytes before
+    // its job did.
+    var short = 0
+    for level in [-5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 19, 22] {
+        for n in 2usize..80 {
+            if not back(text[0..n].copy(), level) {
+                short += 1
+            }
+        }
+        for n in [131088usize, 131089, 131090] {
+            if not back(mixed[0..n].copy(), level) {
+                short += 1
+            }
+        }
+    }
+    println("{short} wrong")    // out: 0 wrong
+
     // Smaller at level 19 than at the fast levels, and noise stored rather than grown by much. Text
     // this regular comes out within a few bytes at levels 1 to 4, either way, as in libzstd.
     let sizes = [compress(text, 1).len(), compress(text, 3).len(), compress(text, 19).len()]
