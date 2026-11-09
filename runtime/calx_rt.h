@@ -905,11 +905,13 @@ CX_FN(cx_i32, cx_zstd_dict_params, (const cx_u8* d, cx_usize n, cx_u8* out));
  * `cx_zse_compress` writes the frame for in[0..n) at `level` into out, which has
  * `cx_zse_bound(n)` bytes, and gives its size; flags 1 asks for a checksum, which std.zstd
  * appends. `cx_zse_compress_dict` does it with a dictionary's content, ID and, if has_params,
- * tables (CLX-186). */
+ * tables (CLX-186), and its key from `cx_zse_dict_key`, which the tables kept for its content are
+ * found by, or 0 to find them by the content (CLX-190). */
 CX_FN(cx_u64, cx_zse_bound, (cx_u64 n));
 CX_FN(cx_u64, cx_zse_compress, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags));
 CX_FN(cx_u64, cx_zse_compress_dict, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n,
-                                     cx_u32 dict_id, const cx_u8* params, cx_u32 has_params));
+                                     cx_u32 dict_id, const cx_u8* params, cx_u32 has_params, cx_u64 key));
+CX_FN(cx_u64, cx_zse_dict_key, (void));
 
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's

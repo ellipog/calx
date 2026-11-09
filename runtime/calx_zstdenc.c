@@ -1025,6 +1025,9 @@ typedef struct {
     int first; /* whether its first block starts it */
     int dict;  /* whether its text before it is a dictionary's content */
     const cx_u8* dparams; /* for the first job, a trained dictionary's tables, or 0 */
+    cx_u64 dkey;          /* for the first job, its dictionary's key, or 0 */
+    struct digest_s* dg;  /* for the first job, its dictionary's kept tables, held, or 0 */
+    struct work_s* dw;    /* and a working copy of them it uses where it is, or 0 */
     /* the match finder's tables */
     cx_u32* hash;
     cx_u32* chain;
@@ -3180,6 +3183,8 @@ static void job_tables(job_t* J) {
         cn = (cx_usize)1 << J->p.clog;
         break;
     }
+    /* With a working copy of a dictionary's, the job uses that instead. */
+    if (J->dw) hn = cn = 0;
     if (J->hash_n != hn) {
         if (J->hash) cx_free(J->hash, J->hash_n * 4);
         J->hash = hn ? (cx_u32*)cx_alloc(hn * 4) : 0;
@@ -3308,12 +3313,18 @@ typedef struct work_s {
     cx_usize bytes;
     cx_u32* hash;
     cx_u32* chain;
+    cx_u8* text; /* the content, then room for WORK_TEXT bytes of a frame's text */
 } work_t;
+
+/* A first job with no more text than this has it after the working copy's content, rather than
+ * the content and its text copied into a buffer of their own. */
+#define WORK_TEXT ((cx_usize)64 << 10)
 
 typedef struct digest_s {
     struct digest_s* next;
     cp_t p;
     cx_u32 pre;     /* the content's last `pre` bytes, which the tables hold */
+    cx_u64 key;     /* the dictionary's key, or 0: then it's found by its content */
     cx_u32 next_up; /* the job's next_up after them */
     cx_u32 refs;    /* frames using it now */
     cx_u64 used;
@@ -3337,12 +3348,18 @@ static void digest_lock(void) {
 
 static void digest_unlock(void) { __atomic_clear(&digest_busy, __ATOMIC_RELEASE); }
 
-/* Whether d is for J's settings and content of J's length, by its ends: the whole content is
- * compared after, outside the lock. */
-static int digest_like(const digest_t* d, const job_t* J, cx_u32 pre, const cx_u8* text) {
+/* Whether d is for settings p and the content's last pre bytes at text: by the dictionary's key if
+ * it has one, which no other dictionary has and whose content can't change, or else by the
+ * content's ends, the whole of it compared after, outside the lock. */
+static int digest_like(const digest_t* d, const cp_t* p, cx_u32 pre, const cx_u8* text, cx_u64 key) {
+    if (d->pre != pre || memcmp(&d->p, p, sizeof *p)) return 0;
+    if (key) return d->key == key;
     const cx_u32 e = pre < 16 ? pre : 16;
-    return d->pre == pre && !memcmp(&d->p, &J->p, sizeof d->p) && !memcmp(d->text, text, e) && !memcmp(d->text + pre - e, text + pre - e, e);
+    return !memcmp(d->text, text, e) && !memcmp(d->text + pre - e, text + pre - e, e);
 }
+
+static work_t* work_new(digest_t* d);
+static void work_give(digest_t* d, work_t* w);
 
 static void digest_release(digest_t* d) {
     digest_lock();
@@ -3350,47 +3367,48 @@ static void digest_release(digest_t* d) {
     digest_unlock();
 }
 
-/* The kept digest of J's dictionary and settings, held until digest_release, or 0. */
-static digest_t* digest_find(const job_t* J) {
-    const cx_u32 pre = J->from - J->start;
-    const cx_u8* const text = J->base + J->start;
+/* The kept digest for settings p and a dictionary's key, or its content's last pre bytes at text,
+ * held until digest_release or work_give, or 0. With wp, *wp is a working copy of it for the frame,
+ * one no frame has now or a new one, or 0 if there's no memory for one: one lock for both. */
+static digest_t* digest_find(const cp_t* p, cx_u32 pre, const cx_u8* text, cx_u64 key, work_t** wp) {
+    if (wp) *wp = 0;
     if (pre < DIGEST_MIN) return 0;
 #ifdef ZSE_TUNE
     if (getenv("ZSE_NODIGEST")) return 0;
 #endif
     digest_t* d;
+    work_t* w = 0;
     digest_lock();
     for (d = digests; d; d = d->next)
-        if (digest_like(d, J, pre, text)) break;
+        if (digest_like(d, p, pre, text, key)) break;
     if (d) {
         d->refs++;
         d->used = ++digest_clock;
+        if (wp && (w = d->work)) d->work = w->next;
     }
     digest_unlock();
     if (!d) return 0;
-    if (d->hash_n != J->hash_n || d->chain_n != J->chain_n || memcmp(d->text, text, pre)) {
-        digest_release(d);
+    if (!key && memcmp(d->text, text, pre)) {
+        if (w) work_give(d, w);
+        else digest_release(d);
         return 0;
     }
+    if (wp) *wp = w ? w : work_new(d);
     return d;
 }
 
-/* A working copy of d's tables for a frame to use, one no frame has now or a new one; 0 if
- * there's no memory for it. */
-static work_t* work_take(digest_t* d) {
-    digest_lock();
-    work_t* w = d->work;
-    if (w) d->work = w->next;
-    digest_unlock();
-    if (w) return w;
-    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n);
-    w = (work_t*)malloc(bytes);
+/* A new working copy of d's tables and content, or 0 if there's no memory for one. */
+static work_t* work_new(digest_t* d) {
+    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n) + d->pre + WORK_TEXT;
+    work_t* const w = (work_t*)malloc(bytes);
     if (!w) return 0;
     w->bytes = bytes;
     w->hash = (cx_u32*)(w + 1);
     w->chain = w->hash + d->hash_n;
+    w->text = (cx_u8*)(w->chain + d->chain_n);
     memcpy(w->hash, d->hash, d->hash_n * 4);
     if (d->chain_n) memcpy(w->chain, d->chain, d->chain_n * 4);
+    memcpy(w->text, d->text, d->pre);
     digest_lock();
     d->bytes += bytes;
     digest_total += bytes;
@@ -3486,6 +3504,7 @@ static void digest_keep(const job_t* J) {
     if (!d) return;
     d->p = J->p;
     d->pre = pre;
+    d->key = J->dkey;
     d->next_up = J->next_up;
     d->refs = 0;
     d->work = 0;
@@ -3504,7 +3523,7 @@ static void digest_keep(const job_t* J) {
     digest_lock();
     for (digest_t* e = digests; e; e = e->next) {
         /* Another thread kept it first. */
-        if (digest_like(e, J, pre, text) && !memcmp(e->text, text, pre)) {
+        if (digest_like(e, &J->p, pre, text, J->dkey) && (J->dkey || !memcmp(e->text, text, pre))) {
             digest_unlock();
             free(d);
             return;
@@ -3536,6 +3555,7 @@ static void digest_keep(const job_t* J) {
 
 typedef struct {
     cx_u8 key[DP_ALL];
+    cx_u64 dkey; /* the dictionary's key, or 0 */
     cx_u32 huf[256];
     cx_u32 huf_log;
     tab_t of, ml, ll;
@@ -3555,10 +3575,10 @@ static void dict_put(ent_t* e, const dict_ent_t* k) {
     for (int i = 0; i < 3; i++) e->rep[i] = k->rep[i];
 }
 
-static void dict_tables(ent_t* e, const cx_u8* P) {
+static void dict_tables(ent_t* e, const cx_u8* P, cx_u64 dkey) {
     digest_lock();
     for (int i = 0; i < DICT_ENT; i++) {
-        if (dict_ents[i] && !memcmp(dict_ents[i]->key, P, DP_ALL)) {
+        if (dict_ents[i] && (dkey ? dict_ents[i]->dkey == dkey : !memcmp(dict_ents[i]->key, P, DP_ALL))) {
             dict_put(e, dict_ents[i]);
             digest_unlock();
             return;
@@ -3569,6 +3589,7 @@ static void dict_tables(ent_t* e, const cx_u8* P) {
     dict_ent_t* const k = (dict_ent_t*)malloc(sizeof(dict_ent_t));
     if (!k) return;
     memcpy(k->key, P, DP_ALL);
+    k->dkey = dkey;
     memcpy(k->huf, e->huf, sizeof k->huf);
     k->huf_log = e->huf_log;
     k->of = e->of;
@@ -3590,14 +3611,13 @@ static void job_blocks(job_t* J);
  * them, as their links change all over and their searches cost far more than the copy. */
 static void job_run(job_t* J) {
     job_tables(J);
-    digest_t* d = J->dict ? digest_find(J) : 0;
-    work_t* w = 0;
+    digest_t* d = J->dg;
+    work_t* const w = J->dw;
     cx_u32* const own_hash = J->hash;
     cx_u32* const own_chain = J->chain;
     cx_u8* const own_tags = J->tags;
     if (d) {
         J->next_up = d->next_up;
-        if (J->p.strat <= S_LAZY2) w = work_take(d);
         if (w) {
             J->hash = w->hash;
             J->chain = w->chain;
@@ -3636,7 +3656,7 @@ static void job_blocks(job_t* J) {
         e->rep[0] = 1;
         e->rep[1] = 4;
         e->rep[2] = 8;
-        if (J->dparams) dict_tables(e, J->dparams);
+        if (J->dparams) dict_tables(e, J->dparams, J->dkey);
     } else {
         e->rep[0] = e->rep[1] = e->rep[2] = 0;
     }
@@ -3733,8 +3753,11 @@ typedef struct {
      * window holds, first_pre bytes, so its matches can reach back into it. */
     cx_u8* first;
     cx_u32 first_pre;
-    cx_usize first_cap;
+    cx_usize first_cap; /* 0 if first is in the working copy */
     const cx_u8* dparams;
+    cx_u64 dkey;
+    digest_t* dg; /* the dictionary's kept tables for the first job, held, or 0 */
+    work_t* dw;   /* and a working copy of them, or 0 */
 } frame_t;
 
 #define START_OF(p) (((cx_u32)1 << (p).wlog) + 1)
@@ -3751,6 +3774,9 @@ static void job_place(frame_t* F, job_t* J, cx_u64 k) {
     J->last = k + 1 == F->jobs;
     J->first = k == 0;
     J->dparams = k == 0 ? F->dparams : 0;
+    J->dkey = k == 0 ? F->dkey : 0;
+    J->dg = k == 0 ? F->dg : 0;
+    J->dw = k == 0 ? F->dw : 0;
     J->dict = k == 0 && F->first;
     if (k == 0 && F->first) {
         J->base = F->first - J->start;
@@ -3798,7 +3824,7 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
  * with a dictionary's content[0..content_n) as the text before it, its ID if that isn't 0, and if
  * params isn't 0 its tables: gives its size. flags: 1 for a checksum, which std.zstd appends. */
 static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
-                          const cx_u8* params) {
+                          const cx_u8* params, cx_u64 key) {
     if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
     frame_t F;
     memset(&F, 0, sizeof F);
@@ -3811,12 +3837,21 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
     F.reach = job_reach(&F.p);
     F.jobs = n ? (n + F.each - 1) / F.each : 1;
     F.dparams = params;
+    F.dkey = key;
     if (content_n) {
         const cx_u64 w = (cx_u64)1 << F.p.wlog, len = n < F.each ? n : F.each;
         F.first_pre = (cx_u32)(content_n < w ? content_n : w);
-        F.first_cap = F.first_pre + (cx_usize)len;
-        F.first = (cx_u8*)cx_alloc(F.first_cap ? F.first_cap : 1);
-        memcpy(F.first, content + content_n - F.first_pre, F.first_pre);
+        const cx_u8* const tail = content + content_n - F.first_pre;
+        /* The content's tables kept for these settings, if they are; up to the lazy levels, in a
+         * working copy, after whose content a small first job's text goes. */
+        F.dg = digest_find(&F.p, F.first_pre, tail, key, F.p.strat <= S_LAZY2 ? &F.dw : 0);
+        if (F.dw && len <= WORK_TEXT) {
+            F.first = F.dw->text;
+        } else {
+            F.first_cap = F.first_pre + (cx_usize)len;
+            F.first = (cx_u8*)cx_alloc(F.first_cap ? F.first_cap : 1);
+            memcpy(F.first, tail, F.first_pre);
+        }
         if (len) memcpy(F.first + F.first_pre, in, (cx_usize)len);
     }
     /* The frame's header: the dictionary's ID if it has one, the size, and a window unless it's
@@ -3874,17 +3909,24 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
         op += F.made[k].n;
     }
     cx_free(F.made, F.jobs * sizeof(made_t));
-    if (F.first) cx_free(F.first, F.first_cap ? F.first_cap : 1);
+    if (F.first_cap) cx_free(F.first, F.first_cap);
     return (cx_u64)(op - out);
 }
 
 cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags) {
-    return frame_write(in, n, out, level, flags, 0, 0, 0, 0);
+    return frame_write(in, n, out, level, flags, 0, 0, 0, 0, 0);
 }
 
-/* As cx_zse_compress, with a dictionary: its content[0..content_n), its ID, 0 for none, and its
- * tables from calx_zstd.c's cx_zstd_dict_params if has_params is set. */
+/* As cx_zse_compress, with a dictionary: its content[0..content_n), its ID, 0 for none, its tables
+ * from calx_zstd.c's cx_zstd_dict_params if has_params is set, and its key from cx_zse_dict_key,
+ * or 0 to have its kept tables found by its content. */
 cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
-                            const cx_u8* params, cx_u32 has_params) {
-    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0);
+                            const cx_u8* params, cx_u32 has_params, cx_u64 key) {
+    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0, key);
+}
+
+/* A key for a new dictionary, which no other has had. */
+cx_u64 cx_zse_dict_key(void) {
+    static cx_u64 keys;
+    return __atomic_add_fetch(&keys, 1, __ATOMIC_RELAXED);
 }
