@@ -487,6 +487,18 @@ static cx_usize write_counts(const cx_i16* norm, cx_u32 max, cx_u32 log, cx_u8* 
     return (cx_usize)(p - out);
 }
 
+/* libzstd's accuracy for a table of n symbols, the last max (FSE_optimalTableLog_internal): about
+ * `minus` bits under n's, at most lg, but enough for the symbols, from 5 to 12. n is 2 or more. */
+static cx_u32 table_log_for(cx_u32 lg, cx_u32 n, cx_u32 max, int minus) {
+    int t = (int)lg;
+    const int by_n = (int)high_bit(n - 1) - minus;
+    const int a = (int)high_bit(n) + 1, b = (int)high_bit(max ? max : 1) + 2;
+    const int least = a < b ? a : b;
+    if (by_n < t) t = by_n;
+    if (least > t) t = least;
+    return (cx_u32)(t < 5 ? 5 : t > 12 ? 12 : t);
+}
+
 /* --- Huffman --------------------------------------------------------------------------------- */
 
 /* A Huffman code for count[0..max], two symbols or more, by Moffat and Katajainen's way of working
@@ -594,14 +606,14 @@ static cx_u32 huf_limit(const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, c
     return longest;
 }
 
-/* Code lengths for count[0..max], two symbols or more, none longer than HUF_LOG. Gives the
- * longest. */
-static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
+/* Code lengths for count[0..max], two symbols or more, none longer than lim, which has room for
+ * them. Gives the longest. */
+static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
     cx_u32 sym[256];
     cx_i64 a[256];
     memset(len, 0, max + 1);
     const int n = huf_depths(count, max, sym, a);
-    return huf_limit(sym, a, n, HUF_LOG, len);
+    return huf_limit(sym, a, n, lim, len);
 }
 
 /* The codes for lengths len[0..max] with the longest `log`, laid out as the decoder lays its table
@@ -2719,7 +2731,10 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
         cx_u8 tree[160];
         cx_usize tree_n = 0, est_new = ~(cx_usize)0;
         if (!skip_new && huf_allowed < 2) {
-            log = huf_lengths(count, max, len);
+            /* As deep as libzstd lets a code go below btultra: for a few hundred literals, 7 to 9
+             * bits rather than 11, which takes a byte or more off the tree for less than that on
+             * the data. On our small files that's 0.16% smaller from level 1 to 12. */
+            log = huf_lengths(count, max, table_log_for(HUF_LOG, (cx_u32)n, max, 1), len);
             cx_u64 bits_new = 0;
             for (cx_u32 s = 0; s <= max; s++) bits_new += (cx_u64)count[s] * len[s];
             tree_n = huf_tree(len, max, log, tree);
@@ -2897,13 +2912,20 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
         }
         goto chosen;
     }
-    cx_u32 lo = 5;
-    while ((1u << lo) < distinct) lo++;
-    cx_u32 hi = high_bit(n) + 2;
-    if (hi > log_max) hi = log_max;
-    if (hi < lo) hi = lo;
-    /* The two largest: a smaller table seldom pays for what its description saves. */
-    if (hi - lo > 1) lo = hi - 1;
+    cx_u32 need = 5;
+    while ((1u << need) < distinct) need++;
+    cx_u32 top = high_bit(n) + 2;
+    if (top > log_max) top = log_max;
+    if (top < need) top = need;
+    /* Two accuracies: libzstd's for n codes, about 2 bits under n's, and the one above. For a few
+     * hundred codes that's 6 or 7 where 8 or 9 were tried, whose descriptions took more than their
+     * bits saved: on our small files 0.2% smaller at every level. For a few thousand or more it's
+     * the two largest, as before. */
+    cx_u32 z = table_log_for(log_max, n, max, 2);
+    if (z > log_max) z = log_max;
+    cx_u32 lo = z < top ? z : top - 1;
+    if (lo < need) lo = need;
+    const cx_u32 hi = lo < top ? lo + 1 : lo;
     /* No table of its own codes the counts in fewer bits than their entropy, and its description
      * takes at least `lo` bits for the first count and, for each symbol after, as many as the slots
      * left have below their highest. When that's no less than the best, as on most small inputs
