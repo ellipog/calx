@@ -1113,6 +1113,23 @@ static inline cx_u32 rep_decode(cx_u32* r, cx_u32 ll, cx_u32 ofb) {
     return off;
 }
 
+/* The repeated offsets after seq[a..b), which f are before: worked out from the last few, the
+ * offsets before them standing in as unknowns, which no offset reaches as the window is below
+ * 2^31. Only if one is still there are more taken, up to all of them. A block split in two had
+ * half its sequences walked for this, 7,700 cycles at level 3. */
+static void reps_at_end(cx_u32* fo, const cx_u32* f, const seq_t* seq, cx_u32 a, cx_u32 b) {
+    for (cx_u32 w = 16;; w *= 8) {
+        const int all = b - a <= w;
+        cx_u32 r[3] = {0xC0000000u, 0xC0000001u, 0xC0000002u};
+        if (all) memcpy(r, f, sizeof r);
+        for (cx_u32 i = all ? a : b - w; i < b; i++) rep_decode(r, seq[i].ll, seq[i].ofb);
+        if (all || ((r[0] | r[1] | r[2]) >> 31) == 0) {
+            memcpy(fo, r, sizeof r);
+            return;
+        }
+    }
+}
+
 /* The literals after the last match. */
 static inline void ss_tail(ss_t* s, const cx_u8* lit, cx_usize n) {
     memcpy(s->lp, lit, n);
@@ -1541,11 +1558,14 @@ static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
  * the next position's entry is loaded before this one's candidates are compared, and it's the
  * one a short match looks at. On a miss the search moves on by a step, 1 to start with and one
  * more for each DSTEP_RUN bytes without a match. Once the job has saved bytes, the step also
- * starts over at each DSTEP_PIECE bytes of the block, as libzstd 1.5.7's 8 KB pieces restart its
- * step: else, after a stretch of random bytes, the step had grown so long that most of the text
- * repeated after it was skipped, and rand_repeats came out 7% bigger than libzstd's, where it's
- * now within 0.3%. Random bytes alone save nothing and keep the long step. A table entry is taken
- * only if it's in the window from all of the block, so one bound serves every position. */
+ * starts over at each DSTEP_PIECE bytes of the block: else, after a stretch of random bytes, the
+ * step had grown so long that most of the text repeated after it was skipped, and rand_repeats
+ * came out 7% bigger than libzstd's, where it's now within 0.3%. libzstd 1.5.7's step starts over
+ * at each block, and its pre-splitter, sampling every 11th byte, cuts random bytes into 8 KB
+ * blocks. It costs src.tar 3 to 5%; growing the step back faster after a restart, or restarting
+ * every 32 KiB, made rand_repeats 1.6 to 5% bigger. Random bytes alone save nothing and keep the
+ * long step. A table entry is taken only if it's in the window from all of the block, so one
+ * bound serves every position. */
 #ifdef ZSE_TUNE
 #define DSTEP_RUN (getenv("ZSE_DS") ? (cx_usize)atoi(getenv("ZSE_DS")) : 256)
 #else
@@ -3499,15 +3519,18 @@ static cx_u32 split_piece(const cp_t* p) {
     return p->strat >= S_BTOPT ? 2 << 10 : 8 << 10;
 }
 
-/* What a split has to save, in 1/256 bits: each part's tables take time to build, which the fast
- * levels spend only for a clear gain, such as a stretch that doesn't compress. */
+/* What a split has to save, in 1/256 bits: each part's tables take time to build, about 27,000
+ * cycles, which the fast levels spend only for a clear gain. At levels 3 and 4 that's 256 bytes,
+ * where 1 KiB left src.tar and clang40 0.3 and 0.4% bigger than libzstd 1.5.7, which splits a
+ * block where its bytes change before parsing it: 256 is 0.17 to 0.23% smaller than 1 KiB for
+ * 0.3 to 0.7% more time, and 16 bytes 0.4% smaller for 3% more. */
 static cx_u64 split_margin(const cp_t* p) {
 #ifdef ZSE_TUNE
     const char* e = getenv("ZSE_SM");
     if (e) return (cx_u64)atoi(e) * 8 * 256;
 #endif
     const cx_u64 byte = 8 * 256;
-    return p->strat <= S_DFAST ? 1024 * byte : p->strat <= S_LAZY2 ? 64 * byte : 0;
+    return p->strat == S_FAST ? 1024 * byte : p->strat == S_DFAST ? 256 * byte : p->strat <= S_LAZY2 ? 64 * byte : 0;
 }
 
 /* Writes the block the match finder left in J->ss, which makes base[at..at+n), as one block or
@@ -3628,12 +3651,7 @@ static cx_usize split_emit(job_t* J, const cx_u32* fin, const cx_u32* fout, cx_u
         const cx_u32 *pa = P + (cx_usize)a * SPLIT_W, *pb = P + (cx_usize)b * SPLIT_W;
         for (cx_u32 k = 0; k < SPLIT_W; k++) d[k] = pb[k] - pa[k];
         cx_u32 fo[3] = {fout[0], fout[1], fout[2]};
-        if (j < nc) {
-            fo[0] = f[0];
-            fo[1] = f[1];
-            fo[2] = f[2];
-            for (cx_u32 i = ca->seq; i < cb->seq; i++) rep_decode(fo, seq[i].ll, seq[i].ofb);
-        }
+        if (j < nc) reps_at_end(fo, f, seq, ca->seq, cb->seq);
         got += emit(J, seq + ca->seq, cb->seq - ca->seq, f, fo, lit + ca->lit, cb->lit - ca->lit, src + ca->pos, cb->pos - ca->pos, last && j == nc, d, ca->seq,
                     out + got, cap - got);
         f[0] = fo[0];
