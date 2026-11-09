@@ -135,8 +135,9 @@ bool remove_from_path(const fs::path& bin) {
 }
 
 // Removes `home` once this program has ended, since Windows won't remove a running calx.exe or
-// the folder it's in: a batch file in the temporary folder waits two seconds, removes the folder,
-// then itself. Whether it started.
+// the folder it's in: a batch file in the temporary folder removes the folder, then itself. It
+// tries each second for 30 seconds, since this calx can take a moment to end and a virus scanner
+// can hold a file it has just seen (CLX-201). Whether it started.
 bool remove_after_exit(const fs::path& home) {
     wchar_t temp[MAX_PATH + 1];
     DWORD n = GetTempPathW(MAX_PATH + 1, temp);
@@ -147,7 +148,14 @@ bool remove_after_exit(const fs::path& home) {
     int len8 = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
     std::string home8(static_cast<std::size_t>(len8), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), home8.data(), len8, nullptr, nullptr);
-    std::string text = "@echo off\r\nchcp 65001 > nul\r\nping -n 3 127.0.0.1 > nul\r\nrmdir /s /q \"" + home8 + "\"\r\ndel \"%~f0\"\r\n";
+    // cmd expands `%` in a batch file's lines even in quotes, so a folder such as `100%` needs `%%`.
+    std::string quoted;
+    for (char c : home8) quoted += c == '%' ? std::string("%%") : std::string(1, c);
+    // `ping -n 2` waits a second. The test for the folder is a line of its own, outside any
+    // parentheses, so `%tries%` is read each time round.
+    std::string text = "@echo off\r\nchcp 65001 > nul\r\nset tries=0\r\n:again\r\nping -n 2 127.0.0.1 > nul\r\nrmdir /s /q \"" +
+                       quoted + "\" 2> nul\r\nif not exist \"" + quoted + "\\\" goto done\r\nset /a tries+=1\r\nif %tries% lss 30 goto again\r\n" +
+                       ":done\r\ndel \"%~f0\"\r\n";
     if (!write_file_atomic(script.string(), text)) return false;
     wchar_t system[MAX_PATH + 1];
     UINT len = GetSystemDirectoryW(system, MAX_PATH + 1);

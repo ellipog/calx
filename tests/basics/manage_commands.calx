@@ -77,9 +77,10 @@ fn main() {
     let said = calx(copied, ["uninstall", "--yes"], env.copy(), dir)
     println("{said.lines()[0].starts_with("This removes Calx from DIR/install, its build cache in DIR/cache")}")    // out: true
     println("{said.ends_with("[exited with status 0]")}")    // out: true
-    // On Windows the folder goes once the command has ended.
+    // On Windows the folder goes once the command has ended. Its remover tries each second for 30
+    // seconds, since a busy machine or a virus scanner can hold a file past the end (CLX-201).
     var waited = 0
-    while exists(home) and waited < 100 {
+    while exists(home) and waited < 400 {
         unsafe { sleep(100000000) }
         waited += 1
     }
