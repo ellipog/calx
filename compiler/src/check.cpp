@@ -71,11 +71,14 @@ struct LoopCtx {
 };
 
 // A closure whose body is being checked (CLX-98): its function, where its own locals start in
-// `visible_`, and what it captures, in the order it first names them.
+// `visible_`, and what it captures, in the order it first names them. Passed to an `FnMut` bound,
+// it may change what it captures (CLX-161), and `changed` is what it does change.
 struct ClosureCtx {
     Item* item;
     std::size_t mark;
     std::vector<Local*> captures;
+    bool may_change = false;
+    std::vector<Local*> changed;
 };
 
 // A `parallel for` whose body is being checked (D21).
@@ -1697,6 +1700,7 @@ private:
                         continue;
                     }
                     p->call = call;
+                    p->call_mut = b->callable_mut;
                     continue;
                 }
                 // The derived properties, which every type that can have them has without an impl.
@@ -2053,8 +2057,17 @@ private:
                     continue;
                 }
                 if (got != want) {
-                    error(span, q(params[i]->name) + " is called as " + q(callable_text(want)) + ", but this is called as " +
-                                    q(callable_text(got)));
+                    error(span, q(params[i]->name) + " is called as " + q(callable_text(want, params[i]->call_mut)) +
+                                    ", but this is called as " + q(callable_text(got)));
+                    ok = false;
+                    continue;
+                }
+                // An `Fn` closure only reads what it captures, so it may be called on many threads at
+                // once; one that changes what it captures can't be given for it (CLX-161).
+                if (!params[i]->call_mut && (args[i]->kind == TypeKind::closure || args[i]->kind == TypeKind::param) &&
+                    args[i]->call_mut) {
+                    error(span, q(params[i]->name) + " is an `Fn` bound, whose closures only read what they capture, so " + what +
+                                    " can't be given one that's `FnMut`, which can change what it captures");
                     ok = false;
                     continue;
                 }
@@ -3683,10 +3696,23 @@ private:
     // Checks that the place rooted at `l` can be changed, and records that it was.
     void require_writable(Expr* place, Local* l, bool whole) {
         if (captured(l)) {
-            error(place->span, "a closure reads what it captures where it is, so it can't change " + q(text(l->name)) +
-                                   "; change a copy in its body, or use a `for` loop");
-            l->used = l->mutated = true;
-            return;
+            // Passed to an `FnMut` bound, a closure can change what it captures, which the call then
+            // takes as a `mut` argument (CLX-161): each closure it's captured by must be one. It's
+            // changed where it is, so the rest is checked as for the code around them.
+            std::size_t at = visible_index(l);
+            bool may = true;
+            for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) may = may && closures_[k].may_change;
+            if (!may) {
+                error(place->span, "a closure reads what it captures where it is, so it can't change " + q(text(l->name)) +
+                                       " unless it's passed to a parameter with an `FnMut` bound; change a copy in its body, "
+                                       "or use a `for` loop");
+                l->used = l->mutated = true;
+                return;
+            }
+            for (std::size_t k = closures_.size(); k-- > 0 && at < closures_[k].mark;) {
+                std::vector<Local*>& ch = closures_[k].changed;
+                if (std::find(ch.begin(), ch.end(), l) == ch.end()) ch.push_back(l);
+            }
         }
         for (const Expr* p = place; p->kind == ExprKind::field || p->kind == ExprKind::index || p->kind == ExprKind::unwrap; p = p->lhs) {
             if (p->kind == ExprKind::index && p->box_value && p->lhs->type && p->lhs->type->shared) {
@@ -5260,6 +5286,12 @@ private:
                 e->local = r.local;
                 r.local->used = true;
                 note_capture(r.local);
+                // What it stands for can change what it captures, so it's called one call at a time
+                // (CLX-161).
+                if (!par_.empty() && r.local->type && r.local->type->kind == TypeKind::param && r.local->type->call_mut) {
+                    error(e->span, q(text(n)) + " can change what it captures, so it's called one call at a time, and a "
+                                   "`parallel for` runs its iterations at once; use it outside the loop, or take it as `Fn`");
+                }
                 return r.local->type;
             case NameKind::item:
                 use_item(r.item);
@@ -5425,6 +5457,23 @@ private:
                 if (mentions(ordered[j], root, &path)) {
                     error(ordered[j]->span, q(text(root->name)) + " is passed as `mut`, so it can't be used again in the same call");
                     note(ordered[i]->span, "it's passed as `mut` here");
+                    break;
+                }
+            }
+        }
+    }
+
+    // D48 for a closure that changes what it captures (CLX-161): the call takes each as a `mut`
+    // argument, so no other argument can use it, nor any part of it.
+    void changed_captures(const std::vector<Expr*>& ordered) {
+        for (std::size_t i = 0; i < ordered.size(); i++) {
+            const Expr* c = ordered[i];
+            if (!c || c->kind != ExprKind::closure || !c->item) continue;
+            for (const Local* l : c->item->changes) {
+                for (std::size_t j = 0; j < ordered.size(); j++) {
+                    if (j == i || !ordered[j] || !mentions(ordered[j], l)) continue;
+                    error(ordered[j]->span, q(text(l->name)) + " is changed by the closure, so it can't be used again in the same call");
+                    note(c->span, "the closure that changes it is here");
                     break;
                 }
             }
@@ -7328,7 +7377,7 @@ private:
     // `|a, b| body`, the closure `e`, given what its parameters are, and what it gives back, or
     // null to take its body's type: its function, checked, with `e->item` set to it. `fn_value`
     // makes it a plain `fn(...)`, which can't capture anything.
-    Item* closure_fn(Expr* e, const std::vector<Type*>& params, Type* result, bool fn_value) {
+    Item* closure_fn(Expr* e, const std::vector<Type*>& params, Type* result, bool fn_value, bool may_change = false) {
         auto* it = ctx_.arena.make<Item>();
         it->kind = ItemKind::fn;
         it->span = e->span;
@@ -7371,7 +7420,7 @@ private:
         it->params = ctx_.arena.copy(ps);
         // Its body is checked here, among the locals around it, but `return`, `break`,
         // `continue`, `try` and `fail` don't leave it.
-        closures_.push_back({it, visible_.size(), {}});
+        closures_.push_back({it, visible_.size(), {}, may_change, {}});
         std::vector<LoopCtx> outer_loops;
         outer_loops.swap(loops_);
         push_scope();
@@ -7380,7 +7429,9 @@ private:
         pop_scope();
         loops_.swap(outer_loops);
         std::vector<Local*> caps = std::move(closures_.back().captures);
+        std::vector<Local*> changed = std::move(closures_.back().changed);
         closures_.pop_back();
+        it->changes = ctx_.arena.copy(changed);
         // A closure inside this one reads what it captures through this one's captures.
         for (Local* l : caps) note_capture(l);
         Type* r = result ? result : body;
@@ -7416,7 +7467,7 @@ private:
     void check_args(Expr* e) {
         for (Arg& a : e->args) {
             if (a.value->kind == ExprKind::closure && fn_) {
-                closure_fn(a.value, std::vector<Type*>(a.value->params.size(), T.error), nullptr, false);
+                closure_fn(a.value, std::vector<Type*>(a.value->params.size(), T.error), nullptr, false, true);
             } else {
                 check(a.value, nullptr);
             }
@@ -7424,9 +7475,9 @@ private:
     }
 
     // `Fn(i32) -> i32`, for the function type `call`.
-    static std::string callable_text(const Type* call) {
+    static std::string callable_text(const Type* call, bool mut = false) {
         std::string n(call->name);
-        return "Fn" + n.substr(2);
+        return (mut ? "FnMut" : "Fn") + n.substr(2);
     }
 
     // A closure's own type, for one passed to a parameter with an `Fn` bound.
@@ -7441,7 +7492,9 @@ private:
         auto [ln, col] = ctx_.sources.file(it->span.file).position(it->span.begin);
         (void)col;
         std::string name = "the closure on line " + std::to_string(ln);
-        return T.closure_of(it, call, name);
+        Type* t = T.closure_of(it, call, name);
+        t->call_mut = !it->changes.empty();
+        return t;
     }
 
     // `|x| ...` where a value goes: a plain `fn(...)` when that's what's wanted, or when its
@@ -7454,7 +7507,7 @@ private:
         }
         // Where an error left what's wanted unknown, its body is checked for the names it uses.
         if (expected && is_bad(expected)) {
-            closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false);
+            closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false, true);
             return T.error;
         }
         if (expected && expected->kind == TypeKind::fn_) {
@@ -7514,7 +7567,7 @@ private:
                 want = subst(want, s);
             }
             if (unresolved(want, vars, s) && quiet) {
-                closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false);
+                closure_fn(e, std::vector<Type*>(e->params.size(), T.error), nullptr, false, true);
                 return T.error;
             }
             if (unresolved(want, vars, s)) {
@@ -7528,11 +7581,11 @@ private:
         }
         Type* want_result = subst(sig->elem, s);
         bool infer_result = unresolved(want_result, vars, s);
-        Item* it = closure_fn(e, params, infer_result ? nullptr : want_result, false);
+        Item* it = closure_fn(e, params, infer_result ? nullptr : want_result, false, f->call_mut);
         if (is_bad(it->result_type) || e->params.size() != params.size()) return T.error;
         if (infer_result && !unify(sig->elem, it->result_type, s, vars)) {
             error(e->body->span, "this closure gives back " + a_type(it->result_type) + ", which doesn't fit " +
-                                     q(callable_text(f->call)));
+                                     q(callable_text(f->call, f->call_mut)));
             return T.error;
         }
         Type* t = closure_type(it);
@@ -8164,6 +8217,7 @@ private:
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
         }
         distinct_muts(ordered, is_mut);
+        changed_captures(ordered);
         e->ordered_args = ctx_.arena.copy(ordered);
         Type* result = f->result_type ? f->result_type : T.error;
         if (!generic) return result;
@@ -10153,6 +10207,11 @@ private:
         }
         Type* t = check(arg, nullptr);
         if (is_bad(t)) return nullptr;
+        if ((t->kind == TypeKind::param || t->kind == TypeKind::closure) && t->call_mut) {
+            error(arg->span, q(m) + " takes an `Fn`, whose closures only read what they capture, so it can't be given one "
+                                 "that's `FnMut`, which can change what it captures");
+            return nullptr;
+        }
         Type* sig = t->kind == TypeKind::fn_ ? t : callable(t);
         if (!sig) {
             error(arg->span, q(m) + " calls what it's given on " + (b == BMethod::opt_map ? "the value" : "each element") +

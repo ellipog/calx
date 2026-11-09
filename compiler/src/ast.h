@@ -50,6 +50,7 @@ struct TypeExpr {
     bool is_const = false;        // pointer
     bool is_unsafe = false;       // fn: `unsafe fn`, which only `unsafe` code can call
     bool callable = false;        // fn: `Fn(A) -> R`, a bound any closure or function it fits has (CLX-98)
+    bool callable_mut = false;    // fn: `FnMut(A) -> R`, whose closures can change what they capture (CLX-161)
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -499,10 +500,12 @@ struct Item {
     // A closure's body, as a function of its own (CLX-98), which each C file that reaches it
     // copies, as instances are. It reads `captures`, the locals of the code around it that it
     // names, through their addresses; one that captures nothing and is a `fn(...)` value takes
-    // no addresses at all (`plain`).
+    // no addresses at all (`plain`). Passed to an `FnMut` bound, it can change some of them
+    // (`changes`, CLX-161).
     bool is_closure = false;
     bool plain = false;
     Slice<Local*> captures;
+    Slice<Local*> changes;
     std::string_view abi;
     // struct, enum
     Slice<FieldDecl> fields;

@@ -108,6 +108,9 @@ struct Type {
     // closure: what it's called as; param: its bound `Fn(A) -> R`, what what it stands for can be
     // called as. Either is a `fn_` type (CLX-98).
     Type* call = nullptr;
+    // param: its bound is `FnMut(A) -> R`, so what it stands for can change what it captures and
+    // is called one call at a time; closure: it changes what it captures (CLX-161).
+    bool call_mut = false;
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };

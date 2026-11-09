@@ -1,0 +1,120 @@
+// Closures that change what they capture, passed to an `FnMut` bound (CLX-161).
+
+fn each(xs: List<i32>, f: FnMut(i32)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn each_pair<F: FnMut(i32, i32)>(n: i32, f: F) {
+    for i in 0..n {
+        f(i, i * i)
+    }
+}
+
+// An `Fn` can be given where an `FnMut` is wanted, and an `FnMut` passed on to another.
+fn each_twice(xs: List<i32>, f: FnMut(i32)) {
+    each(xs, f)
+    each(xs, f)
+}
+
+fn sum_with(xs: List<i32>, f: Fn(i32) -> i32) -> i32 {
+    var total = 0
+    each(xs, |x| { total += f(x) })
+    return total
+}
+
+struct Counter {
+    seen: List<String>
+    hits: i32
+}
+
+fn walk(words: List<String>, visit: FnMut(String) -> bool) -> usize {
+    var kept: usize = 0
+    for w in words {
+        if visit(w) {
+            kept += 1
+        }
+    }
+    return kept
+}
+
+fn add_into(total: mut i32, xs: List<i32>) {
+    each(xs, |x| { total += x })
+}
+
+struct Bag {
+    xs: List<i32>
+    n: i32
+}
+
+impl Bag {
+    fn each(self, f: FnMut(i32)) {
+        for x in self.xs {
+            f(x)
+        }
+    }
+}
+
+fn main() {
+    let xs: List<i32> = [3, 1, 4, 1, 5]
+    var total = 0
+    var biggest = 0
+    each(xs, |x| {
+        total += x
+        biggest = if x > biggest { x } else { biggest }
+    })
+    println("{total} {biggest}")    // out: 14 5
+
+    // A list, a string and a struct's fields, changed where they are.
+    var squares = List<i32>()
+    var text = String()
+    each_pair(4) |i, sq| {
+        squares.push(sq)
+        text.push_str("{i};")
+    }
+    println("{squares} {text}")    // out: [0, 1, 4, 9] 0;1;2;3;
+
+    var c = Counter { seen: List<String>(), hits: 0 }
+    let words: List<String> = ["pear", "fig", "kiwi", "plum"]
+    let kept = walk(words, |w| {
+        c.hits += 1
+        if w.len() == 4 {
+            c.seen.push(w.copy())
+            true
+        } else {
+            false
+        }
+    })
+    println("{kept} {c.hits} {c.seen}")    // out: 3 4 [pear, kiwi, plum]
+
+    // Whole values replaced, as many times as it's called.
+    var last = String("none")
+    each(xs, |x| { last = "got {x}" })
+    println(last)    // out: got 5
+
+    var n = 0
+    each_twice(xs, |_x| { n += 1 })
+    println("{n}")    // out: 10
+
+    println("{sum_with(xs, |x| x * 10)}")    // out: 140
+
+    var grand = 100
+    add_into(mut grand, xs)
+    println("{grand}")    // out: 114
+
+    // A closure inside one that changes a capture changes it through the outer one.
+    var count = 0
+    each(xs) |x| {
+        each([x, x]) |_y| {
+            count += 1
+        }
+    }
+    println("{count}")    // out: 10
+
+    // A method can take one too.
+    let bag = Bag { xs: [2, 7], n: 3 }
+    var sum = 0
+    bag.each(|x| { sum += x * bag.n })
+    println("{sum}")    // out: 27
+}

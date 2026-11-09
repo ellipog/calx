@@ -810,7 +810,10 @@ private:
                     return t;
                 }
                 // `Fn(i32) -> i32`: what a closure, or a function, can be called as (CLX-98).
-                if (ctx_.names.text(peek().name) == "Fn" && peek(1).kind == Tok::lparen && !peek(1).space_before) {
+                // `FnMut(...)` is one whose closures can change what they capture (CLX-161).
+                if ((ctx_.names.text(peek().name) == "Fn" || ctx_.names.text(peek().name) == "FnMut") && peek(1).kind == Tok::lparen &&
+                    !peek(1).space_before) {
+                    t->callable_mut = ctx_.names.text(peek().name) == "FnMut";
                     next();
                     t->kind = TypeExprKind::fn;
                     t->callable = true;

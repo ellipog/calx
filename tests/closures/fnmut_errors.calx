@@ -1,0 +1,76 @@
+// What the checker catches about closures that change what they capture (CLX-161).
+
+fn each(xs: List<i32>, f: FnMut(i32)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn read_each(xs: List<i32>, f: Fn(i32)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn both(n: i32, f: FnMut(i32)) {
+    f(n)
+}
+
+fn in_parallel(n: usize, f: FnMut(usize)) {
+    parallel for i in 0..n {
+        f(i)                                // error: `f` can change what it captures, so it's called one call at a time
+    }
+}
+
+fn to_fn(xs: List<i32>, f: FnMut(i32)) {
+    read_each(xs, f)                        // error: `Fn(i32)` is an `Fn` bound, whose closures only read what they capture
+    _ = xs.map(f)                           // error: `map` takes an `Fn`, whose closures only read what they capture
+}
+
+struct Bag {
+    xs: List<i32>
+    n: i32
+}
+
+impl Bag {
+    fn each(self, f: FnMut(i32)) {
+        for x in self.xs {
+            f(x)
+        }
+    }
+}
+
+fn change_param(xs: List<i32>, n: i32) {
+    each(xs, |x| { n += x })                // error: parameter `n` can't be changed; take it as `mut` to change it
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3]
+    let fixed = 0
+    each(xs, |x| { fixed += x })            // error: `fixed` can't be changed; declare it with `var` to change it
+    var total = 0
+    read_each(xs, |x| { total += x })       // error: a closure reads what it captures where it is, so it can't change `total` unless it's passed to a parameter with an `FnMut` bound
+    both(total, |x| { total += x })         // error: `total` is changed by the closure, so it can't be used again in the same call
+    var list: List<i32> = [4, 5]
+    each(list, |x| { list.push(x) })        // error: `list` is changed by the closure, so it can't be used again in the same call
+    for v in list {
+        each(xs, |x| { list.push(x + v) })  // error: `list` can't be changed while a `for` loop goes over it
+    }
+    var sums: List<i32> = [0, 0, 0, 0]
+    parallel for i in 0..sums.len() {
+        var mine = 0
+        each(xs, |x| { mine += x })
+        sums[i] = mine
+        each(xs, |x| { total += x })        // error: `total` is shared by every iteration of the `parallel for`
+    }
+    // A closure inside an `Fn` one changes what the outer one captures through it.
+    read_each(xs, |_x| {
+        each(xs, |y| { total += y })        // error: a closure reads what it captures where it is, so it can't change `total` unless it's passed to a parameter with an `FnMut` bound
+    })
+    var bag = Bag { xs: [1, 2], n: 0 }
+    bag.each(|x| { bag.n += x })            // error: `bag` is changed by the closure, so it can't be used again in the same call
+    in_parallel(2, |_i| {})
+    to_fn(xs, |_x| {})
+    change_param(xs, 1)
+    println("{total} {sums}")
+}

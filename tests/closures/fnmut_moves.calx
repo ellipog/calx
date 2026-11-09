@@ -1,0 +1,13 @@
+// A closure that can change what it captures still can't move it (CLX-161).
+
+fn each(xs: List<i32>, f: FnMut(i32)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2, 3]
+    let s = String("a")
+    each(xs, |_x| { let t = s; _ = t })    // error: `s` is what the closure reads from the code around it, where it is, so it can't be moved
+}

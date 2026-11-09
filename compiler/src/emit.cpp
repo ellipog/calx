@@ -2971,13 +2971,16 @@ $dropall    m->len = 0;
             line(t + "* " + v + " = cx_in_" + v + ";");
             copies_.push_back({p.local, v, std::move(paths)});
         }
-        // A closure's captures, as pointers to the code around it's locals (CLX-98).
+        // A closure's captures, as pointers to the code around it's locals (CLX-98). Those it
+        // changes, passed to an `FnMut` bound, are pointers to values it can write (CLX-161): no
+        // other argument of the call can reach them (D48), so they're `restrict` too.
         std::vector<const Local*> pointed;
         for (std::size_t k = 0; k < f->captures.size(); k++) {
             const Local* l = f->captures[k];
             std::string v = local_name(l);
             std::string t = ctype(l->type);
-            line("const " + t + "* restrict " + v + " = (const " + t + "*)cx_env[" + std::to_string(k) + "];");
+            std::string c = std::find(f->changes.begin(), f->changes.end(), l) != f->changes.end() ? "" : "const ";
+            line(c + t + "* restrict " + v + " = (" + c + t + "*)cx_env[" + std::to_string(k) + "];");
             line("CX_VIEW(" + v + ");");
             if (!l->is_view && par_pointers_.insert(l).second) pointed.push_back(l);
         }

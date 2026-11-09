@@ -355,7 +355,7 @@ private:
                 // A closure reads what it captures where it is, so it's only ever called (CLX-98).
                 if (l->type && l->type->call && (l->type->kind == TypeKind::param || l->type->kind == TypeKind::closure)) {
                     error(e->span, q(n) + " is a closure or a function the caller passed, which can only be called, or "
-                                       "passed on to a parameter with an `Fn` bound");
+                                       "passed on to a parameter with an `Fn` or `FnMut` bound");
                     break;
                 }
                 if (closure_) {

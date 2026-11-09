@@ -69,7 +69,7 @@ Built: see [Types](reference/types.md).
 
 ### Compound types
 
-Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)), [Lists](reference/lists.md), plain functions as values, `fn(A, mut B) -> R ! E` ([functions as values](reference/functions.md#functions-as-values), D122), and [closures](reference/closures.md), `|a| expr`, each with a type of its own, passed to parameters with bounds such as `Fn(A) -> B` and reading what they capture where it is, or plain `fn(A) -> B` values when they capture nothing (CLX-98). Still to build:
+Built: [Structs](reference/structs.md), [Enums](reference/enums.md), [Tuples](reference/tuples.md), fixed arrays ([Types](reference/types.md#arrays)), [Lists](reference/lists.md), plain functions as values, `fn(A, mut B) -> R ! E` ([functions as values](reference/functions.md#functions-as-values), D122), and [closures](reference/closures.md), `|a| expr`, each with a type of its own, passed to parameters with bounds such as `Fn(A) -> B` and reading what they capture where it is, or changing it where the bound is `FnMut(A) -> B` (CLX-161), or plain `fn(A) -> B` values when they capture nothing (CLX-98). Still to build:
 
 - **Wrapper structs:** `struct Name(String)` holds one field, read as `.0`.
 
