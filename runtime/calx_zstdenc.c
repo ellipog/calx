@@ -784,13 +784,21 @@ done:
     return ofb;
 }
 
-/* Takes a sequence: its literals copied out, and the match finder's repeated offsets r moved on. */
+/* The literals within 16 bytes of the text's end, which the copy in ss_put would read past. */
+static __attribute__((noinline, cold)) void lit_copy_end(cx_u8* d, const cx_u8* lit, cx_u32 ll) {
+    memcpy(d, lit, ll);
+}
+
+/* Takes a sequence: its literals copied out, and the match finder's repeated offsets r moved on.
+ * They're copied 16 bytes at a time, which can write 15 past them, as the literal buffer has the
+ * room for: a run longer than 16 takes a few more copies rather than a call. */
 static inline void ss_put(ss_t* s, cx_u32* r, const cx_u8* lit, cx_u32 ll, cx_u32 off, cx_u32 ml) {
     cx_u8* d = s->lp;
-    if (ll <= 16 && lit + 16 <= s->src_end) {
+    if (__builtin_expect(lit + ll + 16 <= s->src_end, 1)) {
         memcpy(d, lit, 16);
+        for (cx_u32 i = 16; i < ll; i += 16) memcpy(d + i, lit + i, 16);
     } else {
-        memcpy(d, lit, ll);
+        lit_copy_end(d, lit, ll);
     }
     s->lp = d + ll;
 #ifdef ZSE_CHECK
@@ -956,73 +964,124 @@ static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
  * there's that much text before. */
 #define REP_OK(r, cur, start) ((r) - 1 < (cur) - (start))
 
-/* One hash table of positions by their first bytes. Positions are looked up two at a time, so the
- * two lookups overlap, and the round moves on by `step`: 2 looks at every position, and the
- * negative levels look at fewer. On a miss it moves on further the longer it's been since the last
- * match. */
-static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const cx_u32 mls) {
+/* One hash table of positions by their first bytes. The search runs a position ahead of itself:
+ * the next position's table entry is loaded, and the one after's hash taken, before this one's
+ * candidate is compared, so the loads overlap the comparisons. It looks at positions in pairs, a
+ * step apart: the step starts at 2, so every position is looked at, and grows by one for each
+ * STEP_RUN bytes without a match; the negative levels start it further on. The repeated offset
+ * is tried a pair ahead, at the next pair's first position and the one before. A table entry is
+ * taken only if it's in the window from all of the block, so one bound serves every position. */
+#define STEP_RUN 128
+
+static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const ht = J->hash;
-    const cx_u32 hl = J->p.hlog, start = J->start, wsize = J->wsize;
-    ss_t* const ss = &J->ss;
-    const cx_u8* ip = base + at;
-    const cx_u8* anchor = ip;
+    const cx_u32 hl = J->p.hlog, start = J->start;
+    const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
+    const cx_u8* const prefix = base + start;
+    /* The repeated offsets and the sequence store are copies of the job's, which nothing the loop
+     * stores to the table or the literals can be, so they needn't be read again after each. */
+    cx_u32 r[3] = {rp[0], rp[1], rp[2]};
+    ss_t sl = J->ss;
+    ss_t* const ss = &sl;
+    const cx_u8* ip0 = base + at;
+    const cx_u8* anchor = ip0;
     const cx_u8* const iend = base + end;
     const cx_u8* const ilimit = iend - READ;
-    const cx_u32 step = J->p.tlen + (J->p.tlen == 0) + 1;
-    if (end - at <= READ + 2) goto tail;
-    while (ip + 1 < ilimit) {
-        const cx_u32 c0 = (cx_u32)(ip - base);
-        const cx_u32 h0 = hash_at(ip, mls, hl), h1 = hash_at(ip + 1, mls, hl);
-        const cx_u32 m0 = ht[h0];
-        ht[h0] = c0;
-        const cx_u32 m1 = ht[h1];
-        ht[h1] = c0 + 1;
-        cx_u32 ml, off;
+    const cx_usize step0 = J->p.tlen + (J->p.tlen == 0) + 1;
+    /* The repeated offset tried: 0, which never matches, while it reaches back out of the text.
+     * After any match it's the newest offset, which reaches into the text from there on. */
+    cx_u32 rt = REP_OK(r[0], at, start) ? r[0] : 0;
+    for (;;) {
+        cx_usize step = step0;
+        const cx_u8* grow = ip0 + STEP_RUN;
+        const cx_u8* ip1 = ip0 + 1;
+        const cx_u8* ip2 = ip0 + step;
+        const cx_u8* ip3 = ip2 + 1;
+        if (ip3 >= ilimit) break;
+        cx_u32 h0 = hash_at(ip0, mls, hl), h1 = hash_at(ip1, mls, hl);
+        cx_u32 m = ht[h0], c0, ml, off;
         const cx_u8* mp;
-        if (REP_OK(r[0], c0 + 1, start) && ld32(ip + 1 - r[0]) == ld32(ip + 1)) {
-            ml = count(ip + 5, ip + 5 - r[0], iend) + 4;
-            off = r[0];
-            ip++;
-            goto found;
-        }
-        if (m0 >= c0 - wsize && ld32(base + m0) == ld32(ip)) {
-            mp = base + m0;
-        } else if (m1 >= c0 + 1 - wsize && ld32(base + m1) == ld32(ip + 1)) {
-            ip++;
-            mp = base + m1;
-        } else {
-            ip += ((cx_usize)(ip - anchor) >> 8) + step;
-            continue;
-        }
-        ml = count(ip + 4, mp + 4, iend) + 4;
-        while (ip > anchor && mp > base + start && ip[-1] == mp[-1]) {
-            ip--;
+        do {
+            /* ip0, ip1 = ip0 + 1, ip2 = ip0 + step and ip3 = ip2 + 1; h0 and h1 are ip0's and
+             * ip1's hashes, m ip0's entry. */
+            const cx_u32 rv = ld32(ip2 - rt);
+            c0 = (cx_u32)(ip0 - base);
+            ht[h0] = c0;
+            if ((ld32(ip2) == rv) & (rt != 0)) {
+                ht[h1] = c0 + 1;
+                const cx_u32 back = ip2[-1] == (ip2 - rt)[-1];
+                ml = count(ip2 + 4, ip2 + 4 - rt, iend) + 4 + back;
+                ip0 = ip2 - back;
+                off = rt;
+                goto found;
+            }
+            if (m >= low && ld32(base + m) == ld32(ip0)) {
+                ht[h1] = c0 + 1;
+                goto fresh;
+            }
+            m = ht[h1];
+            h0 = h1;
+            h1 = hash_at(ip2, mls, hl);
+            ip0 = ip1;
+            ip1 = ip2;
+            ip2 = ip3;
+            c0 = (cx_u32)(ip0 - base);
+            ht[h0] = c0;
+            if (m >= low && ld32(base + m) == ld32(ip0)) {
+                /* ip1 is ip0 + step - 1, which the match reaches past only if the step is 4 or
+                 * less: the table mustn't hold a position after where the next search starts. */
+                if (step <= 4) ht[h1] = (cx_u32)(ip1 - base);
+                goto fresh;
+            }
+            m = ht[h1];
+            h0 = h1;
+            h1 = hash_at(ip2, mls, hl);
+            ip0 = ip1;
+            ip1 = ip2;
+            ip2 = ip0 + step;
+            ip3 = ip1 + step;
+            if (ip2 >= grow) {
+                step++;
+                grow += STEP_RUN;
+            }
+        } while (ip3 < ilimit);
+        break;
+    fresh:
+        mp = base + m;
+        ml = 4;
+        while (ip0 > anchor && mp > prefix && ip0[-1] == mp[-1]) {
+            ip0--;
             mp--;
             ml++;
         }
-        off = (cx_u32)(ip - mp);
+        ml += count(ip0 + ml, mp + ml, iend);
+        off = (cx_u32)(ip0 - mp);
     found:
-        ss_put(ss, r, anchor, (cx_u32)(ip - anchor), off, ml);
-        ip += ml;
-        anchor = ip;
-        if (ip <= ilimit) {
+        ss_put(ss, r, anchor, (cx_u32)(ip0 - anchor), off, ml);
+        ip0 += ml;
+        anchor = ip0;
+        if (ip0 <= ilimit) {
             ht[hash_at(base + c0 + 2, mls, hl)] = c0 + 2;
-            ht[hash_at(ip - 2, mls, hl)] = (cx_u32)(ip - 2 - base);
+            ht[hash_at(ip0 - 2, mls, hl)] = (cx_u32)(ip0 - 2 - base);
             /* The offset before the last, straight after it. */
             for (;;) {
-                const cx_u32 c2 = (cx_u32)(ip - base);
-                if (ip > ilimit || !REP_OK(r[1], c2, start) || ld32(ip) != ld32(ip - r[1])) break;
-                ml = count(ip + 4, ip + 4 - r[1], iend) + 4;
-                ht[hash_at(ip, mls, hl)] = c2;
+                const cx_u32 c2 = (cx_u32)(ip0 - base);
+                if (ip0 > ilimit || !REP_OK(r[1], c2, start) || ld32(ip0) != ld32(ip0 - r[1])) break;
+                ml = count(ip0 + 4, ip0 + 4 - r[1], iend) + 4;
+                ht[hash_at(ip0, mls, hl)] = c2;
                 ss_put(ss, r, anchor, 0, r[1], ml);
-                ip += ml;
-                anchor = ip;
+                ip0 += ml;
+                anchor = ip0;
             }
         }
+        rt = r[0];
     }
-tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
+    J->ss = sl;
+    rp[0] = r[0];
+    rp[1] = r[1];
+    rp[2] = r[2];
 }
 
 /* The finders are built once for each length the levels hash, so the hash's shift is a constant
@@ -1041,79 +1100,91 @@ static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
 }
 
 /* Two hash tables: one of eight bytes, for long matches, and one of `mml`, for short ones; a short
- * one is taken only if the next position has no long one. */
-static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const cx_u32 mls) {
+ * one is taken only if the next position has no long one. The long table runs a position ahead:
+ * the next position's entry is loaded before this one's candidates are compared, and it's the
+ * one a short match looks at. On a miss the search moves on by a step, 1 to start with and one
+ * more for each DSTEP_RUN bytes without a match. A table entry is taken only if it's in the
+ * window from all of the block, so one bound serves every position. */
+#ifdef ZSE_TUNE
+#define DSTEP_RUN (getenv("ZSE_DS") ? (cx_usize)atoi(getenv("ZSE_DS")) : 256)
+#else
+#define DSTEP_RUN 256
+#endif
+
+static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const hl8 = J->hash;
     cx_u32* const hs = J->chain;
-    const cx_u32 bl = J->p.hlog, bs = J->p.clog, start = J->start, wsize = J->wsize;
-    ss_t* const ss = &J->ss;
+    const cx_u32 bl = J->p.hlog, bs = J->p.clog, start = J->start;
+    const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
+    const cx_u8* const prefix = base + start;
+    cx_u32 r[3] = {rp[0], rp[1], rp[2]};
+    ss_t sl = J->ss;
+    ss_t* const ss = &sl;
     const cx_u8* ip = base + at;
     const cx_u8* anchor = ip;
     const cx_u8* const iend = base + end;
     const cx_u8* const ilimit = iend - READ;
-    if (end - at <= READ + 1) goto tail;
-    /* On a miss it moves on by one more for every 512 bytes since the last match: half as fast as
-     * the one table does, as it looks at one place a round, not two. Faster loses the repeats in a
-     * stretch that doesn't compress, as between the files of a tar. */
-#ifdef ZSE_TUNE
-    const cx_u32 dshift = getenv("ZSE_DS") ? (cx_u32)atoi(getenv("ZSE_DS")) : 9;
-#else
-    const cx_u32 dshift = 9;
-#endif
-    /* The next place to look on a miss is known before this one's tests, so its table entries are
-     * fetched first: they're in hand by the time the tests are, whichever way those go. */
-    cx_u32 h8 = hash_at(ip, 8, bl), h = hash_at(ip, mls, bs);
-    cx_u32 m8 = hl8[h8], m = hs[h];
-    while (ip < ilimit) {
-        const cx_u32 cur = (cx_u32)(ip - base), low = cur - wsize;
-        const cx_u8* const ip1 = ip + ((cx_usize)(ip - anchor) >> dshift) + 1;
-        cx_u32 h8n = 0, hn = 0, m8n = 0, mn = 0;
-        if (ip1 < ilimit) {
-            h8n = hash_at(ip1, 8, bl);
-            hn = hash_at(ip1, mls, bs);
-            m8n = hl8[h8n];
-            mn = hs[hn];
-        }
-        hl8[h8] = hs[h] = cur;
-        if (h8n == h8) m8n = cur;
-        if (hn == h) mn = cur;
-        cx_u32 ml, off;
+    const cx_usize run = DSTEP_RUN;
+    /* The repeated offset tried, as in mf_fast. */
+    cx_u32 rt = REP_OK(r[0], at, start) ? r[0] : 0;
+    for (;;) {
+        cx_usize step = 1;
+        const cx_u8* grow = ip + run;
+        const cx_u8* ip1 = ip + 1;
+        if (ip1 > ilimit) break;
+        cx_u32 h8 = hash_at(ip, 8, bl), m8 = hl8[h8];
+        cx_u32 cur, ml, off, h8n, m8n, m;
         const cx_u8* mp;
-        if (REP_OK(r[0], cur + 1, start) && ld32(ip + 1 - r[0]) == ld32(ip + 1)) {
-            ml = count(ip + 5, ip + 5 - r[0], iend) + 4;
-            off = r[0];
-            ip++;
-            goto found;
-        }
-        if (m8 >= low && ld64(base + m8) == ld64(ip)) {
-            mp = base + m8;
-            ml = count(ip + 8, mp + 8, iend) + 8;
-        } else if (m >= low && ld32(base + m) == ld32(ip)) {
-            const cx_u32 h8b = hash_at(ip + 1, 8, bl), m3 = hl8[h8b];
-            hl8[h8b] = cur + 1;
-            if (m3 >= low + 1 && ld64(base + m3) == ld64(ip + 1)) {
+        do {
+            /* ip1 = ip + step; h8 and m8 are ip's long hash and entry. */
+            const cx_u32 h = hash_at(ip, mls, bs);
+            m = hs[h];
+            cur = (cx_u32)(ip - base);
+            hl8[h8] = hs[h] = cur;
+            if ((ld32(ip + 1 - rt) == ld32(ip + 1)) & (rt != 0)) {
+                ml = count(ip + 5, ip + 5 - rt, iend) + 4;
                 ip++;
-                mp = base + m3;
-                ml = count(ip + 8, mp + 8, iend) + 8;
-            } else {
-                mp = base + m;
-                ml = count(ip + 4, mp + 4, iend) + 4;
+                off = rt;
+                goto found;
             }
-        } else {
+            h8n = hash_at(ip1, 8, bl);
+            if (m8 >= low && ld64(base + m8) == ld64(ip)) {
+                mp = base + m8;
+                ml = count(ip + 8, mp + 8, iend) + 8;
+                goto back;
+            }
+            m8n = hl8[h8n];
+            if (m >= low && ld32(base + m) == ld32(ip)) goto shorter;
+            if (ip1 >= grow) {
+                step++;
+                grow += run;
+            }
             ip = ip1;
+            ip1 += step;
             h8 = h8n;
-            h = hn;
             m8 = m8n;
-            m = mn;
-            continue;
+        } while (ip1 <= ilimit);
+        break;
+    shorter:
+        if (m8n >= low && ld64(base + m8n) == ld64(ip1)) {
+            ip = ip1;
+            mp = base + m8n;
+            ml = count(ip + 8, mp + 8, iend) + 8;
+        } else {
+            mp = base + m;
+            ml = count(ip + 4, mp + 4, iend) + 4;
         }
-        while (ip > anchor && mp > base + start && ip[-1] == mp[-1]) {
+    back:
+        while (ip > anchor && mp > prefix && ip[-1] == mp[-1]) {
             ip--;
             mp--;
             ml++;
         }
         off = (cx_u32)(ip - mp);
+        /* The next position's long entry, unless the step has got so long that it could be past
+         * the match's end, where the next search starts: the table mustn't hold one after that. */
+        if (step < 4) hl8[h8n] = cur + (cx_u32)step;
     found:
         ss_put(ss, r, anchor, (cx_u32)(ip - anchor), off, ml);
         ip += ml;
@@ -1135,15 +1206,13 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
                 anchor = ip;
             }
         }
-        if (ip < ilimit) {
-            h8 = hash_at(ip, 8, bl);
-            h = hash_at(ip, mls, bs);
-            m8 = hl8[h8];
-            m = hs[h];
-        }
+        rt = r[0];
     }
-tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
+    J->ss = sl;
+    rp[0] = r[0];
+    rp[1] = r[1];
+    rp[2] = r[2];
 }
 
 static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {

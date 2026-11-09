@@ -97,7 +97,7 @@ fn main() {
     let bytes = text.to_bytes()
     let fast = compress(bytes, 1)
     let small = compress(bytes, 19, true)
-    println("{bytes.len()} {fast.len()} {small.len()}")    // out: 88638 8616 6689
+    println("{bytes.len()} {fast.len()} {small.len()}")    // out: 88638 8524 6689
     println("{decompress(small)! == bytes}")    // out: true
 }
 ```
@@ -287,7 +287,7 @@ On all the processors:
 - Python and the `zstd` crate run libzstd 1.5.7. On Windows both are built by MSVC, and the crate's is about 5% faster. GCC's, in WSL, is faster again: by up to 8% to level 10, and 18 to 22% at 11 and 12. The Rust programs were built as above, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
 - `ruzstd` 0.8 compresses only at its level 1, "Fastest": 164 ms and 7,054,586 bytes for `src.tar`, and 444 ms and 23,917,712 bytes for `clang40`, on Windows, and 148 and 403 ms in WSL.
 - On one thread, against the faster libzstd, `std.zstd` takes longer up to level 9 and is as fast or faster from 10. On Windows it takes 2 to 10% longer from -1 to 9, and it's 1.04 to 1.17 times as fast at 10 to 12, level at 13 and 14, and as fast or faster from 15, up to 1.4 times. In WSL it takes 8 to 18% longer from -1 to 12, is level at 13, and is 1.06 to 1.35 times as fast from 14. On `clang40` it's the same: slower up to 9, faster from 13.
-- What `std.zstd` writes is within 1.3% of libzstd's size at every level timed. On `src.tar` it's 0.2 to 1.1% bigger at levels 1 to 4, 0.5 to 1.2% smaller from 5 to 12, within 0.3% from 13 to 17, and 0.2 to 0.6% bigger from 18 to 22. The most is `clang40` at level 16, 1.3% bigger.
+- What `std.zstd` writes is within 1.3% of libzstd's size at every level timed. On `src.tar` it's 0.05 to 0.1% smaller at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.2% smaller from 5 to 12, within 0.3% from 13 to 17, and 0.2 to 0.6% bigger from 18 to 22. The most is `clang40` at level 16, 1.3% bigger.
 - On all the processors, `std.zstd` is 1.6 to 2.1 times as fast as the faster libzstd at level 1, about 1.15 times at 3, and 1.2 to 1.4 times from 16. From 5 to 13 it's within 6% either way on Windows, and up to 13% slower in WSL. Both cut the same jobs, four windows long. That's 2 MiB at level 1, so `src.tar` makes 9 jobs. From 9 on the jobs are 16 MiB or more, so the files make 3 at most, and most of the processors wait.
 
 ## How it's checked
@@ -320,7 +320,7 @@ Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked on
 
 | Part | How |
 | --- | --- |
-| Hash tables | At levels 1 and 2, two positions looked up at once, so the loads overlap. At 3 and 4, the next position's lookups are started before the current match is worked out |
+| Hash tables | The search runs a position ahead of itself: the next position's entry is loaded before this one's candidate is compared, so the loads overlap the comparisons. At levels 1 and 2 positions are looked at in pairs, with the repeated offset tried a pair ahead; at 3 and 4 the long table runs ahead, and a short match looks at the next position's long one. One bound per block keeps entries in the window, and a sequence's literals are copied 16 bytes at a time, with no call in the loop |
 | Hash rows | Each row holds the last 15, 31 or 63 positions with its hash, and beside each a byte more of its hash. That byte is compared across the whole row at once, 32 at a time with AVX2, so the text is read only where it's likely to match. The next eight positions' rows are fetched into the cache ahead |
 | Binary trees | The positions with each hash, sorted by the text after them, so a search goes down one path to the longest matches. At levels 13 to 15 a position goes on its hash's list unsorted, and is sorted into the tree only when a search comes to it, since the parse passes over most positions |
 | Picking matches | From level 5 to 15, by what they're worth: four times the length, less the bits of the distance, so a match a byte longer but much further back loses |
