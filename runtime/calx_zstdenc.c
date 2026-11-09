@@ -294,25 +294,67 @@ static inline void ct_put(bw_t* w, const ct_t* ct, cx_u32* x, cx_u32 s) {
 }
 
 /* Probabilities for count[0..max] over `total`, summing to 2^log, each symbol that's there at least
- * 1: each rounded, then nudged a slot at a time where it costs least, by count / slots. Gives what
- * the counts cost with them. */
-static cx_u64 normalize(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 log, cx_i16* norm) {
-    const cx_u32 size = 1u << log;
-    /* The symbols there are, in order, so the passes below go over only them, and ties go to the
-     * first as before. A count is at most 2^17 and size 2^9, so the rounding fits in 32 bits. */
+ * 1: each rounded (norm_round), then nudged a slot at a time where it costs least, by count / slots
+ * (norm_finish). */
+typedef struct {
+    /* The symbols there are, in order, so the passes go over only them, and ties go to the first.
+     * Their counts, their probabilities as they go, and how many and their sum. */
     cx_u32 sym[64], cnt[64], nv[64];
+    cx_u32 k;
+    cx_i32 sum;
+} nrm_t;
+
+/* Each count rounded to its share of 2^log, at least 1. A count is at most 2^17 and 2^log 2^9, so
+ * the rounding fits in 32 bits. */
+static void norm_round(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 log, nrm_t* r) {
+    const cx_u32 size = 1u << log;
     cx_u32 k = 0;
     cx_i32 sum = 0;
     for (cx_u32 s = 0; s <= max; s++) {
-        norm[s] = 0;
         if (count[s] == 0) continue;
         cx_u32 n = (count[s] * size + total / 2) / total;
         if (n < 1) n = 1;
-        sym[k] = s;
-        cnt[k] = count[s];
-        nv[k++] = n;
+        r->sym[k] = s;
+        r->cnt[k] = count[s];
+        r->nv[k++] = n;
         sum += (cx_i32)n;
     }
+    r->k = k;
+    r->sum = sum;
+}
+
+/* At least the bits write_counts takes for the table norm_finish makes from r. Each count it
+ * writes, and the first zero of each run of them, takes at least as many bits as the slots left
+ * then have below their highest; the zeros after a run's first take 2 bits for each 3, and 2 more.
+ * The slots left before a symbol are 2^log + 1 less the counts before it, so 1 more than its own
+ * and those after: the rounded ones, less what the nudges take, at most sum - 2^log in all, and at
+ * least 1 each. */
+static cx_u32 desc_low_bits(const nrm_t* r, cx_u32 log) {
+    const cx_i32 size = (cx_i32)1 << log, take = r->sum > size ? r->sum - size : 0;
+    cx_i32 after = r->sum; /* the rounded counts from the j-th on */
+    cx_u32 bits = 4, next = 0;
+    for (cx_u32 j = 0; j < r->k; j++) {
+        cx_i32 left = j == 0 ? size + 1 : 1 + after - take;
+        const cx_i32 least = 1 + (cx_i32)(r->k - j);
+        left = left < least ? least : left;
+        const cx_u32 lb = high_bit((cx_u32)left), z = r->sym[j] - next;
+        bits += lb + (z ? lb + 2 * ((z - 1) / 3 + 1) : 0);
+        after -= (cx_i32)r->nv[j];
+        next = r->sym[j] + 1;
+    }
+    return bits;
+}
+
+/* The rounded counts nudged to sum to 2^log, into norm[0..max]: gives what the counts cost with
+ * them. */
+static cx_u64 norm_finish(nrm_t* r, cx_u32 max, cx_u32 log, cx_i16* norm) {
+    const cx_u32 size = 1u << log;
+    const cx_u32* const sym = r->sym;
+    const cx_u32* const cnt = r->cnt;
+    cx_u32* const nv = r->nv;
+    const cx_u32 k = r->k;
+    cx_i32 sum = r->sum;
+    for (cx_u32 s = 0; s <= max; s++) norm[s] = 0;
     while (sum > (cx_i32)size) {
         /* Take a slot from the symbol it costs least, count / (n - 1/2), starting from 1/0. There's
          * always one with more than 1, as there are no more symbols than slots. */
@@ -349,6 +391,12 @@ static cx_u64 normalize(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 lo
         cost += (cx_u64)cnt[j] * ((log << 8) - lg8(nv[j]));
     }
     return cost;
+}
+
+static cx_u64 normalize(const cx_u32* count, cx_u32 max, cx_u32 total, cx_u32 log, cx_i16* norm) {
+    nrm_t r;
+    norm_round(count, max, total, log, &r);
+    return norm_finish(&r, max, log, norm);
 }
 
 /* Writes norm[0..max] as the decoder reads a table's description: gives the bytes. */
@@ -2638,11 +2686,11 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
     /* The k-th symbol from the last has at least k + 1 slots left when it's written. */
     cx_u32 after = 0;
     for (cx_u32 k = 2; k <= distinct; k++) after += high_bit(k);
+    cx_i64 low = 0; /* the entropy, if there's a best to beat */
     if (best != ~(cx_u64)0) {
-        cx_i64 low = (cx_i64)n * lg8(n) - 3 * (cx_i64)n;
+        low = (cx_i64)n * lg8(n) - 3 * (cx_i64)n;
         for (cx_u32 s = 0; s <= max; s++) low -= count[s] < CLG_N ? CLG[count[s]] : (cx_i64)count[s] * lg8(count[s]);
-        low += (cx_i64)((4 + lo + after + 7) >> 3) << 11;
-        if (low >= (cx_i64)best) goto chosen;
+        if (low + ((cx_i64)((4 + lo + after + 7) >> 3) << 11) >= (cx_i64)best) goto chosen;
     }
     cx_i16 bnorm[64];
     cx_u32 blog = 0;
@@ -2650,12 +2698,24 @@ static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const
     cx_usize bdesc_n = 0;
     int made = 0;
     for (cx_u32 log = lo; log <= hi && log <= log_max; log++) {
+        /* Not made if its entropy and the shortest description its rounded counts allow wouldn't
+         * make it the best, nor described if what it costs and that wouldn't: most of the tables
+         * that get past the bound above, on small inputs. */
+        nrm_t r;
+        norm_round(count, max, n, log, &r);
+        const cx_u64 dlow = (cx_u64)((desc_low_bits(&r, log) + 7) >> 3) << 11;
+        if (best != ~(cx_u64)0 && low + (cx_i64)dlow >= (cx_i64)best) continue;
         cx_i16 norm[64];
-        const cx_u64 fc = normalize(count, max, n, log, norm);
-        /* Not described if even the shortest description wouldn't make it the best. */
-        if (fc + ((cx_u64)((4 + log + after + 7) >> 3) << 11) >= best) continue;
+        const cx_u64 fc = norm_finish(&r, max, log, norm);
+        if (fc + dlow >= best) continue;
         cx_u8 desc[128];
         const cx_usize dn = write_counts(norm, max, log, desc);
+#ifdef ZSE_CHECK
+        if (((cx_u64)dn << 11) < dlow || (best != ~(cx_u64)0 && (cx_i64)fc < low)) {
+            fprintf(stderr, "pick_table: a bound over the table: %zu bytes, %llu bound\n", dn, (unsigned long long)(dlow >> 11));
+            abort();
+        }
+#endif
         const cx_u64 c = fc + ((cx_u64)dn << 11);
         if (c < best) {
             best = c;
