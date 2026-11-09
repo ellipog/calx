@@ -1130,7 +1130,7 @@ typedef struct {
 #define OPT_NUM 4096
 /* The matches noted at a place: the repeated offsets', a three-byte one, and the tree's, which
  * each search notes one of at most. */
-#define MATCHES_MAX (8 + 1024)
+#define MATCHES_MAX (8 + 2048) /* the repeated offsets', the three-byte one, and two trees' */
 
 /* A job: a stretch of the text compressed into blocks of its own, with the text before it to match
  * into. Positions count from `base`, the first byte at START, which is past what a window reaches,
@@ -1164,11 +1164,19 @@ typedef struct job_s {
     cx_u32 rlog;    /* a hash row's 2^rlog positions */
     cx_u8* tags;    /* each row position's byte more of hash, and each row's head */
     cx_u32* hash3;
-    /* With a working copy of a dictionary's trees: each write into a node of a position before ulo,
-     * the ones it came with, as its slot and what it held, up to ulog_cap of them; ulog_n is
-     * ulog_cap + 1 once there were more. ulo is 0 otherwise, and nothing is noted. */
+    /* With a working copy of a dictionary's tables at the double-hash and hash-row levels: each
+     * slot the job's positions write and what it held, up to ulog_cap of them, as the finders note
+     * them; ulo is 0 otherwise, and nothing is noted. */
     cx_u32* ulog;
     cx_u32 ulog_n, ulog_cap, ulo;
+    /* At the tree levels, for a small first job after a dictionary (job_attached): the dictionary's
+     * kept trees and their hash table, searched where they are and never changed, and their sizes.
+     * The job's own tables then hold only its text's positions, sized for it. 0 otherwise. */
+    const cx_u32* xhash;
+    const cx_u32* xchain;
+    cx_u32 xhlog, xclog;
+    cx_u32 h3log;     /* the three-byte table's size: 2^h3log entries */
+    cx_usize hash3_n; /* its entries as allocated */
     /* the optimal parser's */
     stats_t* st;
     node_t* opt;
@@ -1915,39 +1923,19 @@ static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, a
  * A dictionary's content goes in with the comparisons stopping at its end, J->lim, so the trees
  * are the same whatever text follows it, and kept ones can be used again (digest_take). Text that
  * agrees to there can't be put in order, so, as libzstd does, cur goes in with nothing below it. */
-static inline __attribute__((always_inline)) cx_u32 bt_place_with(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m,
-                                                                  cx_u32* longest, cx_u32 depth, const int undo) {
+static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
     const cx_u32 left = J->lim - cur;
     const cx_u32 limit = left < BT_CMP ? left : BT_CMP;
     const cx_u32 mask = (1u << (J->p.clog - 1)) - 1;
     cx_u32* const son = J->chain;
     cx_u32* ptr0 = son + 2 * (cur & mask) + 1;
     cx_u32* ptr1 = son + 2 * (cur & mask);
-    /* The positions whose nodes ptr0 and ptr1 are in, and the log, in locals: through J they'd be
-     * read again after each store into the trees. */
-    cx_u32 own0 = cur, own1 = cur;
-    cx_u32* const ulog = J->ulog;
-    const cx_u32 ulo = J->ulo, ucap = J->ulog_cap;
-    cx_u32 un = J->ulog_n;
-#define BT_W(ptr, own, v)                                   \
-    do {                                                    \
-        if (undo && (own) < ulo) {                          \
-            if (un < ucap) {                                \
-                ulog[2 * un] = (cx_u32)((ptr) - son);       \
-                ulog[2 * un + 1] = *(ptr);                  \
-                un++;                                       \
-            } else {                                        \
-                un = ucap + 1;                              \
-            }                                               \
-        }                                                   \
-        *(ptr) = (v);                                       \
-    } while (0)
     cx_u32 len0 = 0, len1 = 0, noted = 0, top = 0;
     for (;;) {
         const cx_u32 delta = cur - cand;
         if (depth-- == 0 || cand < low) {
-            BT_W(ptr1, own1, 0);
-            BT_W(ptr0, own0, 0);
+            *ptr1 = 0;
+            *ptr0 = 0;
             break;
         }
         cx_u32* const pair = son + 2 * (cand & mask);
@@ -1972,38 +1960,29 @@ static inline __attribute__((always_inline)) cx_u32 bt_place_with(job_t* J, cons
             }
             if (len >= limit) {
                 if (J->cut) {
-                    BT_W(ptr1, own1, 0);
-                    BT_W(ptr0, own0, 0);
+                    *ptr1 = 0;
+                    *ptr0 = 0;
                     break;
                 }
-                BT_W(ptr1, own1, pair[0]);
-                BT_W(ptr0, own0, pair[1]);
+                *ptr1 = pair[0];
+                *ptr0 = pair[1];
                 break;
             }
         }
         if (pb[len] < ip[len]) {
-            BT_W(ptr1, own1, cand);
+            *ptr1 = cand;
             ptr1 = pair + 1;
-            own1 = cand;
             cand = *ptr1;
             len1 = len;
         } else {
-            BT_W(ptr0, own0, cand);
+            *ptr0 = cand;
             ptr0 = pair;
-            own0 = cand;
             cand = *ptr0;
             len0 = len;
         }
     }
-#undef BT_W
-    if (undo) J->ulog_n = un;
     *longest = top;
     return noted;
-}
-
-static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
-    if (J->ulo) return bt_place_with(J, ip, cur, cand, low, room, best, m, longest, depth, 1);
-    return bt_place_with(J, ip, cur, cand, low, room, best, m, longest, depth, 0);
 }
 
 #define BT_AHEAD 8
@@ -2022,6 +2001,47 @@ static cx_u32 bt_insert(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 room, cx_u
         __builtin_prefetch(J->base + c1);
     }
     return bt_place(J, ip, cur, cand, cur - (mask < J->wsize ? mask : J->wsize), room, best, m, longest, depth);
+}
+
+/* The matches at ip in a dictionary's kept trees, beside the job's own (job_attached): down the
+ * tree as bt_place goes, but changing nothing, with each match longer than `best` noted in m. The
+ * content went in with its comparisons stopping at its end; past there the text goes on into the
+ * job's, so a match may run on into it, and a search that meets text agreeing that far may go the
+ * wrong way below it, which costs only matches. Gives how many. */
+static cx_u32 bt_dict(const job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 room, cx_u32 best, match_t* m, cx_u32 depth) {
+    const cx_u32 mask = (1u << (J->xclog - 1)) - 1;
+    const cx_u32* const son = J->xchain;
+    const cx_u32 left = J->lim - cur, limit = left < BT_CMP ? left : BT_CMP;
+    const cx_u32 low = cur - J->start > J->wsize ? cur - J->wsize : J->start;
+    cx_u32 cand = J->xhash[hash_at(ip, J->bt_mls, J->xhlog)];
+    cx_u32 len0 = 0, len1 = 0, noted = 0;
+    while (depth-- && cand >= low) {
+        const cx_u32* const pair = son + 2 * (cand & mask);
+        const cx_u8* const pb = J->base + cand;
+        cx_u32 len = len0 < len1 ? len0 : len1;
+        __builtin_prefetch(son + 2 * (pair[0] & mask));
+        __builtin_prefetch(son + 2 * (pair[1] & mask));
+        if (pb[len] == ip[len]) {
+            len += 1 + count(ip + len + 1, pb + len + 1, ip + limit);
+            cx_u32 got = len < room ? len : room;
+            if (len == BT_CMP && room > BT_CMP) got = BT_CMP + count(ip + BT_CMP, pb + BT_CMP, ip + room);
+            if (got > best) {
+                best = got;
+                m[noted].len = got;
+                m[noted].off = cur - cand;
+                noted++;
+            }
+            if (len >= limit) break;
+        }
+        if (pb[len] < ip[len]) {
+            cand = pair[1];
+            len1 = len;
+        } else {
+            cand = pair[0];
+            len0 = len;
+        }
+    }
+    return noted;
 }
 
 /* For btlazy2, whose matches pass over most positions without looking for one there, a position
@@ -2075,7 +2095,8 @@ static inline cx_u32 dt_best(job_t* J, const cx_u8* ip, const cx_u8* iend, cx_u3
     }
     match_t* const m = J->mt;
     cx_u32 top;
-    const cx_u32 k = bt_insert(J, ip, cur, (cx_u32)(iend - ip), J->p.mml - 1, m, &top, depth);
+    cx_u32 k = bt_insert(J, ip, cur, (cx_u32)(iend - ip), J->p.mml - 1, m, &top, depth);
+    if (J->xchain) k += bt_dict(J, ip, cur, (cx_u32)(iend - ip), k ? m[k - 1].len : J->p.mml - 1, m + k, depth);
     J->next_up = cur + 1;
     if (!k) return 0;
     /* Of the matches met, each longer than the last and mostly further back, the one worth most
@@ -2105,7 +2126,7 @@ static void bt_update(job_t* J, cx_u32 target, const cx_u8* iend) {
             i++;
             continue;
         }
-        if (J->hash3) J->hash3[hash_at(ip, 3, HASH3_LOG)] = i;
+        if (J->hash3) J->hash3[hash_at(ip, 3, J->h3log)] = i;
         cx_u32 top;
         (void)bt_insert(J, ip, i, room, ~0u, 0, &top, J->bt_up);
         i += top > 384 ? top - 384 : 1;
@@ -2170,7 +2191,7 @@ static cx_u32 all_matches(job_t* J, const cx_u8* ip, const cx_u8* iend, const cx
         }
     }
     if (J->hash3) {
-        const cx_u32 h3 = hash_at(ip, 3, HASH3_LOG);
+        const cx_u32 h3 = hash_at(ip, 3, J->h3log);
         const cx_u32 c3 = J->hash3[h3];
         J->hash3[h3] = cur;
         if (best < 3 && cur - c3 <= HASH3_REACH && c3 >= start) {
@@ -2185,7 +2206,9 @@ static cx_u32 all_matches(job_t* J, const cx_u8* ip, const cx_u8* iend, const cx
         }
     }
     cx_u32 top;
-    n += bt_insert(J, ip, cur, room, best > mml - 1 ? best : mml - 1, m + n, &top, 1u << J->p.slog);
+    const cx_u32 floor = best > mml - 1 ? best : mml - 1;
+    n += bt_insert(J, ip, cur, room, floor, m + n, &top, 1u << J->p.slog);
+    if (J->xchain) n += bt_dict(J, ip, cur, room, n && m[n - 1].len > floor ? m[n - 1].len : floor, m + n, 1u << J->p.slog);
     J->next_up = cur + 1;
     return n;
 }
@@ -3498,7 +3521,7 @@ static void job_unmem(const job_t* J, void* p, cx_usize n) {
 static void job_clear(job_t* J) {
     if (J->hash) memset(J->hash, 0, J->hash_n * 4);
     if (J->chain) memset(J->chain, 0, J->chain_n * 4);
-    if (J->hash3) memset(J->hash3, 0, (cx_usize)4 << HASH3_LOG);
+    if (J->hash3) memset(J->hash3, 0, J->hash3_n * 4);
     J->next_up = J->start;
 }
 
@@ -3524,8 +3547,8 @@ static void job_tables(job_t* J) {
         cn = (cx_usize)1 << J->p.clog;
         break;
     }
-    /* With a working copy of a dictionary's, the job uses that instead. */
-    if (J->dw) hn = cn = 0;
+    /* With a working copy of a dictionary's, the job uses that instead, but at the tree levels. */
+    if (J->dw && J->p.strat < S_BTLAZY2) hn = cn = 0;
     if (J->hash_n != hn) {
         if (J->hash) job_unmem(J, J->hash, J->hash_n * 4);
         J->hash = hn ? (cx_u32*)job_mem(J, hn * 4) : 0;
@@ -3543,11 +3566,11 @@ static void job_tables(job_t* J) {
     if (getenv("ZSE_UD")) J->bt_up >>= atoi(getenv("ZSE_UD"));
     if (!J->bt_up) J->bt_up = 1;
 #endif
-    const int three = J->p.strat >= S_BTLAZY2 && J->p.mml == 3;
-    if (three && !J->hash3 && !J->dw) J->hash3 = (cx_u32*)job_mem(J, (cx_usize)4 << HASH3_LOG);
-    if (!three && J->hash3) {
-        job_unmem(J, J->hash3, (cx_usize)4 << HASH3_LOG);
-        J->hash3 = 0;
+    const cx_usize h3n = J->p.strat >= S_BTLAZY2 && J->p.mml == 3 ? (cx_usize)1 << J->h3log : 0;
+    if (J->hash3_n != h3n) {
+        if (J->hash3) job_unmem(J, J->hash3, J->hash3_n * 4);
+        J->hash3 = h3n ? (cx_u32*)job_mem(J, h3n * 4) : 0;
+        J->hash3_n = h3n;
     }
     if (J->p.strat >= S_BTLAZY2 && !J->mt) J->mt = (match_t*)job_mem(J, MATCHES_MAX * sizeof(match_t));
     if (J->p.strat >= S_BTOPT && !J->opt) {
@@ -3659,21 +3682,21 @@ static void dict_build(dict_ent_t* e, const cx_u8* P) {
 
 /* A copy of a digest's tables that a frame at the hash-table and hash-row levels uses where it is,
  * and puts back as it was after, by the entries its own positions led to: for a small input that's
- * far less than copying all of them. */
+ * far less than copying all of them. At the tree levels, which search the digest's tables where
+ * they are, a copy holds only the content and room for the text. */
 typedef struct work_s {
     struct work_s* next;
     cx_usize bytes;
     cx_u32* hash;
     cx_u32* chain;
     cx_u32* hash3;
-    cx_u32* log; /* from the hash-row levels on, where the job notes its writes into the copy */
+    cx_u32* log; /* at the double-hash and hash-row levels, where the job notes its writes into it */
     cx_u32 log_cap;
     cx_u8* text; /* the content, then room for WORK_TEXT bytes of a frame's text */
 } work_t;
 
-/* The writes into a working copy a frame notes, to undo them: past these, the rows and trees are put
- * back from the digest. A position notes one slot in the rows, and in the trees about as many as
- * the levels search deep for a small input. */
+/* The writes into a working copy a frame notes, to undo them: past these, the tables are put back
+ * from the digest. A position notes one slot in the rows, and up to 4 at the double-hash levels. */
 #define WORK_LOG ((cx_u32)32 << 10)
 
 /* The bytes of tables from which a frame at the double-hash and hash-row levels notes the slots
@@ -3681,7 +3704,8 @@ typedef struct work_s {
 #define TABLES_NOTED ((cx_usize)256 << 10)
 
 /* A first job with no more text than this has it after the working copy's content, rather than
- * the content and its text copied into a buffer of their own. */
+ * the content and its text copied into a buffer of their own; and at the tree levels, searches the
+ * dictionary's kept trees where they are (job_attached). */
 #define WORK_TEXT ((cx_usize)64 << 10)
 
 typedef struct digest_s {
@@ -3763,20 +3787,22 @@ static digest_t* digest_find(const cp_t* p, cx_u32 pre, const cx_u8* text, cx_u6
 
 /* A new working copy of d's tables and content, or 0 if there's no memory for one. */
 static work_t* work_new(digest_t* d) {
-    const cx_u32 log_cap = d->p.strat >= S_DFAST ? WORK_LOG : 0;
-    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n + d->hash3_n + 2 * (cx_usize)log_cap) + d->pre + WORK_TEXT;
+    const int tree = d->p.strat >= S_BTLAZY2;
+    const cx_u32 log_cap = !tree && d->p.strat >= S_DFAST ? WORK_LOG : 0;
+    const cx_usize hn = tree ? 0 : d->hash_n, cn = tree ? 0 : d->chain_n, h3n = tree ? 0 : d->hash3_n;
+    const cx_usize bytes = sizeof(work_t) + 4 * (hn + cn + h3n + 2 * (cx_usize)log_cap) + d->pre + WORK_TEXT;
     work_t* const w = (work_t*)malloc(bytes);
     if (!w) return 0;
     w->bytes = bytes;
     w->hash = (cx_u32*)(w + 1);
-    w->chain = w->hash + d->hash_n;
-    w->hash3 = d->hash3_n ? w->chain + d->chain_n : 0;
-    w->log = w->chain + d->chain_n + d->hash3_n;
+    w->chain = w->hash + hn;
+    w->hash3 = h3n ? w->chain + cn : 0;
+    w->log = w->chain + cn + h3n;
     w->log_cap = log_cap;
     w->text = (cx_u8*)(w->log + 2 * (cx_usize)log_cap);
-    memcpy(w->hash, d->hash, d->hash_n * 4);
-    if (d->chain_n) memcpy(w->chain, d->chain, d->chain_n * 4);
-    if (d->hash3_n) memcpy(w->hash3, d->hash3, d->hash3_n * 4);
+    if (hn) memcpy(w->hash, d->hash, hn * 4);
+    if (cn) memcpy(w->chain, d->chain, cn * 4);
+    if (h3n) memcpy(w->hash3, d->hash3, h3n * 4);
     memcpy(w->text, d->text, d->pre);
     digest_lock();
     d->bytes += bytes;
@@ -3868,39 +3894,9 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
 #undef ROWS_BACK
         break;
     }
-    default: {
-        /* Trees. The nodes the copy came with, of the positions before d->next_up, are as they
-         * were once the writes into them are undone, newest first. The frame's own nodes, and the
-         * hash tables' entries for its positions, are put back from d after, as positions far
-         * enough on take the slots of ones out of the window. */
-        const cx_u32 mask = (1u << (J->p.clog - 1)) - 1, blo = d->next_up;
-        const cx_u32 end = J->to - J->from >= READ ? J->to - READ + 1 : blo;
-        const cx_u32 bhi = J->next_up < end ? J->next_up : end;
-        const cx_usize bn = bhi > blo ? bhi - blo : 0;
-        if (J->ulog_n > J->ulog_cap || bn * 64 > d->chain_n) {
-            memcpy(w->hash, d->hash, d->hash_n * 4);
-            memcpy(w->chain, d->chain, d->chain_n * 4);
-            if (d->hash3_n) memcpy(w->hash3, d->hash3, d->hash3_n * 4);
-            break;
-        }
-        for (cx_u32 k = J->ulog_n; k-- > 0;) w->chain[J->ulog[2 * k]] = J->ulog[2 * k + 1];
-        for (cx_u32 a = blo; a < bhi;) {
-            const cx_u32 at = a & mask, run = bhi - a < mask + 1 - at ? bhi - a : mask + 1 - at;
-            memcpy(w->chain + 2 * (cx_usize)at, d->chain + 2 * (cx_usize)at, (cx_usize)run * 8);
-            a += run;
-        }
-        for (cx_u32 i = blo; i < bhi; i++) {
-            const cx_u32 h = hash_at(base + i, J->bt_mls, J->p.hlog);
-            w->hash[h] = d->hash[h];
-        }
-        if (d->hash3_n) {
-            for (cx_u32 i = blo; i < bhi; i++) {
-                const cx_u32 h = hash_at(base + i, 3, HASH3_LOG);
-                w->hash3[h] = d->hash3[h];
-            }
-        }
+    default:
+        /* The trees' copies hold no tables. */
         break;
-    }
     }
 }
 
@@ -3922,21 +3918,22 @@ static void digest_free(digest_t* d) {
     free(d);
 }
 
-/* Keeps J's tables, with its dictionary's content just taken in, for the frames after. */
-static void digest_keep(const job_t* J) {
+/* Keeps J's tables, with its dictionary's content just taken in, for the frames after: gives the
+ * digest, held as digest_find holds one, or 0 if it isn't kept. */
+static digest_t* digest_keep(const job_t* J) {
     const cx_u32 pre = J->from - J->start;
     const cx_u8* const text = J->base + J->start;
-    if (pre < DIGEST_MIN) return;
-    const cx_usize h3 = J->hash3 ? (cx_usize)1 << HASH3_LOG : 0;
+    if (pre < DIGEST_MIN) return 0;
+    const cx_usize h3 = J->hash3_n;
     const cx_usize bytes = sizeof(digest_t) + 4 * (J->hash_n + J->chain_n + h3) + pre;
-    if (bytes > DIGEST_BYTES / 4) return;
+    if (bytes > DIGEST_BYTES / 4) return 0;
     digest_t* d = (digest_t*)malloc(bytes);
-    if (!d) return;
+    if (!d) return 0;
     d->p = J->p;
     d->pre = pre;
     d->key = J->dkey;
     d->next_up = J->next_up;
-    d->refs = 0;
+    d->refs = 1;
     d->work = 0;
     d->bytes = bytes;
     d->hash_n = J->hash_n;
@@ -3954,9 +3951,10 @@ static void digest_keep(const job_t* J) {
     for (digest_t* e = digests; e; e = e->next) {
         /* Another thread kept it first. */
         if (digest_like(e, &J->p, pre, text, J->dkey) && (J->dkey || !memcmp(e->text, text, pre))) {
+            e->refs++;
             digest_unlock();
             free(d);
-            return;
+            return e;
         }
     }
     d->used = ++digest_clock;
@@ -3976,6 +3974,7 @@ static void digest_keep(const job_t* J) {
         digest_free(v);
     }
     digest_unlock();
+    return d;
 }
 
 /* A trained dictionary's tables, built: kept for the last DICT_ENT dictionaries, as building
@@ -4034,24 +4033,65 @@ static void dict_tables(job_t* J, ent_t* e, const cx_u8* P, cx_u64 dkey) {
 
 static void job_blocks(job_t* J);
 
-/* Compresses the job's text into its blocks. With a dictionary kept for its settings, the
- * hash-table and hash-row levels use a working copy of its tables where it is, and the trees copy
- * them, as their links change all over and their searches cost far more than the copy. */
-static void job_run(job_t* J) {
+/* The job's text after a dictionary whose trees d keeps, at the tree levels: its positions go into
+ * trees of its own, sized for its text, and each search looks in d's too, which stay as they are,
+ * as libzstd attaches a dictionary's. Most positions the parse passes over without a search, and
+ * those go only into the job's trees, which stay in the cache; frames at once share d's. */
+static void job_attached(job_t* J, const digest_t* d) {
+    const cx_u32 len = J->to - J->from;
+    cx_u32 need = 10;
+    while (need < 31 && ((cx_u32)1 << need) < len) need++;
+    J->p.hlog = d->p.hlog < need + 1 ? d->p.hlog : need + 1;
+    J->p.clog = d->p.clog < need + 1 ? d->p.clog : need + 1;
+    J->h3log = HASH3_LOG < need + 1 ? HASH3_LOG : need + 1;
     job_tables(J);
+    job_clear(J);
+    J->next_up = J->from;
+    J->xhash = d->hash;
+    J->xchain = d->chain;
+    J->xhlog = d->p.hlog;
+    J->xclog = d->p.clog;
+    job_blocks(J);
+    J->xhash = J->xchain = 0;
+}
+
+/* Compresses the job's text into its blocks. With a dictionary kept for its settings, the
+ * hash-table and hash-row levels use a working copy of its tables where it is; the tree levels
+ * search its trees where they are for a small text, and copy them for a longer one, which costs
+ * far less than its searches. Either way the same frame comes out whether or not they were kept:
+ * a small text at the tree levels after a dictionary has the trees built and kept first. */
+static void job_run(job_t* J) {
     digest_t* d = J->dg;
     work_t* const w = J->dw;
+    J->h3log = HASH3_LOG;
+    if (J->p.strat >= S_BTLAZY2 && J->dict && J->from - J->start >= DIGEST_MIN && J->to - J->from <= WORK_TEXT) {
+        if (!d) {
+            job_tables(J);
+            job_clear(J);
+            job_prefix(J);
+            d = digest_keep(J);
+        }
+        if (d) {
+            job_attached(J, d);
+            if (w) work_give(d, w);
+            else digest_release(d);
+            return;
+        }
+        /* Too big to keep: the text goes into the trees with the content, as for a longer one. */
+        job_blocks(J);
+        return;
+    }
+    job_tables(J);
     cx_u32* const own_hash = J->hash;
     cx_u32* const own_chain = J->chain;
     cx_u32* const own_hash3 = J->hash3;
     cx_u8* const own_tags = J->tags;
     if (d) {
         J->next_up = d->next_up;
-        if (w) {
+        if (w && J->p.strat < S_BTLAZY2) {
             J->hash = w->hash;
             J->chain = w->chain;
             if (J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2) J->tags = (cx_u8*)w->chain;
-            if (J->p.strat >= S_BTLAZY2) J->hash3 = w->hash3;
             /* The tables' slots are noted only for tables too big to stay in the cache, from
              * TABLES_NOTED: smaller ones are put back from the digest faster than the parse notes
              * its slots and they're put back from that. A row's slot is noted with its row in 24
@@ -4060,7 +4100,7 @@ static void job_run(job_t* J) {
             const int big = (d->hash_n + d->chain_n) * 4 >= TABLES_NOTED;
             const int rows = J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2 && J->p.hlog <= 24;
             const int dfast = J->p.strat == S_DFAST && (cx_u64)(J->to - J->from) * 4 + 16 <= w->log_cap;
-            if (J->p.strat >= S_BTLAZY2 || (big && (rows || dfast))) {
+            if (big && (rows || dfast)) {
                 J->ulog = w->log;
                 J->ulog_n = 0;
                 J->ulog_cap = w->log_cap;
@@ -4070,16 +4110,20 @@ static void job_run(job_t* J) {
             memcpy(J->hash, d->hash, d->hash_n * 4);
             if (d->chain_n) memcpy(J->chain, d->chain, d->chain_n * 4);
             if (d->hash3_n) memcpy(J->hash3, d->hash3, d->hash3_n * 4);
-            digest_release(d);
+            if (w) work_give(d, w);
+            else digest_release(d);
             d = 0;
         }
     } else {
         job_clear(J);
         job_prefix(J);
-        if (J->dict) digest_keep(J);
+        if (J->dict) {
+            digest_t* const k = digest_keep(J);
+            if (k) digest_release(k);
+        }
     }
     job_blocks(J);
-    if (w) {
+    if (d && w) {
         work_clean(J, d, w);
         J->hash = own_hash;
         J->chain = own_chain;
@@ -4132,7 +4176,7 @@ static void job_free(job_t* J) {
     if (J->blk) job_unmem(J, J->blk, BLOCK_ROOM);
     if (J->split) job_unmem(J, J->split, SPLIT_BYTES);
     if (J->htmp) job_unmem(J, J->htmp, 4 * HUF_ROOM);
-    if (J->hash3) job_unmem(J, J->hash3, (cx_usize)4 << HASH3_LOG);
+    if (J->hash3) job_unmem(J, J->hash3, J->hash3_n * 4);
     if (J->mt) job_unmem(J, J->mt, MATCHES_MAX * sizeof(match_t));
     if (J->jd) job_unmem(J, J->jd, sizeof(dict_ent_t));
     J->jd = 0;
@@ -4143,7 +4187,7 @@ static void job_free(job_t* J) {
         job_unmem(J, J->path_at, OPT_NUM * sizeof(cx_u32));
     }
     J->hash = J->chain = J->hash3 = 0;
-    J->hash_n = J->chain_n = 0;
+    J->hash_n = J->chain_n = J->hash3_n = 0;
     J->ss.seq = 0;
     J->ss.lit = 0;
     J->blk = 0;

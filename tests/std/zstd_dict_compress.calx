@@ -134,6 +134,41 @@ fn main() {
     set_workers(1)
     println("{differ} differ")    // out: 0 differ
 
+    // Content of 256 bytes or more has its tables kept, and at the tree levels an input of up to
+    // 64 KiB searches the kept trees where they are, beside its own. The first call with a new
+    // dictionary builds them: the same bytes then as after, back as they went in, the same at once
+    // on eight threads, and the same on any machine.
+    var lines2 = String()
+    for i in 0..120 {
+        lines2.push_str("\{\"id\": {i * 31}, \"name\": \"user{i * 7 % 300}\", \"admin\": {i % 4 == 0}\}\n")
+    }
+    let content = lines2.to_bytes()
+    var medium: List<u8> = []
+    for i in 0..60 {
+        medium.extend("\{\"id\": {i * 29 + 5}, \"name\": \"user{i * 11 % 300}\", \"admin\": {i % 5 == 0}\}\n".to_bytes())
+    }
+    let kept = Dictionary.raw(content.copy())!
+    var unlike = 0
+    var hashes2 = String()
+    for level in [3, 5, 9, 11, 13, 16, 19, 22] {
+        let fresh = Dictionary.raw(content.copy())!
+        for bytes in [record.copy(), medium.copy()] {
+            let first = fresh.compress(bytes, level)
+            let again = fresh.compress(bytes, level)
+            if first != again or fresh.decompress(first.copy())! != bytes or kept.compress(bytes, level) != first {
+                unlike += 1
+            }
+        }
+        hashes2.push_str("{xxh64(kept.compress(medium, level)) >> 40:06x} ")
+    }
+    set_workers(8)
+    for level in [5, 11, 13, 19] {
+        unlike += at_once(kept, many, level)
+    }
+    set_workers(1)
+    println("{unlike} unlike")    // out: 0 unlike
+    println(hashes2.trim())    // out: a3103c 990770 73b9b5 4ed943 33a55e 23de86 cf5971 cf5971
+
     // Part of a list, onto the end of another.
     var out = "> ".to_bytes()
     trained.compress_into(record, 0, 10, 3, true, mut out)
