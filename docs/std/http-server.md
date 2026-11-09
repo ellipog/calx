@@ -152,20 +152,29 @@ They answered the same to all but `/%00`, where Python's handler fails.
 
 These numbers are from our benchmark, so take them as rough:
 
-- **Machine:** an i9-13900K with other work running, the server pinned to its performance cores and the load tool to its efficiency cores, the better of two rounds taken in turn.
-- **Load:** 16 connections kept open at once, from a small load tool written in Rust, on loopback, for 5 seconds.
+- **Machine:** an i9-13900K with other work running, under Windows 11 and under Linux in WSL 2. The server was pinned to the performance cores and the load tool to the efficiency cores. On Linux the same processor numbers were used, though WSL needn't keep them on those cores. Each number is the better of two rounds, taken in turn.
+- **Load:** 16 connections kept open at once, from a small load tool written in Rust, on loopback, for 5 seconds a file.
 - **Requests:** files served from a folder by `serve`, with logging off.
-- **Comparisons:**
+- **Comparisons**, each with `TCP_NODELAY` set, as Calx sets it, since without it Linux holds back each response 40 ms:
   - Python 3.14's `ThreadingHTTPServer` with `SimpleHTTPRequestHandler`, set to HTTP/1.1 so connections stay open, and logging off;
   - Rust 1.91 with axum 0.8.9 and tower-http 0.6.11's `ServeDir`, built for release on tokio's multi-thread runtime with 8 threads.
+- **Memory:** the most the server held at any point across the three files. On Windows that's its working set and its private bytes; on Linux, its resident memory.
 
-| Requests a second | Calx | Calx before | Python | Rust |
-| --- | --- | --- | --- | --- |
-| A 1 KB file | 40,400 | 40,900 | 3,670 | 20,600 |
-| A 1 MB file | 8,400 | 2,660 | 3,300 | 5,440 |
-| A 64 MB file | 64 | 34 | 86 | 76 |
-| Most memory, all three | 36 MB | 157 MB | 61 MB | 14 MB |
+| Windows | Calx | Python | Rust |
+| --- | --- | --- | --- |
+| A 1 KB file, requests a second | 42,700 | 3,680 | 21,200 |
+| A 1 MB file | 10,100 | 3,540 | 5,320 |
+| A 64 MB file | 59 | 95 | 76 |
+| Most memory: working set | 8.4 MB | 59.2 MB | 18.1 MB |
+| Most memory: private | 8.7 MB | 54.2 MB | 17.3 MB |
 
-- *Calx before* is `serve` before it sent files with `send_file`: workers read files up to 4 MiB whole, and the event loop's thread read bigger ones in parts and copied them into each connection's queue. Sending from the file is 3 times as fast for the 1 MB file, and takes a quarter of the memory.
-- A small file costs its open, its look and its close, which on Windows take most of the time. Each file is opened once, and asked its size and time.
-- The 64 MB file is slower than in Python and Rust, which read and send it on 16 threads and 8. Windows editions for desktops run only two `TransmitFile` calls at once, and queue the rest. This row also varied the most between runs, from 50 to 76 for Calx.
+| Linux | Calx | Python | Rust |
+| --- | --- | --- | --- |
+| A 1 KB file, requests a second | 39,500 | 3,950 | 15,300 |
+| A 1 MB file | 15,600 | 2,590 | 3,020 |
+| A 64 MB file | 397 | 97 | 58 |
+| Most memory: resident | 4.8 MB | 33.8 MB | 23.1 MB |
+
+- **Big files** go from the file to the connection by the system, so they cost Calx no copies and no memory. Python and Rust read each one through buffers of their own. Before `serve` sent files this way, it did 2,660 1 MB requests a second on Windows, and held 157 MB.
+- **A small file** costs its open, its look and its close, which on Windows take most of the time. Each file is opened once, and asked its size and time.
+- **The 64 MB file on Windows** is slower than Python's and Rust's, which read and send it on 16 threads and 8. Windows editions for desktops run only two `TransmitFile` calls at once, and queue the rest. Linux's `sendfile` has no such limit. This row varied the most between runs, from 49 to 76 for Calx.
