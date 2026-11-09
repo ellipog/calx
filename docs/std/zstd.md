@@ -137,27 +137,27 @@ fn main() {
 
 `std.zstd` reserves the room a frame says it makes all at once and decodes into it. A frame of 1 MiB or more, or one without a size, is decoded on all the processors with [`parallel for`](../reference/parallel.md)'s threads: while one run of blocks has its literals and sequences decoded on every processor, the run before it has its matches carried out, in order, and the checksum is worked on over what's done. A frame that's smaller is decoded on one thread.
 
-On an i9-13900K running other programs, best of 7 runs in each of three rounds, so the numbers are rough. `src.tar` is 18.3 MB of the Calx repository's files and `clang40` the first 40 MB of `clang.exe`, compressed by Python at level 3, its default, and level 19. On Windows:
+On an i9-13900K, best of 7 runs in each of three rounds, the programs taking turns. On Windows the ones on one thread ran on the performance cores, out of power throttling; WSL can't be held to them, so its numbers are rougher. `src.tar` is 18.3 MB of the Calx repository's files and `clang40` the first 40 MB of `clang.exe`, compressed by Python at level 3, its default, and level 19. On Windows:
 
 | File | Calx | Calx, one thread | Python 3.14 | Rust: zstd 0.13 | Rust: ruzstd 0.8 |
 | --- | --- | --- | --- | --- | --- |
-| src.tar.3.zst | 6.8 ms | 10.5 ms | 22.7 ms | 16.3 ms | 42.4 ms |
-| src.tar.19.zst | 7.3 ms | 11.5 ms | 22.4 ms | 17.2 ms | 40.7 ms |
-| clang40.3.zst | 18.0 ms | 31.3 ms | 53.9 ms | 46.5 ms | 139.7 ms |
-| clang40.19.zst | 28.8 ms | 49.2 ms | 71.2 ms | 63.0 ms | 168.0 ms |
+| src.tar.3.zst | 5.7 ms | 8.6 ms | 19.8 ms | 14.6 ms | 38.9 ms |
+| src.tar.19.zst | 6.0 ms | 8.2 ms | 20.5 ms | 13.9 ms | 35.8 ms |
+| clang40.3.zst | 15.0 ms | 26.4 ms | 49.2 ms | 38.7 ms | 125.3 ms |
+| clang40.19.zst | 22.4 ms | 36.2 ms | 59.6 ms | 47.3 ms | 132.3 ms |
 
 In WSL on the same machine:
 
 | File | Calx | Calx, one thread | Python 3.14 | Rust: zstd 0.13 | Rust: ruzstd 0.8 |
 | --- | --- | --- | --- | --- | --- |
-| src.tar.3.zst | 7.2 ms | 10.5 ms | 12.0 ms | 8.8 ms | 36.3 ms |
-| src.tar.19.zst | 7.5 ms | 10.0 ms | 12.5 ms | 8.9 ms | 32.0 ms |
-| clang40.3.zst | 18.8 ms | 30.3 ms | 52.2 ms | 35.4 ms | 138.4 ms |
-| clang40.19.zst | 30.8 ms | 45.2 ms | 65.8 ms | 48.7 ms | 152.0 ms |
+| src.tar.3.zst | 6.3 ms | 9.1 ms | 11.9 ms | 8.3 ms | 34.0 ms |
+| src.tar.19.zst | 6.7 ms | 8.6 ms | 11.4 ms | 8.3 ms | 29.3 ms |
+| clang40.3.zst | 16.4 ms | 27.0 ms | 45.6 ms | 34.7 ms | 126.9 ms |
+| clang40.19.zst | 24.1 ms | 37.9 ms | 56.5 ms | 41.1 ms | 136.7 ms |
 
 - Python and the `zstd` crate run libzstd 1.5.7 on one thread. On Windows both are built by MSVC, which leaves out libzstd's assembly Huffman decoder; in WSL, Python's is Ubuntu 26.04's and the crate's is built by GCC, both with it. `ruzstd` is written in Rust.
 - "Calx, one thread" is the same decoder with its threads left out, to compare the work each does; a program always gets all the processors for a frame of 1 MiB or more.
-- On one thread, GCC's libzstd is faster than `std.zstd` on text: 8.8 ms to 10.5 on src.tar.3, and 8.9 to 10.0 on src.tar.19. On clang40 it's the other way round, and on Windows `std.zstd` is faster on all four.
+- On one thread, GCC's libzstd is faster than `std.zstd` on text: 8.3 ms to 9.1 on src.tar.3, and 8.3 to 8.6 on src.tar.19. On clang40 it's the other way round, and on Windows `std.zstd` is faster on all four.
 - The Rust programs were built with `lto = "fat"` and one codegen unit, once as they are and once with `target-cpu=x86-64-v3`, as Calx builds for x86-64-v3, and in WSL with libzstd built for it too. Each Rust time is the faster of the two builds' best. Each had the room for its output reserved before it started, and checked that both crates gave the same bytes.
 
 `compress` was timed on the same machine with little else running, `std.zstd`, Python and the Rust programs taking turns for three rounds, best of 3 runs in each up to level 9 and of 1 from 10, on the same two files before they were compressed. On one thread, each program on the performance cores and out of power throttling, `src.tar` at every level, on Windows:
