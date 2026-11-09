@@ -1278,10 +1278,24 @@ static void mf_fast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
 #define DSTEP_RUN 256
 #endif
 
-static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls) {
+static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls, const int undo) {
     const cx_u8* const base = J->base;
     cx_u32* const hl8 = J->hash;
     cx_u32* const hs = J->chain;
+    /* With `undo`, each write's slot and what it replaced, the short table's with the top bit set,
+     * for work_clean; job_run makes sure there's room. */
+    cx_u32* const ul = J->ulog;
+    cx_u32 un = J->ulog_n;
+#define DF_W(tab, top, slot, old, v)                     \
+    do {                                                 \
+        const cx_u32 at_ = (slot);                       \
+        if (undo) {                                      \
+            ul[2 * un] = at_ | (top);                    \
+            ul[2 * un + 1] = (old);                      \
+            un++;                                        \
+        }                                                \
+        (tab)[at_] = (v);                                \
+    } while (0)
     const cx_u32 bl = J->p.hlog, bs = J->p.clog, start = J->start;
     const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
     const cx_u8* const prefix = base + start;
@@ -1309,7 +1323,8 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
             const cx_u32 h = hash_at(ip, mls, bs);
             m = hs[h];
             cur = (cx_u32)(ip - base);
-            hl8[h8] = hs[h] = cur;
+            DF_W(hl8, 0, h8, m8, cur);
+            DF_W(hs, 1u << 31, h, m, cur);
             if ((ld32(ip + 1 - rt) == ld32(ip + 1)) & (rt != 0)) {
                 ml = count(ip + 5, ip + 5 - rt, iend) + 4;
                 ip++;
@@ -1352,23 +1367,26 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
         off = (cx_u32)(ip - mp);
         /* The next position's long entry, unless the step has got so long that it could be past
          * the match's end, where the next search starts: the table mustn't hold one after that. */
-        if (step < 4) hl8[h8n] = cur + (cx_u32)step;
+        if (step < 4) DF_W(hl8, 0, h8n, hl8[h8n], cur + (cx_u32)step);
     found:
         ss_put(ss, r, anchor, (cx_u32)(ip - anchor), off, ml);
         ip += ml;
         anchor = ip;
         if (ip <= ilimit) {
             const cx_u32 c2 = cur + 2, e = (cx_u32)(ip - base);
-            hl8[hash_at(base + c2, 8, bl)] = c2;
-            hl8[hash_at(ip - 2, 8, bl)] = e - 2;
-            hs[hash_at(base + c2, mls, bs)] = c2;
-            hs[hash_at(ip - 1, mls, bs)] = e - 1;
+            const cx_u32 a1 = hash_at(base + c2, 8, bl), a2 = hash_at(ip - 2, 8, bl);
+            const cx_u32 a3 = hash_at(base + c2, mls, bs), a4 = hash_at(ip - 1, mls, bs);
+            DF_W(hl8, 0, a1, hl8[a1], c2);
+            DF_W(hl8, 0, a2, hl8[a2], e - 2);
+            DF_W(hs, 1u << 31, a3, hs[a3], c2);
+            DF_W(hs, 1u << 31, a4, hs[a4], e - 1);
             for (;;) {
                 const cx_u32 c3 = (cx_u32)(ip - base);
                 if (ip > ilimit || !REP_OK(r[1], c3, start) || ld32(ip) != ld32(ip - r[1])) break;
                 ml = count(ip + 4, ip + 4 - r[1], iend) + 4;
-                hs[hash_at(ip, mls, bs)] = c3;
-                hl8[hash_at(ip, 8, bl)] = c3;
+                const cx_u32 a5 = hash_at(ip, mls, bs), a6 = hash_at(ip, 8, bl);
+                DF_W(hs, 1u << 31, a5, hs[a5], c3);
+                DF_W(hl8, 0, a6, hl8[a6], c3);
                 ss_put(ss, r, anchor, 0, r[1], ml);
                 ip += ml;
                 anchor = ip;
@@ -1377,15 +1395,30 @@ static inline __attribute__((always_inline)) void mf_dfast_with(job_t* J, cx_u32
         rt = r[0];
     }
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
+#undef DF_W
+    if (undo) J->ulog_n = un;
     J->ss = sl;
     rp[0] = r[0];
     rp[1] = r[1];
     rp[2] = r[2];
 }
 
-static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
-    ZSE_BY_MML(mf_dfast_with, J, at, end, r);
+/* With the slots noted, for a working copy of a dictionary's tables (job_run): a function of its
+ * own, so the plain parse is compiled as before. */
+static __attribute__((noinline)) void mf_dfast_noted(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+    if (J->p.mml == 5) mf_dfast_with(J, at, end, r, 5, 1);
+    else mf_dfast_with(J, at, end, r, J->p.mml, 1);
 }
+
+#define mf_dfast_plain(J, at, end, r, mls) mf_dfast_with(J, at, end, r, mls, 0)
+static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
+    if (J->ulo) {
+        mf_dfast_noted(J, at, end, r);
+        return;
+    }
+    ZSE_BY_MML(mf_dfast_plain, J, at, end, r);
+}
+#undef mf_dfast_plain
 
 /* Hash rows, for the greedy and lazy levels: each row keeps the last 2^rlog - 1 positions whose
  * hash leads to it, in slots 1 on, newest at the row's head and going round, with the next byte of
@@ -1430,6 +1463,10 @@ typedef struct {
     cx_u32 wsize, tries;
     cx_u32 hc[8]; /* the hashes of the eight positions from next_up, by position mod 8 */
     int skipping; /* in a stretch without matches: see mf_lazy */
+    /* With a working copy of a dictionary's rows, each slot a position takes and what it held, as
+     * J->ulog has them; un counts on past ucap once there are more. */
+    cx_u32* ul;
+    cx_u32 un, ucap;
 } rw_t;
 
 static inline void rw_load(rw_t* w, const job_t* J) {
@@ -1444,15 +1481,26 @@ static inline void rw_load(rw_t* w, const job_t* J) {
     w->wsize = J->wsize;
     w->tries = 1u << J->p.slog;
     w->skipping = 0;
+    w->ul = J->ulog;
+    w->un = J->ulog_n;
+    w->ucap = J->ulog_cap;
 }
 
 /* A position's hash: its row, and its tag in the low byte. */
 static inline cx_u32 row_hash(const rw_t* w, cx_u32 i) { return hash_at(w->base + i, w->mls, w->hb); }
 
-static inline void row_put(rw_t* w, cx_u32 i, cx_u32 h) {
+/* With `undo`, the slot's row and tag and its position are noted first, for work_clean. */
+static inline __attribute__((always_inline)) void row_put(rw_t* w, cx_u32 i, cx_u32 h, const int undo) {
     const cx_u32 at = (h >> 8) << w->rlog;
     cx_u32 hd = (w->tags[at] - 1u) & w->rmask;
     hd += hd == 0 ? w->rmask : 0;
+    if (undo) {
+        if (w->un < w->ucap) {
+            w->ul[2 * w->un] = at << 8 | w->tags[at + hd];
+            w->ul[2 * w->un + 1] = w->pos[at + hd];
+        }
+        w->un++;
+    }
     w->tags[at] = (cx_u8)hd;
     w->tags[at + hd] = (cx_u8)h;
     w->pos[at + hd] = i;
@@ -1476,18 +1524,18 @@ static inline void row_refill(rw_t* w, cx_u32 from) {
  * last go in: the ones between would find the same text the match did. Always inlined, as row_best
  * is, for the same reason. With `safe`, each hash is worked out where it's needed, not eight ahead,
  * for a job's last bytes. */
-static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target, const int safe) {
+static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 target, const int safe, const int undo) {
     cx_u32 i = w->next_up;
     if (target - i > ROW_SKIP) {
         for (const cx_u32 e = i + 96; i < e; i++) {
-            row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7]);
+            row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7], undo);
             if (!safe) row_ahead(w, i + 8);
         }
         i = target - 32;
         if (!safe) row_refill(w, i);
     }
     for (; i < target; i++) {
-        row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7]);
+        row_put(w, i, safe ? row_hash(w, i) : w->hc[i & 7], undo);
         if (!safe) row_ahead(w, i + 8);
     }
     w->next_up = target;
@@ -1497,14 +1545,14 @@ static inline __attribute__((always_inline)) void row_insert(rw_t* w, cx_u32 tar
  * shorter than mml, and its distance in *off. Always inlined, so `w` is the caller's local, which
  * the tags' byte stores can't touch: called through a pointer, it had its fields read again after
  * each store. `safe` as for row_insert. */
-static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off, const int safe) {
+static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off, const int safe, const int undo) {
     const cx_u8* const base = w->base;
     const cx_u32 cur = (cx_u32)(ip - base);
     if (w->skipping) {
         w->next_up = cur;
         w->hc[cur & 7] = row_hash(w, cur);
     } else {
-        row_insert(w, cur, safe);
+        row_insert(w, cur, safe, undo);
         if (safe) w->hc[cur & 7] = row_hash(w, cur);
     }
     const cx_u32 rlog = w->rlog, rmask = w->rmask;
@@ -1526,7 +1574,7 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
     }
     /* This position goes into its row now, while the row is at hand, rather than with the next
      * search's. The candidates are taken already, so this search doesn't find it. */
-    row_put(w, cur, h);
+    row_put(w, cur, h, undo);
     w->next_up = cur + 1;
     if (!safe && !w->skipping) row_ahead(w, cur + 8);
     for (cx_u32 k = 0; k < nc; k++) {
@@ -1550,7 +1598,7 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
 
 /* The parse for the hash-row levels: the longest match at a position, unless the next one or,
  * for lazy2, the one after has one that's worth more by its length and offset. */
-static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const int depth, const cx_u32 mls) {
+static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const int depth, const cx_u32 mls, const int undo) {
     const cx_u8* const base = J->base;
     const cx_u32 start = J->start;
     ss_t* const ss = &J->ss;
@@ -1582,7 +1630,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
         }
         {
             cx_u32 o;
-            const cx_u32 l = row_best(&w, ip, iend, &o, 0);
+            const cx_u32 l = row_best(&w, ip, iend, &o, 0, undo);
             if (l > ml) {
                 ml = l;
                 off = o;
@@ -1623,7 +1671,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
                     }
                 }
                 cx_u32 o;
-                const cx_u32 l = row_best(&w, ip, iend, &o, 0);
+                const cx_u32 l = row_best(&w, ip, iend, &o, 0, undo);
                 if (l && (int)l * 4 - (int)high_bit(o + 3) > worth) {
                     ml = l;
                     off = o;
@@ -1672,7 +1720,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
             mstart = ip + 1;
         }
         cx_u32 o;
-        const cx_u32 l = row_best(&w, ip, iend, &o, 1);
+        const cx_u32 l = row_best(&w, ip, iend, &o, 1, undo);
         if (l > ml) {
             ml = l;
             off = o;
@@ -1695,15 +1743,30 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
         anchor = ip;
     }
     J->next_up = w.next_up;
+    if (undo) J->ulog_n = w.un;
 tail:
     ss_tail(ss, anchor, (cx_usize)(iend - anchor));
 }
 
 /* A copy of the parse for each depth, and for the shortest match of 5 the row levels have, so the
- * looking ahead and the hash's length are worked out when it's compiled. */
+ * looking ahead and the hash's length are worked out when it's compiled; and of each with the
+ * slots noted, for a working copy of a dictionary's rows (job_run), in functions of their own so
+ * the plain ones are compiled into `block` as before. */
+#define ZSE_LAZY_U(J, at, end, r, depth, undo) \
+    if ((J)->p.mml == 5) mf_lazy_with(J, at, end, r, depth, 5, undo); \
+    else mf_lazy_with(J, at, end, r, depth, (J)->p.mml, undo)
+static __attribute__((noinline)) void mf_lazy_noted(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const int depth) {
+    if (depth == 0) {
+        ZSE_LAZY_U(J, at, end, r, 0, 1);
+    } else if (depth == 1) {
+        ZSE_LAZY_U(J, at, end, r, 1, 1);
+    } else {
+        ZSE_LAZY_U(J, at, end, r, 2, 1);
+    }
+}
 #define ZSE_LAZY(J, at, end, r, depth) \
-    if ((J)->p.mml == 5) mf_lazy_with(J, at, end, r, depth, 5); \
-    else mf_lazy_with(J, at, end, r, depth, (J)->p.mml)
+    if ((J)->ulo) mf_lazy_noted(J, at, end, r, depth); \
+    else { ZSE_LAZY_U(J, at, end, r, depth, 0); }
 static void mf_greedy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 0); }
 static void mf_lazy1(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 1); }
 static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, at, end, r, 2); }
@@ -3380,7 +3443,7 @@ static void job_prefix(job_t* J) {
     case S_LAZY2: {
         rw_t w;
         rw_load(&w, J);
-        for (cx_u32 i = from; i < end; i++) row_put(&w, i, row_hash(&w, i));
+        for (cx_u32 i = from; i < end; i++) row_put(&w, i, row_hash(&w, i), 0);
         J->next_up = end;
         break;
     }
@@ -3455,15 +3518,19 @@ typedef struct work_s {
     cx_u32* hash;
     cx_u32* chain;
     cx_u32* hash3;
-    cx_u32* log; /* at the tree levels, where the job notes its writes into the copy's nodes */
+    cx_u32* log; /* from the hash-row levels on, where the job notes its writes into the copy */
     cx_u32 log_cap;
     cx_u8* text; /* the content, then room for WORK_TEXT bytes of a frame's text */
 } work_t;
 
-/* The writes into a working copy's nodes a frame at the tree levels notes, to undo them: past
- * these, the trees are copied back whole. A position of a small input notes about as many as the
- * levels search deep. */
+/* The writes into a working copy a frame notes, to undo them: past these, the rows and trees are put
+ * back from the digest. A position notes one slot in the rows, and in the trees about as many as
+ * the levels search deep for a small input. */
 #define WORK_LOG ((cx_u32)32 << 10)
+
+/* The bytes of tables from which a frame at the double-hash and hash-row levels notes the slots
+ * its positions take (job_run). */
+#define TABLES_NOTED ((cx_usize)256 << 10)
 
 /* A first job with no more text than this has it after the working copy's content, rather than
  * the content and its text copied into a buffer of their own. */
@@ -3548,7 +3615,7 @@ static digest_t* digest_find(const cp_t* p, cx_u32 pre, const cx_u8* text, cx_u6
 
 /* A new working copy of d's tables and content, or 0 if there's no memory for one. */
 static work_t* work_new(digest_t* d) {
-    const cx_u32 log_cap = d->p.strat >= S_BTLAZY2 ? WORK_LOG : 0;
+    const cx_u32 log_cap = d->p.strat >= S_DFAST ? WORK_LOG : 0;
     const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n + d->hash3_n + 2 * (cx_usize)log_cap) + d->pre + WORK_TEXT;
     work_t* const w = (work_t*)malloc(bytes);
     if (!w) return 0;
@@ -3570,8 +3637,9 @@ static work_t* work_new(digest_t* d) {
     return w;
 }
 
-/* Puts w back as d has it, after J's frame: each entry, or for hash rows each row, that one of the
- * frame's positions leads to, or all of them for an input long enough that copying is less. */
+/* Puts w back as d has it, after J's frame: from what the frame noted it wrote, or each entry, or
+ * for hash rows each row, that one of the frame's positions leads to, or all of them for an input
+ * long enough that copying is less. */
 static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
     const cx_u8* const base = J->base;
     const cx_u32 lo = J->from - READ, hi = J->to - J->from >= READ ? J->to - READ + 1 : J->from - READ;
@@ -3589,6 +3657,16 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
         }
         break;
     case S_DFAST:
+        if (J->ulo && J->ulog_n <= J->ulog_cap) {
+            /* What each slot the frame wrote held, newest first. */
+            const cx_u32* const ul = J->ulog;
+            for (cx_u32 k = J->ulog_n; k-- > 0;) {
+                const cx_u32 e = ul[2 * k];
+                cx_u32* const t = e >> 31 ? w->chain : w->hash;
+                t[e & 0x7FFFFFFF] = ul[2 * k + 1];
+            }
+            break;
+        }
         if (n * 16 > d->hash_n + d->chain_n) {
             memcpy(w->hash, d->hash, d->hash_n * 4);
             memcpy(w->chain, d->chain, d->chain_n * 4);
@@ -3610,6 +3688,21 @@ static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
         cx_u8* const tags = (cx_u8*)w->chain;
         const cx_u32* const dpos = d->hash;
         const cx_u8* const dtags = (const cx_u8*)d->chain;
+        if (J->ulo && J->ulog_n <= J->ulog_cap) {
+            /* Each slot the frame's positions took, newest first, given back what it held, and its
+             * row's head moved back. A row the content never reached has a head of 0, which comes
+             * back as 1: the rows put in and look up the same with either while the slots are
+             * empty, so the frames after come out the same. */
+            const cx_u32 rmask = (1u << rlog) - 1;
+            const cx_u32* const ul = J->ulog;
+            for (cx_u32 k = J->ulog_n; k-- > 0;) {
+                const cx_u32 e = ul[2 * k], at = e >> 8, hd = tags[at];
+                tags[at + hd] = (cx_u8)e;
+                pos[at + hd] = ul[2 * k + 1];
+                tags[at] = (cx_u8)(hd == rmask ? 1 : hd + 1);
+            }
+            break;
+        }
         if ((n << rlog) * 2 > d->hash_n) {
             memcpy(w->hash, d->hash, d->hash_n * 4);
             memcpy(w->chain, d->chain, d->chain_n * 4);
@@ -3812,8 +3905,16 @@ static void job_run(job_t* J) {
             J->hash = w->hash;
             J->chain = w->chain;
             if (J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2) J->tags = (cx_u8*)w->chain;
-            if (J->p.strat >= S_BTLAZY2) {
-                J->hash3 = w->hash3;
+            if (J->p.strat >= S_BTLAZY2) J->hash3 = w->hash3;
+            /* The tables' slots are noted only for tables too big to stay in the cache, from
+             * TABLES_NOTED: smaller ones are put back from the digest faster than the parse notes
+             * its slots and they're put back from that. A row's slot is noted with its row in 24
+             * bits, so for tables of up to 2^24 slots, which every level's are; the double-hash
+             * levels write at most 4 slots a position. */
+            const int big = (d->hash_n + d->chain_n) * 4 >= TABLES_NOTED;
+            const int rows = J->p.strat >= S_GREEDY && J->p.strat <= S_LAZY2 && J->p.hlog <= 24;
+            const int dfast = J->p.strat == S_DFAST && (cx_u64)(J->to - J->from) * 4 + 16 <= w->log_cap;
+            if (J->p.strat >= S_BTLAZY2 || (big && (rows || dfast))) {
                 J->ulog = w->log;
                 J->ulog_n = 0;
                 J->ulog_cap = w->log_cap;
