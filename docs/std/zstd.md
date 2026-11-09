@@ -88,7 +88,7 @@ Python raises a `ZstdError` for all but `BadDictionary`, with the message above 
 
 The optimal parser prices every way through the next few thousand bytes, from how often each literal, length and distance has come up, and takes the cheapest. A window is never bigger than the input needs.
 
-That table is libzstd's for inputs over 256 KiB. A smaller input takes libzstd's settings for inputs of its size, up to 256, 128 or 16 KiB, with a dictionary's content counted in, as libzstd picks them: smaller windows and tables, and the deeper searches at lower levels, so binary trees from level 11, or 9 up to 16 KiB, and the optimal parser from 13, or 11. From level 3 to the last hash-row level, the long hash table and the rows have no more slots than the window has positions, half what libzstd allows a small input: on our small files after a dictionary that's 3 to 5% faster at levels 3 and 5, for at most 0.13% more bytes.
+That table is libzstd's for inputs over 256 KiB. A smaller input takes libzstd's settings for inputs of its size, up to 256, 128 or 16 KiB, with a dictionary's content counted in, as libzstd picks them: smaller windows and tables, and the deeper searches at lower levels, so binary trees from level 11, or 9 up to 16 KiB, and the optimal parser from 13, or 11. From level 3 to the last hash-row level, for an input the window holds all of, the long hash table and the rows have no more slots than the input has positions, half what libzstd allows: on our small files after a dictionary that's 3 to 5% faster at levels 3 and 5, for at most 0.13% more bytes, and on 1 MB 7 to 12% faster at 9 and 12 for 0.06%. A longer input takes libzstd's, so level 12 is a deeper search than 11 there.
 
 ```calx
 import std.zstd.{compress, decompress}
@@ -188,7 +188,7 @@ In WSL on the same machine:
 | 9 | 198 ms | 221 ms | 204 ms | 4,090,262 | 4,120,710 |
 | 10 | 273 ms | 328 ms | 322 ms | 4,028,417 | 4,067,118 |
 | 11 | 344 ms | 480 ms | 467 ms | 3,989,654 | 4,035,545 |
-| 12 | 395 ms | 525 ms | 508 ms | 3,989,654 | 4,033,230 |
+| 12 | 395 ms | 525 ms | 508 ms | 3,986,246 | 4,033,230 |
 | 13 | 1,243 ms | 1,318 ms | 1,223 ms | 3,978,696 | 3,985,152 |
 | 14 | 1,630 ms | 1,702 ms | 1,658 ms | 3,938,434 | 3,944,077 |
 | 15 | 2,013 ms | 2,373 ms | 2,285 ms | 3,912,624 | 3,917,800 |
@@ -299,7 +299,7 @@ On all the processors:
 - Python and the `zstd` crate run libzstd 1.5.7. On Windows both are built by MSVC, and the crate's is 5 to 8% faster. GCC's, in WSL, is faster again: by up to 7% to level 10, and 13 to 18% at 11 and 12. The Rust programs were built as above, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
 - `ruzstd` 0.8 compresses only at its level 1, "Fastest": 164 ms and 7,054,586 bytes for `src.tar`, and 457 ms and 23,917,712 bytes for `clang40`, on Windows, and 148 and 408 ms in WSL.
 - On one thread, against the faster libzstd, on our two files: on Windows `std.zstd` is 1 to 6% faster on `src.tar` from level -1 to 9, 1.18 to 1.36 times as fast from 10 to 12, 2% slower at 13, and 1.02 to 1.43 times as fast from 14. On `clang40` it's 2% slower at 3 and 9 and faster at the rest. In WSL, against GCC's, it takes up to 6% longer on `src.tar` from -1 to 13, is level at 14, and is 1.1 to 1.4 times as fast from 15; on `clang40` up to 10% longer to level 9, and faster from 13.
-- What `std.zstd` writes is at most 0.4% bigger than libzstd's at every level timed, and up to 1.1% smaller. On `src.tar` it's within 0.07% at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.1% smaller from 5 to 12, 0.1 to 0.4% smaller from 13 to 17, and 0.2 to 0.3% bigger from 18 to 22. The most is `clang40` at level 3, 0.4% bigger. The sizes are from the encoder as it is now; the times are from before the last changes to it.
+- What `std.zstd` writes is at most 0.4% bigger than libzstd's at every level timed, and up to 1.1% smaller. On `src.tar` it's within 0.07% at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.2% smaller from 5 to 12, 0.1 to 0.4% smaller from 13 to 17, and 0.2 to 0.3% bigger from 18 to 22. The most is `clang40` at level 3, 0.4% bigger. The sizes are from the encoder as it is now; the times are from before the last changes to it.
 - On all the processors, `std.zstd` is 1.5 to 2.3 times as fast as the faster libzstd at level 1, 1.1 to 1.2 times at 3 and 5, and 1.2 to 1.4 times from 16. At 9 and 13 it's 1.05 to 1.1 times as fast on Windows, and within 2% either way in WSL. Both cut the same jobs, four windows long. That's 2 MiB at level 1, so `src.tar` makes 9 jobs. From 9 on the jobs are 16 MiB or more, so the files make 3 at most, and most of the processors wait.
 - On many small files, our 1,143 of [Dictionaries](#dictionaries) at one call each, on Windows on a performance core, `compress` takes 2.8 µs a file at level 1, 8.3 µs at 9 and 37 µs at 19. Python's `compress` takes 5.7, 10.6 and 49 µs, and a `ZstdCompressor` kept from one file to the next 3.5, 8.4 and 47 µs.
 

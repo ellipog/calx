@@ -3573,11 +3573,12 @@ static cp_t params_for(cx_i32 level, cx_u64 n) {
     if (p.wlog > need) p.wlog = need;
     const cx_u32 bt = p.strat >= S_BTLAZY2;
     if (p.hlog > p.wlog + 1) p.hlog = p.wlog + 1;
-    /* The double hash's long table and the hash rows, no more slots than the window has positions,
-     * one less than libzstd allows: for a small input after a dictionary, half the tables to miss
-     * the cache in and put back, 3 to 5% faster on our samples at levels 3 and 5 for at most 0.13%
-     * more. */
-    if (p.strat >= S_DFAST && p.strat <= S_LAZY2 && p.hlog > p.wlog) p.hlog = p.wlog;
+    /* For an input the window holds all of, the double hash's long table and the hash rows, no more
+     * slots than the input has positions, one less than libzstd allows: for a small input after a
+     * dictionary, half the tables to miss the cache in and put back, 3 to 5% faster on our samples
+     * at levels 3 and 5 for at most 0.13% more, and 7 to 12% faster at 9 and 12 on 1 MB for 0.06%.
+     * Not for a longer one, whose text goes on through the window: level 12 would be level 11. */
+    if (n <= ((cx_u64)1 << p.wlog) && p.strat >= S_DFAST && p.strat <= S_LAZY2 && p.hlog > p.wlog) p.hlog = p.wlog;
     if (p.clog > p.wlog + bt) p.clog = p.wlog + bt;
     if (p.hlog < 6) p.hlog = 6;
     if (p.clog < 6) p.clog = 6;
