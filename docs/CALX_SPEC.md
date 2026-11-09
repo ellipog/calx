@@ -317,7 +317,7 @@ Built: see [Modules](reference/modules.md), with [a module's items through its n
 Building and running Calx code has to be fast. The design choices that make it so:
 
 - **A fast front end.** Lexing, parsing, checking and emitting C use arena allocation and interned names, with no heap allocation per node and no whole-program analysis beyond what monomorphization needs. The front end always rechecks everything, because that's cheaper than tracking what to skip.
-- **Clang only where the C changed.** Each module becomes its own C file. An object is cached under a hash of the C text, the flags and the clang version, so a module whose C is unchanged is never compiled again, and changed modules compile in parallel.
+- **Clang only where the C changed.** Each module becomes its own C file. An object is cached under a hash of the C text, the flags and the clang version, so a module whose C is unchanged is never compiled again, and changed modules compile in parallel. At most one clang runs for each logical processor on the machine, counting those of every calx building at the same time, so many builds at once share the processors rather than start hundreds of clangs between them (CLX-205).
 - **The runtime is built once** per target and build mode, and reused.
 - **Debug builds use `-O0`** with line tables only. Release builds use `-O3` (D89), and ThinLTO, which optimizes the program as a whole when it links, so calls between modules inline as calls within one do (D99). lld caches each file's machine code, so after an edit only the files it could change are compiled again.
 - **lld links** on both platforms, since it's several times faster than the default linkers.

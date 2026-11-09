@@ -68,7 +68,9 @@ int run_to_file(const std::vector<std::string>& argv, const std::string& output)
 int run_redirected(const std::vector<std::string>& argv, const std::string& input, const std::string& output,
                    const std::string& errors);
 
-// Starts several programs at once and waits for all of them. Returns the first nonzero status.
+// Runs several programs at once, at most one for each logical processor on the machine at a time,
+// counting those every other calx runs this way, and waits for all of them. Returns the first
+// nonzero status, or -1 if one couldn't start.
 int run_parallel(const std::vector<std::vector<std::string>>& commands);
 
 bool read_file(const std::string& path, std::string& out);
@@ -88,9 +90,10 @@ struct BuildResult {
 };
 
 // Compiles each of `c_sources`, one per module, and links them with the runtime. Each object is
-// cached under a hash of its C text, so only files whose text changed are compiled again, all at
-// once (D64), and an unchanged program is reused whole. A library has no runtime of its own: it
-// takes the program's when the program opens it (D123).
+// cached under a hash of its C text, so only files whose text changed are compiled again, in
+// parallel (D64), at most one clang for each logical processor on the machine at a time
+// (run_parallel, CLX-205), and an unchanged program is reused whole. A library has no runtime of
+// its own: it takes the program's when the program opens it (D123).
 BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c_sources, BuildMode mode, BuildKind kind,
                           bool verbose);
 

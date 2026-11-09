@@ -9,13 +9,16 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -504,28 +507,191 @@ int run_redirected(const std::vector<std::string>& argv, const std::string& inpu
     return finish(h);
 }
 
+namespace {
+
+// At most one compiler for each logical processor runs at a time on this machine, however many
+// builds run together, as a test runner's jobs do (CLX-205). More would only wait for the
+// processors, holding their memory as they wait: eight builds of Calcite's tests, of 100 to 144
+// modules each, had 761 clangs running at once, in 22 GB. Each slot is a lock the system lets go
+// when the process holding it ends, however it ends, so a build that's killed frees its slots: on
+// Windows a named mutex, which the next to wait for it takes as abandoned, and elsewhere a lock on
+// a file of its own. A thread waits only for the slots it doesn't hold, since it would take a
+// mutex it holds again. If the system won't make the locks, the limit is this build's alone.
+class Slots {
+public:
+    // Given by `take` when the locks have stopped working: the process goes ahead without one.
+    static constexpr int kUnlocked = -2;
+
+    Slots() {
+        unsigned n = std::max(1u, std::thread::hardware_concurrency());
+#ifdef _WIN32
+        n = std::min<unsigned>(n, MAXIMUM_WAIT_OBJECTS);  // what WaitForMultipleObjects waits for
+        for (unsigned k = 0; k < n; k++) {
+            HANDLE m = CreateMutexW(nullptr, FALSE, (L"Local\\calx-compile-slot-" + std::to_wstring(k)).c_str());
+            if (!m) {
+                close();
+                break;
+            }
+            locks_.push_back(m);
+        }
+#else
+        std::error_code ec;
+        fs::path dir = fs::temp_directory_path(ec) / ("calx-compile-slots-" + std::to_string(getuid()));
+        if (!ec) fs::create_directories(dir, ec);
+        for (unsigned k = 0; k < n && !ec; k++) {
+            int fd = open((dir / std::to_string(k)).c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+            if (fd < 0) {
+                close();
+                break;
+            }
+            locks_.push_back(fd);
+        }
+#endif
+        held_.assign(n, false);
+    }
+    ~Slots() { close(); }
+    Slots(const Slots&) = delete;
+    Slots& operator=(const Slots&) = delete;
+
+    std::size_t size() const { return held_.size(); }
+
+    // A slot for this thread, waiting for one if `wait`; -1 if none is free, or kUnlocked.
+    int take(bool wait) {
+        std::vector<int> mine;  // the slots this thread doesn't hold
+        for (std::size_t k = 0; k < held_.size(); k++) {
+            if (held_[k]) continue;
+            if (locks_.empty()) {
+                held_[k] = true;
+                return static_cast<int>(k);
+            }
+            mine.push_back(static_cast<int>(k));
+        }
+        if (mine.empty()) return -1;
+#ifdef _WIN32
+        std::vector<HANDLE> hs;
+        for (int k : mine) hs.push_back(locks_[k]);
+        DWORD w = WaitForMultipleObjects(static_cast<DWORD>(hs.size()), hs.data(), FALSE, wait ? INFINITE : 0);
+        std::size_t i;
+        if (w < WAIT_OBJECT_0 + hs.size()) {
+            i = w - WAIT_OBJECT_0;
+        } else if (w >= WAIT_ABANDONED_0 && w < WAIT_ABANDONED_0 + hs.size()) {
+            i = w - WAIT_ABANDONED_0;  // its holder ended without letting it go
+        } else if (w == WAIT_TIMEOUT) {
+            return -1;
+        } else {
+            return kUnlocked;
+        }
+        held_[mine[i]] = true;
+        return mine[i];
+#else
+        for (;;) {
+            for (int k : mine) {
+                if (flock(locks_[k], LOCK_EX | LOCK_NB) == 0) {
+                    held_[k] = true;
+                    return k;
+                }
+                if (errno != EWOULDBLOCK && errno != EINTR) return kUnlocked;
+            }
+            if (!wait) return -1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+#endif
+    }
+
+    void give(int k) {
+        if (k < 0) return;
+        held_[k] = false;
+        if (locks_.empty()) return;
+#ifdef _WIN32
+        ReleaseMutex(locks_[k]);
+#else
+        flock(locks_[k], LOCK_UN);
+#endif
+    }
+
+private:
+    void close() {
+        for (std::size_t k = 0; k < locks_.size(); k++) {
+            if (k < held_.size() && held_[k]) give(static_cast<int>(k));
+#ifdef _WIN32
+            CloseHandle(locks_[k]);
+#else
+            ::close(locks_[k]);
+#endif
+        }
+        locks_.clear();
+    }
+
+#ifdef _WIN32
+    std::vector<HANDLE> locks_;
+#else
+    std::vector<int> locks_;
+#endif
+    std::vector<bool> held_;
+};
+
+}  // namespace
+
 int run_parallel(const std::vector<std::vector<std::string>>& commands) {
 #ifdef _WIN32
-    std::vector<HANDLE> running;
+    using Proc = HANDLE;
 #else
-    std::vector<pid_t> running;
+    using Proc = pid_t;
 #endif
+    struct Running {
+        Proc proc;
+        int slot;
+    };
+    Slots slots;
+    std::vector<Running> running;
     int result = 0;
-    for (const auto& c : commands) {
-        auto h = start(c);
+    std::size_t next = 0;
+    while (next < commands.size() || !running.empty()) {
+        // As many started as there are slots for: waiting for one only while none of this build's
+        // are running, as one of those ending frees one too.
+        while (next < commands.size() && running.size() < slots.size()) {
+            int slot = slots.take(running.empty());
+            if (slot == -1) break;
+            auto h = start(commands[next++]);
 #ifdef _WIN32
-        if (!h) {
+            if (!h) {
 #else
-        if (h < 0) {
+            if (h < 0) {
 #endif
-            result = -1;
-            continue;
+                slots.give(slot);
+                result = -1;
+                continue;
+            }
+            running.push_back({h, slot});
         }
-        running.push_back(h);
-    }
-    for (auto h : running) {
-        int r = finish(h);
-        if (r != 0 && result == 0) result = r;
+        if (running.empty()) continue;
+        // The first of them to end.
+        std::size_t done = 0;
+#ifdef _WIN32
+        std::vector<HANDLE> hs;
+        for (const Running& r : running) hs.push_back(r.proc);
+        DWORD w = WaitForMultipleObjects(static_cast<DWORD>(hs.size()), hs.data(), FALSE, INFINITE);
+        if (w < WAIT_OBJECT_0 + hs.size()) done = w - WAIT_OBJECT_0;
+        int status = finish(running[done].proc);
+#else
+        // waitpid for any child could take one another thread waits for, as `calx test`'s do.
+        int status = 0;
+        for (bool found = false; !found;) {
+            for (std::size_t i = 0; i < running.size() && !found; i++) {
+                int st = 0;
+                pid_t got = waitpid(running[i].proc, &st, WNOHANG);
+                if (got == running[i].proc || (got < 0 && errno != EINTR)) {
+                    found = true;
+                    done = i;
+                    status = got < 0 ? 1 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+                }
+            }
+            if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+#endif
+        if (status != 0 && result == 0) result = status;
+        slots.give(running[done].slot);
+        running.erase(running.begin() + static_cast<std::ptrdiff_t>(done));
     }
     return result;
 }
