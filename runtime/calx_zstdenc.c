@@ -739,13 +739,21 @@ static cx_u64 tab_cost(const tab_t* t, const cx_u32* count, cx_u32 max) {
     return c >= COST_BAD ? ~(cx_u64)0 : c;
 }
 
-/* What a block leaves for the next: its Huffman codes, its three tables, its repeated offsets. */
+/* What a block leaves for the next: its Huffman code, its three tables, its repeated offsets. The
+ * code and the tables stay where they were made, in the job's slots (job_t), the predefined ones or
+ * the job's copy of a dictionary's, so a block that keeps them copies only where they are. */
 typedef struct {
     cx_u32 huf_ok, huf_log;
-    cx_u32 huf[256]; /* code | bits << 16, or 0 for a symbol without one */
-    tab_t ll, of, ml;
+    const cx_u32* huf; /* code | bits << 16, or 0 for a symbol without one */
+    const tab_t* ll;
+    const tab_t* of;
+    const tab_t* ml;
     cx_u32 rep[3];
 } ent_t;
+
+/* No code, and no table, as a job's first block starts with. */
+static const cx_u32 HUF_NONE[256];
+static const tab_t TAB_NONE;
 
 /* A sequence: its literals' length, its match's length, and its offset as the match finder coded
  * it, 1 to 3 for its repeated offsets and the distance plus 3 for a new one. If its block's
@@ -1065,15 +1073,21 @@ typedef struct job_s {
     cx_u8* blk;
     ent_t ent[2];
     int cur;
+    struct dict_ent_s* jd; /* a copy of the last dictionary's tables it had, or 0 */
     cx_u32* split; /* the block splitter's counts */
     cx_u8* htmp;   /* where the four Huffman streams are written */
     /* what comes out */
     cx_u8* out;
     cx_usize out_n, out_cap;
-    /* A block's codes, written before they're read: last, so a new job clears only what's before
-     * them, 13 KiB rather than 310. */
+    /* A block's codes, written before they're read, and the places for its tables: last, so a new
+     * job clears only what's before them, under 1 KiB rather than 313. */
     cx_u8 llc[SEQ_MAX], mlc[SEQ_MAX], ofc[SEQ_MAX];
     cx_u32 ofv[SEQ_MAX];
+    /* Where a block's new tables, literal lengths', offsets' and match lengths', and its new
+     * Huffman code go: of each kind's two, the one the block before's isn't in, so a block that
+     * comes out stored leaves the one before's as it was. */
+    tab_t tabs[3][2];
+    cx_u32 hufs[2][256];
 } job_t;
 
 /* --- the match finders ----------------------------------------------------------------------- */
@@ -2430,13 +2444,14 @@ static cx_u32 used_to(const cx_u32* c, cx_u32 k) {
 }
 
 /* The literals' section for lit[0..n): raw, one byte repeated, or Huffman-coded with a new tree or
- * the last block's, whichever is smallest. known is their counts, if the splitter has them. Gives
- * its size, or 0 if it doesn't fit. */
-static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx_usize n, int huf_allowed, const cx_u32* known, cx_u8* out, cx_usize cap, cx_u8* tmp) {
+ * the last block's, whichever is smallest. known is their counts, if the splitter has them. A new
+ * code is made in ct_new. Gives its size, or 0 if it doesn't fit. */
+static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx_usize n, int huf_allowed, const cx_u32* known, cx_u8* out, cx_usize cap, cx_u8* tmp,
+                             cx_u32* ct_new) {
     const cx_usize raw_head = n < 32 ? 1 : n < 4096 ? 2 : 3;
     next->huf_ok = prev->huf_ok;
     next->huf_log = prev->huf_log;
-    if (prev->huf_ok) memcpy(next->huf, prev->huf, sizeof next->huf);
+    next->huf = prev->huf;
     cx_u32 count[256] = {0};
     if (known) {
         memcpy(count, known, sizeof count);
@@ -2504,7 +2519,6 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
         const int use_old = old_ok && est_old <= est_new;
         const cx_usize est = use_old ? est_old : est_new;
         if ((use_old || tree_n) && est + 5 < n + raw_head) {
-            cx_u32 ct_new[256];
             const cx_u32* ct = prev->huf;
             if (!use_old) {
                 huf_codes(len, max, log, ct_new);
@@ -2541,7 +2555,7 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
                     if (head < 5) memmove(out + head, body, csize);
                     for (cx_usize k = 0; k < head; k++) out[k] = (cx_u8)(h >> (8 * k));
                     if (!use_old) {
-                        memcpy(next->huf, ct_new, sizeof next->huf);
+                        next->huf = ct_new;
                         next->huf_log = log;
                         next->huf_ok = 1;
                     }
@@ -2563,9 +2577,11 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
 static tab_t PRE_LL, PRE_OF, PRE_ML;
 
 /* Picks a table for one of the sequences' codes, count[0..max] of n: the predefined one, one symbol
- * repeated, the last block's, or one of its own at the accuracy that comes out smallest. Puts it in
- * *t, writes its description at out, and gives the mode; *took is the bytes. */
-static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx_u32* count, cx_u32 max, cx_u32 n, cx_u32 log_max, cx_u8* out, cx_usize* took) {
+ * repeated, the last block's, or one of its own at the accuracy that comes out smallest, made in
+ * `fresh`. Points *t at it, writes its description at out, and gives the mode; *took is the
+ * bytes. */
+static cx_u32 pick_table(const tab_t** t, tab_t* fresh, const tab_t* prev, const tab_t* pre, const cx_u32* count, cx_u32 max, cx_u32 n, cx_u32 log_max, cx_u8* out,
+                         cx_usize* took) {
     cx_u32 distinct = 0, one = 0;
     for (cx_u32 s = 0; s <= max; s++) {
         distinct += count[s] != 0;
@@ -2573,7 +2589,7 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     }
     *took = 0;
     if (distinct == 1 && prev->kind == T_RLE && prev->rle == one) {
-        *t = *prev;
+        *t = prev;
         return 3;
     }
     /* In 1/256 bits. */
@@ -2594,11 +2610,12 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     if (distinct == 1) {
         /* One symbol: a byte, and no bits for any of them. */
         if (8 * 256 < best) {
-            t->kind = T_RLE;
-            t->rle = one;
-            t->log = 0;
-            t->max = one;
-            build_rle(&t->ct, one);
+            fresh->kind = T_RLE;
+            fresh->rle = one;
+            fresh->log = 0;
+            fresh->max = one;
+            build_rle(&fresh->ct, one);
+            *t = fresh;
             out[0] = (cx_u8)one;
             *took = 1;
             return 1;
@@ -2631,7 +2648,7 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
     cx_u32 blog = 0;
     cx_u8 bdesc[128];
     cx_usize bdesc_n = 0;
-    int fresh = 0;
+    int made = 0;
     for (cx_u32 log = lo; log <= hi && log <= log_max; log++) {
         cx_i16 norm[64];
         const cx_u64 fc = normalize(count, max, n, log, norm);
@@ -2647,27 +2664,24 @@ static cx_u32 pick_table(tab_t* t, const tab_t* prev, const tab_t* pre, const cx
             blog = log;
             memcpy(bdesc, desc, dn);
             bdesc_n = dn;
-            fresh = 1;
+            made = 1;
         }
     }
-    if (mode == 2 && fresh) {
-        t->kind = T_FSE;
-        t->log = blog;
-        t->max = max;
-        memcpy(t->norm, bnorm, sizeof bnorm);
-        build_ct(&t->ct, t->norm, max, blog);
-        tab_costs(t);
+    if (mode == 2 && made) {
+        fresh->kind = T_FSE;
+        fresh->log = blog;
+        fresh->max = max;
+        memcpy(fresh->norm, bnorm, sizeof bnorm);
+        build_ct(&fresh->ct, fresh->norm, max, blog);
+        tab_costs(fresh);
+        *t = fresh;
         memcpy(out, bdesc, bdesc_n);
         *took = bdesc_n;
         return 2;
     }
 chosen:
-    if (mode == 3) {
-        *t = *prev;
-        return 3;
-    }
-    *t = *pre;
-    return 0;
+    *t = mode == 3 ? prev : pre;
+    return mode == 3 ? 3 : 0;
 }
 
 /* Counts the symbols in s[0..n), each below 64, into four tables at once so that runs of one
@@ -2716,6 +2730,9 @@ static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J,
         next->ml = prev->ml;
         return (cx_usize)(op - out);
     }
+    tab_t* const fl = prev->ll == &J->tabs[0][0] ? &J->tabs[0][1] : &J->tabs[0][0];
+    tab_t* const fo = prev->of == &J->tabs[1][0] ? &J->tabs[1][1] : &J->tabs[1][0];
+    tab_t* const fm = prev->ml == &J->tabs[2][0] ? &J->tabs[2][1] : &J->tabs[2][0];
     cx_u8* const llc = J->llc + s0;
     cx_u8* const mlc = J->mlc + s0;
     cx_u8* const ofc = J->ofc + s0;
@@ -2743,19 +2760,19 @@ static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J,
 #ifdef ZSE_CYCLES
     const cx_u64 c0 = __rdtsc();
 #endif
-    const cx_u32 lm = pick_table(&next->ll, &prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took);
+    const cx_u32 lm = pick_table(&next->ll, fl, prev->ll, &PRE_LL, lc, lmax, n, LL_LOG, op, &took);
     op += took;
-    const cx_u32 om = pick_table(&next->of, &prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took);
+    const cx_u32 om = pick_table(&next->of, fo, prev->of, &PRE_OF, oc, omax, n, OF_LOG, op, &took);
     op += took;
-    const cx_u32 mm = pick_table(&next->ml, &prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took);
+    const cx_u32 mm = pick_table(&next->ml, fm, prev->ml, &PRE_ML, mc, mmax, n, ML_LOG, op, &took);
     op += took;
 #ifdef ZSE_CYCLES
     zse_cycles[4] += __rdtsc() - c0;
 #endif
     *modes = (cx_u8)((lm << 6) | (om << 4) | (mm << 2));
-    const ct_t* const L = &next->ll.ct;
-    const ct_t* const O = &next->of.ct;
-    const ct_t* const M = &next->ml.ct;
+    const ct_t* const L = &next->ll->ct;
+    const ct_t* const O = &next->of->ct;
+    const ct_t* const M = &next->ml->ct;
     /* The bits, held in locals: at most 7 are left after each flush, and a sequence adds 26 for
      * its states and 16 for its literals' length before the first and 47 before the second. */
     cx_u8* p = op;
@@ -2814,9 +2831,9 @@ static inline __attribute__((always_inline)) cx_usize seq_section_with(job_t* J,
         }
         if (__builtin_expect(p > pend, 0)) return 0;
     }
-    ADD(xm - (1u << next->ml.log), next->ml.log);
-    ADD(xo - (1u << next->of.log), next->of.log);
-    ADD(xl - (1u << next->ll.log), next->ll.log);
+    ADD(xm - (1u << next->ml->log), next->ml->log);
+    ADD(xo - (1u << next->of->log), next->of->log);
+    ADD(xl - (1u << next->ll->log), next->ll->log);
     ADD(1, 1);
     FLUSH();
 #undef FSE
@@ -2884,7 +2901,8 @@ static cx_usize emit(job_t* J, const seq_t* seq, cx_u32 ns, const cx_u32* fin, c
 #ifdef ZSE_CYCLES
         const cx_u64 c0 = __rdtsc();
 #endif
-        const cx_usize ls = lit_section(prev, next, lit, nl, huf, known, tmp, BLOCK_ROOM, J->htmp);
+        cx_u32* const fresh = prev->huf == J->hufs[0] ? J->hufs[1] : J->hufs[0];
+        const cx_usize ls = lit_section(prev, next, lit, nl, huf, known, tmp, BLOCK_ROOM, J->htmp, fresh);
 #ifdef ZSE_CYCLES
         const cx_u64 c1 = __rdtsc();
         zse_cycles[2] += c1 - c0;
@@ -3476,10 +3494,21 @@ static void job_prefix(job_t* J) {
 #define DP_FSE 258
 #define DP_REP (258 + 3 * 130)
 
-static void dict_build(ent_t* e, const cx_u8* P) {
+#define DP_ALL (DP_REP + 12)
+
+/* A trained dictionary's tables, built, and the tables they were built from. */
+typedef struct dict_ent_s {
+    cx_u8 key[DP_ALL];
+    cx_u64 dkey; /* the dictionary's key, or 0 */
+    cx_u32 huf[256];
+    cx_u32 huf_log;
+    tab_t of, ml, ll;
+    cx_u32 rep[3];
+} dict_ent_t;
+
+static void dict_build(dict_ent_t* e, const cx_u8* P) {
     huf_codes(P, P[DP_HUF + 1], P[DP_HUF], e->huf);
     e->huf_log = P[DP_HUF];
-    e->huf_ok = 1;
     tab_t* const t[3] = {&e->of, &e->ml, &e->ll};
     for (int k = 0; k < 3; k++) {
         const cx_u8* const q = P + DP_FSE + 130 * k;
@@ -3831,53 +3860,51 @@ static void digest_keep(const job_t* J) {
 }
 
 /* A trained dictionary's tables, built: kept for the last DICT_ENT dictionaries, as building
- * them, three FSE tables and a Huffman code, costs more than all of a small input's matches. */
+ * them, three FSE tables and a Huffman code, costs more than all of a small input's matches. A job
+ * keeps a copy of the last it had, which a kept job's next frame with the same dictionary uses
+ * where it is. */
 #define DICT_ENT 4
-#define DP_ALL (DP_REP + 12)
-
-typedef struct {
-    cx_u8 key[DP_ALL];
-    cx_u64 dkey; /* the dictionary's key, or 0 */
-    cx_u32 huf[256];
-    cx_u32 huf_log;
-    tab_t of, ml, ll;
-    cx_u32 rep[3];
-} dict_ent_t;
 
 static dict_ent_t* dict_ents[DICT_ENT];
 static cx_u32 dict_ent_next;
 
+static int dict_is(const dict_ent_t* k, const cx_u8* P, cx_u64 dkey) { return dkey ? k->dkey == dkey : !memcmp(k->key, P, DP_ALL); }
+
+/* e starts with k's tables, which stay where they are. */
 static void dict_put(ent_t* e, const dict_ent_t* k) {
-    memcpy(e->huf, k->huf, sizeof e->huf);
+    e->huf = k->huf;
     e->huf_log = k->huf_log;
     e->huf_ok = 1;
-    e->of = k->of;
-    e->ml = k->ml;
-    e->ll = k->ll;
+    e->of = &k->of;
+    e->ml = &k->ml;
+    e->ll = &k->ll;
     for (int i = 0; i < 3; i++) e->rep[i] = k->rep[i];
 }
 
-static void dict_tables(ent_t* e, const cx_u8* P, cx_u64 dkey) {
+static void dict_tables(job_t* J, ent_t* e, const cx_u8* P, cx_u64 dkey) {
+    dict_ent_t* jd = J->jd;
+    if (jd && dict_is(jd, P, dkey)) {
+        dict_put(e, jd);
+        return;
+    }
+    if (!jd) jd = J->jd = (dict_ent_t*)job_mem(J, sizeof(dict_ent_t));
     digest_lock();
     for (int i = 0; i < DICT_ENT; i++) {
-        if (dict_ents[i] && (dkey ? dict_ents[i]->dkey == dkey : !memcmp(dict_ents[i]->key, P, DP_ALL))) {
-            dict_put(e, dict_ents[i]);
+        if (dict_ents[i] && dict_is(dict_ents[i], P, dkey)) {
+            *jd = *dict_ents[i];
             digest_unlock();
+            dict_put(e, jd);
             return;
         }
     }
     digest_unlock();
-    dict_build(e, P);
+    memcpy(jd->key, P, DP_ALL);
+    jd->dkey = dkey;
+    dict_build(jd, P);
+    dict_put(e, jd);
     dict_ent_t* const k = (dict_ent_t*)malloc(sizeof(dict_ent_t));
     if (!k) return;
-    memcpy(k->key, P, DP_ALL);
-    k->dkey = dkey;
-    memcpy(k->huf, e->huf, sizeof k->huf);
-    k->huf_log = e->huf_log;
-    k->of = e->of;
-    k->ml = e->ml;
-    k->ll = e->ll;
-    for (int i = 0; i < 3; i++) k->rep[i] = e->rep[i];
+    *k = *jd;
     digest_lock();
     const cx_u32 at = dict_ent_next++ % DICT_ENT;
     dict_ent_t* const old = dict_ents[at];
@@ -3948,7 +3975,8 @@ static void job_blocks(job_t* J) {
     ent_t* e = &J->ent[0];
     J->cur = 0;
     e->huf_ok = 0;
-    e->ll.kind = e->of.kind = e->ml.kind = T_NONE;
+    e->huf = HUF_NONE;
+    e->ll = e->of = e->ml = &TAB_NONE;
     /* The first job starts with the frame's repeated offsets, and a trained dictionary's tables and
      * offsets; the others can't know the ones the job before left, so they have none until their
      * matches make them. */
@@ -3956,7 +3984,7 @@ static void job_blocks(job_t* J) {
         e->rep[0] = 1;
         e->rep[1] = 4;
         e->rep[2] = 8;
-        if (J->dparams) dict_tables(e, J->dparams, J->dkey);
+        if (J->dparams) dict_tables(J, e, J->dparams, J->dkey);
     } else {
         e->rep[0] = e->rep[1] = e->rep[2] = 0;
     }
@@ -3987,6 +4015,8 @@ static void job_free(job_t* J) {
     if (J->htmp) job_unmem(J, J->htmp, 4 * HUF_ROOM);
     if (J->hash3) job_unmem(J, J->hash3, (cx_usize)4 << HASH3_LOG);
     if (J->mt) job_unmem(J, J->mt, MATCHES_MAX * sizeof(match_t));
+    if (J->jd) job_unmem(J, J->jd, sizeof(dict_ent_t));
+    J->jd = 0;
     if (J->opt) {
         job_unmem(J, J->st, sizeof(stats_t));
         job_unmem(J, J->opt, (OPT_NUM + 8) * sizeof(node_t));
