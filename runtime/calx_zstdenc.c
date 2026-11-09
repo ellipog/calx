@@ -1266,6 +1266,7 @@ static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
  * picks out the few positions worth reading the text at, nearly always just the right ones. Slot
  * 0 of the tags holds the head, so it comes into the cache with them. */
 #define ROW_SKIP 512 /* a match longer than this leaves most of its positions out */
+#define LAZY_SKIP 8  /* a step on a miss longer than this leaves the positions skipped out */
 
 static inline cx_u32 row_log(cx_u32 slog) { return slog < 4 ? 4 : slog > 6 ? 6 : slog; }
 
@@ -1300,6 +1301,7 @@ typedef struct {
     cx_u32 next_up; /* the rows have every position before this */
     cx_u32 wsize, tries;
     cx_u32 hc[8]; /* the hashes of the eight positions from next_up, by position mod 8 */
+    int skipping; /* in a stretch without matches: see mf_lazy */
 } rw_t;
 
 static inline void rw_load(rw_t* w, const job_t* J) {
@@ -1314,6 +1316,7 @@ static inline void rw_load(rw_t* w, const job_t* J) {
     w->next_up = J->next_up;
     w->wsize = J->wsize;
     w->tries = 1u << J->p.slog;
+    w->skipping = 0;
 }
 
 /* A position's hash: its row, and its tag in the low byte. */
@@ -1368,7 +1371,12 @@ static inline void row_insert(rw_t* w, cx_u32 target) {
 static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u32* off) {
     const cx_u8* const base = w->base;
     const cx_u32 cur = (cx_u32)(ip - base);
-    row_insert(w, cur);
+    if (w->skipping) {
+        w->next_up = cur;
+        w->hc[cur & 7] = row_hash(w, cur);
+    } else {
+        row_insert(w, cur);
+    }
     const cx_u32 rlog = w->rlog, rmask = w->rmask;
     const cx_u32 h = w->hc[cur & 7], at = (h >> 8) << rlog, hd = w->tags[at];
     cx_u64 m = row_tags(w->tags + at, h & 0xFF, rlog) & ~(cx_u64)1;
@@ -1390,7 +1398,7 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
      * search's. The candidates are taken already, so this search doesn't find it. */
     row_put(w, cur, h);
     w->next_up = cur + 1;
-    row_ahead(w, cur + 8);
+    if (!w->skipping) row_ahead(w, cur + 8);
     for (cx_u32 k = 0; k < nc; k++) {
         const cx_u32 cand = cands[k];
         const cx_u8* mp = base + cand;
@@ -1445,7 +1453,14 @@ static void mf_lazy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, int depth) {
             }
         }
         if (ml == 0) {
-            ip += ((cx_usize)(ip - anchor) >> 8) + 1;
+            /* On a miss it moves on further the longer it's been since the last match. Once that's
+             * more than LAZY_SKIP a time, the positions it moves over stop going into the rows,
+             * just the ones it looks at: a stretch that doesn't compress costs little more than
+             * the looking, as in libzstd 1.5.7, for a little less found in it later. The rows
+             * take every position again from the next match. */
+            const cx_usize step = ((cx_usize)(ip - anchor) >> 8) + 1;
+            ip += step;
+            w.skipping = step > LAZY_SKIP;
             continue;
         }
         /* Whether a match a byte or two on is worth more: its length, less the bits its offset
@@ -1491,6 +1506,10 @@ static void mf_lazy(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, int depth) {
             }
         }
     store:
+        if (w.skipping) {
+            w.skipping = 0;
+            row_refill(&w, w.next_up);
+        }
         ss_put(ss, r, anchor, (cx_u32)(mstart - anchor), off, ml);
         ip = mstart + ml;
         anchor = ip;
