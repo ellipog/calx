@@ -368,6 +368,13 @@ impl File {
         return self.named.copy()
     }
 
+    /// The system's handle to it, as Python's `fileno()`: a `HANDLE` on Windows and a file
+    /// descriptor on Linux, for passing to the system through `extern "C"`. It's the file's for as
+    /// long as it's open, and closing it any way but `close` is the program's mistake.
+    pub fn raw(self) -> i64 {
+        return self.handle
+    }
+
     /// Its size, modified time, permission bits and kind, as `metadata` reads them, from the
     /// file already open, which on Windows is quicker than opening it again by its path.
     pub fn metadata(self) -> Metadata ! FsError {

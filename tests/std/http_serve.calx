@@ -1,6 +1,7 @@
 // std.http.server's serve, on a thread of its own, answers from its worker threads (CLX-169): a
-// file bigger than 4 MiB sent in parts, byte for byte, its length for HEAD, a request that came
-// behind it on the same connection, and several connections at once.
+// big file sent by the system from the file (CLX-198), byte for byte, its length for HEAD, a
+// request that came behind it on the same connection, a second big file behind the first, which
+// goes in parts, and several connections at once.
 import std.fs.{make_dir_all, remove_dir_all, temp_dir, write}
 import std.http.server.{Server}
 import std.net.{Event, Net}
@@ -86,7 +87,7 @@ fn main() {
     let port = ports.wait()!
     let net = Net.new()!
 
-    // The big file, sent in parts.
+    // The big file, sent by the system from the file.
     let got = fetch(net, port, "GET /big.bin HTTP/1.1\r\nConnection: close\r\n\r\n", 9437184 + 1000)
     let end = head_end(got, 0)
     let (status, length) = status_and_length(got, 0, end)
@@ -105,6 +106,17 @@ fn main() {
     let e2 = head_end(two, e1 + l1)
     let (s2, l2) = status_and_length(two, e1 + l1, e2)
     println("{s1} {two[e1..e1 + l1] == big} {s2} {String.from_utf8(two[e2..e2 + l2]) ?? String()}")    // out: HTTP/1.1 200 OK true HTTP/1.1 200 OK small
+
+    // Two big files on one connection: the second is asked for while the system sends the first,
+    // so it goes in parts after it.
+    let three = fetch(net, port, "GET /big.bin HTTP/1.1\r\n\r\nGET /big.bin HTTP/1.1\r\n\r\nGET /small.txt HTTP/1.1\r\nConnection: close\r\n\r\n", 2 * 9437184 + 3000)
+    let f1 = head_end(three, 0)
+    let (_, m1) = status_and_length(three, 0, f1)
+    let f2 = head_end(three, f1 + m1)
+    let (_, m2) = status_and_length(three, f1 + m1, f2)
+    let f3 = head_end(three, f2 + m2)
+    let (_, m3) = status_and_length(three, f2 + m2, f3)
+    println("{three[f1..f1 + m1] == big} {three[f2..f2 + m2] == big} {String.from_utf8(three[f3..f3 + m3]) ?? String()}")    // out: true true small
 
     // Several connections at once.
     var answered = 0

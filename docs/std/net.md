@@ -62,8 +62,9 @@ fn main() {
 | `net.poll(timeout_ms: i64, events: mut List<Event>)` | Waits up to `timeout_ms` milliseconds for something to happen, or forever if it's negative, and replaces what's in `events` with what happened. It returns as soon as there's an event, so `events` is empty only once the time is up: the runtime's own work, such as finishing a send or a close, doesn't end the wait |
 | `net.read(conn: Conn, buf: mut List<u8>) -> usize` | Moves every byte that has arrived on the connection onto the end of `buf`, and returns how many there were |
 | `net.write(conn: Conn, bytes: List<u8>)` | Queues the bytes to send. They go to the system at the next poll or `flush`, with everything else queued on the connection since the last, then as soon as the socket takes them |
+| `net.send_file(conn: Conn, file: File, at: u64, n: u64) -> bool` | Queues `n` bytes of the open [`File`](fs.md), from byte `at`, after what's queued. The system sends them from the file, without them passing through the program ([below](#sending-files)). `false` if the connection is sending a file already, or is closing |
 | `net.flush()` | Sends what was queued on every connection now, rather than at the next poll |
-| `net.queued(conn: Conn) -> usize` | How many bytes queued on the connection the system hasn't taken yet, so something big can be sent in parts, the next queued once most of the last has gone. 0 once it's closed |
+| `net.queued(conn: Conn) -> usize` | How many bytes queued on the connection the system hasn't taken yet, a file's too, so something big can be sent in parts, the next queued once most of the last has gone. 0 once it's closed |
 | `net.close(conn: Conn)` | Sends what was queued on the connection, then closes it |
 | `net.waker() -> Waker ! NetError` | A `Waker` for the `Net`'s polls |
 | `Waker` | Wakes a `Net`'s poll from another thread. It's `Copy` and `Send`, and every copy wakes the same `Net` |
@@ -96,6 +97,60 @@ Bytes written before `Connected` wait until the connection opens. Bytes written 
 Writes wait for the next poll so that a program that writes many times between polls, such as a server sending a tick's packets, hands the system each connection's bytes once, in one send. `flush` sends them sooner, and `close` sends the connection's first.
 
 A `close` is graceful: the other side gets every byte queued before it, then the end of the stream, not a reset. On Windows that means cancelling the receive the runtime keeps pending, and closing the socket once it comes back, since closing it with a receive pending resets the connection.
+
+## Sending files
+
+`send_file` sends part of a file the way Python's `socket.sendfile` and Java's `FileChannel.transferTo` do: the system copies it from the file to the connection, so the program neither reads it nor holds it in memory, however big it is.
+
+```calx
+import std.fs.{open_read, remove_dir_all, temp_dir, write}
+import std.net.{Conn, Event, Net}
+
+// A file sent after a line saying how long it is, then the connection closed once it's gone.
+fn send_whole(net: Net, c: Conn, path: String) {
+    let f = open_read(path)!
+    let size = f.metadata()!.size
+    net.write(c, "{size}\n".to_bytes())
+    if not net.send_file(c, f, 0, size) {
+        net.write(c, f.read_part(0, usize.wrap(size))!)
+    }
+    f.close()!
+    net.close(c)
+}
+
+// The program sends a file to itself.
+fn main() {
+    let dir = temp_dir()!
+    write("{dir}/hello.txt", "Hello from a file".to_bytes())!
+    let net = Net.new()!
+    let port = net.listen("127.0.0.1", 0)!
+    let client = net.connect("127.0.0.1", port)!
+    var got = List<u8>()
+    var events = List<Event>()
+    var done = false
+    while not done {
+        net.poll(1000, mut events)
+        for e in events {
+            match e {
+                Accepted(c) => send_whole(net, c, "{dir}/hello.txt"),
+                Received(c) => {
+                    _ = net.read(c, mut got)
+                },
+                Closed(c) => done = c.id() == client.id(),
+                _ => {},
+            }
+        }
+    }
+    let lines = (String.from_utf8(got) ?? String()).lines()
+    println("{lines[0]} bytes: {lines[1]}")    // out: 17 bytes: Hello from a file
+    remove_dir_all(dir)!
+}
+```
+
+- **In order.** The file goes after what was written before it, and what's written while it goes waits in the runtime and follows it.
+- **One at a time.** A connection sends one file at a time, and `send_file` is `false` while it's sending one, so a second file has to wait, or go another way. [`queued`](#items) counts what's left of it.
+- **Its own handle.** The runtime sends from a copy of the file's handle, so the program can close the `File` as soon as `send_file` returns.
+- **A short file.** The length is the program's to know. If the file ends before `at + n`, the connection closes where it ends, since the other side would wait for the rest forever.
 
 ## Addresses
 
@@ -204,10 +259,12 @@ The runtime keeps each connection's bytes: what arrived and hasn't been read, an
 
 | Platform | Source |
 | --- | --- |
-| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv` and `WSASend`, gathered with `GetQueuedCompletionStatusEx` |
-| Linux | Edge-triggered `epoll`, with `accept4` and non-blocking `recv` and `send` |
+| Windows | An I/O completion port: `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend` and `TransmitFile`, gathered with `GetQueuedCompletionStatusEx` |
+| Linux | Edge-triggered `epoll`, with `accept4`, and non-blocking `recv`, `send` and `sendfile` |
 
 What's written is queued, and handed to the system at the next poll or flush: one `WSASend` or `send` a connection, however many writes there were. A wake is a completion posted to the port with `PostQueuedCompletionStatus` on Windows, and a write to an `eventfd` that epoll watches on Linux, made with the first `waker`. A flag set and cleared atomically makes the wakes before a poll one.
+
+A file goes once what was queued before it has gone, at most 1 GiB a call, from a handle copied with `DuplicateHandle` or `dup`; what's written meanwhile is kept apart and goes after it. Windows editions for desktops, rather than servers, run two `TransmitFile` calls at once and queue the rest, which the system does on its own.
 
 Both read up to 16 KB at a time per connection. A listening socket on Windows uses `SO_EXCLUSIVEADDRUSE`, so a second listener on the same port fails with `AddressInUse` on both platforms.
 

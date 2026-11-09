@@ -63,7 +63,7 @@ fn main() ! Error {
 | `server.url() -> String` | The address to open in a browser: `http://127.0.0.1:8000/` |
 | `server.next(timeout_ms: i64 = -1) -> Request?` | The next request, from whichever connection has one, waiting up to `timeout_ms` milliseconds for it, or forever if it's negative. `none` if none came in that time |
 | `server.respond(req: Request, res: Response)` | Sends `res` as the answer to `req` |
-| `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files read on worker threads and big ones sent in parts ([below](#serving-a-folder)) |
+| `server.serve(dir: String)` | The folder `dir` served on this server until the program is stopped, as `serve_dir` serves it, with its files opened on worker threads and big ones sent by the system from the file ([below](#serving-a-folder)) |
 | `Request` | `method`, `GET` or `POST` or another, as it was sent. `target`, the path and query still percent-encoded: `/find?q=a%20b`. `path`, decoded, without the query: `/find`. `query`, what's after the `?`, as it was sent. `version`, `HTTP/1.1` or `HTTP/1.0`. `headers: List<Header>`, in the order they came. `body: List<u8>`. And `client`, the address it came from |
 | `req.header(name: String) -> String?` | The first header named `name`, in any case |
 | `req.text() -> String?` | The body as text, or `none` if it isn't UTF-8 |
@@ -111,7 +111,7 @@ Some requests are answered by the server itself, without coming from `next`, and
 `serve_dir`, and `serve` on a server of the program's own, answer as `from_dir` does, but not one at a time:
 
 - **Worker threads.** Files are opened, looked at and read on worker threads, one for each processor up to 8, which hand each answer back to the event loop. So many requests are answered at once, and a slow disk holds up only the requests waiting on it.
-- **Big files in parts.** A file bigger than 4 MiB isn't read whole. Its headers go first, then its bytes 1 MiB at a time, topped up as the connection takes them, with at most 4 MiB queued on each connection. So the memory a download takes doesn't grow with the file, and a request that comes behind it on the same connection is answered after it. A `HEAD` request gets the file's length without its bytes being read, from `from_dir` too.
+- **Big files from the file.** A file of 64 KiB or more isn't read. Its headers go first, then the system sends its bytes from the file, with [`Net.send_file`](net.md#sending-files), so the memory a download takes doesn't grow with the file. A request that comes behind it on the same connection is answered after it, and if that's a big file too, it's read and sent 1 MiB at a time, with at most 4 MiB queued on the connection. A `HEAD` request gets the file's length without its bytes being read, from `from_dir` too.
 
 They print a first line saying where, and log each request to standard error as Python's `log_message` does, unless `log` is `false`:
 
@@ -126,7 +126,7 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 - **Threads.** A program's own loop gets requests one at a time, in the thread that calls `next`, so a slow answer holds up the rest. `serve_dir` reads files on up to 8 worker threads. Python's `ThreadingHTTPServer`, which `python -m http.server` runs, gives each connection a thread.
 - **Kept open.** It speaks HTTP/1.1 and keeps connections open. Python's handler speaks HTTP/1.0 unless it's set otherwise, and closes each connection after one answer.
 - **Types.** They come from a table of 52 extensions, the same on every machine, and text types are given with `; charset=utf-8`. Python's come from `mimetypes`, which on Windows also reads the registry, so they can differ from machine to machine.
-- **Whole files from `from_dir`.** `from_dir` reads a file whole, so a program's own loop needs a file's size in memory to send it. `serve_dir` sends files bigger than 4 MiB in parts, as Python does.
+- **Whole files from `from_dir`.** `from_dir` reads a file whole, so a program's own loop needs a file's size in memory to send it. `serve_dir` has the system send files of 64 KiB or more from the file.
 - **No HTTPS.** Python 3.14's `--tls-cert` has no match here yet.
 - **A zero byte.** A path with `%00` in it gets `404`. Python's handler raises an error at it and closes the connection without an answer.
 - **Pages.** Error pages and folder listings are its own short HTML, with the same statuses, links and names as Python's.
@@ -161,11 +161,11 @@ These numbers are from our benchmark, so take them as rough:
 
 | Requests a second | Calx | Calx before | Python | Rust |
 | --- | --- | --- | --- | --- |
-| A 1 KB file | 39,400 | 20,500 | 3,630 | 20,400 |
-| A 1 MB file | 2,370 | 2,250 | 3,300 | 5,410 |
-| A 64 MB file | 30 | 33 | 87 | 75 |
-| Most memory, all three | 152 MB | 2,120 MB | 60 MB | 17 MB |
+| A 1 KB file | 40,400 | 40,900 | 3,670 | 20,600 |
+| A 1 MB file | 8,400 | 2,660 | 3,300 | 5,440 |
+| A 64 MB file | 64 | 34 | 86 | 76 |
+| Most memory, all three | 36 MB | 157 MB | 61 MB | 14 MB |
 
-- *Calx before* is the same requests answered one at a time on the event loop's thread, each file read whole, as `serve` did before it had workers. Its 64 MB file needed 64 MB for each connection.
-- A small file costs its open, its look and its close, which on Windows take most of the time, so the workers serve twice as many. Each file is opened once, and asked its size and time.
-- Big files are bounded by the event loop's thread, which copies each byte into the connection's queue before the system sends it: about 2.4 GB a second. Python's threads and tokio's each copy their own connections' bytes, and send faster.
+- *Calx before* is `serve` before it sent files with `send_file`: workers read files up to 4 MiB whole, and the event loop's thread read bigger ones in parts and copied them into each connection's queue. Sending from the file is 3 times as fast for the 1 MB file, and takes a quarter of the memory.
+- A small file costs its open, its look and its close, which on Windows take most of the time. Each file is opened once, and asked its size and time.
+- The 64 MB file is slower than in Python and Rust, which read and send it on 16 threads and 8. Windows editions for desktops run only two `TransmitFile` calls at once, and queue the rest. This row also varied the most between runs, from 50 to 76 for Calx.

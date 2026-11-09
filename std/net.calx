@@ -6,6 +6,8 @@
 /// `write` queued until the socket takes it, so nothing here waits for the network except `poll`.
 module std.net
 
+import std.fs.{File}
+
 extern "C" {
     fn cx_net_open() -> u64
     fn cx_net_listen(net: u64, host: *const u8, len: usize, port: u16) -> i32
@@ -17,6 +19,7 @@ extern "C" {
     fn cx_net_read(net: u64, conn: u32, to: *u8, n: usize) -> usize
     fn cx_net_send(net: u64, conn: u32, from: *const u8, n: usize)
     fn cx_net_queued(net: u64, conn: u32) -> usize
+    fn cx_net_send_file(net: u64, conn: u32, file: i64, at: u64, len: u64) -> bool
     fn cx_net_close(net: u64, conn: u32)
     fn cx_net_flush(net: u64)
     fn cx_net_waker(net: u64) -> bool
@@ -298,6 +301,16 @@ impl Net {
     /// that has closed.
     pub fn queued(self, conn: Conn) -> usize {
         return unsafe { cx_net_queued(self.handle, conn.number) }
+    }
+
+    /// Queues `n` bytes of `file`, from byte `at`, to send on the connection after what's queued
+    /// on it. The system sends them from the file without them passing through the program:
+    /// TransmitFile on Windows, sendfile on Linux. The runtime keeps its own handle to the file,
+    /// so `file` can be closed at once. What's written while it goes is sent after it. `false` if
+    /// the connection is sending a file already, or is closing or closed. A file shorter than the
+    /// range closes the connection when its end is reached.
+    pub fn send_file(self, conn: Conn, file: File, at: u64, n: u64) -> bool {
+        return unsafe { cx_net_send_file(self.handle, conn.number, file.raw(), at, n) }
     }
 
     /// Queues the bytes to send on the connection. They go to the system at the next poll or

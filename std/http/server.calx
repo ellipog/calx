@@ -130,8 +130,10 @@ struct Client {
     continued: bool
 }
 
-/// A file bigger than this, 4 MiB, `serve` sends in parts rather than reading it whole.
-const STREAM_FROM: u64 = 4194304
+/// A file of this size or more, 64 KiB, `serve` doesn't read: it leaves the system to send it
+/// from the file, with `Net.send_file`, or sends it in parts if the connection is sending a file
+/// already.
+const SEND_FROM: u64 = 65536
 /// A part of a file `serve` sends, 1 MiB, and how much it keeps queued on a connection, 4 MiB.
 const STREAM_PART: u64 = 1048576
 const STREAM_QUEUED: usize = 4194304
@@ -181,7 +183,7 @@ enum Served {
 }
 
 // A thread that answers requests from the folder `dir`, as `from_dir` does but for big files,
-// which it opens and leaves to be sent in parts, and hands each answer back, waking the poll.
+// which it opens and leaves to be sent from the file, and hands each answer back, waking the poll.
 struct FileWorker {
     jobs: Receiver<Request>
     out: Sender<Served>
@@ -192,7 +194,7 @@ struct FileWorker {
 impl Task for FileWorker {
     fn run(own self) {
         while let req = self.jobs.wait() {
-            match answer_dir(self.dir, req, STREAM_FROM) {
+            match answer_dir(self.dir, req, SEND_FROM - 1) {
                 Whole(res) => self.out.send(Served.Whole(req, res)),
                 Head(res, f, size) => self.out.send(Served.Head(req, res, f, size)),
             }
@@ -333,9 +335,9 @@ impl Server {
     /// The folder `dir` served until the program is stopped, as `serve_dir` serves it, after a
     /// line saying where to find it, for a server that's already listening. Files are opened and
     /// read on worker threads, one for each processor up to 8, so many are served at once, and a
-    /// file bigger than 4 MiB is sent in parts as the connection takes them, so the memory it
-    /// takes doesn't grow with the file. Each request is logged to standard error, unless `log` is
-    /// false, which leaves out the line too.
+    /// file of 64 KiB or more isn't read: the system sends it from the file, with
+    /// `Net.send_file`, so the memory it takes doesn't grow with the file. Each request is logged
+    /// to standard error, unless `log` is false, which leaves out the line too.
     pub fn serve(mut self, dir: String) {
         if self.log {
             let shown = if self.host.is_empty() { String("every address") } else { self.host.copy() }
@@ -400,7 +402,10 @@ impl Server {
         }
     }
 
-    // The head of `res`, the response to `req`, sent, then the file `f`'s `size` bytes in parts.
+    // The head of `res`, the response to `req`, sent, then the file `f`'s `size` bytes: by the
+    // system from the file, or in parts if the connection is sending a file already. The system's
+    // way, the runtime keeps what's written after the file behind it, so the connection's next
+    // request can be answered at once.
     fn start_stream(mut self, req: Request, res: Response, f: own File, size: u64) {
         let id = req.conn.id()
         if not self.clients.contains(id) or not self.clients[id].busy {
@@ -410,6 +415,16 @@ impl Server {
         let keep = keeps_open(req, res)
         let head = self.head_of(res, keep)
         self.net.write(req.conn, head.to_bytes())
+        if self.net.send_file(req.conn, f, 0, size) {
+            close_quietly(f)
+            if not keep {
+                self.net.close(req.conn)
+            } else {
+                self.clients[id].busy = false
+                self.ready.push_last(id)
+            }
+            return
+        }
         self.streams.push(Stream { conn: req.conn, file: f, at: 0, left: size, keep: keep })
     }
 
@@ -995,7 +1010,8 @@ pub fn from_dir(dir: String, req: Request) -> Response {
     }
 }
 
-// `from_dir`'s answer, with a file bigger than `stream_from` bytes left open to be sent in parts.
+// `from_dir`'s answer, with a file bigger than `stream_from` bytes left open to be sent after the
+// head.
 fn answer_dir(dir: String, req: Request, stream_from: u64) -> Answer {
     if req.method != "GET" and req.method != "HEAD" {
         return Answer.Whole(Response.error(501, "Unsupported method ({req.method})"))
@@ -1069,7 +1085,7 @@ fn answer_dir(dir: String, req: Request, stream_from: u64) -> Answer {
 
 // The file `f`, open at `path`, as the answer to `req`, closed after it's read. A `HEAD` request
 // gets its length without its bytes being read, and one bigger than `stream_from` bytes is left
-// open to be sent in parts after the head.
+// open to be sent after the head.
 fn serve_file(f: own File, path: String, req: Request, stream_from: u64) -> Answer {
     var meta = Metadata { size: 0, modified: Timestamp { unix_ms: 0 }, mode: 0, kind: Kind.Other }
     match f.metadata() {

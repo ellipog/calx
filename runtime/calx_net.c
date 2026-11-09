@@ -11,6 +11,11 @@
  * connection between two polls goes to the system at once: one `WSASend` or `send` for many
  * writes, which a server that writes many packets a tick needs.
  *
+ * `send_file` queues a range of an open file after what's queued: the system sends it from the
+ * file without it passing through the program, with TransmitFile on Windows and sendfile on
+ * Linux, from a copy of the file's handle. What's written while it goes waits in `after`, and goes
+ * once the file has. A connection sends one file at a time.
+ *
  * A connection's id is its slot in the poller and the slot's generation, so a stale id never
  * reaches a newer connection in the same slot. A slot is reused only after the poll that
  * reported its `Closed` event, and, on Windows, once the system has returned every operation.
@@ -33,6 +38,7 @@
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -105,7 +111,7 @@ static void buf_free(net_buf* b) {
 typedef struct net_slot net_slot;
 
 #ifdef _WIN32
-enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT };
+enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CONNECT, OP_FILE };
 typedef struct {
     OVERLAPPED ov;
     net_slot* slot;
@@ -121,6 +127,14 @@ struct net_slot {
     int dirty;     /* bytes were queued since the last flush */
     int reported;  /* a poll before this one returned its Closed event */
     net_buf in, out;
+    net_buf after;  /* what was queued while a file is being sent, which goes after it */
+    int has_file;   /* a file is being sent: `file`, from `file_at`, `file_left` bytes */
+    cx_u64 file_at, file_left;
+#ifdef _WIN32
+    HANDLE file;
+#else
+    int file;
+#endif
     struct sockaddr_storage peer;  /* the other end, from when it opened */
     int has_peer;
 #ifdef _WIN32
@@ -213,7 +227,31 @@ static net_slot* new_slot(net* n, int kind) {
     return s;
 }
 
+/* Closes the copy of the handle of the file a connection was sending, if it was. */
+static void drop_file(net_slot* s) {
+    if (!s->has_file) return;
+#ifdef _WIN32
+    CloseHandle(s->file);
+#else
+    close(s->file);
+#endif
+    s->has_file = 0;
+    s->file_left = 0;
+}
+
+/* The file is sent: what was queued while it went goes next. `out` is empty then, since the file
+ * only starts once it is. */
+static void file_done(net_slot* s) {
+    drop_file(s);
+    net_buf t = s->out;
+    s->out = s->after;
+    s->after = t;
+    s->after.len = s->after.at = 0;
+}
+
 static void release_slot(net* n, net_slot* s) {
+    drop_file(s);
+    buf_free(&s->after);
     buf_free(&s->in);
     buf_free(&s->out);
 #ifdef _WIN32
@@ -342,6 +380,7 @@ static size_t deliver(net* n) {
 
 static LPFN_ACCEPTEX accept_ex;
 static LPFN_CONNECTEX connect_ex;
+static LPFN_TRANSMITFILE transmit_file;
 static volatile LONG wsa_ready; /* 0, 1 while starting, 2 when started */
 
 static int net_start(void) {
@@ -352,10 +391,11 @@ static int net_start(void) {
             return 0;
         }
         SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-        GUID a = WSAID_ACCEPTEX, c = WSAID_CONNECTEX;
+        GUID a = WSAID_ACCEPTEX, c = WSAID_CONNECTEX, t = WSAID_TRANSMITFILE;
         DWORD got;
         WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &a, sizeof a, &accept_ex, sizeof accept_ex, &got, NULL, NULL);
         WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &c, sizeof c, &connect_ex, sizeof connect_ex, &got, NULL, NULL);
+        WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &t, sizeof t, &transmit_file, sizeof transmit_file, &got, NULL, NULL);
         closesocket(s);
         InterlockedExchange(&wsa_ready, 2);
     }
@@ -410,10 +450,27 @@ static void post_recv(net* n, net_slot* s) {
     s->receiving = 1;
 }
 
+/* The next part of the file being sent, at its offset, at most 1 GiB at a time. */
+static void post_file(net* n, net_slot* s) {
+    DWORD want = s->file_left > ((cx_u64)1 << 30) ? (DWORD)1 << 30 : (DWORD)s->file_left;
+    op_reset(&s->sop, s, OP_FILE);
+    s->sop.ov.Offset = (DWORD)s->file_at;
+    s->sop.ov.OffsetHigh = (DWORD)(s->file_at >> 32);
+    if (!transmit_file(s->s, s->file, want, 0, &s->sop.ov, NULL, 0) && WSAGetLastError() != WSA_IO_PENDING) {
+        lost(n, s);
+        return;
+    }
+    s->pending++;
+    s->sending = 1;
+}
+
 static void post_send(net* n, net_slot* s) {
     if (s->sending || s->state == CONN_CONNECTING || s->state == CONN_CLOSED) return;
     if (!buf_live(&s->fly)) {
-        if (!buf_live(&s->out)) return;
+        if (!buf_live(&s->out)) {
+            if (s->has_file) post_file(n, s);
+            return;
+        }
         net_buf t = s->fly;
         s->fly = s->out;
         s->out = t;
@@ -521,6 +578,20 @@ static void completed(net* n, OVERLAPPED_ENTRY* e) {
             }
             s->fly.at += bytes;
             if (s->fly.at >= s->fly.len) s->fly.at = s->fly.len = 0;
+            post_send(n, s);
+            if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
+            break;
+        case OP_FILE:
+            s->sending = 0;
+            if (s->state == CONN_CLOSED) break;
+            /* A file shorter than the range would leave the other end waiting for the rest. */
+            if (!ok || bytes == 0) {
+                lost(n, s);
+                break;
+            }
+            s->file_at += bytes;
+            s->file_left -= bytes < s->file_left ? bytes : s->file_left;
+            if (!s->file_left) file_done(s);
             post_send(n, s);
             if (s->state == CONN_CLOSING && !s->sending) finish(n, s);
             break;
@@ -703,20 +774,44 @@ static void lost(net* n, net_slot* s) {
 
 static void flush(net* n, net_slot* s) {
     if (s->state == CONN_CONNECTING || s->state == CONN_CLOSED) return;
-    while (s->writable && buf_live(&s->out)) {
-        ssize_t r = send(s->fd, s->out.p + s->out.at, buf_live(&s->out), MSG_NOSIGNAL);
-        if (r > 0) {
-            s->out.at += (size_t)r;
-        } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            s->writable = 0;
-        } else if (r < 0 && errno == EINTR) {
-            continue;
-        } else {
-            lost(n, s);
-            return;
+    for (;;) {
+        while (s->writable && buf_live(&s->out)) {
+            ssize_t r = send(s->fd, s->out.p + s->out.at, buf_live(&s->out), MSG_NOSIGNAL);
+            if (r > 0) {
+                s->out.at += (size_t)r;
+            } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                s->writable = 0;
+            } else if (r < 0 && errno == EINTR) {
+                continue;
+            } else {
+                lost(n, s);
+                return;
+            }
         }
+        if (buf_live(&s->out) || !s->has_file) break;
+        s->out.at = s->out.len = 0;
+        while (s->writable && s->file_left) {
+            off_t at = (off_t)s->file_at;
+            size_t want = s->file_left > ((cx_u64)1 << 30) ? (size_t)1 << 30 : (size_t)s->file_left;
+            ssize_t r = sendfile(s->fd, s->file, &at, want);
+            if (r > 0) {
+                s->file_at += (cx_u64)r;
+                s->file_left -= (cx_u64)r;
+            } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                s->writable = 0;
+            } else if (r < 0 && errno == EINTR) {
+                continue;
+            } else {
+                /* An error, or a file shorter than the range, which would leave the other end
+                 * waiting for the rest. */
+                lost(n, s);
+                return;
+            }
+        }
+        if (s->file_left) break;
+        file_done(s);
     }
-    if (!buf_live(&s->out)) {
+    if (!buf_live(&s->out) && !s->has_file) {
         s->out.at = s->out.len = 0;
         if (s->state == CONN_CLOSING) lost(n, s);
     }
@@ -967,6 +1062,8 @@ void cx_net_free(cx_u64 h) {
     close_all(n);
     for (size_t i = 0; i < n->nslots; i++) {
         net_slot* s = n->slots[i];
+        drop_file(s);
+        buf_free(&s->after);
         buf_free(&s->in);
         buf_free(&s->out);
 #ifdef _WIN32
@@ -1020,11 +1117,11 @@ cx_usize cx_net_queued(cx_u64 h, cx_u32 id) {
     net_check_thread();
     net_slot* s = conn_of((net*)(uintptr_t)h, id);
     if (!s) return 0;
+    cx_u64 left = buf_live(&s->out) + buf_live(&s->after) + s->file_left;
 #ifdef _WIN32
-    return buf_live(&s->out) + buf_live(&s->fly);
-#else
-    return buf_live(&s->out);
+    left += buf_live(&s->fly);
 #endif
+    return (cx_usize)left;
 }
 
 void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
@@ -1032,12 +1129,44 @@ void cx_net_send(cx_u64 h, cx_u32 id, const cx_u8* p, cx_usize len) {
     net* n = (net*)(uintptr_t)h;
     net_slot* s = conn_of(n, id);
     if (!s || len == 0 || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return;
-    buf_append(&s->out, p, len);
+    buf_append(s->has_file ? &s->after : &s->out, p, len);
     if (!s->dirty) {
         s->dirty = 1;
         n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
         n->dirty[n->ndirty++] = s->index;
     }
+}
+
+/* Queues `n` bytes of the open file `file`, from `at`, after what's queued: 0 if the connection is
+ * sending a file already, is closing, or the handle can't be copied. The copy is the runtime's,
+ * so the program may close its own at once. */
+cx_bool cx_net_send_file(cx_u64 h, cx_u32 id, cx_i64 file, cx_u64 at, cx_u64 len) {
+    net_check_thread();
+    net* n = (net*)(uintptr_t)h;
+    net_slot* s = conn_of(n, id);
+    if (!s || s->has_file || s->state == CONN_CLOSED || s->state == CONN_CLOSING) return 0;
+    if (len == 0) return 1;
+#ifdef _WIN32
+    if (!transmit_file) return 0;
+    HANDLE copy;
+    if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)(intptr_t)file, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        return 0;
+    }
+    s->file = copy;
+#else
+    int copy = dup((int)file);
+    if (copy < 0) return 0;
+    s->file = copy;
+#endif
+    s->has_file = 1;
+    s->file_at = at;
+    s->file_left = len;
+    if (!s->dirty) {
+        s->dirty = 1;
+        n->dirty = net_grow(n->dirty, &n->dirty_cap, n->ndirty + 1, sizeof(cx_u32));
+        n->dirty[n->ndirty++] = s->index;
+    }
+    return 1;
 }
 
 /* Sends what was queued on every connection, without waiting for the next poll. */
@@ -1102,7 +1231,7 @@ void cx_net_close(cx_u64 h, cx_u32 id) {
 #else
     flush(n, s);
     if (s->state == CONN_CLOSED) return;
-    if (!buf_live(&s->out)) lost(n, s);
+    if (!buf_live(&s->out) && !s->has_file) lost(n, s);
     else s->state = CONN_CLOSING;
 #endif
 }
