@@ -176,27 +176,27 @@ In WSL on the same machine:
 
 | Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- |
-| -1 | 31.6 ms | 35.9 ms | 33.7 ms | 6,300,983 | 6,306,781 |
-| 1 | 33.0 ms | 37.4 ms | 34.9 ms | 5,343,024 | 5,347,922 |
-| 2 | 38.0 ms | 41.3 ms | 38.3 ms | 5,076,674 | 5,078,988 |
-| 3 | 45.7 ms | 48.4 ms | 46.3 ms | 4,768,200 | 4,753,525 |
-| 4 | 50.9 ms | 52.9 ms | 51.7 ms | 4,739,233 | 4,723,978 |
-| 5 | 86.0 ms | 98.3 ms | 91.1 ms | 4,428,895 | 4,455,092 |
-| 6 | 126 ms | 139 ms | 129 ms | 4,262,124 | 4,282,647 |
-| 7 | 146 ms | 160 ms | 151 ms | 4,177,967 | 4,202,757 |
-| 8 | 189 ms | 206 ms | 195 ms | 4,125,037 | 4,152,012 |
-| 9 | 198 ms | 221 ms | 204 ms | 4,089,886 | 4,120,710 |
-| 10 | 273 ms | 328 ms | 322 ms | 4,027,641 | 4,067,118 |
-| 11 | 344 ms | 480 ms | 467 ms | 3,989,836 | 4,035,545 |
-| 12 | 395 ms | 525 ms | 508 ms | 3,986,351 | 4,033,230 |
-| 13 | 1,243 ms | 1,318 ms | 1,223 ms | 3,984,004 | 3,985,152 |
-| 14 | 1,630 ms | 1,702 ms | 1,658 ms | 3,943,434 | 3,944,077 |
-| 15 | 2,013 ms | 2,373 ms | 2,285 ms | 3,912,630 | 3,917,800 |
-| 16 | 2,542 ms | 2,828 ms | 2,719 ms | 3,714,554 | 3,704,873 |
-| 17 | 2,956 ms | 3,614 ms | 3,316 ms | 3,642,793 | 3,647,661 |
-| 18 | 3,194 ms | 4,505 ms | 4,221 ms | 3,636,289 | 3,613,289 |
+| -1 | 31.6 ms | 35.9 ms | 33.7 ms | 6,308,516 | 6,306,781 |
+| 1 | 33.0 ms | 37.4 ms | 34.9 ms | 5,344,051 | 5,347,922 |
+| 2 | 38.0 ms | 41.3 ms | 38.3 ms | 5,078,746 | 5,078,988 |
+| 3 | 45.7 ms | 48.4 ms | 46.3 ms | 4,768,087 | 4,753,525 |
+| 4 | 50.9 ms | 52.9 ms | 51.7 ms | 4,739,796 | 4,723,978 |
+| 5 | 86.0 ms | 98.3 ms | 91.1 ms | 4,428,338 | 4,455,092 |
+| 6 | 126 ms | 139 ms | 129 ms | 4,261,638 | 4,282,647 |
+| 7 | 146 ms | 160 ms | 151 ms | 4,177,353 | 4,202,757 |
+| 8 | 189 ms | 206 ms | 195 ms | 4,125,359 | 4,152,012 |
+| 9 | 198 ms | 221 ms | 204 ms | 4,090,262 | 4,120,710 |
+| 10 | 273 ms | 328 ms | 322 ms | 4,028,417 | 4,067,118 |
+| 11 | 344 ms | 480 ms | 467 ms | 3,989,654 | 4,035,545 |
+| 12 | 395 ms | 525 ms | 508 ms | 3,989,654 | 4,033,230 |
+| 13 | 1,243 ms | 1,318 ms | 1,223 ms | 3,978,696 | 3,985,152 |
+| 14 | 1,630 ms | 1,702 ms | 1,658 ms | 3,938,434 | 3,944,077 |
+| 15 | 2,013 ms | 2,373 ms | 2,285 ms | 3,912,624 | 3,917,800 |
+| 16 | 2,542 ms | 2,828 ms | 2,719 ms | 3,701,167 | 3,704,873 |
+| 17 | 2,956 ms | 3,614 ms | 3,316 ms | 3,632,305 | 3,647,661 |
+| 18 | 3,194 ms | 4,505 ms | 4,221 ms | 3,625,656 | 3,613,289 |
 | 19 | 3,816 ms | 5,398 ms | 5,060 ms | 3,604,786 | 3,593,426 |
-| 20 | 3,968 ms | 5,587 ms | 5,240 ms | 3,428,953 | 3,420,656 |
+| 20 | 3,968 ms | 5,587 ms | 5,240 ms | 3,428,886 | 3,420,656 |
 | 21 | 4,054 ms | 6,118 ms | 5,710 ms | 3,426,683 | 3,418,755 |
 | 22 | 4,236 ms | 6,346 ms | 6,072 ms | 3,425,473 | 3,418,181 |
 
@@ -204,12 +204,12 @@ In WSL on the same machine:
 
 | Level | Calx | Python 3.14 | Rust: zstd 0.13 | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 69.7 ms | 87.6 ms | 77.4 ms | 20,261,807 | 20,256,662 |
-| 3 | 126 ms | 133 ms | 123 ms | 17,629,556 | 17,556,416 |
-| 5 | 228 ms | 257 ms | 241 ms | 16,682,485 | 16,654,722 |
-| 9 | 551 ms | 572 ms | 540 ms | 15,490,220 | 15,518,610 |
-| 13 | 3,148 ms | 3,570 ms | 3,410 ms | 15,281,703 | 15,293,478 |
-| 16 | 4,813 ms | 6,808 ms | 6,364 ms | 15,019,394 | 14,828,491 |
+| 1 | 69.7 ms | 87.6 ms | 77.4 ms | 20,265,382 | 20,256,662 |
+| 3 | 126 ms | 133 ms | 123 ms | 17,629,230 | 17,556,416 |
+| 5 | 228 ms | 257 ms | 241 ms | 16,682,416 | 16,654,722 |
+| 9 | 551 ms | 572 ms | 540 ms | 15,490,483 | 15,518,610 |
+| 13 | 3,148 ms | 3,570 ms | 3,410 ms | 15,174,068 | 15,293,478 |
+| 16 | 4,813 ms | 6,808 ms | 6,364 ms | 14,804,676 | 14,828,491 |
 | 19 | 11,778 ms | 14,438 ms | 13,705 ms | 13,890,651 | 13,888,852 |
 | 22 | 12,714 ms | 18,260 ms | 18,043 ms | 13,617,004 | 13,616,304 |
 
@@ -217,20 +217,20 @@ On all the processors: `std.zstd` as a program runs it, and libzstd with a worke
 
 | File | Level | Calx | Python 3.14, 32 workers | Rust: zstd 0.13, 32 workers | Calx's size | libzstd's size |
 | --- | --- | --- | --- | --- | --- | --- |
-| src.tar | 1 | 5.9 ms | 11.1 ms | 9.9 ms | 5,343,024 | 5,352,731 |
-| src.tar | 3 | 22.3 ms | 27.8 ms | 26.5 ms | 4,768,200 | 4,757,456 |
-| src.tar | 5 | 39.3 ms | 51.5 ms | 47.9 ms | 4,428,895 | 4,461,129 |
-| src.tar | 9 | 182 ms | 212 ms | 201 ms | 4,089,886 | 4,127,791 |
-| src.tar | 13 | 1,134 ms | 1,209 ms | 1,193 ms | 3,984,004 | 3,992,533 |
-| src.tar | 16 | 2,063 ms | 2,627 ms | 2,526 ms | 3,714,554 | 3,705,752 |
+| src.tar | 1 | 5.9 ms | 11.1 ms | 9.9 ms | 5,344,051 | 5,352,731 |
+| src.tar | 3 | 22.3 ms | 27.8 ms | 26.5 ms | 4,768,087 | 4,757,456 |
+| src.tar | 5 | 39.3 ms | 51.5 ms | 47.9 ms | 4,428,338 | 4,461,129 |
+| src.tar | 9 | 182 ms | 212 ms | 201 ms | 4,090,262 | 4,127,791 |
+| src.tar | 13 | 1,134 ms | 1,209 ms | 1,193 ms | 3,978,696 | 3,992,533 |
+| src.tar | 16 | 2,063 ms | 2,627 ms | 2,526 ms | 3,701,167 | 3,705,752 |
 | src.tar | 19 | 3,821 ms | 5,398 ms | 4,993 ms | 3,604,786 | 3,592,062 |
 | src.tar | 22 | 4,282 ms | 6,341 ms | 6,099 ms | 3,425,473 | 3,418,367 |
-| clang40 | 1 | 9.1 ms | 21.9 ms | 16.0 ms | 20,261,807 | 20,259,344 |
-| clang40 | 3 | 30.0 ms | 40.0 ms | 35.3 ms | 17,629,556 | 17,601,328 |
-| clang40 | 5 | 51.1 ms | 67.8 ms | 62.9 ms | 16,682,485 | 16,733,050 |
-| clang40 | 9 | 264 ms | 290 ms | 276 ms | 15,490,220 | 15,558,830 |
-| clang40 | 13 | 1,645 ms | 1,785 ms | 1,754 ms | 15,281,703 | 15,338,409 |
-| clang40 | 16 | 2,234 ms | 3,248 ms | 3,071 ms | 15,019,394 | 14,842,998 |
+| clang40 | 1 | 9.1 ms | 21.9 ms | 16.0 ms | 20,265,382 | 20,259,344 |
+| clang40 | 3 | 30.0 ms | 40.0 ms | 35.3 ms | 17,629,230 | 17,601,328 |
+| clang40 | 5 | 51.1 ms | 67.8 ms | 62.9 ms | 16,682,416 | 16,733,050 |
+| clang40 | 9 | 264 ms | 290 ms | 276 ms | 15,490,483 | 15,558,830 |
+| clang40 | 13 | 1,645 ms | 1,785 ms | 1,754 ms | 15,174,068 | 15,338,409 |
+| clang40 | 16 | 2,234 ms | 3,248 ms | 3,071 ms | 14,804,676 | 14,842,998 |
 | clang40 | 19 | 8,560 ms | 12,349 ms | 12,184 ms | 13,890,651 | 13,892,293 |
 | clang40 | 22 | 12,507 ms | 18,178 ms | 17,506 ms | 13,617,004 | 13,619,791 |
 
@@ -299,7 +299,7 @@ On all the processors:
 - Python and the `zstd` crate run libzstd 1.5.7. On Windows both are built by MSVC, and the crate's is 5 to 8% faster. GCC's, in WSL, is faster again: by up to 7% to level 10, and 13 to 18% at 11 and 12. The Rust programs were built as above, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
 - `ruzstd` 0.8 compresses only at its level 1, "Fastest": 164 ms and 7,054,586 bytes for `src.tar`, and 457 ms and 23,917,712 bytes for `clang40`, on Windows, and 148 and 408 ms in WSL.
 - On one thread, against the faster libzstd, on our two files: on Windows `std.zstd` is 1 to 6% faster on `src.tar` from level -1 to 9, 1.18 to 1.36 times as fast from 10 to 12, 2% slower at 13, and 1.02 to 1.43 times as fast from 14. On `clang40` it's 2% slower at 3 and 9 and faster at the rest. In WSL, against GCC's, it takes up to 6% longer on `src.tar` from -1 to 13, is level at 14, and is 1.1 to 1.4 times as fast from 15; on `clang40` up to 10% longer to level 9, and faster from 13.
-- What `std.zstd` writes is within 1.3% of libzstd's size at every level timed. On `src.tar` it's 0.05 to 0.1% smaller at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.2% smaller from 5 to 12, within 0.3% from 13 to 17, and 0.2 to 0.6% bigger from 18 to 22. The most is `clang40` at level 16, 1.3% bigger.
+- What `std.zstd` writes is at most 0.4% bigger than libzstd's at every level timed, and up to 1.1% smaller. On `src.tar` it's within 0.07% at levels -1 to 2, 0.3% bigger at 3 and 4, 0.5 to 1.1% smaller from 5 to 12, 0.1 to 0.4% smaller from 13 to 17, and 0.2 to 0.3% bigger from 18 to 22. The most is `clang40` at level 3, 0.4% bigger. The sizes are from the encoder as it is now; the times are from before the last changes to it.
 - On all the processors, `std.zstd` is 1.5 to 2.3 times as fast as the faster libzstd at level 1, 1.1 to 1.2 times at 3 and 5, and 1.2 to 1.4 times from 16. At 9 and 13 it's 1.05 to 1.1 times as fast on Windows, and within 2% either way in WSL. Both cut the same jobs, four windows long. That's 2 MiB at level 1, so `src.tar` makes 9 jobs. From 9 on the jobs are 16 MiB or more, so the files make 3 at most, and most of the processors wait.
 - On many small files, our 1,143 of [Dictionaries](#dictionaries) at one call each, on Windows on a performance core, `compress` takes 2.8 µs a file at level 1, 8.3 µs at 9 and 37 µs at 19. Python's `compress` takes 5.7, 10.6 and 49 µs, and a `ZstdCompressor` kept from one file to the next 3.5, 8.4 and 47 µs.
 
@@ -337,7 +337,7 @@ Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked on
 | --- | --- |
 | Hash tables | The search runs a position ahead of itself: the next position's entry is loaded before this one's candidate is compared, so the loads overlap the comparisons. At levels 1 and 2 positions are looked at in pairs, with the repeated offset tried a pair ahead; at 3 and 4 the long table runs ahead, and a short match looks at the next position's long one. One bound per block keeps entries in the window. At 3 and 4, and at 1 and 2 for a window under 512 KiB, that test has no branch: the entry's address is picked with a conditional move, bytes the text rarely has standing in for one out of the window, and the comparison then also asks that the address was the entry's own. While a table fills, which is all of a small input, whether an entry is in is a coin toss. A hash is the top bits of the bytes times libzstd's constant for their length, so the levels with one table, 2 and below, find what libzstd finds. Text that repeats from further back than a table remembers is found only where an entry happens to last, and the parse goes the same way through each repeat: with a constant of our own, 3 MB repeating every 425 KB never found the repeat at -1, 1.15 MB to libzstd's 282 KB. A sequence's literals are copied 16 bytes at a time, with no call in the loop |
 | Hash rows | Each row holds the last 15, 31 or 63 positions with its hash, and beside each a byte more of its hash. That byte is compared across the whole row at once, 32 at a time with AVX2 but a row of 16 in 16, so the load stays in the row's cache line, and the text is read only where it's likely to match. The next eight positions' rows are fetched into the cache ahead, so the parse stops 16 bytes before a job's end, and the bytes from there to 8 before it get a plainer search that hashes as it goes: a small input's last bytes often match a dictionary's. The parse is built for each depth and for the 5-byte hash most row levels have. Of a match longer than 384, only the first 96 positions and the last 32 go in, as in libzstd. In a stretch without matches, once the search is moving on more than 8 bytes at a time, the positions it moves over stop going into the rows, as in libzstd 1.5.7: random data takes a third of the time, for a little less found in it later. The rows take every position again from the next match |
-| Binary trees | The positions with each hash, sorted by the text after them, so a search goes down one path to the longest matches. At levels 13 to 15 a position goes on its hash's list unsorted, and is sorted into the tree only when a search comes to it, since the parse passes over most positions |
+| Binary trees | The positions with each hash, sorted by the text after them, so a search goes down one path to the longest matches. At levels 13 to 15 a position goes on its hash's list unsorted, and is sorted into the tree only when a search comes to it, since the parse passes over most positions. At most tree levels the tree holds half the window, as libzstd's does. A search that has found nothing yet compares a position it comes to that the tree no longer holds but the window does, and stops there; libzstd compares every such one. On 8 MB of `clang40` at level 16 that's 1.04% smaller, where libzstd's way is 1.44% smaller for five times the far reads |
 | Picking matches | From level 5 to 15, by what they're worth: four times the length, less the bits of the distance, so a match a byte longer but much further back loses |
 | The optimal parser | Every match and literal from each place, priced from how often each literal, length and distance has come up, carried over from block to block and halved at each. A price is worked out where it's looked up, from each count's log and its sum's as they were after the last stretch the parser took, so after each stretch only the counts that changed are taken up again, as libzstd sets its base prices, rather than every price made again. From 19, or 18 or 16 for some smaller inputs, a job's first block is parsed twice, the second time with prices from the first, except after a dictionary, as in libzstd |
 | Splitting blocks | A block's sequences cut into pieces of 2 to 32 KiB, smaller at the higher levels, with the counts of their literals and codes summed from the block's start, so any run of pieces' counts is one subtraction. A run is split in two where an estimate of the parts' sizes saves the most, then each part again. A block too short for two pieces, as every small input is, has its counts made once for the sections, without the running sums. The negative levels don't split |

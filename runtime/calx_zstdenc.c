@@ -1951,10 +1951,18 @@ static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, a
  * as the others were. bt_place does it for the tree below cand, whose positions before low have
  * left it: their places in it may be newer positions' by now.
  *
+ * At most tree levels the tree holds half the window. A search that has found nothing yet compares
+ * a position it comes to that the tree no longer holds but the window does, from wlow, and stops
+ * there, as its links may be newer positions'; libzstd compares every such one. A position whose
+ * hash had nothing newer is often a match: at 16, 8 MB of clang40 came out 1.04% smaller, where it
+ * had been 0.9% bigger than libzstd's, and libzstd's way 1.44%, for five times the far reads. Put
+ * in without a search, wlow is low.
+ *
  * A dictionary's content goes in with the comparisons stopping at its end, J->lim, so the trees
  * are the same whatever text follows it, and kept ones can be used again (digest_take). Text that
  * agrees to there can't be put in order, so, as libzstd does, cur goes in with nothing below it. */
-static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
+static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 wlow, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest,
+                       cx_u32 depth) {
     const cx_u32 left = J->lim - cur;
     const cx_u32 limit = left < BT_CMP ? left : BT_CMP;
     const cx_u32 mask = (1u << (J->p.clog - 1)) - 1;
@@ -1964,7 +1972,8 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
     cx_u32 len0 = 0, len1 = 0, noted = 0, top = 0;
     for (;;) {
         const cx_u32 delta = cur - cand;
-        if (depth-- == 0 || cand < low) {
+        const int gone = cand < low;
+        if (depth-- == 0 || cand < wlow || (gone && noted)) {
             *ptr1 = 0;
             *ptr0 = 0;
             break;
@@ -1990,7 +1999,7 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
                 noted++;
             }
             if (len >= limit) {
-                if (J->cut) {
+                if (J->cut || gone) {
                     *ptr1 = 0;
                     *ptr0 = 0;
                     break;
@@ -2002,11 +2011,19 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
         }
         if (pb[len] < ip[len]) {
             *ptr1 = cand;
+            if (gone) {
+                *ptr0 = 0;
+                break;
+            }
             ptr1 = pair + 1;
             cand = *ptr1;
             len1 = len;
         } else {
             *ptr0 = cand;
+            if (gone) {
+                *ptr1 = 0;
+                break;
+            }
             ptr0 = pair;
             cand = *ptr0;
             len0 = len;
@@ -2031,7 +2048,9 @@ static cx_u32 bt_insert(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 room, cx_u
         __builtin_prefetch(J->chain + 2 * (c1 & mask));
         __builtin_prefetch(J->base + c1);
     }
-    return bt_place(J, ip, cur, cand, cur - (mask < J->wsize ? mask : J->wsize), room, best, m, longest, depth);
+    const cx_u32 low = cur - (mask < J->wsize ? mask : J->wsize);
+    const cx_u32 wlow = !m ? low : cur - J->start > J->wsize ? cur - J->wsize : J->start;
+    return bt_place(J, ip, cur, cand, low, wlow, room, best, m, longest, depth);
 }
 
 /* The matches at ip in a dictionary's kept trees, beside the job's own (job_attached): down the
@@ -2122,7 +2141,7 @@ static inline cx_u32 dt_best(job_t* J, const cx_u8* ip, const cx_u8* iend, cx_u3
     while (n--) {
         const cx_u32 x = got[n];
         cx_u32 top;
-        (void)bt_place(J, base + x, x, son[2 * (x & mask)], low, 0, ~0u, 0, &top, depth);
+        (void)bt_place(J, base + x, x, son[2 * (x & mask)], low, low, 0, ~0u, 0, &top, depth);
     }
     match_t* const m = J->mt;
     cx_u32 top;
