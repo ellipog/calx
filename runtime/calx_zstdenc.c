@@ -1038,13 +1038,21 @@ static void mf_dfast(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
     const cx_u8* const iend = base + end;
     const cx_u8* const ilimit = iend - READ;
     if (end - at <= READ + 1) goto tail;
+    /* On a miss it moves on by one more for every 512 bytes since the last match: half as fast as
+     * the one table does, as it looks at one place a round, not two. Faster loses the repeats in a
+     * stretch that doesn't compress, as between the files of a tar. */
+#ifdef ZSE_TUNE
+    const cx_u32 dshift = getenv("ZSE_DS") ? (cx_u32)atoi(getenv("ZSE_DS")) : 9;
+#else
+    const cx_u32 dshift = 9;
+#endif
     /* The next place to look on a miss is known before this one's tests, so its table entries are
      * fetched first: they're in hand by the time the tests are, whichever way those go. */
     cx_u32 h8 = hash_at(ip, 8, bl), h = hash_at(ip, mls, bs);
     cx_u32 m8 = hl8[h8], m = hs[h];
     while (ip < ilimit) {
         const cx_u32 cur = (cx_u32)(ip - base), low = cur - wsize;
-        const cx_u8* const ip1 = ip + ((cx_usize)(ip - anchor) >> 8) + 1;
+        const cx_u8* const ip1 = ip + ((cx_usize)(ip - anchor) >> dshift) + 1;
         cx_u32 h8n = 0, hn = 0, m8n = 0, mn = 0;
         if (ip1 < ilimit) {
             h8n = hash_at(ip1, 8, bl);
@@ -1236,11 +1244,19 @@ static inline cx_u32 row_best(rw_t* w, const cx_u8* ip, const cx_u8* iend, cx_u3
     if (hd) m = ((m >> hd) | (m << ((1u << rlog) - hd))) & (rlog == 6 ? ~(cx_u64)0 : ((cx_u64)1 << (1u << rlog)) - 1);
     const cx_u32* const rp = w->pos + at;
     const cx_u32 low = cur - w->wsize;
-    cx_u32 tries = w->tries, best = w->mls - 1, best_off = 0;
+    cx_u32 best = w->mls - 1, best_off = 0;
     const cx_u32 room = (cx_u32)(iend - ip);
-    for (; m && tries; tries--, m &= m - 1) {
+    /* The candidates first, each one's text fetched as it's found, so the fetches wait together
+     * rather than one after another; then they're compared. */
+    cx_u32 cands[64], nc = 0;
+    for (const cx_u32 tries = w->tries; m && nc < tries; m &= m - 1) {
         const cx_u32 cand = rp[((cx_u32)__builtin_ctzll(m) + hd) & rmask];
         if (cand < low) break;
+        __builtin_prefetch(base + cand);
+        cands[nc++] = cand;
+    }
+    for (cx_u32 k = 0; k < nc; k++) {
+        const cx_u32 cand = cands[k];
         const cx_u8* mp = base + cand;
         if (mp[best] == ip[best] && ld32(mp) == ld32(ip)) {
             const cx_u32 len = count(ip + 4, mp + 4, iend) + 4;
@@ -1392,6 +1408,12 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
         cx_u32* const pair = son + 2 * (cand & mask);
         const cx_u8* const pb = ip - delta;
         cx_u32 len = len0 < len1 ? len0 : len1;
+        /* Whichever way the text sends the search, it goes to one of these two next: both their
+         * links and their text are fetched while this one is compared. */
+        __builtin_prefetch(son + 2 * (pair[0] & mask));
+        __builtin_prefetch(son + 2 * (pair[1] & mask));
+        __builtin_prefetch(ip - (cur - pair[0]) + len);
+        __builtin_prefetch(ip - (cur - pair[1]) + len);
         if (pb[len] == ip[len]) {
             len += 1 + count(ip + len + 1, pb + len + 1, ip + limit);
             if (len > top) top = len;
