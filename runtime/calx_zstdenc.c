@@ -629,19 +629,22 @@ static cx_u32 huf_merge(const cx_u32* sym, const cx_u64* w, int n, cx_u32 lim, c
  * bigger to level 12 and 0.43% from 13. */
 #define HUF_MERGE_MIN 4096
 
+/* What package-merge has to save over pushing leaves down, in bits, at a level's strategy. It
+ * takes 10,000 to 35,000 cycles, 1 to 2% of a block's time at levels 1 to 4, where on src.tar it
+ * ran for 142 of 146 blocks to save 778 bytes in all; most codes deeper than their limit by one
+ * level gain a bit or two. The push-down's bits over the unlimited code's are the most it can
+ * save. */
+#define HUF_MERGE_GAIN(strat) ((strat) <= S_DFAST ? 512u : (strat) <= S_LAZY2 ? 128u : 0u)
+
 /* Code lengths for count[0..max] from huf_depths' sym[0..n) and a, none longer than lim, which
- * leaves room for n. If the code is deeper: for a block of HUF_MERGE_MIN literals or more, the
- * shortest code that fits; for fewer, the deepest leaves lifted and others pushed down until it
- * fits. Sets only the symbols in sym. Gives the longest. */
-static cx_u32 huf_limit(const cx_u32* count, const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, cx_u8* len) {
+ * leaves room for n. If the code is deeper, the deepest leaves are lifted and others pushed down
+ * until it fits; then, for a block of HUF_MERGE_MIN literals or more where that's more than
+ * `gain` bits over the unlimited code, it's the shortest code that fits instead. Sets only the
+ * symbols in sym. Gives the longest. */
+static cx_u32 huf_limit(const cx_u32* count, const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, cx_u64 gain, cx_u8* len) {
     if (a[0] <= lim) {
         for (int i = 0; i < n; i++) len[sym[i]] = (cx_u8)a[i];
         return (cx_u32)a[0];
-    }
-    {
-        cx_u64 w[256], total = 0;
-        for (int i = 0; i < n; i++) total += w[i] = count[sym[i]];
-        if (total >= HUF_MERGE_MIN) return huf_merge(sym, w, n, lim, len);
     }
     cx_u32 bl[HUF_LOG + 1] = {0};
     for (int i = 0; i < n; i++) bl[a[i] > lim ? lim : a[i]]++;
@@ -668,6 +671,13 @@ static cx_u32 huf_limit(const cx_u32* count, const cx_u32* sym, const cx_i64* a,
         for (cx_u32 c = 0; c < bl[d]; c++) len[sym[i++]] = (cx_u8)d;
         if (bl[d] && !longest) longest = d;
     }
+    cx_u64 w[256], total = 0, unlimited = 0, pushed = 0;
+    for (int j = 0; j < n; j++) {
+        total += w[j] = count[sym[j]];
+        unlimited += w[j] * (cx_u64)a[j];
+        pushed += w[j] * len[sym[j]];
+    }
+    if (total >= HUF_MERGE_MIN && pushed - unlimited > gain) return huf_merge(sym, w, n, lim, len);
     return longest;
 }
 
@@ -684,13 +694,13 @@ static cx_u32 huf_optimal(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* le
 }
 
 /* Code lengths for count[0..max], two symbols or more, none longer than lim, which has room for
- * them. Gives the longest. */
-static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
+ * them, as huf_limit fits them with `gain`. Gives the longest. */
+static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u64 gain, cx_u8* len) {
     cx_u32 sym[256];
     cx_i64 a[256];
     memset(len, 0, max + 1);
     const int n = huf_depths(count, max, sym, a);
-    return huf_limit(count, sym, a, n, lim, len);
+    return huf_limit(count, sym, a, n, lim, gain, len);
 }
 
 /* The codes for lengths len[0..max] with the longest `log`, laid out as the decoder lays its table
@@ -2792,8 +2802,9 @@ static cx_u32 used_to(const cx_u32* c, cx_u32 k) {
 
 /* The literals' section for lit[0..n): raw, one byte repeated, or Huffman-coded with a new tree or
  * the last block's, whichever is smallest. known is their counts, if the splitter has them. A new
- * code is made in ct_new. Gives its size, or 0 if it doesn't fit. */
-static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx_usize n, int huf_allowed, const cx_u32* known, cx_u8* out, cx_usize cap, cx_u8* tmp,
+ * code is made in ct_new, fitted to its limit as huf_limit does with merge_gain. Gives its size,
+ * or 0 if it doesn't fit. */
+static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx_usize n, int huf_allowed, cx_u64 merge_gain, const cx_u32* known, cx_u8* out, cx_usize cap, cx_u8* tmp,
                              cx_u32* ct_new) {
     const cx_usize raw_head = n < 32 ? 1 : n < 4096 ? 2 : 3;
     next->huf_ok = prev->huf_ok;
@@ -2872,7 +2883,7 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
             /* As deep as libzstd lets a code go below btultra: for a few hundred literals, 7 to 9
              * bits rather than 11, which takes a byte or more off the tree for less than that on
              * the data. On our small files that's 0.16% smaller from level 1 to 12. */
-            log = huf_lengths(count, max, table_log_for(HUF_LOG, (cx_u32)n, max, 1), len);
+            log = huf_lengths(count, max, table_log_for(HUF_LOG, (cx_u32)n, max, 1), merge_gain, len);
             cx_u64 bits_new = 0;
             for (cx_u32 s = 0; s <= max; s++) bits_new += (cx_u64)count[s] * len[s];
             tree_n = huf_tree(len, max, log, tree);
@@ -2891,7 +2902,7 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
             memset(tlen, 0, max + 1);
             const cx_u32 least = high_bit((cx_u32)k) + 1;
             for (cx_u32 lim = least; lim <= HUF_LOG; lim++) {
-                const cx_u32 got = huf_limit(count, sym, a, k, lim, tlen);
+                const cx_u32 got = huf_limit(count, sym, a, k, lim, 0, tlen);
                 if (got < lim && lim > least) break;
                 cx_u64 bits = 0;
                 for (int i = 0; i < k; i++) bits += (cx_u64)count[sym[i]] * tlen[sym[i]];
@@ -3353,7 +3364,7 @@ static cx_usize emit(job_t* J, const seq_t* seq, cx_u32 ns, const cx_u32* fin, c
         const cx_u64 c0 = __rdtsc();
 #endif
         cx_u32* const fresh = prev->huf == J->hufs[0] ? J->hufs[1] : J->hufs[0];
-        const cx_usize ls = lit_section(prev, next, lit, nl, huf, known, tmp, BLOCK_ROOM, J->htmp, fresh);
+        const cx_usize ls = lit_section(prev, next, lit, nl, huf, HUF_MERGE_GAIN(J->p.strat), known, tmp, BLOCK_ROOM, J->htmp, fresh);
 #ifdef ZSE_CYCLES
         const cx_u64 c1 = __rdtsc();
         zse_cycles[2] += c1 - c0;
