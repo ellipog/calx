@@ -36,6 +36,25 @@ fn back(d: Dictionary, bytes: List<u8>, level: i32) -> bool {
     }
 }
 
+// How many of the inputs, compressed all at once with d, come out unlike one at a time or don't
+// come back.
+fn at_once(d: Dictionary, inputs: List<List<u8>>, level: i32) -> i32 {
+    var frames: List<List<u8>> = []
+    for _ in 0..inputs.len() {
+        frames.push([])
+    }
+    parallel for k in 0usize..inputs.len() {
+        frames[k] = d.compress(inputs[k], level)
+    }
+    var differ = 0
+    for k in 0..inputs.len() {
+        if frames[k] != d.compress(inputs[k], level) or d.decompress(frames[k].copy())! != inputs[k] {
+            differ += 1
+        }
+    }
+    return differ
+}
+
 fn main() {
     // The dictionary Python's train_dict made for the records in tests/std/zstd.calx, and some
     // text as it is.
@@ -100,6 +119,20 @@ fn main() {
     set_workers(1)
     let b = raw.compress(big, 1)
     println("{a == b} {raw.decompress(a)! == big}")    // out: true true
+
+    // Many records at once with one dictionary, as a server's threads might, so that its kept
+    // tables are taken and given back by several at a time: the same frames as one at a time.
+    var many: List<List<u8>> = []
+    for i in 0..600 {
+        many.push("\{\"id\": {i}, \"name\": \"user{i * 13 % 977}\", \"admin\": {i % 3 == 0}\}".to_bytes())
+    }
+    set_workers(8)
+    var differ = 0
+    for level in [-1, 1, 3, 5, 7, 9, 13, 19] {
+        differ += at_once(trained, many, level) + at_once(raw, many, level)
+    }
+    set_workers(1)
+    println("{differ} differ")    // out: 0 differ
 
     // Part of a list, onto the end of another.
     var out = "> ".to_bytes()

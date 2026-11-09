@@ -3233,7 +3233,7 @@ static void job_prefix(job_t* J) {
 #define DP_FSE 258
 #define DP_REP (258 + 3 * 130)
 
-static void dict_tables(ent_t* e, const cx_u8* P) {
+static void dict_build(ent_t* e, const cx_u8* P) {
     huf_codes(P, P[DP_HUF + 1], P[DP_HUF], e->huf);
     e->huf_log = P[DP_HUF];
     e->huf_ok = 1;
@@ -3265,18 +3265,29 @@ static void dict_tables(ent_t* e, const cx_u8* P) {
 /* Content shorter than this goes into the tables faster than they'd copy. */
 #define DIGEST_MIN 256
 
+/* A copy of a digest's tables that a frame at the hash-table and hash-row levels uses where it is,
+ * and puts back as it was after, by the entries its own positions led to: for a small input that's
+ * far less than copying all of them. */
+typedef struct work_s {
+    struct work_s* next;
+    cx_usize bytes;
+    cx_u32* hash;
+    cx_u32* chain;
+} work_t;
+
 typedef struct digest_s {
     struct digest_s* next;
     cp_t p;
     cx_u32 pre;     /* the content's last `pre` bytes, which the tables hold */
     cx_u32 next_up; /* the job's next_up after them */
-    cx_u32 refs;    /* frames copying from it now */
+    cx_u32 refs;    /* frames using it now */
     cx_u64 used;
-    cx_usize bytes, hash_n, chain_n, hash3_n;
+    cx_usize bytes, hash_n, chain_n, hash3_n; /* bytes: its own and its working copies' */
     cx_u32* hash;
     cx_u32* chain;
     cx_u32* hash3;
     cx_u8* text;
+    work_t* work; /* its working copies that no frame has now */
 } digest_t;
 
 static digest_t* digests;
@@ -3298,8 +3309,14 @@ static int digest_like(const digest_t* d, const job_t* J, cx_u32 pre, const cx_u
     return d->pre == pre && !memcmp(&d->p, &J->p, sizeof d->p) && !memcmp(d->text, text, e) && !memcmp(d->text + pre - e, text + pre - e, e);
 }
 
-/* Copies a kept digest of J's dictionary into J's tables, if there is one: gives whether. */
-static int digest_take(job_t* J) {
+static void digest_release(digest_t* d) {
+    digest_lock();
+    d->refs--;
+    digest_unlock();
+}
+
+/* The kept digest of J's dictionary and settings, held until digest_release, or 0. */
+static digest_t* digest_find(const job_t* J) {
     const cx_u32 pre = J->from - J->start;
     const cx_u8* const text = J->base + J->start;
     if (pre < DIGEST_MIN) return 0;
@@ -3316,17 +3333,102 @@ static int digest_take(job_t* J) {
     }
     digest_unlock();
     if (!d) return 0;
-    const int same = d->hash_n == J->hash_n && d->chain_n == J->chain_n && !memcmp(d->text, text, pre);
-    if (same) {
-        memcpy(J->hash, d->hash, d->hash_n * 4);
-        if (d->chain_n) memcpy(J->chain, d->chain, d->chain_n * 4);
-        if (d->hash3_n) memcpy(J->hash3, d->hash3, d->hash3_n * 4);
-        J->next_up = d->next_up;
+    if (d->hash_n != J->hash_n || d->chain_n != J->chain_n || memcmp(d->text, text, pre)) {
+        digest_release(d);
+        return 0;
     }
+    return d;
+}
+
+/* A working copy of d's tables for a frame to use, one no frame has now or a new one; 0 if
+ * there's no memory for it. */
+static work_t* work_take(digest_t* d) {
     digest_lock();
+    work_t* w = d->work;
+    if (w) d->work = w->next;
+    digest_unlock();
+    if (w) return w;
+    const cx_usize bytes = sizeof(work_t) + 4 * (d->hash_n + d->chain_n);
+    w = (work_t*)malloc(bytes);
+    if (!w) return 0;
+    w->bytes = bytes;
+    w->hash = (cx_u32*)(w + 1);
+    w->chain = w->hash + d->hash_n;
+    memcpy(w->hash, d->hash, d->hash_n * 4);
+    if (d->chain_n) memcpy(w->chain, d->chain, d->chain_n * 4);
+    digest_lock();
+    d->bytes += bytes;
+    digest_total += bytes;
+    digest_unlock();
+    return w;
+}
+
+/* Puts w back as d has it, after J's frame: each entry, or for hash rows each row, that one of the
+ * frame's positions leads to, or all of them for an input long enough that copying is less. */
+static void work_clean(const job_t* J, const digest_t* d, work_t* w) {
+    const cx_u8* const base = J->base;
+    const cx_u32 lo = J->from - READ, hi = J->to - J->from >= READ ? J->to - READ + 1 : J->from - READ;
+    const cx_usize n = hi - lo;
+    const cx_u32 mml = J->p.mml;
+    switch (J->p.strat) {
+    case S_FAST:
+        if (n * 16 > d->hash_n) {
+            memcpy(w->hash, d->hash, d->hash_n * 4);
+            break;
+        }
+        for (cx_u32 i = lo; i < hi; i++) {
+            const cx_u32 h = hash_at(base + i, mml, J->p.hlog);
+            w->hash[h] = d->hash[h];
+        }
+        break;
+    case S_DFAST:
+        if (n * 16 > d->hash_n + d->chain_n) {
+            memcpy(w->hash, d->hash, d->hash_n * 4);
+            memcpy(w->chain, d->chain, d->chain_n * 4);
+            break;
+        }
+        for (cx_u32 i = lo; i < hi; i++) {
+            const cx_u32 h = hash_at(base + i, 8, J->p.hlog), c = hash_at(base + i, mml, J->p.clog);
+            w->hash[h] = d->hash[h];
+            w->chain[c] = d->chain[c];
+        }
+        break;
+    default: {
+        /* Hash rows: each row's positions, and its tags with its head first. */
+        const cx_u32 rlog = J->rlog, hb = J->p.hlog - rlog + 8;
+        cx_u8* const tags = (cx_u8*)w->chain;
+        const cx_u8* const from = (const cx_u8*)d->chain;
+        if ((n << rlog) * 2 > d->hash_n) {
+            memcpy(w->hash, d->hash, d->hash_n * 4);
+            memcpy(w->chain, d->chain, d->chain_n * 4);
+            break;
+        }
+        for (cx_u32 i = lo; i < hi; i++) {
+            const cx_u32 at = (hash_at(base + i, mml, hb) >> 8) << rlog;
+            memcpy(w->hash + at, d->hash + at, (cx_usize)4 << rlog);
+            memcpy(tags + at, from + at, (cx_usize)1 << rlog);
+        }
+        break;
+    }
+    }
+}
+
+/* Gives w back to d, and lets d go. */
+static void work_give(digest_t* d, work_t* w) {
+    digest_lock();
+    w->next = d->work;
+    d->work = w;
     d->refs--;
     digest_unlock();
-    return same;
+}
+
+static void digest_free(digest_t* d) {
+    for (work_t* w = d->work; w;) {
+        work_t* const next = w->next;
+        free(w);
+        w = next;
+    }
+    free(d);
 }
 
 /* Keeps J's tables, with its dictionary's content just taken in, for the frames after. */
@@ -3343,6 +3445,7 @@ static void digest_keep(const job_t* J) {
     d->pre = pre;
     d->next_up = J->next_up;
     d->refs = 0;
+    d->work = 0;
     d->bytes = bytes;
     d->hash_n = J->hash_n;
     d->chain_n = J->chain_n;
@@ -3378,19 +3481,107 @@ static void digest_keep(const job_t* J) {
         *oldest = v->next;
         digest_count--;
         digest_total -= v->bytes;
-        free(v);
+        digest_free(v);
     }
     digest_unlock();
 }
 
-/* Compresses the job's text into its blocks. */
+/* A trained dictionary's tables, built: kept for the last DICT_ENT dictionaries, as building
+ * them, three FSE tables and a Huffman code, costs more than all of a small input's matches. */
+#define DICT_ENT 4
+#define DP_ALL (DP_REP + 12)
+
+typedef struct {
+    cx_u8 key[DP_ALL];
+    cx_u32 huf[256];
+    cx_u32 huf_log;
+    tab_t of, ml, ll;
+    cx_u32 rep[3];
+} dict_ent_t;
+
+static dict_ent_t* dict_ents[DICT_ENT];
+static cx_u32 dict_ent_next;
+
+static void dict_put(ent_t* e, const dict_ent_t* k) {
+    memcpy(e->huf, k->huf, sizeof e->huf);
+    e->huf_log = k->huf_log;
+    e->huf_ok = 1;
+    e->of = k->of;
+    e->ml = k->ml;
+    e->ll = k->ll;
+    for (int i = 0; i < 3; i++) e->rep[i] = k->rep[i];
+}
+
+static void dict_tables(ent_t* e, const cx_u8* P) {
+    digest_lock();
+    for (int i = 0; i < DICT_ENT; i++) {
+        if (dict_ents[i] && !memcmp(dict_ents[i]->key, P, DP_ALL)) {
+            dict_put(e, dict_ents[i]);
+            digest_unlock();
+            return;
+        }
+    }
+    digest_unlock();
+    dict_build(e, P);
+    dict_ent_t* const k = (dict_ent_t*)malloc(sizeof(dict_ent_t));
+    if (!k) return;
+    memcpy(k->key, P, DP_ALL);
+    memcpy(k->huf, e->huf, sizeof k->huf);
+    k->huf_log = e->huf_log;
+    k->of = e->of;
+    k->ml = e->ml;
+    k->ll = e->ll;
+    for (int i = 0; i < 3; i++) k->rep[i] = e->rep[i];
+    digest_lock();
+    const cx_u32 at = dict_ent_next++ % DICT_ENT;
+    dict_ent_t* const old = dict_ents[at];
+    dict_ents[at] = k;
+    digest_unlock();
+    free(old);
+}
+
+static void job_blocks(job_t* J);
+
+/* Compresses the job's text into its blocks. With a dictionary kept for its settings, the
+ * hash-table and hash-row levels use a working copy of its tables where it is, and the trees copy
+ * them, as their links change all over and their searches cost far more than the copy. */
 static void job_run(job_t* J) {
     job_tables(J);
-    if (!J->dict || !digest_take(J)) {
+    digest_t* d = J->dict ? digest_find(J) : 0;
+    work_t* w = 0;
+    cx_u32* const own_hash = J->hash;
+    cx_u32* const own_chain = J->chain;
+    cx_u8* const own_tags = J->tags;
+    if (d) {
+        J->next_up = d->next_up;
+        if (J->p.strat <= S_LAZY2) w = work_take(d);
+        if (w) {
+            J->hash = w->hash;
+            J->chain = w->chain;
+            if (J->p.strat >= S_GREEDY) J->tags = (cx_u8*)w->chain;
+        } else {
+            memcpy(J->hash, d->hash, d->hash_n * 4);
+            if (d->chain_n) memcpy(J->chain, d->chain, d->chain_n * 4);
+            if (d->hash3_n) memcpy(J->hash3, d->hash3, d->hash3_n * 4);
+            digest_release(d);
+            d = 0;
+        }
+    } else {
         job_clear(J);
         job_prefix(J);
         if (J->dict) digest_keep(J);
     }
+    job_blocks(J);
+    if (w) {
+        work_clean(J, d, w);
+        J->hash = own_hash;
+        J->chain = own_chain;
+        J->tags = own_tags;
+        work_give(d, w);
+    }
+}
+
+static void job_blocks(job_t* J) {
     ent_t* e = &J->ent[0];
     J->cur = 0;
     e->huf_ok = 0;
