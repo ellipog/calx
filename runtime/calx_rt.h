@@ -396,6 +396,9 @@ CX_INLINE void cx_drop_String(cx_String* s) {
 CX_FN(cx_String, cx_copy_String, (const cx_String* s));
 /* A `String` that owns a copy of the bytes. */
 CX_FN(cx_String, cx_string_from, (cx_str s));
+/* `s.interned()`: a `String` with a capacity of 0, as a literal's, sharing one copy of a short
+ * text that's never freed with every other interned string of it, or a copy past the limits. */
+CX_FN(cx_String, cx_string_interned, (cx_str s));
 /* Makes room for `extra` more bytes in a string's buffer of `*cap`, holding `len`, as `cx_grow_to`
  * does a list's: twice the size, or 16 bytes to start. A literal's string has a capacity of 0 and
  * doesn't own its bytes, so it comes here for any push, and they're copied into a buffer of its

@@ -185,7 +185,7 @@ fn parse_object(text: String, at: mut usize, depth: usize) -> LinkedMap<String, 
         if at >= text.len() or text.byte_at(at) != 34 {
             fail error_at(text, at, "{found(text, at)} in an object, where a key in double quotes should be")
         }
-        let key = try parse_string(text, mut at)
+        let key = try parse_key(text, mut at)
         skip_space(text, mut at)
         if at >= text.len() or text.byte_at(at) != 58 {
             fail error_at(text, at, "{found(text, at)} after a key, where `:` should be")
@@ -209,6 +209,27 @@ fn parse_object(text: String, at: mut usize, depth: usize) -> LinkedMap<String, 
         }
         fail error_at(text, at, "{found(text, at)} in an object, where `,` or `\}` should be")
     }
+}
+
+// A key, from its opening quote at `at`, interned: an array of objects repeats the same keys,
+// which then share one copy, as Python's parser shares them (CLX-202). A key without escapes is
+// interned straight from the text.
+fn parse_key(text: String, at: mut usize) -> String ! JsonError {
+    var end = at + 1
+    while end < text.len() {
+        let b = text.byte_at(end)
+        if b == 34 {
+            let key = text[at + 1..end].interned()
+            at = end + 1
+            return key
+        }
+        if b == 92 or b < 0x20 {
+            break
+        }
+        end += 1
+    }
+    let key = try parse_string(text, mut at)
+    return key.interned()
 }
 
 // A string, from its opening quote at `at`, with its escapes decoded. The text is UTF-8 already,

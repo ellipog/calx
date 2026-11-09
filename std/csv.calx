@@ -63,6 +63,10 @@ pub fn parse_records(text: String, delimiter: rune = ',') -> List<LinkedMap<Stri
     }
     var header = List<String>()
     var at = read_row(text, 0, d, mut header)
+    // The names are interned, so each record's copy of them costs nothing (CLX-202).
+    for k in 0..header.len() {
+        header[k] = header[k].interned()
+    }
     while at < text.len() {
         var fields = List<String>()
         fields.reserve(header.len())

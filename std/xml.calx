@@ -275,7 +275,8 @@ impl Reader {
     }
 
     // A name, as XML's are: a letter, `_` or `:`, then those, digits, `-` and `.`. Runes past ASCII
-    // are taken as letters.
+    // are taken as letters. It's interned, as ElementTree's parser keeps one copy of each name, so
+    // the elements with a tag share its bytes, which a search then finds in the cache (CLX-202).
     fn name(mut self, text: String, after: str) -> String ! XmlError {
         let start = self.at
         if start >= text.len() or not name_start(text.byte_at(start)) {
@@ -285,7 +286,7 @@ impl Reader {
         while self.at < text.len() and name_byte(text.byte_at(self.at)) {
             self.at += 1
         }
-        return text[start..self.at]
+        return text[start..self.at].interned()
     }
 
     // The attributes of a start tag, up to its `>` or `/>`. Gives whether it was `/>`.

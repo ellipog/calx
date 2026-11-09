@@ -1,0 +1,57 @@
+// `s.interned()` gives a `String` that shares one copy of its text with every other interned
+// string of it, never freed, as a literal's string shares the literal (CLX-202). Copying it shares
+// the copy, changing it copies the text first, and empty text or text longer than a name is an
+// ordinary copy.
+
+fn same(a: String, b: String) -> bool {
+    return unsafe { a.as_ptr() == b.as_ptr() }
+}
+
+fn main() {
+    let text = String("<book><title/></book>")
+    let a = text[1..5].interned()
+    let b = String("book").interned()
+    println("{a} {b} {a == b} {same(a, b)}")    // out: book book true true
+    let c = a.copy()
+    println("{same(a, c)}")    // out: true
+
+    // Changing one copies it first, and the others keep the text.
+    var d = a.copy()
+    d.push_str("s")
+    println("{d} {a} {same(a, d)}")    // out: books book false
+    var e = b.copy()
+    e.clear()
+    e.push_str("note")
+    println("{e} {b}")    // out: note book
+    var f = b.copy()
+    f.truncate(2)
+    f.push('x')
+    let again = "book".interned()
+    println("{f} {b} {same(again, b)}")    // out: box book true
+
+    // Empty text, and text longer than a name, are ordinary strings.
+    let empty = String().interned()
+    println("{empty.is_empty()} {empty.len()}")    // out: true 0
+    let long = "x".repeat(65)
+    println("{long.interned() == long} {same(long.interned(), long.interned())}")    // out: true false
+    let name = "y".repeat(64)
+    println("{same(name.interned(), name.interned())}")    // out: true
+    let rune_name = "straße".interned()
+    println("{rune_name} {rune_name.len()}")    // out: straße 7
+
+    // From many threads at once: each name has the one copy.
+    var got: List<String> = []
+    for _ in 0..256 {
+        got.push(String())
+    }
+    parallel for k in 0usize..256 {
+        got[k] = "tag{k % 16}".interned()
+    }
+    var shared = 0
+    for k in 0usize..256 {
+        if got[k] == "tag{k % 16}" and same(got[k], got[k % 16]) {
+            shared += 1
+        }
+    }
+    println("{shared}")    // out: 256
+}

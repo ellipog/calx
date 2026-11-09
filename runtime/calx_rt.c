@@ -1316,6 +1316,103 @@ cx_String cx_string_from(cx_str s) {
     return r;
 }
 
+/* `s.interned()` (CLX-202): a string that shares one copy of its text with every other interned
+ * string of that text, as a literal's string shares the literal. Its capacity is 0, so dropping it
+ * frees nothing, a copy of it shares it, and a push copies the bytes first. The copies are never
+ * freed, so only names are kept: up to INTERN_LONGEST bytes, INTERN_MOST of them and INTERN_BYTES
+ * in all. Past those, it's an ordinary copy.
+ *
+ * Each name is kept in a chunk after a byte with its length, from malloc, since the chunks and the
+ * table outlive the program's values and a debug build counts what's left of those. A table
+ * behind a lock finds them, and
+ * each thread keeps the last name it was given at each of INTERN_CACHE places, a fixed array so a
+ * thread that ends leaves nothing behind. A parse that interns each tag takes the lock only for a
+ * name it hasn't met. */
+#define INTERN_LONGEST 64
+#define INTERN_MOST 65536u
+#define INTERN_BYTES ((cx_usize)1 << 20)
+#define INTERN_CHUNK ((cx_usize)16384)
+#define INTERN_CACHE 128u
+
+static const cx_u8** intern_table; /* a power of two, at most half full, of the names' bytes */
+static cx_usize intern_mask, intern_count, intern_bytes;
+static cx_u8* intern_room;
+static cx_usize intern_left;
+static _Thread_local const cx_u8* intern_cache[INTERN_CACHE];
+#ifdef _WIN32
+static SRWLOCK intern_mutex = SRWLOCK_INIT;
+#else
+static pthread_mutex_t intern_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+static int intern_same(const cx_u8* p, cx_str s) { return p[-1] == s.len && memcmp(p, s.ptr, s.len) == 0; }
+
+/* The kept copy of `s`, hashed `h`, adding it if there's room, or 0. Called with the lock held. */
+static const cx_u8* intern_find(cx_str s, cx_u64 h) {
+    if (intern_table) {
+        for (cx_usize i = (cx_usize)h & intern_mask;; i = (i + 1) & intern_mask) {
+            const cx_u8* p = intern_table[i];
+            if (!p) break;
+            if (intern_same(p, s)) return p;
+        }
+    }
+    if (intern_count >= INTERN_MOST || intern_bytes + s.len + 1 > INTERN_BYTES) return 0;
+    if (!intern_table || (intern_count + 1) * 2 > intern_mask + 1) {
+        cx_usize size = intern_table ? (intern_mask + 1) * 2 : 256;
+        const cx_u8** t = (const cx_u8**)calloc(size, sizeof(*t));
+        if (!t) return 0;
+        for (cx_usize j = 0; intern_table && j <= intern_mask; j++) {
+            const cx_u8* p = intern_table[j];
+            if (!p) continue;
+            cx_usize i = (cx_usize)cx_hash_bytes(p, p[-1]) & (size - 1);
+            while (t[i]) i = (i + 1) & (size - 1);
+            t[i] = p;
+        }
+        free((void*)intern_table);
+        intern_table = t;
+        intern_mask = size - 1;
+    }
+    if (intern_left < s.len + 1) {
+        cx_u8* room = (cx_u8*)malloc(INTERN_CHUNK);
+        if (!room) return 0;
+        intern_room = room;
+        intern_left = INTERN_CHUNK;
+    }
+    cx_u8* p = intern_room + 1;
+    p[-1] = (cx_u8)s.len;
+    memcpy(p, s.ptr, s.len);
+    intern_room += s.len + 1;
+    intern_left -= s.len + 1;
+    intern_bytes += s.len + 1;
+    cx_usize i = (cx_usize)h & intern_mask;
+    while (intern_table[i]) i = (i + 1) & intern_mask;
+    intern_table[i] = p;
+    intern_count++;
+    return p;
+}
+
+cx_String cx_string_interned(cx_str s) {
+    if (s.len == 0 || s.len > INTERN_LONGEST) return cx_string_from(s);
+    cx_u64 h = cx_hash_bytes(s.ptr, s.len);
+    const cx_u8** slot = &intern_cache[(h >> 32) & (INTERN_CACHE - 1)];
+    const cx_u8* p = *slot;
+    if (!p || !intern_same(p, s)) {
+#ifdef _WIN32
+        AcquireSRWLockExclusive(&intern_mutex);
+        p = intern_find(s, h);
+        ReleaseSRWLockExclusive(&intern_mutex);
+#else
+        pthread_mutex_lock(&intern_mutex);
+        p = intern_find(s, h);
+        pthread_mutex_unlock(&intern_mutex);
+#endif
+        if (!p) return cx_string_from(s);
+        *slot = p;
+    }
+    cx_String r = {(cx_u8*)p, s.len, 0};
+    return r;
+}
+
 /* How many of the `n` bytes at `p` come before the first that's `limit` or more: 16 at a time
  * where the processor has SSE2, which every x86-64 one does. std.unicode skips text that can't
  * change with it. */

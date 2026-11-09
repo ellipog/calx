@@ -141,7 +141,7 @@ A database keeps the last 32 statements it prepared, keyed by their SQL, as Pyth
 
 The compiler builds `sqlite3.c` once for each build mode, always optimized with `-O2`, and keeps the object in its cache. It's left out of ThinLTO, which would optimize it again in every release link, and linked only into programs that use `std.sqlite`. SQLite is built with the options its authors recommend for speed, such as no memory statistics, along with the full-text search (FTS5), R-tree and math functions Python's builds have. It runs in multi-thread mode, since a connection is only used by one thread at a time.
 
-A value is read from a row in one call for a number, and in two for text or bytes: one for the length, then one that copies them into a list the right size.
+A value is read from a row in one call for a number, and in two for text or bytes: one for the length, then one that copies them into a list the right size. `query_records` [interns](../reference/strings.md#interned-strings) the columns' names, so the records share them.
 
 ## Speed
 

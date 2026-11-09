@@ -180,6 +180,8 @@ enum class BMethod : std::uint8_t {
     // On text: Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, and where some
     // text is first or last found in it (D117).
     to_lower_root, to_upper_root, find, find_last, to_bytes,
+    // On text: a `String` sharing one copy of it that's never freed, as a literal's (CLX-202).
+    interned,
     // On text: a part without whitespace or a prefix or suffix, which is copied only where it's
     // kept, as a slice is; and new text or lists of it. `join` is on a list of text.
     text_trim, text_trim_start, text_trim_end, trim_prefix, trim_suffix, split, split_once, split_whitespace, lines, text_replace,

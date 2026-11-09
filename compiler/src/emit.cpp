@@ -6368,6 +6368,7 @@ $dropall    m->len = 0;
                 case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::utf16_len: return view + "cx_str_utf16_len(" + p + "); })";
+                case BMethod::interned: return view + "cx_string_interned(" + p + "); })";
                 case BMethod::to_lower_root: case BMethod::to_upper_root: {
                     // Text that doesn't change comes back as it is, without a copy, when it's a
                     // literal's: a `str`, or a `String` that owns no memory.

@@ -9820,6 +9820,7 @@ private:
             else if (m == "find") b = BMethod::find, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "find_last") b = BMethod::find_last, params = {nullptr}, result = T.optional_of(T.usize);
             else if (m == "to_bytes") b = BMethod::to_bytes, result = T.list_of(T.u8);
+            else if (m == "interned") b = BMethod::interned, result = T.string;
             // A part of the text, like a slice: a `str`'s is a `str` and a `String`'s a `String`.
             else if (m == "trim") b = BMethod::text_trim, result = recv;
             else if (m == "trim_start") b = BMethod::text_trim_start, result = recv;

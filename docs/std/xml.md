@@ -181,7 +181,7 @@ fn main() {
 
 [std/xml.calx](../../std/xml.calx) is written in Calx from the XML 1.0 standard and from how ElementTree behaves. It's checked against Python 3.14's ElementTree, which reads with expat, on 24,000 random documents. They had entities, CDATA, comments, processing instructions, DOCTYPEs, mixed content, odd line ends, and mistakes of every kind. Each document was checked for whether it's read or refused, what `format` and `pretty` write, and what 24 paths find with `find`, `find_all` and `find_text`. Every one matched.
 
-The parser goes through the text once, without recursion, keeping where each open element starts. So a deeply nested document can't overflow the stack, and a mistake can say where the element it concerns began. Text without references is copied in one piece. Entities are kept as declared, read where they're used, and counted against the limits above. Writing escapes in runs, copying the text between the characters it changes.
+The parser goes through the text once, without recursion, keeping where each open element starts. So a deeply nested document can't overflow the stack, and a mistake can say where the element it concerns began. Text without references is copied in one piece. Tags and attribute names are [interned](../reference/strings.md#interned-strings), as ElementTree's parser keeps one copy of each name. So the elements with a tag share its bytes, a copy of an element copies no names, and a search compares bytes already in the cache. Entities are kept as declared, read where they're used, and counted against the limits above. Writing escapes in runs, copying the text between the characters it changes.
 
 ## Speed
 
@@ -189,10 +189,10 @@ On our benchmark, an i9-13900K pinned to its performance cores with other work r
 
 | Work | Calx | Python | Rust |
 | --- | --- | --- | --- |
-| `parse`, the text to a tree | 104 ms | 457 ms | 192 ms with roxmltree, 200 ms with quick-xml |
-| `format`, the tree back to text | 35.3 ms | 692 ms | 39.1 ms |
-| `find_all(".//book[@lang='no']")`, 40,140 found | 13.9 ms | 19.9 ms | 43.1 ms, copies |
-| `find_each(".//book[@lang='no']", ...)` | 7.8 ms | 20.6 ms, `iterfind` | 8.8 ms with roxmltree, 5.8 ms by hand |
+| `parse`, the text to a tree | 102 ms | 455 ms | 194 ms with roxmltree, 192 ms with quick-xml |
+| `format`, the tree back to text | 35.1 ms | 679 ms | 38.0 ms |
+| `find_all(".//book[@lang='no']")`, 40,140 found | 13.4 ms | 20.4 ms | 40.7 ms, copies |
+| `find_each(".//book[@lang='no']", ...)` | 7.6 ms | 21.3 ms, `iterfind` | 8.3 ms with roxmltree, 5.6 ms by hand |
 
 - Python's times are `ET.fromstring`, `ET.tostring(root, encoding="unicode")`, `root.findall` and a loop over `root.iterfind`.
 - roxmltree builds a read-only tree whose text points into the document where it can. quick-xml reads events, which the benchmark builds into a tree of owned strings like `std.xml`'s. Rust's `format` is a writer like `std.xml`'s over that tree.

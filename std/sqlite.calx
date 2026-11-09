@@ -304,7 +304,11 @@ impl Database {
                 fail e
             },
         }
-        let names = st.column_names()
+        // The names are interned, so each record's copies of them cost nothing (CLX-202).
+        var names = st.column_names()
+        for k in 0..names.len() {
+            names[k] = names[k].interned()
+        }
         var out: List<LinkedMap<String, Value>> = []
         loop {
             match st.step() {

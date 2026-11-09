@@ -90,6 +90,7 @@ fn main() {
 | `s.java_hash()` | Java's `String.hashCode`, an `i32`, for code that must match Java's hashes ([Java's view](#javas-view-of-a-string)) |
 | `s.utf16_len()` | Java's `String.length()`: the UTF-16 units, a `usize` |
 | `s.to_bytes()` | A copy of the bytes, a `List<u8>`, which `String.from_utf8` turns back into text |
+| `s.interned()` | The text as a `String` that shares one copy of it, never freed, with every other interned string of the same text, as Python's `sys.intern` does ([interned strings](#interned-strings)) |
 | `s.trim()`, `s.trim_start()`, `s.trim_end()` | The text without the whitespace at both ends, the start or the end, as a part of `s` ([taking text apart](#taking-text-apart)) |
 | `s.trim_prefix(t)`, `s.trim_suffix(t)` | The text without `t` at the start or the end, once, if it's there; otherwise all of it. A part of `s` |
 | `s.split(t)` | The parts between each `t`, a `List<String>`, empty parts too. `""` splits into the runes |
@@ -103,7 +104,7 @@ fn main() {
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
 - `truncate` takes back what pushes added: `let at = s.len()`, pushes, then `s.truncate(at)`.
-- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`, and the ones that give new text or parts, from `trim` to `pad_end`. A `str`'s trimmed part is a `str`.
+- A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash`, `utf16_len` and `interned`, and the ones that give new text or parts, from `trim` to `pad_end`. A `str`'s trimmed part is a `str`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
 - `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).
 - `s.push_str(s)` is an error, since `s` would change while being read. Push a copy.
@@ -284,6 +285,27 @@ fn main() {
 }
 ```
 
+## Interned strings
+
+`s.interned()` gives the text as a `String` that shares one copy of it with every other interned string of the same text, as Python's `sys.intern` and Java's `intern` do. The copy is never freed, and the string owns no memory, as a literal's doesn't. Copying it costs nothing, and changing it copies the text first, so the others keep theirs. A program that holds the same few names many times, such as the tags of a parsed document, holds their bytes once, and comparing them reads bytes that are already in the cache.
+
+```calx
+fn main() {
+    let line = String("tag=book")
+    var tags: List<String> = []
+    for _ in 0..3 {
+        tags.push(line[4..].interned())
+    }
+    var first = tags[0].copy()
+    first.push_str("s")
+    println("{first} {tags[0]} {tags[2]}")    // out: books book book
+}
+```
+
+- Only names are kept, since they're never freed: text of 1 to 64 bytes, up to 65,536 of them and 1 MiB in all. Empty text, longer text and text past those limits comes back as an ordinary copy, so `interned` is always safe to call, and saves memory only for text that repeats.
+- [`std.xml`](../std/xml.md) interns tags and attribute names, and [`std.json`](../std/json.md) object keys.
+- Any thread can call it. Each thread keeps the last names it was given, so a name it has met before costs a hash and a compare, and takes no lock.
+
 ## Printing
 
 `{s}` in a string shows the text. `println(s)` takes a `str` or a `String`.
@@ -321,6 +343,7 @@ cx_String command = cx_string_from(({ const cx_String* cx_t19 = &line; cx_usize 
 - `trim` and its kin are parts, as `s[a..b]` is: `cx_text_trim` gives a `cx_str` of the same bytes, copied by `cx_string_from` only where it's kept. `trim_prefix` and `trim_suffix` are inline C.
 - A `for` loop over `split`, `lines` or `split_whitespace` is a `while` over inline C that gives the next part, a `cx_str`, and where the one after starts. A loop variable is a `cx_String` with the part's pointer and length and a capacity of `CX_VIEW_CAP`, the top bit, which marks a view: freeing it frees nothing, and a copy of it copies the bytes, where a literal's capacity of 0 would share them.
 - A `str` passed for a `String` is `cx_str_view`, the same kind of `cx_String`, built in a temporary that the function gets a pointer to, so the call copies no bytes.
+- `s.interned()` is `cx_string_interned`, which gives a `cx_String` with a capacity of 0, as a literal's, pointing into the runtime's kept names. Each is a byte with its length, then the text, in 16 KiB chunks from `malloc`, found by a table behind a lock. In front of the table, each thread keeps the last name it met at each of 128 places, a fixed array, so a thread that ends leaves nothing behind. A debug build's count of blocks never freed leaves the kept names out, since they're meant to stay.
 - A one-byte separator and the line breaks are found sixteen bytes a step with SSE2, inline, so a short part costs no call, as `memchr`'s would. A longer separator goes through `find`.
 - `split`, `lines` and `split_whitespace` that make a list grow it as `push` does, each part a copy. A list's `join` works out the length first and allocates exactly that once. `s.lines().join(t)` and the others with no list start with room for all of `s`.
 - `replace` finds each match with `find` and copies the text between matches with `memcpy`, into a string that starts with room for all of `s`. `repeat` copies what it has so far, doubling, so `n` copies take about `log2(n)` calls.
