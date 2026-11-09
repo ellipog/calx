@@ -224,13 +224,20 @@ typedef struct {
     cx_u8 cls;
 } page_info;
 
+/* Each page's state, and the free pages' numbers, ARENA_PAGES of each: 3 MiB, in a range reserved
+ * with the arena's and committed TABLE_STEP entries at a time as pages are first taken, so a
+ * program that uses 64 MiB of small blocks has 12 KiB of them. As static arrays they cost every
+ * program all 3 MiB on Windows, which charges an image's writable sections in full when it loads,
+ * touched or not. Only the entries of pages taken, below `next_page`, are ever read. */
+#define TABLE_STEP 1024u
 static cx_u8* arena;
 static int arena_tried;
-static page_info page_of[ARENA_PAGES];
+static page_info* page_of;
 static int page_lock;
 static cx_u32 next_page;
-static cx_u32 free_pages[ARENA_PAGES];
+static cx_u32* free_pages;
 static cx_u32 free_count;
+static cx_u32 table_room; /* entries of both committed */
 /* Pages taken since the last trim a thread made as it took one. */
 static cx_u32 taken_since_trim;
 
@@ -239,14 +246,33 @@ static inline cx_u32 page_number(const void* p) {
     return arena && (const cx_u8*)p >= arena && at < (cx_usize)ARENA_PAGES << PAGE_SHIFT ? (cx_u32)(at >> PAGE_SHIFT) : NO_PAGE;
 }
 
-static void reserve_arena(void) {
-    cx_usize n = (cx_usize)ARENA_PAGES << PAGE_SHIFT;
+static cx_u8* reserve(cx_usize n) {
 #ifdef _WIN32
-    arena = (cx_u8*)VirtualAlloc(NULL, n, MEM_RESERVE, PAGE_READWRITE);
+    return (cx_u8*)VirtualAlloc(NULL, n, MEM_RESERVE, PAGE_READWRITE);
 #else
     void* a = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    arena = a == MAP_FAILED ? NULL : (cx_u8*)a;
+    return a == MAP_FAILED ? NULL : (cx_u8*)a;
 #endif
+}
+
+static void reserve_arena(void) {
+    cx_u8* tables = reserve((cx_usize)ARENA_PAGES * (sizeof(page_info) + sizeof(cx_u32)));
+    if (!tables) return;
+    arena = reserve((cx_usize)ARENA_PAGES << PAGE_SHIFT);
+    page_of = (page_info*)tables;
+    free_pages = (cx_u32*)(tables + (cx_usize)ARENA_PAGES * sizeof(page_info));
+}
+
+/* Room in the tables for page `n`'s entries, with the page lock held: false if the system has no
+ * memory to commit for them. Linux gives a reserved range's pages as they're touched. */
+static int table_room_for(cx_u32 n) {
+    if (n < table_room) return 1;
+#ifdef _WIN32
+    if (!VirtualAlloc(page_of + table_room, TABLE_STEP * sizeof(page_info), MEM_COMMIT, PAGE_READWRITE)) return 0;
+    if (!VirtualAlloc(free_pages + table_room, TABLE_STEP * sizeof(cx_u32), MEM_COMMIT, PAGE_READWRITE)) return 0;
+#endif
+    table_room += TABLE_STEP;
+    return 1;
 }
 
 /* A page for blocks of class `c`, from the free ones, or a new one, committed; or, where no
@@ -259,7 +285,7 @@ static cx_u8* take_page(unsigned c, cx_u32* number) {
     }
     cx_u32 n = NO_PAGE;
     if (free_count) n = free_pages[--free_count];
-    else if (arena && next_page < ARENA_PAGES) n = next_page++;
+    else if (arena && next_page < ARENA_PAGES && table_room_for(next_page)) n = next_page++;
     if (n != NO_PAGE) {
         page_of[n].state = PAGE_CUTTING;
         page_of[n].cls = (cx_u8)c;
@@ -330,7 +356,7 @@ typedef struct {
     int lock;
     cx_u32 count; /* blocks in all the batches */
     cx_u32 n;
-    batch b[BATCHES];
+    batch* b; /* BATCHES of them, from the system when the size is first shared, as `page_of` */
 } shared_list;
 
 static _Thread_local heap tls;
@@ -348,6 +374,7 @@ static const cx_u32 kept[CLASSES] = {
 static void share(heap* h, unsigned c) {
     shared_list* s = &shared[c];
     lock(&s->lock);
+    if (!s->b) s->b = (batch*)os_alloc(BATCHES * sizeof(batch));
     if (s->n < BATCHES) {
         s->b[s->n].head = h->free[c];
         s->b[s->n].last = h->last[c];
