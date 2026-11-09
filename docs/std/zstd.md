@@ -141,23 +141,23 @@ On an i9-13900K, best of 7 runs in each of three rounds, the programs taking tur
 
 | File | Calx | Calx, one thread | Python 3.14 | Rust: zstd 0.13 | Rust: ruzstd 0.8 |
 | --- | --- | --- | --- | --- | --- |
-| src.tar.3.zst | 5.7 ms | 8.6 ms | 19.8 ms | 14.6 ms | 38.9 ms |
-| src.tar.19.zst | 6.0 ms | 8.2 ms | 20.5 ms | 13.9 ms | 35.8 ms |
-| clang40.3.zst | 15.0 ms | 26.4 ms | 49.2 ms | 38.7 ms | 125.3 ms |
-| clang40.19.zst | 22.4 ms | 36.2 ms | 59.6 ms | 47.3 ms | 132.3 ms |
+| src.tar.3.zst | 5.5 ms | 7.8 ms | 19.7 ms | 14.3 ms | 39.3 ms |
+| src.tar.19.zst | 6.0 ms | 7.6 ms | 20.7 ms | 14.2 ms | 36.8 ms |
+| clang40.3.zst | 14.7 ms | 23.8 ms | 49.8 ms | 40.1 ms | 127.1 ms |
+| clang40.19.zst | 21.3 ms | 32.7 ms | 61.4 ms | 47.2 ms | 137.9 ms |
 
 In WSL on the same machine:
 
 | File | Calx | Calx, one thread | Python 3.14 | Rust: zstd 0.13 | Rust: ruzstd 0.8 |
 | --- | --- | --- | --- | --- | --- |
-| src.tar.3.zst | 6.3 ms | 9.1 ms | 11.9 ms | 8.3 ms | 34.0 ms |
-| src.tar.19.zst | 6.7 ms | 8.6 ms | 11.4 ms | 8.3 ms | 29.3 ms |
-| clang40.3.zst | 16.4 ms | 27.0 ms | 45.6 ms | 34.7 ms | 126.9 ms |
-| clang40.19.zst | 24.1 ms | 37.9 ms | 56.5 ms | 41.1 ms | 136.7 ms |
+| src.tar.3.zst | 6.0 ms | 8.1 ms | 11.7 ms | 8.3 ms | 33.9 ms |
+| src.tar.19.zst | 6.2 ms | 7.7 ms | 11.7 ms | 8.1 ms | 29.8 ms |
+| clang40.3.zst | 15.5 ms | 24.3 ms | 50.4 ms | 34.9 ms | 126.3 ms |
+| clang40.19.zst | 23.6 ms | 32.2 ms | 56.2 ms | 39.8 ms | 139.1 ms |
 
 - Python and the `zstd` crate run libzstd 1.5.7 on one thread. On Windows both are built by MSVC, which leaves out libzstd's assembly Huffman decoder; in WSL, Python's is Ubuntu 26.04's and the crate's is built by GCC, both with it. `ruzstd` is written in Rust.
 - "Calx, one thread" is the same decoder with its threads left out, to compare the work each does; a program always gets all the processors for a frame of 1 MiB or more.
-- On one thread, GCC's libzstd is faster than `std.zstd` on text: 8.3 ms to 9.1 on src.tar.3, and 8.3 to 8.6 on src.tar.19. On clang40 it's the other way round, and on Windows `std.zstd` is faster on all four.
+- On one thread, `std.zstd` is a little ahead of GCC's libzstd on text, 8.1 ms to 8.3 on src.tar.3 and 7.7 to 8.1 on src.tar.19, and 1.2 to 1.4 times as fast on clang40. On Windows, against MSVC's, it's 1.4 to 1.9 times as fast.
 - The Rust programs were built with `lto = "fat"` and one codegen unit, once as they are and once with `target-cpu=x86-64-v3`, as Calx builds for x86-64-v3, and in WSL with libzstd built for it too. Each Rust time is the faster of the two builds' best. Each had the room for its output reserved before it started, and checked that both crates gave the same bytes.
 
 `compress` was timed on the same machine with little else running, `std.zstd`, Python and the Rust programs taking turns for three rounds, best of 3 runs in each up to level 9 and of 1 from 10, on the same two files before they were compressed. On one thread, each program on the performance cores and out of power throttling, `src.tar` at every level, on Windows:
@@ -309,7 +309,7 @@ Decompressing is [runtime/calx_zstd.c](../../runtime/calx_zstd.c), linked only i
 
 | Part | How |
 | --- | --- |
-| Bits | Read backwards 64 at a time, from the end of a stream to its start. A sequence takes one reload of the bits when its extra bits come to 30 or fewer, which most do |
+| Bits | Read backwards 64 at a time, from the end of a stream to its start. A sequence takes one reload of the bits when its extra bits come to 30 or fewer, which most do, and counts the bits it has left rather than those it's read, so each read is a subtraction, a shift and a mask |
 | Huffman | Tables of up to 2^12 entries, two bytes each. Four streams are decoded together, four symbols from each between reloads |
 | FSE | The three tables a block's sequences use, built from their counts as RFC 8878 spreads them, or the predefined ones, or kept from the block before |
 | Literals and matches | Copied 32 bytes at a time when the match is 32 or more back, 16 when it's 16 or more, and 8 at a time after its first 8 bytes when it repeats a shorter pattern. The output keeps 64 bytes of room past the end for these |

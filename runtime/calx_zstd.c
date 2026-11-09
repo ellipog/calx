@@ -369,6 +369,10 @@ typedef struct {
     cx_u32 ll_log, of_log, ml_log, huf_log;
     cx_u8 ll_ok, of_ok, ml_ok, huf_ok;
     cx_u32 rep[3];
+    /* What seq_run's loop checks against but never waits on, kept here (see there). */
+    cx_u32 run_left;
+    const cx_u8* run_lit_end;
+    const cx_u8* run_start;
 } ent_t;
 
 typedef struct {
@@ -466,16 +470,27 @@ static cx_usize read_huffman(ent_t* e, const cx_u8* p, cx_usize n) {
     w[count++] = (cx_u8)last;
     ranks[last]++;
     if (ranks[1] < 2 || (ranks[1] & 1)) return 0;
-    /* The longest codes first: each weight's symbols in order, 2^(weight-1) entries each. */
-    cx_u32 pos = 0;
-    for (cx_u32 wt = 1; wt <= log; wt++) {
-        if (!ranks[wt]) continue;
+    /* The longest codes first: each weight's symbols in order, 2^(weight-1) entries each. The
+     * weights add up to the table, so it's filled exactly. One pass over the symbols, each
+     * weight's entries starting where the lighter ones' end. */
+    cx_u32 at[HUF_LOG_MAX + 2];
+    for (cx_u32 wt = 1, pos = 0; wt <= log; wt++) {
+        at[wt] = pos;
+        pos += ranks[wt] << (wt - 1);
+    }
+    for (cx_u32 s = 0; s < count; s++) {
+        const cx_u32 wt = w[s];
+        if (!wt) continue;
+        const cx_u16 entry = (cx_u16)((s << 8) | (log + 1 - wt));
+        cx_u16* d = e->huf + at[wt];
         const cx_u32 len = 1u << (wt - 1);
-        for (cx_u32 s = 0; s < count; s++) {
-            if (w[s] != wt) continue;
-            const cx_u16 entry = (cx_u16)((s << 8) | (log + 1 - wt));
-            for (cx_u32 i = 0; i < len; i++) e->huf[pos + i] = entry;
-            pos += len;
+        at[wt] += len;
+        if (len < 4) {
+            d[0] = entry;
+            if (len == 2) d[1] = entry;
+        } else {
+            const cx_u64 four = entry * 0x0001000100010001ull;
+            for (cx_u32 i = 0; i < len; i += 4) memcpy(d + i, &four, 8);
         }
     }
     e->huf_log = log;
@@ -868,6 +883,12 @@ static inline void match_fast(cx_u8* op, const cx_u8* s, cx_u32 off, cx_u32 ml) 
     }
     cx_u8* d = op + 8;
     cx_u8* const e = op + ml;
+    /* s is less than 16 bytes behind d, so this can't be done in wider steps: left alone, clang
+     * makes it a 32-byte loop behind a test for overlap that always fails, and the registers that
+     * takes are what the sequence loops' states lose. */
+#ifdef __clang__
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
     while (d < e) {
         memcpy(d, s, 8);
         d += 8;
@@ -919,6 +940,37 @@ static inline cx_u32 offset_of(cx_u32 v, cx_u32 ll, cx_u32* r0, cx_u32* r1, cx_u
     return off;
 }
 
+/* seq_run's reader: as br_t, but counting the bits left in `bits` rather than those read, so a
+ * read is a subtraction, a shift and a mask (BMI2's shrx and bzhi) where br_read takes five steps.
+ * It mustn't read past the bits loaded, as br_peek may near the start: past them it gives no
+ * zeros. In a broken stream the count wraps, which gives wrong bits but nothing worse, and the
+ * check at the end finds it. */
+typedef struct {
+    cx_u64 bits;
+    cx_u32 left;
+    const cx_u8* p;
+} bl_t;
+
+static inline cx_u32 bl_read(bl_t* b, cx_u32 n) {
+    b->left -= n;
+    return (cx_u32)((b->bits >> (b->left & 63)) & (((cx_u64)1 << n) - 1));
+}
+
+/* As br_reload, with the stream's start kept elsewhere. */
+static inline void bl_reload_to(bl_t* b, const cx_u8* start) {
+    const cx_u32 used = 64 - b->left;
+    const cx_usize back = used >> 3;
+    const cx_usize can = (cx_usize)(b->p - start);
+    if (__builtin_expect(can >= back, 1)) {
+        b->p -= back;
+        b->left = 64 - (used & 7);
+    } else {
+        b->p = start;
+        b->left += (cx_u32)(can * 8);
+    }
+    b->bits = ld64(b->p);
+}
+
 /* Carries out a sequence whose match reaches into the dictionary, which seq_run's loop leaves. 0
  * if it reaches past it. */
 static __attribute__((noinline, cold)) int seq_cold(const out_t* o, cx_u8* op, const cx_u8* lit, cx_u32 ll, cx_u32 ml, cx_u32 off) {
@@ -930,7 +982,7 @@ static __attribute__((noinline, cold)) int seq_cold(const out_t* o, cx_u8* op, c
  * the literals, onto the output at *opp: the way one thread goes fastest. 0 if they're broken. */
 static __attribute__((noinline)) int seq_run(ent_t* e, const cx_u8* p, cx_usize n, cx_u32 count, const cx_u8* lit, cx_usize lit_n, const out_t* o, cx_u8** opp) {
     cx_u8* op = *opp;
-    const cx_u8* lit_end = lit + lit_n;
+    e->run_lit_end = lit + lit_n;
     if (count) {
         br_t b;
         if (!br_init(&b, p, n)) return 0;
@@ -938,12 +990,16 @@ static __attribute__((noinline)) int seq_run(ent_t* e, const cx_u8* p, cx_usize 
         cx_u32 os = (cx_u32)br_read(&b, e->of_log);
         cx_u32 ms = (cx_u32)br_read(&b, e->ml_log);
         br_reload(&b);
+        bl_t r = {b.bits, 64 - b.used, b.p};
         /* The loop holds as little as it can, so what each sequence waits on stays in registers:
          * a cell is one load, its fields taken out where they're used, and the two older repeated
-         * offsets, which only repeat codes read, stay in e. */
+         * offsets, which only repeat codes read, stay in e. So do the count, the literals' end and
+         * the stream's start, which are only checked against: else the compiler keeps them in
+         * registers and spills the bit reader, which each sequence waits on. */
+        e->run_start = b.start;
         cx_u32 r0 = e->rep[0];
         cx_u32* const rep = e->rep;
-        for (cx_u32 left = count; left; left--) {
+        for (e->run_left = count; e->run_left; e->run_left--) {
             cx_u64 lc, oc, mc;
             memcpy(&lc, &e->ll[ls], 8);
             memcpy(&oc, &e->of[os], 8);
@@ -956,43 +1012,48 @@ static __attribute__((noinline)) int seq_run(ent_t* e, const cx_u8* p, cx_usize 
              * most fit in them, so most sequences take one reload, at their end, as in libzstd's
              * decoder. */
             if (__builtin_expect(ox + mx + lx <= 30, 1)) {
-                v = (cx_u32)(oc >> 32) + (cx_u32)br_read(&b, ox);
-                ml = (cx_u32)(mc >> 32) + (cx_u32)br_read(&b, mx);
-                ll = (cx_u32)(lc >> 32) + (cx_u32)br_read(&b, lx);
+                v = (cx_u32)(oc >> 32) + (cx_u32)bl_read(&r, ox);
+                ml = (cx_u32)(mc >> 32) + (cx_u32)bl_read(&r, mx);
+                ll = (cx_u32)(lc >> 32) + (cx_u32)bl_read(&r, lx);
             } else {
-                v = (cx_u32)(oc >> 32) + (cx_u32)br_read(&b, ox);
-                br_reload(&b);
-                ml = (cx_u32)(mc >> 32) + (cx_u32)br_read(&b, mx);
-                ll = (cx_u32)(lc >> 32) + (cx_u32)br_read(&b, lx);
-                br_reload(&b);
+                v = (cx_u32)(oc >> 32) + (cx_u32)bl_read(&r, ox);
+                bl_reload_to(&r, e->run_start);
+                ml = (cx_u32)(mc >> 32) + (cx_u32)bl_read(&r, mx);
+                ll = (cx_u32)(lc >> 32) + (cx_u32)bl_read(&r, lx);
+                bl_reload_to(&r, e->run_start);
             }
-            if (left > 1) {
-                ls = ((cx_u32)lc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(lc >> 16) & 0xFF);
-                ms = ((cx_u32)mc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(mc >> 16) & 0xFF);
-                os = ((cx_u32)oc & 0xFFFF) + (cx_u32)br_read(&b, (cx_u32)(oc >> 16) & 0xFF);
+            if (e->run_left > 1) {
+                ls = ((cx_u32)lc & 0xFFFF) + (cx_u32)bl_read(&r, (cx_u32)(lc >> 16) & 0xFF);
+                ms = ((cx_u32)mc & 0xFFFF) + (cx_u32)bl_read(&r, (cx_u32)(mc >> 16) & 0xFF);
+                os = ((cx_u32)oc & 0xFFFF) + (cx_u32)bl_read(&r, (cx_u32)(oc >> 16) & 0xFF);
             }
-            br_reload(&b);
+            bl_reload_to(&r, e->run_start);
+            /* An offset code is its extra bits, and 2 or more is a new offset: known as soon as
+             * the cell is, not once its bits are read, so a wrong guess costs less. Code 0, the
+             * commonest repeat, is the last offset, or the one before if there are no literals:
+             * no branch, and no check, as the older offsets are never 0. */
             cx_u32 off;
-            if (v > 3) {
+            if (ox > 1) {
                 off = v - 3;
                 rep[2] = rep[1];
                 rep[1] = r0;
                 r0 = off;
+            } else if (ox == 0) {
+                const cx_u32 r1 = rep[1];
+                off = ll ? r0 : r1;
+                rep[1] = ll ? r1 : r0;
+                r0 = off;
             } else {
                 const cx_u32 k = v - 1 + (ll == 0);
-                if (k == 0) {
-                    off = r0;
-                } else {
-                    off = k == 3 ? r0 - 1 : k == 1 ? rep[1] : rep[2];
-                    if (off == 0) return 0;
-                    if (k != 1) rep[2] = rep[1];
-                    rep[1] = r0;
-                    r0 = off;
-                }
+                off = k == 3 ? r0 - 1 : k == 1 ? rep[1] : rep[2];
+                if (off == 0) return 0;
+                if (k != 1) rep[2] = rep[1];
+                rep[1] = r0;
+                r0 = off;
             }
             /* The literals, then the match. The output has SLACK bytes past the block's room, so
              * the fast copies fit whenever the sequence does. */
-            if ((cx_usize)(lit_end - lit) < ll) return 0;
+            if ((cx_usize)(e->run_lit_end - lit) < ll) return 0;
             if ((cx_usize)(o->bound - op) < (cx_usize)ll + ml) return 0;
             cx_u8* const m = op + ll;
             if (__builtin_expect(off <= (cx_usize)(m - o->base), 1)) {
@@ -1004,10 +1065,10 @@ static __attribute__((noinline)) int seq_run(ent_t* e, const cx_u8* p, cx_usize 
             op = m + ml;
             lit += ll;
         }
-        if (!br_done(&b)) return 0;
+        if (r.p != e->run_start || r.left != 0) return 0;
         e->rep[0] = r0;
     }
-    const cx_usize rest = (cx_usize)(lit_end - lit);
+    const cx_usize rest = (cx_usize)(e->run_lit_end - lit);
     if ((cx_usize)(o->bound - op) < rest) return 0;
     memcpy(op, lit, rest);
     *opp = op + rest;
@@ -1027,35 +1088,36 @@ static int seq_decode(const tabs_t* T, const cx_u8* p, cx_usize n, cx_u32 count,
     cx_u32 os = (cx_u32)br_read(&b, T->of_log);
     cx_u32 ms = (cx_u32)br_read(&b, T->ml_log);
     br_reload(&b);
+    bl_t r = {b.bits, 64 - b.used, b.p};
     cx_usize lits = 0, matches = 0;
     for (cx_u32 i = 0; i < count; i++) {
         const cell_t lc = llt[ls], oc = oft[os], mc = mlt[ms];
         cx_u32 v, ml, ll;
-        /* One reload for most sequences, as in seq_run. */
+        /* One reload for most sequences, and the reader, as in seq_run. */
         if (__builtin_expect(oc.extra + mc.extra + lc.extra <= 30, 1)) {
-            v = oc.base + (cx_u32)br_read(&b, oc.extra);
-            ml = mc.base + (cx_u32)br_read(&b, mc.extra);
-            ll = lc.base + (cx_u32)br_read(&b, lc.extra);
+            v = oc.base + (cx_u32)bl_read(&r, oc.extra);
+            ml = mc.base + (cx_u32)bl_read(&r, mc.extra);
+            ll = lc.base + (cx_u32)bl_read(&r, lc.extra);
         } else {
-            v = oc.base + (cx_u32)br_read(&b, oc.extra);
-            br_reload(&b);
-            ml = mc.base + (cx_u32)br_read(&b, mc.extra);
-            ll = lc.base + (cx_u32)br_read(&b, lc.extra);
-            br_reload(&b);
+            v = oc.base + (cx_u32)bl_read(&r, oc.extra);
+            bl_reload_to(&r, b.start);
+            ml = mc.base + (cx_u32)bl_read(&r, mc.extra);
+            ll = lc.base + (cx_u32)bl_read(&r, lc.extra);
+            bl_reload_to(&r, b.start);
         }
         if (i + 1 < count) {
-            ls = lc.next + (cx_u32)br_read(&b, lc.bits);
-            ms = mc.next + (cx_u32)br_read(&b, mc.bits);
-            os = oc.next + (cx_u32)br_read(&b, oc.bits);
+            ls = lc.next + (cx_u32)bl_read(&r, lc.bits);
+            ms = mc.next + (cx_u32)bl_read(&r, mc.bits);
+            os = oc.next + (cx_u32)bl_read(&r, oc.bits);
         }
-        br_reload(&b);
+        bl_reload_to(&r, b.start);
         s[i].ll = ll;
         s[i].ml = ml;
         s[i].off = v;
         lits += ll;
         matches += ml;
     }
-    if (!br_done(&b) || lits > lit_n || matches > most || lit_n > most - matches) return 0;
+    if (r.p != b.start || r.left != 0 || lits > lit_n || matches > most || lit_n > most - matches) return 0;
     *made = lit_n + matches;
     return 1;
 }
