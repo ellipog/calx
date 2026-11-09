@@ -912,6 +912,13 @@ CX_FN(cx_u64, cx_zse_compress, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 le
 CX_FN(cx_u64, cx_zse_compress_dict, (const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n,
                                      cx_u32 dict_id, const cx_u8* params, cx_u32 has_params, cx_u64 key));
 CX_FN(cx_u64, cx_zse_dict_key, (void));
+/* Trains a dictionary of at most cap bytes from count samples laid one after another, sizes[i]
+ * bytes each, as libzstd's ZDICT_trainFromBuffer does (CLX-191): writes it into out and gives its
+ * size, or 0 for too few samples or bytes, or a cap under 256. */
+CX_FN(cx_u64, cx_zse_train, (const cx_u8* samples, const cx_u64* sizes, cx_u64 count, cx_u8* out, cx_u64 cap, cx_i32 level));
+/* As libzstd's ZDICT_finalizeDictionary: content[0..cn) with tables for `level` from the samples,
+ * at most cap bytes, into out: gives its size, or 0 for a cap under 256 or the content's size. */
+CX_FN(cx_u64, cx_zse_finalize, (const cx_u8* content, cx_u64 cn, const cx_u8* samples, const cx_u64* sizes, cx_u64 count, cx_u8* out, cx_u64 cap, cx_i32 level));
 
 /* SQLite, in calx_sqlite.c over runtime/sqlite/sqlite3.c, behind std.sqlite (CLX-108). A connection
  * and a statement are each a number, the pointer behind it. A call that fails leaves SQLite's

@@ -18,6 +18,8 @@ extern "C" {
     fn cx_zse_compress(input: *const u8, n: u64, out: *u8, level: i32, flags: u32) -> u64
     fn cx_zse_compress_dict(input: *const u8, n: u64, out: *u8, level: i32, flags: u32, content: *const u8, content_n: u64, dict_id: u32, params: *const u8, has_params: u32, key: u64) -> u64
     fn cx_zse_dict_key() -> u64
+    fn cx_zse_train(samples: *const u8, sizes: *const u64, count: u64, out: *u8, cap: u64, level: i32) -> u64
+    fn cx_zse_finalize(content: *const u8, cn: u64, samples: *const u8, sizes: *const u64, count: u64, out: *u8, cap: u64, level: i32) -> u64
 }
 
 /// Why bytes didn't decompress. Python raises a `ZstdError` for each, and a `ValueError` for a
@@ -45,6 +47,10 @@ pub enum Error {
     TooLong
     /// A dictionary that isn't one. Python says "invalid Zstandard dictionary".
     BadDictionary
+    /// `train_dict` had fewer than seven samples, fewer than 8 bytes in the first three quarters
+    /// of them, or a size under 256, or `finalize_dict` a size under 256 or under its content's.
+    /// Python says "Src size is incorrect" or "Destination buffer is too small".
+    Training
 }
 
 /// What went wrong, in words: `corrupt data`, `the data ends early`.
@@ -60,6 +66,7 @@ impl Display for Error {
             Truncated => print("the data ends early"),
             TooLong => print("longer than the limit when decompressed"),
             BadDictionary => print("not a Zstandard dictionary"),
+            Training => print("too few samples or too small a size to train a dictionary"),
         }
     }
 }
@@ -141,6 +148,12 @@ impl Dictionary {
         return self.dict_id
     }
 
+    /// Its bytes, as Python's `dict_content` gives them: to keep one `train_dict` made in a file,
+    /// which `new` reads back.
+    pub fn to_bytes(self) -> List<u8> {
+        return self.bytes.copy()
+    }
+
     /// What the bytes decompress to with this dictionary, as `decompress(bytes, zstd_dict=d)`
     /// gives it.
     pub fn decompress(self, bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error {
@@ -174,6 +187,62 @@ impl Dictionary {
     pub fn compress_into(self, bytes: List<u8>, from: usize, to: usize, level: i32, checksum: bool, out: mut List<u8>) {
         encode(bytes, from, to, level, checksum, self.bytes, self.content, self.dict_id, self.params, self.key, mut out)
     }
+}
+
+/// A dictionary of at most `size` bytes trained from samples of what it's for, as Python's
+/// `train_dict(samples, size)` trains one, with libzstd's fastCover: its content is the stretches
+/// of the samples whose bytes come up most often in them, the best last, and its tables are for
+/// what's left after matches into it. Of five lengths of stretch, it takes the one with which the
+/// last quarter of the samples, left out of the training, comes out smallest. The same samples
+/// give the same dictionary. Fails with `Training` for fewer than seven samples, fewer than 8
+/// bytes in the first three quarters of them, or a size under 256, as Python raises a
+/// `ZstdError`.
+pub fn train_dict(samples: List<List<u8>>, size: usize) -> Dictionary ! Error {
+    let (all, sizes) = laid_out(samples)
+    var out: List<u8> = [0; size]
+    let n = unsafe { cx_zse_train(all.as_ptr(), sizes.as_ptr(), u64(sizes.len()), out.as_mut_ptr(), u64(size), 3) }
+    if n == 0 {
+        fail Error.Training
+    }
+    out.truncate(usize.wrap(n))
+    return try Dictionary.new(out)
+}
+
+/// A dictionary of at most `size` bytes with `content`'s bytes as its content, and tables from the
+/// samples for frames at `level`, as Python's `finalize_dict(content, samples, size, level)` makes
+/// one: for content picked by hand, or some other way than `train_dict`'s. If the content and the
+/// tables are more than `size`, the content's end is kept, the part nearest what follows it, where
+/// Python keeps its start. Fails with `Training` for a size under 256 or under the content's, as
+/// Python raises a `ZstdError`. Panics for a level outside -131072 to 22.
+@track_caller
+pub fn finalize_dict(content: Dictionary, samples: List<List<u8>>, size: usize, level: i32) -> Dictionary ! Error {
+    if level < -131072 or level > 22 {
+        panic("the level {level} isn't one: levels go from -131072 to 22")
+    }
+    let (all, sizes) = laid_out(samples)
+    var out: List<u8> = [0; size]
+    let n = unsafe { cx_zse_finalize(content.bytes.as_ptr(), u64(content.bytes.len()), all.as_ptr(), sizes.as_ptr(), u64(sizes.len()), out.as_mut_ptr(), u64(size), level) }
+    if n == 0 {
+        fail Error.Training
+    }
+    out.truncate(usize.wrap(n))
+    return try Dictionary.new(out)
+}
+
+// The samples one after another, and each one's size.
+fn laid_out(samples: List<List<u8>>) -> (List<u8>, List<u64>) {
+    var total: usize = 0
+    for s in samples {
+        total += s.len()
+    }
+    var all: List<u8> = []
+    all.reserve(total)
+    var sizes: List<u64> = []
+    for s in samples {
+        all.extend(s)
+        sizes.push(u64(s.len()))
+    }
+    return (all, sizes)
 }
 
 fn tables_for() -> List<u8> {

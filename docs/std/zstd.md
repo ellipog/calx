@@ -1,6 +1,6 @@
 ---
 title: std.zstd
-description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, and compressed at zstd's levels, with or without a dictionary, on all the processors for big ones.
+description: Zstandard files decompressed as Python's compression.zstd reads them, with checksums, skippable frames and dictionaries, compressed at zstd's levels, with or without a dictionary, on all the processors for big ones, and dictionaries trained from samples.
 ---
 
 # `std.zstd`
@@ -40,7 +40,10 @@ fn main() {
 | `xxh64(bytes: List<u8>, seed: u64 = 0) -> u64` | The XXH64 hash, as the `xxhash` package's `xxh64_intdigest` gives it. A frame's checksum is its low 32 bits |
 | `Dictionary.new(bytes: own List<u8>) -> Dictionary ! Error` | A dictionary that `zstd --train` or `train_dict` made, as `ZstdDict(bytes)` takes it. See [Dictionaries](#dictionaries) |
 | `Dictionary.raw(bytes: own List<u8>) -> Dictionary ! Error` | Bytes to use as a dictionary as they are, as `ZstdDict(bytes, is_raw=True)` takes them |
+| `train_dict(samples: List<List<u8>>, size: usize) -> Dictionary ! Error` | A dictionary of at most `size` bytes trained from samples of what it's for, as Python's `train_dict(samples, size)` trains one. See [Training one](#training-one) |
+| `finalize_dict(content: Dictionary, samples: List<List<u8>>, size: usize, level: i32) -> Dictionary ! Error` | A dictionary with `content`'s bytes as its content and tables from the samples, as Python's `finalize_dict(content, samples, size, level)` makes one |
 | `d.id() -> u32` | The ID frames compressed with `d` carry, or 0 |
+| `d.to_bytes() -> List<u8>` | The dictionary's bytes, as `dict_content` gives them: to keep a trained one in a file, which `Dictionary.new` reads back |
 | `d.decompress(bytes: List<u8>, limit: u64 = u64.MAX) -> List<u8> ! Error` | As `decompress`, with the dictionary, as `decompress(bytes, zstd_dict=d)` |
 | `d.decompress_into(bytes: List<u8>, from: usize, to: usize, limit: u64, out: mut List<u8>) ! Error` | As `decompress_into`, with the dictionary |
 | `d.compress(bytes: List<u8>, level: i32 = 3, checksum: bool = false) -> List<u8>` | As `compress`, with the dictionary, as `compress(bytes, level, zstd_dict=d)` |
@@ -59,8 +62,9 @@ Why bytes don't decompress, as `Error`:
 | `Truncated` | They end inside a frame, or are empty | the data ends early | Compressed data ended before the end-of-stream marker was reached |
 | `TooLong` | What they decompress to is more than the limit | longer than the limit when decompressed | |
 | `BadDictionary` | `Dictionary.new` or `raw` was given bytes that aren't a dictionary | not a Zstandard dictionary | `ValueError`, or a `ZstdError` when it's first used |
+| `Training` | `train_dict` was given fewer than seven samples, fewer than 8 bytes in the first three quarters of them, or a size under 256; or `finalize_dict` a size under 256 or under its content's | too few samples or too small a size to train a dictionary | Src size is incorrect, or Destination buffer is too small |
 
-Python raises a `ZstdError` for all but `BadDictionary`, with the message above after "Unable to decompress Zstandard data: ".
+Python raises a `ZstdError` for all but `BadDictionary`, with the message above after "Unable to decompress Zstandard data: ", or for `Training` after "Unable to train the Zstandard dictionary: " or "Unable to finalize the Zstandard dictionary: ".
 
 - Frames follow one another to the end of the bytes, as `zstd` writes them with `zstd -c a b`. Skippable frames give nothing. After a frame, anything that isn't the start of another fails with `Format`, and the start of one cut short with `Truncated`, as in Python. An empty list is `Truncated` too.
 - A frame's size, when it gives one, must be what its blocks make. A checksum, when it has one, is checked.
@@ -144,6 +148,37 @@ Python writes 27 bytes for that text with the dictionary, and 63 without.
 - As libzstd reads them, bytes given to `raw` that start with the magic number are a dictionary all the same, with their ID and tables.
 - Both fail with `BadDictionary` for fewer than eight bytes, as Python does, and for a dictionary whose tables are broken. Python's `ZstdDict` takes those and raises a `ZstdError` the first time it decompresses with them; `std.zstd` fails at once. `new` also fails for bytes without the magic number or with an ID of 0, as `ZstdDict` does.
 - As libzstd's lets them, matches may reach back past a dictionary's content into its tables. `d.compress`'s don't.
+
+### Training one
+
+`train_dict(samples, size)` makes a dictionary from samples of what it's for, as Python's `train_dict` does, by libzstd's fastCover method, written from its description rather than its code. `d.to_bytes()` gives its bytes to keep in a file, which `Dictionary.new` reads back.
+
+```calx
+import std.zstd.{compress, train_dict}
+
+fn main() {
+    // Records like the ones the dictionary is for.
+    var samples: List<List<u8>> = []
+    for i in 0..1000 {
+        samples.push("\{\"id\": {i * 7919 % 10007}, \"name\": \"user{i * 31 % 977}\", \"admin\": {i % 7 == 0}\}".to_bytes())
+    }
+    let d = train_dict(samples, 4096)!
+    let record = "\{\"id\": 4242, \"name\": \"user42\", \"admin\": false\}".to_bytes()
+    let z = d.compress(record)
+    println("{z.len()} {compress(record).len()} {d.decompress(z)! == record}")    // out: 27 55 true
+    println("{d.to_bytes().len()}")    // out: 4096
+}
+```
+
+Python's `train_dict` on those samples makes a dictionary that compresses the record to 27 bytes too.
+
+- **What it holds.** The first three quarters of the samples train it and the last quarter tests it. Its content is stretches of the training samples, one from each part of them in turn: the stretch whose 8-byte strings come up most often in all the samples, each counted once, after which they count for nothing, so the next stretch adds what the content doesn't have yet. The stretches fill the content from its end, so the best are nearest the text that follows. Its tables are for what the training samples' parses at level 3 take with that content before them, each literal, length and offset code counted from one, so that every byte can be coded. Five lengths of stretch are tried, 50 to 1,998 bytes, at once on five processors, and the one kept is the one whose dictionary and test samples, a frame each at level 3, come to the fewest bytes.
+- **Where it differs from libzstd's.** When the content and the tables are more than `size`, libzstd leaves out the end of the content, where the best stretches are, and `std.zstd` its start. The literals' Huffman code is the shortest of at most 11 bits for their counts: the encoder's own way of fitting a code to 11 bits took 10% more bits than that on those literals, where most bytes never come up but still need a code. The ID is a hash of the content, from 32,768 up as libzstd's are, but not libzstd's hash.
+- **Sizes.** On four sets of samples, JSON records, pieces of the repository's source, a server's log in pieces of 3 to 25 lines, and the small files of [Dictionaries](#dictionaries), each trained at 4 KB, 16 KB and 110 KB, with the samples held out compressed a frame each at levels 1, 3, 9 and 19: compressed by Python, they come out from 1.5% smaller to 1.8% bigger with `std.zstd`'s dictionary than with Python's, 0.1% bigger on average, and over 1% bigger in one case of 48. Compressed by `std.zstd`, they come out from 2.5% smaller to 1.1% bigger, 0.5% smaller on average. The same content made into a dictionary by both `finalize_dict`s comes out within 1.2% either way compressed by Python, and 0.4% compressed by `std.zstd`.
+- **Speed.** On an i9-13900K on Windows, training from those sets, 0.3 to 3.3 MB, at 16 KB and 110 KB, took 9 to 34 ms, where Python's took 25 to 166 ms: 2.9 to 5.2 times as fast. Picking the content takes most of it, and is about 3 ns a byte of samples for each length of stretch.
+- The same samples give the same dictionary, on any machine with any number of processors.
+- `finalize_dict(content, samples, size, level)` puts tables on content picked some other way, from all the samples' parses at `level`, as Python's does. When the content and the tables don't fit in `size`, it keeps the content's end, where Python keeps its start. As in Python, `size` can't be less than the content.
+- `train_dict` fails with `Training` for fewer than seven samples, as five must be left to train on, for fewer than 8 bytes in the first three quarters of them, and for a size under 256; `finalize_dict` for a size under 256 or under the content's. Python raises a `ZstdError` for each.
 
 ## Speed
 
@@ -317,6 +352,8 @@ The [tests](../../tests/std/zstd.calx) hold Python's bytes and Python's outcomes
 
 What `compress` writes was checked on 70 files: text, a program, random bytes, zeros, runs, text that repeats every 1 to 70,000 bytes with and without noise, a mix of kinds, and slices of `src.tar` cut a byte either side of the block size and its multiples, from empty to 2.5 MB. Each was compressed at every level from 1 to 22 and at -1, -3, -7 and -50: 1,820 frames, by an encoder built to check every match it takes against the text. Python 3.14's `compression.zstd`, `zstd` 1.5.7 and `std.zstd` each decompressed all 1,820 to what went in. The same files at 18 levels came out the same from the encoder built for AVX2, for SSE2 alone and for neither, as on Arm. The [tests](../../tests/std/zstd_compress.calx) compress at every level and check that what comes back is what went in. They hold Python's bytes for a short text, and hashes of frames that every machine must match, and check that 6 MB compressed on 8 threads and on 1 is the same.
 
+`train_dict` and `finalize_dict` were checked on the four sets of [Training one](#training-one): 24 dictionaries, with 150 of each set's samples held out compressed by `std.zstd` at levels -5, 1, 3, 9 and 19. Python 3.14's `compression.zstd` and `zstd -D` 1.5.7 decompressed all 18,000 frames to what went in, and Python compressed with the dictionaries and read its frames back. The [tests](../../tests/std/zstd_train.calx) train from records and finalize content picked from them, check what comes back, that the same samples give the same bytes on one thread and on eight, and hold hashes of the dictionaries that every machine must match.
+
 What `d.compress` writes was checked on 1,146 files: 1,000 JSON records, 143 pieces of the repository's source, a file of 200 KB and one of 3 MB made of them end to end, and an empty one. Each was compressed at every level from 1 to 22 and at -1 and -5, with a dictionary Python's `train_dict` made from most of them and with 8.7 KB of them as content alone: 55,008 frames. Python 3.14's `compression.zstd` and `zstd -D` 1.5.7, each with the same dictionary, and `std.zstd` decompressed all of them to what went in. The [tests](../../tests/std/zstd_dict_compress.calx) compress with both kinds at every level, check the frames' headers and IDs, and hold hashes of frames that every machine must match.
 
 ## How it's built
@@ -347,3 +384,4 @@ Compressing is [runtime/calx_zstdenc.c](../../runtime/calx_zstdenc.c), linked on
 | All the processors | Jobs of four windows, each on a thread of [`parallel for`](../reference/parallel.md), joined in order |
 | Small frames | A frame of up to 256 KiB takes a job kept from the frames before, with its buffers and tables, rather than allocating and freeing a job's ten blocks for each call. Up to 16 are kept, from the system's allocator as they last as long as the program, and a kept job's tables are let go when they're over 1 MiB. A block's Huffman code and FSE tables stay where they were made, in one of the job's two places for each kind, so a block that keeps them takes only where they are, rather than copying 7 KiB; a job keeps a copy of the last trained dictionary's tables, so its next frame with that dictionary starts from them where they are |
 | Dictionaries | The content is the first job's text before it. It goes into the match finder's tables once for each level's settings, and up to 16 such sets, 32 MiB in all, are kept for the frames after; the least recently used is let go first. Each `Dictionary` has a number of its own, and as its content can't change, a set is found by that and its settings, without comparing the content. At the hash-table and hash-row levels a frame takes a working copy of the set's tables, which holds the content too, and an input of up to 64 KiB goes in after it, so neither the content nor the tables are copied for the frame. When it's done, the frame puts back from the set only the entries its own text changed; frames at once take copies of their own. At the levels with two hash tables and with hash rows, for tables of 256 KiB or more, too big to stay in the cache beside the copy, the frame notes what each of its writes replaced, and puts that back, newest first, without reading the set again; smaller ones are copied back from the set. At the tree levels an input of up to 64 KiB doesn't touch the set's trees: its positions go into trees of its own, sized for it, and each position the parse searches looks in the set's too, which stay as they are, as libzstd attaches a dictionary. Most positions the parse passes over, and those go only into the frame's trees, which stay in the cache; frames at once share the set's. The first frame with a dictionary at those levels builds and keeps its trees before it starts, so it comes out as the frames after do. A longer input copies the set's trees and goes into them. A trained dictionary's Huffman and FSE tables, built from its header, are kept for the last 4 dictionaries. In the binary trees the content's comparisons stop at its end, and text that agrees to there goes in with nothing below it, as in libzstd, so the trees are the same whatever text follows. At the btlazy2 levels it goes in sorted |
+| Training | Each 8-byte string's count, by the top 20 bits of its hash, in a table of 2^20, as libzstd's fastCover counts them. A stretch is picked by sliding a window over its part of the samples and keeping the one whose strings' counts, each counted once, add up to most; each string's hash is worked out once, into a ring, and its counts fetched 32 strings ahead, as most of the time went on waiting for the tables, 6 MiB of them, which took a third off it. The tables come from the encoder's own parses: a frame with a place to count into counts its literals and codes and writes nothing. The five lengths of stretch are trained at once, and each one's frames one after another: on more threads, frames this small only wait on one another, and took 1.2 to 2.5 times as long |

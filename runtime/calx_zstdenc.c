@@ -609,6 +609,61 @@ static cx_u32 huf_limit(const cx_u32* sym, const cx_i64* a, int n, cx_u32 lim, c
     return longest;
 }
 
+/* The shortest code lengths for count[0..max], two symbols or more, none longer than lim, which has
+ * room for them: package-merge. Gives the longest. huf_limit's way of fitting a deep code is far
+ * from this when most of the symbols are lifted, as a trained dictionary's are, every byte having
+ * a code: 10% more bits on its literals there. */
+static cx_u32 huf_optimal(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
+    cx_u32 sym[256];
+    cx_i64 a[256];
+    memset(len, 0, max + 1);
+    const int n = huf_depths(count, max, sym, a);
+    cx_u64 w[256], cur[512], next[512];
+    for (int i = 0; i < n; i++) w[i] = count[sym[i]];
+    /* Each list in order of weight: the symbols' and the packages of pairs from the list before.
+     * Whether each item is a symbol's is all the walk back needs, as the symbols in a list are in
+     * order of weight too, and its packages are of the list before's first items, in pairs. */
+    cx_u8 leaf[HUF_LOG][512];
+    int m = n;
+    for (int i = 0; i < n; i++) {
+        cur[i] = w[i];
+        leaf[0][i] = 1;
+    }
+    for (cx_u32 lv = 1; lv < lim; lv++) {
+        const int pn = m / 2;
+        int x = 0, y = 0, k = 0;
+        while (x < n || y < pn) {
+            const cx_u64 pk = y < pn ? cur[2 * y] + cur[2 * y + 1] : 0;
+            if (y >= pn || (x < n && w[x] <= pk)) {
+                next[k] = w[x++];
+                leaf[lv][k++] = 1;
+            } else {
+                next[k] = pk;
+                y++;
+                leaf[lv][k++] = 0;
+            }
+        }
+        m = k;
+        memcpy(cur, next, (size_t)m * sizeof(cx_u64));
+    }
+    /* The first 2n - 2 items of the last list: each symbol's length is how many lists it's taken
+     * from. */
+    cx_u8 depth[256] = {0};
+    int take = 2 * n - 2;
+    for (int lv = (int)lim - 1; lv >= 0; lv--) {
+        int leaves = 0;
+        for (int i = 0; i < take; i++) leaves += leaf[lv][i];
+        for (int i = 0; i < leaves; i++) depth[i]++;
+        take = 2 * (take - leaves);
+    }
+    cx_u32 longest = 0;
+    for (int i = 0; i < n; i++) {
+        len[sym[i]] = depth[i];
+        longest = depth[i] > longest ? depth[i] : longest;
+    }
+    return longest;
+}
+
 /* Code lengths for count[0..max], two symbols or more, none longer than lim, which has room for
  * them. Gives the longest. */
 static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u32 lim, cx_u8* len) {
@@ -929,6 +984,12 @@ typedef struct {
     const cx_u8* src_end; /* where the text ends: literals are copied 16 at a time before it */
 } ss_t;
 
+/* What parses took, for a trained dictionary's tables (CLX-191): each literal's count, and each
+ * literal length's, match length's and offset's code's. */
+typedef struct {
+    cx_u64 lit[256], ll[64], ml[64], of[32];
+} sink_t;
+
 /* The offset `off` after `ll` literals as coded, 1 to 3 for a repeated one and off + 3 for a new
  * one, with the repeated offsets r moved on as the decoder moves them. */
 static inline cx_u32 rep_code(cx_u32* r, cx_u32 ll, cx_u32 off) {
@@ -1244,6 +1305,7 @@ typedef struct job_s {
     cx_u8* out;
     cx_usize out_n, out_cap;
     cx_i64 saved; /* the bytes the job's blocks before this one saved */
+    sink_t* sink; /* where its parses are counted, when a dictionary is trained, or 0 */
     /* A block's codes, written before they're read, and the places for its tables: last, so a new
      * job clears only what's before them, under 1 KiB rather than 313. */
     cx_u8 llc[SEQ_MAX], mlc[SEQ_MAX], ofc[SEQ_MAX];
@@ -3596,6 +3658,19 @@ static cx_usize block(job_t* J, cx_u32 at, cx_u32 n, int last, cx_u8* out, cx_us
     const cx_u64 t1 = __rdtsc();
     zse_cycles[0] += t1 - t0;
 #endif
+    if (__builtin_expect(J->sink != 0, 0)) {
+        /* A frame for a trained dictionary's counts, of a block at most, is only parsed: what it
+         * would write isn't wanted. */
+        sink_t* const S = J->sink;
+        for (const cx_u8* p = J->ss.lit; p < J->ss.lp; p++) S->lit[*p]++;
+        for (cx_u32 i = 0; i < J->ss.n; i++) {
+            const seq_t* const q = &J->ss.seq[i];
+            S->ll[ll_code(q->ll)]++;
+            S->ml[ml_code(q->ml - 3)]++;
+            S->of[high_bit(q->ofb)]++;
+        }
+        return 0;
+    }
     const cx_usize got = split_emit(J, fin, r, at, n, last, out, cap);
 #ifdef ZSE_CYCLES
     zse_cycles[1] += __rdtsc() - t1;
@@ -4458,6 +4533,7 @@ typedef struct {
     cx_u64 dkey;
     digest_t* dg; /* the dictionary's kept tables for the first job, held, or 0 */
     work_t* dw;   /* and a working copy of them, or 0 */
+    sink_t* sink; /* where the first job counts its parses, which it only parses, or 0 */
 } frame_t;
 
 #define START_OF(p) (((cx_u32)1 << (p).wlog) + 1)
@@ -4478,6 +4554,7 @@ static void job_place(frame_t* F, job_t* J, cx_u64 k) {
     J->dg = k == 0 ? F->dg : 0;
     J->dw = k == 0 ? F->dw : 0;
     J->dict = k == 0 && F->first;
+    J->sink = k == 0 ? F->sink : 0;
     if (k == 0 && F->first) {
         J->base = F->first - J->start;
         J->from = J->start + F->first_pre;
@@ -4582,9 +4659,11 @@ static void group_body(void* v, cx_u64 begin, cx_u64 end) {
 
 /* Writes the frame for in[0..n) at the given level into out, which has cx_zse_bound(n) bytes,
  * with a dictionary's content[0..content_n) as the text before it, its ID if that isn't 0, and if
- * params isn't 0 its tables: gives its size. flags: 1 for a checksum, which std.zstd appends. */
+ * params isn't 0 its tables: gives its size. flags: 1 for a checksum, which std.zstd appends. With
+ * a sink, the first job counts its parses into it and writes nothing, for a trained dictionary's
+ * tables: the input is a block at most. */
 static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
-                          const cx_u8* params, cx_u64 key) {
+                          const cx_u8* params, cx_u64 key, sink_t* sink) {
     if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
     frame_t F;
     memset(&F, 0, sizeof F);
@@ -4598,6 +4677,7 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
     F.jobs = n ? (n + F.each - 1) / F.each : 1;
     F.dparams = params;
     F.dkey = key;
+    F.sink = sink;
     if (content_n) {
         const cx_u64 w = (cx_u64)1 << F.p.wlog, len = n < F.each ? n : F.each;
         F.first_pre = (cx_u32)(content_n < w ? content_n : w);
@@ -4674,7 +4754,7 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
 }
 
 cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags) {
-    return frame_write(in, n, out, level, flags, 0, 0, 0, 0, 0);
+    return frame_write(in, n, out, level, flags, 0, 0, 0, 0, 0, 0);
 }
 
 /* As cx_zse_compress, with a dictionary: its content[0..content_n), its ID, 0 for none, its tables
@@ -4682,11 +4762,363 @@ cx_u64 cx_zse_compress(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u
  * or 0 to have its kept tables found by its content. */
 cx_u64 cx_zse_compress_dict(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, cx_u32 flags, const cx_u8* content, cx_u64 content_n, cx_u32 dict_id,
                             const cx_u8* params, cx_u32 has_params, cx_u64 key) {
-    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0, key);
+    return frame_write(in, n, out, level, flags, content, content_n, dict_id, has_params ? params : 0, key, 0);
 }
 
 /* A key for a new dictionary, which no other has had. */
 cx_u64 cx_zse_dict_key(void) {
     static cx_u64 keys;
     return __atomic_add_fetch(&keys, 1, __ATOMIC_RELAXED);
+}
+
+/* --- dictionaries, trained (CLX-191) ---------------------------------------------------------- */
+
+/* A dictionary trained from samples as libzstd's ZDICT_trainFromBuffer trains one, which is what
+ * Python's train_dict calls: its content is segments of the samples picked by fastCover, its
+ * tables from what the samples' parses take with that content before them, and of five segment
+ * lengths the one whose dictionary compresses the samples held back for testing smallest. Ours
+ * differs where libzstd's leaves the best out: when the content and tables don't fit in the size
+ * asked for, libzstd keeps the content's start, the segments picked last, and ours its end, the
+ * segments picked first. */
+
+#define TR_F 20                      /* bits of a d-mer's hash: 2^20 counts, as libzstd's */
+#define TR_D 8                       /* the bytes in a d-mer */
+#define TR_KS 5                      /* segment lengths tried: 50 to 1998 bytes, 487 apart */
+#define TR_STATS ((cx_u64)128 << 10) /* the bytes of each sample whose parse counts, as libzstd's */
+#define TR_AHEAD 32                  /* how far ahead a segment's counts are fetched */
+#define TR_RING 2048                 /* room for a segment's d-mers' hashes and TR_AHEAD more */
+/* The most a dictionary can be: its offsets' codes, up to the content and a block, stop at 30. */
+#define TR_CAP_MAX (((cx_u64)1 << 31) - ((cx_u64)128 << 10) - 1)
+
+static inline cx_u32 tr_hash(const cx_u8* p) { return (cx_u32)((ld64(p) * 0xCF1BBCDCB7A56463ull) >> (64 - TR_F)); }
+
+typedef struct {
+    const cx_u8* s;     /* the samples, one after another */
+    const cx_u64* at;   /* where each starts, and where the last ends */
+    cx_u64 count;       /* how many */
+    cx_u64 train;       /* how many train, the first three quarters: the rest test */
+    cx_u64 dmers;       /* the training samples' bytes where a d-mer starts */
+    const cx_u32* freq; /* each d-mer hash's count in the training samples */
+    cx_u64 cap;         /* the size asked for */
+    cx_i32 level;
+    cx_u8* dict[TR_KS]; /* each segment length's dictionary, or 0 */
+    cx_u64 dict_n[TR_KS], score[TR_KS];
+} train_t;
+
+/* Drops the kept tables for a key that no frame has now: a trained candidate's, once its frames
+ * are written, so that training leaves the program's own kept. */
+static void digest_forget(cx_u64 key) {
+    digest_lock();
+    for (digest_t** at = &digests; *at;) {
+        digest_t* const d = *at;
+        if (d->key == key && !d->refs) {
+            *at = d->next;
+            digest_count--;
+            digest_total -= d->bytes;
+            digest_free(d);
+        } else {
+            at = &d->next;
+        }
+    }
+    digest_unlock();
+}
+
+/* The best segment of k bytes whose d-mers start in [begin, end): the one whose different d-mers'
+ * counts sum to most. Those d-mers' counts are then 0, so that later segments add what this one
+ * doesn't have. seg is all 0, as it's left. As libzstd's FASTCOVER_selectSegment. */
+static cx_u64 tr_segment(const train_t* T, cx_u32* freq, cx_u16* seg, cx_u64 begin, cx_u64 end, cx_u32 k, cx_u64* sb, cx_u64* se) {
+    const cx_u64 in_k = k - TR_D + 1;
+    const cx_u8* const s = T->s;
+    /* Each d-mer's hash, from the window's start to TR_AHEAD past its end, whose counts are
+     * fetched as it's hashed: the tables are 6 MiB, and most of the time went on waiting for them. */
+    cx_u32 hs[TR_RING];
+    cx_u64 b = begin, e = begin, score = 0, best = 0, bb = 0, be = 0;
+    for (cx_u64 p = begin; p < end && p < begin + TR_AHEAD; p++) hs[p & (TR_RING - 1)] = tr_hash(s + p);
+    while (e < end) {
+        if (e + TR_AHEAD < end) {
+            const cx_u32 f = tr_hash(s + e + TR_AHEAD);
+            hs[(e + TR_AHEAD) & (TR_RING - 1)] = f;
+            __builtin_prefetch(&seg[f], 1);
+            __builtin_prefetch(&freq[f], 0);
+        }
+        const cx_u32 i = hs[e & (TR_RING - 1)];
+        if (seg[i] == 0) score += freq[i];
+        seg[i]++;
+        e++;
+        if (e - b == in_k + 1) {
+            const cx_u32 j = hs[b & (TR_RING - 1)];
+            if (--seg[j] == 0) score -= freq[j];
+            b++;
+        }
+        if (score > best) {
+            best = score;
+            bb = b;
+            be = e;
+        }
+    }
+    for (; b < end; b++) seg[hs[b & (TR_RING - 1)]]--;
+    for (cx_u64 p = bb; p != be; p++) freq[tr_hash(s + p)] = 0;
+    *sb = bb;
+    *se = be;
+    return best;
+}
+
+/* The content for segments of k bytes, filled from the back of dict[0..T->cap) so that the best
+ * are nearest the text: a segment from each epoch, a stretch of the training samples, in turn.
+ * Gives its bytes, at the end of dict. As libzstd's FASTCOVER_buildDictionary. */
+static cx_u64 tr_content(const train_t* T, cx_u32 k, cx_u32* freq, cx_u16* seg, cx_u8* dict) {
+    const cx_u64 n = T->dmers;
+    cx_u64 num = T->cap / k, size;
+    if (num < 1) num = 1;
+    size = n / num;
+    if (size < 10 * (cx_u64)k) {
+        size = 10 * (cx_u64)k < n ? 10 * (cx_u64)k : n;
+        num = n / size;
+    }
+    cx_u64 tail = T->cap;
+    int zero = 0;
+    for (cx_u64 ep = 0; tail > 0; ep = (ep + 1) % num) {
+        cx_u64 sb, se;
+        if (tr_segment(T, freq, seg, ep * size, ep * size + size, k, &sb, &se) == 0) {
+            /* There may be more in other epochs, for a while. */
+            if (++zero >= 10) break;
+            continue;
+        }
+        zero = 0;
+        cx_u64 len = se - sb + TR_D - 1;
+        if (len > tail) len = tail;
+        if (len < TR_D) break;
+        tail -= len;
+        memcpy(dict + tail, T->s + sb, len);
+    }
+    return T->cap - tail;
+}
+
+/* x[0..n) and 1 each, scaled down if their sum is over most: into c, at least 1 each. Gives the
+ * sum. */
+static cx_u32 tr_counts(const cx_u64* x, cx_u32 n, cx_u32* c, cx_u64 most) {
+    cx_u64 total = 0;
+    for (cx_u32 i = 0; i < n; i++) total += x[i] + 1;
+    cx_u32 sh = 0;
+    while ((total >> sh) > most) sh++;
+    cx_u32 sum = 0;
+    for (cx_u32 i = 0; i < n; i++) {
+        const cx_u64 v = (x[i] + 1) >> sh;
+        c[i] = v ? (cx_u32)v : 1;
+        sum += c[i];
+    }
+    return sum;
+}
+
+/* A dictionary's ID from its content, from 32768 to 2^31 - 1, as libzstd's are. */
+static cx_u32 tr_id(const cx_u8* p, cx_u64 n) {
+    cx_u64 h = 0x9E3779B97F4A7C15ull ^ n, i = 0;
+    for (; i + 8 <= n; i += 8) {
+        h = (h ^ ld64(p + i)) * 0xCF1BBCDCB7A56463ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    h ^= h >> 32;
+    return (cx_u32)(h % (((cx_u64)1 << 31) - 32768)) + 32768;
+}
+
+/* Frames of samples [from, to) after a dictionary: each sample's first 128 KiB with content
+ * alone, parsed and counted into sink, for a dictionary's tables; or each whole sample with a
+ * dictionary's ID and tables, for its score, which it gives. Or ~0 if there's no memory. One
+ * sample after another: the five candidates are trained at once, and frames this small on more
+ * threads than that only wait on one another, 1.2 to 2.5 times as long on our samples. */
+static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* content, cx_u64 cn, cx_u32 id, const cx_u8* dp, sink_t* sink) {
+    cx_u64 most = 0;
+    for (cx_u64 i = from; i < to; i++) {
+        const cx_u64 len = T->at[i + 1] - T->at[i];
+        most = len > most ? len : most;
+    }
+    if (sink) most = most < TR_STATS ? most : TR_STATS;
+    cx_u8* const out = (cx_u8*)malloc((size_t)cx_zse_bound(most));
+    if (!out) return ~(cx_u64)0;
+    const cx_u64 key = cx_zse_dict_key();
+    cx_u64 sum = 0;
+    for (cx_u64 i = from; i < to; i++) {
+        cx_u64 len = T->at[i + 1] - T->at[i];
+        if (sink) {
+            len = len < TR_STATS ? len : TR_STATS;
+            if (len) frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, 0, key, sink);
+        } else {
+            sum += frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, id, dp, key, 0);
+        }
+    }
+    digest_forget(key);
+    free(out);
+    return sum;
+}
+
+/* The dictionary for content[0..cn), into dict, T->cap bytes, and its tables as cx_zstd_dict_params
+ * gives them into dp: its tables from what the training samples' first 128 KiB take with the
+ * content before them, each literal, literal length, match length and offset code counted from 1,
+ * as libzstd's ZDICT_finalizeDictionary. Gives its size and *h where its content starts, or 0 if
+ * the tables leave no room. */
+static cx_u64 tr_finish(const train_t* T, const cx_u8* content, cx_u64 cn, cx_u8* dict, cx_u8* dp, cx_u64* hp) {
+    sink_t S;
+    memset(&S, 0, sizeof S);
+    if (tr_pass(T, 0, T->train, content, cn, 0, 0, &S) == ~(cx_u64)0) return 0;
+
+    memset(dp, 0, DP_ALL);
+    cx_u8 hdr[512];
+    st32(hdr, 0xEC30A437u);
+    cx_usize h = 8;
+    /* The literals' code: if every byte is as likely, which a tree can't say, nearly so, as
+     * libzstd's ZDICT_flatLit. Their counts are kept below 2^18, as huf_depths sorts them. */
+    cx_u32 lit[256];
+    cx_u8 len[256];
+    tr_counts(S.lit, 256, lit, (cx_u64)1 << 17);
+    cx_u32 log = huf_optimal(lit, 255, HUF_LOG, len);
+    cx_usize t = huf_tree(len, 255, log, hdr + h);
+    if (!t) {
+        for (int i = 1; i < 256; i++) lit[i] = 2;
+        lit[0] = 4;
+        lit[253] = lit[254] = 1;
+        log = huf_optimal(lit, 255, HUF_LOG, len);
+        t = huf_tree(len, 255, log, hdr + h);
+        if (!t) return 0;
+    }
+    h += t;
+    memcpy(dp, len, 256);
+    dp[256] = (cx_u8)log;
+    dp[257] = 255;
+    /* The offsets' codes up to the content and a block's, and the lengths', at libzstd's sizes. */
+    const cx_u32 maxes[3] = {high_bit((cx_u32)(cn + ((cx_u64)128 << 10))), ML_MAX, LL_MAX}, logs[3] = {8, 9, 9};
+    const cx_u64* const from[3] = {S.of, S.ml, S.ll};
+    for (int k = 0; k < 3; k++) {
+        cx_u32 c[64];
+        cx_i16 norm[64];
+        const cx_u32 total = tr_counts(from[k], maxes[k] + 1, c, (cx_u64)1 << 22);
+        normalize(c, maxes[k], total, logs[k], norm);
+        h += write_counts(norm, maxes[k], logs[k], hdr + h);
+        cx_u8* const d = dp + DP_FSE + 130 * k;
+        d[0] = (cx_u8)logs[k];
+        d[1] = (cx_u8)maxes[k];
+        for (cx_u32 s = 0; s <= maxes[k]; s++) {
+            d[2 + 2 * s] = (cx_u8)((cx_u16)norm[s] & 0xFF);
+            d[3 + 2 * s] = (cx_u8)((cx_u16)norm[s] >> 8);
+        }
+    }
+    /* The repeated offsets a frame starts with: libzstd's, 1, 4 and 8. */
+    st32(hdr + h, 1);
+    st32(hdr + h + 4, 4);
+    st32(hdr + h + 8, 8);
+    memcpy(dp + DP_REP, hdr + h, 12);
+    h += 12;
+    /* The content's end, as much as fits, after zeros if it's less than the last offset. */
+    if (h + 8 > T->cap) return 0;
+    const cx_u64 keep = cn < T->cap - h ? cn : T->cap - h, pad = keep < 8 ? 8 - keep : 0;
+    memcpy(dict, hdr, h);
+    memset(dict + h, 0, (size_t)pad);
+    memcpy(dict + h + pad, content + cn - keep, (size_t)keep);
+    const cx_u64 dn = h + pad + keep;
+    st32(dict + 4, tr_id(dict + h, dn - h));
+    *hp = h;
+    return dn;
+}
+
+/* One segment length's dictionary, k = 50 + 487c, and its score: its size and the test samples'
+ * frames with it. As libzstd's FASTCOVER_tryParameters. */
+static void tr_candidate(train_t* T, cx_u64 c) {
+    const cx_u32 k = 50 + 487 * (cx_u32)c;
+    if (k > T->cap) return;
+    cx_u32* const freq = (cx_u32*)malloc((size_t)4 << TR_F);
+    cx_u16* const seg = (cx_u16*)calloc((size_t)1 << TR_F, 2);
+    cx_u8* const content = (cx_u8*)malloc((size_t)T->cap);
+    cx_u8* const dict = (cx_u8*)malloc((size_t)T->cap);
+    if (freq && seg && content && dict) {
+        memcpy(freq, T->freq, (size_t)4 << TR_F);
+        const cx_u64 cn = tr_content(T, k, freq, seg, content);
+        cx_u8 dp[DP_ALL];
+        cx_u64 h = 0;
+        const cx_u64 dn = tr_finish(T, content + T->cap - cn, cn, dict, dp, &h);
+        const cx_u64 sum = dn ? tr_pass(T, T->train, T->count, dict + h, dn - h, (cx_u32)ld32(dict + 4), dp, 0) : ~(cx_u64)0;
+        if (sum != ~(cx_u64)0) {
+            T->dict[c] = dict;
+            T->dict_n[c] = dn;
+            T->score[c] = dn + sum;
+        }
+    }
+    free(freq);
+    free(seg);
+    free(content);
+    if (!T->dict[c]) free(dict);
+}
+
+static void tr_body(void* v, cx_u64 begin, cx_u64 end) {
+    for (cx_u64 c = begin; c < end; c++) tr_candidate((train_t*)v, c);
+}
+
+/* Trains a dictionary of at most cap bytes from count samples, one after another in samples, each
+ * sizes[i] bytes, for frames at `level`: writes it into out and gives its size, or 0 if there are
+ * fewer than 7 samples, the first three quarters of them have fewer than 8 bytes, cap is under 256
+ * or over TR_CAP_MAX, or there's no memory. */
+cx_u64 cx_zse_train(const cx_u8* samples, const cx_u64* sizes, cx_u64 count, cx_u8* out, cx_u64 cap, cx_i32 level) {
+    if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
+    const cx_u64 train = count / 4 * 3 + count % 4 * 3 / 4;
+    if (train < 5 || count - train < 1 || cap < 256 || cap > TR_CAP_MAX) return 0;
+    cx_u64* const at = (cx_u64*)malloc((size_t)(count + 1) * 8);
+    if (!at) return 0;
+    at[0] = 0;
+    for (cx_u64 i = 0; i < count; i++) at[i + 1] = at[i] + sizes[i];
+    cx_u64 got = 0;
+    cx_u32* const freq = at[train] >= TR_D ? (cx_u32*)calloc((size_t)1 << TR_F, 4) : 0;
+    if (freq) {
+        /* Each d-mer's count, within each training sample. */
+        for (cx_u64 i = 0; i < train; i++)
+            for (cx_u64 p = at[i]; p + TR_D <= at[i + 1]; p++) freq[tr_hash(samples + p)]++;
+        train_t T;
+        memset(&T, 0, sizeof T);
+        T.s = samples;
+        T.at = at;
+        T.count = count;
+        T.train = train;
+        T.dmers = at[train] - TR_D + 1;
+        T.freq = freq;
+        T.cap = cap;
+        T.level = level;
+        cx_parallel(TR_KS, tr_body, &T);
+        /* The smallest score; on a tie the shortest segments, as libzstd. */
+        int best = -1;
+        for (int c = 0; c < TR_KS; c++)
+            if (T.dict[c] && (best < 0 || T.score[c] < T.score[best])) best = c;
+        if (best >= 0) {
+            memcpy(out, T.dict[best], (size_t)T.dict_n[best]);
+            got = T.dict_n[best];
+        }
+        for (int c = 0; c < TR_KS; c++) free(T.dict[c]);
+        free(freq);
+    }
+    free(at);
+    return got;
+}
+
+/* A dictionary of at most cap bytes with content[0..cn) as its content and tables for frames at
+ * `level` from count samples, one after another in samples, sizes[i] bytes each, as libzstd's
+ * ZDICT_finalizeDictionary makes one, which is what Python's finalize_dict calls: writes it into
+ * out and gives its size, or 0 if cap is under 256 or the content's size, or there's no room for
+ * the tables. When the content and the tables don't fit, the content's end is kept. */
+cx_u64 cx_zse_finalize(const cx_u8* content, cx_u64 cn, const cx_u8* samples, const cx_u64* sizes, cx_u64 count, cx_u8* out, cx_u64 cap, cx_i32 level) {
+    if (!__atomic_load_n(&tables_ready, __ATOMIC_ACQUIRE)) tables_init();
+    if (cap < 256 || cap < cn || cap > TR_CAP_MAX) return 0;
+    cx_u64* const at = (cx_u64*)malloc((size_t)(count + 1) * 8);
+    if (!at) return 0;
+    at[0] = 0;
+    for (cx_u64 i = 0; i < count; i++) at[i + 1] = at[i] + sizes[i];
+    train_t T;
+    memset(&T, 0, sizeof T);
+    T.s = samples;
+    T.at = at;
+    T.count = count;
+    T.train = count;
+    T.cap = cap;
+    T.level = level;
+    cx_u8 dp[DP_ALL];
+    cx_u64 h = 0;
+    const cx_u64 got = tr_finish(&T, content, cn, out, dp, &h);
+    free(at);
+    return got;
 }
