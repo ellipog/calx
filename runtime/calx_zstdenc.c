@@ -51,6 +51,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -417,19 +418,26 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
         len[s] = 0;
         if (count[s]) sym[n++] = s;
     }
-    /* In order of count, rarest first, and by symbol where counts are the same: two passes of a
-     * stable radix sort, nine bits each, as a block's counts are below 2^18. */
+    /* In order of count, rarest first, and by symbol where counts are the same: a stable counting
+     * sort, by the whole count when they're all below 512, as a small block's are, and otherwise
+     * two passes of nine bits each, as a block's counts are below 2^18. */
     {
+        cx_u32 most = 0;
+        for (int i = 0; i < n; i++) most = count[sym[i]] > most ? count[sym[i]] : most;
         cx_u32 tmp[256];
-        for (int pass = 0; pass < 2; pass++) {
+        const int passes = most < 512 ? 1 : 2;
+        const cx_u32 buckets = passes == 1 ? most + 1 : 512;
+        for (int pass = 0; pass < passes; pass++) {
             const int sh = 9 * pass;
-            cx_u32 at[513] = {0};
+            cx_u32 at[513];
+            memset(at, 0, (buckets + 1) * sizeof(cx_u32));
             cx_u32* const from = pass ? tmp : sym;
             cx_u32* const to = pass ? sym : tmp;
             for (int i = 0; i < n; i++) at[((count[from[i]] >> sh) & 511) + 1]++;
-            for (int k = 0; k < 512; k++) at[k + 1] += at[k];
+            for (cx_u32 k = 0; k < buckets; k++) at[k + 1] += at[k];
             for (int i = 0; i < n; i++) to[at[(count[from[i]] >> sh) & 511]++] = from[i];
         }
+        if (passes == 1) memcpy(sym, tmp, (cx_usize)n * sizeof(cx_u32));
     }
     for (int i = 0; i < n; i++) a[i] = count[sym[i]];
     /* The tree: each internal node's weight, then its parent. */
@@ -503,14 +511,17 @@ static cx_u32 huf_lengths(const cx_u32* count, cx_u32 max, cx_u8* len) {
 /* The codes for lengths len[0..max] with the longest `log`, laid out as the decoder lays its table
  * out: each weight's symbols in order, the longest codes first. Each is code | bits << 16. */
 static void huf_codes(const cx_u8* len, cx_u32 max, cx_u32 log, cx_u32* ct) {
-    cx_u32 pos = 0;
-    for (cx_u32 s = 0; s < 256; s++) ct[s] = 0;
-    for (cx_u32 l = log; l >= 1; l--) {
-        for (cx_u32 s = 0; s <= max; s++) {
-            if (len[s] != l) continue;
-            ct[s] = (pos >> (log - l)) | (l << 16);
-            pos += 1u << (log - l);
-        }
+    /* Where each length's codes start: the longest first, each length's symbols in order. */
+    cx_u32 n[HUF_LOG + 2] = {0}, pos[HUF_LOG + 2];
+    for (cx_u32 s = 0; s <= max; s++) n[len[s]]++;
+    pos[log] = 0;
+    for (cx_u32 l = log; l > 1; l--) pos[l - 1] = pos[l] + (n[l] << (log - l));
+    memset(ct, 0, 256 * sizeof(cx_u32));
+    for (cx_u32 s = 0; s <= max; s++) {
+        const cx_u32 l = len[s];
+        if (!l) continue;
+        ct[s] = (pos[l] >> (log - l)) | (l << 16);
+        pos[l] += 1u << (log - l);
     }
 }
 
@@ -1003,6 +1014,8 @@ typedef struct {
     cx_u32 next_up; /* the hash rows or trees have every position before this */
     cx_u32 bt_mls;  /* the bytes a tree's hash takes */
     cx_u32 bt_up;   /* how deep a position no match is looked for at goes into its tree */
+    cx_u32 lim;     /* where the trees' comparisons stop: `to`, or a dictionary's content's end */
+    int cut;        /* whether text that agrees to lim goes in with nothing below it */
     cx_u32 rlog;    /* a hash row's 2^rlog positions */
     cx_u8* tags;    /* each row position's byte more of hash, and each row's head */
     cx_u32* hash3;
@@ -1017,13 +1030,15 @@ typedef struct {
     cx_u8* blk;
     ent_t ent[2];
     int cur;
-    cx_u8 llc[SEQ_MAX], mlc[SEQ_MAX], ofc[SEQ_MAX];
-    cx_u32 ofv[SEQ_MAX];
     cx_u32* split; /* the block splitter's counts */
     cx_u8* htmp;   /* where the four Huffman streams are written */
     /* what comes out */
     cx_u8* out;
     cx_usize out_n, out_cap;
+    /* A block's codes, written before they're read: last, so a new job clears only what's before
+     * them, 13 KiB rather than 310. */
+    cx_u8 llc[SEQ_MAX], mlc[SEQ_MAX], ofc[SEQ_MAX];
+    cx_u32 ofv[SEQ_MAX];
 } job_t;
 
 /* --- the match finders ----------------------------------------------------------------------- */
@@ -1674,9 +1689,13 @@ static void mf_lazy2(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) { ZSE_LAZY(J, a
  * The comparisons go to the job's end, or BT_CMP bytes, the same for every position however near
  * a block's end it is: a tree stays sorted only if each place in it was found by comparing as far
  * as the others were. bt_place does it for the tree below cand, whose positions before low have
- * left it: their places in it may be newer positions' by now. */
+ * left it: their places in it may be newer positions' by now.
+ *
+ * A dictionary's content goes in with the comparisons stopping at its end, J->lim, so the trees
+ * are the same whatever text follows it, and kept ones can be used again (digest_take). Text that
+ * agrees to there can't be put in order, so, as libzstd does, cur goes in with nothing below it. */
 static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u32 low, cx_u32 room, cx_u32 best, match_t* m, cx_u32* longest, cx_u32 depth) {
-    const cx_u32 left = J->to - cur;
+    const cx_u32 left = J->lim - cur;
     const cx_u32 limit = left < BT_CMP ? left : BT_CMP;
     const cx_u32 mask = (1u << (J->p.clog - 1)) - 1;
     cx_u32* const son = J->chain;
@@ -1710,6 +1729,10 @@ static cx_u32 bt_place(job_t* J, const cx_u8* ip, cx_u32 cur, cx_u32 cand, cx_u3
                 noted++;
             }
             if (len >= limit) {
+                if (J->cut) {
+                    *ptr0 = *ptr1 = 0;
+                    break;
+                }
                 *ptr1 = pair[0];
                 *ptr0 = pair[1];
                 break;
@@ -3146,7 +3169,6 @@ static void job_tables(job_t* J) {
         cx_free(J->hash3, (cx_usize)4 << HASH3_LOG);
         J->hash3 = 0;
     }
-    job_clear(J);
     if (J->p.strat >= S_BTLAZY2 && !J->mt) J->mt = (match_t*)cx_alloc(MATCHES_MAX * sizeof(match_t));
     if (J->p.strat >= S_BTOPT && !J->opt) {
         J->st = (stats_t*)cx_alloc(sizeof(stats_t));
@@ -3184,11 +3206,22 @@ static void job_prefix(job_t* J) {
     }
     case S_BTLAZY2:
         J->next_up = from;
-        dt_update(J, end);
-        break;
+        if (!J->dict) {
+            dt_update(J, end);
+            break;
+        }
+        /* A dictionary's content goes in sorted, as libzstd does it, rather than for each frame's
+         * searches to sort it again: its trees are kept (digest_take). */
+        /* fall through */
     default:
         J->next_up = from;
+        if (J->dict) {
+            J->lim = to;
+            J->cut = 1;
+        }
         bt_update(J, end, base + to);
+        J->lim = J->to;
+        J->cut = 0;
         break;
     }
 }
@@ -3219,11 +3252,145 @@ static void dict_tables(ent_t* e, const cx_u8* P) {
     for (int i = 0; i < 3; i++) e->rep[i] = ld32(P + DP_REP + 4 * i);
 }
 
+/* --- dictionaries' tables, kept -------------------------------------------------------------- */
+
+/* A dictionary's content taken into the match finder's tables, for one level's settings, kept so
+ * that a later frame with the same content and settings copies the tables rather than taking the
+ * content in again, which on a small input is most of the work. One is found by its settings and
+ * by its content compared byte for byte, as the trees take what they were built from on trust. At
+ * most DIGEST_MAX are kept, DIGEST_BYTES in all, the least recently used let go first. They're
+ * the system's memory, not the runtime allocator's, as they're kept until the program ends. */
+#define DIGEST_MAX 16
+#define DIGEST_BYTES ((cx_usize)32 << 20)
+/* Content shorter than this goes into the tables faster than they'd copy. */
+#define DIGEST_MIN 256
+
+typedef struct digest_s {
+    struct digest_s* next;
+    cp_t p;
+    cx_u32 pre;     /* the content's last `pre` bytes, which the tables hold */
+    cx_u32 next_up; /* the job's next_up after them */
+    cx_u32 refs;    /* frames copying from it now */
+    cx_u64 used;
+    cx_usize bytes, hash_n, chain_n, hash3_n;
+    cx_u32* hash;
+    cx_u32* chain;
+    cx_u32* hash3;
+    cx_u8* text;
+} digest_t;
+
+static digest_t* digests;
+static cx_u64 digest_clock;
+static cx_usize digest_total, digest_count;
+static char digest_busy;
+
+static void digest_lock(void) {
+    while (__atomic_test_and_set(&digest_busy, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&digest_busy, __ATOMIC_RELAXED)) {}
+}
+
+static void digest_unlock(void) { __atomic_clear(&digest_busy, __ATOMIC_RELEASE); }
+
+/* Whether d is for J's settings and content of J's length, by its ends: the whole content is
+ * compared after, outside the lock. */
+static int digest_like(const digest_t* d, const job_t* J, cx_u32 pre, const cx_u8* text) {
+    const cx_u32 e = pre < 16 ? pre : 16;
+    return d->pre == pre && !memcmp(&d->p, &J->p, sizeof d->p) && !memcmp(d->text, text, e) && !memcmp(d->text + pre - e, text + pre - e, e);
+}
+
+/* Copies a kept digest of J's dictionary into J's tables, if there is one: gives whether. */
+static int digest_take(job_t* J) {
+    const cx_u32 pre = J->from - J->start;
+    const cx_u8* const text = J->base + J->start;
+    if (pre < DIGEST_MIN) return 0;
+#ifdef ZSE_TUNE
+    if (getenv("ZSE_NODIGEST")) return 0;
+#endif
+    digest_t* d;
+    digest_lock();
+    for (d = digests; d; d = d->next)
+        if (digest_like(d, J, pre, text)) break;
+    if (d) {
+        d->refs++;
+        d->used = ++digest_clock;
+    }
+    digest_unlock();
+    if (!d) return 0;
+    const int same = d->hash_n == J->hash_n && d->chain_n == J->chain_n && !memcmp(d->text, text, pre);
+    if (same) {
+        memcpy(J->hash, d->hash, d->hash_n * 4);
+        if (d->chain_n) memcpy(J->chain, d->chain, d->chain_n * 4);
+        if (d->hash3_n) memcpy(J->hash3, d->hash3, d->hash3_n * 4);
+        J->next_up = d->next_up;
+    }
+    digest_lock();
+    d->refs--;
+    digest_unlock();
+    return same;
+}
+
+/* Keeps J's tables, with its dictionary's content just taken in, for the frames after. */
+static void digest_keep(const job_t* J) {
+    const cx_u32 pre = J->from - J->start;
+    const cx_u8* const text = J->base + J->start;
+    if (pre < DIGEST_MIN) return;
+    const cx_usize h3 = J->hash3 ? (cx_usize)1 << HASH3_LOG : 0;
+    const cx_usize bytes = sizeof(digest_t) + 4 * (J->hash_n + J->chain_n + h3) + pre;
+    if (bytes > DIGEST_BYTES / 4) return;
+    digest_t* d = (digest_t*)malloc(bytes);
+    if (!d) return;
+    d->p = J->p;
+    d->pre = pre;
+    d->next_up = J->next_up;
+    d->refs = 0;
+    d->bytes = bytes;
+    d->hash_n = J->hash_n;
+    d->chain_n = J->chain_n;
+    d->hash3_n = h3;
+    d->hash = (cx_u32*)(d + 1);
+    d->chain = d->hash + d->hash_n;
+    d->hash3 = d->chain + d->chain_n;
+    d->text = (cx_u8*)(d->hash3 + h3);
+    memcpy(d->hash, J->hash, d->hash_n * 4);
+    if (d->chain_n) memcpy(d->chain, J->chain, d->chain_n * 4);
+    if (h3) memcpy(d->hash3, J->hash3, h3 * 4);
+    memcpy(d->text, text, pre);
+    digest_lock();
+    for (digest_t* e = digests; e; e = e->next) {
+        /* Another thread kept it first. */
+        if (digest_like(e, J, pre, text) && !memcmp(e->text, text, pre)) {
+            digest_unlock();
+            free(d);
+            return;
+        }
+    }
+    d->used = ++digest_clock;
+    d->next = digests;
+    digests = d;
+    digest_count++;
+    digest_total += bytes;
+    while (digest_count > DIGEST_MAX || digest_total > DIGEST_BYTES) {
+        digest_t** oldest = 0;
+        for (digest_t** at = &digests; *at; at = &(*at)->next)
+            if (*at != d && !(*at)->refs && (!oldest || (*at)->used < (*oldest)->used)) oldest = at;
+        if (!oldest) break;
+        digest_t* const v = *oldest;
+        *oldest = v->next;
+        digest_count--;
+        digest_total -= v->bytes;
+        free(v);
+    }
+    digest_unlock();
+}
+
 /* Compresses the job's text into its blocks. */
 static void job_run(job_t* J) {
     job_tables(J);
-    J->next_up = J->start;
-    job_prefix(J);
+    if (!J->dict || !digest_take(J)) {
+        job_clear(J);
+        job_prefix(J);
+        if (J->dict) digest_keep(J);
+    }
     ent_t* e = &J->ent[0];
     J->cur = 0;
     e->huf_ok = 0;
@@ -3356,13 +3523,15 @@ static void job_place(frame_t* F, job_t* J, cx_u64 k) {
         J->from = J->start + F->first_pre;
         J->to = J->from + (cx_u32)to;
     }
+    J->lim = J->to;
+    J->cut = 0;
 }
 
 static void group_body(void* v, cx_u64 begin, cx_u64 end) {
     frame_t* F = (frame_t*)v;
     for (cx_u64 g = begin; g < end; g++) {
         job_t* J = (job_t*)cx_alloc(sizeof(job_t));
-        memset(J, 0, sizeof *J);
+        memset(J, 0, __builtin_offsetof(job_t, llc));
         job_ready(J);
         for (cx_u64 k = g; k < F->jobs; k += F->groups) {
             made_t* slot = &F->made[k];
