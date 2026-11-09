@@ -7435,7 +7435,9 @@ private:
         outer_loops.swap(loops_);
         push_scope();
         for (Param& p : it->params) declare(p.local);
-        Type* body = check(e->body, result);
+        // One that gives nothing back is a statement, as a function's body is, so it can end
+        // with an `if` that has no `else`.
+        Type* body = result && result->kind == TypeKind::unit ? check_expr_stmt(e->body, false) : check(e->body, result);
         pop_scope();
         loops_.swap(outer_loops);
         std::vector<Local*> caps = std::move(closures_.back().captures);
@@ -9843,7 +9845,7 @@ private:
                 }
                 b = m == "runes" ? BMethod::runes : BMethod::chars, result = recv;
             } else if (!owned) {
-                if (m == "push" || m == "push_str" || m == "clear" || m == "reserve") {
+                if (m == "push" || m == "push_str" || m == "clear" || m == "reserve" || m == "truncate") {
                     error(e->callee->span, "a `str` can't change; make a `String` with " + q("String(...)"));
                     check_args(e);
                     return T.error;
@@ -9854,6 +9856,7 @@ private:
             else if (m == "push_str") b = BMethod::push_str, changes = true, params = {nullptr};
             else if (m == "clear") b = BMethod::clear, changes = true;
             else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "truncate") b = BMethod::truncate, changes = true, params = {T.usize};
         } else if (recv->kind == TypeKind::map || recv->kind == TypeKind::set) {
             bool map = recv->kind == TypeKind::map;
             Type* look = lookup_key(recv);

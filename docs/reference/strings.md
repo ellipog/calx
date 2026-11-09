@@ -81,6 +81,7 @@ fn main() {
 | `s.push(r)` | Adds the `rune` `r`, as UTF-8 |
 | `s.push_str(t)` | Adds the text `t` |
 | `s.clear()` | Removes all the text, keeping the memory |
+| `s.truncate(n)` | Keeps the first `n` bytes, and the memory. Does nothing if it has `n` or fewer. Panics if byte `n` is inside a rune |
 | `s.reserve(n)` | Makes room for `n` more bytes, so the next pushes don't allocate |
 | `s.contains(t)` | Whether `t` appears in `s`. Every string contains `""` |
 | `s.find(t)`, `s.find_last(t)` | The byte offset where `t` first or last starts in `s`, a `usize?`. `""` is found at 0, or last at the end |
@@ -101,6 +102,7 @@ fn main() {
 | `xs.join(t)` | A list of `String`s or of `str`s as one `String`, with `t` between them |
 
 - Methods that take text, `t` above, take a `str` or a `String`, since they only look at it.
+- `truncate` takes back what pushes added: `let at = s.len()`, pushes, then `s.truncate(at)`.
 - A `str` has the methods that only look: `len`, `is_empty`, `byte_at`, `contains`, `find`, `find_last`, `starts_with`, `ends_with`, `to_lower_root`, `to_upper_root`, `java_hash` and `utf16_len`, and the ones that give new text or parts, from `trim` to `pad_end`. A `str`'s trimmed part is a `str`.
 - Methods that change the string need a variable declared with `var`, or a `mut` parameter.
 - `s.as_ptr()` points at the bytes, for [unsafe code](unsafe.md#pointers).

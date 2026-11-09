@@ -6351,6 +6351,8 @@ $dropall    m->len = 0;
                     return head + "cx_string_push_str(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::clear: return "cx_string_clear(" + address(recv) + ")";
                 case BMethod::reserve: return head + "cx_string_reserve(" + p + ", " + arg(0, e->args[0].value->type) + "); })";
+                case BMethod::truncate:
+                    return head + "cx_string_truncate(" + p + ", " + arg(0, e->args[0].value->type) + ", " + location(e->span) + "); })";
                 case BMethod::contains: return view + "cx_str_contains(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::starts_with: return view + "cx_str_starts_with(" + p + ", " + text_arg(0) + "); })";
                 case BMethod::ends_with: return view + "cx_str_ends_with(" + p + ", " + text_arg(0) + "); })";

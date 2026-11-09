@@ -1773,6 +1773,15 @@ void cx_panic_insert(cx_usize index, cx_usize length, const char* at) {
     cx_panic_end();
 }
 
+void cx_panic_truncate(cx_usize n, cx_usize length, const char* at) {
+    char text[112];
+    cx_panic_begin(at);
+    snprintf(text, sizeof text, "truncating to %llu bytes cuts a rune apart: byte %llu is inside one, in text of length %llu",
+             (unsigned long long)n, (unsigned long long)n, (unsigned long long)length);
+    panic_text(text);
+    cx_panic_end();
+}
+
 void cx_panic_set_len(cx_usize length, cx_usize capacity, const char* at) {
     char text[96];
     cx_panic_begin(at);

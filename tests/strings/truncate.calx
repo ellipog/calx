@@ -1,0 +1,36 @@
+// `s.truncate(n)` keeps the first `n` bytes (CLX-161).
+
+fn main() {
+    var s = String("path/to/file")
+    s.truncate(7)
+    println("[{s}] {s.len()}")    // out: [path/to] 7
+    s.truncate(20)
+    println("[{s}]")    // out: [path/to]
+    s.push_str("/other")
+    println("[{s}]")    // out: [path/to/other]
+
+    // A literal's string, which pushes copy after.
+    var lit = String("abcdef")
+    lit = "abcdef"
+    lit.truncate(3)
+    lit.push('x')
+    println("[{lit}]")    // out: [abcx]
+
+    // Where a rune starts, and to nothing.
+    var runes = String("née!")
+    runes.truncate(3)
+    println("[{runes}]")    // out: [né]
+    runes.truncate(0)
+    println("[{runes}] {runes.is_empty()}")    // out: [] true
+
+    // A path built up and taken back, as a walk does.
+    var path = String()
+    var seen = List<String>()
+    for k in ["a", "b"] {
+        let at = path.len()
+        path.push_str("/{k}")
+        seen.push(path.copy())
+        path.truncate(at)
+    }
+    println("{seen} [{path}]")    // out: [/a, /b] []
+}

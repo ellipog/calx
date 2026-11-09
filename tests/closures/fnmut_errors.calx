@@ -32,6 +32,7 @@ fn wrap(xs: List<i32>, f: FnMut(i32)) {
     read_each(xs, |x| f(x))                 // error: `f` can change what it captures, so a closure that uses it changes it too, and can only be passed to a parameter with an `FnMut` bound
     _ = xs.map(|x| { f(x); x })             // error: `f` can change what it captures, so a closure that uses it changes it too
     each(xs, |x| f(x))
+    read_each(xs, |x| x + 1)                // error: this `i32` value is unused
 }
 
 struct Bag {

@@ -1,0 +1,6 @@
+// Truncating can't cut a rune apart (CLX-161).
+
+fn main() {
+    var s = String("née")
+    s.truncate(2)    // panic: truncating to 2 bytes cuts a rune apart: byte 2 is inside one, in text of length 4
+}

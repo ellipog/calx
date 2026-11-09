@@ -67,7 +67,9 @@ fn main() {
     var biggest = 0
     each(xs, |x| {
         total += x
-        biggest = if x > biggest { x } else { biggest }
+        if x > biggest {
+            biggest = x
+        }
     })
     println("{total} {biggest}")    // out: 14 5
 

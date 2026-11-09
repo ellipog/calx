@@ -451,6 +451,14 @@ CX_INLINE void cx_string_clear(cx_String* s) {
         s->len = 0;
     }
 }
+/* `s.truncate(n)`: the first `n` bytes, where `n` is where a rune starts. A literal's string keeps
+ * pointing at the literal, whose bytes its first push copies. */
+CX_COLD CX_FN(void, cx_panic_truncate, (cx_usize n, cx_usize length, const char* at));
+CX_INLINE void cx_string_truncate(cx_String* s, cx_usize n, const char* at) {
+    if (n >= s->len) return;
+    if (__builtin_expect((s->ptr[n] & 0xC0) == 0x80, 0)) cx_panic_truncate(n, s->len, at);
+    s->len = n;
+}
 CX_FN(cx_bool, cx_str_contains, (cx_str hay, cx_str needle));
 /* Whether the bytes are UTF-8: no overlong forms, surrogates, or values past U+10FFFF. */
 CX_FN(cx_bool, cx_utf8_valid, (const cx_u8* p, cx_usize n));

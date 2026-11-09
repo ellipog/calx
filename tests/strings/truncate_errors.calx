@@ -1,0 +1,6 @@
+// A `str` can't be truncated (CLX-161).
+
+fn main() {
+    let s: str = "abc"
+    s.truncate(1)    // error: a `str` can't change
+}
