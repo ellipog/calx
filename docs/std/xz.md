@@ -7,7 +7,7 @@ description: .xz, .lzma and .lz files decompressed as Python's lzma.decompress r
 
 `std.xz` decompresses .xz files, such as release archives in `.tar.xz`, and the older .lzma files and lzip's .lz files. It reads what `xz` and Python's `lzma` write, and it decompresses the same bytes as Python's `lzma.decompress` does. It fails on the same broken files, for the same reasons.
 
-It compresses too, at `xz`'s presets, into files that `xz` and Python read. On our benchmark they come out within about one percent of liblzma's size, and at the default preset a file of tens of megabytes is written 5 to 12 times as fast as liblzma writes it, on all the processors. [`std.tar`](tar.md) opens a `.tar.xz` with it, and writes one.
+It compresses too, at `xz`'s presets, into files that `xz` and Python read. On our benchmark they come out within about one percent of liblzma's size, and at the default preset a file of tens of megabytes is written 8 to 13 times as fast as liblzma writes it, on all the processors. [`std.tar`](tar.md) opens a `.tar.xz` with it, and writes one.
 
 Both also take a file [a piece at a time](#a-piece-at-a-time), for a file bigger than memory or bytes from a pipe, and give the same results.
 
@@ -226,51 +226,51 @@ In WSL on the same machine, with liblzma built by GCC:
 
 `std.xz` reads the block sizes `xz` writes into each block's header, reserves all the room at once, and writes each block straight into its place. When a file has several blocks with their sizes, as `xz -T` writes them by default, it decodes them on all the processors at once with [`parallel for`](../reference/parallel.md)'s threads.
 
-On an i9-13900K running other programs, best of 7 runs each, so the numbers are rough. `src.tar` is 16.9 MB of source files, and `bin.exe` a 6.2 MB Windows program. The `mt` files are `xz -T0 --block-size=2MiB`'s, with 9 and 3 blocks:
+On an i9-13900K, best of 7 runs in each of three rounds, the programs taking turns. On Windows the ones on one thread ran on the performance cores, out of power throttling; the threaded ones, and `std.xz` on the `mt` files, ran on any. `src.tar` is 18.6 MB of the Calx repository's files and `bin.exe` the Calx compiler, a 6.2 MB Windows program, each compressed by `xz -6`. The `mt` files are `xz -T0 --block-size=2MiB`'s, with 9 and 3 blocks:
 
 | File | Calx | Python 3.14 | Rust: liblzma 0.4.9 | Rust: lzma-rust2 0.25 | Rust: lzma-rs 0.3 |
 | --- | --- | --- | --- | --- | --- |
-| src.tar.xz | 94 ms | 156 ms | 141 ms | 150 ms | 295 ms |
-| src.tar.mt.xz | 17 ms | 154 ms | 29 ms | 30 ms | 304 ms |
-| bin.exe.xz | 41 ms | 65 ms | 74 ms | 75 ms | 124 ms |
-| bin.exe.mt.xz | 16 ms | 64 ms | 34 ms | 33 ms | 127 ms |
+| src.tar.xz | 79.7 ms | 127 ms | 122 ms | 116 ms | 199 ms |
+| src.tar.mt.xz | 11.7 ms | 135 ms | 23.2 ms | 21.9 ms | 209 ms |
+| bin.exe.xz | 31.8 ms | 50.8 ms | 46.9 ms | 48.3 ms | 77.9 ms |
+| bin.exe.mt.xz | 13.0 ms | 51.2 ms | 20.3 ms | 19.6 ms | 79.3 ms |
 
 - Python and the liblzma crate run liblzma 5.8, Python on one thread. Each Rust crate's time is from whichever of its decoders, plain or threaded, was faster on the file: the threaded ones on the `mt` files. Each Rust decoder had the room for its output reserved before it started.
 - The Rust programs were built with `lto = "fat"`, one codegen unit and `target-cpu=x86-64-v3`, as Calx builds for x86-64-v3.
-- liblzma built by GCC, as Linux distributions ship it, is faster than the Windows builds above. In WSL on the same machine, Python with it is level with `std.xz` on the files with one block: 88 ms to 88 on src.tar.xz, and 37 to 38 on bin.exe.xz. On the `mt` files it takes 84 and 36 ms, and `std.xz` 15.
+- liblzma built by GCC, as Linux distributions ship it, is faster than the Windows builds above. In WSL on the same machine, Python with it is faster than `std.xz` on the files with one block: 74 ms to 82 on src.tar.xz, and 32 to 33 on bin.exe.xz. On the `mt` files it takes 79 and 33 ms, and `std.xz` 13 and 14.
 
-`compress` was timed on the same machine, with the same programs running, best of 3 runs, or of 2 for the 40 MB file. `std.txt` is 1.2 MB of Calx source, `src.tar` 18.2 MB of the Calx repository's files, and `clang40` the first 40 MB of `clang.exe`. At preset 6, the default:
+`compress` was timed on the same machine, the programs taking turns for two rounds, best of 3 runs in each, or of 2 for the 40 MB file. The ones on one thread ran on the performance cores, out of power throttling; the threaded ones and `std.xz` ran on any. `std.txt` is 1.25 MB of Calx source, `src.tar` the 18.6 MB above, and `clang40` the first 40 MB of `clang.exe`. At preset 6, the default:
 
 | File | Calx | Python 3.14 | Rust: liblzma 0.4.9 | Rust: liblzma, threads | Rust: lzma-rust2 0.25 | Rust: lzma-rust2, threads |
 | --- | --- | --- | --- | --- | --- | --- |
-| std.txt | 112 ms | 389 ms | 379 ms | 421 ms | 450 ms | 522 ms |
-| src.tar | 883 ms | 9,967 ms | 10,914 ms | 11,813 ms | 11,490 ms | 8,726 ms |
-| clang40 | 2,291 ms | 29,705 ms | 25,868 ms | 12,884 ms | 29,320 ms | 20,006 ms |
+| std.txt | 87 ms | 233 ms | 268 ms | 269 ms | 272 ms | 273 ms |
+| src.tar | 630 ms | 5,250 ms | 5,660 ms | 5,651 ms | 5,722 ms | 5,706 ms |
+| clang40 | 1,285 ms | 15,492 ms | 16,243 ms | 10,617 ms | 16,211 ms | 10,551 ms |
 
 At preset 0, the fastest:
 
 | File | Calx | Python 3.14 | Rust: liblzma 0.4.9 | Rust: liblzma, threads | Rust: lzma-rust2 0.25 | Rust: lzma-rust2, threads |
 | --- | --- | --- | --- | --- | --- | --- |
-| std.txt | 23 ms | 36 ms | 45 ms | 41 ms | 43 ms | 37 ms |
-| src.tar | 60 ms | 620 ms | 698 ms | 84 ms | 744 ms | 104 ms |
-| clang40 | 227 ms | 2,350 ms | 2,512 ms | 237 ms | 3,887 ms | 331 ms |
+| std.txt | 18 ms | 28 ms | 33 ms | 29 ms | 27 ms | 24 ms |
+| src.tar | 38 ms | 426 ms | 503 ms | 50 ms | 426 ms | 48 ms |
+| clang40 | 115 ms | 1,420 ms | 1,622 ms | 127 ms | 1,460 ms | 149 ms |
 
 - Python and the liblzma crate run liblzma 5.8. The threaded encoders had a thread for each of the 32 processors. They give each block a thread, and cut blocks of three times the dictionary, as `xz -T0` does: 24 MiB at preset 6, so `std.txt` and `src.tar` get one thread and `clang40` two, and 1 MiB at preset 0. `std.xz` cuts the same blocks, and puts all the processors on each.
-- At preset 6, what `std.xz` writes is 0.4%, 0.6% and 1.1% bigger than what liblzma writes on one thread, for the three files, and 0.4%, 0.6% and 0.3% bigger than what it writes on threads. At preset 0 it's 3.2%, 3.8% and 1.2% smaller than liblzma's, 0.9% bigger than lzma-rust2's on one thread, and the same size as lzma-rust2's on threads.
-- At preset 0 the blocks are 1 MiB, so the threaded encoders have blocks for every processor too, and come near `std.xz`'s time. At preset 6, `std.xz` is 3.4 times as fast as the fastest of the others on `std.txt`, 9.9 times on `src.tar` and 5.6 times on `clang40`.
-- `xz` 5.8.3, in WSL on the same machine, took about as long as liblzma: 10.6 s for `src.tar` at preset 6, 9.9 s with `-T0`, and 18.9 s for `clang40` with `-T0`.
+- At preset 6, what `std.xz` writes is 0.4%, 0.6% and 1.1% bigger than what liblzma writes on one thread, for the three files, and 0.4%, 0.6% and 0.3% bigger than what it writes on threads. At preset 0 it's 3.5%, 3.7% and 1.2% smaller than liblzma's, 0.6% to 1.1% bigger than lzma-rust2's on one thread, and the same size as lzma-rust2's on threads.
+- At preset 0 the blocks are 1 MiB, so the threaded encoders have blocks for every processor too, and come near `std.xz`'s time. At preset 6, `std.xz` is 2.7 times as fast as the fastest of the others on `std.txt`, 8.3 times on `src.tar` and 8.2 times on `clang40`.
+- `xz` 5.8.3, in WSL on the same machine, which can't be held to the performance cores, took 9.5 s for `src.tar` at preset 6, 6.2 s with `-T0`, and 11.0 s for `clang40` with `-T0`.
 - The Rust programs were built as above, and once more without `target-cpu`, and each Rust time is the faster of the two builds' best. Each program checked that what it wrote decompressed to the file.
 
 Finding the matches on all the processors takes more memory than one thread does. The trees have room for the dictionary and a window of text more, and the threads note a window's matches, packed into 4 bytes each, or 5 for presets 7 to 9 with `extreme`, before the slices are parsed from them. Peak memory, as `/usr/bin/time` gives it in WSL on the same machine:
 
 | File | Preset | Calx | Python 3.14 | `xz -T1` | `xz -T0` |
 | --- | --- | --- | --- | --- | --- |
-| src.tar | 0 | 70 MiB | 39 MiB | 5 MiB | 67 MiB |
-| src.tar | 6 | 434 MiB | 127 MiB | 95 MiB | 116 MiB |
-| src.tar | 9 | 582 MiB | 254 MiB | 223 MiB | 243 MiB |
-| clang40 | 0 | 169 MiB | 82 MiB | 5 MiB | 124 MiB |
-| clang40 | 6 | 405 MiB | 166 MiB | 95 MiB | 239 MiB |
-| clang40 | 9 | 844 MiB | 480 MiB | 410 MiB | 460 MiB |
+| src.tar | 0 | 68 MiB | 40 MiB | 5 MiB | 69 MiB |
+| src.tar | 6 | 427 MiB | 127 MiB | 95 MiB | 116 MiB |
+| src.tar | 9 | 604 MiB | 258 MiB | 226 MiB | 247 MiB |
+| clang40 | 0 | 171 MiB | 82 MiB | 5 MiB | 125 MiB |
+| clang40 | 6 | 407 MiB | 166 MiB | 95 MiB | 239 MiB |
+| clang40 | 9 | 857 MiB | 481 MiB | 410 MiB | 460 MiB |
 
 - Calx and Python hold the whole file and what it compresses to, as `compress` and `lzma.compress` take and give them. `xz` reads the file and writes as it goes.
 - On a machine with less than twice the memory that finding a block's matches on all the processors would take, `compress` gives each block one thread, as liblzma does, and writes the same bytes.
