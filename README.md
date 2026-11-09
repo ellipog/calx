@@ -16,7 +16,16 @@ What sets it apart:
 - **Strict by default.** No implicit conversions, no dropped values, no unused names and no shadowing. Each mistake gets an error that says what to write instead.
 - **Fast to build.** `calx run` on a small program takes about 0.3 s from an empty cache and under 25 ms when nothing changed.
 
-Status: Phases 3 and 4, the compiler's core and Calcite's protocol with a flat world, are done, and Phase 5, chunks, storage, regions and world generation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on Windows and Linux. The standard library has `std.io`, `std.env`, `std.time`, `std.math` and `std.java.math`, `std.pool`, `std.net` (TCP driven by events on IOCP and epoll), `std.mail` (messages between actors), `std.text.mutf8`, `std.hash`, `std.crypto`, `std.zlib`, `std.lz4`, `std.http`, `std.thread` (threads for services, and typed queues), `std.meta` (declarations for attributes), `std.fs` (files and directories), `std.build` (the program's build ID), `std.term` (the terminal), `std.process` (starting other programs, and this process), `std.text.utf8` (bytes that may not be UTF-8, read as Java reads them) `std.palette` (vanilla's paletted containers, for chunk sections), `std.zip` and `std.tar` (archives, read, written and extracted), and the Java-compatible collections and strings are built. The [reference](docs/README.md#reference) lists what's built.
+Status: Calcite's Phases 0 to 5 have passed their gates, the compiler's core, the protocol, and chunks, storage, regions and world generation among them, and Phase 6, simulation, is under way. The compiler builds integers, floats, arrays, structs, enums, tuples, optionals, `match`, generics, interfaces, modules, `String`, `List`, `Map` and `Set`, error values (`T ! E`, `fail`, `try`), closures, `unsafe` code with C functions, `parallel for`, libraries a program opens while it runs, for plugins, and attributes that libraries define in Calx, which generate code while the program compiles. They give Java's results on Windows and Linux. The standard library has:
+
+- **Files, processes and the terminal:** `std.fs`, `std.path`, `std.process`, `std.env`, `std.io`, `std.term`, `std.cli`, `std.shell` and `std.log`.
+- **Text and data:** `std.json`, `std.yaml`, `std.toml`, `std.ini`, `std.csv`, `std.xml`, `std.html`, `std.sqlite`, `std.regex`, `std.textwrap`, `std.diff`, `std.unicode`, `std.url` and `std.uuid`.
+- **Compression and archives:** `std.zlib`, `std.zstd`, `std.xz`, `std.lz4`, `std.zip` and `std.tar`.
+- **Numbers:** `std.math`, `std.bigint`, `std.decimal`, `std.stats`, `std.random` and `std.java.math`.
+- **Networking and threads:** `std.net` (TCP driven by events on IOCP and epoll), `std.http` and `std.http.server`, `std.mail` (messages between actors), `std.thread` and `std.pool`.
+- **The rest:** `std.crypto`, `std.hash`, `std.image` (PNG and JPEG), `std.time`, `std.meta` (declarations for attributes), `std.build`, and, for Calcite, `std.palette`, `std.text.mutf8` and the Java-compatible collections and strings.
+
+The [reference](docs/README.md#reference) lists what's built.
 
 ## Performance
 
