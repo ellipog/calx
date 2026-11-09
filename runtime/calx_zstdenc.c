@@ -994,8 +994,13 @@ typedef struct {
 typedef struct {
     cx_u32 lit[256], ll[LL_MAX + 1], ml[ML_MAX + 1], of[OF_MAX + 1];
     cx_u32 lit_sum, ll_sum, ml_sum, of_sum;
-    /* the prices they make, in 1/256 bits */
-    cx_u32 lit_p[256], ll_p[LL_MAX + 1], ml_p[ML_MAX + 1], of_p[OF_MAX + 1];
+    /* What the prices, in 1/256 bits, are made from, as at the last prices_set: each count's lg8,
+     * less 256 for each of a code's extra bits, and the sums' lg8. A price is the sum's less the
+     * count's, which is what a table of them made then would hold. The dirty bits are the counts
+     * changed since. */
+    cx_u32 lit_w[256], ll_w[LL_MAX + 1], ml_w[ML_MAX + 1], of_w[OF_MAX + 1];
+    cx_u32 lit_s, ll_s, ml_s, of_s;
+    cx_u64 lit_d[4], ll_d, ml_d, of_d;
     int ready;
 } stats_t;
 
@@ -2001,17 +2006,40 @@ static cx_u32 all_matches(job_t* J, const cx_u8* ip, const cx_u8* iend, const cx
 
 #define INF_PRICE (1u << 30)
 
+static inline cx_u32 ll_w_of(const stats_t* s, cx_u32 c) { return lg8(s->ll[c]) - LL_EXTRA[c] * 256; }
+static inline cx_u32 ml_w_of(const stats_t* s, cx_u32 c) { return lg8(s->ml[c]) - ML_EXTRA[c] * 256; }
+static inline cx_u32 of_w_of(const stats_t* s, cx_u32 c) { return lg8(s->of[c]) - c * 256; }
+
+/* The prices as the counts are now: the sums', and those of the counts that changed. After each
+ * stretch the parser takes, as libzstd sets its base prices: on a small input there are many, and
+ * making every price again took a fifth of the time at level 13. */
 static void prices_set(stats_t* s) {
-    const cx_u32 ls = lg8(s->lit_sum), lls = lg8(s->ll_sum), mls = lg8(s->ml_sum), ofs = lg8(s->of_sum);
-    for (int i = 0; i < 256; i++) {
-        cx_u32 p = ls - lg8(s->lit[i]);
-        if (p > 11 * 256) p = 11 * 256;
-        if (p < 256) p = 256; /* a Huffman code is a bit at least */
-        s->lit_p[i] = p;
+    s->lit_s = lg8(s->lit_sum);
+    s->ll_s = lg8(s->ll_sum);
+    s->ml_s = lg8(s->ml_sum);
+    s->of_s = lg8(s->of_sum);
+    for (cx_u32 k = 0; k < 4; k++) {
+        for (cx_u64 m = s->lit_d[k]; m; m &= m - 1) {
+            const cx_u32 c = 64 * k + (cx_u32)__builtin_ctzll(m);
+            s->lit_w[c] = lg8(s->lit[c]);
+        }
+        s->lit_d[k] = 0;
     }
-    for (int i = 0; i <= LL_MAX; i++) s->ll_p[i] = lls - lg8(s->ll[i]) + LL_EXTRA[i] * 256;
-    for (int i = 0; i <= ML_MAX; i++) s->ml_p[i] = mls - lg8(s->ml[i]) + ML_EXTRA[i] * 256;
-    for (int i = 0; i <= OF_MAX; i++) s->of_p[i] = ofs - lg8(s->of[i]) + (cx_u32)i * 256;
+    for (cx_u64 m = s->ll_d; m; m &= m - 1) s->ll_w[__builtin_ctzll(m)] = ll_w_of(s, (cx_u32)__builtin_ctzll(m));
+    for (cx_u64 m = s->ml_d; m; m &= m - 1) s->ml_w[__builtin_ctzll(m)] = ml_w_of(s, (cx_u32)__builtin_ctzll(m));
+    for (cx_u64 m = s->of_d; m; m &= m - 1) s->of_w[__builtin_ctzll(m)] = of_w_of(s, (cx_u32)__builtin_ctzll(m));
+    s->ll_d = s->ml_d = s->of_d = 0;
+}
+
+/* Every count's, when they've all changed. */
+static void prices_all(stats_t* s) {
+    for (cx_u32 i = 0; i < 256; i++) s->lit_w[i] = lg8(s->lit[i]);
+    for (cx_u32 i = 0; i <= LL_MAX; i++) s->ll_w[i] = ll_w_of(s, i);
+    for (cx_u32 i = 0; i <= ML_MAX; i++) s->ml_w[i] = ml_w_of(s, i);
+    for (cx_u32 i = 0; i <= OF_MAX; i++) s->of_w[i] = of_w_of(s, i);
+    s->lit_d[0] = s->lit_d[1] = s->lit_d[2] = s->lit_d[3] = 0;
+    s->ll_d = s->ml_d = s->of_d = 0;
+    prices_set(s);
 }
 
 static cx_u32 sum_of(const cx_u32* f, int n) {
@@ -2041,24 +2069,37 @@ static void stats_start(stats_t* s, const cx_u8* src, cx_u32 n) {
     s->ll_sum = sum_of(s->ll, LL_MAX + 1);
     s->ml_sum = sum_of(s->ml, ML_MAX + 1);
     s->of_sum = sum_of(s->of, OF_MAX + 1);
-    prices_set(s);
+    prices_all(s);
 }
 
 /* A sequence taken: its literals and codes counted. */
 static void stats_add(stats_t* s, const cx_u8* lit, cx_u32 ll, cx_u32 ofb, cx_u32 ml) {
-    for (cx_u32 i = 0; i < ll; i++) s->lit[lit[i]] += 2;
+    for (cx_u32 i = 0; i < ll; i++) {
+        s->lit[lit[i]] += 2;
+        s->lit_d[lit[i] >> 6] |= (cx_u64)1 << (lit[i] & 63);
+    }
     s->lit_sum += 2 * ll;
-    s->ll[ll_code(ll)]++;
+    const cx_u32 lc = ll_code(ll), mc = ml_code(ml - 3), oc = high_bit(ofb);
+    s->ll[lc]++;
+    s->ll_d |= (cx_u64)1 << lc;
     s->ll_sum++;
-    s->ml[ml_code(ml - 3)]++;
+    s->ml[mc]++;
+    s->ml_d |= (cx_u64)1 << mc;
     s->ml_sum++;
-    s->of[high_bit(ofb)]++;
+    s->of[oc]++;
+    s->of_d |= (cx_u64)1 << oc;
     s->of_sum++;
 }
 
-static inline cx_u32 ll_price(const stats_t* s, cx_u32 ll) { return s->ll_p[ll_code(ll)]; }
+static inline cx_u32 lit_price(const stats_t* s, cx_u32 c) {
+    const cx_u32 p = s->lit_s - s->lit_w[c];
+    /* A Huffman code is a bit at least, and at most 11. */
+    return p > 11 * 256 ? 11 * 256 : p < 256 ? 256 : p;
+}
 
-static inline cx_u32 match_price(const stats_t* s, cx_u32 ofb, cx_u32 ml) { return s->of_p[high_bit(ofb)] + s->ml_p[ml_code(ml - 3)]; }
+static inline cx_u32 ll_price(const stats_t* s, cx_u32 ll) { return s->ll_s - s->ll_w[ll_code(ll)]; }
+static inline cx_u32 ml_price(const stats_t* s, cx_u32 code) { return s->ml_s - s->ml_w[code]; }
+static inline cx_u32 of_price(const stats_t* s, cx_u32 code) { return s->of_s - s->of_w[code]; }
 
 /* Parses base[at..end) by prices: from each place, every match and the literal, each priced from
  * the counts, the cheapest way to each place kept, up to OPT_NUM bytes on or a match that's long
@@ -2109,10 +2150,10 @@ static void mf_opt(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
             for (cx_u32 k = 0; k < nm; k++) {
                 const cx_u32 off = mt[k].off;
                 const cx_u32 ofb = ofb_of(r, lit0 == 0, off);
-                const cx_u32 base_price = opt[0].price + st->of_p[high_bit(ofb)] + ll_price(st, 0);
+                const cx_u32 base_price = opt[0].price + of_price(st, high_bit(ofb)) + ll_price(st, 0);
                 for (; l <= mt[k].len; l++) {
                     node_t* q = &opt[l];
-                    q->price = base_price + st->ml_p[ml_code(l - 3)];
+                    q->price = base_price + ml_price(st, ml_code(l - 3));
                     q->off = off;
                     q->mlen = l;
                     q->litlen = 0;
@@ -2127,7 +2168,7 @@ static void mf_opt(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
             node_t* q = &opt[cur];
             {
                 const cx_u32 L = pv->litlen + 1;
-                const cx_u32 lp = pv->price + st->lit_p[ip[cur - 1]] + ll_price(st, L) - ll_price(st, L - 1);
+                const cx_u32 lp = pv->price + lit_price(st, ip[cur - 1]) + ll_price(st, L) - ll_price(st, L - 1);
                 if (lp <= q->price) {
                     q->price = lp;
                     q->off = 0;
@@ -2157,11 +2198,11 @@ static void mf_opt(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r) {
             for (cx_u32 k = 0; k < nm; k++) {
                 const cx_u32 off = mt[k].off;
                 const cx_u32 ofb = ofb_of(q->rep, ll0, off);
-                const cx_u32 base_price = lp0 + st->of_p[high_bit(ofb)];
+                const cx_u32 base_price = lp0 + of_price(st, high_bit(ofb));
                 for (; l <= mt[k].len; l++) {
                     const cx_u32 pos = cur + l;
                     while (last < pos) opt[++last].price = INF_PRICE;
-                    const cx_u32 price = base_price + st->ml_p[ml_code(l - 3)];
+                    const cx_u32 price = base_price + ml_price(st, ml_code(l - 3));
                     node_t* t = &opt[pos];
                     if (price < t->price) {
                         t->price = price;
@@ -2346,10 +2387,8 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
     }
     cx_u32 max = 0, distinct = 0;
     for (cx_u32 s = 0; s < 256; s++) {
-        if (count[s]) {
-            max = s;
-            distinct++;
-        }
+        max = count[s] ? s : max;
+        distinct += count[s] != 0;
     }
     if (n > 0 && distinct == 1 && n >= 3) {
         /* One byte, repeated. */
@@ -2362,23 +2401,39 @@ static cx_usize lit_section(const ent_t* prev, ent_t* next, const cx_u8* lit, cx
         return raw_head + 1;
     }
     if (huf_allowed && n >= HUF_MIN && distinct >= 2) {
-        cx_u8 len[256];
-        const cx_u32 log = huf_lengths(count, max, len);
-        cx_u64 bits_new = 0, bits_old = 0;
-        int old_ok = prev->huf_ok;
-        for (cx_u32 s = 0; s <= max; s++) {
-            if (!count[s]) continue;
-            bits_new += (cx_u64)count[s] * len[s];
-            const cx_u32 ol = prev->huf[s] >> 16;
-            if (!ol) old_ok = 0;
-            bits_old += (cx_u64)count[s] * ol;
-        }
-        cx_u8 tree[160];
-        const cx_usize tree_n = huf_tree(len, max, log, tree);
         const int four = n >= 256;
         const cx_usize streams = four ? 6 : 0;
-        const cx_usize est_new = tree_n ? tree_n + streams + (bits_new + 7) / 8 + (four ? 3 : 0) : ~(cx_usize)0;
+        /* The last block's code, if it has every symbol there is. */
+        cx_u64 bits_old = 0;
+        int old_ok = prev->huf_ok;
+        for (cx_u32 s = 0; s <= max; s++) {
+            const cx_u32 ol = prev->huf[s] >> 16;
+            old_ok &= count[s] == 0 || ol != 0;
+            bits_old += (cx_u64)count[s] * ol;
+        }
         const cx_usize est_old = old_ok ? streams + (bits_old + 7) / 8 + (four ? 3 : 0) : ~(cx_usize)0;
+        /* A new code takes no fewer bits than the literals' entropy, worked out with lg8 and 3/256
+         * bits a literal taken off for its error, as pick_table does, and its tree 2 bytes at least.
+         * When that's no less than the last block's, as after a dictionary on most small inputs,
+         * it isn't made: the last block's would be chosen all the same. */
+        int skip_new = 0;
+        if (old_ok) {
+            cx_i64 low = (cx_i64)n * lg8((cx_u32)n) - 3 * (cx_i64)n;
+            for (cx_u32 s = 0; s <= max; s++) low -= count[s] < CLG_N ? CLG[count[s]] : (cx_i64)count[s] * lg8(count[s]);
+            const cx_u64 low_bits = low > 0 ? ((cx_u64)low + 255) >> 8 : 0;
+            skip_new = est_old <= 2 + streams + (low_bits + 7) / 8 + (four ? 3 : 0);
+        }
+        cx_u8 len[256];
+        cx_u32 log = 0;
+        cx_u8 tree[160];
+        cx_usize tree_n = 0, est_new = ~(cx_usize)0;
+        if (!skip_new) {
+            log = huf_lengths(count, max, len);
+            cx_u64 bits_new = 0;
+            for (cx_u32 s = 0; s <= max; s++) bits_new += (cx_u64)count[s] * len[s];
+            tree_n = huf_tree(len, max, log, tree);
+            if (tree_n) est_new = tree_n + streams + (bits_new + 7) / 8 + (four ? 3 : 0);
+        }
         const int use_old = old_ok && est_old <= est_new;
         const cx_usize est = use_old ? est_old : est_new;
         if ((use_old || tree_n) && est + 5 < n + raw_head) {
@@ -2972,6 +3027,39 @@ static cx_usize split_emit(job_t* J, const cx_u32* fin, const cx_u32* fout, cx_u
 #ifdef ZSE_CYCLES
     const cx_u64 c0 = __rdtsc();
 #endif
+    cx_u32 d[SPLIT_W];
+    if (np == 1) {
+        /* One piece, as for every small input: its counts go straight to the sections, without
+         * the running counts each piece's are read off. */
+        memset(d, 0, sizeof d);
+        cx_u32 i = 0;
+        if (nl >= 1024) {
+            cx_u32 c[3][256];
+            memset(c, 0, sizeof c);
+            for (; i + 4 <= nl; i += 4) {
+                d[lit[i]]++;
+                c[0][lit[i + 1]]++;
+                c[1][lit[i + 2]]++;
+                c[2][lit[i + 3]]++;
+            }
+            for (int s = 0; s < 256; s++) d[s] += c[0][s] + c[1][s] + c[2][s];
+        }
+        for (; i < nl; i++) d[lit[i]]++;
+        for (i = 0; i < ns; i++) {
+            const cx_u32 l = ll_code(seq[i].ll), m = ml_code(seq[i].ml - 3), o = high_bit(seq[i].ofb);
+            J->llc[i] = (cx_u8)l;
+            J->mlc[i] = (cx_u8)m;
+            J->ofc[i] = (cx_u8)o;
+            d[SPLIT_LL + l]++;
+            d[SPLIT_ML + m]++;
+            d[SPLIT_OF + o]++;
+        }
+#ifdef ZSE_CYCLES
+        zse_cycles[6] += __rdtsc() - c0;
+#endif
+        cx_u32 f[3] = {fin[0], fin[1], fin[2]}, fo[3] = {fout[0], fout[1], fout[2]};
+        return emit(J, seq, ns, f, fo, lit, nl, src, n, last, d, 0, out, cap);
+    }
     /* The counts, which the sections then use too: kept running from the block's start, the
      * literals' in four tables so a byte repeated doesn't wait on its own count, and read off at
      * each piece's end. */
@@ -3016,7 +3104,6 @@ static cx_usize split_emit(job_t* J, const cx_u32* fin, const cx_u32* fout, cx_u
     zse_cycles[6] += __rdtsc() - c0;
 #endif
     cx_u32 f[3] = {fin[0], fin[1], fin[2]};
-    cx_u32 d[SPLIT_W];
     cx_usize got = 0;
     cx_u32 a = 0;
     for (cx_u32 j = 0; j <= nc; j++) {
