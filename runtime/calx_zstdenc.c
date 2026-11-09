@@ -1860,6 +1860,48 @@ static inline __attribute__((always_inline)) cx_u32 row_best(rw_t* w, const cx_u
     return best_off ? best : 0;
 }
 
+/* A job's last bytes, to READ before its end, after the hash-row parse: the first match at each,
+ * the repeated offset's or the row's, with no hashing ahead. A small input's end, which a
+ * dictionary often has, is a good part of it. Out of line, so the parse's own loop is compiled as
+ * if it weren't there: inlined into it, it made level 5 5% slower on src.tar. Gives where the
+ * literals left start. */
+static __attribute__((noinline)) const cx_u8* row_tail(rw_t* w, ss_t* ss, cx_u32* r, const cx_u8* ip, const cx_u8* anchor, const cx_u8* base, const cx_u8* iend,
+                                                       const cx_u32 start, const int undo) {
+    for (const cx_u8* const tlimit = iend - READ; ip < tlimit;) {
+        cx_u32 ml = 0, off = 0;
+        const cx_u8* mstart = ip;
+        const cx_u32 c1 = (cx_u32)(ip + 1 - base);
+        if (REP_OK(r[0], c1, start) && ld32(ip + 1) == ld32(ip + 1 - r[0])) {
+            ml = count(ip + 5, ip + 5 - r[0], iend) + 4;
+            off = r[0];
+            mstart = ip + 1;
+        }
+        cx_u32 o;
+        const cx_u32 l = undo ? row_best(w, ip, iend, &o, 1, 1) : row_best(w, ip, iend, &o, 1, 0);
+        if (l > ml) {
+            ml = l;
+            off = o;
+            mstart = ip;
+        }
+        if (ml == 0) {
+            ip++;
+            continue;
+        }
+        if (off != r[0]) {
+            const cx_u8* mp = mstart - off;
+            while (mstart > anchor && mp > base + start && mstart[-1] == mp[-1]) {
+                mstart--;
+                mp--;
+                ml++;
+            }
+        }
+        ss_put(ss, r, anchor, (cx_u32)(mstart - anchor), off, ml);
+        ip = mstart + ml;
+        anchor = ip;
+    }
+    return anchor;
+}
+
 /* The parse for the hash-row levels: the longest match at a position, unless the next one or,
  * for lazy2, the one after has one that's worth more by its length and offset. */
 static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* r, const int depth, const cx_u32 mls, const int undo) {
@@ -1971,41 +2013,7 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
             anchor = ip;
         }
     }
-    /* A job's last bytes, to READ before its end: the first match at each, the repeated offset's
-     * or the row's, with no hashing ahead. A small input's end, which a dictionary often has, is a
-     * good part of it. */
-    for (const cx_u8* const tlimit = iend - READ; ip < tlimit;) {
-        cx_u32 ml = 0, off = 0;
-        const cx_u8* mstart = ip;
-        const cx_u32 c1 = (cx_u32)(ip + 1 - base);
-        if (REP_OK(r[0], c1, start) && ld32(ip + 1) == ld32(ip + 1 - r[0])) {
-            ml = count(ip + 5, ip + 5 - r[0], iend) + 4;
-            off = r[0];
-            mstart = ip + 1;
-        }
-        cx_u32 o;
-        const cx_u32 l = row_best(&w, ip, iend, &o, 1, undo);
-        if (l > ml) {
-            ml = l;
-            off = o;
-            mstart = ip;
-        }
-        if (ml == 0) {
-            ip++;
-            continue;
-        }
-        if (off != r[0]) {
-            const cx_u8* mp = mstart - off;
-            while (mstart > anchor && mp > base + start && mstart[-1] == mp[-1]) {
-                mstart--;
-                mp--;
-                ml++;
-            }
-        }
-        ss_put(ss, r, anchor, (cx_u32)(mstart - anchor), off, ml);
-        ip = mstart + ml;
-        anchor = ip;
-    }
+    anchor = row_tail(&w, ss, r, ip, anchor, base, iend, start, undo);
     J->next_up = w.next_up;
     if (undo) J->ulog_n = w.un;
 tail:
