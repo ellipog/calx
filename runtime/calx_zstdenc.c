@@ -1774,7 +1774,9 @@ typedef struct {
     cx_u32 rlog, rmask, hb, mls;
     cx_u32 next_up; /* the rows have every position before this */
     cx_u32 wsize, tries;
-    cx_u32 hc[8]; /* the hashes of the eight positions from next_up, by position mod 8 */
+    /* The hashes of the eight positions from next_up, by position mod 8: an array of the
+     * parse's own, since one indexed by position would keep this whole struct in memory. */
+    cx_u32* hc;
     int skipping; /* in a stretch without matches: see mf_lazy */
     /* With a working copy of a dictionary's rows, each slot a position takes and what it held, as
      * J->ulog has them; un counts on past ucap once there are more. */
@@ -1793,6 +1795,7 @@ static inline void rw_load(rw_t* w, const job_t* J) {
     w->next_up = J->next_up;
     w->wsize = J->wsize;
     w->tries = 1u << J->p.slog;
+    w->hc = 0;
     w->skipping = 0;
     w->ul = J->ulog;
     w->un = J->ulog_n;
@@ -1822,14 +1825,14 @@ static inline __attribute__((always_inline)) void row_put(rw_t* w, cx_u32 i, cx_
 /* The next eight positions' hashes are kept, and their rows fetched into the cache, so a row is
  * there by the time its position comes to be looked up or put in. The parse stops 16 bytes before
  * the job's end, so the eight bytes hashed are always in. */
-static inline void row_ahead(rw_t* w, cx_u32 i) {
+static inline __attribute__((always_inline)) void row_ahead(rw_t* w, cx_u32 i) {
     const cx_u32 h = row_hash(w, i), at = (h >> 8) << w->rlog;
     w->hc[i & 7] = h;
     __builtin_prefetch(w->pos + at);
     __builtin_prefetch(w->tags + at);
 }
 
-static inline void row_refill(rw_t* w, cx_u32 from) {
+static inline __attribute__((always_inline)) void row_refill(rw_t* w, cx_u32 from) {
     for (cx_u32 i = from; i < from + 8; i++) row_ahead(w, i);
 }
 
@@ -1968,6 +1971,8 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
     rw_t w;
     rw_load(&w, J);
     w.mls = mls;
+    cx_u32 hcache[8];
+    w.hc = hcache;
     /* Whenever the loop runs at all: with ilimit at ip + 1 it runs once, and the hashes it would
      * look up rows by were never worked out (CLX-190). */
     if (ilimit > ip) row_refill(&w, w.next_up);
@@ -2062,7 +2067,14 @@ static inline __attribute__((always_inline)) void mf_lazy_with(job_t* J, cx_u32 
             anchor = ip;
         }
     }
-    anchor = row_tail(&w, ss, r, ip, anchor, base, iend, start, undo);
+    {
+        /* A copy, so the parse's own never has its address taken, which would keep it out of
+         * registers. */
+        rw_t tw = w;
+        anchor = row_tail(&tw, ss, r, ip, anchor, base, iend, start, undo);
+        w.next_up = tw.next_up;
+        w.un = tw.un;
+    }
     J->next_up = w.next_up;
     if (undo) J->ulog_n = w.un;
 tail:
