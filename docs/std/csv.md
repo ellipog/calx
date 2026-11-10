@@ -110,21 +110,21 @@ A line end that holds the delimiter or a quote panics, as Python refuses it, sin
 
 ## How it's built
 
-[std/csv.calx](../../std/csv.calx) is written in Calx from how Python's reader behaves, and checked against Python 3.14's `csv` module on 11,500 random cases. The cases were awkward text read with six delimiters, random rows written with eight line ends and read back, and header-keyed records with repeated and missing names. Every case matched.
+[std/csv.calx](../../std/csv.calx) is written in Calx from how Python's reader behaves, and checked against Python 3.14's `csv` module on 11,500 random cases. The cases were awkward text read with six delimiters, random rows written with eight line ends and read back, and header-keyed records with repeated and missing names. Every case matched, and 4,000 more did once fields were scanned 16 bytes at a time, with runs of up to 100 bytes and texts that end inside a field or a quote.
 
-Each row is read in one pass over its bytes. A field without quotes is cut straight from the text. A field in quotes is built from the runs between its doubled quotes. `parse` gives each row room for as many fields as the row before had. `parse_records` [interns](../reference/strings.md#interned-strings) the header's names, so the records share them and copying them into each costs nothing: 10% less time on a 15 MB file of 150,000 rows. Writing checks each field against a table of the bytes that need quoting.
+Each row is read in one pass over its bytes. A field without quotes is cut straight from the text, its end, the delimiter or a line break, found 16 bytes at a time with SSE2, which every x86-64 has: most fields are shorter, so one step finds it. A field in quotes is built from the runs between its doubled quotes, each quote found the same way. Against a byte at a time, that took 16 to 29% off the reading times below. `parse` gives each row room for as many fields as the row before had. `parse_records` [interns](../reference/strings.md#interned-strings) the header's names, so the records share them and copying them into each costs nothing: 10% less time on a 15 MB file of 150,000 rows. Writing checks each field against a table of the bytes that need quoting.
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs. The file is 12.2 MB of CSV like a real export: 150,000 rows of 8 fields, with commas, quotes, line breaks and non-ASCII text in some fields. The comparisons are Python 3.14's `csv` module, which is written in C, and Rust 1.91 with the `csv` crate 1.4, built for release with `x86-64-v3`:
+On our benchmark, an i9-13900K otherwise quiet, each program on its performance cores, the best of 30 runs taken in turns. The file is 13.5 MB of CSV like a real export: 150,000 rows of 8 fields, with commas, quotes, line breaks and non-ASCII text in some fields. The comparisons are Python 3.14's `csv` module, which is written in C, and Rust 1.91 with the `csv` crate 1.4, built for release with `x86-64-v3`:
 
 | Work | Calx | Python | Rust `csv` |
 | --- | --- | --- | --- |
-| `parse`, every row as a list of `String`s | 22.5 ms | 145 ms | 72.5 ms |
-| `parse_records`, every row keyed by the header | 34.5 ms | 260 ms | 102 ms |
-| `format`, the rows back to the same text | 11.7 ms | 126 ms | 21.8 ms |
-| `Reader`, a row at a time into one list | 14.1 ms | | 14.5 ms |
+| `parse`, every row as a list of `String`s | 13.4 ms | 150 ms | 75.8 ms |
+| `parse_records`, every row keyed by the header | 29.2 ms | 276 ms | 107 ms |
+| `format`, the rows back to the same text | 10.9 ms | 139 ms | 19.4 ms |
+| `Reader`, a row at a time into one list | 11.0 ms | | 13.4 ms |
 
 - Python's times are `list(csv.reader(...))`, `list(csv.DictReader(...))` and `writer.writerows`.
 - Rust's are `records()` collected into `Vec<Vec<String>>`, and the same zipped with the header into pairs, which is less work than a map. Its last row is `read_byte_record` into one reused `ByteRecord`. Rust used its default allocator, which on Windows is the system's, and that's much of its cost when every field is a new `String`.
-- Calx's `Reader` time includes copying the 12.2 MB text for it, since the benchmark reads the same text each run.
+- Calx's `Reader` time includes copying the 13.5 MB text for it, about half a millisecond, since the benchmark reads the same text each run. Rust's reads the text where it is.

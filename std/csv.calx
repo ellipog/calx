@@ -6,6 +6,10 @@
 /// it, so a file gives the rows here that it gives there.
 module std.csv
 
+extern "C" {
+    fn cx_bytes_find3(hay: *const u8, len: usize, from: usize, a: u8, b: u8, c: u8) -> usize
+}
+
 // The byte of a delimiter, which is ASCII and isn't a quote or a line break.
 @track_caller
 fn delimiter_byte(delimiter: rune) -> u8 {
@@ -157,9 +161,9 @@ fn read_row(text: String, at: usize, d: u8, row: mut List<String>) -> usize {
             var start = j
             var closed = false
             while j < n {
-                if text.byte_at(j) != b'"' {
-                    j += 1
-                    continue
+                j = unsafe { cx_bytes_find3(text.as_ptr(), n, j, b'"', b'"', b'"') }
+                if j == n {
+                    break
                 }
                 row[used - 1].push_str(text[start..j])
                 if j + 1 < n and text.byte_at(j + 1) == b'"' {
@@ -196,18 +200,10 @@ fn read_row(text: String, at: usize, d: u8, row: mut List<String>) -> usize {
     return i
 }
 
-// Where an unquoted stretch from `i` ends: at the delimiter, a line break or the end of the text.
+// Where an unquoted stretch from `i` ends: at the delimiter, a line break or the end of the text,
+// found 16 bytes at a time (CLX-188).
 fn field_end(text: String, i: usize, d: u8) -> usize {
-    var j = i
-    let n = text.len()
-    while j < n {
-        let b = text.byte_at(j)
-        if b == d or b == b'\r' or b == b'\n' {
-            return j
-        }
-        j += 1
-    }
-    return n
+    return unsafe { cx_bytes_find3(text.as_ptr(), text.len(), i, d, b'\r', b'\n') }
 }
 
 /// The rows as CSV text, as Python's `csv.writer` writes them: each row's fields with `delimiter`

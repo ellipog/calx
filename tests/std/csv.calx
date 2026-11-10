@@ -16,6 +16,21 @@ fn show(rows: List<List<String>>) -> String {
     return out.join(" ")
 }
 
+// A field's end and a quote are found 16 bytes at a time (CLX-188): fields longer than a step, a
+// delimiter right at a step's end, and fields in the last bytes, which go one by one.
+fn long_fields() {
+    let long = "abcdefghijklmnopqrstuvwxyz0123456789"
+    let rows = parse("{long},{long[0..15]},x\n\"{long}\"\"{long}\",{long[0..16]}\r\n{long[0..3]}")
+    println("{rows.len()} {rows[0][0] == long} {rows[0][1].len()} {rows[0][2]} {rows[1][0].len()} {rows[1][1].len()} {rows[2][0]}")
+    var r = Reader.new("{long}\n{long},\"a\"\"b\"")
+    var row = List<String>()
+    var seen: List<String> = []
+    while r.read(mut row) {
+        seen.push("{row.len()}:{row[row.len() - 1].len()}")
+    }
+    println("{seen}")
+}
+
 fn main() {
     // Rows end at \n, \r\n or a lone \r, and an empty line is an empty row.
     println(show(parse("a,b\nc,d\n")))                // out: [a][b] [c][d]
@@ -38,6 +53,9 @@ fn main() {
     println(show(parse("\"ab")))                      // out: [ab]
     println(show(parse("x\n\"")))                     // out: [x] []
     println(show(parse("é,€\n😀")))                   // out: [é][€] [😀]
+    long_fields()
+    // out: 3 true 15 x 73 16 abc
+    // out: [1:36, 2:3]
 
     // Other delimiters.
     println(show(parse("a\t\"b\tc\"\td,e", '\t')))    // out: [a][b\tc][d,e]
