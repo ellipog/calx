@@ -1,7 +1,12 @@
 // std.unicode.names gives the names Python 3.14's unicodedata and Java 25's Character give
 // (CLX-235): names made by rule and kept in the tables, aliases, named sequences, case, Java's
 // names by block, and runes with no name. Each line is what Python or Java gave.
-import std.unicode.names.{java_code_point_of, java_name, lookup, name}
+import std.unicode.names.{java_code_point_of, java_name, lookup, lookup_rune, name}
+
+fn one(t: str) -> String {
+    let r = lookup_rune(String(t)) else return String("none")
+    return "{u32(r):X}"
+}
 
 fn codes(s: String?) -> String {
     let text = s else return String("none")
@@ -54,6 +59,10 @@ fn main() {
     // Named sequences are more than one rune.
     println("{codes(lookup("KEYCAP NUMBER SIGN"))}, {codes(lookup("BENGALI LETTER KHINYA"))}")
     // out: 23 FE0F 20E3, 995 9CD 9B7
+    // `lookup_rune` gives one rune, as `re`'s `\N{...}` takes `ord` of what `lookup` gives, so no
+    // named sequence (CLX-239).
+    println("{one("nbsp")} {one("HANGUL SYLLABLE GAG")} {one("cjk unified ideograph-4e00")} {one("TANGUT IDEOGRAPH-17000")} {one("VARIATION SELECTOR-17")} {one("KEYCAP NUMBER SIGN")} {one("é")}")
+    // out: A0 AC01 4E00 17000 E0100 none none
     // Hangul syllables take the longest jamo names that fit.
     println("{codes(lookup("hangul syllable gag"))} {codes(lookup("HANGUL SYLLABLE GGA"))} {codes(lookup("HANGUL SYLLABLE GAGG"))} {codes(lookup("HANGUL SYLLABLE A"))} {codes(lookup("HANGUL SYLLABLE KKAG"))}")
     // out: AC01 AE4C AC02 C544 none

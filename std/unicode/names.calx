@@ -1,10 +1,11 @@
 /// Unicode 16's character names: a rune's name and the runes a name names, as Python 3.14's
 /// `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and
 /// `Character.codePointOf` do, which std.nbt's `\N{...}` follows. The names are kept compressed in
-/// std.text.names' table of bytes, about 400 KB of a program, and read where they're asked for.
+/// std.text.names' tables of bytes, and read where they're asked for. A program carries those it
+/// reads: about 350 KB for `lookup_rune` and the Java ones, and 70 KB more for `name` and `lookup`.
 module std.unicode.names
 
-import std.text.names.{ALIAS, ASSIGNED, CHECK, CJK, CODE_A, CODE_B, CODE_C, DATA, ENTRIES, FAMILY_BASE, FAMILY_DIGITS, FAMILY_HI, FAMILY_LO, FAMILY_PREFIX, JAMO_L, JAMO_T, JAMO_V, JAVA, JAVA_BLOCK, JAVA_HI, JAVA_LO, KEY, KEYS, NAME, PLACES, PLACES_AT, PLACE_A, PLACE_B, PLACE_C, PLACE_CHECK, RUNS, RUN_COUNT, SEQUENCES, SEQ_AT, SEQ_RUNES, SEQ_RUNES_AT, SEQ_TEXT, STREAM, STREAM_AT, TANGUT, WORD_A, WORD_AT, WORD_B, WORD_C, WORD_LEN, WORD_STEP, WORD_TEXT}
+import std.text.names.{ALIAS, ASSIGNED, CHECK, CJK, CODE_A, CODE_B, CODE_C, DATA, ENTRIES, FAMILY_BASE, FAMILY_DIGITS, FAMILY_HI, FAMILY_LO, FAMILY_PREFIX, JAMO_L, JAMO_T, JAMO_V, JAVA, JAVA_BLOCK, JAVA_HI, JAVA_LO, KEY, KEYS, NAME, PLACES, PLACES_AT, PLACE_A, PLACE_B, PLACE_C, PLACE_CHECK, PLACE_DATA, RUNS, RUN_COUNT, SEQUENCES, SEQ_AT, SEQ_DATA, SEQ_RUNES, SEQ_RUNES_AT, SEQ_TEXT, STREAM, STREAM_AT, TANGUT, WORD_A, WORD_AT, WORD_B, WORD_C, WORD_LEN, WORD_STEP, WORD_TEXT}
 
 // Hangul syllables, as the Unicode Standard's section 3.12 makes them from jamo.
 const S_BASE: u32 = 0xAC00
@@ -38,30 +39,12 @@ pub fn name(r: rune) -> String? {
 /// such as `LF` or `NBSP`, a Hangul syllable's, a CJK or Tangut ideograph's by its number, or a
 /// named sequence's, which is more than one rune. `none` if nothing has that name.
 pub fn lookup(text: String) -> String? {
-    var up = String()
-    for i in 0..text.len() {
-        let b = text.byte_at(i)
-        if b >= 0x80 {
-            return none
-        }
-        up.push(rune(if b >= b'a' and b <= b'z' { b - 32 } else { b }))
+    if let r = lookup_rune(text) {
+        var s = String()
+        s.push(r)
+        return some(s)
     }
-    if up.starts_with("HANGUL SYLLABLE ") {
-        let c = hangul(up[16..]) else return none
-        return one(c)
-    }
-    if let c = numbered(up, "CJK UNIFIED IDEOGRAPH-", false) {
-        return one(c)
-    }
-    if let c = numbered(up, "TANGUT IDEOGRAPH-", true) {
-        return one(c)
-    }
-    if let c = family_rune(up) {
-        return one(c)
-    }
-    if let c = find(up, NAME | ALIAS) {
-        return one(c)
-    }
+    let up = upper(text) else return none
     var lo: usize = 0
     var hi = SEQUENCES
     while lo < hi {
@@ -74,10 +57,10 @@ pub fn lookup(text: String) -> String? {
     }
     if lo < SEQUENCES and sequence_compare(lo, up) == 0 {
         var out = String()
-        var at = SEQ_RUNES + fixed(SEQ_RUNES_AT + 3 * lo)
-        let end = SEQ_RUNES + fixed(SEQ_RUNES_AT + 3 * lo + 3)
+        var at = SEQ_RUNES + seq_fixed(SEQ_RUNES_AT + 3 * lo)
+        let end = SEQ_RUNES + seq_fixed(SEQ_RUNES_AT + 3 * lo + 3)
         while at < end {
-            out.push(rune.try_from(u32.wrap(fixed(at)))!)
+            out.push(rune.try_from(u32.wrap(seq_fixed(at)))!)
             at += 3
         }
         return some(out)
@@ -85,15 +68,53 @@ pub fn lookup(text: String) -> String? {
     return none
 }
 
+/// The rune `lookup` gives for `text` when it gives one: a name that isn't a named sequence's, as
+/// Python's `re` reads `\N{...}`, which takes `ord` of what `unicodedata.lookup` gives. A program
+/// that only calls this doesn't carry the named sequences, or what `name` reads.
+pub fn lookup_rune(text: String) -> rune? {
+    let up = upper(text) else return none
+    if up.starts_with("HANGUL SYLLABLE ") {
+        let c = hangul(up[16..]) else return none
+        return rune.try_from(c)
+    }
+    if let c = numbered(up, "CJK UNIFIED IDEOGRAPH-", false) {
+        return rune.try_from(c)
+    }
+    if let c = numbered(up, "TANGUT IDEOGRAPH-", true) {
+        return rune.try_from(c)
+    }
+    if let c = family_rune(up) {
+        return rune.try_from(c)
+    }
+    if let c = find(up, NAME | ALIAS) {
+        return rune.try_from(c)
+    }
+    return none
+}
+
+// `text` with its ASCII letters in capitals, or `none` if it has anything past ASCII, which no
+// name has.
+fn upper(text: String) -> String? {
+    var up = String()
+    for i in 0..text.len() {
+        let b = text.byte_at(i)
+        if b >= 0x80 {
+            return none
+        }
+        up.push(rune(if b >= b'a' and b <= b'z' { b - 32 } else { b }))
+    }
+    return some(up)
+}
+
 // How named sequence `k`'s name compares with `up`, byte by byte.
 fn sequence_compare(k: usize, up: String) -> i32 {
-    let from = SEQ_TEXT + fixed(SEQ_AT + 3 * k)
-    let end = SEQ_TEXT + fixed(SEQ_AT + 3 * k + 3)
+    let from = SEQ_TEXT + seq_fixed(SEQ_AT + 3 * k)
+    let end = SEQ_TEXT + seq_fixed(SEQ_AT + 3 * k + 3)
     for i in 0..(end - from) {
         if i >= up.len() {
             return 1
         }
-        let b = DATA[from + i]
+        let b = SEQ_DATA[from + i]
         let u = up.byte_at(i)
         if b != u {
             return if b < u { -1 } else { 1 }
@@ -170,13 +191,6 @@ pub fn java_code_point_of(text: String) -> u32? {
         return some(c)
     }
     return family_rune(up)
-}
-
-fn one(c: u32) -> String? {
-    let r = rune.try_from(c) else return none
-    var s = String()
-    s.push(r)
-    return some(s)
 }
 
 // `c` in hex, in capitals, with no zeros in front.
@@ -361,10 +375,42 @@ fn fixed(at: usize) -> usize {
     return usize(digit(at) * 65536 + digit(at + 1) * 256 + digit(at + 2))
 }
 
+// The same in PLACE_DATA, and in SEQ_DATA: each table is a constant of its own, so a program
+// carries only those its functions read.
+fn place_fixed(at: usize) -> usize {
+    return usize(u32(PLACE_DATA[at]) * 65536 + u32(PLACE_DATA[at + 1]) * 256 + u32(PLACE_DATA[at + 2]))
+}
+
+fn seq_fixed(at: usize) -> usize {
+    return usize(u32(SEQ_DATA[at]) * 65536 + u32(SEQ_DATA[at + 1]) * 256 + u32(SEQ_DATA[at + 2]))
+}
+
+// The number at place `i` of PLACE_DATA, written in PLACES' tiers, and moves `i` past it.
+fn place_number(i: mut usize) -> u32 {
+    let d0 = u32(PLACE_DATA[i])
+    i += 1
+    if d0 < PLACE_A {
+        return d0
+    }
+    if d0 < PLACE_A + PLACE_B {
+        let v = PLACE_A + (d0 - PLACE_A) * 256 + u32(PLACE_DATA[i])
+        i += 1
+        return v
+    }
+    if d0 < PLACE_A + PLACE_B + PLACE_C {
+        let v = PLACE_A + PLACE_B * 256 + ((d0 - PLACE_A - PLACE_B) * 256 + u32(PLACE_DATA[i])) * 256 + u32(PLACE_DATA[i + 1])
+        i += 2
+        return v
+    }
+    let v = PLACE_A + PLACE_B * 256 + PLACE_C * 65536 + (((d0 - PLACE_A - PLACE_B - PLACE_C) * 256 + u32(PLACE_DATA[i])) * 256 + u32(PLACE_DATA[i + 1])) * 256 + u32(PLACE_DATA[i + 2])
+    i += 3
+    return v
+}
+
 // Of run `k` in RUNS, its first rune for `field` 0, how many runes it has for 1, and the first
 // rune's number in PLACES for 2.
 fn run(k: usize, field: usize) -> u32 {
-    return u32.wrap(fixed(RUNS + 9 * k + 3 * field))
+    return u32.wrap(place_fixed(RUNS + 9 * k + 3 * field))
 }
 
 fn unzig(z: u32) -> i64 {
@@ -566,10 +612,10 @@ fn entry_name(c: u32, kinds: u32) -> String? {
     }
     let ordinal = usize(run(lo - 1, 2) + (c - run(lo - 1, 0)))
     let k = ordinal / PLACE_CHECK
-    var at = PLACES + fixed(PLACES_AT + 3 * k)
+    var at = PLACES + place_fixed(PLACES_AT + 3 * k)
     var j: i64 = 0
     for x in (k * PLACE_CHECK)..(ordinal + 1) {
-        let v = number(mut at, PLACE_A, PLACE_B, PLACE_C)
+        let v = place_number(mut at)
         j = if x % PLACE_CHECK == 0 { i64(v) } else { j + unzig(v) }
     }
     // The entry's words, read from the last one written whole before it.

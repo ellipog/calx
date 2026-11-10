@@ -5,16 +5,17 @@ description: Unicode 16's character names, as Python 3.14's unicodedata.name and
 
 # `std.unicode.names`
 
-Unicode 16's character names: a rune's name and the runes a name stands for, as Python 3.14's `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and `Character.codePointOf` do. [std.regex](regex.md)'s `Regex.python` reads `\N{...}` with `lookup`, as Python's `re` does, and [std.nbt](nbt.md) reads SNBT's with the Java ones, as vanilla does.
+Unicode 16's character names: a rune's name and the runes a name stands for, as Python 3.14's `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and `Character.codePointOf` do. [std.regex](regex.md)'s `Regex.python` reads `\N{...}` with `lookup_rune`, as Python's `re` reads it with `lookup`, and [std.nbt](nbt.md) reads SNBT's with the Java ones, as vanilla does.
 
 ```calx
-import std.unicode.names.{java_code_point_of, java_name, lookup, name}
+import std.unicode.names.{java_code_point_of, java_name, lookup, lookup_rune, name}
 
 fn main() {
     println(name('é') ?? String("none"))    // out: LATIN SMALL LETTER E WITH ACUTE
     println("{name('\u{AC00}') ?? String()} / {name('\u{4E00}') ?? String()}")    // out: HANGUL SYLLABLE GA / CJK UNIFIED IDEOGRAPH-4E00
     println("{name('\u{E000}') == none} {lookup("snowman") ?? String()} {lookup("NBSP") == some(String("\u{A0}"))}")    // out: true ☃ true
     println(lookup("KEYCAP DIGIT ONE") ?? String())    // out: 1️⃣
+    println("{lookup_rune("Snowman") == some('☃')} {lookup_rune("KEYCAP DIGIT ONE") == none}")    // out: true true
     println("{java_name(0xA) ?? String()} / {java_name(0x4E00) ?? String()}")    // out: LINE FEED (LF) / CJK UNIFIED IDEOGRAPHS 4E00
     println("{java_code_point_of(String(" line feed (lf) ")) ?? 0} {java_code_point_of(String("LF")) == none}")    // out: 10 true
 }
@@ -24,6 +25,7 @@ fn main() {
 | --- | --- |
 | `name(r: rune) -> String?` | The name Python's `unicodedata.name(r)` gives, or `none` where it has none |
 | `lookup(text: String) -> String?` | The runes `unicodedata.lookup(text)` gives: one, or several for a named sequence, or `none` where it raises `KeyError` |
+| `lookup_rune(text: String) -> rune?` | The rune `lookup` gives when it gives one, so `none` for a named sequence too, as `ord(unicodedata.lookup(text))` takes it, which is how Python's `re` reads `\N{...}` |
 | `java_name(c: u32) -> String?` | The name Java's `Character.getName(c)` gives, for any code point, surrogates too, or `none` where it gives `null` or throws |
 | `java_code_point_of(text: String) -> u32?` | The code point Java's `Character.codePointOf(text)` gives, or `none` where it throws |
 
@@ -57,9 +59,17 @@ It gives `none` for a code point not assigned yet, a noncharacter, and anything 
 
 ## How it's built
 
-The names are in [std/text/names.calx](../../std/text/names.calx) and the file of bytes it embeds, std/text/names.bin, which [tools/unicode/gen_names.calx](../../tools/unicode/gen_names.calx) writes from Unicode 16.0.0's UnicodeData.txt, NameAliases.txt, NamedSequences.txt, Blocks.txt and Jamo.txt. There are 33,550 entries: the names, the aliases and Java's names for the control characters, in alphabetical order. Each is written as numbers of words, of 11,805 words in all, the most used first, so the most used take one byte. An entry shares what it can of the words of the one before it, and gives its rune as the difference from the one before's. Every 8th entry is written whole, and its first 16 bytes are kept apart. For each rune with a name, in order, the tables give its entry, as the difference from the one before's.
+The names are in [std/text/names.calx](../../std/text/names.calx) and the files of bytes it embeds, std/text/names.bin, names_places.bin and names_sequences.bin, which [tools/unicode/gen_names.calx](../../tools/unicode/gen_names.calx) writes from Unicode 16.0.0's UnicodeData.txt, NameAliases.txt, NamedSequences.txt, Blocks.txt and Jamo.txt. There are 33,550 entries: the names, the aliases and Java's names for the control characters, in alphabetical order. Each is written as numbers of words, of 11,805 words in all, the most used first, so the most used take one byte. An entry shares what it can of the words of the one before it, and gives its rune as the difference from the one before's. Every 8th entry is written whole, and its first 16 bytes are kept apart. For each rune with a name, in order, the tables give its entry, as the difference from the one before's.
 
-Numbers are written in base 256, a byte to a digit, in the 420,932 bytes of names.bin, which the module makes a [constant with `embed`](../reference/variables.md#file-constants). A build never reads them: they go into the program through the assembler. They add about 430 KB to a program, and about 5 ms to a build that reuses its cached files.
+Numbers are written in base 256, a byte to a digit, in 420,932 bytes, which the module makes three [constants with `embed`](../reference/variables.md#file-constants). A build never reads them: they go into the program through the assembler, about 5 ms of a build that reuses its cached files. A program carries only the files its functions read ([CLX-239](https://acta.aaenz.no/aaen-studios/clx#CLX-239)):
+
+| File | Bytes | Read by |
+| --- | --- | --- |
+| names.bin: the words, the entries and the first bytes of every 8th | 347,562 | All four, and `lookup_rune` |
+| names_places.bin: each rune's entry | 56,346 | `name` and `java_name` |
+| names_sequences.bin: the named sequences | 17,024 | `lookup` |
+
+So a program that uses [std.regex](regex.md), which calls only `lookup_rune`, carries 348 KB of them, and one that calls `name` and `lookup` all 421 KB.
 
 - `name` and `java_name` first skip the blocks of 256 runes that hold nothing assigned. Then they find the rune's entry and read it on from the last one written whole.
 - `lookup` and `java_code_point_of` find the last entry written whole that isn't past the name, mostly by the first 16 bytes kept for each. Then they read on from it. An entry whose shared words reach past where the one before differed from the name compares the same way, so it's only skipped over. Another is compared from where its shared words end, and no name is built.

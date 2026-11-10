@@ -5,7 +5,7 @@
 module std.regex.sre
 
 import std.text.python.{repr_str}
-import std.unicode.names.{lookup}
+import std.unicode.names.{lookup_rune}
 import std.text.ucd.{ALNUM, ALNUM_LEN, DIGIT, DIGIT_LEN, PY_LOWER_FROM, PY_LOWER_FROM_LEN, PY_LOWER_TO, PY_SPACE, PY_SPACE_LEN, PY_UPPER_FROM, PY_UPPER_FROM_LEN, PY_UPPER_TO}
 
 // This follows CPython's re: Lib/re/_parser.py, Lib/re/_compiler.py and Lib/re/_casefix.py, and
@@ -723,13 +723,8 @@ impl Parser {
         }
         let name = try self.get_until(125, "character name")
         let text = runes_text(name)
-        if let r = lookup(text.copy()) {
-            if r.len() > 0 {
-                let first = decode(r, 0)
-                if first.1 == r.len() {
-                    return first.0
-                }
-            }
+        if let r = lookup_rune(text.copy()) {
+            return u32(r)
         }
         fail self.error("undefined character name {repr_str(text)}", name.len() + 4)
     }

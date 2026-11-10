@@ -15,9 +15,10 @@
 //   or the abbreviation where a later character took that, as U+1F514 took `BELL`, or else the
 //   figment alias. Java names a rune it has no name for by its block and number.
 //
-// The tables are bytes, in one file the module embeds, so a build never reads them: numbers are
-// written in base 256, a byte to a digit. The names are in alphabetical order, as numbers of
-// words, each sharing what it can of the words of the one before, but every 8th.
+// The tables are bytes, in three files the module embeds, so a build never reads them, and a
+// program carries only the files it reads. Numbers are written in base 256, a byte to a digit.
+// The names are in alphabetical order, as numbers of words, each sharing what it can of the words
+// of the one before, but every 8th.
 import std.env
 import std.fs
 import std.http
@@ -265,11 +266,12 @@ fn zig(d: i64) -> u32 {
     return u32.wrap(if d >= 0 { 2 * d } else { -2 * d - 1 })
 }
 
-// Adds `bytes` to the tables in `data`, and gives the constant that says where they start.
-fn block(data: mut List<u8>, name: str, doc: str, bytes: List<u8>) -> String {
+// Adds `bytes` to the tables in `data`, which the module calls `whole`, and gives the constant that
+// says where they start.
+fn block(data: mut List<u8>, whole: str, name: str, doc: str, bytes: List<u8>) -> String {
     let at = data.len()
     data.extend(bytes)
-    return "/// {doc} It starts here in DATA.\npub const {name}: usize = {at}\n"
+    return "/// {doc} It starts here in {whole}.\npub const {name}: usize = {at}\n"
 }
 
 fn table(name: str, doc: str, values: List<u32>) -> String {
@@ -730,21 +732,25 @@ fn main() {
         put_fixed(mut runs, run_len[k], 3)
         put_fixed(mut runs, run_first[k], 3)
     }
+    // Three files, so a program links only those it reads: a rune's name needs PLACE_DATA, and
+    // only `lookup` reads the named sequences.
     var data: List<u8> = []
+    var place_data: List<u8> = []
+    var seq_data: List<u8> = []
     var blocks: List<String> = []
-    blocks.push(block(mut data, "WORD_TEXT", "The words names are made of, most used first, one after the other, `_` for a space.", word_text))
-    blocks.push(block(mut data, "WORD_LEN", "Each word's length, in one digit.", word_len))
-    blocks.push(block(mut data, "WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at))
-    blocks.push(block(mut data, "STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream))
-    blocks.push(block(mut data, "STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at))
-    blocks.push(block(mut data, "KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end.", keys))
-    blocks.push(block(mut data, "PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places))
-    blocks.push(block(mut data, "PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at))
-    blocks.push(block(mut data, "RUNS", "The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each.", runs))
-    blocks.push(block(mut data, "SEQ_TEXT", "The named sequences' names, in order, one after the other.", seq_text))
-    blocks.push(block(mut data, "SEQ_AT", "Where each named sequence's name starts in SEQ_TEXT, and after the last, where they end, in three digits.", seq_at))
-    blocks.push(block(mut data, "SEQ_RUNES", "Each named sequence's runes, in three digits each.", seq_runes))
-    blocks.push(block(mut data, "SEQ_RUNES_AT", "Where each named sequence's runes start in SEQ_RUNES, and after the last, where they end, in three digits.", seq_runes_at))
+    blocks.push(block(mut data, "DATA", "WORD_TEXT", "The words names are made of, most used first, one after the other, `_` for a space.", word_text))
+    blocks.push(block(mut data, "DATA", "WORD_LEN", "Each word's length, in one digit.", word_len))
+    blocks.push(block(mut data, "DATA", "WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at))
+    blocks.push(block(mut data, "DATA", "STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream))
+    blocks.push(block(mut data, "DATA", "STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at))
+    blocks.push(block(mut data, "DATA", "KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end.", keys))
+    blocks.push(block(mut place_data, "PLACE_DATA", "PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places))
+    blocks.push(block(mut place_data, "PLACE_DATA", "PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at))
+    blocks.push(block(mut place_data, "PLACE_DATA", "RUNS", "The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each.", runs))
+    blocks.push(block(mut seq_data, "SEQ_DATA", "SEQ_TEXT", "The named sequences' names, in order, one after the other.", seq_text))
+    blocks.push(block(mut seq_data, "SEQ_DATA", "SEQ_AT", "Where each named sequence's name starts in SEQ_TEXT, and after the last, where they end, in three digits.", seq_at))
+    blocks.push(block(mut seq_data, "SEQ_DATA", "SEQ_RUNES", "Each named sequence's runes, in three digits each.", seq_runes))
+    blocks.push(block(mut seq_data, "SEQ_DATA", "SEQ_RUNES_AT", "Where each named sequence's runes start in SEQ_RUNES, and after the last, where they end, in three digits.", seq_runes_at))
     let parts: List<String> = [
         String("/// Unicode's character names, for std.unicode.names: `name` and `lookup`, as Python has them, and"),
         String("/// `java_name` and `java_code_point_of`, which std.nbt's SNBT reads `\\N\{...\}` with."),
@@ -752,8 +758,8 @@ fn main() {
         String("module std.text.names"),
         String(),
         notice(),
-        String("// The tables are in DATA, the bytes of names.bin, and numbers in them are written in base"),
-        String("// 256, a byte to a digit."),
+        String("// The tables are in DATA, PLACE_DATA and SEQ_DATA, the bytes of names.bin, names_places.bin"),
+        String("// and names_sequences.bin, and numbers in them are written in base 256, a byte to a digit."),
         String("/// What an entry is: a rune's name, an alias, or a name Java gives a control character."),
         "pub const NAME: u32 = {NAME}\npub const ALIAS: u32 = {ALIAS}\npub const JAVA: u32 = {JAVA}",
         "/// How many entries and words there are, how many entries go between two written whole, how many\n/// places between two in PLACES_AT, and how many words between two in WORD_AT.",
@@ -763,7 +769,9 @@ fn main() {
         tiers("WORD", wt),
         tiers("CODE", ct),
         tiers("PLACE", pt),
-        "/// The tables below, a byte to a digit.\npub const DATA: [u8; {data.len()}] = embed(\"names.bin\")\n",
+        "/// The tables below, a byte to a digit: the words and the entries, which every name and lookup reads.\npub const DATA: [u8; {data.len()}] = embed(\"names.bin\")\n",
+        "/// Where each rune's entry is, which only a rune's name needs.\npub const PLACE_DATA: [u8; {place_data.len()}] = embed(\"names_places.bin\")\n",
+        "/// The named sequences, which only `lookup` reads.\npub const SEQ_DATA: [u8; {seq_data.len()}] = embed(\"names_sequences.bin\")\n",
         blocks.join("\n"),
         table("FAMILY_LO", "The first rune of each family of names made from a rune's number, such as `CJK COMPATIBILITY IDEOGRAPH-F900`.", lo),
         table("FAMILY_HI", "The last rune of each family.", hi),
@@ -783,8 +791,10 @@ fn main() {
     let out = "{root}/std/text/names.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
     fs.write("{root}/std/text/names.bin", data)!
+    fs.write("{root}/std/text/names_places.bin", place_data)!
+    fs.write("{root}/std/text/names_sequences.bin", seq_data)!
     println("{out}: {entries.len()} entries, {ranked.len()} words, {families.len()} families, {run_count} runs, {java_lo.len()} Java blocks")
-    println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}, all {data.len()} bytes")
+    println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}, all {data.len() + place_data.len() + seq_data.len()} bytes")
 }
 
 // How many words two names share at their start, at most 92.

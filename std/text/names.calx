@@ -39,8 +39,8 @@ module std.text.names
 // advertising or otherwise to promote the sale, use or other dealings in these Data Files or
 // Software without prior written authorization of the copyright holder.
 
-// The tables are in DATA, the bytes of names.bin, and numbers in them are written in base
-// 256, a byte to a digit.
+// The tables are in DATA, PLACE_DATA and SEQ_DATA, the bytes of names.bin, names_places.bin
+// and names_sequences.bin, and numbers in them are written in base 256, a byte to a digit.
 /// What an entry is: a rune's name, an alias, or a name Java gives a control character.
 pub const NAME: u32 = 1
 pub const ALIAS: u32 = 2
@@ -69,8 +69,14 @@ pub const PLACE_A: u32 = 129
 pub const PLACE_B: u32 = 125
 pub const PLACE_C: u32 = 1
 
-/// The tables below, a byte to a digit.
-pub const DATA: [u8; 420932] = embed("names.bin")
+/// The tables below, a byte to a digit: the words and the entries, which every name and lookup reads.
+pub const DATA: [u8; 347562] = embed("names.bin")
+
+/// Where each rune's entry is, which only a rune's name needs.
+pub const PLACE_DATA: [u8; 56346] = embed("names_places.bin")
+
+/// The named sequences, which only `lookup` reads.
+pub const SEQ_DATA: [u8; 17024] = embed("names_sequences.bin")
 
 /// The words names are made of, most used first, one after the other, `_` for a space. It starts here in DATA.
 pub const WORD_TEXT: usize = 0
@@ -90,26 +96,26 @@ pub const STREAM_AT: usize = 267876
 /// The first KEY bytes of each CHECKth entry's name, `~` past its end. It starts here in DATA.
 pub const KEYS: usize = 280458
 
-/// For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole. It starts here in DATA.
-pub const PLACES: usize = 347562
+/// For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole. It starts here in PLACE_DATA.
+pub const PLACES: usize = 0
 
-/// Where each PLACE_CHECKth number starts in PLACES, in three digits. It starts here in DATA.
-pub const PLACES_AT: usize = 391251
+/// Where each PLACE_CHECKth number starts in PLACES, in three digits. It starts here in PLACE_DATA.
+pub const PLACES_AT: usize = 43689
 
-/// The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each. It starts here in DATA.
-pub const RUNS: usize = 397464
+/// The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each. It starts here in PLACE_DATA.
+pub const RUNS: usize = 49902
 
-/// The named sequences' names, in order, one after the other. It starts here in DATA.
-pub const SEQ_TEXT: usize = 403908
+/// The named sequences' names, in order, one after the other. It starts here in SEQ_DATA.
+pub const SEQ_TEXT: usize = 0
 
-/// Where each named sequence's name starts in SEQ_TEXT, and after the last, where they end, in three digits. It starts here in DATA.
-pub const SEQ_AT: usize = 415244
+/// Where each named sequence's name starts in SEQ_TEXT, and after the last, where they end, in three digits. It starts here in SEQ_DATA.
+pub const SEQ_AT: usize = 11336
 
-/// Each named sequence's runes, in three digits each. It starts here in DATA.
-pub const SEQ_RUNES: usize = 416630
+/// Each named sequence's runes, in three digits each. It starts here in SEQ_DATA.
+pub const SEQ_RUNES: usize = 12722
 
-/// Where each named sequence's runes start in SEQ_RUNES, and after the last, where they end, in three digits. It starts here in DATA.
-pub const SEQ_RUNES_AT: usize = 419546
+/// Where each named sequence's runes start in SEQ_RUNES, and after the last, where they end, in three digits. It starts here in SEQ_DATA.
+pub const SEQ_RUNES_AT: usize = 15638
 
 /// The first rune of each family of names made from a rune's number, such as `CJK COMPATIBILITY IDEOGRAPH-F900`.
 pub const FAMILY_LO: [u32; 11] = [
