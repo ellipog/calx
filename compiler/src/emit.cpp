@@ -2827,6 +2827,23 @@ $dropall    m->len = 0;
             return s + " }";
         }
         if (e->type->kind != TypeKind::array) return expr(e);
+        // A table of integers known when compiling, as std's Unicode tables are, is plain numbers,
+        // which clang reads in half the time a cast for each takes, and one of bytes is a string,
+        // which it reads in a tenth of it (CLX-235).
+        const Type* el = e->type->elem;
+        bool known = el && is_int(el) && !e->repeat && !e->elems.empty();
+        for (std::size_t i = 0; known && i < e->elems.size(); i++) known = e->elems[i]->has_bits;
+        if (known) {
+            if (el->bits == 8) {
+                std::string bytes;
+                bytes.reserve(e->elems.size());
+                for (const Expr* x : e->elems) bytes += static_cast<char>(x->const_bits & 0xFF);
+                return "{ " + c_string_literal(bytes) + " }";
+            }
+            std::string s = "{{";
+            for (std::size_t i = 0; i < e->elems.size(); i++) s += (i ? ", " : " ") + plain_int(el, e->elems[i]->const_bits);
+            return s + " }}";
+        }
         std::string s = "{{";
         if (e->repeat) {
             std::string x = const_init(e->elems[0]);
@@ -4557,6 +4574,16 @@ $dropall    m->len = 0;
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
         }
+    }
+
+    // An integer as a number without a cast, for an initializer, which converts it to its type.
+    static std::string plain_int(const Type* t, std::uint64_t bits) {
+        if (t->is_signed) {
+            auto v = static_cast<std::int64_t>(bits);
+            if (v == INT64_MIN) return "(-9223372036854775807LL - 1)";
+            return std::to_string(v) + (t->bits == 64 ? "LL" : "");
+        }
+        return std::to_string(bits) + (t->bits == 64 ? "ULL" : "u");
     }
 
     std::string int_const(const Type* t, std::uint64_t bits) {

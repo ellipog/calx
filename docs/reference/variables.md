@@ -43,7 +43,7 @@ fn main() {
 }
 ```
 
-An integer constant is written into the code wherever it's used, so it costs nothing. A float, a `str`, an array or a tuple is a `static const` in C, in each file that uses it. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
+An integer constant is written into the code wherever it's used, so it costs nothing. A float, a `str`, an array or a tuple is a `static const` in C, in each file that uses it. An array of integers is written as plain numbers, and one of bytes as a C string, so a table of thousands of them adds little to a build. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
 
 ### Text constants
 
