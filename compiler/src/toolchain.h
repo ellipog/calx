@@ -19,6 +19,9 @@ struct Toolchain {
     bool lld = false;     // whether lld is next to it, or on PATH
     std::string lld_path;    // where, or ""
     std::string lld_beside;  // where it would be next to clang
+    // On Windows, whether clang targets mingw-w64 and the UCRT, as the toolchain a release carries
+    // does (llvm-mingw's layout), rather than Visual Studio's C runtime and the Windows SDK.
+    bool mingw = false;
     std::string identity; // what changes when clang does: its path, size and modification time
     std::string home;     // the Calx installation: runtime/ and std/ are under it
     std::string cache;    // the object cache
@@ -32,9 +35,9 @@ std::filesystem::path self_exe();
 // empty, with the reason in `error`, if none has a runtime.
 std::string find_home(std::string& error);
 
-// Finds clang (CALX_CC, or `clang` on PATH), the Calx home (see find_home) and the cache
-// (CALX_CACHE, or the platform's cache folder). On failure returns false and puts the reason in
-// `error`.
+// Finds the Calx home (see find_home), clang (CALX_CC, or the toolchain the installation carries in
+// toolchain/bin, or `clang` on PATH) and the cache (CALX_CACHE, or the platform's cache folder). On
+// failure returns false and puts the reason in `error`.
 bool find_toolchain(Toolchain& tc, std::string& error);
 
 // The program `name` (with `.exe` on Windows) in the first folder on PATH that has it, or "".

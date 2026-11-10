@@ -1,19 +1,21 @@
 // Packages a release of Calx, run by CI from the repository's root:
 //
-//     calx run tools/release/package.calx -- VERSION OS CALX UPDATER OUT
+//     calx run tools/release/package.calx -- VERSION OS CALX UPDATER OUT [TOOLCHAIN]
 //
-// OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. It writes
+// OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. TOOLCHAIN
+// is the folder tools/release/toolchain.calx made, with clang, lld and what they build with,
+// which the release carries as toolchain/ so nothing else needs installing (CLX-110). It writes
 // to the folder OUT:
 //
 // - calx-VERSION-windows-x64.zip, or calx-VERSION-linux-x64.tar.gz, holding calx/ with bin/calx
-//   and bin/calx-update, runtime/, std/, LICENSE and VERSION;
+//   and bin/calx-update, runtime/, std/, toolchain/ if there's one, LICENSE and VERSION;
 // - the archive's name with .sha256 added, holding its SHA-256 as `sha256sum` writes it;
 // - version.txt, holding VERSION.
 //
 // Files are added in sorted order with fixed dates, so the same inputs make the same archive.
 
 import std.env.{args}
-import std.fs.{is_dir, list, make_dir_all, read, write}
+import std.fs.{is_dir, list, make_dir_all, metadata, read, write}
 import std.hash.{sha256}
 import std.process.{exit}
 import std.tar.{Writer as TarWriter}
@@ -21,17 +23,18 @@ import std.zip.{Writer as ZipWriter}
 
 fn main() {
     let a = args()
-    if a.len() != 5 or (a[1] != "windows" and a[1] != "linux") {
-        eprintln("usage: calx run tools/release/package.calx -- VERSION windows|linux CALX UPDATER OUT")
+    if (a.len() != 5 and a.len() != 6) or (a[1] != "windows" and a[1] != "linux") {
+        eprintln("usage: calx run tools/release/package.calx -- VERSION windows|linux CALX UPDATER OUT [TOOLCHAIN]")
         exit(2)
     }
-    if let err(e) = package(a[0], a[1], a[2], a[3], a[4]) {
+    let toolchain = if a.len() == 6 { a[5].copy() } else { String() }
+    if let err(e) = package(a[0], a[1], a[2], a[3], a[4], toolchain) {
         eprintln("package: {e}")
         exit(1)
     }
 }
 
-fn package(version: String, os: String, calx: String, updater: String, out: String) ! String {
+fn package(version: String, os: String, calx: String, updater: String, out: String, toolchain: String) ! String {
     let windows = os == "windows"
     let exe = if windows { ".exe" } else { "" }
     // (path in the archive, bytes, mode)
@@ -40,6 +43,9 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
     files.push(("calx/bin/calx-update{exe}", try load(updater), 0o755))
     try add_tree(mut files, "runtime", "calx/runtime")
     try add_tree(mut files, "std", "calx/std")
+    if not toolchain.is_empty() {
+        try add_all(mut files, toolchain, "calx/toolchain")
+    }
     files.push((String("calx/LICENSE"), try load("LICENSE"), 0o644))
     files.push((String("calx/VERSION"), "{version}\n".to_bytes(), 0o644))
 
@@ -83,6 +89,27 @@ fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: Strin
             try add_tree(mut files, path, "{prefix}/{n}")
         } else if n.ends_with(".c") or n.ends_with(".h") or n.ends_with(".calx") or n.ends_with(".bin") {
             files.push(("{prefix}/{n}", try load(path), 0o644))
+        }
+    }
+}
+
+// Every file under the folder `dir`, as `prefix/...`, in sorted order, with the permission bits it
+// has: the toolchain's programs run.
+fn add_all(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: String) ! String {
+    let names = match list(dir) {
+        ok(n) => n,
+        err(e) => fail "can't list {dir}: {e}",
+    }
+    for n in names {
+        let path = "{dir}/{n}"
+        if is_dir(path) {
+            try add_all(mut files, path, "{prefix}/{n}")
+        } else {
+            let mode = match metadata(path) {
+                ok(m) => if m.mode & 0o111 != 0 { 0o755u32 } else { 0o644u32 },
+                err(e) => fail "can't read {path}: {e}",
+            }
+            files.push(("{prefix}/{n}", try load(path), mode))
         }
     }
 }

@@ -31,23 +31,17 @@ Calx is pre-release, so until the first stable release, the scripts install the 
 
 ## clang
 
-Calx compiles programs to C and has clang build that C, so programs need **clang and lld, from LLVM 18 or later**. Releases will soon carry their own ([CLX-110](https://acta.aaenz.no/aaen-studios/clx#CLX-110)). Until then, the install scripts say if clang is missing.
+Calx compiles programs to C and has clang build that C.
 
-On Ubuntu or Debian:
+On Windows, a release carries its own, in `.calx\toolchain`: clang and lld from LLVM 23, and [mingw-w64](https://www.mingw-w64.org/)'s headers and libraries for the Windows C runtime, the UCRT, which every Windows from 10 on has. So nothing else needs installing: not LLVM, and not Visual Studio. The programs it builds need only Windows 10 or later. `CALX_CC` picks another clang, such as one from LLVM's installer, which builds with Visual Studio's C runtime and SDK.
+
+On Linux, programs need **clang and lld, from LLVM 18 or later**, until the Linux release carries them too ([CLX-110](https://acta.aaenz.no/aaen-studios/clx#CLX-110)). The install script says if clang is missing. On Ubuntu or Debian:
 
 ```sh
 sudo apt install clang lld
 ```
 
 If `clang --version` says your clang is older than 18, [apt.llvm.org](https://apt.llvm.org/) has newer ones.
-
-On Windows:
-
-```powershell
-winget install LLVM.LLVM
-```
-
-clang links Windows programs with the C runtime and the Windows SDK from **Visual Studio's Build Tools**, with the "Desktop development with C++" workload, from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/downloads/). LLVM's installer puts clang in `C:\Program Files\LLVM\bin`. Add that folder to your PATH, or set `CALX_CC` to the full path of `clang.exe`.
 
 Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor.
 
@@ -69,7 +63,7 @@ calx run hello.calx
 
 The first run builds Calx's runtime as well as the program, which takes a moment. After that, a program that hasn't changed starts in milliseconds.
 
-If it says it can't find clang, put clang on your PATH, or set `CALX_CC` to its full path.
+If it says it can't find clang, put clang on your PATH, or set `CALX_CC` to its full path. `calx doctor` checks everything a build needs and says how to fix what's wrong.
 
 `calx new hello` starts a program of your own: a folder `hello` with `hello.calx`, which reads its arguments and has a test, and a `.gitignore` ([starting a program](../reference/command.md#starting-a-program)).
 
@@ -101,7 +95,7 @@ The compiler caches what it builds. The cache is in `%LOCALAPPDATA%\calx\cache` 
 calx uninstall
 ```
 
-removes Calx: its folder, its build cache, and the PATH entry the install script added. It asks before it removes anything. clang and Visual Studio's Build Tools stay, since other programs may use them.
+removes Calx: its folder, with the toolchain it carries, its build cache, and the PATH entry the install script added. It asks before it removes anything. A clang installed on its own stays, since other programs may use it.
 
 ## Building from source
 
@@ -114,7 +108,7 @@ cmake -S compiler -B build/compiler -G Ninja -DCMAKE_CXX_COMPILER=clang++
 ninja -C build/compiler
 ```
 
-On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the tools; on Windows, `winget install Git.Git Kitware.CMake Ninja-build.Ninja LLVM.LLVM`.
+On Ubuntu or Debian, `sudo apt install git cmake ninja-build clang lld` gets the tools; on Windows, `winget install Git.Git Kitware.CMake Ninja-build.Ninja LLVM.LLVM`, with Visual Studio's Build Tools and the "Desktop development with C++" workload, from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/downloads/), for the C runtime and SDK that LLVM's clang links with. A build from source uses the clang on PATH, or `CALX_CC`; set that to a release's `toolchain\bin\clang.exe` to build programs the way a release does.
 
 That makes `build/compiler/calx`, or `calx.exe` on Windows. It finds its runtime in the checkout it was built from, so leave the checkout where it is. If you move it, set `CALX_HOME` to the new place. `calx version` says `0.1.0-dev (built from source)`, where a release names its commit and date. `calx update` doesn't update a build from source: `git pull` and `ninja` do.
 

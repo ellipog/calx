@@ -89,6 +89,11 @@ std::uintmax_t folder_bytes(const fs::path& dir) {
 }
 
 std::string install_clang() {
+    // A release carries its own clang in toolchain/ (CLX-110); a build from source uses one installed.
+    if (CALX_COMMIT[0]) {
+        return "A release of Calx carries its own clang, in toolchain/ beside bin/. Reinstall Calx to get\n"
+               "it back, or set CALX_CC to another clang.";
+    }
 #ifdef _WIN32
     return "Install LLVM with `winget install LLVM.LLVM`, then open a new terminal, or set CALX_CC to\n"
            "the full path of clang.exe.";
@@ -98,9 +103,15 @@ std::string install_clang() {
 #endif
 }
 
-// What a failed build's output says about what's missing, and how to get it.
-std::string diagnose(const std::string& out) {
+// What a failed build's output says about what's missing, and how to get it. `mingw` says clang
+// builds for mingw-w64 with the headers and libraries beside it, rather than Visual Studio's.
+std::string diagnose(const std::string& out, bool mingw) {
 #ifdef _WIN32
+    if (mingw && (contains(out, "file not found") || contains(out, "unable to find library") ||
+                  contains(out, "crt2.o") || contains(out, "libmingw"))) {
+        return "clang can't find mingw-w64's headers or libraries beside it, in the folder above its bin/.\n"
+               "Reinstall Calx, or set CALX_CC to another clang.";
+    }
     if (contains(out, "libcmt") || contains(out, "msvcrt") || contains(out, "kernel32.lib") || contains(out, "vcruntime") ||
         contains(out, "'stdio.h' file not found") || contains(out, "ucrt")) {
         return "clang can't find the Windows SDK or the C runtime it links programs with. Install Visual\n"
@@ -108,6 +119,7 @@ std::string diagnose(const std::string& out) {
                "https://visualstudio.microsoft.com/downloads/, then open a new terminal.";
     }
 #else
+    (void)mingw;
     if (contains(out, "crt1.o") || contains(out, "-lc") || contains(out, "'stdio.h' file not found") ||
         contains(out, "cannot find -lgcc")) {
         return "clang can't find the C library's headers or start files. On Ubuntu or Debian:\n"
@@ -145,9 +157,16 @@ int run_doctor() {
         ok("runtime and standard library in " + home);
     }
 
-    // clang and lld.
+    // clang and lld, found as a build finds them: CALX_CC, then the toolchain the installation
+    // carries, then PATH.
     const char* cc = std::getenv("CALX_CC");
-    std::string clang = cc && *cc ? std::string(cc) : which("clang");
+    bool from_env = cc && *cc;
+    Toolchain tc;
+    std::string tc_error;
+    bool found = !home.empty() && find_toolchain(tc, tc_error);
+    std::string clang = found ? tc.clang : from_env ? std::string(cc) : which("clang");
+    bool bundled = found && !from_env &&
+                   fs::equivalent(fs::path(clang).parent_path().parent_path(), fs::path(home) / "toolchain", ec);
     std::string folder = temp_folder();
     bool have_clang = false;
     if (clang.empty()) {
@@ -166,14 +185,11 @@ int run_doctor() {
             fix(install_clang());
         } else {
             ok("clang " + (version.empty() ? first_line(out) : version) + " at " + clang +
-               (cc && *cc ? " (from CALX_CC)" : ""));
+               (from_env ? " (from CALX_CC)" : bundled ? " (the one Calx carries)" : "") +
+               (tc.mingw ? ", building for mingw-w64 and the UCRT" : ""));
             have_clang = true;
         }
-#ifdef _WIN32
-        bool lld = fs::is_regular_file(fs::path(clang).parent_path() / "lld-link.exe", ec) || !which("lld-link").empty();
-#else
-        bool lld = fs::is_regular_file(fs::path(clang).parent_path() / "ld.lld", ec) || !which("ld.lld").empty();
-#endif
+        bool lld = found && tc.lld;
         if (have_clang && lld) {
             ok("lld, which links faster and optimizes across modules in release builds");
         } else if (have_clang) {
@@ -202,7 +218,7 @@ int run_doctor() {
                 // The last lines of what went wrong.
                 std::size_t from = out.size() > 1500 ? out.size() - 1500 : 0;
                 std::printf("%s\n", out.substr(from).c_str());
-                fix(diagnose(out));
+                fix(diagnose(out, tc.mingw));
                 break;
             }
         }

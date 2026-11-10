@@ -47,6 +47,8 @@ std::string env(const char* name) {
 constexpr char kPathSep = ';';
 constexpr const char* kExe = ".exe";
 constexpr const char* kLib = ".dll";
+// What clang builds for with mingw-w64's headers and libraries and the UCRT (CLX-110).
+constexpr const char* kMingwTarget = "--target=x86_64-w64-windows-gnu";
 #else
 constexpr char kPathSep = ':';
 constexpr const char* kExe = "";
@@ -416,10 +418,17 @@ fs::path long_path(const std::string& path) {
 std::string which(const std::string& name) { return find_on_path(name); }
 
 bool find_toolchain(Toolchain& tc, std::string& error) {
+    tc.home = find_home(error);
+    if (tc.home.empty()) return false;
+    // CALX_CC, then the toolchain the installation carries, then clang on PATH (CLX-110).
     tc.clang = env("CALX_CC");
+    if (tc.clang.empty()) {
+        fs::path bundled = fs::path(tc.home) / "toolchain" / "bin" / (std::string("clang") + kExe);
+        if (plain_file(bundled)) tc.clang = bundled.string();
+    }
     if (tc.clang.empty()) tc.clang = find_on_path("clang");
     if (tc.clang.empty()) {
-        error = "can't find clang; put it on PATH or set CALX_CC";
+        error = "can't find clang; put it on PATH or set CALX_CC, or run `calx doctor`";
         return false;
     }
     std::error_code ec;
@@ -431,8 +440,17 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = clang_path.string();
     fs::path dir = clang_path.parent_path();
 #ifdef _WIN32
-    tc.lld_beside = (dir / "lld-link.exe").string();
-    tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("lld-link");
+    // llvm-mingw's layout: the target's headers and libraries in a folder named for it, beside bin.
+    // Its clang drives lld as ld.lld, with GNU ld's options.
+    std::error_code dir_ec;
+    tc.mingw = fs::is_directory(dir.parent_path() / "x86_64-w64-mingw32", dir_ec);
+    if (tc.mingw) {
+        tc.lld_beside = (dir / "ld.lld.exe").string();
+        tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : "";
+    } else {
+        tc.lld_beside = (dir / "lld-link.exe").string();
+        tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("lld-link");
+    }
 #else
     tc.lld_beside = (dir / "ld.lld").string();
     tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("ld.lld");
@@ -441,9 +459,10 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     auto size = fs::file_size(clang_path, ec);
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
     tc.identity = tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
-
-    tc.home = find_home(error);
-    if (tc.home.empty()) return false;
+    // The toolchain a release carries names itself in VERSION beside its bin/, since its files
+    // come with the archive's fixed dates: a release with another clang compiles everything again.
+    std::string version;
+    if (read_file((dir.parent_path() / "VERSION").string(), version)) tc.identity += "|" + version;
 
     tc.cache = cache_dir();
     make_dirs(fs::path(tc.cache) / "obj");
@@ -986,7 +1005,9 @@ static std::vector<std::string> fit_command(const std::vector<std::string>& args
     }
     if (!write_file_atomic(rsp, text)) return args;
     // The clang driver reads a response file as a Unix shell would, backslashes and all, unless
-    // told otherwise; lld-link takes the same flag.
+    // told otherwise; lld-link takes the same flag. ld.lld linking for mingw-w64 has no such flag,
+    // and on Windows reads one as a Windows command line already.
+    if (fs::path(args[0]).stem() == "ld.lld") return {args[0], "@" + rsp};
     return {args[0], "--rsp-quoting=windows", "@" + rsp};
 #else
     (void)rsp;
@@ -1479,14 +1500,24 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // that overflows always reaches the page kept below it and panics, never stepping over it
     // into other memory. Windows' code does this already, through __chkstk.
     flags.push_back("-fstack-clash-protection");
+#else
+    // With mingw-w64's headers and libraries beside it, clang builds for them, whatever its own
+    // default target: LLVM's release builds for Visual Studio's unless told, and loads the
+    // configuration beside it named for the target. It writes DWARF unless asked for CodeView,
+    // which the PDB holds and dbghelp reads for stack traces, as with Visual Studio's.
+    if (tc.mingw) {
+        flags.push_back(kMingwTarget);
+        flags.push_back("-gcodeview");
+    }
 #endif
     if (mode == BuildMode::debug) {
         flags.push_back("-O0");
         flags.push_back("-DCX_DEBUG");  // the runtime checks that everything allocated is freed
 #ifdef _WIN32
         // The DLL C runtime. Linking the static one copies its debug info into every PDB, which
-        // doubles the link time. Release builds link it statically, so they run anywhere.
-        flags.push_back("-fms-runtime-lib=dll");
+        // doubles the link time. Release builds link it statically, so they run anywhere. With
+        // mingw every build uses the UCRT's DLL, which every Windows from 10 on has.
+        if (!tc.mingw) flags.push_back("-fms-runtime-lib=dll");
 #endif
     } else {
         flags.push_back("-O3");
@@ -1668,24 +1699,39 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
 
     std::vector<std::string> link_flags;
+#ifdef _WIN32
+    if (tc.mingw) link_flags.push_back(kMingwTarget);
+#endif
     if (tc.lld) link_flags.push_back("-fuse-ld=lld");
     if (library) {
         link_flags.push_back("-shared");
 #ifdef _WIN32
-        link_flags.push_back("-Wl,/noimplib");  // nothing links against it: programs open it
+        // Nothing links against it: programs open it. mingw's lld writes no import library unless
+        // asked.
+        if (!tc.mingw) link_flags.push_back("-Wl,/noimplib");
 #endif
     }
 #ifdef _WIN32
     // The main thread's stack is 8 MiB, as Linux and macOS give it and as the runtime gives every
     // thread it starts, so a program recurses as deep on every system (D135). Windows' is 1 MiB
     // unless the program says. It's address space, taken as memory only as the stack grows.
-    if (!library) link_flags.push_back("-Wl,/STACK:8388608");
+    if (!library) link_flags.push_back(tc.mingw ? "-Wl,--stack,8388608" : "-Wl,/STACK:8388608");
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
-    // The PDB makes lld-link keep every section by default; a section nothing reads, such as an
-    // `embed` table a program never looks at, is dropped as it would be without one.
-    link_flags.push_back("-Wl,/OPT:REF");
-    // The driver always names the static C runtime when linking; the objects name the DLL one.
-    if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
+    if (tc.mingw) {
+        // A PDB beside the image, named for it, as Visual Studio's linker writes, and the sections
+        // nothing reads dropped.
+        link_flags.push_back("-Wl,--pdb=");
+        link_flags.push_back("-Wl,--gc-sections");
+        // The system libraries the runtime's parts use, which Visual Studio's linker takes from the
+        // `#pragma comment(lib)` in each. A program imports from one only what it calls.
+        for (const char* lib : {"-lws2_32", "-lwinhttp", "-lbcrypt", "-lsynchronization"}) link_flags.push_back(lib);
+    } else {
+        // The PDB makes lld-link keep every section by default; a section nothing reads, such as
+        // an `embed` table a program never looks at, is dropped as it would be without one.
+        link_flags.push_back("-Wl,/OPT:REF");
+        // The driver always names the static C runtime when linking; the objects name the DLL one.
+        if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
+    }
 #else
     link_flags.push_back("-lm");
     link_flags.push_back("-Wl,--gc-sections");
@@ -1696,13 +1742,24 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         std::string lto_cache = (fs::path(tc.cache) / "lto").string();
         link_flags.push_back("-flto=thin");
 #ifdef _WIN32
-        // The driver doesn't pass the optimization level to lld-link, which would use -O2.
-        for (const char* f : {"/opt:lldlto=3", "/lldltocachepolicy:cache_size_bytes=512m"}) {
+        if (tc.mingw) {
+            // mingw's lld takes ld.lld's options, and the optimization level from the driver.
+            link_flags.push_back("-O3");
+            link_flags.push_back("-march=x86-64-v3");
+            for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"),
+                                         "--thinlto-cache-dir=" + lto_cache}) {
+                link_flags.push_back("-Xlinker");
+                link_flags.push_back(f);
+            }
+        } else {
+            // The driver doesn't pass the optimization level to lld-link, which would use -O2.
+            for (const char* f : {"/opt:lldlto=3", "/lldltocachepolicy:cache_size_bytes=512m"}) {
+                link_flags.push_back("-Xlinker");
+                link_flags.push_back(f);
+            }
             link_flags.push_back("-Xlinker");
-            link_flags.push_back(f);
+            link_flags.push_back("/lldltocache:" + lto_cache);
         }
-        link_flags.push_back("-Xlinker");
-        link_flags.push_back("/lldltocache:" + lto_cache);
 #else
         link_flags.push_back("-O3");
         link_flags.push_back("-march=x86-64-v3");

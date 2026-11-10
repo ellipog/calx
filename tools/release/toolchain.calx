@@ -1,0 +1,99 @@
+// Puts together the toolchain a release carries as toolchain/, so building a program needs nothing
+// else installed (CLX-110), run by CI from the repository's root:
+//
+//     calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME
+//
+// MINGW is llvm-mingw's x86_64 UCRT release and LLVM is LLVM's own release for Windows, of the
+// same LLVM version, both unpacked; OUT is the folder to make. NAME, such as `LLVM 23.1.5,
+// llvm-mingw 20261104`, goes in OUT/VERSION, which builds put in their cache keys, so a release
+// with a new toolchain compiles everything again.
+//
+// clang and lld come from LLVM's release, one program each, linked statically with an allocator
+// of their own: llvm-mingw's load LLVM from DLLs and use the C runtime's heap, which made a
+// module's debug build about 10% slower and a release build from an empty cache 20% slower.
+// From llvm-mingw come what clang builds for mingw-w64 and the UCRT with: the configuration that
+// picks them, mingw-w64's headers, the import libraries for x86_64 and compiler-rt's builtins,
+// with the licenses, LLVM's and mingw-w64's. It leaves out the other targets and tools, C++'s
+// headers and libraries, and the DDK's headers, some of which are LGPL.
+
+import std.env.{args}
+import std.fs.{Kind, copy, is_file, make_dir_all, metadata, walk, write_text}
+import std.process.{exit}
+
+fn main() {
+    let a = args()
+    if a.len() != 5 or a[0] != "windows" {
+        eprintln("usage: calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME")
+        exit(2)
+    }
+    if let err(e) = windows(a[1], a[2], a[3], a[4]) {
+        eprintln("toolchain: {e}")
+        exit(1)
+    }
+}
+
+fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
+    var kept = Kept { files: 0, bytes: 0 }
+    try put(mut kept, "{llvm}/bin/clang.exe", "{out}/bin/clang.exe")
+    // lld picks how to link from the name it's started by; clang starts ld.lld for mingw-w64.
+    let lld = if is_file("{llvm}/bin/ld.lld.exe") { "{llvm}/bin/ld.lld.exe" } else { "{llvm}/bin/lld.exe" }
+    try put(mut kept, lld, "{out}/bin/ld.lld.exe")
+    try tree(mut kept, llvm, out, "lib/clang", |rel: String| { rel.contains("/include/") })
+    // The configuration clang loads for the target: the C runtime and unwinder LLVM's, and lld.
+    try put(mut kept, "{mingw}/bin/x86_64-w64-windows-gnu.cfg", "{out}/bin/x86_64-w64-windows-gnu.cfg")
+    try put(mut kept, "{mingw}/bin/mingw32-common.cfg", "{out}/bin/mingw32-common.cfg")
+    try put(mut kept, "{mingw}/LICENSE.TXT", "{out}/LICENSE.TXT")
+    try tree(mut kept, mingw, out, "include", |rel: String| {
+        not rel.starts_with("include/c++/") and not rel.starts_with("include/ddk/") and not rel.ends_with(".idl")
+    })
+    try tree(mut kept, mingw, out, "x86_64-w64-mingw32", |rel: String| {
+        (rel.starts_with("x86_64-w64-mingw32/lib/") and not rel.contains("/libc++")) or
+            rel.starts_with("x86_64-w64-mingw32/share/mingw32/COPYING")
+    })
+    try tree(mut kept, mingw, out, "lib/clang", |rel: String| {
+        rel.ends_with("/lib/windows/libclang_rt.builtins-x86_64.a")
+    })
+    if let err(e) = write_text("{out}/VERSION", "{name}\n") {
+        fail "can't write {out}/VERSION: {e}"
+    }
+    println("toolchain: {name}, {kept.files} files, {kept.bytes / 1048576} MiB, in {out}")
+}
+
+struct Kept {
+    files: usize
+    bytes: u64
+}
+
+// Copies each file under `from/dir` whose path from `from`, with `/` between names, `keep` takes.
+fn tree(kept: mut Kept, from: String, out: String, dir: String, keep: Fn(String) -> bool) ! String {
+    let entries = match walk("{from}/{dir}") {
+        ok(e) => e,
+        err(e) => fail "can't list {from}/{dir}: {e}",
+    }
+    for e in entries {
+        if e.kind != Kind.File {
+            continue
+        }
+        let rel = e.path[from.len() + 1..e.path.len()].replace("\\", "/")
+        if keep(rel.copy()) {
+            try put(mut kept, e.path.copy(), "{out}/{rel}")
+        }
+    }
+}
+
+fn put(kept: mut Kept, from: String, to: String) ! String {
+    let slash = to.find_last("/")
+    if let at = slash {
+        if let err(e) = make_dir_all(to[0..at]) {
+            fail "can't make {to[0..at]}: {e}"
+        }
+    }
+    if let err(e) = copy(from.copy(), to.copy()) {
+        fail "can't copy {from} to {to}: {e}"
+    }
+    kept.files += 1
+    kept.bytes += match metadata(to) {
+        ok(m) => m.size,
+        err(_) => 0,
+    }
+}

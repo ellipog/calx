@@ -241,7 +241,7 @@ In debug builds the runtime checks memory: a block freed twice or with the wrong
 
 Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
 
-On Windows, debug builds use the C runtime DLL that comes with Visual Studio, since linking the static one puts its debug information into every PDB and doubles the link time. Release builds link the C runtime statically, so they run on any Windows machine.
+On Windows, a release builds with the toolchain it carries in `toolchain\` ([install](../guide/install.md#clang)): clang and lld from LLVM, with mingw-w64's headers and libraries, so programs use the UCRT, the C runtime DLL every Windows from 10 on has, in both modes. They run as fast as with Visual Studio's C runtime: on the [tick benchmark](../benchmarks.md), 18.6 ms a tick on one worker and 2.45 ms on 24, against 18.8 ms and 2.47 ms. With a clang that builds with Visual Studio's C runtime instead, such as one from LLVM's installer, debug builds use its DLL, since linking the static one puts its debug information into every PDB and doubles the link time, and release builds link it statically.
 
 ## Fast builds
 
@@ -274,7 +274,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 
 | Variable | Meaning |
 | --- | --- |
-| `CALX_CC` | The clang to use. Otherwise `clang` is found on `PATH` |
+| `CALX_CC` | The clang to use. Otherwise the one the installation carries in `toolchain/bin`, which a Windows release has, or else `clang` on `PATH` |
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
@@ -298,10 +298,10 @@ calx doctor
 
   ok    calx 0.2.0 (3f9c2a1b7d4e, 2026-11-01) at C:\Users\you\.calx\bin\calx.exe
   ok    runtime and standard library in C:\Users\you\.calx
-  ok    clang 20.1.8 at C:\Program Files\LLVM\bin\clang.exe
+  ok    clang 23.1.5 at C:\Users\you\.calx\toolchain\bin\clang.exe (the one Calx carries), building for mingw-w64 and the UCRT
   ok    lld, which links faster and optimizes across modules in release builds
-  ok    builds and runs a program in a debug build (143 ms)
-  ok    builds and runs a program in a release build (260 ms)
+  ok    builds and runs a program in a debug build (176 ms)
+  ok    builds and runs a program in a release build (190 ms)
   ok    calx on PATH is this one
   ok    build cache in C:\Users\you\AppData\Local\calx\cache, 412 MB
   ok    updates: `calx update` installs new releases, and a daily check says when there's one
@@ -309,7 +309,7 @@ calx doctor
 Everything works.
 ```
 
-The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 

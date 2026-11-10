@@ -82,7 +82,9 @@ try {
     Write-Host "Checked its SHA-256 ($mb MB)."
 
     $unpacked = Join-Path $temp 'unpacked'
-    Expand-Archive -Path $zip -DestinationPath $unpacked
+    # .NET's own unzip: Expand-Archive takes minutes over the toolchain's thousands of files.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpacked)
     $new = Join-Path $unpacked 'calx'
     if (-not (Test-Path (Join-Path $new 'bin\calx.exe'))) { Stop-Install 'the download has no bin\calx.exe' }
     Get-ChildItem -Recurse -File $new | Unblock-File
@@ -119,9 +121,10 @@ if ($env:CALX_NO_MODIFY_PATH -ne '1') {
 Write-Host ""
 Write-Host "Calx is installed in $root." -ForegroundColor Green
 
-# Calx builds programs with clang. Until releases carry their own (CLX-110), it has to be there.
+# Calx builds programs with clang. A release carries its own, with the Windows libraries it links
+# with, in toolchain\ (CLX-110), so nothing else needs installing; one from before that needs one.
 $clang = if ($env:CALX_CC) { $env:CALX_CC } else { (Get-Command clang -ErrorAction SilentlyContinue).Source }
-if (-not $clang) {
+if (-not $clang -and -not (Test-Path (Join-Path $root 'toolchain\bin\clang.exe'))) {
     Write-Host ""
     Write-Host "Calx builds programs with clang, which isn't on your PATH yet. Install LLVM:"
     Write-Host "    winget install LLVM.LLVM"

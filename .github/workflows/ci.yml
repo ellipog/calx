@@ -95,7 +95,7 @@ jobs:
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
       - name: Check the release tools and the art script
         shell: bash
-        run: for f in tools/update/update.calx tools/release/package.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+        run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark
@@ -118,8 +118,9 @@ jobs:
   # A release of every push to main that passes, as the nightly, and of every v* tag, which must
   # match VERSION, as a stable release (CLX-81). Each platform builds the compiler with its
   # version, commit and date stamped in, builds calx-update with it, and packages both with the
-  # runtime and std (tools/release/package.calx). Then it unpacks the archive and builds a
-  # program with what's in it, the way a user's installation will.
+  # runtime and std (tools/release/package.calx), and on Windows the toolchain too (CLX-110). Then
+  # it unpacks the archive and builds a program with what's in it, the way a user's installation
+  # will.
   package:
     name: package (${{ matrix.platform }})
     needs: test
@@ -186,6 +187,42 @@ jobs:
               "$($matches[1])=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
             }
           }
+      # The toolchain a Windows release carries, so building a program needs nothing else
+      # installed (CLX-110): clang and lld from LLVM's own release, and mingw-w64's headers and
+      # libraries from llvm-mingw's, of the same LLVM version, pinned and checked, which
+      # tools/release/toolchain.calx puts together.
+      - name: Fetch the toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          function Get-Pinned($url, $file, $sha256) {
+            foreach ($wait in 10, 30, 60, 0) {
+              try {
+                Invoke-WebRequest $url -OutFile $file
+                break
+              } catch {
+                if ($wait -eq 0) { throw "the download of $url failed: $_" }
+                Write-Host "the download of $url failed: $_"
+                Start-Sleep -Seconds $wait
+              }
+            }
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+            if ($hash -ne $sha256) { throw "$file's SHA-256 is $hash" }
+          }
+          $ProgressPreference = 'SilentlyContinue'
+          $mingw = "llvm-mingw-20261104-ucrt-x86_64"
+          Get-Pinned "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$mingw.zip" "$env:RUNNER_TEMP\$mingw.zip" `
+            "552191B5754C49A5A20723276A6FC56541EA1922C4C50B7B669022333FC1B40F"
+          7z x -y "-o$env:RUNNER_TEMP" "$env:RUNNER_TEMP\$mingw.zip" > $null
+          $llvm = "clang+llvm-23.1.5-x86_64-pc-windows-msvc"
+          Get-Pinned "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" "$env:RUNNER_TEMP\$llvm.tar.zst" `
+            "B2BE33385DDC86E83511417A060DE927AE8B09D1F3017CC3CDCE5C73CD5029D7"
+          # Only what the toolchain takes from it: the whole release is 4 GB unpacked.
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\$llvm.tar.zst" -C $env:RUNNER_TEMP `
+            "$llvm/bin/clang.exe" "$llvm/bin/lld.exe" "$llvm/lib/clang"
+          if ($LASTEXITCODE -ne 0) { throw "can't unpack $llvm.tar.zst" }
+          "LLVM_MINGW=$env:RUNNER_TEMP\$mingw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_RELEASE=$env:RUNNER_TEMP\$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Version
         id: version
         shell: bash
@@ -223,9 +260,17 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "${link[@]}" \
             "-DCALX_VERSION=$VERSION" "-DCALX_COMMIT=$COMMIT" "-DCALX_DATE=$DATE"
           ninja -C build/release
+          toolchain=()
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            build/release/calx$exe run tools/release/toolchain.calx -- windows "$LLVM_MINGW" "$LLVM_RELEASE" \
+              build/toolchain "LLVM 23.1.5, llvm-mingw 20261104"
+            toolchain=(build/toolchain)
+            # calx-update built with the toolchain the release carries, as a user's programs are.
+            export CALX_CC="$PWD/build/toolchain/bin/clang.exe"
+          fi
           build/release/calx$exe build --release tools/update/update.calx -o build/release/calx-update$exe
           build/release/calx$exe run tools/release/package.calx -- "$VERSION" ${{ matrix.platform }} \
-            build/release/calx$exe build/release/calx-update$exe build/dist
+            build/release/calx$exe build/release/calx-update$exe build/dist "${toolchain[@]}"
       - name: Try the release
         shell: bash
         run: |
@@ -239,6 +284,14 @@ jobs:
           fi
           "$calx" version
           "$calx" run tests/basics/hello.calx
+          "$calx" run --release tests/basics/hello.calx
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Builds with the clang it carries, not Visual Studio's or one on PATH: the tests that
+            # reach the system the most, libraries, and stack traces, which read the PDBs.
+            "$calx" doctor | tee build/try/doctor.txt
+            grep -q "the one Calx carries" build/try/doctor.txt
+            "$calx" run --release tests/run.calx -- --modes debug,release tests/std tests/library tests/panics
+          fi
           # Reaches GitHub over HTTPS. Before the first nightly is published there's nothing to find.
           "$calx" update --check || echo "(no release to compare with yet)"
       - uses: actions/upload-artifact@v7
