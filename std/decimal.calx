@@ -1405,7 +1405,7 @@ fn exact_pow(x: Decimal, y: Decimal, p: i64) -> List<Decimal> {
     var s = one.copy()
     if not m_one {
         // m = s^b needs m at least 2^b.
-        if f64(i32.wrap(b)) > 3.33 * f64(i32.wrap(ndigits(m))) + 1.0 {
+        if f64.nearest(b) > 3.33 * f64.nearest(ndigits(m)) + 1.0 {
             return []
         }
         s = iroot_mag(m, u64.wrap(b))
@@ -1418,7 +1418,7 @@ fn exact_pow(x: Decimal, y: Decimal, p: i64) -> List<Decimal> {
     let a5 = mul_exp(q5, a)
     let k = a2.min(a5)
     // Its digits are at least these, so past p + 1 it can't be a place the rounding changes.
-    let s_digits = if m_one { 0.0 } else { (f64(i32.wrap(ndigits(s))) - 1.0).max(0.47) }
+    let s_digits = if m_one { 0.0 } else { (f64.nearest(ndigits(s)) - 1.0).max(0.47) }
     let low = f64.nearest(a_abs) * s_digits + f64.nearest(a2 - k) * 0.30 + f64.nearest(a5 - k) * 0.69
     if low > f64.nearest(p + 1) {
         return []
