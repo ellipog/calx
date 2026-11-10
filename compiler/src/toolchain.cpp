@@ -1616,8 +1616,19 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
     r.link_ms = ms_since(t1);
     r.ok = true;
-    trim(fs::path(tc.cache) / "bin", kKeepPrograms, kProgramBytes);
-    trim(obj_dir, kKeepObjects, kObjectBytes);
+    // `CALX_CACHE_MB` keeps that many megabytes of each, however many files: a CI job that builds
+    // more programs than the limits hold, and keeps the cache for its next run, then finds the
+    // files its first builds made still there.
+    std::size_t keep_programs = kKeepPrograms, keep_objects = kKeepObjects;
+    std::uintmax_t program_bytes = kProgramBytes, object_bytes = kObjectBytes;
+    std::string mb = env("CALX_CACHE_MB");
+    unsigned long long megabytes = mb.empty() ? 0 : std::strtoull(mb.c_str(), nullptr, 10);
+    if (megabytes > 0) {
+        keep_programs = keep_objects = static_cast<std::size_t>(-1);
+        program_bytes = object_bytes = static_cast<std::uintmax_t>(megabytes) << 20;
+    }
+    trim(fs::path(tc.cache) / "bin", keep_programs, program_bytes);
+    trim(obj_dir, keep_objects, object_bytes);
     return r;
 }
 
