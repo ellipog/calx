@@ -159,23 +159,23 @@ These methods round a number to a place, with its context's rounding:
 
 A `Decimal` is a sign, a coefficient and an exponent, with the context.
 
-- **The coefficient:** a list of limbs of nine decimal digits each, base 10^9, the lowest first, as libmpdec keeps its in base 10^19. Rounding to a number of digits cuts limbs and divides one by a power of ten, and writing the digits out needs no change of base.
+- **The coefficient:** a list of limbs of nine decimal digits each, base 10^9, the lowest first, as libmpdec keeps its in base 10^19. Rounding to a number of digits cuts limbs and divides the rest by a power of ten, each limb with a multiply and a shift rather than a division, and writing the digits out needs no change of base.
 - **Multiplying:** a column of the product at a time, with the column's products summed in 64 bits and carried every 16 products.
-- **Dividing:** Knuth's algorithm D. Each quotient limb is guessed with a multiply by the divisor's reciprocal, and each product is split apart from the others, so only a borrow passes from one limb to the next.
+- **Dividing:** Knuth's algorithm D. Up to 36 digits in the divisor, it works in the coefficient's limbs, and each quotient limb is guessed with a multiply by the divisor's reciprocal. From 37, it puts the limbs together two at a time, into limbs of 18 digits, a quarter of the steps, as libmpdec works in limbs of 19. Each product of a quotient limb and a divisor limb, up to 36 digits, is split at 10^18 with a multiply by that divisor limb's 2^64 / 10^18, worked out once a division, and the borrows that pass from one limb to the next come from the top bits of differences, with no branches.
 - **Square root:** Newton's method on the coefficient. It starts from a double, or from the root of the top half of the digits, which has half the digits right, so one step gets them all.
 - **exp, ln and log10:** worked out in binary fixed point on `BigInt`s, to a few more digits than the precision, with a bound on the error. When the result rounds the same at both ends of the bound, that's the correctly rounded result; otherwise they're worked out again with more digits, which is Ziv's method. ln 2 and ln 10 come from a table to 2048 bits, and from their series past that. `exp` reduces by ln 10 and by halving, then squares back. `ln` takes out powers of ten and of two, so what's left is within √2 of 1, and sums the series of atanh.
 - **powi:** an exact result is worked out exactly. Otherwise the power lies between two bounds, cut down and up to a few more digits than the precision, until both round the same.
 - **pow:** x^y has a finite number of digits only when, with x = c × 10^e and y = a / b in lowest terms, b divides the powers of 2 and 5 in c × 10^e and the rest of c is a perfect b-th power. Such a result is worked out exactly. Every other one is e^(y ln x), with Ziv's method, which ends because a value that isn't exact is never where the rounding changes.
 
-On our benchmark, the time for each operation at 28, 80 and 300 digits, against Python 3.14's `decimal`, which is libmpdec in C. The times are in nanoseconds, for 1.4142… against 1.7320… These are rough: the machine was running other programs.
+On our benchmark, the time for each operation at 28, 80 and 300 digits, against Python 3.14's `decimal`, which is libmpdec in C. The times are in nanoseconds, for 1.4142… against 1.7320…, the best of 15 runs taking turns, on the performance cores of an i9-13900K on Windows.
 
 | Operation | Calx 28 | Python 28 | Calx 80 | Python 80 | Calx 300 | Python 300 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `+` | 22 | 97 | 28 | 111 | 44 | 128 |
-| `*` | 40 | 102 | 100 | 264 | 800 | 1258 |
-| `/` | 127 | 188 | 345 | 445 | 2500 | 1963 |
-| `sqrt` | 480 | 960 | 1610 | 2840 | 7490 | 21570 |
-| `exp` | 1950 | 3600 | 3520 | 18130 | 13540 | 477900 |
-| `ln` | 3240 | 9950 | 5850 | 42830 | 29480 | 688140 |
+| `+` | 15 | 71 | 19 | 80 | 33 | 85 |
+| `*` | 30 | 82 | 71 | 176 | 519 | 813 |
+| `/` | 98 | 139 | 176 | 285 | 763 | 1407 |
+| `sqrt` | 482 | 860 | 1043 | 2725 | 3727 | 19136 |
+| `exp` | 1898 | 3375 | 3285 | 17587 | 13370 | 534347 |
+| `ln` | 3391 | 9484 | 6255 | 35754 | 31250 | 650288 |
 
-Python's times include its interpreter's overhead, tens of nanoseconds an operation. Past about 150 digits libmpdec divides faster: its limbs hold 19 digits, so a division takes about a fifth of the steps. [`tools/math_tables.calx`](../../tools/math_tables.calx), which fits std.math's polynomials at 80 digits, takes 0.92 s where the Python it was ported from took 3.3 s.
+Python's times include its interpreter's overhead, tens of nanoseconds an operation. Dividing at 1000 digits takes 5.3 µs to Python's 11.6, and at 4000, 69 µs to 406. [`tools/math_tables.calx`](../../tools/math_tables.calx), which fits std.math's polynomials at 80 digits, takes 0.92 s where the Python it was ported from took 3.3 s.

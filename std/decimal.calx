@@ -1942,14 +1942,31 @@ fn shift_down(a: List<u32>, k: i64) -> List<u32> {
         }
         return out
     }
-    let p = POW10[r]
-    let m = POW10[9 - r]
+    let p = u64(POW10[r])
+    let m = u64(POW10[9 - r])
+    var cur = down10(u64(a[wu]), r)
     for i in wu..a.len() {
-        let hi = if i + 1 < a.len() { a[i + 1] % p } else { 0 }
-        out.push(a[i] / p + hi * m)
+        let next = if i + 1 < a.len() { u64(a[i + 1]) } else { 0 }
+        let q = down10(next, r)
+        out.push(u32.wrap(cur + (next - q * p) * m))
+        cur = q
     }
     trim(mut out)
     return out
+}
+
+/// Multipliers and shifts for a limb divided by 10^r, r from 1 to 8: x / 10^r is
+/// x × DOWN_M[r] >> DOWN_S[r] for every x below 2^30, where DOWN_S[r] is 31 and the bits of 10^r,
+/// and DOWN_M[r] 2^DOWN_S[r] / 10^r + 1. The multiplier is over by at most 1, so the product is
+/// over by at most x, which is less than 2^DOWN_S[r] / (2 × 10^r): not enough to reach the next
+/// quotient. The product fits in 63 bits.
+const DOWN_M: [u64; 9] = [0, 3435973837, 2748779070, 2199023256, 3518437209, 2814749768, 2251799814,
+    3602879702, 2882303762]
+const DOWN_S: [u64; 9] = [0, 35, 38, 41, 45, 48, 51, 55, 58]
+
+/// `x / 10^r`, for `x` below 2^30 and `r` from 1 to 8, with a multiply and a shift.
+fn down10(x: u64, r: usize) -> u64 {
+    return (x * DOWN_M[r]) >> DOWN_S[r]
 }
 
 /// `a / 10^k`, rounded down, in place.
@@ -1971,13 +1988,18 @@ fn shift_down_own(a: own List<u32>, k: i64) -> List<u32> {
             x[i] = x[i + wu]
         }
     } else {
-        let p = POW10[r]
-        let m = POW10[9 - r]
+        // Each limb's quotient is worked out once, by down10, and its remainder goes on top of
+        // the limb below's.
+        let p = u64(POW10[r])
+        let m = u64(POW10[9 - r])
         let last = x.len() - 1
+        var cur = down10(u64(x[wu]), r)
         for i in 0..n {
             let at = i + wu
-            let hi = if at < last { x[at + 1] % p } else { 0 }
-            x[i] = x[at] / p + hi * m
+            let next = if at < last { u64(x[at + 1]) } else { 0 }
+            let q = down10(next, r)
+            x[i] = u32.wrap(cur + (next - q * p) * m)
+            cur = q
         }
     }
     x.truncate(n)
@@ -2059,6 +2081,9 @@ fn divmod_mag(a: own List<u32>, b: List<u32>, rest: bool) -> (List<u32>, List<u3
         let r = rem_small(u, d)
         let left: List<u32> = if r == 0 { [] } else { [u32.wrap(r)] }
         return (div_small(u, d), left)
+    }
+    if b.len() >= WIDE_FROM {
+        return divmod_wide(u, b, rest)
     }
     // Knuth's algorithm D (The Art of Computer Programming, 4.3.1) in base 10^9. Both are scaled
     // so the divisor's top limb is at least half the base, which makes each guess at a quotient
@@ -2155,6 +2180,211 @@ fn divmod_mag(a: own List<u32>, b: List<u32>, rest: bool) -> (List<u32>, List<u3
         return (q, u)
     }
     return (q, div_small(u, f))
+}
+
+/// The base a long division by WIDE_FROM limbs or more works in, two of the coefficient's limbs
+/// to one.
+const WIDE: u64 = 1000000000000000000
+/// 2^120 / 10^18, rounded down.
+const WIDE_INV: u64 = 1329227995784915872
+/// The divisor's length in limbs of 10^9 from which a division works in 10^18.
+const WIDE_FROM: usize = 5
+
+/// divmod_mag for a divisor of WIDE_FROM limbs or more: Knuth's algorithm D as there, in base
+/// 10^18, as libmpdec divides in 10^19, which takes a quarter of the steps. Each product of a
+/// guess and one of the divisor's limbs is split by the base with that limb times 2^64 / 10^18,
+/// worked out once: the guess times it, the high half, is the product's quotient by the base or
+/// one less, and the remainder, within twice the base, comes from the low halves.
+fn divmod_wide(a: List<u32>, b: List<u32>, rest: bool) -> (List<u32>, List<u32>) {
+    let n = (b.len() + 1) / 2
+    let len = (a.len() + 1) / 2
+    let m = len - n
+    // The divisor's limbs, then each one's 2^64 / 10^18 times.
+    var v = pack_wide(b, 2 * n)
+    var u = pack_wide(a, len + 1)
+    let f = WIDE / (v[n - 1] + 1)
+    scale_wide(mut v, n, f)
+    scale_wide(mut u, len + 1, f)
+    // v × 2^64 / 10^18 is 18v and v × (2^64 - 18 × 10^18) / 10^18, which split_wide gives
+    // without a division.
+    for i in 0usize..n {
+        let p = v[i].widening_mul(446744073709551616)
+        v[n + i] = 18 * v[i] + split_wide(p.0, p.1).0
+    }
+    var q: List<u64> = [0; m + 1]
+    let vt = v[n - 1]
+    let vs = v[n - 2]
+    unsafe {
+        let pu = u.as_mut_ptr()
+        let pv = v.as_ptr()
+        let pr = pv.add(n)
+        let pq = q.as_mut_ptr()
+        var j = m + 1
+        while j > 0 {
+            j -= 1
+            // The guess, from the top two limbs by the divisor's top one, at most 2 too big, then
+            // put right by the next limbs of each.
+            let top = pu.add(j + n).read().widening_mul(WIDE)
+            let low = top.0 + pu.add(j + n - 1).read()
+            let g = u64.div_wide(top.1 + (if low < top.0 { 1 } else { 0 }), low, vt)
+            var qhat = g.0
+            var rhat = g.1
+            let next = pu.add(j + n - 2).read()
+            loop {
+                if qhat < WIDE {
+                    let l = qhat.widening_mul(vs)
+                    let r = rhat.widening_mul(WIDE)
+                    let rl = r.0 + next
+                    let rh = r.1 + (if rl < r.0 { 1 } else { 0 })
+                    if l.1 < rh or (l.1 == rh and l.0 <= rl) {
+                        break
+                    }
+                }
+                qhat -= 1
+                rhat += vt
+                if rhat >= WIDE {
+                    break
+                }
+            }
+            // u[j..j + n] -= qhat × v. Each limb takes the product's low part, borrowing the base
+            // if it goes below zero, then what the limb before passed on, borrowing again: what
+            // it passes on, the product's high part and the borrows, waits only on a subtraction,
+            // a shift and an add. Each borrow is the top bit of a difference of numbers below
+            // 2^60, and the base goes back in by a mask: no branches, which a long division's
+            // digits would mispredict.
+            let pj = pu.add(j)
+            var c: u64 = 0
+            var i: usize = 0
+            while i < n {
+                let hi = qhat.widening_mul(pr.add(i).read()).1
+                let d0 = qhat * pv.add(i).read() - hi * WIDE - WIDE
+                let k0 = d0 >> 63
+                let lo = d0 + (WIDE & (0 - k0))
+                let d1 = pj.add(i).read() - lo
+                let k1 = d1 >> 63
+                let y = d1 + (WIDE & (0 - k1))
+                let h = hi + 1 - k0 + k1
+                let d2 = y - c
+                let k2 = d2 >> 63
+                pj.add(i).write(d2 + (WIDE & (0 - k2)))
+                c = h + k2
+                i += 1
+            }
+            let sub = c
+            let x = pj.add(n).read()
+            if x >= sub {
+                pj.add(n).write(x - sub)
+            } else {
+                // One too many: add the divisor back.
+                pj.add(n).write(x + WIDE - sub)
+                qhat -= 1
+                var carry: u64 = 0
+                var t: usize = 0
+                while t < n {
+                    let s = pj.add(t).read() + pv.add(t).read() + carry
+                    carry = if s >= WIDE { 1 } else { 0 }
+                    pj.add(t).write(s - carry * WIDE)
+                    t += 1
+                }
+                pj.add(n).write((pj.add(n).read() + carry) % WIDE)
+            }
+            pq.add(j).write(qhat)
+        }
+    }
+    // What's left in u's low limbs, scaled back, is the remainder.
+    u.truncate(n)
+    if rest {
+        unscale_wide(mut u, f)
+        return (unpack_wide(q), unpack_wide(u))
+    }
+    var left: List<u32> = []
+    for x in u {
+        if x != 0 {
+            left.push(1)
+            break
+        }
+    }
+    return (unpack_wide(q), left)
+}
+
+/// `a`'s limbs two at a time, as limbs of 10^18, with zeros on top to `len` of them.
+fn pack_wide(a: List<u32>, len: usize) -> List<u64> {
+    var out: List<u64> = [0; len]
+    var i: usize = 0
+    while 2 * i + 1 < a.len() {
+        out[i] = u64(a[2 * i]) + u64(a[2 * i + 1]) * BASE
+        i += 1
+    }
+    if 2 * i < a.len() {
+        out[i] = u64(a[2 * i])
+    }
+    return out
+}
+
+/// Limbs of 10^18 as limbs of 10^9, without zeros on top.
+fn unpack_wide(w: List<u64>) -> List<u32> {
+    var out = List<u32>()
+    out.reserve(2 * w.len())
+    for x in w {
+        let hi = x / BASE
+        out.push(u32.wrap(x - hi * BASE))
+        out.push(u32.wrap(hi))
+    }
+    trim(mut out)
+    return out
+}
+
+/// A number below 2^120, by its low and high halves, divided by 10^18: the quotient and the
+/// remainder. Its top 64 bits times WIDE_INV, the high half, is the quotient or up to 2 less, so
+/// the remainder from that is below 3 × 10^18, and the top bits of it less the base and less
+/// twice the base say how many more, with no branches.
+fn split_wide(lo: u64, hi: u64) -> (u64, u64) {
+    let e = ((hi << 8) | (lo >> 56)).widening_mul(WIDE_INV).1
+    let r = lo - e * WIDE
+    let k1 = (r - WIDE) >> 63
+    let k2 = (r - 2 * WIDE) >> 63
+    return (e + 2 - k1 - k2, r - 2 * WIDE + (WIDE & (0 - k1)) + (WIDE & (0 - k2)))
+}
+
+/// `x[0..count) × f` in place in base 10^18, for `f` below the base. The carry out of the top is
+/// dropped: the divisor has room for it by the choice of `f`, and the dividend has a limb of zeros
+/// on top. Each product is split by the base before the carry goes in, so only an add, a shift and
+/// a subtraction wait on the limb before.
+fn scale_wide(x: mut List<u64>, count: usize, f: u64) {
+    if f == 1 {
+        return
+    }
+    var carry: u64 = 0
+    unsafe {
+        let p = x.as_mut_ptr()
+        var i: usize = 0
+        while i < count {
+            let w = p.add(i).read().widening_mul(f)
+            let d = split_wide(w.0, w.1)
+            let s = d.1 + carry - WIDE
+            let k = s >> 63
+            p.add(i).write(s + (WIDE & (0 - k)))
+            carry = d.0 + 1 - k
+            i += 1
+        }
+    }
+}
+
+/// `x / f` in place in base 10^18, for `f` below the base, which divides it.
+fn unscale_wide(x: mut List<u64>, f: u64) {
+    if f == 1 {
+        return
+    }
+    var r: u64 = 0
+    var i = x.len()
+    while i > 0 {
+        i -= 1
+        let p = r.widening_mul(WIDE)
+        let lo = p.0 + x[i]
+        let d = u64.div_wide(p.1 + (if lo < p.0 { 1 } else { 0 }), lo, f)
+        x[i] = d.0
+        r = d.1
+    }
 }
 
 /// `a × f` in place, for `f` below the base.
