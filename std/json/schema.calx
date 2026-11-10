@@ -180,8 +180,8 @@ impl Validator {
 
     /// The same validator, checking `format` as `FormatChecker()` does with the libraries of
     /// `pip install "jsonschema[format-nongpl]"` too: `color`, `date-time`, `duration`,
-    /// `hostname`, `iri`, `iri-reference`, `json-pointer`, `relative-json-pointer`, `uri`,
-    /// `uri-reference` and `uri-template` as well. `idn-hostname` passes so far.
+    /// `hostname`, `idn-hostname`, `iri`, `iri-reference`, `json-pointer`,
+    /// `relative-json-pointer`, `uri`, `uri-reference` and `uri-template` as well.
     pub fn with_all_formats(own self) -> Validator {
         var v = self
         v.formats = true

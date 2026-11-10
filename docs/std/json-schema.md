@@ -66,17 +66,37 @@ Python checks the other formats only with a library of its own for each, which `
 | `date-time` | rfc3339-validator | It's RFC 3339's `date-time` once uppercased, so `t` and `z` count, with a day the month has. `$` in its pattern also matches before a newline at the end, so one may end it |
 | `duration` | isoduration | A sign, `P`, then numbers each followed by a designator, in the order `Y`, `M`, `D`, `W`, and after a `T`, `H`, `M`, `S`, ending with one. `W` goes with the others only when their numbers are zero, so `P0Y1W` is a duration and `P1Y1W` isn't. A number is a `Decimal`, so it may have a fraction, after `.` or `,`, and an exponent |
 | `hostname` | fqdn | Labels of 1 to 63 letters, digits and hyphens, with no hyphen at either end, joined by dots, with a dot allowed at the end and 253 runes at most without it. Python lowercases it and matches ignoring case, so `ı`, `ſ` and the Kelvin sign count as letters, and any Unicode decimal digit as a digit |
+| `idn-hostname` | idna | `idna.encode` takes it: labels split at `.`, `。`, `．` and `｡`, each checked as IDNA 2008 asks ([below](#idn-hostname)), 63 bytes at most once written in Punycode, and 253 for the name |
 | `iri`, `iri-reference` | rfc3987-syntax | RFC 3987's grammar reads all of it |
 | `json-pointer` | jsonpointer | It's empty or starts with `/`, and every `~` is followed by `0` or `1` |
 | `relative-json-pointer` | jsonschema | A non-negative integer with no leading zero, in any Unicode digits Python's `isdigit` takes, then `#` or a JSON pointer |
 | `uri`, `uri-reference` | rfc3986-validator | RFC 3986's grammar reads it, where `uri` has a scheme. Its pattern's `$` also matches before a newline at the end |
 | `uri-template` | uri-template | Text with no `{` or `}` but its expressions, each in braces: an operator, then variables separated by commas, each with a `*` or `[]`, a prefix length of 1 to 999 after `:`, or a default after `=`, as the library reads them |
 
-`idn-hostname` needs the `idna` package's tables, so it passes here so far ([CLX-246](https://acta.aaenz.no/aaen-studios/clx#CLX-246)).
+### idn-hostname
+
+idna 3.20's `encode`, which jsonschema calls without UTS 46's mapping, so nothing is case-folded or mapped first:
+
+- A label of ASCII is lowered. One that then starts with `xn--` is Punycode: the rest must decode, and must be the one way of writing what it decodes to (RFC 5891's section 5.3), so `xn---bbk` is refused where `xn--bbk` passes. What it decodes to is then checked as below.
+- Any other label is checked as it is, so `Exämple.com` fails on its `E`, where `Example.com` passes.
+- A label is checked as RFC 5891 and 5892 ask. It must be in NFC, with no `--` as its third and fourth runes and no `-` at either end, and no mark first. Each rune must be one IDNA 2008 allows anywhere (PVALID) or one it allows where it is (CONTEXTJ and CONTEXTO): a zero width joiner after a virama, a non-joiner after a virama or between letters that join, `·` between two `l`s, `͵` before Greek, `׳` and `״` after Hebrew, `・` with kana or Han beside it, and Arabic-Indic digits not mixed with the extended ones.
+- A label with a right-to-left rune must keep RFC 5893's Bidi rule.
+- A rune Unicode 16 hasn't assigned is refused. idna's tables are Unicode 18's, but Python 3.14's `unicodedata` gives such a rune no direction.
+
+```calx
+import std.json.schema.formats.{is_idn_hostname}
+
+fn main() {
+    println("{is_idn_hostname("bücher.example")} {is_idn_hostname("XN--BCHER-KVA.example.")}")    // out: true true
+    println("{is_idn_hostname("Bücher.example")} {is_idn_hostname("xn---bbk")} {is_idn_hostname("l·l")}")    // out: false false true
+}
+```
+
+The tables are written by [tools/unicode/gen_idna.py](../../tools/unicode/gen_idna.py) from idna's and Python's own, 3,113 ranges in 18 KB. On every rune, alone and in three contexts that reach the rules for joiners and right-to-left labels, Calx and Python give the same answer. Checking all 4.4 million takes Calx 0.28 s and Python 36.7 s.
 
 Two of these checks can raise in Python, which leaves the validator, so here they're a `SchemaFault` ([faults](#faults)): a `duration` with a number too big for a `Decimal`, `P1e1000000D`, is `Overflow`, and a `relative-json-pointer` whose first digit Python's `int` can't read is `ValueError`.
 
-`std.json.schema.formats` has the checks on their own. `FormatChecker.new()` and `FormatChecker.with_libraries()` are Python's `FormatChecker()` without and with the libraries, and `checker.conforms(s, format) -> bool ! FormatFault` is its `conforms`. A `FormatFault` has the `kind` and `message` of what Python raised. For one string, there are `is_color`, `is_date`, `is_date_time`, `is_email`, `is_hostname`, `is_ipv4`, `is_ipv6`, `is_json_pointer`, `is_time`, `is_uri_template` and `is_uuid`, each giving a `bool`, and `is_duration` and `is_relative_json_pointer`, which can fail with a `FormatFault`.
+`std.json.schema.formats` has the checks on their own. `FormatChecker.new()` and `FormatChecker.with_libraries()` are Python's `FormatChecker()` without and with the libraries, and `checker.conforms(s, format) -> bool ! FormatFault` is its `conforms`. A `FormatFault` has the `kind` and `message` of what Python raised. For one string, there are `is_color`, `is_date`, `is_date_time`, `is_email`, `is_hostname`, `is_idn_hostname`, `is_ipv4`, `is_ipv6`, `is_json_pointer`, `is_time`, `is_uri_template` and `is_uuid`, each giving a `bool`, and `is_duration` and `is_relative_json_pointer`, which can fail with a `FormatFault`.
 
 ```calx
 import std.json
@@ -214,12 +234,11 @@ What Python raises instead of giving errors comes back as a `SchemaFault`, whose
 
 - Python's `json` refuses an integer of more than 4,300 digits by default, and its `repr` one past that, so jsonschema never sees one. [`std.json`](json.md) keeps one, and it's checked as any other integer.
 - Two of Python's results depend on the order of a set, which changes from run to run: the order of the unexpected names in `additionalProperties`' message from `check_schema`, and which broken resource a registry's crawl stops at first. Here each is one of the orders Python gives.
-- `idn-hostname` passes with `with_all_formats()`, where Python checks it with `idna` ([CLX-246](https://acta.aaenz.no/aaen-studios/clx#CLX-246)).
 - `best_match` never fails. Python's raises `TypeError: unhashable type: 'dict'` when an error's schema is a draft 3 one whose `type` holds a schema, since it asks its type checker about that schema as if it were a type's name.
 
 ## How it's built
 
-[std/json/schema.calx](../../std/json/schema.calx), in Calx, written from jsonschema's and referencing's behaviour and checked against them: every draft's tests in the [JSON-Schema-Test-Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), and 5,400 more of schemas broken on purpose, references across registries and real configuration files, 16,810 results in all, with the errors, their messages, paths, values and contexts, `best_match`, `check_schema` and the faults compared. All are the same. Integers past `u64`, which [`std.json`](json.md) keeps exactly as Python does, were checked too on 10,000 more schemas, every number keyword with them and with floats at the edges of `f64`'s range, each with the same errors or the same exception, such as `OverflowError: int too large to convert to float` from a `multipleOf`. The formats were checked against `FormatChecker()` on the suite's format tests and 560,000 random strings near good ones, all with the same answers, and the library formats against it with `jsonschema[format-nongpl]` on 267,000 more, with the edges of `hostname`'s length and of a `Decimal`'s exponent, each with the same answer or the same exception. [std/json/schema/formats.calx](../../std/json/schema/formats.calx) has the checks: `uri` and `uri-reference` use rfc3986-validator's patterns (MIT, its notice kept there), and `iri` a pattern written from RFC 3987's grammar, checked against rfc3987-syntax's parser on 60,000 strings.
+[std/json/schema.calx](../../std/json/schema.calx), in Calx, written from jsonschema's and referencing's behaviour and checked against them: every draft's tests in the [JSON-Schema-Test-Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), and 5,400 more of schemas broken on purpose, references across registries and real configuration files, 16,810 results in all, with the errors, their messages, paths, values and contexts, `best_match`, `check_schema` and the faults compared. All are the same. Integers past `u64`, which [`std.json`](json.md) keeps exactly as Python does, were checked too on 10,000 more schemas, every number keyword with them and with floats at the edges of `f64`'s range, each with the same errors or the same exception, such as `OverflowError: int too large to convert to float` from a `multipleOf`. The formats were checked against `FormatChecker()` on the suite's format tests and 560,000 random strings near good ones, all with the same answers, and the library formats against it with `jsonschema[format-nongpl]` on 267,000 more, with the edges of `hostname`'s length and of a `Decimal`'s exponent, each with the same answer or the same exception. `idn-hostname` was checked against idna on the suite's tests and 195,000 strings: Punycode labels, mutated and not, random ones, and lengths at the limits, all with the same answers. [std/json/schema/formats.calx](../../std/json/schema/formats.calx) has the checks: `uri` and `uri-reference` use rfc3986-validator's patterns (MIT, its notice kept there), and `iri` a pattern written from RFC 3987's grammar, checked against rfc3987-syntax's parser on 60,000 strings.
 
 A schema is read once into a table of nodes, each object's keywords numbered, so a check never looks a keyword up by name. The meta-schemas are read and crawled only when a `$ref` reaches them, and a `$ref` is resolved once for each place it's reached from, then remembered for the rest of the check.
 

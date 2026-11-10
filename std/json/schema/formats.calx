@@ -5,9 +5,11 @@
 /// `with_all_formats()` use them, and they're here for code that checks one string.
 module std.json.schema.formats
 
+import std.json.schema.idna.{RECORDS, STARTS}
 import std.regex.{Regex}
 import std.text.python.{is_space, repr_str}
 import std.text.ucd.{DIGIT, DIGIT_LEN}
+import std.unicode.{Form, is_normalized}
 
 /// What Python raises from a check that doesn't only say yes or no, which leaves jsonschema too:
 /// `ValueError` from `relative-json-pointer`, whose leading number is read with `int`, and
@@ -27,8 +29,8 @@ impl Display for FormatFault {
 }
 
 /// jsonschema's `FormatChecker()`: `new()` checks what it checks with jsonschema installed alone,
-/// and `with_libraries()` what it checks with `jsonschema[format-nongpl]`, all but `idn-hostname`
-/// so far. It keeps the patterns it compiles.
+/// and `with_libraries()` what it checks with `jsonschema[format-nongpl]`. It keeps the patterns
+/// it compiles.
 pub struct FormatChecker {
     libraries: bool
     // `uri`, `uri-reference`, `iri` and `iri-reference`'s patterns, with the libraries.
@@ -43,8 +45,8 @@ impl FormatChecker {
     }
 
     /// `FormatChecker()` with the libraries of `jsonschema[format-nongpl]` too: `color`,
-    /// `date-time`, `duration`, `hostname`, `iri`, `iri-reference`, `json-pointer`,
-    /// `relative-json-pointer`, `uri`, `uri-reference` and `uri-template`.
+    /// `date-time`, `duration`, `hostname`, `idn-hostname`, `iri`, `iri-reference`,
+    /// `json-pointer`, `relative-json-pointer`, `uri`, `uri-reference` and `uri-template`.
     pub fn with_libraries() -> FormatChecker {
         var rx = List<Regex>()
         rx.push(Regex.python(URI)!)
@@ -89,6 +91,9 @@ impl FormatChecker {
         }
         if format == "hostname" {
             return is_hostname(s)
+        }
+        if format == "idn-hostname" {
+            return is_idn_hostname(s)
         }
         if format == "color" {
             return is_color(s)
@@ -607,6 +612,490 @@ pub fn is_hostname(s: String) -> bool {
         }
         a = b + 1
     }
+}
+
+/// `idn-hostname`: whether idna's `encode(s)` takes `s`, which is jsonschema's check with idna
+/// 3.20. It's split into labels at `.`, `。`, `．` and `｡`, and a dot can end it. A label of ASCII
+/// is lowered and checked, and one starting `xn--` is Punycode, which must decode and be how idna
+/// would write what it decodes to, then what it decodes to is checked. Any other label is checked
+/// as it is, then written in Punycode. A label is checked as IDNA 2008 asks: in NFC, no `--` as its
+/// third and fourth runes, no `-` at either end, no mark first, each rune one IDNA 2008 allows
+/// anywhere (PVALID) or where it is (CONTEXTJ and CONTEXTO, RFC 5892), and RFC 5893's Bidi rule
+/// where it has a right-to-left rune. Written in ASCII, a label is 63 bytes at most and the name
+/// 253, past a dot at the end. UTS 46's mapping is off, as jsonschema calls `encode`, so
+/// `Example.com` passes, lowered, but `Exämple.com` doesn't.
+pub fn is_idn_hostname(s: String) -> bool {
+    var rs = List<u32>()
+    for r in s.runes() {
+        rs.push(u32(r))
+    }
+    let n = rs.len()
+    if n == 0 or n > 254 {
+        return false
+    }
+    let end = if full_stop(rs[n - 1]) { n - 1 } else { n }
+    var work = Idna { low: List<u32>(), decoded: List<u32>(), written: List<u32>(), records: List<u32>() }
+    var total: usize = 0
+    var a: usize = 0
+    loop {
+        var b = a
+        while b < end and not full_stop(rs[b]) {
+            b += 1
+        }
+        let len = alabel_len(rs, a, b, mut work)
+        if len == 0 {
+            return false
+        }
+        total += len
+        if b == end {
+            return total <= 253
+        }
+        total += 1
+        a = b + 1
+    }
+}
+
+// The dots idna splits a name at, by default: `.`, `。`, `．` and `｡`.
+fn full_stop(c: u32) -> bool {
+    return c == 0x2E or c == 0x3002 or c == 0xFF0E or c == 0xFF61
+}
+
+// The lists `is_idn_hostname` reuses from label to label.
+struct Idna {
+    // An ASCII label, lowered.
+    low: List<u32>
+    // What an `xn--` label decodes to.
+    decoded: List<u32>
+    // A label in Punycode.
+    written: List<u32>
+    // The record of each rune of the label being checked.
+    records: List<u32>
+}
+
+// The length of idna's `alabel` of `rs[a..b]`, the label as ASCII, or 0 where it raises.
+fn alabel_len(rs: List<u32>, a: usize, b: usize, w: mut Idna) -> usize {
+    if b == a {
+        return 0
+    }
+    var ascii = true
+    for k in a..b {
+        if rs[k] >= 0x80 {
+            ascii = false
+            break
+        }
+    }
+    if not ascii {
+        if not label_ok(rs, a, b, mut w.records) {
+            return 0
+        }
+        punycode_encode(rs, a, b, mut w.written)
+        let len = 4 + w.written.len()
+        return if len <= 63 { len } else { 0 }
+    }
+    // `ulabel`, then the label's length as it was given.
+    if b - a > 63 {
+        return 0
+    }
+    w.low.clear()
+    for k in a..b {
+        let c = rs[k]
+        w.low.push(if c >= 0x41 and c <= 0x5A { c + 32 } else { c })
+    }
+    let n = w.low.len()
+    if n < 4 or w.low[0] != 0x78 or w.low[1] != 0x6E or w.low[2] != 0x2D or w.low[3] != 0x2D {
+        return if label_ok(w.low, 0, n, mut w.records) { n } else { 0 }
+    }
+    if n == 4 or w.low[n - 1] == 0x2D or not punycode_decode(w.low, 4, mut w.decoded) {
+        return 0
+    }
+    // RFC 5891's section 5.3: only the one way of writing the label in Punycode is taken.
+    punycode_encode(w.decoded, 0, w.decoded.len(), mut w.written)
+    if w.written.len() != n - 4 {
+        return 0
+    }
+    for k in 0..n - 4 {
+        if w.written[k] != w.low[k + 4] {
+            return 0
+        }
+    }
+    return if label_ok(w.decoded, 0, w.decoded.len(), mut w.records) { n } else { 0 }
+}
+
+// The bits of a rune's record in std.json.schema.idna's tables.
+const IDNA_MARK: u32 = 0x1000
+const IDNA_VIRAMA: u32 = 0x2000
+const IDNA_NAMELESS: u32 = 0x4000
+const BIDI_L: u32 = 0
+const BIDI_R: u32 = 1
+const BIDI_AL: u32 = 2
+const BIDI_AN: u32 = 3
+const BIDI_EN: u32 = 4
+const BIDI_NSM: u32 = 10
+const JOIN_D: u32 = 2
+const JOIN_L: u32 = 3
+const JOIN_R: u32 = 4
+const JOIN_T: u32 = 5
+const SCRIPT_GREEK: u32 = 1
+const SCRIPT_HAN: u32 = 2
+const SCRIPT_HEBREW: u32 = 3
+const SCRIPT_HIRAGANA: u32 = 4
+const SCRIPT_KATAKANA: u32 = 5
+
+// The record of the range `c` is in: 0 for a rune idna refuses.
+fn idna_record(c: u32) -> u32 {
+    var lo: usize = 0
+    var hi = STARTS.len()
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2
+        if STARTS[mid] <= c {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return u32(RECORDS[lo])
+}
+
+fn bidi_of(record: u32) -> u32 {
+    return (record >> 2) & 15
+}
+
+fn joining_of(record: u32) -> u32 {
+    return (record >> 6) & 7
+}
+
+fn script_of(record: u32) -> u32 {
+    return (record >> 9) & 7
+}
+
+// idna's `check_label` of `cs[a..b]`: whether it raises nothing. Which check fails first doesn't
+// matter, as any is a no, so the runes are looked up first and the label's text is made only for
+// the NFC check, when it isn't ASCII.
+fn label_ok(cs: List<u32>, a: usize, b: usize, records: mut List<u32>) -> bool {
+    let n = b - a
+    if n == 0 or n > 254 {
+        return false
+    }
+    records.clear()
+    var ascii = true
+    for k in a..b {
+        let r = idna_record(cs[k])
+        if r == 0 {
+            return false
+        }
+        records.push(r)
+        if cs[k] >= 0x80 {
+            ascii = false
+        }
+    }
+    if (n >= 4 and cs[a + 2] == 0x2D and cs[a + 3] == 0x2D) or cs[a] == 0x2D or cs[b - 1] == 0x2D {
+        return false
+    }
+    if records[0] & IDNA_MARK != 0 {
+        return false
+    }
+    for i in 0..n {
+        let kind = records[i] & 3
+        if kind == 2 and not context_j(cs, a, records, i) {
+            return false
+        }
+        if kind == 3 and not context_o(cs, a, records, i) {
+            return false
+        }
+    }
+    if not bidi_ok(records) {
+        return false
+    }
+    if ascii {
+        return true
+    }
+    var text = String()
+    for k in a..b {
+        // Every rune here is one idna takes, so none is a surrogate.
+        text.push(rune.try_from(cs[k]) ?? '\u{FFFD}')
+    }
+    return is_normalized(text, Form.NFC)
+}
+
+// RFC 5892's CONTEXTJ rules, as idna's `valid_contextj` has them, for the joiner at `i`. The rune
+// before one is looked up by `unicodedata.combining`, and a rune of class 0 with no name in
+// `unicodedata.name` makes idna raise.
+fn context_j(cs: List<u32>, a: usize, records: List<u32>, i: usize) -> bool {
+    let n = records.len()
+    if cs[a + i] == 0x200D {
+        return i > 0 and records[i - 1] & IDNA_NAMELESS == 0 and records[i - 1] & IDNA_VIRAMA != 0
+    }
+    if i > 0 {
+        if records[i - 1] & IDNA_NAMELESS != 0 {
+            return false
+        }
+        if records[i - 1] & IDNA_VIRAMA != 0 {
+            return true
+        }
+    }
+    // A zero width non-joiner: joining type L or D before it and R or D after, past any T.
+    var before = false
+    var k = i
+    while k > 0 {
+        k -= 1
+        let t = joining_of(records[k])
+        if t != JOIN_T {
+            before = t == JOIN_L or t == JOIN_D
+            break
+        }
+    }
+    if not before {
+        return false
+    }
+    for j in i + 1..n {
+        let t = joining_of(records[j])
+        if t != JOIN_T {
+            return t == JOIN_R or t == JOIN_D
+        }
+    }
+    return false
+}
+
+// RFC 5892's CONTEXTO rules, as idna's `valid_contexto` has them, for the rune at `i`.
+fn context_o(cs: List<u32>, a: usize, records: List<u32>, i: usize) -> bool {
+    let n = records.len()
+    let c = cs[a + i]
+    if c == 0xB7 {
+        return i > 0 and i + 1 < n and cs[a + i - 1] == 0x6C and cs[a + i + 1] == 0x6C
+    }
+    if c == 0x375 {
+        return i + 1 < n and script_of(records[i + 1]) == SCRIPT_GREEK
+    }
+    if c == 0x5F3 or c == 0x5F4 {
+        return i > 0 and script_of(records[i - 1]) == SCRIPT_HEBREW
+    }
+    if c == 0x30FB {
+        for k in 0..n {
+            let s = script_of(records[k])
+            if cs[a + k] != 0x30FB and (s == SCRIPT_HIRAGANA or s == SCRIPT_KATAKANA or s == SCRIPT_HAN) {
+                return true
+            }
+        }
+        return false
+    }
+    // Arabic-Indic digits and extended ones, which can't be in one label together.
+    let (lo, hi): (u32, u32) = if c >= 0x660 and c <= 0x669 { (0x6F0, 0x6F9) } else if c >= 0x6F0 and c <= 0x6F9 { (0x660, 0x669) } else { return false }
+    for k in 0..n {
+        if cs[a + k] >= lo and cs[a + k] <= hi {
+            return false
+        }
+    }
+    return true
+}
+
+// RFC 5893's Bidi rule, as idna's `check_bidi` has it: only for a label with a rune of class R,
+// AL or AN.
+fn bidi_ok(records: List<u32>) -> bool {
+    var any_rtl = false
+    for r in records {
+        let d = bidi_of(r)
+        if d == BIDI_R or d == BIDI_AL or d == BIDI_AN {
+            any_rtl = true
+            break
+        }
+    }
+    if not any_rtl {
+        return true
+    }
+    let first = bidi_of(records[0])
+    let rtl = first == BIDI_R or first == BIDI_AL
+    if not rtl and first != BIDI_L {
+        return false
+    }
+    var ends_well = false
+    var numbers: u32 = 0
+    for r in records {
+        let d = bidi_of(r)
+        if rtl {
+            // Rule 2: anything but L. Rule 3: the end, past marks, R, AL, EN or AN. Rule 4: EN
+            // and AN not both.
+            if d == BIDI_L {
+                return false
+            }
+            if d == BIDI_R or d == BIDI_AL or d == BIDI_EN or d == BIDI_AN {
+                ends_well = true
+            } else if d != BIDI_NSM {
+                ends_well = false
+            }
+            if d == BIDI_AN or d == BIDI_EN {
+                if numbers == 0 {
+                    numbers = d
+                } else if numbers != d {
+                    return false
+                }
+            }
+        } else {
+            // Rule 5: no R, AL or AN. Rule 6: the end, past marks, L or EN.
+            if d == BIDI_R or d == BIDI_AL or d == BIDI_AN {
+                return false
+            }
+            if d == BIDI_L or d == BIDI_EN {
+                ends_well = true
+            } else if d != BIDI_NSM {
+                ends_well = false
+            }
+        }
+    }
+    return ends_well
+}
+
+// Python's `punycode` codec writing `cs[a..b]`, as RFC 3492 has it with its encodings module's
+// steps: the ASCII runes, a `-` if there are any, then the others' places as numbers in base 36.
+fn punycode_encode(cs: List<u32>, a: usize, b: usize, out: mut List<u32>) {
+    out.clear()
+    for k in a..b {
+        if cs[k] < 0x80 {
+            out.push(cs[k])
+        }
+    }
+    let base = out.len()
+    if base > 0 {
+        out.push(0x2D)
+    }
+    var bias: i64 = 72
+    var points: usize = 0
+    var old_char: u32 = 0x80
+    var old_index: i64 = -1
+    var last: u32 = 0x7F
+    loop {
+        // The next rune past ASCII, in order, and each place it's at.
+        var c = u32.MAX
+        for k in a..b {
+            if cs[k] > last and cs[k] < c {
+                c = cs[k]
+            }
+        }
+        if c == u32.MAX {
+            return
+        }
+        last = c
+        var below: i64 = 0
+        for k in a..b {
+            if cs[k] < c {
+                below += 1
+            }
+        }
+        var delta = (below + 1) * i64(c - old_char)
+        var index: i64 = -1
+        for k in a..b {
+            if cs[k] < c {
+                index += 1
+            } else if cs[k] == c {
+                index += 1
+                delta += index - old_index
+                let d = delta - 1
+                write_number(d, bias, mut out)
+                bias = adapt(d, points == 0, i64.wrap(base + points + 1))
+                points += 1
+                old_index = index
+                delta = 0
+            }
+        }
+        old_char = c
+    }
+}
+
+// RFC 3492's variable-length number `n`, in the digits `a` to `z` and `0` to `9`.
+fn write_number(n: i64, bias: i64, out: mut List<u32>) {
+    var left = n
+    var j: i64 = 0
+    loop {
+        let t = threshold(j, bias)
+        if left < t {
+            out.push(digit_rune(left))
+            return
+        }
+        out.push(digit_rune(t + (left - t) % (36 - t)))
+        left = (left - t) / (36 - t)
+        j += 1
+    }
+}
+
+fn digit_rune(d: i64) -> u32 {
+    return if d < 26 { u32.wrap(0x61 + d) } else { u32.wrap(0x30 + d - 26) }
+}
+
+fn threshold(j: i64, bias: i64) -> i64 {
+    let t = 36 * (j + 1) - bias
+    return if t < 1 { 1 } else if t > 26 { 26 } else { t }
+}
+
+fn adapt(delta: i64, first: bool, points: i64) -> i64 {
+    var d = if first { delta / 700 } else { delta / 2 }
+    d += d / points
+    var divisions: i64 = 0
+    while d > 455 {
+        d = d / 35
+        divisions += 36
+    }
+    return divisions + 36 * d / (d + 38)
+}
+
+// Python's `punycode` codec reading `low[from..]`, which is lowered ASCII, into `out`, or false
+// where it raises: past its last `-`, each number puts a rune at a place. Python's integers don't
+// overflow; a number past 2^40 is one whose rune would be past U+10FFFF, which it refuses.
+fn punycode_decode(low: List<u32>, from: usize, out: mut List<u32>) -> bool {
+    out.clear()
+    let n = low.len()
+    var dash = n
+    var k = n
+    while k > from {
+        k -= 1
+        if low[k] == 0x2D {
+            dash = k
+            break
+        }
+    }
+    var at = from
+    if dash < n {
+        for i in from..dash {
+            out.push(low[i])
+        }
+        at = dash + 1
+    }
+    let first_at = at
+    var c: i64 = 0x80
+    var place: i64 = -1
+    var bias: i64 = 72
+    while at < n {
+        let start = at
+        var delta: i64 = 0
+        var weight: i64 = 1
+        var j: i64 = 0
+        loop {
+            if at >= n {
+                return false
+            }
+            let r = low[at]
+            at += 1
+            let digit: i64 = if r >= 0x61 and r <= 0x7A { i64(r - 0x61) } else if r >= 0x30 and r <= 0x39 { i64(r) - 22 } else { return false }
+            let t = threshold(j, bias)
+            delta += digit * weight
+            if delta > 1 << 40 {
+                return false
+            }
+            if digit < t {
+                break
+            }
+            weight *= 36 - t
+            j += 1
+        }
+        place += delta + 1
+        let slots = i64.wrap(out.len() + 1)
+        c += place / slots
+        if c > 0x10FFFF {
+            return false
+        }
+        place = place % slots
+        out.insert(usize.wrap(place), u32.wrap(c))
+        bias = adapt(delta, start == first_at, i64.wrap(out.len()))
+    }
+    return true
 }
 
 /// `color`, draft 3's: whether webcolors' `name_to_hex(s)` finds `s.lower()` among CSS3's 147

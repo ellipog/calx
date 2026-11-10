@@ -44,12 +44,12 @@ fn main() {
 
     // With the libraries of `jsonschema[format-nongpl]` too: `with_all_formats`.
     var lib = List<String>()
-    for f in ["color", "date-time", "duration", "hostname", "iri", "iri-reference", "json-pointer", "relative-json-pointer", "uri", "uri-reference", "uri-template"] {
+    for f in ["color", "date-time", "duration", "hostname", "idn-hostname", "iri", "iri-reference", "json-pointer", "relative-json-pointer", "uri", "uri-reference", "uri-template"] {
         lib.push("\"{f}\": \{\"format\": \"{f}\"\}")
     }
     let schema2 = json.parse("\{\"properties\": \{{lib.join(", ")}\}\}")!
     var all = Validator.new(schema2, Draft.Draft202012).with_all_formats()
-    let bad2 = json.parse(##"{"color": "#abcd", "date-time": "1985-04-12T23:20:50", "duration": "P1Y1W", "hostname": "-a.b", "iri": "http://a b", "iri-reference": "\\", "json-pointer": "a/b", "relative-json-pointer": "-1", "uri": "/a/b", "uri-reference": "http://[::1", "uri-template": "{a"}"##)!
+    let bad2 = json.parse(##"{"color": "#abcd", "date-time": "1985-04-12T23:20:50", "duration": "P1Y1W", "hostname": "-a.b", "idn-hostname": "Exämple.com", "iri": "http://a b", "iri-reference": "\\", "json-pointer": "a/b", "relative-json-pointer": "-1", "uri": "/a/b", "uri-reference": "http://[::1", "uri-template": "{a"}"##)!
     for e in all.iter_errors(bad2)! {
         println("{e.json_path()} {e.message}")
     }
@@ -57,6 +57,7 @@ fn main() {
     // out: $['date-time'] '1985-04-12T23:20:50' is not a 'date-time'
     // out: $.duration 'P1Y1W' is not a 'duration'
     // out: $.hostname '-a.b' is not a 'hostname'
+    // out: $['idn-hostname'] 'Exämple.com' is not a 'idn-hostname'
     // out: $.iri 'http://a b' is not a 'iri'
     // out: $['iri-reference'] '\\' is not a 'iri-reference'
     // out: $['json-pointer'] 'a/b' is not a 'json-pointer'
@@ -64,7 +65,7 @@ fn main() {
     // out: $.uri '/a/b' is not a 'uri'
     // out: $['uri-reference'] 'http://[::1' is not a 'uri-reference'
     // out: $['uri-template'] '{a' is not a 'uri-template'
-    let good2 = json.parse(##"{"color": "DarkKhaki", "date-time": "1985-04-12t23:20:50.52z", "duration": "P1Y2M3DT4H5M6.5S", "hostname": "xn--bcher-kva.example", "iri": "http://ü.example/ä?é#ö", "iri-reference": "//ü/", "json-pointer": "/a~0b/c~1d", "relative-json-pointer": "1/a", "uri": "urn:isbn:0451450523", "uri-reference": "../c", "uri-template": "http://example.com/{id}{?q,r}"}"##)!
+    let good2 = json.parse(##"{"color": "DarkKhaki", "date-time": "1985-04-12t23:20:50.52z", "duration": "P1Y2M3DT4H5M6.5S", "hostname": "xn--bcher-kva.example", "idn-hostname": "bücher.example", "iri": "http://ü.example/ä?é#ö", "iri-reference": "//ü/", "json-pointer": "/a~0b/c~1d", "relative-json-pointer": "1/a", "uri": "urn:isbn:0451450523", "uri-reference": "../c", "uri-template": "http://example.com/{id}{?q,r}"}"##)!
     println("{all.is_valid(good2)!}")                                           // out: true
     // A number too big for a `Decimal` raises from Python's check, and so it fails here.
     match all.is_valid(json.parse(#"{"duration": "P1e1000000D"}"#)!) {

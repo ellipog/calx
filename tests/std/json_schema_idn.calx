@@ -1,0 +1,37 @@
+// `idn-hostname` as jsonschema checks it with idna 3.20's `encode`: each answer is Python's.
+import std.json.schema.formats.{is_idn_hostname}
+
+fn row(cases: List<String>) {
+    var out = List<String>()
+    for c in cases {
+        out.push(if is_idn_hostname(c) { String("T") } else { String("F") })
+    }
+    println(out.join(" "))
+}
+
+fn main() {
+    // Names: ASCII lowered, other labels as they are, the four dots, one at the end, none empty.
+    row(["example.com", "EXAMPLE.com", "Exämple.com", "bücher.example", "a.b.", "a..b", "", "."])    // out: T T F T T F F F
+    row(["a\u{3002}b", "a\u{FF0E}b", "a\u{FF61}b", "실례.테스트"])                                    // out: T T T T
+    // Hyphens: none at either end, and no `--` as the third and fourth runes.
+    row(["-ab", "ab-", "ab--cd", "a-b-c"])                                                            // out: F F F T
+    // Punycode: it must decode, and be the one way of writing what it decodes to, which is checked.
+    row(["xn--bcher-kva", "XN--BCHER-KVA", "xn--", "xn--abc-", "xn---bbk", "xn--bbk"])                // out: T T F F F T
+    row(["xn--zz", "xn--a", "xn--ls8h", "xn--99999999999"])                                           // out: F F F F
+    // Lengths: 63 bytes a label once in Punycode, 253 the name, past a dot at the end.
+    let a63 = "a".repeat(63)
+    row([a63.copy(), "a".repeat(64), "ä".repeat(57), "ä{"a".repeat(57)}"])                           // out: T F T F
+    let name = "{a63}.{a63}.{a63}."
+    row(["{name}{"a".repeat(61)}", "{name}{"a".repeat(62)}", "{name}{"a".repeat(61)}."])              // out: T F T
+    // NFC, and no mark first.
+    row(["é", "e\u{301}", "\u{301}a", "\u{1100}\u{1161}", "\u{AC00}"])                                // out: T F F F T
+    // Joiners: a ZWJ after a virama, a ZWNJ after one or between letters that join, past marks.
+    // Tangut has no name in Python's `unicodedata`, which idna raises at before a joiner.
+    row(["क्\u{200D}ष", "a\u{200D}b", "ب\u{200C}ب", "a\u{200C}b", "بً\u{200C}ًب", "\u{17000}", "\u{17000}\u{200D}"])    // out: T F T F T T F
+    // CONTEXTO: middle dot, Greek keraia, Hebrew geresh, katakana middle dot, Arabic-Indic digits.
+    row(["l·l", "a·l", "͵β", "α͵", "א׳", "a׳", "ア・", "・", "ب١", "ب١۱"])                              // out: T F T F T F T F T F
+    // The Bidi rule, for a label with a right-to-left rune.
+    row(["אב", "אa", "א1", "1א", "א١", "א1١", "a1\u{301}"])                                           // out: T F T F T F T
+    // Runes idna refuses, and one it takes that Unicode 16 hasn't assigned.
+    row(["a\u{1F600}", "\u{5C8}", "a b", "a_b"])                                                       // out: F F F F
+}
