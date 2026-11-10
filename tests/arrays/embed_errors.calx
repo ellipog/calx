@@ -1,0 +1,18 @@
+// `embed`'s errors (CLX-238).
+// file: main.calx
+const MISSING: [u8; 3] = embed("missing.bin")      // error: there's no file `missing.bin` to embed
+const HALF: [u16; 2] = embed("three.txt")          // error: is 3 bytes, which isn't a whole number of `u16`s
+const SHORT: [u8; 2] = embed("three.txt")          // error: is 3 bytes, so the array is `[u8; 3]`, not `[u8; 2]`
+const EMPTY: [u8; 1] = embed("empty.txt")          // error: `empty.txt` is empty
+const FLAGS: [bool; 3] = embed("three.txt")        // error: `embed` is a constant's whole value
+const PART: [u8; 3] = embed("three.{1}")           // error: `embed` takes the file's path
+const GOOD: [u8; 3] = embed("three.txt")
+const AGAIN: [u8; 3] = GOOD                        // error: a constant can't be made from `GOOD`
+
+fn main() {
+    let x: [u8; 3] = embed("three.txt")             // error: `embed` is a constant's whole value
+    println("{x[0]} {MISSING[0]} {HALF[0]} {SHORT[0]} {EMPTY[0]} {FLAGS[0]} {PART[0]} {AGAIN[0]}")
+}
+// file: three.txt
+ab
+// file: empty.txt

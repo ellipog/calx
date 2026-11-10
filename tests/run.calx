@@ -44,7 +44,8 @@
 //
 // A test can be several modules. A line `// file: NAME.calx` starts each one, and the first is the
 // main module. Each file keeps its lines' numbers from the whole test, so errors in any of them are
-// expected the same way.
+// expected the same way. A line `// file: NAME` with another ending starts a file of text the test
+// reads, such as one it embeds, whose bytes are the lines after it, each ending in `\n`.
 //
 // Each test that expects errors is also checked with `calx check --json --stdin`, the form editors
 // use, which must report the same errors at the same places.
@@ -96,7 +97,7 @@ struct Patterns {
 fn patterns() -> Patterns {
     return Patterns {
         expect: Regex.new("//\\s*(out|error|panic|trace|stderr|stdin|args|status|lib|kind|firewall):(.*)$")!,
-        file: Regex.new("^// file: (\\S+\\.calx)\\s*$")!,
+        file: Regex.new("^// file: (\\S+)\\s*$")!,
         diag: Regex.new("^(.*?):(\\d+):(\\d+): error: (.*)$")!,
         panic_line: Regex.new("^panic at (.*?):(\\d+):(\\d+): (.*)$")!,
         panic_at: Regex.new("^panic at (<[^>]+>): (.*)$")!,
@@ -141,8 +142,9 @@ fn parse_test(name: own String, source: String, file_path: own String?, p: mut P
     for k in 0..starts.len() {
         let at = starts[k].0
         let end = if k + 1 < starts.len() { starts[k + 1].0 } else { lines.len() }
-        // Blank lines first, so each file's line numbers are the test's.
-        var text = "\n".repeat(at + 1)
+        // Blank lines first, so each module's line numbers are the test's. Another file, such as
+        // one a test embeds, is just its lines.
+        var text = if starts[k].1.ends_with(".calx") { "\n".repeat(at + 1) } else { String() }
         for j in (at + 1)..end {
             text.push_str(lines[j])
             text.push('\n')

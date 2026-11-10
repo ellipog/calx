@@ -139,7 +139,7 @@ struct Local {
 // What the checker found a name or call to be.
 enum class Ref : std::uint8_t { none, local, fn, const_, type, builtin, variant };
 
-enum class Builtin : std::uint8_t { none, print, println, eprint, eprintln, panic, assert_, caller };
+enum class Builtin : std::uint8_t { none, print, println, eprint, eprintln, panic, assert_, caller, embed };
 
 enum class CallKind : std::uint8_t {
     none,
@@ -524,6 +524,12 @@ struct Item {
     // const
     TypeExpr* type = nullptr;
     Expr* value = nullptr;
+    // A constant whose value is `embed("file")` (CLX-238): the file's full path, with `/`s, and
+    // its size and modified time when it was checked, which its C carries so that its object is
+    // made again when the file changes.
+    std::string_view embed_file;
+    std::uint64_t embed_size = 0;
+    std::int64_t embed_time = 0;
     // import
     Path import_path;
     Slice<ImportName> import_names;  // `import a.b.{X, Y}`; empty for `import a.b`, the module itself

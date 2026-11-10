@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -5237,8 +5238,10 @@ private:
                     : s == "eprintln" ? Builtin::eprintln
                     : s == "panic" ? Builtin::panic
                     : s == "assert" ? Builtin::assert_
-                    // Not reserved, as the others are: a `caller` of the program's own comes first.
+                    // Not reserved, as the others are: a `caller` or an `embed` of the program's own
+                    // comes first.
                     : s == "caller" ? Builtin::caller
+                    : s == "embed" ? Builtin::embed
                                      : Builtin::none;
         if (r.builtin != Builtin::none) r.kind = NameKind::builtin;
         return r;
@@ -5253,6 +5256,11 @@ private:
     // would be, without copying the text.
     Type* const_ref(Expr* e, Item* c, Type* expected) {
         check_const(c);
+        // An embedded file's bytes are the assembler's, so C can't build another constant from them.
+        if (!c->embed_file.empty() && current_item_ && current_item_->kind == ItemKind::const_ && current_item_ != c) {
+            error(e->span, "a constant can't be made from " + q(text(c->name)) + ", whose bytes are an embedded file's; "
+                                                                                    "read it in a function");
+        }
         e->ref = Ref::const_;
         e->item = c;
         e->is_const = true;
@@ -7766,7 +7774,7 @@ private:
             }
             Resolved r = resolve_name(n);
             switch (r.kind) {
-                case NameKind::builtin: return builtin_call(e, r.builtin);
+                case NameKind::builtin: return builtin_call(e, r.builtin, expected);
                 case NameKind::item:
                     if (r.item->kind != ItemKind::fn) {
                         error(callee->span, q(text(n)) + " isn't a function");
@@ -8875,7 +8883,86 @@ private:
         return to;
     }
 
-    Type* builtin_call(Expr* e, Builtin b) {
+    // `const DATA: [u8; 1024] = embed("data.bin")` (CLX-238): the file's bytes as the constant,
+    // read where the program is built, as Rust's `include_bytes!` reads them. The checker only
+    // looks at the file's size; its bytes go into the program through the assembler.
+    Type* embed_call(Expr* e, Type* expected) {
+        const char* form = "`embed` is a constant's whole value, an array of integers the file fills: "
+                           "`const DATA: [u8; 1024] = embed(\"data.bin\")`";
+        Item* c = current_item_;
+        if (!c || c->kind != ItemKind::const_ || c->value != e || !expected || expected->kind != TypeKind::array ||
+            !is_int(expected->elem)) {
+            error(e->span, form);
+            check_args(e);
+            return T.error;
+        }
+        if (e->args.size() != 1 || e->args[0].value->kind != ExprKind::string_lit ||
+            !e->args[0].value->interpolations.empty()) {
+            error(e->span, "`embed` takes the file's path, as a string with no `{...}` in it, from the folder of the "
+                           "file it's in: `embed(\"data.bin\")`");
+            check_args(e);
+            return T.error;
+        }
+        Expr* arg = e->args[0].value;
+        arg->type = T.str;
+        std::string written;
+        for (const StringPart& p : arg->literal.parts) written += p.text;
+        namespace fs = std::filesystem;
+        auto utf8 = [](const fs::path& p) {
+            std::u8string s = p.generic_u8string();
+            return std::string(s.begin(), s.end());
+        };
+        std::error_code ec;
+        fs::path from = fs::path(ctx_.sources.file(e->span.file).path).parent_path();
+        fs::path file =
+            fs::absolute(from / fs::path(std::u8string(written.begin(), written.end())), ec).lexically_normal();
+        std::string shown = q(written);
+        if (ec || !fs::is_regular_file(file, ec)) {
+            error(arg->span, "there's no file " + shown + " to embed: " + q(utf8(file)) + " isn't one");
+            return T.error;
+        }
+        std::uint64_t size = fs::file_size(file, ec);
+        auto time = fs::last_write_time(file, ec).time_since_epoch().count();
+        std::string full = utf8(file);
+        if (ec) {
+            error(arg->span, "can't read the file " + shown + " to embed");
+            return T.error;
+        }
+        if (full.find('"') != std::string::npos || full.find('\n') != std::string::npos ||
+            full.find('\\') != std::string::npos) {
+            error(arg->span, "the path of " + shown + " has a `\"`, a `\\` or a line break in it, which the assembler can't take");
+            return T.error;
+        }
+        if (size == 0) {
+            error(arg->span, shown + " is empty, and an embedded array can't be");
+            return T.error;
+        }
+        std::uint64_t width = expected->elem->bits / 8;
+        if (size != expected->length * width) {
+            std::string unit(expected->elem->name);
+            if (size % width != 0) {
+                error(arg->span, shown + " is " + std::to_string(size) + " bytes, which isn't a whole number of " +
+                                     q(unit) + "s");
+            } else {
+                error(arg->span, shown + " is " + std::to_string(size) + " bytes, so the array is `[" + unit + "; " +
+                                     std::to_string(size / width) + "]`, not `[" + unit + "; " +
+                                     std::to_string(expected->length) + "]`");
+            }
+            return T.error;
+        }
+        c->embed_file = ctx_.arena.copy(full);
+        c->embed_size = size;
+        c->embed_time = static_cast<std::int64_t>(time);
+        e->is_const = true;
+        return expected;
+    }
+
+    Type* builtin_call(Expr* e, Builtin b, Type* expected = nullptr) {
+        if (b == Builtin::embed) {
+            e->call = CallKind::builtin;
+            e->builtin = b;
+            return embed_call(e, expected);
+        }
         e->call = CallKind::builtin;
         e->builtin = b;
         for (Arg& a : e->args) {
@@ -8944,6 +9031,7 @@ private:
                 e->item = make;
                 return make->result_type;
             }
+            case Builtin::embed:
             case Builtin::none: break;
         }
         return T.error;

@@ -1,0 +1,47 @@
+// `embed` (CLX-238): a constant whose elements are a file's bytes, read where the program is built,
+// from the folder of the module it's in. Wider integers take the bytes little-endian.
+// file: main.calx
+import data.table
+
+const TEXT: [u8; 12] = embed("hello.txt")
+const PAIRS: [u16; 6] = embed("hello.txt")
+
+fn total(xs: [u8; 12]) -> u32 {
+    var s: u32 = 0
+    for x in xs {
+        s += u32(x)
+    }
+    return s
+}
+
+fn main() {
+    println("{TEXT[0]} {TEXT[4]} {TEXT[11]} {TEXT.len()}")   // out: 104 111 10 12
+    println("{total(TEXT)}")                                  // out: 1126
+    println("{PAIRS[0]} {PAIRS[5]}")                          // out: 25960 2660
+    let copy = TEXT
+    var spaces = 0
+    for b in copy {
+        if b == 32 {
+            spaces += 1
+        }
+    }
+    println("{spaces}")                                       // out: 1
+    println("{table.at(0)} {table.at(3)} {table.size()}")     // out: 1684234849 175074925 4
+}
+// file: hello.txt
+hello world
+// file: data/rows.txt
+abcdefghijklmno
+// file: data/table.calx
+module data.table
+
+// From the folder of this module, not the main one's.
+const ROWS: [u32; 4] = embed("rows.txt")
+
+pub fn at(i: usize) -> u32 {
+    return ROWS[i]
+}
+
+pub fn size() -> usize {
+    return ROWS.len()
+}

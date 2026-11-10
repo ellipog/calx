@@ -73,6 +73,26 @@ fn main() {
 }
 ```
 
+### File constants
+
+`embed("file")` makes an array constant of a file's bytes, read when the program is built, as Rust's `include_bytes!` is. It's the constant's whole value, and the path is from the folder of the module it's written in. The array's elements are any integer type, and wider ones take the bytes little-endian, so a file of 4,096 bytes is a `[u8; 4096]`, a `[u16; 2048]` or a `[u32; 1024]`. The length must match the file's size, and the compiler says what it should be when it doesn't:
+
+```calx
+// file: main.calx
+const PALETTE: [u8; 12] = embed("palette.txt")
+const PAIRS: [u16; 6] = embed("palette.txt")
+
+fn main() {
+    println("{PALETTE[0]} {PALETTE.len()} {PAIRS[0]}")    // out: 114 12 25970
+}
+// file: palette.txt
+red green b
+```
+
+The bytes go into the program through the assembler, never through the compiler or C, so even a big file costs a build little: on our machine, one of 16 MB added about 50 ms to a build that assembled it. The program is built again when the file changes. A table made ahead of time, such as a Unicode database, is best kept this way, as a file of bytes, where written as numbers in Calx the compiler would read it in every build that uses it.
+
+A constant made by `embed` is read like any other array constant, in a function, and a loop over it or a call that takes it reads it where it is, without copying it. Another constant can't be made from it, or from an element of it, as its bytes aren't known until the program is linked. The file must be there when the program is built, and its path can't hold `{...}`.
+
 ## Assignment
 
 `place = value` assigns to a variable, a field of one or an element of one. `place op= value` is `place = place op value`, for every arithmetic, bitwise and shift operator. Java's order holds: the place's parts, such as an index, are worked out first, then the value. On a struct or an enum, whose operator is an [interface's](interfaces.md#operators), the place is read and then set, so it can't hold a call.
