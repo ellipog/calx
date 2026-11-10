@@ -1,0 +1,41 @@
+// A constant can be a struct whose fields can all be constants: a literal of constants, with the
+// fields it leaves out at their defaults, or `Name()`, all at theirs (CLX-247).
+
+struct Point {
+    x: i32
+    y: i32
+}
+
+// A field's default can be another constant, a struct one too.
+struct Look {
+    name: str = "plain"
+    scale: f64 = 1.0
+    at: Point = ORIGIN
+    tags: [str; 2] = TAGS
+    corner: (i32, char) = CORNER
+}
+
+const TAGS: [str; 2] = ["a", "b"]
+const CORNER: (i32, char) = (3, 'c')
+const ORIGIN: Point = Point { x: 0, y: 0 }
+const FAR: Point = Point { x: i32.MAX, y: -7 * 3 }
+const PLAIN: Look = Look()
+const BOLD: Look = Look { name: "bold", at: FAR, scale: 2.5 }
+const CORNERS: [Point; 2] = [ORIGIN, Point { x: 1, y: 1 }]
+const PAIR: (Point, bool) = (FAR, true)
+
+fn norm1(p: Point) -> i64 {
+    return i64(p.x).abs() + i64(p.y).abs()
+}
+
+fn main() {
+    println("{ORIGIN.x} {FAR.x} {FAR.y}")                              // out: 0 2147483647 -21
+    println("{PLAIN.name} {PLAIN.scale} {PLAIN.at.y} {PLAIN.tags[1]}")  // out: plain 1.0 0 b
+    println("{BOLD.name} {BOLD.scale} {BOLD.at.x} {BOLD.corner.1}")     // out: bold 2.5 2147483647 c
+    println("{CORNERS[1].y} {PAIR.0.y} {PAIR.1}")                       // out: 1 -21 true
+    // A constant is a value like any other: passed, copied into a `var` and changed there.
+    println("{norm1(FAR)} {norm1(CORNERS[1])}")                         // out: 2147483668 2
+    var p = ORIGIN
+    p.x += 5
+    println("{p.x} {ORIGIN.x} {p == ORIGIN} {Look().at == ORIGIN}")     // out: 5 0 false true
+}

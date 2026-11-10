@@ -3161,34 +3161,69 @@ private:
 
     // What a constant can be: a number, `bool`, `char`, `rune` or `str`, or an array or tuple of
     // them, such as a table of coefficients or of names.
-    bool const_type(const Type* t) const {
+    bool const_type(Type* t) {
         if (t == T.str) return true;
         if (t->kind == TypeKind::array) return const_type(t->elem);
         if (t->kind == TypeKind::tuple) {
-            for (const Type* x : t->elems) {
+            for (Type* x : t->elems) {
                 if (!const_type(x)) return false;
+            }
+            return true;
+        }
+        // A struct whose fields all are, made by a literal of constants or by `Name()` (CLX-247).
+        if (t->kind == TypeKind::struct_) {
+            Item* s = struct_fields(t);
+            if (!s) return false;
+            for (FieldDecl& f : s->fields) {
+                if (!f.resolved || !const_type(f.resolved)) return false;
             }
             return true;
         }
         return is_numeric(t) || t->kind == TypeKind::bool_ || t->kind == TypeKind::char_ || t->kind == TypeKind::rune;
     }
 
-    // A `String`, or an array or tuple with one in it, which a constant can't be.
-    bool holds_string(const Type* t) const {
+    // A struct type's item with its fields' types worked out, or null if they're still being
+    // worked out, as when a field's type names the constant asking.
+    Item* struct_fields(Type* t) {
+        Item* s = t->item;
+        if (!s || t->open) return nullptr;
+        if (!s->resolved) {
+            if (s->resolving) return nullptr;
+            resolve_fields(s);
+        }
+        return s->resolved ? s : nullptr;
+    }
+
+    // A `String`, or an array, tuple or struct with one in it, which a constant can't be.
+    bool holds_string(Type* t) {
         if (t == T.string) return true;
         if (t->kind == TypeKind::array) return holds_string(t->elem);
         if (t->kind == TypeKind::tuple) {
-            for (const Type* x : t->elems) {
+            for (Type* x : t->elems) {
                 if (holds_string(x)) return true;
+            }
+        }
+        if (t->kind == TypeKind::struct_) {
+            if (Item* s = struct_fields(t)) {
+                for (FieldDecl& f : s->fields) {
+                    if (f.resolved && holds_string(f.resolved)) return true;
+                }
             }
         }
         return false;
     }
 
-    // Whether an expression's value is known at compile time: a constant, or an array or tuple of
-    // them.
+    // Whether an expression's value is known at compile time: a constant, or an array, tuple or
+    // struct literal of them. A struct literal's fields left out have their defaults, which are
+    // constants.
     static bool known(const Expr* e) {
         if (e->is_const) return true;
+        if (e->kind == ExprKind::struct_lit) {
+            for (const Expr* x : e->elems) {
+                if (x && !known(x)) return false;
+            }
+            return true;
+        }
         if (e->kind != ExprKind::array_lit && e->kind != ExprKind::tuple) return false;
         if (e->repeat) return !e->elems.empty() && known(e->elems[0]);
         for (const Expr* x : e->elems) {
@@ -3243,9 +3278,10 @@ private:
                 if (!is_bad(vt) && !known(c->value)) {
                     error(c->value->span, "a constant's value must be known at compile time");
                 }
-                // Integers are written where they're used; floats, `str`s, arrays and tuples are
-                // C constants.
-                if (is_float(t) || t == T.str || t->kind == TypeKind::array || t->kind == TypeKind::tuple) {
+                // Integers are written where they're used; floats, `str`s, arrays, tuples and
+                // structs are C constants.
+                if (is_float(t) || t == T.str || t->kind == TypeKind::array || t->kind == TypeKind::tuple ||
+                    t->kind == TypeKind::struct_) {
                     prog_.consts.push_back(c);
                 }
             }

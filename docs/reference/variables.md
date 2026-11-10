@@ -25,7 +25,7 @@ fn main() {
 
 ## Constants
 
-`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char`, `rune` or [`str`](#text-constants), or arrays and tuples of them, such as a table of coefficients or a point that stands for "none":
+`const NAME: T = value` declares a constant at the top level of a module. The type must be given, and the value must be known while compiling: literals, other constants and operators on them. Constants can be integers, floats, `bool`, `char`, `rune` or [`str`](#text-constants), or arrays, tuples and [structs](#struct-constants) of them, such as a table of coefficients or a point that stands for "none":
 
 ```calx
 const STEP: i32 = 4
@@ -43,7 +43,36 @@ fn main() {
 }
 ```
 
-An integer constant is written into the code wherever it's used, so it costs nothing. A float, a `str`, an array or a tuple is a `static const` in C, in each file that uses it. An array of integers is written as plain numbers, and one of bytes as a C string, so a table of thousands of them adds little to a build. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
+An integer constant is written into the code wherever it's used, so it costs nothing. A float, a `str`, an array, a tuple or a struct is a `static const` in C, in each file that uses it. An array of integers is written as plain numbers, and one of bytes as a C string, so a table of thousands of them adds little to a build. Reading an element of an array constant is bounds checked, at compile time when the index is a constant.
+
+### Struct constants
+
+A constant can be a struct whose fields can all be constants, from a struct literal of constants, with the fields it leaves out at their defaults, or from `Name()`, with all of them at theirs. It's a value like any other: its fields are read where it is, and it can be passed, compared, copied into a `var` and changed there, or be a field's default ([CLX-247](https://acta.aaenz.no/aaen-studios/clx#CLX-247)):
+
+```calx
+struct Point {
+    x: i32
+    y: i32
+}
+
+struct Style {
+    name: str = "plain"
+    origin: Point = ORIGIN
+    scale: f64 = 1.0
+}
+
+const ORIGIN: Point = Point { x: 0, y: 0 }
+const PLAIN: Style = Style()
+const WIDE: Style = Style { name: "wide", scale: 2.0 }
+
+fn main() {
+    var p = ORIGIN
+    p.x += 3
+    println("{p.x} {p == ORIGIN} {PLAIN.name} {WIDE.scale} {WIDE.origin.y}")    // out: 3 false plain 2.0 0
+}
+```
+
+A struct that holds a `String`, a `List` or anything else that owns memory can't be a constant, as a tuple holding one can't.
 
 ### Text constants
 

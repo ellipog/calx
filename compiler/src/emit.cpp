@@ -2866,14 +2866,15 @@ $dropall    m->len = 0;
     }
 
     // A constant's value as a C initializer: an array is its elements in braces, as the struct
-    // holding them, and a tuple its elements in braces, rather than a compound literal, which C
-    // allows only inside functions. Another constant is its value, as C can't start a constant
-    // from one.
+    // holding them, a tuple its elements in braces, rather than a compound literal, which C
+    // allows only inside functions, and a struct its fields by name. Another constant is its
+    // value, as C can't start a constant from one.
     std::string const_init(Expr* e) {
         if (e->has_bits) return expr(e);
         if ((e->kind == ExprKind::name || e->kind == ExprKind::self || e->kind == ExprKind::field) && e->ref == Ref::const_ &&
             e->item->value &&
-            (e->type->kind == TypeKind::array || e->type->kind == TypeKind::tuple || e->type->kind == TypeKind::str)) {
+            (e->type->kind == TypeKind::array || e->type->kind == TypeKind::tuple || e->type->kind == TypeKind::str ||
+             e->type->kind == TypeKind::struct_)) {
             return const_init(e->item->value);
         }
         if (e->kind == ExprKind::string_lit) {
@@ -2883,6 +2884,18 @@ $dropall    m->len = 0;
         if (e->type->kind == TypeKind::tuple) {
             std::string s = "{";
             for (std::size_t i = 0; i < e->elems.size(); i++) s += (i ? ", " : " ") + const_init(e->elems[i]);
+            return s + " }";
+        }
+        if (e->type->kind == TypeKind::struct_) {
+            // A struct literal, its fields left out at their defaults, or `Name()`, all at theirs
+            // (CLX-247).
+            const Item* st = e->type->item;
+            std::string s = "{";
+            for (std::size_t i = 0; i < st->fields.size(); i++) {
+                Expr* v = e->kind == ExprKind::struct_lit && i < e->elems.size() ? e->elems[i] : nullptr;
+                if (!v) v = st->fields[i].default_value;
+                s += (i ? ", " : " ") + member(e->type, static_cast<std::uint32_t>(i)) + " = " + const_init(v);
+            }
             return s + " }";
         }
         if (e->type->kind != TypeKind::array) return expr(e);

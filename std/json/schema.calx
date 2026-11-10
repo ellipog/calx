@@ -3846,9 +3846,7 @@ struct Num {
 // What `cmp_num` gives when one of the numbers is an integer past `u64`.
 const UNSURE: i32 = 2
 
-fn big_num() -> Num {
-    return Num { kind: K_BIG, i: 0, u: 0, f: 0.0 }
-}
+const BIG_NUM: Num = Num { kind: K_BIG, i: 0, u: 0, f: 0.0 }
 
 fn int_num(i: i64) -> Num {
     return Num { kind: K_INT, i: i, u: 0, f: 0.0 }
@@ -3859,7 +3857,7 @@ fn num_json(v: Json) -> Num? {
     return match v {
         Json.Int(i) => some(int_num(i)),
         Json.UInt(u) => some(Num { kind: K_UINT, i: 0, u: u, f: 0.0 }),
-        Json.Big(_) => some(big_num()),
+        Json.Big(_) => some(BIG_NUM),
         Json.Float(f) => some(Num { kind: K_FLOAT, i: 0, u: 0, f: f }),
         _ => none,
     }
@@ -3882,7 +3880,7 @@ fn num_node(g: Graph, n: u32) -> Num? {
         return some(int_num(if g.nodes[i].b { 1 } else { 0 }))
     }
     if k == K_BIG {
-        return some(big_num())
+        return some(BIG_NUM)
     }
     return none
 }

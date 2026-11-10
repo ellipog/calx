@@ -1,0 +1,30 @@
+// What a struct constant can't be: one holding a field that can't be a constant, or a value only
+// known when the program runs (CLX-247).
+
+struct Point {
+    x: i32
+    y: i32
+}
+
+struct Named {
+    name: String
+    n: i32
+}
+
+struct Bag {
+    items: List<i32>
+}
+
+fn f() -> i32 {
+    return 1
+}
+
+const P: Point = Point { x: 1, y: 2 }
+const N: Named = Named { name: "a", n: 1 }    // error: a constant can't hold a `String`, which owns its memory; write `str`, which is a `String` where one is wanted
+const B: Bag = Bag { items: [] }              // error: constants of this type aren't implemented yet
+const X: Point = Point { x: 1, y: f() }       // error: a constant's value must be known at compile time
+
+fn main() {
+    P.x = 4                                    // error: can't assign to `P`: it isn't a variable
+    println("{P.y} {N.n} {B.items.len()} {X.x}")
+}
