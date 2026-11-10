@@ -225,9 +225,17 @@ Both modes keep every check: bounds checks, division by zero, and Java's integer
 | debug (the default) | `-O0 -DCX_DEBUG` | Fast builds while you work |
 | release | `-O3 -march=x86-64-v3 -flto=thin` | Speed |
 
-Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
+Release builds use `-O3`, the level Rust's release builds use, since it's the one that specializes a loop for each value of a test that doesn't change inside it, such as which layout a palette has (D89). In both modes the C is compiled with `-std=gnu17 -fwrapv -ffp-contract=off -fno-math-errno -gline-tables-only -ffunction-sections -fdata-sections`. `-fwrapv` and `-ffp-contract=off` are part of Calx's semantics: without them C wouldn't wrap on overflow or round every float operation as Java does ([integers](integers.md), [floats](floats.md)).
 
 Release builds also optimize the program as a whole when it links, with ThinLTO (D99). Each module is a C file of its own, so without it a call from one module to another could never be inlined, however small the function: a loop that adds vectors from another module ran 4.6 times faster with it, and one that packs block positions 7.6 times. The runtime's functions inline the same way. lld does this, so it needs lld next to clang or on `PATH`; with another linker, each file is optimized alone. Since clang can then see that a call to a function in another module has no side effects, a benchmark should pass what it measures through [`std.hint.black_box`](../std/hint.md).
+
+A program carries only what it can reach. Each function and each piece of data is in a section of its own, and the link drops every section nothing reaches, with `/OPT:REF` on Windows and `--gc-sections` on Linux. So a table a module [embeds](variables.md#file-constants) is in a program only if a function the program calls reads it ([CLX-249](https://acta.aaenz.no/aaen-studios/clx#CLX-249)). Before this, on Windows, lld-link kept everything, since the PDB turns its default to `/OPT:NOREF`. Release builds were measured on Windows; build times didn't change:
+
+| Program | Before | Now |
+| --- | --- | --- |
+| Printing `hi` | 544 KB | 170 KB |
+| Using std.regex | 1,223 KB | 817 KB |
+| Using std.regex, debug | 1,170 KB | 940 KB |
 
 In debug builds the runtime checks memory: a block freed twice or with the wrong size stops the program, and a program that ends with blocks still allocated says so. Either way it exits with status 102. The compiler frees every value exactly once ([ownership](ownership.md#in-c)), so that's a bug in Calx, worth reporting. Release builds don't check, and use Calx's own allocator, which is faster than the system's.
 

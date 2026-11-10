@@ -1470,8 +1470,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Java's semantics hold in every mode: wrapping, no contraction (D63, CALX_SPEC.md).
     // Line tables in both modes, so debuggers and profilers show Calx lines through `#line`.
     // They don't change the generated code.
+    // Each function and each piece of data in a section of its own, so the link drops what nothing
+    // reaches.
     std::vector<std::string> flags = {"-std=gnu17", "-fwrapv", "-ffp-contract=off", "-fno-math-errno", "-w",
-                                      "-gline-tables-only"};
+                                      "-gline-tables-only", "-ffunction-sections", "-fdata-sections"};
 #ifndef _WIN32
     // A function whose frame is bigger than a page touches each page of it in turn, so a stack
     // that overflows always reaches the page kept below it and panics, never stepping over it
@@ -1679,10 +1681,14 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // unless the program says. It's address space, taken as memory only as the stack grows.
     if (!library) link_flags.push_back("-Wl,/STACK:8388608");
     link_flags.push_back("-g");  // writes the PDB that holds the line tables
+    // The PDB makes lld-link keep every section by default; a section nothing reads, such as an
+    // `embed` table a program never looks at, is dropped as it would be without one.
+    link_flags.push_back("-Wl,/OPT:REF");
     // The driver always names the static C runtime when linking; the objects name the DLL one.
     if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
 #else
     link_flags.push_back("-lm");
+    link_flags.push_back("-Wl,--gc-sections");
 #endif
     if (lto) {
         // lld keeps each file's machine code in a cache of its own, so a link after an edit

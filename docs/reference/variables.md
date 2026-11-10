@@ -120,6 +120,8 @@ red green b
 
 The bytes go into the program through the assembler, never through the compiler or C, so even a big file costs a build little: on our machine, one of 16 MB added about 50 ms to a build that assembled it. The program is built again when the file changes. A table made ahead of time, such as a Unicode database, is best kept this way, as a file of bytes, where written as numbers in Calx the compiler would read it in every build that uses it.
 
+The bytes are in a section of their own, which the link drops when no function the program calls reads the constant, so a module can embed several tables and a program carries only those it uses ([CLX-249](https://acta.aaenz.no/aaen-studios/clx#CLX-249)).
+
 A constant made by `embed` is read like any other array constant, in a function, and a loop over it or a call that takes it reads it where it is, without copying it. Another constant can't be made from it, or from an element of it, as its bytes aren't known until the program is linked. The file must be there when the program is built, and its path can't hold `{...}`.
 
 ## Assignment
