@@ -239,7 +239,7 @@ It matches by backtracking, as Python does, so it isn't linear: a pattern such a
 
 ## How it works
 
-`std.regex` is written in Calx: [std/regex.calx](../../std/regex.calx), with the Unicode tables in [std/text/ucd.calx](../../std/text/ucd.calx), which [tools/unicode/gen_ucd.calx](../../tools/unicode/gen_ucd.calx) writes from the Unicode Character Database's own files, version 16.0.0.
+`std.regex` is written in Calx: [std/regex.calx](../../std/regex.calx), with the Unicode tables in [std/text/ucd.calx](../../std/text/ucd.calx) and the files of numbers it embeds, which [tools/unicode/gen_ucd.calx](../../tools/unicode/gen_ucd.calx) writes from the Unicode Character Database's own files, version 16.0.0.
 
 - The parser turns the pattern into a tree, with classes as sorted ranges of runes and `(?i)` literals as the runes they fold to.
 - The tree is compiled twice. Once to a program of runes for a Pike VM, which runs every thread of the pattern in step, one rune at a time, and so finds the groups in linear time. And once to a program of bytes, with each class turned into the UTF-8 sequences of its runes, for two lazy DFAs: one reads forward and finds where the leftmost-first match ends, and one reads back from there and finds where it starts. The DFAs' states are worked out the first time a search needs them and kept, up to 8 MB of transitions, after which they're worked out again. A state is a row of transitions, one for each class of bytes the pattern can't tell apart, so a byte costs a lookup and a load.

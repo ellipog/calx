@@ -1,6 +1,6 @@
-// Writes std/text/names.calx, the character names std.unicode.names gives and looks up, from the Unicode
-// Character Database's own files, which it downloads from unicode.org into build/ucd/<version> the
-// first time, and reads from there after.
+// Writes std/text/names.calx and the tables it embeds, std/text/names.bin: the character names
+// std.unicode.names gives and looks up, from the Unicode Character Database's own files, which it
+// downloads from unicode.org into build/ucd/<version> the first time, and reads from there after.
 //
 //     calx run tools/unicode/gen_names.calx
 //
@@ -15,8 +15,8 @@
 //   or the abbreviation where a later character took that, as U+1F514 took `BELL`, or else the
 //   figment alias. Java names a rune it has no name for by its block and number.
 //
-// The tables are text, which a build reads fast: numbers are written in base 93, in the printable
-// ASCII runes but `#`, 128 to a line. The names are in alphabetical order, as numbers of
+// The tables are bytes, in one file the module embeds, so a build never reads them: numbers are
+// written in base 256, a byte to a digit. The names are in alphabetical order, as numbers of
 // words, each sharing what it can of the words of the one before, but every 8th.
 import std.env
 import std.fs
@@ -29,11 +29,12 @@ const MAX: u32 = 0x10FFFF
 const CHECK: usize = 8
 const PLACE_CHECK: usize = 16
 const WORD_STEP: usize = 4
-const LINE: usize = 128
-// The first bytes of each entry written whole, which a search reads before the entry, and how
-// many of them go on a line of KEYS.
+// The first bytes of each entry written whole, which a search reads before the entry.
 const KEY: usize = 16
-const KEY_LINE: usize = 8
+// The base numbers are written in, and its square and cube.
+const BASE: u32 = 256
+const BASE2: u32 = 65536
+const BASE3: u32 = 16777216
 
 // What an entry of the table is: a name, an alias, or a name only Java gives.
 const NAME: u32 = 1
@@ -149,65 +150,64 @@ fn hex_upper(n: u32) -> String {
 
 // --- writing numbers ------------------------------------------------------------------------------
 
-// The rune for the digit `v`, from 0 to 92: printable ASCII, but `#`, which could end a raw string.
-fn sym(v: u32) -> rune {
-    if v >= 93 {
+// The byte for the digit `v`, from 0 to 255.
+fn sym(v: u32) -> u8 {
+    if v >= BASE {
         panic("{v} isn't a digit")
     }
-    let c = v + 0x21
-    return rune.try_from(if c >= 0x23 { c + 1 } else { c })!
+    return u8.wrap(v)
 }
 
-// How many digits a number takes: 1 below `a`, 2 below `a + b * 93`, 3 below that and `c * 93^2`,
-// and 4 past it, so the first digit says how many follow.
+// How many digits a number takes: 1 below `a`, 2 below `a + b * 256`, 3 below that and
+// `c * 256^2`, and 4 past it, so the first digit says how many follow.
 struct Tiers {
     a: u32
     b: u32
     c: u32
 }
 
-fn put_num(out: mut String, v: u32, t: Tiers) {
+fn put_num(out: mut List<u8>, v: u32, t: Tiers) {
     if v < t.a {
         out.push(sym(v))
         return
     }
     var x = v - t.a
-    if x < t.b * 93 {
-        out.push(sym(t.a + x / 93))
-        out.push(sym(x % 93))
+    if x < t.b * BASE {
+        out.push(sym(t.a + x / BASE))
+        out.push(sym(x % BASE))
         return
     }
-    x -= t.b * 93
-    if x < t.c * 8649 {
-        out.push(sym(t.a + t.b + x / 8649))
-        out.push(sym(x / 93 % 93))
-        out.push(sym(x % 93))
+    x -= t.b * BASE
+    if x < t.c * BASE2 {
+        out.push(sym(t.a + t.b + x / BASE2))
+        out.push(sym(x / BASE % BASE))
+        out.push(sym(x % BASE))
         return
     }
-    x -= t.c * 8649
-    if x / 804357 >= 93 - t.a - t.b - t.c {
+    x -= t.c * BASE2
+    if x / BASE3 >= BASE - t.a - t.b - t.c {
         panic("{v} is too big for its tiers")
     }
-    out.push(sym(t.a + t.b + t.c + x / 804357))
-    out.push(sym(x / 8649 % 93))
-    out.push(sym(x / 93 % 93))
-    out.push(sym(x % 93))
+    out.push(sym(t.a + t.b + t.c + x / BASE3))
+    out.push(sym(x / BASE2 % BASE))
+    out.push(sym(x / BASE % BASE))
+    out.push(sym(x % BASE))
 }
 
 // `v` in exactly `width` digits.
-fn put_fixed(out: mut String, v: u32, width: u32) {
+fn put_fixed(out: mut List<u8>, v: u32, width: u32) {
     var p: u32 = 1
     for _ in 1..width {
-        p *= 93
+        p *= BASE
     }
-    if v / p >= 93 {
+    if v / p >= BASE {
         panic("{v} doesn't fit {width} digits")
     }
     var x = v
     for _ in 0..width {
         out.push(sym(x / p))
         x %= p
-        p = if p >= 93 { p / 93 } else { 1 }
+        p = if p >= BASE { p / BASE } else { 1 }
     }
 }
 
@@ -219,17 +219,23 @@ fn best_tiers(values: List<u32>) -> Tiers {
     let top = u64(sorted[n - 1]) + 1
     var best = Tiers { a: 0, b: 0, c: 0 }
     var best_size: u64 = 0xFFFFFFFFFFFFFFFF
-    for a in 1u32..92 {
-        for b in 0u32..(92 - a) {
-            for c in 0u32..(93 - a - b) {
-                let d = 93 - a - b - c
-                let t1 = u64(a)
-                let t2 = t1 + u64(b) * 93
-                let t3 = t2 + u64(c) * 8649
-                if t3 + u64(d) * 804357 < top {
+    // How many of the values are below each number of one digit, and of two, as `a` and `b` set.
+    var under1: List<usize> = []
+    for t in 0u64..(u64(BASE) + 1) {
+        under1.push(below(sorted, t))
+    }
+    for a in 1u32..(BASE - 1) {
+        for b in 0u32..(BASE - 1 - a) {
+            let t1 = u64(a)
+            let t2 = t1 + u64(b) * u64(BASE)
+            let n2 = below(sorted, t2)
+            for c in 0u32..(BASE - a - b) {
+                let d = BASE - a - b - c
+                let t3 = t2 + u64(c) * u64(BASE2)
+                if t3 + u64(d) * u64(BASE3) < top {
                     continue
                 }
-                let size = u64(n) + u64(n - below(sorted, t1)) + u64(n - below(sorted, t2)) + u64(n - below(sorted, t3))
+                let size = u64(n) + u64(n - under1[usize(a)]) + u64(n - n2) + u64(n - below(sorted, t3))
                 if size < best_size {
                     best_size = size
                     best = Tiers { a, b, c }
@@ -259,22 +265,11 @@ fn zig(d: i64) -> u32 {
     return u32.wrap(if d >= 0 { 2 * d } else { -2 * d - 1 })
 }
 
-// `text` as a raw block string constant, LINE runes to a line.
-fn block(name: str, doc: str, text: String) -> String {
-    return block_lines(name, doc, text, LINE)
-}
-
-fn block_lines(name: str, doc: str, text: String, line: usize) -> String {
-    var out: String = "/// {doc}\npub const {name}: str = #\"\n"
-    var i: usize = 0
-    while i < text.len() {
-        let end = (i + line).min(text.len())
-        out.push_str(text[i..end])
-        out.push('\n')
-        i = end
-    }
-    out.push_str("\"#\n")
-    return out
+// Adds `bytes` to the tables in `data`, and gives the constant that says where they start.
+fn block(data: mut List<u8>, name: str, doc: str, bytes: List<u8>) -> String {
+    let at = data.len()
+    data.extend(bytes)
+    return "/// {doc} It starts here in DATA.\npub const {name}: usize = {at}\n"
 }
 
 fn table(name: str, doc: str, values: List<u32>) -> String {
@@ -538,16 +533,16 @@ fn main() {
     }
     ranked.sort()
     var rank = Map<String, u32>()
-    var word_text = String()
-    var word_len = String()
-    var word_at = String()
+    var word_text: List<u8> = []
+    var word_len: List<u8> = []
+    var word_at: List<u8> = []
     for k in 0..ranked.len() {
         let w = ranked[k].1.copy()
         if k % WORD_STEP == 0 {
             put_fixed(mut word_at, u32.wrap(word_text.len()), 3)
         }
         put_fixed(mut word_len, u32.wrap(w.len()), 1)
-        word_text.push_str(w)
+        word_text.extend(w.to_bytes())
         rank.insert(w, u32.wrap(k))
     }
 
@@ -565,16 +560,16 @@ fn main() {
     }
     let wt = best_tiers(word_values)
     let ct = best_tiers(code_values)
-    var stream = String()
-    var stream_at = String()
-    var keys = String()
+    var stream: List<u8> = []
+    var stream_at: List<u8> = []
+    var keys: List<u8> = []
     for e in 0..entries.len() {
         if e % CHECK == 0 {
             put_fixed(mut stream_at, u32.wrap(stream.len()), 3)
             let n = entries[e].0.copy()
-            keys.push_str(n[..n.len().min(KEY)])
+            keys.extend(n[..n.len().min(KEY)].to_bytes())
             for _ in n.len()..KEY {
-                keys.push('~')
+                keys.push(b'~')
             }
         }
         let shared = if e % CHECK == 0 { 0usize } else { common(split[e - 1], split[e]) }
@@ -614,8 +609,8 @@ fn main() {
         place_values.push(if k % PLACE_CHECK == 0 { j } else { zig(i64(j) - i64(place[named[k - 1]])) })
     }
     let pt = best_tiers(place_values)
-    var places = String()
-    var places_at = String()
+    var places: List<u8> = []
+    var places_at: List<u8> = []
     var run_start: List<u32> = []
     var run_len: List<u32> = []
     var run_first: List<u32> = []
@@ -713,12 +708,43 @@ fn main() {
         base.push(f.base)
         prefixes.push(f.prefix.copy())
     }
-    var seq_names: List<String> = []
-    var seq_runes: List<String> = []
+    // The named sequences: their names one after the other, and their runes, three digits each,
+    // with where each starts and, after the last, where they end.
+    var seq_text: List<u8> = []
+    var seq_at: List<u8> = []
+    var seq_runes: List<u8> = []
+    var seq_runes_at: List<u8> = []
     for s in seqs {
-        seq_names.push(s.0.copy())
-        seq_runes.push(s.1.copy())
+        put_fixed(mut seq_at, u32.wrap(seq_text.len()), 3)
+        seq_text.extend(s.0.to_bytes())
+        put_fixed(mut seq_runes_at, u32.wrap(seq_runes.len()), 3)
+        for h in s.1.split(" ") {
+            put_fixed(mut seq_runes, hex(h), 3)
+        }
     }
+    put_fixed(mut seq_at, u32.wrap(seq_text.len()), 3)
+    put_fixed(mut seq_runes_at, u32.wrap(seq_runes.len()), 3)
+    var runs: List<u8> = []
+    for k in 0..run_count {
+        put_fixed(mut runs, run_start[k], 3)
+        put_fixed(mut runs, run_len[k], 3)
+        put_fixed(mut runs, run_first[k], 3)
+    }
+    var data: List<u8> = []
+    var blocks: List<String> = []
+    blocks.push(block(mut data, "WORD_TEXT", "The words names are made of, most used first, one after the other, `_` for a space.", word_text))
+    blocks.push(block(mut data, "WORD_LEN", "Each word's length, in one digit.", word_len))
+    blocks.push(block(mut data, "WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at))
+    blocks.push(block(mut data, "STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream))
+    blocks.push(block(mut data, "STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at))
+    blocks.push(block(mut data, "KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end.", keys))
+    blocks.push(block(mut data, "PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places))
+    blocks.push(block(mut data, "PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at))
+    blocks.push(block(mut data, "RUNS", "The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each.", runs))
+    blocks.push(block(mut data, "SEQ_TEXT", "The named sequences' names, in order, one after the other.", seq_text))
+    blocks.push(block(mut data, "SEQ_AT", "Where each named sequence's name starts in SEQ_TEXT, and after the last, where they end, in three digits.", seq_at))
+    blocks.push(block(mut data, "SEQ_RUNES", "Each named sequence's runes, in three digits each.", seq_runes))
+    blocks.push(block(mut data, "SEQ_RUNES_AT", "Where each named sequence's runes start in SEQ_RUNES, and after the last, where they end, in three digits.", seq_runes_at))
     let parts: List<String> = [
         String("/// Unicode's character names, for std.unicode.names: `name` and `lookup`, as Python has them, and"),
         String("/// `java_name` and `java_code_point_of`, which std.nbt's SNBT reads `\\N\{...\}` with."),
@@ -726,27 +752,19 @@ fn main() {
         String("module std.text.names"),
         String(),
         notice(),
-        String("// Numbers are written in base 93, in the printable ASCII runes but `#`, and in each str"),
-        String("// constant, a newline follows each LINE of them."),
+        String("// The tables are in DATA, the bytes of names.bin, and numbers in them are written in base"),
+        String("// 256, a byte to a digit."),
         String("/// What an entry is: a rune's name, an alias, or a name Java gives a control character."),
         "pub const NAME: u32 = {NAME}\npub const ALIAS: u32 = {ALIAS}\npub const JAVA: u32 = {JAVA}",
         "/// How many entries and words there are, how many entries go between two written whole, how many\n/// places between two in PLACES_AT, and how many words between two in WORD_AT.",
-        "pub const ENTRIES: usize = {entries.len()}\npub const WORDS: usize = {ranked.len()}\npub const CHECK: usize = {CHECK}\npub const PLACE_CHECK: usize = {PLACE_CHECK}\npub const WORD_STEP: usize = {WORD_STEP}\npub const KEY: usize = {KEY}\npub const KEY_LINE: usize = {KEY_LINE}\npub const LINE: usize = {LINE}",
-        String("/// The digits a number takes: 1 below A, 2 below A + B * 93, 3 below that and C * 93^2, and 4 past it."),
+        "pub const ENTRIES: usize = {entries.len()}\npub const WORDS: usize = {ranked.len()}\npub const CHECK: usize = {CHECK}\npub const PLACE_CHECK: usize = {PLACE_CHECK}\npub const WORD_STEP: usize = {WORD_STEP}\npub const KEY: usize = {KEY}",
+        "/// How many runs of named runes there are in RUNS, and named sequences in SEQ_TEXT.\npub const RUN_COUNT: usize = {run_count}\npub const SEQUENCES: usize = {seqs.len()}",
+        String("/// The digits a number takes: 1 below A, 2 below A + B * 256, 3 below that and C * 256^2, and 4 past it."),
         tiers("WORD", wt),
         tiers("CODE", ct),
         tiers("PLACE", pt),
-        block("WORD_TEXT", "The words names are made of, most used first, one after the other, `_` for a space.", word_text),
-        block("WORD_LEN", "Each word's length, in one digit.", word_len),
-        block("WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at),
-        block("STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream),
-        block("STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at),
-        block_lines("KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end, KEY_LINE to a line.", keys, KEY * KEY_LINE),
-        block("PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places),
-        block("PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at),
-        table("RUN_START", "The runs of runes with a name or a Java name: the first rune of each.", run_start),
-        table("RUN_LEN", "How many runes each run has.", run_len),
-        table("RUN_FIRST", "The first rune's number in PLACES.", run_first),
+        "/// The tables below, a byte to a digit.\npub const DATA: [u8; {data.len()}] = embed(\"names.bin\")\n",
+        blocks.join("\n"),
         table("FAMILY_LO", "The first rune of each family of names made from a rune's number, such as `CJK COMPATIBILITY IDEOGRAPH-F900`.", lo),
         table("FAMILY_HI", "The last rune of each family.", hi),
         table("FAMILY_DIGITS", "0 for a family named by the rune's number in hex, or else how many digits its decimal count has at least.", digits),
@@ -758,16 +776,15 @@ fn main() {
         table("JAVA_LO", "The first rune of each range Java names by its block, as `PRIVATE USE AREA E000`.", java_lo),
         table("JAVA_HI", "The last rune of each.", java_hi),
         strings("JAVA_BLOCK", "Each range's block, as Java writes it.", java_block),
-        strings("SEQUENCE_NAMES", "The named sequences' names, in order.", seq_names),
-        strings("SEQUENCE_RUNES", "Each named sequence's runes, in hex.", seq_runes),
         strings("JAMO_L", "The short names of the jamo a Hangul syllable starts with.", jamo_l),
         strings("JAMO_V", "Of its vowels.", jamo_v),
         strings("JAMO_T", "Of the jamo it may end with, the first for none.", jamo_t),
     ]
     let out = "{root}/std/text/names.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
+    fs.write("{root}/std/text/names.bin", data)!
     println("{out}: {entries.len()} entries, {ranked.len()} words, {families.len()} families, {run_count} runs, {java_lo.len()} Java blocks")
-    println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}")
+    println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}, all {data.len()} bytes")
 }
 
 // How many words two names share at their start, at most 92.

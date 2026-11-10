@@ -56,7 +56,7 @@ fn main() {
 
 ## How it's built
 
-[std/unicode.calx](../../std/unicode.calx) is written in Calx from UAX #15, the standard for normalization. Its tables, [std/text/normal.calx](../../std/text/normal.calx), are written by [tools/unicode/gen_normal.calx](../../tools/unicode/gen_normal.calx) from the Unicode Character Database's own files. For each rune they hold:
+[std/unicode.calx](../../std/unicode.calx) is written in Calx from UAX #15, the standard for normalization. Its tables, files of numbers that [std/text/normal.calx](../../std/text/normal.calx) embeds, so a build never reads them, are written by [tools/unicode/gen_normal.calx](../../tools/unicode/gen_normal.calx) from the Unicode Character Database's own files. For each rune they hold:
 
 - its combining class;
 - its full canonical and compatibility decompositions, each applied again to what it gives until nothing decomposes further;

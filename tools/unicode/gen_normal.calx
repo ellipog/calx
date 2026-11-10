@@ -1,6 +1,6 @@
-// Writes std/text/normal.calx, the tables std.unicode normalizes text with, from the Unicode
-// Character Database's own files, which it downloads from unicode.org into build/ucd/<version> the
-// first time, and reads from there after.
+// Writes std/text/normal.calx and the tables it embeds, in std/text/normal/: the tables std.unicode
+// normalizes text with, from the Unicode Character Database's own files, which it downloads from
+// unicode.org into build/ucd/<version> the first time, and reads from there after.
 //
 //     calx run tools/unicode/gen_normal.calx
 //
@@ -218,20 +218,23 @@ fn pair_slot(a: u32, b: u32) -> usize {
     return usize(h >> 21)
 }
 
-fn table(name: str, doc: str, ty: str, values: List<u32>) -> String {
-    var lines: List<String> = ["/// {doc}", "pub const {name}: [{ty}; {values.len()}] = ["]
-    var i: usize = 0
-    while i < values.len() {
-        let end = (i + 16).min(values.len())
-        var parts: List<String> = []
-        for k in i..end {
-            parts.push("{values[k]}")
+// A table in a file of its own in std/text/normal/, little-endian, which the module embeds, so a
+// build never reads its numbers.
+fn table(root: String, name: str, doc: str, ty: str, values: List<u32>) -> String {
+    let width: u32 = if ty == "u8" { 1 } else if ty == "u16" { 2 } else { 4 }
+    var bytes: List<u8> = []
+    for v in values {
+        if width < 4 and v >> (8 * width) != 0 {
+            stop("{name} holds {v}, which doesn't fit {ty}")
         }
-        lines.push("    {parts.join(", ")},")
-        i = end
+        for k in 0u32..width {
+            bytes.push(u8.wrap(v >> (8 * k)))
+        }
     }
-    lines.push("]")
-    return "{lines.join("\n")}\n\n"
+    let file = "{String(name).to_lower_root()}.bin"
+    fs.make_dir_all("{root}/std/text/normal")!
+    fs.write("{root}/std/text/normal/{file}", bytes)!
+    return "/// {doc}\npub const {name}: [{ty}; {values.len()}] = embed(\"normal/{file}\")\n\n"
 }
 
 fn main() {
@@ -399,28 +402,28 @@ fn main() {
     out.push_str(notice())
     out.push_str("/// The runes in a block of the two stages.\n")
     out.push_str("pub const BLOCK: usize = {block}\n\n")
-    out.push_str(table("STAGE1", "For each block of runes, where its records' numbers start in STAGE2, in blocks.", "u16", st.0))
-    out.push_str(table("STAGE2", "Each rune's record, by blocks.", "u16", st.1))
+    out.push_str(table(root, "STAGE1", "For each block of runes, where its records' numbers start in STAGE2, in blocks.", "u16", st.0))
+    out.push_str(table(root, "STAGE2", "Each rune's record, by blocks.", "u16", st.1))
     var cols: List<List<u32>> = [[], [], [], [], [], []]
     for rec in records {
         for i in 0usize..6 {
             cols[i].push(rec[i])
         }
     }
-    out.push_str(table("EASY", "For each block, the forms in which every rune of it has class 0 and passes the quick check: 1 NFD, 2 NFKD, 4 NFC, 8 NFKC.", "u8", easy))
-    out.push_str(table("CCC", "Each record's canonical combining class.", "u8", cols[0]))
-    out.push_str(table("QC", "Each record's quick checks: 1 not in NFD, 2 not in NFKD, 4 not in NFC, 8 maybe in NFC, 16 not in NFKC, 32 maybe in NFKC.", "u8", cols[1]))
-    out.push_str(table("CANON_AT", "Where each record's full canonical decomposition is in POOL.", "u16", cols[2]))
-    out.push_str(table("CANON_LEN", "Its length, 0 if the rune has none.", "u8", cols[3]))
-    out.push_str(table("COMPAT_AT", "Where each record's full compatibility decomposition is in POOL.", "u16", cols[4]))
-    out.push_str(table("COMPAT_LEN", "Its length, 0 if the rune has none.", "u8", cols[5]))
-    out.push_str(table("POOL", "The decompositions' runes.", "u32", pool))
+    out.push_str(table(root, "EASY", "For each block, the forms in which every rune of it has class 0 and passes the quick check: 1 NFD, 2 NFKD, 4 NFC, 8 NFKC.", "u8", easy))
+    out.push_str(table(root, "CCC", "Each record's canonical combining class.", "u8", cols[0]))
+    out.push_str(table(root, "QC", "Each record's quick checks: 1 not in NFD, 2 not in NFKD, 4 not in NFC, 8 maybe in NFC, 16 not in NFKC, 32 maybe in NFKC.", "u8", cols[1]))
+    out.push_str(table(root, "CANON_AT", "Where each record's full canonical decomposition is in POOL.", "u16", cols[2]))
+    out.push_str(table(root, "CANON_LEN", "Its length, 0 if the rune has none.", "u8", cols[3]))
+    out.push_str(table(root, "COMPAT_AT", "Where each record's full compatibility decomposition is in POOL.", "u16", cols[4]))
+    out.push_str(table(root, "COMPAT_LEN", "Its length, 0 if the rune has none.", "u8", cols[5]))
+    out.push_str(table(root, "POOL", "The decompositions' runes.", "u32", pool))
     out.push_str("/// The pairs that compose, by `pair_slot` in std/unicode.calx, each in its slot or the next free\n")
     out.push_str("/// one after it: the first rune, 0 for a free slot, the second, and what they compose to. Every\n")
     out.push_str("/// pair is found within {tries} tries.\n")
-    out.push_str(table("PAIR_FIRST", "The first runes.", "u32", pa))
-    out.push_str(table("PAIR_SECOND", "The second runes.", "u32", pb))
-    out.push_str(table("PAIR_RESULT", "What they compose to.", "u32", pc))
+    out.push_str(table(root, "PAIR_FIRST", "The first runes.", "u32", pa))
+    out.push_str(table(root, "PAIR_SECOND", "The second runes.", "u32", pb))
+    out.push_str(table(root, "PAIR_RESULT", "What they compose to.", "u32", pc))
     fs.write_text("{root}/std/text/normal.calx", out)!
     println("wrote std/text/normal.calx: {records.len()} records, a pool of {pool.len()}, blocks of {block} in {st.1.len()} numbers, {pairs.len()} pairs within {tries} tries")
 }

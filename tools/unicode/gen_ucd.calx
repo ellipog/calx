@@ -1,6 +1,6 @@
-// Writes std/text/ucd.calx, the Unicode tables std.regex and std.textwrap read, from the Unicode Character
-// Database's own files, which it downloads from unicode.org into build/ucd/<version> the first
-// time, and reads from there after.
+// Writes std/text/ucd.calx and the tables it embeds, in std/text/ucd/: the Unicode tables std.regex
+// and std.textwrap read, from the Unicode Character Database's own files, which it downloads from
+// unicode.org into build/ucd/<version> the first time, and reads from there after.
 //
 //     calx run tools/unicode/gen_ucd.calx
 //
@@ -204,19 +204,39 @@ fn hex_upper(n: u32) -> String {
     return String.from_utf8(out) ?? String()
 }
 
-fn table(name: str, doc: str, values: List<u32>) -> String {
-    var lines: List<String> = ["/// {doc}", "pub const {name}: [u32; {values.len()}] = ["]
-    var i: usize = 0
-    while i < values.len() {
-        let end = (i + 8).min(values.len())
-        var parts: List<String> = []
-        for k in i..end {
-            parts.push("0x{hex_upper(values[k])}")
+// A table of EMBED numbers or more goes in a file of its own in `dir`, little-endian, which the
+// module embeds, so a build never reads it. A smaller one is written out, as an object of its own
+// would cost a build more.
+const EMBED: usize = 256
+
+fn table(dir: String, name: str, doc: str, values: List<u32>) -> String {
+    var lines: List<String> = ["/// {doc}"]
+    if values.len() >= EMBED {
+        let file = "{String(name).to_lower_root()}.bin"
+        var bytes: List<u8> = []
+        for v in values {
+            bytes.push(u8.wrap(v))
+            bytes.push(u8.wrap(v >> 8))
+            bytes.push(u8.wrap(v >> 16))
+            bytes.push(u8.wrap(v >> 24))
         }
-        lines.push("    {parts.join(", ")},")
-        i = end
+        fs.make_dir_all(dir.copy())!
+        fs.write("{dir}/{file}", bytes)!
+        lines.push("pub const {name}: [u32; {values.len()}] = embed(\"{path.file_name(dir.copy()) ?? String()}/{file}\")")
+    } else {
+        lines.push("pub const {name}: [u32; {values.len()}] = [")
+        var i: usize = 0
+        while i < values.len() {
+            let end = (i + 8).min(values.len())
+            var parts: List<String> = []
+            for k in i..end {
+                parts.push("0x{hex_upper(values[k])}")
+            }
+            lines.push("    {parts.join(", ")},")
+            i = end
+        }
+        lines.push("]")
     }
-    lines.push("]")
     lines.push("/// How many numbers `{name}` holds.")
     lines.push("pub const {name}_LEN: usize = {values.len()}")
     return "{lines.join("\n")}\n"
@@ -403,6 +423,7 @@ fn main() {
     let py_spaces = ranges(py_space)
     let py_print = ranges(is_print)
 
+    let dir = "{root}/std/text/ucd"
     let parts: List<String> = [
         String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
         String("/// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`"),
@@ -412,19 +433,19 @@ fn main() {
         String("module std.text.ucd"),
         String(),
         notice(),
-        table("WORD", "`\\w`'s runes, as ranges: each first rune, then the last.", flat(word)),
-        table("DIGIT", "`\\d`'s runes, the decimal digits, as ranges.", flat(digit)),
-        table("SPACE", "`\\s`'s runes, White_Space, as ranges.", flat(space)),
-        table("ALNUM", "The runes Python's `str.isalnum` is true for, the letters and those with a numeric value, as ranges.", flat(alnum)),
-        table("FOLD_FROM", "Each rune that case folding puts with others, in order.", pairs.map(|p| p.0)),
-        table("FOLD_NEXT", "The next rune in `FOLD_FROM[i]`'s orbit: the smallest past it, or else the smallest.", pairs.map(|p| p.1)),
-        table("PY_LOWER_FROM", "Each rune Python's `re` lowers to another, in order.", lower_from),
-        table("PY_LOWER_TO", "The rune `PY_LOWER_FROM[i]` lowers to.", lower_to),
-        table("PY_UPPER_FROM", "Each rune Python's `re` uppers to another, in order.", upper_from),
-        table("PY_UPPER_TO", "The rune `PY_UPPER_FROM[i]` uppers to.", upper_to),
-        table("PY_SPACE", "The runes Python's `str.isspace` is true for, as ranges.", flat(py_spaces)),
-        table("PY_PRINT", "The runes Python's `str.isprintable` is true for, as ranges.", flat(py_print)),
-        table("JAVA_ALNUM", "The runes up to U+FFFF Java's `Character.isAlphabetic` or `isDigit` is true for, as ranges.", flat(java)),
+        table(dir, "WORD", "`\\w`'s runes, as ranges: each first rune, then the last.", flat(word)),
+        table(dir, "DIGIT", "`\\d`'s runes, the decimal digits, as ranges.", flat(digit)),
+        table(dir, "SPACE", "`\\s`'s runes, White_Space, as ranges.", flat(space)),
+        table(dir, "ALNUM", "The runes Python's `str.isalnum` is true for, the letters and those with a numeric value, as ranges.", flat(alnum)),
+        table(dir, "FOLD_FROM", "Each rune that case folding puts with others, in order.", pairs.map(|p| p.0)),
+        table(dir, "FOLD_NEXT", "The next rune in `FOLD_FROM[i]`'s orbit: the smallest past it, or else the smallest.", pairs.map(|p| p.1)),
+        table(dir, "PY_LOWER_FROM", "Each rune Python's `re` lowers to another, in order.", lower_from),
+        table(dir, "PY_LOWER_TO", "The rune `PY_LOWER_FROM[i]` lowers to.", lower_to),
+        table(dir, "PY_UPPER_FROM", "Each rune Python's `re` uppers to another, in order.", upper_from),
+        table(dir, "PY_UPPER_TO", "The rune `PY_UPPER_FROM[i]` uppers to.", upper_to),
+        table(dir, "PY_SPACE", "The runes Python's `str.isspace` is true for, as ranges.", flat(py_spaces)),
+        table(dir, "PY_PRINT", "The runes Python's `str.isprintable` is true for, as ranges.", flat(py_print)),
+        table(dir, "JAVA_ALNUM", "The runes up to U+FFFF Java's `Character.isAlphabetic` or `isDigit` is true for, as ranges.", flat(java)),
     ]
     let out = "{root}/std/text/ucd.calx"
     fs.write_text(out.copy(), parts.join("\n"))!

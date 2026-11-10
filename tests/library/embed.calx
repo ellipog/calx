@@ -1,0 +1,32 @@
+// A library can embed a file (CLX-238): its bytes are the library's own, read where it was built.
+// lib: plugin.calx
+// file: main.calx
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    let lib = unsafe { Library.open(given[0])! }
+    let at = lib.find<fn(usize) -> u8>("byte_at")!
+    let sum = lib.find<fn() -> u32>("sum")!
+    println("{at(0)} {at(4)} {sum()}")  // out: 116 32 1041
+    unsafe { lib.close() }
+}
+
+// file: plugin.calx
+const TEXT: [u8; 11] = embed("text.txt")
+
+@export
+fn byte_at(i: usize) -> u8 {
+    return TEXT[i]
+}
+
+@export
+fn sum() -> u32 {
+    var s: u32 = 0
+    for b in TEXT {
+        s += u32(b)
+    }
+    return s
+}
+// file: text.txt
+test bytes
