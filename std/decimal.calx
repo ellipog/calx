@@ -892,9 +892,11 @@ fn rest_after(a: List<u32>, k: i64) -> i32 {
         return if a.len() == 0 { 0 } else { 1 }
     }
     let i = usize.wrap(li)
-    let p = POW10[usize.wrap(top % 9)]
-    let digit = (a[i] / p) % 10
-    var below = a[i] % p == 0
+    let r = usize.wrap(top % 9)
+    let x = u64(a[i])
+    let q = if r == 0 { x } else { down10(x, r) }
+    let digit = q % 10
+    var below = x == q * u64(POW10[r])
     var j: usize = 0
     while below and j < i {
         if a[j] != 0 {
@@ -1493,36 +1495,50 @@ fn pow_of(x: Decimal, n: i64) -> Decimal {
         // Exact, then rounded.
         return make(neg, pow_mag(x.coef, m), ideal, false, ctx)
     }
-    // Bounds at w digits, closer each time, until both round the same.
+    // Bounds at w digits, closer each time, until both round the same. The power is worked out
+    // cut down at each step, and the other bound is that plus a margin pow_down proves: c^m is
+    // below lo × (1 + η), η = 2m × 10^(1 - w), and lo has w digits once anything was cut, so
+    // that's under 20m units of its last.
     let z = trailing_zeros(x.coef)
     let c = shift_down(x.coef, z)
     let e = x.ex + z
     var w = p + 10 + digits_i64(i64.wrap(m.min(1000000000000000000)))
     loop {
-        var b = pow_bounds(c, m, w)
-        b.lo_e += mul_exp(e, i64.wrap(m))
-        b.hi_e = b.lo_e - b.hi_shift
-        if n < 0 {
-            let (rl, rle, rl_exact) = recip(b.hi, b.hi_e, w, false)
-            let (rh, rhe, _) = recip(b.lo, b.lo_e, w, true)
-            b.exact = b.exact and rl_exact
-            b.lo = rl
-            b.lo_e = rle
-            b.hi = rh
-            b.hi_e = rhe
-        }
-        if b.exact {
-            if n > 0 {
+        let (lo, le0, exact) = pow_down(c, m, w)
+        let le = le0 + mul_exp(e, i64.wrap(m))
+        if n > 0 {
+            if exact {
                 // Python's exact power keeps the ideal exponent where the precision allows.
-                let pad = (b.lo_e - ideal).min(p - ndigits(b.lo)).max(0)
-                return make(neg, shift_up(b.lo, pad), b.lo_e - pad, false, ctx)
+                let pad = (le - ideal).min(p - ndigits(lo)).max(0)
+                return make(neg, shift_up(lo, pad), le - pad, false, ctx)
             }
-            return make(neg, b.lo, b.lo_e, false, ctx)
-        }
-        let lo = make(neg, b.lo, b.lo_e, false, ctx)
-        let hi = make(neg, b.hi, b.hi_e, false, ctx)
-        if lo.ex == hi.ex and cmp_mag(lo.coef, hi.coef) == 0 {
-            return lo
+            // 10^(digits of m + 2) is over 20m.
+            let hi = add_pow10(lo.copy(), digits_i64(i64.wrap(m.min(1000000000000000000))) + 2 + (ndigits(lo) - w).max(0))
+            let a = make(neg, lo, le, false, ctx)
+            let b = make(neg, hi, le, false, ctx)
+            if a.ex == b.ex and cmp_mag(a.coef, b.coef) == 0 {
+                return a
+            }
+        } else {
+            // 1 / c^m is at most r, 1 / lo rounded up, and r is over 1 / lo by less than
+            // 10^-w of it, as r has more than w digits. So 1 / c^m is at least
+            // r × (1 - 10^-w - η), which takes off less than 20m + 1 units of r's w-th digit.
+            let (r0, re0, rexact) = recip(lo, le, w, true)
+            if exact and rexact {
+                return make(neg, r0, re0, false, ctx)
+            }
+            // An exact 1 / lo comes without its zeros at the end: they go back, so r has its
+            // w + 1 digits and the margin is in its units.
+            let pad = (w + 1 - ndigits(r0)).max(0)
+            let r = shift_up(r0, pad)
+            let re = re0 - pad
+            // 10^(digits of m + 2) is over 20m + 1.
+            let low = sub_mag(r, shift_up([1], digits_i64(i64.wrap(m.min(1000000000000000000))) + 2 + (ndigits(r) - w).max(0)))
+            let a = make(neg, low, re, false, ctx)
+            let b = make(neg, r, re, false, ctx)
+            if a.ex == b.ex and cmp_mag(a.coef, b.coef) == 0 {
+                return a
+            }
         }
         w += w
     }
@@ -1560,50 +1576,37 @@ fn mul_exp(e: i64, n: i64) -> i64 {
     return r
 }
 
-struct Bounds {
-    lo: List<u32>
-    lo_e: i64
-    hi: List<u32>
-    hi_e: i64
-    hi_shift: i64     // lo_e - hi_e, while the exponents are kept apart from the power's
-    exact: bool
-}
-
-/// c^m between lo and hi, each cut to w digits, down and up.
-fn pow_bounds(c: List<u32>, m: u64, w: i64) -> Bounds {
-    var base_lo = c.copy()
-    var base_hi = c.copy()
-    var blo: i64 = 0
-    var bhi: i64 = 0
+/// c^m by squaring, cut down to w digits after each multiply: the coefficient, its exponent, and
+/// whether nothing was cut. A cut takes off less than 10^(1 - w) of what it cuts, as what's left
+/// has w digits, and its error is raised to the power of the times what it cut goes into c^m: the
+/// square made at step s goes in 2^(j - s) times for each bit j from s up that's set in m, which
+/// comes to 2^j - 1 for each bit, and the result's own cuts once each, at most one a bit. So the
+/// errors come to at most m of them, and c^m is below lo / (1 - 10^(1 - w))^m, which is below
+/// lo × (1 + 2m × 10^(1 - w)) as long as m × 10^(1 - w) is under a half, as pow_of's w makes it.
+fn pow_down(c: List<u32>, m: u64, w: i64) -> (List<u32>, i64, bool) {
+    var base = c.copy()
+    var be: i64 = 0
     var lo: List<u32> = [1]
-    var hi: List<u32> = [1]
-    var lo_e: i64 = 0
-    var hi_e: i64 = 0
+    var le: i64 = 0
     var exact = true
     var k = m
     loop {
         if k & 1 == 1 {
-            let (a, ae, ax) = cut(mul_mag(lo, base_lo), lo_e + blo, w, false)
-            let (b, be, _) = cut(mul_mag(hi, base_hi), hi_e + bhi, w, true)
+            let (a, ae, ax) = cut(mul_mag(lo, base), le + be, w, false)
             lo = a
-            lo_e = ae
-            hi = b
-            hi_e = be
+            le = ae
             exact = exact and ax
         }
         k = k >> 1
         if k == 0 {
             break
         }
-        let (a, ae, ax) = cut(mul_mag(base_lo, base_lo), blo + blo, w, false)
-        let (b, be, _) = cut(mul_mag(base_hi, base_hi), bhi + bhi, w, true)
-        base_lo = a
-        blo = ae
-        base_hi = b
-        bhi = be
+        let (a, ae, ax) = cut(mul_mag(base, base), be + be, w, false)
+        base = a
+        be = ae
         exact = exact and ax
     }
-    return Bounds { lo: lo, lo_e: lo_e, hi: hi, hi_e: hi_e, hi_shift: lo_e - hi_e, exact: exact }
+    return (lo, le, exact)
 }
 
 /// c × 10^e cut to w digits, down or up, and whether nothing was cut.
@@ -1796,6 +1799,31 @@ fn inc(a: mut List<u32>) {
         a[i] = 0
     }
     a.push(1)
+}
+
+/// `a + 10^t`, in place.
+fn add_pow10(a: own List<u32>, t: i64) -> List<u32> {
+    var x = a
+    var i = usize.wrap(t / 9)
+    while x.len() <= i {
+        x.push(0)
+    }
+    var add = POW10[usize.wrap(t % 9)]
+    while add != 0 {
+        if i == x.len() {
+            x.push(0)
+        }
+        let s = x[i] + add
+        if s >= 1000000000 {
+            x[i] = s - 1000000000
+            add = 1
+        } else {
+            x[i] = s
+            add = 0
+        }
+        i += 1
+    }
+    return x
 }
 
 /// `a += b`, in place.
