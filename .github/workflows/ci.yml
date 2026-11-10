@@ -221,10 +221,14 @@ jobs:
           $llvm = "clang+llvm-23.1.5-x86_64-pc-windows-msvc"
           Get-Pinned "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/$llvm.tar.zst" "$env:RUNNER_TEMP\$llvm.tar.zst" `
             "B2BE33385DDC86E83511417A060DE927AE8B09D1F3017CC3CDCE5C73CD5029D7"
-          # Only what the toolchain takes from it: the whole release is 4 GB unpacked.
-          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\$llvm.tar.zst" -C $env:RUNNER_TEMP `
+          # Only what the toolchain takes from it: the whole release is 4 GB unpacked. Its zstd
+          # window is 1 GiB, which only zstd itself decodes when told to.
+          zstd -d -q --long=31 "$env:RUNNER_TEMP\$llvm.tar.zst" -o "$env:RUNNER_TEMP\$llvm.tar"
+          if ($LASTEXITCODE -ne 0) { throw "can't decompress $llvm.tar.zst" }
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\$llvm.tar" -C $env:RUNNER_TEMP `
             "$llvm/bin/clang.exe" "$llvm/bin/lld.exe" "$llvm/lib/clang"
-          if ($LASTEXITCODE -ne 0) { throw "can't unpack $llvm.tar.zst" }
+          if ($LASTEXITCODE -ne 0) { throw "can't unpack $llvm.tar" }
+          Remove-Item "$env:RUNNER_TEMP\$llvm.tar", "$env:RUNNER_TEMP\$llvm.tar.zst"
           "LLVM_MINGW=$env:RUNNER_TEMP\$mingw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "LLVM_RELEASE=$env:RUNNER_TEMP\$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Version
