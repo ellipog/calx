@@ -1,0 +1,148 @@
+// std.nbt follows NBT paths as vanilla 26.3's NbtPathArgument does: what each line finds and
+// changes is what vanilla did with the same path, tag and change. The messages are std.nbt's own
+// (CLX-231).
+import std.nbt.{NbtPath, Tag, parse_snbt}
+
+fn path(text: String) -> NbtPath {
+    return NbtPath.parse(text)!
+}
+
+fn t(text: String) -> Tag {
+    return parse_snbt(text)!
+}
+
+fn parses(text: String) -> String {
+    return match NbtPath.parse(text) {
+        ok(p) => "{p}",
+        err(e) => "error: {e}",
+    }
+}
+
+fn tags(ts: List<Tag>) -> String {
+    var s = String()
+    for x in ts {
+        if not s.is_empty() {
+            s.push(' ')
+        }
+        s.push_str("{x}")
+    }
+    return s
+}
+
+fn get(p: String, root: String) -> String {
+    return match path(p).get(t(root)) {
+        ok(ts) => tags(ts),
+        err(e) => "error: {e}",
+    }
+}
+
+fn set(p: String, root: String, value: String) -> String {
+    var r = t(root)
+    return match path(p).set(mut r, t(value)) {
+        ok(n) => "{n} {r}",
+        err(e) => "error: {e}, leaving {r}",
+    }
+}
+
+fn remove(p: String, root: String) -> String {
+    var r = t(root)
+    return match path(p).remove(mut r) {
+        ok(n) => "{n} {r}",
+        err(e) => "error: {e}, leaving {r}",
+    }
+}
+
+fn insert(p: String, root: String, index: i32, items: String) -> String {
+    var r = t(root)
+    let xs = match t(items) {
+        List(xs) => xs,
+        _ => List<Tag>(),
+    }
+    return match path(p).insert(mut r, index, xs) {
+        ok(n) => "{n} {r}",
+        err(e) => "error: {e}, leaving {r}",
+    }
+}
+
+fn create(p: String, root: String, value: String) -> String {
+    var r = t(root)
+    return match path(p).get_or_create(mut r, t(value)) {
+        ok(ts) => "[{tags(ts)}] {r}",
+        err(e) => "error: {e}, leaving {r}",
+    }
+}
+
+fn nested(n: usize) -> String {
+    var s = String()
+    for _ in 0..n {
+        s.push('[')
+    }
+    for _ in 0..n {
+        s.push(']')
+    }
+    return s
+}
+
+fn main() {
+    // Reading paths: bare keys take anything but spaces, quotes, brackets, braces and `.`.
+    println("{parses("a.b[0][-1]")} {parses("a[\{b:1\}].c")} {parses("a\{b:1\}[]")} {parses("\{a:1\}.b")} {parses("\"a b\".c")} {parses("a.")} {parses("a[01]")} {parses("a-b+c:d/é")}")
+    // out: a.b[0][-1] a[{b:1}].c a{b:1}[] {a:1}.b "a b".c a. a[01] a-b+c:d/é
+    println(parses("\{a:1\}b"))    // out: error: line 1, column 6: `b` after a part of the path, where `.`, `[` or the end should be
+    println(parses("a..b"))    // out: error: line 1, column 3: `.`, where a key or `[` should be
+    println(parses("\"\".a"))    // out: error: line 1, column 1: an empty key, which a path doesn't take
+    println(parses("a\{b:1\}\{c:2\}"))    // out: error: line 1, column 7: `{` after the path's first part, where a key or `[` should be
+    println(parses("a[ 0]"))    // out: error: line 1, column 3: ` ` in `[...]`, where an index, a compound or `]` should be
+    println(parses("a[1.5]"))    // out: error: line 1, column 3: `1.5` in `[...]`, which isn't an int an index can be
+    println(parses("a[2147483648]"))    // out: error: line 1, column 3: `2147483648` in `[...]`, which isn't an int an index can be
+    println(parses("a["))    // out: error: line 1, column 3: the end in `[...]`, where an index, a compound or `]` should be
+    println(parses("\"a\\nb\""))    // out: error: line 1, column 4: `n` after `\` in a quoted key, where `\` or `"` should be
+    println(parses("a b"))    // out: error: line 1, column 2: ` ` in the path, where it should end
+
+    // Finding: indexes from the end, every element, compounds that hold a pattern.
+    println("{get("a[-1]", "\{a:[5,6]\}")} | {get("a[]", "\{a:[I;5,6]\}")} | {get("a[].b", "\{a:[\{b:1\},\{c:2\},\{b:3\}]\}")} | {get("", "\{a:1\}")}")
+    // out: 6 | 5 6 | 1 3 | {a:1}
+    println("{get("a[\{b:1\}]", "\{a:[\{b:1\},\{b:2\},\{b:1,c:3\}]\}")} | {get("\{a:[2,1]\}", "\{a:[1,2]\}")} | {get("\{a:1b\}", "\{a:true\}")}")
+    // out: {b:1} {b:1,c:3} | {a:[1,2]} | {a:1b}
+    println(get("\{a:[]\}", "\{a:[1,2]\}"))    // out: error: nothing matches `{a:[]}`
+    println(get("\{a:1\}", "\{a:1b\}"))    // out: error: nothing matches `{a:1}`
+    println(get("c.a", "\{\}"))    // out: error: nothing matches `c`
+    println(get("a[].b[]", "\{a:[1]\}"))    // out: error: nothing matches `a[].b`
+    println("{path("a[]").count(t("\{a:[]\}"))} {path("a[].b").count(t("\{a:[\{b:1\},\{c:2\},\{b:3\}]\}"))}")    // out: 0 2
+
+    // Setting: the compounds and lists on the way are made, and a tag already equal isn't counted.
+    println("{set("a.b", "\{a:\{b:1\}\}", "1")} | {set("a.b", "\{a:\{b:1\}\}", "1b")} | {set("x.y.z", "\{a:1\}", "5")} | {set("c[]", "\{c:[1,9,3]\}", "9")}")
+    // out: 0 {a:{b:1}} | 1 {a:{b:1b}} | 1 {a:1,x:{y:{z:5}}} | 2 {c:[9,9,9]}
+    println(set("d[\{x:5\}].y", "\{d:[\{x:1,y:2\},\{x:2\},\{x:1,z:3\}]\}", "7"))
+    // out: 1 {d:[{x:1,y:2},{x:2},{x:1,z:3},{x:5,y:7}]}
+    println("{set("n[\{a:1\}]", "\{\}", "9")} | {set("a[0]", "\{a:[\{b:1\}]\}", "\{b:1\}")} | {set("a\{b:1\}", "\{a:\{b:1\}\}", "5")}")
+    // out: 1 {n:[9]} | 0 {a:[{b:1}]} | 1 {a:5}
+    // Arrays take numbers as their kind: low bits, floats rounded down, a float cut to a long.
+    println("{set("f[0]", "\{f:[B;1,2,3]\}", "300")} | {set("a[0]", "\{a:[I;0]\}", "-0.9")} | {set("a[0]", "\{a:[L;0]\}", "-0.9f")} | {set("a[0]", "\{a:[I;0]\}", "1e30")}")
+    // out: 1 {f:[B;44B,2B,3B]} | 1 {a:[I;-1]} | 1 {a:[L;0L]} | 1 {a:[I;2147483647]}
+    println("{set("f[0]", "\{f:[I;1,2,3]\}", "\"x\"")} | {set("a[]", "\{a:[I;1,2]\}", "\"x\"")}")
+    // out: 0 {f:[I;1,2,3]} | 0 {a:[I;]}
+    println(set("\{e:\"no\"\}.e", "\{e:\"s\"\}", "\"t\""))    // out: error: nothing matches `{e:"no"}`, leaving {e:"s"}
+    println(set("a[0].c", "\{\}", "7"))    // out: error: nothing matches `a[0]`, leaving {a:[]}
+    println(set("a[].a[]", "\{a:0b\}", "1"))    // out: error: nothing matches `a[].a[]`, leaving {a:0b}
+    println(set("", "\{\}", "1"))    // out: error: an empty path names the root itself, which can't be changed through it, leaving {}
+    // The path's parts and the value's depth may come to 512.
+    println("{set("a", "\{\}", nested(511)).len()} {set("a", "\{\}", nested(512))}")
+    // out: 1028 error: the change would nest lists and compounds more than 512 deep, leaving {}
+
+    // Removing.
+    println("{remove("d[\{x:1\}]", "\{d:[\{x:1,y:2\},\{x:2\},\{x:1,z:3\}]\}")} | {remove("h[][0]", "\{h:[[1],[2,3]]\}")} | {remove("f[]", "\{f:[I;1,2,3]\}")} | {remove("zz.y", "\{a:1\}")}")
+    // out: 2 {d:[{x:2}]} | 2 {h:[[],[3]]} | 3 {f:[I;]} | 0 {a:1}
+
+    // Inserting: -1 is after the last, and a list that fails leaves those before it changed.
+    println("{insert("c", "\{c:[1,2,3]\}", -1, "[9]")} | {insert("c", "\{c:[1,2,3]\}", -2, "[9]")} | {insert("zz", "\{\}", 0, "[9]")} | {insert("c", "\{c:[1,2,3]\}", 1, "[8,9]")}")
+    // out: 1 {c:[1,2,3,9]} | 1 {c:[1,2,9,3]} | 1 {zz:[9]} | 1 {c:[1,8,9,2,3]}
+    println("{insert("f", "\{f:[I;1,2,3]\}", 1, "[7,\"x\",9]")} | {insert("f", "\{f:[B;1,2,3]\}", -1, "[300]")} | {insert("f", "\{f:[I;1]\}", 5, "[\"x\"]")}")
+    // out: 1 {f:[I;1,7,9,2,3]} | 1 {f:[B;1B,2B,3B,44B]} | 0 {f:[I;1]}
+    println(insert("c", "\{c:[1,2,3]\}", 4, "[9]"))    // out: error: 4 is outside a list of 3, where an index should be from -4 to 3, leaving {c:[1,2,3]}
+    println(insert("e", "\{e:\"s\"\}", 0, "[9]"))    // out: error: `"s"`, where a list or an array to insert into should be, leaving {e:"s"}
+    println(insert("h[]", "\{h:[[1],\"x\",[2]]\}", 0, "[9]"))    // out: error: `"x"`, where a list or an array to insert into should be, leaving {h:[[9,1],"x",[2]]}
+
+    // Getting or making.
+    println("{create("x[\{a:1\}]", "\{\}", "7")} | {create("g[]", "\{g:[]\}", "7")} | {create("c[5]", "\{c:[1,2,3]\}", "7")} | {create("a[]", "\{a:[I;]\}", "7")}")
+    // out: [{a:1}] {x:[{a:1}]} | [7] {g:[7]} | [] {c:[1,2,3]} | [7] {a:[I;7]}
+}

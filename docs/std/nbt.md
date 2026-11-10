@@ -1,6 +1,6 @@
 ---
 title: std.nbt
-description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, and SNBT read, shown and laid out as vanilla does.
+description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does.
 ---
 
 # `std.nbt`
@@ -133,6 +133,71 @@ What `parse_snbt` takes, as vanilla does:
 - Arrays, `[B; 1, 2]`, whose integers take the array's kind unless they have a narrower one, lists of any kinds, and compounds, whose keys are quoted and not empty, or bare, and both may end with a comma.
 - White space anywhere between parts: what Java's `Character.isWhitespace` says, which isn't true of no-break spaces.
 
+## NBT paths
+
+An `NbtPath` names tags inside a tag, as vanilla's `/data` and `/execute store` commands take one, and finds, sets, removes and inserts them as vanilla 26.3's `NbtPathArgument` does:
+
+```calx
+import std.nbt.{NbtPath, Tag, parse_snbt}
+
+fn main() {
+    var player = parse_snbt("\{Inventory:[\{Slot:0b,id:\"minecraft:stone\",count:64\},\{Slot:1b,id:\"minecraft:dirt\",count:3\}],Pos:[0.5d,64.0d,0.5d]\}")!
+    println("{NbtPath.parse("Inventory[].id")!.get(player)!}")    // out: ["minecraft:stone", "minecraft:dirt"]
+    println("{NbtPath.parse("Pos[-2]")!.get(player)!}")    // out: [64.0d]
+
+    // Set the count of the item in slot 1, and add a torch at the end.
+    let count = NbtPath.parse("Inventory[\{Slot:1b\}].count")!
+    println("{count.set(mut player, Tag.Int(10))!}")    // out: 1
+    let torch = parse_snbt("\{Slot:2b,id:\"minecraft:torch\",count:1\}")!
+    _ = NbtPath.parse("Inventory")!.insert(mut player, -1, [torch])!
+    println("{NbtPath.parse("Inventory[]")!.count(player)}")    // out: 3
+
+    // What isn't there is made on the way.
+    _ = NbtPath.parse("Tags.home.x")!.set(mut player, Tag.Int(5))!
+    _ = NbtPath.parse("Inventory[\{id:\"minecraft:stone\"\}]")!.remove(mut player)!
+    println("{player}")
+    // out: {Inventory:[{Slot:1b,count:10,id:"minecraft:dirt"},{Slot:2b,count:1,id:"minecraft:torch"}],Pos:[0.5d,64.0d,0.5d],Tags:{home:{x:5}}}
+    match NbtPath.parse("Armor[0]")!.get(player) {
+        ok(_) => println("found"),
+        err(e) => println("{e}"),    // out: nothing matches `Armor`
+    }
+}
+```
+
+A path's parts, joined by `.` before a key:
+
+| Part | Names |
+| --- | --- |
+| `name`, `"a name"` | The tag at a compound's key. A bare key is anything up to a space, a quote, a bracket, a brace or `.`, and a quoted one takes `\\` and `\"` |
+| `name{...}` | The compound at the key, if it holds what the SNBT compound does |
+| `[i]` | A list's or an array's element, counted from the end if `i` is below 0, so `[-1]` is the last |
+| `[]` | Every element of a list or an array |
+| `[{...}]` | Each compound in a list that holds what the SNBT compound does |
+| `{...}`, first | The root, if it holds what the compound does |
+
+A compound holds what a pattern does if it has each of the pattern's keys with a value that matches. A list matches if it holds, for each of the pattern's elements, one that matches, in any order, and an empty list only matches an empty one. Anything else must be equal: `{a:1}` doesn't match `{a:1b}`.
+
+| Item | Gives |
+| --- | --- |
+| `NbtPath.parse(text) -> NbtPath ! SnbtError` | The path in `text`, all of it. An empty one names the root |
+| `p.get(root) -> List<Tag> ! PathError` | Copies of the tags the path names, in order, or `NoMatch` |
+| `p.count(root) -> usize` | How many tags the path names |
+| `p.set(root: mut Tag, value) -> usize ! PathError` | Puts a copy of `value` at each place the path names, as `/data modify ... set` does, and gives how many tags changed. One already equal to `value` isn't counted |
+| `p.remove(root: mut Tag) -> usize ! PathError` | Takes out what the path names, as `/data remove` does, and gives how many tags it took |
+| `p.insert(root: mut Tag, index: i32, items: List<Tag>) -> usize ! PathError` | Puts copies of `items` into each list or array the path names, from `index`: 0 is before the first, as `prepend` puts them, and -1 after the last, as `append` does. Gives how many lists took an item |
+| `p.get_or_create(root: mut Tag, value) -> List<Tag> ! PathError` | Copies of the tags the path names, after making what's missing, with a copy of `value` at the end |
+| `"{p}"` | The path as it was written |
+
+Changing through a path makes what's missing on the way, as vanilla does: a compound where a key comes next and a list where `[...]` does, the pattern's compound for `name{...}` or `[{...}]`, and one element in an empty list for `[]`. An array takes a number as its kind does in vanilla: an integer's low bits, a float or a double rounded down and clamped to an int, and for a long array, a float cut toward 0 and a double rounded down. Anything else isn't put in.
+
+| `PathError` | When |
+| --- | --- |
+| `NoMatch(path)` | The path names nothing, or a part before the last found nothing to change in. `path` is the path as far as that part |
+| `NotList(tag)` | Inserting found `tag` where a list or an array should be |
+| `BadIndex { index, len }` | Inserting at an index outside a list of `len`, which takes from `-len - 1` to `len` |
+| `TooDeep` | The path's parts and the value's depth come to more than 512, which vanilla refuses before changing anything |
+| `Empty` | Setting, removing or inserting through an empty path, which names no tag in the root to change |
+
 ## Tags without a file
 
 Packets send a tag with its kind and no name, and a file holds its root with a name. These read and write either from where it sits in a buffer:
@@ -207,6 +272,13 @@ SNBT was checked against vanilla 26.3's `TagParser` and `SnbtPrinterTagVisitor` 
 - Half a surrogate pair, such as `\uD800` on its own, reads as `?`, as a Calx `String` can't hold it.
 - Lists and compounds nest at most 512 deep, as in NBT. Vanilla's parser has no limit and slows down a lot on deep text.
 - Its errors are its own, a line and a column and what was found where, though it fails on the same text.
+
+NBT paths were checked against vanilla's `NbtPathArgument` on 748 cases written to probe each rule, and 140,000 random ones over small trees, with every kind of part and change. `std.nbt` read the same paths, found the same tags, changed the same ones to the same values with the same counts, and failed on the same changes with the same part named. Where a change fails partway, as an insert into the second of two lists does, it left the tag as vanilla left it. It differs in four places:
+
+- `NbtPath.parse` reads the whole text, where a command stops at a space and leaves the rest for what comes after.
+- An empty path can't be changed through, and `a[` is an error. Vanilla's code fails on both with a Java exception.
+- A value nested past 512 can't be read from SNBT, as above, so it can't be given to a change from text.
+- Its messages are its own.
 
 Compound keys are [interned](../reference/strings.md#interned-strings): each is kept once, so a tree of many compounds with the same keys holds one copy of each, and reading one costs no allocation. The runtime keeps a bounded number of names, and a key past that limit is an ordinary copy.
 

@@ -1,8 +1,9 @@
 /// NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures and
 /// each chunk of a region file. Tags are read and written as vanilla 26.3's `NbtIo` reads and
-/// writes them, files gzipped, zlib-compressed or plain, and shown as SNBT as its `toString`
-/// shows them. A compound keeps its keys in the order they were read or put, as a Python dict
-/// does, so the NBT of a file read and written back is the same, byte for byte.
+/// writes them, files gzipped, zlib-compressed or plain, SNBT is read and written as its
+/// `TagParser`, `toString` and pretty printer do, and NBT paths are followed as its
+/// `NbtPathArgument` does. A compound keeps its keys in the order they were read or put, as a
+/// Python dict does, so the NBT of a file read and written back is the same, byte for byte.
 module std.nbt
 
 import std.bytes.{i16_be, i32_be, i64_be, put_i16_be, put_i32_be, put_i64_be, put_u16_be, put_u32_be, put_u64_be, u16_be, u32_be, u64_be}
@@ -2063,4 +2064,1021 @@ fn kind_name_of(bits: u32) -> str {
 
 fn int_tag(v: i64, bits: u32) -> Tag {
     return if bits == 8 { Tag.Byte(i8.wrap(v)) } else if bits == 16 { Tag.Short(i16.wrap(v)) } else if bits == 32 { Tag.Int(i32.wrap(v)) } else { Tag.Long(v) }
+}
+
+// --- NBT paths -----------------------------------------------------------------------------------
+
+/// A path to tags inside a tag, as vanilla's `/data` and `/execute store` commands take one:
+/// `Inventory[{Slot:0b}].id`, `Pos[0]`, `Passengers[].id`. Its parts are a compound's keys, a
+/// list's or an array's elements by index or all of them, and compounds that hold some tags, and
+/// it reads and changes what it names as vanilla 26.3's `NbtPathArgument` does.
+pub struct NbtPath {
+    text: String
+    nodes: List<PathNode>
+    // Where each node ends in `text`, to say which part of the path found nothing.
+    ends: List<usize>
+}
+
+// One part of a path.
+enum PathNode {
+    // `{...}`, first: the root, if it's a compound that holds what the pattern does.
+    Root(Tag)
+    // `name`: the tag at a compound's key.
+    Key(String)
+    // `name{...}`: the compound at a key, if it holds what the pattern does.
+    KeyMatch { name: String, pattern: Tag }
+    // `[i]`: a list's or an array's element, counted from the end if `i` is below 0.
+    Index(i32)
+    // `[]`: every element of a list or an array.
+    All
+    // `[{...}]`: each compound in a list that holds what the pattern does.
+    ListMatch(Tag)
+}
+
+/// Why a path couldn't be followed, or a change through it made, where vanilla's commands fail.
+pub enum PathError {
+    /// The path names nothing, or the part of it before the last names nothing to change in:
+    /// vanilla's "Found no elements matching".
+    NoMatch(String)
+    /// Inserting found this tag where a list or an array should be.
+    NotList(Tag)
+    /// Inserting at `index`, which is outside a list of `len`: an index is from `-len - 1` to
+    /// `len`.
+    BadIndex { index: i32, len: usize }
+    /// The change would nest more than 512 deep, counting the path's parts and the value's depth.
+    TooDeep
+    /// The path is empty, so it names the root, which can't be changed through it.
+    Empty
+}
+
+impl Display for PathError {
+    fn show(self) {
+        match self {
+            NoMatch(p) => print("nothing matches `{p}`"),
+            NotList(t) => print("`{t}`, where a list or an array to insert into should be"),
+            BadIndex { index, len } => print("{index} is outside a list of {len}, where an index should be from -{len + 1} to {len}"),
+            TooDeep => print("the change would nest lists and compounds more than 512 deep"),
+            Empty => print("an empty path names the root itself, which can't be changed through it"),
+        }
+    }
+}
+
+impl NbtPath {
+    /// The path in `text`, as vanilla reads one: keys bare or quoted, joined by `.`, then `[i]`,
+    /// `[]` or `[{...}]` after a key or each other, `name{...}` for a compound that holds some
+    /// tags, and `{...}` first for the root. The whole text is the path, and an empty one names
+    /// the root.
+    pub fn parse(text: String) -> NbtPath ! SnbtError {
+        var nodes = List<PathNode>()
+        var ends = List<usize>()
+        var keys = new_keys()
+        var at: usize = 0
+        let n = text.len()
+        while at < n and text.byte_at(at) != b' ' {
+            nodes.push(try path_node(text, mut at, ends.is_empty(), mut keys))
+            ends.push(at)
+            if at < n {
+                let c = text.byte_at(at)
+                if c == b'.' {
+                    at += 1
+                } else if c != b' ' and c != b'[' and c != b'{' {
+                    fail snbt_error(text, at, "{found(text, at)} after a part of the path, where `.`, `[` or the end should be")
+                }
+            }
+        }
+        if at < n {
+            fail snbt_error(text, at, "{found(text, at)} in the path, where it should end")
+        }
+        return NbtPath { text: text.copy(), nodes, ends }
+    }
+
+    /// Copies of the tags the path names in `root`, in order, or `NoMatch` with the path as far
+    /// as the part that found nothing.
+    pub fn get(self, root: Tag) -> List<Tag> ! PathError {
+        var out = List<Tag>()
+        var reached: usize = 0
+        _ = path_find(root, self.nodes, 0, mut out, true, mut reached)
+        if out.is_empty() {
+            fail PathError.NoMatch(self.prefix(reached))
+        }
+        return out
+    }
+
+    /// How many tags the path names in `root`.
+    pub fn count(self, root: Tag) -> usize {
+        var out = List<Tag>()
+        var reached: usize = 0
+        return path_find(root, self.nodes, 0, mut out, false, mut reached)
+    }
+
+    /// Puts a copy of `value` at each place the path names, making the compounds and lists on the
+    /// way that aren't there, as `/data modify ... set` does. Gives how many tags it changed: one
+    /// that already equals `value` doesn't count.
+    pub fn set(self, root: mut Tag, value: Tag) -> usize ! PathError {
+        if self.nodes.is_empty() {
+            fail PathError.Empty
+        }
+        if self.nodes.len() + tag_depth(value) > MAX_DEPTH {
+            fail PathError.TooDeep
+        }
+        var w = PathWalk { what: WALK_SET, index: 0, found: List<Tag>(), count: 0, reached: 0, failed: none }
+        let none_items = List<Tag>()
+        path_walk(mut root, self.nodes, 0, value, none_items, mut w)
+        try self.check_reached(w.reached)
+        return w.count
+    }
+
+    /// Takes out the tags the path names, as `/data remove` does, and gives how many it took.
+    pub fn remove(self, root: mut Tag) -> usize ! PathError {
+        if self.nodes.is_empty() {
+            fail PathError.Empty
+        }
+        var w = PathWalk { what: WALK_REMOVE, index: 0, found: List<Tag>(), count: 0, reached: 0, failed: none }
+        let none_items = List<Tag>()
+        path_walk(mut root, self.nodes, 0, Tag.End, none_items, mut w)
+        return w.count
+    }
+
+    /// Puts copies of `items` into each list or array the path names, in order from `index`, as
+    /// `/data modify ... insert` does: -1 is after the last element, as `append` puts them, and 0
+    /// before the first, as `prepend` does. A list the path names that isn't there is made. An
+    /// array takes the numbers among the items, as its kind. Gives how many lists or arrays took
+    /// an item.
+    pub fn insert(self, root: mut Tag, index: i32, items: List<Tag>) -> usize ! PathError {
+        if self.nodes.is_empty() {
+            fail PathError.Empty
+        }
+        var deepest: usize = 0
+        for item in items {
+            let d = tag_depth(item)
+            if d > deepest {
+                deepest = d
+            }
+        }
+        if not items.is_empty() and self.nodes.len() + deepest > MAX_DEPTH {
+            fail PathError.TooDeep
+        }
+        // Vanilla makes what's missing all the way first, then inserts into each list in turn,
+        // so a list that fails leaves those before it changed and the rest made but not changed.
+        // The walk does the same in one go, inserting no more after the first failure.
+        var w = PathWalk { what: WALK_INSERT, index, found: List<Tag>(), count: 0, reached: 0, failed: none }
+        path_walk(mut root, self.nodes, 0, Tag.End, items, mut w)
+        try self.check_reached(w.reached)
+        if let e = w.failed.take() {
+            fail e
+        }
+        return w.count
+    }
+
+    /// Copies of the tags the path names in `root`, making what isn't there on the way, with a
+    /// copy of `value` at the end, as vanilla's `getOrCreate` does.
+    pub fn get_or_create(self, root: mut Tag, value: Tag) -> List<Tag> ! PathError {
+        if self.nodes.is_empty() {
+            fail PathError.Empty
+        }
+        var w = PathWalk { what: WALK_CREATE, index: 0, found: List<Tag>(), count: 0, reached: 0, failed: none }
+        let none_items = List<Tag>()
+        path_walk(mut root, self.nodes, 0, value, none_items, mut w)
+        try self.check_reached(w.reached)
+        return w.found
+    }
+
+    // A change fails if a part of the path before the last found nothing, naming the path as far
+    // as that part.
+    fn check_reached(self, reached: usize) ! PathError {
+        if reached + 1 < self.nodes.len() {
+            fail PathError.NoMatch(self.prefix(reached))
+        }
+    }
+
+    // The path's text as far as part `j`. Vanilla keeps one `[]` for a path's every `[]` and
+    // finds where a part ends by the part, so a `[]` ends where the path's last `[]` does.
+    fn prefix(self, j: usize) -> String {
+        var end = self.ends[j]
+        if let All = self.nodes[j] {
+            for k in j..self.nodes.len() {
+                if let All = self.nodes[k] {
+                    end = self.ends[k]
+                }
+            }
+        }
+        return self.text[0..end]
+    }
+}
+
+/// `{path}` is the path as it was written.
+impl Display for NbtPath {
+    fn show(self) {
+        print(self.text)
+    }
+}
+
+// One part of a path, from `at`, which moves past it.
+fn path_node(t: String, at: mut usize, first: bool, keys: mut List<String>) -> PathNode ! SnbtError {
+    let n = t.len()
+    let start = at
+    if at < n and t.byte_at(at) == b'{' {
+        if not first {
+            fail snbt_error(t, at, "`\{` after the path's first part, where a key or `[` should be")
+        }
+        return PathNode.Root(Tag.Compound(try snbt_compound(t, mut at, 1, mut keys)))
+    }
+    if at < n and t.byte_at(at) == b'[' {
+        at += 1
+        if at < n and t.byte_at(at) == b']' {
+            at += 1
+            return PathNode.All
+        }
+        if at < n and t.byte_at(at) == b'{' {
+            let pattern = Tag.Compound(try snbt_compound(t, mut at, 1, mut keys))
+            if at >= n or t.byte_at(at) != b']' {
+                fail snbt_error(t, at, "{found(t, at)} after the compound in `[...]`, where `]` should be")
+            }
+            at += 1
+            return PathNode.ListMatch(pattern)
+        }
+        // As Brigadier reads an int: digits, `-` and `.`, then Java's `Integer.parseInt`.
+        let from = at
+        while at < n and (is_digit(t.byte_at(at)) or t.byte_at(at) == b'-' or t.byte_at(at) == b'.') {
+            at += 1
+        }
+        if at == from {
+            fail snbt_error(t, at, "{found(t, at)} in `[...]`, where an index, a compound or `]` should be")
+        }
+        let index = match i32.parse(t[from..at]) {
+            some(v) => v,
+            none => fail snbt_error(t, from, "`{t[from..at]}` in `[...]`, which isn't an int an index can be"),
+        }
+        if at >= n or t.byte_at(at) != b']' {
+            fail snbt_error(t, at, "{found(t, at)} after the index, where `]` should be")
+        }
+        at += 1
+        return PathNode.Index(index)
+    }
+    var name = String()
+    if at < n and (t.byte_at(at) == b'"' or t.byte_at(at) == b'\'') {
+        name = try path_quoted(t, mut at)
+        if name.is_empty() {
+            fail snbt_error(t, start, "an empty key, which a path doesn't take")
+        }
+    } else {
+        while at < n and path_bare(t.byte_at(at)) {
+            at += 1
+        }
+        if at == start {
+            let what = if first { "a key, `[` or `\{`" } else { "a key or `[`" }
+            fail snbt_error(t, at, "{found(t, at)}, where {what} should be")
+        }
+        name = intern_key(t, start, at, mut keys)
+    }
+    if at < n and t.byte_at(at) == b'{' {
+        let pattern = Tag.Compound(try snbt_compound(t, mut at, 1, mut keys))
+        return PathNode.KeyMatch { name, pattern }
+    }
+    return PathNode.Key(name)
+}
+
+// A bare key in a path is anything up to a space, a quote, a bracket, a brace or `.`.
+fn path_bare(c: u8) -> bool {
+    return c != b' ' and c != b'"' and c != b'\'' and c != b'[' and c != b']' and c != b'.' and c != b'{' and c != b'}'
+}
+
+// A quoted key, as Brigadier reads a quoted string: `\` only before `\` or the quote it's in.
+fn path_quoted(t: String, at: mut usize) -> String ! SnbtError {
+    let q = t.byte_at(at)
+    at += 1
+    var out = String()
+    var from = at
+    loop {
+        if at >= t.len() {
+            fail snbt_error(t, at, "the end in a quoted key, where `{rune(q)}` should be")
+        }
+        let c = t.byte_at(at)
+        if c == q {
+            out.push_str(t[from..at])
+            at += 1
+            return out
+        }
+        if c == b'\\' {
+            out.push_str(t[from..at])
+            at += 1
+            if at < t.len() and (t.byte_at(at) == q or t.byte_at(at) == b'\\') {
+                out.push(rune(t.byte_at(at)))
+                at += 1
+                from = at
+                continue
+            }
+            fail snbt_error(t, at, "{found(t, at)} after `\\` in a quoted key, where `\\` or `{rune(q)}` should be")
+        }
+        at += 1
+    }
+}
+
+// The index `k` names in `len` elements, counting from the end if it's below 0.
+fn path_index(k: i32, len: usize) -> usize? {
+    let j = if k < 0 { i64.wrap(len) + i64(k) } else { i64(k) }
+    if j < 0 or j >= i64.wrap(len) {
+        return none
+    }
+    return some(usize.wrap(j))
+}
+
+// The tags `nodes[i..]` name from `tag`, counted, and copied into `out` if `keep`. `reached` is
+// the most parts any tag was found through.
+fn path_find(tag: Tag, nodes: List<PathNode>, i: usize, out: mut List<Tag>, keep: bool, reached: mut usize) -> usize {
+    if i > reached {
+        reached = i
+    }
+    if i == nodes.len() {
+        if keep {
+            out.push(tag.copy())
+        }
+        return 1
+    }
+    var n: usize = 0
+    match nodes[i] {
+        Root(p) => {
+            if matches(p, tag) {
+                n += path_find(tag, nodes, i + 1, mut out, keep, mut reached)
+            }
+        },
+        Key(name) => {
+            if let Compound(m) = tag {
+                if m.contains(name) {
+                    n += path_find(m[name], nodes, i + 1, mut out, keep, mut reached)
+                }
+            }
+        },
+        KeyMatch { name, pattern } => {
+            if let Compound(m) = tag {
+                if m.contains(name) and matches(pattern, m[name]) {
+                    n += path_find(m[name], nodes, i + 1, mut out, keep, mut reached)
+                }
+            }
+        },
+        Index(k) => {
+            match tag {
+                List(xs) => if let j = path_index(k, xs.len()) { n += path_find(xs[j], nodes, i + 1, mut out, keep, mut reached) },
+                ByteArray(v) => if let j = path_index(k, v.len()) { n += path_find(Tag.Byte(v[j]), nodes, i + 1, mut out, keep, mut reached) },
+                IntArray(v) => if let j = path_index(k, v.len()) { n += path_find(Tag.Int(v[j]), nodes, i + 1, mut out, keep, mut reached) },
+                LongArray(v) => if let j = path_index(k, v.len()) { n += path_find(Tag.Long(v[j]), nodes, i + 1, mut out, keep, mut reached) },
+                _ => {},
+            }
+        },
+        All => {
+            match tag {
+                List(xs) => { for x in xs { n += path_find(x, nodes, i + 1, mut out, keep, mut reached) } },
+                ByteArray(v) => { for x in v { n += path_find(Tag.Byte(x), nodes, i + 1, mut out, keep, mut reached) } },
+                IntArray(v) => { for x in v { n += path_find(Tag.Int(x), nodes, i + 1, mut out, keep, mut reached) } },
+                LongArray(v) => { for x in v { n += path_find(Tag.Long(x), nodes, i + 1, mut out, keep, mut reached) } },
+                _ => {},
+            }
+        },
+        ListMatch(p) => {
+            if let List(xs) = tag {
+                for x in xs {
+                    if matches(p, x) {
+                        n += path_find(x, nodes, i + 1, mut out, keep, mut reached)
+                    }
+                }
+            }
+        },
+    }
+    return n
+}
+
+// What a walk through a path does: sets or removes at the last part, or makes what's missing and
+// keeps copies of what it finds or inserts into it.
+const WALK_SET: u8 = 0
+const WALK_REMOVE: u8 = 1
+const WALK_CREATE: u8 = 2
+const WALK_INSERT: u8 = 3
+
+struct PathWalk {
+    what: u8
+    // Where insert puts the items.
+    index: i32
+    found: List<Tag>
+    count: usize
+    // The most parts of the path any tag was found through.
+    reached: usize
+    // The first list insert failed on, after which it inserts into no more.
+    failed: PathError?
+}
+
+// Walks `nodes[i..]` from `tag` as `w.what` says, depth first. Vanilla goes a part at a time over
+// every tag found so far, but each part changes only the tags it's at, so the two end the same.
+fn path_walk(tag: mut Tag, nodes: List<PathNode>, i: usize, value: Tag, items: List<Tag>, w: mut PathWalk) {
+    if i > w.reached {
+        w.reached = i
+    }
+    if i + 1 == nodes.len() and w.what == WALK_SET {
+        w.count += set_last(mut tag, nodes[i], value)
+        return
+    }
+    if i + 1 == nodes.len() and w.what == WALK_REMOVE {
+        w.count += remove_last(mut tag, nodes[i])
+        return
+    }
+    if i == nodes.len() {
+        if w.what == WALK_CREATE {
+            w.found.push(tag.copy())
+        } else if w.what == WALK_INSERT and w.failed == none {
+            match insert_into(mut tag, w.index, items) {
+                ok(took) => {
+                    if took {
+                        w.count += 1
+                    }
+                },
+                err(e) => w.failed = some(e),
+            }
+        }
+        return
+    }
+    let create = w.what != WALK_REMOVE
+    match nodes[i] {
+        Root(p) => {
+            if matches(p, tag) {
+                path_walk(mut tag, nodes, i + 1, value, items, mut w)
+            }
+        },
+        Key(name) => {
+            if let Compound(m) = mut tag {
+                if create and not m.contains(name) {
+                    m.insert(name.copy(), path_made(nodes, i, value, w.what))
+                }
+                if m.contains(name) {
+                    path_walk(mut m[name], nodes, i + 1, value, items, mut w)
+                }
+            }
+        },
+        KeyMatch { name, pattern } => {
+            if let Compound(m) = mut tag {
+                if m.contains(name) {
+                    if matches(pattern, m[name]) {
+                        path_walk(mut m[name], nodes, i + 1, value, items, mut w)
+                    }
+                } else if create {
+                    m.insert(name.copy(), pattern.copy())
+                    path_walk(mut m[name], nodes, i + 1, value, items, mut w)
+                }
+            }
+        },
+        Index(k) => {
+            match mut tag {
+                List(xs) => {
+                    if let j = path_index(k, xs.len()) {
+                        path_walk(mut xs[j], nodes, i + 1, value, items, mut w)
+                    }
+                },
+                // An array's element is a number, which nothing after it can change, so a copy
+                // stands in for it.
+                ByteArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        var e = Tag.Byte(v[j])
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                IntArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        var e = Tag.Int(v[j])
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                LongArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        var e = Tag.Long(v[j])
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                _ => {},
+            }
+        },
+        All => {
+            // An empty list or array takes one element first, if the walk makes what's missing.
+            match mut tag {
+                List(xs) => {
+                    if create and xs.is_empty() {
+                        xs.push(path_made(nodes, i, value, w.what))
+                    }
+                    for x in mut xs {
+                        path_walk(mut x, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                // An empty array that takes the tag made goes on with that tag, as vanilla does,
+                // not with the number the array keeps of it.
+                ByteArray(v) => {
+                    if create and v.is_empty() {
+                        var made = path_made(nodes, i, value, w.what)
+                        if let b = array_byte(made) {
+                            v.push(b)
+                            path_walk(mut made, nodes, i + 1, value, items, mut w)
+                        }
+                        return
+                    }
+                    for x in v {
+                        var e = Tag.Byte(x)
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                IntArray(v) => {
+                    if create and v.is_empty() {
+                        var made = path_made(nodes, i, value, w.what)
+                        if let b = array_int(made) {
+                            v.push(b)
+                            path_walk(mut made, nodes, i + 1, value, items, mut w)
+                        }
+                        return
+                    }
+                    for x in v {
+                        var e = Tag.Int(x)
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                LongArray(v) => {
+                    if create and v.is_empty() {
+                        var made = path_made(nodes, i, value, w.what)
+                        if let b = array_long(made) {
+                            v.push(b)
+                            path_walk(mut made, nodes, i + 1, value, items, mut w)
+                        }
+                        return
+                    }
+                    for x in v {
+                        var e = Tag.Long(x)
+                        path_walk(mut e, nodes, i + 1, value, items, mut w)
+                    }
+                },
+                _ => {},
+            }
+        },
+        ListMatch(p) => {
+            // A list with no compound that matches takes a copy of the pattern, if the walk
+            // makes what's missing.
+            if let List(xs) = mut tag {
+                var any = false
+                for x in mut xs {
+                    if matches(p, x) {
+                        any = true
+                        path_walk(mut x, nodes, i + 1, value, items, mut w)
+                    }
+                }
+                if not any and create {
+                    xs.push(p.copy())
+                    let last = xs.len() - 1
+                    path_walk(mut xs[last], nodes, i + 1, value, items, mut w)
+                }
+            }
+        },
+    }
+}
+
+// What a walk puts where part `i` finds nothing: for a part before the last, a compound if a key
+// comes next and a list if `[...]` does, and for the last, the value being made or, for insert,
+// a list.
+fn path_made(nodes: List<PathNode>, i: usize, value: Tag, what: u8) -> Tag {
+    if i + 1 < nodes.len() {
+        return match nodes[i + 1] {
+            Key(_) => Tag.Compound(LinkedMap()),
+            KeyMatch { name: _, pattern: _ } => Tag.Compound(LinkedMap()),
+            _ => Tag.List(List()),
+        }
+    }
+    if what == WALK_CREATE {
+        return value.copy()
+    }
+    return Tag.List(List())
+}
+
+// Puts `value` where the path's last part names from `tag`, and gives how many tags changed.
+fn set_last(tag: mut Tag, node: PathNode, value: Tag) -> usize {
+    match node {
+        Root(_) => return 0,
+        Key(name) => {
+            if let Compound(m) = mut tag {
+                let same_there = m.contains(name) and tag_equal(m[name], value)
+                m.insert(name.copy(), value.copy())
+                return if same_there { 0 } else { 1 }
+            }
+        },
+        KeyMatch { name, pattern } => {
+            if let Compound(m) = mut tag {
+                if m.contains(name) and matches(pattern, m[name]) and not tag_equal(m[name], value) {
+                    m.insert(name.copy(), value.copy())
+                    return 1
+                }
+            }
+        },
+        Index(k) => {
+            match mut tag {
+                List(xs) => {
+                    if let j = path_index(k, xs.len()) {
+                        if not tag_equal(xs[j], value) {
+                            xs[j] = value.copy()
+                            return 1
+                        }
+                    }
+                },
+                ByteArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        if not tag_equal(Tag.Byte(v[j]), value) {
+                            if let b = array_byte(value) {
+                                v[j] = b
+                                return 1
+                            }
+                        }
+                    }
+                },
+                IntArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        if not tag_equal(Tag.Int(v[j]), value) {
+                            if let b = array_int(value) {
+                                v[j] = b
+                                return 1
+                            }
+                        }
+                    }
+                },
+                LongArray(v) => {
+                    if let j = path_index(k, v.len()) {
+                        if not tag_equal(Tag.Long(v[j]), value) {
+                            if let b = array_long(value) {
+                                v[j] = b
+                                return 1
+                            }
+                        }
+                    }
+                },
+                _ => {},
+            }
+        },
+        All => {
+            // As vanilla does it: an empty one takes the value and counts 1 even if an array
+            // can't hold it, and otherwise every element is replaced, if any differs, and an
+            // array that can't hold the value is left empty.
+            match mut tag {
+                List(xs) => {
+                    if xs.is_empty() {
+                        xs.push(value.copy())
+                        return 1
+                    }
+                    var differ: usize = 0
+                    for x in xs {
+                        if not tag_equal(x, value) {
+                            differ += 1
+                        }
+                    }
+                    if differ > 0 {
+                        for x in mut xs {
+                            x = value.copy()
+                        }
+                    }
+                    return differ
+                },
+                ByteArray(v) => {
+                    if v.is_empty() {
+                        if let b = array_byte(value) {
+                            v.push(b)
+                        }
+                        return 1
+                    }
+                    var differ: usize = 0
+                    for x in v {
+                        if not tag_equal(Tag.Byte(x), value) {
+                            differ += 1
+                        }
+                    }
+                    if differ == 0 {
+                        return 0
+                    }
+                    let n = v.len()
+                    v.clear()
+                    if let b = array_byte(value) {
+                        for _ in 0..n {
+                            v.push(b)
+                        }
+                        return differ
+                    }
+                    return 0
+                },
+                IntArray(v) => {
+                    if v.is_empty() {
+                        if let b = array_int(value) {
+                            v.push(b)
+                        }
+                        return 1
+                    }
+                    var differ: usize = 0
+                    for x in v {
+                        if not tag_equal(Tag.Int(x), value) {
+                            differ += 1
+                        }
+                    }
+                    if differ == 0 {
+                        return 0
+                    }
+                    let n = v.len()
+                    v.clear()
+                    if let b = array_int(value) {
+                        for _ in 0..n {
+                            v.push(b)
+                        }
+                        return differ
+                    }
+                    return 0
+                },
+                LongArray(v) => {
+                    if v.is_empty() {
+                        if let b = array_long(value) {
+                            v.push(b)
+                        }
+                        return 1
+                    }
+                    var differ: usize = 0
+                    for x in v {
+                        if not tag_equal(Tag.Long(x), value) {
+                            differ += 1
+                        }
+                    }
+                    if differ == 0 {
+                        return 0
+                    }
+                    let n = v.len()
+                    v.clear()
+                    if let b = array_long(value) {
+                        for _ in 0..n {
+                            v.push(b)
+                        }
+                        return differ
+                    }
+                    return 0
+                },
+                _ => {},
+            }
+        },
+        ListMatch(p) => {
+            // An empty list takes the value, whatever it is, as vanilla does.
+            var n: usize = 0
+            if let List(xs) = mut tag {
+                if xs.is_empty() {
+                    xs.push(value.copy())
+                    return 1
+                }
+                for x in mut xs {
+                    if matches(p, x) and not tag_equal(x, value) {
+                        x = value.copy()
+                        n += 1
+                    }
+                }
+            }
+            return n
+        },
+    }
+    return 0
+}
+
+// Takes out what the path's last part names from `tag`, and gives how many tags it took.
+fn remove_last(tag: mut Tag, node: PathNode) -> usize {
+    match node {
+        Root(_) => return 0,
+        Key(name) => {
+            if let Compound(m) = mut tag {
+                if m.remove(name) != none {
+                    return 1
+                }
+            }
+        },
+        KeyMatch { name, pattern } => {
+            if let Compound(m) = mut tag {
+                if m.contains(name) and matches(pattern, m[name]) {
+                    _ = m.remove(name)
+                    return 1
+                }
+            }
+        },
+        Index(k) => {
+            match mut tag {
+                List(xs) => if let j = path_index(k, xs.len()) { _ = xs.remove(j); return 1 },
+                ByteArray(v) => if let j = path_index(k, v.len()) { _ = v.remove(j); return 1 },
+                IntArray(v) => if let j = path_index(k, v.len()) { _ = v.remove(j); return 1 },
+                LongArray(v) => if let j = path_index(k, v.len()) { _ = v.remove(j); return 1 },
+                _ => {},
+            }
+        },
+        All => {
+            match mut tag {
+                List(xs) => { let n = xs.len(); xs.clear(); return n },
+                ByteArray(v) => { let n = v.len(); v.clear(); return n },
+                IntArray(v) => { let n = v.len(); v.clear(); return n },
+                LongArray(v) => { let n = v.len(); v.clear(); return n },
+                _ => {},
+            }
+        },
+        ListMatch(p) => {
+            if let List(xs) = mut tag {
+                let before = xs.len()
+                xs.retain(|x| not matches(p, x))
+                return before - xs.len()
+            }
+        },
+    }
+    return 0
+}
+
+// Puts copies of `items` into the list or array `tag` from `index`, and says whether it took any.
+// As vanilla does it, the index is only wrong once an item would go in, so an array given no
+// numbers takes none and fails on none.
+fn insert_into(tag: mut Tag, index: i32, items: List<Tag>) -> bool ! PathError {
+    let len = match tag {
+        List(xs) => xs.len(),
+        ByteArray(v) => v.len(),
+        IntArray(v) => v.len(),
+        LongArray(v) => v.len(),
+        _ => fail PathError.NotList(tag.copy()),
+    }
+    let start = if index < 0 { i64.wrap(len) + i64(index) + 1 } else { i64(index) }
+    let fits = start >= 0 and start <= i64.wrap(len)
+    var at = if fits { usize.wrap(start) } else { 0 }
+    var any = false
+    match mut tag {
+        List(xs) => {
+            for item in items {
+                if not fits {
+                    fail PathError.BadIndex { index, len }
+                }
+                xs.insert(at, item.copy())
+                at += 1
+                any = true
+            }
+        },
+        ByteArray(v) => {
+            for item in items {
+                if let b = array_byte(item) {
+                    if not fits {
+                        fail PathError.BadIndex { index, len }
+                    }
+                    v.insert(at, b)
+                    at += 1
+                    any = true
+                }
+            }
+        },
+        IntArray(v) => {
+            for item in items {
+                if let b = array_int(item) {
+                    if not fits {
+                        fail PathError.BadIndex { index, len }
+                    }
+                    v.insert(at, b)
+                    at += 1
+                    any = true
+                }
+            }
+        },
+        LongArray(v) => {
+            for item in items {
+                if let b = array_long(item) {
+                    if not fits {
+                        fail PathError.BadIndex { index, len }
+                    }
+                    v.insert(at, b)
+                    at += 1
+                    any = true
+                }
+            }
+        },
+        _ => {},
+    }
+    return any
+}
+
+// Whether `tag` holds what `pattern` does, as vanilla matches a path's compounds: a compound
+// holds each of the pattern's keys with a value that matches, a list holds for each of the
+// pattern's elements one that matches, in any order, and an empty list only matches an empty
+// one. Anything else must be equal.
+fn matches(pattern: Tag, tag: Tag) -> bool {
+    match pattern {
+        Compound(p) => {
+            if let Compound(m) = tag {
+                for (k, v) in p {
+                    if not m.contains(k) or not matches(v, m[k]) {
+                        return false
+                    }
+                }
+                return true
+            }
+            return false
+        },
+        List(p) => {
+            if let List(xs) = tag {
+                if p.is_empty() {
+                    return xs.is_empty()
+                }
+                for want in p {
+                    var hit = false
+                    for x in xs {
+                        if matches(want, x) {
+                            hit = true
+                            break
+                        }
+                    }
+                    if not hit {
+                        return false
+                    }
+                }
+                return true
+            }
+            return false
+        },
+        _ => return tag_equal(pattern, tag),
+    }
+}
+
+// Whether two tags are equal as vanilla's are: as `==` has it, but with every NaN equal to every
+// other, as Java's records compare floats, and -0.0 equal to 0.0, which vanilla keeps as 0.0.
+fn tag_equal(a: Tag, b: Tag) -> bool {
+    match a {
+        Float(x) => if let Float(y) = b { return x == y or (x.is_nan() and y.is_nan()) },
+        Double(x) => if let Double(y) = b { return x == y or (x.is_nan() and y.is_nan()) },
+        List(xs) => {
+            if let List(ys) = b {
+                if xs.len() != ys.len() {
+                    return false
+                }
+                for i in 0..xs.len() {
+                    if not tag_equal(xs[i], ys[i]) {
+                        return false
+                    }
+                }
+                return true
+            }
+        },
+        Compound(m) => {
+            if let Compound(n) = b {
+                if m.len() != n.len() {
+                    return false
+                }
+                for (k, v) in m {
+                    if not n.contains(k) or not tag_equal(v, n[k]) {
+                        return false
+                    }
+                }
+                return true
+            }
+        },
+        _ => return a == b,
+    }
+    return false
+}
+
+// How deep a tag nests, as vanilla counts it for a change through a path: 1 for a number, a
+// string, an array or an empty list or compound, and one more than its deepest tag for a list or
+// a compound that holds some.
+fn tag_depth(t: Tag) -> usize {
+    var d: usize = 0
+    match t {
+        List(xs) => { for x in xs { d = d.max(tag_depth(x)) } },
+        Compound(m) => { for (_, v) in m { d = d.max(tag_depth(v)) } },
+        _ => {},
+    }
+    return d + 1
+}
+
+// A number as an array of its kind takes it, as vanilla's `NumericTag` gives it: an integer's low
+// bits, and a float or a double rounded down first, then clamped to an int. A long array takes a
+// float cut toward 0 instead, as Java's `(long) f` does, and a double rounded down.
+fn array_byte(v: Tag) -> i8? {
+    return match v {
+        Byte(x) => some(x),
+        Short(x) => some(i8.wrap(x)),
+        Int(x) => some(i8.wrap(x)),
+        Long(x) => some(i8.wrap(x)),
+        Float(x) => some(i8.wrap(i32.saturate(x.floor()))),
+        Double(x) => some(i8.wrap(i32.saturate(x.floor()))),
+        _ => none,
+    }
+}
+
+fn array_int(v: Tag) -> i32? {
+    return match v {
+        Byte(x) => some(i32(x)),
+        Short(x) => some(i32(x)),
+        Int(x) => some(x),
+        Long(x) => some(i32.wrap(x)),
+        Float(x) => some(i32.saturate(x.floor())),
+        Double(x) => some(i32.saturate(x.floor())),
+        _ => none,
+    }
+}
+
+fn array_long(v: Tag) -> i64? {
+    return match v {
+        Byte(x) => some(i64(x)),
+        Short(x) => some(i64(x)),
+        Int(x) => some(i64(x)),
+        Long(x) => some(x),
+        Float(x) => some(i64.saturate(x)),
+        Double(x) => some(i64.saturate(x.floor())),
+        _ => none,
+    }
 }
