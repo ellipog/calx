@@ -3,9 +3,10 @@
 #
 #     curl -fsSL https://calxlang.com/install.sh | sh
 #
-# It downloads the newest release from github.com/ellipog/calx, checks its SHA-256, unpacks it
-# into ~/.calx, and puts ~/.calx/bin on your PATH. No root is needed. Run it again to reinstall;
-# `calx update` keeps an installation up to date.
+# It downloads the newest release from github.com/ellipog/calx, and the toolchain it builds
+# programs with, clang and lld, unless that's installed already, checks their SHA-256s, unpacks
+# them into ~/.calx, and puts ~/.calx/bin on your PATH. No root is needed. Run it again to
+# reinstall; `calx update` keeps an installation up to date.
 #
 # CALX_INSTALL installs somewhere else, CALX_CHANNEL=nightly picks the nightly releases,
 # CALX_NO_MODIFY_PATH=1 leaves PATH alone, and CALX_RELEASES points at a mirror.
@@ -95,6 +96,33 @@ for part in "$new"/* ; do
 done
 rm -rf "$aside"
 
+# The toolchain programs are built with, clang and lld, is a download of its own, since it changes
+# only with LLVM (CLX-110, CLX-251): it's fetched when the one here isn't the one the release names
+# in toolchain.txt, its file, SHA-256 and VERSION. Unpacked beside the installation, since /tmp
+# may be too small a RAM disk for its 400 MB.
+if [ -f "$root/toolchain.txt" ]; then
+    tc_file=$(sed -n 1p "$root/toolchain.txt")
+    tc_sum=$(sed -n 2p "$root/toolchain.txt")
+    tc_name=$(sed -n 3p "$root/toolchain.txt")
+    if [ "$(cat "$root/toolchain/VERSION" 2> /dev/null)" != "$tc_name" ]; then
+        echo "Downloading the toolchain programs are built with, $tc_name..."
+        work="$root/.update/toolchain-install"
+        rm -rf "$work"
+        mkdir -p "$work"
+        get_to "$releases/download/$tag/$tc_file" "$work/$tc_file" || stop "can't download $releases/download/$tag/$tc_file"
+        got=$(sha256 "$work/$tc_file")
+        if [ "$got" != "$tc_sum" ]; then
+            rm -rf "$work"
+            stop "the toolchain's SHA-256 is $got, but the release says $tc_sum. Try again in a minute; \`calx update --toolchain\` does too."
+        fi
+        echo "Checked its SHA-256 ($(( $(wc -c < "$work/$tc_file") / 1048576 )) MB). Unpacking it..."
+        tar -xJf "$work/$tc_file" -C "$work" || stop "can't unpack the toolchain, which needs xz: on Ubuntu or Debian, sudo apt install xz-utils"
+        rm -rf "$root/toolchain"
+        mv "$work/toolchain" "$root/toolchain"
+        rm -rf "$work"
+    fi
+fi
+
 bin="$root/bin"
 if [ "${CALX_NO_MODIFY_PATH:-}" != 1 ]; then
     case ":$PATH:" in
@@ -122,11 +150,18 @@ fi
 echo
 echo "Calx is installed in $root."
 
-# Calx builds programs with clang. Until releases carry their own (CLX-110), it has to be there.
-if [ -z "${CALX_CC:-}" ] && ! command -v clang > /dev/null 2>&1; then
+# Calx builds programs with clang: the toolchain's, or one installed for a release without one.
+if [ ! -x "$root/toolchain/bin/clang" ] && [ -z "${CALX_CC:-}" ] && ! command -v clang > /dev/null 2>&1; then
     echo
     echo "Calx builds programs with clang, which isn't installed yet. On Ubuntu or Debian:"
     echo "    sudo apt install clang lld"
+fi
+# Programs use the system's C library, with its headers and start files.
+if [ ! -f /usr/include/stdio.h ]; then
+    echo
+    echo "Calx builds programs with the C library's headers, which aren't installed yet."
+    echo "On Ubuntu or Debian:  sudo apt install libc6-dev"
+    echo "On Fedora:            sudo dnf install glibc-devel"
 fi
 if ! ldconfig -p 2> /dev/null | grep -q 'libcurl'; then
     echo

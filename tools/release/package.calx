@@ -3,16 +3,22 @@
 //     calx run tools/release/package.calx -- VERSION OS CALX UPDATER OUT [TOOLCHAIN]
 //
 // OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. TOOLCHAIN
-// is the folder tools/release/toolchain.calx made, with clang, lld and what they build with,
-// which the release carries as toolchain/ so nothing else needs installing (CLX-110). It writes
-// to the folder OUT:
+// is the folder tools/release/toolchain.calx made, with clang, lld and what they build with, which
+// an installation keeps as toolchain/, so nothing else needs installing (CLX-110). It writes to the
+// folder OUT:
 //
 // - calx-VERSION-windows-x64.zip, or calx-VERSION-linux-x64.tar.gz, holding calx/ with bin/calx
-//   and bin/calx-update, runtime/, std/, toolchain/ if there's one, LICENSE and VERSION;
-// - the archive's name with .sha256 added, holding its SHA-256 as `sha256sum` writes it;
+//   and bin/calx-update, runtime/, std/, LICENSE, VERSION, and with a toolchain, toolchain.txt;
+// - with a toolchain, calx-toolchain-NAME-OS-x64.tar.xz, holding toolchain/, NAME being the
+//   toolchain's VERSION in lower case with `-` between its words, such as
+//   `llvm-23.1.5-llvm-mingw-20261104`. toolchain.txt names it, with its SHA-256 and its VERSION,
+//   on three lines. The toolchain is a download of its own, since it's most of a release and
+//   changes only with LLVM: `calx update` and the install scripts fetch it only when the one
+//   installed isn't the one the release names (CLX-251);
+// - each archive's name with .sha256 added, holding its SHA-256 as `sha256sum` writes it;
 // - version.txt, holding VERSION.
 //
-// Files are added in sorted order with fixed dates, so the same inputs make the same archive.
+// Files are added in sorted order with fixed dates, so the same inputs make the same archives.
 
 import std.env.{args}
 import std.fs.{is_dir, list, make_dir_all, metadata, read, write}
@@ -43,8 +49,12 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
     files.push(("calx/bin/calx-update{exe}", try load(updater), 0o755))
     try add_tree(mut files, "runtime", "calx/runtime")
     try add_tree(mut files, "std", "calx/std")
+    if let err(e) = make_dir_all(out) {
+        fail "can't make {out}: {e}"
+    }
     if not toolchain.is_empty() {
-        try add_all(mut files, toolchain, "calx/toolchain")
+        let (asset, sum, name) = try toolchain_archive(os, toolchain, out)
+        files.push((String("calx/toolchain.txt"), "{asset}\n{sum}\n{name}\n".to_bytes(), 0o644))
     }
     files.push((String("calx/LICENSE"), try load("LICENSE"), 0o644))
     files.push((String("calx/VERSION"), "{version}\n".to_bytes(), 0o644))
@@ -65,9 +75,6 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
             t.add(path, data, mode: mode)
         }
         bytes = t.finish_gz(9)
-    }
-    if let err(e) = make_dir_all(out) {
-        fail "can't make {out}: {e}"
     }
     let sum = hex(sha256(bytes))
     try save("{out}/{name}", bytes)
@@ -91,6 +98,52 @@ fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: Strin
             files.push(("{prefix}/{n}", try load(path), 0o644))
         }
     }
+}
+
+// The toolchain in `dir` as calx-toolchain-NAME-OS-x64.tar.xz in `out`, with its .sha256: its name,
+// its SHA-256 and its VERSION.
+fn toolchain_archive(os: String, dir: String, out: String) -> (String, String, String) ! String {
+    let text = String.from_utf8(try load("{dir}/VERSION")) ?? String()
+    let name = text.trim()
+    if name.is_empty() {
+        fail "{dir}/VERSION is empty"
+    }
+    let asset = "calx-toolchain-{slug(name)}-{os}-x64.tar.xz"
+    var files = List<(String, List<u8>, u32)>()
+    try add_all(mut files, dir, "toolchain")
+    var t = TarWriter.new()
+    for f in files {
+        let (path, data, mode) = f.copy()
+        t.add(path, data, mode: mode)
+    }
+    let bytes = t.finish_xz(9)
+    let sum = hex(sha256(bytes))
+    try save("{out}/{asset}", bytes)
+    try save("{out}/{asset}.sha256", "{sum}  {asset}\n".to_bytes())
+    println("{asset}: {files.len()} files, {bytes.len()} bytes, sha256 {sum}")
+    return (asset, sum, name)
+}
+
+// `name` in lower case, with `-` for each run of what isn't a letter, a digit or a `.`.
+fn slug(name: String) -> String {
+    var out = String()
+    var gap = false
+    for i in 0..name.len() {
+        var b = name.byte_at(i)
+        if b >= 65 and b <= 90 {
+            b += 32
+        }
+        if (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 46 {
+            if gap and not out.is_empty() {
+                out.push('-')
+            }
+            out.push(rune(b))
+            gap = false
+        } else {
+            gap = true
+        }
+    }
+    return out
 }
 
 // Every file under the folder `dir`, as `prefix/...`, in sorted order, with the permission bits it

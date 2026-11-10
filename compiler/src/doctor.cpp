@@ -62,6 +62,13 @@ int capture(const std::vector<std::string>& argv, const std::string& folder, std
     return status;
 }
 
+// `text` without the spaces and line ends around it.
+std::string trimmed(const std::string& text) {
+    std::size_t a = text.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    return text.substr(a, text.find_last_not_of(" \t\r\n") - a + 1);
+}
+
 // The first line of `text`.
 std::string first_line(const std::string& text) {
     std::size_t end = text.find_first_of("\r\n");
@@ -89,10 +96,11 @@ std::uintmax_t folder_bytes(const fs::path& dir) {
 }
 
 std::string install_clang() {
-    // A release carries its own clang in toolchain/ (CLX-110); a build from source uses one installed.
+    // A release builds with its own clang in toolchain/ (CLX-110); a build from source uses one
+    // installed.
     if (CALX_COMMIT[0]) {
-        return "A release of Calx carries its own clang, in toolchain/ beside bin/. Reinstall Calx to get\n"
-               "it back, or set CALX_CC to another clang.";
+        return "`calx update --toolchain` installs the clang a release of Calx builds with, in toolchain/\n"
+               "beside bin/. Or set CALX_CC to another clang.";
     }
 #ifdef _WIN32
     return "Install LLVM with `winget install LLVM.LLVM`, then open a new terminal, or set CALX_CC to\n"
@@ -155,6 +163,29 @@ int run_doctor() {
         fix("Reinstall Calx.");
     } else {
         ok("runtime and standard library in " + home);
+    }
+
+    // The toolchain the release builds programs with, a download of its own that the install
+    // scripts and `calx update` fetch, named on the third line of toolchain.txt (CLX-251).
+    std::string note;
+    if (!home.empty() && read_file((fs::path(home) / "toolchain.txt").string(), note)) {
+        std::string name, installed;
+        std::size_t at = 0;
+        for (int line = 0; line < 3 && at <= note.size(); line++) {
+            std::size_t end = note.find('\n', at);
+            if (end == std::string::npos) end = note.size();
+            if (line == 2) name = trimmed(note.substr(at, end - at));
+            at = end + 1;
+        }
+        read_file((fs::path(home) / "toolchain" / "VERSION").string(), installed);
+        installed = trimmed(installed);
+        if (installed.empty()) {
+            warn("the toolchain this release builds programs with, " + name + ", isn't installed");
+            fix("`calx update --toolchain` installs it.");
+        } else if (installed != name) {
+            warn("the toolchain installed is " + installed + ", but this release builds with " + name);
+            fix("`calx update --toolchain` installs that one.");
+        }
     }
 
     // clang and lld, found as a build finds them: CALX_CC, then the toolchain the installation

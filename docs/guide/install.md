@@ -19,7 +19,7 @@ On Linux:
 curl -fsSL https://calxlang.com/install.sh | sh
 ```
 
-Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), checks it against the SHA-256 published with it, unpacks it into `.calx` in your home folder, and puts `.calx/bin` on your PATH. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls.
+Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), and the [toolchain](#clang) it builds programs with, checks them against the SHA-256s published with them, unpacks them into `.calx` in your home folder, and puts `.calx/bin` on your PATH. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls.
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
 
@@ -31,17 +31,12 @@ Calx is pre-release, so until the first stable release, the scripts install the 
 
 ## clang
 
-Calx compiles programs to C and has clang build that C.
+Calx compiles programs to C and has clang build that C. A release brings its own, in `.calx/toolchain`: clang and lld from LLVM 23, so nothing else needs installing, not LLVM, and on Windows not Visual Studio.
 
-On Windows, a release carries its own, in `.calx\toolchain`: clang and lld from LLVM 23, and [mingw-w64](https://www.mingw-w64.org/)'s headers and libraries for the Windows C runtime, the UCRT, which every Windows from 10 on has. So nothing else needs installing: not LLVM, and not Visual Studio. The programs it builds need only Windows 10 or later. `CALX_CC` picks another clang, such as one from LLVM's installer, which builds with Visual Studio's C runtime and SDK.
+- **On Windows**, with [mingw-w64](https://www.mingw-w64.org/)'s headers and libraries for the Windows C runtime, the UCRT, which every Windows from 10 on has. The programs it builds need only Windows 10 or later. It's a 60 MB download.
+- **On Linux**, programs use the system's C library, glibc 2.35 or later, with its headers and start files, and compiler-rt in place of GCC's parts, so GCC needn't be installed. It's a 90 MB download. Most systems have glibc's headers; the install script says if they're missing, which on Ubuntu or Debian is `sudo apt install libc6-dev`, and on Fedora `sudo dnf install glibc-devel`.
 
-On Linux, programs need **clang and lld, from LLVM 18 or later**, until the Linux release carries them too ([CLX-110](https://acta.aaenz.no/aaen-studios/clx#CLX-110)). The install script says if clang is missing. On Ubuntu or Debian:
-
-```sh
-sudo apt install clang lld
-```
-
-If `clang --version` says your clang is older than 18, [apt.llvm.org](https://apt.llvm.org/) has newer ones.
+The toolchain is a download of its own, which changes only with LLVM, so most updates leave it as it is. `calx update --toolchain` installs it again if it goes missing, and `calx doctor` says if it is. `CALX_CC` picks another clang, such as one from LLVM's installer; on Windows that one builds with Visual Studio's C runtime and SDK, from its Build Tools with the "Desktop development with C++" workload.
 
 Release builds use x86-64-v3 instructions, so the programs they make need a processor with AVX2, as most made since 2015 have. Debug builds run on any 64-bit x86 processor.
 

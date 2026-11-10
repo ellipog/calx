@@ -274,7 +274,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 
 | Variable | Meaning |
 | --- | --- |
-| `CALX_CC` | The clang to use. Otherwise the one the installation carries in `toolchain/bin`, which a Windows release has, or else `clang` on `PATH` |
+| `CALX_CC` | The clang to use. Otherwise the one the installation carries in `toolchain/bin`, or else `clang` on `PATH` |
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
@@ -309,7 +309,7 @@ calx doctor
 Everything works.
 ```
 
-It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
+It finds clang as a build does: `CALX_CC`, then the toolchain the installation carries, then `PATH`, and says if the toolchain the release builds with isn't the one installed, which `calx update --toolchain` mends. The real test is building a program, in debug and release, which is what everything else is for. When that fails, it shows what clang said and names what's missing: on Windows, mingw-w64's headers and libraries beside the toolchain's clang, or with another clang, the C runtime and SDK from Visual Studio's Build Tools; on Linux, the C library's headers. It exits with 1 if something needs fixing, and 0 if not. A failed build points at it too.
 
 ## Updating
 
@@ -322,11 +322,13 @@ calx update --nightly      # follow the nightly releases from now on
 calx update --stable       # follow the stable releases from now on
 calx update --to 0.2.0     # install a version, newer or older
 calx update --rollback     # put back what the last update replaced; again, to undo that
+calx update --toolchain    # install the toolchain this release builds with, if it isn't there
 ```
 
 - **Channels.** Stable releases are tagged `vX.Y.Z`. A nightly is published for every push to `main` that passes CI, with a version such as `0.2.0-nightly.202611011530`, a prerelease of the next stable version. `calx update` stays on the channel of the version that's running. Until there's a first stable release, the stable channel follows the nightlies.
 - **Each download is checked** against the SHA-256 the release publishes beside it, and nothing changes if it doesn't match. Releases come only from github.com/ellipog/calx, over HTTPS, so the trust is in that account and TLS. They aren't signed.
 - **The swap is quick and can't leave half an installation.** The new release is unpacked beside the installation, then each part is renamed into place, with what it replaces renamed into `.update/old`. If a rename fails, the ones before it are put back. On Windows, the running `calx.exe` is renamed out of the way, which Windows allows, where overwriting it isn't.
+- **The toolchain is its own download.** clang, lld and what they build with are most of a release, 60 MB on Windows and 90 MB on Linux, and change only with LLVM. So a release's archive names the toolchain it builds with in `toolchain.txt`, an archive of its own in the same release, and an update downloads it only when `toolchain/VERSION` isn't that one, which keeps most updates to 6 MB. A new toolchain is checked and unpacked before anything moves, and the one it replaces goes into `.update/old` with the rest, so `--rollback` brings it back too. `--toolchain` installs the one the release names if it's missing, which the install scripts run.
 - **A build from source** says to update with `git pull` and a rebuild, and how to install a release instead.
 
 `calx update` runs `calx-update`, a Calx program that ships beside `calx` in each release: [tools/update/update.calx](../../tools/update/update.calx). It's built on [`std.http`](../std/http.md), [`std.hash`](../std/hash.md), [`std.zip`](../std/zip.md) and [`std.tar`](../std/tar.md).

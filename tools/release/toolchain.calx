@@ -2,38 +2,51 @@
 // else installed (CLX-110), run by CI from the repository's root:
 //
 //     calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME
+//     calx run tools/release/toolchain.calx -- linux LLVM OUT NAME
 //
-// MINGW is llvm-mingw's x86_64 UCRT release and LLVM is LLVM's own release for Windows, of the
-// same LLVM version, both unpacked; OUT is the folder to make. NAME, such as `LLVM 23.1.5,
-// llvm-mingw 20261104`, goes in OUT/VERSION, which builds put in their cache keys, so a release
-// with a new toolchain compiles everything again.
+// LLVM is LLVM's own release for the system, and MINGW llvm-mingw's x86_64 UCRT release of the
+// same LLVM version, unpacked; OUT is the folder to make. NAME, such as `LLVM 23.1.5, llvm-mingw
+// 20261104`, goes in OUT/VERSION, which builds put in their cache keys, so a release with a new
+// toolchain compiles everything again, and which names the archive package.calx makes of it. A
+// change to what's kept needs a new NAME, such as with `r2` after it.
 //
 // clang and lld come from LLVM's release, one program each, linked statically with an allocator
-// of their own: llvm-mingw's load LLVM from DLLs and use the C runtime's heap, which made a
-// module's debug build about 10% slower and a release build from an empty cache 20% slower.
-// From llvm-mingw come what clang builds for mingw-w64 and the UCRT with: the configuration that
-// picks them, mingw-w64's headers, the import libraries for x86_64 and compiler-rt's builtins,
-// with the licenses, LLVM's and mingw-w64's. It leaves out the other targets and tools, C++'s
-// headers and libraries, and the DDK's headers, some of which are LGPL.
+// of their own. On Windows, llvm-mingw's load LLVM from DLLs and use the C runtime's heap, which
+// made a module's debug build about 10% slower and a release build from an empty cache 20%
+// slower. From llvm-mingw come what clang builds for mingw-w64 and the UCRT with: the
+// configuration that picks them, mingw-w64's headers, the import libraries for x86_64 and
+// compiler-rt's builtins, with the licenses, LLVM's and mingw-w64's. It leaves out the other
+// targets and tools, C++'s headers and libraries, and the DDK's headers, some of which are LGPL.
+//
+// On Linux, programs use the system's C library, its headers and start files, which libc6-dev or
+// glibc-devel has, and compiler-rt's builtins and start files rather than GCC's, so GCC needn't
+// be installed. clang and lld are stripped of their symbols, a fifth of clang and a third of lld.
 
 import std.env.{args}
-import std.fs.{Kind, copy, is_file, make_dir_all, metadata, walk, write_text}
-import std.process.{exit}
+import std.fs.{Entry, Kind, copy, is_file, make_dir_all, metadata, walk, write_text}
+import std.process.{Command, exit}
 
 fn main() {
-    let a = args()
-    if a.len() != 5 or a[0] != "windows" {
-        eprintln("usage: calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME")
-        exit(2)
-    }
-    if let err(e) = windows(a[1], a[2], a[3], a[4]) {
+    if let err(e) = run(args()) {
         eprintln("toolchain: {e}")
         exit(1)
     }
 }
 
+fn run(a: List<String>) ! String {
+    if a.len() == 5 and a[0] == "windows" {
+        try windows(a[1], a[2], a[3], a[4])
+    } else if a.len() == 4 and a[0] == "linux" {
+        try linux(a[1], a[2], a[3])
+    } else {
+        eprintln("usage: calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME")
+        eprintln("       calx run tools/release/toolchain.calx -- linux LLVM OUT NAME")
+        exit(2)
+    }
+}
+
 fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
-    var kept = Kept { files: 0, bytes: 0 }
+    var kept = Kept { files: 0 }
     try put(mut kept, "{llvm}/bin/clang.exe", "{out}/bin/clang.exe")
     // lld picks how to link from the name it's started by; clang starts ld.lld for mingw-w64.
     let lld = if is_file("{llvm}/bin/ld.lld.exe") { "{llvm}/bin/ld.lld.exe" } else { "{llvm}/bin/lld.exe" }
@@ -53,24 +66,81 @@ fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
     try tree(mut kept, mingw, out, "lib/clang", |rel: String| {
         rel.ends_with("/lib/windows/libclang_rt.builtins-x86_64.a")
     })
-    if let err(e) = write_text("{out}/VERSION", "{name}\n") {
-        fail "can't write {out}/VERSION: {e}"
+    try finish(out, name, kept)
+}
+
+fn linux(llvm: String, out: String, name: String) ! String {
+    var kept = Kept { files: 0 }
+    // bin/clang is a link to clang-<major>, the program.
+    var driver = String()
+    for e in try entries("{llvm}/bin") {
+        let n = e.path[llvm.len() + 5..e.path.len()]
+        if e.kind == Kind.File and n.starts_with("clang-") and digits(n[6..n.len()]) {
+            driver = e.path.copy()
+        }
     }
-    println("toolchain: {name}, {kept.files} files, {kept.bytes / 1048576} MiB, in {out}")
+    if driver.is_empty() {
+        fail "no clang-<major> in {llvm}/bin"
+    }
+    try put(mut kept, driver, "{out}/bin/clang")
+    // lld picks how to link from the name it's started by.
+    try put(mut kept, "{llvm}/bin/lld", "{out}/bin/ld.lld")
+    let strip = Command.new("{llvm}/bin/llvm-strip").args(["--strip-all", "{out}/bin/clang", "{out}/bin/ld.lld"])
+    match strip.output() {
+        ok(o) => {
+            if not o.status.success() {
+                fail "llvm-strip failed: {o.error_text()}"
+            }
+        },
+        err(e) => fail "can't run {llvm}/bin/llvm-strip: {e}",
+    }
+    // What clang loads for the target it was made for: compiler-rt's builtins and start files, no
+    // unwinder, which C needs none of, and lld. The runtime's stack traces use glibc's backtrace,
+    // which loads the system's libgcc_s by itself.
+    let cfg = #"
+        # Calx's toolchain: compiler-rt and lld, with the system's C library, and no GCC.
+        --start-no-unused-arguments
+        -rtlib=compiler-rt
+        -unwindlib=none
+        -fuse-ld=lld
+        --end-no-unused-arguments
+        "#
+    if let err(e) = write_text("{out}/bin/x86_64-unknown-linux-gnu.cfg", cfg) {
+        fail "can't write {out}/bin/x86_64-unknown-linux-gnu.cfg: {e}"
+    }
+    kept.files += 1
+    try put(mut kept, "{llvm}/include/llvm/Support/LICENSE.TXT", "{out}/LICENSE.TXT")
+    try tree(mut kept, llvm, out, "lib/clang", |rel: String| {
+        rel.contains("/include/") or rel.ends_with("/libclang_rt.builtins.a") or rel.ends_with("/clang_rt.crtbegin.o") or
+            rel.ends_with("/clang_rt.crtend.o")
+    })
+    try finish(out, name, kept)
 }
 
 struct Kept {
     files: usize
-    bytes: u64
+}
+
+// Writes VERSION, and says what was kept.
+fn finish(out: String, name: String, kept: Kept) ! String {
+    if let err(e) = write_text("{out}/VERSION", "{name}\n") {
+        fail "can't write {out}/VERSION: {e}"
+    }
+    var bytes: u64 = 0
+    for e in try entries(out) {
+        if e.kind == Kind.File {
+            bytes += match metadata(e.path) {
+                ok(m) => m.size,
+                err(_) => 0,
+            }
+        }
+    }
+    println("toolchain: {name}, {kept.files + 1} files, {bytes / 1048576} MiB, in {out}")
 }
 
 // Copies each file under `from/dir` whose path from `from`, with `/` between names, `keep` takes.
 fn tree(kept: mut Kept, from: String, out: String, dir: String, keep: Fn(String) -> bool) ! String {
-    let entries = match walk("{from}/{dir}") {
-        ok(e) => e,
-        err(e) => fail "can't list {from}/{dir}: {e}",
-    }
-    for e in entries {
+    for e in try entries("{from}/{dir}") {
         if e.kind != Kind.File {
             continue
         }
@@ -92,8 +162,24 @@ fn put(kept: mut Kept, from: String, to: String) ! String {
         fail "can't copy {from} to {to}: {e}"
     }
     kept.files += 1
-    kept.bytes += match metadata(to) {
-        ok(m) => m.size,
-        err(_) => 0,
+}
+
+fn entries(dir: String) -> List<Entry> ! String {
+    return match walk(dir) {
+        ok(e) => e,
+        err(e) => fail "can't list {dir}: {e}",
     }
+}
+
+fn digits(s: String) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        if b < 48 or b > 57 {
+            return false
+        }
+    }
+    return true
 }

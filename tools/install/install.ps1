@@ -3,8 +3,10 @@
 #     irm https://calxlang.com/install.ps1 | iex
 #
 # It downloads the newest release from github.com/ellipog/calx, checks its SHA-256, unpacks it
-# into %USERPROFILE%\.calx, and puts .calx\bin on your PATH. No administrator rights are needed.
-# Run it again to reinstall; `calx update` keeps an installation up to date.
+# into %USERPROFILE%\.calx, and puts .calx\bin on your PATH; then calx-update fetches the
+# toolchain it builds programs with, clang, lld and mingw-w64, unless that's installed already.
+# No administrator rights are needed. Run it again to reinstall; `calx update` keeps an
+# installation up to date.
 #
 # CALX_INSTALL installs somewhere else, CALX_CHANNEL=nightly picks the nightly releases,
 # CALX_NO_MODIFY_PATH=1 leaves PATH alone, and CALX_RELEASES points at a mirror.
@@ -82,7 +84,7 @@ try {
     Write-Host "Checked its SHA-256 ($mb MB)."
 
     $unpacked = Join-Path $temp 'unpacked'
-    # .NET's own unzip: Expand-Archive takes minutes over the toolchain's thousands of files.
+    # .NET's own unzip, which is many times faster than Expand-Archive.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpacked)
     $new = Join-Path $unpacked 'calx'
@@ -115,6 +117,14 @@ if ($env:CALX_NO_MODIFY_PATH -ne '1') {
         Write-Host "Added $bin to your PATH."
     }
     if (($env:Path -split ';') -notcontains $bin) { $env:Path = "$env:Path;$bin" }
+}
+
+# The toolchain programs are built with is a download of its own, since it changes only with LLVM
+# (CLX-110, CLX-251). calx-update fetches it when the one here isn't the one the release names in
+# toolchain.txt, and unpacks the .tar.xz, which Windows' own tools may not read.
+if (Test-Path (Join-Path $root 'toolchain.txt')) {
+    & (Join-Path $bin 'calx-update.exe') --home $root --current $version --toolchain
+    if ($LASTEXITCODE -ne 0) { Stop-Install 'the toolchain didn''t install; `calx update --toolchain` tries again' }
 }
 
 & (Join-Path $bin 'calx.exe') version
