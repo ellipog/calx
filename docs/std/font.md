@@ -7,7 +7,7 @@ description: TrueType and OpenType fonts and collections read as FreeType reads 
 
 TrueType and OpenType fonts, read from `.ttf`, `.otf` and `.ttc` files. Their glyphs are drawn antialiased, and text is measured and drawn on [images](image.md), as Python scripts do with Pillow's `ImageFont.truetype` and `ImageDraw.text`.
 
-- The outlines, character maps, advances and kerning are the ones FreeType and fontTools read from the same files.
+- The outlines, character maps and advances are the ones FreeType and fontTools read from the same files, and the kerning is the one HarfBuzz applies.
 - Each pixel's coverage is the exact area of the outline inside it.
 - Nothing needs installing: it's all Calx.
 
@@ -78,7 +78,7 @@ Each contour ends where it starts. TrueType fonts have quadratic curves and CFF 
 
 - **Files.** TrueType outlines (`glyf`), simple and composite with their scales and offsets. CFF outlines (`.otf`), as Type 2 charstrings with their subroutines, including CID-keyed fonts. Collections (`.ttc`, `.otc`).
 - **Characters.** Unicode character maps of formats 4 and 12, and 0 and 6. Symbol fonts, whose characters sit at U+F000, take ASCII as their own.
-- **Kerning.** From the `kern` table, as Pillow's basic layout takes it. Fonts that only kern in `GPOS` aren't kerned, in Pillow's basic layout either.
+- **Kerning.** From `GPOS`'s `kern` feature for Latin text, as HarfBuzz and browsers take it: its pairs and class pairs, and its extension lookups. A font without one kerns from its `kern` table, as Pillow's basic layout does. Most newer fonts, such as Inter, Roboto and Noto, kern only in `GPOS`, which Pillow's basic layout leaves unkerned.
 - **Metrics.** From `hhea`, or `OS/2` where `hhea` has none, as FreeType takes them.
 
 Some things aren't done:
@@ -102,7 +102,7 @@ Some things aren't done:
 
 Drawing scales the outline to pixels and cuts its curves into lines no more than 1/128 of a pixel from them. Then each line adds the signed area it leaves to its right, in each pixel of each row it crosses, as a difference from the pixel before. A running sum along each row is then the area covered. Its size, at most 1, is the coverage: contours wound the same way don't count twice where they overlap, and a hole, wound the other way, takes away.
 
-It was checked against fontTools on 22 fonts, Windows' and some CFF ones, from Arial to Segoe UI Emoji's 64,883 glyphs and the CJK collections. Every glyph's outline, every character in the Unicode character map, every advance and every kerning pair of ASCII were the same, but for one rotated emoji component, a hundredth of a unit apart. The coverage was checked against a reference that finds, in 64 rows a pixel, exactly where the winding number isn't 0: the largest difference was 2.2 in 255, and the mean 0.23.
+It was checked against fontTools on 22 fonts, Windows' and some CFF ones, from Arial to Segoe UI Emoji's 64,883 glyphs and the CJK collections. Every glyph's outline, every character in the Unicode character map, every advance and every kerning pair of ASCII were the same, but for one rotated emoji component, a hundredth of a unit apart. The kerning was worked out from fontTools' reading of each font's `GPOS` or `kern` table. The coverage was checked against a reference that finds, in 64 rows a pixel, exactly where the winding number isn't 0: the largest difference was 2.2 in 255, and the mean 0.23.
 
 ## Speed
 

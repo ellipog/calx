@@ -17,7 +17,9 @@ The TrueType font, em 1000, ascender 800, descender -200, line gap 100:
 The CFF font has the same glyphs, except B, as Type 2 charstrings written out by hand to use
 the operators a renderer meets: widths before the first operator, stems and hint masks, the
 line operators that alternate direction, hvcurveto and vhcurveto, flex, and local and global
-subroutines.
+subroutines. It kerns in GPOS only: A then V by -80, the class pair of A or V then A, V or O
+by -40, which A then V overrides, and in an extension lookup that adds to those, A then V by
+-5 more and O then A by -25.
 """
 import os
 import sys
@@ -33,6 +35,21 @@ ORDER = [".notdef", "space", "A", "O", "B", "V"]
 CMAP = {0x20: "space", 0x41: "A", 0x4F: "O", 0x42: "B", 0x56: "V", 0x1F600: "O"}
 ADV = {".notdef": 500, "space": 250, "A": 700, "O": 700, "B": 400, "V": 600}
 NAME = {"familyName": "Calx Test", "styleName": "Regular"}
+GPOS_KERN = """
+languagesystem DFLT dflt;
+languagesystem latn dflt;
+@LEFT = [A V];
+@RIGHT = [A V O];
+lookup EXTRA useExtension {
+    pos A V -5;
+    pos O A -25;
+} EXTRA;
+feature kern {
+    pos A V -80;
+    pos @LEFT @RIGHT -40;
+    lookup EXTRA;
+} kern;
+"""
 
 
 def ttf():
@@ -140,6 +157,9 @@ def otf():
     fb.setupNameTable(NAME)
     fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
     fb.setupPost()
+    # Kerning in GPOS only, as newer fonts have it: a pair, a class pair the pair overrides, and
+    # an extension lookup that adds to both.
+    fb.addOpenTypeFeatures(GPOS_KERN)
     return fb.font
 
 

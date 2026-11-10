@@ -27,6 +27,10 @@ pub struct Font {
     symbol: bool
     kern: usize
     kern_pairs: usize
+    // The pair lookups of GPOS's kern feature, each lookup's subtables then a 0: kerning comes
+    // from these when there are any, and from the kern table when there aren't, as HarfBuzz
+    // takes it.
+    gpos_pairs: List<usize>
     // The glyphs of ASCII, looked up once.
     ascii: List<u32>
     // A CFF font's outlines, when it has them instead of glyf's: none or one.
@@ -138,6 +142,7 @@ impl Font {
         var glyf: usize = 0
         var glyf_len: usize = 0
         var kern: usize = 0
+        var gpos: usize = 0
         var kern_len: usize = 0
         var name: usize = 0
         var name_len: usize = 0
@@ -192,6 +197,8 @@ impl Font {
             } else if tag == 0x43464620 {
                 cff = at
                 cff_len = len
+            } else if tag == 0x47504F53 {
+                gpos = at
             }
         }
         if head == 0 or maxp == 0 or hhea == 0 or hmtx == 0 or cmap == 0 {
@@ -240,6 +247,7 @@ impl Font {
             fail String("the font has no Unicode character map")
         }
         let (pairs_at, pairs) = find_kern(d, kern, kern_len)
+        let gpos_pairs = gpos_kern(d, gpos)
         var f = Font {
             data: d,
             glyphs: glyphs,
@@ -259,6 +267,7 @@ impl Font {
             symbol: symbol,
             kern: pairs_at,
             kern_pairs: pairs,
+            gpos_pairs: gpos_pairs,
             ascii: [],
             cff: outlines,
             family_name: String(),
@@ -319,8 +328,9 @@ impl Font {
         return f64(self.advance_units(self.glyph_index(c))) * size / f64(self.em)
     }
 
-    /// How much closer, or further, `right` sits after `left` at `size`, in pixels, from the
-    /// font's kern table: negative for a pair such as "AV" that moves together.
+    /// How much closer, or further, `right` sits after `left` at `size`, in pixels: negative for
+    /// a pair such as "AV" that moves together. It comes from GPOS's kern feature for Latin text,
+    /// as HarfBuzz takes it, or from the kern table of a font without one.
     pub fn kerning(self, left: rune, right: rune, size: f64) -> f64 {
         return f64(self.kern_units(self.glyph_index(left), self.glyph_index(right))) * size / f64(self.em)
     }
@@ -451,6 +461,22 @@ impl Font {
     }
 
     fn kern_units(self, left: u32, right: u32) -> i32 {
+        if self.gpos_pairs.len() > 0 {
+            // Each lookup adds the first of its subtables that has the pair.
+            var total: i32 = 0
+            var found = false
+            for sub in self.gpos_pairs {
+                if sub == 0 {
+                    found = false
+                } else if not found {
+                    if let v = pair_value(self.data, sub, left, right) {
+                        total += v
+                        found = true
+                    }
+                }
+            }
+            return total
+        }
         if self.kern_pairs == 0 {
             return 0
         }
@@ -884,6 +910,218 @@ fn find_kern(d: List<u8>, kern: usize, len: usize) -> (usize, usize) {
         at += sub_len
     }
     return (0, 0)
+}
+
+// The pair adjustment subtables of GPOS's kern feature, for Latin text or the default script:
+// each lookup's in order, then a 0. Lookups run in the order the lookup list has them, and an
+// extension lookup's subtables are the ones it points to.
+fn gpos_kern(d: List<u8>, gpos: usize) -> List<usize> {
+    var out: List<usize> = []
+    if gpos == 0 or u16_at(d, gpos) != 1 {
+        return out
+    }
+    let scripts = gpos + usize(u16_at(d, gpos + 4))
+    let features = gpos + usize(u16_at(d, gpos + 6))
+    let lookups = gpos + usize(u16_at(d, gpos + 8))
+    // The default language of Latin, or of the default script, or of the first script.
+    let script_count = usize(u16_at(d, scripts))
+    var script: usize = 0
+    var rank: u32 = 0
+    for i in 0..script_count {
+        let tag = u32_at(d, scripts + 2 + 6 * i)
+        let r: u32 = if tag == 0x6C61746E { 3 } else if tag == 0x44464C54 { 2 } else if i == 0 { 1 } else { 0 }
+        if r > rank {
+            rank = r
+            script = scripts + usize(u16_at(d, scripts + 2 + 6 * i + 4))
+        }
+    }
+    var indices: List<usize> = []
+    let lang = if script != 0 and u16_at(d, script) != 0 { script + usize(u16_at(d, script)) } else { 0 }
+    if lang != 0 {
+        let count = usize(u16_at(d, lang + 4))
+        for k in 0..count {
+            indices.push(usize(u16_at(d, lang + 6 + 2 * k)))
+        }
+    } else {
+        for k in 0..usize(u16_at(d, features)) {
+            indices.push(k)
+        }
+    }
+    var picked: List<bool> = [false; usize(u16_at(d, lookups))]
+    let feature_count = usize(u16_at(d, features))
+    for fi in indices {
+        if fi >= feature_count {
+            continue
+        }
+        let rec = features + 2 + 6 * fi
+        if u32_at(d, rec) != 0x6B65726E {
+            continue
+        }
+        let feature = features + usize(u16_at(d, rec + 4))
+        for k in 0..usize(u16_at(d, feature + 2)) {
+            let li = usize(u16_at(d, feature + 4 + 2 * k))
+            if li < picked.len() {
+                picked[li] = true
+            }
+        }
+    }
+    for li in 0..picked.len() {
+        if not picked[li] {
+            continue
+        }
+        let lookup = lookups + usize(u16_at(d, lookups + 2 + 2 * li))
+        let kind = u16_at(d, lookup)
+        let subs = usize(u16_at(d, lookup + 4))
+        var any = false
+        for k in 0..subs {
+            var sub = lookup + usize(u16_at(d, lookup + 6 + 2 * k))
+            if kind == 9 {
+                // An extension: the real subtable's type and where it is, 32 bits away.
+                if u16_at(d, sub + 2) != 2 {
+                    continue
+                }
+                sub = sub + usize(u32_at(d, sub + 4))
+            } else if kind != 2 {
+                continue
+            }
+            let format = u16_at(d, sub)
+            if sub < d.len() and (format == 1 or format == 2) {
+                out.push(sub)
+                any = true
+            }
+        }
+        if any {
+            out.push(0)
+        }
+    }
+    return out
+}
+
+// What a pair adjustment subtable moves the pen after `left` when `right` follows, in font units,
+// or nothing if the subtable doesn't have the pair. Only the first glyph's x advance counts:
+// placements and device tables move glyphs for hinting or marks, not the space between them.
+fn pair_value(d: List<u8>, sub: usize, left: u32, right: u32) -> i32? {
+    let format = u16_at(d, sub)
+    let first = match coverage_index(d, sub + usize(u16_at(d, sub + 2)), left) {
+        some(i) => i,
+        none => {
+            return none
+        },
+    }
+    let vf1 = u16_at(d, sub + 4)
+    let vf2 = u16_at(d, sub + 6)
+    let len1 = 2 * usize.wrap(vf1.count_ones())
+    let len2 = 2 * usize.wrap(vf2.count_ones())
+    // Where the x advance sits in the first value record: after the placements that come first.
+    let adv = 2 * usize.wrap((vf1 & 3).count_ones())
+    if format == 1 {
+        if first >= usize(u16_at(d, sub + 8)) {
+            return none
+        }
+        let set = sub + usize(u16_at(d, sub + 10 + 2 * first))
+        let size = 2 + len1 + len2
+        var lo: usize = 0
+        var hi = usize(u16_at(d, set))
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let rec = set + 2 + size * mid
+            let g = u16_at(d, rec)
+            if g == right {
+                return some(if vf1 & 4 != 0 { i16_at(d, rec + 2 + adv) } else { 0 })
+            }
+            if g < right {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return none
+    }
+    // Format 2: by the classes of the two glyphs.
+    let c1 = usize(class_of(d, sub + usize(u16_at(d, sub + 8)), left))
+    let c2 = usize(class_of(d, sub + usize(u16_at(d, sub + 10)), right))
+    let count1 = usize(u16_at(d, sub + 12))
+    let count2 = usize(u16_at(d, sub + 14))
+    if c1 >= count1 or c2 >= count2 {
+        return none
+    }
+    let rec = sub + 16 + (c1 * count2 + c2) * (len1 + len2)
+    return some(if vf1 & 4 != 0 { i16_at(d, rec + adv) } else { 0 })
+}
+
+// Where glyph g is in a coverage table, or nothing.
+fn coverage_index(d: List<u8>, cov: usize, g: u32) -> usize? {
+    let format = u16_at(d, cov)
+    let count = usize(u16_at(d, cov + 2))
+    var lo: usize = 0
+    var hi = count
+    if format == 1 {
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let v = u16_at(d, cov + 4 + 2 * mid)
+            if v == g {
+                return some(mid)
+            }
+            if v < g {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return none
+    }
+    if format == 2 {
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let rec = cov + 4 + 6 * mid
+            if u16_at(d, rec + 2) < g {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo < count {
+            let rec = cov + 4 + 6 * lo
+            let start = u16_at(d, rec)
+            if start <= g {
+                return some(usize(u16_at(d, rec + 4) + (g - start)))
+            }
+        }
+    }
+    return none
+}
+
+// Glyph g's class in a class definition table, 0 if it has none.
+fn class_of(d: List<u8>, def: usize, g: u32) -> u32 {
+    let format = u16_at(d, def)
+    if format == 1 {
+        let start = u16_at(d, def + 2)
+        let count = u16_at(d, def + 4)
+        if g >= start and g - start < count {
+            return u16_at(d, def + 6 + 2 * usize(g - start))
+        }
+        return 0
+    }
+    if format == 2 {
+        let count = usize(u16_at(d, def + 2))
+        var lo: usize = 0
+        var hi = count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if u16_at(d, def + 4 + 6 * mid + 2) < g {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo < count {
+            let rec = def + 4 + 6 * lo
+            if u16_at(d, rec) <= g {
+                return u16_at(d, rec + 4)
+            }
+        }
+    }
+    return 0
 }
 
 // --- Names -------------------------------------------------------------------------------------
