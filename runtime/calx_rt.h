@@ -156,6 +156,9 @@ CX_FN(cx_usize, cx_workers, (void));
 CX_FN(void*, cx_alloc, (cx_usize size));
 CX_FN(void*, cx_realloc, (void* p, cx_usize old, cx_usize size));
 CX_FN(void, cx_free, (void* p, cx_usize size));
+/* As cx_realloc, but only the first `keep` bytes need to come with it, for a list's growing: what
+ * it holds, not its room to spare. Called in the runtime only. */
+void* cx_realloc_keep(void* p, cx_usize old, cx_usize size, cx_usize keep);
 /* How many blocks are allocated, in debug builds; 0 in others. */
 CX_FN(cx_usize, cx_alloc_live, (void));
 /* Gives the system back the memory of freed blocks that it can, and returns how many bytes. */

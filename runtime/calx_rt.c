@@ -1154,7 +1154,9 @@ void cx_print_newline(void) { write_bytes("\n", 1); }
 
 /* --- growing lists --------------------------------------------------------------------------- */
 
-__attribute__((noinline)) void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+/* Grows a buffer of `*cap` elements to hold len + extra, keeping its first len elements, or with
+ * `whole` all of it. */
+static void* grow_keeping(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size, int whole) {
     /* No buffer can be bigger than half the address space. */
     cx_usize max = ((cx_usize)-1 / 2) / (size ? size : 1);
     if (len > max || extra > max - len) cx_panic_capacity();
@@ -1164,12 +1166,19 @@ __attribute__((noinline)) void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize le
     if (n < need) n = need;
     if (n < 4 && max >= 4) n = 4;
     *cap = n;
-    return cx_realloc(ptr, old * size, n * size);
+    return cx_realloc_keep(ptr, old * size, n * size, (whole ? old : len) * size);
+}
+
+/* A list's elements past its length aren't kept: a list that reserved room it didn't use, and
+ * then reserves more, copies what it holds, not the room. */
+__attribute__((noinline)) void* cx_grow_to(void* ptr, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
+    return grow_keeping(ptr, cap, len, extra, size, 0);
 }
 
 __attribute__((noinline)) void* cx_deque_grow_to(void* ptr, cx_usize* head, cx_usize* cap, cx_usize len, cx_usize extra, cx_usize size) {
     cx_usize old = *cap;
-    ptr = cx_grow_to(ptr, cap, len, extra, size);
+    /* A deque's elements can be anywhere in its ring, so all of it is kept. */
+    ptr = grow_keeping(ptr, cap, len, extra, size, 1);
     cx_usize n = *cap;
     if (n == old || *head + len <= old) return ptr;
     /* The ring wrapped: `a` elements from `head` to the old end, then `b` from the start. The
@@ -1281,7 +1290,7 @@ __attribute__((noinline)) cx_u8* cx_string_grow_to(cx_u8* ptr, cx_usize* cap, cx
     cx_usize n = old * 2;
     if (n < need) n = need;
     *cap = n;
-    return (cx_u8*)cx_realloc(ptr, old, n);
+    return (cx_u8*)cx_realloc_keep(ptr, old, n, len);
 }
 
 void cx_string_reserve(cx_String* s, cx_usize extra) {

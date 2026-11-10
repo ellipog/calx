@@ -93,6 +93,12 @@ void* cx_realloc(void* p, cx_usize old, cx_usize size) {
     return h + 1;
 }
 
+/* realloc decides what it copies. */
+void* cx_realloc_keep(void* p, cx_usize old, cx_usize size, cx_usize keep) {
+    (void)keep;
+    return cx_realloc(p, old, size);
+}
+
 void cx_free(void* p, cx_usize size) {
     if (!p) return;
     block_head* h = head_of(p, size);
@@ -778,7 +784,11 @@ void cx_free(void* p, cx_usize n) {
     large_release(p, n);
 }
 
-void* cx_realloc(void* p, cx_usize old, cx_usize n) {
+void* cx_realloc(void* p, cx_usize old, cx_usize n) { return cx_realloc_keep(p, old, n, old); }
+
+/* Only the first `keep` bytes move to a new block: a list that reserved room it hasn't used
+ * copies what it holds, not the room. */
+void* cx_realloc_keep(void* p, cx_usize old, cx_usize n, cx_usize keep) {
     if (!p) return cx_alloc(n);
     /* A block of the same size class already fits. */
     if (old <= SMALL_MAX && n <= SMALL_MAX) {
@@ -787,7 +797,8 @@ void* cx_realloc(void* p, cx_usize old, cx_usize n) {
         if (large_class(old) == large_class(n)) return p;
     }
     void* q = cx_alloc(n);
-    memcpy(q, p, old < n ? old : n);
+    const cx_usize most = old < n ? old : n;
+    memcpy(q, p, keep < most ? keep : most);
     cx_free(p, old);
     return q;
 }

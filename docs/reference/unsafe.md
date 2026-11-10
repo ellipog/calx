@@ -120,7 +120,7 @@ fn main() {
 
 ## Filling a list from C
 
-`xs.set_len(n)` sets a list's length without making or dropping elements, for code that has written them through a pointer, such as a C function that reads into a buffer. It needs `unsafe`, since the elements up to `n` must have been written, and elements that are `Copy`. A length past the capacity panics.
+`xs.set_len(n)` sets a list's length without making or dropping elements, for code that has written them through a pointer, such as a C function that reads into a buffer. It needs `unsafe`, since the elements up to `n` must have been written, and elements that are `Copy`. A length past the capacity panics. Set the length before anything that can grow the list, such as `reserve` or `push`: growing keeps only the elements up to the length, so it copies what the list holds rather than all the room it had.
 
 ```calx
 fn fill(xs: mut List<u8>, n: usize, byte: u8) {
