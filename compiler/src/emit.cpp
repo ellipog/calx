@@ -1397,6 +1397,12 @@ private:
         }
     }
 
+    // A map's `put` always goes inline where its values are aggregates, which C passes through
+    // memory: the caller builds the value with narrow stores that `put` then reads back wide to
+    // copy it into its slot, a store that can't be forwarded to the load. Inline, the value is
+    // built in the slot. Reading NBT's compounds took a tenth less time (CLX-230).
+    static bool inline_put(const Type* t) { return t->kind == TypeKind::map && is_view_type(t->elem); }
+
     std::string table_decls(const Type* t) {
         if (t->table == TableKind::sorted) return sorted_decls(t);
         if (t->table == TableKind::fastutil) return otable_decls(t);
@@ -1404,7 +1410,8 @@ private:
         bool map = t->kind == TypeKind::map;
         return fill(std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
                                 "static void $grow($T* m, cx_usize buckets);\n") +
-                        (map ? "static inline void $put($T* m, $K k, $V v);\n" : "static inline void $put($T* m, $K k);\n") +
+                        (map ? std::string(inline_put(t) ? "CX_INLINE" : "static inline") + " void $put($T* m, $K k, $V v);\n"
+                             : "static inline void $put($T* m, $K k);\n") +
                         (t->table != TableKind::linked ? ""
                          : map                         ? "static void $putend($T* m, $K k, $V v, cx_bool front);\n"
                                                        : "static void $putend($T* m, $K k, cx_bool front);\n") +
@@ -1457,7 +1464,9 @@ private:
         // `$put`, and a linked table's `$putend`, which puts a key at the front or the back,
         // moving it there if it's in the table already.
         auto put_fn = [&](bool end) {
-            std::string s = end ? "static void $putend($T* m, $params, cx_bool front) {\n" : "static inline void $put($T* m, $params) {\n";
+            std::string s = end            ? "static void $putend($T* m, $params, cx_bool front) {\n"
+                            : inline_put(t) ? "CX_INLINE void $put($T* m, $params) {\n"
+                                            : "static inline void $put($T* m, $params) {\n";
             s += R"(    cx_u64 h = $hash;
     cx_u8 tag = cx_table_tag(h);
     cx_usize pos = (cx_usize)h & m->mask, stride = 0, i = CX_NOT_FOUND;
