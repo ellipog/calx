@@ -1,11 +1,11 @@
 ---
 title: std.nbt
-description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does.
+description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does, and FTB's SNBT as FTB Library does.
 ---
 
 # `std.nbt`
 
-NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures, and each chunk of a region file. `std.nbt` reads and writes it as vanilla 26.3's `NbtIo` does, and reads and writes [SNBT](#snbt), its text form, as vanilla's `TagParser`, `Tag.toString` and pretty printer do. A compound keeps its keys in the order they were read or put, as a Python dict does, so a file read and written back holds the same NBT, byte for byte.
+NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures, and each chunk of a region file. `std.nbt` reads and writes it as vanilla 26.3's `NbtIo` does, and reads and writes [SNBT](#snbt), its text form, as vanilla's `TagParser`, `Tag.toString` and pretty printer do, and [FTB's SNBT](#ftbs-snbt) as FTB Library does. A compound keeps its keys in the order they were read or put, as a Python dict does, so a file read and written back holds the same NBT, byte for byte.
 
 ```calx
 import std.nbt.{Compression, NbtFile, Tag}
@@ -198,6 +198,56 @@ Changing through a path makes what's missing on the way, as vanilla does: a comp
 | `TooDeep` | The path's parts and the value's depth come to more than 512, which vanilla refuses before changing anything |
 | `Empty` | Setting, removing or inserting through an empty path, which names no tag in the root to change |
 
+## FTB's SNBT
+
+FTB's mods keep their configs, their teams and chunks, and FTB Quests' quests in their own SNBT, which FTB Library reads and writes. `parse_ftb_snbt` reads it as FTB Library 2101.1.39's `SNBT.read` does, and `to_snbt` writes it back as its `SNBT.write` does, a key a line:
+
+```calx
+import std.nbt.{NbtPath, Tag, parse_ftb_snbt}
+
+fn main() {
+    let text = "# a quest\n\{\n\tid: \"1A2B\"\n\toptional: true\n\ttasks: [\{\n\t\tcount: 4L\n\t\titem: \"minecraft:oak_log\"\n\t\}]\n\}\n"
+    var quest = parse_ftb_snbt(text)!
+    println("{quest.root}")    // out: {id:"1A2B",optional:1b,tasks:[{count:4L,item:"minecraft:oak_log"}]}
+    println("{quest.booleans.contains("optional")}")    // out: true
+
+    // Change it through paths, and write it back as FTB would.
+    _ = NbtPath.parse("tasks[0].count")!.set(mut quest.root, Tag.Long(8))!
+    _ = NbtPath.parse("optional")!.set(mut quest.root, Tag.Byte(0))!
+    print(quest.to_snbt())
+    // out: {
+    // out: 	id: "1A2B"
+    // out: 	optional: false
+    // out: 	tasks: [{
+    // out: 		count: 8L
+    // out: 		item: "minecraft:oak_log"
+    // out: 	}]
+    // out: }
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `parse_ftb_snbt(text: String) -> FtbSnbt ! SnbtError` | The file in `text`, a compound, as FTB reads it |
+| `FtbSnbt` | A file: `root`, a `Tag.Compound`, and `booleans`, a `Set<String>` of the paths of the bytes written `true` or `false` |
+| `FtbSnbt.new(root: own Tag) -> FtbSnbt` | A file of `root`, with no booleans |
+| `FtbSnbt.open(path: String) -> FtbSnbt ! Error` | The file at `path`, which must be UTF-8, as FTB wants |
+| `f.to_snbt() -> String` | The file as FTB writes it: a tab a level, a key a line in their order, `{ }` and `[ ]` when empty, and a list or an array of one on the line it starts |
+| `f.save(path: String) ! Error` | Writes `f.to_snbt()` to `path` |
+
+FTB's `true` and `false` are bytes, 1b and 0b, as in NBT, and FTB writes them back as words because it remembers, for each key of a compound, that it read a word there. `booleans` keeps that, as the paths `NbtPath` reads: `quests[2].optional`, `"a b".c`. A byte at one of them is written `true` if it isn't 0 and `false` if it is, so a change to the byte is a change to the word. A byte in a list is always written as a number, as FTB writes it. A list's paths name places, so a script that takes out or moves elements of a list moves the booleans under them too.
+
+What `parse_ftb_snbt` takes, as FTB does:
+
+- A line whose first rune past white space is `#` is left out, wherever it is.
+- Keys and values split by white space or commas, which FTB doesn't tell apart: `{a:1 b:2}`, `{a:1,,b:2,}` and `[1 2]` are all fine. White space is any rune up to U+0020.
+- Bare words: a first rune, whatever it is, then letters and digits as Java's `Character.isAlphabetic` and `isDigit` see them, and `_ - . +`. So `élan` and `Ⅻ` are words, and `:` ends one, so an id such as `minecraft:stone` needs quotes.
+- `true`, `false` and `null`, just so, are 1b, 0b and `Tag.End`. A word that isn't a number is a string.
+- Numbers: `1b`, `1s`, `1L`, `1.5f` and `1.5d` in either case. An integer with no letter is an int, or a double if it's too big for one. Anything else Java's `Double.parseDouble` takes is a double: `1.5`, `.5`, `1e3`, `+1`, `NaN`, `Infinity` and hex like `0x1p3`. A letter's digits that don't make that kind are a string, such as `1.5b`, but a byte or a short out of its range is an error, as `128b` is.
+- Strings in `"` or `'`, with `\" \\ \t \n \b \r \f`. Any other `\` is dropped with the rune after it, so `\x41` is `41`, and a `\` before a rune past ASCII is an error.
+- Lists of one kind, which can't hold `null`. Arrays, `[I; 1, 2]` with the letter in either case, take any numbers, converted as Minecraft 1.21.1 does: an integer's low bits, and a float or a double rounded down by `Mth.floor`, which gives the largest int for one below an int's range. A long array takes a float cut toward 0 and a double rounded down.
+- Text after the compound is ignored.
+
 ## Tags without a file
 
 Packets send a tag with its kind and no name, and a file holds its root with a name. These read and write either from where it sits in a buffer:
@@ -240,7 +290,7 @@ Writing panics on what NBT can't hold: a string past 65,535 bytes, which Java's 
 
 ## As vanilla does it
 
-`std.nbt` was checked against vanilla 26.3's own `NbtIo` and `Tag.toString`, run as a black box:
+`std.nbt` was checked against vanilla 26.3's own `NbtIo` and `Tag.toString`, and FTB Library's SNBT, run as a black box:
 
 - On 80,000 random byte strings, most of them NBT, it accepted and rejected the same ones, with the same SNBT and the same bytes left over. What vanilla wrote back of each, `std.nbt` read and wrote again byte for byte.
 - On all 1,975 NBT files of vanilla's structures and of worlds vanilla saved, it gave the same SNBT, and wrote back the NBT it read byte for byte.
@@ -280,6 +330,16 @@ NBT paths were checked against vanilla's `NbtPathArgument` on 748 cases written 
 - A value nested past 512 can't be read from SNBT, as above, so it can't be given to a change from text.
 - Its messages are its own.
 
+FTB's SNBT was checked against FTB Library 2101.1.39's `SNBT.read` and `SNBT.write`, on Minecraft 1.21.1 and Java 25, as a black box. The checks were 759 texts written to probe each rule, 50,000 random ones, and 5,969 `.snbt` files of quests, chapters and configs from FTB's and other modpacks, 81 MB. `parse_ftb_snbt` accepted and rejected the same ones, read the same tag, kind for kind, with the same booleans, and `to_snbt` wrote what FTB wrote. It differs in five places:
+
+- A key read again after `true` or `false`, as in `{a:true, a:1}`: FTB keeps writing the word it read first, and std.nbt writes the value the key holds. FTB never writes a key twice.
+- A rune past U+FFFF outside quotes, such as an emoji in a bare word, is an error. FTB reads its two halves apart, which a Calx `String` can't hold.
+- Lists and compounds nest at most 512 deep. FTB goes until Java's stack runs out.
+- Lines end with `\n`, where FTB ends them as the system does, `\r\n` on Windows.
+- Its messages are its own.
+
+`null` reads as `Tag.End`, as FTB reads it, which binary NBT can't hold, so writing such a tree as NBT panics. A compound such as `{"": "x"}` in a list is written as NBT wrapped, as 26.3 writes it, where 1.21.1 writes it as it is. Two of the 5,969 files hold one.
+
 Compound keys are [interned](../reference/strings.md#interned-strings): each is kept once, so a tree of many compounds with the same keys holds one copy of each, and reading one costs no allocation. The runtime keeps a bounded number of names, and a key past that limit is an ordinary copy.
 
 ## Speed
@@ -304,5 +364,14 @@ SNBT, on the same files as SNBT, 30 MB of it written compact, and timed the same
 | Lay it out | 106 ms | 891 ms | 6,154 ms |
 
 nbtlib's times are for its own SNBT: `parse_nbt` on what `serialize_tag(compact=True)` writes, and `serialize_tag(indent=4)`. On this benchmark std.nbt reads SNBT 13 to 15 times as fast as vanilla and 100 times as fast as nbtlib, and lays it out 8 times as fast as vanilla and 58 times as fast as nbtlib.
+
+FTB's SNBT, on the 5,948 files of the checks above that all three read, 81 MB of quests, chapters and configs, from memory, and timed the same way:
+
+| | std.nbt | FTB Library 2101.1.39's `SNBT`, Java 25 | ftb-snbt-lib 0.4.1, Python 3.14 |
+| --- | --- | --- | --- |
+| Read it | 161 ms | 400 ms | 16,923 ms |
+| Write it | 106 ms | 308 ms | 1,596 ms |
+
+FTB's read is `SNBT.readLines` on the text split into lines as `Files.readAllLines` splits it, and its write is `writeLines` joined. ftb-snbt-lib's times are `loads` and `dumps`, the best of 3 passes. On this benchmark std.nbt reads FTB's SNBT 2.5 times as fast as FTB and 105 times as fast as ftb-snbt-lib, and writes it 2.9 and 15 times as fast.
 
 `std.nbt` is written in Calx: [std/nbt.calx](../../std/nbt.calx).

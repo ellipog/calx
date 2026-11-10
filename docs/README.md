@@ -128,7 +128,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 57. [std.wave](std/wave.md): WAV files read as Python's `wave` module reads them and written byte for byte as it writes them, floats too, with their samples as numbers instead of `struct.unpack`
 58. [std.text.python](std/text-python.md): Python's `repr` of strings and floats, `str.isprintable` and `str.isspace`, as CPython 3.14 gives them, for messages that quote values as Python does
 59. [std.json.schema](std/json-schema.md): JSON Schema checked as Python's jsonschema checks it, drafts 3 to 2020-12, with the same errors, messages, paths and order, and `$ref`s found as the referencing library finds them
-60. [std.nbt](std/nbt.md): Minecraft's NBT read and written as vanilla 26.3's `NbtIo` does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does
+60. [std.nbt](std/nbt.md): Minecraft's NBT read and written as vanilla 26.3's `NbtIo` does it, files gzipped, zlib-compressed or plain, tags changed in place, SNBT read, shown and laid out, and NBT paths, as vanilla does, and FTB's SNBT as FTB Library does
 
 ### Java compatibility
 

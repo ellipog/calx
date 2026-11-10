@@ -1,14 +1,16 @@
 /// NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures and
 /// each chunk of a region file. Tags are read and written as vanilla 26.3's `NbtIo` reads and
 /// writes them, files gzipped, zlib-compressed or plain, SNBT is read and written as its
-/// `TagParser`, `toString` and pretty printer do, and NBT paths are followed as its
-/// `NbtPathArgument` does. A compound keeps its keys in the order they were read or put, as a
+/// `TagParser`, `toString` and pretty printer do, NBT paths are followed as its
+/// `NbtPathArgument` does, and FTB's SNBT is read and written as FTB Library's `SNBT` class
+/// does. A compound keeps its keys in the order they were read or put, as a
 /// Python dict does, so the NBT of a file read and written back is the same, byte for byte.
 module std.nbt
 
 import std.bytes.{i16_be, i32_be, i64_be, put_i16_be, put_i32_be, put_i64_be, put_u16_be, put_u32_be, put_u64_be, u16_be, u32_be, u64_be}
 import std.fs
 import std.text.mutf8
+import std.text.ucd.{JAVA_ALNUM, JAVA_ALNUM_LEN}
 import std.zlib
 
 /// One NBT value: a number, a string, an array, a list of tags or a compound of named ones.
@@ -3081,4 +3083,758 @@ fn array_long(v: Tag) -> i64? {
         Double(x) => some(i64.saturate(x.floor())),
         _ => none,
     }
+}
+
+// --- FTB's SNBT ----------------------------------------------------------------------------------
+
+/// A file in FTB Library's SNBT, the text FTB Quests, FTB Chunks, FTB Teams and FTB's other mods
+/// keep their configs and data in: a compound, and which of its bytes are written `true` and
+/// `false`.
+pub struct FtbSnbt {
+    /// The root, a `Tag.Compound`.
+    pub root: Tag
+    /// The paths of the bytes that are written `true` or `false`, as `NbtPath` reads them, such
+    /// as `quests[2].optional`. FTB keeps this for a compound's keys, so a byte in a list is
+    /// always a number.
+    pub booleans: Set<String>
+}
+
+impl FtbSnbt {
+    /// A file of `root`, a compound, with no booleans.
+    pub fn new(root: own Tag) -> FtbSnbt {
+        return FtbSnbt { root: root, booleans: Set<String>() }
+    }
+
+    /// The file at `path`, read as `parse_ftb_snbt` reads text. It must be UTF-8, as FTB wants.
+    pub fn open(path: String) -> FtbSnbt ! Error {
+        let text = match try fs.read_text(path.copy()).context("reading {path}") {
+            some(t) => t,
+            none => fail "reading {path}: it isn't UTF-8",
+        }
+        return match parse_ftb_snbt(text) {
+            ok(f) => f,
+            err(e) => fail "reading {path}: {e}",
+        }
+    }
+
+    /// The file as FTB Library's `SNBT.write` writes it: a tab for each level, a line for each
+    /// key, in their order, and a line break after the last line. FTB ends its lines as the
+    /// system does, `\r\n` on Windows; these end with `\n`.
+    pub fn to_snbt(self) -> String {
+        var out = String()
+        var path = String()
+        ftb_write(self.root, 0, self.booleans, mut path, mut out)
+        out.push('\n')
+        return out
+    }
+
+    /// Writes the file to `path`, as `to_snbt` lays it out.
+    pub fn save(self, path: String) ! Error {
+        try fs.write_text(path.copy(), self.to_snbt()).context("writing {path}")
+    }
+}
+
+/// The file in `text`, as FTB Library 2101.1.39's `SNBT.read` reads it. That's a compound, with
+/// lines that start with `#` left out, keys and values split by white space or commas, bare
+/// strings, `true`, `false` and `null`, numbers with or without their kind's letter, strings in
+/// either quote, lists of one kind and arrays. Text after the compound is ignored, as FTB
+/// ignores it.
+pub fn parse_ftb_snbt(text: String) -> FtbSnbt ! SnbtError {
+    var r = FtbRead { booleans: Set<String>(), path: String(), keys: new_keys() }
+    var at: usize = 0
+    ftb_skip(text, mut at, false)
+    if at >= text.len() or text.byte_at(at) != b'{' {
+        fail snbt_error(text, at, "{found(text, at)}, where the file's `\{` should be")
+    }
+    let root = Tag.Compound(try ftb_compound(text, mut at, 1, mut r))
+    return FtbSnbt { root: root, booleans: r.booleans }
+}
+
+struct FtbRead {
+    booleans: Set<String>
+    // The path to where the reader is, kept only where a boolean could be.
+    path: String
+    keys: List<String>
+}
+
+// Skips what FTB skips between parts: runes up to U+0020, commas too if `commas`, and lines
+// whose first rune past those is `#`, which FTB drops before it reads. FTB splits lines at `\n`,
+// `\r\n` and `\r`.
+fn ftb_skip(t: String, at: mut usize, commas: bool) {
+    while at < t.len() {
+        let b = t.byte_at(at)
+        if b <= 32 or (commas and b == b',') {
+            at += 1
+        } else if b == b'#' and ftb_line_start(t, at) {
+            while at < t.len() and t.byte_at(at) != 10 and t.byte_at(at) != 13 {
+                at += 1
+            }
+        } else {
+            return
+        }
+    }
+}
+
+// Whether nothing but runes up to U+0020 comes before `at` on its line.
+fn ftb_line_start(t: String, at: usize) -> bool {
+    var k = at
+    while k > 0 {
+        let b = t.byte_at(k - 1)
+        if b == 10 or b == 13 {
+            return true
+        }
+        if b > 32 {
+            return false
+        }
+        k -= 1
+    }
+    return true
+}
+
+// The rune at byte `at`, and how many bytes it takes.
+fn rune_at(t: String, at: usize) -> (u32, usize) {
+    let b = t.byte_at(at)
+    if b < 0x80 {
+        return (u32(b), 1)
+    }
+    let n: usize = if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    var r: u32 = if n == 2 { u32(b & 0x1F) } else if n == 3 { u32(b & 0x0F) } else { u32(b & 0x07) }
+    for i in 1..n {
+        r = (r << 6) | u32(t.byte_at(at + i) & 0x3F)
+    }
+    return (r, n)
+}
+
+// Java's `Character.isAlphabetic(c) || Character.isDigit(c)`, for a UTF-16 unit, as FTB asks it.
+fn java_alnum(c: u32) -> bool {
+    if c < 0x80 {
+        return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57)
+    }
+    var lo: usize = 0
+    var hi = JAVA_ALNUM_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if c > JAVA_ALNUM[2 * mid + 1] {
+            lo = mid + 1
+        } else if c < JAVA_ALNUM[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+fn ftb_compound(t: String, at: mut usize, depth: usize, r: mut FtbRead) -> LinkedMap<String, Tag> ! SnbtError {
+    at += 1
+    var m = LinkedMap<String, Tag>()
+    let mark = r.path.len()
+    loop {
+        ftb_skip(t, mut at, true)
+        if at >= t.len() {
+            fail snbt_error(t, at, "the end in a compound, where a key or `\}` should be")
+        }
+        let c = t.byte_at(at)
+        if c == b'}' {
+            at += 1
+            return m
+        }
+        var key = String()
+        if c == b'"' or c == b'\'' {
+            key = try ftb_quoted(t, mut at)
+        } else {
+            let start = at
+            try ftb_token(t, mut at)
+            key = intern_key(t, start, at, mut r.keys)
+        }
+        ftb_skip(t, mut at, false)
+        if at >= t.len() or t.byte_at(at) != b':' {
+            fail snbt_error(t, at, "{found(t, at)} after a key, where `:` should be")
+        }
+        at += 1
+        ftb_skip(t, mut at, false)
+        // The path matters to a value that's a boolean or holds some, and to a key read again,
+        // whose booleans go with the value it had.
+        let again = not r.booleans.is_empty() and m.contains(key)
+        var pathed = again
+        if at < t.len() {
+            let v = t.byte_at(at)
+            pathed = pathed or v == b'{' or v == b'[' or v == b't' or v == b'f'
+        }
+        if pathed {
+            ftb_path_key(key, mut r.path)
+        }
+        if again {
+            ftb_forget(mut r.booleans, r.path)
+        }
+        let value = try ftb_value(t, mut at, depth, mut r, true)
+        if pathed {
+            r.path.truncate(mark)
+        }
+        m.insert(key, value)
+    }
+}
+
+// Adds `key` to a path, as `NbtPath` reads one: bare if it can be, quoted otherwise.
+fn ftb_path_key(key: String, path: mut String) {
+    if not path.is_empty() {
+        path.push('.')
+    }
+    var bare = not key.is_empty()
+    for i in 0..key.len() {
+        if not path_bare(key.byte_at(i)) {
+            bare = false
+            break
+        }
+    }
+    if bare {
+        path.push_str(key)
+        return
+    }
+    path.push('"')
+    var from: usize = 0
+    for i in 0..key.len() {
+        let c = key.byte_at(i)
+        if c == b'"' or c == b'\\' {
+            path.push_str(key[from..i])
+            path.push('\\')
+            from = i
+        }
+    }
+    path.push_str(key[from..key.len()])
+    path.push('"')
+}
+
+// Drops the booleans at `path` and under it.
+fn ftb_forget(booleans: mut Set<String>, path: String) {
+    var gone = List<String>()
+    for p in booleans {
+        if p.starts_with(path) and (p.len() == path.len() or p.byte_at(path.len()) == b'.' or p.byte_at(path.len()) == b'[') {
+            gone.push(p.copy())
+        }
+    }
+    for p in gone {
+        booleans.remove(p)
+    }
+}
+
+// A value, `depth` lists and compounds in. `keyed` is whether it's a compound's, where FTB marks
+// `true` and `false`.
+fn ftb_value(t: String, at: mut usize, depth: usize, r: mut FtbRead, keyed: bool) -> Tag ! SnbtError {
+    ftb_skip(t, mut at, false)
+    if at >= t.len() {
+        fail snbt_error(t, at, "the end, where a value should be")
+    }
+    let c = t.byte_at(at)
+    if c == b'{' or c == b'[' {
+        if depth >= MAX_DEPTH {
+            fail snbt_error(t, at, "lists and compounds nest more than 512 deep")
+        }
+        if c == b'{' {
+            return Tag.Compound(try ftb_compound(t, mut at, depth + 1, mut r))
+        }
+        return try ftb_list(t, mut at, depth + 1, mut r)
+    }
+    if c == b'"' or c == b'\'' {
+        return Tag.String(try ftb_quoted(t, mut at))
+    }
+    let start = at
+    try ftb_token(t, mut at)
+    return try ftb_word(t, start, at, mut r, keyed)
+}
+
+// Moves past a bare token: its first rune, whatever it is, then letters and digits, as Java's
+// `Character.isAlphabetic` and `isDigit` take them, and `_-.+`.
+fn ftb_token(t: String, at: mut usize) ! SnbtError {
+    let (c, n) = rune_at(t, at)
+    if c > 0xFFFF {
+        fail snbt_error(t, at, "{found(t, at)} outside quotes, which FTB would split in two")
+    }
+    at += n
+    while at < t.len() {
+        let b = t.byte_at(at)
+        if b < 0x80 {
+            if not bare_char(b) {
+                return
+            }
+            at += 1
+            continue
+        }
+        let (r, m) = rune_at(t, at)
+        if not java_alnum(r) {
+            return
+        }
+        at += m
+    }
+}
+
+// What FTB makes of a bare token: `true`, `false` or `null`, a number, or else a string.
+fn ftb_word(t: String, start: usize, end: usize, r: mut FtbRead, keyed: bool) -> Tag ! SnbtError {
+    let first = t.byte_at(start)
+    if first == b't' and bytes_are(t, start, end, "true") {
+        if keyed {
+            r.booleans.insert(r.path.copy())
+        }
+        return Tag.Byte(1)
+    }
+    if first == b'f' and bytes_are(t, start, end, "false") {
+        if keyed {
+            r.booleans.insert(r.path.copy())
+        }
+        return Tag.Byte(0)
+    }
+    if first == b'n' and bytes_are(t, start, end, "null") {
+        return Tag.End
+    }
+    // A word that can't be a number is a string. Numbers start with a digit, a sign or `.`, or
+    // are `NaN` or `Infinity`.
+    if not (is_digit(first) or first == b'-' or first == b'+' or first == b'.' or first == b'N' or first == b'I') {
+        return Tag.String(t[start..end])
+    }
+    let last = t.byte_at(end - 1)
+    if last == b'b' or last == b'B' or last == b's' or last == b'S' {
+        // FTB takes digits that fit an int, then wants them to fit the kind.
+        let v = if ftb_digits(t, start, end - 1) { ftb_integer(t, start, end - 1) ?? 9223372036854775807 } else { 9223372036854775807 }
+        if v < -2147483648 or v > 2147483647 {
+            return Tag.String(t[start..end])
+        }
+        let byte = last == b'b' or last == b'B'
+        let lo: i64 = if byte { -128 } else { -32768 }
+        if v < lo or v > -lo - 1 {
+            let kind = if byte { "a byte" } else { "a short" }
+            fail snbt_error(t, start, "`{t[start..end]}`, which is past the range of {kind}, {lo} to {-lo - 1}")
+        }
+        return if byte { Tag.Byte(i8.wrap(v)) } else { Tag.Short(i16.wrap(v)) }
+    }
+    if last == b'l' or last == b'L' {
+        if ftb_digits(t, start, end - 1) {
+            if let v = ftb_integer(t, start, end - 1) {
+                return Tag.Long(v)
+            }
+        }
+        return Tag.String(t[start..end])
+    }
+    if last == b'f' or last == b'F' {
+        if let v = f32.parse(t[start..end - 1]) {
+            return Tag.Float(if v == 0.0 { 0.0 } else { v })
+        }
+        return Tag.String(t[start..end])
+    }
+    if last == b'd' or last == b'D' {
+        if let v = f64.parse(t[start..end - 1]) {
+            return Tag.Double(if v == 0.0 { 0.0 } else { v })
+        }
+        return Tag.String(t[start..end])
+    }
+    if ftb_digits(t, start, end) {
+        if let v = ftb_integer(t, start, end) {
+            if v >= -2147483648 and v <= 2147483647 {
+                return Tag.Int(i32.wrap(v))
+            }
+        }
+    }
+    // FTB reads an int too big for one as a double, and so whatever else Java's
+    // `Double.parseDouble` takes, such as `1.5`, `.5`, `1e3`, `+1` and `NaN`.
+    if let v = f64.parse(t[start..end]) {
+        return Tag.Double(if v == 0.0 { 0.0 } else { v })
+    }
+    return Tag.String(t[start..end])
+}
+
+// Whether the bytes from `from` to `to` are `word`.
+fn bytes_are(t: String, from: usize, to: usize, word: str) -> bool {
+    if to - from != word.len() {
+        return false
+    }
+    for i in 0..word.len() {
+        if t.byte_at(from + i) != word.byte_at(i) {
+            return false
+        }
+    }
+    return true
+}
+
+// Whether the bytes from `from` to `to` are an integer as FTB's pattern `-?[0-9]+` takes one.
+fn ftb_digits(t: String, from: usize, to: usize) -> bool {
+    var i = from
+    if i < to and t.byte_at(i) == b'-' {
+        i += 1
+    }
+    if i >= to {
+        return false
+    }
+    while i < to {
+        if not is_digit(t.byte_at(i)) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// The integer from `from` to `to`, which `ftb_digits` takes, or `none` past a long's range.
+fn ftb_integer(t: String, from: usize, to: usize) -> i64? {
+    let neg = t.byte_at(from) == b'-'
+    let m = match digits_value(t, if neg { from + 1 } else { from }, to, 10) {
+        some(v) => v,
+        none => return none,
+    }
+    if neg {
+        if m > 9223372036854775808u64 {
+            return none
+        }
+        return some(i64.wrap(0u64.wrapping_sub(m)))
+    }
+    if m > 9223372036854775807u64 {
+        return none
+    }
+    return some(i64.wrap(m))
+}
+
+// A list, or an array if a kind's letter in either case and `;` start it.
+fn ftb_list(t: String, at: mut usize, depth: usize, r: mut FtbRead) -> Tag ! SnbtError {
+    at += 1
+    ftb_skip(t, mut at, false)
+    if at < t.len() {
+        let k = t.byte_at(at) | 0x20
+        if k == b'b' or k == b'i' or k == b'l' {
+            var after = at + 1
+            ftb_skip(t, mut after, false)
+            if after < t.len() and t.byte_at(after) == b';' {
+                at = after + 1
+                return try ftb_array(t, mut at, k, depth, mut r)
+            }
+        }
+    }
+    var items = List<Tag>()
+    let mark = r.path.len()
+    loop {
+        ftb_skip(t, mut at, true)
+        if at >= t.len() {
+            fail snbt_error(t, at, "the end in a list, where a value or `]` should be")
+        }
+        let c = t.byte_at(at)
+        if c == b']' {
+            at += 1
+            break
+        }
+        // Only a compound in a list holds booleans.
+        let pathed = c == b'{' or c == b'['
+        if pathed {
+            r.path.push_str("[{items.len()}]")
+        }
+        let el_at = at
+        let v = try ftb_value(t, mut at, depth, mut r, false)
+        if pathed {
+            r.path.truncate(mark)
+        }
+        if v.id() == END {
+            fail snbt_error(t, el_at, "`null` in a list, which FTB doesn't take")
+        }
+        if items.len() > 0 and v.id() != items[0].id() {
+            fail snbt_error(t, el_at, "{a_kind(v)} in a list of {items[0].kind_name()}, which FTB doesn't mix")
+        }
+        items.push(v)
+    }
+    return Tag.List(items)
+}
+
+// An array's numbers, after its `;`, each converted to the array's kind as Minecraft 1.21.1's
+// `NumericTag` converts it: an integer's low bits, and a float or a double rounded down with
+// `Mth.floor`. A long array takes a float cut toward 0, and a double rounded down, clamped.
+fn ftb_array(t: String, at: mut usize, kind: u8, depth: usize, r: mut FtbRead) -> Tag ! SnbtError {
+    var bytes = List<i8>()
+    var ints = List<i32>()
+    var longs = List<i64>()
+    loop {
+        ftb_skip(t, mut at, true)
+        if at >= t.len() {
+            fail snbt_error(t, at, "the end in an array, where a number or `]` should be")
+        }
+        if t.byte_at(at) == b']' {
+            at += 1
+            break
+        }
+        let el_at = at
+        let v = try ftb_value(t, mut at, depth, mut r, false)
+        let x: i64 = match v {
+            Byte(x) => i64(x),
+            Short(x) => i64(x),
+            Int(x) => i64(x),
+            Long(x) => x,
+            Float(x) => if kind == b'l' { i64.saturate(x) } else { i64(mth_floor_f32(x)) },
+            Double(x) => if kind == b'l' { i64.saturate(x.floor()) } else { i64(mth_floor(x)) },
+            _ => fail snbt_error(t, el_at, "{a_kind(v)} in an array, where a number should be"),
+        }
+        if kind == b'b' {
+            bytes.push(i8.wrap(x))
+        } else if kind == b'i' {
+            ints.push(i32.wrap(x))
+        } else {
+            longs.push(x)
+        }
+    }
+    return if kind == b'b' { Tag.ByteArray(bytes) } else if kind == b'i' { Tag.IntArray(ints) } else { Tag.LongArray(longs) }
+}
+
+// Minecraft's `Mth.floor`: Java's `(int)` cast, then one less if that's above. So a double below
+// an int's range gives the largest int, as the cast clamps and the one less wraps.
+fn mth_floor(v: f64) -> i32 {
+    let i = i32.saturate(v)
+    return if v < f64(i) { i.wrapping_sub(1) } else { i }
+}
+
+fn mth_floor_f32(v: f32) -> i32 {
+    let i = i32.saturate(v)
+    return if v < f32.nearest(i) { i.wrapping_sub(1) } else { i }
+}
+
+// A string in quotes as FTB reads it: up to the same quote, with `\"`, `\\`, `\t`, `\n`, `\b`,
+// `\r` and `\f`, and any other `\` dropped with the ASCII rune after it. It can't hold a line
+// break.
+fn ftb_quoted(t: String, at: mut usize) -> String ! SnbtError {
+    let open = at
+    let q = t.byte_at(at)
+    at += 1
+    var end = at
+    while end < t.len() {
+        let b = t.byte_at(end)
+        if b == q or b == b'\\' or b == 10 or b == 13 {
+            break
+        }
+        end += 1
+    }
+    if end < t.len() and t.byte_at(end) == q {
+        let s = t[at..end]
+        at = end + 1
+        return s
+    }
+    var out = String()
+    var from = at
+    loop {
+        if at >= t.len() {
+            fail snbt_error(t, open, "a string that doesn't end")
+        }
+        let c = t.byte_at(at)
+        if c == 10 or c == 13 {
+            fail snbt_error(t, at, "a line break in a string, which FTB doesn't take")
+        }
+        if c != q and c != b'\\' {
+            at += 1
+            continue
+        }
+        out.push_str(t[from..at])
+        at += 1
+        if c == q {
+            return out
+        }
+        if at >= t.len() {
+            fail snbt_error(t, open, "a string that doesn't end")
+        }
+        let e = t.byte_at(at)
+        if e == 10 or e == 13 {
+            fail snbt_error(t, at, "a line break in a string, which FTB doesn't take")
+        }
+        // FTB looks the rune after `\` up in a table of ASCII, and fails past it.
+        if e >= 0x80 {
+            fail snbt_error(t, at, "{found(t, at)} after `\\`, where FTB takes only ASCII")
+        }
+        at += 1
+        let v: u8 = if e == b'"' or e == b'\\' { e } else if e == b't' { 9 } else if e == b'n' { 10 } else if e == b'b' { 8 } else if e == b'r' { 13 } else if e == b'f' { 12 } else { 0 }
+        if v != 0 {
+            out.push(rune(v))
+        }
+        from = at
+    }
+}
+
+// --- FTB's SNBT written --------------------------------------------------------------------------
+
+// `tag` as FTB's `SNBT.write` writes it, `indent` tabs in. `path` is where it is, kept only when
+// there are booleans.
+fn ftb_write(tag: Tag, indent: usize, booleans: Set<String>, path: mut String, out: mut String) {
+    match tag {
+        End => out.push_str("null"),
+        Byte(v) => out.push_str("{v}b"),
+        Short(v) => out.push_str("{v}s"),
+        Int(v) => out.push_str("{v}"),
+        Long(v) => out.push_str("{v}L"),
+        Float(v) => out.push_str("{v}f"),
+        Double(v) => out.push_str("{v}d"),
+        String(s) => ftb_quote(s, mut out),
+        ByteArray(v) => {
+            out.push_str("[B;")
+            if v.is_empty() {
+                out.push_str(" ]")
+            } else if v.len() == 1 {
+                out.push_str("{v[0]}b]")
+            } else {
+                for x in v {
+                    out.push('\n')
+                    push_tabs(indent + 1, mut out)
+                    out.push_str("{x}b")
+                }
+                out.push('\n')
+                push_tabs(indent, mut out)
+                out.push(']')
+            }
+        },
+        IntArray(v) => {
+            out.push_str("[I;")
+            if v.is_empty() {
+                out.push_str(" ]")
+            } else if v.len() == 1 {
+                out.push_str("{v[0]}]")
+            } else {
+                for x in v {
+                    out.push('\n')
+                    push_tabs(indent + 1, mut out)
+                    out.push_str("{x}")
+                }
+                out.push('\n')
+                push_tabs(indent, mut out)
+                out.push(']')
+            }
+        },
+        LongArray(v) => {
+            out.push_str("[L;")
+            if v.is_empty() {
+                out.push_str(" ]")
+            } else if v.len() == 1 {
+                out.push_str("{v[0]}L]")
+            } else {
+                for x in v {
+                    out.push('\n')
+                    push_tabs(indent + 1, mut out)
+                    out.push_str("{x}L")
+                }
+                out.push('\n')
+                push_tabs(indent, mut out)
+                out.push(']')
+            }
+        },
+        List(items) => {
+            if items.is_empty() {
+                out.push_str("[ ]")
+                return
+            }
+            out.push('[')
+            let one = items.len() == 1
+            let mark = path.len()
+            for i in 0..items.len() {
+                let pathed = not booleans.is_empty() and (items[i].id() == COMPOUND or items[i].id() == LIST)
+                if pathed {
+                    path.push_str("[{i}]")
+                }
+                if one {
+                    ftb_write(items[i], indent, booleans, mut path, mut out)
+                } else {
+                    out.push('\n')
+                    push_tabs(indent + 1, mut out)
+                    ftb_write(items[i], indent + 1, booleans, mut path, mut out)
+                }
+                if pathed {
+                    path.truncate(mark)
+                }
+            }
+            if not one {
+                out.push('\n')
+                push_tabs(indent, mut out)
+            }
+            out.push(']')
+        },
+        Compound(m) => {
+            if m.is_empty() {
+                out.push_str("\{ \}")
+                return
+            }
+            out.push('{')
+            let mark = path.len()
+            for (k, v) in m {
+                out.push('\n')
+                push_tabs(indent + 1, mut out)
+                ftb_key(k, mut out)
+                out.push_str(": ")
+                let id = v.id()
+                let pathed = not booleans.is_empty() and (id == BYTE or id == COMPOUND or id == LIST)
+                if pathed {
+                    ftb_path_key(k, mut path)
+                }
+                match v {
+                    Byte(b) => {
+                        if pathed and booleans.contains(path) {
+                            out.push_str(if b != 0 { "true" } else { "false" })
+                        } else {
+                            out.push_str("{b}b")
+                        }
+                    },
+                    _ => ftb_write(v, indent + 1, booleans, mut path, mut out),
+                }
+                if pathed {
+                    path.truncate(mark)
+                }
+            }
+            out.push('\n')
+            push_tabs(indent, mut out)
+            out.push('}')
+        },
+    }
+}
+
+fn push_tabs(n: usize, out: mut String) {
+    for _ in 0..n {
+        out.push('\t')
+    }
+}
+
+// A key as FTB writes it: bare if every UTF-16 unit in it is a letter or a digit to Java, or
+// `_-.+`, and quoted otherwise.
+fn ftb_key(k: String, out: mut String) {
+    var bare = not k.is_empty()
+    var i: usize = 0
+    while bare and i < k.len() {
+        let b = k.byte_at(i)
+        if b < 0x80 {
+            bare = bare_char(b)
+            i += 1
+        } else {
+            let (c, n) = rune_at(k, i)
+            bare = java_alnum(c)
+            i += n
+        }
+    }
+    if bare {
+        out.push_str(k)
+    } else {
+        ftb_quote(k, mut out)
+    }
+}
+
+// `s` in `"`, as FTB writes a string: `"`, `\`, tabs, line breaks, backspaces, carriage returns
+// and form feeds escaped, and everything else as it is.
+fn ftb_quote(s: String, out: mut String) {
+    out.push('"')
+    var from: usize = 0
+    for i in 0..s.len() {
+        let c = s.byte_at(i)
+        if c >= 0x20 and c != b'"' and c != b'\\' {
+            continue
+        }
+        let e: u8 = if c == b'"' or c == b'\\' { c } else if c == 8 { b'b' } else if c == 9 { b't' } else if c == 10 { b'n' } else if c == 12 { b'f' } else if c == 13 { b'r' } else { 0 }
+        if e == 0 {
+            continue
+        }
+        out.push_str(s[from..i])
+        out.push('\\')
+        out.push(rune(e))
+        from = i + 1
+    }
+    out.push_str(s[from..s.len()])
+    out.push('"')
+}
+
+// A tag's kind with its article, for a message: `an INT`, `a STRING`.
+fn a_kind(t: Tag) -> String {
+    let k = t.kind_name()
+    return if k.starts_with("INT") { "an {k}" } else { "a {k}" }
 }

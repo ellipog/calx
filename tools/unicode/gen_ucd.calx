@@ -26,6 +26,9 @@
 //   or S, or whose category is Zs.
 // - PY_PRINT, Python's `str.isprintable`, which `repr` keeps as they are: the space, and the runes
 //   whose category isn't C or Z.
+// - JAVA_ALNUM, the runes up to U+FFFF for which Java's `Character.isAlphabetic` or `isDigit` is
+//   true, for std.nbt's FTB SNBT, which checks each UTF-16 unit: the letters, letter numbers,
+//   Other_Alphabetic and the decimal digits.
 import std.env
 import std.fs
 import std.http
@@ -313,6 +316,19 @@ fn main() {
         is_digit[c] = cat == "Nd"
         is_alnum[c] = cat.starts_with("L") or numeric[c]
     }
+    var java_alnum: List<bool> = [false; size]
+    for c in 0usize..0x10000 {
+        let cat = category[c].copy()
+        java_alnum[c] = cat.starts_with("L") or cat == "Nl" or cat == "Nd"
+    }
+    for s in property(props, "Other_Alphabetic") {
+        for c in s.0..(s.1 + 1) {
+            if c <= 0xFFFF {
+                java_alnum[usize(c)] = true
+            }
+        }
+    }
+    let java = ranges(java_alnum)
     var word_spans = ranges(is_word)
     for s in property(props, "Other_Alphabetic") {
         for c in s.0..(s.1 + 1) {
@@ -390,7 +406,8 @@ fn main() {
     let parts: List<String> = [
         String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
         String("/// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`"),
-        String("/// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`."),
+        String("/// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`;"),
+        String("/// and for std.nbt, the runes Java's `isAlphabetic` or `isDigit` is true for."),
         "/// Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
         String("module std.text.ucd"),
         String(),
@@ -407,8 +424,9 @@ fn main() {
         table("PY_UPPER_TO", "The rune `PY_UPPER_FROM[i]` uppers to.", upper_to),
         table("PY_SPACE", "The runes Python's `str.isspace` is true for, as ranges.", flat(py_spaces)),
         table("PY_PRINT", "The runes Python's `str.isprintable` is true for, as ranges.", flat(py_print)),
+        table("JAVA_ALNUM", "The runes up to U+FFFF Java's `Character.isAlphabetic` or `isDigit` is true for, as ranges.", flat(java)),
     ]
     let out = "{root}/std/text/ucd.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
-    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds, {lower_from.len()} lower, {upper_from.len()} upper, {py_spaces.len()} py space, {py_print.len()} printable")
+    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds, {lower_from.len()} lower, {upper_from.len()} upper, {py_spaces.len()} py space, {py_print.len()} printable, {java.len()} java alnum")
 }

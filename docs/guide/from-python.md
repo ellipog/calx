@@ -214,6 +214,7 @@ fn main() ! Error {
 | nbtlib's `nbtlib.load(p)`, `f.save()`, `f["Data"]["DayTime"]`, `str(tag)` | `NbtFile.open(p)`, `f.save(p)`, `f.root.get("Data")!.get("DayTime")` or a `match` in place, and `"{tag}"` from [`std.nbt`](../std/nbt.md), with vanilla's SNBT, and 20 to 66 times as fast on [its benchmark](../std/nbt.md#speed) |
 | nbtlib's `nbtlib.parse_nbt(text)`, `serialize_tag(tag, indent=4)` | `parse_snbt(text)!` and `tag.to_pretty_snbt()` from [`std.nbt`](../std/nbt.md#snbt), which read and lay out SNBT as vanilla 26.3 does |
 | nbtlib's `tag[Path("a.b[0]")]`, `tag[path] = v`, `del tag[path]` | `NbtPath.parse("a.b[0]")!` and its `get(tag)`, `set(mut tag, v)` and `remove(mut tag)` from [`std.nbt`](../std/nbt.md#nbt-paths), which follow paths as vanilla's `/data` does |
+| ftb-snbt-lib's `slib.load(fp)`, `slib.loads(text)`, `slib.dumps(tag)` | `FtbSnbt.open(p)`, `parse_ftb_snbt(text)!` and `f.to_snbt()` from [`std.nbt`](../std/nbt.md#ftbs-snbt), which read and write FTB's quests and configs as FTB Library does, `true` and `false` kept |
 | `lzma.decompress(b)` | `decompress(b)` from [`std.xz`](../std/xz.md), with the same errors and a limit if it's given |
 | `lzma.compress(b, preset=9)` | `compress(b, 9)` from [`std.xz`](../std/xz.md), on all the processors, the same bytes on any machine |
 | `LZMADecompressor()`, `lzma.open(path)` to read | `Decompressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `d.add(piece)`, then `d.finish()`, which reads every stream as `lzma.open` does |

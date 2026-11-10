@@ -1,0 +1,93 @@
+// std.nbt reads and writes FTB's SNBT as FTB Library 2101.1.39's SNBT.read and SNBT.write do: what
+// each line reads, and how it's written back, is what FTB did with the same text. Line breaks in
+// what's written show as `\n` and tabs as `\t`. The messages are std.nbt's own (CLX-231).
+import std.nbt.{FtbSnbt, Tag, parse_ftb_snbt}
+
+fn shown(s: String) -> String {
+    return s.replace("\n", "\\n").replace("\t", "\\t")
+}
+
+// The text read and written back, on one line, with how many booleans it has.
+fn back(text: String) -> String {
+    return match parse_ftb_snbt(text) {
+        ok(f) => shown(f.to_snbt()),
+        err(e) => "error: {e}",
+    }
+}
+
+// The tag read, as vanilla's SNBT shows it, which tells the kinds apart.
+fn read(text: String) -> String {
+    return match parse_ftb_snbt(text) {
+        ok(f) => "{f.root}",
+        err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    // Layout: a tab a level, a key a line, `{ }` and `[ ]` when empty, one element on the line.
+    println(back("\{a:1, b:\{\}, c:[], d:[1], e:[1,2], f:\{x:\"y\"\}, g:[\{x:1\}], h:[[1]]\}"))
+    // out: {\n\ta: 1\n\tb: { }\n\tc: [ ]\n\td: [1]\n\te: [\n\t\t1\n\t\t2\n\t]\n\tf: {\n\t\tx: "y"\n\t}\n\tg: [{\n\t\tx: 1\n\t}]\n\th: [[1]]\n}\n
+    println(back("\{a:[B;], b:[I;1], c:[L;1,2], d:[B;1b,-2b]\}"))
+    // out: {\n\ta: [B; ]\n\tb: [I;1]\n\tc: [L;\n\t\t1L\n\t\t2L\n\t]\n\td: [B;\n\t\t1b\n\t\t-2b\n\t]\n}\n
+
+    // Comment lines, entries split by line breaks alone, and text after the compound ignored.
+    println(read("# made by hand\n\{\n\t# the size\n\tsize: 3\n\tname: \"x\" other: 'y'\n\}\nleft over"))
+    // out: {name:"x",other:"y",size:3}
+    println(read("\{a:1 # not a comment\n\}"))    // out: error: line 1, column 8: `n` after a key, where `:` should be
+    println(read("\{\r\na: 1\r# c\rb: 2\r\n\}"))    // out: {a:1,b:2}
+
+    // Numbers: a kind's letter in either case, and Java's parsing for floats and doubles.
+    println(read("\{a:1b, b:2S, c:3l, d:1.5F, e:1.5, f:1e3, g:.5, h:+1, i:1d, j:1fd, k:NaN, l:-Infinity\}"))
+    // out: {a:1b,b:2s,c:3L,d:1.5f,e:1.5d,f:1000.0d,g:0.5d,h:1.0d,i:1.0d,j:1.0d,k:NaNd,l:-Infinityd}
+    println(read("\{a:2147483648, b:9223372036854775808L, c:0x1p3, d:-0.0, e:007b, f:2147483648b\}"))
+    // out: {a:2.147483648E9d,b:"9223372036854775808L",c:8.0d,d:0.0d,e:7b,f:"2147483648b"}
+    println(read("\{a:1.5b, b:1_000, c:0x1F, d:1e, e:x.y-z+1\}"))    // out: {a:"1.5b",b:"1_000",c:"0x1F",d:"1e",e:"x.y-z+1"}
+    println(read("\{id:minecraft:stone\}"))    // out: error: line 1, column 20: `}` after a key, where `:` should be
+    println(read("\{a:128b\}"))    // out: error: line 1, column 4: `128b`, which is past the range of a byte, -128 to 127
+    println(read("\{a:32768s\}"))    // out: error: line 1, column 4: `32768s`, which is past the range of a short, -32768 to 32767
+
+    // Words: letters and digits as Java sees them, `true`, `false` and `null`.
+    println(read("\{a:élan, b:Ⅻ2, c:true, d:True, e:null, Ⅻ:1\}"))    // out: {a:"élan",b:"Ⅻ2",c:1b,d:"True",e:END,"Ⅻ":1}
+    println(read("\{a:😀\}"))    // out: error: line 1, column 4: `😀` outside quotes, which FTB would split in two
+
+    // Strings: either quote, its escapes, any other `\` dropped with the rune after it.
+    println(read("\{a:\"x\\ty\", b:'it\\'s', c:\"\\x41\", d:\"\\\"\"\}"))    // out: {a:"x\ty",b:"its",c:"41",d:'"'}
+    println(read("\{a:\"x\ny\"\}"))    // out: error: line 1, column 6: a line break in a string, which FTB doesn't take
+    println(read("\{a:\"\\é\"\}"))    // out: error: line 1, column 6: `é` after `\`, where FTB takes only ASCII
+
+    // Keys: quoted ones may be empty, and a key read again keeps its place and takes the new value.
+    println(back("\{\"\": 1, \"a b\": 2, é: 3, x: 1, x: 4\}"))    // out: {\n\t"": 1\n\t"a b": 2\n\té: 3\n\tx: 4\n}\n
+    println(read("\{a:,1\}"))    // out: {a:",1"}
+    println(read("\{a,:1\}"))    // out: error: line 1, column 3: `,` after a key, where `:` should be
+
+    // Lists hold one kind, and never `null`. Arrays take any numbers, converted as 1.21.1 does.
+    println(read("\{a:[1b, true], b:[,x,,y,]\}"))    // out: {a:[1b,1b],b:["x","y"]}
+    println(read("\{a:[1, 1.5]\}"))    // out: error: line 1, column 8: a DOUBLE in a list of INT, which FTB doesn't mix
+    println(read("\{a:[null]\}"))    // out: error: line 1, column 5: `null` in a list, which FTB doesn't take
+    println(read("\{a:[I; 1.5, -1.5, 1e10, -1e10, true], b:[B; 300, -1.5f], c:[L; -1.5f, -1.5]\}"))
+    // out: {a:[I;1,-2,2147483647,2147483647,1],b:[B;44B,-2B],c:[L;-1L,-2L]}
+    println(read("\{a:[I; \"1\"]\}"))    // out: error: line 1, column 8: a STRING in an array, where a number should be
+    println(read("\{a:[ i ; 1], b:[I, x]\}"))    // out: {a:[I;1],b:["I","x"]}
+    println(read("\{a:[x, 1]\}"))    // out: error: line 1, column 8: an INT in a list of STRING, which FTB doesn't mix
+
+    // Booleans: kept by path for a compound's keys, and written from the byte that's there.
+    var f = parse_ftb_snbt("\{optional: true, quests: [\{done: false, n: 1b\}], flags: [true]\}")!
+    println("{f.booleans.contains("optional")} {f.booleans.contains("quests[0].done")} {f.booleans.len()}")    // out: true true 2
+    println(shown(f.to_snbt()))    // out: {\n\toptional: true\n\tquests: [{\n\t\tdone: false\n\t\tn: 1b\n\t}]\n\tflags: [1b]\n}\n
+    _ = f.root.insert("optional", Tag.Byte(0))
+    _ = f.root.insert("hidden", Tag.Byte(1))
+    f.booleans.insert("hidden")
+    println(shown(f.to_snbt()))    // out: {\n\toptional: false\n\tquests: [{\n\t\tdone: false\n\t\tn: 1b\n\t}]\n\tflags: [1b]\n\thidden: true\n}\n
+    let h = parse_ftb_snbt("\{\"a b\": \{\"c.d\": true\}\}")!
+    println("{h.booleans.contains("\"a b\".\"c.d\"")}")    // out: true
+
+    // A file of a new root has no booleans.
+    var g = FtbSnbt.new(Tag.Compound(LinkedMap()))
+    _ = g.root.insert("s", Tag.String("q\"\\"))
+    println(shown(g.to_snbt()))    // out: {\n\ts: "q\"\\"\n}\n
+
+    // What can't be read.
+    println(read("[1]"))    // out: error: line 1, column 1: `[`, where the file's `{` should be
+    println(read("# only a comment"))    // out: error: line 1, column 17: the end, where the file's `{` should be
+    println(read("\{a:1"))    // out: error: line 1, column 5: the end in a compound, where a key or `}` should be
+}
