@@ -1,0 +1,39 @@
+// A program whose folder and cache both have paths of over 300 characters, past the 260 Windows'
+// paths are limited to, builds, writes its output there and runs (CLX-209). std.fs makes, writes,
+// lists and removes the folders too. On Linux, whose limit is far higher, it's an ordinary build.
+import std.env.{variable}
+import std.fs.{is_file, list, make_dir_all, read_text, remove_dir_all, separator, temp_dir, write_text}
+import std.process.{Command}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let s = separator()
+    let dir = temp_dir()!
+    // Folders of 40 characters each, so none passes the 255 a name may have.
+    var deep = "{dir}{s}long-paths"
+    while deep.len() < 310 {
+        deep = "{deep}{s}a-folder-name-of-forty-characters-0000"
+    }
+    let cache = "{deep}{s}cache"
+    make_dir_all("{deep}{s}util")!
+    write_text("{deep}{s}main.calx", "import util.greet.\{hello\}\n\nfn main() \{\n    println(hello(\"deep folder\"))\n\}\n")!
+    write_text("{deep}{s}util{s}greet.calx", "module util.greet\n\npub fn hello(who: str) -> String \{\n    return \"hello from a \{who\}\"\n\}\n")!
+    let greet = read_text("{deep}{s}util{s}greet.calx")! ?? String()
+    println("{greet.starts_with("module util.greet")} {list(deep.copy())!.len()}")    // out: true 2
+
+    // From the short folder, since Windows won't start a program in a folder past the limit.
+    let main_path = "{deep}{s}main.calx"
+    let exe = "{deep}{s}out{s}main.exe"
+    let build = Command.new(calx.copy()).args(["build", main_path.copy(), "-o", exe.copy()]).dir(dir.copy())
+    let built = build.env("CALX_CACHE", cache.copy()).output()!
+    println("built: {built.status}")    // out: built: exited with status 0
+    if not built.status.success() {
+        println(built.error_text())
+    }
+    println("{is_file(exe.copy())}")    // out: true
+    let run = Command.new(calx.copy()).args(["run", main_path.copy()]).dir(dir.copy())
+    let ran = run.env("CALX_CACHE", cache.copy()).output()!
+    println(ran.text().trim())    // out: hello from a deep folder
+    remove_dir_all(dir.copy())!
+    println("{is_file(main_path.copy())}")    // out: false
+}

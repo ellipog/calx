@@ -39,8 +39,13 @@ bool find_toolchain(Toolchain& tc, std::string& error);
 std::string which(const std::string& name);
 
 // The cache folder: CALX_CACHE, or `%LOCALAPPDATA%\calx\cache` on Windows and
-// `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux.
+// `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux. On Windows, one of more than 100 characters
+// is given in the `\\?\` form, so the paths under it can pass MAX_PATH.
 std::string cache_dir();
+
+// `path` to open, make or remove: on Windows, in the `\\?\` form if it's 248 characters or more,
+// since Windows' file functions refuse longer paths otherwise. Messages show the path as given.
+std::filesystem::path long_path(const std::string& path);
 
 // Starts a program that runs on after this one ends, with no console, no inherited handles and
 // its streams going nowhere. Returns whether it started.

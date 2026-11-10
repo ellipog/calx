@@ -140,7 +140,7 @@ int direct_run(int argc, char** argv, Options& opt) {
     if (i == argc) return usage();
     std::string file = argv[i];
     std::error_code ec;
-    bool there = std::filesystem::is_regular_file(file, ec);
+    bool there = std::filesystem::is_regular_file(long_path(file), ec);
     if (!there && std::filesystem::path(file).extension() != ".calx") {
         std::fprintf(stderr, "calx: `%s` isn't a command, or a file to run\n\n", file.c_str());
         usage();
@@ -721,14 +721,14 @@ int main(int argc, char** argv) {
         } else if (files.size() == 1) {
             std::error_code ec;
             std::filesystem::path parent = std::filesystem::path(opt.output).parent_path();
-            if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+            if (!parent.empty()) std::filesystem::create_directories(long_path(parent.string()), ec);
             if (!write_file_atomic(opt.output, files[0].text)) {
                 std::fprintf(stderr, "calx: can't write %s\n", opt.output.c_str());
                 return 1;
             }
         } else {
             std::error_code ec;
-            std::filesystem::create_directories(opt.output, ec);
+            std::filesystem::create_directories(long_path(opt.output), ec);
             for (const CFile& f : files) {
                 std::string path = (std::filesystem::path(opt.output) / f.name).string();
                 if (!write_file_atomic(path, f.text)) {

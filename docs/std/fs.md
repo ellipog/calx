@@ -153,7 +153,9 @@ A lock is held until `release`, and the system lets it go when the program ends,
 
 A path is a `String`, relative to the directory the program runs in unless it starts at a root, such as `/srv` or `C:\srv`. `/` separates directories on both systems, and `\` does too on Windows. Windows converts the path to UTF-16, so a name in any script works on both.
 
-A path with a NUL byte fails with `BadPath`, since the system would read only the part before it. Windows paths are limited to 260 UTF-16 units for now.
+A path with a NUL byte fails with `BadPath`, since the system would read only the part before it.
+
+Windows' file functions refuse paths of 260 UTF-16 units or more unless they're in the `\\?\` form, and `CreateDirectoryW` at 248. So `std.fs` gives a path that long in that form: made absolute first, as `absolute` makes it, since the form turns off the rest of Windows' handling of paths. Programs read, write, list and remove files at any length, as Linux's do. Still limited to 260: `set_current_dir`, and a link `make_link` makes.
 
 Names from `list` are UTF-8. On Linux, a name is bytes, and each part that isn't UTF-8 becomes U+FFFD. On Windows, an unpaired surrogate in a name becomes U+FFFD. `list` sorts the names, since each system lists them in its own order, and a program's output shouldn't depend on which it runs on.
 

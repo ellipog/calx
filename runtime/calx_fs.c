@@ -141,6 +141,38 @@ static wchar_t* wide(const cx_u8* p, size_t n) {
     return w;
 }
 
+/* The path as `wide` gives it, for the calls that open, make or remove what's there: in the `\\?\`
+ * form if it's 248 units or more, since Windows' file functions refuse such paths otherwise, and
+ * CreateDirectoryW's limit is 248. That form turns off the rest of Windows' path handling, so the
+ * path is made absolute by GetFullPathNameW first, with `.` and `..` taken out and each `/` a `\`;
+ * a share's `\\server\share` becomes `\\?\UNC\server\share` (CLX-209). */
+static wchar_t* wide_long(const cx_u8* p, size_t n) {
+    wchar_t* w = wide(p, n);
+    if (!w) return NULL;
+    size_t units = wcslen(w);
+    if (units < 248 || (w[0] == L'\\' && w[1] == L'\\' && (w[2] == L'?' || w[2] == L'.') && w[3] == L'\\')) return w;
+    DWORD need = GetFullPathNameW(w, 0, NULL, NULL);
+    if (need == 0) return w;
+    wchar_t* full = (wchar_t*)malloc((size_t)need * sizeof(wchar_t));
+    if (!full) fs_out_of_memory();
+    DWORD got = GetFullPathNameW(w, need, full, NULL);
+    if (got == 0 || got >= need) {
+        free(full);
+        return w;
+    }
+    int unc = full[0] == L'\\' && full[1] == L'\\';
+    const wchar_t* prefix = unc ? L"\\\\?\\UNC\\" : L"\\\\?\\";
+    size_t head = unc ? 8 : 4, skip = unc ? 2 : 0;
+    wchar_t* out = (wchar_t*)malloc((head + got - skip + 1) * sizeof(wchar_t));
+    if (!out) fs_out_of_memory();
+    memcpy(out, prefix, head * sizeof(wchar_t));
+    memcpy(out + head, full + skip, (got - skip) * sizeof(wchar_t));
+    out[head + got - skip] = 0;
+    free(full);
+    free(w);
+    return out;
+}
+
 /* Adds UTF-16 text to the result buffer as UTF-8. An unpaired surrogate becomes U+FFFD. */
 static void buf_add_wide(const wchar_t* w, int units) {
     if (units == 0) return;
@@ -154,7 +186,7 @@ static void buf_add_wide(const wchar_t* w, int units) {
 }
 
 cx_i64 cx_fs_open(const cx_u8* path, size_t len, cx_u32 write) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return -1;
     /* 3 writes in place, and keeps a file open: shared as Java's FileChannel shares one, so others
      * may read, write and remove it meanwhile. */
@@ -243,7 +275,7 @@ cx_i32 cx_fs_close(cx_i64 h) {
  * Java's, 0 to Long.MAX_VALUE. The handle, -1 for an error, or -2 if another handle holds a lock
  * on the file, which refuses the write too. */
 cx_i64 cx_fs_lock(const cx_u8* path, size_t len, const cx_u8* bytes, size_t n) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return -1;
     HANDLE h = CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
@@ -293,9 +325,9 @@ cx_i32 cx_fs_unlock(cx_i64 h) {
 /* Moves `from` to `to`, replacing a file there. With `sync`, MoveFileExW returns once the move is on
  * the disk. */
 cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len, cx_u32 sync) {
-    wchar_t* a = wide(from, from_len);
+    wchar_t* a = wide_long(from, from_len);
     if (!a) return 0;
-    wchar_t* b = wide(to, to_len);
+    wchar_t* b = wide_long(to, to_len);
     if (!b) {
         free(a);
         return 0;
@@ -308,7 +340,7 @@ cx_i32 cx_fs_rename(const cx_u8* from, size_t from_len, const cx_u8* to, size_t 
 }
 
 cx_i32 cx_fs_remove_file(const cx_u8* path, size_t len) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     BOOL ok = DeleteFileW(w);
     if (!ok) {
@@ -325,7 +357,7 @@ cx_i32 cx_fs_remove_file(const cx_u8* path, size_t len) {
 }
 
 cx_i32 cx_fs_remove_dir(const cx_u8* path, size_t len) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     BOOL ok = RemoveDirectoryW(w);
     if (!ok) fail_win(GetLastError());
@@ -334,7 +366,7 @@ cx_i32 cx_fs_remove_dir(const cx_u8* path, size_t len) {
 }
 
 cx_i32 cx_fs_make_dir(const cx_u8* path, size_t len) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     BOOL ok = CreateDirectoryW(w, NULL);
     if (!ok) fail_win(GetLastError());
@@ -353,7 +385,7 @@ static int is_link(const wchar_t* w) {
 }
 
 cx_u32 cx_fs_kind(const cx_u8* path, size_t len, cx_u32 follow) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return KIND_ERROR;
     DWORD attrs = GetFileAttributesW(w);
     cx_u32 kind;
@@ -399,7 +431,7 @@ cx_u32 cx_fs_kind(const cx_u8* path, size_t len, cx_u32 follow) {
 /* A handle to what's at the path, following links, with `access` alone, which may be 0 to read
  * its attributes. A directory opens too. */
 static HANDLE open_attributes(const cx_u8* path, size_t len, DWORD access) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return INVALID_HANDLE_VALUE;
     HANDLE h = CreateFileW(w, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -442,7 +474,7 @@ cx_i32 cx_fs_stat(const cx_u8* path, size_t len) {
 cx_i32 cx_fs_handle_stat(cx_i64 h) { return stat_handle((HANDLE)(intptr_t)h); }
 
 cx_i32 cx_fs_set_mode(const cx_u8* path, size_t len, cx_u32 mode) {
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     /* Only the owner's write bit means anything here: without it the file is read-only. */
     DWORD attrs = GetFileAttributesW(w);
@@ -482,7 +514,7 @@ static cx_i32 list_dir(const cx_u8* path, size_t len, int typed) {
     memcpy(pattern, path, n);
     if (n > 0 && pattern[n - 1] != '/' && pattern[n - 1] != '\\') pattern[n++] = '\\';
     pattern[n++] = '*';
-    wchar_t* w = wide(pattern, n);
+    wchar_t* w = wide_long(pattern, n);
     free(pattern);
     if (!w) return 0;
     WIN32_FIND_DATAW d;
@@ -546,9 +578,9 @@ static int same_file(const wchar_t* a, const wchar_t* b) {
  * keeps the modified time and the attributes, as it keeps the read-only flag. A file copied onto
  * itself, which CopyFileW refuses, is left as it is, as on Linux. */
 cx_i32 cx_fs_copy(const cx_u8* from, size_t from_len, const cx_u8* to, size_t to_len) {
-    wchar_t* a = wide(from, from_len);
+    wchar_t* a = wide_long(from, from_len);
     if (!a) return 0;
-    wchar_t* b = wide(to, to_len);
+    wchar_t* b = wide_long(to, to_len);
     if (!b) {
         free(a);
         return 0;
@@ -656,7 +688,7 @@ cx_i32 cx_fs_temp_dir(void) {
  * buffer: `C:\...`, or `\\server\share\...` on a network, without the `\\?\` the system adds. */
 cx_i32 cx_fs_real_path(const cx_u8* path, size_t len) {
     fs_len = 0;
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -729,7 +761,7 @@ static void buf_add_link_name(const wchar_t* s, int units) {
  * the path is neither, or 0 if it can't be read. */
 cx_i32 cx_fs_read_link(const cx_u8* path, size_t len) {
     fs_len = 0;
-    wchar_t* w = wide(path, len);
+    wchar_t* w = wide_long(path, len);
     if (!w) return 0;
     HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);

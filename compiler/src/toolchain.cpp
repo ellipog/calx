@@ -118,6 +118,31 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<std::size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// `path` in the form Windows' file functions take at any length, as clang and lld do too: absolute,
+// with backslashes, `.` and `..` taken out, after `\\?\`, or `\\?\UNC\` for a share. That form
+// turns off the rest of Windows' path handling, which is why it's made normal first (CLX-209).
+std::string verbatim(const std::string& path) {
+    if (path.rfind("\\\\?\\", 0) == 0) return path;
+    std::error_code ec;
+    fs::path p(widen(path));
+    if (!p.is_absolute()) {
+        fs::path cwd = fs::current_path(ec);
+        if (ec) return path;
+        p = cwd / p;
+    }
+    std::wstring s = p.lexically_normal().make_preferred().wstring();
+    if (s.rfind(L"\\\\", 0) == 0) return narrow(L"\\\\?\\UNC\\" + s.substr(2));
+    return narrow(L"\\\\?\\" + s);
+}
+
 // Where a program's standard streams go: files, or the compiler's own when null. Errors go with
 // the output when `errors` is null and `output` isn't.
 struct Redirect {
@@ -128,7 +153,7 @@ struct Redirect {
 
 HANDLE open_for(const std::string& path, bool write) {
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-    return CreateFileW(widen(path).c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, &sa,
+    return CreateFileW(widen(path.size() >= 248 ? verbatim(path) : path).c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, &sa,
                        write ? CREATE_ALWAYS : OPEN_EXISTING, write ? FILE_ATTRIBUTE_TEMPORARY : FILE_ATTRIBUTE_NORMAL,
                        nullptr);
 }
@@ -337,13 +362,28 @@ std::string find_home(std::string& error) {
 
 std::string cache_dir() {
     std::string cache = env("CALX_CACHE");
-    if (!cache.empty()) return cache;
 #ifdef _WIN32
-    std::string base = env("LOCALAPPDATA");
-    return (fs::path(base.empty() ? env("TEMP") : base) / "calx" / "cache").string();
+    if (cache.empty()) {
+        std::string base = env("LOCALAPPDATA");
+        cache = (fs::path(base.empty() ? env("TEMP") : base) / "calx" / "cache").string();
+    }
+    // What's kept under the cache adds up to about 90 characters, so past 100 its paths could pass
+    // MAX_PATH. Those are written from the `\\?\` form, which takes any length (CLX-209).
+    if (cache.size() > 100) cache = verbatim(cache);
+    return cache;
 #else
+    if (!cache.empty()) return cache;
     std::string base = env("XDG_CACHE_HOME");
     return base.empty() ? (fs::path(env("HOME")) / ".cache" / "calx").string() : (fs::path(base) / "calx").string();
+#endif
+}
+
+fs::path long_path(const std::string& path) {
+#ifdef _WIN32
+    // CreateDirectoryW's limit is 248, lower than the others' 260.
+    return fs::path(widen(path.size() >= 248 ? verbatim(path) : path));
+#else
+    return fs::path(path);
 #endif
 }
 
@@ -697,7 +737,7 @@ int run_parallel(const std::vector<std::vector<std::string>>& commands) {
 }
 
 bool read_file(const std::string& path, std::string& out) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(long_path(path), std::ios::binary);
     if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -706,7 +746,8 @@ bool read_file(const std::string& path, std::string& out) {
 }
 
 bool write_file_atomic(const std::string& path, const std::string& data) {
-    std::string temp = path + ".tmp" + unique_stamp();
+    fs::path to = long_path(path);
+    fs::path temp = long_path(path + ".tmp" + unique_stamp());
     {
         std::ofstream out(temp, std::ios::binary);
         if (!out) return false;
@@ -714,7 +755,7 @@ bool write_file_atomic(const std::string& path, const std::string& data) {
         if (!out) return false;
     }
     std::error_code ec;
-    fs::rename(temp, path, ec);
+    fs::rename(temp, to, ec);
     if (ec) {
         fs::remove(temp, ec);
         return false;
@@ -724,7 +765,7 @@ bool write_file_atomic(const std::string& path, const std::string& data) {
 
 bool file_exists(const std::string& path) {
     std::error_code ec;
-    return fs::is_regular_file(path, ec);
+    return fs::is_regular_file(long_path(path), ec);
 }
 
 namespace {
@@ -1137,8 +1178,8 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
     std::error_code ec;
     // The output's folder is made if it isn't there, as `-o build/app` expects.
     fs::path parent = fs::path(out).parent_path();
-    if (!parent.empty()) fs::create_directories(parent, ec);
-    fs::copy_file(built, out, fs::copy_options::overwrite_existing, ec);
+    if (!parent.empty()) fs::create_directories(long_path(parent.string()), ec);
+    fs::copy_file(long_path(built), long_path(out), fs::copy_options::overwrite_existing, ec);
     if (ec) {
         error = "can't write " + out + ": " + ec.message();
         return false;
@@ -1177,7 +1218,7 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         fs::path to = fs::path(out).replace_extension(".pdb");
         std::string name = to.filename().string();
         if (name.size() + 1 > room || !file_exists(pdb)) return true;
-        fs::copy_file(pdb, to, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(long_path(pdb), long_path(to.string()), fs::copy_options::overwrite_existing, ec);
         if (ec) {
             error = "can't write " + to.string() + ": " + ec.message();
             return false;

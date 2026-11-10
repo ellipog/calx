@@ -1,4 +1,5 @@
 #include "modules.h"
+#include "toolchain.h"
 
 #include <algorithm>
 #include <cctype>
@@ -358,7 +359,7 @@ private:
             std::string want = std::string(text(parts[i])) + (i + 1 == parts.size() ? ".calx" : "");
             bool found = false;
             std::error_code ec;
-            for (fs::directory_iterator d(dir, ec), end; !ec && d != end; d.increment(ec)) {
+            for (fs::directory_iterator d(long_path(dir.string()), ec), end; !ec && d != end; d.increment(ec)) {
                 if (d->path().filename().string() == want) {
                     found = true;
                     break;

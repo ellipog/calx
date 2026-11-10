@@ -1,4 +1,5 @@
 #include "source.h"
+#include "toolchain.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -46,7 +47,7 @@ std::string_view SourceFile::line_text(std::uint32_t line) const {
 }
 
 std::uint32_t Sources::load(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(long_path(path), std::ios::binary);
     if (!in) return 0;
     std::ostringstream buf;
     buf << in.rdbuf();

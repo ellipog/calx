@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!-- The driver's narrow strings are UTF-8 on Windows too: its arguments, the paths it opens and
-     the command lines it builds. Windows 10 1903 and later honor this. -->
+     the command lines it builds. Windows 10 1903 and later honor this. With longPathAware, paths
+     past MAX_PATH work everywhere where the system's LongPathsEnabled is set; without it, the
+     driver gives long paths in the \\?\ form itself (CLX-209). -->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <application>
     <windowsSettings>
       <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
 </assembly>
