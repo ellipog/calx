@@ -1,0 +1,11 @@
+// A box whose corners are the wrong way round panics at the call, as Pillow raises ValueError
+// for it (CLX-218).
+
+import std.image.{Color, Image, Kind, Paint}
+
+fn main() {
+    var im = Image.new(4, 4, Kind.Rgb, Color.rgb(255, 255, 255))
+    im.rectangle(0, 0, 3, 3, Paint.filled(Color.rgb(0, 0, 0)))
+    println("{im.get(3, 3)}")    // out: #000000
+    im.ellipse(3, 0, 1, 3, Paint.filled(Color.rgb(0, 0, 0)))    // panic: a box's x1, 1, is less than its x0, 3
+}

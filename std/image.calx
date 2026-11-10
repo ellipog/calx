@@ -1,6 +1,7 @@
 /// Images in memory: read from PNG, JPEG and ICO files, changed, and written back, as Pillow
-/// does it. Resizing and blurring give Pillow's pixels, PNG and JPEG are read as libpng and
-/// libjpeg-turbo read them, and JPEGs are written byte for byte as Pillow writes them.
+/// does it. Resizing, blurring and drawing shapes give Pillow's pixels, PNG and JPEG are read
+/// as libpng and libjpeg-turbo read them, and JPEGs are written byte for byte as Pillow writes
+/// them.
 ///
 /// An `Image` holds its pixels 8 bits a channel, row by row from the top, in `pixels`.
 module std.image
@@ -10,7 +11,11 @@ import std.fs.{read, write}
 import std.image.jpeg
 import std.image.jpeg.{Sampling}
 import std.image.png
-import std.math.{PI, cos, sin}
+import std.math.{PI, atan2, cos, hypot, sin}
+
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
 
 /// What each pixel holds.
 pub enum Kind {
@@ -154,6 +159,35 @@ pub enum Filter {
     Bicubic
     /// A Lanczos-windowed sinc over 6: the sharpest.
     Lanczos
+}
+
+/// How a shape is drawn: its inside filled, its edge drawn, or both, as Pillow's `fill`,
+/// `outline` and `width` give them.
+pub struct Paint {
+    /// The color inside the shape, or `none` to leave the inside as it is.
+    pub fill: Color?
+    /// The color of the edge, or `none` for no edge.
+    pub outline: Color?
+    /// How many pixels wide the edge is, inward from the shape's own edge. 0 draws none.
+    pub width: u32
+}
+
+impl Paint {
+    /// The inside filled with `color`, and no edge.
+    pub fn filled(color: Color) -> Paint {
+        return Paint { fill: some(color), outline: none, width: 1 }
+    }
+
+    /// Only the edge, in `color`, `width` pixels wide.
+    pub fn outlined(color: Color, width: u32 = 1) -> Paint {
+        return Paint { fill: none, outline: some(color), width }
+    }
+
+    /// The inside filled with `inside`, then the edge drawn over it in `edge`, `width` pixels
+    /// wide.
+    pub fn both(inside: Color, edge: Color, width: u32 = 1) -> Paint {
+        return Paint { fill: some(inside), outline: some(edge), width }
+    }
 }
 
 /// An image: its size, what each pixel holds, and the pixels.
@@ -782,6 +816,276 @@ impl Image {
         }
     }
 
+    // The ink for `color` on this image: blended by its alpha when it isn't opaque and the
+    // image has none, as Pillow blends RGBA drawn on RGB, and set as it is otherwise.
+    fn ink(self, color: Color) -> Ink {
+        return Ink { w: i32.wrap(self.w), h: i32.wrap(self.h), ch: self.form.channels(), px: pixel_bytes(self.form, color), alpha: u32(color.a), blend: not self.form.has_alpha() and color.a < 255 }
+    }
+
+    /// Sets pixel (x, y) to `color`, as Pillow's `ImageDraw.point`: a color that isn't opaque
+    /// is blended on an image without alpha. Nothing happens outside the image.
+    @track_caller
+    pub fn point(mut self, x: i64, y: i64, color: Color) {
+        self.check()
+        let k = self.ink(color)
+        ink_point(mut self.pixels, k, c32(x), c32(y))
+    }
+
+    /// Draws lines from each point to the next, `width` pixels wide, as Pillow's
+    /// `ImageDraw.line`. `round_joints` rounds the corners where wide lines meet, as Pillow's
+    /// `joint="curve"` does for lines wider than 4.
+    @track_caller
+    pub fn line(mut self, points: List<(i64, i64)>, color: Color, width: u32 = 1, round_joints: bool = false) {
+        self.check()
+        if width == 0 {
+            return
+        }
+        let k = self.ink(color)
+        let w = w32(width)
+        let xy = coords(points)
+        draw_lines(mut self.pixels, k, xy, w)
+        if not round_joints or w <= 4 or points.len() < 3 {
+            return
+        }
+        // Pillow's joints: a pie slice the line's width across at each corner, turning from one
+        // line's direction to the next, and past 8 pixels a short line over the gap between.
+        for i in 1usize..points.len() - 1 {
+            let (ax, ay) = points[i - 1]
+            let (cx, cy) = points[i]
+            let (bx, by) = points[i + 1]
+            let a0 = py_mod360(atan2(f64.nearest(cx - ax), f64.nearest(ay - cy)) * RAD_TO_DEG)
+            let a1 = py_mod360(atan2(f64.nearest(bx - cx), f64.nearest(cy - by)) * RAD_TO_DEG)
+            if a0 == a1 {
+                continue
+            }
+            let flipped = (a1 > a0 and a1 - 180.0 > a0) or (a1 < a0 and a1 + 180.0 > a0)
+            let half = f64(w) / 2.0
+            let px0 = i32.saturate(f64.nearest(cx) - half + 1.0)
+            let py0 = i32.saturate(f64.nearest(cy) - half + 1.0)
+            let px1 = i32.saturate(f64.nearest(cx) + half - 1.0)
+            let py1 = i32.saturate(f64.nearest(cy) + half - 1.0)
+            let (s, e) = if flipped { (a1 + 90.0, a0 + 90.0) } else { (a0 - 90.0, a1 - 90.0) }
+            draw_pieslice(mut self.pixels, k, px0, py0, px1, py1, f32.nearest(s - 90.0), f32.nearest(e - 90.0), true, 0)
+            if w > 8 {
+                let turn = if flipped { 90.0 } else { -90.0 }
+                let (gx0, gy0) = at_angle(cx, cy, a0 + turn, w)
+                let (gx1, gy1) = at_angle(cx, cy, a1 + turn, w)
+                draw_lines(mut self.pixels, k, [c32(gx0), c32(gy0), c32(cx), c32(cy), c32(gx1), c32(gy1)], 3)
+            }
+        }
+    }
+
+    /// Draws the rectangle from (x0, y0) to (x1, y1), both corners' pixels included, as
+    /// Pillow's `ImageDraw.rectangle`: filled, outlined `paint.width` pixels inward, or both.
+    /// Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn rectangle(mut self, x0: i64, y0: i64, x1: i64, y1: i64, paint: Paint) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        if let f = paint.fill {
+            let k = self.ink(f)
+            draw_rect(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), true, 0)
+        }
+        if let o = edge_of(self.form, paint) {
+            let k = self.ink(o)
+            draw_rect(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), false, w32(paint.width))
+        }
+    }
+
+    /// Draws the rectangle from (x0, y0) to (x1, y1) with its corners rounded `radius` pixels,
+    /// as Pillow's `ImageDraw.rounded_rectangle`. `corners` says which are rounded: top left,
+    /// top right, bottom right and bottom left. Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn rounded_rectangle(mut self, x0: i64, y0: i64, x1: i64, y1: i64, radius: u32, paint: Paint, corners: [bool; 4] = [true, true, true, true]) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        var d = (x1 - x0).min(y1 - y0).min(i64(radius) * 2)
+        var full_x = false
+        var full_y = false
+        if corners[0] and corners[1] and corners[2] and corners[3] {
+            // Corners that meet are drawn as halves of one ellipse, or as a whole one.
+            full_x = d >= x1 - x0 - 1
+            if full_x {
+                d = x1 - x0
+            }
+            full_y = d >= y1 - y0 - 1
+            if full_y {
+                d = y1 - y0
+            }
+            if full_x and full_y {
+                self.ellipse(x0, y0, x1, y1, paint)
+                return
+            }
+        }
+        if d == 0 or not (corners[0] or corners[1] or corners[2] or corners[3]) {
+            self.rectangle(x0, y0, x1, y1, paint)
+            return
+        }
+        let r = d / 2
+        // Each corner's box and the angles it turns through.
+        var parts: List<(i64, i64, i64, i64, f32, f32)> = []
+        if full_x {
+            parts.push((x0, y0, x0 + d, y0 + d, 180.0f32, 360.0f32))
+            parts.push((x0, y1 - d, x0 + d, y1, 0.0f32, 180.0f32))
+        } else if full_y {
+            parts.push((x0, y0, x0 + d, y0 + d, 90.0f32, 270.0f32))
+            parts.push((x1 - d, y0, x1, y0 + d, 270.0f32, 90.0f32))
+        } else {
+            if corners[0] {
+                parts.push((x0, y0, x0 + d, y0 + d, 180.0f32, 270.0f32))
+            }
+            if corners[1] {
+                parts.push((x1 - d, y0, x1, y0 + d, 270.0f32, 360.0f32))
+            }
+            if corners[2] {
+                parts.push((x1 - d, y1 - d, x1, y1, 0.0f32, 90.0f32))
+            }
+            if corners[3] {
+                parts.push((x0, y1 - d, x0 + d, y1, 90.0f32, 180.0f32))
+            }
+        }
+        // How far down the left and right sides start and end, past the corners rounded.
+        let lt = if corners[0] { y0 + r + 1 } else { y0 }
+        let lb = if corners[3] { y1 - r - 1 } else { y1 }
+        let rt = if corners[1] { y0 + r + 1 } else { y0 }
+        let rb = if corners[2] { y1 - r - 1 } else { y1 }
+        if let f = paint.fill {
+            let k = self.ink(f)
+            for p in parts {
+                draw_pieslice(mut self.pixels, k, c32(p.0), c32(p.1), c32(p.2), c32(p.3), p.4, p.5, true, 0)
+            }
+            if full_x {
+                fill_box(mut self.pixels, k, x0, y0 + r + 1, x1, y1 - r - 1)
+            } else if x1 - r - 1 >= x0 + r + 1 {
+                fill_box(mut self.pixels, k, x0 + r + 1, y0, x1 - r - 1, y1)
+            }
+            if not full_x and not full_y {
+                fill_box(mut self.pixels, k, x0, lt, x0 + r, lb)
+                fill_box(mut self.pixels, k, x1 - r, rt, x1, rb)
+            }
+        }
+        if let o = edge_of(self.form, paint) {
+            let k = self.ink(o)
+            let w = i64(paint.width)
+            for p in parts {
+                draw_arc(mut self.pixels, k, c32(p.0), c32(p.1), c32(p.2), c32(p.3), p.4, p.5, w32(paint.width))
+            }
+            if not full_x {
+                let tl = if corners[0] { x0 + r + 1 } else { x0 }
+                let tr = if corners[1] { x1 - r - 1 } else { x1 }
+                fill_box(mut self.pixels, k, tl, y0, tr, y0 + w - 1)
+                let bl = if corners[3] { x0 + r + 1 } else { x0 }
+                let br = if corners[2] { x1 - r - 1 } else { x1 }
+                fill_box(mut self.pixels, k, bl, y1 - w + 1, br, y1)
+            }
+            if not full_y {
+                fill_box(mut self.pixels, k, x0, lt, x0 + w - 1, lb)
+                fill_box(mut self.pixels, k, x1 - w + 1, rt, x1, rb)
+            }
+        }
+    }
+
+    /// Draws the ellipse that fits the box from (x0, y0) to (x1, y1), both corners' pixels
+    /// included, as Pillow's `ImageDraw.ellipse`. Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn ellipse(mut self, x0: i64, y0: i64, x1: i64, y1: i64, paint: Paint) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        if let f = paint.fill {
+            let k = self.ink(f)
+            draw_ellipse(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), true, 0)
+        }
+        if let o = edge_of(self.form, paint) {
+            let k = self.ink(o)
+            draw_ellipse(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), false, w32(paint.width))
+        }
+    }
+
+    /// Draws the circle around (x, y) `radius` pixels out, as Pillow's `ImageDraw.circle`: the
+    /// ellipse from (x - radius, y - radius) to (x + radius, y + radius).
+    @track_caller
+    pub fn circle(mut self, x: i64, y: i64, radius: u32, paint: Paint) {
+        let r = i64(radius)
+        self.ellipse(x - r, y - r, x + r, y + r, paint)
+    }
+
+    /// Draws the polygon through `points`, closed back to the first, as Pillow's
+    /// `ImageDraw.polygon`. Its edge is drawn inside the shape, so a wide one doesn't make it
+    /// bigger. Panics for fewer than 2 points.
+    @track_caller
+    pub fn polygon(mut self, points: List<(i64, i64)>, paint: Paint) {
+        self.check()
+        if points.len() < 2 {
+            panic("a polygon needs at least 2 points, not {points.len()}")
+        }
+        let xy = coords(points)
+        if let f = paint.fill {
+            let k = self.ink(f)
+            ink_polygon(mut self.pixels, k, xy, true, 0, [])
+        }
+        let o = edge_of(self.form, paint) else return
+        let k = self.ink(o)
+        if paint.width == 1 {
+            ink_polygon(mut self.pixels, k, xy, false, 1, [])
+            return
+        }
+        // A line twice as wide, drawn only where the polygon's inside is.
+        var inside: List<u8> = [0u8; self.w * self.h]
+        let mark = Ink { w: k.w, h: k.h, ch: 1, px: [1, 0, 0, 0], alpha: 255, blend: false }
+        ink_polygon(mut inside, mark, xy, true, 0, [])
+        ink_polygon(mut self.pixels, k, xy, false, w32(paint.width) * 2 - 1, inside)
+    }
+
+    /// Draws the part of the ellipse in the box from (x0, y0) to (x1, y1) from `start` to
+    /// `end` degrees, clockwise from 3 o'clock, `width` pixels wide, as Pillow's
+    /// `ImageDraw.arc`. Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn arc(mut self, x0: i64, y0: i64, x1: i64, y1: i64, start: f64, end: f64, color: Color, width: u32 = 1) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        if width == 0 {
+            return
+        }
+        let k = self.ink(color)
+        draw_arc(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), f32.nearest(start), f32.nearest(end), w32(width))
+    }
+
+    /// Draws the part of the ellipse in the box from (x0, y0) to (x1, y1) cut off by the line
+    /// from `start` to `end` degrees, clockwise from 3 o'clock, as Pillow's `ImageDraw.chord`.
+    /// Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn chord(mut self, x0: i64, y0: i64, x1: i64, y1: i64, start: f64, end: f64, paint: Paint) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        let (s, e) = (f32.nearest(start), f32.nearest(end))
+        if let f = paint.fill {
+            let k = self.ink(f)
+            draw_chord(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), s, e, true, 0)
+        }
+        if let o = edge_of(self.form, paint) {
+            let k = self.ink(o)
+            draw_chord(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), s, e, false, w32(paint.width))
+        }
+    }
+
+    /// Draws the slice of the ellipse in the box from (x0, y0) to (x1, y1) from `start` to
+    /// `end` degrees, clockwise from 3 o'clock, with its sides to the center, as Pillow's
+    /// `ImageDraw.pieslice`. Panics if x1 is less than x0 or y1 than y0.
+    @track_caller
+    pub fn pieslice(mut self, x0: i64, y0: i64, x1: i64, y1: i64, start: f64, end: f64, paint: Paint) {
+        self.check()
+        check_box(x0, y0, x1, y1)
+        let (s, e) = (f32.nearest(start), f32.nearest(end))
+        if let f = paint.fill {
+            let k = self.ink(f)
+            draw_pieslice(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), s, e, true, 0)
+        }
+        if let o = edge_of(self.form, paint) {
+            let k = self.ink(o)
+            draw_pieslice(mut self.pixels, k, c32(x0), c32(y0), c32(x1), c32(y1), s, e, false, w32(paint.width))
+        }
+    }
+
     /// Fills the image with `color`.
     @track_caller
     pub fn fill(mut self, color: Color) {
@@ -930,6 +1234,1098 @@ impl Paletted {
             fail "can't write {path}: a palette image is written as a PNG"
         }
         try write(path.copy(), self.encode_png()).context("writing {path}")
+    }
+}
+
+// ---- Shapes, drawn as Pillow's ImageDraw draws them ----
+//
+// What follows takes the steps of Pillow 12.3's src/libImaging/Draw.c and ImageDraw.py, written
+// again in Calx so that each shape covers the same pixels: Bresenham's lines, the scan-line
+// polygon filler with its rules for corners, the ellipse traced on a grid of doubled
+// coordinates, and the trees of half-planes that cut arcs, chords and pie slices from it.
+// Pillow's notice:
+//
+// The Python Imaging Library (PIL) is
+//
+//     Copyright © 1997-2011 by Secret Labs AB
+//     Copyright © 1995-2011 by Fredrik Lundh and contributors
+//
+// Pillow is the friendly PIL fork. It is
+//
+//     Copyright © 2010 by Jeffrey 'Alex' Clark and contributors
+//
+// Like PIL, Pillow is licensed under the open source MIT-CMU License:
+//
+// By obtaining, using, and/or copying this software and/or its associated documentation, you
+// agree that you have read, understood, and will comply with the following terms and
+// conditions:
+//
+// Permission to use, copy, modify and distribute this software and its documentation for any
+// purpose and without fee is hereby granted, provided that the above copyright notice appears in
+// all copies, and that both that copyright notice and this permission notice appear in
+// supporting documentation, and that the name of Secret Labs AB or the author not be used in
+// advertising or publicity pertaining to distribution of the software without specific, written
+// prior permission.
+//
+// SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING
+// ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL SECRET LABS AB OR THE
+// AUTHOR BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+// RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+// OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+// SOFTWARE.
+
+const RAD_TO_DEG: f64 = 180.0 / PI
+const DEG_TO_RAD: f64 = PI / 180.0
+// Widths past this are cut to it, so the arithmetic on them can't overflow.
+const MOST_WIDTH: u32 = 1 << 24
+const CLIP_AND: u8 = 0
+const CLIP_OR: u8 = 1
+const CLIP_PLANE: u8 = 2
+
+// Where a shape's pixels go and what they get: the image's size and channels, the color's bytes
+// as the image holds them, and whether they're blended by its alpha.
+struct Ink {
+    w: i32
+    h: i32
+    ch: usize
+    px: [u8; 4]
+    alpha: u32
+    blend: bool
+}
+
+// A coordinate as Pillow's C takes it, an int.
+fn c32(v: i64) -> i32 {
+    return i32.wrap(v.max(i64(i32.MIN)).min(i64(i32.MAX)))
+}
+
+fn w32(width: u32) -> i32 {
+    return i32.wrap(width.min(MOST_WIDTH))
+}
+
+fn coords(points: List<(i64, i64)>) -> List<i32> {
+    var xy: List<i32> = []
+    xy.reserve(points.len() * 2)
+    for (x, y) in points {
+        xy.push(c32(x))
+        xy.push(c32(y))
+    }
+    return xy
+}
+
+@track_caller
+fn check_box(x0: i64, y0: i64, x1: i64, y1: i64) {
+    if x1 < x0 {
+        panic("a box's x1, {x1}, is less than its x0, {x0}")
+    }
+    if y1 < y0 {
+        panic("a box's y1, {y1}, is less than its y0, {y0}")
+    }
+}
+
+// Whether two colors are the same ink on this kind of image, as Pillow compares them to leave
+// out an edge the fill's color.
+fn same_ink(kind: Kind, a: Color, b: Color) -> bool {
+    return match kind {
+        Gray => a.luma() == b.luma(),
+        GrayAlpha => a.luma() == b.luma() and a.a == b.a,
+        _ => a == b,
+    }
+}
+
+// The edge's color, unless there's no edge or it's the fill's ink.
+fn edge_of(kind: Kind, p: Paint) -> Color? {
+    let o = p.outline else return none
+    if p.width == 0 {
+        return none
+    }
+    if let f = p.fill {
+        if same_ink(kind, f, o) {
+            return none
+        }
+    }
+    return some(o)
+}
+
+// Python's `%` by 360 on a float: the result has the divisor's sign.
+fn py_mod360(x: f64) -> f64 {
+    let m = x % 360.0
+    if m == 0.0 {
+        return 0.0
+    }
+    return if m < 0.0 { m + 360.0 } else { m }
+}
+
+// A point `width / 2 - 1` from (x, y) at `angle` - 90 degrees, its offsets rounded toward 0,
+// as Pillow's coord_at_angle.
+fn at_angle(x: i64, y: i64, angle: f64, width: i32) -> (i64, i64) {
+    let a = (angle - 90.0) * DEG_TO_RAD
+    let distance = f64(width) / 2.0 - 1.0
+    let dx = distance * cos(a)
+    let dy = distance * sin(a)
+    let ox = i64.saturate(if dx > 0.0 { dx.floor() } else { dx.ceil() })
+    let oy = i64.saturate(if dy > 0.0 { dy.floor() } else { dy.ceil() })
+    return (x + ox, y + oy)
+}
+
+// C's roundf and lround: the nearest integer, halves away from 0.
+fn roundf(v: f32) -> f32 {
+    let t = if v < 0.0f32 { v.ceil() } else { v.floor() }
+    let f = v - t
+    if f >= 0.5f32 {
+        return t + 1.0f32
+    }
+    if f <= -0.5f32 {
+        return t - 1.0f32
+    }
+    return t
+}
+
+fn lround(v: f64) -> i32 {
+    let t = if v < 0.0 { v.ceil() } else { v.floor() }
+    let f = v - t
+    let r = if f >= 0.5 { t + 1.0 } else if f <= -0.5 { t - 1.0 } else { t }
+    return i32.saturate(r)
+}
+
+// Pillow's ROUND_UP and ROUND_DOWN: halves away from 0, and toward it, in the float's own type.
+fn round_up32(f: f32) -> i32 {
+    if f >= 0.0f32 {
+        return i32.saturate(f64((f + 0.5f32).floor()))
+    }
+    return -i32.saturate(f64((f.abs() + 0.5f32).floor()))
+}
+
+fn round_down32(f: f32) -> i32 {
+    if f >= 0.0f32 {
+        return i32.saturate(f64((f - 0.5f32).ceil()))
+    }
+    return -i32.saturate(f64((f.abs() - 0.5f32).ceil()))
+}
+
+fn round_up64(f: f64) -> i32 {
+    if f >= 0.0 {
+        return i32.saturate((f + 0.5).floor())
+    }
+    return -i32.saturate((f.abs() + 0.5).floor())
+}
+
+fn round_down64(f: f64) -> i32 {
+    if f >= 0.0 {
+        return i32.saturate((f - 0.5).ceil())
+    }
+    return -i32.saturate((f.abs() - 0.5).ceil())
+}
+
+fn ink_put(px: mut List<u8>, k: Ink, at: usize) {
+    if k.blend {
+        for c in 0usize..k.ch {
+            px[at + c] = u8.wrap(div255(u32(px[at + c]) * (255 - k.alpha) + u32(k.px[c]) * k.alpha + 128))
+        }
+        return
+    }
+    for c in 0usize..k.ch {
+        px[at + c] = k.px[c]
+    }
+}
+
+fn ink_point(px: mut List<u8>, k: Ink, x: i32, y: i32) {
+    if x >= 0 and x < k.w and y >= 0 and y < k.h {
+        ink_put(mut px, k, (usize.wrap(y) * usize.wrap(k.w) + usize.wrap(x)) * k.ch)
+    }
+}
+
+// The pixels from x0 to x1 on row y, both included, cut off at the edges; where `mask` isn't
+// empty, only those it marks.
+fn ink_hline(px: mut List<u8>, k: Ink, x0: i32, y: i32, x1: i32, mask: List<u8>) {
+    if y < 0 or y >= k.h {
+        return
+    }
+    if x0 >= k.w or x1 < 0 {
+        return
+    }
+    let a = x0.max(0)
+    let b = x1.min(k.w - 1)
+    if a > b {
+        return
+    }
+    let row = usize.wrap(y) * usize.wrap(k.w)
+    if mask.len() == 0 {
+        // The row is inside the image, checked above, so it's written through a pointer.
+        let n = usize.wrap(b - a + 1)
+        let total = n * k.ch
+        unsafe {
+            let start = (row + usize.wrap(a)) * k.ch
+            let p = px.as_mut_ptr().add(start)
+            if not k.blend {
+                // The first pixel, then copies of the part done, twice as long each time.
+                for c in 0usize..k.ch {
+                    p.add(c).write(k.px[c])
+                }
+                let from = px.as_ptr().add(start)
+                var done = k.ch
+                while done < total {
+                    let more = done.min(total - done)
+                    _ = memcpy(p.add(done), from, more)
+                    done += more
+                }
+                return
+            }
+            // Only images without alpha blend: gray, or red, green and blue.
+            let keep = 255 - k.alpha
+            let t0 = u32(k.px[0]) * k.alpha + 128
+            if k.ch == 1 {
+                for i in 0usize..n {
+                    p.add(i).write(u8.wrap(div255(u32(p.add(i).read()) * keep + t0)))
+                }
+                return
+            }
+            let t1 = u32(k.px[1]) * k.alpha + 128
+            let t2 = u32(k.px[2]) * k.alpha + 128
+            for i in 0usize..n {
+                let q = p.add(i * 3)
+                q.write(u8.wrap(div255(u32(q.read()) * keep + t0)))
+                q.add(1).write(u8.wrap(div255(u32(q.add(1).read()) * keep + t1)))
+                q.add(2).write(u8.wrap(div255(u32(q.add(2).read()) * keep + t2)))
+            }
+        }
+        return
+    }
+    for x in a..b + 1 {
+        let i = row + usize.wrap(x)
+        if mask.len() > 0 and mask[i] == 0 {
+            continue
+        }
+        ink_put(mut px, k, i * k.ch)
+    }
+}
+
+// The points of a column from y0 up to but not including y1, either way, cut off at the edges:
+// Pillow's line where it's vertical.
+fn ink_vline(px: mut List<u8>, k: Ink, x: i32, y0: i32, y1: i32) {
+    if x < 0 or x >= k.w or y0 == y1 {
+        return
+    }
+    // The rows drawn, lowest first.
+    let (lo, hi) = if y1 > y0 { (i64(y0), i64(y1) - 1) } else { (i64(y1) + 1, i64(y0)) }
+    let a = lo.max(0)
+    let b = hi.min(i64(k.h) - 1)
+    var y = a
+    while y <= b {
+        ink_put(mut px, k, (usize.wrap(y) * usize.wrap(k.w) + usize.wrap(x)) * k.ch)
+        y += 1
+    }
+}
+
+// Pillow's line: Bresenham's, from (x0, y0) up to but not including (x1, y1).
+fn ink_line(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32) {
+    var dx = x1 - x0
+    var xs: i32 = 1
+    if dx < 0 {
+        dx = -dx
+        xs = -1
+    }
+    var dy = y1 - y0
+    var ys: i32 = 1
+    if dy < 0 {
+        dy = -dy
+        ys = -1
+    }
+    if dx == 0 {
+        ink_vline(mut px, k, x0, y0, y1)
+        return
+    }
+    var x = x0
+    var y = y0
+    if dy == 0 {
+        // Pillow's horizontal line stops short of x1; a row cut off at the edges.
+        if xs > 0 {
+            ink_hline(mut px, k, x0, y0, x1 - 1, [])
+        } else {
+            ink_hline(mut px, k, x1 + 1, y0, x0, [])
+        }
+        return
+    }
+    if dx > dy {
+        let ddy = dy + dy
+        var e = ddy - dx
+        let ddx = dx + dx
+        for _ in 0..dx {
+            ink_point(mut px, k, x, y)
+            if e >= 0 {
+                y += ys
+                e -= ddx
+            }
+            e += ddy
+            x += xs
+        }
+        return
+    }
+    let ddx = dx + dx
+    var e = ddx - dy
+    let ddy = dy + dy
+    for _ in 0..dy {
+        ink_point(mut px, k, x, y)
+        if e >= 0 {
+            x += xs
+            e -= ddy
+        }
+        e += ddx
+        y += ys
+    }
+}
+
+// A polygon's side, for filling it a row at a time: Pillow's Edge.
+struct Edge {
+    x0: i32
+    y0: i32
+    xmin: i32
+    ymin: i32
+    xmax: i32
+    ymax: i32
+    dx: f32
+}
+
+fn new_edge(x0: i32, y0: i32, x1: i32, y1: i32) -> Edge {
+    let dx = if y0 == y1 { 0.0f32 } else { f32.nearest(x1 - x0) / f32.nearest(y1 - y0) }
+    return Edge { x0, y0, xmin: x0.min(x1), ymin: y0.min(y1), xmax: x0.max(x1), ymax: y0.max(y1), dx }
+}
+
+// Where a side crosses row y, worked out in f32 as Pillow does.
+fn edge_x(e: Edge, y: i32) -> f32 {
+    return f32.nearest(y - e.y0) * e.dx + f32.nearest(e.x0)
+}
+
+fn sort_f32(xs: mut List<f32>) {
+    if xs.len() > 24 {
+        xs.sort_by(|a, b| a.total_cmp(b))
+        return
+    }
+    for i in 1usize..xs.len() {
+        let v = xs[i]
+        var j = i
+        while j > 0 and xs[j - 1] > v {
+            xs[j] = xs[j - 1]
+            j -= 1
+        }
+        xs[j] = v
+    }
+}
+
+// Pillow's draw_horizontal_lines, when blending: the flat sides on row y from `pos` on, so no
+// pixel is drawn twice. Gives where the row has been drawn to.
+fn flat_sides(px: mut List<u8>, k: Ink, es: List<Edge>, pos: i32, y: i32, mask: List<u8>) -> i32 {
+    var at = pos
+    for e in es {
+        if e.ymin != y or e.ymin != e.ymax {
+            continue
+        }
+        var xmin = e.xmin
+        if at != -1 and at < xmin {
+            continue
+        }
+        if at > xmin {
+            xmin = at
+            if e.xmax < xmin {
+                continue
+            }
+        }
+        ink_hline(mut px, k, xmin, y, e.xmax, mask)
+        at = e.xmax + 1
+    }
+    return at
+}
+
+// Pillow's polygon_generic: each row crosses the sides at points worked out in f32, which are
+// sorted and filled between in pairs, with Pillow's rules for where sides meet.
+fn scan_fill(px: mut List<u8>, k: Ink, es: List<Edge>, mask: List<u8>) {
+    if es.len() == 0 {
+        return
+    }
+    var sides: List<usize> = []
+    var ymin = k.h - 1
+    var ymax: i32 = 0
+    for i in 0usize..es.len() {
+        let e = es[i]
+        ymin = ymin.min(e.ymin)
+        ymax = ymax.max(e.ymax)
+        if e.ymin == e.ymax {
+            if not k.blend {
+                ink_hline(mut px, k, e.xmin, e.ymin, e.xmax, mask)
+            }
+            continue
+        }
+        sides.push(i)
+    }
+    ymin = ymin.max(0)
+    ymax = ymax.min(k.h)
+    var xx: List<f32> = []
+    var y = ymin
+    while y <= ymax {
+        xx.clear()
+        for si in 0usize..sides.len() {
+            let e = es[sides[si]]
+            if y < e.ymin or y > e.ymax {
+                continue
+            }
+            let x = edge_x(e, y)
+            xx.push(x)
+            if y == e.ymax and y < ymax {
+                xx.push(x)
+                continue
+            }
+            if (y != e.ymin and y != e.ymax) or e.dx == 0.0f32 {
+                continue
+            }
+            // A corner of two sides that would leave a gap moves out to meet the next row.
+            for sk in 0usize..si {
+                let o = es[sides[sk]]
+                if (y != o.ymin and y != o.ymax) or o.dx == 0.0f32 {
+                    continue
+                }
+                let last = xx.len() - 1
+                if roundf(xx[last]) != roundf(edge_x(o, y)) {
+                    continue
+                }
+                let step: i32 = if y == e.ymax { -1 } else { 1 }
+                let near = y + step
+                if near < o.ymin or near > o.ymax {
+                    continue
+                }
+                let mine = edge_x(e, near)
+                let theirs = edge_x(o, near)
+                if xx[last] > mine + 1.0f32 and xx[last] > theirs + 1.0f32 {
+                    xx[last] = roundf(mine.max(theirs)) + 1.0f32
+                } else if xx[last] < mine - 1.0f32 and xx[last] < theirs - 1.0f32 {
+                    xx[last] = roundf(mine.min(theirs)) - 1.0f32
+                }
+                break
+            }
+        }
+        sort_f32(mut xx)
+        if not k.blend {
+            var i: usize = 1
+            while i < xx.len() {
+                ink_hline(mut px, k, round_up32(xx[i - 1]), y, round_down32(xx[i]), mask)
+                i += 2
+            }
+        } else {
+            var pos: i32 = if xx.len() == 0 { -1 } else { 0 }
+            var i: usize = 1
+            while i < xx.len() {
+                let x_end = round_down32(xx[i])
+                if x_end >= pos {
+                    pos = flat_sides(mut px, k, es, pos, y, mask)
+                    if x_end >= pos {
+                        var x_start = round_up32(xx[i - 1])
+                        var go = true
+                        if pos > x_start {
+                            x_start = pos
+                            go = x_end >= x_start
+                        }
+                        if go {
+                            ink_hline(mut px, k, x_start, y, x_end, mask)
+                            pos = x_end + 1
+                        }
+                    }
+                }
+                i += 2
+            }
+            _ = flat_sides(mut px, k, es, pos, y, mask)
+        }
+        y += 1
+    }
+}
+
+// Pillow's ImagingDrawWideLine: a line `width` across as a polygon of four corners, its ends cut
+// square.
+fn ink_wide_line(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, mask: List<u8>) {
+    let dx = x1 - x0
+    let dy = y1 - y0
+    if dx == 0 and dy == 0 {
+        ink_point(mut px, k, x0, y0)
+        return
+    }
+    let big = hypot(f64(dx), f64(dy))
+    let small = f64(width - 1) / 2.0
+    let ratio_max = f64(round_up64(small)) / big
+    let ratio_min = f64(round_down64(small)) / big
+    let dxmin = round_down64(ratio_min * f64(dy))
+    let dxmax = round_down64(ratio_max * f64(dy))
+    let dymin = round_down64(ratio_min * f64(dx))
+    let dymax = round_down64(ratio_max * f64(dx))
+    let (ax, ay) = (x0 - dxmin, y0 + dymax)
+    let (bx, by) = (x1 - dxmin, y1 + dymax)
+    let (cx, cy) = (x1 + dxmax, y1 - dymin)
+    let (ex, ey) = (x0 + dxmax, y0 - dymin)
+    let es: List<Edge> = [new_edge(ax, ay, bx, by), new_edge(bx, by, cx, cy), new_edge(cx, cy, ex, ey), new_edge(ex, ey, ax, ay)]
+    scan_fill(mut px, k, es, mask)
+}
+
+// Pillow's _draw_lines: width 1 as Bresenham's lines, each without its last point, then the
+// last point; wider as a polygon for each line.
+fn draw_lines(px: mut List<u8>, k: Ink, xy: List<i32>, width: i32) {
+    let n = xy.len() / 2
+    if n < 2 {
+        return
+    }
+    for i in 0usize..n - 1 {
+        if width == 1 {
+            ink_line(mut px, k, xy[2 * i], xy[2 * i + 1], xy[2 * i + 2], xy[2 * i + 3])
+        } else {
+            ink_wide_line(mut px, k, xy[2 * i], xy[2 * i + 1], xy[2 * i + 2], xy[2 * i + 3], width, [])
+        }
+    }
+    if width == 1 {
+        ink_point(mut px, k, xy[2 * n - 2], xy[2 * n - 1])
+    }
+}
+
+// Pillow's ImagingDrawPolygon: filled, with a run of flat sides going the same way as one; or
+// its sides as lines, `width` wide.
+fn ink_polygon(px: mut List<u8>, k: Ink, xy: List<i32>, fill: bool, width: i32, mask: List<u8>) {
+    let count = xy.len() / 2
+    if count == 0 {
+        return
+    }
+    if fill {
+        var es: List<Edge> = []
+        var i: usize = 0
+        while i + 1 < count {
+            let (x0, y0, x1, y1) = (xy[i * 2], xy[i * 2 + 1], xy[i * 2 + 2], xy[i * 2 + 3])
+            if y0 == y1 and i != 0 and y0 == xy[i * 2 - 1] {
+                let last = es.len() - 1
+                if x1 > x0 and x0 > xy[i * 2 - 2] {
+                    es[last].xmax = x1
+                    i += 1
+                    continue
+                }
+                if x1 < x0 and x0 < xy[i * 2 - 2] {
+                    es[last].xmin = x1
+                    i += 1
+                    continue
+                }
+            }
+            es.push(new_edge(x0, y0, x1, y1))
+            i += 1
+        }
+        if xy[i * 2] != xy[0] or xy[i * 2 + 1] != xy[1] {
+            es.push(new_edge(xy[i * 2], xy[i * 2 + 1], xy[0], xy[1]))
+        }
+        scan_fill(mut px, k, es, mask)
+        return
+    }
+    for i in 0usize..count {
+        let j = if i + 1 < count { i + 1 } else { 0 }
+        if width == 1 {
+            ink_line(mut px, k, xy[i * 2], xy[i * 2 + 1], xy[j * 2], xy[j * 2 + 1])
+        } else {
+            ink_wide_line(mut px, k, xy[i * 2], xy[i * 2 + 1], xy[j * 2], xy[j * 2 + 1], width, mask)
+        }
+    }
+}
+
+// Pillow's ImagingDrawRectangle: filled from row y0 to y1, or `width` rings inward.
+fn draw_rect(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, fill: bool, width: i32) {
+    let top = y0.min(y1)
+    let bottom = y0.max(y1)
+    if fill {
+        if top >= k.h or bottom < 0 {
+            return
+        }
+        for y in top.max(0)..bottom.min(k.h) + 1 {
+            ink_hline(mut px, k, x0, y, x1, [])
+        }
+        return
+    }
+    let w = if width == 0 { 1 } else { width }
+    // Ring i draws rows top + i and bottom - i, and columns x1 - i and x0 + i between; only the
+    // rings that reach the image are drawn. Each pixel gets the same ink as many times as in
+    // Pillow, and the same ink blended twice is the same whichever comes first.
+    let (t, b, l, r, ww, hh) = (i64(top), i64(bottom), i64(x0), i64(x1), i64(k.w), i64(k.h))
+    var spans: List<(i64, i64)> = [(-t, hh - 1 - t), (b - hh + 1, b), (r - ww + 1, r), (-l, ww - 1 - l)]
+    spans.sort()
+    var next: i64 = 0
+    for (s, e) in spans {
+        var i = s.max(next)
+        let stop = e.min(i64(w) - 1)
+        while i <= stop {
+            let n = i32.wrap(i)
+            ink_hline(mut px, k, x0, top + n, x1, [])
+            ink_hline(mut px, k, x0, bottom - n, x1, [])
+            ink_vline(mut px, k, x1 - n, top + w, bottom - w + 1)
+            ink_vline(mut px, k, x0 + n, top + w, bottom - w + 1)
+            i += 1
+        }
+        next = next.max(stop + 1)
+    }
+}
+
+// A filled box that's skipped where its corners are the wrong way round: Pillow refuses those.
+fn fill_box(px: mut List<u8>, k: Ink, x0: i64, y0: i64, x1: i64, y1: i64) {
+    if x1 >= x0 and y1 >= y0 {
+        draw_rect(mut px, k, c32(x0), c32(y0), c32(x1), c32(y1), true, 0)
+    }
+}
+
+// Pillow's quarter_state: a quarter of an ellipse traced on the grid of doubled coordinates,
+// from its right end up, the point nearest the curve each step.
+struct Quarter {
+    a2: i64
+    b2: i64
+    a2b2: i64
+    cx: i32
+    cy: i32
+    ex: i32
+    ey: i32
+    done: bool
+}
+
+impl Quarter {
+    fn new(a: i32, b: i32) -> Quarter {
+        if a < 0 or b < 0 {
+            return Quarter { a2: 0, b2: 0, a2b2: 0, cx: 0, cy: 0, ex: 0, ey: 0, done: true }
+        }
+        let a2 = i64(a) * i64(a)
+        let b2 = i64(b) * i64(b)
+        return Quarter { a2, b2, a2b2: a2 * b2, cx: a, cy: b % 2, ex: a % 2, ey: b, done: false }
+    }
+
+    // How far the point is from the curve: the ellipse's equation with it put in.
+    fn off(self, x: i32, y: i32) -> i64 {
+        let (fx, fy) = (i64(x), i64(y))
+        return (self.a2 * fy * fy + self.b2 * fx * fx - self.a2b2).abs()
+    }
+
+    fn next(mut self) -> (i32, i32)? {
+        if self.done {
+            return none
+        }
+        let at = (self.cx, self.cy)
+        if self.cx == self.ex and self.cy == self.ey {
+            self.done = true
+            return some(at)
+        }
+        var nx = self.cx
+        var ny = self.cy + 2
+        let up = self.off(nx, ny)
+        if nx > 1 {
+            let diagonal = self.off(self.cx - 2, self.cy + 2)
+            let best = up.min(diagonal)
+            if up > diagonal {
+                nx = self.cx - 2
+            }
+            if best > self.off(self.cx - 2, self.cy) {
+                nx = self.cx - 2
+                ny = self.cy
+            }
+        }
+        self.cx = nx
+        self.cy = ny
+        return some(at)
+    }
+}
+
+// Pillow's ellipse_state: an ellipse's rows on the doubled grid, `width` thick, from an outer
+// quarter and an inner one, each row given out for all four quarters.
+struct EllipseRows {
+    outer: Quarter
+    inner: Quarter
+    py: i32
+    pl: i32
+    pr: i32
+    ys: [i32; 4]
+    ls: [i32; 4]
+    rs: [i32; 4]
+    count: usize
+    done: bool
+    leftmost: i32
+}
+
+impl EllipseRows {
+    fn new(a: i32, b: i32, width: i32) -> EllipseRows {
+        var s = EllipseRows { outer: Quarter.new(a, b), inner: Quarter.new(-1, -1), py: 0, pl: 0, pr: 0, ys: [0, 0, 0, 0], ls: [0, 0, 0, 0], rs: [0, 0, 0, 0], count: 0, done: true, leftmost: a % 2 }
+        if width < 1 {
+            return s
+        }
+        let first = s.outer.next() else return s
+        s.pr = first.0
+        s.py = first.1
+        s.done = false
+        s.inner = Quarter.new(a - 2 * (width - 1), b - 2 * (width - 1))
+        s.pl = s.leftmost
+        return s
+    }
+
+    fn keep(mut self, l: i32, y: i32, r: i32) {
+        self.ls[self.count] = l
+        self.ys[self.count] = y
+        self.rs[self.count] = r
+        self.count += 1
+    }
+
+    // The next row: from x0 to x1 on row y, doubled.
+    fn next(mut self) -> (i32, i32, i32)? {
+        if self.count == 0 {
+            if self.done {
+                return none
+            }
+            let y = self.py
+            var l = self.pl
+            let r = self.pr
+            loop {
+                match self.outer.next() {
+                    none => {
+                        self.done = true
+                        break
+                    }
+                    some(p) => {
+                        if p.1 > y {
+                            self.pr = p.0
+                            self.py = p.1
+                            break
+                        }
+                    }
+                }
+            }
+            loop {
+                match self.inner.next() {
+                    none => {
+                        self.pl = self.leftmost
+                        break
+                    }
+                    some(p) => {
+                        if p.1 > y {
+                            self.pl = p.0
+                            break
+                        }
+                        l = p.0
+                    }
+                }
+            }
+            let left = if l == 0 { 2 } else { l }
+            if (l > 0 or l < r) and y > 0 {
+                self.keep(left, y, r)
+            }
+            if y > 0 {
+                self.keep(-r, y, -l)
+            }
+            if l > 0 or l < r {
+                self.keep(left, -y, r)
+            }
+            self.keep(-r, -y, -l)
+        }
+        self.count -= 1
+        let i = self.count
+        return some((self.ls[i], self.ys[i], self.rs[i]))
+    }
+}
+
+// Pillow's ellipseNew: the ellipse in the box, filled or `width` thick.
+fn draw_ellipse(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, fill: bool, width: i32) {
+    let a = x1 - x0
+    let b = y1 - y0
+    if a < 0 or b < 0 {
+        return
+    }
+    var rows = EllipseRows.new(a, b, if fill { a + b } else { width })
+    loop {
+        let s = rows.next() else break
+        ink_hline(mut px, k, x0 + (s.0 + a) / 2, y0 + (s.1 + b) / 2, x0 + (s.2 + a) / 2, [])
+    }
+}
+
+// A node of Pillow's clipping tree: where both or either of two subtrees keep, or the
+// half-plane where a x + b y + c isn't below 0.
+struct ClipNode {
+    op: u8
+    a: f64
+    b: f64
+    c: f64
+    l: usize
+    r: usize
+}
+
+// An ellipse's rows and the tree that cuts them: Pillow's clip_ellipse_state.
+struct Clipped {
+    rows: EllipseRows
+    nodes: List<ClipNode>
+    root: usize?
+}
+
+impl Clipped {
+    fn new(a: i32, b: i32, width: i32) -> Clipped {
+        return Clipped { rows: EllipseRows.new(a, b, width), nodes: [], root: none }
+    }
+
+    fn plane(mut self, a: f64, b: f64, c: f64) -> usize {
+        self.nodes.push(ClipNode { op: CLIP_PLANE, a, b, c, l: 0, r: 0 })
+        return self.nodes.len() - 1
+    }
+
+    fn join(mut self, op: u8, l: usize, r: usize) -> usize {
+        self.nodes.push(ClipNode { op, a: 0.0, b: 0.0, c: 0.0, l, r })
+        return self.nodes.len() - 1
+    }
+}
+
+// Pillow's clip_tree_do_clip: the row from x0 to x1 cut by the tree, as the ends of the pieces
+// kept, each an x and 1 for a start or -1 for an end, in order.
+fn clip_ends(nodes: List<ClipNode>, at: usize?, x0: i32, y: i32, x1: i32) -> List<(i32, i32)> {
+    let i = at else return [(x0, 1), (x1, -1)]
+    let n = nodes[i]
+    if n.op == CLIP_PLANE {
+        let eps = 1e-9
+        var lo = x0
+        var hi = x1
+        let fy = f64(y)
+        if n.a.abs() < eps {
+            if n.b * fy + n.c < -eps {
+                lo = 1
+                hi = 0
+            }
+        } else {
+            let ix = -(n.b * fy + n.c) / n.a
+            if n.a * f64(x0) + n.b * fy + n.c < eps {
+                lo = lround(f64(x0).max(ix))
+            }
+            if n.a * f64(x1) + n.b * fy + n.c < eps {
+                hi = lround(f64(x1).min(ix))
+            }
+        }
+        if lo <= hi {
+            return [(lo, 1), (hi, -1)]
+        }
+        return []
+    }
+    let l1 = clip_ends(nodes, some(n.l), x0, y, x1)
+    let l2 = clip_ends(nodes, some(n.r), x0, y, x1)
+    var out: List<(i32, i32)> = []
+    var i1: usize = 0
+    var i2: usize = 0
+    var k1: i32 = 0
+    var k2: i32 = 0
+    while i1 < l1.len() or i2 < l2.len() {
+        let first = i2 >= l2.len() or (i1 < l1.len() and (l1[i1].0 < l2[i2].0 or (l1[i1].0 == l2[i2].0 and l1[i1].1 > l2[i2].1)))
+        var t: (i32, i32) = (0, 0)
+        if first {
+            t = l1[i1]
+            k1 += t.1
+            i1 += 1
+        } else {
+            t = l2[i2]
+            k2 += t.1
+            i2 += 1
+        }
+        let open = out.len() > 0 and out[out.len() - 1].1 == 1
+        let keep = if n.op == CLIP_OR {
+            (t.1 == 1 and not open) or (t.1 == -1 and k1 == 0 and k2 == 0)
+        } else {
+            (t.1 == 1 and not open and k1 > 0 and k2 > 0) or (t.1 == -1 and open and (k1 == 0 or k2 == 0))
+        }
+        if keep {
+            out.push(t)
+        }
+    }
+    return out
+}
+
+// Pillow's clipEllipseNew: the rows of the ellipse in the box at (x0, y0), `a` and `b` across
+// and down, cut by the tree.
+fn draw_clipped(px: mut List<u8>, k: Ink, x0: i32, y0: i32, a: i32, b: i32, c: mut Clipped) {
+    loop {
+        let s = c.rows.next() else break
+        let ends = clip_ends(c.nodes, c.root, s.0, s.1, s.2)
+        var i: usize = 0
+        while i + 1 < ends.len() {
+            ink_hline(mut px, k, x0 + (ends[i].0 + a) / 2, y0 + (s.1 + b) / 2, x0 + (ends[i + 1].0 + a) / 2, [])
+            i += 2
+        }
+    }
+}
+
+// Pillow's normalize_angles: 0 <= start < 360 and start <= end <= start + 360, in f32 as Pillow
+// keeps them, worked out with C's fmod.
+fn normalize_angles(al: f32, ar: f32) -> (f32, f32) {
+    if ar - al >= 360.0f32 {
+        return (0.0f32, 360.0f32)
+    }
+    let from = if al < 0.0f32 { 360.0 - (f64(-al) % 360.0) } else { f64(al) }
+    let l = f32.nearest(from % 360.0)
+    let span = if ar < l { 360.0 - (f64(l - ar) % 360.0) } else { f64(ar - l) }
+    return (l, f32.nearest(f64(l) + (span % 360.0)))
+}
+
+// Pillow's arc_init: an arc from `al` to `ar` degrees, its ends cut square to the curve, worked
+// out on an ellipse wider than it's tall and turned for one that isn't.
+fn arc_clip(a: i32, b: i32, width: i32, al0: f32, ar0: f32) -> Clipped {
+    if a < b {
+        var c = arc_clip(b, a, width, 90.0f32 - ar0, 90.0f32 - al0)
+        c.rows = EllipseRows.new(a, b, width)
+        for i in 0usize..c.nodes.len() {
+            if c.nodes[i].op == CLIP_PLANE {
+                let t = c.nodes[i].a
+                c.nodes[i].a = c.nodes[i].b
+                c.nodes[i].b = t
+            }
+        }
+        return c
+    }
+    var c = Clipped.new(a, b, width)
+    let (al, ar) = normalize_angles(al0, ar0)
+    if ar == al + 360.0f32 {
+        return c
+    }
+    let (l, r) = (f64(al), f64(ar))
+    let lc = c.plane(f64(-a) * sin(l * PI / 180.0), f64(b) * cos(l * PI / 180.0), f64(a * a - b * b) * sin(l * PI / 90.0) / 2.0)
+    let rc = c.plane(f64(a) * sin(r * PI / 180.0), f64(-b) * cos(r * PI / 180.0), f64(b * b - a * a) * sin(r * PI / 90.0) / 2.0)
+    let narrow = if ar - al < 180.0f32 { CLIP_AND } else { CLIP_OR }
+    let half_l = i32.saturate(f64(al / 180.0f32))
+    let half_r = i32.saturate(f64(ar / 180.0f32))
+    if l % 180.0 == 0.0 or r % 180.0 == 0.0 {
+        c.root = some(c.join(narrow, lc, rc))
+    } else if (half_l + half_r) % 2 == 1 {
+        let pl = c.plane(0.0, if half_l % 2 == 0 { 1.0 } else { -1.0 }, 0.0)
+        let pr = c.plane(0.0, if half_r % 2 == 0 { 1.0 } else { -1.0 }, 0.0)
+        let left = c.join(CLIP_AND, pl, lc)
+        let right = c.join(CLIP_AND, pr, rc)
+        c.root = some(c.join(CLIP_OR, left, right))
+    } else {
+        let both = c.join(narrow, lc, rc)
+        let side = c.plane(0.0, if ar < 180.0f32 or ar > 540.0f32 { 1.0 } else { -1.0 }, 0.0)
+        c.root = some(c.join(narrow, both, side))
+    }
+    return c
+}
+
+// The ends of the arc from `al` to `ar` on the ellipse a by b: x at al, x at ar, y at al, y at ar.
+fn arc_ends(a: i32, b: i32, al: f32, ar: f32) -> (f64, f64, f64, f64) {
+    let (l, r) = (f64(al) * PI / 180.0, f64(ar) * PI / 180.0)
+    return (f64(a) * cos(l), f64(a) * cos(r), f64(b) * sin(l), f64(b) * sin(r))
+}
+
+// Pillow's chord_line_init: the band `width` thick inside the chord's line.
+fn chord_line_clip(a: i32, b: i32, width: i32, al: f32, ar: f32) -> Clipped {
+    var c = Clipped.new(a, b, a + b + 1)
+    let (xl, xr, yl, yr) = arc_ends(a, b, al, ar)
+    let la = yr - yl
+    let lb = xl - xr
+    let lc = -(la * xl + lb * yl)
+    let near = c.plane(la, lb, lc)
+    let far = c.plane(-la, -lb, f64(2 * width) * (la * la + lb * lb).sqrt() - lc)
+    c.root = some(c.join(CLIP_AND, near, far))
+    return c
+}
+
+// Pillow's pie_side_init: the side of a pie slice at `al` degrees, `width` thick.
+fn pie_side_clip(a: i32, b: i32, width: i32, al: f32) -> Clipped {
+    var c = Clipped.new(a, b, a + b + 1)
+    let (xl, _, yl, _) = arc_ends(a, b, al, al)
+    let a1 = -yl
+    let b1 = xl
+    let c1 = f64(width) * (a1 * a1 + b1 * b1).sqrt()
+    let p1 = c.plane(a1, b1, c1)
+    let p2 = c.plane(-a1, -b1, c1)
+    let band = c.join(CLIP_AND, p1, p2)
+    let ahead = c.plane(b1, -a1, 0.0)
+    c.root = some(c.join(CLIP_AND, band, ahead))
+    return c
+}
+
+// Pillow's chord_init: the ellipse on one side of the chord's line.
+fn chord_clip(a: i32, b: i32, width: i32, al: f32, ar: f32) -> Clipped {
+    var c = Clipped.new(a, b, width)
+    let (xl, xr, yl, yr) = arc_ends(a, b, al, ar)
+    let ca = yr - yl
+    let cb = xl - xr
+    c.root = some(c.plane(ca, cb, -(ca * xl + cb * yl)))
+    return c
+}
+
+// Pillow's pie_init: the ellipse between the two sides of a pie slice, and in front of the
+// center for a slice narrower than 90 degrees, so it has no spike behind.
+fn pie_clip(a: i32, b: i32, width: i32, al: f32, ar: f32) -> Clipped {
+    var c = Clipped.new(a, b, width)
+    let (xl, xr, yl, yr) = arc_ends(a, b, al, ar)
+    let lc = c.plane(-yl, xl, 0.0)
+    let rc = c.plane(yr, -xr, 0.0)
+    var root = c.join(if ar - al < 180.0f32 { CLIP_AND } else { CLIP_OR }, lc, rc)
+    if ar - al < 90.0f32 {
+        let spike = c.plane((xl + xr) / 2.0, (yl + yr) / 2.0, 0.0)
+        root = c.join(CLIP_AND, root, spike)
+    }
+    c.root = some(root)
+    return c
+}
+
+// Pillow's ImagingDrawArc.
+fn draw_arc(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, start: f32, end: f32, width: i32) {
+    let (s, e) = normalize_angles(start, end)
+    if s + 360.0f32 == e {
+        draw_ellipse(mut px, k, x0, y0, x1, y1, false, width)
+        return
+    }
+    let (a, b) = (x1 - x0, y1 - y0)
+    if s == e or a < 0 or b < 0 {
+        return
+    }
+    var c = arc_clip(a, b, width, s, e)
+    draw_clipped(mut px, k, x0, y0, a, b, mut c)
+}
+
+// Pillow's ImagingDrawChord.
+fn draw_chord(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, start: f32, end: f32, fill: bool, width: i32) {
+    let (s, e) = normalize_angles(start, end)
+    if s + 360.0f32 == e {
+        draw_ellipse(mut px, k, x0, y0, x1, y1, fill, width)
+        return
+    }
+    let (a, b) = (x1 - x0, y1 - y0)
+    if s == e or a < 0 or b < 0 {
+        return
+    }
+    if fill {
+        var c = chord_clip(a, b, a + b + 1, s, e)
+        draw_clipped(mut px, k, x0, y0, a, b, mut c)
+        return
+    }
+    var band = chord_line_clip(a, b, width, s, e)
+    draw_clipped(mut px, k, x0, y0, a, b, mut band)
+    var c = chord_clip(a, b, width, s, e)
+    draw_clipped(mut px, k, x0, y0, a, b, mut c)
+}
+
+// Pillow's ImagingDrawPieslice: filled, or its two sides, a dot at the center the edge's width
+// across, and its curved edge.
+fn draw_pieslice(px: mut List<u8>, k: Ink, x0: i32, y0: i32, x1: i32, y1: i32, start: f32, end: f32, fill: bool, width: i32) {
+    let (s, e) = normalize_angles(start, end)
+    if s + 360.0f32 == e {
+        draw_ellipse(mut px, k, x0, y0, x1, y1, fill, width)
+        return
+    }
+    if s == e {
+        return
+    }
+    let (a, b) = (x1 - x0, y1 - y0)
+    let shaped = a >= 0 and b >= 0
+    if fill {
+        if shaped {
+            var c = pie_clip(a, b, a + b, s, e)
+            draw_clipped(mut px, k, x0, y0, a, b, mut c)
+        }
+        return
+    }
+    if shaped {
+        var side = pie_side_clip(a, b, width, s)
+        draw_clipped(mut px, k, x0, y0, a, b, mut side)
+        var other = pie_side_clip(a, b, width, e)
+        draw_clipped(mut px, k, x0, y0, a, b, mut other)
+    }
+    let xc = lround(f64(x0 + x1 - width) / 2.0)
+    let yc = lround(f64(y0 + y1 - width) / 2.0)
+    draw_ellipse(mut px, k, xc, yc, xc + width - 1, yc + width - 1, true, 0)
+    if shaped {
+        var c = pie_clip(a, b, width, s, e)
+        draw_clipped(mut px, k, x0, y0, a, b, mut c)
     }
 }
 

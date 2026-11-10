@@ -1,6 +1,6 @@
 ---
 title: std.image
-description: Images read from PNG, JPEG and ICO files, resized, blurred, cropped, turned, drawn on, blended, quantized and written back, with Pillow's pixels and Pillow's bytes.
+description: Images read from PNG, JPEG and ICO files, resized, blurred, cropped, turned, drawn on with lines, shapes and text, blended, quantized and written back, with Pillow's pixels and Pillow's bytes.
 ---
 
 # `std.image`
@@ -140,7 +140,7 @@ These change the image in place.
 | `im.flood_fill(x, y, color: Color, threshold: u8 = 0)` | Fills the area around (x, y) that's the color it is there, as Pillow's `ImageDraw.floodfill` does. It takes the pixels joined to (x, y) up, down, left or right, and no more than `threshold` from its color in any channel |
 | `im.draw_text(x: i64, y: i64, text: String, font: Font, size: f64, color: Color)` | Draws `text` in a [`Font`](font.md) at `size` pixels per em, antialiased, as Pillow's `ImageDraw.text` places it: (x, y) is the left of the first line at its ascender. Lines split at `\n` ([drawing text](font.md#drawing-text)) |
 
-`paste`, `overlay`, `fill_rect` and `draw_text` take positions that can be negative or past the edge. Whatever falls outside the image is cut off.
+`paste`, `overlay`, `fill_rect`, `draw_text` and the [shapes](#shapes) take positions that can be negative or past the edge. Whatever falls outside the image is cut off.
 
 ```calx
 import std.image.{Color, Image, Kind}
@@ -156,6 +156,83 @@ fn main() {
     println("{m.get(1, 2)} {m.get(2, 1)} {m.get(4, 0)}")    // out: #646464 #ffffff #000000
 }
 ```
+
+### Shapes
+
+Lines, rectangles, ellipses, polygons, arcs and pie slices are drawn as Pillow's `ImageDraw` draws them, covering the same pixels. A script that draws with Pillow comes over call for call:
+
+```calx
+import std.image.{Color, Image, Kind, Paint}
+
+fn main() {
+    // A gear for a 16 by 16 sprite: a body, four teeth, and a hole, edged in one color.
+    let body = Color.rgb(208, 112, 60)
+    let ink = Color.rgb(26, 26, 32)
+    var im = Image.new(16, 16, Kind.Rgba, Color.rgba(0, 0, 0, 0))
+    im.ellipse(3, 3, 12, 12, Paint.both(body, ink))
+    let teeth: List<(i64, i64)> = [(7, 1), (7, 14), (1, 7), (14, 7)]
+    for (x, y) in teeth {
+        im.rectangle(x - 1, y - 1, x + 1, y + 1, Paint.both(body, ink))
+    }
+    im.ellipse(6, 6, 9, 9, Paint.both(Color.rgba(0, 0, 0, 0), ink))
+    println("{im.get(4, 7)} {im.get(3, 7)} {im.get(7, 7)}")    // out: #d0703c #1a1a20 #00000000
+
+    // A polygon's wide edge stays inside it.
+    var tri = Image.new(11, 7, Kind.Gray, Color.gray(0))
+    tri.polygon([(0, 6), (5, 0), (10, 6)], Paint.outlined(Color.gray(255), 2))
+    for y in 0usize..7 {
+        var row = String()
+        for x in 0usize..11 {
+            row.push(if tri.get(x, y).r == 255 { '#' } else { '.' })
+        }
+        println(row)
+    }
+    // out: .....#.....
+    // out: ....###....
+    // out: ...#####...
+    // out: ...##.##...
+    // out: ..##...##..
+    // out: .#########.
+    // out: ###########
+}
+```
+
+| Item | Draws |
+| --- | --- |
+| `im.point(x: i64, y: i64, color: Color)` | One pixel, as Pillow's `point` |
+| `im.line(points: List<(i64, i64)>, color: Color, width: u32 = 1, round_joints: bool = false)` | Lines from each point to the next, `width` pixels across, as `line`. With `round_joints`, lines wider than 4 meet in a curve, as `joint="curve"` |
+| `im.rectangle(x0, y0, x1, y1, paint: Paint)` | The rectangle from (x0, y0) to (x1, y1), as `rectangle` |
+| `im.rounded_rectangle(x0, y0, x1, y1, radius: u32, paint: Paint, corners: [bool; 4] = [true, true, true, true])` | The rectangle with its corners rounded `radius` pixels, as `rounded_rectangle`. `corners` are the top left, top right, bottom right and bottom left |
+| `im.ellipse(x0, y0, x1, y1, paint: Paint)` | The ellipse that fits the box, as `ellipse` |
+| `im.circle(x, y, radius: u32, paint: Paint)` | The circle around (x, y), as `circle` |
+| `im.polygon(points: List<(i64, i64)>, paint: Paint)` | The polygon through the points, closed back to the first, as `polygon`. Panics for fewer than 2 points |
+| `im.arc(x0, y0, x1, y1, start: f64, end: f64, color: Color, width: u32 = 1)` | The ellipse's edge from `start` to `end` degrees, as `arc` |
+| `im.chord(x0, y0, x1, y1, start: f64, end: f64, paint: Paint)` | The ellipse cut off by the line from `start` to `end`, as `chord` |
+| `im.pieslice(x0, y0, x1, y1, start: f64, end: f64, paint: Paint)` | The slice of the ellipse from `start` to `end`, with its sides to the center, as `pieslice` |
+
+A `Paint` says what's drawn, as Pillow's `fill`, `outline` and `width` do:
+
+| Item | Gives |
+| --- | --- |
+| `Paint.filled(color)` | The inside filled, and no edge |
+| `Paint.outlined(color, width: u32 = 1)` | Only the edge |
+| `Paint.both(inside, edge, width: u32 = 1)` | The inside filled, then the edge drawn over it |
+| `Paint { fill: Color?, outline: Color?, width: u32 }` | The same, by its fields |
+
+These rules decide which pixels a shape covers, all of them Pillow's:
+
+- **A box is its corners' pixels and those between**, both corners included, as Pillow's `[x0, y0, x1, y1]`: `rectangle(2, 6, 13, 10, ...)` covers 12 by 5 pixels. That's unlike `fill_rect`, which takes a width and a height. A box whose x1 is less than its x0, or y1 than y0, panics, where Pillow raises `ValueError`.
+- **An edge is drawn inward**, `width` pixels from the shape's own edge, so a wider one doesn't make the shape bigger. An edge in the fill's color is left out.
+- **Angles are degrees clockwise from 3 o'clock**, since y runs down. 0 to 90 is the bottom right quarter.
+- **No shape is antialiased:** each pixel is in or out. For smooth edges, draw at 4 times the size and `resize` down.
+- **Coordinates are whole pixels.** Pillow also takes floats, and drops their fractions, rounding toward 0.
+
+How a color lands depends on the image:
+
+- **On an image with alpha**, the shape sets its pixels to the color, alpha included, as Pillow does, so a clear fill makes a hole, as above.
+- **On an image without alpha**, a color that isn't opaque is blended over what's there by its alpha. That's what Pillow's `ImageDraw.Draw(im, "RGBA")` does on an RGB image. Pillow's plain `ImageDraw.Draw(im)` drops the alpha instead.
+
+The shapes follow the steps of Pillow 12.3's `Draw.c` and `ImageDraw.py`, written again in Calx: Bresenham's lines, a polygon filled a row at a time with Pillow's rules for corners, and the ellipse traced on a grid of doubled coordinates. Arcs, chords and pie slices are cut from the ellipse by trees of half-planes. They were checked against Pillow on 201,367 random shapes, 125,097 of which drew something. They covered every kind of image, blended and not, with boxes partly or wholly outside it, widths from 0 to 30, and angles from -400 to 800 degrees. Every image was the same, byte for byte. Pillow's license is kept with the code in [std/image.calx](../../std/image.calx).
 
 ## Palettes
 
@@ -186,6 +263,7 @@ Pillow's own `quantize` picks colors another way, so the palette is not Pillow's
 
 - **`thumbnail` filters in one step.** Pillow first shrinks by a whole factor with `reduce`, and then filters. The size is the same, but the pixels are a little sharper.
 - **A PNG chunk with a broken CRC** fails only if the image needs that chunk; otherwise it's skipped, as libpng does. Pillow refuses any.
+- **A rounded rectangle with only some corners rounded**, too small for its straight sides, is drawn without those sides. Pillow raises `ValueError` partway through drawing it.
 - **PNG files are written with libpng's filter choice.** Each row gets the filter that leaves the smallest sum of its bytes, taken as signed. On our photo the files came out within about 1% of Pillow's size.
 
 ## Speed
@@ -208,6 +286,19 @@ Times for a 1600 × 900 photo, the README's banner scaled up with Lanczos and sa
 | To gray | 0.61 ms | 1.02 ms |
 
 Writing a JPEG does its pixel work with AVX2, as libjpeg-turbo's hand-written SIMD does: [std.image.jpeg](image-jpeg.md#how-its-built) has how, and its other settings' times.
+
+Drawing 200 shapes, each up to 120 pixels across, on a 512 × 512 RGB image, against Pillow 12.3 on the same machine, run 3 times in turns, best of 30 runs:
+
+| 200 of these | Calx | Pillow |
+| --- | --- | --- |
+| Rectangles, filled and edged 2 wide | 0.36 ms | 0.63 ms |
+| Ellipses, filled and edged 2 wide | 0.76 ms | 0.87 ms |
+| Lines through 3 points | 0.05 ms | 0.32 ms |
+| The same, 6 wide | 0.30 ms | 0.77 ms |
+| Polygons of 4 points, filled and edged | 0.43 ms | 0.97 ms |
+| Rounded rectangles | 2.27 ms | 5.47 ms |
+| Pie slices | 5.13 ms | 9.71 ms |
+| Rectangles in a color 100 of 255 opaque, blended | 0.30 ms | 1.34 ms |
 
 ## See also
 

@@ -1,0 +1,112 @@
+// Shapes drawn as Pillow's ImageDraw draws them (CLX-218). Each picture and CRC below is the one
+// Pillow 12.3 gives for the same calls; the shapes were also checked against Pillow's on 130,000
+// random ones, on every kind of image, with and without blending.
+
+import std.image.{Color, Image, Kind, Paint}
+import std.zlib.{crc32}
+
+// The image as rows of `#` where it's `ink` and `.` elsewhere, the rows split by spaces.
+fn art(im: Image, ink: Color) -> String {
+    var rows: List<String> = []
+    for y in 0usize..im.height() {
+        var s = String()
+        for x in 0usize..im.width() {
+            s.push(if im.get(x, y) == ink { '#' } else { '.' })
+        }
+        rows.push(s)
+    }
+    return rows.join(" ")
+}
+
+fn new(w: usize, h: usize) -> Image {
+    return Image.new(w, h, Kind.Rgb, Color.rgb(255, 255, 255))
+}
+
+fn main() {
+    let ink = Color.rgb(0, 0, 0)
+    let blue = Color.rgb(24, 56, 208)
+
+    // Ellipses fit their box, both corners' pixels included: filled, an edge, and a wider edge.
+    var a = new(9, 9)
+    a.ellipse(0, 0, 8, 8, Paint.filled(ink))
+    println(art(a, ink))    // out: ...###... .#######. .#######. ######### ######### ######### .#######. .#######. ...###...
+    var b = new(9, 9)
+    b.ellipse(0, 0, 8, 8, Paint.outlined(ink))
+    println(art(b, ink))    // out: ...###... .##...##. .#.....#. #.......# #.......# #.......# .#.....#. .##...##. ...###...
+    var c = new(10, 6)
+    c.ellipse(0, 0, 9, 5, Paint.outlined(ink, 2))
+    println(art(c, ink))    // out: ..######.. .########. ###....### ###....### .########. ..######..
+
+    // A rectangle's edge goes inward; lines, 1 and 3 wide; a triangle.
+    var r = new(8, 6)
+    r.rectangle(1, 1, 6, 4, Paint.outlined(ink, 2))
+    println(art(r, ink))    // out: ........ .######. .######. .######. .######. ........
+    var l = new(9, 5)
+    l.line([(0, 0), (8, 4)], ink)
+    println(art(l, ink))    // out: #........ .##...... ...##.... .....##.. .......##
+    var w = new(9, 7)
+    w.line([(1, 1), (7, 5)], ink, 3)
+    println(art(w, ink))    // out: ..#...... .###..... ######... ..#####.. ...###### .....###. ......#..
+    var t = new(9, 6)
+    t.polygon([(0, 5), (4, 0), (8, 5)], Paint.filled(ink))
+    println(art(t, ink))    // out: ....#.... ...###... ..#####.. ..#####.. .#######. #########
+
+    // Rounded corners, filled with one color and edged with another; a pie slice, an arc and a
+    // chord, their angles clockwise from 3 o'clock.
+    var rr = new(12, 9)
+    rr.rounded_rectangle(0, 0, 11, 8, 3, Paint.both(blue, ink))
+    println(art(rr, ink))    // out: ..########.. .#........#. #..........# #..........# #..........# #..........# #..........# .#........#. ..########..
+    println(art(rr, blue))    // out: ............ ..########.. .##########. .##########. .##########. .##########. .##########. ..########.. ............
+    var p = new(9, 9)
+    p.pieslice(0, 0, 8, 8, 0.0, 90.0, Paint.filled(ink))
+    println(art(p, ink))    // out: ......... ......... ......... ......... ....##### ....##### ....####. ....####. ....##...
+    var q = new(9, 9)
+    q.arc(0, 0, 8, 8, 180.0, 360.0, ink)
+    println(art(q, ink))    // out: ...###... .##...##. .#.....#. #.......# #.......# ......... ......... ......... .........
+    var ch = new(9, 9)
+    ch.chord(0, 0, 8, 8, 30.0, 150.0, Paint.filled(ink))
+    println(art(ch, ink))    // out: ......... ......... ......... ......... ......... ......... .#######. .#######. ...###...
+
+    // A wide polygon edge stays inside the shape: no pixel of it is outside the filled one.
+    let corners: List<(i64, i64)> = [(1, 1), (10, 2), (8, 8), (2, 7)]
+    var pf = new(12, 10)
+    pf.polygon(corners, Paint.filled(ink))
+    var po = new(12, 10)
+    po.polygon(corners, Paint.outlined(ink, 3))
+    var outside = 0
+    for y in 0usize..10 {
+        for x in 0usize..12 {
+            if po.get(x, y) == ink and pf.get(x, y) != ink {
+                outside += 1
+            }
+        }
+    }
+    println("{outside} {art(po, ink)}")    // out: 0 ............ .#.......... .##########. .##########. ..##...###.. ..###..###.. ..########.. ..#######... ........#... ............
+
+    // Wide lines meet square, or rounded with `round_joints`.
+    let path: List<(i64, i64)> = [(4, 4), (34, 8), (10, 26), (36, 25)]
+    var j = new(40, 30)
+    j.line(path, ink, 9, round_joints: true)
+    println("{crc32(j.pixels)}")    // out: 3996564041
+    var j2 = new(40, 30)
+    j2.line(path, ink, 9)
+    println("{crc32(j2.pixels)}")    // out: 3504536194
+
+    // A color that isn't opaque blends on an image without alpha.
+    var bl = Image.new(4, 4, Kind.Rgb, Color.rgb(200, 100, 0))
+    bl.rectangle(0, 0, 3, 1, Paint.filled(Color.rgba(0, 0, 255, 128)))
+    println("{bl.get(0, 0)} {bl.get(0, 3)}")    // out: #643280 #c86400
+
+    // On an image with alpha it replaces the pixels, alpha too, so a clear fill makes a hole.
+    let edge = Color.rgba(26, 26, 32, 255)
+    var g = Image.new(16, 16, Kind.Rgba, Color.rgba(0, 0, 0, 0))
+    g.ellipse(3, 3, 12, 12, Paint.both(Color.rgb(208, 112, 60), edge))
+    g.ellipse(6, 6, 9, 9, Paint.both(Color.rgba(0, 0, 0, 0), edge))
+    g.point(4, 4, Color.rgb(255, 151, 81))
+    println("{g.get(7, 7)} {g.get(6, 7)} {g.get(4, 4)} {crc32(g.pixels)}")    // out: #00000000 #1a1a20 #ff9751 1735583252
+
+    // A gray image takes each color's brightness.
+    var gr = Image.new(10, 10, Kind.Gray, Color.gray(0))
+    gr.circle(5, 5, 3, Paint.both(Color.gray(226), Color.gray(255)))
+    println("{gr.get(5, 5).r} {gr.get(5, 2).r} {crc32(gr.pixels)}")    // out: 226 255 2704056354
+}
