@@ -40,8 +40,15 @@ public:
     std::uint32_t add_generated(std::string path, std::string text, Span at, std::string why);
     const SourceFile& file(std::uint32_t id) const { return *files_[id - 1]; }
 
+    // The paths of the files `load` read, and whether an attribute generated any code: what a
+    // build's record names (CLX-242).
+    const std::vector<std::string>& loaded() const { return loaded_; }
+    bool any_generated() const { return generated_; }
+
 private:
     std::vector<std::unique_ptr<SourceFile>> files_;
+    std::vector<std::string> loaded_;
+    bool generated_ = false;
 };
 
 enum class Severity { error, warning, note };

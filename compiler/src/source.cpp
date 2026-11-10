@@ -54,6 +54,7 @@ std::string_view SourceFile::line_text(std::uint32_t line) const {
 std::uint32_t Sources::load(const std::string& path) {
     std::string text;
     if (!read_file(path, text)) return 0;
+    loaded_.push_back(path);
     return add(path, std::move(text));
 }
 
@@ -64,6 +65,7 @@ std::uint32_t Sources::add(std::string path, std::string text) {
 
 std::uint32_t Sources::add_generated(std::string path, std::string text, Span at, std::string why) {
     std::uint32_t id = add(std::move(path), std::move(text));
+    generated_ = true;
     files_.back()->generated_at = at;
     files_.back()->generated_by = std::move(why);
     return id;

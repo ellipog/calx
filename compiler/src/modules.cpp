@@ -250,6 +250,12 @@ public:
     const std::vector<Module*>& modules() const { return order_; }
     std::string root() const { return root_.generic_string(); }
 
+    std::vector<std::string> folders() const {
+        std::vector<std::string> out;
+        for (const auto& [dir, names] : listings_) out.push_back(dir);
+        return out;
+    }
+
 private:
     std::string_view text(Name n) const { return ctx_.names.text(n); }
 
@@ -410,6 +416,8 @@ void ModuleLoader::add_items(Module* m, const std::vector<Item*>& items) { impl_
 const std::vector<Module*>& ModuleLoader::modules() const { return impl_->modules(); }
 
 std::string ModuleLoader::root() const { return impl_->root(); }
+
+std::vector<std::string> ModuleLoader::folders() const { return impl_->folders(); }
 
 std::vector<Module*> load_program(ParseContext ctx, Sources& sources, std::uint32_t main_file, const std::string& home,
                                   const std::string& home_error) {

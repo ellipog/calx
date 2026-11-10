@@ -23,6 +23,7 @@
 #include "manage.h"
 #include "modules.h"
 #include "parser.h"
+#include "record.h"
 #include "source.h"
 #include "toolchain.h"
 #include "update.h"
@@ -555,6 +556,100 @@ int serve_options(const std::vector<std::string>& rest, Options& opt) {
     return -1;
 }
 
+// Where the record is kept of what a `run`, `build` or `test` of the input read (CLX-242), under a
+// key of everything else that decides what it builds: this compiler, the folder it runs in, the
+// path as given, which panics show, the command and options, the Calx home, the cache, and the
+// environment that finds clang or changes the flags. "" if there's no home.
+std::string record_for(const Options& opt) {
+    std::string home_error;
+    std::string home = find_home(home_error);
+    if (home.empty()) return {};
+    auto utf8 = [](const std::filesystem::path& p) {
+        std::u8string u = p.u8string();
+        return std::string(u.begin(), u.end());
+    };
+    std::string self = utf8(self_exe());
+    Stamp me = stamp_of(self);
+    if (!me.ok) return {};
+    std::error_code ec;
+    std::string cwd = utf8(std::filesystem::current_path(ec));
+    auto env = [](const char* name) {
+        const char* v = std::getenv(name);
+        return std::string(v ? v : "\x01");  // not set, which is not the same as set to ""
+    };
+    std::vector<std::string> key = {CALX_VERSION,
+                                    self,
+                                    std::to_string(me.size),
+                                    std::to_string(me.time),
+                                    cwd,
+                                    opt.input,
+                                    opt.command == "test" ? "test" : "program",
+                                    opt.library ? "library" : "",
+                                    opt.line_directives ? "lines" : "",
+                                    opt.mode == BuildMode::release ? "release" : "debug",
+                                    home,
+                                    env("PATH"),
+                                    env("CALX_CC"),
+                                    env("CALX_PROFILE"),
+                                    env("CALX_LTO")};
+    std::vector<std::string_view> parts(key.begin(), key.end());
+    return record_path(cache_dir(), parts);
+}
+
+// What `run`, `build` and `test` do with the program they built, or found unchanged in the cache.
+int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests) {
+    if (opt.command == "build") {
+        std::string out = opt.output;
+        if (out.empty()) {
+            out = std::filesystem::path(opt.input).stem().string();
+            if (opt.library) {
+                out += library_suffix();
+            } else {
+#ifdef _WIN32
+                out += ".exe";
+#endif
+            }
+        }
+        std::string why;
+        if (!place_build(exe, out, why)) {
+            std::fprintf(stderr, "calx: %s\n", why.c_str());
+            return 1;
+        }
+        return 0;
+    }
+    if (opt.command == "test") {
+        set_run_environment(opt.input);
+        return run_tests(exe, tests, opt.filters);
+    }
+    if (opt.command == "eval" || serve) {
+        std::vector<std::string> run = {exe};
+        run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
+        std::fflush(stdout);
+        std::fflush(stderr);
+        int status = run_process(run, opt.command);
+        if (status < 0) {
+            std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
+            return 1;
+        }
+        return status;
+    }
+    std::vector<std::string> run = {exe};
+    run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
+    std::fflush(stdout);
+    std::fflush(stderr);
+    // The program sees the file it was built from as its `argv[0]`, as a Python script sees
+    // `sys.argv[0]`, rather than the cached program's path, so `std.env.program()` names it.
+    // Its full path is `std.env.script()`, as Python's `__file__` is, and this compiler's is in
+    // CALX, as Python's `sys.executable` is.
+    set_run_environment(opt.input);
+    int status = run_process(run, opt.input);
+    if (status < 0) {
+        std::fprintf(stderr, "calx: can't run %s\n", exe.c_str());
+        return 1;
+    }
+    return status;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -631,6 +726,18 @@ int main(int argc, char** argv) {
     }
 
     auto t0 = std::chrono::steady_clock::now();
+    // CLX-242: a build whose record finds every file it read as it was goes straight to the
+    // program it made, which is still in the cache, without reading or checking anything.
+    std::int64_t started = stamp_now();
+    std::string record;
+    if ((opt.command == "run" || opt.command == "build" || opt.command == "test") && !opt.stdin_text && !opt.json) {
+        record = record_for(opt);
+        BuildRecord found;
+        if (!record.empty() && load_record(record, found)) {
+            if (opt.timings) std::fprintf(stderr, "nothing changed: reused the cached program (%.1f ms)\n", ms(t0));
+            return finish(opt, serve, found.exe, found.tests);
+        }
+    }
     bool color = isatty(fileno(stderr)) != 0;
     auto front = std::make_unique<Front>();
     if (opt.command == "eval") {
@@ -748,6 +855,23 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> c_sources;
     for (CFile& f : files) c_sources.push_back(std::move(f.text));
+    // What the build read, for its record: each source file, each folder an import looked
+    // through, and each file a constant embeds. Code an attribute generated comes from a program
+    // the build ran, so a build with any keeps no record.
+    BuildRecord made;
+    if (!record.empty() && !sources.any_generated() && diags.all().empty()) {
+        for (const std::string& f : sources.loaded()) made.files.push_back(absolute_path(f));
+        for (const std::string& d : front->loader->folders()) made.folders.push_back(absolute_path(d));
+        // Every constant's, used or not, since the checker checks each one's size.
+        for (const Module* m : program.modules) {
+            for (const Item* c : m->items) {
+                if (!c->embed_file.empty()) made.files.emplace_back(c->embed_file);
+            }
+        }
+        made.tests = tests;
+    } else {
+        record.clear();
+    }
     // The checked program isn't needed past here, and is left for the system to free as the
     // process ends: freeing its many small pieces one at a time took a cached build of a program
     // that uses std.regex half a millisecond (CLX-240).
@@ -758,54 +882,22 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "front end: %.1f ms, emit: %.1f ms, clang: %.1f ms, link: %.1f ms%s\n", front_ms, emit_ms,
                      b.compile_ms, b.link_ms, b.reused ? " (reused the cached program)" : "");
     }
-    if (opt.command == "build") {
-        std::string out = opt.output;
-        if (out.empty()) {
-            out = std::filesystem::path(opt.input).stem().string();
-            if (opt.library) {
-                out += library_suffix();
-            } else {
-#ifdef _WIN32
-                out += ".exe";
-#endif
-            }
+    if (!record.empty()) {
+        // And the runtime's files and the toolchain, which the cache's keys hold.
+        for (const std::string& f : b.inputs) made.files.push_back(absolute_path(f));
+        made.files.push_back(absolute_path(tc.clang));
+        if (!tc.lld_path.empty() && tc.lld_path == tc.lld_beside) {
+            made.files.push_back(absolute_path(tc.lld_beside));
+        } else {
+            made.missing.push_back(absolute_path(tc.lld_beside));
+            if (!tc.lld_path.empty()) made.files.push_back(absolute_path(tc.lld_path));
         }
-        std::string why;
-        if (!place_build(b.exe, out, why)) {
-            std::fprintf(stderr, "calx: %s\n", why.c_str());
-            return 1;
+        for (std::vector<std::string>* v : {&made.files, &made.folders}) {
+            std::sort(v->begin(), v->end());
+            v->erase(std::unique(v->begin(), v->end()), v->end());
         }
-        return 0;
+        made.exe = b.exe;
+        save_record(record, made, started);
     }
-    if (opt.command == "test") {
-        set_run_environment(opt.input);
-        return run_tests(b.exe, tests, opt.filters);
-    }
-    if (opt.command == "eval" || serve) {
-        std::vector<std::string> run = {b.exe};
-        run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
-        std::fflush(stdout);
-        std::fflush(stderr);
-        int status = run_process(run, opt.command);
-        if (status < 0) {
-            std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());
-            return 1;
-        }
-        return status;
-    }
-    std::vector<std::string> run = {b.exe};
-    run.insert(run.end(), opt.program_args.begin(), opt.program_args.end());
-    std::fflush(stdout);
-    std::fflush(stderr);
-    // The program sees the file it was built from as its `argv[0]`, as a Python script sees
-    // `sys.argv[0]`, rather than the cached program's path, so `std.env.program()` names it.
-    // Its full path is `std.env.script()`, as Python's `__file__` is, and this compiler's is in
-    // CALX, as Python's `sys.executable` is.
-    set_run_environment(opt.input);
-    int status = run_process(run, opt.input);
-    if (status < 0) {
-        std::fprintf(stderr, "calx: can't run %s\n", b.exe.c_str());
-        return 1;
-    }
-    return status;
+    return finish(opt, serve, b.exe, tests);
 }

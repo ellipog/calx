@@ -431,10 +431,13 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     tc.clang = clang_path.string();
     fs::path dir = clang_path.parent_path();
 #ifdef _WIN32
-    tc.lld = plain_file(dir / "lld-link.exe") || !find_on_path("lld-link").empty();
+    tc.lld_beside = (dir / "lld-link.exe").string();
+    tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("lld-link");
 #else
-    tc.lld = plain_file(dir / "ld.lld") || !find_on_path("ld.lld").empty();
+    tc.lld_beside = (dir / "ld.lld").string();
+    tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("ld.lld");
 #endif
+    tc.lld = !tc.lld_path.empty();
     auto size = fs::file_size(clang_path, ec);
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
     tc.identity = tc.clang + "|" + std::to_string(size) + "|" + std::to_string(time);
@@ -1190,6 +1193,8 @@ void trim(const fs::path& dir, std::size_t keep, std::uintmax_t budget) {
 
 }  // namespace
 
+void trim_cache(const std::string& dir, std::size_t keep, std::uintmax_t budget) { trim(dir, keep, budget); }
+
 std::string compiler_hash(const Toolchain& tc) {
     fs::path exe = self_exe();
     std::error_code ec;
@@ -1430,10 +1435,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     BuildResult r;
     bool library = kind == BuildKind::library;
     fs::path runtime = fs::path(tc.home) / "runtime";
+    // Each of the runtime's files the keys hold, which a build's record names (CLX-242).
+    auto read_runtime = [&](const fs::path& file, std::string& text) {
+        r.inputs.push_back(file.string());
+        return read_file(file.string(), text);
+    };
     std::string rt_h, rt_c, sort_h, btree_h, heap_h;
-    if (!read_file((runtime / "calx_rt.h").string(), rt_h) || !read_file((runtime / "calx_rt.c").string(), rt_c) ||
-        !read_file((runtime / "calx_sort.h").string(), sort_h) || !read_file((runtime / "calx_btree.h").string(), btree_h) ||
-        !read_file((runtime / "calx_heap.h").string(), heap_h)) {
+    if (!read_runtime(runtime / "calx_rt.h", rt_h) || !read_runtime(runtime / "calx_rt.c", rt_c) ||
+        !read_runtime(runtime / "calx_sort.h", sort_h) || !read_runtime(runtime / "calx_btree.h", btree_h) ||
+        !read_runtime(runtime / "calx_heap.h", heap_h)) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }
@@ -1548,7 +1558,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     std::vector<std::string> part_texts;                      // and its source, for the build ID
     auto part = [&](const char* file) {
         std::string text;
-        if (!read_file((runtime / file).string(), text)) return false;
+        if (!read_runtime(runtime / file, text)) return false;
         std::string key = hash_hex({"runtime-part", file, rt_hash, text, flag_text, tc.identity});
         parts.push_back({file, (fs::path(obj_dir) / (key + ".o")).string()});
         all_keys += " " + key;
@@ -1601,6 +1611,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         parts_ok = part("calx_sqlite.c");
         std::error_code ec;
         fs::path src = runtime / "sqlite" / "sqlite3.c";
+        r.inputs.push_back(src.string());
         auto size = fs::file_size(src, ec);
         auto time = ec ? 0 : fs::last_write_time(src, ec).time_since_epoch().count();
         if (ec) parts_ok = false;
@@ -1628,7 +1639,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     }
     // The allocator is a file of its own, linked into every program (D95).
     std::string alloc_c;
-    if (!read_file((runtime / "calx_alloc.c").string(), alloc_c)) {
+    if (!read_runtime(runtime / "calx_alloc.c", alloc_c)) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }

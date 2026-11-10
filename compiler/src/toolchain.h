@@ -16,7 +16,9 @@ enum class BuildKind { program, library };
 
 struct Toolchain {
     std::string clang;    // the clang executable
-    bool lld = false;     // whether lld is next to it
+    bool lld = false;     // whether lld is next to it, or on PATH
+    std::string lld_path;    // where, or ""
+    std::string lld_beside;  // where it would be next to clang
     std::string identity; // what changes when clang does: its path, size and modification time
     std::string home;     // the Calx installation: runtime/ and std/ are under it
     std::string cache;    // the object cache
@@ -92,6 +94,7 @@ struct BuildResult {
     bool reused = false;    // nothing was compiled or linked
     double compile_ms = 0;  // clang, including the runtime when it wasn't cached
     double link_ms = 0;
+    std::vector<std::string> inputs;  // the runtime's files it read, whose text is in the keys
 };
 
 // Compiles each of `c_sources`, one per module, and links them with the runtime. Each object is
@@ -109,6 +112,11 @@ std::string compiler_hash(const Toolchain& tc);
 // How long the cache keeps what a build used, whatever its limits, since another build that's
 // running side by side may need it still.
 extern const std::chrono::minutes kCacheGrace;
+
+// Keeps the most recently used entries of a cache folder, up to `keep` of them and `budget`
+// bytes, and deletes the rest, but for anything used in the last kCacheGrace. An entry is every
+// file whose name starts with the same 32-digit hash.
+void trim_cache(const std::string& dir, std::size_t keep, std::uintmax_t budget);
 
 // What a built library's file name ends with: `.dll` or `.so`.
 const char* library_suffix();

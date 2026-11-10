@@ -1,0 +1,112 @@
+// A build keeps a record of every file it read, and a later build that finds them all as they
+// were goes straight to the program it made, without reading or checking anything (CLX-242). A
+// changed module, embedded file or folder, or one changed as the build ran, means a full build.
+// `--timings` says which it was. The files are given times well in the past, as files not being
+// edited have, since a record isn't kept of one changed in the two seconds before a build.
+import std.env.{variable}
+import std.fs.{make_dir_all, remove_dir_all, set_modified, temp_dir, write, write_text, separator}
+import std.process.{Command}
+import std.time.{Timestamp}
+
+// What a calx run in `dir` printed, then what it said on standard error, cut to its first words,
+// and how it ended.
+fn calx(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let said = o.error_text()
+            var how = String("?")
+            if said.starts_with("nothing changed") {
+                how = String("reused")
+            } else if said.starts_with("front end") {
+                how = String("built")
+            } else if said.len() > 0 {
+                how = said.lines()[0].copy()
+            }
+            // `calx test`'s count of passes ends with how long they took.
+            var text = String()
+            for line in o.text().lines() {
+                if not line.contains(" passed, ") {
+                    text = if text.len() == 0 { line.copy() } else { "{text} | {line}" }
+                }
+            }
+            return "{text} / {how} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+// Sets `path`'s time to `minutes` ago.
+fn age(path: String, minutes: i64) {
+    let now = unsafe { Timestamp.now() }
+    set_modified(path, Timestamp { unix_ms: now.unix_ms - minutes * 60000 })!
+}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let app = "{dir}{s}app"
+    make_dir_all(app)!
+    let main_file = "{app}{s}main.calx"
+    let util = "{app}{s}util.calx"
+    let data = "{app}{s}data.bin"
+    write_text(main_file, "import util.\{word\}\n\nconst DATA: [u8; 4] = embed(\"data.bin\")\n\nfn main() \{\n    var s: u32 = 0\n    for b in DATA \{\n        s += u32(b)\n    \}\n    println(\"\{word()\} \{s\}\")\n\}\n")!
+    write_text(util, "pub fn word() -> String \{\n    return String(\"one\")\n\}\n")!
+    write(data, [1, 2, 3, 4])!
+    for f in [main_file.copy(), util.copy(), data.copy(), app.copy()] {
+        age(f, 60)
+    }
+    let run: List<String> = ["run", "main.calx", "--timings"]
+
+    // Built, then reused.
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: one 10 / built [exited with status 0]
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: one 10 / reused [exited with status 0]
+
+    // A module changed.
+    write_text(util, "pub fn word() -> String \{\n    return String(\"two\")\n\}\n")!
+    age(util, 50)
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 10 / built [exited with status 0]
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 10 / reused [exited with status 0]
+
+    // An embedded file changed, keeping its size.
+    write(data, [5, 6, 7, 8])!
+    age(data, 50)
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 26 / built [exited with status 0]
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 26 / reused [exited with status 0]
+
+    // A file added to a folder an import looked through, which could have been the module.
+    write_text("{app}{s}notes.txt", "x")!
+    age("{app}{s}notes.txt", 50)
+    age(app, 40)
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 26 / built [exited with status 0]
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: two 26 / reused [exited with status 0]
+
+    // An error is reported, and fixed, and no record is kept of a build that failed.
+    write_text(util, "pub fn word() -> String \{\n    return 3\n\}\n")!
+    age(util, 30)
+    let failed = calx(exe.copy(), run.copy(), app.copy())
+    println(failed.split(" / ")[1])    // out: util.calx:2:12: error: expected `String`, found `i32` [exited with status 1]
+    write_text(util, "pub fn word() -> String \{\n    return String(\"three\")\n\}\n")!
+    age(util, 20)
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: three 26 / built [exited with status 0]
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: three 26 / reused [exited with status 0]
+
+    // A module changed just now is built, and no record is kept until it's two seconds old.
+    write_text(util, "pub fn word() -> String \{\n    return String(\"four\")\n\}\n")!
+    println(calx(exe.copy(), run.copy(), app.copy()))    // out: four 26 / built [exited with status 0]
+
+    // The same file from another folder is another build, since panics name it by the path given.
+    println(calx(exe.copy(), ["run", "app{s}main.calx", "--timings"], dir.copy()))    // out: four 26 / built [exited with status 0]
+
+    // `calx test` keeps its tests' names.
+    let tests = "{app}{s}checks.calx"
+    write_text(tests, "@test\nfn adds() \{\n    assert(1 + 1 == 2)\n\}\n\n@test\nfn counts() \{\n    assert(\"ab\".len() == 2)\n\}\n")!
+    age(tests, 60)
+    age(app, 30)
+    let test: List<String> = ["test", "checks.calx", "--timings"]
+    println(calx(exe.copy(), test.copy(), app.copy()))    // out: ok    adds | ok    counts / built [exited with status 0]
+    println(calx(exe.copy(), test.copy(), app.copy()))    // out: ok    adds | ok    counts / reused [exited with status 0]
+    // And only those its filter names.
+    println(calx(exe.copy(), ["test", "checks.calx", "counts", "--timings"], app.copy()))    // out: ok    counts / reused [exited with status 0]
+    remove_dir_all(dir)!
+}

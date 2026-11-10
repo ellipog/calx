@@ -25,6 +25,7 @@ add_executable(calx
     src/check.cpp
     src/emit.cpp
     src/toolchain.cpp
+    src/record.cpp
     src/update.cpp
     src/manage.cpp
     src/format.cpp

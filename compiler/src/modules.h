@@ -26,6 +26,9 @@ public:
     const std::vector<Module*>& modules() const;
     // The folder module names start from: the main file's, less the folders its `module` line names.
     std::string root() const;
+    // Each folder whose names an import looked through, to find its file with exactly its letters:
+    // a file added, removed or renamed there could change which an import finds (CLX-242).
+    std::vector<std::string> folders() const;
 
 private:
     std::unique_ptr<Loader> impl_;
