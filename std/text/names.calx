@@ -52,7 +52,10 @@ pub const WORDS: usize = 11805
 pub const CHECK: usize = 8
 pub const PLACE_CHECK: usize = 16
 pub const WORD_STEP: usize = 4
-pub const KEY: usize = 16
+/// The hash from a name to its block: how many buckets and slots it has, and the bits of a block's number.
+pub const BUCKETS: usize = 5592
+pub const SLOT_COUNT: usize = 33889
+pub const BLOCK_BITS: u32 = 13
 /// How many runs of named runes there are in RUNS, and named sequences in SEQ_TEXT.
 pub const RUN_COUNT: usize = 716
 pub const SEQUENCES: usize = 461
@@ -70,7 +73,7 @@ pub const PLACE_B: u32 = 125
 pub const PLACE_C: u32 = 1
 
 /// The tables below, a byte to a digit: the words and the entries, which every name and lookup reads.
-pub const DATA: [u8; 347562] = embed("names.bin")
+pub const DATA: [u8; 346714] = embed("names.bin")
 
 /// Where each rune's entry is, which only a rune's name needs.
 pub const PLACE_DATA: [u8; 56346] = embed("names_places.bin")
@@ -93,8 +96,11 @@ pub const STREAM: usize = 80474
 /// Where each CHECKth entry starts in STREAM, in three digits. It starts here in DATA.
 pub const STREAM_AT: usize = 267876
 
-/// The first KEY bytes of each CHECKth entry's name, `~` past its end. It starts here in DATA.
-pub const KEYS: usize = 280458
+/// Each bucket's pilot, in two digits. It starts here in DATA.
+pub const PILOTS: usize = 280458
+
+/// Each slot's block, in BLOCK_BITS bits, from the lowest bit of the first byte up. It starts here in DATA.
+pub const SLOTS: usize = 291642
 
 /// For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole. It starts here in PLACE_DATA.
 pub const PLACES: usize = 0

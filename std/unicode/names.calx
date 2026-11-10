@@ -5,7 +5,7 @@
 /// reads: about 350 KB for `lookup_rune` and the Java ones, and 70 KB more for `name` and `lookup`.
 module std.unicode.names
 
-import std.text.names.{ALIAS, ASSIGNED, CHECK, CJK, CODE_A, CODE_B, CODE_C, DATA, ENTRIES, FAMILY_BASE, FAMILY_DIGITS, FAMILY_HI, FAMILY_LO, FAMILY_PREFIX, JAMO_L, JAMO_T, JAMO_V, JAVA, JAVA_BLOCK, JAVA_HI, JAVA_LO, KEY, KEYS, NAME, PLACES, PLACES_AT, PLACE_A, PLACE_B, PLACE_C, PLACE_CHECK, PLACE_DATA, RUNS, RUN_COUNT, SEQUENCES, SEQ_AT, SEQ_DATA, SEQ_RUNES, SEQ_RUNES_AT, SEQ_TEXT, STREAM, STREAM_AT, TANGUT, WORD_A, WORD_AT, WORD_B, WORD_C, WORD_LEN, WORD_STEP, WORD_TEXT}
+import std.text.names.{ALIAS, ASSIGNED, BLOCK_BITS, BUCKETS, CHECK, CJK, CODE_A, CODE_B, CODE_C, DATA, ENTRIES, FAMILY_BASE, FAMILY_DIGITS, FAMILY_HI, FAMILY_LO, FAMILY_PREFIX, JAMO_L, JAMO_T, JAMO_V, JAVA, JAVA_BLOCK, JAVA_HI, JAVA_LO, NAME, PLACES, PLACES_AT, PLACE_A, PLACE_B, PLACE_C, PLACE_CHECK, PILOTS, PLACE_DATA, RUNS, RUN_COUNT, SEQUENCES, SEQ_AT, SEQ_DATA, SEQ_RUNES, SEQ_RUNES_AT, SEQ_TEXT, SLOTS, SLOT_COUNT, STREAM, STREAM_AT, TANGUT, WORD_A, WORD_AT, WORD_B, WORD_C, WORD_LEN, WORD_STEP, WORD_TEXT}
 
 // Hangul syllables, as the Unicode Standard's section 3.12 makes them from jamo.
 const S_BASE: u32 = 0xAC00
@@ -72,7 +72,22 @@ pub fn lookup(text: String) -> String? {
 /// Python's `re` reads `\N{...}`, which takes `ord` of what `unicodedata.lookup` gives. A program
 /// that only calls this doesn't carry the named sequences, or what `name` reads.
 pub fn lookup_rune(text: String) -> rune? {
-    let up = upper(text) else return none
+    // A name in capitals, as most are, is looked up as it is, with no copy made.
+    for i in 0..text.len() {
+        let b = text.byte_at(i)
+        if b >= 0x80 {
+            return none
+        }
+        if b >= b'a' and b <= b'z' {
+            let up = upper(text) else return none
+            return rune_named(up)
+        }
+    }
+    return rune_named(text)
+}
+
+// `lookup_rune` of `up`, in capitals.
+fn rune_named(up: String) -> rune? {
     if up.starts_with("HANGUL SYLLABLE ") {
         let c = hangul(up[16..]) else return none
         return rune.try_from(c)
@@ -489,77 +504,51 @@ fn match_word(k: u32, up: String, pos: mut usize, last: mut u8) -> i32 {
     return 0
 }
 
-// How the entry written whole at `at` compares with `up`, read only as far as they're the same.
-fn probe(at: usize, up: String) -> i32 {
-    var p = at
-    let h = header(mut p)
-    var pos: usize = 0
-    var last: u8 = 0
-    for _ in 0..h.1 {
-        let r = match_word(number(mut p, WORD_A, WORD_B, WORD_C), up, mut pos, mut last)
-        if r != 0 {
-            return r
-        }
-    }
-    return if pos < up.len() { -1 } else { 0 }
-}
-
-// How the CHECKth entry `k`'s name compares with `up` by its first KEY bytes in KEYS, or 0 if
-// they don't tell.
-fn key_compare(k: usize, up: String) -> i32 {
-    let base = KEYS + k * KEY
-    for i in 0..KEY {
-        let b = DATA[base + i]
-        if b == b'~' {
-            return 0
-        }
-        if i >= up.len() {
-            return 1
-        }
-        let u = up.byte_at(i)
-        if b != u {
-            return if b < u { -1 } else { 1 }
-        }
-    }
-    return 0
-}
-
 // Past every place in a name, for a word that ends past where the name and `up` differ.
 const FAR: usize = 0xFFFFFFFF
+const MOST_WORDS: usize = 48
+
+// The block of CHECK entries the name `up` is in, if it's a name at all: a perfect hash of the
+// names, which tools/unicode/gen_names.calx builds as PTHash does. `up`'s FNV-1a hash picks a
+// bucket, whose pilot, mixed with the hash, picks a slot, which holds the block.
+fn block_of(up: String) -> usize {
+    var h: u64 = 0xCBF29CE484222325
+    for i in 0..up.len() {
+        h = (h ^ u64(up.byte_at(i))) * 0x100000001B3
+    }
+    let bucket = usize.wrap(((h >> 32) * u64(BUCKETS)) >> 32)
+    let pilot = u64(DATA[PILOTS + 2 * bucket]) * 256 + u64(DATA[PILOTS + 2 * bucket + 1])
+    var x = h ^ (pilot * 0x9E3779B97F4A7C15)
+    x ^= x >> 29
+    x *= 0xBF58476D1CE4E5B9
+    x ^= x >> 32
+    let slot = usize.wrap(((x & 0xFFFFFFFF) * u64(SLOT_COUNT)) >> 32)
+    let bit = slot * usize(BLOCK_BITS)
+    let at = SLOTS + bit / 8
+    let three = u32(DATA[at]) | (u32(DATA[at + 1]) << 8) | (u32(DATA[at + 2]) << 16)
+    return usize((three >> u32.wrap(bit % 8)) & ((1u32 << BLOCK_BITS) - 1))
+}
 
 // The rune of the entry named `up` exactly, if its kind is one of `kinds`.
 fn find(up: String, kinds: u32) -> u32? {
-    // The last entry written whole whose name isn't past `up`, told by its first bytes where they
-    // can, and by reading it where they can't.
-    var lo: usize = 0
-    var hi = (ENTRIES + CHECK - 1) / CHECK
-    while lo < hi {
-        let mid = (lo + hi) / 2
-        var c = key_compare(mid, up)
-        if c == 0 {
-            c = probe(STREAM + fixed(STREAM_AT + 3 * mid), up)
-        }
-        if c <= 0 {
-            lo = mid + 1
-        } else {
-            hi = mid
-        }
-    }
-    if lo == 0 {
+    // The block the name would be in, read from its first entry, which is written whole, each
+    // after it sharing its first words with the one before. `same` is how many bytes the one
+    // before shares with `up`, and `ends` where its words end, or FAR past that: an entry whose
+    // shared words reach past it compares as the one before did, and one that shares less is
+    // compared from where its shared words end.
+    let k = block_of(up)
+    if k * CHECK >= ENTRIES {
         return none
     }
-    // Then the ones after it, each sharing its first words with the one before. `same` is how
-    // many bytes the one before shares with `up`, and `ends` where its words end, or FAR past
-    // that: an entry whose shared words reach past it compares as the one before did, and one
-    // that shares less is compared from where its shared words end.
-    let k = lo - 1
     var at = STREAM + fixed(STREAM_AT + 3 * k)
-    var ends: List<usize> = []
+    // No name has more than MOST_WORDS words, which the generator checks.
+    var ends = [0usize; MOST_WORDS]
+    var count: usize = 0
     var same: usize = 0
     var code: u32 = 0
     for x in (k * CHECK)..((k + 1) * CHECK).min(ENTRIES) {
         let h = header(mut at)
-        ends.truncate(h.0)
+        count = h.0
         let from = if h.0 == 0 { 0usize } else { ends[h.0 - 1] }
         var r: i32 = -1
         if from <= same {
@@ -571,7 +560,8 @@ fn find(up: String, kinds: u32) -> u32? {
                 if r == 0 {
                     r = match_word(w, up, mut pos, mut last)
                 }
-                ends.push(if r == 0 { pos } else { FAR })
+                ends[count] = if r == 0 { pos } else { FAR }
+                count += 1
             }
             if r == 0 and pos < up.len() {
                 r = -1
@@ -580,7 +570,8 @@ fn find(up: String, kinds: u32) -> u32? {
         } else {
             for _ in 0..h.1 {
                 _ = number(mut at, WORD_A, WORD_B, WORD_C)
-                ends.push(FAR)
+                ends[count] = FAR
+                count += 1
             }
         }
         let v = number(mut at, CODE_A, CODE_B, CODE_C)

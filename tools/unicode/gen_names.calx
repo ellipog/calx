@@ -30,8 +30,8 @@ const MAX: u32 = 0x10FFFF
 const CHECK: usize = 8
 const PLACE_CHECK: usize = 16
 const WORD_STEP: usize = 4
-// The first bytes of each entry written whole, which a search reads before the entry.
-const KEY: usize = 16
+// About how many names share a pilot in the hash from a name to its block.
+const BUCKET_SIZE: usize = 6
 // The base numbers are written in, and its square and cube.
 const BASE: u32 = 256
 const BASE2: u32 = 65536
@@ -520,6 +520,10 @@ fn main() {
         if name_of(ws) != e.0 {
             stop("{e.0} splits into words that don't make it again")
         }
+        // std.unicode.names' `find` keeps where each word of a name ends in an array of 48.
+        if ws.len() > 48 {
+            stop("{e.0} has {ws.len()} words, more than `find` keeps")
+        }
         for w in ws {
             if counts.contains(w) {
                 counts[w] += 1
@@ -564,15 +568,9 @@ fn main() {
     let ct = best_tiers(code_values)
     var stream: List<u8> = []
     var stream_at: List<u8> = []
-    var keys: List<u8> = []
     for e in 0..entries.len() {
         if e % CHECK == 0 {
             put_fixed(mut stream_at, u32.wrap(stream.len()), 3)
-            let n = entries[e].0.copy()
-            keys.extend(n[..n.len().min(KEY)].to_bytes())
-            for _ in n.len()..KEY {
-                keys.push(b'~')
-            }
         }
         let shared = if e % CHECK == 0 { 0usize } else { common(split[e - 1], split[e]) }
         let fresh = split[e].len() - shared
@@ -587,6 +585,82 @@ fn main() {
             put_num(mut stream, rank[split[e][k]], wt)
         }
         put_num(mut stream, code_values[e], ct)
+    }
+
+    // A hash of each entry's name to its block of CHECK entries, which `find` reads in place of a
+    // search: a minimal-ish perfect hash, as PTHash builds one. Each name goes to a bucket of
+    // about BUCKET_SIZE, and each bucket has a pilot, the smallest that sends its names to slots
+    // no other name has, tried for the biggest buckets first. A slot holds its name's block.
+    let hash_count = entries.len()
+    let slot_count = hash_count * 100 / 99 + 1
+    let bucket_count = hash_count / BUCKET_SIZE + 1
+    var hashes: List<u64> = []
+    var members: List<List<usize>> = []
+    for _ in 0..bucket_count {
+        members.push(List<usize>())
+    }
+    for e in 0..hash_count {
+        let h = name_hash(entries[e].0)
+        hashes.push(h)
+        members[bucket_of(h, bucket_count)].push(e)
+    }
+    var order: List<(usize, usize)> = []
+    for b in 0..bucket_count {
+        order.push((hash_count - members[b].len(), b))
+    }
+    order.sort()
+    var filled: List<bool> = [false; slot_count]
+    var pilots: List<u32> = [0u32; bucket_count]
+    var slot_block: List<u32> = [0u32; slot_count]
+    var most_tries: u64 = 0
+    for o in order {
+        let b = o.1
+        if members[b].is_empty() {
+            continue
+        }
+        var pilot: u64 = 0
+        loop {
+            var slots: List<usize> = []
+            for k in members[b] {
+                let s = slot_of(hashes[k], pilot, slot_count)
+                if filled[s] or slots.contains(s) {
+                    break
+                }
+                slots.push(s)
+            }
+            if slots.len() == members[b].len() {
+                for j in 0..slots.len() {
+                    filled[slots[j]] = true
+                    slot_block[slots[j]] = u32.wrap(members[b][j] / CHECK)
+                }
+                pilots[b] = u32.wrap(pilot)
+                break
+            }
+            pilot += 1
+            if pilot >= u64(BASE2) {
+                stop("no pilot below 65536 fits bucket {b}")
+            }
+        }
+        most_tries = most_tries.max(pilot)
+    }
+    var block_bits: u32 = 1
+    while (1u64 << u64(block_bits)) < u64((hash_count + CHECK - 1) / CHECK) {
+        block_bits += 1
+    }
+    var pilot_bytes: List<u8> = []
+    for p in pilots {
+        put_fixed(mut pilot_bytes, p, 2)
+    }
+    // Each slot's block in `block_bits` bits, from the lowest bit of the first byte up, and two
+    // bytes more, so a slot is read as three bytes.
+    var slot_bytes: List<u8> = [0u8; (slot_count * usize(block_bits) + 7) / 8 + 2]
+    for s in 0..slot_count {
+        let at = s * usize(block_bits)
+        for bit in 0..usize(block_bits) {
+            if (slot_block[s] >> u32.wrap(bit)) & 1 != 0 {
+                slot_bytes[(at + bit) / 8] |= u8.wrap(1u32 << u32.wrap((at + bit) % 8))
+            }
+        }
     }
 
     // For each rune with a name or a Java name, in order, its entry, as a difference from the one
@@ -743,7 +817,8 @@ fn main() {
     blocks.push(block(mut data, "DATA", "WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at))
     blocks.push(block(mut data, "DATA", "STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream))
     blocks.push(block(mut data, "DATA", "STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at))
-    blocks.push(block(mut data, "DATA", "KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end.", keys))
+    blocks.push(block(mut data, "DATA", "PILOTS", "Each bucket's pilot, in two digits.", pilot_bytes))
+    blocks.push(block(mut data, "DATA", "SLOTS", "Each slot's block, in BLOCK_BITS bits, from the lowest bit of the first byte up.", slot_bytes))
     blocks.push(block(mut place_data, "PLACE_DATA", "PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places))
     blocks.push(block(mut place_data, "PLACE_DATA", "PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at))
     blocks.push(block(mut place_data, "PLACE_DATA", "RUNS", "The runs of runes with a name or a Java name, RUN_COUNT of them, nine digits each: the first rune, how many runes the run has, and the first rune's number in PLACES, in three digits each.", runs))
@@ -763,7 +838,9 @@ fn main() {
         String("/// What an entry is: a rune's name, an alias, or a name Java gives a control character."),
         "pub const NAME: u32 = {NAME}\npub const ALIAS: u32 = {ALIAS}\npub const JAVA: u32 = {JAVA}",
         "/// How many entries and words there are, how many entries go between two written whole, how many\n/// places between two in PLACES_AT, and how many words between two in WORD_AT.",
-        "pub const ENTRIES: usize = {entries.len()}\npub const WORDS: usize = {ranked.len()}\npub const CHECK: usize = {CHECK}\npub const PLACE_CHECK: usize = {PLACE_CHECK}\npub const WORD_STEP: usize = {WORD_STEP}\npub const KEY: usize = {KEY}",
+        "pub const ENTRIES: usize = {entries.len()}\npub const WORDS: usize = {ranked.len()}\npub const CHECK: usize = {CHECK}\npub const PLACE_CHECK: usize = {PLACE_CHECK}\npub const WORD_STEP: usize = {WORD_STEP}",
+        "/// The hash from a name to its block: how many buckets and slots it has, and the bits of a block's number.",
+        "pub const BUCKETS: usize = {bucket_count}\npub const SLOT_COUNT: usize = {slot_count}\npub const BLOCK_BITS: u32 = {block_bits}",
         "/// How many runs of named runes there are in RUNS, and named sequences in SEQ_TEXT.\npub const RUN_COUNT: usize = {run_count}\npub const SEQUENCES: usize = {seqs.len()}",
         String("/// The digits a number takes: 1 below A, 2 below A + B * 256, 3 below that and C * 256^2, and 4 past it."),
         tiers("WORD", wt),
@@ -795,6 +872,29 @@ fn main() {
     fs.write("{root}/std/text/names_sequences.bin", seq_data)!
     println("{out}: {entries.len()} entries, {ranked.len()} words, {families.len()} families, {run_count} runs, {java_lo.len()} Java blocks")
     println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}, all {data.len() + place_data.len() + seq_data.len()} bytes")
+    println("hash: {bucket_count} buckets, {slot_count} slots of {block_bits} bits, {pilot_bytes.len() + slot_bytes.len()} bytes, highest pilot {most_tries}")
+}
+
+// FNV-1a of a name's bytes, which std.unicode.names' `find` works out the same way.
+fn name_hash(s: String) -> u64 {
+    var h: u64 = 0xCBF29CE484222325
+    for i in 0..s.len() {
+        h = (h ^ u64(s.byte_at(i))) * 0x100000001B3
+    }
+    return h
+}
+
+fn bucket_of(h: u64, buckets: usize) -> usize {
+    return usize.wrap(((h >> 32) * u64(buckets)) >> 32)
+}
+
+// The slot a name of hash `h` goes to with `pilot`: the two mixed, then put in range.
+fn slot_of(h: u64, pilot: u64, slots: usize) -> usize {
+    var x = h ^ (pilot * 0x9E3779B97F4A7C15)
+    x ^= x >> 29
+    x *= 0xBF58476D1CE4E5B9
+    x ^= x >> 32
+    return usize.wrap(((x & 0xFFFFFFFF) * u64(slots)) >> 32)
 }
 
 // How many words two names share at their start, at most 92.

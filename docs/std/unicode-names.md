@@ -59,22 +59,30 @@ It gives `none` for a code point not assigned yet, a noncharacter, and anything 
 
 ## How it's built
 
-The names are in [std/text/names.calx](../../std/text/names.calx) and the files of bytes it embeds, std/text/names.bin, names_places.bin and names_sequences.bin, which [tools/unicode/gen_names.calx](../../tools/unicode/gen_names.calx) writes from Unicode 16.0.0's UnicodeData.txt, NameAliases.txt, NamedSequences.txt, Blocks.txt and Jamo.txt. There are 33,550 entries: the names, the aliases and Java's names for the control characters, in alphabetical order. Each is written as numbers of words, of 11,805 words in all, the most used first, so the most used take one byte. An entry shares what it can of the words of the one before it, and gives its rune as the difference from the one before's. Every 8th entry is written whole, and its first 16 bytes are kept apart. For each rune with a name, in order, the tables give its entry, as the difference from the one before's.
+The names are in [std/text/names.calx](../../std/text/names.calx) and the files of bytes it embeds, std/text/names.bin, names_places.bin and names_sequences.bin, which [tools/unicode/gen_names.calx](../../tools/unicode/gen_names.calx) writes from Unicode 16.0.0's UnicodeData.txt, NameAliases.txt, NamedSequences.txt, Blocks.txt and Jamo.txt. There are 33,550 entries: the names, the aliases and Java's names for the control characters, in alphabetical order. Each is written as numbers of words, of 11,805 words in all, the most used first, so the most used take one byte. An entry shares what it can of the words of the one before it, and gives its rune as the difference from the one before's. Every 8th entry is written whole, which starts a block of 8. A perfect hash of the names gives each one's block ([CLX-236](https://acta.aaenz.no/aaen-studios/clx#CLX-236)). For each rune with a name, in order, the tables give its entry, as the difference from the one before's.
 
-Numbers are written in base 256, a byte to a digit, in 420,932 bytes, which the module makes three [constants with `embed`](../reference/variables.md#file-constants). A build never reads them: they go into the program through the assembler, about 5 ms of a build that reuses its cached files. A program carries only the files its functions read ([CLX-239](https://acta.aaenz.no/aaen-studios/clx#CLX-239)):
+The hash is built as PTHash builds one:
+
+- A name's FNV-1a hash picks one of 5,592 buckets, about 6 names to a bucket.
+- Each bucket has a pilot, the smallest number that, mixed with the hash, sends each of its names to a slot no other name has. The pilots are tried for the biggest buckets first.
+- Each of the 33,889 slots holds its name's block in 13 bits.
+
+The pilots and the slots take 66 KB.
+
+Numbers are written in base 256, a byte to a digit, in 420,084 bytes, which the module makes three [constants with `embed`](../reference/variables.md#file-constants). A build never reads them: they go into the program through the assembler, about 5 ms of a build that reuses its cached files. A program carries only the files its functions read ([CLX-239](https://acta.aaenz.no/aaen-studios/clx#CLX-239)):
 
 | File | Bytes | Read by |
 | --- | --- | --- |
-| names.bin: the words, the entries and the first bytes of every 8th | 347,562 | All four, and `lookup_rune` |
+| names.bin: the words, the entries and the hash | 346,714 | All four, and `lookup_rune` |
 | names_places.bin: each rune's entry | 56,346 | `name` and `java_name` |
 | names_sequences.bin: the named sequences | 17,024 | `lookup` |
 
-So a program that uses [std.regex](regex.md), which calls only `lookup_rune`, carries 348 KB of them, and one that calls `name` and `lookup` all 421 KB.
+So a program that uses [std.regex](regex.md), which calls only `lookup_rune`, carries 347 KB of them, and one that calls `name` and `lookup` all 420 KB.
 
 - `name` and `java_name` first skip the blocks of 256 runes that hold nothing assigned. Then they find the rune's entry and read it on from the last one written whole.
-- `lookup` and `java_code_point_of` find the last entry written whole that isn't past the name, mostly by the first 16 bytes kept for each. Then they read on from it. An entry whose shared words reach past where the one before differed from the name compares the same way, so it's only skipped over. Another is compared from where its shared words end, and no name is built.
+- `lookup` and `java_code_point_of` hash the name to the block it would be in, and read the block from its start. An entry whose shared words reach past where the one before differed from the name compares the same way, so it's only skipped over. Another is compared from where its shared words end, and no name is built. A name in capitals is hashed and compared as it is, with no copy made. Text that isn't a name hashes to some block, where no entry matches it.
 
-`name` and `java_name` were checked against Python 3.14 and Java 25 on every code point, and `lookup` and `java_code_point_of` on 553,364 names:
+`name` and `java_name` were checked against Python 3.14 and Java 25 on every code point, and `lookup` and `java_code_point_of` on 553,364 names. With the hash, `lookup` was checked again on 251,545 more: every name, alias and sequence, each changed twice by one character or put in lowercase or title case, 194,765 of them no name at all. They were:
 
 - every name and alias of both, and every named sequence;
 - a fifth of them in lowercase and a twentieth in title case;
@@ -90,11 +98,12 @@ On our benchmark, an i9-13900K pinned to its performance cores and out of power 
 | Work | Calx | Python | Java |
 | --- | --- | --- | --- |
 | `name` of every code point | 13.0 ms | 93.9 ms | |
-| `lookup` of each of Python's 148,853 names | 22.7 ms | 31.3 ms | |
+| `lookup` of each of Python's 148,853 names | 11.3 ms | 23.3 ms | |
 | `java_name` of every code point | 13.9 ms | | 25.0 ms |
-| `java_code_point_of` of each of Java's 294,579 names | 25.2 ms | | 37.2 ms |
+| `java_code_point_of` of each of Java's 294,579 names | 16.1 ms | | 37.2 ms |
 
-- Of the 148,853 names, 97,668 are CJK ideographs' and 11,172 Hangul syllables'. Those take 67 ns and 161 ns each, where Python takes 153 ns and 537 ns. The other 40,013 take 355 ns each, and Python, which keeps its names in a DAWG, 285 ns.
+- Of the 148,853 names, 97,668 are CJK ideographs' and 11,172 Hangul syllables'. Those took 67 ns and 161 ns each, where Python took 153 ns and 537 ns. The other 40,013 take 165 ns each, and Python, which keeps its names in a DAWG, 217 ns. Before the hash, which replaced a binary search on the first 16 bytes of every 8th name, they took 289 ns, and all of `lookup` 20.4 ms (CLX-236).
+- The `lookup` and `java_code_point_of` rows, and the 40,013 names, were measured again with the hash, Python and Java alongside. Java's `codePointOf` took 36.6 to 37.7 ms, as before.
 - Most of Java's names are a block's and a number, which `java_code_point_of` reads straight from the number.
 
 The module is [std/unicode/names.calx](../../std/unicode/names.calx).
