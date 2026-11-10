@@ -4155,7 +4155,19 @@ $dropall    m->len = 0;
     }
 
     void bind(const Match& m) {
-        for (const auto& [l, v] : m.binds) line(ctype(l->type) + " " + local_name(l) + " = " + v + ";");
+        for (const auto& [l, v] : m.binds) {
+            // `match mut place`'s names point at their parts, where they are (CLX-233).
+            if (l->is_part_view) line(ctype(l->type) + "* " + local_name(l) + " = &" + v + ";");
+            else line(ctype(l->type) + " " + local_name(l) + " = " + v + ";");
+        }
+    }
+
+    // The place `match mut` or `if let ... = mut` matches, found once: a pointer to it, which may
+    // come from a table's lookup through a `const` pointer, though the table isn't (CLX-233).
+    std::string part_place(Expr* v) {
+        std::string p = tmp();
+        line(ctype(v->type) + "* " + p + " = (" + ctype(v->type) + "*)&" + place(v) + ";");
+        return "(*" + p + ")";
     }
 
     // The value being matched, in a place: the variable itself when reading it can't change
@@ -4176,7 +4188,7 @@ $dropall    m->len = 0;
     // `if let p = v`. When it unwraps, `v` is an optional and `p` matches its value. `at` is
     // where the value is.
     Match let_match(Expr* e, std::string& at) {
-        at = scrutinee(e->cond, false, e->hidden);
+        at = e->by_mut ? part_place(e->cond) : scrutinee(e->cond, false, e->hidden);
         Match m;
         std::string inner = at;
         if (e->let_unwraps) {
@@ -4238,7 +4250,7 @@ $dropall    m->len = 0;
         std::string end = "cx_brk" + std::to_string(e->loop_id);
         line("{");
         indent_++;
-        std::string at = scrutinee(e->scrutinee, guards, e->hidden);
+        std::string at = e->by_mut ? part_place(e->scrutinee) : scrutinee(e->scrutinee, guards, e->hidden);
         for (std::size_t i = 0; i < e->arms.size(); i++) {
             const MatchArm& arm = e->arms[i];
             bool last = i + 1 == e->arms.size();

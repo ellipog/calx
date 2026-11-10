@@ -1,0 +1,128 @@
+// `match mut place`, `if let p = mut place` and `while let p = mut place`: each name is a `mut`
+// view of its part of the place, which the arm changes it through (CLX-233).
+
+enum Node {
+    Num(i64)
+    Text(String)
+    Pair(i64, String)
+    Rect { w: f64, h: f64 }
+    Items(List<Node>)
+    Fields(LinkedMap<String, Node>)
+}
+
+impl Node {
+    // Doubles every number and marks every text, all the way down, where they are.
+    fn grow(mut self) {
+        match mut self {
+            Num(n) => n *= 2,
+            Text(s) => s.push('!'),
+            Pair(n, s) => {
+                n += 1
+                s.push_str("+")
+            },
+            Rect { w, h } => {
+                w *= 2.0
+                h = h + 0.5
+            },
+            Items(xs) => {
+                for x in mut xs {
+                    x.grow()
+                }
+            },
+            Fields(m) => {
+                var keys = List<String>()
+                for (k, _) in m {
+                    keys.push(k.copy())
+                }
+                for k in keys {
+                    m[k].grow()
+                }
+            },
+        }
+    }
+
+    // Puts `v` at `k`, if this is a `Fields`.
+    fn put(mut self, k: own String, v: own Node) -> bool {
+        if let Fields(m) = mut self {
+            m.insert(k, v)
+            return true
+        }
+        return false
+    }
+}
+
+struct Doc {
+    root: Node
+    edits: i32
+}
+
+// A generic function's names are views too.
+fn first_or<T>(xs: mut List<T?>, fallback: own T) {
+    if let x = mut xs[0] {
+        x = fallback
+    }
+}
+
+fn main() {
+    var n = Node.Fields(LinkedMap())
+    _ = n.put(String("a"), Node.Num(4))
+    _ = n.put(String("b"), Node.Items([Node.Text("x"), Node.Pair(1, "p"), Node.Rect { w: 1.5, h: 2.0 }]))
+    n.grow()
+    println("{n}")    // out: Fields({a: Num(8), b: Items([Text(x!), Pair(2, p+), Rect { w: 3.0, h: 2.5 }])})
+    var one = Node.Num(1)
+    println("{one.put(String("z"), Node.Num(2))}")    // out: false
+
+    // A field of a struct, while another field changes.
+    var d = Doc { root: Node.Text("hi"), edits: 0 }
+    if let Text(s) = mut d.root {
+        s.push_str(" there")
+        d.edits += 1
+    }
+    println("{d.root} {d.edits}")    // out: Text(hi there) 1
+
+    // An optional's value, a map's value and a list's element.
+    var o: Node? = some(Node.Num(7))
+    if let x = mut o {
+        x.grow()
+    }
+    println("{o}")    // out: some(Num(14))
+    var m = LinkedMap<String, Node>()
+    m.insert(String("k"), Node.Num(1))
+    match mut m["k"] {
+        Num(v) => v += 100,
+        _ => {},
+    }
+    println("{m}")    // out: {k: Num(101)}
+    var xs = [Node.Num(1), Node.Num(2)]
+    while let Num(v) = mut xs[0] {
+        if v > 5 {
+            break
+        }
+        v += 3
+    }
+    println("{xs}")    // out: [Num(7), Num(2)]
+
+    // Guards read the names, and a match gives a value.
+    var p = Node.Pair(3, "q")
+    let got = match mut p {
+        Pair(k, s) if k > 2 => {
+            s.push_str("!")
+            k
+        },
+        _ => 0,
+    }
+    println("{got} {p}")    // out: 3 Pair(3, q!)
+
+    // A tuple's parts, and a generic function.
+    var t = (1, String("a"))
+    match mut t {
+        (a, s) => {
+            a += 1
+            s.push('b')
+        },
+    }
+    println("{t}")    // out: (2, ab)
+    var opts: List<String?> = [some(String("old")), none]
+    first_or(mut opts, String("new"))
+    println("{opts}")    // out: [some(new), none]
+}

@@ -1,0 +1,89 @@
+// What `match mut` and `if let ... = mut` don't allow (CLX-233).
+
+pub enum Node {
+    Num(i64)
+    Text(String)
+}
+
+pub struct Doc {
+    pub root: Node
+    pub edits: i32
+}
+
+fn make() -> Node {
+    return Node.Num(1)
+}
+
+pub fn made_here() {
+    match mut make() {    // error: `match mut` changes the value where it is, so it matches a variable or a part of one, not a value made here; match without `mut`, or put the value in a `var` first
+        Num(n) => n += 1,
+        Text(s) => s.push('!'),
+    }
+}
+
+pub fn read_only(n: Node) {
+    if let Num(v) = mut n {    // error: parameter `n` can't be changed; take it as `mut` to change it
+        v += 1
+    }
+}
+
+pub fn not_var() {
+    let n = Node.Num(1)
+    match mut n {    // error: `n` can't be changed; declare it with `var` to change it
+        Num(v) => v += 1,
+        _ => {},
+    }
+    println("{n}")
+}
+
+pub fn nothing_changed(n: mut Node) {
+    match mut n {    // error: nothing is changed through the names `match mut` binds; match without `mut`
+        Num(v) => println("{v}"),
+        Text(s) => println(s),
+    }
+    n = Node.Num(0)
+}
+
+pub fn uses_place(d: mut Doc) {
+    if let Text(s) = mut d.root {
+        s.push('!')
+        d.edits += 1
+        println("{d.root}")    // error: `d.root` can't be used while `if let ... = mut` changes it; reach it through the names the pattern binds
+    }
+}
+
+pub fn uses_whole(d: mut Doc) {
+    match mut d.root {
+        Num(v) => {
+            v += 1
+            let _e = d    // error: `d` can't be used while `match mut` changes `d.root`; reach it through the names the pattern binds
+        },
+        _ => {},
+    }
+}
+
+pub fn changes_place(n: mut Node) {
+    match mut n {
+        Num(v) => {
+            v += 1
+            n = Node.Num(0)    // error: `n` can't be used while `match mut` changes it; reach it through the names the pattern binds
+        },
+        _ => {},
+    }
+}
+
+pub fn mut_name(n: mut Node) {
+    match mut n {
+        Num(mut v) => v += 1,    // error: each name `match mut` binds is a `mut` view already; leave out this `mut`
+        _ => {},
+    }
+}
+
+pub fn plain_mut(n: Node) {
+    match n {
+        Num(mut v) => println("{v}"),    // error: a pattern binds a copy; to change the value where it is, match it with `match mut` or `if let ... = mut`, or copy it into a `var`
+        _ => {},
+    }
+}
+
+fn main() {}

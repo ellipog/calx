@@ -39,7 +39,7 @@ fn main() {
 
 - An enum needs at least one variant, and variant names are unique.
 - A variant's fields are written in any order when building it, and their values run in the order written, as a [struct's](structs.md#building-a-value) do.
-- `match` reads the data back out ([patterns](patterns.md)). There's no other way to reach it, so a variant's data can't be read as the wrong variant.
+- `match` reads the data back out ([patterns](patterns.md)), and `match mut` changes it where it is ([changing the parts in place](patterns.md#changing-the-parts-in-place)). There's no other way to reach it, so a variant's data can't be read as the wrong variant.
 - An enum isn't a number. `Shape(1)` doesn't compile.
 
 ## Representations

@@ -3318,7 +3318,7 @@ private:
             return;
         }
         // A local whose type was an error already has an error, and its uses weren't all checked.
-        if (!l->used && !(l->is_loop_var && l->mutated) && !starts_with_underscore(n) && !is_bad(l->type)) {
+        if (!l->used && !((l->is_loop_var || l->is_part_view) && l->mutated) && !starts_with_underscore(n) && !is_bad(l->type)) {
             error(l->span, q(n) + " is never used");
         } else if (l->is_loop_var && l->mode == ParamMode::mut && !l->mutated && !is_bad(l->type)) {
             error(l->span, q(n) + " never changes an element, so go over them without `mut`");
@@ -3775,6 +3775,10 @@ private:
             l->mutated = true;  // `for x in mut xs`: a view of each element
             return;
         }
+        if (l->is_part_view) {
+            l->mutated = true;  // `match mut place`: a view of a part of it (CLX-233)
+            return;
+        }
         if (l->is_loop_var) {
             error(place->span, "the loop variable " + q(n) + " can't be changed; copy it into a `var`, or change the "
                                    "elements with " + q("for " + std::string(n) + " in mut ..."));
@@ -3802,6 +3806,13 @@ private:
         const Local* tie = nullptr;  // an arena list made from `place`, which holds it until its block ends (D114)
         bool exclusive = false;      // `for x in mut place`: nothing else reaches it, to read or change
         const Local* by = nullptr;   // that loop's variable
+        const char* by_match = nullptr;  // `match mut place`'s arm, or `if let p = mut place`'s block (CLX-233)
+    };
+
+    // CLX-233: the names a `match mut` or `if let ... = mut` pattern binds.
+    struct PartViews {
+        const char* what;  // `match mut`, or what the `let` is
+        std::vector<Local*> names;
     };
 
     // Using a place that a `for ... in mut` loop changes: one error for each place, which a
@@ -3811,6 +3822,11 @@ private:
         if (!mut_loop_errors_.insert(key).second) return;
         std::string over = place_text(b->place);
         std::string what = place_text(place);
+        if (b->by_match) {
+            error(place->span, q(what) + " can't be used while " + q(b->by_match) + " changes " +
+                                   (what == over ? "it" : q(over)) + "; reach it through the names the pattern binds");
+            return;
+        }
         error(place->span, q(what) + " can't be used while a `for ... in mut` loop changes " +
                                (what == over ? "its elements" : "the elements of " + q(over)) +
                                (b->by ? "; reach them through " + q(text(b->by->name)) : std::string()));
@@ -6530,11 +6546,21 @@ private:
                 }
             }
             push_scope();
-            if (check_pattern(p, pt) && !is_bad(pt) && !e->let_unwraps && irrefutable(p, pt, nullptr)) {
+            const char* what = e->from_while ? "while let ... = mut" : "if let ... = mut";
+            Local* root = e->by_mut && !is_bad(vt) ? part_view_place(e->cond, what) : nullptr;
+            PartViews views{what, {}};
+            // The names are views even after an error in the place, so changing them isn't a second one.
+            if (e->by_mut) part_views_ = &views;
+            bool pattern_ok = check_pattern(p, pt) && !is_bad(pt);
+            if (pattern_ok && !e->let_unwraps && irrefutable(p, pt, nullptr)) {
                 error(p->span, "this pattern matches every " + name_of(pt) +
                                    (e->from_while ? ", so the loop would never stop there; write `loop`, with `let` inside" : "; use `let`"));
             }
+            part_views_ = nullptr;
+            if (root) hold_part_views(root, e->cond, what);
             a = check_block(e->block, stmt ? nullptr : expected, stmt ? BlockUse::stmt : BlockUse::value);
+            if (root) release_part_views();
+            if (root && pattern_ok && !is_bad(a)) part_views_changed(views, e->cond);
             pop_scope();
         } else {
             check_condition(e->cond);
@@ -6587,9 +6613,14 @@ private:
         bool patterns_ok = !is_bad(st);
         Type* result = nullptr;
         bool all_never = true, any_bad = false;
+        Local* root = e->by_mut && !is_bad(st) ? part_view_place(e->scrutinee, "match mut") : nullptr;
+        PartViews views{"match mut", {}};
         for (MatchArm& arm : e->arms) {
             push_scope();
+            if (e->by_mut) part_views_ = &views;
             patterns_ok = check_pattern(arm.pattern, st) && patterns_ok;
+            part_views_ = nullptr;
+            if (root) hold_part_views(root, e->scrutinee, "match mut");
             if (arm.guard) check_condition(arm.guard);
             Type* t;
             if (stmt) {
@@ -6598,15 +6629,55 @@ private:
                 t = check(arm.body, expected ? expected : result);
                 if (!result && !is_bad(t) && t->kind != TypeKind::never) result = t;
             }
+            if (root) release_part_views();
             if (is_bad(t)) any_bad = true;
             if (t->kind != TypeKind::never) all_never = false;
             pop_scope();
         }
+        if (root && patterns_ok && !any_bad) part_views_changed(views, e->scrutinee);
         if (patterns_ok) check_arms(e, st);
         if (stmt) return all_never ? T.never : T.unit;
         if (any_bad) return T.error;
         if (all_never) return T.never;
         return result ? result : T.error;
+    }
+
+    // `match mut place` and `if let p = mut place` (CLX-233): the root of `place`, which the code must
+    // be able to change, or null after an error.
+    Local* part_view_place(Expr* v, const char* what) {
+        Local* root = place_root(v);
+        if (!root) {
+            error(v->span, q(what) + " changes the value where it is, so it matches a variable or a part of one, not a "
+                                     "value made here; match without `mut`, or put the value in a `var` first");
+            return nullptr;
+        }
+        require_writable(v, root, false);
+        return root;
+    }
+
+    // While an arm runs, the place it matched is reached only through the names it bound, as a
+    // `for ... in mut` loop's elements are.
+    void hold_part_views(Local* root, Expr* place, const char* what) {
+        LoopBorrow b{root, field_path(place), place};
+        b.exclusive = true;
+        b.by_match = what;
+        loop_borrows_.push_back(b);
+        mut_loops_++;
+    }
+
+    void release_part_views() {
+        mut_loops_--;
+        loop_borrows_.pop_back();
+    }
+
+    // A `match mut` that changes nothing through its names is a `match` that needn't be `mut`, as
+    // a `var` never changed needn't be one (D63).
+    void part_views_changed(const PartViews& views, const Expr* place) {
+        for (const Local* l : views.names) {
+            if (l->mutated) return;
+        }
+        error(place->span, std::string("nothing is changed through the names ") + q(views.what) +
+                               " binds; match without `mut`");
     }
 
     // Reports arms that can never match, and a `match` that misses a case (D63).
@@ -6667,9 +6738,21 @@ private:
                                        "; a name that binds a value starts with a lowercase letter");
                     return false;
                 }
-                if (p->is_mut) error(p->span, "a pattern binds a copy; to change it, copy it into a `var`");
+                if (p->is_mut) {
+                    error(p->span, part_views_ ? "each name `" + std::string(part_views_->what) +
+                                                     "` binds is a `mut` view already; leave out this `mut`"
+                                               : std::string("a pattern binds a copy; to change the value where it is, match it with "
+                                                             "`match mut` or `if let ... = mut`, or copy it into a `var`"));
+                }
                 Local* l = new_local(p->name, t, p->span, pattern_var_);
                 p->local = l;
+                if (part_views_) {
+                    // A `mut` view of this part of the place matched, which the arm changes it through.
+                    l->is_view = true;
+                    l->mode = ParamMode::mut;
+                    l->is_part_view = true;
+                    part_views_->names.push_back(l);
+                }
                 declare(l);
                 return true;
             }
@@ -10955,8 +11038,9 @@ private:
     Item* error_add_fn_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
     const Expr* place_lhs_ = nullptr;  // the base of the field or index being checked
-    int mut_loops_ = 0;                // `for ... in mut` loops around the code being checked
+    int mut_loops_ = 0;                // `for ... in mut` loops and `match mut` arms around the code being checked
     std::unordered_set<std::uint64_t> mut_loop_errors_;  // where a place was used inside one, reported
+    PartViews* part_views_ = nullptr;  // the names the pattern being checked binds as views (CLX-233)
     Expr* let_value_ = nullptr;  // the value of the plain `let` being checked, the one place an arena list is made
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;

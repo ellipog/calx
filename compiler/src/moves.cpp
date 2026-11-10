@@ -19,7 +19,7 @@ bool copyable(const Type* t) { return !t || is_copy(t); }
 enum class Use : std::uint8_t { consume, view, change };
 
 // Why a local doesn't own its value.
-enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, mut_element, part, capture };
+enum class ViewOf : std::uint8_t { none, read_param, mut_param, element, mut_element, part, mut_part, capture };
 
 bool is_local_name(const Expr* e) {
     return (e->kind == ExprKind::name || e->kind == ExprKind::self) && e->ref == Ref::local && e->local;
@@ -105,6 +105,9 @@ private:
         bool arena = false;
         // A closure passed to the call being worked out reads it, until the call is done (CLX-98).
         bool closure = false;
+        // `by` is a `mut` view of the part at `path`, which `match mut` bound, so the root's other
+        // fields are free, as a `for` loop's are (CLX-233).
+        bool part = false;
     };
 
     std::string_view text(Name n) const { return ctx_.names.text(n); }
@@ -379,6 +382,13 @@ private:
                 error(e->span, q(n) + " is a `mut` view of an element, so it can't be moved; move a copy with " +
                                    q(n + ".copy()") + ", or take the element out of the list" + hint);
                 break;
+            case ViewOf::mut_part: {
+                auto d = part_of_.find(l);
+                std::string whole = d == part_of_.end() ? "the value matched" : q(d->second);
+                error(e->span, q(n) + " is a `mut` view of a part of " + whole + ", so it can't be moved; move a copy with " +
+                                   q(n + ".copy()") + ", or match without `mut` to take the value apart" + hint);
+                break;
+            }
             default: {
                 auto d = part_of_.find(l);
                 std::string whole = d == part_of_.end() ? "the value matched" : q(d->second);
@@ -394,7 +404,7 @@ private:
     const Borrow* borrowed(const Local* l, const std::vector<std::uint32_t>* path = nullptr) const {
         for (const Borrow& b : borrows_) {
             if (b.root != l) continue;
-            if (path && (!b.by || b.arena)) {
+            if (path && (!b.by || b.arena || b.part)) {
                 std::size_t n = std::min(path->size(), b.path.size());
                 if (!std::equal(path->begin(), path->begin() + static_cast<std::ptrdiff_t>(n), b.path.begin())) continue;
             }
@@ -422,10 +432,11 @@ private:
         return path;
     }
 
-    // A change to the place rooted at `l`. A `for` loop's own rule is the checker's.
+    // A change to the place rooted at `l`. A `for` loop's own rule is the checker's, and so is
+    // `match mut`'s.
     void check_change(Local* l, Span at) {
         for (const Borrow& b : borrows_) {
-            if (b.root != l || !b.by || b.arena) continue;
+            if (b.root != l || !b.by || b.arena || b.part) continue;
             error(at, name_of(l) + " can't be changed while " + name_of(b.by) + " is a view into it");
             note(b.at, name_of(b.by) + " is a view into " + name_of(l) + " here");
             return;
@@ -618,7 +629,8 @@ private:
     // Declares a pattern's names. With `owns`, they own their parts of the value. Otherwise those
     // that aren't `Copy` are views into it, and `root`, the local it's part of, can't change or
     // move while they're in scope.
-    void bind(Pattern* p, bool owns, Local* root, const std::string& whole, ViewOf why = ViewOf::part) {
+    void bind(Pattern* p, bool owns, Local* root, const std::string& whole, ViewOf why = ViewOf::part,
+              const Expr* place = nullptr) {
         if (!p) return;
         if (p->kind == PatternKind::binding && p->local) {
             Local* l = p->local;
@@ -626,7 +638,14 @@ private:
             if (!l->owns) {
                 view_of_[l] = why;
                 part_of_[l] = whole;
-                if (root && !scan_) borrows_.push_back({root, l, p->span, nullptr, {}, false});
+                if (root && !scan_) {
+                    Borrow b{root, l, p->span, nullptr, {}, false};
+                    if (why == ViewOf::mut_part && place) {
+                        b.path = field_path(place);
+                        b.part = true;
+                    }
+                    borrows_.push_back(b);
+                }
             }
             if (!scan_) {
                 declare(l);
@@ -634,8 +653,8 @@ private:
             }
             return;
         }
-        for (Pattern* x : p->elems) bind(x, owns, root, whole, why);
-        for (FieldPattern& f : p->fields) bind(f.pattern, owns, root, whole, why);
+        for (Pattern* x : p->elems) bind(x, owns, root, whole, why, place);
+        for (FieldPattern& f : p->fields) bind(f.pattern, owns, root, whole, why, place);
     }
 
     // Ends the views that the innermost scope's names made.
@@ -1255,21 +1274,26 @@ private:
     void if_let(Expr* e, Use bu) {
         Expr* v = e->cond;
         Local* root = place_root(v);
+        // `if let p = mut place` (CLX-233): the names are `mut` views of its parts, so it's never
+        // taken apart.
+        bool by_mut = e->by_mut && root;
         if (scan_) {
             scopes_.emplace_back();
             bind(e->let_pattern, false, nullptr, "");
             block(e->block, bu);
             end_scope();
             if (e->else_) expr(e->else_, bu);
-            e->let_consumes = binds_moved(e->let_pattern);
+            e->let_consumes = !by_mut && binds_moved(e->let_pattern);
             bool whole = root && is_local_name(v);
             if (e->let_consumes && whole) moved_any_.insert(root);
-            expr(v, root ? Use::view : Use::consume);
+            expr(v, by_mut ? Use::change : root ? Use::view : Use::consume);
             return;
         }
         scopes_.emplace_back();
         Local* hidden = nullptr;
-        if (root) {
+        if (by_mut) {
+            expr(v, Use::change);
+        } else if (root) {
             expr(v, Use::view);
         } else {
             expr(v, Use::consume);
@@ -1284,7 +1308,8 @@ private:
         e->let_consumes = e->let_consumes && (whole || hidden);
         scopes_.emplace_back();
         if (e->let_consumes) take(whole ? root : hidden, v->span);
-        bind(e->let_pattern, e->let_consumes, e->let_consumes || !root ? nullptr : root, place_text(v));
+        bind(e->let_pattern, e->let_consumes, e->let_consumes || !root ? nullptr : root, place_text(v),
+             by_mut ? ViewOf::mut_part : ViewOf::part, v);
         block(e->block, bu);
         e->let_drops = drops_from(scopes_.size() - 1);
         unborrow_scope();
@@ -1308,6 +1333,8 @@ private:
         Use bu = branch_use(e, u);
         Expr* v = e->scrutinee;
         Local* root = place_root(v);
+        // `match mut place` (CLX-233): the names are `mut` views of its parts, so no arm takes it apart.
+        bool by_mut = e->by_mut && root;
         if (scan_) {
             bool any = false;
             for (MatchArm& a : e->arms) {
@@ -1316,16 +1343,18 @@ private:
                 if (a.guard) expr(a.guard, Use::view);
                 expr(a.body, bu);
                 end_scope();
-                a.consumes = binds_moved(a.pattern);
+                a.consumes = !by_mut && binds_moved(a.pattern);
                 any = any || a.consumes;
             }
             if (any && root && is_local_name(v)) moved_any_.insert(root);
-            expr(v, root ? Use::view : Use::consume);
+            expr(v, by_mut ? Use::change : root ? Use::view : Use::consume);
             return;
         }
         scopes_.emplace_back();
         Local* hidden = nullptr;
-        if (root) {
+        if (by_mut) {
+            expr(v, Use::change);
+        } else if (root) {
             expr(v, Use::view);
         } else {
             expr(v, Use::consume);
@@ -1343,7 +1372,8 @@ private:
             scopes_.emplace_back();
             a.consumes = a.consumes && (whole || hidden);
             if (a.consumes) take(whole ? root : hidden, v->span);
-            bind(a.pattern, a.consumes, a.consumes || !root ? nullptr : root, place_text(v));
+            bind(a.pattern, a.consumes, a.consumes || !root ? nullptr : root, place_text(v),
+                 by_mut ? ViewOf::mut_part : ViewOf::part, v);
             if (a.guard) expr(a.guard, Use::view);
             expr(a.body, bu);
             a.drops = drops_from(scopes_.size() - 1);

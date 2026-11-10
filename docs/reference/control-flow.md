@@ -63,7 +63,7 @@ fn main() {
 
 - It's `loop { if let pattern = value { ... } else { break } }`, so `break` and `continue` work as in any loop, and `continue` works the value out again. It can't `break` with a value, as a `while` can't.
 - A pattern that fits every value, such as `while let x = 5`, is an error, since the loop could only stop at a `break`: write `loop`, with `let` inside.
-- Each pass owns what the pattern takes from a new value, such as the `String` that `pop_first` gives, and frees it at the end of the pass. Names bound from a variable are views into it, as in `if let`, so the body can't change the variable unless its type is `Copy`.
+- Each pass owns what the pattern takes from a new value, such as the `String` that `pop_first` gives, and frees it at the end of the pass. Names bound from a variable are views into it, as in `if let`, so the body can't change the variable unless its type is `Copy`. `while let pattern = mut place` binds them as `mut` views instead, which change the parts where they are ([changing the parts in place](patterns.md#changing-the-parts-in-place)).
 
 ## `for`
 

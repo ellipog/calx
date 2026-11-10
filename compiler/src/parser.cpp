@@ -988,6 +988,7 @@ private:
         test->from_while = true;
         test->let_pattern = pattern();
         expect(Tok::eq, "after the pattern in `while let`");
+        if (accept(Tok::kw_mut)) test->by_mut = true;
         test->cond = expr_no_struct();
         test->block = block_body();
         Span span = Span::join(start, prev_span());
@@ -1605,6 +1606,7 @@ private:
         if (accept(Tok::kw_let)) {
             e->let_pattern = pattern();
             expect(Tok::eq, "after the pattern in `if let`");
+            if (accept(Tok::kw_mut)) e->by_mut = true;
         }
         e->cond = expr_no_struct();
         e->block = block_body();
@@ -1631,6 +1633,7 @@ private:
     Expr* match_expr() {
         Span start = expect(Tok::kw_match, "").span;
         Expr* e = new_expr(ExprKind::match, start);
+        if (accept(Tok::kw_mut)) e->by_mut = true;
         e->scrutinee = expr_no_struct();
         expect(Tok::lbrace, "to start the match arms");
         bool saved = no_struct_;

@@ -1,0 +1,27 @@
+// The names `match mut` binds are views, so they can't be moved out (CLX-233).
+
+pub enum Node {
+    Num(i64)
+    Text(String)
+}
+
+fn keep(_s: own String) {}
+
+pub fn moves_out(n: mut Node) {
+    match mut n {
+        Text(s) => {
+            s.push('!')
+            keep(s)    // error: `s` is a `mut` view of a part of `n`, so it can't be moved; move a copy with `s.copy()`, or match without `mut` to take the value apart
+        },
+        Num(v) => v += 1,
+    }
+}
+
+pub fn moves_copy(n: mut Node) {
+    if let Text(s) = mut n {
+        s.push('!')
+        keep(s.copy())
+    }
+}
+
+fn main() {}

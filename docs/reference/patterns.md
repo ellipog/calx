@@ -1,6 +1,6 @@
 ---
 title: Patterns and match
-description: Matching values with match, every kind of pattern, exhaustiveness, if let, let-else and destructuring.
+description: Matching values with match, every kind of pattern, exhaustiveness, if let, let-else, destructuring, and match mut, which changes the parts in place.
 ---
 
 # Patterns and `match`
@@ -172,7 +172,7 @@ fn main() {
 }
 ```
 
-A pattern binds copies, so `mut name` isn't allowed. To change the value, copy it into a `var`.
+A pattern binds copies, so `mut name` isn't allowed. To change the value where it is, match it with [`match mut`](#changing-the-parts-in-place), or copy it into a `var`.
 
 ## `let` and `for`
 
@@ -277,6 +277,94 @@ fn main() {
 
 A pattern that always matches is an error after `if let`: write `let`.
 
+## Changing the parts in place
+
+`match mut place { ... }`, `if let pattern = mut place` and `while let pattern = mut place` bind each name as a `mut` view of its part of `place`, so the arm changes the part where it is, as [`for x in mut xs`](control-flow.md#changing-the-elements) changes the elements. A tree of enums, such as JSON or NBT, is edited this way without copying what it holds ([CLX-233](https://acta.aaenz.no/aaen-studios/clx#CLX-233)):
+
+```calx
+enum Node {
+    Num(i64)
+    Text(String)
+    Items(List<Node>)
+}
+
+impl Node {
+    fn grow(mut self) {
+        match mut self {
+            Num(n) => n *= 2,
+            Text(s) => s.push('!'),
+            Items(xs) => {
+                for x in mut xs {
+                    x.grow()
+                }
+            },
+        }
+    }
+}
+
+struct Doc {
+    root: Node
+    edits: i32
+}
+
+fn main() {
+    var n = Node.Items([Node.Num(4), Node.Text("hi"), Node.Items([Node.Num(1)])])
+    n.grow()
+    println("{n}")    // out: Items([Num(8), Text(hi!), Items([Num(2)])])
+    var d = Doc { root: Node.Text("a"), edits: 0 }
+    if let Text(s) = mut d.root {
+        s.push_str("b")
+        d.edits += 1
+    }
+    println("{d.root} {d.edits}")    // out: Text(ab) 1
+    var counts = Map<String, Node>()
+    counts.insert(String("x"), Node.Num(1))
+    match mut counts["x"] {
+        Num(c) => c += 1,
+        _ => {},
+    }
+    println("{counts}")    // out: {x: Num(2)}
+}
+```
+
+- `place` is a `var`, a `mut` parameter or `mut self`, or a part of one: a field, an element, a map's value or an optional's. It's found once, before the arms.
+- Every name is a view, a `Copy` part's too, so `n *= 2` changes the number in the place. A whole part can be given a new value, `s = String("new")`, which frees the old one.
+- While an arm runs, `place` is reached only through the names, as a `for ... in mut` loop's elements are. Other fields of the variable it's in can be read and changed, as `d.edits` is above.
+- The names can't be moved, since the place still owns their parts. Move a copy, or match without `mut` to take the value apart.
+- Guards read the names, and a `match mut` gives a value as any `match` does.
+- A `match mut` whose arms change nothing through their names is an error: match without `mut`.
+
+```calx
+enum Node {
+    Num(i64)
+    Text(String)
+}
+
+fn make() -> Node {
+    return Node.Num(1)
+}
+
+fn show(n: mut Node) {
+    match mut n {    // error: nothing is changed through the names `match mut` binds; match without `mut`
+        Num(v) => println("{v}"),
+        Text(s) => println(s),
+    }
+    match mut make() {    // error: `match mut` changes the value where it is, so it matches a variable or a part of one, not a value made here; match without `mut`, or put the value in a `var` first
+        Num(v) => v += 1,
+        _ => {},
+    }
+    if let Num(v) = mut n {
+        v += 1
+        println("{n}")    // error: `n` can't be used while `if let ... = mut` changes it; reach it through the names the pattern binds
+    }
+}
+
+fn main() {
+    var n = Node.Num(1)
+    show(mut n)
+}
+```
+
 ## In C
 
-A `match` compiles to a chain of tests. A variable or field is tested in place; anything else, or an input with guards, is computed once into a temporary. The last arm is never tested, since coverage proves it matches, and bindings are plain copies of the parts.
+A `match` compiles to a chain of tests. A variable or field is tested in place; anything else, or an input with guards, is computed once into a temporary. The last arm is never tested, since coverage proves it matches, and bindings are plain copies of the parts. A `match mut` takes the place's address once, and each name is a pointer to its part, as a `mut` parameter is.

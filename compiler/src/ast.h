@@ -124,6 +124,7 @@ struct Local {
     bool is_var = false;     // `var`, which can be assigned again
     bool is_param = false;
     bool is_loop_var = false;  // a `for` loop's variable, which the loop assigns
+    bool is_part_view = false;  // a name `match mut` or `if let ... = mut` binds: a `mut` view of a part (CLX-233)
     ParamMode mode{};        // parameters: read, mut or own
     bool is_view = false;    // a parameter passed as a pointer: structs and arrays in read or mut mode
     // What the body did with it, for the unused and never-changed checks (D63).
@@ -276,6 +277,8 @@ struct Expr {
     std::uint32_t loop_id = 0;   // loop, match: its labels in C
     bool let_unwraps = false;    // if_: `if let p = opt` matches `p` against the optional's value
     bool from_while = false;     // loop, if_: what a `while let` is parsed as (D111)
+    bool by_mut = false;         // match, if_: `match mut place` and `if let p = mut place`, whose
+                                 // names are `mut` views of the place's parts (CLX-233)
     bool print_into = false;     // `s.push_str("..{x}..")`: the parts print straight into `s`,
                                  // which none of them mentions, with no string between
     bool str_view = false;       // a `str` passed for a `String` that's only looked at: it goes as

@@ -144,6 +144,7 @@ A `match` arm, `if let` or `let` with a pattern either looks at its value or tak
 
 - It **takes the value apart** when one of the names it binds that owns memory is moved somewhere, has a field moved out of it, or is bound with `var`. Its names then own their parts, and the rest of the value is freed. The value counts as moved.
 - Otherwise it **looks**: its names are views into the value. While they're in use, the value can't be changed or moved.
+- `match mut` and `if let ... = mut` **change** it: its names are `mut` views of its parts, through which the arm changes them where they are ([changing the parts in place](patterns.md#changing-the-parts-in-place)).
 
 ```calx
 enum Msg {
