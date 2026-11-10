@@ -83,18 +83,18 @@ fn main() {
 
 Formats print as the rest of the string does, so `"{x:.2}"` builds a `String` and `s.push_str("{x:.2}")` adds to one. `s.push_str("..{x}..")` prints its parts straight into `s`, as Rust's `write!` does, with no string built and copied between, whether or not they have formats.
 
-The formats are in [runtime/calx_format.c](../../runtime/calx_format.c), and the float ones in [calx_float.c](../../runtime/calx_float.c), which rounds with one 128-bit multiply when there are at most 19 digits after the point and the value fits in 64 bits, and with exact big integers otherwise. A padded value is put together on the stack and written once. They're linked only into programs that use them. `{x:.p}`, `.pe` and `.p%` matched Python's exact formatting on 32,715 doubles: random bits, decimals, exact halves, subnormals, and the neighbours of every power of ten.
+The formats are in [runtime/calx_format.c](../../runtime/calx_format.c), and the float ones in [calx_float.c](../../runtime/calx_float.c), which rounds with one 128-bit multiply when there are at most 19 digits after the point and the value fits in 64 bits, and with exact big integers otherwise. A padded value is put together on the stack and written once. A number padded on the left, with no sign, zeros or groups asked for, as `{n:>8}`, gets its fill straight before its digits where they were written, so nothing is copied: that took `{i:>8}` from 3.3 ms to 1.5 ms below. They're linked only into programs that use them. `{x:.p}`, `.pe` and `.p%` matched Python's exact formatting on 32,715 doubles: random bits, decimals, exact halves, subnormals, and the neighbours of every power of ten.
 
-Into a `String`, best of 7, on an i9-13900K:
+Into a `String`, on our benchmark, an i9-13900K otherwise quiet, each program on its performance cores, the best of 42 runs taken in turns:
 
 | | Calx | Rust |
 | --- | --- | --- |
-| 200,000 doubles, `"{v:.3},"` | 7.8 ms | 15.1 ms |
-| 200,000 integers, `"{i:>8},"` | 3.3 ms | 3.5 ms |
-| A million integers, `"{i},"` | 7.4 ms | 15.3 ms |
-| 200,000 doubles, `"{v},"` | 4.8 ms | 13.3 ms |
+| 200,000 doubles, `"{v:.3},"` | 7.8 ms | 14.3 ms |
+| 200,000 integers, `"{i:>8},"` | 1.5 ms | 3.0 ms |
+| A million integers, `"{i},"` | 5.7 ms | 11.2 ms |
+| 200,000 doubles, `"{v},"` | 5.0 ms | 10.2 ms |
 
-The Rust is `write!(out, "{:.3},", v)` and the same for the rest, into a `String`. Calx writes integers two digits at a time from a table, as Rust does.
+The Rust is Rust 1.91's `write!(out, "{:.3},", v)` and the same for the rest, into a `String`, built for release with `x86-64-v3`. The values are a xorshift's: doubles from 0 to 1,000 and integers below 1,048,576. Calx writes integers two digits at a time from a table, as Rust does.
 
 Standard output is buffered and written at exit, or when a panic starts. It's the same bytes on Windows and Linux: `\n` is never turned into `\r\n`.
 

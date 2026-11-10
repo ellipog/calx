@@ -19,6 +19,11 @@ fn main() {
     let neg = -42
     println("[{n:>10}] [{n:<10}] [{n:^10}] [{n:*^11}] [{n:010}] [{neg:06}] [{neg:+}] [{n:+}] [{n:,}] [{n:_}]")    // out: [   1234567] [1234567   ] [ 1234567  ] [**1234567**] [0001234567] [-00042] [-42] [+1234567] [1,234,567] [1_234_567]
     println("[{1234:09,}] [{1234:08,}] [{-1234:010,}] [{-5:+05}] [{5:+05}] [{123456789:_}]")    // out: [0,001,234] [0,001,234] [-0,001,234] [-0005] [+0005] [123_456_789]
+    // Padded on the left, with no sign, zeros or groups asked for, the fill goes straight before
+    // the digits (CLX-188): a sign, a width the number passes, the widest, and the extremes.
+    let big = i64.MIN
+    let top = u64.MAX
+    println("[{neg:>6}] [{n:>3}] [{n:7}] [{0:>1}] [{neg:#>5}] [{n:é>9}] [{big:>21}] [{top:>21}] [{1:>64}]".replace(" ", "."))    // out: [...-42].[1234567].[1234567].[0].[##-42].[éé1234567].[.-9223372036854775808].[.18446744073709551615].[...............................................................1]
     // Hex, octal and binary, with `#` for the prefix and `_` for groups of four. A negative
     // number is written as its bits, as Java's `toHexString` writes it.
     println("[{255:x}] [{255:X}] [{255:#x}] [{255:#X}] [{255:#010x}] [{255:#010_x}] [{5:b}] [{5:#b}] [{8:o}] [{8:#o}] [{0xdeadbeefu32:_x}]")    // out: [ff] [FF] [0xff] [0xFF] [0x000000ff] [0x000_00ff] [101] [0b101] [10] [0o10] [dead_beef]

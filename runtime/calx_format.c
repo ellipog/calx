@@ -199,6 +199,15 @@ static void format_int(cx_u64 v, int negative, cx_spec s) {
         } while (v);
     } else {
         i = 64 - cx_u64_text(v, buf + 64);
+        /* The usual padded number, `{n:>8}` or `{n:8}`: the sign and the fill go in front of the
+         * digits where they are, and it's all one write, with nothing copied (CLX-188). */
+        if (!(s.flags & (CX_SPEC_PLUS | CX_SPEC_ALT | CX_SPEC_ZERO | CX_SPEC_COMMA | CX_SPEC_UNDER)) && s.fill < 0x80 &&
+            (s.align == 0 || s.align == '>') && s.width <= 64) {
+            if (negative) buf[--i] = '-';
+            while (64 - i < (int)s.width) buf[--i] = (char)s.fill;
+            cx_print_str((cx_str){(const cx_u8*)buf + i, (cx_usize)(64 - i)});
+            return;
+        }
     }
     cx_str sign = {(const cx_u8*)"", 0}, prefix = {(const cx_u8*)"", 0};
     if (negative) sign = (cx_str){(const cx_u8*)"-", 1};
