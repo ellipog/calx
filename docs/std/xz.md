@@ -237,7 +237,7 @@ On an i9-13900K, best of 7 runs in each of three rounds, the programs taking tur
 
 - Python and the liblzma crate run liblzma 5.8, Python on one thread. Each Rust crate's time is from whichever of its decoders, plain or threaded, was faster on the file: the threaded ones on the `mt` files. Each Rust decoder had the room for its output reserved before it started.
 - The Rust programs were built with `lto = "fat"`, one codegen unit and `target-cpu=x86-64-v3`, as Calx builds for x86-64-v3.
-- liblzma built by GCC, as Linux distributions ship it, is faster than the Windows builds above. In WSL on the same machine, Python with it is faster than `std.xz` on the files with one block: 74 ms to 82 on src.tar.xz, and 32 to 33 on bin.exe.xz. On the `mt` files it takes 79 and 33 ms, and `std.xz` 13 and 14.
+- liblzma built by GCC, as Linux distributions ship it, is faster than the Windows builds above. In WSL on the same machine, on one CPU and with a newer src.tar of 20.5 MB, Python with it decodes src.tar.xz in 88 ms to `std.xz`'s 92, and bin.exe.xz in 33 ms, as `std.xz` does ([CLX-184](https://acta.aaenz.no/aaen-studios/clx#CLX-184)). On the `mt` files it took 79 and 33 ms, and `std.xz` 13 and 14.
 
 `compress` was timed on the same machine, the programs taking turns for two rounds, best of 3 runs in each, or of 2 for the 40 MB file. The ones on one thread ran on the performance cores, out of power throttling; the threaded ones and `std.xz` ran on any. `std.txt` is 1.25 MB of Calx source, `src.tar` the 18.6 MB above, and `clang40` the first 40 MB of `clang.exe`. At preset 6, the default:
 
@@ -300,9 +300,9 @@ Decompressing is [runtime/calx_xz.c](../../runtime/calx_xz.c), linked only into 
 | Part | How |
 | --- | --- |
 | The range decoder | Kept in registers, with a fast loop while 64 bytes of input are left that doesn't check where the input ends, and a careful one for the rest |
-| Bits in trees | Without branches, and with the next level's probabilities loaded before the bit is known |
+| Bits in trees | Without branches, and with the next level's probabilities loaded before the bit is known. The range, the code, the probability and the next one are each picked by one subtraction's borrow, as liblzma's x86-64 steps do it |
 | Literals after a match | Both of the next probabilities loaded at once |
-| Copying a match | 16 bytes at a time when the distance is at least the length, never past its end, so blocks next to each other can decode at the same time |
+| Copying a match | 16 bytes at a time, with no branch on its length, wherever each 16 reads only text before the match or 16 or more bytes back. That can write up to 15 bytes past the match, which the next symbols write over, but never past where the block's text ends, so blocks next to each other can decode at the same time |
 | CRC-64 | Folded with the processor's carry-less multiply in four lanes, 64 bytes a step, at about 39 GB/s on bytes in the cache, with tables where it's missing |
 | CRC-32 and SHA-256 | `std.zlib`'s and `std.hash`'s |
 | A piece at a time | LZMA2 decodes a chunk once it's all there. LZMA stops between symbols while a symbol's most input is left, then tries to finish from what's there, going back to a copy of its state if that runs out. The window slides what matches can reach to its front: once the text since the dictionary was last reset is longer than they reach, only the low four bits of positions matter, which pick probabilities. The branch filters say where they stopped, and x86's two numbers and delta's last 256 bytes carry over |

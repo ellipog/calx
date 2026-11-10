@@ -147,12 +147,14 @@ static int rc_init(dec_t* d, const cx_u8* in, cx_usize n) {
 #define TDEC(FAST, slot, pr, bit)                                                 \
     do {                                                                          \
         NORM(FAST)                                                                \
-        cx_u32 bound_ = (range >> BITS) * (pr);                                   \
-        (bit) = code >= bound_;                                                   \
-        cx_u32 m_ = 0u - (bit);                                                   \
-        range = (bit) ? range - bound_ : bound_;                                  \
-        code -= bound_ & m_;                                                      \
-        *(slot) = (prob)((pr) - (cx_u32)((cx_i32)((pr) - ((ONE - 31) & ~m_)) >> MOVE)); \
+        cx_u32 bound_ = (range >> BITS) * (pr), rest_ = range - bound_, less_;    \
+        /* The borrow of code - bound is the bit's opposite, and every choice below \
+         * takes it, as liblzma's x86-64 steps take one subtraction's carry. */    \
+        cx_u32 zero_ = __builtin_sub_overflow(code, bound_, &less_);             \
+        (bit) = zero_ ^ 1;                                                        \
+        range = zero_ ? bound_ : rest_;                                           \
+        code = zero_ ? code : less_;                                              \
+        *(slot) = (prob)((pr) - ((zero_ ? (pr) - (ONE - 31) : (pr)) >> MOVE));    \
     } while (0)
 
 /* A step down a bit tree at `probs`: decodes the bit at node `sym`, whose probability is `pr`,
@@ -327,15 +329,28 @@ static int rc_init(dec_t* d, const cx_u8* in, cx_usize n) {
         }                                                                                         \
         len += 2;                                                                                 \
         if (len > ulimit - upos) goto corrupt;                                                    \
-        copy_match(base, upos, (cx_usize)rep0 + 1, len);                                   \
+        copy_match(base, upos, (cx_usize)rep0 + 1, len, ulimit - upos);                           \
         upos += len;                                                                              \
         prev = base[upos - 1];                                                                    \
     }
 
-/* Copies a match of `len` bytes from `dist` back. */
-static inline __attribute__((always_inline)) void copy_match(cx_u8* out, cx_usize pos, cx_usize dist, cx_u32 len) {
+/* Copies a match of `len` bytes from `dist` back, with `room` bytes free from where it goes, at
+ * least `len`. Where 15 more are free, it's copied 16 bytes at a time, each 16 read before any is
+ * written, as long as each 16 reads only bytes before the match or 16 or more back: what it writes
+ * past the match is the next symbols' to write over, and comes before where the text ends, so no
+ * other block's. Most matches in text are short, so one 16-byte copy takes the place of a branch on
+ * the length that guesses wrong much of the time, as liblzma's 32-byte copies do. */
+static inline __attribute__((always_inline)) void copy_match(cx_u8* out, cx_usize pos, cx_usize dist, cx_u32 len, cx_usize room) {
     const cx_u8* from = out + pos - dist;
     cx_u8* to = out + pos;
+    if (__builtin_expect(room - len >= 15 && dist >= (len < 16 ? len : 16), 1)) {
+        cx_u32 i = 0;
+        do {
+            __builtin_memmove(to + i, from + i, 16);
+            i += 16;
+        } while (i < len);
+        return;
+    }
     if (dist >= len) {
         /* From text before the copy: whole moves, the last one ending where the match does, so
          * nothing reads what this copy writes. */
