@@ -189,21 +189,21 @@ Pillow's own `quantize` picks colors another way, so the palette is not Pillow's
 
 ## Speed
 
-Times for a 1600 × 900 photo: the best of 10 to 30 runs in one process, against Pillow 12.3 with libjpeg-turbo, on an i9-13900K under Windows. The desktop had other work running, so treat them as rough.
+Times for a 1600 × 900 photo, the README's banner scaled up with Lanczos and saved at quality 90, against Pillow 12.3 with libjpeg-turbo, on an i9-13900K under Windows with a little other work running. Each program ran on the performance cores, 4 times in turns, and each row is the best of 60 runs (20 for writing a PNG).
 
 | Work | Calx | Pillow |
 | --- | --- | --- |
-| Reading a baseline JPEG | 3.0 ms | 3.9 ms |
-| Reading a progressive JPEG, 1376 × 768 | 5.7 ms | 6.8 ms |
-| Writing a JPEG at quality 75 | 3.5 ms | 2.2 ms |
-| Reading a PNG | 11.5 ms | 16.6 ms |
+| Reading a baseline JPEG | 3.1 ms | 3.5 ms |
+| Reading a progressive JPEG, the banner itself, 1376 × 768 | 5.8 ms | 6.8 ms |
+| Writing a JPEG at quality 75 | 3.5 ms | 2.3 ms |
+| Reading a PNG | 12.1 ms | 17.4 ms |
 | Writing a PNG at level 6 | 60 ms | 95 ms |
 | Lanczos to 800 × 450 | 8.5 ms | 10.7 ms |
-| Bicubic to 400 × 225 | 4.8 ms | 5.3 ms |
-| Bilinear up to 3200 × 1800 | 21.5 ms | 24.1 ms |
-| Gaussian blur, radius 6 | 12.5 ms | 23.1 ms |
-| Box blur, radius 2 | 4.3 ms | 9.6 ms |
-| To gray | 0.58 ms | 0.95 ms |
+| Bicubic to 400 × 225 | 4.9 ms | 5.3 ms |
+| Bilinear up to 3200 × 1800 | 21.3 ms | 24.2 ms |
+| Gaussian blur, radius 6 | 12.5 ms | 23.0 ms |
+| Box blur, radius 2 | 4.4 ms | 9.6 ms |
+| To gray | 0.63 ms | 1.07 ms |
 
 Writing JPEGs is the one place Pillow is ahead: libjpeg-turbo's encoder is hand-written SIMD.
 
