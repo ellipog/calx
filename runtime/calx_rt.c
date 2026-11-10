@@ -1802,6 +1802,48 @@ cx_usize cx_bytes_find_break(const cx_u8* hay, cx_usize len, cx_usize from) {
     while (p < end && *p >= 0x1F && *p != 0xC2 && *p != 0xE2) p++;
     return (cx_usize)(p - hay);
 }
+
+/* For std.unicode's quick check: the first byte from `from`, a rune's start, that leads a rune
+ * other than these, or `len`: a byte below `low`, and with `kinds` 1, 2 and 4 the three-byte runes
+ * of CJK's ideographs, U+4E00 to U+9FFF; Hangul's syllables, U+AC00 to U+D7FF; and Latin Extended
+ * Additional, U+1E00 to U+1EFF, which Vietnamese is written in. std.unicode passes the ones its
+ * tables say are starters certainly in the form. Continuation bytes are passed over one by one,
+ * after their lead, so what's returned is always a lead byte, where a rune starts. Each step
+ * tests a lead with the byte after it, so it reads one byte past the step. */
+cx_usize cx_bytes_skip_starters(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 low, cx_u8 kinds) {
+    const cx_u8* p = hay + from;
+    const cx_u8* end = hay + len;
+#if defined(FIND_STEP)
+    typedef cx_u8 skip_u __attribute__((vector_size(FIND_STEP), aligned(1)));
+    cx_u32 all = FIND_STEP == 32 ? 0xFFFFFFFFu : 0xFFFFu;
+    while (end - p >= FIND_STEP + 1) {
+        skip_u w = *(const skip_u*)p;
+        find_v ok = (find_v)(w < low);
+        /* A step of only bytes below `low`, as ASCII text is, needs nothing more. */
+        if ((FIND_MASK(ok) & all) != all) {
+            skip_u x = *(const skip_u*)(p + 1);
+            ok |= (find_v)((w & 0xC0) == 0x80);
+            if (kinds & 1) ok |= (find_v)(((w >= 0xE5) & (w <= 0xE9)) | ((w == 0xE4) & (x >= 0xB8)));
+            if (kinds & 2) ok |= (find_v)(((w >= 0xEB) & (w <= 0xED)) | ((w == 0xEA) & (x >= 0xB0)));
+            if (kinds & 4) ok |= (find_v)((w == 0xE1) & (x >= 0xB8) & (x <= 0xBB));
+            cx_u32 m = ~FIND_MASK(ok) & all;
+            if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        }
+        p += FIND_STEP;
+    }
+#endif
+    while (p < end) {
+        cx_u8 b = *p;
+        cx_u8 x = end - p > 1 ? p[1] : 0;
+        if (!(b < low || (b & 0xC0) == 0x80 ||
+              ((kinds & 1) && ((b >= 0xE5 && b <= 0xE9) || (b == 0xE4 && x >= 0xB8))) ||
+              ((kinds & 2) && ((b >= 0xEB && b <= 0xED) || (b == 0xEA && x >= 0xB0))) ||
+              ((kinds & 4) && b == 0xE1 && x >= 0xB8 && x <= 0xBB)))
+            break;
+        p++;
+    }
+    return (cx_usize)(p - hay);
+}
 #undef RX_ONES
 #undef RX_HIGHS
 #undef RX_HAS_ZERO

@@ -1,0 +1,69 @@
+// std.unicode's quick check skips runs of runes its tables say can't change (CLX-188): what it
+// skips is right by the tables, and a rune that ends a run is seen at every place in a step.
+import std.text.normal.{BLOCK, EASY}
+import std.unicode.{Form, is_normalized, normalize}
+
+fn codes(s: String) -> String {
+    var parts: List<String> = []
+    for r in s.runes() {
+        parts.push("{u32(r):X}")
+    }
+    return parts.join(" ")
+}
+
+// Whether EASY says every rune from `lo` to `hi` is a starter certainly in the form of `bit`.
+fn easy(lo: usize, hi: usize, bit: u8) -> bool {
+    var c = lo
+    while c <= hi {
+        if (EASY[c / BLOCK] & bit) == 0 {
+            return false
+        }
+        c += BLOCK
+    }
+    return true
+}
+
+// `fill` `k` times, then `tail`, normalized to `form`, is `fill` `k` times and then `want`, for
+// every `k` from 0 to 39; and is in the form only if `tail` is. The count that are.
+fn sweep(fill: str, tail: str, want: str, form: Form) -> i32 {
+    var right = 0
+    for k in 0..40 {
+        var text = String()
+        var expect = String()
+        for _ in 0..k {
+            text.push_str(fill)
+            expect.push_str(fill)
+        }
+        text.push_str(tail)
+        expect.push_str(want)
+        if normalize(text, form) == expect and is_normalized(text, form) == (text == expect) {
+            right += 1
+        }
+    }
+    return right
+}
+
+fn main() {
+    // EASY's bits: NFD 1, NFKD 2, NFC 4, NFKC 8. CJK's ideographs in every form, Hangul's
+    // syllables in NFC and NFKC, Latin Extended Additional in NFC.
+    let cjk = easy(0x4E00, 0x9FFF, 1) and easy(0x4E00, 0x9FFF, 2) and easy(0x4E00, 0x9FFF, 4) and easy(0x4E00, 0x9FFF, 8)
+    println("{cjk} {easy(0xAC00, 0xD7FF, 4)} {easy(0xAC00, 0xD7FF, 8)} {easy(0x1E00, 0x1EFF, 4)}")    // out: true true true true
+
+    // A trailing jamo composes with the syllable before it; a mark composes with the letter.
+    println("{sweep("가", "가\u{11A8}", "각", Form.NFC)}")    // out: 40
+    println("{sweep("가 ", "가\u{11A8}", "각", Form.NFKC)}")    // out: 40
+    println("{sweep("ạ", "ạ\u{302}", "ậ", Form.NFC)}")    // out: 40
+    println("{sweep("ạ", "ạ\u{302}", "ậ", Form.NFKC)}")    // out: 40
+    // A singleton after ideographs, and an ideograph left as it is in a decomposing form.
+    println("{sweep("一", "\u{F900}", "\u{8C48}", Form.NFC)}")    // out: 40
+    println("{sweep("丁", "\u{E9}", "e\u{301}", Form.NFD)}")    // out: 40
+    println("{sweep("丁a", "丁", "丁", Form.NFKD)}")    // out: 40
+    // Runes next to the skipped blocks that aren't skipped: a Rejang virama, U+A953, is just
+    // before Hangul and a mark of class 9; a Greek letter with an acute, U+1F71, is just after
+    // Latin Extended Additional and changes in NFC; and U+1DCE is a mark of class 214.
+    println("{sweep("가", "x\u{316}\u{A953}", "x\u{A953}\u{316}", Form.NFC)}")    // out: 40
+    println("{sweep("ạ", "\u{1F71}", "\u{3AC}", Form.NFC)}")    // out: 40
+    println("{sweep("ạ", "x\u{316}\u{1DCE}", "x\u{1DCE}\u{316}", Form.NFC)}")    // out: 40
+    println(codes(normalize(String("가각\u{11A8}"), Form.NFC)))    // out: AC00 AC01 11A8
+    println("{is_normalized(String("한국어 사람"), Form.NFC)} {is_normalized(String("한국어 사람"), Form.NFD)}")    // out: true false
+}

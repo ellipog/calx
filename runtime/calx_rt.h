@@ -675,6 +675,9 @@ CX_FN(cx_usize, cx_bytes_find3, (const cx_u8* hay, cx_usize len, cx_usize from, 
 CX_FN(cx_usize, cx_bytes_find5, (const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, cx_u8 b, cx_u8 c, cx_u8 d, cx_u8 e));
 /* For std.textwrap: the first byte from `from` that could start a line break `splitlines` sees. */
 CX_FN(cx_usize, cx_bytes_find_break, (const cx_u8* hay, cx_usize len, cx_usize from));
+/* For std.unicode's quick check: the first rune from `from` that isn't below `low` or, as `kinds`
+ * says, a CJK ideograph (1), a Hangul syllable (2) or in Latin Extended Additional (4), or `len`. */
+CX_FN(cx_usize, cx_bytes_skip_starters, (const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 low, cx_u8 kinds));
 /* Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, in calx_case.c (D117). Text
  * that doesn't change comes back without a copy when `keep` says its bytes are a literal's. */
 CX_FN(cx_String, cx_case_lower, (cx_str s, cx_bool keep));

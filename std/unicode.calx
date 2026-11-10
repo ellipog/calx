@@ -8,6 +8,7 @@ import std.text.normal.{BLOCK, CANON_AT, CANON_LEN, CCC, COMPAT_AT, COMPAT_LEN, 
 
 extern "C" {
     fn cx_bytes_below(p: *const u8, n: usize, limit: u8) -> usize
+    fn cx_bytes_skip_starters(hay: *const u8, len: usize, from: usize, low: u8, kinds: u8) -> usize
 }
 
 /// A normalization form, as UAX #15 defines it.
@@ -38,7 +39,7 @@ const S_COUNT: u32 = 11172
 /// `text` in `form`, as Python's `unicodedata.normalize` gives it. Text that's already in it comes
 /// back as it is, which the quick checks of UAX #15 tell for most of it without normalizing.
 pub fn normalize(text: String, form: Form) -> String {
-    let checked = quick(text, form)
+    let checked = quick(text, form, false)
     if checked.0 == Check.Yes {
         return text.copy()
     }
@@ -52,7 +53,7 @@ pub fn normalize(text: String, form: Form) -> String {
 /// Whether `text` is in `form`, as Python's `unicodedata.is_normalized` says: by the quick checks
 /// where they can tell, and otherwise by normalizing it.
 pub fn is_normalized(text: String, form: Form) -> bool {
-    return match quick(text, form).0 {
+    return match quick(text, form, true).0 {
         Check.Yes => true,
         Check.No => false,
         Check.Maybe => normalize(text, form) == text,
@@ -98,6 +99,12 @@ fn easy_bit(form: Form) -> u8 {
 // The bytes from `i` on that are below `limit`, counted 16 at a time.
 fn below(text: String, i: usize, limit: u8) -> usize {
     return unsafe { cx_bytes_below(text.as_ptr().add(i), text.len() - i, limit) }
+}
+
+// Whether byte `b` can start a run cx_bytes_skip_starters skips: one below `low`, or the lead of a
+// three-byte rune from U+1000 to U+DFFF, among which are the blocks it knows.
+fn run_start(b: u8, low: u8) -> bool {
+    return b < low or (b >= 0xE1 and b <= 0xED)
 }
 
 // The bit that says it might not be, in a composing form.
@@ -169,14 +176,24 @@ enum Check {
 // UAX #15's quick check of `text` for `form`: Yes if it's in it, No if it isn't, and Maybe if only
 // normalizing can tell. With it, the offset from which normalizing must start: the last starter
 // before the first rune that isn't certainly in the form. Nothing before a starter can compose
-// with what's after it, so what's before it is in the form as it is.
-fn quick(text: String, form: Form) -> (Check, usize) {
+// with what's after it, so what's before it is in the form as it is. Normalizing starts there for
+// Maybe as for No, so `normalize` stops at the first doubt, `past_maybe` false: text in NFD, whose
+// every mark is a Maybe in NFC, isn't read twice. `is_normalized` looks on for a No, which saves
+// it normalizing.
+fn quick(text: String, form: Form, past_maybe: bool) -> (Check, usize) {
     let no = no_bit(form)
     let maybe = maybe_bit(form)
     let easy = easy_bit(form)
     // ASCII is in every form, and nothing below U+0300 changes in NFC, which in UTF-8 is every
-    // byte below 0xCC. Runs of them are skipped 16 bytes at a time.
+    // byte below 0xCC. CJK's ideographs are starters in every form, Hangul's syllables in the
+    // composing ones, and Latin Extended Additional in NFC, as tests/std/unicode_skip.calx checks
+    // in the tables. Runs of them are skipped 16 or 32 bytes at a time.
     let low: u8 = if form == Form.NFC { 0xCC } else { 0x80 }
+    let kinds: u8 = match form {
+        Form.NFC => 7,
+        Form.NFKC => 3,
+        _ => 1,
+    }
     let n = text.len()
     var result = Check.Yes
     var doubt = n
@@ -185,21 +202,19 @@ fn quick(text: String, form: Form) -> (Check, usize) {
     var i: usize = 0
     while i < n {
         let b = text.byte_at(i)
-        if b < low {
-            // One byte, such as the space between words, or a run, counted 16 bytes at a time.
-            // The last rune in it starts at its last byte that isn't a continuation byte.
-            if i + 1 < n and text.byte_at(i + 1) < low {
-                i += below(text, i, low)
-            } else {
-                i += 1
+        if run_start(b, low) {
+            // A run. The last rune in it starts at its last byte that isn't a continuation byte.
+            let to = unsafe { cx_bytes_skip_starters(text.as_ptr(), n, i, low, kinds) }
+            if to > i {
+                i = to
+                var s = i - 1
+                while (text.byte_at(s) & 0xC0) == 0x80 {
+                    s -= 1
+                }
+                starter = s
+                last_class = 0
+                continue
             }
-            var s = i - 1
-            while (text.byte_at(s) & 0xC0) == 0x80 {
-                s -= 1
-            }
-            starter = s
-            last_class = 0
-            continue
         }
         let d = decode(text, i)
         if (EASY[usize(d.0) / BLOCK] & easy) != 0 {
@@ -233,6 +248,9 @@ fn quick(text: String, form: Form) -> (Check, usize) {
             return (Check.No, if result == Check.Maybe { doubt } else { starter })
         }
         if q & maybe != 0 and result == Check.Yes {
+            if not past_maybe {
+                return (Check.Maybe, starter)
+            }
             result = Check.Maybe
             doubt = starter
         }
