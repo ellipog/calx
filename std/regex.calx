@@ -2964,6 +2964,40 @@ impl Regex {
         return self.replace_n(text, with, usize.wrap(UNSET))
     }
 
+    /// `text` with its first match replaced by what `f` gives for its `Captures`: Python's
+    /// `re.sub(p, f, text, count=1)` with a function.
+    pub fn replace_with(mut self, text: String, f: FnMut(Captures) -> String) -> String {
+        return self.replace_with_n(text, f, 1)
+    }
+
+    /// `text` with every match replaced by what `f` gives for it, called on the matches in order,
+    /// the ones `find_all` finds: `re.sub(p, f, text)`.
+    pub fn replace_all_with(mut self, text: String, f: FnMut(Captures) -> String) -> String {
+        return self.replace_with_n(text, f, usize.wrap(UNSET))
+    }
+
+    fn replace_with_n(mut self, text: String, f: FnMut(Captures) -> String, limit: usize) -> String {
+        var out = String()
+        var kept: usize = 0
+        var count: usize = 0
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        while count < limit {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                out.push_str(text[kept..s])
+                if let c = self.groups_at(text, s, e) {
+                    out.push_str(f(c))
+                }
+                kept = e
+                count += 1
+            } else {
+                break
+            }
+        }
+        out.push_str(text[kept..])
+        return out
+    }
+
     // `re.sub` with Python's template.
     @track_caller
     fn python_sub(mut self, text: String, with: String, limit: usize) -> String {

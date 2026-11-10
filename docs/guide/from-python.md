@@ -125,6 +125,7 @@ fn main() ! Error {
 | `s.lower()` | `s.to_lower_root()` |
 | `int(s)`, `float(s)` | `i32.parse(s)`, `f64.parse(s)`, which give `none` for text that isn't one |
 | `re.sub(p, r, s)` | `Regex.python(p)` from [`std.regex`](../std/regex.md), then `replace_all(s, r)`: Python's `re` as it is, its syntax, templates and matches. Or `Regex.new(p)`, whose syntax is Rust's and which searches in linear time, for patterns from outside |
+| `re.sub(p, lambda m: ..., s)` | `replace_all_with(s, \|c\| ...)` on a `Regex` from [`std.regex`](../std/regex.md), where `c` is the match's `Captures` |
 | `re.match(p, s)`, `re.fullmatch(p, s)` | `match_start(s)` and `full_match(s)` on a `Regex` from [`std.regex`](../std/regex.md), or `captures_start` and `full_captures` for the groups |
 | `s.encode()`, `b.decode()` | `s.to_bytes()`, `String.from_utf8(b)`, which gives `none` for bad UTF-8, or [`decode_lossy_unicode`](../std/text-utf8.md) for Python's `errors="replace"` |
 

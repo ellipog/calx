@@ -62,6 +62,7 @@ A `Regex` keeps what its searches work out for the next one, so one that searche
 | `re.match_start(text) -> Match?`, `re.captures_start(text) -> Captures?` | The match at the start of the text, if one starts there, as Python's `re.match` finds it: the match `find` would give if matches could only start there, so `a\|ab` gives the `a` of `ab` |
 | `re.full_match(text) -> Match?`, `re.full_captures(text) -> Captures?` | The match that's the whole text, if there's one, as Python's `re.fullmatch` finds it: the way through the pattern it prefers of those that end at the end, so `a\|ab` matches all of `ab` |
 | `re.replace(text, with) -> String`, `re.replace_all(text, with)` | The text with its first match, or every match, replaced by the template `with`. See [Templates](#templates) |
+| `re.replace_with(text, f) -> String`, `re.replace_all_with(text, f)` | The same with each match replaced by what the closure `f` gives for its `Captures`, as Python's `re.sub` with a function. `f` is called on the matches in order and can change what it captures, such as a count |
 | `re.split(text) -> List<String>` | The parts between the matches, empty ones too, as Python's `re.split` gives them without groups |
 | `re.pattern()`, `{re}` | The pattern as it was written |
 | `re.group_count() -> usize` | The groups, not counting the whole match |
@@ -121,6 +122,7 @@ Where it differs from Python's `re`:
 - Lookaround, `(?=x)` and the rest, backreferences, `\1` and `(?P=name)`, atomic groups and possessive quantifiers are errors that say why. Unicode properties, `\p{L}`, are an error for now.
 - Classes are Unicode by default, as in Python 3 and Rust; `(?a)` is ASCII, as `re.ASCII` is.
 - Case folding is Unicode's simple folding, rune for rune, as in Rust, so `(?i)ß` doesn't match `ss`.
+- A repeat whose body can match nothing doesn't take an empty pass after one that matched something, as in Rust, so `(a?)+` matching `a` leaves group 1 as `a`, where Python's takes one more pass and leaves it empty.
 
 Which match is found is as Python and Rust choose: the leftmost, and of the matches that start there, the one the pattern prefers, trying alternatives in order and quantifiers as many times as they can, or as few for lazy ones. So `sam|samwise` finds `sam` in `samwise`.
 
@@ -138,6 +140,17 @@ Since `{` and `}` interpolate in Calx's strings, patterns with a count, such as 
 | `$$` | A `$` |
 
 A name or a number after `$` takes as many letters, digits and `_` as follow, so `$1a` is group `1a`; write `${1}a` for group 1 then `a`. Write templates as raw strings too, since `${name}` would interpolate.
+
+When the new text has to be worked out, `replace_all_with` takes a closure instead, which gets each match's `Captures`:
+
+```calx
+import std.regex.{Regex, RegexError}
+
+fn main() ! RegexError {
+    var stacks = try Regex.new(#"(\d+) (\w+)"#)
+    println(stacks.replace_all_with("3 stone, 12 dirt", |c| "{(i64.parse(c.get(1) ?? "0") ?? 0) * 64} {c.get(2) ?? ""}"))    // out: 192 stone, 768 dirt
+}
+```
 
 ## Empty matches
 
@@ -177,6 +190,7 @@ A count is at most 100000, and a pattern compiles to at most 2000000 instruction
 | `find_all(text)`, `captures_all(text)`, `count(text)` | `p.finditer(text)`: an empty match right after a match is one, unless that match was empty too |
 | `match_start(text)`, `captures_start(text)`, `full_match(text)`, `full_captures(text)` | `p.match(text)` and `p.fullmatch(text)` |
 | `replace(text, with)`, `replace_all(text, with)` | `p.sub(with, text, count=1)` and `p.sub(with, text)`, with Python's templates |
+| `replace_with(text, f)`, `replace_all_with(text, f)` | `p.sub(f, text, count=1)` and `p.sub(f, text)` with a function |
 | `split(text)` | `p.split(text)`, with each group's text after each part |
 
 ```calx

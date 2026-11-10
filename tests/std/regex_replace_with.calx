@@ -1,0 +1,66 @@
+// std.regex's replace_with and replace_all_with: each match replaced by what a closure gives for
+// its groups, as Python's re.sub with a function does it, for Regex.new and Regex.python (CLX-224).
+// Each line out is what Python printed for the same calls, but where Regex.new's empty matches and
+// repeats are Rust's, as said. build/scratch's rig matched Python on 200,000 more for Regex.python,
+// and for Regex.new on the 181,000 of them whose patterns can't match empty, but for one with an
+// empty pass of a repeat, as below.
+import std.regex.{Captures, Regex}
+
+fn runes(s: String) -> usize {
+    var n: usize = 0
+    for _ in s.runes() {
+        n += 1
+    }
+    return n
+}
+
+fn main() {
+    for python in [false, true] {
+        var digits = if python { Regex.python(#"\d+"#)! } else { Regex.new(#"\d+"#)! }
+        let double = |c: Captures| "{(i64.parse(c.get(0) ?? "0") ?? 0) * 2}"
+        println(digits.replace_all_with("3 stone, 12 dirt, 0 air", double))
+        println(digits.replace_with("3 stone, 12 dirt, 0 air", double))
+        var mail = if python { Regex.python(#"(\w+)@(\w+)"#)! } else { Regex.new(#"(\w+)@(\w+)"#)! }
+        println(mail.replace_all_with("sam@example ann@test", |c| "{c.get(2) ?? ""}/{c.get(1) ?? ""}"))
+        var pairs = if python { Regex.python(#"(?P<k>\w+)=(?P<v>\w*)"#)! } else { Regex.new(#"(?P<k>\w+)=(?P<v>\w*)"#)! }
+        println(pairs.replace_all_with("a=1 bb= ccc=xyz", |c| "{(c.name("k") ?? "").to_upper_root()}:{(c.name("v") ?? "").len()}"))
+        var either = if python { Regex.python("(a)|b")! } else { Regex.new("(a)|b")! }
+        println(either.replace_all_with("abcab", |c| "[{c.get(1) ?? "-"}]"))
+        println(digits.replace_all_with("no digits here", |_| String()))
+        var accent = if python { Regex.python("é+")! } else { Regex.new("é+")! }
+        println(accent.replace_all_with("café éé!", |c| "{runes(c.get(0) ?? "")}"))
+    }
+    // out: 6 stone, 24 dirt, 0 air
+    // out: 6 stone, 12 dirt, 0 air
+    // out: example/sam test/ann
+    // out: A:1 BB:0 CCC:3
+    // out: [a][-]c[a][-]
+    // out: no digits here
+    // out: caf1 2!
+    // out: 6 stone, 24 dirt, 0 air
+    // out: 6 stone, 12 dirt, 0 air
+    // out: example/sam test/ann
+    // out: A:1 BB:0 CCC:3
+    // out: [a][-]c[a][-]
+    // out: no digits here
+    // out: caf1 2!
+
+    // The closure is called once for each match, in order, and can keep count. Python's empty
+    // matches include one right after a match; Rust's, and so Regex.new's, don't.
+    for python in [true, false] {
+        var star = if python { Regex.python("x*")! } else { Regex.new("x*")! }
+        var n = 0
+        let out = star.replace_all_with("abxd", |_| {
+            n += 1
+            "<{n}>"
+        })
+        println("{out} {n}")
+    }
+    // out: <1>a<2>b<3><4>d<5> 5
+    // out: <1>a<2>b<3>d<4> 4
+
+    // A repeat whose body can match nothing: Python takes one more empty pass, Rust doesn't.
+    var py_rep = Regex.python("(a?)+")!
+    var rust_rep = Regex.new("(a?)+")!
+    println("[{py_rep.full_captures("a")!.get(1) ?? "-"}] [{rust_rep.full_captures("a")!.get(1) ?? "-"}]")    // out: [] [a]
+}
