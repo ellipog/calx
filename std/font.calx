@@ -1,0 +1,1874 @@
+/// TrueType and OpenType fonts: read from .ttf, .otf and .ttc files, measured, and drawn as
+/// antialiased glyphs, as Pillow's `ImageFont.truetype` reads and draws them. A glyph's coverage
+/// is the exact area of its outline in each pixel, without hinting.
+///
+/// Sizes are in pixels per em, as Pillow's font size is.
+module std.font
+
+import std.fs.{read}
+
+/// A font: the file's bytes and where its tables are.
+pub struct Font {
+    data: List<u8>
+    glyphs: usize
+    em: u32
+    long_loca: bool
+    loca: usize
+    glyf: usize
+    glyf_end: usize
+    hmtx: usize
+    hmtx_end: usize
+    hmetrics: usize
+    asc: i32
+    desc: i32
+    gap: i32
+    cmap: usize
+    cmap_format: u32
+    symbol: bool
+    kern: usize
+    kern_pairs: usize
+    // The glyphs of ASCII, looked up once.
+    ascii: List<u32>
+    // A CFF font's outlines, when it has them instead of glyf's: none or one.
+    cff: List<Cff>
+    family_name: String
+    style_name: String
+}
+
+/// `Font(Arial Regular)`.
+impl Display for Font {
+    fn show(self) {
+        print("Font({self.family_name} {self.style_name})")
+    }
+}
+
+/// A glyph's outline in font units, y up: contours of lines and curves, each ending where it
+/// starts.
+pub struct Outline {
+    /// Each step: 0 starts a contour at a point, 1 is a line to a point, 2 a quadratic curve
+    /// through a control point to a point, and 3 a cubic curve through two control points.
+    pub verbs: List<u8>
+    /// The steps' points, x then y: one for a start or a line, two for a quadratic curve and
+    /// three for a cubic one.
+    pub points: List<f32>
+}
+
+/// A glyph drawn at a size.
+pub struct Glyph {
+    /// The size of its coverage in pixels: 0 by 0 for a space.
+    pub width: usize
+    pub height: usize
+    /// Where its top left pixel is from the pen on the baseline, in pixels, y down: a letter
+    /// that stands on the baseline has a negative y.
+    pub x: i64
+    pub y: i64
+    /// How far the pen moves on after it, in pixels.
+    pub advance: f64
+    /// How much of each pixel it covers, 0 to 255, row by row from the top.
+    pub coverage: List<u8>
+}
+
+/// The font's lines at a size, in pixels: the ascender above the baseline, the descender below
+/// it (negative), and the gap the font asks for between lines.
+pub struct LineMetrics {
+    pub ascent: f64
+    pub descent: f64
+    pub line_gap: f64
+}
+
+impl LineMetrics {
+    /// From one baseline to the next: the ascent, the descent and the gap.
+    pub fn height(self) -> f64 {
+        return self.ascent - self.descent + self.line_gap
+    }
+}
+
+/// Text drawn as one mask, for std.image's `draw_text`: its coverage, `width` by `height`, with its
+/// top left at (x, y) from where the text was placed.
+pub struct Mask {
+    pub width: usize
+    pub height: usize
+    pub x: i64
+    pub y: i64
+    pub coverage: List<u8>
+}
+
+impl Font {
+    /// The font in a .ttf, .otf or .ttc file, as `decode` reads it.
+    pub fn open(path: String, index: usize = 0) -> Font ! Error {
+        let bytes = try read(path.copy()).context("reading {path}")
+        return try Font.decode(bytes, index).context("reading {path}")
+    }
+
+    /// The font in a file's bytes, or why it can't be read. For a collection (.ttc), `index` picks
+    /// the font, from 0.
+    pub fn decode(bytes: own List<u8>, index: usize = 0) -> Font ! String {
+        let d = bytes
+        if d.len() < 12 {
+            fail String("not a font file: it's shorter than a font's header")
+        }
+        var dir: usize = 0
+        if u32_at(d, 0) == 0x74746366 {
+            // A collection: a header, then where each font's table directory is.
+            let count = usize(u32_at(d, 8))
+            if index >= count {
+                fail "the collection holds {count} fonts, so there's no font {index}"
+            }
+            dir = usize(u32_at(d, 12 + 4 * index))
+        } else if index != 0 {
+            fail "the file holds one font, so there's no font {index}"
+        }
+        let version = u32_at(d, dir)
+        if version != 0x00010000 and version != 0x4F54544F and version != 0x74727565 {
+            fail String("not a TrueType or OpenType font")
+        }
+        let tables = usize(u16_at(d, dir + 4))
+        if dir + 12 + 16 * tables > d.len() {
+            fail String("the font file ends in its table directory")
+        }
+        var head: usize = 0
+        var maxp: usize = 0
+        var hhea: usize = 0
+        var hmtx: usize = 0
+        var hmtx_len: usize = 0
+        var cmap: usize = 0
+        var cmap_len: usize = 0
+        var loca: usize = 0
+        var loca_len: usize = 0
+        var glyf: usize = 0
+        var glyf_len: usize = 0
+        var kern: usize = 0
+        var kern_len: usize = 0
+        var name: usize = 0
+        var name_len: usize = 0
+        var os2: usize = 0
+        var os2_len: usize = 0
+        var cff: usize = 0
+        var cff_len: usize = 0
+        for i in 0..tables {
+            let rec = dir + 12 + 16 * i
+            let tag = u32_at(d, rec)
+            let at = usize(u32_at(d, rec + 8))
+            let len = usize(u32_at(d, rec + 12))
+            if at > d.len() or len > d.len() - at {
+                fail "the font's {tag_name(tag)} table runs past the end of the file"
+            }
+            if tag == 0x68656164 {
+                head = at
+                if len < 54 {
+                    fail String("the font's head table is too short")
+                }
+            } else if tag == 0x6D617870 {
+                maxp = at
+                if len < 6 {
+                    fail String("the font's maxp table is too short")
+                }
+            } else if tag == 0x68686561 {
+                hhea = at
+                if len < 36 {
+                    fail String("the font's hhea table is too short")
+                }
+            } else if tag == 0x686D7478 {
+                hmtx = at
+                hmtx_len = len
+            } else if tag == 0x636D6170 {
+                cmap = at
+                cmap_len = len
+            } else if tag == 0x6C6F6361 {
+                loca = at
+                loca_len = len
+            } else if tag == 0x676C7966 {
+                glyf = at
+                glyf_len = len
+            } else if tag == 0x6B65726E {
+                kern = at
+                kern_len = len
+            } else if tag == 0x6E616D65 {
+                name = at
+                name_len = len
+            } else if tag == 0x4F532F32 {
+                os2 = at
+                os2_len = len
+            } else if tag == 0x43464620 {
+                cff = at
+                cff_len = len
+            }
+        }
+        if head == 0 or maxp == 0 or hhea == 0 or hmtx == 0 or cmap == 0 {
+            fail String("the font is missing one of the head, maxp, hhea, hmtx and cmap tables")
+        }
+        let em = u16_at(d, head + 18)
+        if em < 16 or em > 16384 {
+            fail "the font's units per em are {em}, not 16 to 16384"
+        }
+        let glyphs = usize(u16_at(d, maxp + 4))
+        let hmetrics = usize(u16_at(d, hhea + 34))
+        if hmetrics == 0 or 4 * hmetrics > hmtx_len {
+            fail String("the font's hmtx table is too short for its metrics")
+        }
+        let long_loca = i16_at(d, head + 50) != 0
+        var outlines: List<Cff> = []
+        if glyf != 0 {
+            if loca == 0 {
+                fail String("the font has a glyf table but no loca")
+            }
+            let need = (glyphs + 1) * (if long_loca { 4usize } else { 2usize })
+            if loca_len < need {
+                fail String("the font's loca table is too short for its glyphs")
+            }
+        } else if cff != 0 {
+            outlines.push(try read_cff(d, cff, cff_len))
+        } else {
+            fail String("the font has no outlines: neither a glyf nor a CFF table")
+        }
+        // Line metrics from hhea, or OS/2 where hhea has none, as FreeType takes them.
+        var asc = i16_at(d, hhea + 4)
+        var desc = i16_at(d, hhea + 6)
+        var gap = i16_at(d, hhea + 8)
+        if asc == 0 and desc == 0 and os2 != 0 and os2_len >= 78 {
+            asc = i16_at(d, os2 + 68)
+            desc = i16_at(d, os2 + 70)
+            gap = i16_at(d, os2 + 72)
+            if asc == 0 and desc == 0 {
+                asc = i32.wrap(u16_at(d, os2 + 74))
+                desc = 0 - i32.wrap(u16_at(d, os2 + 76))
+                gap = 0
+            }
+        }
+        let (sub, format, symbol) = pick_cmap(d, cmap, cmap_len)
+        if sub == 0 {
+            fail String("the font has no Unicode character map")
+        }
+        let (pairs_at, pairs) = find_kern(d, kern, kern_len)
+        var f = Font {
+            data: d,
+            glyphs: glyphs,
+            em: em,
+            long_loca: long_loca,
+            loca: loca,
+            glyf: glyf,
+            glyf_end: glyf + glyf_len,
+            hmtx: hmtx,
+            hmtx_end: hmtx + hmtx_len,
+            hmetrics: hmetrics,
+            asc: asc,
+            desc: desc,
+            gap: gap,
+            cmap: sub,
+            cmap_format: format,
+            symbol: symbol,
+            kern: pairs_at,
+            kern_pairs: pairs,
+            ascii: [],
+            cff: outlines,
+            family_name: String(),
+            style_name: String(),
+        }
+        f.family_name = name_of(f.data, name, name_len, 16, 1)
+        f.style_name = name_of(f.data, name, name_len, 17, 2)
+        var ascii: List<u32> = []
+        for c in 0u32..128 {
+            ascii.push(f.lookup(c))
+        }
+        f.ascii = ascii
+        return f
+    }
+
+    /// The font's family, as its name table gives it: "Arial".
+    pub fn family(self) -> String {
+        return self.family_name.copy()
+    }
+
+    /// Its style within the family: "Regular", "Bold Italic".
+    pub fn style(self) -> String {
+        return self.style_name.copy()
+    }
+
+    /// How many glyphs it has.
+    pub fn glyph_count(self) -> usize {
+        return self.glyphs
+    }
+
+    /// The units its outlines are measured in, to an em.
+    pub fn units_per_em(self) -> u32 {
+        return self.em
+    }
+
+    /// The glyph for `c`, or 0, the font's glyph for missing characters, if it has none.
+    pub fn glyph_index(self, c: rune) -> u32 {
+        let v = u32(c)
+        if v < 128 {
+            return self.ascii[usize(v)]
+        }
+        return self.lookup(v)
+    }
+
+    /// Whether the font has a glyph for `c`.
+    pub fn has_glyph(self, c: rune) -> bool {
+        return self.glyph_index(c) != 0
+    }
+
+    /// The ascent, descent and line gap at `size` pixels per em.
+    pub fn line_metrics(self, size: f64) -> LineMetrics {
+        let s = size / f64(self.em)
+        return LineMetrics { ascent: f64(self.asc) * s, descent: f64(self.desc) * s, line_gap: f64(self.gap) * s }
+    }
+
+    /// How far the pen moves past `c` at `size`, in pixels.
+    pub fn advance(self, c: rune, size: f64) -> f64 {
+        return f64(self.advance_units(self.glyph_index(c))) * size / f64(self.em)
+    }
+
+    /// How much closer, or further, `right` sits after `left` at `size`, in pixels, from the
+    /// font's kern table: negative for a pair such as "AV" that moves together.
+    pub fn kerning(self, left: rune, right: rune, size: f64) -> f64 {
+        return f64(self.kern_units(self.glyph_index(left), self.glyph_index(right))) * size / f64(self.em)
+    }
+
+    /// The outline of the glyph for `c`, in font units.
+    pub fn outline(self, c: rune) -> Outline {
+        return self.glyph_outline(self.glyph_index(c))
+    }
+
+    /// The glyph for `c` drawn at `size` pixels per em, with the pen on a whole pixel.
+    pub fn render(self, c: rune, size: f64) -> Glyph {
+        let g = self.glyph_index(c)
+        return self.render_index(g, size, 0.0, 0.0)
+    }
+
+    /// How wide `text` is at `size`, in pixels: the advances and kerning of its widest line, the
+    /// lines split at `\n`.
+    pub fn measure(self, text: String, size: f64) -> f64 {
+        let s = size / f64(self.em)
+        var widest = 0.0
+        var pen = 0.0
+        var prev: u32 = 0
+        for r in text.runes() {
+            if r == '\n' {
+                widest = widest.max(pen)
+                pen = 0.0
+                prev = 0
+                continue
+            }
+            let g = self.glyph_index(r)
+            if prev != 0 {
+                pen += f64(self.kern_units(prev, g)) * s
+            }
+            pen += f64(self.advance_units(g)) * s
+            prev = g
+        }
+        return widest.max(pen)
+    }
+
+    /// `text` drawn at `size` as one mask, for std.image's `draw_text`, placed as Pillow's anchor
+    /// `la` places it: (0, 0) is the left of the first line at its ascender, rounded up to a
+    /// whole pixel as FreeType rounds it. Lines split at `\n` and are the font's line height
+    /// apart. Each glyph is drawn at its pen's fraction of a pixel, and where glyphs overlap the
+    /// mask keeps the larger coverage.
+    pub fn mask(self, text: String, size: f64) -> Mask {
+        let m = self.line_metrics(size)
+        let s = size / f64(self.em)
+        let top = m.ascent.ceil()
+        let step = m.height()
+        var placed: List<Glyph> = []
+        var at: List<(i64, i64)> = []
+        var pen = 0.0
+        var line = 0.0
+        var prev: u32 = 0
+        for r in text.runes() {
+            if r == '\n' {
+                pen = 0.0
+                line += step
+                prev = 0
+                continue
+            }
+            let g = self.glyph_index(r)
+            if prev != 0 {
+                pen += f64(self.kern_units(prev, g)) * s
+            }
+            let px = pen.floor()
+            let base = top + line
+            let py = base.floor()
+            let glyph = self.render_index(g, size, pen - px, base - py)
+            if glyph.width > 0 {
+                at.push((i64.saturate(px) + glyph.x, i64.saturate(py) + glyph.y))
+                placed.push(glyph)
+            }
+            pen += f64(self.advance_units(g)) * s
+            prev = g
+        }
+        if placed.len() == 0 {
+            return Mask { width: 0, height: 0, x: 0, y: 0, coverage: [] }
+        }
+        var x0 = i64.MAX
+        var y0 = i64.MAX
+        var x1 = i64.MIN
+        var y1 = i64.MIN
+        for i in 0..placed.len() {
+            let (gx, gy) = at[i]
+            x0 = x0.min(gx)
+            y0 = y0.min(gy)
+            x1 = x1.max(gx + i64.wrap(placed[i].width))
+            y1 = y1.max(gy + i64.wrap(placed[i].height))
+        }
+        let w = usize.wrap(x1 - x0)
+        let h = usize.wrap(y1 - y0)
+        var cov: List<u8> = [0; w * h]
+        var i: usize = 0
+        for g in placed {
+            let (gx, gy) = at[i]
+            i += 1
+            let ox = usize.wrap(gx - x0)
+            let oy = usize.wrap(gy - y0)
+            for row in 0..g.height {
+                let src = row * g.width
+                let dst = (oy + row) * w + ox
+                for col in 0..g.width {
+                    let v = g.coverage[src + col]
+                    if v > cov[dst + col] {
+                        cov[dst + col] = v
+                    }
+                }
+            }
+        }
+        return Mask { width: w, height: h, x: x0, y: y0, coverage: cov }
+    }
+
+    // --- Glyphs by index ------------------------------------------------------------------------
+
+    fn lookup(self, c: u32) -> u32 {
+        var g = cmap_glyph(self.data, self.cmap, self.cmap_format, c)
+        if g == 0 and self.symbol and c < 0x100 {
+            // A symbol font's characters are at U+F000 on.
+            g = cmap_glyph(self.data, self.cmap, self.cmap_format, 0xF000 + c)
+        }
+        return if usize(g) < self.glyphs { g } else { 0 }
+    }
+
+    fn advance_units(self, g: u32) -> u32 {
+        let i = usize(g).min(self.hmetrics - 1)
+        return u16_at(self.data, self.hmtx + 4 * i)
+    }
+
+    fn kern_units(self, left: u32, right: u32) -> i32 {
+        if self.kern_pairs == 0 {
+            return 0
+        }
+        let key = left << 16 | right
+        var lo: usize = 0
+        var hi = self.kern_pairs
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let at = self.kern + 6 * mid
+            let k = u32_at(self.data, at)
+            if k == key {
+                return i16_at(self.data, at + 4)
+            }
+            if k < key {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return 0
+    }
+
+    /// The outline of glyph `index`, in font units: empty for a glyph with none, such as a space,
+    /// or past the font's glyphs.
+    pub fn glyph_outline(self, index: u32) -> Outline {
+        let g = index
+        var out = Outline { verbs: [], points: [] }
+        if usize(g) >= self.glyphs {
+            return out
+        }
+        if self.cff.len() > 0 {
+            cff_outline(self.data, self.cff[0], g, mut out)
+            return out
+        }
+        // A simple glyph sits its left side bearing from the origin, which its box can disagree
+        // with; FreeType and fontTools move it to agree, and so does this. A composite stays
+        // where its components put it, as there.
+        let (start, end) = self.glyph_range(g)
+        var shift = 0.0f32
+        if start != end and i16_at(self.data, start) >= 0 {
+            shift = f32.nearest(self.left_bearing(g) - i16_at(self.data, start + 2))
+        }
+        var raw = Raw { xs: [], ys: [], on: [], ends: [] }
+        // A budget of points and components, so a composite that uses itself many times over
+        // ends, as FreeType limits it.
+        var budget: u32 = 1000000
+        self.glyph_points(g, Transform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: shift, f: 0.0 }, 0, mut raw, mut budget)
+        raw_outline(raw, mut out)
+        return out
+    }
+
+    fn left_bearing(self, g: u32) -> i32 {
+        let i = usize(g)
+        let at = if i < self.hmetrics { self.hmtx + 4 * i + 2 } else { self.hmtx + 4 * self.hmetrics + 2 * (i - self.hmetrics) }
+        return if at + 2 <= self.hmtx_end { i16_at(self.data, at) } else { 0 }
+    }
+
+    // Where glyph g's data is in glyf, and where it ends.
+    fn glyph_range(self, g: u32) -> (usize, usize) {
+        let i = usize(g)
+        let (a, b) = if self.long_loca {
+            (usize(u32_at(self.data, self.loca + 4 * i)), usize(u32_at(self.data, self.loca + 4 * i + 4)))
+        } else {
+            (2 * usize(u16_at(self.data, self.loca + 2 * i)), 2 * usize(u16_at(self.data, self.loca + 2 * i + 2)))
+        }
+        let start = self.glyf + a
+        let end = self.glyf + b
+        if b <= a or end > self.glyf_end {
+            return (0, 0)
+        }
+        return (start, end)
+    }
+
+    // Appends glyph g's points, moved by t, to raw: a simple glyph's own, or a composite's
+    // components' in turn.
+    fn glyph_points(self, g: u32, t: Transform, depth: u32, raw: mut Raw, budget: mut u32) {
+        let (start, end) = self.glyph_range(g)
+        if start == end or depth > 16 or budget == 0 {
+            return
+        }
+        budget -= 1
+        let contours = i16_at(self.data, start)
+        if contours >= 0 {
+            let before = raw.xs.len()
+            simple_points(self.data, start, end, usize.wrap(contours), t, mut raw)
+            let n = u32.wrap(raw.xs.len() - before)
+            budget = if n >= budget { 0 } else { budget - n }
+            return
+        }
+        // A composite: each component a glyph, placed by offsets or by matching points, and
+        // perhaps scaled, gathered in the composite's own units before t moves them all.
+        var mine = Raw { xs: [], ys: [], on: [], ends: [] }
+        var at = start + 10
+        var more = true
+        while more {
+            if at + 4 > end {
+                break
+            }
+            let flags = u16_at(self.data, at)
+            let child = u16_at(self.data, at + 2)
+            at += 4
+            var arg1: i32 = 0
+            var arg2: i32 = 0
+            if flags & 1 != 0 {
+                if flags & 2 != 0 {
+                    arg1 = i16_at(self.data, at)
+                    arg2 = i16_at(self.data, at + 2)
+                } else {
+                    arg1 = i32.wrap(u16_at(self.data, at))
+                    arg2 = i32.wrap(u16_at(self.data, at + 2))
+                }
+                at += 4
+            } else {
+                if flags & 2 != 0 {
+                    arg1 = i32(i8.wrap(u8_at(self.data, at)))
+                    arg2 = i32(i8.wrap(u8_at(self.data, at + 1)))
+                } else {
+                    arg1 = i32.wrap(u8_at(self.data, at))
+                    arg2 = i32.wrap(u8_at(self.data, at + 1))
+                }
+                at += 2
+            }
+            var a = 1.0f32
+            var b = 0.0f32
+            var c = 0.0f32
+            var dd = 1.0f32
+            if flags & 8 != 0 {
+                a = f2dot14(self.data, at)
+                dd = a
+                at += 2
+            } else if flags & 0x40 != 0 {
+                a = f2dot14(self.data, at)
+                dd = f2dot14(self.data, at + 2)
+                at += 4
+            } else if flags & 0x80 != 0 {
+                a = f2dot14(self.data, at)
+                b = f2dot14(self.data, at + 2)
+                c = f2dot14(self.data, at + 4)
+                dd = f2dot14(self.data, at + 6)
+                at += 8
+            }
+            // The component, scaled in its own units.
+            let inner = Transform { a: a, b: b, c: c, d: dd, e: 0.0, f: 0.0 }
+            var part = Raw { xs: [], ys: [], on: [], ends: [] }
+            self.glyph_points(child, inner, depth + 1, mut part, mut budget)
+            var dx = 0.0f32
+            var dy = 0.0f32
+            if flags & 2 != 0 {
+                dx = f32.nearest(arg1)
+                dy = f32.nearest(arg2)
+                // Apple's fonts scale the offset too; others don't, as FreeType has it.
+                if flags & 0x800 != 0 and flags & 0x1000 == 0 {
+                    dx = dx * (a * a + b * b).sqrt()
+                    dy = dy * (c * c + dd * dd).sqrt()
+                }
+            } else {
+                // Point arg1 of the components so far meets point arg2 of this one.
+                let p = usize.wrap(arg1)
+                let q = usize.wrap(arg2)
+                if p < mine.xs.len() and q < part.xs.len() {
+                    dx = mine.xs[p] - part.xs[q]
+                    dy = mine.ys[p] - part.ys[q]
+                }
+            }
+            let base = mine.xs.len()
+            for i in 0..part.xs.len() {
+                mine.xs.push(part.xs[i] + dx)
+                mine.ys.push(part.ys[i] + dy)
+                mine.on.push(part.on[i])
+            }
+            for e in part.ends {
+                mine.ends.push(base + e)
+            }
+            more = flags & 0x20 != 0
+        }
+        let base = raw.xs.len()
+        for i in 0..mine.xs.len() {
+            let x = mine.xs[i]
+            let y = mine.ys[i]
+            raw.xs.push(t.a * x + t.c * y + t.e)
+            raw.ys.push(t.b * x + t.d * y + t.f)
+            raw.on.push(mine.on[i])
+        }
+        for e in mine.ends {
+            raw.ends.push(base + e)
+        }
+    }
+
+    // Glyph g at `size`, its pen (ox, oy) pixels right of and below a whole pixel.
+    fn render_index(self, g: u32, size: f64, ox: f64, oy: f64) -> Glyph {
+        let s = size / f64(self.em)
+        let advance = f64(self.advance_units(g)) * s
+        let o = self.glyph_outline(g)
+        if o.points.len() == 0 {
+            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
+        }
+        // In pixels, y down, and cut into lines, so the box is the lines' own.
+        let lines = flatten(o, f32.nearest(s), f32.nearest(ox), f32.nearest(oy))
+        if lines.len() == 0 {
+            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
+        }
+        var minx = f32.INFINITY
+        var miny = f32.INFINITY
+        var maxx = f32.NEG_INFINITY
+        var maxy = f32.NEG_INFINITY
+        var i: usize = 0
+        while i < lines.len() {
+            minx = minx.min(lines[i])
+            maxx = maxx.max(lines[i])
+            miny = miny.min(lines[i + 1])
+            maxy = maxy.max(lines[i + 1])
+            i += 2
+        }
+        let left = minx.floor()
+        let top = miny.floor()
+        let w = usize.wrap(i64.saturate(maxx.ceil() - left)).max(1)
+        let h = usize.wrap(i64.saturate(maxy.ceil() - top)).max(1)
+        if w > 16384 or h > 16384 or w * h > 16777216 {
+            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
+        }
+        let cov = raster(lines, left, top, w, h)
+        return Glyph { width: w, height: h, x: i64.saturate(left), y: i64.saturate(top), advance: advance, coverage: cov }
+    }
+}
+
+// A 2 by 3 transform: (x, y) to (a x + c y + e, b x + d y + f).
+struct Transform {
+    a: f32
+    b: f32
+    c: f32
+    d: f32
+    e: f32
+    f: f32
+}
+
+// A TrueType glyph's points, on the curve or off it, and the last point of each contour.
+struct Raw {
+    xs: List<f32>
+    ys: List<f32>
+    on: List<bool>
+    ends: List<usize>
+}
+
+// --- Reading -----------------------------------------------------------------------------------
+
+// Each read gives 0 past the end, so a damaged font draws wrong rather than stopping the program.
+fn u8_at(d: List<u8>, at: usize) -> u32 {
+    return if at < d.len() { u32(d[at]) } else { 0 }
+}
+
+fn u16_at(d: List<u8>, at: usize) -> u32 {
+    if at + 2 > d.len() {
+        return 0
+    }
+    return u32(d[at]) << 8 | u32(d[at + 1])
+}
+
+fn i16_at(d: List<u8>, at: usize) -> i32 {
+    return i32(i16.wrap(u16_at(d, at)))
+}
+
+fn u32_at(d: List<u8>, at: usize) -> u32 {
+    if at + 4 > d.len() {
+        return 0
+    }
+    return u32(d[at]) << 24 | u32(d[at + 1]) << 16 | u32(d[at + 2]) << 8 | u32(d[at + 3])
+}
+
+fn f2dot14(d: List<u8>, at: usize) -> f32 {
+    return f32.nearest(i16_at(d, at)) / 16384.0f32
+}
+
+fn tag_name(tag: u32) -> String {
+    var s = String()
+    var k: u32 = 32
+    while k > 0 {
+        k -= 8
+        let b = u8.wrap(tag >> k)
+        s.push(if b >= 32 and b < 127 { rune(b) } else { '?' })
+    }
+    return s
+}
+
+// --- Character maps ----------------------------------------------------------------------------
+
+// The best Unicode subtable: its offset, its format and whether it's a symbol font's. Full
+// Unicode first, then the Basic Multilingual Plane, then symbols, then Mac Roman.
+fn pick_cmap(d: List<u8>, cmap: usize, len: usize) -> (usize, u32, bool) {
+    let count = usize(u16_at(d, cmap + 2))
+    var best: usize = 0
+    var best_format: u32 = 0
+    var best_score: u32 = 0
+    var symbol = false
+    for i in 0..count {
+        let rec = cmap + 4 + 8 * i
+        if rec + 8 > cmap + len {
+            break
+        }
+        let platform = u16_at(d, rec)
+        let encoding = u16_at(d, rec + 2)
+        let off = usize(u32_at(d, rec + 4))
+        if off >= len {
+            continue
+        }
+        let sub = cmap + off
+        let format = u16_at(d, sub)
+        let unicode = platform == 0 or (platform == 3 and (encoding == 1 or encoding == 10))
+        let score: u32 = if unicode and format == 12 {
+            5
+        } else if unicode and format == 4 {
+            4
+        } else if unicode and (format == 6 or format == 0) {
+            3
+        } else if platform == 3 and encoding == 0 and format == 4 {
+            2
+        } else if platform == 1 and encoding == 0 and (format == 0 or format == 6) {
+            1
+        } else {
+            0
+        }
+        if score > best_score {
+            best_score = score
+            best = sub
+            best_format = format
+            symbol = score == 2
+        }
+    }
+    return (best, best_format, symbol)
+}
+
+fn cmap_glyph(d: List<u8>, sub: usize, format: u32, c: u32) -> u32 {
+    if format == 4 {
+        if c > 0xFFFF {
+            return 0
+        }
+        let segs = usize(u16_at(d, sub + 6)) / 2
+        let ends = sub + 14
+        // The first segment whose end is at or past c.
+        var lo: usize = 0
+        var hi = segs
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if u16_at(d, ends + 2 * mid) < c {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo >= segs {
+            return 0
+        }
+        let starts = ends + 2 * segs + 2
+        let start = u16_at(d, starts + 2 * lo)
+        if start > c {
+            return 0
+        }
+        let delta = u16_at(d, starts + 2 * segs + 2 * lo)
+        let ranges = starts + 4 * segs
+        let range = usize(u16_at(d, ranges + 2 * lo))
+        if range == 0 {
+            return (c + delta) & 0xFFFF
+        }
+        let g = u16_at(d, ranges + 2 * lo + range + 2 * usize(c - start))
+        return if g == 0 { 0 } else { (g + delta) & 0xFFFF }
+    }
+    if format == 12 {
+        let groups = usize(u32_at(d, sub + 12))
+        var lo: usize = 0
+        var hi = groups
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let at = sub + 16 + 12 * mid
+            if u32_at(d, at + 4) < c {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo >= groups {
+            return 0
+        }
+        let at = sub + 16 + 12 * lo
+        let start = u32_at(d, at)
+        if start > c {
+            return 0
+        }
+        return u32_at(d, at + 8) + (c - start)
+    }
+    if format == 6 {
+        let first = u16_at(d, sub + 6)
+        let count = u16_at(d, sub + 8)
+        if c < first or c - first >= count {
+            return 0
+        }
+        return u16_at(d, sub + 10 + 2 * usize(c - first))
+    }
+    if format == 0 {
+        return if c < 256 { u8_at(d, sub + 6 + usize(c)) } else { 0 }
+    }
+    return 0
+}
+
+// --- Kerning -----------------------------------------------------------------------------------
+
+// The pairs of the kern table's first horizontal format 0 subtable, as FreeType reads them: where
+// they start and how many there are, or (0, 0).
+fn find_kern(d: List<u8>, kern: usize, len: usize) -> (usize, usize) {
+    if kern == 0 or len < 4 or u16_at(d, kern) != 0 {
+        return (0, 0)
+    }
+    let tables = usize(u16_at(d, kern + 2))
+    var at = kern + 4
+    let end = kern + len
+    for _ in 0..tables {
+        if at + 14 > end {
+            break
+        }
+        let sub_len = usize(u16_at(d, at + 2))
+        let coverage = u16_at(d, at + 4)
+        if coverage >> 8 == 0 and coverage & 0x7 == 1 {
+            // Horizontal, kerning rather than minimums, not across the line. A big table's
+            // length can overflow its 16 bits, so the pairs are counted by what's there.
+            let pairs = usize(u16_at(d, at + 6))
+            let first = at + 14
+            let fit = (end - first) / 6
+            return (first, pairs.min(fit))
+        }
+        if sub_len < 6 {
+            break
+        }
+        at += sub_len
+    }
+    return (0, 0)
+}
+
+// --- Names -------------------------------------------------------------------------------------
+
+// The name with id `want`, or `fallback` if there's none: Windows' English first, then any
+// Windows name, then Mac Roman.
+fn name_of(d: List<u8>, name: usize, len: usize, want: u32, fallback: u32) -> String {
+    if name == 0 or len < 6 {
+        return String()
+    }
+    for id in [want, fallback] {
+        let count = usize(u16_at(d, name + 2))
+        let strings = name + usize(u16_at(d, name + 4))
+        var best: usize = 0
+        var best_score: u32 = 0
+        for i in 0..count {
+            let rec = name + 6 + 12 * i
+            if rec + 12 > name + len {
+                break
+            }
+            if u16_at(d, rec + 6) != id {
+                continue
+            }
+            let platform = u16_at(d, rec)
+            let encoding = u16_at(d, rec + 2)
+            let lang = u16_at(d, rec + 4)
+            let score: u32 = if platform == 3 and (encoding == 1 or encoding == 10) and lang == 0x409 {
+                4
+            } else if platform == 3 and (encoding == 1 or encoding == 10) {
+                3
+            } else if platform == 0 {
+                2
+            } else if platform == 1 and encoding == 0 {
+                1
+            } else {
+                0
+            }
+            if score > best_score {
+                best_score = score
+                best = rec
+            }
+        }
+        if best_score == 0 {
+            continue
+        }
+        let n = usize(u16_at(d, best + 8))
+        let at = strings + usize(u16_at(d, best + 10))
+        if at + n > d.len() {
+            continue
+        }
+        var s = String()
+        if best_score == 1 {
+            // Mac Roman: its ASCII half is ASCII.
+            for i in 0..n {
+                let b = d[at + i]
+                s.push(if b < 128 { rune(b) } else { '?' })
+            }
+            return s
+        }
+        // UTF-16, big-endian.
+        var i: usize = 0
+        while i + 1 < n {
+            var u = u16_at(d, at + i)
+            i += 2
+            if u >= 0xD800 and u < 0xDC00 and i + 1 < n {
+                let lo = u16_at(d, at + i)
+                if lo >= 0xDC00 and lo < 0xE000 {
+                    u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00)
+                    i += 2
+                }
+            }
+            s.push(rune.try_from(u) ?? '?')
+        }
+        return s
+    }
+    return String()
+}
+
+// --- TrueType outlines -------------------------------------------------------------------------
+
+// A simple glyph's points, moved by t, onto raw.
+fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Transform, raw: mut Raw) {
+    var at = start + 10
+    if at + 2 * contours + 2 > end {
+        return
+    }
+    let base = raw.xs.len()
+    var ends: List<usize> = []
+    var last: usize = 0
+    for i in 0..contours {
+        let e = usize(u16_at(d, at + 2 * i))
+        if i > 0 and e < last {
+            return
+        }
+        last = e
+        ends.push(e)
+    }
+    if contours == 0 {
+        return
+    }
+    let n = last + 1
+    at += 2 * contours
+    at += 2 + usize(u16_at(d, at))
+    // The flags, with their repeats.
+    var flags: List<u8> = []
+    flags.reserve(n)
+    while flags.len() < n {
+        if at >= end {
+            return
+        }
+        let f = d[at]
+        at += 1
+        flags.push(f)
+        if f & 8 != 0 {
+            if at >= end {
+                return
+            }
+            let r = usize(d[at])
+            at += 1
+            var k: usize = 0
+            while k < r and flags.len() < n {
+                flags.push(f)
+                k += 1
+            }
+        }
+    }
+    var xs: List<f32> = []
+    var ys: List<f32> = []
+    xs.reserve(n)
+    ys.reserve(n)
+    var x: i32 = 0
+    for i in 0..n {
+        let f = flags[i]
+        if f & 2 != 0 {
+            let v = i32.wrap(u8_at(d, at))
+            at += 1
+            x += if f & 16 != 0 { v } else { 0 - v }
+        } else if f & 16 == 0 {
+            x += i16_at(d, at)
+            at += 2
+        }
+        xs.push(f32.nearest(x))
+    }
+    var y: i32 = 0
+    for i in 0..n {
+        let f = flags[i]
+        if f & 4 != 0 {
+            let v = i32.wrap(u8_at(d, at))
+            at += 1
+            y += if f & 32 != 0 { v } else { 0 - v }
+        } else if f & 32 == 0 {
+            y += i16_at(d, at)
+            at += 2
+        }
+        ys.push(f32.nearest(y))
+    }
+    for i in 0..n {
+        raw.xs.push(t.a * xs[i] + t.c * ys[i] + t.e)
+        raw.ys.push(t.b * xs[i] + t.d * ys[i] + t.f)
+        raw.on.push(flags[i] & 1 != 0)
+    }
+    for e in ends {
+        raw.ends.push(base + e)
+    }
+}
+
+// TrueType's points as lines and quadratic curves: two points off the curve in a row have one on
+// it halfway between them.
+fn raw_outline(raw: Raw, out: mut Outline) {
+    var s: usize = 0
+    for e in raw.ends {
+        if e < s or e >= raw.xs.len() {
+            return
+        }
+        let m = e - s + 1
+        if m < 2 {
+            s = e + 1
+            continue
+        }
+        var sx = 0.0f32
+        var sy = 0.0f32
+        var from = s
+        var count = m
+        if raw.on[s] {
+            sx = raw.xs[s]
+            sy = raw.ys[s]
+            from = s + 1
+            count = m - 1
+        } else if raw.on[e] {
+            sx = raw.xs[e]
+            sy = raw.ys[e]
+            count = m - 1
+        } else {
+            sx = (raw.xs[s] + raw.xs[e]) * 0.5f32
+            sy = (raw.ys[s] + raw.ys[e]) * 0.5f32
+        }
+        out.verbs.push(0)
+        out.points.push(sx)
+        out.points.push(sy)
+        var held = false
+        var cx = 0.0f32
+        var cy = 0.0f32
+        for k in 0..count {
+            let i = from + k
+            let x = raw.xs[i]
+            let y = raw.ys[i]
+            if raw.on[i] {
+                if held {
+                    quad_to(mut out, cx, cy, x, y)
+                    held = false
+                } else {
+                    line_to(mut out, x, y)
+                }
+            } else {
+                if held {
+                    quad_to(mut out, cx, cy, (cx + x) * 0.5f32, (cy + y) * 0.5f32)
+                }
+                cx = x
+                cy = y
+                held = true
+            }
+        }
+        if held {
+            quad_to(mut out, cx, cy, sx, sy)
+        } else {
+            line_to(mut out, sx, sy)
+        }
+        s = e + 1
+    }
+}
+
+fn line_to(out: mut Outline, x: f32, y: f32) {
+    out.verbs.push(1)
+    out.points.push(x)
+    out.points.push(y)
+}
+
+fn quad_to(out: mut Outline, cx: f32, cy: f32, x: f32, y: f32) {
+    out.verbs.push(2)
+    out.points.push(cx)
+    out.points.push(cy)
+    out.points.push(x)
+    out.points.push(y)
+}
+
+fn cubic_to(out: mut Outline, ax: f32, ay: f32, bx: f32, by: f32, x: f32, y: f32) {
+    out.verbs.push(3)
+    out.points.push(ax)
+    out.points.push(ay)
+    out.points.push(bx)
+    out.points.push(by)
+    out.points.push(x)
+    out.points.push(y)
+}
+
+// --- Drawing -----------------------------------------------------------------------------------
+
+// The outline in pixels, scaled by s and with y down, its origin at (ox, oy), as lines: x0, y0,
+// x1, y1 for each. Curves are cut into lines no more than 1/128 of a pixel from them.
+fn flatten(o: Outline, s: f32, ox: f32, oy: f32) -> List<f32> {
+    var out: List<f32> = []
+    out.reserve(o.points.len() * 2)
+    var at: usize = 0
+    var x = 0.0f32
+    var y = 0.0f32
+    for v in o.verbs {
+        if v == 0 {
+            x = o.points[at] * s + ox
+            y = oy - o.points[at + 1] * s
+            at += 2
+        } else if v == 1 {
+            let nx = o.points[at] * s + ox
+            let ny = oy - o.points[at + 1] * s
+            push_line(mut out, x, y, nx, ny)
+            x = nx
+            y = ny
+            at += 2
+        } else if v == 2 {
+            let cx = o.points[at] * s + ox
+            let cy = oy - o.points[at + 1] * s
+            let nx = o.points[at + 2] * s + ox
+            let ny = oy - o.points[at + 3] * s
+            // n lines are at most |p0 - 2 p1 + p2| / (4 n^2) from the curve.
+            let ddx = x - 2.0f32 * cx + nx
+            let ddy = y - 2.0f32 * cy + ny
+            let n = segments((ddx * ddx + ddy * ddy).sqrt() * 0.25f32)
+            let step = 1.0f32 / f32.nearest(n)
+            var px = x
+            var py = y
+            for k in 1..n {
+                let t = f32.nearest(k) * step
+                let u = 1.0f32 - t
+                let qx = u * u * x + 2.0f32 * u * t * cx + t * t * nx
+                let qy = u * u * y + 2.0f32 * u * t * cy + t * t * ny
+                push_line(mut out, px, py, qx, qy)
+                px = qx
+                py = qy
+            }
+            push_line(mut out, px, py, nx, ny)
+            x = nx
+            y = ny
+            at += 4
+        } else {
+            let ax = o.points[at] * s + ox
+            let ay = oy - o.points[at + 1] * s
+            let bx = o.points[at + 2] * s + ox
+            let by = oy - o.points[at + 3] * s
+            let nx = o.points[at + 4] * s + ox
+            let ny = oy - o.points[at + 5] * s
+            // n lines are at most 3/4 of the larger second difference over n^2 from the curve.
+            let d1x = x - 2.0f32 * ax + bx
+            let d1y = y - 2.0f32 * ay + by
+            let d2x = ax - 2.0f32 * bx + nx
+            let d2y = ay - 2.0f32 * by + ny
+            let n = segments((d1x * d1x + d1y * d1y).max(d2x * d2x + d2y * d2y).sqrt() * 0.75f32)
+            let step = 1.0f32 / f32.nearest(n)
+            var px = x
+            var py = y
+            for k in 1..n {
+                let t = f32.nearest(k) * step
+                let u = 1.0f32 - t
+                let qx = u * u * u * x + 3.0f32 * u * u * t * ax + 3.0f32 * u * t * t * bx + t * t * t * nx
+                let qy = u * u * u * y + 3.0f32 * u * u * t * ay + 3.0f32 * u * t * t * by + t * t * t * ny
+                push_line(mut out, px, py, qx, qy)
+                px = qx
+                py = qy
+            }
+            push_line(mut out, px, py, nx, ny)
+            x = nx
+            y = ny
+            at += 6
+        }
+    }
+    return out
+}
+
+fn push_line(out: mut List<f32>, x0: f32, y0: f32, x1: f32, y1: f32) {
+    out.push(x0)
+    out.push(y0)
+    out.push(x1)
+    out.push(y1)
+}
+
+// The coverage of lines in pixels, moved by (-left, -top), inside w by h. Each line adds the
+// signed area it leaves to its right in each pixel of each row it crosses, as differences from
+// the pixel before, so a running sum along the row is the area covered. The sum's size, at most
+// 1, is the coverage, so contours that wind the same way and overlap don't count twice, and a
+// hole, wound the other way, takes away.
+fn raster(lines: List<f32>, left: f32, top: f32, w: usize, h: usize) -> List<u8> {
+    var r = Raster { w: w, h: h, stride: w + 2, acc: [0.0f32; (w + 2) * h] }
+    var i: usize = 0
+    while i < lines.len() {
+        r.edge(lines[i] - left, lines[i + 1] - top, lines[i + 2] - left, lines[i + 3] - top)
+        i += 4
+    }
+    return r.coverage()
+}
+
+// How many lines keep a curve whose lines would be `dev` from it, as one, within 1/128 of a pixel.
+fn segments(dev: f32) -> u32 {
+    let n = (dev * 128.0f32).sqrt().ceil()
+    if n.is_nan() or n < 1.0f32 {
+        return 1
+    }
+    return if n > 64.0f32 { 64 } else { u32.wrap(i32.saturate(n)) }
+}
+
+struct Raster {
+    w: usize
+    h: usize
+    stride: usize
+    acc: List<f32>
+}
+
+impl Raster {
+    // A line from (x0, y0) to (x1, y1): in each row it crosses, the area it leaves to its right.
+    fn edge(mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        if y0 == y1 {
+            return
+        }
+        let (dir, ax, ay, bx, by) = if y0 < y1 { (1.0f32, x0, y0, x1, y1) } else { (-1.0f32, x1, y1, x0, y0) }
+        let dxdy = (bx - ax) / (by - ay)
+        let hf = f32.nearest(self.h)
+        let wf = f32.nearest(self.w)
+        let top = ay.max(0.0f32)
+        let bottom = by.min(hf)
+        if top >= bottom {
+            return
+        }
+        var row = usize.wrap(i32.saturate(top.floor()))
+        var ya = top
+        while ya < bottom and row < self.h {
+            let yb = bottom.min(f32.nearest(row + 1))
+            let xa = (ax + (ya - ay) * dxdy).max(0.0f32).min(wf)
+            let xb = (ax + (yb - ay) * dxdy).max(0.0f32).min(wf)
+            self.span(row, xa, xb, (yb - ya) * dir)
+            ya = yb
+            row += 1
+        }
+    }
+
+    // Within one row, a line from xa to xb, d of the row high, signed by its direction. The
+    // coverage it gives pixel i is d times the part of the pixel right of it, on average over its
+    // height: d / (hi - lo) (Q(i + 1 - lo) - Q(i + 1 - hi)), Q(v) the integral of v clamped to
+    // 0 to 1. The row holds the differences from one pixel to the next.
+    fn span(mut self, row: usize, xa: f32, xb: f32, d: f32) {
+        let base = row * self.stride
+        let lo = xa.min(xb)
+        let hi = xa.max(xb)
+        let i0 = usize.wrap(i32.saturate(lo.floor()))
+        if hi - lo < 1.0e-6f32 {
+            let frac = lo - f32.nearest(i0)
+            self.acc[base + i0] += d * (1.0f32 - frac)
+            self.acc[base + i0 + 1] += d * frac
+            return
+        }
+        let i1 = usize.wrap(i32.saturate(hi.floor()))
+        let s = d / (hi - lo)
+        var before = 0.0f32
+        for i in i0..i1 + 1 {
+            let u = f32.nearest(i + 1)
+            let c = s * (area_left(u - lo) - area_left(u - hi))
+            self.acc[base + i] += c - before
+            before = c
+        }
+        self.acc[base + i1 + 1] += d - before
+    }
+
+    fn coverage(self) -> List<u8> {
+        var out: List<u8> = []
+        out.reserve(self.w * self.h)
+        for row in 0..self.h {
+            let base = row * self.stride
+            var sum = 0.0f32
+            for i in 0..self.w {
+                sum += self.acc[base + i]
+                let v = sum.abs().min(1.0f32)
+                out.push(u8.wrap(i32.saturate(v * 255.0f32 + 0.5f32)))
+            }
+        }
+        return out
+    }
+}
+
+// The integral from 0 to v of x clamped to 0 to 1.
+fn area_left(v: f32) -> f32 {
+    if v <= 0.0f32 {
+        return 0.0f32
+    }
+    if v < 1.0f32 {
+        return v * v * 0.5f32
+    }
+    return v - 0.5f32
+}
+
+// --- CFF outlines ------------------------------------------------------------------------------
+
+// A CFF INDEX: `count` items, item i from data + offset(i) to data + offset(i + 1), each offset
+// `size` bytes at `offsets`.
+struct Index {
+    count: usize
+    size: usize
+    offsets: usize
+    data: usize
+}
+
+// A CFF table's glyph programs and subroutines: the global ones, and the local ones of each font
+// dict, one for a font that isn't CID-keyed, chosen for a glyph by FDSelect.
+struct Cff {
+    charstrings: Index
+    globals: Index
+    locals: List<Index>
+    fdselect: usize
+}
+
+fn empty_index() -> Index {
+    return Index { count: 0, size: 0, offsets: 0, data: 0 }
+}
+
+// The INDEX at `at`, and where it ends.
+fn read_index(d: List<u8>, at: usize) -> (Index, usize) {
+    let count = usize(u16_at(d, at))
+    if count == 0 {
+        return (empty_index(), at + 2)
+    }
+    let size = usize(u8_at(d, at + 2))
+    if size < 1 or size > 4 {
+        return (empty_index(), d.len())
+    }
+    let offsets = at + 3
+    let data = offsets + (count + 1) * size - 1
+    let idx = Index { count: count, size: size, offsets: offsets, data: data }
+    return (idx, data + index_offset(d, idx, count))
+}
+
+fn index_offset(d: List<u8>, idx: Index, i: usize) -> usize {
+    var v: u64 = 0
+    let at = idx.offsets + i * idx.size
+    for k in 0..idx.size {
+        v = v << 8 | u64(u8_at(d, at + k))
+    }
+    return usize.wrap(v)
+}
+
+// Where item i of the INDEX is, or (0, 0).
+fn index_item(d: List<u8>, idx: Index, i: usize) -> (usize, usize) {
+    if i >= idx.count {
+        return (0, 0)
+    }
+    let a = idx.data + index_offset(d, idx, i)
+    let b = idx.data + index_offset(d, idx, i + 1)
+    if b < a or b > d.len() {
+        return (0, 0)
+    }
+    return (a, b)
+}
+
+// The operands of operator `op` in the DICT from start to end, or nothing. An operator of two
+// bytes, 12 then x, is 1200 + x.
+fn dict_find(d: List<u8>, start: usize, end: usize, op: u32) -> List<f64> {
+    var args: List<f64> = []
+    var at = start
+    while at < end {
+        let b = u32(d[at])
+        if b <= 21 {
+            var code = b
+            at += 1
+            if b == 12 {
+                code = 1200 + u8_at(d, at)
+                at += 1
+            }
+            if code == op {
+                return args
+            }
+            args = []
+        } else if b == 28 {
+            args.push(f64(i16_at(d, at + 1)))
+            at += 3
+        } else if b == 29 {
+            args.push(f64(i32.wrap(u32_at(d, at + 1))))
+            at += 5
+        } else if b == 30 {
+            // A real number, in nibbles to an end of 0xf; only its length matters here.
+            at += 1
+            while at < end {
+                let v = u32(d[at])
+                at += 1
+                if v & 0xF == 0xF or v >> 4 == 0xF {
+                    break
+                }
+            }
+            args.push(0.0)
+        } else if b >= 32 and b <= 246 {
+            args.push(f64(i32.wrap(b) - 139))
+            at += 1
+        } else if b >= 247 and b <= 250 {
+            args.push(f64(i32.wrap((b - 247) * 256 + u8_at(d, at + 1) + 108)))
+            at += 2
+        } else if b >= 251 and b <= 254 {
+            args.push(f64(0 - i32.wrap((b - 251) * 256 + u8_at(d, at + 1) + 108)))
+            at += 2
+        } else {
+            at += 1
+        }
+    }
+    return []
+}
+
+// A Private DICT's local subroutines, given its size and offset in the CFF table.
+fn private_subrs(d: List<u8>, cff: usize, args: List<f64>) -> Index {
+    if args.len() < 2 {
+        return empty_index()
+    }
+    let size = usize.wrap(i64.saturate(args[0]))
+    let at = cff + usize.wrap(i64.saturate(args[1]))
+    if at + size > d.len() {
+        return empty_index()
+    }
+    let subrs = dict_find(d, at, at + size, 19)
+    if subrs.len() == 0 {
+        return empty_index()
+    }
+    let (idx, _) = read_index(d, at + usize.wrap(i64.saturate(subrs[0])))
+    return idx
+}
+
+fn read_cff(d: List<u8>, at: usize, len: usize) -> Cff ! String {
+    if len < 4 or u8_at(d, at) != 1 {
+        fail String("the font's CFF table isn't CFF version 1")
+    }
+    let (_, after_names) = read_index(d, at + usize(u8_at(d, at + 2)))
+    let (tops, after_tops) = read_index(d, after_names)
+    let (_, after_strings) = read_index(d, after_tops)
+    let (globals, _) = read_index(d, after_strings)
+    let (ts, te) = index_item(d, tops, 0)
+    if ts == te {
+        fail String("the font's CFF table has no top DICT")
+    }
+    let kind = dict_find(d, ts, te, 1206)
+    if kind.len() > 0 and kind[0] != 2.0 {
+        fail String("the font's CFF glyphs aren't Type 2 charstrings")
+    }
+    let cs = dict_find(d, ts, te, 17)
+    if cs.len() == 0 {
+        fail String("the font's CFF table has no charstrings")
+    }
+    let (charstrings, _) = read_index(d, at + usize.wrap(i64.saturate(cs[0])))
+    var locals: List<Index> = []
+    var fdselect: usize = 0
+    let fds = dict_find(d, ts, te, 1236)
+    if fds.len() > 0 {
+        // CID-keyed: each font dict has its own Private DICT, and FDSelect says whose a glyph is.
+        let (fd, _) = read_index(d, at + usize.wrap(i64.saturate(fds[0])))
+        for i in 0..fd.count {
+            let (s, e) = index_item(d, fd, i)
+            locals.push(private_subrs(d, at, dict_find(d, s, e, 18)))
+        }
+        let sel = dict_find(d, ts, te, 1237)
+        if sel.len() > 0 {
+            fdselect = at + usize.wrap(i64.saturate(sel[0]))
+        }
+    } else {
+        locals.push(private_subrs(d, at, dict_find(d, ts, te, 18)))
+    }
+    return Cff { charstrings: charstrings, globals: globals, locals: locals, fdselect: fdselect }
+}
+
+// Which font dict glyph g's local subroutines come from.
+fn fd_of(d: List<u8>, sel: usize, g: u32) -> usize {
+    if sel == 0 {
+        return 0
+    }
+    let format = u8_at(d, sel)
+    if format == 0 {
+        return usize(u8_at(d, sel + 1 + usize(g)))
+    }
+    if format == 3 {
+        let ranges = usize(u16_at(d, sel + 1))
+        var fd: usize = 0
+        for i in 0..ranges {
+            let at = sel + 3 + 3 * i
+            if u16_at(d, at) > g {
+                break
+            }
+            fd = usize(u8_at(d, at + 2))
+        }
+        return fd
+    }
+    return 0
+}
+
+// The bias added to a subroutine's number, which depends on how many there are.
+fn subr_bias(count: usize) -> i64 {
+    return if count < 1240 { 107 } else if count < 33900 { 1131 } else { 32768 }
+}
+
+fn cff_outline(d: List<u8>, cff: Cff, g: u32, out: mut Outline) {
+    let (s, e) = index_item(d, cff.charstrings, usize(g))
+    if s == e {
+        return
+    }
+    let fd = fd_of(d, cff.fdselect, g)
+    let locals = if fd < cff.locals.len() { cff.locals[fd] } else { empty_index() }
+    var c = Charstring { stack: [], x: 0.0, y: 0.0, sx: 0.0, sy: 0.0, open: false, stems: 0, done: false, ops: 0, locals: locals, globals: cff.globals }
+    c.run(d, s, e, 0, mut out)
+    c.close(mut out)
+}
+
+// The state of a Type 2 charstring as it runs: its operands, the pen, where the contour started,
+// and how many stems have been declared, which says how long a hint mask is.
+struct Charstring {
+    stack: List<f32>
+    x: f32
+    y: f32
+    sx: f32
+    sy: f32
+    open: bool
+    stems: usize
+    done: bool
+    // Operators run, against subroutines that call each other many times over.
+    ops: u32
+    locals: Index
+    globals: Index
+}
+
+impl Charstring {
+    fn close(mut self, out: mut Outline) {
+        if self.open {
+            if self.x != self.sx or self.y != self.sy {
+                line_to(mut out, self.sx, self.sy)
+            }
+            self.open = false
+        }
+    }
+
+    fn move_to(mut self, out: mut Outline, dx: f32, dy: f32) {
+        self.close(mut out)
+        self.x += dx
+        self.y += dy
+        self.sx = self.x
+        self.sy = self.y
+        out.verbs.push(0)
+        out.points.push(self.x)
+        out.points.push(self.y)
+        self.open = true
+    }
+
+    fn line(mut self, out: mut Outline, dx: f32, dy: f32) {
+        if not self.open {
+            self.move_to(mut out, 0.0f32, 0.0f32)
+        }
+        self.x += dx
+        self.y += dy
+        line_to(mut out, self.x, self.y)
+    }
+
+    fn curve(mut self, out: mut Outline, dxa: f32, dya: f32, dxb: f32, dyb: f32, dxc: f32, dyc: f32) {
+        if not self.open {
+            self.move_to(mut out, 0.0f32, 0.0f32)
+        }
+        let ax = self.x + dxa
+        let ay = self.y + dya
+        let bx = ax + dxb
+        let by = ay + dyb
+        self.x = bx + dxc
+        self.y = by + dyc
+        cubic_to(mut out, ax, ay, bx, by, self.x, self.y)
+    }
+
+    // Runs the program from start to end: a glyph's, or a subroutine's, `depth` calls in.
+    fn run(mut self, d: List<u8>, start: usize, end: usize, depth: u32, out: mut Outline) {
+        if depth > 10 {
+            self.done = true
+            return
+        }
+        var at = start
+        while at < end and not self.done {
+            let b = u32(d[at])
+            at += 1
+            self.ops += 1
+            if self.ops > 200000 {
+                self.done = true
+                return
+            }
+            if b >= 32 {
+                // A number.
+                if b <= 246 {
+                    self.push(f32.nearest(i32.wrap(b) - 139))
+                } else if b <= 250 {
+                    self.push(f32.nearest(i32.wrap((b - 247) * 256 + u8_at(d, at) + 108)))
+                    at += 1
+                } else if b <= 254 {
+                    self.push(f32.nearest(0 - i32.wrap((b - 251) * 256 + u8_at(d, at) + 108)))
+                    at += 1
+                } else {
+                    self.push(f32.nearest(i32.wrap(u32_at(d, at))) / 65536.0f32)
+                    at += 4
+                }
+                continue
+            }
+            if b == 28 {
+                self.push(f32.nearest(i16_at(d, at)))
+                at += 2
+                continue
+            }
+            let n = self.stack.len()
+            if b == 1 or b == 3 or b == 18 or b == 23 {
+                // Stems, perhaps after the width.
+                self.stems += n / 2
+                self.stack = []
+            } else if b == 19 or b == 20 {
+                // A hint mask, after any stems not declared before it.
+                self.stems += n / 2
+                self.stack = []
+                at += (self.stems + 7) / 8
+            } else if b == 21 {
+                if n >= 2 {
+                    let (dx, dy) = (self.stack[n - 2], self.stack[n - 1])
+                    self.move_to(mut out, dx, dy)
+                }
+                self.stack = []
+            } else if b == 22 {
+                if n >= 1 {
+                    let dx = self.stack[n - 1]
+                    self.move_to(mut out, dx, 0.0f32)
+                }
+                self.stack = []
+            } else if b == 4 {
+                if n >= 1 {
+                    let dy = self.stack[n - 1]
+                    self.move_to(mut out, 0.0f32, dy)
+                }
+                self.stack = []
+            } else if b == 5 {
+                var i: usize = 0
+                while i + 1 < n {
+                    let (dx, dy) = (self.stack[i], self.stack[i + 1])
+                    self.line(mut out, dx, dy)
+                    i += 2
+                }
+                self.stack = []
+            } else if b == 6 or b == 7 {
+                // Lines that alternate across and up, starting across for 6.
+                var across = b == 6
+                for i in 0..n {
+                    let v = self.stack[i]
+                    if across {
+                        self.line(mut out, v, 0.0f32)
+                    } else {
+                        self.line(mut out, 0.0f32, v)
+                    }
+                    across = not across
+                }
+                self.stack = []
+            } else if b == 8 {
+                var i: usize = 0
+                while i + 5 < n {
+                    self.curve6(mut out, i)
+                    i += 6
+                }
+                self.stack = []
+            } else if b == 24 {
+                // Curves, then a line.
+                var i: usize = 0
+                while i + 8 <= n {
+                    self.curve6(mut out, i)
+                    i += 6
+                }
+                if i + 1 < n {
+                    let (dx, dy) = (self.stack[i], self.stack[i + 1])
+                    self.line(mut out, dx, dy)
+                }
+                self.stack = []
+            } else if b == 25 {
+                // Lines, then a curve.
+                var i: usize = 0
+                while i + 8 <= n {
+                    let (dx, dy) = (self.stack[i], self.stack[i + 1])
+                    self.line(mut out, dx, dy)
+                    i += 2
+                }
+                if i + 5 < n {
+                    self.curve6(mut out, i)
+                }
+                self.stack = []
+            } else if b == 26 {
+                // Curves that start and end going up; an odd operand first is the first one's
+                // dx.
+                var i: usize = 0
+                var dx1 = 0.0f32
+                if n % 4 == 1 {
+                    dx1 = self.stack[0]
+                    i = 1
+                }
+                while i + 3 < n {
+                    let s = self.stack.copy()
+                    self.curve(mut out, dx1, s[i], s[i + 1], s[i + 2], 0.0f32, s[i + 3])
+                    dx1 = 0.0f32
+                    i += 4
+                }
+                self.stack = []
+            } else if b == 27 {
+                // Curves that start and end going across; an odd operand first is the first
+                // one's dy.
+                var i: usize = 0
+                var dy1 = 0.0f32
+                if n % 4 == 1 {
+                    dy1 = self.stack[0]
+                    i = 1
+                }
+                while i + 3 < n {
+                    let s = self.stack.copy()
+                    self.curve(mut out, s[i], dy1, s[i + 1], s[i + 2], s[i + 3], 0.0f32)
+                    dy1 = 0.0f32
+                    i += 4
+                }
+                self.stack = []
+            } else if b == 30 or b == 31 {
+                // Curves whose ends alternate between up and across, starting up for 30; the
+                // last can take one more operand for its other end.
+                let s = self.stack.copy()
+                var up = b == 30
+                var i: usize = 0
+                while i + 3 < n {
+                    let last = i + 5 == n
+                    let extra = if last { s[i + 4] } else { 0.0f32 }
+                    if up {
+                        self.curve(mut out, 0.0f32, s[i], s[i + 1], s[i + 2], s[i + 3], extra)
+                    } else {
+                        self.curve(mut out, s[i], 0.0f32, s[i + 1], s[i + 2], extra, s[i + 3])
+                    }
+                    up = not up
+                    i += 4
+                }
+                self.stack = []
+            } else if b == 10 or b == 29 {
+                // A call: the subroutine's number, less its bias, is on the stack.
+                if n == 0 {
+                    self.done = true
+                    return
+                }
+                let idx = if b == 10 { self.locals } else { self.globals }
+                let k = i64.saturate(self.stack[n - 1]) + subr_bias(idx.count)
+                _ = self.stack.pop()
+                if k < 0 {
+                    self.done = true
+                    return
+                }
+                let (s, e) = index_item(d, idx, usize.wrap(k))
+                if s == e {
+                    self.done = true
+                    return
+                }
+                self.run(d, s, e, depth + 1, mut out)
+            } else if b == 11 {
+                return
+            } else if b == 14 {
+                // The end; four operands more would be an accent over a base glyph, which OpenType
+                // fonts don't use.
+                self.done = true
+                self.stack = []
+                return
+            } else if b == 12 {
+                let op = u8_at(d, at)
+                at += 1
+                self.flex(mut out, op)
+                self.stack = []
+            } else {
+                self.stack = []
+            }
+        }
+    }
+
+    fn push(mut self, v: f32) {
+        if self.stack.len() < 48 {
+            self.stack.push(v)
+        }
+    }
+
+    fn curve6(mut self, out: mut Outline, i: usize) {
+        let s = self.stack.copy()
+        self.curve(mut out, s[i], s[i + 1], s[i + 2], s[i + 3], s[i + 4], s[i + 5])
+    }
+
+    // The flex operators: two curves, which a renderer without hinting draws as they are.
+    fn flex(mut self, out: mut Outline, op: u32) {
+        let s = self.stack.copy()
+        let n = s.len()
+        if op == 35 and n >= 12 {
+            self.curve(mut out, s[0], s[1], s[2], s[3], s[4], s[5])
+            self.curve(mut out, s[6], s[7], s[8], s[9], s[10], s[11])
+        } else if op == 34 and n >= 7 {
+            // hflex: dx1 dx2 dy2 dx3 dx4 dx5 dx6, ending at the height it started.
+            self.curve(mut out, s[0], 0.0f32, s[1], s[2], s[3], 0.0f32)
+            self.curve(mut out, s[4], 0.0f32, s[5], 0.0f32 - s[2], s[6], 0.0f32)
+        } else if op == 36 and n >= 9 {
+            // hflex1: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6, back to the height it started.
+            let y0 = self.y
+            self.curve(mut out, s[0], s[1], s[2], s[3], s[4], 0.0f32)
+            let dy6 = y0 - (self.y + s[6 + 1])
+            self.curve(mut out, s[5], 0.0f32, s[6], s[7], s[8], dy6)
+        } else if op == 37 and n >= 11 {
+            // flex1: the last point's other coordinate comes back to where it started.
+            let x0 = self.x
+            let y0 = self.y
+            var dx = 0.0f32
+            var dy = 0.0f32
+            for k in 0usize..5 {
+                dx += s[2 * k]
+                dy += s[2 * k + 1]
+            }
+            self.curve(mut out, s[0], s[1], s[2], s[3], s[4], s[5])
+            let ax = s[6]
+            let ay = s[7]
+            let bx = s[8]
+            let by = s[9]
+            if dx.abs() > dy.abs() {
+                let ex = s[10]
+                let ey = y0 - (self.y + ay + by)
+                self.curve(mut out, ax, ay, bx, by, ex, ey)
+            } else {
+                let ey = s[10]
+                let ex = x0 - (self.x + ax + bx)
+                self.curve(mut out, ax, ay, bx, by, ex, ey)
+            }
+        }
+    }
+}

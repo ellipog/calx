@@ -138,8 +138,9 @@ These change the image in place.
 | `im.fill_rect(x: i64, y: i64, width, height, color: Color)` | Fills a rectangle with `color` |
 | `im.fill(color: Color)` | Fills the whole image |
 | `im.flood_fill(x, y, color: Color, threshold: u8 = 0)` | Fills the area around (x, y) that's the color it is there, as Pillow's `ImageDraw.floodfill` does. It takes the pixels joined to (x, y) up, down, left or right, and no more than `threshold` from its color in any channel |
+| `im.draw_text(x: i64, y: i64, text: String, font: Font, size: f64, color: Color)` | Draws `text` in a [`Font`](font.md) at `size` pixels per em, antialiased, as Pillow's `ImageDraw.text` places it: (x, y) is the left of the first line at its ascender. Lines split at `\n` ([drawing text](font.md#drawing-text)) |
 
-`paste`, `overlay` and `fill_rect` take positions that can be negative or past the edge. Whatever falls outside the image is cut off.
+`paste`, `overlay`, `fill_rect` and `draw_text` take positions that can be negative or past the edge. Whatever falls outside the image is cut off.
 
 ```calx
 import std.image.{Color, Image, Kind}
@@ -211,5 +212,6 @@ Writing a JPEG does its pixel work with AVX2, as libjpeg-turbo's hand-written SI
 ## See also
 
 - [std.image.png](image-png.md) and [std.image.jpeg](image-jpeg.md): the codecs on their own, for raw pixels without an `Image`
+- [std.font](font.md): fonts, and the text `draw_text` draws
 - [std.zlib](zlib.md): the compression inside PNG files
 - [std.fs](fs.md): reading and writing the files

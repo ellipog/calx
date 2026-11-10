@@ -5,6 +5,7 @@
 /// An `Image` holds its pixels 8 bits a channel, row by row from the top, in `pixels`.
 module std.image
 
+import std.font.{Font}
 import std.fs.{read, write}
 import std.image.jpeg
 import std.image.jpeg.{Sampling}
@@ -725,6 +726,58 @@ impl Image {
                 for c in 0usize..ch {
                     self.pixels[at + c] = px[c]
                 }
+            }
+        }
+    }
+
+    /// Draws `text` in `font` at `size` pixels per em, in `color`, as Pillow's `ImageDraw.text`
+    /// places it: (x, y) is the left of the first line at its ascender, rounded up to a whole
+    /// pixel. Lines split at `\n`, the font's line height apart. The glyphs are antialiased, at
+    /// their pens' fractions of a pixel, and blended over the image by their coverage and the
+    /// color's alpha; an image with alpha gets more where the text covers it. Text past the edges
+    /// is cut off.
+    @track_caller
+    pub fn draw_text(mut self, x: i64, y: i64, text: String, font: Font, size: f64, color: Color) {
+        self.check()
+        let m = font.mask(text, size)
+        let ch = self.form.channels()
+        let alpha = self.form.has_alpha()
+        let ink = pixel_bytes(self.form, color)
+        let left = x + m.x
+        let top = y + m.y
+        let x0 = left.max(0)
+        let y0 = top.max(0)
+        let x1 = (left + i64.wrap(m.width)).min(i64.wrap(self.w))
+        let y1 = (top + i64.wrap(m.height)).min(i64.wrap(self.h))
+        let colors = if alpha { ch - 1 } else { ch }
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let c = u32(m.coverage[usize.wrap(row - top) * m.width + usize.wrap(col - left)])
+                if c == 0 {
+                    continue
+                }
+                // How much of the ink this pixel gets, 0 to 255.
+                let a = div255(c * u32(color.a) + 128)
+                if a == 0 {
+                    continue
+                }
+                let at = (usize.wrap(row) * self.w + usize.wrap(col)) * ch
+                if not alpha {
+                    for k in 0..colors {
+                        let v = u32(self.pixels[at + k])
+                        self.pixels[at + k] = u8.wrap(div255(v * (255 - a) + u32(ink[k]) * a + 128))
+                    }
+                    continue
+                }
+                // Over what's there: the ink's share, then the rest of what was there.
+                let da = u32(self.pixels[at + colors])
+                let keep = div255(da * (255 - a) + 128)
+                let out_a = a + keep
+                for k in 0..colors {
+                    let v = u32(self.pixels[at + k])
+                    self.pixels[at + k] = u8.wrap((u32(ink[k]) * a + v * keep + out_a / 2) / out_a)
+                }
+                self.pixels[at + colors] = u8.wrap(out_a)
             }
         }
     }

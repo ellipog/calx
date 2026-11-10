@@ -215,6 +215,8 @@ fn main() ! Error {
 | `compression.zstd.decompress(b)`, `ZstdDict(d)` | `decompress(b)` and `Dictionary.new(d)` from [`std.zstd`](../std/zstd.md), with the same errors, big frames on all the processors |
 | `compression.zstd.compress(b, 19)`, `compress(b, 19, zstd_dict=d)` | `compress(b, 19)` and `d.compress(b, 19)` from [`std.zstd`](../std/zstd.md#compressing), big inputs on all the processors, the same bytes on any machine |
 | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)`, `d.dict_content` | `train_dict(samples, 16384)`, `finalize_dict(d, samples, 16384, 3)` and `d.to_bytes()` from [`std.zstd`](../std/zstd.md#training-one), 3 to 5 times as fast |
+| Pillow's `Image.open(p)`, `im.resize((w, h))`, `im.save(p)` | `Image.open(p)`, `im.resize(w, h)` and `im.save(p)` from [`std.image`](../std/image.md), with Pillow's pixels |
+| `ImageFont.truetype(p, 24)`, `ImageDraw.Draw(im).text((x, y), t, font=f, fill=c)` | `Font.open(p)` from [`std.font`](../std/font.md), then `im.draw_text(x, y, t, font, 24.0, c)`; `font.measure(t, 24.0)` for `f.getlength(t)` |
 | `datetime.now()`, `strftime`, `strptime` | `unsafe { Timestamp.now() }`, `format` and `parse` from [`std.time`](../std/time.md), with Python's codes |
 | `time.perf_counter()` | `unsafe { Instant.now() }` from [`std.time`](../std/time.md) |
 | `time.sleep(0.5)` | `unsafe { sleep(500_000_000) }`, in nanoseconds, from [`std.thread`](../std/thread.md) |
