@@ -1,0 +1,780 @@
+// Writes std/text/names.calx, the character names std.unicode.names gives and looks up, from the Unicode
+// Character Database's own files, which it downloads from unicode.org into build/ucd/<version> the
+// first time, and reads from there after.
+//
+//     calx run tools/unicode/gen_names.calx
+//
+// The names are Unicode 16's, as Python 3.14's unicodedata and Java 25's Character have them:
+//
+// - Each rune's name in UnicodeData.txt, and the names made from a rune's number: `CJK UNIFIED
+//   IDEOGRAPH-4E00`, the Hangul syllables, and families such as `CJK COMPATIBILITY IDEOGRAPH-F900`
+//   and `TANGUT COMPONENT-001`, which the table keeps as a range each.
+// - The aliases in NameAliases.txt and the sequences in NamedSequences.txt, which Python's
+//   `lookup` takes.
+// - The names Java gives the control characters, which have none in Unicode: the Unicode 1 name,
+//   or the abbreviation where a later character took that, as U+1F514 took `BELL`, or else the
+//   figment alias. Java names a rune it has no name for by its block and number.
+//
+// The tables are text, which a build reads fast: numbers are written in base 93, in the printable
+// ASCII runes but `#`, 128 to a line. The names are in alphabetical order, as numbers of
+// words, each sharing what it can of the words of the one before, but every 8th.
+import std.env
+import std.fs
+import std.http
+import std.path
+import std.process
+
+const VERSION: str = "16.0.0"
+const MAX: u32 = 0x10FFFF
+const CHECK: usize = 8
+const PLACE_CHECK: usize = 16
+const WORD_STEP: usize = 4
+const LINE: usize = 128
+// The first bytes of each entry written whole, which a search reads before the entry, and how
+// many of them go on a line of KEYS.
+const KEY: usize = 16
+const KEY_LINE: usize = 8
+
+// What an entry of the table is: a name, an alias, or a name only Java gives.
+const NAME: u32 = 1
+const ALIAS: u32 = 2
+const JAVA: u32 = 4
+
+fn notice() -> String {
+    let text = #"
+    // The tables below are from the Unicode Character Database, under this notice:
+    //
+    // UNICODE LICENSE V3
+    //
+    // COPYRIGHT AND PERMISSION NOTICE
+    //
+    // Copyright (c) 1991-2024 Unicode, Inc.
+    //
+    // NOTICE TO USER: Carefully read the following legal agreement. BY DOWNLOADING, INSTALLING,
+    // COPYING OR OTHERWISE USING DATA FILES, AND/OR SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE
+    // BOUND BY, ALL OF THE TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+    // DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a copy of data files and
+    // any associated documentation (the "Data Files") or software and any associated documentation
+    // (the "Software") to deal in the Data Files or Software without restriction, including without
+    // limitation the rights to use, copy, modify, merge, publish, distribute, and/or sell copies of
+    // the Data Files or Software, and to permit persons to whom the Data Files or Software are
+    // furnished to do so, provided that either (a) this copyright and permission notice appear with
+    // all copies of the Data Files or Software, or (b) this copyright and permission notice appear in
+    // associated Documentation.
+    //
+    // THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    // PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
+    //
+    // IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE BE LIABLE FOR ANY
+    // CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM
+    // LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+    // ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA FILES OR
+    // SOFTWARE.
+    //
+    // Except as contained in this notice, the name of a copyright holder shall not be used in
+    // advertising or otherwise to promote the sale, use or other dealings in these Data Files or
+    // Software without prior written authorization of the copyright holder.
+    "#
+    return "{text}\n"
+}
+
+fn stop(why: String) {
+    eprintln("gen_names: {why}")
+    process.exit(1)
+}
+
+// A file of the database, downloaded once into `cache`.
+fn ucd_file(cache: String, name: String) -> String {
+    let local = "{cache}/{name}"
+    if not fs.is_file(local.copy()) {
+        let url = "https://www.unicode.org/Public/{VERSION}/ucd/{name}"
+        println("downloading {url}")
+        var r = http.get(url.copy(), [], 60000, 16777216)
+        match r.wait() {
+            ok(resp) => {
+                if resp.status != 200 {
+                    stop("{url} gave status {resp.status}")
+                }
+                fs.make_dir_all(cache)!
+                fs.write(local.copy(), resp.body)!
+            },
+            err(e) => stop("can't download {url}: {e}"),
+        }
+    }
+    return fs.read_text(local)! ?? String()
+}
+
+fn hex(s: String) -> u32 {
+    return u32.parse_radix(s.trim(), 16) ?? panic("{s} isn't hex")
+}
+
+// The fields of each line that isn't a comment, split at `;`, without the comment at its end.
+fn rows(text: String) -> List<List<String>> {
+    var out: List<List<String>> = []
+    for line in text.lines() {
+        let data = (line.split_once("#") ?? (line.copy(), String())).0
+        if data.trim().is_empty() {
+            continue
+        }
+        out.push(data.split(";").map(|f| f.trim()))
+    }
+    return out
+}
+
+fn span(s: String) -> (u32, u32) {
+    if let (lo, hi) = s.split_once("..") {
+        return (hex(lo), hex(hi))
+    }
+    let c = hex(s.copy())
+    return (c, c)
+}
+
+fn hex_upper(n: u32) -> String {
+    let digits = "0123456789ABCDEF"
+    if n == 0 {
+        return String("0")
+    }
+    var out = List<u8>()
+    var v = n
+    while v > 0 {
+        out.push(digits.byte_at(usize(v % 16)))
+        v /= 16
+    }
+    out.reverse()
+    return String.from_utf8(out) ?? String()
+}
+
+// --- writing numbers ------------------------------------------------------------------------------
+
+// The rune for the digit `v`, from 0 to 92: printable ASCII, but `#`, which could end a raw string.
+fn sym(v: u32) -> rune {
+    if v >= 93 {
+        panic("{v} isn't a digit")
+    }
+    let c = v + 0x21
+    return rune.try_from(if c >= 0x23 { c + 1 } else { c })!
+}
+
+// How many digits a number takes: 1 below `a`, 2 below `a + b * 93`, 3 below that and `c * 93^2`,
+// and 4 past it, so the first digit says how many follow.
+struct Tiers {
+    a: u32
+    b: u32
+    c: u32
+}
+
+fn put_num(out: mut String, v: u32, t: Tiers) {
+    if v < t.a {
+        out.push(sym(v))
+        return
+    }
+    var x = v - t.a
+    if x < t.b * 93 {
+        out.push(sym(t.a + x / 93))
+        out.push(sym(x % 93))
+        return
+    }
+    x -= t.b * 93
+    if x < t.c * 8649 {
+        out.push(sym(t.a + t.b + x / 8649))
+        out.push(sym(x / 93 % 93))
+        out.push(sym(x % 93))
+        return
+    }
+    x -= t.c * 8649
+    if x / 804357 >= 93 - t.a - t.b - t.c {
+        panic("{v} is too big for its tiers")
+    }
+    out.push(sym(t.a + t.b + t.c + x / 804357))
+    out.push(sym(x / 8649 % 93))
+    out.push(sym(x / 93 % 93))
+    out.push(sym(x % 93))
+}
+
+// `v` in exactly `width` digits.
+fn put_fixed(out: mut String, v: u32, width: u32) {
+    var p: u32 = 1
+    for _ in 1..width {
+        p *= 93
+    }
+    if v / p >= 93 {
+        panic("{v} doesn't fit {width} digits")
+    }
+    var x = v
+    for _ in 0..width {
+        out.push(sym(x / p))
+        x %= p
+        p = if p >= 93 { p / 93 } else { 1 }
+    }
+}
+
+// The tiers that write `values` in the fewest digits.
+fn best_tiers(values: List<u32>) -> Tiers {
+    var sorted = values.copy()
+    sorted.sort()
+    let n = sorted.len()
+    let top = u64(sorted[n - 1]) + 1
+    var best = Tiers { a: 0, b: 0, c: 0 }
+    var best_size: u64 = 0xFFFFFFFFFFFFFFFF
+    for a in 1u32..92 {
+        for b in 0u32..(92 - a) {
+            for c in 0u32..(93 - a - b) {
+                let d = 93 - a - b - c
+                let t1 = u64(a)
+                let t2 = t1 + u64(b) * 93
+                let t3 = t2 + u64(c) * 8649
+                if t3 + u64(d) * 804357 < top {
+                    continue
+                }
+                let size = u64(n) + u64(n - below(sorted, t1)) + u64(n - below(sorted, t2)) + u64(n - below(sorted, t3))
+                if size < best_size {
+                    best_size = size
+                    best = Tiers { a, b, c }
+                }
+            }
+        }
+    }
+    return best
+}
+
+// How many of `sorted` are below `t`.
+fn below(sorted: List<u32>, t: u64) -> usize {
+    var lo: usize = 0
+    var hi = sorted.len()
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if u64(sorted[mid]) < t {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+fn zig(d: i64) -> u32 {
+    return u32.wrap(if d >= 0 { 2 * d } else { -2 * d - 1 })
+}
+
+// `text` as a raw block string constant, LINE runes to a line.
+fn block(name: str, doc: str, text: String) -> String {
+    return block_lines(name, doc, text, LINE)
+}
+
+fn block_lines(name: str, doc: str, text: String, line: usize) -> String {
+    var out: String = "/// {doc}\npub const {name}: str = #\"\n"
+    var i: usize = 0
+    while i < text.len() {
+        let end = (i + line).min(text.len())
+        out.push_str(text[i..end])
+        out.push('\n')
+        i = end
+    }
+    out.push_str("\"#\n")
+    return out
+}
+
+fn table(name: str, doc: str, values: List<u32>) -> String {
+    var lines: List<String> = ["/// {doc}", "pub const {name}: [u32; {values.len()}] = ["]
+    var i: usize = 0
+    while i < values.len() {
+        let end = (i + 8).min(values.len())
+        var parts: List<String> = []
+        for k in i..end {
+            parts.push("0x{hex_upper(values[k])}")
+        }
+        lines.push("    {parts.join(", ")},")
+        i = end
+    }
+    lines.push("]")
+    return "{lines.join("\n")}\n"
+}
+
+fn strings(name: str, doc: str, values: List<String>) -> String {
+    var lines: List<String> = ["/// {doc}", "pub const {name}: [str; {values.len()}] = ["]
+    for v in values {
+        lines.push("    \"{v}\",")
+    }
+    lines.push("]")
+    return "{lines.join("\n")}\n"
+}
+
+fn tiers(prefix: str, t: Tiers) -> String {
+    return "pub const {prefix}_A: u32 = {t.a}\npub const {prefix}_B: u32 = {t.b}\npub const {prefix}_C: u32 = {t.c}\n"
+}
+
+// --- names into words ----------------------------------------------------------------------------
+
+// A name's words: split at spaces, and after each hyphen inside a word, so `LEFT-POINTING` is
+// `LEFT-` and `POINTING`. A word that ends with a hyphen before a space, as `BSKA-` does, ends
+// with `_` for the space.
+fn words_of(name: String) -> List<String> {
+    var out: List<String> = []
+    let parts = name.split(" ")
+    for i in 0..parts.len() {
+        let w = parts[i].copy()
+        var from: usize = 0
+        for k in 0..w.len() {
+            if w.byte_at(k) == b'-' and k + 1 < w.len() {
+                out.push(w[from..k + 1])
+                from = k + 1
+            }
+        }
+        var last = w[from..]
+        if last.ends_with("-") and i + 1 < parts.len() {
+            last.push('_')
+        }
+        out.push(last)
+    }
+    return out
+}
+
+// The name the words make, as std.unicode puts them back together.
+fn name_of(words: List<String>) -> String {
+    var out = String()
+    for i in 0..words.len() {
+        let w = words[i].copy()
+        if i > 0 and not (words[i - 1].ends_with("-") or words[i - 1].ends_with("_")) {
+            out.push(' ')
+        }
+        out.push_str(w.replace("_", " "))
+    }
+    return out
+}
+
+// --- families -------------------------------------------------------------------------------------
+
+struct Family {
+    lo: u32
+    hi: u32
+    prefix: String
+    // 0 for the rune's number in hex; otherwise a decimal of at least this many digits, counting
+    // from `base` at `lo`.
+    digits: u32
+    base: u32
+}
+
+fn family_name(f: Family, c: u32) -> String {
+    if f.digits == 0 {
+        return "{f.prefix}-{hex_upper(c)}"
+    }
+    return "{f.prefix}-{"{c - f.lo + f.base}".pad_start(usize(f.digits), '0')}"
+}
+
+fn main() {
+    let here = path.parent_dir(env.script() ?? panic("run this with `calx run`")) ?? String()
+    let root = path.parent_dir(path.parent_dir(here) ?? String()) ?? String()
+    let cache = "{root}/build/ucd/{VERSION}"
+
+    // Names, Unicode 1 names, and the ranges UnicodeData.txt gives as a first and a last line.
+    var names = Map<u32, String>()
+    var uni1 = Map<u32, String>()
+    var controls: List<u32> = []
+    var assigned: List<bool> = [false; usize(MAX) + 1]
+    var ranges: List<(u32, u32, String)> = []
+    var first: u32 = 0
+    for r in rows(ucd_file(cache.copy(), String("UnicodeData.txt"))) {
+        let c = hex(r[0].copy())
+        let n = r[1].copy()
+        if n.ends_with(", First>") {
+            first = c
+            continue
+        }
+        if n.ends_with(", Last>") {
+            ranges.push((first, c, n[1..n.len() - 7]))
+            for x in first..(c + 1) {
+                assigned[usize(x)] = true
+            }
+            continue
+        }
+        assigned[usize(c)] = true
+        if n == "<control>" {
+            controls.push(c)
+            if not r[10].is_empty() {
+                uni1.insert(c, r[10].copy())
+            }
+        } else if n.starts_with("<") {
+            stop("{n} at {hex_upper(c)}")
+        } else {
+            names.insert(c, n)
+        }
+    }
+
+    // Families: runs of names that are a prefix and the rune's number in hex, or a counted decimal.
+    var by_code: List<u32> = []
+    for (c, _) in names {
+        by_code.push(c)
+    }
+    by_code.sort()
+    var families: List<Family> = []
+    var in_family = Set<u32>()
+    var i: usize = 0
+    while i < by_code.len() {
+        let c = by_code[i]
+        let n = names[c].copy()
+        let dash = n.find_last("-") ?? 0
+        let tail = n[dash + 1..]
+        var f = Family { lo: c, hi: c, prefix: n[..dash], digits: 0, base: 0 }
+        let is_hex = dash > 0 and tail == hex_upper(c)
+        var is_dec = dash > 0 and not is_hex and tail.len() > 0
+        for k in 0..tail.len() {
+            if not (tail.byte_at(k) >= b'0' and tail.byte_at(k) <= b'9') {
+                is_dec = false
+            }
+        }
+        if not is_hex and not is_dec {
+            i += 1
+            continue
+        }
+        if is_dec {
+            f.base = u32.parse(tail.copy())!
+            f.digits = if tail.byte_at(0) == b'0' { u32.wrap(tail.len()) } else { 1 }
+        }
+        var j = i + 1
+        while j < by_code.len() and by_code[j] == by_code[j - 1] + 1 and names[by_code[j]] == family_name(f, by_code[j]) {
+            j += 1
+        }
+        if j - i >= 16 {
+            f.hi = by_code[j - 1]
+            for k in i..j {
+                in_family.insert(by_code[k])
+            }
+            families.push(f)
+            i = j
+        } else {
+            i += 1
+        }
+    }
+
+    // Aliases, and the names Java gives control characters.
+    var aliases: List<(String, u32, String)> = []
+    for r in rows(ucd_file(cache.copy(), String("NameAliases.txt"))) {
+        aliases.push((r[1].copy(), hex(r[0].copy()), r[2].copy()))
+    }
+    var taken = Set<String>()
+    for (_, n) in names {
+        taken.insert(n.copy())
+    }
+    var java = Map<u32, String>()
+    for c in controls {
+        var n = String()
+        if uni1.contains(c) {
+            let u = uni1[c].copy()
+            if not taken.contains(u) {
+                n = u
+            } else {
+                for a in aliases {
+                    if a.1 == c and a.2 == "abbreviation" {
+                        n = a.0.copy()
+                        break
+                    }
+                }
+            }
+        } else {
+            for a in aliases {
+                if a.1 == c and a.2 == "figment" {
+                    n = a.0.copy()
+                    break
+                }
+            }
+        }
+        if not n.is_empty() {
+            java.insert(c, n)
+        }
+    }
+
+    // The entries: each name, alias and Java name once, with what it is.
+    var kinds = Map<String, (u32, u32)>()
+    for (c, n) in names {
+        if not in_family.contains(c) {
+            kinds.insert(n.copy(), (c, NAME))
+        }
+    }
+    for a in aliases {
+        if let k = kinds.get(a.0) {
+            stop("the alias {a.0} is also the name of {hex_upper(k.0)}")
+        }
+        kinds.insert(a.0.copy(), (a.1, ALIAS))
+    }
+    for (c, n) in java {
+        if let k = kinds.get(n) {
+            if k.0 != c {
+                stop("Java's {n} for {hex_upper(c)} is {hex_upper(k.0)}'s")
+            }
+            kinds.insert(n.copy(), (c, k.1 | JAVA))
+        } else {
+            kinds.insert(n.copy(), (c, JAVA))
+        }
+    }
+    var entries: List<(String, u32, u32)> = []
+    for (n, k) in kinds {
+        entries.push((n.copy(), k.0, k.1))
+    }
+    entries.sort()
+
+    // The words, most used first.
+    var counts = Map<String, u32>()
+    var split: List<List<String>> = []
+    for e in entries {
+        let ws = words_of(e.0)
+        if name_of(ws) != e.0 {
+            stop("{e.0} splits into words that don't make it again")
+        }
+        for w in ws {
+            if counts.contains(w) {
+                counts[w] += 1
+            } else {
+                counts.insert(w.copy(), 1)
+            }
+        }
+        split.push(ws)
+    }
+    var ranked: List<(u32, String)> = []
+    for (w, n) in counts {
+        ranked.push((0xFFFFFFFF - n, w.copy()))
+    }
+    ranked.sort()
+    var rank = Map<String, u32>()
+    var word_text = String()
+    var word_len = String()
+    var word_at = String()
+    for k in 0..ranked.len() {
+        let w = ranked[k].1.copy()
+        if k % WORD_STEP == 0 {
+            put_fixed(mut word_at, u32.wrap(word_text.len()), 3)
+        }
+        put_fixed(mut word_len, u32.wrap(w.len()), 1)
+        word_text.push_str(w)
+        rank.insert(w, u32.wrap(k))
+    }
+
+    // The entries, each as the words it shares with the one before, its new words, and its rune
+    // as a difference from the one before's, with what it is.
+    var word_values: List<u32> = []
+    var code_values: List<u32> = []
+    for e in 0..entries.len() {
+        let shared = if e % CHECK == 0 { 0usize } else { common(split[e - 1], split[e]) }
+        for k in shared..split[e].len() {
+            word_values.push(rank[split[e][k]])
+        }
+        let d = if e % CHECK == 0 { entries[e].1 } else { zig(i64(entries[e].1) - i64(entries[e - 1].1)) }
+        code_values.push(d * 8 + entries[e].2)
+    }
+    let wt = best_tiers(word_values)
+    let ct = best_tiers(code_values)
+    var stream = String()
+    var stream_at = String()
+    var keys = String()
+    for e in 0..entries.len() {
+        if e % CHECK == 0 {
+            put_fixed(mut stream_at, u32.wrap(stream.len()), 3)
+            let n = entries[e].0.copy()
+            keys.push_str(n[..n.len().min(KEY)])
+            for _ in n.len()..KEY {
+                keys.push('~')
+            }
+        }
+        let shared = if e % CHECK == 0 { 0usize } else { common(split[e - 1], split[e]) }
+        let fresh = split[e].len() - shared
+        if shared < 10 and fresh < 9 {
+            stream.push(sym(u32.wrap(shared * 9 + fresh)))
+        } else {
+            stream.push(sym(90))
+            stream.push(sym(u32.wrap(shared)))
+            stream.push(sym(u32.wrap(fresh)))
+        }
+        for k in shared..split[e].len() {
+            put_num(mut stream, rank[split[e][k]], wt)
+        }
+        put_num(mut stream, code_values[e], ct)
+    }
+
+    // For each rune with a name or a Java name, in order, its entry, as a difference from the one
+    // before's, and the runs of such runes.
+    var place = Map<u32, u32>()
+    for e in 0..entries.len() {
+        if (entries[e].2 & (NAME | JAVA)) != 0 {
+            if place.contains(entries[e].1) {
+                stop("{hex_upper(entries[e].1)} has two names")
+            }
+            place.insert(entries[e].1, u32.wrap(e))
+        }
+    }
+    var named: List<u32> = []
+    for (c, _) in place {
+        named.push(c)
+    }
+    named.sort()
+    var place_values: List<u32> = []
+    for k in 0..named.len() {
+        let j = place[named[k]]
+        place_values.push(if k % PLACE_CHECK == 0 { j } else { zig(i64(j) - i64(place[named[k - 1]])) })
+    }
+    let pt = best_tiers(place_values)
+    var places = String()
+    var places_at = String()
+    var run_start: List<u32> = []
+    var run_len: List<u32> = []
+    var run_first: List<u32> = []
+    for k in 0..named.len() {
+        if k % PLACE_CHECK == 0 {
+            put_fixed(mut places_at, u32.wrap(places.len()), 3)
+        }
+        put_num(mut places, place_values[k], pt)
+        if k == 0 or named[k] != named[k - 1] + 1 {
+            var n: u32 = 1
+            while k + usize(n) < named.len() and named[k + usize(n)] == named[k] + n {
+                n += 1
+            }
+            run_start.push(named[k])
+            run_len.push(n)
+            run_first.push(u32.wrap(k))
+        }
+    }
+    let run_count = run_start.len()
+
+    // The ranges of names made from a rune's number, and the runes Java names by their block.
+    var cjk: List<u32> = []
+    var tangut: List<u32> = []
+    for r in ranges {
+        if r.2.starts_with("CJK Ideograph") {
+            cjk.push(r.0)
+            cjk.push(r.1)
+        } else if r.2.starts_with("Tangut Ideograph") {
+            tangut.push(r.0)
+            tangut.push(r.1)
+        }
+    }
+    var block_of: List<(u32, u32, String)> = []
+    for r in rows(ucd_file(cache.copy(), String("Blocks.txt"))) {
+        let s = span(r[0].copy())
+        block_of.push((s.0, s.1, r[1].to_upper_root().replace("-", " ").replace("_", " ")))
+    }
+    var java_lo: List<u32> = []
+    var java_hi: List<u32> = []
+    var java_block: List<String> = []
+    for b in block_of {
+        var c = b.0
+        while c <= b.1 {
+            let bare = assigned[usize(c)] and not place.contains(c) and not in_family.contains(c)
+            let n = java_lo.len()
+            if bare {
+                if n > 0 and java_hi[n - 1] + 1 == c and java_block[n - 1] == b.2 {
+                    java_hi[n - 1] = c
+                } else {
+                    java_lo.push(c)
+                    java_hi.push(c)
+                    java_block.push(b.2.copy())
+                }
+            }
+            c += 1
+        }
+    }
+    // Which blocks of 256 runes hold any rune that's assigned, a bit each, 32 to a number.
+    var any: List<u32> = [0u32; usize(MAX + 1) / 8192]
+    for c in 0..(usize(MAX) + 1) {
+        if assigned[c] {
+            any[c / 8192] |= 1u32 << u32.wrap(c / 256 % 32)
+        }
+    }
+
+    // Named sequences, in order, and the jamo's short names for the Hangul syllables.
+    var seqs: List<(String, String)> = []
+    for r in rows(ucd_file(cache.copy(), String("NamedSequences.txt"))) {
+        seqs.push((r[0].copy(), r[1].copy()))
+    }
+    seqs.sort()
+    var jamo_l: List<String> = []
+    var jamo_v: List<String> = []
+    var jamo_t: List<String> = [String()]
+    for r in rows(ucd_file(cache.copy(), String("Jamo.txt"))) {
+        let c = hex(r[0].copy())
+        if c >= 0x1100 and c < 0x1113 {
+            jamo_l.push(r[1].copy())
+        } else if c >= 0x1161 and c < 0x1176 {
+            jamo_v.push(r[1].copy())
+        } else if c >= 0x11A8 and c < 0x11C3 {
+            jamo_t.push(r[1].copy())
+        }
+    }
+
+    var lo: List<u32> = []
+    var hi: List<u32> = []
+    var digits: List<u32> = []
+    var base: List<u32> = []
+    var prefixes: List<String> = []
+    for f in families {
+        lo.push(f.lo)
+        hi.push(f.hi)
+        digits.push(f.digits)
+        base.push(f.base)
+        prefixes.push(f.prefix.copy())
+    }
+    var seq_names: List<String> = []
+    var seq_runes: List<String> = []
+    for s in seqs {
+        seq_names.push(s.0.copy())
+        seq_runes.push(s.1.copy())
+    }
+    let parts: List<String> = [
+        String("/// Unicode's character names, for std.unicode.names: `name` and `lookup`, as Python has them, and"),
+        String("/// `java_name` and `java_code_point_of`, which std.nbt's SNBT reads `\\N\{...\}` with."),
+        "/// Written by tools/unicode/gen_names.calx from Unicode {VERSION}; don't edit by hand.",
+        String("module std.text.names"),
+        String(),
+        notice(),
+        String("// Numbers are written in base 93, in the printable ASCII runes but `#`, and in each str"),
+        String("// constant, a newline follows each LINE of them."),
+        String("/// What an entry is: a rune's name, an alias, or a name Java gives a control character."),
+        "pub const NAME: u32 = {NAME}\npub const ALIAS: u32 = {ALIAS}\npub const JAVA: u32 = {JAVA}",
+        "/// How many entries and words there are, how many entries go between two written whole, how many\n/// places between two in PLACES_AT, and how many words between two in WORD_AT.",
+        "pub const ENTRIES: usize = {entries.len()}\npub const WORDS: usize = {ranked.len()}\npub const CHECK: usize = {CHECK}\npub const PLACE_CHECK: usize = {PLACE_CHECK}\npub const WORD_STEP: usize = {WORD_STEP}\npub const KEY: usize = {KEY}\npub const KEY_LINE: usize = {KEY_LINE}\npub const LINE: usize = {LINE}",
+        String("/// The digits a number takes: 1 below A, 2 below A + B * 93, 3 below that and C * 93^2, and 4 past it."),
+        tiers("WORD", wt),
+        tiers("CODE", ct),
+        tiers("PLACE", pt),
+        block("WORD_TEXT", "The words names are made of, most used first, one after the other, `_` for a space.", word_text),
+        block("WORD_LEN", "Each word's length, in one digit.", word_len),
+        block("WORD_AT", "Where each WORD_STEPth word starts in WORD_TEXT, in three digits.", word_at),
+        block("STREAM", "The entries, in order of their names: the words shared with the one before and the new ones, in one digit, or a 90 and one digit each, the new words' numbers, then the rune, as its difference from the one before's, zigzagged, times 8, with what the entry is. Every CHECKth is whole.", stream),
+        block("STREAM_AT", "Where each CHECKth entry starts in STREAM, in three digits.", stream_at),
+        block_lines("KEYS", "The first KEY bytes of each CHECKth entry's name, `~` past its end, KEY_LINE to a line.", keys, KEY * KEY_LINE),
+        block("PLACES", "For each rune with a name or a Java name, in order, its entry, as its difference from the one before's, zigzagged. Every PLACE_CHECKth is whole.", places),
+        block("PLACES_AT", "Where each PLACE_CHECKth number starts in PLACES, in three digits.", places_at),
+        table("RUN_START", "The runs of runes with a name or a Java name: the first rune of each.", run_start),
+        table("RUN_LEN", "How many runes each run has.", run_len),
+        table("RUN_FIRST", "The first rune's number in PLACES.", run_first),
+        table("FAMILY_LO", "The first rune of each family of names made from a rune's number, such as `CJK COMPATIBILITY IDEOGRAPH-F900`.", lo),
+        table("FAMILY_HI", "The last rune of each family.", hi),
+        table("FAMILY_DIGITS", "0 for a family named by the rune's number in hex, or else how many digits its decimal count has at least.", digits),
+        table("FAMILY_BASE", "The count at the family's first rune.", base),
+        strings("FAMILY_PREFIX", "What comes before each family's `-`.", prefixes),
+        table("CJK", "The ranges of the CJK unified ideographs, named `CJK UNIFIED IDEOGRAPH-` and their number.", cjk),
+        table("TANGUT", "The ranges of the Tangut ideographs, which Python's `lookup` takes as `TANGUT IDEOGRAPH-` and their number, though `name` gives them none.", tangut),
+        table("ASSIGNED", "Whether each block of 256 runes holds a rune that's assigned, as bit `c >> 8 & 31` of number `c >> 13`, so the rest need no looking up.", any),
+        table("JAVA_LO", "The first rune of each range Java names by its block, as `PRIVATE USE AREA E000`.", java_lo),
+        table("JAVA_HI", "The last rune of each.", java_hi),
+        strings("JAVA_BLOCK", "Each range's block, as Java writes it.", java_block),
+        strings("SEQUENCE_NAMES", "The named sequences' names, in order.", seq_names),
+        strings("SEQUENCE_RUNES", "Each named sequence's runes, in hex.", seq_runes),
+        strings("JAMO_L", "The short names of the jamo a Hangul syllable starts with.", jamo_l),
+        strings("JAMO_V", "Of its vowels.", jamo_v),
+        strings("JAMO_T", "Of the jamo it may end with, the first for none.", jamo_t),
+    ]
+    let out = "{root}/std/text/names.calx"
+    fs.write_text(out.copy(), parts.join("\n"))!
+    println("{out}: {entries.len()} entries, {ranked.len()} words, {families.len()} families, {run_count} runs, {java_lo.len()} Java blocks")
+    println("words {word_text.len()}, lengths {word_len.len()}, stream {stream.len()}, places {places.len()}")
+}
+
+// How many words two names share at their start, at most 92.
+fn common(a: List<String>, b: List<String>) -> usize {
+    var n: usize = 0
+    while n < a.len() and n < b.len() and n < 92 and a[n] == b[n] {
+        n += 1
+    }
+    return n.min(b.len())
+}

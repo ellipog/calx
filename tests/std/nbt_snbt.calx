@@ -26,6 +26,11 @@ fn main() {
     // Strings: either quote, escapes, surrogate pairs, and bare words.
     println("{show("'say \"hi\"'")} {show("\"\\u00e9\\x41\\U0001F600\"")} {show("\"\\uD83D\\uDE00\"")} {show("\"\\s\\t\"")} {show("\"\\ n\"")}")
     // out: 'say "hi"' "éA😀" "😀" " \t" "\n"
+    // `\N{name}`: Java's names, in any case and spaced, a name by block, and surrogates by name.
+    println("{show("\"\\N\{latin small letter a\}\\N \{ SNOWMAN \}\\ N\{DIGIT ONE\}\"")} {show("'\\N\{GRINNING FACE\}'")} {show("\"\\N\{CJK UNIFIED IDEOGRAPHS 4E00\}\"")}")
+    // out: "a☃1" "😀" "一"
+    println("{show("\"\\N\{HIGH SURROGATES D800\}\\N\{LOW SURROGATES DE00\}\"")} {show("\"\\N\{HIGH SURROGATES D800\}x\"")}")
+    // out: "𐈀" "?x"
     println("{show("abc")} {show("a-b.c+d")} {show("TRUE")} {show("False")} {show("truey")} {show("Infinity")}")
     // out: "abc" "a-b.c+d" 1b 0b "truey" "Infinity"
     // bool() and uuid().
@@ -49,6 +54,9 @@ fn main() {
     println(show("\{\"\":1\}"))    // out: error: line 1, column 2: an empty key, which SNBT doesn't take
     println(show("\"\\q\""))    // out: error: line 1, column 2: `\` then `q` isn't an escape SNBT has
     println(show("\"\\u12\""))    // out: error: line 1, column 2: `\u` takes 4 hexadecimal digits
+    println(show("\"\\N\{LF\}\""))    // out: error: line 1, column 2: no character is named `LF`, as Java's `Character.codePointOf` reads names
+    println(show("\"\\N\{LATIN_SMALL\}\""))    // out: error: line 1, column 10: `_` in a character's name, which has only letters, digits, spaces and `-`
+    println(show("\"\\N\{\}\""))    // out: error: line 1, column 2: `\N{}` needs a character's name, as `\N{SNOWMAN}`
     println(show("[1 2]"))    // out: error: line 1, column 4: `2` in a list, where `,` or `]` should be
     println(show("\{a:1"))    // out: error: line 1, column 5: the end in a compound, where `,` or `}` should be
     println(show("bool(\"x\")"))    // out: error: line 1, column 1: bool() takes a number or a boolean

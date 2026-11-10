@@ -128,7 +128,7 @@ What `parse_snbt` takes, as vanilla does:
 - Integers: `1` is an int, and `1b`, `1s`, `1i` and `1L` the other kinds, in either case. `u` or `s` before the letter makes it unsigned or signed, so `255ub` is -1b. Hex `0xFF` and binary `0b101` are unsigned unless they have `s`, so `0xFFFFFFFF` is -1, and a negative one needs it, as `-0x80sb`. `_` may go between digits, as `1_000`. A decimal integer can't start with 0, unless it's 0.
 - Floats and doubles: `1.5f` and `1.5d`, or `1.5`, `.5`, `1.` and `1e3` for doubles, rounded once from the text as Java does. One too big for its kind is an error, and -0.0 reads as 0.0.
 - White space between a number's parts, such as `1 .5` or `0x1F b`, though not inside its digits.
-- Strings in `"` or `'`, with the escapes `\\ \' \" \b \s \t \n \f \r`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`, and white space allowed between the `\` and its letter. A bare word of letters, digits and `_ - . +` that starts with a letter or `_` is a string too, and `true` and `false` in any case are 1b and 0b.
+- Strings in `"` or `'`, with the escapes `\\ \' \" \b \s \t \n \f \r`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`, and white space allowed between the `\` and its letter. `\N{name}` is a character by its name, as Java's `Character.codePointOf` reads it with [`java_code_point_of`](unicode-names.md): `\N{snowman}` and `\N{PRIVATE USE AREA E000}`, though not an alias, such as `\N{LF}`. White space may go before the `{`, and the name has letters, digits, spaces and `-`. A bare word of letters, digits and `_ - . +` that starts with a letter or `_` is a string too, and `true` and `false` in any case are 1b and 0b.
 - `bool(x)`, which is 1b if the number `x` isn't 0, and `uuid("...")`, the UUID's four ints, as Java's `UUID.fromString` reads it.
 - Arrays, `[B; 1, 2]`, whose integers take the array's kind unless they have a narrower one, lists of any kinds, and compounds, whose keys are quoted and not empty, or bare, and both may end with a comma.
 - White space anywhere between parts: what Java's `Character.isWhitespace` says, which isn't true of no-break spaces.
@@ -315,11 +315,11 @@ SNBT was checked against vanilla 26.3's `TagParser` and `SnbtPrinterTagVisitor` 
 - On 855 texts written to probe each rule above, and 45,000 random ones, `parse_snbt` accepted and rejected the same ones, read the same tag, kind for kind, and wrote it compact and laid out as vanilla does.
 - On 160,000 random decimals, floats and doubles of up to 20 digits with exponents up to 40, it rounded each to the same value.
 - All 1,975 files, written compact and laid out, read back as the tags they were written from.
+- On 6,542 strings with `\N{...}`, it took the same names and refused the same ones. They held 6,000 of the names [std.unicode.names](unicode-names.md) was checked on, in their cases and with their changes, the names of surrogates, alone and in pairs, and the edges of the escape. They read the same, but where the name was half a surrogate pair, as the next point says.
 
-`parse_snbt` differs from vanilla in four places:
+`parse_snbt` differs from vanilla in three places:
 
-- `\N{name}`, a character by its Unicode name, is an error for now, where vanilla looks the name up.
-- Half a surrogate pair, such as `\uD800` on its own, reads as `?`, as a Calx `String` can't hold it.
+- Half a surrogate pair, such as `\uD800` or `\N{HIGH SURROGATES D800}` on its own, reads as `?`, as a Calx `String` can't hold it.
 - Lists and compounds nest at most 512 deep, as in NBT. Vanilla's parser has no limit and slows down a lot on deep text.
 - Its errors are its own, a line and a column and what was found where, though it fails on the same text.
 

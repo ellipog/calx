@@ -202,6 +202,7 @@ fn main() ! Error {
 | `html.escape(t)`, `html.unescape(t)` | `escape(t)` and `unescape(t)` from [`std.html`](../std/html.md) |
 | `textwrap.fill(t, 70)`, `textwrap.dedent(t)`, `TextWrapper(width=40, ...)` | `fill(t, 70)`, `dedent(t)` and `Wrapper { width: 40, ... }` from [`std.textwrap`](../std/textwrap.md) |
 | `unicodedata.normalize("NFC", t)`, `unicodedata.is_normalized` | `normalize(t, Form.NFC)` and `is_normalized` from [`std.unicode`](../std/unicode.md) |
+| `unicodedata.name(c, None)`, `unicodedata.lookup(n)`, `"\N{SNOWMAN}"` | `name(r)` and `lookup(n)` from [`std.unicode.names`](../std/unicode-names.md), which give `none` where Python raises. Calx's strings have no `\N{...}`; write the rune or `\u{2603}` |
 | `sqlite3.connect(p)`, `execute`, `executemany`, `fetchall` | `Database.open(p)`, then `execute`, `execute_many` and `query` from [`std.sqlite`](../std/sqlite.md), with SQLite built in and each statement its own transaction unless it's between `begin` and `commit` |
 | `urllib.parse.quote`, `urlsplit`, `urljoin` | `encode`, `Url.parse`, `url.join` from [`std.url`](../std/url.md), or its `urlsplit`, `urljoin` and `urldefrag`, which give Python's results to the letter |
 | `jsonschema.validate(i, s)`, `Draft7Validator(s).iter_errors(i)`, `best_match(errors)` | `validate(i, s)`, `Validator.new(s, Draft.Draft7)` then `v.iter_errors(i)`, and `best_match(errors)` from [`std.json.schema`](../std/json-schema.md), with the same errors, messages, paths and order |

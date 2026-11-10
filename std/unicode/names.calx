@@ -1,0 +1,576 @@
+/// Unicode 16's character names: a rune's name and the runes a name names, as Python 3.14's
+/// `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and
+/// `Character.codePointOf` do, which std.nbt's `\N{...}` follows. The names are kept compressed in
+/// std.text.names, about 390 KB of a program, and read where they're asked for.
+module std.unicode.names
+
+import std.text.names.{ALIAS, ASSIGNED, CHECK, CJK, CODE_A, CODE_B, CODE_C, ENTRIES, FAMILY_BASE, FAMILY_DIGITS, FAMILY_HI, FAMILY_LO, FAMILY_PREFIX, JAMO_L, JAMO_T, JAMO_V, JAVA, JAVA_BLOCK, JAVA_HI, JAVA_LO, KEY, KEYS, KEY_LINE, LINE, NAME, PLACES, PLACES_AT, PLACE_A, PLACE_B, PLACE_C, PLACE_CHECK, RUN_FIRST, RUN_LEN, RUN_START, SEQUENCE_NAMES, SEQUENCE_RUNES, STREAM, STREAM_AT, TANGUT, WORD_A, WORD_AT, WORD_B, WORD_C, WORD_LEN, WORD_STEP, WORD_TEXT}
+
+// Hangul syllables, as the Unicode Standard's section 3.12 makes them from jamo.
+const S_BASE: u32 = 0xAC00
+const S_COUNT: u32 = 11172
+const V_COUNT: u32 = 21
+const T_COUNT: u32 = 28
+
+/// The name Python's `unicodedata.name` gives `r`, or `none` for a rune without one, such as a
+/// control character, a private use one, or one not assigned yet.
+pub fn name(r: rune) -> String? {
+    let c = u32(r)
+    if not maybe_assigned(c) {
+        return none
+    }
+    if c >= S_BASE and c < S_BASE + S_COUNT {
+        let s = c - S_BASE
+        return some("HANGUL SYLLABLE {JAMO_L[usize(s / (V_COUNT * T_COUNT))]}{JAMO_V[usize(s / T_COUNT % V_COUNT)]}{JAMO_T[usize(s % T_COUNT)]}")
+    }
+    if in_cjk(c) {
+        var out = String("CJK UNIFIED IDEOGRAPH-")
+        push_hex(mut out, c)
+        return some(out)
+    }
+    if let n = family_name(c) {
+        return some(n)
+    }
+    return entry_name(c, NAME)
+}
+
+/// The runes Python's `unicodedata.lookup` gives for `text`: a rune's name in any case, an alias
+/// such as `LF` or `NBSP`, a Hangul syllable's, a CJK or Tangut ideograph's by its number, or a
+/// named sequence's, which is more than one rune. `none` if nothing has that name.
+pub fn lookup(text: String) -> String? {
+    var up = String()
+    for i in 0..text.len() {
+        let b = text.byte_at(i)
+        if b >= 0x80 {
+            return none
+        }
+        up.push(rune(if b >= b'a' and b <= b'z' { b - 32 } else { b }))
+    }
+    if up.starts_with("HANGUL SYLLABLE ") {
+        let c = hangul(up[16..]) else return none
+        return one(c)
+    }
+    if let c = numbered(up, "CJK UNIFIED IDEOGRAPH-", false) {
+        return one(c)
+    }
+    if let c = numbered(up, "TANGUT IDEOGRAPH-", true) {
+        return one(c)
+    }
+    if let c = family_rune(up) {
+        return one(c)
+    }
+    if let c = find(up, NAME | ALIAS) {
+        return one(c)
+    }
+    var lo: usize = 0
+    var hi = SEQUENCE_NAMES.len()
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if SEQUENCE_NAMES[mid] < up {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo < SEQUENCE_NAMES.len() and SEQUENCE_NAMES[lo] == up {
+        var out = String()
+        for h in SEQUENCE_RUNES[lo].split(" ") {
+            out.push(rune.try_from(u32.parse_radix(h, 16)!)!)
+        }
+        return some(out)
+    }
+    return none
+}
+
+/// The name Java's `Character.getName` gives the code point `c`, which may be a surrogate: its
+/// name, a control character's Unicode 1 name or its abbreviation, or for one with no name, such
+/// as a CJK ideograph or a private use one, its block and its number in hex, as `CJK UNIFIED
+/// IDEOGRAPHS 4E00`. `none` for one not assigned yet, and past U+10FFFF, where Java throws.
+pub fn java_name(c: u32) -> String? {
+    if c > 0x10FFFF or not maybe_assigned(c) {
+        return none
+    }
+    if let b = java_block(c) {
+        var out = String(JAVA_BLOCK[b])
+        out.push(' ')
+        push_hex(mut out, c)
+        return some(out)
+    }
+    if let n = family_name(c) {
+        return some(n)
+    }
+    return entry_name(c, NAME | JAVA)
+}
+
+// Whether the block of 256 runes `c` is in holds any rune that's assigned.
+fn maybe_assigned(c: u32) -> bool {
+    return ((ASSIGNED[usize(c >> 13)] >> ((c >> 8) & 31)) & 1) != 0
+}
+
+// Which of the ranges Java names by their block `c` is in, if it's in one. A rune in one has no
+// other name.
+fn java_block(c: u32) -> usize? {
+    var lo: usize = 0
+    var hi = JAVA_LO.len()
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if JAVA_HI[mid] < c {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return if lo < JAVA_LO.len() and JAVA_LO[lo] <= c { some(lo) } else { none }
+}
+
+/// The code point Java's `Character.codePointOf` gives for `text`: what `java_name` gives for it,
+/// in any case, with spaces and control characters around it, which Java's `trim` drops. It takes
+/// no aliases, and gives a surrogate for `HIGH SURROGATES D800`. `none` where Java throws.
+pub fn java_code_point_of(text: String) -> u32? {
+    var from: usize = 0
+    var to = text.len()
+    while from < to and text.byte_at(from) <= 32 {
+        from += 1
+    }
+    while to > from and text.byte_at(to - 1) <= 32 {
+        to -= 1
+    }
+    let up = text[from..to].to_upper_root()
+    // Most of the names Java gives are a block's and a number, written as `java_name` writes them.
+    if let space = up.find_last(" ") {
+        if let c = hex_value(up[space + 1..]) {
+            if let b = java_block(c) {
+                if up.byte_at(space + 1) != b'0' and up[..space] == JAVA_BLOCK[b] {
+                    return some(c)
+                }
+            }
+        }
+    }
+    if let c = find(up, NAME | JAVA) {
+        return some(c)
+    }
+    return family_rune(up)
+}
+
+fn one(c: u32) -> String? {
+    let r = rune.try_from(c) else return none
+    var s = String()
+    s.push(r)
+    return some(s)
+}
+
+// `c` in hex, in capitals, with no zeros in front.
+fn hex(c: u32) -> String {
+    var out = String()
+    push_hex(mut out, c)
+    return out
+}
+
+fn push_hex(out: mut String, c: u32) {
+    var shift: u32 = 0
+    while shift < 28 and (c >> (shift + 4)) != 0 {
+        shift += 4
+    }
+    loop {
+        let d = (c >> shift) & 15
+        out.push(rune(u8.wrap(if d < 10 { 48 + d } else { 55 + d })))
+        if shift == 0 {
+            break
+        }
+        shift -= 4
+    }
+}
+
+// The number `s` is in hex, in capitals, if it's one below 0x110000. With no zero in front, it's
+// written as `hex` writes it.
+fn hex_value(s: String) -> u32? {
+    if s.is_empty() or s.len() > 6 {
+        return none
+    }
+    var v: u32 = 0
+    for i in 0..s.len() {
+        let b = s.byte_at(i)
+        let d = if b >= b'0' and b <= b'9' { b - b'0' } else if b >= b'A' and b <= b'F' { b - b'A' + 10 } else { return none }
+        v = v * 16 + u32(d)
+    }
+    return if v <= 0x10FFFF { some(v) } else { none }
+}
+
+// Whether `c` is a CJK unified ideograph, from CJK's ranges, `lo, hi, lo, hi, ...`.
+fn in_cjk(c: u32) -> bool {
+    var k: usize = 0
+    while k < CJK.len() {
+        if c >= CJK[k] and c <= CJK[k + 1] {
+            return true
+        }
+        k += 2
+    }
+    return false
+}
+
+fn in_tangut(c: u32) -> bool {
+    var k: usize = 0
+    while k < TANGUT.len() {
+        if c >= TANGUT[k] and c <= TANGUT[k + 1] {
+            return true
+        }
+        k += 2
+    }
+    return false
+}
+
+// The rune a name of `prefix` and a number in hex names, if it's a Tangut ideograph or a CJK
+// unified one, as asked, and the number is written as `hex` writes it.
+fn numbered(up: String, prefix: str, tangut: bool) -> u32? {
+    if not up.starts_with(prefix) {
+        return none
+    }
+    let c = hex_value(up[prefix.len()..]) else return none
+    let fits = if tangut { in_tangut(c) } else { in_cjk(c) }
+    if fits and up.byte_at(prefix.len()) != b'0' {
+        return some(c)
+    }
+    return none
+}
+
+// The name a family gives `c`, if it's in one.
+fn family_name(c: u32) -> String? {
+    for f in 0..FAMILY_LO.len() {
+        if c >= FAMILY_LO[f] and c <= FAMILY_HI[f] {
+            if FAMILY_DIGITS[f] == 0 {
+                return some("{FAMILY_PREFIX[f]}-{hex(c)}")
+            }
+            let n = "{c - FAMILY_LO[f] + FAMILY_BASE[f]}"
+            return some("{FAMILY_PREFIX[f]}-{n.pad_start(usize(FAMILY_DIGITS[f]), '0')}")
+        }
+    }
+    return none
+}
+
+// The rune a family's name names, if `up` is one exactly.
+fn family_rune(up: String) -> u32? {
+    let dash = up.find_last("-") else return none
+    let tail = up[dash + 1..]
+    for f in 0..FAMILY_LO.len() {
+        if dash != FAMILY_PREFIX[f].len() or not up.starts_with(FAMILY_PREFIX[f]) {
+            continue
+        }
+        var c: u32 = 0
+        if FAMILY_DIGITS[f] == 0 {
+            let x = hex_value(tail) else continue
+            c = x
+        } else {
+            let n = u32.parse(tail) else continue
+            if n < FAMILY_BASE[f] {
+                continue
+            }
+            c = FAMILY_LO[f] + (n - FAMILY_BASE[f])
+        }
+        if c < FAMILY_LO[f] or c > FAMILY_HI[f] {
+            continue
+        }
+        if let n = family_name(c) {
+            if n == up {
+                return some(c)
+            }
+        }
+    }
+    return none
+}
+
+// The syllable the jamo names in `s` make, each the longest that fits, as CPython reads them.
+fn hangul(s: String) -> u32? {
+    var at: usize = 0
+    let l = jamo(s, mut at, 0) else return none
+    let v = jamo(s, mut at, 1) else return none
+    let t = jamo(s, mut at, 2) else return none
+    if at != s.len() {
+        return none
+    }
+    return some(S_BASE + (l * V_COUNT + v) * T_COUNT + t)
+}
+
+// The longest of the jamo names of `kind`, 0 for leading consonants, 1 for vowels and 2 for
+// trailing consonants, at `at` in `s`, the first of those as long, and moves `at` past it.
+fn jamo(s: String, at: mut usize, kind: u8) -> u32? {
+    let count: usize = if kind == 0 { 19 } else if kind == 1 { 21 } else { 28 }
+    var best: u32? = none
+    var best_len: usize = 0
+    for i in 0..count {
+        let n = if kind == 0 { JAMO_L[i] } else if kind == 1 { JAMO_V[i] } else { JAMO_T[i] }
+        if (best == none or n.len() > best_len) and s[at..].starts_with(n) {
+            best = some(u32.wrap(i))
+            best_len = n.len()
+        }
+    }
+    at += best_len
+    return best
+}
+
+// --- reading the tables ---------------------------------------------------------------------------
+
+// The digit at place `i` of a table, which has a newline after each LINE.
+fn digit(t: str, i: usize) -> u32 {
+    let c = u32(t.byte_at(i + i / LINE))
+    return if c > 0x23 { c - 0x22 } else { c - 0x21 }
+}
+
+// The number at place `i`, written in the tiers `a`, `b` and `c`, and moves `i` past it.
+fn number(t: str, i: mut usize, a: u32, b: u32, c: u32) -> u32 {
+    let d0 = digit(t, i)
+    i += 1
+    if d0 < a {
+        return d0
+    }
+    if d0 < a + b {
+        let v = a + (d0 - a) * 93 + digit(t, i)
+        i += 1
+        return v
+    }
+    if d0 < a + b + c {
+        let v = a + b * 93 + ((d0 - a - b) * 93 + digit(t, i)) * 93 + digit(t, i + 1)
+        i += 2
+        return v
+    }
+    let v = a + b * 93 + c * 8649 + (((d0 - a - b - c) * 93 + digit(t, i)) * 93 + digit(t, i + 1)) * 93 + digit(t, i + 2)
+    i += 3
+    return v
+}
+
+// The number of `width` digits at place `at`.
+fn fixed(t: str, at: usize, width: usize) -> u32 {
+    var v: u32 = 0
+    for k in 0..width {
+        v = v * 93 + digit(t, at + k)
+    }
+    return v
+}
+
+fn unzig(z: u32) -> i64 {
+    return if z % 2 == 0 { i64(z / 2) } else { -i64(z / 2) - 1 }
+}
+
+// Where word `k` starts in WORD_TEXT, as a place, not counting its newlines, and its length.
+fn word(k: usize) -> (usize, usize) {
+    let first = k / WORD_STEP * WORD_STEP
+    var at = usize(fixed(WORD_AT, 3 * (k / WORD_STEP), 3))
+    for x in first..k {
+        at += usize(digit(WORD_LEN, x))
+    }
+    return (at, usize(digit(WORD_LEN, k)))
+}
+
+// Adds word `k` to the name in `out`, after a space unless the word before ends with `-` or a
+// space, which `_` in a word stands for.
+fn add_word(out: mut String, k: u32) {
+    if out.len() > 0 {
+        let last = out.byte_at(out.len() - 1)
+        if last != b'-' and last != b' ' {
+            out.push(' ')
+        }
+    }
+    let w = word(usize(k))
+    for i in w.0..(w.0 + w.1) {
+        let b = WORD_TEXT.byte_at(i + i / LINE)
+        out.push(rune(if b == b'_' { b' ' } else { b }))
+    }
+}
+
+// An entry's header in STREAM: how many words it shares with the one before, and how many new
+// ones follow.
+fn header(at: mut usize) -> (usize, u32) {
+    let h = digit(STREAM, at)
+    at += 1
+    if h == 90 {
+        let shared = digit(STREAM, at)
+        let fresh = digit(STREAM, at + 1)
+        at += 2
+        return (usize(shared), fresh)
+    }
+    return (usize(h / 9), h % 9)
+}
+
+// Compares word `k` of a name with `up` at `pos`, after the space before it, if the word before
+// doesn't end with `-` or a space, which `last` is the last byte of, or 0 for the first word.
+// Gives 0 if they're the same, with `pos` and `last` after the word, or else below 0 if the name
+// sorts first, with `pos` where they differ.
+fn match_word(k: u32, up: String, pos: mut usize, last: mut u8) -> i32 {
+    if last != 0 and last != b'-' and last != b' ' {
+        if pos >= up.len() {
+            return 1
+        }
+        let u = up.byte_at(pos)
+        if u != b' ' {
+            return if u > b' ' { -1 } else { 1 }
+        }
+        pos += 1
+    }
+    let w = word(usize(k))
+    for i in w.0..(w.0 + w.1) {
+        let raw = WORD_TEXT.byte_at(i + i / LINE)
+        let b = if raw == b'_' { b' ' } else { raw }
+        if pos >= up.len() {
+            return 1
+        }
+        let u = up.byte_at(pos)
+        if b != u {
+            return if b < u { -1 } else { 1 }
+        }
+        pos += 1
+        last = b
+    }
+    return 0
+}
+
+// How the entry written whole at `at` compares with `up`, read only as far as they're the same.
+fn probe(at: usize, up: String) -> i32 {
+    var p = at
+    let h = header(mut p)
+    var pos: usize = 0
+    var last: u8 = 0
+    for _ in 0..h.1 {
+        let r = match_word(number(STREAM, mut p, WORD_A, WORD_B, WORD_C), up, mut pos, mut last)
+        if r != 0 {
+            return r
+        }
+    }
+    return if pos < up.len() { -1 } else { 0 }
+}
+
+// How the CHECKth entry `k`'s name compares with `up` by its first KEY bytes in KEYS, or 0 if
+// they don't tell.
+fn key_compare(k: usize, up: String) -> i32 {
+    let base = k / KEY_LINE * (KEY * KEY_LINE + 1) + k % KEY_LINE * KEY
+    for i in 0..KEY {
+        let b = KEYS.byte_at(base + i)
+        if b == b'~' {
+            return 0
+        }
+        if i >= up.len() {
+            return 1
+        }
+        let u = up.byte_at(i)
+        if b != u {
+            return if b < u { -1 } else { 1 }
+        }
+    }
+    return 0
+}
+
+// Past every place in a name, for a word that ends past where the name and `up` differ.
+const FAR: usize = 0xFFFFFFFF
+
+// The rune of the entry named `up` exactly, if its kind is one of `kinds`.
+fn find(up: String, kinds: u32) -> u32? {
+    // The last entry written whole whose name isn't past `up`, told by its first bytes where they
+    // can, and by reading it where they can't.
+    var lo: usize = 0
+    var hi = (ENTRIES + CHECK - 1) / CHECK
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        var c = key_compare(mid, up)
+        if c == 0 {
+            c = probe(usize(fixed(STREAM_AT, 3 * mid, 3)), up)
+        }
+        if c <= 0 {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == 0 {
+        return none
+    }
+    // Then the ones after it, each sharing its first words with the one before. `same` is how
+    // many bytes the one before shares with `up`, and `ends` where its words end, or FAR past
+    // that: an entry whose shared words reach past it compares as the one before did, and one
+    // that shares less is compared from where its shared words end.
+    let k = lo - 1
+    var at = usize(fixed(STREAM_AT, 3 * k, 3))
+    var ends: List<usize> = []
+    var same: usize = 0
+    var code: u32 = 0
+    for x in (k * CHECK)..((k + 1) * CHECK).min(ENTRIES) {
+        let h = header(mut at)
+        ends.truncate(h.0)
+        let from = if h.0 == 0 { 0usize } else { ends[h.0 - 1] }
+        var r: i32 = -1
+        if from <= same {
+            var pos = from
+            var last: u8 = if from == 0 { 0u8 } else { up.byte_at(from - 1) }
+            r = 0
+            for _ in 0..h.1 {
+                let w = number(STREAM, mut at, WORD_A, WORD_B, WORD_C)
+                if r == 0 {
+                    r = match_word(w, up, mut pos, mut last)
+                }
+                ends.push(if r == 0 { pos } else { FAR })
+            }
+            if r == 0 and pos < up.len() {
+                r = -1
+            }
+            same = pos
+        } else {
+            for _ in 0..h.1 {
+                _ = number(STREAM, mut at, WORD_A, WORD_B, WORD_C)
+                ends.push(FAR)
+            }
+        }
+        let v = number(STREAM, mut at, CODE_A, CODE_B, CODE_C)
+        code = if x % CHECK == 0 { v / 8 } else { u32.wrap(i64(code) + unzig(v / 8)) }
+        if r == 0 {
+            return if ((v % 8) & kinds) != 0 { some(code) } else { none }
+        }
+        if r > 0 {
+            return none
+        }
+    }
+    return none
+}
+
+// The name of the entry for `c`, if it has one of `kinds`.
+fn entry_name(c: u32, kinds: u32) -> String? {
+    var lo: usize = 0
+    var hi = RUN_START.len()
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if RUN_START[mid] <= c {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo == 0 or c - RUN_START[lo - 1] >= RUN_LEN[lo - 1] {
+        return none
+    }
+    let ordinal = usize(RUN_FIRST[lo - 1] + (c - RUN_START[lo - 1]))
+    let k = ordinal / PLACE_CHECK
+    var at = usize(fixed(PLACES_AT, 3 * k, 3))
+    var j: i64 = 0
+    for x in (k * PLACE_CHECK)..(ordinal + 1) {
+        let v = number(PLACES, mut at, PLACE_A, PLACE_B, PLACE_C)
+        j = if x % PLACE_CHECK == 0 { i64(v) } else { j + unzig(v) }
+    }
+    // The entry's words, read from the last one written whole before it.
+    let entry = usize.wrap(j)
+    let first = entry / CHECK
+    var from = usize(fixed(STREAM_AT, 3 * first, 3))
+    var words: List<u32> = []
+    var kind: u32 = 0
+    for _ in (first * CHECK)..(entry + 1) {
+        let h = header(mut from)
+        words.truncate(h.0)
+        for _ in 0..h.1 {
+            words.push(number(STREAM, mut from, WORD_A, WORD_B, WORD_C))
+        }
+        kind = number(STREAM, mut from, CODE_A, CODE_B, CODE_C) % 8
+    }
+    if (kind & kinds) == 0 {
+        return none
+    }
+    var out = String()
+    for w in words {
+        add_word(mut out, w)
+    }
+    return some(out)
+}

@@ -11,6 +11,7 @@ import std.bytes.{i16_be, i32_be, i64_be, put_i16_be, put_i32_be, put_i64_be, pu
 import std.fs
 import std.text.mutf8
 import std.text.ucd.{JAVA_ALNUM, JAVA_ALNUM_LEN}
+import std.unicode.names.{java_code_point_of}
 import std.zlib
 
 /// One NBT value: a number, a string, an array, a list of tags or a compound of named ones.
@@ -1615,19 +1616,23 @@ fn snbt_quoted(t: String, at: mut usize) -> String ! SnbtError {
             push_unit(mut out, mut high, 12)
         } else if e == b'r' {
             push_unit(mut out, mut high, 13)
-        } else if e == b'x' or e == b'u' or e == b'U' {
-            let n: usize = if e == b'x' { 2 } else if e == b'u' { 4 } else { 8 }
+        } else if e == b'x' or e == b'u' or e == b'U' or e == b'N' {
             var v: u32 = 0
-            for i in 0..n {
-                let d = if at + i < t.len() { digit_value(t.byte_at(at + i)) } else { 99 }
-                if d >= 16 {
-                    fail snbt_error(t, esc, "`\\{rune(e)}` takes {n} hexadecimal digits")
+            if e == b'N' {
+                v = try snbt_named(t, mut at, esc)
+            } else {
+                let n: usize = if e == b'x' { 2 } else if e == b'u' { 4 } else { 8 }
+                for i in 0..n {
+                    let d = if at + i < t.len() { digit_value(t.byte_at(at + i)) } else { 99 }
+                    if d >= 16 {
+                        fail snbt_error(t, esc, "`\\{rune(e)}` takes {n} hexadecimal digits")
+                    }
+                    v = v * 16 + d
                 }
-                v = v * 16 + d
-            }
-            at += n
-            if v > 0x10FFFF {
-                fail snbt_error(t, esc, "U+{t[at - n..at]} is past the last Unicode character")
+                at += n
+                if v > 0x10FFFF {
+                    fail snbt_error(t, esc, "U+{t[at - n..at]} is past the last Unicode character")
+                }
             }
             if v >= 0x10000 {
                 if high != 0 {
@@ -1638,8 +1643,6 @@ fn snbt_quoted(t: String, at: mut usize) -> String ! SnbtError {
             } else {
                 push_unit(mut out, mut high, v)
             }
-        } else if e == b'N' {
-            fail snbt_error(t, esc, "`\\N\{...\}` names a character, which std.nbt can't look up yet")
         } else {
             fail snbt_error(t, esc, "`\\` then {found(t, at - 1)} isn't an escape SNBT has")
         }
@@ -1649,6 +1652,37 @@ fn snbt_quoted(t: String, at: mut usize) -> String ! SnbtError {
         out.push('?')
     }
     return out
+}
+
+// `\N{name}`, after the `N`: the code point Java's `Character.codePointOf` gives for the name, as
+// vanilla takes it, with white space before the `{` and the name of letters, digits, spaces and
+// `-`. It can be a surrogate, as `HIGH SURROGATES D800`, which is then a UTF-16 unit.
+fn snbt_named(t: String, at: mut usize, esc: usize) -> u32 ! SnbtError {
+    skip_white(t, mut at)
+    if at >= t.len() or t.byte_at(at) != b'\{' {
+        fail snbt_error(t, esc, "`\\N` takes a character's name in braces, as `\\N\{SNOWMAN\}`")
+    }
+    at += 1
+    let start = at
+    while at < t.len() {
+        let b = t.byte_at(at)
+        if not (is_digit(b) or (b >= b'A' and b <= b'Z') or (b >= b'a' and b <= b'z') or b == b' ' or b == b'-') {
+            break
+        }
+        at += 1
+    }
+    if at == start {
+        fail snbt_error(t, esc, "`\\N\{\}` needs a character's name, as `\\N\{SNOWMAN\}`")
+    }
+    if at >= t.len() or t.byte_at(at) != b'\}' {
+        fail snbt_error(t, at, "{found(t, at)} in a character's name, which has only letters, digits, spaces and `-`")
+    }
+    let name = t[start..at]
+    at += 1
+    let c = java_code_point_of(name) else {
+        fail snbt_error(t, esc, "no character is named `{name}`, as Java's `Character.codePointOf` reads names")
+    }
+    return c
 }
 
 // Adds a UTF-16 unit to `out`, pairing surrogates, with `high` a high one waiting for its low one.

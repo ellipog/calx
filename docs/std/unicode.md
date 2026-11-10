@@ -31,6 +31,8 @@ fn main() {
 | `NFKC` | Compatibility decomposition, then composition: also `ﬁ` as `fi`, `²` as `2` and `①` as `1`. For matching text as people read it, such as names and identifiers |
 | `NFKD` | Compatibility decomposition |
 
+Characters' names, as `unicodedata.name` and `unicodedata.lookup` give them, are in [std.unicode.names](unicode-names.md), a module of their own, so a program that only normalizes doesn't carry them.
+
 Hangul syllables decompose into their jamo and compose back from them, as the Unicode Standard's arithmetic does it. The runes U+0958 and the like, which Unicode excludes from composing, stay decomposed in NFC, as they do in Python.
 
 ```calx
