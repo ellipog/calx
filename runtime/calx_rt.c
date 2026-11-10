@@ -2104,28 +2104,22 @@ cx_usize cx_table_buckets_for(cx_usize n) {
     return b;
 }
 
-/* A table's slots, rounded up to a group, then its control bytes and their copy. */
+/* A table's slots, rounded up to a group so the control bytes after them start on one, then its
+ * control bytes and their copy, then what else it keeps. */
 static cx_usize table_slot_bytes(cx_usize buckets, cx_usize size) { return (buckets * size + 15) & ~(cx_usize)15; }
 
-cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, void** slots) {
-    if (buckets > ((cx_usize)-1 >> 1) / (size + 1)) cx_panic_capacity();
+cx_u8* cx_table_alloc(cx_usize buckets, cx_usize size, cx_usize extra) {
+    if (buckets > ((cx_usize)-1 >> 2) / (size + 1) || extra > ((cx_usize)-1 >> 2)) cx_panic_capacity();
     cx_usize bytes = table_slot_bytes(buckets, size);
-    cx_u8* base = (cx_u8*)cx_alloc(bytes + buckets + CX_GROUP);
-    memset(base + bytes, CX_CTRL_EMPTY, buckets + CX_GROUP);
-    *slots = base;
-    return base + bytes;
+    cx_u8* ctrl = (cx_u8*)cx_alloc(bytes + buckets + CX_GROUP + extra) + bytes;
+    memset(ctrl, CX_CTRL_EMPTY, buckets + CX_GROUP);
+    return ctrl;
 }
 
-void cx_table_free(void* slots, cx_usize buckets, cx_usize size) {
-    cx_free(slots, table_slot_bytes(buckets, size) + buckets + CX_GROUP);
+void cx_table_free(cx_u8* ctrl, cx_usize buckets, cx_usize size, cx_usize extra) {
+    cx_usize bytes = table_slot_bytes(buckets, size);
+    cx_free(ctrl - bytes, bytes + buckets + CX_GROUP + extra);
 }
-
-cx_u32* cx_lk_alloc(cx_usize buckets) {
-    if (buckets > (cx_usize)0xFFFFFFFFu) cx_panic_capacity();
-    return (cx_u32*)cx_alloc(buckets * 2 * sizeof(cx_u32));
-}
-
-void cx_lk_free(cx_u32* link, cx_usize buckets) { cx_free(link, buckets * 2 * sizeof(cx_u32)); }
 
 /* --- parallel for ---------------------------------------------------------------------------
  * `parallel for` runs its body on a pool of threads that the calling thread takes part in. The

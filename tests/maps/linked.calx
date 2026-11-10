@@ -123,4 +123,28 @@ fn main() {
         total = total * 10 + k
     }
     println("{fs} {total}")    // out: {4, 1, 2} 41
+
+    // An empty table has no list: its ends, a loop, a copy and `==` see nothing.
+    var nothing = LinkedMap<String, i32>()
+    let empty_ids = LinkedSet<i64>()
+    for (k, v) in nothing {
+        println("{k} {v}")
+    }
+    println("{nothing.pop_first()} {nothing.pop_last()} {empty_ids.first()} {empty_ids.last()} {nothing.copy()} {nothing == LinkedMap<String, i32>()}")    // out: none none none none {} true
+
+    // Growing keeps the order that moves and inserts at the front made, and a copy keeps it too.
+    var moved = LinkedMap<String, i32>()
+    for i in 0..3 {
+        moved.insert("k{i}", i)
+    }
+    moved.insert_first("front", -1)
+    _ = moved.move_to_last("k0")
+    moved.reserve(100)
+    for i in 3..6 {
+        moved.insert_first("k{i}", i)
+    }
+    let kept = moved.copy()
+    _ = moved.remove("k1")
+    println("{moved} {kept.len()} {moved.capacity() >= 100}")    // out: {k5: 5, k4: 4, k3: 3, front: -1, k2: 2, k0: 0} 7 true
+    println("{kept}")    // out: {k5: 5, k4: 4, k3: 3, front: -1, k1: 1, k2: 2, k0: 0}
 }

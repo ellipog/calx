@@ -707,12 +707,13 @@ private:
                                 "* nodes; cx_jtnode* tree; cx_usize len; cx_u32 cap, thr, used, room, spare; }; }; };\n";
                         break;
                     }
-                    // The control bytes, the slots, the slot count less one, the values in it, and
-                    // how many more fit before it must grow (D94), and a linked table's list
-                    // through its slots (D109).
-                    out_ += "struct " + ctype(t) + " { cx_u8* ctrl; " + ctype(slot_type(t)) +
-                            "* slots; cx_usize mask; cx_usize len; cx_usize growth;" +
-                            (t->table == TableKind::linked ? " union { cx_lhead l; struct { cx_u32* link; cx_u32 first, last; }; };" : "") + " };\n";
+                    // The control bytes, with the slots before them, the slot count less one, the
+                    // values in it, and how many more fit before it must grow (D94). A linked
+                    // table keeps its list after its control bytes (D109), and can't have more
+                    // than 2^31 slots, so its counts are `cx_u32`s and the whole is 24 bytes, as
+                    // a `List`'s is (CLX-234).
+                    out_ += "struct " + ctype(t) + " { cx_u8* ctrl; cx_usize mask; " +
+                            (t->table == TableKind::linked ? "cx_u32 len, growth;" : "cx_usize len, growth;") + " };\n";
                     break;
                 case TypeKind::tuple:
                     out_ += "struct " + ctype(t) + " {";
@@ -1079,9 +1080,15 @@ private:
     // in Java's order (D105).
     static std::string each_slot(const Type* t, const std::string& tab, const std::string& indent, const std::string& body) {
         if (t->table == TableKind::linked) {
-            // Along the list, in the order the keys went in (D109).
-            return indent + "for (cx_usize i = (cx_usize)" + tab + "first - 1; i != CX_NOT_FOUND; i = (cx_usize)" + tab +
-                   "link[2 * i + 1] - 1) {\n" + body + indent + "}\n";
+            // Along the list, in the order the keys went in (D109). An empty table has no list.
+            std::string s = indent + "if (" + tab + "mask) {\n" + indent + "    const cx_u32* link = " + links(tab) + ";\n" + indent +
+                            "    for (cx_usize i = (cx_usize)link[1] - 1; i != CX_NOT_FOUND; i = (cx_usize)link[2 * i + 3] - 1) {\n";
+            for (std::size_t at = 0; at < body.size();) {
+                std::size_t end = body.find('\n', at);
+                s += "    " + body.substr(at, end - at + 1);
+                at = end + 1;
+            }
+            return s + indent + "    }\n" + indent + "}\n";
         }
         if (t->table == TableKind::fastutil) {
             // fastutil's order: the key 0 first, in slot `n`, then the last slot to the first (D107).
@@ -1103,8 +1110,21 @@ private:
         return s + indent + "    }\n" + indent + "}\n";
     }
     // What slot `i` of the table `tab` holds.
-    static std::string slot_at(const Type* t, const std::string& tab, const std::string& i) {
-        return t->table == TableKind::java ? tab + "nodes[" + i + "].v" : tab + "slots[" + i + "]";
+    std::string slot_at(const Type* t, const std::string& tab, const std::string& i) {
+        if (t->table == TableKind::java) return tab + "nodes[" + i + "].v";
+        if (t->table == TableKind::fastutil) return tab + "slots[" + i + "]";
+        return own_slot(t, tab, i);
+    }
+    // Slot `i` of a `Map`'s, a `Set`'s or a linked table's `tab` (`m->` or `v.`), whose slots end
+    // where its control bytes start (CLX-234).
+    std::string own_slot(const Type* t, const std::string& tab, const std::string& i) {
+        return "CX_SLOT(" + ctype(slot_type(t)) + ", " + tab + "ctrl, " + tab + "mask, " + i + ")";
+    }
+    // A linked table's list, after its control bytes (D109).
+    static std::string links(const std::string& tab) { return "cx_lk_links(" + tab + "ctrl, " + tab + "mask)"; }
+    // What a table of `buckets` slots keeps after its control bytes: a linked table's list.
+    static std::string table_extra(const Type* t, const std::string& buckets) {
+        return t->table == TableKind::linked ? "cx_lk_bytes(" + buckets + ")" : "0";
     }
     // The start of a table's C name: `cx_map_`, `cx_jmap_` and the rest.
     static std::string table_prefix(const Type* t) {
@@ -1472,31 +1492,37 @@ private:
         bool map = t->kind == TypeKind::map, linked = t->table == TableKind::linked;
         const Type* k = table_key(t);
         const Type* slot = slot_type(t);
-        std::string eq = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, "m->slots[i]") + "), k)" : equal(k, slot_key(t, "m->slots[i]"), "k");
-        std::string eqj = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, "m->slots[j]") + "), cx_sv(k))" : equal(k, slot_key(t, "m->slots[j]"), "k");
-        std::string drop_slots = is_copy(slot) ? std::string() : each_full("m->", "    ", "        " + drop_fn(slot) + "(&m->slots[i]);\n");
-        std::string move_slot = "            cx_u64 h = " + hash_value(k, slot_key(t, "m->slots[i]")) +
+        std::string at_i = own_slot(t, "m->", "i"), at_j = own_slot(t, "m->", "j");
+        std::string eq = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_i) + "), k)" : equal(k, slot_key(t, at_i), "k");
+        std::string eqj = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_j) + "), cx_sv(k))" : equal(k, slot_key(t, at_j), "k");
+        std::string drop_slots = is_copy(slot) ? std::string() : each_full("m->", "    ", "        " + drop_fn(slot) + "(&" + at_i + ");\n");
+        std::string move_slot = "            cx_u64 h = " + hash_value(k, slot_key(t, at_i)) +
                                 ";\n            cx_usize j = cx_table_free_slot(ctrl, mask, h);\n"
                                 "            cx_table_set(ctrl, mask, j, cx_table_tag(h));\n"
-                                "            slots[j] = m->slots[i];\n";
+                                "            CX_SLOT($S, ctrl, mask, j) = " + at_i + ";\n";
         std::string move_slots;
         if (linked) {
-            move_slots = each_full("m->", "        ", move_slot + "            l.link[2 * j] = m->link[2 * i];\n"
-                                                                  "            l.link[2 * j + 1] = m->link[2 * i + 1];\n"
-                                                                  "            m->link[2 * i] = (cx_u32)j + 1;\n") +
-                         each_full("m->", "        ", "            cx_usize j = (cx_usize)m->link[2 * i] - 1;\n"
-                                                    "            cx_u32 prev = l.link[2 * j], next = l.link[2 * j + 1];\n"
-                                                    "            l.link[2 * j] = prev ? m->link[2 * (prev - 1)] : 0;\n"
-                                                    "            l.link[2 * j + 1] = next ? m->link[2 * (next - 1)] : 0;\n") +
-                         "        l.first = m->first ? m->link[2 * (m->first - 1)] : 0;\n"
-                         "        l.last = m->last ? m->link[2 * (m->last - 1)] : 0;\n";
+            // Each key's old links go with it, and its new place plus 1 is left where its link
+            // back was. With the old list's head made 0, the new list's head's own place, a
+            // second pass turns each old neighbour into its new place without a branch.
+            move_slots = "        cx_u32* old = cx_lk_links(m->ctrl, m->mask);\n" +
+                         each_full("m->", "        ", move_slot + "            link[2 * j + 2] = old[2 * i + 2];\n"
+                                                                  "            link[2 * j + 3] = old[2 * i + 3];\n"
+                                                                  "            old[2 * i + 2] = (cx_u32)j + 1;\n") +
+                         "        cx_u32 first = old[1], last = old[0];\n"
+                         "        old[0] = 0;\n" +
+                         each_full("m->", "        ", "            cx_usize at = old[2 * i + 2];\n"
+                                                    "            link[2 * at] = old[2 * link[2 * at]];\n"
+                                                    "            link[2 * at + 1] = old[2 * link[2 * at + 1]];\n") +
+                         "        link[1] = old[2 * first];\n"
+                         "        link[0] = old[2 * last];\n";
         } else {
             move_slots = each_full("m->", "        ", move_slot);
         }
         std::string replace;
         if (map) {
-            if (!is_copy(t->elem)) replace += "                " + drop_fn(t->elem) + "(&m->slots[j].f1);\n";
-            replace += "                m->slots[j].f1 = v;\n";
+            if (!is_copy(t->elem)) replace += "                " + drop_fn(t->elem) + "(&" + at_j + ".f1);\n";
+            replace += "                " + at_j + ".f1 = v;\n";
         }
         if (!is_copy(k)) replace += "                " + drop_fn(k) + "(&k);\n";
         // `$put`, and a linked table's `$putend`, which puts a key at the front or the back,
@@ -1515,7 +1541,7 @@ private:
             cx_usize j = (pos + (cx_usize)__builtin_ctz(bits)) & m->mask;
             if ($eqj) {
 $replace)";
-            if (end) s += "                cx_lk_move(&m->l, j, front);\n";
+            if (end) s += "                cx_lk_move(cx_lk_links(m->ctrl, m->mask), j, front);\n";
             s += R"(                return;
             }
         }
@@ -1527,25 +1553,28 @@ $replace)";
     }
     if (__builtin_expect(m->ctrl[i] < 0x80, 0)) i = (cx_usize)__builtin_ctz(cx_group_free(m->ctrl));
     if (__builtin_expect(m->growth == 0 && m->ctrl[i] == CX_CTRL_EMPTY, 0)) {
-        $grow(m, cx_table_grown(m->slots ? m->mask + 1 : 0, m->len));
+        $grow(m, cx_table_grown(m->mask ? m->mask + 1 : 0, m->len));
         i = cx_table_free_slot(m->ctrl, m->mask, h);
     }
     m->growth -= m->ctrl[i] == CX_CTRL_EMPTY;
     cx_table_set(m->ctrl, m->mask, i, cx_table_tag(h));
-    m->slots[i] = $new;
+    CX_SLOT($S, m->ctrl, m->mask, i) = $new;
     m->len++;
 )";
-            if (end) s += "    if (front) cx_lk_push_front(&m->l, i);\n    else cx_lk_push_back(&m->l, i);\n";
-            else if (linked) s += "    cx_lk_push_back(&m->l, i);\n";
+            if (end) s += "    if (front) cx_lk_push_front(cx_lk_links(m->ctrl, m->mask), i);\n"
+                          "    else cx_lk_push_back(cx_lk_links(m->ctrl, m->mask), i);\n";
+            else if (linked) s += "    cx_lk_push_back(cx_lk_links(m->ctrl, m->mask), i);\n";
             return s + "}\n";
         };
         auto names = table_names(t);
         names.insert(names.begin(), {
             {"$eqj", eqj}, {"$eq", eq}, {"$hash", hash_value(k, "k")}, {"$lookup", as_lookup(t, "k")}, {"$replace", replace},
             {"$dropall", drop_slots}, {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"},
-            {"$moveall", move_slots}, {"$growhead", linked ? "    cx_lhead l = { cx_lk_alloc(buckets), 0, 0 };\n" : ""},
-            {"$growfree", linked ? "        cx_lk_free(m->link, m->mask + 1);\n" : ""}, {"$growtail", linked ? "    m->l = l;\n" : ""},
-            {"$clearlist", linked ? "    m->first = m->last = 0;\n" : ""},
+            {"$moveall", move_slots}, {"$xnew", table_extra(t, "buckets")}, {"$xold", table_extra(t, "m->mask + 1")},
+            // A linked table's list's slots are `cx_u32`s, and its head starts empty.
+            {"$growhead", linked ? "    if (buckets > (cx_usize)1 << 31) cx_panic_capacity();\n" : ""},
+            {"$growlist", linked ? "    cx_u32* link = cx_lk_links(ctrl, mask);\n    link[0] = link[1] = 0;\n" : ""},
+            {"$clearlist", linked ? "    cx_u32* link = cx_lk_links(m->ctrl, m->mask);\n    link[0] = link[1] = 0;\n" : ""},
         });
         return fill(R"(CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h) {
     cx_u8 tag = cx_table_tag(h);
@@ -1562,19 +1591,17 @@ $replace)";
     }
 }
 static __attribute__((noinline)) void $grow($T* m, cx_usize buckets) {
-    $S* slots;
-    cx_u8* ctrl = cx_table_alloc(buckets, sizeof($S), (void**)&slots);
+$growhead    cx_u8* ctrl = cx_table_alloc(buckets, sizeof($S), $xnew);
     cx_usize mask = buckets - 1;
-$growhead    if (m->slots) {
-$moveall        cx_table_free(m->slots, m->mask + 1, sizeof($S));
-$growfree    }
+$growlist    if (m->mask) {
+$moveall        cx_table_free(m->ctrl, m->mask + 1, sizeof($S), $xold);
+    }
     m->ctrl = ctrl;
-    m->slots = slots;
     m->mask = mask;
     m->growth = cx_table_capacity(buckets) - m->len;
-$growtail}
+}
 )" + put_fn(false) + (linked ? put_fn(true) : std::string()) + R"(static void $clear($T* m) {
-    if (!m->slots) return;
+    if (!m->mask) return;
 $dropall    __builtin_memset(m->ctrl, CX_CTRL_EMPTY, m->mask + 1 + CX_GROUP);
     m->len = 0;
     m->growth = cx_table_capacity(m->mask + 1);
@@ -1582,7 +1609,7 @@ $clearlist}
 static void $reserve($T* m, cx_usize n) {
     if (n <= m->growth) return;
     cx_usize b = cx_table_buckets_for(m->len + n);
-    if (m->slots && b < m->mask + 1) b = m->mask + 1;
+    if (m->mask && b < m->mask + 1) b = m->mask + 1;
     $grow(m, b);
 }
 )", names);
@@ -2296,14 +2323,15 @@ $dropall    m->len = 0;
             return lookup_ctype(t) + " " + key + " = " + lookup_value(a, t) + "; cx_usize " + i + " = " + table_fn("find", t) + "(" + p +
                    ", " + key + ", " + lookup_hash(t, key) + "); ";
         };
-        std::string slot = p + "->slots[" + i + "]";
+        std::string slot = own_slot(t, p + "->", i);
         // A linked table's key comes off its list first (D109).
-        std::string erase = (t->table == TableKind::linked ? "cx_lk_unlink(&" + p + "->l, " + i + "); " : std::string()) + p +
+        std::string erase = (t->table == TableKind::linked ? "cx_lk_unlink(" + links(p + "->") + ", " + i + "); " : std::string()) + p +
                             "->growth += cx_table_erase(" + p + "->ctrl, " + p + "->mask, " + i + "); " + p + "->len--; ";
         switch (e->bmethod) {
-            case BMethod::len: return "(" + expr(recv) + ").len";
+            // A linked table's counts are `cx_u32`s.
+            case BMethod::len: return "((cx_usize)(" + expr(recv) + ").len)";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
-            case BMethod::capacity: return view + p + "->len + " + p + "->growth; })";
+            case BMethod::capacity: return view + "(cx_usize)" + p + "->len + " + p + "->growth; })";
             case BMethod::insert: {
                 HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
                 std::string s = head + hk.first;
@@ -2333,19 +2361,20 @@ $dropall    m->len = 0;
             // A linked table's ends (D109).
             case BMethod::first: case BMethod::last: {
                 std::string o = ctype(e->type), at = tmp();
-                return view + "cx_u32 " + at + " = " + p + (e->bmethod == BMethod::first ? "->first" : "->last") + "; " + at + " ? (" + o +
-                       "){ .v = " + slot_key(t, p + "->slots[" + at + " - 1]") + ", .has = 1 } : (" + o + "){0}; })";
+                return view + "cx_u32 " + at + " = cx_lk_end(" + p + "->ctrl, " + p + "->mask, " +
+                       (e->bmethod == BMethod::first ? "1" : "0") + "); " + at + " ? (" + o + "){ .v = " +
+                       slot_key(t, own_slot(t, p + "->", at + " - 1")) + ", .has = 1 } : (" + o + "){0}; })";
             }
             case BMethod::pop_first: case BMethod::pop_last: {
                 std::string o = ctype(e->type), r = tmp();
-                return head + o + " " + r + " = {0}; cx_usize " + i + " = (cx_usize)" + p +
-                       (e->bmethod == BMethod::pop_first ? "->first" : "->last") + " - 1; if (" + i + " != CX_NOT_FOUND) { " + r +
-                       ".v = " + slot + "; " + r + ".has = 1; " + erase + "} " + r + "; })";
+                return head + o + " " + r + " = {0}; cx_usize " + i + " = (cx_usize)cx_lk_end(" + p + "->ctrl, " + p + "->mask, " +
+                       (e->bmethod == BMethod::pop_first ? "1" : "0") + ") - 1; if (" + i + " != CX_NOT_FOUND) { " + r + ".v = " + slot +
+                       "; " + r + ".has = 1; " + erase + "} " + r + "; })";
             }
             case BMethod::move_to_first: case BMethod::move_to_last: {
                 std::string r = tmp();
-                return head + found(e->args[0].value) + "cx_bool " + r + " = " + i + " != CX_NOT_FOUND; if (" + r + ") cx_lk_move(&" + p +
-                       "->l, " + i + ", " + (e->bmethod == BMethod::move_to_first ? "1" : "0") + "); " + r + "; })";
+                return head + found(e->args[0].value) + "cx_bool " + r + " = " + i + " != CX_NOT_FOUND; if (" + r + ") cx_lk_move(" +
+                       links(p + "->") + ", " + i + ", " + (e->bmethod == BMethod::move_to_first ? "1" : "0") + "); " + r + "; })";
             }
             case BMethod::insert_first: case BMethod::insert_last: {
                 std::string front = e->bmethod == BMethod::insert_first ? "1" : "0";
@@ -2431,10 +2460,12 @@ $dropall    m->len = 0;
                     return "    if (a.len != b.len) return 0;\n" + each_slot(t, "a.", "    ", body) + "    return 1;\n";
                 }
                 // The same keys, each with an equal value, whatever order they're in.
-                std::string key = slot_key(t, "a.slots[i]");
+                std::string key = slot_key(t, own_slot(t, "a.", "i"));
                 std::string body = "        cx_usize j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) + ", " +
                                    hash_value(table_key(t), key) + ");\n        if (j == CX_NOT_FOUND) return 0;\n";
-                if (t->kind == TypeKind::map) body += "        if (!" + equal(t->elem, "a.slots[i].f1", "b.slots[j].f1") + ") return 0;\n";
+                if (t->kind == TypeKind::map) {
+                    body += "        if (!" + equal(t->elem, own_slot(t, "a.", "i") + ".f1", own_slot(t, "b.", "j") + ".f1") + ") return 0;\n";
+                }
                 return "    if (a.len != b.len) return 0;\n" + each_full("a.", "    ", body) + "    return 1;\n";
             }
             default: {
@@ -2665,10 +2696,9 @@ $dropall    m->len = 0;
                     break;
                 }
                 // A table that was never filled, or was moved out of, has no slots.
-                s += "    if (!p->slots) return;\n";
-                if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&p->slots[i]);\n");
-                s += "    cx_table_free(p->slots, p->mask + 1, sizeof(*p->slots));\n";
-                if (t->table == TableKind::linked) s += "    cx_lk_free(p->link, p->mask + 1);\n";
+                s += "    if (!p->mask) return;\n";
+                if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&" + own_slot(t, "p->", "i") + ");\n");
+                s += "    cx_table_free(p->ctrl, p->mask + 1, sizeof(" + ctype(slot_type(t)) + "), " + table_extra(t, "p->mask + 1") + ");\n";
                 break;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
@@ -2738,17 +2768,16 @@ $dropall    m->len = 0;
                     if (!is_copy(st)) s += each_slot(t, "p->", "    ", "        r.nodes[i].v = " + copy_fn(st) + "(&p->nodes[i].v);\n");
                     break;
                 }
-                std::string e = ctype(st);
-                s += "    if (!p->slots) return r;\n    r.ctrl = cx_table_alloc(p->mask + 1, sizeof(" + e +
-                     "), (void**)&r.slots);\n    __builtin_memcpy(r.ctrl, p->ctrl, p->mask + 1 + CX_GROUP);\n";
+                // The control bytes, and a linked table's list after them: the same slots, so the
+                // same links (D109).
+                std::string e = ctype(st), extra = table_extra(t, "p->mask + 1");
+                s += "    if (!p->mask) return r;\n    r.ctrl = cx_table_alloc(p->mask + 1, sizeof(" + e + "), " + extra +
+                     ");\n    __builtin_memcpy(r.ctrl, p->ctrl, p->mask + 1 + CX_GROUP + " + extra + ");\n";
                 if (is_copy(st)) {
-                    s += "    __builtin_memcpy(r.slots, p->slots, (p->mask + 1) * sizeof(" + e + "));\n";
+                    s += "    __builtin_memcpy(r.ctrl - (p->mask + 1) * sizeof(" + e + "), p->ctrl - (p->mask + 1) * sizeof(" + e + "), (p->mask + 1) * sizeof(" +
+                         e + "));\n";
                 } else {
-                    s += each_full("p->", "    ", "        r.slots[i] = " + copy_fn(st) + "(&p->slots[i]);\n");
-                }
-                // The same slots, so the same links (D109).
-                if (t->table == TableKind::linked) {
-                    s += "    r.link = cx_lk_alloc(p->mask + 1);\n    __builtin_memcpy(r.link, p->link, (p->mask + 1) * 2 * sizeof(cx_u32));\n";
+                    s += each_full("p->", "    ", "        " + own_slot(t, "r.", "i") + " = " + copy_fn(st) + "(&" + own_slot(t, "p->", "i") + ");\n");
                 }
                 break;
             }
@@ -3863,17 +3892,19 @@ $dropall    m->len = 0;
                 }
                 bins = true;
             } else if (is_table(at) && at->table == TableKind::linked) {
-                // Along the list, in the order the keys went in (D109).
-                elem_at = arr + "->slots[" + i + "]";
-                line("for (cx_usize " + i + " = (cx_usize)" + arr + "->first - 1; " + i + " != CX_NOT_FOUND; " + i + " = (cx_usize)" + arr +
-                     "->link[2 * " + i + " + 1] - 1) {");
+                // Along the list, in the order the keys went in (D109). An empty table has no list.
+                std::string link = tmp();
+                elem_at = own_slot(at, arr + "->", i);
+                line("const cx_u32* " + link + " = " + arr + "->mask ? " + links(arr + "->") + " : 0;");
+                line("for (cx_usize " + i + " = " + link + " ? (cx_usize)" + link + "[1] - 1 : CX_NOT_FOUND; " + i + " != CX_NOT_FOUND; " + i +
+                     " = (cx_usize)" + link + "[2 * " + i + " + 3] - 1) {");
                 indent_++;
             } else if (is_table(at)) {
                 // Slot by slot, a group of 16 control bytes at a time, so finding the full slots
                 // takes no branch per slot: the order depends only on the hashes and what was done
                 // to the table, so it's the same in every run (D56).
                 std::string g = tmp(), bits = tmp();
-                elem_at = arr + "->slots[" + i + "]";
+                elem_at = own_slot(at, arr + "->", i);
                 line("for (cx_usize " + g + " = 0; " + g + " <= " + arr + "->mask; " + g + " += CX_GROUP) {");
                 indent_++;
                 line("for (cx_u32 " + bits + " = cx_group_full(" + arr + "->ctrl + " + g + "); " + bits + "; " + bits + " &= " + bits +
@@ -4887,8 +4918,8 @@ $dropall    m->len = 0;
         if (at->table == TableKind::java) {
             return head + "cx_i32 " + i + " = " + found + "; " + i + " < 0 ? (" + vp + ")0 : (" + vp + ")&" + b + "->nodes[" + i + "].v.f1; })";
         }
-        return head + "cx_usize " + i + " = " + found + "; " + i + " == CX_NOT_FOUND ? (" + vp + ")0 : (" + vp + ")&" + b + "->slots[" + i +
-               "].f1; })";
+        return head + "cx_usize " + i + " = " + found + "; " + i + " == CX_NOT_FOUND ? (" + vp + ")0 : (" + vp + ")&" +
+               own_slot(at, b + "->", i) + ".f1; })";
     }
 
     // `if let` and `let ... else` of `m.find(k)`: the pointer, in a temporary, and the value it
@@ -4933,7 +4964,7 @@ $dropall    m->len = 0;
             return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k + " = " +
                    lookup_value(e->rhs, at) + "; cx_usize " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
                    lookup_hash(at, k) + "); if (__builtin_expect(" + i + " == CX_NOT_FOUND, 0)) cx_panic_key(" +
-                   location(e->rhs->span) + "); &" + b + "->slots[" + i + "].f1; }))";
+                   location(e->rhs->span) + "); &" + own_slot(at, b + "->", i) + ".f1; }))";
         }
         if (at->kind == TypeKind::deque) {
             // The deque is found first, then the index, which counts from its first element round

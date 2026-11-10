@@ -350,22 +350,22 @@ Times for 1,511 structure files from vanilla 26.3, 45 MB of NBT, on one P-core o
 
 | | std.nbt | Vanilla's `NbtIo`, Java 25 | nbtlib 2.0.4, Python 3.14 |
 | --- | --- | --- | --- |
-| Open: gunzip and read | 141 ms | 151 ms | 7,772 ms |
-| Read the NBT already gunzipped | 114 ms | 117 ms | 7,594 ms |
-| Write it | 75 ms | 248 ms | 1,547 ms |
-| Show it as SNBT | 80 ms | 156 ms | 5,129 ms |
+| Open: gunzip and read | 123 ms | 151 ms | 7,772 ms |
+| Read the NBT already gunzipped | 93 ms | 117 ms | 7,594 ms |
+| Write it | 57 ms | 248 ms | 1,547 ms |
+| Show it as SNBT | 83 ms | 156 ms | 5,129 ms |
 
-On this benchmark std.nbt reads a little faster than vanilla, writes 3 times as fast, and is between 20 and 66 times as fast as nbtlib. Each tag takes 64 bytes, the size of its biggest kind, a compound's map, so a list of numbers takes more memory than an array of them does.
+On this benchmark std.nbt reads a fifth faster than vanilla, writes 4 times as fast, and is between 27 and 82 times as fast as nbtlib. Each tag takes 32 bytes, the size of its biggest kinds: a list, a string, an array, or a compound's [map](../reference/linked-maps.md#in-c), which is 24 bytes. A list of numbers still takes more memory than an array of them does.
 
 SNBT, on the same files as SNBT, 30 MB of it written compact, and timed the same way:
 
 | | std.nbt | Vanilla's `TagParser` and `SnbtPrinterTagVisitor`, Java 25 | nbtlib 2.0.4, Python 3.14 |
 | --- | --- | --- | --- |
-| Read it compact | 219 ms | 3,310 ms | 22,245 ms |
-| Read it laid out | 387 ms | 5,154 ms | |
-| Lay it out | 106 ms | 891 ms | 6,154 ms |
+| Read it compact | 208 ms | 3,310 ms | 22,245 ms |
+| Read it laid out | 349 ms | 5,154 ms | |
+| Lay it out | 103 ms | 891 ms | 6,154 ms |
 
-nbtlib's times are for its own SNBT: `parse_nbt` on what `serialize_tag(compact=True)` writes, and `serialize_tag(indent=4)`. On this benchmark std.nbt reads SNBT 13 to 15 times as fast as vanilla and 100 times as fast as nbtlib, and lays it out 8 times as fast as vanilla and 58 times as fast as nbtlib.
+nbtlib's times are for its own SNBT: `parse_nbt` on what `serialize_tag(compact=True)` writes, and `serialize_tag(indent=4)`. On this benchmark std.nbt reads SNBT 15 to 16 times as fast as vanilla and 107 times as fast as nbtlib, and lays it out almost 9 times as fast as vanilla and 60 times as fast as nbtlib.
 
 FTB's SNBT, on the 5,948 files of the checks above that all three read, 81 MB of quests, chapters and configs, from memory, and timed the same way:
 

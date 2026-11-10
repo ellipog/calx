@@ -1119,8 +1119,15 @@ CX_INLINE cx_u64 cx_hash_str(cx_str s) { return cx_hash_bytes(s.ptr, s.len); }
 /* The tables behind `Map` and `Set`: open addressing, with a control byte per slot that's EMPTY,
  * DELETED, or the top 7 bits of the hash of what's there. Lookups compare 16 control bytes at
  * once, and the 16 after the last slot repeat the first 16, so a group never wraps. A table has
- * a power of two slots, at least 4, filled to at most 7/8. An empty table has no slots, and its
- * control bytes are `cx_table_empty`'s, which every lookup stops at. */
+ * a power of two slots, at least 4, filled to at most 7/8. An empty table has no slots and a mask
+ * of 0, and its control bytes are `cx_table_empty`'s, which every lookup stops at.
+ *
+ * One allocation holds the slots, then the control bytes: the slots end where the control bytes
+ * start, so a table needs no pointer to its slots. They're in order, so slot `i` is at the slots'
+ * start plus `i`, which a loop over lookups works out once; hashbrown's slots, which go back from
+ * the control bytes, took a subtraction at every key, and lookups 10% longer (CLX-234). A linked
+ * table's list comes after the control bytes (D109). */
+#define CX_SLOT(S, ctrl, mask, i) (((S*)(ctrl) - ((mask) + 1))[i])
 #define CX_CTRL_EMPTY ((cx_u8)0x80)
 #define CX_CTRL_DELETED ((cx_u8)0xFE)
 #define CX_GROUP 16
@@ -1270,55 +1277,48 @@ CX_INLINE cx_usize cx_table_grown(cx_usize buckets, cx_usize len) {
 }
 /* The slot count with room for `n` values. */
 CX_FN(cx_usize, cx_table_buckets_for, (cx_usize n));
-/* A table of `buckets` slots of `size` bytes, all EMPTY: gives the control bytes, and the slots
- * through `slots`. One allocation holds both, so freeing the slots frees the table. */
-CX_FN(cx_u8*, cx_table_alloc, (cx_usize buckets, cx_usize size, void** slots));
-/* Frees what cx_table_alloc gave for `buckets` slots of `size` bytes. */
-CX_FN(void, cx_table_free, (void* slots, cx_usize buckets, cx_usize size));
+/* A table of `buckets` slots of `size` bytes, all EMPTY, with `extra` bytes after its control
+ * bytes: gives the control bytes, with the slots before them. */
+CX_FN(cx_u8*, cx_table_alloc, (cx_usize buckets, cx_usize size, cx_usize extra));
+/* Frees what cx_table_alloc gave. */
+CX_FN(void, cx_table_free, (cx_u8* ctrl, cx_usize buckets, cx_usize size, cx_usize extra));
 
 /* A `LinkedMap` or a `LinkedSet` is a table as above with a list through its full slots, in the
- * order their keys went in (D109). `link[2 * i]` is the slot before slot `i` and `link[2 * i + 1]`
- * the one after, so both are in the same cache line; `first` and `last` are the ends. Each is the
- * slot plus 1, and 0 for none, so a table that's all zeros is an empty list. Only full slots'
- * links are ever read. */
-typedef struct cx_lhead {
-    cx_u32* link;
-    cx_u32 first, last;
-} cx_lhead;
-CX_INLINE void cx_lk_unlink(cx_lhead* l, cx_usize i) {
-    cx_u32 prev = l->link[2 * i], next = l->link[2 * i + 1];
-    if (prev) l->link[2 * (prev - 1) + 1] = next;
-    else l->first = next;
-    if (next) l->link[2 * (next - 1)] = prev;
-    else l->last = prev;
+ * order their keys went in (D109). The list is two `cx_u32`s a slot after the control bytes, so
+ * both are in the same cache line: `link[2 * at]` is the one before and `link[2 * at + 1]` the one
+ * after, where `at` is the slot plus 1. `at` 0 is the list's own head, whose links are its last
+ * and first slots, so a list that's empty is two zeros, and taking a slot out or putting one in
+ * takes no branch. Only full slots' links are ever read. */
+CX_INLINE cx_usize cx_lk_bytes(cx_usize buckets) { return (buckets + 1) * 2 * sizeof(cx_u32); }
+CX_INLINE cx_u32* cx_lk_links(cx_u8* ctrl, cx_usize mask) { return (cx_u32*)(ctrl + mask + 1 + CX_GROUP); }
+/* The first slot plus 1 (`end` 1) or the last (`end` 0), or 0 when the table is empty. */
+CX_INLINE cx_u32 cx_lk_end(cx_u8* ctrl, cx_usize mask, int end) { return mask ? cx_lk_links(ctrl, mask)[end] : 0; }
+CX_INLINE void cx_lk_unlink(cx_u32* link, cx_usize i) {
+    cx_u32 prev = link[2 * i + 2], next = link[2 * i + 3];
+    link[2 * prev + 1] = next;
+    link[2 * next] = prev;
 }
-CX_INLINE void cx_lk_push_back(cx_lhead* l, cx_usize i) {
-    cx_u32 at = (cx_u32)i + 1;
-    l->link[2 * i] = l->last;
-    l->link[2 * i + 1] = 0;
-    if (l->last) l->link[2 * (l->last - 1) + 1] = at;
-    else l->first = at;
-    l->last = at;
+CX_INLINE void cx_lk_push_back(cx_u32* link, cx_usize i) {
+    cx_u32 at = (cx_u32)i + 1, last = link[0];
+    link[2 * at] = last;
+    link[2 * at + 1] = 0;
+    link[2 * last + 1] = at;
+    link[0] = at;
 }
-CX_INLINE void cx_lk_push_front(cx_lhead* l, cx_usize i) {
-    cx_u32 at = (cx_u32)i + 1;
-    l->link[2 * i] = 0;
-    l->link[2 * i + 1] = l->first;
-    if (l->first) l->link[2 * (l->first - 1)] = at;
-    else l->last = at;
-    l->first = at;
+CX_INLINE void cx_lk_push_front(cx_u32* link, cx_usize i) {
+    cx_u32 at = (cx_u32)i + 1, first = link[1];
+    link[2 * at] = 0;
+    link[2 * at + 1] = first;
+    link[2 * first] = at;
+    link[1] = at;
 }
 /* Moves slot `i`, which is in the list, to its front or its back. */
-CX_INLINE void cx_lk_move(cx_lhead* l, cx_usize i, cx_bool front) {
-    cx_u32 at = (cx_u32)i + 1;
-    if ((front ? l->first : l->last) == at) return;
-    cx_lk_unlink(l, i);
-    if (front) cx_lk_push_front(l, i);
-    else cx_lk_push_back(l, i);
+CX_INLINE void cx_lk_move(cx_u32* link, cx_usize i, cx_bool front) {
+    if (link[front] == (cx_u32)i + 1) return;
+    cx_lk_unlink(link, i);
+    if (front) cx_lk_push_front(link, i);
+    else cx_lk_push_back(link, i);
 }
-/* The links for a table of `buckets` slots, which can't have more than a `cx_u32` counts. */
-CX_FN(cx_u32*, cx_lk_alloc, (cx_usize buckets));
-CX_FN(void, cx_lk_free, (cx_u32* link, cx_usize buckets));
 CX_COLD CX_FN(void, cx_panic_key, (const char* at));
 /* `m.range(a..b)` on a `SortedMap` or a `SortedSet`, with `b` before `a` (D112). */
 CX_COLD CX_FN(void, cx_panic_range, (const char* at));

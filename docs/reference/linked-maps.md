@@ -95,8 +95,9 @@ fn main() {
 
 ## In C
 
-- The table is a [`Map`'s](maps.md#in-c), named for its types, such as `cx_lmap_i64_String` and `cx_lset_i32`, with a list through its full slots after it: the runtime's `cx_lhead`, an array of two `cx_u32`s per slot for the slots before and after it, and the first and last slot. Each is the slot plus 1, and 0 for none, so a table that's made empty has an empty list.
-- Finding a key is `Map`'s, so a lookup costs the same. Putting a key in also links it, and taking one out unlinks it, a few stores in the same cache line.
+- The table is a [`Map`'s](maps.md#in-c), named for its types, such as `cx_lmap_i64_String` and `cx_lset_i32`, with a list through its full slots. The list is in the table's allocation, after its control bytes: two `cx_u32`s a slot, for the slots before and after it, each the slot plus 1. Place 0 is the list's own head, whose two are its last and first slots, so an empty list is two zeros.
+- A table has at most 2^31 slots, about 1.9 billion keys, so its length and room are `cx_u32`s, and the struct is 24 bytes, as a `List`'s is. An enum that holds a `LinkedMap`, such as [std.nbt](../std/nbt.md)'s `Tag`, is then no bigger than one that holds a list.
+- Finding a key is `Map`'s, so a lookup costs the same. Putting a key in also links it, and taking one out unlinks it, a few stores in the same cache line and no branch, since the head is a place like any other.
 - Growing goes over the old slots in order, as `Map`'s does, and fixes the links up in a second pass, since following the list would miss the cache at every key.
 - A loop follows the list. Its slots are in no order in memory, so over a table much bigger than the cache a loop waits on memory at each key, as fastutil's does, where Java's `LinkedHashMap` keeps its entries in memory in the order they were made. Up to 100,000 keys, which fit, it takes 1 to 7 ns a key.
 
