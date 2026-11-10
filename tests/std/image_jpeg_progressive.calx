@@ -1,0 +1,40 @@
+// std.image.jpeg's progressive JPEGs against Pillow's bytes (CLX-213): libjpeg's ten scans for
+// color and six for gray, each with tables made for it, at sizes that leave blocks past the edge,
+// in every sampling, and at qualities that leave many coefficients to refine. Release builds take
+// the AVX2 code and debug builds the plain C; both must give these. The CRCs are of the files
+// Pillow 12.3 writes for the same pixels with progressive=True.
+
+import std.image.jpeg.{Sampling}
+import std.image.{Color, Image, Kind}
+import std.zlib.{crc32}
+
+// r = x * 17 + y * 3, g = y * 29 + x, b = x * y * 7, each mod 256, as in image.calx.
+fn gradient(w: usize, h: usize) -> Image {
+    var im = Image.new(w, h, Kind.Rgb, Color.rgb(0, 0, 0))
+    for y in 0usize..h {
+        for x in 0usize..w {
+            im.set(x, y, Color.rgb(u8.wrap(x * 17 + y * 3), u8.wrap(y * 29 + x), u8.wrap(x * y * 7)))
+        }
+    }
+    return im
+}
+
+fn show(bytes: List<u8>) -> String {
+    return "{bytes.len()} {crc32(bytes)}"
+}
+
+fn main() {
+    let g = gradient(37, 23)
+    println(show(g.encode_jpeg(75, Sampling.S420, false, true)))    // out: 997 2303483547
+    println(show(g.encode_jpeg(50, Sampling.S444, false, true)))    // out: 1048 163328222
+    let big = gradient(70, 45)
+    println(show(big.encode_jpeg(90, Sampling.S422, false, true)))    // out: 3677 972695163
+    let wide = gradient(160, 120)
+    println(show(wide.encode_jpeg(95, Sampling.S420, false, true)))    // out: 17145 3263159260
+    println(show(wide.encode_jpeg(100, Sampling.S444, false, true)))    // out: 52147 2710687217
+    // Gray: six scans of the one component.
+    println(show(g.to(Kind.Gray).encode_jpeg(75, Sampling.S420, false, true)))    // out: 583 2519107849
+    println(show(wide.to(Kind.Gray).encode_jpeg(90, Sampling.S420, false, true)))    // out: 9021 463494220
+    // optimize changes nothing: every progressive scan's tables are made for it.
+    println(show(g.encode_jpeg(75, Sampling.S420, true, true)))    // out: 997 2303483547
+}

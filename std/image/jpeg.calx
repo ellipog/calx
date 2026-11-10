@@ -19,6 +19,9 @@ extern "C" {
     fn cx_jpg_down21(r0: *const u8, n: usize, out: *u8)
     fn cx_jpg_huff(out: *u8, len: usize, st: *u64, tabs: *const u32, coefs: *const i16, masks: *const u64, mcus: usize, luma: usize, ncomp: usize) -> usize
     fn cx_jpg_huff_end(out: *u8, len: usize, st: *u64) -> usize
+    fn cx_jpg_pack(coefs: *const i16, masks: *const u64, n: usize, dc: *i16, vals: *i16, offs: *u32) -> usize
+    fn cx_jpg_scan(out: *u8, len: usize, gather: u32, counts: *u64, tabs: *const u32, dc: *const i16, vals: *const i16, offs: *const u32, masks: *const u64,
+        order: *const u32, comp: *const u8, n: usize, ss: u32, se: u32, ah: u32, al: u32) -> usize
 }
 
 /// A JPEG's pixels, 8 bits a channel.
@@ -1524,15 +1527,18 @@ impl Strips {
     }
 }
 
-/// The pixels as a baseline JPEG file, as libjpeg writes it with Pillow's settings, so the bytes
-/// are Pillow's: `channels` is 1 for gray or 3 for RGB, `quality` is 1 to 100 with libjpeg's
-/// scaling of the Annex K tables (75, the default, is libjpeg's and Pillow's), `sampling` how
-/// much of the color to keep, and `optimize` builds Huffman tables for this image, as Pillow's
-/// `optimize=True` does, a few percent smaller and slower to write. Panics unless `pixels` holds
+/// The pixels as a JPEG file, as libjpeg writes it with Pillow's settings, so the bytes are
+/// Pillow's: `channels` is 1 for gray or 3 for RGB, `quality` is 1 to 100 with libjpeg's scaling
+/// of the Annex K tables (75, the default, is libjpeg's and Pillow's), `sampling` how much of the
+/// color to keep, and `optimize` builds Huffman tables for this image, as Pillow's
+/// `optimize=True` does, a few percent smaller and slower to write. `progressive` writes the
+/// coefficients in libjpeg's ten scans, six for gray, coarse ones first, each with tables made
+/// for it, as Pillow's `progressive=True` does. Panics unless `pixels` holds
 /// `width × height × channels` bytes, or if the image is bigger than 65,535 pixels a side,
 /// which a JPEG can't be.
 @track_caller
-pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false) -> List<u8> {
+pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false,
+    progressive: bool = false) -> List<u8> {
     if channels != 1 and channels != 3 {
         panic("a JPEG's pixels are gray or RGB, 1 or 3 channels, not {channels}")
     }
@@ -1584,9 +1590,11 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
         }
         divisors.push(div)
     }
-    // An MCU row's blocks at a time, or, to make tables for the image, all of them first.
+    // An MCU row's blocks at a time, or, to make tables for the image or write it in scans, all of
+    // them first.
     let row_blocks = mcus_x * (hmax * vmax + ncomp - 1)
-    let held = if optimize { mcus_y * row_blocks } else { row_blocks }
+    let all = optimize or progressive
+    let held = if all { mcus_y * row_blocks } else { row_blocks }
     var blocks: List<i16> = []
     var masks: List<u64> = []
     blocks.reserve(held * 64)
@@ -1595,13 +1603,16 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
         blocks.set_len(held * 64)
         masks.set_len(held)
     }
-    // The Huffman tables: Annex K's, or ones made from how often each symbol comes.
+    // The Huffman tables: Annex K's, or ones made from how often each symbol comes. A progressive
+    // file's scans each make their own.
     var dc_coders: List<Coder> = []
     var ac_coders: List<Coder> = []
-    if optimize {
+    if all {
         for my in 0usize..mcus_y {
             strips.row(pixels, my, divisors, mut blocks, mut masks, my * row_blocks)
         }
+    }
+    if optimize and not progressive {
         var dc_counts: List<List<u64>> = [[0; 256], [0; 256]]
         var ac_counts: List<List<u64>> = [[0; 256], [0; 256]]
         walk_blocks(blocks, masks, ncomp, hmax, vmax, mcus_x * mcus_y, mut dc_counts, mut ac_counts)
@@ -1611,7 +1622,7 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
             dc_coders.push(optimal(dc_counts[1]))
             ac_coders.push(optimal(ac_counts[1]))
         }
-    } else {
+    } else if not progressive {
         dc_coders.push(coder(DC_LUMA_BITS, DC_VALUES.to_list()))
         ac_coders.push(coder(AC_LUMA_BITS, AC_LUMA_VALUES.to_list()))
         if ncomp > 1 {
@@ -1630,12 +1641,19 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
             out.push(u8.wrap(tables[t][NATURAL[k]]))
         }
     }
-    out.extend([0xFF, 0xC0, 0, u8.wrap(8 + 3 * ncomp), 8, u8.wrap(height / 256), u8.wrap(height % 256), u8.wrap(width / 256), u8.wrap(width % 256), u8.wrap(ncomp)])
+    // SOF0, baseline, or SOF2, progressive.
+    out.extend([0xFF, if progressive { 0xC2u8 } else { 0xC0u8 }, 0, u8.wrap(8 + 3 * ncomp), 8, u8.wrap(height / 256), u8.wrap(height % 256), u8.wrap(width / 256),
+        u8.wrap(width % 256), u8.wrap(ncomp)])
     for c in 0usize..ncomp {
         let (h, v) = if c == 0 { (hmax, vmax) } else { (1usize, 1usize) }
         out.push(u8.wrap(c + 1))
         out.push(u8.wrap(h * 16 + v))
         out.push(if c == 0 { 0u8 } else { 1u8 })
+    }
+    if progressive {
+        write_scans(mut out, blocks, masks, width, height, ncomp, hmax, vmax, mcus_x, mcus_y)
+        out.extend([0xFF, 0xD9])
+        return out
     }
     for t in 0usize..ntables {
         write_table(mut out, 0, t, dc_coders[t])
@@ -1661,7 +1679,7 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
     var bits: List<u64> = [0; 5]
     for my in 0usize..mcus_y {
         var first: usize = 0
-        if optimize {
+        if all {
             first = my * row_blocks
         } else {
             strips.row(pixels, my, divisors, mut blocks, mut masks, 0)
@@ -1725,4 +1743,149 @@ fn write_table(out: mut List<u8>, class: usize, id: usize, c: Coder) {
         out.push(c.bits[i])
     }
     out.extend(c.values)
+}
+
+// A scan of a progressive file: its components, its band of coefficients, ss to se in zigzag
+// order, and its successive approximation, ah the bit the last scan of the band stopped at, and
+// al the one this one stops at.
+struct ScanSpec {
+    comps: List<usize>
+    ss: u32
+    se: u32
+    ah: u32
+    al: u32
+}
+
+fn spec(comps: own List<usize>, ss: u32, se: u32, ah: u32, al: u32) -> ScanSpec {
+    return ScanSpec { comps, ss, se, ah, al }
+}
+
+// A progressive file's scans, after its frame header, as libjpeg's jpeg_simple_progression lays
+// them out, which is what Pillow's progressive=True asks for: the DC to its last bit but one,
+// luma's first five AC coefficients to all but two bits, the chroma's to all but one, the rest
+// of luma's, then the bits left, luma's last as it's the biggest. A scan of one component goes
+// through that component's blocks row by row, only those in the image; the DC scans of all
+// three go through the MCUs, as a baseline scan does.
+fn write_scans(out: mut List<u8>, blocks: List<i16>, masks: List<u64>, width: usize, height: usize, ncomp: usize, hmax: usize, vmax: usize, mcus_x: usize, mcus_y: usize) {
+    let script: List<ScanSpec> = if ncomp == 3 {
+        [spec([0, 1, 2], 0, 0, 0, 1), spec([0], 1, 5, 0, 2), spec([2], 1, 63, 0, 1), spec([1], 1, 63, 0, 1), spec([0], 6, 63, 0, 2), spec([0], 1, 63, 2, 1),
+            spec([0, 1, 2], 0, 0, 1, 0), spec([2], 1, 63, 1, 0), spec([1], 1, 63, 1, 0), spec([0], 1, 63, 1, 0)]
+    } else {
+        [spec([0], 0, 0, 0, 1), spec([0], 1, 5, 0, 2), spec([0], 6, 63, 0, 2), spec([0], 1, 63, 2, 1), spec([0], 0, 0, 1, 0), spec([0], 1, 63, 1, 0)]
+    }
+    // Where each block is, as the MCUs hold them: each MCU's luma blocks row by row, then a block
+    // of each other component.
+    let lumas = hmax * vmax
+    let per = lumas + ncomp - 1
+    let mcus = mcus_x * mcus_y
+    var all_order: List<u32> = []
+    var all_comp: List<u8> = []
+    for i in 0usize..mcus * per {
+        all_order.push(u32.wrap(i))
+        let at = i % per
+        all_comp.push(if at < lumas { 0u8 } else { u8.wrap(at - lumas + 1) })
+    }
+    var orders: List<List<u32>> = []
+    var comps: List<List<u8>> = []
+    let bw = (width + 7) / 8
+    let bh = (height + 7) / 8
+    var luma: List<u32> = []
+    for by in 0usize..bh {
+        for bx in 0usize..bw {
+            luma.push(u32.wrap(((by / vmax) * mcus_x + bx / hmax) * per + (by % vmax) * hmax + bx % hmax))
+        }
+    }
+    orders.push(luma)
+    comps.push([0u8; bw * bh])
+    for c in 1usize..ncomp {
+        var o: List<u32> = []
+        for m in 0usize..mcus {
+            o.push(u32.wrap(m * per + lumas + c - 1))
+        }
+        orders.push(o)
+        comps.push([u8.wrap(c); mcus])
+    }
+    // Each block's DC, and its nonzero AC coefficients in zigzag order, packed for the scans, which
+    // then read a few hundred kilobytes each rather than every block's 128 bytes.
+    let n = masks.len()
+    var total: usize = 0
+    for m in masks {
+        total += usize.wrap(m.count_ones())
+    }
+    var p = Packed { dc: [], vals: [], offs: [] }
+    p.dc.reserve(n)
+    p.vals.reserve(total)
+    p.offs.reserve(n)
+    unsafe {
+        _ = cx_jpg_pack(blocks.as_ptr(), masks.as_ptr(), n, p.dc.as_mut_ptr(), p.vals.as_mut_ptr(), p.offs.as_mut_ptr())
+        p.dc.set_len(n)
+        p.vals.set_len(total)
+        p.offs.set_len(n)
+    }
+    var tabs: List<u32> = [0; 2048]
+    var counts: List<u64> = [0; 512]
+    for s in script {
+        if s.comps.len() > 1 {
+            write_scan(mut out, p, masks, all_order, all_comp, s, mut tabs, mut counts)
+        } else {
+            write_scan(mut out, p, masks, orders[s.comps[0]], comps[s.comps[0]], s, mut tabs, mut counts)
+        }
+    }
+}
+
+// Blocks packed by cx_jpg_pack: each one's DC, and its nonzero AC coefficients from offs[i] in
+// vals.
+struct Packed {
+    dc: List<i16>,
+    vals: List<i16>,
+    offs: List<u32>,
+}
+
+// One scan: unless it only refines the DC, which takes no codes, a pass that counts its codes and
+// the tables made from those counts, each table its components use once, as libjpeg's
+// jpeg_gen_optimal_table makes them for each scan; then its header and its blocks.
+fn write_scan(out: mut List<u8>, p: Packed, masks: List<u64>, order: List<u32>, comp: List<u8>, s: ScanSpec, tabs: mut List<u32>, counts: mut List<u64>) {
+    let n = order.len()
+    let dc = s.ss == 0
+    if not dc or s.ah == 0 {
+        for i in 0usize..512 {
+            counts[i] = 0
+        }
+        unsafe {
+            _ = cx_jpg_scan(out.as_mut_ptr(), out.len(), 1, counts.as_mut_ptr(), tabs.as_ptr(), p.dc.as_ptr(), p.vals.as_ptr(), p.offs.as_ptr(), masks.as_ptr(), order.as_ptr(),
+                comp.as_ptr(), n, s.ss, s.se, s.ah, s.al)
+        }
+        var done: [bool; 2] = [false; 2]
+        for c in s.comps {
+            let t = if c == 0 { 0usize } else { 1usize }
+            if not done[t] {
+                done[t] = true
+                let made = optimal(counts[t * 256..t * 256 + 256])
+                write_table(mut out, if dc { 0 } else { 1 }, t, made)
+                let base = t * 1024 + (if dc { 0usize } else { 512usize })
+                for v in 0usize..256 {
+                    tabs[base + v] = made.code[v]
+                    tabs[base + 256 + v] = made.size[v]
+                }
+            }
+        }
+    }
+    out.extend([0xFF, 0xDA, 0, u8.wrap(6 + 2 * s.comps.len()), u8.wrap(s.comps.len())])
+    for c in s.comps {
+        let t = if c == 0 { 0u8 } else { 1u8 }
+        let td: u8 = if dc and s.ah == 0 { t } else { 0 }
+        let ta: u8 = if s.se != 0 { t } else { 0 }
+        out.push(u8.wrap(c + 1))
+        out.push(td * 16 + ta)
+    }
+    out.extend([u8.wrap(s.ss), u8.wrap(s.se), u8.wrap(s.ah * 16 + s.al)])
+    // At most 27 bits a coefficient in the band (a 16-bit code and its bits, or a refinement's
+    // code, sign and correction), and 94 for a block's zero runs and end, doubled for stuffing.
+    let most = usize(s.se - s.ss + 1) * 27 + 94
+    out.reserve(n * 2 * ((most + 7) / 8) + 1024)
+    unsafe {
+        let len = cx_jpg_scan(out.as_mut_ptr(), out.len(), 0, counts.as_mut_ptr(), tabs.as_ptr(), p.dc.as_ptr(), p.vals.as_ptr(), p.offs.as_ptr(), masks.as_ptr(), order.as_ptr(),
+            comp.as_ptr(), n, s.ss, s.se, s.ah, s.al)
+        out.set_len(len)
+    }
 }

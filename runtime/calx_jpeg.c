@@ -439,6 +439,223 @@ cx_usize cx_jpg_huff_end(cx_u8* out, cx_usize len, cx_u64* st) {
     return (cx_usize)(stuff(out + len, w.p) - out);
 }
 
+/* --- progressive scans (CLX-213) -------------------------------------------------------------- */
+
+/* One scan of a progressive JPEG, coded as T.81's Annex G codes it and libjpeg's jcphuff.c, which
+ * Pillow writes with, does it, so the bytes are the same: a DC scan's first pass codes each DC
+ * divided by 2^Al, less the one before it in the component, as a baseline scan does; its refining
+ * pass writes the next bit of each, with no code. An AC scan's first pass codes the coefficients
+ * Ss to Se divided by 2^Al, rounding toward zero, as runs and sizes, and a block whose last ones
+ * are zero ends in an end-of-band, counted into a run of them (EOBRUN) that's coded once, before
+ * the next code, or at 32,767. An AC refining pass codes the coefficients that become nonzero at
+ * this bit, a 1 with its sign; the next bit of each already nonzero one goes after the next code,
+ * as a correction bit, kept until then, and an end-of-band run takes its blocks' correction bits
+ * with it. libjpeg writes the run out early when its bits pass 937, which changes the codes, so
+ * that's here too. Zero runs of 16 aren't coded when the band's end can take them. */
+
+/* A scan's state: the bits, the table its codes come from, and with `gather`, counts of the
+ * codes instead of bits, for tables made for the scan. */
+typedef struct {
+    bits_t w;
+    int gather;
+    cx_u64* counts;
+    const cx_u32* code;
+    const cx_u32* size;
+    cx_u32 eobrun;
+    cx_u32 be;              /* correction bits held for the end-of-band run */
+    cx_u8 corr[1000 + 64];  /* those, then the block's own */
+} prog_t;
+
+static inline void p_code(prog_t* P, cx_u32 sym) {
+    if (P->gather) P->counts[sym]++;
+    else put(&P->w, P->code[sym], P->size[sym]);
+}
+
+/* The low n bits of v, n from 1 to 16. */
+static inline void p_bits(prog_t* P, cx_u32 v, cx_u32 n) {
+    if (!P->gather) put(&P->w, v & ((1u << n) - 1), n);
+}
+
+/* Correction bits, 24 at a time. */
+static void p_corr(prog_t* P, const cx_u8* b, cx_u32 n) {
+    if (P->gather) return;
+    cx_u32 i = 0;
+    for (; i + 24 <= n; i += 24) {
+        cx_u32 v = 0;
+        for (cx_u32 j = 0; j < 24; j++) v = v << 1 | b[i + j];
+        put(&P->w, v, 24);
+    }
+    if (i < n) {
+        cx_u32 v = 0;
+        for (cx_u32 j = i; j < n; j++) v = v << 1 | b[j];
+        put(&P->w, v, n - i);
+    }
+}
+
+/* The end-of-band run, if there is one: a code for its size in bits less one, then its low bits,
+ * then the correction bits held with it. */
+static void p_eobrun(prog_t* P) {
+    if (!P->eobrun) return;
+    const cx_u32 nb = 31 - (cx_u32)__builtin_clz(P->eobrun);
+    p_code(P, nb << 4);
+    if (nb) p_bits(P, P->eobrun, nb);
+    P->eobrun = 0;
+    p_corr(P, P->corr, P->be);
+    P->be = 0;
+}
+
+/* The n blocks of 64 coefficients of `coefs` in row order, packed for the scans: each one's DC
+ * into dc, and its nonzero AC ones, in zigzag order as its mask has them, into vals from offs[i].
+ * A scan then reads a few hundred bytes a row of blocks rather than every block's 128, and ten
+ * scans, each read twice, would otherwise read them all from beyond the L2 cache. Gives how many
+ * went into vals, which has room for every mask's bits. */
+cx_usize cx_jpg_pack(const cx_i16* coefs, const cx_u64* masks, cx_usize n, cx_i16* dc, cx_i16* vals, cx_u32* offs) {
+    cx_usize at = 0;
+    for (cx_usize i = 0; i < n; i++, coefs += 64) {
+        dc[i] = coefs[0];
+        offs[i] = (cx_u32)at;
+        cx_u64 m = masks[i];
+        while (m) {
+            vals[at++] = coefs[NATURAL[__builtin_ctzll(m)]];
+            m &= m - 1;
+        }
+    }
+    return at;
+}
+
+/* The scan of blocks order[0..n), packed by cx_jpg_pack: dc, vals and offs, with each block's
+ * nonzero AC coefficients as bits of masks in zigzag order. comp[i] is a block's component, 0 to
+ * 2, whose DC goes after that component's last and whose table is 0 for the first component and 1
+ * for the others; tabs holds 1024 per table as cx_jpg_huff's. With gather it counts each table's
+ * codes into counts, 256 a table, and writes nothing; otherwise it writes the scan's bytes from
+ * out + len, padded to a byte and stuffed, and gives the new length. out has room for 27 bits a
+ * coefficient of the band and 94 more a block, doubled, and 1024 bytes more. The AC passes go
+ * through the nonzero coefficients by their masks: a zero one is zero at every bit. */
+cx_usize cx_jpg_scan(cx_u8* out, cx_usize len, cx_u32 gather, cx_u64* counts, const cx_u32* tabs, const cx_i16* dc, const cx_i16* vals,
+                     const cx_u32* offs, const cx_u64* masks, const cx_u32* order, const cx_u8* comp, cx_usize n, cx_u32 ss, cx_u32 se,
+                     cx_u32 ah, cx_u32 al) {
+    static prog_t zero;
+    prog_t* const P = (prog_t*)cx_alloc(sizeof(prog_t));
+    *P = zero;
+    P->w.p = out + len;
+    P->gather = (int)gather;
+    if (ss == 0) {
+        if (ah == 0) {
+            cx_i32 pred[3] = {0, 0, 0};
+            for (cx_usize i = 0; i < n; i++) {
+                const cx_u32 c = comp[i], t = c ? 1 : 0;
+                P->counts = counts + 256 * t;
+                P->code = tabs + 1024 * t;
+                P->size = P->code + 256;
+                const cx_i32 d = (cx_i32)dc[order[i]] >> al;
+                const cx_i32 diff = d - pred[c];
+                pred[c] = d;
+                const cx_u32 s = magnitude(diff);
+                p_code(P, s);
+                if (s) p_bits(P, (cx_u32)(diff < 0 ? diff - 1 : diff), s);
+            }
+        } else {
+            for (cx_usize i = 0; i < n; i++) p_bits(P, (cx_u32)((cx_i32)dc[order[i]] >> al), 1);
+        }
+    } else {
+        const cx_u32 t = n && comp[0] ? 1 : 0;
+        P->counts = counts + 256 * t;
+        P->code = tabs + 1024 * t + 512;
+        P->size = P->code + 256;
+        /* The band's bits of a mask. */
+        const cx_u64 below = ((cx_u64)1 << ss) - 1;
+        const cx_u64 band = (se == 63 ? ~(cx_u64)0 : ((cx_u64)1 << (se + 1)) - 1) & ~below;
+        for (cx_usize i = 0; i < n; i++) {
+            const cx_u32 at_block = order[i];
+            const cx_u64 full = masks[at_block];
+            /* The band's values follow those of the coefficients before it. */
+            const cx_i16* b = vals + offs[at_block] + __builtin_popcountll(full & below);
+            cx_u64 m = full & band;
+            if (ah == 0) {
+                /* The last coefficient coded, and each run of zeros from there. */
+                cx_u32 last = ss - 1;
+                while (m) {
+                    const cx_u32 k = (cx_u32)__builtin_ctzll(m);
+                    m &= m - 1;
+                    const cx_i32 v = *b++;
+                    const cx_u32 a = (cx_u32)(v < 0 ? -v : v) >> al;
+                    if (!a) continue;
+                    cx_u32 r = k - last - 1;
+                    p_eobrun(P);
+                    while (r > 15) {
+                        p_code(P, 0xF0);
+                        r -= 16;
+                    }
+                    const cx_u32 s = 32 - (cx_u32)__builtin_clz(a);
+                    p_code(P, (r << 4) + s);
+                    p_bits(P, v < 0 ? ~a : a, s);
+                    last = k;
+                }
+                if (last < se) {
+                    if (++P->eobrun == 0x7FFF) p_eobrun(P);
+                }
+            } else {
+                /* The coefficients that aren't zero at this bit, each one's size there, and the
+                 * last that becomes nonzero at it. */
+                cx_u8 at[64], pos[64];
+                cx_u32 abs[64], count = 0, eob = 0;
+                while (m) {
+                    const cx_u32 k = (cx_u32)__builtin_ctzll(m);
+                    m &= m - 1;
+                    const cx_i32 v = *b++;
+                    const cx_u32 a = (cx_u32)(v < 0 ? -v : v) >> al;
+                    if (!a) continue;
+                    at[count] = (cx_u8)k;
+                    pos[count] = v >= 0;
+                    abs[count++] = a;
+                    if (a == 1) eob = k;
+                }
+                /* This block's correction bits go after those held, until a code takes them. The
+                 * run of zeros doesn't count the coefficients that were already nonzero. */
+                cx_u32 base = P->be, br = 0, r = 0, prev = ss - 1;
+                for (cx_u32 j = 0; j < count; j++) {
+                    const cx_u32 k = at[j], a = abs[j];
+                    r += k - prev - 1;
+                    prev = k;
+                    while (r > 15 && k <= eob) {
+                        p_eobrun(P);
+                        p_code(P, 0xF0);
+                        r -= 16;
+                        p_corr(P, P->corr + base, br);
+                        base = 0;
+                        br = 0;
+                    }
+                    if (a > 1) {
+                        P->corr[base + br++] = (cx_u8)(a & 1);
+                        continue;
+                    }
+                    p_eobrun(P);
+                    p_code(P, (r << 4) + 1);
+                    p_bits(P, pos[j], 1);
+                    p_corr(P, P->corr + base, br);
+                    base = 0;
+                    br = 0;
+                    r = 0;
+                }
+                r += se - prev;
+                if (r || br) {
+                    P->eobrun++;
+                    P->be += br;
+                    if (P->eobrun == 0x7FFF || P->be > 1000 - 64 + 1) p_eobrun(P);
+                }
+            }
+        }
+        p_eobrun(P);
+    }
+    cx_usize got = len;
+    if (!gather) {
+        put(&P->w, 0x7F, 7);
+        got = (cx_usize)(stuff(out + len, P->w.p) - out);
+    }
+    cx_free(P, sizeof(prog_t));
+    return got;
+}
+
 /* --- downsampling ---------------------------------------------------------------------------- */
 
 /* 2n samples of r0, and of r1 if it isn't null, averaged into n. */

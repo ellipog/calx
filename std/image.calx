@@ -282,14 +282,15 @@ impl Image {
     }
 
     /// The image as a JPEG file, byte for byte as Pillow writes it with the same settings:
-    /// `quality` from 1 to 100, `sampling` how much color to keep, and `optimize` for Huffman
-    /// tables made for the image. Panics if the image has alpha, which a JPEG can't hold.
+    /// `quality` from 1 to 100, `sampling` how much color to keep, `optimize` for Huffman tables
+    /// made for the image, and `progressive` for a file that shows a rough picture early and
+    /// sharpens as the rest comes. Panics if the image has alpha, which a JPEG can't hold.
     @track_caller
-    pub fn encode_jpeg(self, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false) -> List<u8> {
+    pub fn encode_jpeg(self, quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false, progressive: bool = false) -> List<u8> {
         if self.form.has_alpha() {
             panic("a JPEG holds no alpha, and the image is {self.form}; drop it first with to(Kind.Rgb)")
         }
-        return jpeg.encode(self.w, self.h, self.form.channels(), self.pixels, quality, sampling, optimize)
+        return jpeg.encode(self.w, self.h, self.form.channels(), self.pixels, quality, sampling, optimize, progressive)
     }
 
     /// How many pixels across.

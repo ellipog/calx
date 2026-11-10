@@ -67,7 +67,7 @@ A color prints as CSS writes it, `#1838d0`, with the alpha after only when it is
 | `Image.decode(bytes: List<u8>) -> Image ! String` | The image in a file's bytes, told apart by how they start, or why it can't be read |
 | `im.save(path: String) ! Error` | Writes a `.png`, a `.jpg` or `.jpeg` at quality 75, or an `.ico`, by the name's end |
 | `im.encode_png(level: u32 = 6) -> List<u8>` | The image as a PNG, at zlib `level` 0 to 9 |
-| `im.encode_jpeg(quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false) -> List<u8>` | The image as a JPEG, byte for byte as Pillow's `save(f, "JPEG", quality=, subsampling=, optimize=)` writes it. Panics if the image has alpha |
+| `im.encode_jpeg(quality: u32 = 75, sampling: Sampling = Sampling.S420, optimize: bool = false, progressive: bool = false) -> List<u8>` | The image as a JPEG, byte for byte as Pillow's `save(f, "JPEG", quality=, subsampling=, optimize=, progressive=)` writes it. Panics if the image has alpha |
 | `im.width()`, `im.height()`, `im.kind()`, `im.channels()` | Its size and what its pixels hold |
 | `im.get(x, y) -> Color` | The color of pixel (x, y) from the top left. A gray pixel gives the same R, G and B; with no alpha, it gives 255 |
 | `im.set(x, y, color: Color)` | Sets pixel (x, y): its brightness in a gray image, and without alpha in one that has none |
@@ -196,6 +196,7 @@ Times for a 1600 × 900 photo, the README's banner scaled up with Lanczos and sa
 | Reading a baseline JPEG | 3.1 ms | 3.6 ms |
 | Reading a progressive JPEG, the banner itself, 1376 × 768 | 5.8 ms | 6.9 ms |
 | Writing a JPEG at quality 75 | 1.4 ms | 2.3 ms |
+| Writing a progressive JPEG at quality 75 | 5.6 ms | 10.1 ms |
 | Reading a PNG | 12.2 ms | 17.5 ms |
 | Writing a PNG at level 6 | 58 ms | 95 ms |
 | Lanczos to 800 × 450 | 8.5 ms | 10.7 ms |
