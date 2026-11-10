@@ -29,6 +29,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "source.h"
+#include "term.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -550,7 +551,11 @@ int run_fmt(const std::vector<std::string>& args) {
             return 1;
         }
     }
+    // In a terminal, `! path` for each file that isn't formatted, or `✓ path` for each it formats,
+    // and a line that sums them up.
+    const term::Caps& c = term::out();
     int status = 0;
+    std::size_t changed = 0;
     for (const fs::path& p : files) {
         std::string text, out, error;
         if (!read_file(p, text)) {
@@ -564,8 +569,10 @@ int run_fmt(const std::vector<std::string>& args) {
             continue;
         }
         if (out == text) continue;
+        changed++;
         if (check) {
-            std::printf("%s isn't formatted\n", p.string().c_str());
+            if (c.color) std::printf("  %s %s %s\n", term::bang(c).c_str(), term::accent(c, p.string()).c_str(), term::dim(c, "isn't formatted").c_str());
+            else std::printf("%s isn't formatted\n", p.string().c_str());
             status = 1;
             continue;
         }
@@ -577,9 +584,25 @@ int run_fmt(const std::vector<std::string>& args) {
             status = 1;
             continue;
         }
-        std::printf("formatted %s\n", p.string().c_str());
+        if (c.color) std::printf("  %s %s\n", term::tick(c).c_str(), term::accent(c, p.string()).c_str());
+        else std::printf("formatted %s\n", p.string().c_str());
     }
-    if (files.empty()) std::printf("calx fmt: no .calx files here\n");
+    if (files.empty()) {
+        std::printf("calx fmt: no .calx files here\n");
+    } else if (c.color) {
+        auto count = [](std::size_t n) { return std::to_string(n) + (n == 1 ? " file" : " files"); };
+        std::string of = changed == files.size() ? count(changed) : std::to_string(changed) + " of " + count(files.size());
+        std::string sum;
+        if (changed == 0) {
+            sum = term::tick(c) + " " + term::bold(c, files.size() == 1 ? "It's formatted" : "All " + count(files.size()) + " are formatted");
+        } else if (check) {
+            sum = term::bang(c) + " " + term::bold(c, of + (changed == 1 ? " isn't" : " aren't") + " formatted") +
+                  term::dim(c, "; ") + term::code(c, "`calx fmt` formats them", false);
+        } else {
+            sum = term::tick(c) + " " + term::bold(c, "Formatted " + of);
+        }
+        std::printf("%s%s\n", changed ? "\n" : "", sum.c_str());
+    }
     return status;
 }
 

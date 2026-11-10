@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "term.h"
 #include "toolchain.h"
 
 #ifdef _WIN32
@@ -569,14 +570,18 @@ int run_new(const std::vector<std::string>& args) {
         }
     }
     if (!write_new(main, starter(name, script))) return 1;
+    // In a terminal, a ✓ before what it made, and the commands it gives in the accent.
+    const term::Caps& c = term::out();
+    std::string made = c.color ? term::tick(c) + " Made " : "Made ";
+    auto say = [&](const std::string& text) { std::fputs(term::code(c, text, false).c_str(), stdout); };
     if (script) {
 #ifndef _WIN32
         // So `./tidy.calx` runs it, through its `#!` line.
         fs::permissions(main, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec, fs::perm_options::add, ec);
         std::string run = path.is_absolute() || given.rfind("./", 0) == 0 || given.rfind("../", 0) == 0 ? given : "./" + given;
-        std::printf("Made %s. Run it with `calx %s`, or `%s`.\n", given.c_str(), shell_word(given).c_str(), shell_word(run).c_str());
+        say(made + given + ". Run it with `calx " + shell_word(given) + "`, or `" + shell_word(run) + "`.\n");
 #else
-        std::printf("Made %s. Run it with `calx %s`.\n", given.c_str(), shell_word(given).c_str());
+        say(made + given + ". Run it with `calx " + shell_word(given) + "`.\n");
 #endif
         return 0;
     }
@@ -584,11 +589,35 @@ int run_new(const std::vector<std::string>& args) {
     bool kept = fs::exists(ignore, ec);
     if (!kept && !write_new(ignore, "# What `calx build` makes\n/" + name + "\n/" + name + ".exe\n/" + name + ".pdb\n")) return 1;
     bool here = fs::equivalent(dir, fs::current_path(ec), ec);
-    std::printf("Made %s, with %s.calx%s. Run it with:\n\n", here ? "a program here" : given.c_str(), name.c_str(),
-                kept ? ", and kept the .gitignore that was there" : " and a .gitignore");
-    if (!here) std::printf("    cd %s\n", shell_word(given).c_str());
-    std::printf("    calx %s.calx\n\n", name.c_str());
-    std::printf("`calx test %s.calx` runs its tests, and `calx build --release %s.calx` builds it.\n", name.c_str(), name.c_str());
+    if (c.color) {
+        // What it made as a tree, then the commands to go on with, lined up with what each does.
+        std::string root = here ? "." : given;
+        std::printf("%s Made %s\n\n", term::tick(c).c_str(), term::bold(c, root).c_str());
+        std::printf("    %s\n", term::accent(c, root + "/").c_str());
+        std::printf("    %s %s%s\n", term::dim(c, "\xE2\x94\x9C\xE2\x94\x80\xE2\x94\x80").c_str(), term::pad(name + ".calx", 14).c_str(),
+                    term::dim(c, "reads its arguments, and has a test").c_str());
+        std::printf("    %s %s%s\n\n", term::dim(c, "\xE2\x94\x94\xE2\x94\x80\xE2\x94\x80").c_str(), term::pad(".gitignore", 14).c_str(),
+                    term::dim(c, kept ? "kept, as it was" : "leaves out what calx build makes").c_str());
+        std::vector<std::pair<std::string, std::string>> next;
+        if (!here) next.push_back({"cd " + shell_word(given), ""});
+        next.push_back({"calx " + name + ".calx", "runs it"});
+        next.push_back({"calx test " + name + ".calx", "runs its tests"});
+        next.push_back({"calx build --release " + name + ".calx", "builds it"});
+        std::size_t wide = 0;
+        for (auto& [command, does] : next) wide = std::max(wide, command.size());
+        std::printf("  %s\n", term::heading(c, "next").c_str());
+        for (auto& [command, does] : next) {
+            std::string shown = term::accent(c, command);
+            if (!does.empty()) shown = term::pad(shown, static_cast<int>(wide) + 3) + term::dim(c, does);
+            std::printf("    %s\n", shown.c_str());
+        }
+        return 0;
+    }
+    say(made + (here ? "a program here" : given) + ", with " + name + ".calx" +
+        (kept ? ", and kept the .gitignore that was there" : " and a .gitignore") + ". Run it with:\n\n");
+    if (!here) std::printf("    %s\n", term::accent(c, "cd " + shell_word(given)).c_str());
+    std::printf("    %s\n\n", term::accent(c, "calx " + name + ".calx").c_str());
+    say("`calx test " + name + ".calx` runs its tests, and `calx build --release " + name + ".calx` builds it.\n");
     return 0;
 }
 

@@ -26,9 +26,13 @@ import std.env.{args, variable}
 import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
 import std.hash.{sha256}
 import std.http.{Header, get}
+import std.io.{flush, is_terminal}
+import std.math.{sin}
 import std.process.{exit}
 import std.tar.{Tar}
-import std.time.{Timestamp}
+import std.term.{size as term_size}
+import std.thread.{Task, sleep}
+import std.time.{Instant, Timestamp}
 import std.zip.{Zip}
 
 struct Options {
@@ -46,15 +50,20 @@ struct Options {
 
 fn main() {
     let o = options()
-    if let err(message) = run(o) {
-        eprintln("calx update: {message}")
+    let l = look()
+    if let err(message) = run(o, l) {
+        if l.color {
+            eprintln("{paint(l, "31", "✗")} calx update: {commands(l, message)}")
+        } else {
+            eprintln("calx update: {message}")
+        }
         exit(1)
     }
 }
 
-fn run(o: Options) ! String {
+fn run(o: Options, l: Look) ! String {
     if o.rollback {
-        try rollback(o.home)
+        try rollback(o.home, l)
         return
     }
     if not o.background.is_empty() {
@@ -62,19 +71,43 @@ fn run(o: Options) ! String {
         return
     }
     if o.toolchain {
-        try install_toolchain(o)
+        try install_toolchain(o, l)
         return
     }
     let windows = separator() == "\\"
     let nightly = channel_is_nightly(o)
     var target = o.to.copy()
     if target.is_empty() {
-        println("Looking for the newest {if nightly { "nightly" } else { "stable" }} release of Calx...")
-        target = try newest(nightly, false)
+        let looking = "Looking for the newest {if nightly { "nightly" } else { "stable" }} release of Calx"
+        if l.color {
+            let p = pulse(l, looking)
+            target = match newest(nightly, false, l) {
+                ok(v) => v,
+                err(e) => {
+                    stop_pulse(p)
+                    fail e
+                },
+            }
+            stop_pulse(p)
+            if not nightly and target.contains("-nightly.") {
+                println("{dim(l, "·")} {dim(l, "There's no stable release yet, so this follows the nightly releases.")}")
+            }
+        } else {
+            println("{looking}...")
+            target = try newest(nightly, false, l)
+        }
     }
     let newer = compare(target, o.current) > 0
     if o.check {
-        if target == o.current {
+        if l.color {
+            if target == o.current {
+                done(l, "calx `{o.current}` is the newest")
+            } else if newer {
+                println("{band(l, "↑ calx {target} is out")}  {dim(l, "you have {o.current};")} {commands(l, "`calx update` installs it")}")
+            } else {
+                done(l, "calx `{o.current}` is newer than the newest release, {target}")
+            }
+        } else if target == o.current {
             println("calx {o.current} is the newest.")
         } else if newer {
             println("calx {target} is out; you have {o.current}. `calx update` installs it.")
@@ -84,25 +117,39 @@ fn run(o: Options) ! String {
         return
     }
     if target == o.current and not o.force {
-        println("calx {o.current} is the newest; there's nothing to update.")
+        if l.color {
+            done(l, "calx `{o.current}` is the newest; there's nothing to update")
+        } else {
+            println("calx {o.current} is the newest; there's nothing to update.")
+        }
         return
     }
     if not newer and o.to.is_empty() and not o.force {
-        println("calx {o.current} is newer than the newest release, {target}; `calx update --to {target}` goes back to it.")
+        if l.color {
+            done(l, "calx `{o.current}` is newer than the newest release, {target}; `calx update --to {target}` goes back to it")
+        } else {
+            println("calx {o.current} is newer than the newest release, {target}; `calx update --to {target}` goes back to it.")
+        }
         return
     }
     let tag = tag_of(target)
     let file = "calx-{target}-{if windows { "windows-x64.zip" } else { "linux-x64.tar.gz" }}"
     let url = "{releases()}/download/{tag}/{file}"
-    println("Downloading {file}...")
-    let archive = try fetch(url, 300000, 1073741824)    // 1 GiB
+    if not l.color {
+        println("Downloading {file}...")
+    }
+    let archive = try fetch_shown(l, file, url, 300000, 1073741824)    // 1 GiB
     let sums = try fetch("{url}.sha256", 30000, 4096)
     let want = first_word(String.from_utf8(sums) ?? String())
     let got = hex(sha256(archive))
     if want != got {
         fail "the download's SHA-256 is {got}, but the release says {want}; nothing was changed. Try again in a minute, in case the release was being replaced."
     }
-    println("Checked its SHA-256 ({megabytes(archive.len())} MB).")
+    if l.color {
+        done(l, "Downloaded {file} {dim(l, "{megabytes(archive.len())} MB, SHA-256 checked")}")
+    } else {
+        println("Checked its SHA-256 ({megabytes(archive.len())} MB).")
+    }
 
     let work = "{o.home}/.update"
     let fresh = "{work}/new"
@@ -129,7 +176,7 @@ fn run(o: Options) ! String {
         fail "the download has no bin/{exe} or runtime/; nothing was changed"
     }
     // The toolchain it builds with, if that's another, before anything moves.
-    let tools = try fetch_toolchain(o.home, root, tag, work)
+    let tools = try fetch_toolchain(o.home, root, tag, work, l)
     try swap(o.home, root, "{work}/old")
     if not tools.is_empty() {
         try place_toolchain(o.home, tools, "{work}/old")
@@ -138,7 +185,13 @@ fn run(o: Options) ! String {
     try clear(fresh)
     if let err(_) = write("{work}/previous", "{o.current}\n".to_bytes()) {
     }
-    println("Installed calx {target}, in place of {o.current}. `calx update --rollback` puts {o.current} back.")
+    if l.color {
+        println("")
+        println("{band(l, "✓ Installed calx {target}")}")
+        println("{dim(l, commands(l, "in place of {o.current}; `calx update --rollback` puts it back"))}")
+    } else {
+        println("Installed calx {target}, in place of {o.current}. `calx update --rollback` puts {o.current} back.")
+    }
 }
 
 // The release a version is in: `nightly` for a nightly, `vVERSION` for the others.
@@ -177,29 +230,47 @@ fn installed_toolchain(home: String) -> String {
 // Downloads and checks the toolchain the release in `root` names, from the release `tag`, and
 // unpacks it under `work`, if `home` hasn't that one already. Gives where it unpacked it, or ""
 // if there's nothing to do. Nothing in `home` changes.
-fn fetch_toolchain(home: String, root: String, tag: String, work: String) -> String ! String {
+fn fetch_toolchain(home: String, root: String, tag: String, work: String, l: Look) -> String ! String {
     let note = (try toolchain_note(root)) else return String()
     if installed_toolchain(home) == note.name {
         return String()
     }
     let url = "{releases()}/download/{tag}/{note.file}"
-    println("Downloading the toolchain programs are built with, {note.name}...")
-    let archive = try fetch(url, 900000, 2147483648)    // 2 GiB
+    if not l.color {
+        println("Downloading the toolchain programs are built with, {note.name}...")
+    }
+    let archive = try fetch_shown(l, "toolchain", url, 900000, 2147483648)    // 2 GiB
     let got = hex(sha256(archive))
     if got != note.sha256 {
         fail "the toolchain's SHA-256 is {got}, but the release says {note.sha256}; nothing was changed. Try again in a minute, in case the release was being replaced."
     }
-    println("Checked its SHA-256 ({megabytes(archive.len())} MB). Unpacking it...")
+    if l.color {
+        done(l, "Downloaded the toolchain, {note.name} {dim(l, "{megabytes(archive.len())} MB, SHA-256 checked")}")
+    } else {
+        println("Checked its SHA-256 ({megabytes(archive.len())} MB). Unpacking it...")
+    }
     let fresh = "{work}/toolchain"
     try clear(fresh)
     if let err(e) = make_dir_all(fresh) {
         fail "can't make {fresh}: {why(e)}"
     }
+    // Opening it decompresses it, which takes seconds too, so the pulse starts first.
+    let unpacking = pulse(l, "Unpacking the toolchain")
     let t = match Tar.open(archive) {
         ok(t) => t,
-        err(e) => fail "the toolchain isn't a tar archive Calx can read: {e}",
+        err(e) => {
+            stop_pulse(unpacking)
+            fail "the toolchain isn't a tar archive Calx can read: {e}"
+        },
     }
-    try t.extract(fresh)
+    if let err(e) = t.extract(fresh) {
+        stop_pulse(unpacking)
+        fail e
+    }
+    stop_pulse(unpacking)
+    if l.color {
+        done(l, "Unpacked the toolchain")
+    }
     let exe = if separator() == "\\" { ".exe" } else { "" }
     let dir = "{fresh}/toolchain"
     if not is_file("{dir}/bin/clang{exe}") {
@@ -224,15 +295,19 @@ fn place_toolchain(home: String, from: String, old: String) ! String {
 }
 
 // Installs the toolchain the installed release names, if it isn't there.
-fn install_toolchain(o: Options) ! String {
+fn install_toolchain(o: Options, l: Look) ! String {
     let note = (try toolchain_note(o.home)) else {
         println("This release of Calx builds programs with the clang it finds; it names no toolchain to install.")
         return
     }
     let work = "{o.home}/.update"
-    let dir = try fetch_toolchain(o.home, o.home, tag_of(o.current), work)
+    let dir = try fetch_toolchain(o.home, o.home, tag_of(o.current), work, l)
     if dir.is_empty() {
-        println("The toolchain, {note.name}, is installed.")
+        if l.color {
+            done(l, "The toolchain, {note.name}, is installed")
+        } else {
+            println("The toolchain, {note.name}, is installed.")
+        }
         return
     }
     // The one it replaces isn't kept: it's not what this release builds with.
@@ -241,7 +316,11 @@ fn install_toolchain(o: Options) ! String {
     try place_toolchain(o.home, dir, aside)
     try clear(aside)
     try clear("{work}/toolchain")
-    println("Installed the toolchain, {note.name}.")
+    if l.color {
+        done(l, bold(l, "Installed the toolchain, {note.name}"))
+    } else {
+        println("Installed the toolchain, {note.name}.")
+    }
 }
 
 // The releases page of Calx's repository, or CALX_RELEASES, for a mirror or a test.
@@ -313,7 +392,7 @@ fn channel_is_nightly(o: Options) -> bool {
 
 // The newest release's version on a channel. Until there's a stable release, the stable
 // channel follows nightlies.
-fn newest(nightly: bool, quiet: bool) -> String ! String {
+fn newest(nightly: bool, quiet: bool, l: Look) -> String ! String {
     if not nightly {
         match fetch("{releases()}/latest/download/version.txt", 15000, 65536) {
             ok(b) => return try parse_version(b),
@@ -321,7 +400,8 @@ fn newest(nightly: bool, quiet: bool) -> String ! String {
                 if not e.contains("404") {
                     fail e
                 }
-                if not quiet {
+                // In a terminal, the pulse that's drawing says it once it's done, as a note.
+                if not quiet and not l.color {
                     println("There's no stable release yet, so this follows the nightly releases.")
                 }
             },
@@ -360,7 +440,7 @@ fn fetch(url: String, timeout_ms: u32, limit: usize) -> List<u8> ! String {
 fn background(o: Options) {
     let file = o.background.copy()
     let now = unsafe { Timestamp.now() }.unix_ms / 1000
-    let newer = match newest(channel_is_nightly(o), true) {
+    let newer = match newest(channel_is_nightly(o), true, look()) {
         ok(v) => if compare(v, o.current) > 0 { v } else { String() },
         err(_) => {
             let before = match read(file) {
@@ -444,7 +524,7 @@ fn undo(moved: List<(String, String)>, message: String) -> String {
 
 // Swaps the installation with what the last update replaced, so running it twice goes back to
 // where it started.
-fn rollback(home: String) ! String {
+fn rollback(home: String, l: Look) ! String {
     let work = "{home}/.update"
     let old = "{work}/old"
     if not is_dir(old) {
@@ -467,7 +547,12 @@ fn rollback(home: String) ! String {
     try clear(back)
     if let err(_) = write("{work}/previous", "{current}\n".to_bytes()) {
     }
-    println("Went back to calx {previous}, from {current}. `calx update --rollback` again returns to {current}.")
+    if l.color {
+        println("{band(l, "✓ Went back to calx {previous}")}")
+        println("{dim(l, commands(l, "from {current}; `calx update --rollback` again returns to it"))}")
+    } else {
+        println("Went back to calx {previous}, from {current}. `calx update --rollback` again returns to {current}.")
+    }
 }
 
 // Removes a folder if it's there. On Windows a calx.exe that's still running can't be removed,
@@ -608,4 +693,313 @@ fn hex_digit(v: u32) -> rune {
 fn megabytes(n: usize) -> String {
     let tenths = (n * 10 + 524288) / 1048576
     return "{tenths / 10}.{tenths % 10}"
+}
+
+// How calx-update looks (CLX-250), as calx does. In a terminal someone's watching it shows colour,
+// a ✓ before what's done, a progress bar for each download, and a pulse while the toolchain
+// unpacks. Anywhere else, such as a pipe, CI or with NO_COLOR set, it prints the plain lines it
+// always printed. CLICOLOR_FORCE=1 or FORCE_COLOR turns the terminal's look on anyway, for a
+// recording.
+struct Look {
+    color: bool
+    live: bool
+    truecolor: bool
+}
+
+fn env(name: String) -> String {
+    return variable(name) ?? String()
+}
+
+fn look() -> Look {
+    let force_color = env("FORCE_COLOR")
+    let force = env("CLICOLOR_FORCE") == "1" or (not force_color.is_empty() and force_color != "0")
+    let off = not env("NO_COLOR").is_empty() or env("TERM") == "dumb"
+    let color = force or (is_terminal() and not off)
+    let colorterm = env("COLORTERM")
+    // Every Windows console that takes ANSI codes takes 24-bit colour.
+    let truecolor = separator() == "\\" or colorterm == "truecolor" or colorterm == "24bit" or not env("WT_SESSION").is_empty() or force
+    return Look { color: color, live: color and (force or env("CI").is_empty()), truecolor: truecolor }
+}
+
+// `s` in the style `sgr`, which comes back after each style inside it ends, so a dim line with a
+// command in the accent is dim on both sides of it.
+fn paint(l: Look, sgr: String, s: String) -> String {
+    if not l.color {
+        return s.copy()
+    }
+    let inner = s.replace("\u{1b}[0m", "\u{1b}[0m\u{1b}[{sgr}m")
+    return "\u{1b}[{sgr}m{inner}\u{1b}[0m"
+}
+
+// Calx's amber, as calx's: the brand's (`--calx` on calxlang.com), or the nearest the terminal's
+// palette has. `ground` is the same colour behind text, for a chip.
+fn amber(l: Look) -> String {
+    if l.truecolor {
+        return String("38;2;188;133;54")
+    }
+    return if env("TERM").contains("256") { String("38;5;136") } else { String("33") }
+}
+
+fn ground(l: Look) -> String {
+    if l.truecolor {
+        return String("48;2;188;133;54")
+    }
+    return if env("TERM").contains("256") { String("48;5;136") } else { String("43") }
+}
+
+fn accent(l: Look, s: String) -> String {
+    return paint(l, amber(l), s)
+}
+
+// A result: `text` on a chip of amber that dithers in and out, `░▒▓ text ▓▒░`, as calx's.
+fn band(l: Look, text: String) -> String {
+    if not l.color {
+        return text.copy()
+    }
+    let ink = if l.truecolor { String("38;2;24;24;27;1") } else { String("30") }
+    let fg = amber(l)
+    return "\u{1b}[{fg}m░▒▓\u{1b}[0m\u{1b}[{ground(l)};{ink}m {text} \u{1b}[0m\u{1b}[{fg}m▓▒░\u{1b}[0m"
+}
+
+fn dim(l: Look, s: String) -> String {
+    return paint(l, "90", s)
+}
+
+fn bold(l: Look, s: String) -> String {
+    return paint(l, "1", s)
+}
+
+// `✓ text`, with each `...` in `text` in the accent, without its backticks.
+fn done(l: Look, text: String) {
+    println("{paint(l, "32", "✓")} {commands(l, text)}")
+    flush()
+}
+
+// `text` with each `...` in it in the accent, without the backticks.
+fn commands(l: Look, text: String) -> String {
+    var out = String()
+    var rest = text.copy()
+    loop {
+        let open = rest.find("`") ?? rest.len()
+        if open == rest.len() {
+            break
+        }
+        let after = rest[open + 1..]
+        let close = after.find("`") ?? after.len()
+        if close == after.len() {
+            break
+        }
+        out.push_str(rest[..open])
+        out.push_str(accent(l, after[..close]))
+        rest = after[close + 1..]
+    }
+    out.push_str(rest)
+    return out
+}
+
+// Cells of shade, each amber or the grey of a track, with one escape code for each run of either.
+struct Cells {
+    out: String
+    lit: i32    // 0 before the first cell, 1 for the track's grey, 2 for amber
+    amber: String
+}
+
+impl Cells {
+    fn add(mut self, lit: bool, cell: String) {
+        let want: i32 = if lit { 2 } else { 1 }
+        if want != self.lit {
+            if self.lit != 0 {
+                self.out.push_str("\u{1b}[0m")
+            }
+            if lit {
+                let code = "\u{1b}[{self.amber}m"
+                self.out.push_str(code)
+            } else {
+                self.out.push_str("\u{1b}[90m")
+            }
+            self.lit = want
+        }
+        self.out.push_str(cell)
+    }
+
+    fn done(own self) -> String {
+        var out = self.out
+        out.push_str("\u{1b}[0m")
+        return out
+    }
+}
+
+// The shades by how much of a cell they ink, in quarters: ░, ▒, ▓, █.
+fn shade(quarters: i64) -> String {
+    return if quarters <= 1 { String("░") } else if quarters == 2 { String("▒") } else if quarters == 3 { String("▓") } else { String("█") }
+}
+
+// A bar `width` cells wide, `part` of `whole` filled, as calx's: full cells, then an edge that
+// fades through ▓ ▒ ░ over four cells, on a grey ░ track. The edge breathes from frame to frame.
+fn bar(l: Look, part: u64, whole: u64, width: u64, frame: u64) -> String {
+    var fraction = 0.0
+    if whole > 0 {
+        fraction = f64.nearest(if part > whole { whole } else { part }) / f64.nearest(whole)
+    }
+    let edge = 4.0
+    var head = (0.5 - edge / 2.0) + fraction * (f64.nearest(width) + edge - 1.0)
+    if fraction > 0.0 and fraction < 1.0 {
+        head += 0.6 * sin(f64.nearest(frame % 1000) * 0.7)
+    }
+    var cells = Cells { out: String(), lit: 0, amber: amber(l) }
+    for i in 0..width {
+        let v = ((head - (f64.nearest(i) + 0.5)) / edge + 0.5).max(0.0).min(1.0)
+        let q = i64.saturate((v * 4.0 + 0.5).floor())
+        cells.add(q > 0, shade(if q > 0 { q } else { 1 }))
+    }
+    return cells.done()
+}
+
+// A comet of dither that sweeps to and fro across a grey ░ track `width` cells wide, as calx's.
+fn scanner(l: Look, frame: u64, width: u64) -> String {
+    let span = width - 1
+    let at = frame % (2 * span)
+    let rightward = at < span
+    let head = if rightward { at } else { 2 * span - at }
+    var cells = Cells { out: String(), lit: 0, amber: amber(l) }
+    for i in 0..width {
+        // How far behind the head this cell is, going the way it's going.
+        var behind: i64 = -1
+        if rightward and i <= head {
+            behind = i64.wrap(head - i)
+        } else if not rightward and i >= head {
+            behind = i64.wrap(i - head)
+        }
+        let lit = behind >= 0 and behind < 4
+        cells.add(lit, shade(if lit { 4 - behind } else { 1 }))
+    }
+    return cells.done()
+}
+
+// `ns` so far, for a status line: `0.4 s`, `12.3 s`, `2 min 5 s`.
+fn elapsed(ns: u64) -> String {
+    let tenths = ns / 100000000
+    if tenths < 600 {
+        return "{tenths / 10}.{tenths % 10} s"
+    }
+    let s = tenths / 10
+    return "{s / 60} min {s % 60} s"
+}
+
+// The columns of the terminal, or 80.
+fn columns() -> u64 {
+    return match unsafe { term_size() } {
+        some(s) => if s.columns >= 40 { u64(s.columns) } else { 80 },
+        none => 80,
+    }
+}
+
+// The body of a GET, as `fetch`, with what's happening drawn on the line while it comes, if `l`
+// is live: `label`, a progress bar and the speed for a download that says how long it is, or a
+// pulse after a quarter of a second for one that doesn't, so a quick request draws nothing.
+fn fetch_shown(l: Look, label: String, url: String, timeout_ms: u32, limit: usize) -> List<u8> ! String {
+    if not l.live {
+        return try fetch(url, timeout_ms, limit)
+    }
+    let agent = Header { name: "User-Agent", value: "calx-update" }
+    var r = get(url.copy(), [agent], timeout_ms, limit)
+    let start = unsafe { Instant.now() }
+    var frame: u64 = 0
+    var drawn = false
+    while not r.done() {
+        let ns = unsafe { Instant.now() }.nanos_since(start)
+        let p = r.progress()
+        if ns >= 250000000 {
+            // Tenths of a MB, and of a MB a second.
+            let got = p.received * 10 / 1048576
+            let speed = if ns > 0 { got * 1000000000 / ns } else { 0 }
+            let rate = dim(l, "{speed / 10}.{speed % 10} MB/s")
+            let line = match p.total {
+                some(total) => {
+                    let all = total * 10 / 1048576
+                    let numbers = "{got / 10}.{got % 10} of {all / 10}.{all % 10} MB"
+                    let used = 2 + u64(label.len()) + 2 + u64(numbers.len()) + 2 + 10
+                    let width = if columns() > used + 10 { (columns() - used).min(30) } else { 10 }
+                    "  {label}  {bar(l, p.received, total, width, frame)}  {numbers}  {rate}"
+                },
+                none => "  {label}  {scanner(l, frame, 8)}  {got / 10}.{got % 10} MB  {rate}",
+            }
+            print("\r\u{1b}[2K{line}")
+            flush()
+            drawn = true
+            frame += 1
+        }
+        unsafe { sleep(50000000) }
+    }
+    if drawn {
+        print("\r\u{1b}[2K")
+        flush()
+    }
+    let resp = match r.wait() {
+        ok(resp) => resp,
+        err(e) => fail "can't reach {url}: {e}",
+    }
+    if resp.status != 200 {
+        fail "{url} answered {resp.status}"
+    }
+    return resp.body
+}
+
+// A thread that draws `text` with a scanner before it and the time so far after it, once a
+// quarter of a second has passed, until `stop` gets a message, then takes the line off the screen.
+struct Pulse {
+    text: String
+    stop: Receiver<bool>
+    look: Look
+}
+
+impl Task for Pulse {
+    fn run(own self) {
+        let start = unsafe { Instant.now() }
+        var frame: u64 = 0
+        var drawn = false
+        loop {
+            if let _ = self.stop.next() {
+                break
+            }
+            let ns = unsafe { Instant.now() }.nanos_since(start)
+            if ns >= 250000000 {
+                let time = if ns >= 1000000000 { "  {dim(self.look, elapsed(ns))}" } else { String() }
+                print("\r\u{1b}[2K{scanner(self.look, frame, 8)}  {self.text}{time}")
+                flush()
+                drawn = true
+                frame += 1
+            }
+            unsafe { sleep(80000000) }
+        }
+        if drawn {
+            print("\r\u{1b}[2K")
+            flush()
+        }
+    }
+}
+
+// A pulse that runs while the main thread works, if `l` is live, which `stop_pulse` stops.
+struct Pulsing {
+    thread: Thread?
+    stop: Sender<bool>
+}
+
+fn pulse(l: Look, text: String) -> Pulsing {
+    let stop = Receiver<bool>()
+    let to_stop = stop.sender()
+    if not l.live {
+        return Pulsing { thread: none, stop: to_stop }
+    }
+    let t = unsafe { Thread.spawn(Pulse { text: text.copy(), stop: stop, look: l }) }
+    return Pulsing { thread: some(t), stop: to_stop }
+}
+
+fn stop_pulse(p: own Pulsing) {
+    let Pulsing { thread: thread, stop: stop } = p
+    var to_stop = stop
+    to_stop.send(true)
+    if let t = thread {
+        t.join()
+    }
 }

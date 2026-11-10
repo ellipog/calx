@@ -9,6 +9,7 @@
 
 #include "check.h"
 #include "emit.h"
+#include "term.h"
 #include "toolchain.h"
 
 namespace calx {
@@ -708,6 +709,7 @@ private:
                 diags.print_json(stdout);
                 std::fflush(stdout);
             } else {
+                term::quiet();
                 diags.print(stderr, opt_.color);
             }
             error(uses_[0].attr->span, attr_name(uses_[0]) + " can't run until the errors in the attributes' code are fixed");
@@ -824,6 +826,7 @@ private:
             if (!printed.empty()) {
                 const Use& u = uses_[i < uses_.size() ? i : uses_.size() - 1];
                 const SourceFile& f = sources_.file(u.attr->span.file);
+                term::quiet();
                 std::fprintf(stderr, "%s, for %s at %s:%u, printed:\n%s%s", attr_name(u).c_str(),
                              q(text(u.item->name)).c_str(), f.path.c_str(), f.position(u.attr->span.begin).first,
                              printed.c_str(), printed.back() == '\n' ? "" : "\n");

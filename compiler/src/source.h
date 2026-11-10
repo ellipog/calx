@@ -61,7 +61,8 @@ struct Diagnostic {
 };
 
 // Collects diagnostics and prints them in the form `path:line:col: error: message`, followed by
-// the source line and a caret under the span, the way clang does.
+// the source line and a caret under the span, the way clang does. In colour, for a terminal, the
+// source line has its number in a gutter beside it (CLX-250).
 class Diagnostics {
 public:
     explicit Diagnostics(const Sources& sources) : sources_(sources) {}
@@ -85,7 +86,7 @@ private:
     std::string json_location(Span span) const;
 
     void add(Severity severity, Span span, std::string message);
-    std::string excerpt(Span span, bool color) const;
+    std::string excerpt(Span span, bool color, Severity severity) const;
 
     const Sources& sources_;
     std::vector<Diagnostic> list_;

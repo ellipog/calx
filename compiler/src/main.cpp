@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -28,6 +29,7 @@
 #include "toolchain.h"
 #include "update.h"
 #include "doctor.h"
+#include "term.h"
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -45,6 +47,21 @@ namespace {
 // `calx 0.2.0 (3f9c2a1b7d4e, 2026-11-01)` for a release or a nightly, which CI stamps with its
 // commit and date, and `calx 0.2.0-dev (built from source)` otherwise.
 void print_version() {
+    // In a terminal, beside the mark, with where this calx is.
+    const term::Caps& c = term::out();
+    if (c.color) {
+#ifdef _WIN32
+        const char* platform = "Windows, x64";
+#else
+        const char* platform = "Linux, x64";
+#endif
+        std::string built = CALX_COMMIT[0] ? std::string(CALX_COMMIT) + ", " + CALX_DATE : "built from source";
+        std::printf("\n%s\n", term::beside_mark(c, {"", "", term::bold(c, "calx ") + term::accent(c, CALX_VERSION),
+                                                    term::dim(c, built + " \xC2\xB7 " + platform),
+                                                    term::dim(c, self_exe().string()), "", ""})
+                                  .c_str());
+        return;
+    }
     if (CALX_COMMIT[0]) {
         std::printf("calx %s (%s, %s)\n", CALX_VERSION, CALX_COMMIT, CALX_DATE);
     } else {
@@ -52,8 +69,99 @@ void print_version() {
     }
 }
 
-int usage() {
-    std::fputs(
+// The help in a terminal: the mark with the usage beside it, then the commands in groups under
+// headings, each with what it takes and what it does, wrapped to the terminal's width. What's in
+// backticks is in the accent.
+struct HelpRow {
+    const char* name;
+    const char* takes;
+    const char* does;
+};
+
+struct HelpGroup {
+    const char* title;
+    std::vector<HelpRow> rows;
+};
+
+const std::vector<HelpGroup>& help_groups() {
+    static const std::vector<HelpGroup> groups = {
+        {"start", {{"new", "NAME", "start a program: `calx new hello` makes hello/hello.calx; `calx new tidy.calx`, a script"}}},
+        {"build and run",
+         {{"run", "FILE", "build a program and run it; arguments after `--` go to it"},
+          {"build", "FILE", "build a program (`-o` names the output)"},
+          {"check", "FILE", "check a program without building it"},
+          {"test", "FILE [NAMES]", "run a file's @test functions, as many at once as there are processors; names pick tests"},
+          {"eval", "CODE", "run code and print its last value: `calx eval \"1 << 20\"`"}}},
+        {"tools",
+         {{"fmt", "PATHS", "format .calx files, or a folder's (`--check` changes nothing, `--stdin` reads standard input)"},
+          {"serve", "[FOLDER]", "serve a folder's files over HTTP on this machine (`--port N`, `--bind ADDRESS`)"},
+          {"emit-c", "FILE", "print the C a program compiles to (`-o` names a file)"},
+          {"expand", "FILE", "print the code a program's attributes generate"}}},
+        {"calx itself",
+         {{"update", "", "install the newest release (`--check`, `--nightly`, `--stable`, `--to V`, `--rollback`)"},
+          {"doctor", "", "check that Calx can build and run programs, and say how to fix what's wrong"},
+          {"clean", "", "remove the build cache, and say how much room that gave back"},
+          {"uninstall", "", "remove Calx, its build cache and its PATH entry (`--yes` doesn't ask)"},
+          {"completions", "SHELL", "print completions for bash, zsh, fish or powershell"},
+          {"version", "", "print the version, and where this calx is"}}},
+        {"options",
+         {{"--release", "", "optimize; the default, a debug build, builds fastest"},
+          {"--lib", "", "build a library, which a program opens while it runs"},
+          {"-o", "PATH", "where build and emit-c write"},
+          {"--timings", "", "print how long each step took"},
+          {"--verbose", "", "print the clang commands"},
+          {"--no-line", "", "leave #line directives out of the C"},
+          {"--json", "", "errors as JSON lines on standard output, for editors"},
+          {"--stdin", "", "read the file from standard input; its path names it in errors"}}},
+    };
+    return groups;
+}
+
+std::string styled_help(const term::Caps& c) {
+    std::string version = CALX_COMMIT[0] ? std::string(CALX_VERSION) : std::string(CALX_VERSION) + ", built from source";
+    std::string out = "\n" + term::beside_mark(c, {
+        "",
+        "",
+        term::bold(c, "calx ") + term::dim(c, version),
+        term::dim(c, "usage  ") + "calx " + term::accent(c, "<command>") + " [options] <file.calx>",
+        "       calx <file.calx> [arguments]" + term::dim(c, "   runs it"),
+        "",
+        "",
+    });
+    std::size_t first = 0;
+    for (const HelpGroup& g : help_groups()) {
+        for (const HelpRow& r : g.rows) first = std::max(first, std::strlen(r.name) + 1 + std::strlen(r.takes));
+    }
+    int column = 4 + static_cast<int>(first) + 3;
+    int room = std::max(30, c.columns - column - 1);
+    for (const HelpGroup& g : help_groups()) {
+        out += "\n  " + term::heading(c, g.title) + "\n";
+        for (const HelpRow& r : g.rows) {
+            std::string left = "    " + term::accent(c, r.name) + (*r.takes ? " " + term::dim(c, r.takes) : "");
+            std::vector<std::string> lines = term::wrap(r.does, room);
+            for (std::size_t i = 0; i < lines.size(); i++) {
+                out += term::pad(i == 0 ? left : "", column) + term::code(c, lines[i], false) + "\n";
+            }
+        }
+    }
+    out += "\n  " + term::dim(c, "The guide and the reference are at ") + term::accent(c, "https://calxlang.com/docs") + "\n";
+    return out;
+}
+
+// The help text as it is, or in a terminal laid out as `styled_help` lays it out.
+void print_help(std::FILE* to, const term::Caps& c, const char* text) {
+    if (!c.color) {
+        std::fputs(text, to);
+        return;
+    }
+    std::fputs(styled_help(c).c_str(), to);
+}
+
+// The help, on standard output when it's asked for, or on standard error with status 2 when a
+// command line was wrong.
+int usage(bool asked = false) {
+    std::FILE* to = asked ? stdout : stderr;
+    print_help(to, asked ? term::out() : term::err(),
         "usage: calx <command> [options] <file.calx>\n"
         "       calx [options] <file.calx> [arguments]   run a program, giving it the arguments\n"
         "\n"
@@ -88,9 +196,8 @@ int usage() {
         "  --verbose   print the clang commands\n"
         "  --no-line   leave #line directives out of the C\n"
         "  --json      print errors as JSON lines on standard output, for editors\n"
-        "  --stdin     read the file's text from standard input; the path names it in errors\n",
-        stderr);
-    return 2;
+        "  --stdin     read the file's text from standard input; the path names it in errors\n");
+    return asked ? 0 : 2;
 }
 
 struct Options {
@@ -178,6 +285,7 @@ int run_tests(const std::string& exe, const std::vector<std::string>& names, con
         bool done = false;
         int status = 0;
         std::string output;
+        double ms = 0;
     };
     std::vector<Result> results(chosen.size());
     std::mutex mu;
@@ -188,14 +296,16 @@ int run_tests(const std::string& exe, const std::vector<std::string>& names, con
             std::size_t k = next++;
             if (k >= chosen.size()) return;
             std::string out = (dir / (std::to_string(k) + ".txt")).string();
+            auto started = std::chrono::steady_clock::now();
             int status = run_to_file({exe, "--calx-test=" + std::to_string(chosen[k])}, out);
+            double took = ms(started);
             std::string text;
             read_file(out, text);
             std::error_code rm;
             std::filesystem::remove(out, rm);
             {
                 std::lock_guard<std::mutex> lock(mu);
-                results[k] = Result{true, status, std::move(text)};
+                results[k] = Result{true, status, std::move(text), took};
             }
             ready.notify_all();
         }
@@ -204,33 +314,57 @@ int run_tests(const std::string& exe, const std::vector<std::string>& names, con
     std::size_t workers = std::min<std::size_t>(cores, chosen.size());
     std::vector<std::thread> pool;
     for (std::size_t w = 0; w < workers; w++) pool.emplace_back(work);
+    // In a terminal, `✓ name` and `✗ name` with how long each took, the names in a column and
+    // the times lined up after them, and while a test takes a while, a status line naming it over
+    // a bar of how many have finished.
+    const term::Caps& c = term::out();
+    int name_width = 0;
+    for (std::size_t k : chosen) name_width = std::max(name_width, std::min(48, term::width(names[k])));
     std::size_t passed = 0, failed = 0;
     for (std::size_t k = 0; k < chosen.size(); k++) {
+        const std::string& name = names[chosen[k]];
         Result r;
         {
             std::unique_lock<std::mutex> lock(mu);
-            ready.wait(lock, [&] { return results[k].done; });
+            if (!results[k].done) {
+                // It takes nothing of `mu`, so it can start and stop while this holds it.
+                std::optional<term::Status> status;
+                if (c.live) {
+                    status.emplace("Running " + name + " (" + std::to_string(k + 1) + " of " + std::to_string(chosen.size()) + ")", 2);
+                    status->progress(static_cast<double>(k) / static_cast<double>(chosen.size()));
+                }
+                ready.wait(lock, [&] { return results[k].done; });
+            }
             r = std::move(results[k]);
         }
-        const std::string& name = names[chosen[k]];
+        std::string took;
+        if (c.color) {
+            std::string t = term::duration(r.ms / 1000.0);
+            took = "  " + term::dim(c, std::string(t.size() < 7 ? 7 - t.size() : 0, ' ') + t);
+        }
         if (r.status == 0) {
             passed++;
-            std::printf("ok    %s\n", name.c_str());
+            if (c.color) std::printf("  %s %s%s\n", term::tick(c).c_str(), term::pad(name, name_width).c_str(), took.c_str());
+            else std::printf("ok    %s\n", name.c_str());
         } else {
             failed++;
-            if (r.status < 0) {
-                std::printf("FAIL  %s: it couldn't start\n", name.c_str());
+            std::string why = r.status < 0 ? "it couldn't start" : "exit status " + std::to_string(r.status);
+            if (c.color) {
+                if (r.status == 101) why = "panicked";  // the status a panic ends with
+                std::printf("  %s %s%s  %s\n", term::cross(c).c_str(), term::pad(term::bad(c, name), name_width).c_str(),
+                            took.c_str(), term::bad(c, why).c_str());
             } else {
-                std::printf("FAIL  %s: exit status %d\n", name.c_str(), r.status);
+                std::printf("FAIL  %s: %s\n", name.c_str(), why.c_str());
             }
             // What it wrote, indented, so each failure reads apart from the next.
+            std::string margin = c.color ? "    " + term::dim(c, "\xE2\x94\x82") + " " : "    ";
             std::size_t at = 0;
             while (at < r.output.size()) {
                 std::size_t end = r.output.find('\n', at);
                 if (end == std::string::npos) end = r.output.size();
                 std::string line = r.output.substr(at, end - at);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                std::printf("    %s\n", line.c_str());
+                std::printf("%s%s\n", margin.c_str(), line.c_str());
                 at = end + 1;
             }
         }
@@ -238,7 +372,15 @@ int run_tests(const std::string& exe, const std::vector<std::string>& names, con
     }
     for (std::thread& t : pool) t.join();
     std::filesystem::remove_all(dir, ec);
-    std::printf("%zu passed, %zu failed (%.2f s)\n", passed, failed, ms(t0) / 1000.0);
+    if (c.color) {
+        // The passes and failures as a bar, green into red, then in words.
+        std::string tally = term::ratio(c, {{passed, term::Tone::good}, {failed, term::Tone::bad}}, 24) + "  " +
+                            term::good(c, term::bold(c, std::to_string(passed) + " passed")) + "  " +
+                            (failed ? term::bad(c, term::bold(c, std::to_string(failed) + " failed")) : term::dim(c, "0 failed"));
+        std::printf("\n  %s  %s\n", tally.c_str(), term::dim(c, "in " + term::duration(ms(t0) / 1000.0)).c_str());
+    } else {
+        std::printf("%zu passed, %zu failed (%.2f s)\n", passed, failed, ms(t0) / 1000.0);
+    }
     return failed ? 1 : 0;
 }
 
@@ -596,8 +738,10 @@ std::string record_for(const Options& opt) {
     return record_path(cache_dir(), parts);
 }
 
-// What `run`, `build` and `test` do with the program they built, or found unchanged in the cache.
-int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests) {
+// What `run`, `build` and `test` do with the program they built, or found unchanged in the cache,
+// `reused` saying which, the build having started at `t0`.
+int finish(const Options& opt, bool serve, const std::string& exe, const std::vector<std::string>& tests,
+           std::chrono::steady_clock::time_point t0, bool reused) {
     if (opt.command == "build") {
         std::string out = opt.output;
         if (out.empty()) {
@@ -614,6 +758,21 @@ int finish(const Options& opt, bool serve, const std::string& exe, const std::ve
         if (!place_build(exe, out, why)) {
             std::fprintf(stderr, "calx: %s\n", why.c_str());
             return 1;
+        }
+        // In a terminal, what it built and how long that took; nothing otherwise, as before.
+        const term::Caps& c = term::err();
+        if (c.color) {
+            std::string what = std::string(opt.mode == BuildMode::release ? "release" : "debug") + (opt.library ? " library" : "");
+            std::string how = (reused ? "unchanged, " : "in ") + term::duration(ms(t0) / 1000.0);
+            std::error_code size_ec;
+            double bytes = static_cast<double>(std::filesystem::file_size(out, size_ec));
+            char size[32] = "";
+            if (!size_ec) {
+                if (bytes < 1024 * 1024) std::snprintf(size, sizeof size, "%.0f KB \xC2\xB7 ", bytes / 1024);
+                else std::snprintf(size, sizeof size, "%.1f MB \xC2\xB7 ", bytes / (1024 * 1024));
+            }
+            std::fprintf(stderr, "%s Built %s  %s\n", term::tick(c).c_str(), term::accent(c, out).c_str(),
+                         term::dim(c, what + " \xC2\xB7 " + size + how).c_str());
         }
         return 0;
     }
@@ -660,10 +819,7 @@ int main(int argc, char** argv) {
         print_version();
         return 0;
     }
-    if (opt.command == "help" || opt.command == "--help" || opt.command == "-h") {
-        usage();
-        return 0;
-    }
+    if (opt.command == "help" || opt.command == "--help" || opt.command == "-h") return usage(true);
     if (opt.command == "update") return run_update(std::vector<std::string>(argv + 2, argv + argc));
     if (opt.command == "doctor") return run_doctor();
     std::vector<std::string> rest(argv + 2, argv + argc);
@@ -735,10 +891,16 @@ int main(int argc, char** argv) {
         BuildRecord found;
         if (!record.empty() && load_record(record, found)) {
             if (opt.timings) std::fprintf(stderr, "nothing changed: reused the cached program (%.1f ms)\n", ms(t0));
-            return finish(opt, serve, found.exe, found.tests);
+            return finish(opt, serve, found.exe, found.tests, t0, true);
         }
     }
-    bool color = isatty(fileno(stderr)) != 0;
+    bool color = term::err().color;
+    // In a terminal, a status line while a build takes a while; build_program says which step
+    // it's on.
+    std::optional<term::Status> building;
+    if (!opt.json && (opt.command == "run" || opt.command == "build" || opt.command == "test")) {
+        building.emplace("Building " + opt.input);
+    }
     auto front = std::make_unique<Front>();
     if (opt.command == "eval") {
         // The code's last statement is printed if it has a value. If the program that prints it
@@ -782,10 +944,13 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         if (diags.has_errors() || !expanded) return 1;
     }
+    if (!diags.all().empty() || !expanded) building.reset();  // off the screen before they're printed
     if (diags.has_errors()) {
         diags.print(stderr, color);
         std::size_t n = diags.error_count();
-        std::fprintf(stderr, "%zu error%s\n", n, n == 1 ? "" : "s");
+        std::string count = std::to_string(n) + (n == 1 ? " error" : " errors");
+        if (color) count = term::cross(term::err()) + " " + term::bad(term::err(), term::bold(term::err(), count));
+        std::fprintf(stderr, "%s\n", count.c_str());
         return 1;
     }
     if (!expanded) return 1;
@@ -807,6 +972,12 @@ int main(int argc, char** argv) {
     }
     if (opt.command == "check") {
         if (opt.timings) std::fprintf(stderr, "check: %.1f ms\n", front_ms);
+        // In a terminal, a word that it's fine; nothing otherwise, as before.
+        if (color) {
+            const term::Caps& c = term::err();
+            std::fprintf(stderr, "%s No errors in %s %s\n", term::tick(c).c_str(), term::accent(c, opt.input).c_str(),
+                         term::dim(c, term::duration(front_ms / 1000.0)).c_str());
+        }
         return 0;
     }
 
@@ -877,6 +1048,7 @@ int main(int argc, char** argv) {
     // that uses std.regex half a millisecond (CLX-240).
     (void)front.release();
     BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose);
+    building.reset();
     if (!b.ok) return 1;
     if (opt.timings) {
         std::fprintf(stderr, "front end: %.1f ms, emit: %.1f ms, clang: %.1f ms, link: %.1f ms%s\n", front_ms, emit_ms,
@@ -899,5 +1071,5 @@ int main(int argc, char** argv) {
         made.exe = b.exe;
         save_record(record, made, started);
     }
-    return finish(opt, serve, b.exe, tests);
+    return finish(opt, serve, b.exe, tests, t0, b.reused);
 }

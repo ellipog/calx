@@ -1,4 +1,5 @@
 #include "source.h"
+#include "term.h"
 #include "toolchain.h"
 
 #include <algorithm>
@@ -87,14 +88,32 @@ void Diagnostics::note(Span span, std::string message) {
     if (!list_.empty()) list_.back().notes.emplace_back(span, std::move(message));
 }
 
-std::string Diagnostics::excerpt(Span span, bool color) const {
+// The colour a severity's label and caret are in.
+static const char* tone(Severity s) {
+    switch (s) {
+        case Severity::error: return "\x1b[1;31m";
+        case Severity::warning: return "\x1b[1;33m";
+        case Severity::note: break;
+    }
+    return term::err().truecolor ? "\x1b[1;38;2;68;102;238m" : "\x1b[1;94m";
+}
+
+std::string Diagnostics::excerpt(Span span, bool color, Severity severity) const {
     if (span.file == 0) return {};
     const SourceFile& f = sources_.file(span.file);
     auto [line, col] = f.position(span.begin);
     std::string_view text = f.line_text(line);
-    std::string out = "  ";
+    // In colour, ` 12 │ ` before the line, and `    │ ` before the caret; otherwise two spaces.
+    std::string gutter = "  ", blank = "  ";
+    if (color) {
+        std::string number = std::to_string(line);
+        std::string pad(number.size() < 3 ? 3 - number.size() : 0, ' ');
+        gutter = "\x1b[90m" + pad + number + " \xE2\x94\x82\x1b[0m ";
+        blank = "\x1b[90m" + std::string(pad.size() + number.size(), ' ') + " \xE2\x94\x82\x1b[0m ";
+    }
+    std::string out = gutter;
     out += text;
-    out += "\n  ";
+    out += "\n" + blank;
     // A column for each character, not each byte, so the caret is under what it points at after
     // letters outside ASCII.
     auto lead = [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; };
@@ -109,7 +128,7 @@ std::string Diagnostics::excerpt(Span span, bool color) const {
         for (std::uint32_t i = span.begin; i < std::min(span.end, line_end); i++) chars += lead(f.text[i]);
         width = std::max<std::uint32_t>(1, chars);
     }
-    if (color) out += "\x1b[1;32m";
+    if (color) out += tone(severity);
     out += '^';
     out.append(width - 1, '~');
     if (color) out += "\x1b[0m";
@@ -131,19 +150,21 @@ std::string Diagnostics::format(const Diagnostic& d, bool color) const {
         if (span.file == 0) return std::string("calx: ");
         const SourceFile& f = sources_.file(span.file);
         auto [line, col] = f.position(span.begin);
-        return f.path + ":" + std::to_string(line) + ":" + std::to_string(col) + ": ";
+        std::string at = f.path + ":" + std::to_string(line) + ":" + std::to_string(col) + ":";
+        return (color ? term::bold(term::err(), at) : at) + " ";
     };
     auto head = [&](Severity s) {
         std::string h;
-        if (color) h += s == Severity::error ? "\x1b[1;31m" : s == Severity::warning ? "\x1b[1;35m" : "\x1b[1;36m";
+        if (color) h += tone(s);
         h += label(s);
         h += ':';
         if (color) h += "\x1b[0m";
         return h;
     };
-    std::string out = where(d.span) + head(d.severity) + " " + d.message + "\n" + excerpt(d.span, color);
+    auto text = [&](const std::string& msg) { return color ? term::code(term::err(), msg, true) : msg; };
+    std::string out = where(d.span) + head(d.severity) + " " + text(d.message) + "\n" + excerpt(d.span, color, d.severity);
     for (const auto& [span, msg] : d.notes) {
-        out += where(span) + head(Severity::note) + " " + msg + "\n" + excerpt(span, color);
+        out += where(span) + head(Severity::note) + " " + text(msg) + "\n" + excerpt(span, color, Severity::note);
     }
     return out;
 }

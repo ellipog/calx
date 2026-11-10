@@ -2,7 +2,7 @@
 // while each request runs on its own thread, the way a Calcite server's loop goes on while a
 // login waits for Mojang.
 
-import std.http.{Header, Request, fetch, get, post}
+import std.http.{Header, Progress, Request, fetch, get, post}
 import std.net.{Event, Net}
 
 // The value of a header in a request the server got, or "none".
@@ -19,6 +19,15 @@ fn asked(head: String, name: String) -> String {
         value = value[1..]
     }
     return value
+}
+
+// How far a request has come, as `received/total`, with `?` for a total the server didn't give.
+fn so_far(p: Progress) -> String {
+    let total = match p.total {
+        some(n) => "{n}",
+        none => String("?"),
+    }
+    return "{p.received}/{total}"
 }
 
 fn reply(status: String, headers: String, body: String) -> List<u8> {
@@ -122,8 +131,12 @@ fn main() {
     var bufs = List<List<u8>>()
 
     var r = get("{base}/hello", [Header { name: "X-Asked", value: "yes" }], 5000, 1000)
+    // Nothing comes until the server, which runs on this thread, answers.
+    let before = r.progress()
     serve(net, mut bufs, r)
+    println("{so_far(before)} {so_far(r.progress())}")    // out: 0/? 29/29
     let hello = r.wait()!
+    println(so_far(r.progress()))    // out: 0/?
     println("{hello.status}")    // out: 200
     println(String.from_utf8(hello.body.copy()) ?? "bad")    // out: ua=Calx accept=none asked=yes
     println("{hello.header("x-thing") ?? "none"} {hello.header("X-LATIN") ?? "none"} {hello.header("nope") ?? "none"}")    // out: seven café none
@@ -146,6 +159,7 @@ fn main() {
 
     var blank = get("{base}/none", [], 5000, 1000)
     serve(net, mut bufs, blank)
+    println(so_far(blank.progress()))    // out: 0/?
     let nothing = blank.wait()!
     println("{nothing.status} {nothing.body.len()}")    // out: 204 0
 

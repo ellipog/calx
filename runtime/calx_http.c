@@ -90,6 +90,11 @@ typedef struct {
     bytes raw;  /* the response's header lines as they came */
     bytes lines; /* and as std.http reads them */
     bytes data;
+    /* For a progress bar, read by the program's thread while the request's writes them: how much
+     * of the body has come, and its Content-Length plus 1, or 0 until that's known or if there's
+     * none. */
+    cx_u64 received, expected;
+    int sized;
 #ifdef _WIN32
     HANDLE thread;
 #else
@@ -243,6 +248,36 @@ static int has_header(const char* head, const char* name) {
     return 0;
 }
 
+/* The Content-Length the response's header lines in `raw` give, plus 1, or 0 if they give none. */
+static cx_u64 content_length(const bytes* raw) {
+    const char* p = raw->p;
+    size_t n = raw->len, i = 0;
+    while (i < n) {
+        size_t s = i;
+        while (i < n && p[i] != '\n') i++;
+        if (starts_ci(p + s, i - s, "content-length:")) {
+            size_t k = s + 15;
+            while (k < i && (p[k] == ' ' || p[k] == '\t')) k++;
+            cx_u64 v = 0;
+            int digits = 0;
+            while (k < i && p[k] >= '0' && p[k] <= '9' && digits < 19) v = v * 10 + (cx_u64)(p[k++] - '0'), digits++;
+            return digits ? v + 1 : 0;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Says how much of the body has come, for a progress bar: with the Content-Length the first
+ * time. */
+static void note_progress(request* r) {
+    if (!r->sized) {
+        r->sized = 1;
+        __atomic_store_n(&r->expected, content_length(&r->raw), __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&r->received, (cx_u64)r->data.len, __ATOMIC_RELAXED);
+}
+
 /* The header lines from `raw` as "name:value\r\n" in UTF-8: the status line dropped, each value
  * trimmed, and lines with no name dropped. With `latin1` the bytes are Latin-1, and otherwise
  * UTF-8 already. */
@@ -381,6 +416,7 @@ static void run(request* r) {
         free(w);
     }
     if (!tidy_headers(r, 0)) cx_panic_capacity();
+    note_progress(r);
     for (;;) {
         if (GetTickCount64() >= deadline) {
             r->error = E_TIMEOUT;
@@ -395,6 +431,7 @@ static void run(request* r) {
         if (!WinHttpReadData(q, r->data.p + r->data.len, (DWORD)want, &got)) goto failed;
         if (got == 0) break;
         r->data.len += got;
+        note_progress(r);
         if (r->data.len > r->limit) {
             r->error = E_TOO_LONG;
             break;
@@ -502,7 +539,9 @@ static size_t on_body(char* p, size_t size, size_t n, void* user) {
         r->error = E_TOO_LONG;
         return 0;
     }
-    return add(&r->data, p, k) ? k : 0;
+    if (!add(&r->data, p, k)) return 0;
+    note_progress(r);
+    return k;
 }
 
 static size_t on_header(char* p, size_t size, size_t n, void* user) {
@@ -658,6 +697,19 @@ cx_i32 cx_http_wait(cx_u64 h) {
         r->started = 0;
     }
     return r->error;
+}
+
+/* How much of the body has come so far, while the request runs or after, and its Content-Length
+ * plus 1, or 0 if that isn't known yet or the response gives none. 0 for both if the response was
+ * taken. */
+cx_u64 cx_http_received(cx_u64 h) {
+    request* r = table_find(h);
+    return r ? __atomic_load_n(&r->received, __ATOMIC_RELAXED) : 0;
+}
+
+cx_u64 cx_http_expected(cx_u64 h) {
+    request* r = table_find(h);
+    return r ? __atomic_load_n(&r->expected, __ATOMIC_RELAXED) : 0;
 }
 
 /* The system's error code, for E_OS. */

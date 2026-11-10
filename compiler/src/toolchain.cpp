@@ -1,4 +1,5 @@
 #include "toolchain.h"
+#include "term.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1803,9 +1804,14 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             compiles.push_back(cmd);
             renames.push_back({temp, obj});
         };
+        bool runtime_too = false, sqlite_too = false;
         if (!library) {  // a library links none of the runtime
-            if (file_exists(rt_obj)) touch(rt_obj);
-            else compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+            if (file_exists(rt_obj)) {
+                touch(rt_obj);
+            } else {
+                compile((runtime / "calx_rt.c").string(), rt_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
+                runtime_too = true;
+            }
             if (file_exists(alloc_obj)) touch(alloc_obj);
             else compile((runtime / "calx_alloc.c").string(), alloc_obj, {"-D_CRT_SECURE_NO_WARNINGS"});
             for (const auto& [file, obj] : parts) {
@@ -1816,8 +1822,12 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                 if (file_exists(sqlite_obj)) {
                     touch(sqlite_obj);
                 } else {
-                    // Seconds of waiting with nothing said would look like a hang.
-                    if (stderr_is_terminal()) std::fprintf(stderr, "calx: compiling SQLite for std.sqlite, once (about 15 seconds)\n");
+                    // Seconds of waiting with nothing said would look like a hang. The status line
+                    // says it where there is one.
+                    sqlite_too = true;
+                    if (stderr_is_terminal() && !term::err().live) {
+                        std::fprintf(stderr, "calx: compiling SQLite for std.sqlite, once (about 15 seconds)\n");
+                    }
                     compile((runtime / "sqlite" / "sqlite3.c").string(), sqlite_obj, {"-D_CRT_SECURE_NO_WARNINGS"}, &sqlite_flags);
                 }
             }
@@ -1847,6 +1857,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             }
         }
         if (!compiles.empty()) {
+            std::size_t n = c_paths.size();
+            term::step(sqlite_too    ? std::string("Compiling SQLite for std.sqlite, once (about 15 seconds)")
+                       : runtime_too ? std::string("Compiling the runtime, once for this toolchain and mode")
+                                     : "Compiling " + std::to_string(n) + (n == 1 ? " module" : " modules"));
             int status = run_parallel(compiles);
             std::error_code ec;
             if (status != 0) {
@@ -1886,6 +1900,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         for (const auto& [file, obj] : parts) inputs.push_back(obj);
         if (!sqlite_obj.empty()) inputs.push_back(sqlite_obj);
     }
+    term::step(lto ? "Linking, and optimizing across modules" : "Linking");
     bool linked = link_program(tc, inputs, temp_exe, link_flags, verbose);
     if (!linked && std::any_of(inputs.begin(), inputs.end(), [](const std::string& f) { return !file_exists(f); })) {
         linked = make_objects() && link_program(tc, inputs, temp_exe, link_flags, verbose);

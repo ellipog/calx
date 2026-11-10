@@ -838,6 +838,10 @@ CX_FN(void, cx_http_head, (cx_u64 h, cx_u8* out));
 CX_FN(cx_usize, cx_http_body_len, (cx_u64 h));
 CX_FN(void, cx_http_body, (cx_u64 h, cx_u8* out));
 CX_FN(void, cx_http_free, (cx_u64 h));
+/* How much of the body has come, and its Content-Length plus 1 or 0, while the request runs, for a
+ * progress bar. */
+CX_FN(cx_u64, cx_http_received, (cx_u64 h));
+CX_FN(cx_u64, cx_http_expected, (cx_u64 h));
 
 /* LZ4 as lz4-java's block streams write it, in calx_lz4.c (D118). `cx_lz4_decode` carries on from
  * `state`, four numbers: where the next header is, the output's length, what the rest decompresses

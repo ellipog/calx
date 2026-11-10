@@ -124,6 +124,8 @@ ok    reads_a_number
 2 passed, 0 failed (0.02 s)
 ```
 
+That's what it prints to a pipe or a file. In a terminal, each test starts with a green `✓` or a red `✗` and says how long it took, a status line names a test that's taking a while, and one that panicked says so ([in a terminal](#in-a-terminal)).
+
 - A test takes nothing and returns nothing. It fails by panicking, which is what a failed `assert` does, or by failing with an error, as a `main` can: `fn reads_a_number() ! String`.
 - What a test prints is shown only if it fails, under its name, with its panic or its error and where it happened.
 - Names after the file run only the tests whose names hold one of them: `calx test tool.calx parse` runs `parses_ints` and `parse_errors`.
@@ -215,6 +217,22 @@ Serving HTTP on 127.0.0.1 port 8000 (http://127.0.0.1:8000/) ...
 | 1 | `calx test`: a test failed, no test's name held one of the names given, or the file has no tests |
 | *the code's* | `calx eval` exits with the status of the program its code became, or 1 if the code has errors |
 | *the program's* | `calx run`, and `calx file.calx`, exit with the program's status: 0, 101 after a [panic](printing.md#panics), or 102 when a debug build finds memory that was never freed |
+
+## In a terminal
+
+What `calx` prints to a pipe or a file is plain text, the same bytes whatever the terminal, so scripts, tests and editors read it as they always have. In a terminal someone's watching, it's easier to read (CLX-250):
+
+- **Colour and marks.** Lines that report something start with a green `✓`, a yellow `!` or a red `✗`: `calx test`'s tests, `calx doctor`'s checks, the files `calx fmt` formats. Names, commands and numbers are in Calx's amber, and what's secondary, such as how long something took, is grey.
+- **The dither.** Bars, headings and the mark are drawn with the shade characters `░ ▒ ▓ █`, a quarter, a half, three quarters and all of a cell in ink. Headings are amber chips that fade out into the background, `start ▓▒░`, and results are bands that fade in and out, such as `calx doctor`'s `░▒▓ ✓ Everything works ▓▒░`.
+- **The mark.** `calx help`, `calx doctor`, `calx version` and the install scripts start with Calx's mark, drawn in shaded cells, seven rows of 22. The install scripts dissolve it in, each cell fading up in the order a Bayer matrix gives.
+- **A status line while it works.** A build, a test that's still running, or `calx doctor`'s builds draw a line on standard error that says what they're doing, `░▒▓█░░░░  Compiling the runtime, once for this toolchain and mode`, with a comet of dither that sweeps to and fro, and the time so far once a second has passed. They take it away when they're done. It appears only after a quarter of a second, so a quick build draws nothing. While tests run, a bar shows how many have finished.
+- **Saying what it did.** `calx build` ends with `✓ Built hello.exe  release · 82 KB · in 541 ms`, `calx check` with `✓ No errors in hello.calx`, and `calx fmt` with how many files it formatted. Each test says how long it took, with the times in a column, and a test that [panicked](printing.md#panics) says so; the tally is a bar of green into red, the passes and the failures. Errors have the line's number in a gutter beside it. `calx new` draws the files it made as a tree, with the commands to go on with.
+- **Laid out for reading.** `calx help` groups the commands under headings, each with what it takes and what it does, wrapped to the terminal's width. `calx doctor` groups its checks under headings too, each a row with a label, what it found and, in grey, where; a check that takes a while shows a scanner in its row. `calx version` says which commit and platform it is, and where.
+- **Progress for downloads.** [`calx update`](#updating) and the [install scripts](../guide/install.md) draw a bar for each download, with how much has come and how fast, and a scanner while the toolchain unpacks.
+
+It's plain, with no colour or status lines, when standard output (or for status lines, standard error) isn't a terminal, and when `NO_COLOR` is set to anything, or `TERM` is `dumb`. With `CI` set there's colour in a terminal, but no status lines. `CLICOLOR_FORCE=1`, or `FORCE_COLOR` set to anything but `0`, turns the terminal's look on even into a pipe, for a recording; `COLUMNS` then says how wide to draw. On Windows, calx turns on the console's ANSI colours and UTF-8 itself; a console too old to take ANSI codes counts as no terminal. The amber is 24-bit colour where the terminal takes it (every Windows console that takes ANSI codes does, and elsewhere `COLORTERM=truecolor` says so), the nearest in the 256-colour palette where `TERM` names one, and yellow otherwise.
+
+`calx help` prints its help on standard output. `calx` with no command, or with a command line it can't use, prints it on standard error and exits with status 2.
 
 ## Build modes
 
@@ -366,6 +384,14 @@ Nothing is checked or said when standard error isn't a terminal, with `--json`, 
 ## Errors
 
 Errors are printed in source order, in the form `path:line:column: error: message`, followed by the line and a caret under the problem, the way clang prints them. A note can follow, pointing at a related place. There are no warnings: everything the compiler objects to is an error (D63).
+
+In a terminal, the line has its number in a grey gutter beside it, `error:` and the caret are red, and the names in the message are amber ([in a terminal](#in-a-terminal)):
+
+```text
+broken.calx:2:22: error: expected `i32`, found `str`
+  2 │     let total: i32 = "12"
+    │                      ^~~~
+```
 
 ## Errors for editors
 

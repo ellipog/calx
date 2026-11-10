@@ -52,12 +52,43 @@ fn main() {
 | `post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32, limit: usize) -> Request` | Starts a POST of `body`. Give a `Content-Type` header for it |
 | `fetch(url: String, timeout_ms: u32 = 60000) -> Response ! Error` | GETs `url` and waits for the answer, for scripts, as Python's `requests.get(url)`: no headers of its own and a body of up to 1 GiB. Any status is an answer; only no answer is an error |
 | `r.done() -> bool` | Whether the request has finished, so `wait` won't wait |
+| `r.progress() -> Progress` | How much of the body has come so far, while the request runs or once it's done, for a progress bar. Nothing has come until the headers have, and once the response is taken it's 0 of an unknown length |
+| `Progress { received: u64, total: u64? }` | The bytes of the body that have come, and its length in all if the server gave a `Content-Length` |
 | `r.wait() -> Response ! Error` | Waits for it to finish and takes the response. Panics if it was taken already, by `r` or a copy of it |
 | `Header { name: String, value: String }` | A header line |
 | `resp.status: u32` | The status code: 200, or 204 when the session server says a player hasn't joined |
 | `resp.headers: List<Header>` | The response's header lines, in the order they came, with each value trimmed |
 | `resp.body: List<u8>` | The body |
 | `resp.header(name: String) -> String?` | The first header named `name`, ignoring case, as HTTP compares names |
+
+A download shows how far it has come by asking `progress` while it waits, as `calx update` draws its progress bar:
+
+```calx
+import std.env.{args}
+import std.http.{get}
+import std.thread.{sleep}
+
+fn main() {
+    let a = args()
+    if a.is_empty() {
+        println("give a URL to download")    // out: give a URL to download
+        return
+    }
+    var r = get(a[0].copy(), [], 600000, 1073741824)    // 1 GiB at most
+    while not r.done() {
+        let p = r.progress()
+        match p.total {
+            some(total) => print("\r{p.received * 100 / (total + 1)}%"),
+            none => print("\r{p.received} bytes"),
+        }
+        unsafe { sleep(100_000_000) }    // a tenth of a second
+    }
+    match r.wait() {
+        ok(resp) => println("\r{resp.body.len()} bytes"),
+        err(e) => println("\rno response: {e}"),
+    }
+}
+```
 
 `get` and `post` panic if the timeout is 0, or if a header is one that `std.http` writes itself (`Host`, `Content-Length`, `Transfer-Encoding` or `Connection`). They also panic if a header's name has a byte HTTP doesn't allow in names, or its value has a line break or a zero byte. Those would let a value a player chose start a header of its own.
 

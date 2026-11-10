@@ -19,7 +19,7 @@ On Linux:
 curl -fsSL https://calxlang.com/install.sh | sh
 ```
 
-Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), and the [toolchain](#clang) it builds programs with, checks them against the SHA-256s published with them, unpacks them into `.calx` in your home folder, and puts `.calx/bin` on your PATH. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls.
+Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), and the [toolchain](#clang) it builds programs with, checks them against the SHA-256s published with them, unpacks them into `.calx` in your home folder, and puts `.calx/bin` on your PATH. In a terminal, Calx's mark dissolves in, each download shows a progress bar, and the script then builds and runs a first program, which checks that everything works and compiles Calx's runtime, so your first program builds as quickly as the rest. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls.
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
 

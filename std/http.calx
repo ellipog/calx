@@ -17,6 +17,8 @@ extern "C" {
     fn cx_http_body_len(h: u64) -> usize
     fn cx_http_body(h: u64, out: *u8)
     fn cx_http_free(h: u64)
+    fn cx_http_received(h: u64) -> u64
+    fn cx_http_expected(h: u64) -> u64
 }
 
 /// A header line of a request or a response.
@@ -90,6 +92,14 @@ impl Response {
     }
 }
 
+/// How far a request's response has come: what a download's progress bar shows.
+pub struct Progress {
+    /// The bytes of the body that have come so far.
+    pub received: u64,
+    /// The body's length in all, if the server said, in its Content-Length header.
+    pub total: u64?,
+}
+
 /// A request that's running, or finished and waiting to be taken.
 pub struct Request {
     handle: u64,
@@ -99,6 +109,28 @@ impl Request {
     /// Whether it has finished, so that `wait` won't wait.
     pub fn done(self) -> bool {
         return self.handle == 0 or unsafe { cx_http_done(self.handle) } != 0
+    }
+
+    /// How much of the body has come so far, and how long it is in all if the server said, which
+    /// a program draws as a progress bar while it waits:
+    ///
+    /// ```
+    /// var r = get(url, [], 600000, 1 << 30)
+    /// while not r.done() {
+    ///     let p = r.progress()
+    ///     ...
+    /// }
+    /// ```
+    ///
+    /// Nothing has come until the response's headers have. Once the response is taken, by `wait`,
+    /// it's 0 of an unknown length.
+    pub fn progress(self) -> Progress {
+        if self.handle == 0 {
+            return Progress { received: 0, total: none }
+        }
+        let expected = unsafe { cx_http_expected(self.handle) }
+        let total: u64? = if expected == 0 { none } else { some(expected - 1) }
+        return Progress { received: unsafe { cx_http_received(self.handle) }, total: total }
     }
 
     /// Waits for it to finish, and gives the response. Panics if the response was taken already,

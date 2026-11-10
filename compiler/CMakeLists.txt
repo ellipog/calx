@@ -30,6 +30,7 @@ add_executable(calx
     src/manage.cpp
     src/format.cpp
     src/doctor.cpp
+    src/term.cpp
 )
 
 # The runtime's sources, which the driver compiles (once, then from the cache) into every program.
