@@ -100,16 +100,16 @@ fn main() {
 | RSA public key | Read once, with what Montgomery multiplication needs worked out then: R^2 mod n, as 2^k R doubled up from the top power of 2 below n and squared 6 times, so about 64 doublings where 1 doubled 128 times a limb takes 4096 for 2048 bits. The exponent isn't secret, so it goes a bit at a time, a squaring each and a multiply for each that's set: 65537 takes 17 |
 | Primes | 300 small primes, then 16 rounds of Miller-Rabin, which a composite passes with odds below 2^-32 |
 
-On an i9-13900K, one run each:
+On our benchmark, an i9-13900K. The decrypt and verify rows are the best of 60 rounds of 2,000, each program on the performance cores, taking turns, with the machine otherwise quiet. The others are one run each:
 
 | | Calx | Java 25 |
 | --- | --- | --- |
 | CFB8 encrypting | 135 MB/s | 77 MB/s |
 | CFB8 decrypting | 659 MB/s | 79 MB/s |
 | A 1024-bit key pair | 8.4 ms | 7 to 16 ms |
-| A 1024-bit decrypt | 97 µs | 108 µs |
-| A 2048-bit `SHA256withRSA` verify | 19 µs | 22 µs |
+| A 1024-bit decrypt | 90 µs | 102 µs |
+| A 2048-bit `SHA256withRSA` verify, of 32 bytes | 18.5 µs | 21 µs |
 
-The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login, and a verify once for each signed chat message. Java's verify is its best of three runs of 2000, after its JIT has warmed up. Interleaving the multiply's two carry chains with ADX would make RSA about twice as fast again.
+The ciphers run for every byte a player sends or gets, so they're what counts. RSA runs once for each login, and a verify once for each signed chat message. Java's best rounds come after its JIT has warmed up. Interleaving the multiply's two carry chains with ADX would make RSA about twice as fast again.
 
 `std.crypto` is written in Calx over those runtime calls: [std/crypto.calx](../../std/crypto.calx).
