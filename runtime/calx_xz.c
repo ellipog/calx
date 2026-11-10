@@ -143,7 +143,7 @@ static int rc_init(dec_t* d, const cx_u8* in, cx_usize n) {
 /* A bit with the probability `pr`, which is stored back updated at `slot`, worked out without a
  * branch, as the bits of literals and distances are as good as random to a branch predictor. A 0
  * moves the probability up by (ONE - p) >> MOVE and a 1 down by p >> MOVE, which is p less
- * (p - 2017 or p) >> MOVE, shifting arithmetically. */
+ * (p - 2017 or p) >> MOVE in the low 16 bits, which are all that's stored. */
 #define TDEC(FAST, slot, pr, bit)                                                 \
     do {                                                                          \
         NORM(FAST)                                                                \
