@@ -62,23 +62,31 @@ fn main() {
 
 Then the pairs that compose, in a hash table. Each rune's record is found through two stages of blocks of 128 runes, and a byte for each block says in which forms every rune in it passes the quick check.
 
-It passes Unicode 16's NormalizationTest.txt: all 19,965 of its lines in all four forms, and every other rune unchanged in each. It also matches Python 3.14's `normalize` and `is_normalized` in all four forms on 160,000 random strings, which were heavy in marks, Hangul, compatibility forms and runes from every plane.
+It passes Unicode 16's NormalizationTest.txt: all 19,965 of its lines in all four forms, and every other rune unchanged in each. It also matches Python 3.14's `normalize` and `is_normalized` in all four forms on 160,000 random strings, which were heavy in marks, Hangul, compatibility forms and runes from every plane, and on 6,000 more made of the runes around the edges of the blocks the quick check skips.
 
-`normalize` first runs the quick check. ASCII is in every form, and nothing below U+0300 changes in NFC, which in UTF-8 is every byte below 0xCC. Runs of those are skipped 16 bytes at a time, and so are runes in blocks that pass whole, such as Hangul and CJK. Text that's already in the form is copied as it is. Otherwise the check finds where the text stops being certainly in the form, and backs up to the last starter before it, since nothing before a starter can compose with what's after it. The text before that is copied, and the rest is decomposed into a few pending runes, which are put in canonical order. In NFC and NFKC they're composed and written out at each starter nothing composes into; in NFD and NFKD, starters go straight out.
+`normalize` first runs the quick check, which skips runs of runes that can't change, 32 bytes at a time with AVX2, as release builds have, and 16 with SSE2:
+
+- ASCII, which is in every form;
+- in NFC, everything below U+0300, which in UTF-8 is every byte below 0xCC;
+- CJK's ideographs, U+4E00 to U+9FFF, in every form;
+- Hangul's syllables in NFC and NFKC;
+- in NFC, Latin Extended Additional, U+1E00 to U+1EFF, in which most of Vietnamese's letters are.
+
+Other runes in blocks that pass whole are read one at a time. Text that's already in the form is copied as it is. Otherwise the check stops at the first rune that isn't certainly in the form, and backs up to the last starter before it, since nothing before a starter can compose with what's after it. The text before that is copied, and the rest is decomposed into a few pending runes, which are put in canonical order. In NFC and NFKC they're composed and written out at each starter nothing composes into; in NFD and NFKD, starters go straight out. `is_normalized` reads on past a rune that only might not be in the form, since finding one that can't be saves it normalizing.
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs. The texts are words picked at random: English, Vietnamese in NFC, the same Vietnamese in NFD, Korean, and text full of compatibility forms. The comparisons are Python 3.14's `unicodedata`, and Rust 1.91 with unicode-normalization 0.1, built for release with `x86-64-v3`, collecting its iterator into a `String`, and with its quick check run first:
+On our benchmark, an i9-13900K pinned to its performance cores and out of power throttling, the best of 32 runs over rounds taken in turn. Python's two decompositions take seconds, so they ran once a round, and are the best of 8. The texts are words picked at random: English, Vietnamese in NFC, the same Vietnamese in NFD, Korean, and text full of compatibility forms. The comparisons are Python 3.14's `unicodedata`, and Rust 1.91 with unicode-normalization 0.1.26, built for release with `x86-64-v3`, collecting its iterator into a `String`, and with its quick check run first:
 
 | Work | Calx | Python | Rust | Rust, quick check first |
 | --- | --- | --- | --- | --- |
-| English, 9.5 MB, to NFC, which it's in | 0.4 ms | 0.0 ms | 73.0 ms | 3.6 ms |
-| Vietnamese, 6.9 MB, to NFC, which it's in | 4.5 ms | 5.5 ms | 63.2 ms | 13.0 ms |
-| Vietnamese, to NFD | 24.0 ms | 7,568 ms | 50.4 ms | 66.3 ms |
-| Vietnamese in NFD, 8.6 MB, to NFC | 33.5 ms | 113 ms | 76.9 ms | 82.3 ms |
-| Korean, 9.1 MB, to NFC, which it's in | 5.0 ms | 3.8 ms | 66.5 ms | 18.5 ms |
-| Korean, to NFD | 17.4 ms | 16,874 ms | 55.4 ms | 56.2 ms |
-| Compatibility forms, 6.3 MB, to NFKC | 20.4 ms | 1,420 ms | 46.0 ms | 54.2 ms |
+| English, 9.5 MB, to NFC, which it's in | 0.96 ms | 0.01 ms | 68.1 ms | 4.0 ms |
+| Vietnamese, 6.9 MB, to NFC, which it's in | 0.83 ms | 5.5 ms | 64.0 ms | 15.2 ms |
+| Vietnamese, to NFD | 25.0 ms | 6,774 ms | 51.0 ms | 50.8 ms |
+| Vietnamese in NFD, 8.5 MB, to NFC | 26.7 ms | 114 ms | 61.4 ms | 77.8 ms |
+| Korean, 9.1 MB, to NFC, which it's in | 1.24 ms | 4.3 ms | 70.3 ms | 17.8 ms |
+| Korean, to NFD | 19.7 ms | 14,032 ms | 59.2 ms | 59.3 ms |
+| Compatibility forms, 6.3 MB, to NFKC | 24.3 ms | 2,141 ms | 44.3 ms | 44.0 ms |
 
-- Python's string knows when it's all ASCII, so its `normalize` gives such a string back without reading it. Its other strings hold each character at a fixed width, so its quick check reads Korean without decoding UTF-8 first, which is why it's quicker there. Its decomposing is much slower: it took seconds on the texts above.
-- `normalize` copies text that's already in the form: 0.4 to 0.6 ms of the times above. Python gives back the same string.
+- Python's string knows when it's all ASCII, so its `normalize` gives such a string back without reading it. Its other strings hold each character at a fixed width, so its quick check reads them without decoding UTF-8. Its decomposing is much slower: it took seconds on the texts above.
+- `normalize` gives back a copy of text that's already in the form, where Python gives back the same string. The copy is most of the English row: the check alone, `is_normalized`, takes 0.14 ms there.
