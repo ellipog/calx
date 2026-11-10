@@ -407,6 +407,7 @@ const K_FLOAT: u8 = 4
 const K_STR: u8 = 5
 const K_ARRAY: u8 = 6
 const K_OBJECT: u8 = 7
+const K_BIG: u8 = 8      // an integer past `i64` and `u64`, its digits in `s` (CLX-227)
 
 const MAX: usize = 4294967295
 
@@ -470,6 +471,10 @@ fn add_json(g: mut Graph, v: Json) -> u32 {
             node.kind = K_UINT
             node.u = u
         },
+        Json.Big(digits) => {
+            node.kind = K_BIG
+            node.s = digits.copy()
+        },
         Json.Float(f) => {
             node.kind = K_FLOAT
             node.f = f
@@ -522,6 +527,9 @@ fn node_json(g: Graph, n: u32) -> Json {
     }
     if k == K_UINT {
         return Json.UInt(g.nodes[i].u)
+    }
+    if k == K_BIG {
+        return Json.Big(g.nodes[i].s.copy())
     }
     if k == K_FLOAT {
         return Json.Float(g.nodes[i].f)
@@ -2491,6 +2499,7 @@ fn code_check(d: Draft, inst: Json, code: u8) -> u8 {
         3 => match inst {
             Json.Int(_) => true,
             Json.UInt(_) => true,
+            Json.Big(_) => true,
             Json.Float(f) => rank(d) >= 6 and f - f == 0.0 and f.floor() == f,
             _ => false,
         },
@@ -2501,6 +2510,7 @@ fn code_check(d: Draft, inst: Json, code: u8) -> u8 {
         5 => match inst {
             Json.Int(_) => true,
             Json.UInt(_) => true,
+            Json.Big(_) => true,
             Json.Float(_) => true,
             _ => false,
         },
@@ -2812,7 +2822,10 @@ fn kw_bound(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<
         let x_type = if x.kind == K_FLOAT { "float" } else { "int" }
         fail type_error("'{op}' not supported between instances of '{x_type}' and '{py_type(g, v)}'")
     }
-    let c = cmp_num(x, y)
+    var c = cmp_num(x, y)
+    if c == UNSURE {
+        c = cmp_exact(exact_json(inst), exact_node(g, v))
+    }
     let failed = if upper { c > 0 or (strict and c == 0) } else { c < 0 or (strict and c == 0) }
     if not failed {
         return
@@ -2835,10 +2848,15 @@ fn kw_multiple_of(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut
     var failed = false
     if dk == K_FLOAT {
         let d = g.nodes[usize(v)].f
+        // `instance / dB` makes the instance a float first.
+        var xf = num_f64(x)
+        if let Json.Big(digits) = inst {
+            xf = try big_f64(digits)
+        }
         if d == 0.0 {
             fail fault("ZeroDivisionError", "division by zero")
         }
-        let q = num_f64(x) / d
+        let q = xf / d
         if q - q != 0.0 {
             if q.is_nan() {
                 fail fault("ValueError", "cannot convert float NaN to integer")
@@ -2846,21 +2864,28 @@ fn kw_multiple_of(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut
             if x.kind == K_FLOAT and x.f - x.f != 0.0 {
                 fail fault("OverflowError", "cannot convert Infinity to integer ratio")
             }
-            failed = not exact_multiple(x, d)
+            failed = not exact_multiple(exact_json(inst), d)
         } else {
             failed = q.floor() != q
         }
-    } else if dk == K_INT or dk == K_UINT or dk == K_BOOL {
-        let d = num_node(g, v) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+    } else if dk == K_INT or dk == K_UINT or dk == K_BIG or dk == K_BOOL {
+        let d = num_node(g, v) ?? int_num(0)
         if num_is_zero(d) {
             fail fault("ZeroDivisionError", "division by zero")
         }
         if x.kind == K_FLOAT {
-            let r = x.f % num_f64(d)
+            // `instance % dB` makes `dB` a float.
+            let df = if d.kind == K_BIG { try big_f64(g.nodes[usize(v)].s) } else { num_f64(d) }
+            let r = x.f % df
             failed = r != 0.0 and not r.is_nan()
             if x.f - x.f != 0.0 {
                 failed = true
             }
+        } else if x.kind == K_BIG or d.kind == K_BIG {
+            let (xb, _) = exact_json(inst)
+            let (db, _) = exact_node(g, v)
+            let (_, r) = xb.div_rem(db)
+            failed = not r.is_zero()
         } else {
             failed = not int_divides(d, x)
         }
@@ -2907,7 +2932,7 @@ fn kw_size(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<F
         _ => return,
     }
     let at_least = k == KW_MIN_LENGTH or k == KW_MIN_ITEMS or k == KW_MIN_PROPERTIES
-    let n = Num { kind: K_INT, i: i64.wrap(size), u: 0, f: 0.0 }
+    let n = int_num(i64.wrap(size))
     let c = try cmp_num_node(n, "int", g, v, if at_least { "<" } else { ">" })
     if (at_least and c >= 0) or (not at_least and c <= 0) {
         return
@@ -3003,7 +3028,7 @@ fn kw_contains(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<
         if try evolve_valid(g, mut cx, ev, v, x) {
             matches += 1
             let over = if let m = max_node {
-                try cmp_num_node(Num { kind: K_INT, i: matches, u: 0, f: 0.0 }, "int", g, m, ">") > 0
+                try cmp_num_node(int_num(matches), "int", g, m, ">") > 0
             } else {
                 matches > i64.wrap(items.len())
             }
@@ -3024,7 +3049,7 @@ fn kw_contains(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<
         }
     }
     let under = if let m = min_node {
-        try cmp_num_node(Num { kind: K_INT, i: matches, u: 0, f: 0.0 }, "int", g, m, "<") < 0
+        try cmp_num_node(int_num(matches), "int", g, m, "<") < 0
     } else {
         matches < 1
     }
@@ -3603,6 +3628,7 @@ fn py_type_json(v: Json) -> String {
         Json.Bool(_) => "bool",
         Json.Int(_) => "int",
         Json.UInt(_) => "int",
+        Json.Big(_) => "int",
         Json.Float(_) => "float",
         Json.Str(_) => "str",
         Json.Array(_) => "list",
@@ -3618,7 +3644,7 @@ fn py_type(g: Graph, n: u32) -> String {
     if k == K_BOOL {
         return "bool"
     }
-    if k == K_INT or k == K_UINT {
+    if k == K_INT or k == K_UINT or k == K_BIG {
         return "int"
     }
     if k == K_FLOAT {
@@ -3646,6 +3672,7 @@ fn repr_into(out: mut String, v: Json) {
         Json.Bool(b) => out.push_str(if b { "True" } else { "False" }),
         Json.Int(i) => out.push_str("{i}"),
         Json.UInt(u) => out.push_str("{u}"),
+        Json.Big(digits) => out.push_str(digits),
         Json.Float(f) => repr_float_into(mut out, f),
         Json.Str(s) => repr_str_into(mut out, s),
         Json.Array(items) => {
@@ -3692,6 +3719,8 @@ fn repr_node_into(out: mut String, g: Graph, n: u32) {
         out.push_str("{g.nodes[i].i}")
     } else if k == K_UINT {
         out.push_str("{g.nodes[i].u}")
+    } else if k == K_BIG {
+        out.push_str(g.nodes[i].s)
     } else if k == K_FLOAT {
         repr_float_into(mut out, g.nodes[i].f)
     } else if k == K_STR {
@@ -3753,7 +3782,7 @@ fn truthy(g: Graph, n: u32) -> bool {
     if k == K_INT {
         return g.nodes[i].i != 0
     }
-    if k == K_UINT {
+    if k == K_UINT or k == K_BIG {
         return true
     }
     if k == K_FLOAT {
@@ -3771,6 +3800,7 @@ fn py_truthy(v: Json) -> bool {
         Json.Bool(b) => b,
         Json.Int(i) => i != 0,
         Json.UInt(_) => true,
+        Json.Big(_) => true,
         Json.Float(f) => f != 0.0,
         Json.Str(s) => not s.is_empty(),
         Json.Array(items) => not items.is_empty(),
@@ -3802,6 +3832,10 @@ fn rune_len(s: String) -> usize {
 
 // --- numbers, compared exactly -------------------------------------------------------------------
 
+// A number as the checks compare it. An integer past `i64` and `u64` is only marked (`K_BIG`): a
+// comparison with one is `UNSURE`, and the caller compares the exact values, from the JSON or the
+// node it has, with `cmp_exact`. The checks of the numbers that fit stay small enough to inline,
+// and only a value that has such an integer pays for one.
 struct Num {
     kind: u8
     i: i64
@@ -3809,11 +3843,23 @@ struct Num {
     f: f64
 }
 
+// What `cmp_num` gives when one of the numbers is an integer past `u64`.
+const UNSURE: i32 = 2
+
+fn big_num() -> Num {
+    return Num { kind: K_BIG, i: 0, u: 0, f: 0.0 }
+}
+
+fn int_num(i: i64) -> Num {
+    return Num { kind: K_INT, i: i, u: 0, f: 0.0 }
+}
+
 // The instance's number, if it's one: bools aren't, to jsonschema.
 fn num_json(v: Json) -> Num? {
     return match v {
-        Json.Int(i) => some(Num { kind: K_INT, i: i, u: 0, f: 0.0 }),
+        Json.Int(i) => some(int_num(i)),
         Json.UInt(u) => some(Num { kind: K_UINT, i: 0, u: u, f: 0.0 }),
+        Json.Big(_) => some(big_num()),
         Json.Float(f) => some(Num { kind: K_FLOAT, i: 0, u: 0, f: f }),
         _ => none,
     }
@@ -3824,7 +3870,7 @@ fn num_node(g: Graph, n: u32) -> Num? {
     let i = usize(n)
     let k = g.nodes[i].kind
     if k == K_INT {
-        return some(Num { kind: K_INT, i: g.nodes[i].i, u: 0, f: 0.0 })
+        return some(int_num(g.nodes[i].i))
     }
     if k == K_UINT {
         return some(Num { kind: K_UINT, i: 0, u: g.nodes[i].u, f: 0.0 })
@@ -3833,11 +3879,15 @@ fn num_node(g: Graph, n: u32) -> Num? {
         return some(Num { kind: K_FLOAT, i: 0, u: 0, f: g.nodes[i].f })
     }
     if k == K_BOOL {
-        return some(Num { kind: K_INT, i: if g.nodes[i].b { 1 } else { 0 }, u: 0, f: 0.0 })
+        return some(int_num(if g.nodes[i].b { 1 } else { 0 }))
+    }
+    if k == K_BIG {
+        return some(big_num())
     }
     return none
 }
 
+// The nearest float, of a number that isn't `K_BIG`.
 fn num_f64(x: Num) -> f64 {
     if x.kind == K_INT {
         return f64.nearest(x.i)
@@ -3848,12 +3898,25 @@ fn num_f64(x: Num) -> f64 {
     return x.f
 }
 
+// Python's `float(n)` of an integer past `u64`, from its digits: `OverflowError` past the largest
+// float.
+fn big_f64(digits: String) -> f64 ! SchemaFault {
+    let f = f64.parse(digits) ?? 0.0
+    if f - f != 0.0 {
+        fail fault("OverflowError", "int too large to convert to float")
+    }
+    return f
+}
+
 fn num_is_zero(x: Num) -> bool {
     if x.kind == K_INT {
         return x.i == 0
     }
     if x.kind == K_UINT {
         return x.u == 0
+    }
+    if x.kind == K_BIG {
+        return false
     }
     return x.f == 0.0
 }
@@ -3889,7 +3952,11 @@ fn cmp_u_f(u: u64, f: f64) -> i32 {
     return sign(u < tu, u > tu)
 }
 
+// -1, 0 or 1 as `a` is less than, equal to or more than `b`, exactly, or `UNSURE`.
 fn cmp_num(a: Num, b: Num) -> i32 {
+    if a.kind == K_BIG or b.kind == K_BIG {
+        return cmp_big(a, b)
+    }
     if a.kind == K_FLOAT and b.kind == K_FLOAT {
         return sign(a.f < b.f, a.f > b.f)
     }
@@ -3912,20 +3979,82 @@ fn cmp_num(a: Num, b: Num) -> i32 {
     return if a.kind == K_INT { -1 } else { 1 }
 }
 
-// `x <op> n`, for a schema's `n`: its comparison, or Python's `TypeError` if `n` isn't a number.
+// A comparison with an integer past `i64` and `u64`: an infinity is past it, and anything else is
+// `UNSURE`, for the caller to compare exactly.
+fn cmp_big(a: Num, b: Num) -> i32 {
+    if b.kind == K_FLOAT and b.f - b.f != 0.0 {
+        return if b.f > 0.0 { -1 } else { 1 }
+    }
+    if a.kind == K_FLOAT and a.f - a.f != 0.0 {
+        return if a.f > 0.0 { 1 } else { -1 }
+    }
+    return UNSURE
+}
+
+// A number as an integer times a power of two, exactly: what `cmp_exact` compares. A bool is 0
+// or 1, as in Python's comparisons.
+fn exact_json(v: Json) -> (BigInt, i64) {
+    return match v {
+        Json.Int(i) => (BigInt.from(i), 0),
+        Json.UInt(u) => (BigInt.from(u), 0),
+        Json.Big(digits) => (BigInt.parse(digits) ?? BigInt.zero(), 0),
+        Json.Float(f) => float_parts(f),
+        Json.Bool(b) => (BigInt.from(if b { 1 } else { 0 }), 0),
+        _ => (BigInt.zero(), 0),
+    }
+}
+
+fn exact_node(g: Graph, n: u32) -> (BigInt, i64) {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_INT {
+        return (BigInt.from(g.nodes[i].i), 0)
+    }
+    if k == K_UINT {
+        return (BigInt.from(g.nodes[i].u), 0)
+    }
+    if k == K_BIG {
+        return (BigInt.parse(g.nodes[i].s) ?? BigInt.zero(), 0)
+    }
+    if k == K_FLOAT {
+        return float_parts(g.nodes[i].f)
+    }
+    return (BigInt.from(if k == K_BOOL and g.nodes[i].b { 1 } else { 0 }), 0)
+}
+
+// -1, 0 or 1 as finite `a` is less than, equal to or more than finite `b`.
+fn cmp_exact(a: own (BigInt, i64), b: own (BigInt, i64)) -> i32 {
+    let (am, ae) = a
+    let (bm, be) = b
+    var x = am
+    var y = bm
+    if ae > be {
+        x = x.shl(u64.wrap(ae - be))
+    } else if be > ae {
+        y = y.shl(u64.wrap(be - ae))
+    }
+    return sign(x < y, x > y)
+}
+
+// `x <op> n`, for a schema's `n` and a small integer `x`: its comparison, or Python's `TypeError`
+// if `n` isn't a number.
 fn cmp_num_node(x: Num, x_type: String, g: Graph, n: u32, op: String) -> i32 ! SchemaFault {
     let y = num_node(g, n) else {
         fail type_error("'{op}' not supported between instances of '{x_type}' and '{py_type(g, n)}'")
     }
-    return cmp_num(x, y)
+    let c = cmp_num(x, y)
+    if c == UNSURE {
+        return cmp_exact((BigInt.from(x.i), 0), exact_node(g, n))
+    }
+    return c
 }
 
-// Python's `n == v`, for a schema's `n` and a small integer.
+// Python's `n == v`, for a schema's `n` and a small integer, which an integer past `u64` never is.
 fn eq_int_node(g: Graph, n: u32, v: i64) -> bool {
     let y = num_node(g, n) else {
         return false
     }
-    return cmp_num(y, Num { kind: K_INT, i: v, u: 0, f: 0.0 }) == 0
+    return cmp_num(y, int_num(v)) == 0
 }
 
 fn num_big(x: Num) -> BigInt {
@@ -3935,7 +4064,7 @@ fn num_big(x: Num) -> BigInt {
     return BigInt.from(x.i)
 }
 
-// Whether integer `d` divides integer `x`: Python's `x % d` being 0.
+// Whether integer `d` divides integer `x`, neither past `u64`: Python's `x % d` being 0.
 fn int_divides(d: Num, x: Num) -> bool {
     if d.kind == K_INT and x.kind == K_INT {
         if d.i == -1 or d.i == 1 {
@@ -3968,17 +4097,9 @@ fn float_parts(f: f64) -> (BigInt, i64) {
 }
 
 // Whether `x / d` is a whole number, exactly: Python's `Fraction(x) / Fraction(d)` having a
-// denominator of 1.
-fn exact_multiple(x: Num, d: f64) -> bool {
-    var xm = BigInt.zero()
-    var xe: i64 = 0
-    if x.kind == K_FLOAT {
-        let (m, e) = float_parts(x.f)
-        xm = m
-        xe = e
-    } else {
-        xm = num_big(x)
-    }
+// denominator of 1. `x` is an integer times a power of two, from `exact_json`.
+fn exact_multiple(x: own (BigInt, i64), d: f64) -> bool {
+    let (xm, xe) = x
     let (dm, de) = float_parts(d)
     var num = xm
     var den = dm
@@ -4051,11 +4172,12 @@ fn equal_json(a: Json, b: Json) -> bool {
             }
         },
         _ => {
-            let x = num_json(a) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+            let x = num_json(a) ?? int_num(0)
             let y = num_json(b) else {
                 return false
             }
-            return cmp_num(x, y) == 0
+            let c = cmp_num(x, y)
+            return c == 0 or (c == UNSURE and cmp_exact(exact_json(a), exact_json(b)) == 0)
         },
     }
 }
@@ -4116,11 +4238,12 @@ fn equal_node(g: Graph, n: u32, b: Json) -> bool {
             _ => false,
         }
     }
-    let x = num_node(g, n) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+    let x = num_node(g, n) ?? int_num(0)
     let y = num_json(b) else {
         return false
     }
-    return cmp_num(x, y) == 0
+    let c = cmp_num(x, y)
+    return c == 0 or (c == UNSURE and cmp_exact(exact_node(g, n), exact_json(b)) == 0)
 }
 
 // Python's own `==`, where `true` is 1: what sorting compares with.
@@ -4134,7 +4257,8 @@ fn py_eq(a: Json, b: Json) -> bool {
         let q = nb else {
             return false
         }
-        return cmp_num(p, q) == 0
+        let c = cmp_num(p, q)
+        return c == 0 or (c == UNSURE and cmp_exact(exact_json(a), exact_json(b)) == 0)
     }
     match a {
         Json.Str(s) => {
@@ -4190,7 +4314,7 @@ fn py_eq(a: Json, b: Json) -> bool {
 
 fn py_num(v: Json) -> Num? {
     return match v {
-        Json.Bool(b) => some(Num { kind: K_INT, i: if b { 1 } else { 0 }, u: 0, f: 0.0 }),
+        Json.Bool(b) => some(int_num(if b { 1 } else { 0 })),
         _ => num_json(v),
     }
 }
@@ -4200,9 +4324,13 @@ fn py_lt(a: Json, b: Json) -> bool? {
     let x = py_num(a)
     let y = py_num(b)
     if x != none and y != none {
-        let p = x ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
-        let q = y ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
-        return some(cmp_num(p, q) < 0)
+        let p = x ?? int_num(0)
+        let q = y ?? int_num(0)
+        var c = cmp_num(p, q)
+        if c == UNSURE {
+            c = cmp_exact(exact_json(a), exact_json(b))
+        }
+        return some(c < 0)
     }
     match a {
         Json.Str(s) => {
@@ -4246,6 +4374,7 @@ fn uniq(items: List<Json>) -> bool {
             Json.Str(_) => numbers = false,
             Json.Int(_) => texts = false,
             Json.UInt(_) => texts = false,
+            Json.Big(_) => texts = false,
             Json.Float(_) => texts = false,
             _ => {
                 texts = false

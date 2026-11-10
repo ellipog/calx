@@ -64,8 +64,9 @@ fn main() ! JsonError {
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [[1], ["2"]]}"#))    // out: `Player.grid[1][0]` should be an integer, not a string
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {"a": 3000000000}}"#))    // out: `Player.scores.a` should be from -2147483648 to 2147483647, not 3000000000
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": -1}"#))    // out: `Player.id` should be 0 or more, not -1
-    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 18446744073709551616}"#))    // out: `Player.id` should be an integer, not a number
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 18446744073709551616}"#))    // out: `Player.id` should be at most 18446744073709551615, not 18446744073709551616
     show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 1, "count": 1, "small": 9223372036854775808}"#))    // out: `Player.small` should be from -128 to 127, not 9223372036854775808
+    show(String(#"{"name": "x", "serverPort": 1, "ratio": 1, "scale": 1, "tags": [], "on": true, "pos": {"x": 1, "z": 1}, "grid": [], "scores": {}, "order": {}, "extra": 1, "id": 1, "count": 1, "small": -98249283749234923498293171823948729348710298301928331}"#))    // out: `Player.small` should be from -128 to 127, not -98249283749234923498293171823948729348710298301928331
     show(String(#"{"name": "x""#))    // out: line 1, column 13: the end in an object, where `,` or `}` should be
 
     // A type with `@json` builds and reads `Json` values as they are.

@@ -53,7 +53,7 @@ fn main() ! JsonError {
 | `v.pointer(path: String) -> Json?` | A copy of the value a JSON Pointer names, as RFC 6901 and serde_json read one: `/downloads/server/url` is member `url` of member `server` of member `downloads`, `/versions/0` an array's first element, with `~1` for `/` and `~0` for `~` in a name. `""` is the whole value. Only what's found is copied |
 | `v.as_str()`, `v.as_bool()` | The text or the bool, if `v` is one |
 | `v.as_i64() -> i64?`, `v.as_u64() -> u64?` | The number, if `v` is an integer that fits |
-| `v.as_f64() -> f64?` | Any number, as the nearest `f64` |
+| `v.as_f64() -> f64?` | Any number, as the nearest `f64`, or an infinity for a `Big` past `f64`'s range |
 | `v.is_null() -> bool` | Whether `v` is `null` |
 | `v.len() -> usize` | An array's elements or an object's members, and 0 for anything else |
 | `v.keys() -> List<String>` | An object's keys, in order |
@@ -70,6 +70,7 @@ pub enum Json {
     Bool(bool)
     Int(i64)                          // an integer that fits an i64
     UInt(u64)                         // one past that, up to 2^64 - 1
+    Big(String)                       // one past both, as its digits
     Float(f64)                        // any other number
     Str(String)
     Array(List<Json>)
@@ -77,7 +78,7 @@ pub enum Json {
 }
 ```
 
-- **Integers are exact.** A number written without a fraction or an exponent is an `Int` if it fits an `i64` and a `UInt` if it fits a `u64`, so an id comes through to the last digit, as it does with serde_json. Anything else is a `Float`: `1.0`, `1e3`, and an integer too big for either, which is the nearest `f64`. JavaScript reads every number as an `f64`, so an integer past 2^53 doesn't survive a trip through a browser; that's JavaScript's limit, not JSON's.
+- **Integers are exact.** A number written without a fraction or an exponent is an `Int` if it fits an `i64` and a `UInt` if it fits a `u64`, so an id comes through to the last digit, as it does with serde_json. One too big for either is a `Big`, which holds its digits, with a `-` first if it's below zero, and writes them back as they were, as Python's `json` keeps an `int` of any size. Each number has one form, so `==` compares them, and [`BigInt.parse(digits)`](bigint.md) gives one to compute with. Anything else is a `Float`: `1.0` and `1e3`. JavaScript reads every number as an `f64`, so an integer past 2^53 doesn't survive a trip through a browser; that's JavaScript's limit, not JSON's.
 - **Objects keep their order.** An object's members are a [`LinkedMap`](../reference/linked-maps.md), in the order the text had them, so a file read and written back keeps its order, and `m[key]` finds one at once. A key written twice keeps its first place and its last value, as in Python and JavaScript.
 - **The grammar is JSON's, no more:** no comments, no commas after the last element, no single quotes, no `NaN` or `Infinity`, no leading zeros or `+`. Arrays and objects may nest 512 deep, so text from anyone can't run the stack out.
 
@@ -98,6 +99,8 @@ fn main() {
         // out: "sam"
         println("{members["max"].as_u64()} {members["max"].as_i64()} {members["max"].kind()}")    // out: some(18446744073709551615) none a number
     }
+    let big = parse("[123456789012345678901234567890]")!
+    println("{big}")    // out: [123456789012345678901234567890]
 }
 ```
 
@@ -256,7 +259,7 @@ fn main() {
 
 `std.json` is written in Calx: [std/json.calx](../../std/json.calx).
 
-- The parser goes through the text's bytes once, by recursive descent. A string is copied a run at a time between its escapes, and a number is checked against JSON's grammar as its digits add up in a `u64`; one with a fraction or an exponent, or too big, is read with `f64.parse`. A line and a column are counted only when there's an error to report, so text that parses pays nothing for them.
+- The parser goes through the text's bytes once, by recursive descent. A string is copied a run at a time between its escapes, and a number is checked against JSON's grammar as its digits add up in a `u64`; one with a fraction or an exponent is read with `f64.parse`, and an integer too big keeps its digits, which costs nothing to convert. So a `Big` may have any number of digits, where Python's `json` refuses one of more than 4,300 by default, since its `int` reads them in quadratic time. A line and a column are counted only when there's an error to report, so text that parses pays nothing for them.
 - Object keys are [interned](../reference/strings.md#interned-strings), as Python's parser shares them: the objects of an array share one copy of each key. On our benchmark's 18.7 MB file of 120,000 objects, that held 15 MB less at the most, and looking a key up in each object took 17% less time.
 - `\u` escapes are joined as UTF-16 surrogate pairs, and half a pair alone is an error, since a `String` holds only valid UTF-8.
 - The writer adds to one `String`, and copies a string a run at a time between the characters it escapes.

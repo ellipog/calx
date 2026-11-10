@@ -1,0 +1,39 @@
+// std.json.schema on integers past `u64`, which std.json keeps exactly, as Python's `json` keeps
+// an `int` (CLX-227): compared exactly with each other and with floats, `multipleOf` worked out
+// exactly, and Python's `OverflowError` where it makes one a float too big for an `f64`. Each line
+// expected below is what jsonschema 4.26 printed for the same schema and value.
+import std.json
+import std.json.schema.{Draft, Validator}
+
+fn check(schema: String, inst: String) {
+    var v = Validator.new(json.parse(schema)!, Draft.Draft202012)
+    match v.iter_errors(json.parse(inst)!) {
+        ok(errors) => {
+            var parts = List<String>()
+            for e in errors {
+                parts.push("{e.json_path()} {e.message}")
+            }
+            println(if parts.is_empty() { String("ok") } else { parts.join(" | ") })
+        },
+        err(f) => println("{f.kind}: {f}"),
+    }
+}
+
+fn main() {
+    check(#"{"maximum": 18446744073709551615}"#, "18446744073709551616")    // out: $ 18446744073709551616 is greater than the maximum of 18446744073709551615
+    check(#"{"minimum": -9223372036854775808}"#, "-98249283749234923498293171823948729348710298301928331")    // out: $ -98249283749234923498293171823948729348710298301928331 is less than the minimum of -9223372036854775808
+    check(#"{"exclusiveMaximum": 1e20}"#, "100000000000000000000")    // out: $ 100000000000000000000 is greater than or equal to the maximum of 1e+20
+    check(#"{"maximum": 1e20}"#, "100000000000000000001")    // out: $ 100000000000000000001 is greater than the maximum of 1e+20
+    check(#"{"multipleOf": 3}"#, "100000000000000000000")    // out: $ 100000000000000000000 is not a multiple of 3
+    check(#"{"multipleOf": 18446744073709551616}"#, "36893488147419103232")    // out: ok
+    var huge = String("1")
+    huge.push_str("0".repeat(400))
+    check(#"{"multipleOf": 0.5}"#, huge)    // out: OverflowError: int too large to convert to float
+    check(#"{"multipleOf": 7}"#, "1e300")    // out: $ 1e+300 is not a multiple of 7
+    check("\{\"multipleOf\": {huge}\}", "1.5")    // out: OverflowError: int too large to convert to float
+    check(#"{"const": 100000000000000000000}"#, "1e20")    // out: ok
+    check(#"{"enum": [18446744073709551616]}"#, "18446744073709551617")    // out: $ 18446744073709551617 is not one of [18446744073709551616]
+    check(#"{"uniqueItems": true}"#, "[18446744073709551616, 1.8446744073709552e19]")    // out: $ [18446744073709551616, 1.8446744073709552e+19] has non-unique elements
+    check(#"{"type": "integer"}"#, "-98249283749234923498293171823948729348710298301928331")    // out: ok
+    check(#"{"minItems": 18446744073709551616}"#, "[1]")    // out: $ [1] is too short
+}

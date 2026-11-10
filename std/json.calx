@@ -14,6 +14,10 @@ pub enum Json {
     /// One written the same way that's too big for an `i64` but fits a `u64`: from 2^63 to
     /// 2^64 - 1. With it, every `u64` comes through exactly.
     UInt(u64)
+    /// One written the same way that's past both, kept exactly, as Python's `json` keeps an `int`
+    /// of any size: its digits, with a `-` first if it's below zero, as the text has them. They're
+    /// what `BigInt.parse` reads, and each number has one form, so `==` compares the numbers.
+    Big(String)
     /// Any other number.
     Float(f64)
     Str(String)
@@ -328,8 +332,8 @@ fn hex4(text: String, at: mut usize, slash: usize) -> u32 ! JsonError {
 }
 
 // A number, checked against JSON's grammar: `-`, digits without a leading zero, then a fraction
-// and an exponent if there are. One with neither that fits an `i64` is an `Int`, and one past that
-// that fits a `u64` a `UInt`.
+// and an exponent if there are. One with neither that fits an `i64` is an `Int`, one past that
+// that fits a `u64` a `UInt`, and any other a `Big`.
 fn parse_number(text: String, at: mut usize) -> Json ! JsonError {
     let start = at
     let negative = text.byte_at(at) == 45
@@ -391,6 +395,9 @@ fn parse_number(text: String, at: mut usize) -> Json ! JsonError {
         if mag <= 9223372036854775808 {
             return Json.Int(i64.wrap(0 - mag))
         }
+    }
+    if whole {
+        return Json.Big(text[start..at].copy())
     }
     return Json.Float(f64.parse(text[start..at]) ?? 0.0)
 }
@@ -504,6 +511,7 @@ fn write_json(out: mut String, v: Json, indented: bool, indent: usize, level: us
         Json.Bool(b) => out.push_str(if b { "true" } else { "false" }),
         Json.Int(n) => out.push_str("{n}"),
         Json.UInt(n) => out.push_str("{n}"),
+        Json.Big(digits) => out.push_str(digits),
         Json.Float(f) => {
             // JSON has no NaN or infinity; JavaScript writes them as null too.
             if f - f == 0.0 {
@@ -665,11 +673,13 @@ impl Json {
         }
     }
 
-    /// The number, if this is one, as the nearest `f64`.
+    /// The number, if this is one, as the nearest `f64`: an infinity for a `Big` past `f64`'s
+    /// range, where Python's `float` raises `OverflowError`.
     pub fn as_f64(self) -> f64? {
         return match self {
             Json.Int(n) => some(f64.nearest(n)),
             Json.UInt(n) => some(f64.nearest(n)),
+            Json.Big(digits) => f64.parse(digits),
             Json.Float(f) => some(f),
             _ => none,
         }
@@ -729,6 +739,7 @@ impl Json {
             Json.Bool(_) => "a bool",
             Json.Int(_) => "a number",
             Json.UInt(_) => "a number",
+            Json.Big(_) => "a number",
             Json.Float(_) => "a number",
             Json.Str(_) => "a string",
             Json.Array(_) => "an array",
@@ -810,6 +821,9 @@ pub fn json_int(value: Json, what: String, min: i64, max: i64) -> i64 ! JsonErro
         Json.UInt(n) => {
             fail JsonError { message: "`{what}` should be from {min} to {max}, not {n}", line: 0, column: 0 }
         },
+        Json.Big(digits) => {
+            fail JsonError { message: "`{what}` should be from {min} to {max}, not {digits}", line: 0, column: 0 }
+        },
         _ => {},
     }
     fail json_expected(value, "an integer", what)
@@ -826,6 +840,10 @@ pub fn json_u64(value: Json, what: String) -> u64 ! JsonError {
         },
         Json.UInt(n) => {
             return n
+        },
+        Json.Big(digits) => {
+            let limit = if digits.starts_with("-") { "0 or more" } else { "at most 18446744073709551615" }
+            fail JsonError { message: "`{what}` should be {limit}, not {digits}", line: 0, column: 0 }
         },
         _ => {},
     }
@@ -846,6 +864,7 @@ pub fn json_f64(value: Json, what: String) -> f64 ! JsonError {
     return match value {
         Json.Int(n) => f64.nearest(n),
         Json.UInt(n) => f64.nearest(n),
+        Json.Big(digits) => f64.parse(digits) ?? 0.0,
         Json.Float(f) => f,
         _ => {
             fail json_expected(value, "a number", what)

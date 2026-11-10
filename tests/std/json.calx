@@ -66,9 +66,10 @@ fn main() {
     try_parse(String(#"["a\"b\\c\/d\b\f\n\r\t", "\u00e9\u4e16\ud83d\ude00", "é世😀"]"#))    // out: ok ["a\"b\\c/d\b\f\n\r\t","é世😀","é世😀"]
     try_parse(String(#""\u0001\u001f""#))    // out: ok "\u0001\u001f"
 
-    // Numbers: integers that fit an i64 or a u64, and everything else as an f64.
-    try_parse(String("[0, -0, 9223372036854775807, -9223372036854775808, 9223372036854775808, 18446744073709551615, 18446744073709551616, -9223372036854775809, 1e3, 1.5E-3, -0.0, 12345678901234567890]"))    // out: ok [0,0,9223372036854775807,-9223372036854775808,9223372036854775808,18446744073709551615,1.8446744073709552E19,-9.223372036854776E18,1000.0,0.0015,-0.0,12345678901234567890]
-    let big = parse(String("[18446744073709551615, 7, -7, 2.5]"))!
+    // Numbers: integers that fit an i64 or a u64, integers past both kept exactly, and everything
+    // else as an f64.
+    try_parse(String("[0, -0, 9223372036854775807, -9223372036854775808, 9223372036854775808, 18446744073709551615, 18446744073709551616, -9223372036854775809, 1e3, 1.5E-3, -0.0, 12345678901234567890]"))    // out: ok [0,0,9223372036854775807,-9223372036854775808,9223372036854775808,18446744073709551615,18446744073709551616,-9223372036854775809,1000.0,0.0015,-0.0,12345678901234567890]
+    let big = parse(String("[18446744073709551615, 7, -7, 2.5, 98249283749234923498293171823948729348710298301928331, -18446744073709551616]"))!
     for i in 0..big.len() {
         let n = big.at(i) ?? Json.Null
         println("{n.as_i64()} {n.as_u64()} {n.as_f64()}")
@@ -77,6 +78,14 @@ fn main() {
     // out: some(7) some(7) some(7.0)
     // out: some(-7) none some(-7.0)
     // out: none none some(2.5)
+    // out: none none some(9.824928374923492E52)
+    // out: none none some(-1.8446744073709552E19)
+    if let Json.Array(xs) = big {
+        if let Json.Big(digits) = xs[4] {
+            println("{digits} {digits.len()}")    // out: 98249283749234923498293171823948729348710298301928331 53
+        }
+        println("{xs[5] == parse(String("-18446744073709551616"))!} {xs[4] == xs[5]}")    // out: true false
+    }
 
     // A key given twice keeps its first place and its last value.
     try_parse(String(#"{"a": 1, "b": 2, "a": 3}"#))    // out: ok {"a":3,"b":2}
