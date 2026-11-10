@@ -1398,6 +1398,120 @@ fn pike_search(prog: Prog, p: mut Pike, text: String, from: usize, limit: usize,
     return matched
 }
 
+// --- the bounded backtracker --------------------------------------------------------------------
+
+// How many (instruction, place) bits the backtracker may keep, 256 KB of them: a span longer than
+// this allows goes to the Pike VM.
+const TRACK_BITS: usize = 2097152
+
+// What the backtracker keeps between searches, so a search allocates nothing once it has run:
+// which instructions it has been at, at which places, as bits, the steps still to take, and the
+// slots of the way it's on.
+struct Track {
+    visited: List<u64>
+    stack_pc: List<u32>
+    stack_at: List<usize>
+    stack_value: List<u64>
+    slots: List<u64>
+}
+
+fn new_track(prog: Prog) -> Track {
+    return Track { visited: List<u64>(), stack_pc: List<u32>(), stack_at: List<usize>(), stack_value: List<u64>(), slots: [UNSET; prog.slots] }
+}
+
+// Whether `track_search` may look at the span from `from` to `limit`.
+fn track_fits(prog: Prog, from: usize, limit: usize) -> bool {
+    return prog.op.len() * (limit - from + 1) <= TRACK_BITS
+}
+
+// What `pike_search` finds, anchored at `from`, with its slots in `best`, found as Rust's bounded
+// backtracker finds it: depth-first, trying each split's preferred way first, so the first match
+// it comes to is the one the pattern prefers, and never trying an instruction twice at the same
+// place, since what follows from there is the same, so it takes time linear in the span. The span
+// has to fit, as `track_fits` says.
+fn track_search(prog: Prog, t: mut Track, text: String, from: usize, limit: usize, whole: bool, best: mut List<u64>) -> bool {
+    let span = limit - from + 1
+    let words = (prog.op.len() * span + 63) / 64
+    while t.visited.len() < words {
+        t.visited.push(0)
+    }
+    for w in 0..words {
+        t.visited[w] = 0
+    }
+    let slots = prog.slots
+    for k in 0..slots {
+        t.slots[k] = UNSET
+    }
+    t.stack_pc.clear()
+    t.stack_at.clear()
+    t.stack_value.clear()
+    t.stack_pc.push(prog.start)
+    t.stack_at.push(from)
+    t.stack_value.push(0)
+    while not t.stack_pc.is_empty() {
+        var pc = t.stack_pc.pop() ?? 0
+        var at = t.stack_at.pop() ?? 0
+        let value = t.stack_value.pop() ?? 0
+        if pc == NONE {
+            // A slot to put back, now that the ways after it have failed.
+            t.slots[at] = value
+            continue
+        }
+        loop {
+            let bit = usize(pc) * span + (at - from)
+            let word = bit / 64
+            let mask = 1u64 << u64(bit % 64)
+            if t.visited[word] & mask != 0 {
+                break
+            }
+            t.visited[word] = t.visited[word] | mask
+            let i = usize(pc)
+            let op = prog.op[i]
+            if op == OP_RUNE or op == OP_CLASS {
+                if at >= limit {
+                    break
+                }
+                let (r, n) = rune_at(text, at)
+                let hit = if op == OP_RUNE { r >= prog.a[i] and r <= prog.b[i] } else { class_has(prog.classes[usize(prog.a[i])], r) }
+                if not hit {
+                    break
+                }
+                pc = prog.next[i]
+                at += n
+            } else if op == OP_SPLIT {
+                t.stack_pc.push(prog.b[i])
+                t.stack_at.push(at)
+                t.stack_value.push(0)
+                pc = prog.a[i]
+            } else if op == OP_SAVE {
+                let k = usize(prog.a[i])
+                if k < slots {
+                    t.stack_pc.push(NONE)
+                    t.stack_at.push(k)
+                    t.stack_value.push(t.slots[k])
+                    t.slots[k] = u64(at)
+                }
+                pc = prog.next[i]
+            } else if op == OP_LOOK {
+                if not look_holds(prog.a[i], around(text, at)) {
+                    break
+                }
+                pc = prog.next[i]
+            } else {
+                if whole and at != limit {
+                    break
+                }
+                for k in 0..slots {
+                    best[k] = t.slots[k]
+                }
+                best[1] = u64(at)
+                return true
+            }
+        }
+    }
+    return false
+}
+
 // --- bytes: the program the DFAs run -----------------------------------------------------------
 
 // The byte program's instructions: a range of bytes, a split, an assertion, and the match.
@@ -2394,6 +2508,8 @@ pub struct Regex {
     source: String
     prog: Prog
     pike: Pike
+    // The backtracker that finds a match's groups when the match is short enough, else the Pike VM.
+    track: Track
     groups: usize
     names: List<String>
     // The pattern as plain text, when it's nothing more, found with `find` as it is.
@@ -2447,6 +2563,7 @@ impl Regex {
         }
         let literal = literal_of(node)
         let pike = new_pike(prog)
+        let track = new_track(prog)
         var fwd = new_dfa(node, false)
         let rev = new_dfa(node, true)
         var prefix = List<u8>()
@@ -2480,7 +2597,7 @@ impl Regex {
                 lit_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
             }
         }
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, whole: new_dfa(Node.Empty, false), whole_made: false, python_re: false, py: sre.empty() }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, whole: new_dfa(Node.Empty, false), whole_made: false, python_re: false, py: sre.empty() }
     }
 
     /// The pattern compiled as Python's `re.compile` compiles it, or the error it raises, with
@@ -2498,9 +2615,10 @@ impl Regex {
         var prog = Prog { op: List<u8>(), a: List<u32>(), b: List<u32>(), next: List<u32>(), classes: List<RuneClass>(), start: 0, slots: 2, too_big: false }
         prog.start = prog.emit(OP_MATCH, 0, 0, 0)
         let pike = new_pike(prog)
+        let track = new_track(prog)
         let groups = py.group_count()
         let names = py.group_names()
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, whole: new_dfa(Node.Empty, false), whole_made: true, python_re: true, py: py }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, track: track, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, whole: new_dfa(Node.Empty, false), whole_made: true, python_re: true, py: py }
     }
 
     /// The pattern as it was written.
@@ -2815,11 +2933,20 @@ impl Regex {
             groups.push(some(Match { start: s, end: e, text: text[s..e] }))
             return some(Captures { groups: groups, names: self.names.copy() })
         }
-        let slots = self.prog.slots
-        if pike_search(self.prog, mut self.pike, text, s, e, true, false, slots) {
+        if self.find_slots(text, s, e) {
             return some(self.groups_of(text))
         }
         return none
+    }
+
+    // The slots of the match from `s` to `e`, in `pike.best`, for a `Regex.new` with groups: the
+    // backtracker finds them when the match is short enough for its bits, else the Pike VM.
+    fn find_slots(mut self, text: String, s: usize, e: usize) -> bool {
+        if track_fits(self.prog, s, e) {
+            return track_search(self.prog, mut self.track, text, s, e, false, mut self.pike.best)
+        }
+        let slots = self.prog.slots
+        return pike_search(self.prog, mut self.pike, text, s, e, true, false, slots)
     }
 
     // The groups in `pike.best`, of the match just found.
@@ -2892,6 +3019,12 @@ impl Regex {
         }
         // The groups of the way through that ends at the end, which a search that may end
         // anywhere wouldn't take.
+        if track_fits(self.prog, 0, text.len()) {
+            if track_search(self.prog, mut self.track, text, 0, text.len(), true, mut self.pike.best) {
+                return some(self.groups_of(text))
+            }
+            return none
+        }
         let slots = self.prog.slots
         if pike_search(self.prog, mut self.pike, text, 0, text.len(), true, true, slots) {
             return some(self.groups_of(text))
@@ -3043,16 +3176,28 @@ impl Regex {
         var out = String()
         var kept: usize = 0
         var count: usize = 0
-        let plain = not with.contains("$")
+        let pieces = read_template(with, self.names)
+        // Whether the template names a group other than the whole match, which then has to be
+        // found; group 0 is where the match is.
+        var needs_groups = false
+        for p in pieces {
+            if p.group != NO_GROUP and p.group > 0 and p.group <= self.groups {
+                needs_groups = true
+            }
+        }
         var at: usize = 0
         var last_end = usize.wrap(UNSET)
         while count < limit {
             if let (s, e) = self.next_span(text, mut at, mut last_end) {
                 out.push_str(text[kept..s])
-                if plain {
-                    out.push_str(with)
-                } else if let c = self.groups_at(text, s, e) {
-                    expand(mut out, with, c)
+                if needs_groups {
+                    if self.find_slots(text, s, e) {
+                        expand_slots(mut out, pieces, text, self.pike.best, self.groups)
+                    }
+                } else {
+                    self.pike.best[0] = u64(s)
+                    self.pike.best[1] = u64(e)
+                    expand_slots(mut out, pieces, text, self.pike.best, 0)
                 }
                 kept = e
                 count += 1
@@ -3094,8 +3239,26 @@ impl Regex {
     }
 }
 
-// Adds `with` to `out`, with `$1`, `${name}` and the rest replaced by the groups in `c`.
-fn expand(out: mut String, with: String, c: Captures) {
+// A piece of a template: text, or the number of the group whose text goes there, with `NO_GROUP`
+// for text.
+struct Piece {
+    text: String
+    group: usize
+}
+
+const NO_GROUP: usize = 4294967295
+
+fn text_piece(pieces: mut List<Piece>, s: String) {
+    if not s.is_empty() {
+        pieces.push(Piece { text: s.copy(), group: NO_GROUP })
+    }
+}
+
+// The template `with` read once into pieces: `$1` and `${1}` group 1, `${name}` and `$name` the
+// group named so, `$0` the whole match, `$$` a `$`. A name that's no group's is nothing, as is a
+// number past the groups, which `expand_slots` passes over.
+fn read_template(with: String, names: List<String>) -> List<Piece> {
+    var pieces = List<Piece>()
     var i: usize = 0
     var kept: usize = 0
     while i < with.len() {
@@ -3103,10 +3266,10 @@ fn expand(out: mut String, with: String, c: Captures) {
             i += 1
             continue
         }
-        out.push_str(with[kept..i])
+        text_piece(mut pieces, with[kept..i])
         i += 1
         if i < with.len() and with.byte_at(i) == 36 {
-            out.push('$')
+            text_piece(mut pieces, "$")
             i += 1
             kept = i
             continue
@@ -3117,7 +3280,7 @@ fn expand(out: mut String, with: String, c: Captures) {
                 name = with[i + 1..i + j]
                 i = i + j + 1
             } else {
-                out.push('$')
+                text_piece(mut pieces, "$")
                 kept = i
                 continue
             }
@@ -3130,18 +3293,38 @@ fn expand(out: mut String, with: String, c: Captures) {
         }
         kept = i
         if name.is_empty() {
-            out.push('$')
+            text_piece(mut pieces, "$")
             continue
         }
         if let n = usize.parse(name) {
-            if let t = c.get(n) {
-                out.push_str(t)
+            pieces.push(Piece { text: String(), group: n })
+        } else {
+            for g in 0..names.len() {
+                if names[g] == name {
+                    pieces.push(Piece { text: String(), group: g + 1 })
+                    break
+                }
             }
-        } else if let t = c.name(name) {
-            out.push_str(t)
         }
     }
-    out.push_str(with[kept..])
+    text_piece(mut pieces, with[kept..])
+    return pieces
+}
+
+// Adds the template's pieces to `out`, each group's text from its slots in `best`, for a pattern
+// with `groups` groups found; a group past them, or one that took no part, adds nothing.
+fn expand_slots(out: mut String, pieces: List<Piece>, text: String, best: List<u64>, groups: usize) {
+    for p in pieces {
+        if p.group == NO_GROUP {
+            out.push_str(p.text)
+        } else if p.group <= groups {
+            let s = best[p.group * 2]
+            let e = best[p.group * 2 + 1]
+            if s != UNSET and e != UNSET {
+                out.push_str(text[usize.wrap(s)..usize.wrap(e)])
+            }
+        }
+    }
 }
 
 // The text a pattern is, when it's nothing but runes to match as they are.

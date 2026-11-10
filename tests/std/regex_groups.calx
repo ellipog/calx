@@ -1,0 +1,49 @@
+// std.regex's groups for Regex.new: the bounded backtracker on short matches, the Pike VM on ones
+// too long for its bits, and replace_all's templates read once and filled from the groups' places,
+// their corners too (CLX-229).
+import std.regex.{Regex}
+
+fn main() {
+    var rx = Regex.new(#"(?P<n>\d+)-(\w+)"#)!
+    let text = "12-ab 7-c"
+    for with in ["$2=$1", #"${1}x"#, "[$1a]", "$9|$0", "x$", #"${n"#, #"$n and ${n}"#, "$$1", "plain"] {
+        println(rx.replace_all(text, with))
+    }
+    // out: ab=12 c=7
+    // out: 12x 7x
+    // out: [] []
+    // out: |12-ab |7-c
+    // out: x$ x$
+    // out: ${n ${n
+    // out: 12 and 12 7 and 7
+    // out: $1 $1
+    // out: plain plain
+    println(rx.replace(text, "<$2>"))    // out: <ab> 7-c
+
+    // A group that takes no part, and one inside a repeat, which keeps its last pass.
+    var opt = Regex.new("(a)?(b)|(c)+")!
+    for c in opt.captures_all("b ab ccc") {
+        println("{c.get(0) ?? "-"} [{c.get(1) ?? "-"}] [{c.get(2) ?? "-"}] [{c.get(3) ?? "-"}] {c.span(3)}")
+    }
+    // out: b [-] [b] [-] none
+    // out: ab [a] [b] [-] none
+    // out: ccc [-] [-] [c] some((7, 8))
+
+    // Matches short enough for the backtracker's bits and too long for them give the same groups.
+    var ab = Regex.new("(a+)(b+)")!
+    for n in [1000usize, 300000usize] {
+        var long = String()
+        for _ in 0..n {
+            long.push('a')
+        }
+        long.push_str("bbbbb")
+        let bang = "{long}!"
+        let c = ab.captures(bang)!
+        println("{c.span(1)} {c.span(2)} {ab.replace_all(bang, "$2").len()} {ab.full_captures(bang) == none}")
+        println("{ab.full_captures(long)!.span(2)}")
+    }
+    // out: some((0, 1000)) some((1000, 1005)) 6 true
+    // out: some((1000, 1005))
+    // out: some((0, 300000)) some((300000, 300005)) 6 true
+    // out: some((300000, 300005))
+}
