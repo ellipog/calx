@@ -218,6 +218,8 @@ fn main() ! Error {
 | Pillow's `Image.open(p)`, `im.resize((w, h))`, `im.save(p)` | `Image.open(p)`, `im.resize(w, h)` and `im.save(p)` from [`std.image`](../std/image.md), with Pillow's pixels |
 | `draw = ImageDraw.Draw(im)`, `draw.rectangle([x0, y0, x1, y1], fill=a, outline=b, width=2)`, `draw.line(pts, fill=c, width=3)`, `draw.point((x, y), fill=c)` | `im.rectangle(x0, y0, x1, y1, Paint.both(a, b, 2))`, `im.line(pts, c, 3)` and `im.point(x, y, c)` from [`std.image`](../std/image.md#shapes), with Pillow's pixels; `ellipse`, `polygon`, `rounded_rectangle`, `arc` and `pieslice` too |
 | `ImageFont.truetype(p, 24)`, `ImageDraw.Draw(im).text((x, y), t, font=f, fill=c)` | `Font.open(p)` from [`std.font`](../std/font.md), then `im.draw_text(x, y, t, font, 24.0, c)`; `font.measure(t, 24.0)` for `f.getlength(t)` |
+| `wave.open(p)`, `w.getnchannels()`, `w.readframes(w.getnframes())`, then `struct.unpack(f"<{n}h", raw)` | `Wave.open(p)` from [`std.wave`](../std/wave.md), then `w.channels`, `w.frames`, and `w.samples()` for the numbers, or `w.samples_f32()` from -1 to 1 |
+| `wave.open(p, "wb")`, `setnchannels`, `setsampwidth`, `setframerate`, `writeframes` | `Wave.from_i16(channels, rate, samples).save(p)` or `Wave.new(channels, rate, width, frames).save(p)` from [`std.wave`](../std/wave.md), the same bytes |
 | `datetime.now()`, `strftime`, `strptime` | `unsafe { Timestamp.now() }`, `format` and `parse` from [`std.time`](../std/time.md), with Python's codes |
 | `time.perf_counter()` | `unsafe { Instant.now() }` from [`std.time`](../std/time.md) |
 | `time.sleep(0.5)` | `unsafe { sleep(500_000_000) }`, in nanoseconds, from [`std.thread`](../std/thread.md) |

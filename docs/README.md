@@ -125,6 +125,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 54. [std.xz](std/xz.md): .xz, .lzma and .lz files decompressed as Python's `lzma.decompress` reads them, every filter and check, and .xz and .lzma files compressed at `xz`'s presets, both on all the processors, whole or a piece at a time
 55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors, and dictionaries trained from samples
 56. [std.font](std/font.md): TrueType and OpenType fonts and collections read as FreeType reads them, glyphs drawn antialiased by the exact area they cover, and text measured and drawn on images, as Pillow's `ImageFont` and `ImageDraw.text` do
+57. [std.wave](std/wave.md): WAV files read as Python's `wave` module reads them and written byte for byte as it writes them, floats too, with their samples as numbers instead of `struct.unpack`
 
 ### Java compatibility
 

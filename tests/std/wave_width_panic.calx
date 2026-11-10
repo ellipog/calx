@@ -1,0 +1,9 @@
+// Integer samples take 1 to 4 bytes, as Python's `wave` writes them; any other width panics at
+// the call, where Python's `setsampwidth` raises (CLX-219).
+
+import std.wave.{Wave}
+
+fn main() {
+    println("{Wave.new(1, 8000, 4, [0, 0, 0, 0]).frame_count()}")    // out: 1
+    _ = Wave.new(1, 8000, 5, [])    // panic: integer samples take 1 to 4 bytes, not 5
+}

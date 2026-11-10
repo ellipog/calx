@@ -1,0 +1,93 @@
+// std.wave (CLX-219): WAV files read as Python's `wave` reads them, written byte for byte as it
+// writes them, and their samples as numbers. The CRCs and header bytes are Python 3.14's for the
+// same frames. It was also checked against Python's `wave` on 23,000 generated files, good and
+// broken, and against ffmpeg's raw samples for 54 files of every sample format.
+
+import std.bytes.{from_hex, hex}
+import std.wave.{Wave}
+import std.zlib.{crc32}
+
+// A WAV file's bytes, a chunk at a time.
+fn chunk(name: String, body: List<u8>) -> List<u8> {
+    var out = name.to_bytes()
+    let n = u32.wrap(body.len())
+    out.extend([u8.wrap(n), u8.wrap(n >> 8), u8.wrap(n >> 16), u8.wrap(n >> 24)])
+    out.extend(body)
+    if body.len() % 2 == 1 {
+        out.push(0)
+    }
+    return out
+}
+
+fn riff(chunks: List<List<u8>>) -> List<u8> {
+    var body = String("WAVE").to_bytes()
+    for c in chunks {
+        body.extend(c)
+    }
+    return chunk(String("RIFF"), body)
+}
+
+fn why(bytes: List<u8>) -> String {
+    return match Wave.decode(bytes) {
+        ok(w) => "read {w.channels} channels",
+        err(e) => e,
+    }
+}
+
+fn main() {
+    // Stereo 16-bit, written as Python writes it: a 44-byte header, then the frames.
+    let w = Wave.from_i16(2, 44100, [0, 1000, -1000, 32767, -32768, 5])
+    let bytes = w.encode()
+    println("{bytes.len()} {hex(bytes[0..44])} {crc32(bytes)}")    // out: 56 524946463000000057415645666d7420100000000100020044ac000010b1020004001000646174610c000000 2926047568
+    let back = Wave.decode(bytes)!
+    println("{back.channels} {back.width} {back.rate} {back.frame_count()} {back.samples()}")    // out: 2 2 44100 3 [0, 1000, -1000, 32767, -32768, 5]
+    println("{back.samples_f32()}")    // out: [0.0, 0.030517578, -0.030517578, 0.9999695, -1.0, 1.5258789E-4]
+
+    // 8 bits are unsigned in the file, 128 silence; `samples` centers them. An odd length gets no
+    // pad byte, as Python writes it.
+    let small = Wave.new(1, 8000, 1, [0, 128, 255])
+    println("{crc32(small.encode())} {small.encode().len()} {small.samples()}")    // out: 3383552314 47 [-128, 0, 127]
+
+    // 24 bits, signed, from three bytes each.
+    let deep = Wave.new(1, 48000, 3, [0xff, 0xff, 0x7f, 0x00, 0x00, 0x80, 0xfe, 0xff, 0xff])
+    println("{deep.samples()} {deep.duration()}")    // out: [8388607, -8388608, -2] 6.25E-5
+
+    // Floats from -1 to 1 become integers by the largest value the width holds, clipped first.
+    let made = Wave.from_f32(1, 8000, [-1.5, -1.0, -0.5, 0.0, 0.25, 1.0, 2.0])
+    println("{made.samples()}")    // out: [-32767, -32767, -16384, 0, 8192, 32767, 32767]
+
+    // Float samples, which Python's `wave` can't read, in a file with a `fact` chunk; and the
+    // same written out and read back.
+    let fmt = from_hex("03000100401f0000007d00000400200000")!
+    var floats: List<u8> = []
+    for v in [0.5f32, -0.25f32, 1.0f32] {
+        let u = v.to_bits()
+        floats.extend([u8.wrap(u), u8.wrap(u >> 8), u8.wrap(u >> 16), u8.wrap(u >> 24)])
+    }
+    let f = Wave.decode(riff([chunk(String("fmt "), fmt[0..16]), chunk(String("fact"), [3, 0, 0, 0]), chunk(String("data"), floats)]))!
+    println("{f.float} {f.width} {f.samples_f32()} {Wave.decode(f.encode())!.samples_f32()}")    // out: true 4 [0.5, -0.25, 1.0] [0.5, -0.25, 1.0]
+
+    // WAVE_FORMAT_EXTENSIBLE, as ffmpeg writes for more than 2 channels or more than 16 bits, past
+    // a LIST chunk of an odd length.
+    let ext = from_hex("feff010044ac0000885801000200100016001000040000000100000000001000800000aa00389b71")!
+    let x = Wave.decode(riff([chunk(String("LIST"), [1, 2, 3]), chunk(String("fmt "), ext), chunk(String("data"), [1, 0, 255, 255])]))!
+    println("{x.channels} {x.rate} {x.samples()}")    // out: 1 44100 [1, -1]
+
+    // Frames cut off by the end of the file are left out, as the part of one at the end.
+    println("{Wave.decode(bytes[0..51])!.samples()}")    // out: [0, 1000]
+
+    // Files it can't read, each for the reason Python's `wave` gives.
+    println(why([1, 2, 3]))    // out: it doesn't start with RIFF, so it isn't a WAV file
+    println(why(chunk(String("RIFF"), String("AVI ").to_bytes())))    // out: its RIFF form isn't WAVE, so it isn't a WAV file
+    println(why(riff([chunk(String("data"), [0, 0]), chunk(String("fmt "), fmt[0..16])])))    // out: its data chunk comes before its fmt chunk
+    println(why(riff([chunk(String("fmt "), fmt[0..16])])))    // out: it has no data chunk
+    println(why(riff([chunk(String("fmt "), from_hex("0200010044ac0000885801000200")!)])))    // out: it's in format 2, not PCM or float, which this can't read
+    println(why(riff([chunk(String("fmt "), fmt[0..12])])))    // out: its fmt chunk is cut short
+    var odd = ext.copy()
+    odd[24] = 2
+    println(why(riff([chunk(String("fmt "), odd), chunk(String("data"), [])])))    // out: it's in an extended format this can't read, 00000002-0000-0010-8000-00aa00389b71
+    match Wave.open("no such sound.wav") {
+        ok(_) => println("read"),
+        err(e) => println("{e.contexts()}"),    // out: [reading no such sound.wav]
+    }
+}

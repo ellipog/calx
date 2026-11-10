@@ -1,0 +1,320 @@
+/// WAV files, read as Python's `wave` module reads them and written byte for byte as it writes
+/// them: integer samples of any width, in plain or extensible files, and, beyond `wave`, 32 and
+/// 64-bit floats. The samples come out as numbers, so no `struct.unpack` is needed.
+module std.wave
+
+import std.bytes.{put_u16_le, put_u32_le, u16_le, u32_le, u64_le}
+import std.fs.{read, write}
+
+/// A WAV file's sound: how many channels and frames a second, how the samples are stored, and the
+/// frames themselves.
+pub struct Wave {
+    /// How many samples each frame has, one for each channel: 1 for mono and 2 for stereo.
+    pub channels: u32
+    /// Frames a second: 44100, say.
+    pub rate: u32
+    /// How many bytes each sample takes, Python's `sampwidth`: 1, 2, 3 or 4 for integers, 4 or 8
+    /// for floats.
+    pub width: u32
+    /// Whether the samples are IEEE floats rather than integers.
+    pub float: bool
+    /// The frames as the file holds them, Python's `readframes`: each frame's samples in channel
+    /// order, little-endian. Integers of 8 bits are unsigned, with 128 as silence, and wider ones
+    /// signed.
+    pub frames: List<u8>
+}
+
+const FORMAT_PCM: u32 = 1
+const FORMAT_FLOAT: u32 = 3
+const FORMAT_EXTENSIBLE: u32 = 0xFFFE
+// The rest of a WAVE_FORMAT_EXTENSIBLE sub-format GUID, after its first two bytes, which give the
+// format: KSDATAFORMAT_SUBTYPE_PCM and _IEEE_FLOAT end this way.
+const GUID_TAIL: [u8; 14] = [0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]
+
+// A GUID's 16 bytes as it's written, 00000001-0000-0010-8000-00aa00389b71.
+fn guid_text(g: List<u8>) -> String {
+    let order: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15]
+    var s = String()
+    for i in 0usize..16 {
+        if i == 4 or i == 6 or i == 8 or i == 10 {
+            s.push('-')
+        }
+        let v = g[order[i]]
+        s.push(digit(v / 16))
+        s.push(digit(v % 16))
+    }
+    return s
+}
+
+fn digit(v: u8) -> rune {
+    return rune(if v < 10 { v + 48 } else { v + 87 })
+}
+
+impl Wave {
+    /// The sound in a WAV file.
+    pub fn open(path: String) -> Wave ! Error {
+        let bytes = try read(path.copy()).context("reading {path}")
+        return match Wave.decode(bytes) {
+            ok(w) => w,
+            err(e) => fail "reading {path}: {e}",
+        }
+    }
+
+    /// The sound in a WAV file's bytes, or why it can't be read. The chunks are read as Python's
+    /// `wave` reads them: within the size the RIFF header gives, each after the one before and
+    /// its pad byte, the last `fmt ` before `data` saying what the samples are. Frames cut off by
+    /// the end of the file or of the RIFF chunk are left out.
+    pub fn decode(bytes: List<u8>) -> Wave ! String {
+        if bytes.len() < 8 or bytes[0..4] != [82, 73, 70, 70] {
+            fail "it doesn't start with RIFF, so it isn't a WAV file"
+        }
+        // Everything is read within the RIFF chunk, as far as the file goes.
+        let end = (8 + usize(u32_le(bytes, 4))).min(bytes.len())
+        if end < 12 or bytes[8..12] != [87, 65, 86, 69] {
+            fail "its RIFF form isn't WAVE, so it isn't a WAV file"
+        }
+        var at: usize = 12
+        var format: u32 = 0
+        var channels: u32 = 0
+        var rate: u32 = 0
+        var width: u32 = 0
+        var seen_fmt = false
+        while at + 8 <= end {
+            let name = bytes[at..at + 4]
+            let size = usize(u32_le(bytes, at + 4))
+            let body = at + 8
+            let stop = (body + size).min(end)
+            if name == [102, 109, 116, 32] {
+                // fmt: the format, channels and rate, then the bits a sample, checked in
+                // the order Python checks them.
+                if stop - body < 14 {
+                    fail "its fmt chunk is cut short"
+                }
+                format = u32(u16_le(bytes, body))
+                channels = u32(u16_le(bytes, body + 2))
+                rate = u32_le(bytes, body + 4)
+                if format != FORMAT_PCM and format != FORMAT_FLOAT and format != FORMAT_EXTENSIBLE {
+                    fail "it's in format {format}, not PCM or float, which this can't read"
+                }
+                if stop - body < 16 {
+                    fail "its fmt chunk is cut short"
+                }
+                let bits = u32(u16_le(bytes, body + 14))
+                if format == FORMAT_EXTENSIBLE {
+                    if stop - body < 40 {
+                        fail "its fmt chunk is cut short"
+                    }
+                    let guid = bytes[body + 24..body + 40]
+                    let sub = u32(u16_le(bytes, body + 24))
+                    if guid[2..16] != GUID_TAIL[0..14] or (sub != FORMAT_PCM and sub != FORMAT_FLOAT) {
+                        fail "it's in an extended format this can't read, {guid_text(guid)}"
+                    }
+                    format = sub
+                }
+                width = (bits + 7) / 8
+                if width == 0 {
+                    fail "its samples are 0 bits"
+                }
+                if channels == 0 {
+                    fail "it has no channels"
+                }
+                if format == FORMAT_FLOAT and width != 4 and width != 8 {
+                    fail "its float samples are {bits} bits, not 32 or 64"
+                }
+                seen_fmt = true
+            } else if name == [100, 97, 116, 97] {
+                if not seen_fmt {
+                    fail "its data chunk comes before its fmt chunk"
+                }
+                let frame = usize(channels) * usize(width)
+                let whole = (stop - body) / frame * frame
+                return Wave { channels, rate, width, float: format == FORMAT_FLOAT, frames: bytes[body..body + whole] }
+            }
+            // On to the next chunk, past this one's pad byte when its size is odd.
+            at = body + size + size % 2
+        }
+        if not seen_fmt {
+            fail "it has no fmt chunk"
+        }
+        fail "it has no data chunk"
+    }
+
+    /// Integer samples, `width` bytes each, as Python's `wave` writes them: 1 to 4 bytes, at
+    /// least 1 channel and 1 frame a second. Panics otherwise, or if `frames` doesn't hold whole
+    /// frames.
+    @track_caller
+    pub fn new(channels: u32, rate: u32, width: u32, frames: own List<u8>) -> Wave {
+        if channels == 0 {
+            panic("a WAV has at least 1 channel")
+        }
+        if rate == 0 {
+            panic("a WAV plays at least 1 frame a second")
+        }
+        if width == 0 or width > 4 {
+            panic("integer samples take 1 to 4 bytes, not {width}")
+        }
+        let frame = usize(channels) * usize(width)
+        if frames.len() % frame != 0 {
+            panic("{frames.len()} bytes aren't whole frames of {frame}")
+        }
+        return Wave { channels, rate, width, float: false, frames }
+    }
+
+    /// 16-bit samples, each frame's in channel order. Panics as `new` does, or if `samples`
+    /// doesn't hold whole frames.
+    @track_caller
+    pub fn from_i16(channels: u32, rate: u32, samples: List<i16>) -> Wave {
+        var frames: List<u8> = []
+        frames.reserve(samples.len() * 2)
+        for s in samples {
+            let v = u16.wrap(s)
+            frames.push(u8.wrap(v))
+            frames.push(u8.wrap(u32(v) >> 8))
+        }
+        return Wave.new(channels, rate, 2, frames)
+    }
+
+    /// Samples from -1 to 1 as integers `width` bytes each: clipped to that range, then
+    /// multiplied by the largest value the width holds, 32767 for 2 bytes, and rounded to the
+    /// nearest, as libsndfile writes floats to PCM. Panics as `new` does.
+    @track_caller
+    pub fn from_f32(channels: u32, rate: u32, samples: List<f32>, width: u32 = 2) -> Wave {
+        if width == 0 or width > 4 {
+            panic("integer samples take 1 to 4 bytes, not {width}")
+        }
+        let most = f64(1u32 << (width * 8 - 1)) - 1.0
+        var frames: List<u8> = []
+        frames.reserve(samples.len() * usize(width))
+        for s in samples {
+            let x = f64(s).max(-1.0).min(1.0)
+            var v = i64.saturate((x * most).rint())
+            if width == 1 {
+                v += 128
+            }
+            for k in 0u32..width {
+                frames.push(u8.wrap(v >> (k * 8)))
+            }
+        }
+        return Wave.new(channels, rate, width, frames)
+    }
+
+    /// How many frames there are, Python's `getnframes`.
+    pub fn frame_count(self) -> usize {
+        return self.frames.len() / (usize(self.channels) * usize(self.width))
+    }
+
+    /// How long it plays, in seconds.
+    pub fn duration(self) -> f64 {
+        return f64.nearest(self.frame_count()) / f64(self.rate)
+    }
+
+    /// Each integer sample, each frame's in channel order: what Python's
+    /// `struct.unpack("<{n}h", frames)` gives for 16 bits, and the same for 24 and 32. Samples of
+    /// 8 bits are centered, from -128 to 127. Panics for floats, and for integers wider than 4
+    /// bytes.
+    @track_caller
+    pub fn samples(self) -> List<i32> {
+        if self.float {
+            panic("the samples are floats: `samples_f32` gives them")
+        }
+        if self.width > 4 {
+            panic("`samples` gives integers of up to 32 bits, not {self.width * 8}")
+        }
+        let w = usize(self.width)
+        let n = self.frames.len() / w
+        var out: List<i32> = []
+        out.reserve(n)
+        if w == 1 {
+            for b in self.frames {
+                out.push(i32(b) - 128)
+            }
+        } else if w == 2 {
+            for i in 0usize..n {
+                out.push(i32(i16.wrap(u32(self.frames[2 * i]) | u32(self.frames[2 * i + 1]) << 8)))
+            }
+        } else if w == 3 {
+            for i in 0usize..n {
+                let v = u32(self.frames[3 * i]) | u32(self.frames[3 * i + 1]) << 8 | u32(self.frames[3 * i + 2]) << 16
+                out.push(i32.wrap(v << 8) >> 8)
+            }
+        } else {
+            for i in 0usize..n {
+                out.push(i32.wrap(u32_le(self.frames, 4 * i)))
+            }
+        }
+        return out
+    }
+
+    /// Each sample from -1 to 1, each frame's in channel order: floats as they are, and integers
+    /// divided by 2 to the power of one less than their bits, 32768 for 16, as libsndfile and
+    /// Python's soundfile read them.
+    pub fn samples_f32(self) -> List<f32> {
+        var out: List<f32> = []
+        let w = usize(self.width)
+        let n = self.frames.len() / w
+        out.reserve(n)
+        if self.float {
+            for i in 0usize..n {
+                if w == 4 {
+                    out.push(f32.from_bits(u32_le(self.frames, 4 * i)))
+                } else {
+                    out.push(f32.nearest(f64.from_bits(u64_le(self.frames, 8 * i))))
+                }
+            }
+            return out
+        }
+        if w <= 4 {
+            let scale = 1.0 / f64(1u32 << (self.width * 8 - 1))
+            for v in self.samples() {
+                out.push(f32.nearest(f64(v) * scale))
+            }
+            return out
+        }
+        // Wider integers by their top 4 bytes.
+        for i in 0usize..n {
+            let top = u32_le(self.frames, w * i + w - 4)
+            out.push(f32.nearest(f64(i32.wrap(top)) / 2147483648.0))
+        }
+        return out
+    }
+
+    /// The WAV file's bytes. Integer samples are written byte for byte as Python's `wave`
+    /// writes them: a 44-byte header, then the frames. Floats are written as
+    /// WAVE_FORMAT_IEEE_FLOAT, with the `fact` chunk the format asks for. Panics past 4 GiB.
+    @track_caller
+    pub fn encode(self) -> List<u8> {
+        let n = self.frames.len()
+        let fmt_size: u32 = if self.float { 18 } else { 16 }
+        let extra: usize = if self.float { 12 } else { 0 }
+        if n > usize(u32.MAX) - 64 {
+            panic("a WAV file holds at most 4 GiB of frames, not {n} bytes")
+        }
+        var out: List<u8> = []
+        out.reserve(44 + extra + n)
+        out.extend([82, 73, 70, 70])
+        put_u32_le(mut out, u32.wrap(n) + 20 + fmt_size + u32.wrap(extra))
+        out.extend([87, 65, 86, 69, 102, 109, 116, 32])
+        put_u32_le(mut out, fmt_size)
+        put_u16_le(mut out, u16.wrap(if self.float { FORMAT_FLOAT } else { FORMAT_PCM }))
+        put_u16_le(mut out, u16.wrap(self.channels))
+        put_u32_le(mut out, self.rate)
+        put_u32_le(mut out, self.channels * self.rate * self.width)
+        put_u16_le(mut out, u16.wrap(self.channels * self.width))
+        put_u16_le(mut out, u16.wrap(self.width * 8))
+        if self.float {
+            put_u16_le(mut out, 0)
+            out.extend([102, 97, 99, 116])
+            put_u32_le(mut out, 4)
+            put_u32_le(mut out, u32.wrap(self.frame_count()))
+        }
+        out.extend([100, 97, 116, 97])
+        put_u32_le(mut out, u32.wrap(n))
+        out.extend(self.frames)
+        return out
+    }
+
+    /// Writes the WAV file.
+    pub fn save(self, path: String) ! Error {
+        try write(path.copy(), self.encode()).context("writing {path}")
+    }
+}
