@@ -1042,6 +1042,7 @@ private:
                 if (accept(Tok::colon)) s->type = type();
                 if (accept(Tok::eq)) {
                     skip_newlines();
+                    if (accept(Tok::kw_mut)) s->by_mut = true;
                     s->value = expr();
                     if (accept(Tok::kw_else)) diverge(s);
                 }

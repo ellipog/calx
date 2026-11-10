@@ -1,0 +1,89 @@
+// `let p = mut place else`: each name is a `mut` view of its part of the place, as with `if let p =
+// mut place`, until the block the `let` is in ends, so the rest of the function needn't nest in an
+// `if let` (CLX-245). The debug build checks that nothing is freed twice or leaked.
+
+enum Node {
+    Num(i64)
+    Text(String)
+    Pair(i64, String)
+}
+
+struct Doc {
+    root: Node
+    edits: i32
+}
+
+// A part of a parameter, while another part changes.
+fn bump(d: mut Doc) -> bool {
+    let Num(n) = mut d.root else {
+        return false
+    }
+    n += 1
+    d.edits += 1
+    return true
+}
+
+// A map's value, found once.
+fn tag(m: mut Map<String, List<String>>, k: str, t: str) {
+    let tags = mut m.find(k) else {
+        m.insert(String(k), [String(t)])
+        return
+    }
+    tags.push(String(t))
+}
+
+// A generic function's names are views too.
+fn set_first<T>(xs: mut List<T?>, v: own T) -> bool {
+    let x = mut xs[0] else {
+        return false
+    }
+    x = v
+    return true
+}
+
+fn main() {
+    var d = Doc { root: Node.Num(1), edits: 0 }
+    println("{bump(mut d)} {d.root} {d.edits}")    // out: true Num(2) 1
+    d.root = Node.Text("x")
+    println("{bump(mut d)} {d.root} {d.edits}")    // out: false Text(x) 1
+
+    var m = Map<String, List<String>>()
+    tag(mut m, "a", "x")
+    tag(mut m, "a", "y")
+    tag(mut m, "b", "z")
+    println("{m["a"]} {m["b"]}")    // out: [x, y] [z]
+
+    // In a loop's body, the place is free again each time round, and after the loop.
+    var counts = Map<i32, i32>()
+    counts.insert(1, 10)
+    counts.insert(2, 20)
+    for k in 0..4 {
+        let c = mut counts.find(k) else {
+            continue
+        }
+        c += 5
+    }
+    counts.insert(3, 0)
+    println("{counts[1]} {counts[2]} {counts[3]}")    // out: 15 25 0
+
+    // An optional's value, and several names.
+    var o: String? = some(String("a"))
+    var p = Node.Pair(3, "q")
+    {
+        let s = mut o else {
+            return
+        }
+        s.push('b')
+        let Pair(k, w) = mut p else {
+            return
+        }
+        k *= 2
+        w.push_str("!")
+    }
+    println("{o} {p}")    // out: some(ab) Pair(6, q!)
+
+    var opts: List<String?> = [none, some(String("old"))]
+    println("{set_first(mut opts, String("new"))}")    // out: false
+    opts[0] = some(String("x"))
+    println("{set_first(mut opts, String("new"))} {opts}")    // out: true [some(new), some(old)]
+}

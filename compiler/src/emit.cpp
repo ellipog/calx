@@ -4323,6 +4323,8 @@ $dropall    m->len = 0;
         std::string at;
         if (s->value->kind == ExprKind::index && s->value->map_find) {
             t = at = found_value(s->value, m);
+        } else if (s->by_mut) {
+            t = part_place(s->value);  // `let p = mut place else`: the names point into it (CLX-245)
         } else if (s->hidden) {
             t = local_name(s->hidden);
             line(ctype(vt) + " " + t + " = " + value(s->value, vt) + ";");

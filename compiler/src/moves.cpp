@@ -574,7 +574,12 @@ private:
         Expr* v = s->value;
         Local* root = place_root(v);
         Local* hidden = nullptr;
-        if (root) {
+        // `let p = mut place else` (CLX-245): the names are `mut` views of its parts, so it's never
+        // taken apart.
+        bool by_mut = s->by_mut && root;
+        if (by_mut) {
+            expr(v, Use::change);
+        } else if (root) {
             expr(v, Use::view);
         } else {
             expr(v, Use::consume);
@@ -603,7 +608,7 @@ private:
                 // What `m.find(k)` found stays in the map (CLX-228).
                 std::string m = place_text(v->lhs);
                 error(p->span, "a `var` owns its value, and what " + q(at) + " finds stays in " + q(m) + "; change it there with " +
-                                   q("if let v = mut " + m + ".find(key) { ... }") + ", or take it out with " +
+                                   q("let v = mut " + m + ".find(key) else { ... }") + ", or take it out with " +
                                    q(m + ".remove(key)"));
                 bind(p, true, nullptr, at);
                 return;
@@ -615,9 +620,9 @@ private:
             bind(p, true, nullptr, at);
             return;
         }
-        s->consumes = s->consumes && (whole || hidden);
+        s->consumes = !by_mut && s->consumes && (whole || hidden);
         if (s->consumes) take(whole ? root : hidden, v->span);
-        bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v), ViewOf::part, v);
+        bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v), by_mut ? ViewOf::mut_part : ViewOf::part, v);
     }
 
     // Decides whether a `let` with a pattern takes its value apart: it does when one of the names
@@ -625,7 +630,7 @@ private:
     // of the value it's in, in C, so one that changes has to own its value, or the value would
     // still hold what it was and free it again.
     void decide_let(Stmt* s) {
-        s->consumes = binds_moved(s->pattern);
+        s->consumes = !s->by_mut && binds_moved(s->pattern);
         if (s->consumes && is_local_name(s->value)) moved_any_.insert(s->value->local);
     }
 

@@ -3386,6 +3386,8 @@ private:
     Type* check_block(Block* b, Type* expected, BlockUse use) {
         push_scope();
         std::size_t ties = loop_borrows_.size();  // the arena lists declared here hold their arenas until it ends
+        std::size_t held = held_views_.size();    // and each `let p = mut place else` its place (CLX-245)
+        int mut_depth = mut_loops_;
         bool diverged = false;
         bool reported = false;
         auto unreachable = [&](Span s) {
@@ -3409,6 +3411,11 @@ private:
             }
         }
         if (diverged) result = T.never;
+        for (std::size_t i = held; i < held_views_.size(); i++) {
+            if (held_views_[i].ok && !is_bad(result)) part_views_changed(held_views_[i].views, held_views_[i].place);
+        }
+        held_views_.resize(held);
+        mut_loops_ = mut_depth;
         loop_borrows_.resize(ties);
         pop_scope();
         return result;
@@ -3468,6 +3475,15 @@ private:
         if (p->is_mut) {
             error(p->span, "declare a variable that changes with `var`, not `let mut`");
         }
+        if (s->by_mut && !has_else) {
+            error(s->value ? s->value->span : p->span,
+                  "`let p = mut place` needs an `else`: it matches the place and binds `mut` views of its parts, as "
+                  "`if let` does; a pattern that always matches needs no views, so change the parts through the place");
+        } else if (s->by_mut && s->is_var) {
+            error(p->span, "a `var` owns its value, and `= mut` binds views of a place's parts; write `let p = mut place "
+                           "else`, then change them through its names");
+            s->is_var = false;  // checked as the `let` it should be, so no other error follows from this one
+        }
         // A capitalized name can be a variant (`let Empty = s else return`), unless it's already
         // declared, which gets the clearer error about reusing the name.
         bool plain = p->kind == PatternKind::binding && (!std::isupper(static_cast<unsigned char>(text(p->name)[0])) ||
@@ -3486,6 +3502,10 @@ private:
         let_value_ = s->value;
         Type* t = check(s->value, declared);
         let_value_ = saved_let;
+        if (s->by_mut) {
+            // `let x = mut place` with no `else`, an error already: the place counts as changed.
+            if (Local* r = place_root(s->value)) r->mutated = true;
+        }
         Type* local_t = declared ? declared : t;
         if (t->kind == TypeKind::unit) {
             error(s->value->span, "this has no value to bind");
@@ -3563,9 +3583,20 @@ private:
                 error(es, "the `else` of `let ... else` must leave: `return`, `break`, `continue` or a panic");
             }
         }
+        // `let p = mut place else` (CLX-245): the names are `mut` views of the place's parts, which
+        // nothing else reaches until the block ends.
+        const char* what = "let ... = mut";
+        Local* root = s->by_mut && !is_bad(vt) ? part_view_place(s->value, what) : nullptr;
+        PartViews views{what, {}};
+        if (s->by_mut) part_views_ = &views;
         pattern_var_ = s->is_var;
         bool ok = check_pattern(p, pt);
         pattern_var_ = false;
+        part_views_ = nullptr;
+        if (root) {
+            hold_part_views(root, s->value, what);
+            held_views_.push_back({std::move(views), s->value, ok && !is_bad(pt)});
+        }
         if (p->kind == PatternKind::binding) s->local = p->local;
         if (!ok || is_bad(pt)) return false;
         std::string missing;
@@ -11178,6 +11209,13 @@ private:
     int mut_loops_ = 0;                // `for ... in mut` loops and `match mut` arms around the code being checked
     std::unordered_set<std::uint64_t> mut_loop_errors_;  // where a place was used inside one, reported
     PartViews* part_views_ = nullptr;  // the names the pattern being checked binds as views (CLX-233)
+    // A `let p = mut place else` in a block being checked, whose names must change something by its end.
+    struct HeldViews {
+        PartViews views;
+        const Expr* place;
+        bool ok;  // its pattern was checked without an error
+    };
+    std::vector<HeldViews> held_views_;
     Expr* let_value_ = nullptr;  // the value of the plain `let` being checked, the one place an arena list is made
     // D103: each generic interface with each list of arguments it's used with.
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;

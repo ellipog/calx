@@ -22,9 +22,14 @@ fn main() {
         return
     }
     m.insert(3, String("three"))    // error: `m` can't be changed while `w` is a view into it
-    var u = m.find(1) else {        // error: a `var` owns its value, and what `m.find(...)` finds stays in `m`; change it there with `if let v = mut m.find(key) { ... }`, or take it out with `m.remove(key)`
+    var u = m.find(1) else {        // error: a `var` owns its value, and what `m.find(...)` finds stays in `m`; change it there with `let v = mut m.find(key) else { ... }`, or take it out with `m.remove(key)`
         return
     }
     u.push('!')
+    let lv = mut lists.find(1) else {
+        return
+    }
+    lv.push(3)
+    ys.push(lv)                     // error: `lv` is a view of the value in `lists`, so it can't be moved; move a copy with `lv.copy()`, or take the value out with `lists.remove(key)`
     println("{w} {u} {xs.len()} {ys.len()}")
 }

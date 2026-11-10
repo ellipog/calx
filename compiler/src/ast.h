@@ -384,6 +384,8 @@ struct Stmt {
     bool is_parallel = false;      // for_
     Expr* pool = nullptr;          // for_: `parallel(pool) for`
     bool iter_mut = false;         // for_: `in mut xs`
+    bool by_mut = false;           // let-else: `let p = mut place else`, whose names are `mut` views
+                                   // of the place's parts until the block ends (CLX-245)
     Item* item = nullptr;
 
     // Filled in by the checker.

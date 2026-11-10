@@ -1,0 +1,67 @@
+// What `let p = mut place else` doesn't allow (CLX-245).
+
+pub enum Node {
+    Num(i64)
+    Text(String)
+}
+
+pub struct Doc {
+    pub root: Node
+    pub edits: i32
+}
+
+fn make() -> Node {
+    return Node.Num(1)
+}
+
+pub fn made_here() {
+    let Num(n) = mut make() else {    // error: `let ... = mut` changes the value where it is, so it matches a variable or a part of one, not a value made here; match without `mut`, or put the value in a `var` first
+        return
+    }
+    println("{n}")
+}
+
+pub fn no_else(d: mut Doc) {
+    let r = mut d.root    // error: `let p = mut place` needs an `else`: it matches the place and binds `mut` views of its parts, as `if let` does; a pattern that always matches needs no views, so change the parts through the place
+    println("{r}")
+}
+
+pub fn a_var(o: mut i32?) {
+    var v = mut o else {    // error: a `var` owns its value, and `= mut` binds views of a place's parts; write `let p = mut place else`, then change them through its names
+        return
+    }
+    v += 1
+}
+
+pub fn nothing_changed(o: mut String?) {
+    let s = mut o else {    // error: nothing is changed through the names `let ... = mut` binds; match without `mut`
+        return
+    }
+    println(s)
+}
+
+pub fn uses_place(d: mut Doc) {
+    let Text(s) = mut d.root else {
+        return
+    }
+    s.push('!')
+    d.edits += 1
+    println("{d.root}")    // error: `d.root` can't be used while `let ... = mut` changes it; reach it through the names the pattern binds
+}
+
+pub fn uses_whole(d: mut Doc) {
+    let Num(v) = mut d.root else {
+        return
+    }
+    v += 1
+    let _e = d    // error: `d` can't be used while `let ... = mut` changes `d.root`; reach it through the names the pattern binds
+}
+
+pub fn read_only(o: i32?) {
+    let v = mut o else {    // error: parameter `o` can't be changed; take it as `mut` to change it
+        return
+    }
+    v += 1
+}
+
+fn main() {}

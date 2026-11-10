@@ -281,7 +281,7 @@ A pattern that always matches is an error after `if let`: write `let`.
 
 ## Changing the parts in place
 
-`match mut place { ... }`, `if let pattern = mut place` and `while let pattern = mut place` bind each name as a `mut` view of its part of `place`, so the arm changes the part where it is, as [`for x in mut xs`](control-flow.md#changing-the-elements) changes the elements. A tree of enums, such as JSON or NBT, is edited this way without copying what it holds ([CLX-233](https://acta.aaenz.no/aaen-studios/clx#CLX-233)):
+`match mut place { ... }`, `if let pattern = mut place`, `while let pattern = mut place` and `let pattern = mut place else` bind each name as a `mut` view of its part of `place`, so the arm changes the part where it is, as [`for x in mut xs`](control-flow.md#changing-the-elements) changes the elements. A tree of enums, such as JSON or NBT, is edited this way without copying what it holds ([CLX-233](https://acta.aaenz.no/aaen-studios/clx#CLX-233)):
 
 ```calx
 enum Node {
@@ -336,6 +336,34 @@ fn main() {
 - Guards read the names, and a `match mut` gives a value as any `match` does.
 - A `match mut` whose arms change nothing through their names is an error: match without `mut`.
 
+`let pattern = mut place else <leave>` binds the names the same way, until the end of the block the `let` is in, so the code that changes the parts needn't nest inside an `if let`. Until then, `place` is reached only through the names. A `let` with `= mut` needs the `else`, and is a `let`, never a `var` ([CLX-245](https://acta.aaenz.no/aaen-studios/clx#CLX-245)):
+
+```calx
+enum Node {
+    Num(i64)
+    Text(String)
+}
+
+struct Doc {
+    root: Node
+    edits: i32
+}
+
+fn shout(d: mut Doc) {
+    let Text(s) = mut d.root else {
+        return
+    }
+    s.push('!')
+    d.edits += 1
+}
+
+fn main() {
+    var d = Doc { root: Node.Text("hey"), edits: 0 }
+    shout(mut d)
+    println("{d.root} {d.edits}")    // out: Text(hey!) 1
+}
+```
+
 ```calx
 enum Node {
     Num(i64)
@@ -359,6 +387,8 @@ fn show(n: mut Node) {
         v += 1
         println("{n}")    // error: `n` can't be used while `if let ... = mut` changes it; reach it through the names the pattern binds
     }
+    let t = mut n    // error: `let p = mut place` needs an `else`: it matches the place and binds `mut` views of its parts, as `if let` does; a pattern that always matches needs no views, so change the parts through the place
+    println("{t}")
 }
 
 fn main() {

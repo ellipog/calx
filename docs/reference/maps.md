@@ -96,7 +96,7 @@ fn main() {
 
 `m.find(k)` looks `k` up once and gives its value where it is, or `none` when it isn't there. It's what `if let`, `while let` or `let ... else` matches, and the names it binds are views of the value, as with an optional that's a field. So `if m.contains(k) { use(m[k]) }`, which hashes `k` twice, is `if let v = m.find(k) { use(v) }`, and it works for values that own memory, which `get` can't copy.
 
-- `if let v = mut m.find(k)` binds a `mut` view, which changes the value in the map. The map must be a `var` or a `mut` parameter.
+- `if let v = mut m.find(k)` binds a `mut` view, which changes the value in the map. The map must be a `var` or a `mut` parameter. `let v = mut m.find(k) else { ... }` binds one until the block ends ([changing the parts in place](patterns.md#changing-the-parts-in-place)).
 - While the names are in scope, the map can't change or move, so a view can't point at a value that's gone. With `mut`, the map is reached only through the names.
 - A name can't be moved out, since the value stays in the map. Take the value out with `remove`, or move a copy with `.copy()`.
 - `find` looks in a map that's a variable or a part of one, such as a field or a list's element.
@@ -116,10 +116,19 @@ fn main() {
     } else {
         println("no air")           // out: no air
     }
+    count(mut tags, "stone")
     let t = tags.find("stone") else {
         return
     }
-    println("{t.len()}")            // out: 2
+    println("{t.len()}")            // out: 3
+}
+
+fn count(tags: mut Map<String, List<String>>, k: str) {
+    let t = mut tags.find(k) else {
+        tags.insert(String(k), ["new"])
+        return
+    }
+    t.push("seen")
 }
 ```
 
