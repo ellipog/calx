@@ -5,7 +5,7 @@ description: Unicode 16's character names, as Python 3.14's unicodedata.name and
 
 # `std.unicode.names`
 
-Unicode 16's character names: a rune's name and the runes a name stands for, as Python 3.14's `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and `Character.codePointOf` do. [std.nbt](nbt.md) reads SNBT's `\N{...}` with the Java ones, as vanilla does.
+Unicode 16's character names: a rune's name and the runes a name stands for, as Python 3.14's `unicodedata.name` and `unicodedata.lookup` give them, and as Java 25's `Character.getName` and `Character.codePointOf` do. [std.regex](regex.md)'s `Regex.python` reads `\N{...}` with `lookup`, as Python's `re` does, and [std.nbt](nbt.md) reads SNBT's with the Java ones, as vanilla does.
 
 ```calx
 import std.unicode.names.{java_code_point_of, java_name, lookup, name}

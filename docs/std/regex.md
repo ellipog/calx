@@ -217,10 +217,18 @@ fn main() ! RegexError {
     var sep = try Regex.python(#"\s*([,;])\s*"#)
     println(sep.split("a , b;c").join("|"))    // out: a|,|b|;|c
 
+    // A rune by its name, in any case, or by an alias.
+    var dash = try Regex.python(#"\s*[\N{em dash}\N{EN DASH}]\s*"#)
+    println(dash.replace_all("1990 – 1999 — the end", "-"))    // out: 1990-1999-the end
+
     // Python's errors, at Python's places.
     match Regex.python("(?P<1x>a)") {
         ok(_) => {},
         err(e) => println("{e}"),    // out: column 5: bad character in group name '1x'
+    }
+    match Regex.python(#"\N{LATIN SMALL LETTER Q WITH TAIL}"#) {
+        ok(_) => {},
+        err(e) => println("{e}"),    // out: column 1: undefined character name 'LATIN SMALL LETTER Q WITH TAIL'
     }
 }
 ```
@@ -232,7 +240,7 @@ Where it differs from Python:
 - Places in the text are byte offsets into its UTF-8, as everywhere in Calx, where Python counts code points. The matches are the same text.
 - Flags are written in the pattern, `(?i)`, `(?m)`, `(?s)`, `(?x)`, `(?a)` and the rest, as Python takes them inline: `re.compile(p, re.I | re.M)` is `Regex.python("(?im){p}")`.
 - `split` gives `""` for a group that took no part, where Python gives `None`.
-- There are no bytes patterns and no `re.LOCALE`, and `\N{name}` isn't read yet.
+- There are no bytes patterns and no `re.LOCALE`.
 - `match` is a keyword in Calx, so `re.match` is `match_start`.
 
 It matches by backtracking, as Python does, so it isn't linear: a pattern such as `(a+)+b` takes time exponential in a run of `a`s with no `b`, there as here. For patterns that come from outside a program, `Regex.new` is the one that can't hang.
@@ -249,7 +257,7 @@ It matches by backtracking, as Python does, so it isn't linear: a pattern such a
 
 `Regex.python` is [std/regex/sre.calx](../../std/regex/sre.calx), which follows CPython's own `re`, under the Python Software Foundation's license, whose notice it keeps:
 
-- The parser is `re/_parser.py`'s, with its errors and their places, and the compiler `re/_compiler.py`'s, to sre's opcodes, numbered as sre numbers them, with Python's case folding from `re/_casefix.py` and its classes: `\d` is Unicode's decimal digits, `\s` what `str.isspace` takes and `\w` what `str.isalnum` takes and `_`. Python's lower and upper case, white space and printable runes are tables in std/text/ucd.calx, from the same Unicode Character Database.
+- The parser is `re/_parser.py`'s, with its errors and their places, and the compiler `re/_compiler.py`'s, to sre's opcodes, numbered as sre numbers them, with Python's case folding from `re/_casefix.py` and its classes: `\d` is Unicode's decimal digits, `\s` what `str.isspace` takes and `\w` what `str.isalnum` takes and `_`. Python's lower and upper case, white space and printable runes are tables in std/text/ucd.calx, from the same Unicode Character Database. `\N{name}` is looked up as `unicodedata.lookup` looks it up, by [std.unicode.names](unicode-names.md), whose tables add about 430 KB to a program that uses std.regex.
 - The matcher is a backtracking machine that takes the steps `Modules/_sre/sre_lib.h` takes, with the same marks for the groups, the same protection against repeating an empty match, and the same order of trying, so what it finds and what each group holds are Python's. It keeps its own stack rather than recursing, so a deep pattern can't overflow the program's.
 - A search skips to where a match can start, as sre's INFO block has it and further. A pattern every match of which starts with a literal is found at each place the literal is, as `String.find` finds text, and one that's only a literal needs no matching at all. Otherwise the bytes a match can start with are worked out from the pattern, past groups, lookaround and assertions, into branches and through case-insensitive literals, and the search skips to the next of them. Only patterns that can't match nothing skip, so Python's rule for empty matches is never passed over.
 - It was checked against CPython 3.14's `re` on tens of thousands of random patterns, with texts of Python's tricky runes, for the same matches, groups, `finditer`, `split` and `sub` results and the same errors at the same places.

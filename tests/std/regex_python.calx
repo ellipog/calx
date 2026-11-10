@@ -81,6 +81,12 @@ fn main() {
     println("{refused(#"\1(a)"#)} / {refused("(?P<1x>a)")} / {refused("a**")} / {refused("[z-a]")}")    // out: column 2: invalid group reference 1 / column 5: bad character in group name '1x' / column 3: multiple repeat / column 2: bad character range z-a
     println("{refused(#"\q"#)} / {refused("(?i")} / {refused("x(?i)y")}")    // out: column 1: bad escape \q / column 4: missing -, : or ) / column 2: global flags not at the start of the expression
 
+    // `\N{name}` (CLX-222): a name in any case, an alias, a Hangul syllable or a CJK ideograph by
+    // its number, in a class too, with Python's errors. A named sequence is no rune.
+    println(all(#"\N{snowman}+|[\N{LF}\N{CJK UNIFIED IDEOGRAPH-4E00}]|\N{HANGUL SYLLABLE GAG}"#, "a☃☃\n一각"))    // out: 1-7 7-8 8-11 11-14
+    println("{refused(#"\N"#)} / {refused(#"\N{}"#)} / {refused(#"[\N{abc]"#)} / {refused(#"\N{KEYCAP NUMBER SIGN}"#)}")    // out: column 3: missing { / column 4: missing character name / column 5: missing }, unterminated name / column 1: undefined character name 'KEYCAP NUMBER SIGN'
+    println("{refused(#"\N{a\}b}"#)} / {refused(#"[\N{COMET}-\N{SNOWMAN}]"#)}")    // out: column 1: undefined character name 'a\\}b' / column 18: bad character range \N-\N
+
     // A long text, where the searches skip to a literal prefix or to the bytes a match can start
     // with: the counts are Python's.
     var text = String()
