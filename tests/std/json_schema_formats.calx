@@ -1,11 +1,12 @@
 // std.json.schema's formats: what jsonschema 4.26's `FormatChecker()` checks with no format library
-// installed, `date`, `email`, `idn-email`, `ipv4`, `ipv6`, `regex`, `time` and `uuid`, and the
-// checks of std.json.schema.formats on their own (CLX-226). Each line expected below is what
-// jsonschema printed for the same schema and values.
+// installed, `date`, `email`, `idn-email`, `ipv4`, `ipv6`, `regex`, `time` and `uuid`, what it
+// checks with `jsonschema[format-nongpl]` too, and the checks of std.json.schema.formats on their
+// own (CLX-226). Each line expected below is what jsonschema printed for the same schema and values.
 
 import std.json
 import std.json.schema.{Draft, Validator}
 import std.json.schema.formats
+import std.json.schema.formats.{FormatChecker}
 
 fn main() {
     var props = List<String>()
@@ -40,4 +41,49 @@ fn main() {
     println("{formats.is_ipv6("1:2:3:4:5:6:1.2.3.4")} {formats.is_ipv6("1::2::3")}")  // out: true false
     println("{formats.is_ipv4("256.0.0.0")} {formats.is_date("0000-01-01")}")       // out: false false
     println("{formats.is_email("a@b")} {formats.is_date("2000-02-29")}")            // out: true true
+
+    // With the libraries of `jsonschema[format-nongpl]` too: `with_all_formats`.
+    var lib = List<String>()
+    for f in ["color", "date-time", "duration", "hostname", "iri", "iri-reference", "json-pointer", "relative-json-pointer", "uri", "uri-reference", "uri-template"] {
+        lib.push("\"{f}\": \{\"format\": \"{f}\"\}")
+    }
+    let schema2 = json.parse("\{\"properties\": \{{lib.join(", ")}\}\}")!
+    var all = Validator.new(schema2, Draft.Draft202012).with_all_formats()
+    let bad2 = json.parse(##"{"color": "#abcd", "date-time": "1985-04-12T23:20:50", "duration": "P1Y1W", "hostname": "-a.b", "iri": "http://a b", "iri-reference": "\\", "json-pointer": "a/b", "relative-json-pointer": "-1", "uri": "/a/b", "uri-reference": "http://[::1", "uri-template": "{a"}"##)!
+    for e in all.iter_errors(bad2)! {
+        println("{e.json_path()} {e.message}")
+    }
+    // out: $.color '#abcd' is not a 'color'
+    // out: $['date-time'] '1985-04-12T23:20:50' is not a 'date-time'
+    // out: $.duration 'P1Y1W' is not a 'duration'
+    // out: $.hostname '-a.b' is not a 'hostname'
+    // out: $.iri 'http://a b' is not a 'iri'
+    // out: $['iri-reference'] '\\' is not a 'iri-reference'
+    // out: $['json-pointer'] 'a/b' is not a 'json-pointer'
+    // out: $['relative-json-pointer'] '-1' is not a 'relative-json-pointer'
+    // out: $.uri '/a/b' is not a 'uri'
+    // out: $['uri-reference'] 'http://[::1' is not a 'uri-reference'
+    // out: $['uri-template'] '{a' is not a 'uri-template'
+    let good2 = json.parse(##"{"color": "DarkKhaki", "date-time": "1985-04-12t23:20:50.52z", "duration": "P1Y2M3DT4H5M6.5S", "hostname": "xn--bcher-kva.example", "iri": "http://ü.example/ä?é#ö", "iri-reference": "//ü/", "json-pointer": "/a~0b/c~1d", "relative-json-pointer": "1/a", "uri": "urn:isbn:0451450523", "uri-reference": "../c", "uri-template": "http://example.com/{id}{?q,r}"}"##)!
+    println("{all.is_valid(good2)!}")                                           // out: true
+    // A number too big for a `Decimal` raises from Python's check, and so it fails here.
+    match all.is_valid(json.parse(#"{"duration": "P1e1000000D"}"#)!) {
+        ok(b) => println("{b}"),
+        err(f) => println("{f.kind} {f}"),                                      // out: Overflow [<class 'decimal.Overflow'>]
+    }
+
+    // `FormatChecker` on its own, as jsonschema's: the Kelvin sign lowercases to `k`, `$` matches
+    // before a newline at the end, and `relative-json-pointer` reads a second digit's first with `int`.
+    var fc = FormatChecker.with_libraries()
+    println("{fc.conforms("dar\u{212a}khaki", "color")!} {fc.conforms("a.b\n", "hostname")!}")  // out: true true
+    println("{fc.conforms("1985-04-12T23:20:50Z\n", "date-time")!} {fc.conforms("a:\n", "uri")!}")  // out: true true
+    println("{fc.conforms("a:\n", "iri")!} {fc.conforms("P0Y1W", "duration")!}")    // out: false true
+    println("{fc.conforms("\u{b2}/a", "relative-json-pointer")!}")               // out: true
+    match fc.conforms("\u{b2}3", "relative-json-pointer") {
+        ok(b) => println("{b}"),
+        err(f) => println("{f.kind}: {f}"),                                     // out: ValueError: invalid literal for int() with base 10: '²'
+    }
+    // Without the libraries, those formats pass.
+    var alone = FormatChecker.new()
+    println("{alone.conforms("-a.b", "hostname")!}")                           // out: true
 }

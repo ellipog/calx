@@ -7,7 +7,7 @@ module std.json.schema
 import std.bigint.{BigInt}
 import std.json
 import std.json.{Json}
-import std.json.schema.formats as fmt
+import std.json.schema.formats.{FormatChecker}
 import std.json.schema.meta
 import std.regex.{Regex}
 import std.text.python.{is_space, repr_float_into, repr_str, repr_str_into}
@@ -97,7 +97,8 @@ pub struct ValidationError {
 pub struct SchemaFault {
     /// The exception's class: `Unresolvable`, `PointerToNowhere`, `NoSuchAnchor`,
     /// `InvalidAnchor`, `UnknownType`, `PatternError`, `TypeError`, `ValueError`,
-    /// `AttributeError` or `ZeroDivisionError`.
+    /// `AttributeError` or `ZeroDivisionError`, or `Overflow` from a `duration` with a number too
+    /// big for a `Decimal` (see `with_all_formats`).
     pub kind: String
     /// What Python's `str` of it gives: `Unresolvable: other.json#/a`.
     pub message: String
@@ -173,6 +174,18 @@ impl Validator {
     pub fn with_formats(own self) -> Validator {
         var v = self
         v.formats = true
+        v.cx.checker = FormatChecker.new()
+        return v
+    }
+
+    /// The same validator, checking `format` as `FormatChecker()` does with the libraries of
+    /// `pip install "jsonschema[format-nongpl]"` too: `color`, `date-time`, `duration`,
+    /// `hostname`, `iri`, `iri-reference`, `json-pointer`, `relative-json-pointer`, `uri`,
+    /// `uri-reference` and `uri-template` as well. `idn-hostname` passes so far.
+    pub fn with_all_formats(own self) -> Validator {
+        var v = self
+        v.formats = true
+        v.cx.checker = FormatChecker.with_libraries()
         return v
     }
 
@@ -1688,6 +1701,7 @@ struct Ctx {
     rx_errs: List<SchemaFault>
     quiet: u32
     formats: bool
+    checker: FormatChecker
 }
 
 struct RefHit {
@@ -1702,6 +1716,7 @@ fn new_ctx() -> Ctx {
         uris: List<String>(), uri_ids: Map<String, u32>(), scopes: List<Scope>(),
         refs: Map<u64, u32>(), ref_hits: List<RefHit>(), rx: List<Regex>(),
         rx_ids: Map<String, i64>(), rx_errs: List<SchemaFault>(), quiet: 0, formats: false,
+        checker: FormatChecker.new(),
     }
 }
 
@@ -2934,7 +2949,7 @@ fn kw_format(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fa
     let Json.Str(s) = inst else {
         return
     }
-    if conforms(mut cx, g.nodes[usize(v)].s, s) {
+    if try conforms(mut cx, g.nodes[usize(v)].s, s) {
         return
     }
     if quiet(cx) {
@@ -2944,35 +2959,19 @@ fn kw_format(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fa
     }
 }
 
-// Whether `s` is of the format `name`, as `FormatChecker()` checks it with jsonschema alone
-// installed: `date`, `email`, `idn-email`, `ipv4`, `ipv6`, `regex`, `time` and `uuid`. Any other
-// format passes.
-fn conforms(cx: mut Ctx, name: String, s: String) -> bool {
+// Whether `s` is of the format `name`, as the validator's `FormatChecker()` says. A `regex` is
+// compiled once for the validator, as `pattern`'s are.
+fn conforms(cx: mut Ctx, name: String, s: String) -> bool ! SchemaFault {
     if name == "regex" {
         return match search(mut cx, s, "") {
             ok(_) => true,
             err(_) => false,
         }
     }
-    if name == "email" or name == "idn-email" {
-        return fmt.is_email(s)
+    match cx.checker.conforms(s, name) {
+        ok(b) => return b,
+        err(f) => fail fault(f.kind, f.message.copy()),
     }
-    if name == "ipv4" {
-        return fmt.is_ipv4(s)
-    }
-    if name == "ipv6" {
-        return fmt.is_ipv6(s)
-    }
-    if name == "date" {
-        return fmt.is_date(s)
-    }
-    if name == "time" {
-        return fmt.is_time(s)
-    }
-    if name == "uuid" {
-        return fmt.is_uuid(s)
-    }
-    return true
 }
 
 fn kw_contains(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
