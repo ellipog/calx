@@ -1,0 +1,41 @@
+// std.font's default font: Pillow's load_default(), Aileron Regular cut down, built into the program.
+import std.font.{Font}
+import std.image.{Color, Image, Kind}
+
+fn main() {
+    let f = Font.default()
+    println("{f} {f.glyph_count()} {f.units_per_em()}")    // out: Font(Aileron Regular) 116 1000
+
+    // Every printable ASCII character, and the marks Pillow kept; nothing else.
+    var ascii = 0
+    for c in 32u32..127 {
+        if f.has_glyph(rune.try_from(c)!) {
+            ascii += 1
+        }
+    }
+    println("{ascii} {f.has_glyph('©')} {f.has_glyph('…')} {f.has_glyph('é')} {f.glyph_index('é')}")    // out: 95 true true false 0
+
+    // Its metrics, advances and kerning at Pillow's default size, 10 pixels.
+    let m = f.line_metrics(10.0)
+    println("{m.ascent:.2} {m.descent:.2} {m.line_gap:.2} {f.advance('H', 10.0):.2} {f.measure("Hello, world", 10.0):.2}")    // out: 9.70 -2.30 0.00 7.30 53.58
+    println("{f.kerning('A', 'V', 10.0):.2} {f.kerning('L', 'Y', 10.0):.2} {f.kerning('a', 'b', 10.0):.2}")    // out: -0.60 -1.67 0.00
+
+    // Drawn: a 0 is a ring, so the middle of its box is clear and its sides are inked.
+    let g = f.render('0', 40.0)
+    let mid = g.coverage[(g.height / 2) * g.width + g.width / 2]
+    let left = g.coverage[(g.height / 2) * g.width + 1]
+    println("{g.width}x{g.height} {mid} {left > 128}")    // out: 21x30 0 true
+
+    // Text on an image, as draw_text draws it.
+    var im = Image.new(64, 16, Kind.Gray, Color.gray(0))
+    im.draw_text(1, 1, "Calx", f, 12.0, Color.gray(255))
+    var lit = 0
+    for y in 0usize..16 {
+        for x in 0usize..64 {
+            if im.get(x, y).r > 0 {
+                lit += 1
+            }
+        }
+    }
+    println("{lit > 50} {im.get(0, 0).r}")    // out: true 0
+}

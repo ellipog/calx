@@ -25,6 +25,20 @@ fn card(font: Font, title: String) -> Image {
 }
 
 fn main() {
+    // Pillow's default font, from the program itself: there's no file to find.
+    let im = card(Font.default(), "Hello from Calx")
+    var ink = 0
+    for y in 0usize..im.height() {
+        for x in 0usize..im.width() {
+            if im.get(x, y) != Color.rgb(248, 248, 245) {
+                ink += 1
+            }
+        }
+    }
+    println("{ink} pixels of ink")    // out: 3014 pixels of ink
+    // `im.save("card.png")!` writes it.
+
+    // Any other font is a file.
     match Font.open("fonts/Inter-Regular.ttf") {
         ok(font) => card(font, "Hello from Calx").save("card.png")!,
         err(e) => println("{e}"),    // out: reading fonts/Inter-Regular.ttf: not found
@@ -40,6 +54,7 @@ Sizes are in pixels per em, as Pillow's font size is: at 40, the font's em is 40
 | --- | --- |
 | `Font.open(path: String, index: usize = 0) -> Font ! Error` | The font in a file. For a collection, `index` picks the font, from 0 |
 | `Font.decode(bytes: List<u8>, index: usize = 0) -> Font ! String` | The font in a file's bytes, or why it can't be read |
+| `Font.default() -> Font` | The font Pillow's `ImageFont.load_default()` gives, built into the program ([the default font](#the-default-font)) |
 | `font.family()`, `font.style()` | Its names: "Arial" and "Bold Italic", say |
 | `font.glyph_count()`, `font.units_per_em()` | How many glyphs it has, and the units its outlines are measured in to an em |
 | `font.glyph_index(c: rune) -> u32` | The glyph for `c`, or 0, the font's glyph for missing characters |
@@ -63,6 +78,17 @@ An `Outline` is a glyph's contours as `verbs` and `points`, the points x then y:
 - 3 is a cubic curve through two.
 
 Each contour ends where it starts. TrueType fonts have quadratic curves and CFF fonts cubic ones.
+
+## The default font
+
+`Font.default()` is the font Pillow's `ImageFont.load_default()` gives since Pillow 10.1: Aileron Regular, a sans serif by Sora Sagano that's in the public domain (CC0), cut down to 116 glyphs as Pillow embeds it. It has the 95 printable ASCII characters and © « ° ± ´ · » ‘ ’ “ ” … ‹ › ⁄ ™. Any other character draws as its missing-glyph box.
+
+- Its bytes, 12,676 of them, are the ones Pillow embeds, so the outlines and advances are Pillow's. Checked against fontTools, each of its 111 characters has the same glyph, advance and outline.
+- It's built into the program, so a script that draws a label or a chart's numbers needs no font file. A program that never calls `Font.default()` doesn't carry it.
+- Pillow draws it at 10 pixels when it's given no size. Here every call takes its size, as for any font.
+- Its kerning is in `GPOS`, so "AV" and "To" sit closer here than in Pillow, whose basic layout reads only a `kern` table.
+
+Its notices, Aileron's and Pillow's, are in [std/font/default.txt](../../std/font/default.txt).
 
 ## Drawing text
 

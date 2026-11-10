@@ -97,7 +97,20 @@ pub struct Mask {
     pub coverage: List<u8>
 }
 
+/// Pillow's default font, as Pillow 10.1 and later embed it: Aileron Regular, cut down to ASCII and
+/// a few marks. Its notices are in std/font/default.txt.
+const DEFAULT_TTF: [u8; 12676] = embed("font/default.ttf")
+
 impl Font {
+    /// The font Pillow's `ImageFont.load_default()` gives, from the program's own bytes, so text
+    /// can be drawn without a font file: Aileron Regular, a public-domain sans serif, with the 95
+    /// printable ASCII characters and © « ° ± ´ · » ‘ ’ “ ” … ‹ › ⁄ ™. Other characters draw as
+    /// its missing-glyph box. Pillow draws it at 10 pixels unless given a size; here each call
+    /// takes its size.
+    pub fn default() -> Font {
+        return Font.decode(DEFAULT_TTF.to_list())!
+    }
+
     /// The font in a .ttf, .otf or .ttc file, as `decode` reads it.
     pub fn open(path: String, index: usize = 0) -> Font ! Error {
         let bytes = try read(path.copy()).context("reading {path}")
