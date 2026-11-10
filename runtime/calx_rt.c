@@ -1768,6 +1768,22 @@ cx_usize cx_bytes_find3(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, 
     while (p < end && *p != a && *p != b && *p != c) p++;
     return (cx_usize)(p - hay);
 }
+
+/* For std.html's `escape`: the same for five bytes, `&`, `<`, `>`, `"` and `'` (CLX-188). */
+cx_usize cx_bytes_find5(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, cx_u8 b, cx_u8 c, cx_u8 d, cx_u8 e) {
+    const cx_u8* p = hay + from;
+    const cx_u8* end = hay + len;
+#if defined(FIND_STEP)
+    while (end - p >= FIND_STEP) {
+        find_v w = *(const find_v*)p;
+        cx_u32 m = FIND_MASK((w == (char)a) | (w == (char)b) | (w == (char)c) | (w == (char)d) | (w == (char)e));
+        if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        p += FIND_STEP;
+    }
+#endif
+    while (p < end && *p != a && *p != b && *p != c && *p != d && *p != e) p++;
+    return (cx_usize)(p - hay);
+}
 #undef RX_ONES
 #undef RX_HIGHS
 #undef RX_HAS_ZERO

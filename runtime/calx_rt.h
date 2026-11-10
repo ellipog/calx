@@ -671,6 +671,8 @@ CX_FN(cx_usize, cx_bytes_find_rare, (const cx_u8* hay, cx_usize len, const cx_u8
 CX_FN(cx_usize, cx_rx_skip, (const cx_u8* hay, cx_usize len, cx_usize from, const cx_u8* set, cx_u32 count, cx_u32 bytes));
 /* For std.csv: the first byte from `from` that's `a`, `b` or `c`, or `len`. */
 CX_FN(cx_usize, cx_bytes_find3, (const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, cx_u8 b, cx_u8 c));
+/* For std.html: the same for five bytes. */
+CX_FN(cx_usize, cx_bytes_find5, (const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, cx_u8 b, cx_u8 c, cx_u8 d, cx_u8 e));
 /* Java's `toLowerCase(Locale.ROOT)` and `toUpperCase(Locale.ROOT)`, in calx_case.c (D117). Text
  * that doesn't change comes back without a copy when `keep` says its bytes are a literal's. */
 CX_FN(cx_String, cx_case_lower, (cx_str s, cx_bool keep));

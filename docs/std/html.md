@@ -43,17 +43,17 @@ fn main() {
 
 [std/html.calx](../../std/html.calx) is written in Calx from how Python's `html` module behaves. It's checked against Python 3.14 on 160,000 random strings full of names, cut-off names, numbers of every kind and stray `&`s, run through `unescape` and both kinds of `escape`. Every result matched.
 
-`escape` looks for the first character it changes and copies the text up to it in one piece, then the runs between the others. `unescape` copies the runs between `&`s whole. Names are looked up in a hash table, which [tools/html/gen_entities.calx](../../tools/html/gen_entities.calx) builds from the HTML Standard's `entities.json` along with the table of names. An old name without its `;` is at most 6 ASCII letters, so after a name that isn't one, only its first 2 to 6 letters are tried, where Python tries every length.
+`escape` looks for the first character it changes and copies the text up to it in one piece, then the runs between the others, each found 16 bytes at a time with SSE2, which every x86-64 has. That made it 5 times as fast as testing a byte at a time, and it matched Python on 5,000 more random strings once it did. `unescape` copies the runs between `&`s whole. Names are looked up in a hash table, which [tools/html/gen_entities.calx](../../tools/html/gen_entities.calx) builds from the HTML Standard's `entities.json` along with the table of names. An old name without its `;` is at most 6 ASCII letters, so after a name that isn't one, only its first 2 to 6 letters are tried, where Python tries every length.
 
 The names and the text they stand for are from the [HTML Standard](https://html.spec.whatwg.org/), © WHATWG (Apple, Google, Mozilla, Microsoft), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs. The text is 5.0 MB of words with names, old names without `;`, numbers and `&nbsp;` among them. The comparisons are Python 3.14's `html` module, and Rust 1.91 with htmlize 1.1, built for release with `x86-64-v3`:
+On our benchmark, an i9-13900K with a little other work running, each program on its performance cores, the best of 30 runs taken in turns. The text is 5.0 MB of words, one piece in four a character reference: names, old names without `;`, decimal and hex numbers, and `&nbsp;`. The comparisons are Python 3.14's `html` module, and Rust 1.91 with htmlize 1.1, built for release with `x86-64-v3`:
 
 | Work | Calx | Python | Rust `htmlize` |
 | --- | --- | --- | --- |
-| `unescape`, the 5.0 MB | 12.6 ms | 155 ms | 17.2 ms |
-| `escape`, what that gives back | 5.1 ms | 8.9 ms | 7.0 ms |
+| `unescape`, the 5.0 MB | 8.3 ms | 85 ms | 12.5 ms |
+| `escape`, what that gives back | 1.4 ms | 24.6 ms | 9.1 ms |
 
 - Rust's times are `htmlize::unescape` and `htmlize::escape_all_quotes`, each made into an owned `String`.

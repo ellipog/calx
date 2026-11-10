@@ -4,45 +4,46 @@ module std.html
 
 import std.text.entities.{LONGEST_BARE, NAMES, SLOTS, VALUES}
 
+extern "C" {
+    fn cx_bytes_find3(hay: *const u8, len: usize, from: usize, a: u8, b: u8, c: u8) -> usize
+    fn cx_bytes_find5(hay: *const u8, len: usize, from: usize, a: u8, b: u8, c: u8, d: u8, e: u8) -> usize
+}
+
 /// `text` with `&`, `<` and `>` written as `&amp;`, `&lt;` and `&gt;`, and, with `quote`, `"` and
 /// `'` as `&quot;` and `&#x27;`, so it can go in an attribute's value, as Python's `html.escape`
 /// writes them.
 pub fn escape(text: String, quote: bool = true) -> String {
-    var first = text.len()
-    for i in 0..text.len() {
-        if escaped(text.byte_at(i), quote) {
-            first = i
-            break
-        }
-    }
-    if first == text.len() {
+    let n = text.len()
+    let first = next_escaped(text, 0, quote)
+    if first == n {
         return text.copy()
     }
     var out = String()
-    out.reserve(text.len() + text.len() / 8 + 8)
+    out.reserve(n + n / 8 + 8)
     out.push_str(text[..first])
-    var from = first
-    for i in first..text.len() {
-        let c = text.byte_at(i)
-        if not escaped(c, quote) {
-            continue
-        }
-        out.push_str(text[from..i])
-        out.push_str(match c {
+    var i = first
+    while i < n {
+        out.push_str(match text.byte_at(i) {
             b'&' => "&amp;",
             b'<' => "&lt;",
             b'>' => "&gt;",
             b'"' => "&quot;",
             _ => "&#x27;",
         })
-        from = i + 1
+        let next = next_escaped(text, i + 1, quote)
+        out.push_str(text[i + 1..next])
+        i = next
     }
-    out.push_str(text[from..])
     return out
 }
 
-fn escaped(c: u8, quote: bool) -> bool {
-    return c == b'&' or c == b'<' or c == b'>' or (quote and (c == b'"' or c == b'\''))
+// Where the next character `escape` changes is from `i`, or the text's length: found 16 bytes at a
+// time (CLX-188).
+fn next_escaped(text: String, i: usize, quote: bool) -> usize {
+    if quote {
+        return unsafe { cx_bytes_find5(text.as_ptr(), text.len(), i, b'&', b'<', b'>', b'"', b'\'') }
+    }
+    return unsafe { cx_bytes_find3(text.as_ptr(), text.len(), i, b'&', b'<', b'>') }
 }
 
 /// `text` with each character reference read back, as Python's `html.unescape` reads them, which
