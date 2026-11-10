@@ -169,7 +169,7 @@ calx fmt --stdin < a.calx   # print standard input formatted, for editors
 
 Calx has one format, with no settings, so code reads the same wherever it's from. `calx fmt`:
 
-- indents four spaces for each bracket a line is inside, counting the brackets one line opens once, and once more for a line that goes on with the statement before it, after an operator such as `+`, `and` or `=`. A line that starts by closing a bracket lines up with the line that opened it;
+- indents four spaces for each bracket a line is inside, counting the brackets one line opens once, and once more for a line that goes on with the statement before it, after an operator such as `+`, `and` or `=`. A line that starts by closing a bracket lines up with the line that opened it. The block of an `if`, `while`, `for` or `match` whose condition goes on over lines opens at the statement's level, as in Go: its lines are one in, as the condition's are, and its `}` lines up with the `if`;
 - puts one space after `,`, `;` and `:`, and around `=`, `->`, `=>` and binary operators, and none inside `()` and `[]`, before `,` and `:`, or around `.`. Braces get a space inside, as in `Point { x: 1 }`, except `{}` and an import's list, `std.fs.{read, write}`;
 - spaces `a < b` but not `List<i32>`, from what the parser read each `<` and `>` as. Where the space is part of the meaning, as before a `(` that calls or a `?` that makes a type optional, it stays as it was;
 - keeps line breaks where they are, since a line break ends a statement, and keeps at most one blank line in a row, with none just inside a block or at the ends of the file;

@@ -81,4 +81,3 @@ pub const PAIR_SECOND: [u32; 2048] = embed("normal/pair_second.bin")
 
 /// What they compose to.
 pub const PAIR_RESULT: [u32; 2048] = embed("normal/pair_result.bin")
-

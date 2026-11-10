@@ -66,8 +66,8 @@ fn main() {
             }
             let (qq, m) = a.div_rem(b)
             let holds = qq * b + m == a and m.abs() < b.abs() and (m.is_zero() or m.is_negative() == a.is_negative()) and
-                        (a * b).div_rem(b).0 == a and BigInt.parse(a.to_radix(10))! == a and
-                        BigInt.parse_radix(a.to_radix(36), 36)! == a and BigInt.parse_radix(b.to_radix(7), 7)! == b
+                (a * b).div_rem(b).0 == a and BigInt.parse(a.to_radix(10))! == a and
+                BigInt.parse_radix(a.to_radix(36), 36)! == a and BigInt.parse_radix(b.to_radix(7), 7)! == b
             checked += 1
             if not holds {
                 failed += 1

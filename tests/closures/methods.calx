@@ -64,7 +64,7 @@ fn main() {
     println("{ws}")                             // out: [kiwi, pear, banana]
 
     var team: List<Player> = [Player { name: String("a"), score: 3 }, Player { name: String("b"), score: 9 },
-                              Player { name: String("c"), score: 5 }]
+        Player { name: String("c"), score: 5 }]
     team.sort_by_key(|p| -p.score)
     println("{team.map(|p| p.name.copy())}")    // out: [b, c, a]
     println("{team.find(|p| p.score > 4).map(|p| p.score)}")  // out: some(9)

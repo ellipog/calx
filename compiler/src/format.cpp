@@ -321,6 +321,10 @@ std::string render(const std::string& text, const Scanned& s) {
     std::string out;
     const Line* prev = nullptr;
     const Line* prev_code = nullptr;  // the last line with tokens
+    // The first word of the statement the line goes on with, past any closers, as `else` in
+    // `} else if a or`: a statement that takes a block, whose condition goes on over lines, opens
+    // the block at its own level.
+    Tok stmt_word = Tok::eof;
     for (std::size_t n = 0; n < s.lines.size(); n++) {
         const Line& line = s.lines[n];
         if (line.shebang) {
@@ -334,6 +338,15 @@ std::string render(const std::string& text, const Scanned& s) {
         bool in_braces = stack.empty() || stack.back().kind == Tok::lbrace;
         int more = in_braces && !starts_closed && prev_code && continues(toks[prev_code->toks.back()].kind) ? 1 : 0;
         int indent = starts_closed && !stack.empty() ? stack.back().outer : (stack.empty() ? 0 : stack.back().inner) + more;
+        if (!more && !line.toks.empty()) {
+            stmt_word = Tok::eof;
+            for (std::size_t i : line.toks) {
+                if (!closer(toks[i].kind)) {
+                    stmt_word = toks[i].kind;
+                    break;
+                }
+            }
+        }
         bool after_open = prev && !prev->shebang && !prev->toks.empty() && prev->comment.empty() &&
                           opener(toks[prev->toks.back()].kind);
         if (prev && line.blank_before > 0 && !after_open && !starts_closed) out += "\n";
@@ -354,7 +367,14 @@ std::string render(const std::string& text, const Scanned& s) {
                     // At most the line's own level: `} else {` opens where the `}` closed, and
                     // `u0: i32) -> bool {`, which closed what made it a continuation, opens where
                     // that started.
-                    int outer = std::min(indent, (stack.empty() ? 0 : stack.back().inner) + more);
+                    int level = stack.empty() ? 0 : stack.back().inner;
+                    int outer = std::min(indent, level + more);
+                    // The block of an `if`, `while`, `for` or `match` whose condition went on over
+                    // lines opens at the statement's level, as gofmt has it: its lines are one in
+                    // from the statement's, as the condition's are, and its `}` lines up with it.
+                    bool block = stmt_word == Tok::kw_if || stmt_word == Tok::kw_else || stmt_word == Tok::kw_while ||
+                                 stmt_word == Tok::kw_for || stmt_word == Tok::kw_match;
+                    if (more && block && t.kind == Tok::lbrace && j + 1 == line.toks.size()) outer = level;
                     stack.push_back({t.kind, n, outer, outer + 1});
                 }
             } else if (closer(t.kind) && !stack.empty()) {

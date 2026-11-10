@@ -22,7 +22,7 @@ fn stop(why: String) {
 
 fn rounding_of(name: String) -> Rounding {
     let all = [Rounding.HalfEven, Rounding.HalfUp, Rounding.HalfDown, Rounding.Up, Rounding.Down, Rounding.Ceiling, Rounding.Floor,
-               Rounding.ZeroFiveUp]
+        Rounding.ZeroFiveUp]
     for m in all {
         if "{m}" == name {
             return m
@@ -371,7 +371,7 @@ fn main() {
     }
     let here = path.parent_dir(env.script() ?? current_exe()) ?? String(".")
     let ops = ["add", "sub", "mul", "div", "rem", "neg", "abs", "sqrt", "exp", "ln", "log10", "powi", "pow", "quantize", "round",
-               "integral", "normalize", "cmp", "str", "plain", "float", "int", "fromfloat"]
+        "integral", "normalize", "cmp", "str", "plain", "float", "int", "fromfloat"]
     var r = Random.new(seed)
     var cases = List<String>()
     for op in ops {

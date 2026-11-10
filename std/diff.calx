@@ -85,7 +85,7 @@ pub fn unified(a: String, b: String, a_name: String = "a", b_name: String = "b",
 /// of the box, the path's middle part whose ends both searches reach, splits it into two smaller
 /// boxes, each marked the same way (Myers, 1986, section 4b).
 fn mark<T: Equal>(a: List<T>, b: List<T>, l0: usize, t0: usize, r0: usize, b1: usize, deleted: mut List<bool>,
-                  inserted: mut List<bool>, v: mut List<i64>, w: mut List<i64>) {
+    inserted: mut List<bool>, v: mut List<i64>, w: mut List<i64>) {
     var left = l0
     var top = t0
     var right = r0
@@ -134,7 +134,7 @@ fn step(x0: i64, y0: i64, x1: i64, y1: i64, deleted: mut List<bool>, inserted: m
 /// start and the end of its diagonal, and its end, as (x, y) pairs. A search from the top left
 /// and one from the bottom right go a step further in turn, until their paths meet.
 fn middle_snake<T: Equal>(a: List<T>, b: List<T>, left: i64, top: i64, right: i64, bottom: i64, v: mut List<i64>,
-                          w: mut List<i64>) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+    w: mut List<i64>) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
     let width = right - left
     let height = bottom - top
     let delta = width - height
@@ -273,7 +273,7 @@ fn grouped(codes: List<Edit>, n: usize) -> List<List<Edit>> {
         var e = c
         if e.kind == EditKind.Keep and e.a_end - e.a_start > 2 * n {
             group.push(Edit { kind: EditKind.Keep, a_start: e.a_start, a_end: e.a_end.min(e.a_start + n), b_start: e.b_start,
-                              b_end: e.b_end.min(e.b_start + n) })
+                b_end: e.b_end.min(e.b_start + n) })
             out.push(group)
             group = []
             e.a_start = e.a_start.max(e.a_end - n)

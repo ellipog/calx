@@ -503,8 +503,8 @@ pub fn is_date_time(s: String) -> bool {
     }
     // No rune but an ASCII one uppers to what the pattern takes.
     if n < 20 or not all_digits(s, 0, 4) or s.byte_at(4) != b'-' or not all_digits(s, 5, 7) or s.byte_at(7) != b'-' or
-       not all_digits(s, 8, 10) or (s.byte_at(10) != b'T' and s.byte_at(10) != b't') or not hour_at(s, 11) or
-       s.byte_at(13) != b':' or not sixty(s, 14) or s.byte_at(16) != b':' or not sixty(s, 17) {
+        not all_digits(s, 8, 10) or (s.byte_at(10) != b'T' and s.byte_at(10) != b't') or not hour_at(s, 11) or
+        s.byte_at(13) != b':' or not sixty(s, 14) or s.byte_at(16) != b':' or not sixty(s, 17) {
         return false
     }
     var i: usize = 19
@@ -1460,7 +1460,7 @@ fn expression(e: String) -> bool {
     let n = e.len()
     let first = if n == 0 { b'\}' } else { e.byte_at(0) }
     let named = (first >= b'a' and first <= b'z') or (first >= b'A' and first <= b'Z') or (first >= b'0' and first <= b'9') or
-                first == b'_' or (first == b'%' and n >= 3 and hex_digit(e.byte_at(1)) >= 0 and hex_digit(e.byte_at(2)) >= 0)
+        first == b'_' or (first == b'%' and n >= 3 and hex_digit(e.byte_at(1)) >= 0 and hex_digit(e.byte_at(2)) >= 0)
     if named {
         let skip: usize = if first == b'%' { 3 } else { 1 }
         let newline = e[skip..].find("\n")

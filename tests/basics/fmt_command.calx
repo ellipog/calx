@@ -51,6 +51,10 @@ fn main() {
             let long = p.x +
             p.y +
                        total
+            if total > 1 and
+               total < 1000 {
+                    println("mid")
+                }
             println("{small} {m} {long} {-p.y*3 - -1}")
 
 
@@ -84,6 +88,10 @@ fn main() {
     // out:     let long = p.x +
     // out:         p.y +
     // out:         total
+    // out:     if total > 1 and
+    // out:         total < 1000 {
+    // out:         println("mid")
+    // out:     }
     // out:     println("{small} {m} {long} {-p.y*3 - -1}")
     // out: }
     // out: [exited with status 0]

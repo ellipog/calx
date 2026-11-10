@@ -96,6 +96,10 @@ jobs:
       - name: Check the release tools and the art script
         shell: bash
         run: for f in tools/update/update.calx tools/release/package.calx tools/release/toolchain.calx assets/logo/banner.calx; do "$CALX_BIN" check "$f"; done
+      # Calx's own code in its one format (CLX-160). The suite checks the tests' files.
+      - name: Formatting
+        shell: bash
+        run: '"$CALX_BIN" fmt --check std tools bench assets tests/run.calx'
       # A full run must print the expected checksum, with one thread and with several. The
       # times on a shared runner are only a rough guide.
       - name: Tick benchmark

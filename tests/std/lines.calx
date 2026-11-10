@@ -10,11 +10,11 @@ fn main() {
     }
     // out: 1 [give @p stone] 13
     // out: 2 [] 0
-    // out: 3 [  spaces kept  ] 15
+    // out: 3 [  spaces  kept] 14
     // out: 4 [€ and é] 10
     println("{input.next() == none}")    // out: true
 }
 // stdin: give @p stone
 // stdin:
-// stdin:   spaces kept  
+// stdin:   spaces  kept
 // stdin: € and é

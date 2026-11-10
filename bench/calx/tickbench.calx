@@ -698,7 +698,7 @@ fn aabb_of(e: Entity) -> Aabb {
 /// Whether any block in the layer at `layer` along axis `a`, across the box's extent in `u` and
 /// `v`, is solid.
 fn hit(blocks: List<Blocks>, chunk_map: I64Map<ChunkRef>, home: Home, a: usize, u: usize, v: usize, layer: i32,
-       u0: i32, u1: i32, v0: i32, v1: i32) -> bool {
+    u0: i32, u1: i32, v0: i32, v1: i32) -> bool {
     for p in u0..=u1 {
         for q in v0..=v1 {
             var c = [0, 0, 0]

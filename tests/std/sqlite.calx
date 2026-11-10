@@ -25,7 +25,7 @@ fn main() ! SqliteError {
 
     // Every kind of value, empty text and an empty blob included, which aren't NULL.
     let added = try db.execute(String("INSERT INTO mobs (name, hp, speed, sound) VALUES (?, ?, ?, ?)"),
-                               [Value.Text(String("zombie")), Value.Int(20), Value.Real(0.25), Value.Blob([1, 2, 255])])
+        [Value.Text(String("zombie")), Value.Int(20), Value.Real(0.25), Value.Blob([1, 2, 255])])
     println("{added} {db.last_insert_id()}")    // out: 1 1
     _ = try db.execute(String("INSERT INTO mobs (name, hp, sound) VALUES (?, ?, ?)"), [Value.Text(String("")), Value.Null, Value.Blob([])])
     for row in try db.query(String("SELECT name, hp, speed, sound, typeof(name), typeof(sound) FROM mobs ORDER BY id")) {

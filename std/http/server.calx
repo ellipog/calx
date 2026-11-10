@@ -258,26 +258,26 @@ impl Server {
     fn poll_events(mut self, wait: i64) {
         self.net.poll(wait, mut self.events)
         for e in self.events {
-                match e {
-                    Accepted(c) => {
-                        self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false })
-                    }
-                    Received(c) => {
-                        let id = c.id()
-                        if let client = mut self.clients.find(id) {
-                            _ = self.net.read(c, mut client.buf)
-                            self.ready.push_last(id)
-                        } else {
-                            var junk = List<u8>()
-                            _ = self.net.read(c, mut junk)
-                        }
-                    }
-                    Closed(c) => {
-                        _ = self.clients.remove(c.id())
-                    }
-                    Connected(_) => {}
-                    Woken => {}
+            match e {
+                Accepted(c) => {
+                    self.clients.insert(c.id(), Client { conn: c, buf: List<u8>(), busy: false, continued: false })
                 }
+                Received(c) => {
+                    let id = c.id()
+                    if let client = mut self.clients.find(id) {
+                        _ = self.net.read(c, mut client.buf)
+                        self.ready.push_last(id)
+                    } else {
+                        var junk = List<u8>()
+                        _ = self.net.read(c, mut junk)
+                    }
+                }
+                Closed(c) => {
+                    _ = self.clients.remove(c.id())
+                }
+                Connected(_) => {}
+                Woken => {}
+            }
         }
     }
 

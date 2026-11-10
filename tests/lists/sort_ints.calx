@@ -78,7 +78,7 @@ fn lengths() -> List<usize> {
         ns.push(n)
     }
     for n in [127usize, 128usize, 129usize, 191usize, 192usize, 193usize, 1000usize, 4096usize, 16384usize, 16385usize,
-              32768usize, 32769usize, 65536usize, 65537usize] {
+        32768usize, 32769usize, 65536usize, 65537usize] {
         ns.push(n)
     }
     return ns

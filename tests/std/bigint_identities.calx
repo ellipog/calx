@@ -24,10 +24,10 @@ fn main() {
             let c = number(mut r, sb)
             let (q, m) = a.div_rem(b)
             let holds = q * b + m == a and m.abs() < b.abs() and (m.is_zero() or m.is_negative() == a.is_negative()) and
-                     (a + b) * c == a * c + b * c and (a - b) + b == a and a * b == b * a and
-                     (a * b).div_rem(b).0 == a and a.floor_mod(b).sign() != -b.sign() and
-                     BigInt.parse("{a}")! == a and BigInt.parse_radix(a.to_radix(16), 16)! == a and
-                     a.shl(77).shr(77) == a and (a * a).abs().isqrt() == a.abs()
+                (a + b) * c == a * c + b * c and (a - b) + b == a and a * b == b * a and
+                (a * b).div_rem(b).0 == a and a.floor_mod(b).sign() != -b.sign() and
+                BigInt.parse("{a}")! == a and BigInt.parse_radix(a.to_radix(16), 16)! == a and
+                a.shl(77).shr(77) == a and (a * a).abs().isqrt() == a.abs()
             checked += 1
             if not holds {
                 failed += 1

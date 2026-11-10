@@ -71,7 +71,7 @@ impl CliParser {
 
     /// Adds field `name`, which `help` says what it's for, as `kind`.
     pub fn add(mut self, name: String, help: String, kind: CliKind = CliKind.Value, short: String = "", default: String = "",
-               one_of: String = "", required: bool = false) {
+        one_of: String = "", required: bool = false) {
         self.kinds.push(kind)
         self.names.push(name.copy())
         self.shorts.push(short.copy())
@@ -502,7 +502,7 @@ pub fn cli(decl: StructDecl, name: String = "") -> Generated ! String {
     let about = literal(decl.doc)
     var g = Generated.new()
     g.add(if k == 0 { "import std.cli.\{CliParser, CliError, cli_args, cli_exit\}" }
-          else { "import std.cli.\{CliParser, CliKind, CliError, cli_args, cli_exit\}" })
+        else { "import std.cli.\{CliParser, CliKind, CliError, cli_args, cli_exit\}" })
     g.add(#"
         impl #{decl.name} {
             /// The program's arguments, read as `@cli` reads them. `--help` prints the help and

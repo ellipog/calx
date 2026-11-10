@@ -852,7 +852,6 @@ fn unresolvable(class: String, message: String) -> SchemaFault {
     return fault(class, "{class}: {message}")
 }
 
-
 // --- the registry, as nodes ----------------------------------------------------------------------
 
 struct Res {

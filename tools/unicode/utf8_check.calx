@@ -56,7 +56,7 @@ fn check_side(decode: bool) {
 // never appear in UTF-8.
 fn edges() -> List<u8> {
     return [0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4,
-            0xF5, 0xF7, 0xF8, 0xFF]
+        0xF5, 0xF7, 0xF8, 0xFF]
 }
 
 // A code point's UTF-8.
@@ -212,7 +212,7 @@ fn main() {
         data.push(10)
     }
     var same = compare("decode", run(Command.new(java.copy()).args([checker.copy(), "decode"]), data.copy()),
-                       run(Command.new(me.copy()).arg("decode"), data))
+        run(Command.new(me.copy()).arg("decode"), data))
     println("decode: {count} strings")
 
     var lines: usize = 0

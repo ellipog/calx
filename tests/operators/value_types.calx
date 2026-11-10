@@ -47,7 +47,7 @@ fn main() {
     d += b
     d -= a
     println("{d.x} {d.y} {d.z}")      // out: 0.5 0.5 0.5
-    let s = sum(three(a, b),  Vec3 { x: 0.0, y: 0.0, z: 0.0 })
+    let s = sum(three(a, b), Vec3 { x: 0.0, y: 0.0, z: 0.0 })
     println("{s.x} {s.y} {s.z}")      // out: 2.5 4.5 6.5
     let ns: List<i32> = [1, 2, 3]
     println("{sum(ns, 0)}")           // out: 6

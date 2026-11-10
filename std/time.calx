@@ -134,7 +134,7 @@ fn floor_mod(a: i64, b: i64) -> i64 {
 }
 
 const MONTH_NAMES: [str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
-                                "October", "November", "December"]
+    "October", "November", "December"]
 const DAY_NAMES: [str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 /// Whether `year` has a 29th of February on the Gregorian calendar: every fourth year, but not
@@ -170,8 +170,8 @@ impl DateTime {
             return false
         }
         return self.day >= 1 and self.day <= days_in_month(self.year, self.month) and self.hour >= 0 and self.hour <= 23 and
-               self.minute >= 0 and self.minute <= 59 and self.second >= 0 and self.second <= 59 and self.milli >= 0 and
-               self.milli <= 999
+            self.minute >= 0 and self.minute <= 59 and self.second >= 0 and self.second <= 59 and self.milli >= 0 and
+            self.milli <= 999
     }
 
     /// The moment this date and time is, where the clock is `offset` seconds ahead of UTC: the
@@ -559,10 +559,10 @@ fn parse_with(text: String, pattern: String, zone: bool, offset: mut i32) -> Dat
             matched = p.number(1, 1, mut w) and w <= 6
         } else if code == b'F' {
             matched = p.number(4, 4, mut d.year) and p.take(b'-') and p.number(1, 2, mut d.month) and p.take(b'-') and
-                 p.number(1, 2, mut d.day)
+                p.number(1, 2, mut d.day)
         } else if code == b'T' {
             matched = p.number(1, 2, mut d.hour) and p.take(b':') and p.number(1, 2, mut d.minute) and p.take(b':') and
-                 p.number(1, 2, mut d.second)
+                p.number(1, 2, mut d.second)
         } else if code == b'z' {
             if not zone {
                 panic("a `DateTime` has no offset for `%z`; parse a `Timestamp`, which has one")
@@ -736,7 +736,7 @@ fn lower(c: u8) -> u8 {
 fn iso_date_time(p: mut Scan) -> DateTime? {
     var d = DateTime { year: 0, month: 1, day: 1, hour: 0, minute: 0, second: 0, milli: 0 }
     if not (p.number(4, 4, mut d.year) and p.take(b'-') and p.number(2, 2, mut d.month) and p.take(b'-') and
-            p.number(2, 2, mut d.day)) {
+        p.number(2, 2, mut d.day)) {
         return none
     }
     if p.take(b'T') or p.take(b't') or p.take(b' ') {
