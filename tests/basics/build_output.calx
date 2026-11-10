@@ -1,0 +1,85 @@
+// `calx build -o` copies the program out of the cache (CLX-237). One that already holds what it
+// would get is left as it is; one that doesn't, even by a byte, is written again. On Windows the
+// PDB goes beside it, and the program names it there. They're compared with the cache's copies
+// a block at a time, never read whole (CLX-241).
+import std.env.{os, variable}
+import std.fs.{exists, read, remove_dir_all, remove_file, temp_dir, write_parts, write_text, separator}
+import std.process.{Command}
+
+// What a calx or a program printed, run in `dir`, and how it ended.
+fn run(exe: String, args: List<String>, dir: String) -> String {
+    match Command.new(exe).args(args).dir(dir).output() {
+        ok(o) => {
+            let text = "{o.text()}{o.error_text()}".trim_end()
+            if text.len() == 0 {
+                return "[{o.status}]"
+            }
+            return "{text} [{o.status}]"
+        },
+        err(e) => return "{e}",
+    }
+}
+
+// Whether `name`'s bytes are somewhere in `bytes`.
+fn holds(bytes: List<u8>, name: String) -> bool {
+    let want = name.to_bytes()
+    var i: usize = 0
+    while i + want.len() <= bytes.len() {
+        var j: usize = 0
+        while j < want.len() and bytes[i + j] == want[j] {
+            j += 1
+        }
+        if j == want.len() {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// Changes one byte of the file, in place.
+fn damage(path: String, at: u64) {
+    write_parts(path, [(at, [0x5A])], false)!
+}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    let s = separator()
+    let windows = os() == "windows"
+    write_text("{dir}{s}app.calx", "fn main() \{\n    println(\"built\")\n\}\n")!
+    let name = if windows { "app.exe" } else { "app" }
+    let program = "{dir}{s}out{s}{name}"
+    let pdb = "{dir}{s}out{s}app.pdb"
+
+    // A folder on the way is made.
+    println(run(calx.copy(), ["build", "app.calx", "-o", "out/{name}"], dir.copy()))    // out: [exited with status 0]
+    println(run(program.copy(), [], dir.copy()))    // out: built [exited with status 0]
+    let first = read(program)!
+    // On Windows the program names its PDB by the name alone, which is beside it.
+    println("{not windows or (exists(pdb) and holds(first.copy(), "app.pdb"))}")    // out: true
+
+    // Built again, it's the same.
+    println(run(calx.copy(), ["build", "app.calx", "-o", "out/{name}"], dir.copy()))    // out: [exited with status 0]
+    println("{read(program)! == first}")    // out: true
+
+    // A byte changed in the program, or in its PDB, is put back.
+    damage(program, 1000)
+    println("{read(program)! == first}")    // out: false
+    println(run(calx.copy(), ["build", "app.calx", "-o", "out/{name}"], dir.copy()))    // out: [exited with status 0]
+    println("{read(program)! == first}")    // out: true
+    if windows {
+        let kept = read(pdb)!
+        damage(pdb, 5000)
+        let damaged = run(calx.copy(), ["build", "app.calx", "-o", "out/{name}"], dir.copy())
+        let back = read(pdb)! == kept
+        remove_file(pdb)!
+        let removed = run(calx.copy(), ["build", "app.calx", "-o", "out/{name}"], dir.copy())
+        println("{damaged} {removed} {back and read(pdb)! == kept}")
+    } else {
+        println("[exited with status 0] [exited with status 0] true")
+    }
+    // out: [exited with status 0] [exited with status 0] true
+    println(run(program.copy(), [], dir.copy()))    // out: built [exited with status 0]
+    remove_dir_all(dir)!
+}

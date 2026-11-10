@@ -839,7 +839,7 @@ private:
 
 // Compared a block at a time, so a file the size of a program's PDB isn't read into memory
 // whole only to be compared (CLX-240).
-constexpr std::size_t kBlock = 64 * 1024;
+constexpr std::size_t kBlock = 256 * 1024;
 
 }  // namespace
 
@@ -1284,41 +1284,65 @@ std::string library_attach_c(const RuntimeApi& api) {
 
 const char* library_suffix() { return kLib; }
 
-// Whether the file at `path` holds exactly `bytes`.
-bool same_file(const std::string& path, const std::string& bytes) {
-    InFile f(path);
-    if (!f.ok() || f.size() != bytes.size()) return false;
-    std::unique_ptr<char[]> block(new char[kBlock]);
-    for (std::size_t at = 0; at < bytes.size();) {
-        std::size_t want = std::min(kBlock, bytes.size() - at);
-        if (f.fill(block.get(), want) != static_cast<long long>(want)) return false;
-        if (std::memcmp(block.get(), bytes.data() + at, want) != 0) return false;
+namespace {
+
+// Whether the file at `path` holds what the file at `from` does, with `patch` in place of its
+// bytes at `patch_at`. Both are read a block at a time into the same two buffers: a whole
+// program that embeds 16 MB, read into memory zeroed first, took a cached build of it 5 ms more
+// than this, and a mapping is slower still, at a page fault for each 4 KB (CLX-241).
+bool same_file(const std::string& path, const std::string& from, std::size_t patch_at = 0, std::string_view patch = {}) {
+    InFile a(path), b(from);
+    if (!a.ok() || !b.ok() || a.size() != b.size() || patch_at + patch.size() > b.size()) return false;
+    std::unique_ptr<char[]> blocks(new char[2 * kBlock]);
+    char* x = blocks.get();
+    char* y = x + kBlock;
+    for (std::uint64_t at = 0; at < a.size();) {
+        std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(kBlock, a.size() - at));
+        if (a.fill(x, want) != static_cast<long long>(want) || b.fill(y, want) != static_cast<long long>(want)) return false;
+        // The part of the patch in this block, if any.
+        std::uint64_t lo = std::max<std::uint64_t>(at, patch_at), hi = std::min<std::uint64_t>(at + want, patch_at + patch.size());
+        if (lo < hi) std::memcpy(y + (lo - at), patch.data() + (lo - patch_at), static_cast<std::size_t>(hi - lo));
+        if (std::memcmp(x, y, want) != 0) return false;
         at += want;
     }
     return true;
 }
 
 #ifdef _WIN32
-namespace {
-
-// Whether the files at `a` and `b` hold the same bytes: a program's PDB and the one beside it.
-bool same_files(const std::string& a, const std::string& b) {
-    InFile x(a), y(b);
-    if (!x.ok() || !y.ok() || x.size() != y.size()) return false;
-    std::unique_ptr<char[]> block(new char[2 * kBlock]);
-    char* bx = block.get();
-    char* by = bx + kBlock;
-    for (std::uint64_t at = 0; at < x.size();) {
-        std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(kBlock, x.size() - at));
-        if (x.fill(bx, want) != static_cast<long long>(want) || y.fill(by, want) != static_cast<long long>(want)) return false;
-        if (std::memcmp(bx, by, want) != 0) return false;
-        at += want;
+// A file mapped into memory, to read a few parts of: a program's headers. The cache's programs
+// are only ever replaced whole by a rename, never written in place, so it can't change under it.
+class MappedFile {
+public:
+    explicit MappedFile(const std::string& path) {
+        HANDLE f = CreateFileW(long_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return;
+        LARGE_INTEGER size;
+        if (GetFileSizeEx(f, &size) && size.QuadPart > 0) {
+            if (HANDLE m = CreateFileMappingW(f, nullptr, PAGE_READONLY, 0, 0, nullptr)) {
+                data_ = static_cast<const char*>(MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0));
+                if (data_) size_ = static_cast<std::size_t>(size.QuadPart);
+                CloseHandle(m);
+            }
+        }
+        CloseHandle(f);
     }
-    return true;
-}
+    ~MappedFile() {
+        if (data_) UnmapViewOfFile(data_);
+    }
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+
+    bool ok() const { return data_ != nullptr; }
+    std::string_view bytes() const { return data_ ? std::string_view(data_, size_) : std::string_view(); }
+
+private:
+    const char* data_ = nullptr;
+    std::size_t size_ = 0;
+};
+#endif
 
 }  // namespace
-#endif
 
 bool place_build(const std::string& built, const std::string& out, std::string& error) {
     std::error_code ec;
@@ -1327,25 +1351,27 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
     if (!parent.empty()) make_dirs(long_path(parent.string()));
     // A file that already holds what it would get is left as it is, but for its time, which is
     // now, as a build's output's is. Writing a program on Windows has it scanned again, which took
-    // a small program's build 20 ms, and a program that's running can't be written over.
-    auto put = [&](const std::string& path, const std::string& bytes) {
-        if (same_file(path, bytes)) {
+    // a small program's build 20 ms, and a program that's running can't be written over. What it
+    // would get is the file at `from`, with `patch` at `patch_at`.
+    auto put = [&](const std::string& path, const std::string& from, std::size_t patch_at = 0, std::string_view patch = {}) {
+        if (same_file(path, from, patch_at, patch)) {
             fs::last_write_time(long_path(path), fs::file_time_type::clock::now(), ec);
             return true;
         }
+        std::string bytes;
+        if (!read_file(from, bytes) || patch_at + patch.size() > bytes.size()) {
+            error = "can't read " + from;
+            return false;
+        }
+        bytes.replace(patch_at, patch.size(), patch);
         if (!write_file_atomic(path, bytes)) {
             error = "can't write " + path;
             return false;
         }
         return true;
     };
-    std::string image;
-    if (!read_file(built, image)) {
-        error = "can't read " + built;
-        return false;
-    }
 #ifndef _WIN32
-    if (same_file(out, image)) {
+    if (same_file(out, built)) {
         fs::last_write_time(long_path(out), fs::file_time_type::clock::now(), ec);
         return true;
     }
@@ -1360,12 +1386,18 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
     // The image names its PDB by the path it was linked with, in the cache, which a later build
     // can trim. So the PDB goes beside it as `out.pdb`, and the image names that instead: the
     // name alone, which debuggers and dbghelp look for beside the image.
+    MappedFile built_file(built);
+    if (!built_file.ok()) {
+        error = "can't read " + built;
+        return false;
+    }
+    std::string_view image = built_file.bytes();
     auto u16 = [&](std::size_t at) -> std::uint32_t {
         return at + 2 <= image.size() ? static_cast<unsigned char>(image[at]) | static_cast<unsigned char>(image[at + 1]) << 8 : 0;
     };
     auto u32 = [&](std::size_t at) -> std::uint32_t { return u16(at) | u16(at + 2) << 16; };
     std::size_t pe = u32(0x3C);
-    if (image.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return put(out, image);
+    if (pe + 4 > image.size() || image.compare(pe, 4, std::string_view("PE\0\0", 4)) != 0) return put(out, built);
     std::size_t opt = pe + 24;
     std::size_t dirs = opt + (u16(opt) == 0x20B ? 112 : 96);
     std::uint32_t debug_rva = u32(dirs + 6 * 8), debug_size = u32(dirs + 6 * 8 + 4);
@@ -1376,31 +1408,19 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         std::uint32_t vsize = u32(s + 8), va = u32(s + 12), rsize = u32(s + 16), raw = u32(s + 20);
         if (debug_rva >= va && debug_rva < va + std::max(vsize, rsize)) debug = debug_rva - va + raw;
     }
-    if (!debug) return put(out, image);
+    if (!debug) return put(out, built);
     for (std::size_t e = debug; e + 28 <= debug + debug_size && e + 28 <= image.size(); e += 28) {
         std::uint32_t type = u32(e + 12), size = u32(e + 16), at = u32(e + 24);
         if (type != 2 || at + size > image.size() || size < 25 || image.compare(at, 4, "RSDS") != 0) continue;
         std::size_t name_at = at + 24, room = size - 24;
-        std::string pdb = image.substr(name_at, image.find('\0', name_at) - name_at);
+        std::string pdb(image.substr(name_at, image.find('\0', name_at) - name_at));
         fs::path to = fs::path(out).replace_extension(".pdb");
         std::string name = to.filename().string();
         if (name.size() + 1 > room || !file_exists(pdb)) break;
-        // Compared file to file, and read only when it's changed: a release build's PDB is several
-        // MB (CLX-240).
-        if (same_files(pdb, to.string())) {
-            fs::last_write_time(long_path(to.string()), fs::file_time_type::clock::now(), ec);
-        } else {
-            std::string pdb_bytes;
-            if (!read_file(pdb, pdb_bytes)) {
-                error = "can't read " + pdb;
-                return false;
-            }
-            if (!put(to.string(), pdb_bytes)) return false;
-        }
-        image.replace(name_at, room, name + std::string(room - name.size(), '\0'));
-        break;
+        if (!put(to.string(), pdb)) return false;
+        return put(out, built, name_at, name + std::string(room - name.size(), '\0'));
     }
-    if (!put(out, image)) return false;
+    if (!put(out, built)) return false;
 #endif
     return true;
 }
