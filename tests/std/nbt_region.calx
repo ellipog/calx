@@ -1,0 +1,160 @@
+// std.nbt.region: region files written and read back in each compression, where chunks land in
+// the file, chunks of their own files, clearing, and broken chunks, read as vanilla 26.3's
+// RegionFile reads them. Each was checked against vanilla's RegionFile by the rig of CLX-232.
+import std.fs.{FsError, is_file, metadata, remove_dir_all, temp_dir, write}
+import std.nbt.{parse_snbt}
+import std.nbt.region.{Compression, RegionFile, region_file_name, region_of}
+
+fn size(path: String) -> u64 {
+    return metadata(path)!.size
+}
+
+// A region file of one chunk at 0, 0, in sector 2, whose sector holds `chunk`.
+fn one(path: String, chunk: List<u8>) {
+    var bytes: List<u8> = [0, 0, 2, 1]
+    while bytes.len() < 8192 {
+        bytes.push(0)
+    }
+    bytes.extend(chunk)
+    while bytes.len() % 4096 != 0 {
+        bytes.push(0)
+    }
+    write(path, bytes)!
+}
+
+// What has, exists and read_bytes say of a file in `dir` whose chunk at 0, 0 is `chunk`, with
+// `dir` written as `<dir>`.
+fn broken(dir: String, chunk: List<u8>) {
+    let path = "{dir}/r.0.0.mca"
+    one(path, chunk)
+    var b = RegionFile.open(path)!
+    let read = show(b, 0, 0).replace(dir, "<dir>").replace("\\", "/")
+    println("{b.has(0, 0)} {b.exists(0, 0)} {read}")
+    b.close()!
+}
+
+fn show(r: RegionFile, x: i32, z: i32) -> String {
+    return match r.read_bytes(x, z) {
+        ok(found) => if let b = found { "{b.len()} bytes" } else { String("none") },
+        err(e) => "{if e.vanilla_missing() { "missing" } else { "error" }}: {e}",
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let path = "{dir}/r.-1.2.mca"
+
+    // A new file, with a chunk in each compression.
+    var r = RegionFile.open(path)!
+    println("{is_file(path)} {size(path)} {r.chunks().len()}")    // out: true 0 0
+    let tag = parse_snbt("\{xPos: -3, zPos: 70, Status: \"minecraft:full\"\}")!
+    r.write(-3, 70, tag)!
+    r.compression = Compression.Gzip
+    r.write(-4, 70, tag)!
+    r.compression = Compression.None
+    r.write(-5, 70, tag)!
+    r.compression = Compression.Lz4
+    r.write(-6, 70, tag)!
+    println("{r.read(-3, 70)!!}")    // out: {Status:"minecraft:full",xPos:-3,zPos:70}
+    for x in -6..-2 {
+        println("{x} {r.read(x, 70)! == some(tag.copy())} {r.has(x, 70)} {r.exists(x, 70)} {r.timestamp(x, 70) > 1700000000}")
+    }
+    // out: -6 true true true true
+    // out: -5 true true true true
+    // out: -4 true true true true
+    // out: -3 true true true true
+    println("{r.read(-7, 70)! == none} {r.has(-7, 70)} {r.exists(-7, 70)} {r.timestamp(-7, 70)}")    // out: true false false 0
+    // The region is -1, 2 by its name, so its chunks are -32 to -1, 64 to 95.
+    println("{r.chunks()}")    // out: [(-6, 70), (-5, 70), (-4, 70), (-3, 70)]
+    // A chunk takes the first free sectors, after the header's two.
+    println("{size(path)}")    // out: 24576
+    r.close()!
+
+    // Opened again, it reads the same. Sectors free up only after the new ones are taken, so a
+    // chunk written again moves; then the next fills the gap.
+    r = RegionFile.open(path)!
+    r.compression = Compression.None
+    r.write_bytes(-3, 70, [1, 2, 3])!
+    println("{show(r, -3, 70)} {size(path)}")    // out: 3 bytes 28672
+    r.write_bytes(-8, 70, List<u8>())!
+    println("{show(r, -8, 70)} {size(path)}")    // out: 0 bytes 28672
+    // 4091 bytes and the 5 before them fill a sector; one more takes two.
+    r.write_bytes(-9, 70, [7; 4092])!
+    println("{size(path)}")    // out: 36864
+
+    // Clearing drops the chunk and frees its sectors.
+    r.clear(-9, 70)!
+    println("{r.has(-9, 70)} {show(r, -9, 70)} {r.timestamp(-9, 70) > 0}")    // out: false none true
+    r.clear(-9, 70)!
+
+    // A chunk of 256 sectors or more goes in a file of its own, named by its coordinates.
+    r.write_bytes(-10, 70, [5; 1100000])!
+    println("{show(r, -10, 70)} {size("{dir}/c.-10.70.mcc")} {r.exists(-10, 70)}")    // out: 1100000 bytes 1100000 true
+    r.write_bytes(-10, 70, [5; 10])!
+    println("{show(r, -10, 70)} {is_file("{dir}/c.-10.70.mcc")}")    // out: 10 bytes false
+    r.close()!
+
+    // Read only: a missing file isn't made, and writing is refused.
+    match RegionFile.open_read("{dir}/r.0.0.mca") {
+        ok(_) => println("opened"),
+        err(e) => println("{e == FsError.NotFound} {is_file("{dir}/r.0.0.mca")}"),
+    }
+    // out: true false
+    var ro = RegionFile.open_read(path)!
+    println(show(ro, -5, 70))    // out: 51 bytes
+    match ro.write_bytes(0, 0, [1]) {
+        ok => println("written"),
+        err(e) => println("{e == FsError.Denied}"),
+    }
+    // out: true
+    ro.close()!
+
+    // Broken chunks: vanilla takes most to be missing, and fails on broken compressed bytes.
+    broken(dir, [0, 0, 0, 0, 3])
+    broken(dir, [0, 0, 19, 136, 3, 1, 2])
+    broken(dir, [255, 255, 255, 250, 3])
+    broken(dir, [0, 0, 0, 2, 9, 0])
+    broken(dir, [0, 0, 0, 1, 130])
+    broken(dir, [0, 0, 0, 5, 127, 0, 2, 104, 105])
+    broken(dir, [0, 0, 0, 2, 127, 0])
+    broken(dir, [0, 0, 0, 4, 2, 1, 2, 3])
+    broken(dir, [0, 0, 0, 1, 1])
+    // out: true false missing: the chunk is empty
+    // out: true false missing: the chunk is cut short
+    // out: true false missing: the chunk's length is -6
+    // out: true false missing: the chunk's compression is 9, which isn't one of vanilla's
+    // out: true false missing: the chunk's own file, <dir>/c.0.0.mcc, isn't there
+    // out: true true missing: the chunk is compressed by hi, a mod's compression
+    // out: true true error: the name of the chunk's compression is broken
+    // out: true true error: the chunk's compressed bytes are broken: corrupt data
+    // out: true true error: the chunk's compressed bytes are broken: the data ends early
+
+    // NBT that isn't a compound.
+    let bad = "{dir}/r.0.0.mca"
+    one(bad, [0, 0, 0, 2, 3, 0])
+    var b = RegionFile.open(bad)!
+    match b.read(0, 0) {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),
+    }
+    // out: the chunk's NBT is broken: the root tag isn't a compound
+    b.close()!
+
+    // A place in the header that can't be right is dropped as the file opens: one in the
+    // header's sectors, one of no sectors, and one past the end.
+    var header: List<u8> = [0, 0, 1, 1, 0, 0, 2, 0, 0, 0, 9, 1, 0, 0, 2, 1]
+    while header.len() < 8192 {
+        header.push(0)
+    }
+    header.extend([0u8, 0, 0, 1, 3])
+    write(bad, header)!
+    b = RegionFile.open(bad)!
+    println("{b.has(0, 0)} {b.has(1, 0)} {b.has(2, 0)} {b.has(3, 0)} {show(b, 3, 0)}")    // out: false false false true 0 bytes
+    // Closing pads the file to whole sectors, as vanilla's does.
+    b.close()!
+    println("{size(bad)}")    // out: 12288
+
+    println("{region_of(-33, 70)} {region_file_name(-2, 2)}")    // out: (-2, 2) r.-2.2.mca
+    println("{Compression.from_name("lz4") == some(Compression.Lz4)}")    // out: true
+    remove_dir_all(dir)!
+}

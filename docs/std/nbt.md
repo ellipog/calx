@@ -54,6 +54,8 @@ fn main() {
 | `file.save(path: String) ! Error` | Writes `file.encode()` to `path` |
 | `Compression` | `None`, as `NbtIo.write` writes; `Gzip`, as `level.dat`, players' files and structures are; `Zlib`, as most chunks in a region file are |
 
+A world's chunks are in region files, `r.X.Z.mca`, which [std.nbt.region](nbt-region.md) reads and writes as vanilla does.
+
 ## Tags
 
 | Variant | Holds | SNBT |
