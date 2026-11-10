@@ -1017,6 +1017,7 @@ typedef struct {
  * literal length's, match length's and offset's code's. */
 typedef struct {
     cx_u64 lit[256], ll[64], ml[64], of[32];
+    cx_u64 pick; /* the size every sample's settings are picked for: their average and the content */
 } sink_t;
 
 /* The offset `off` after `ll` literals as coded, 1 to 3 for a repeated one and off + 3 for a new
@@ -4748,10 +4749,14 @@ static cx_u64 frame_write(const cx_u8* in, cx_u64 n, cx_u8* out, cx_i32 level, c
      * `zstd -D` do. Otherwise a small enough input would take the table for 16 KiB, which at
      * level 13 searches four times as deep: 12% more time for 0.7% less on 1,144 small files with
      * a 16 KB dictionary (CLX-189). The window still grows to the input and content's, as
-     * libzstd's grows to the input's: a block can't be bigger than the window. */
-    const cx_u64 pick = dict_n && (n < ((cx_u64)128 << 10) || n < 6 * dict_n) ? dict_n + 499 : n + content_n;
-    F.p = params_for(level, pick, n + content_n);
-    if (pick != n + content_n) {
+     * libzstd's grows to the input's: a block can't be bigger than the window. For a bigger input,
+ * the table for it and the whole dictionary, as libzstd's.
+ *   A trained dictionary's parses, for its tables, all take the settings for the samples'
+ * average and the content, as libzstd's ZDICT_analyzeEntropy, which gives every sample the
+ * same ones (ZSTD_getParams). A sample is never more than the window then. */
+    const cx_u64 pick = sink ? sink->pick : dict_n && (n < ((cx_u64)128 << 10) || n < 6 * dict_n) ? dict_n + 499 : n + (dict_n ? dict_n : content_n);
+    F.p = params_for(level, pick, sink ? pick : n + content_n);
+    if (!sink && pick != n + content_n) {
         const cx_u32 wlog = params_for(level, n + content_n, n + content_n).wlog;
         if (F.p.wlog < wlog) F.p.wlog = wlog;
     }
@@ -5005,18 +5010,25 @@ static cx_u32 tr_id(const cx_u8* p, cx_u64 n) {
     return (cx_u32)(h % (((cx_u64)1 << 31) - 32768)) + 32768;
 }
 
-/* Frames of samples [from, to) after a dictionary: each sample's first 128 KiB with content
- * alone, parsed and counted into sink, for a dictionary's tables; or each whole sample with a
- * dictionary's ID and tables, for its score, which it gives. Or ~0 if there's no memory. One
+/* Frames of samples [from, to) after a dictionary: each sample's first 128 KiB, or as much as
+ * the window holds, with content alone, parsed and counted into sink, for a dictionary's tables,
+ * all with the settings for the samples' average and the content; or each whole sample with the
+ * dictionary of dn bytes, its ID and tables, for its score, which it gives, with the settings a
+ * frame with it takes, as libzstd's ZSTD_compress_usingCDict. Or ~0 if there's no memory. One
  * sample after another: the five candidates are trained at once, and frames this small on more
  * threads than that only wait on one another, 1.2 to 2.5 times as long on our samples. */
-static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* content, cx_u64 cn, cx_u32 id, const cx_u8* dp, sink_t* sink) {
-    cx_u64 most = 0;
+static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* content, cx_u64 cn, cx_u64 dn, cx_u32 id, const cx_u8* dp, sink_t* sink) {
+    cx_u64 most = 0, cut = TR_STATS;
     for (cx_u64 i = from; i < to; i++) {
         const cx_u64 len = T->at[i + 1] - T->at[i];
         most = len > most ? len : most;
     }
-    if (sink) most = most < TR_STATS ? most : TR_STATS;
+    if (sink) {
+        sink->pick = (T->at[to] - T->at[from]) / (to > from ? to - from : 1) + cn;
+        const cx_u64 w = (cx_u64)1 << params_for(T->level, sink->pick, sink->pick).wlog;
+        cut = w < cut ? w : cut;
+        most = most < cut ? most : cut;
+    }
     cx_u8* const out = (cx_u8*)malloc((size_t)cx_zse_bound(most));
     if (!out) return ~(cx_u64)0;
     const cx_u64 key = cx_zse_dict_key();
@@ -5024,10 +5036,10 @@ static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* con
     for (cx_u64 i = from; i < to; i++) {
         cx_u64 len = T->at[i + 1] - T->at[i];
         if (sink) {
-            len = len < TR_STATS ? len : TR_STATS;
+            len = len < cut ? len : cut;
             if (len) frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, 0, 0, key, sink);
         } else {
-            sum += frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, 0, id, dp, key, 0);
+            sum += frame_write(T->s + T->at[i], len, out, T->level, 0, content, cn, dn, id, dp, key, 0);
         }
     }
     digest_forget(key);
@@ -5043,7 +5055,7 @@ static cx_u64 tr_pass(const train_t* T, cx_u64 from, cx_u64 to, const cx_u8* con
 static cx_u64 tr_finish(const train_t* T, const cx_u8* content, cx_u64 cn, cx_u8* dict, cx_u8* dp, cx_u64* hp) {
     sink_t S;
     memset(&S, 0, sizeof S);
-    if (tr_pass(T, 0, T->train, content, cn, 0, 0, &S) == ~(cx_u64)0) return 0;
+    if (tr_pass(T, 0, T->train, content, cn, 0, 0, 0, &S) == ~(cx_u64)0) return 0;
 
     memset(dp, 0, DP_ALL);
     cx_u8 hdr[512];
@@ -5118,7 +5130,7 @@ static void tr_candidate(train_t* T, cx_u64 c) {
         cx_u8 dp[DP_ALL];
         cx_u64 h = 0;
         const cx_u64 dn = tr_finish(T, content + T->cap - cn, cn, dict, dp, &h);
-        const cx_u64 sum = dn ? tr_pass(T, T->train, T->count, dict + h, dn - h, (cx_u32)ld32(dict + 4), dp, 0) : ~(cx_u64)0;
+        const cx_u64 sum = dn ? tr_pass(T, T->train, T->count, dict + h, dn - h, dn, (cx_u32)ld32(dict + 4), dp, 0) : ~(cx_u64)0;
         if (sum != ~(cx_u64)0) {
             T->dict[c] = dict;
             T->dict_n[c] = dn;
