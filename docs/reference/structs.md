@@ -36,24 +36,25 @@ fn main() {
 
 ## Declaring
 
-`struct Name { field: Type ... }` declares a struct, with one field per line (or separated by commas). A field can have a default, `y: f64 = 0.0`, which must be a constant. A struct can't hold itself by value.
+`struct Name { field: Type ... }` declares a struct, with one field per line (or separated by commas). A field can have a default, `y: f64 = 0.0`, which must be known while compiling: a constant, or an array, tuple or struct literal of constants, such as `at: Point = Point { x: 0, y: 0 }` or `tags: [str; 2] = ["a", "b"]`. A struct can't hold itself by value.
 
 ## Building a value
 
 - `Name { field: value, ... }` gives every field without a default. Fields can be written in any order, and their values run in the order written.
 - `Name { x, y }` takes the variables named `x` and `y`.
-- `Name()` builds a value with every field at its default, and needs every field to have one. Since every default is a constant, so is `Name()`, which can be another struct's default: `look: Look = Look()`.
+- `Name()` builds a value with every field at its default, and needs every field to have one. Since every default is known while compiling, so is `Name()`, which can be another struct's default, `look: Look = Look()`, or a [constant](variables.md#struct-constants).
 
 ```calx
 struct Settings {
     distance: i32 = 10
     hardcore: bool = false
+    spawn: (i32, i32) = (0, 64)
 }
 
 fn main() {
     let a = Settings()
     let b = Settings { hardcore: true }
-    println("{a.distance} {b.hardcore}")    // out: 10 true
+    println("{a.distance} {b.hardcore} {a.spawn.1}")    // out: 10 true 64
 }
 ```
 

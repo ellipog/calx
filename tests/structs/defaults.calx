@@ -21,6 +21,28 @@ struct Pos {
     z: i32
 }
 
+struct Point {
+    x: i32
+    y: i32
+}
+
+// A default can be an array, tuple or struct literal of constants (CLX-248).
+struct Shape {
+    at: Point = Point { x: 0, y: 0 }
+    tags: [str; 2] = ["a", "b"]
+    corner: (i32, char) = (3, 'c')
+    grid: [[u8; 2]; 2] = [[1, 2], [3, 4]]
+    look: Look = Look { bold: true }
+}
+
+// And `Name()` of one is a constant.
+struct Frame {
+    at: Point = Point { x: 0, y: 7 }
+    size: [i32; 2] = [8, 9]
+}
+
+const FRAME: Frame = Frame()
+
 fn main() {
     let s = Settings()
     println("{s.distance} {s.hardcore} {s.scale}")    // out: 10 false 1.5
@@ -34,4 +56,11 @@ fn main() {
     l.look.bold = true
     let m = Line { text: String("there") }
     println("{l.look.bold} {m.look.bold} {m.look.color == none}")    // out: true false true
+    let sh = Shape()
+    println("{sh.at.x} {sh.tags[1]} {sh.corner.1} {sh.grid[1][0]} {sh.look.bold}")    // out: 0 b c 3 true
+    var sh2 = Shape { tags: ["x", "y"] }
+    sh2.at.x = 5
+    sh2.grid[0][0] = 9
+    println("{sh2.at.x} {sh2.tags[0]} {sh2.grid[0][0]} {Shape().at.x} {Shape().grid[0][0]}")    // out: 5 x 9 0 1
+    println("{FRAME.at.y} {FRAME.size[1]} {FRAME == Frame()}")    // out: 7 9 true
 }

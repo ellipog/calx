@@ -1,0 +1,22 @@
+// A field's default must be known while compiling: a constant, or an array, tuple or struct
+// literal of constants (CLX-248).
+
+struct Point {
+    x: i32
+    y: i32
+}
+
+fn f() -> i32 {
+    return 1
+}
+
+struct Shape {
+    at: Point = Point { x: 0, y: f() }    // error: a field's default must be a constant, or an array, tuple or struct literal of constants
+    sizes: [i32; 2] = [1, f()]            // error: a field's default must be a constant, or an array, tuple or struct literal of constants
+    pair: (i32, i32) = (f(), 2)           // error: a field's default must be a constant, or an array, tuple or struct literal of constants
+}
+
+fn main() {
+    let s = Shape()
+    println("{s.at.x} {s.sizes[0]} {s.pair.1}")
+}

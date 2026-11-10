@@ -1154,9 +1154,10 @@ private:
         std::size_t mark = push_env(s);
         for (FieldDecl& f : s->fields) {
             if (!f.default_value) continue;
+            // A literal of constants is known as a constant is, so it can be one too (CLX-248).
             Type* t = check(f.default_value, f.resolved);
-            if (!is_bad(t) && !f.default_value->is_const) {
-                error(f.default_value->span, "a field's default must be a constant");
+            if (!is_bad(t) && !known(f.default_value)) {
+                error(f.default_value->span, "a field's default must be a constant, or an array, tuple or struct literal of constants");
             }
         }
         pop_env(mark);
