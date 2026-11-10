@@ -1,0 +1,88 @@
+// std.nbt reads SNBT as vanilla 26.3's TagParser does and lays it out as its
+// SnbtPrinterTagVisitor does: each tag here is what vanilla gave for the same text (CLX-231).
+import std.nbt.{Tag, parse_snbt}
+
+fn show(text: String) -> String {
+    return match parse_snbt(text) {
+        ok(t) => "{t}",
+        err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    // Integers: kinds, signedness, hex and binary, `_` between digits.
+    println("{show("0xFFub")} {show("-0x80sb")} {show("0x7Fb")} {show("0b101")} {show("0b")} {show("0b1b")}")
+    // out: -1b -128b 2043 5 0b 1b
+    println("{show("1_000")} {show("255ub")} {show("4294967295ui")} {show("1sb")} {show("1us")} {show("0xFFFFFFFF")} {show("-0")}")
+    // out: 1000 -1b -1 1b 1s -1 0
+    // Floats and doubles, rounded once from the text, and -0.0 read as 0.0.
+    println("{show("1.")} {show(".5")} {show("+1.5e+2")} {show("1E2D")} {show("00.5")} {show("01f")} {show("1e-400")} {show("-0.0")}")
+    // out: 1.0d 0.5d 150.0d 100.0d 0.5d 1.0f 0.0d 0.0d
+    println("{show("1.00000005960464477539062501f")} {show("3.4028235E38f")} {show("1.4E-45f")} {show("16777217f")}")
+    // out: 1.0000001f 3.4028235E38f 1.4E-45f 1.6777216E7f
+    // White space between a number's parts, though not inside its digits.
+    println("{show("1 .5")} {show("0x1F b")} {show("- 0x1sb")} {show("1.5 e +5 f")} {show("0 b 1")}")
+    // out: 1.5d 31b -1b 150000.0f 1
+    // Strings: either quote, escapes, surrogate pairs, and bare words.
+    println("{show("'say \"hi\"'")} {show("\"\\u00e9\\x41\\U0001F600\"")} {show("\"\\uD83D\\uDE00\"")} {show("\"\\s\\t\"")} {show("\"\\ n\"")}")
+    // out: 'say "hi"' "éA😀" "😀" " \t" "\n"
+    println("{show("abc")} {show("a-b.c+d")} {show("TRUE")} {show("False")} {show("truey")} {show("Infinity")}")
+    // out: "abc" "a-b.c+d" 1b 0b "truey" "Infinity"
+    // bool() and uuid().
+    println("{show("bool(2.5)")} {show("bool (0)")} {show("bool(1,)")} {show("uuid(\"1-2-3-4-5\")")}")
+    // out: 1b 0b 1b [I;1,131075,262144,5]
+    println(show("uuid(\"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\")"))    // out: [I;-132296786,2112623056,-1486552928,-920753162]
+    // Arrays, lists of several kinds, compounds, trailing commas.
+    println("{show("[B;-1,0x7f,1ub]")} {show("[L;1b,2s,3]")} {show("[ I ; 1 , 2 , ]")} {show("[I]")} {show("[1,2b]")} {show("[a,b]")}")
+    // out: [B;-1B,127B,1B] [L;1L,2L,3L] [I;1,2] ["I"] [1,2b] ["a","b"]
+    println("{show("\{a:1,a:2\}")} {show("\{1:1,.a:2,-b:3\}")} {show("\{ a : 1 , b:2 , \}")} {show("[\{a:1\},\{\}]")}")
+    // out: {a:2} {"-b":3,.a:2,"1":1} {a:1,b:2} [{a:1},{}]
+    // What vanilla rejects.
+    println(show("1a"))    // out: error: line 1, column 2: `a` after the tag, where the text should end
+    println(show("00"))    // out: error: line 1, column 1: an integer can't start with 0, unless it's 0
+    println(show("128b"))    // out: error: line 1, column 1: 128b is past the range of a byte
+    println(show("-0x1"))    // out: error: line 1, column 1: -0x1 is negative, which a hex or binary integer can only be with `s` before its kind's letter
+    println(show("-1ub"))    // out: error: line 1, column 1: -1ub is negative, and unsigned
+    println(show("1e39f"))    // out: error: line 1, column 1: 1e39f is too big for a float
+    println(show("[B;1L]"))    // out: error: line 1, column 4: a long in an array of bytes
+    println(show("[I;1.5]"))    // out: error: line 1, column 4: a float or a double in an array, which holds integers
+    println(show("\{\"\":1\}"))    // out: error: line 1, column 2: an empty key, which SNBT doesn't take
+    println(show("\"\\q\""))    // out: error: line 1, column 2: `\` then `q` isn't an escape SNBT has
+    println(show("\"\\u12\""))    // out: error: line 1, column 2: `\u` takes 4 hexadecimal digits
+    println(show("[1 2]"))    // out: error: line 1, column 4: `2` in a list, where `,` or `]` should be
+    println(show("\{a:1"))    // out: error: line 1, column 5: the end in a compound, where `,` or `}` should be
+    println(show("bool(\"x\")"))    // out: error: line 1, column 1: bool() takes a number or a boolean
+    println(show("foo(1)"))    // out: error: line 1, column 1: there's no `foo` of 1 arguments: SNBT has bool(x) and uuid(s)
+    println(show("1_"))    // out: error: line 1, column 3: the end after `_`, where a digit should be
+    println(show("minecraft:stone"))    // out: error: line 1, column 10: `:` after the tag, where the text should end
+    println(show("\u{a0}1"))    // out: error: line 1, column 1: U+00A0, where a tag should be
+    println(show("[\n1,\n2 3]"))    // out: error: line 3, column 3: `3` in a list, where `,` or `]` should be
+
+    // Laid out: four spaces a level, a structure's keys in vanilla's order, and its blocks,
+    // palette and entities one to a line.
+    let s = parse_snbt("\{size:[1,2,3],data:[\{state:\"b\",pos:[1,0,0],nbt:\{id:\"x\",Items:[\{Slot:0b\}]\}\}],zz:[1,2],e:[I;1,2],h:\{\},DataVersion:1\}")!
+    println(s.to_pretty_snbt())
+    // out: {
+    // out:     DataVersion: 1,
+    // out:     size: [1, 2, 3],
+    // out:     data: [
+    // out:         {pos: [1, 0, 0], state: "b", nbt: {Items: [{Slot: 0b}], id: "x"}}
+    // out:     ],
+    // out:     e: [I; 1, 2],
+    // out:     h: {},
+    // out:     zz: [
+    // out:         1,
+    // out:         2
+    // out:     ]
+    // out: }
+    let k = parse_snbt("\{\"a b\":1,\"9x\":2,\"-a\":3,\"é\":4,'x\"y':[B;]\}")!
+    println(k.to_pretty_snbt())
+    // out: {
+    // out:     -a: 3,
+    // out:     9x: 2,
+    // out:     "a b": 1,
+    // out:     'x"y': [B;],
+    // out:     "é": 4
+    // out: }
+    println(Tag.List([]).to_pretty_snbt())    // out: []
+}

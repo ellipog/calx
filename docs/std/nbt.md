@@ -1,11 +1,11 @@
 ---
 title: std.nbt
-description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, and SNBT as Tag.toString shows it.
+description: Minecraft's NBT read and written as vanilla 26.3's NbtIo does it, files gzipped, zlib-compressed or plain, tags changed in place, and SNBT read, shown and laid out as vanilla does.
 ---
 
 # `std.nbt`
 
-NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures, and each chunk of a region file. `std.nbt` reads and writes it as vanilla 26.3's `NbtIo` does, and shows it as SNBT as vanilla's `Tag.toString` does. A compound keeps its keys in the order they were read or put, as a Python dict does, so a file read and written back holds the same NBT, byte for byte.
+NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures, and each chunk of a region file. `std.nbt` reads and writes it as vanilla 26.3's `NbtIo` does, and reads and writes [SNBT](#snbt), its text form, as vanilla's `TagParser`, `Tag.toString` and pretty printer do. A compound keeps its keys in the order they were read or put, as a Python dict does, so a file read and written back holds the same NBT, byte for byte.
 
 ```calx
 import std.nbt.{Compression, NbtFile, Tag}
@@ -84,6 +84,54 @@ A `match` reads a tag where it is, and a [`match mut` or `if let ... = mut`](../
 | `t.remove(key: String) -> Tag?` | Takes the tag at `key` out, if `t` is a compound that has one |
 | `t.push(value: own Tag) -> bool` | Adds `value` at the end if `t` is a list, and says whether it is |
 | `t.to_snbt() -> String`, `"{t}"` | The tag as SNBT, as vanilla's `Tag.toString` writes it |
+| `t.to_pretty_snbt() -> String` | The tag as SNBT laid out to be read, as vanilla's `SnbtPrinterTagVisitor` writes it ([SNBT](#snbt)) |
+
+## SNBT
+
+SNBT is NBT as text, as commands, datapacks and structures' `.snbt` files hold it. `parse_snbt` reads it as vanilla 26.3's `TagParser` does, and a tag is written back compact or laid out:
+
+```calx
+import std.nbt.{parse_snbt}
+
+fn main() {
+    let t = parse_snbt("\{Count:1b,id:\"minecraft:stone\",Pos:[1.5d,64.0d,-3.0d],flags:[B;1,0x7f],on:true\}")!
+    println("{t}")
+    // out: {Count:1b,Pos:[1.5d,64.0d,-3.0d],flags:[B;1B,127B],id:"minecraft:stone",on:1b}
+    println(t.to_pretty_snbt())
+    // out: {
+    // out:     Count: 1b,
+    // out:     Pos: [
+    // out:         1.5d,
+    // out:         64.0d,
+    // out:         -3.0d
+    // out:     ],
+    // out:     flags: [B; 1B, 127B],
+    // out:     id: "minecraft:stone",
+    // out:     on: 1b
+    // out: }
+    match parse_snbt("[1, 2") {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),    // out: line 1, column 6: the end in a list, where `,` or `]` should be
+    }
+}
+```
+
+| Item | Gives |
+| --- | --- |
+| `parse_snbt(text: String) -> Tag ! SnbtError` | The tag in `text`, with white space around it allowed |
+| `t.to_snbt()`, `"{t}"` | The tag compact, as vanilla's `Tag.toString` writes it, with a compound's keys in Java's order |
+| `t.to_pretty_snbt()` | The tag laid out: four spaces a level and `key: value`. A structure's keys come in the order vanilla gives them, and its size, blocks, palette entries and entities go on one line each, as in vanilla's `.snbt` files |
+| `SnbtError` | Why the text isn't SNBT: `message`, and the `line` and `column` where it went wrong, both from 1 |
+
+What `parse_snbt` takes, as vanilla does:
+
+- Integers: `1` is an int, and `1b`, `1s`, `1i` and `1L` the other kinds, in either case. `u` or `s` before the letter makes it unsigned or signed, so `255ub` is -1b. Hex `0xFF` and binary `0b101` are unsigned unless they have `s`, so `0xFFFFFFFF` is -1, and a negative one needs it, as `-0x80sb`. `_` may go between digits, as `1_000`. A decimal integer can't start with 0, unless it's 0.
+- Floats and doubles: `1.5f` and `1.5d`, or `1.5`, `.5`, `1.` and `1e3` for doubles, rounded once from the text as Java does. One too big for its kind is an error, and -0.0 reads as 0.0.
+- White space between a number's parts, such as `1 .5` or `0x1F b`, though not inside its digits.
+- Strings in `"` or `'`, with the escapes `\\ \' \" \b \s \t \n \f \r`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`, and white space allowed between the `\` and its letter. A bare word of letters, digits and `_ - . +` that starts with a letter or `_` is a string too, and `true` and `false` in any case are 1b and 0b.
+- `bool(x)`, which is 1b if the number `x` isn't 0, and `uuid("...")`, the UUID's four ints, as Java's `UUID.fromString` reads it.
+- Arrays, `[B; 1, 2]`, whose integers take the array's kind unless they have a narrower one, lists of any kinds, and compounds, whose keys are quoted and not empty, or bare, and both may end with a comma.
+- White space anywhere between parts: what Java's `Character.isWhitespace` says, which isn't true of no-break spaces.
 
 ## Tags without a file
 
@@ -147,6 +195,19 @@ It differs from vanilla in three places:
 - A string holding half a surrogate pair reads as `?` in its place, as [`std.text.mutf8`](text-mutf8.md) decodes it, since a Calx `String` is UTF-8 and can't hold one. Java keeps it.
 - Gzip and zlib come from [`std.zlib`](zlib.md), which picks its own matches, so a compressed file isn't Java's bytes, though the NBT inside is. Either reads the other's.
 
+SNBT was checked against vanilla 26.3's `TagParser` and `SnbtPrinterTagVisitor` the same way:
+
+- On 855 texts written to probe each rule above, and 45,000 random ones, `parse_snbt` accepted and rejected the same ones, read the same tag, kind for kind, and wrote it compact and laid out as vanilla does.
+- On 160,000 random decimals, floats and doubles of up to 20 digits with exponents up to 40, it rounded each to the same value.
+- All 1,975 files, written compact and laid out, read back as the tags they were written from.
+
+`parse_snbt` differs from vanilla in four places:
+
+- `\N{name}`, a character by its Unicode name, is an error for now, where vanilla looks the name up.
+- Half a surrogate pair, such as `\uD800` on its own, reads as `?`, as a Calx `String` can't hold it.
+- Lists and compounds nest at most 512 deep, as in NBT. Vanilla's parser has no limit and slows down a lot on deep text.
+- Its errors are its own, a line and a column and what was found where, though it fails on the same text.
+
 Compound keys are [interned](../reference/strings.md#interned-strings): each is kept once, so a tree of many compounds with the same keys holds one copy of each, and reading one costs no allocation. The runtime keeps a bounded number of names, and a key past that limit is an ordinary copy.
 
 ## Speed
@@ -161,5 +222,15 @@ Times for 1,511 structure files from vanilla 26.3, 45 MB of NBT, on one P-core o
 | Show it as SNBT | 80 ms | 156 ms | 5,129 ms |
 
 On this benchmark std.nbt reads a little faster than vanilla, writes 3 times as fast, and is between 20 and 66 times as fast as nbtlib. Each tag takes 64 bytes, the size of its biggest kind, a compound's map, so a list of numbers takes more memory than an array of them does.
+
+SNBT, on the same files as SNBT, 30 MB of it written compact, and timed the same way:
+
+| | std.nbt | Vanilla's `TagParser` and `SnbtPrinterTagVisitor`, Java 25 | nbtlib 2.0.4, Python 3.14 |
+| --- | --- | --- | --- |
+| Read it compact | 219 ms | 3,310 ms | 22,245 ms |
+| Read it laid out | 387 ms | 5,154 ms | |
+| Lay it out | 106 ms | 891 ms | 6,154 ms |
+
+nbtlib's times are for its own SNBT: `parse_nbt` on what `serialize_tag(compact=True)` writes, and `serialize_tag(indent=4)`. On this benchmark std.nbt reads SNBT 13 to 15 times as fast as vanilla and 100 times as fast as nbtlib, and lays it out 8 times as fast as vanilla and 58 times as fast as nbtlib.
 
 `std.nbt` is written in Calx: [std/nbt.calx](../../std/nbt.calx).

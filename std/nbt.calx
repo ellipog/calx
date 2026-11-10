@@ -788,6 +788,16 @@ impl Tag {
         write_snbt(self, mut out)
         return out
     }
+
+    /// The tag as SNBT laid out to be read, as vanilla's `SnbtPrinterTagVisitor` writes it, and
+    /// so the `.snbt` files of structures: four spaces a level, `key: value`, and a compound's keys
+    /// in Java's order of strings. A structure's keys come in the order vanilla gives them, and
+    /// its blocks, palette and entities one to a line.
+    pub fn to_pretty_snbt(self) -> String {
+        var out = String()
+        write_pretty(self, AT_ROOT, 0, false, mut out)
+        return out
+    }
 }
 
 /// `{tag}` is the tag as SNBT, as `to_snbt` writes it.
@@ -977,4 +987,1080 @@ fn quote(s: String, out: mut String) {
 
 fn hex_digit(v: u8) -> rune {
     return rune(if v < 10 { v + 48 } else { v + 55 })
+}
+
+// --- SNBT laid out -------------------------------------------------------------------------------
+
+// Where a tag is, as far as the layout cares. Vanilla names places by paths, `{}` for a compound,
+// `[]` for a list and keys between, and lays out five of a structure's differently: `{}` itself,
+// `{}.size.[]`, and each of `{}.data.[].{}`, `{}.palette.[].{}` and `{}.entities.[].{}`.
+const AT_ROOT: u8 = 0
+const AT_OTHER: u8 = 1
+const AT_SIZE: u8 = 2
+const AT_DATA: u8 = 3
+const AT_PALETTE: u8 = 4
+const AT_ENTITIES: u8 = 5
+const AT_BLOCK: u8 = 6
+const AT_PALETTE_ENTRY: u8 = 7
+const AT_ENTITY: u8 = 8
+
+// `place` is where the tag is, and `flat` whether it goes on one line.
+fn write_pretty(tag: Tag, place: u8, level: usize, flat: bool, out: mut String) {
+    match tag {
+        List(items) => {
+            if items.is_empty() {
+                out.push_str("[]")
+                return
+            }
+            let one_line = flat or place == AT_SIZE
+            let inner = if place == AT_DATA { AT_BLOCK } else if place == AT_PALETTE { AT_PALETTE_ENTRY } else if place == AT_ENTITIES { AT_ENTITY } else { AT_OTHER }
+            out.push('[')
+            for i in 0..items.len() {
+                if i > 0 {
+                    out.push(',')
+                    if one_line {
+                        out.push(' ')
+                    }
+                }
+                if not one_line {
+                    out.push('\n')
+                    push_indent(level + 1, mut out)
+                }
+                write_pretty(items[i], inner, level + 1, one_line, mut out)
+            }
+            if not one_line {
+                out.push('\n')
+                push_indent(level, mut out)
+            }
+            out.push(']')
+        },
+        Compound(m) => {
+            if m.len() == 0 {
+                out.push_str("\{\}")
+                return
+            }
+            let keys = pretty_order(m, place)
+            let one_line = flat or place == AT_BLOCK or place == AT_PALETTE_ENTRY or place == AT_ENTITY
+            out.push('{')
+            var first = true
+            for k in keys {
+                if not first {
+                    out.push(',')
+                    if one_line {
+                        out.push(' ')
+                    }
+                }
+                first = false
+                if not one_line {
+                    out.push('\n')
+                    push_indent(level + 1, mut out)
+                }
+                if pretty_bare(k) {
+                    out.push_str(k)
+                } else {
+                    quote(k, mut out)
+                }
+                out.push_str(": ")
+                var inner = AT_OTHER
+                if place == AT_ROOT {
+                    inner = if k == "size" { AT_SIZE } else if k == "data" { AT_DATA } else if k == "palette" { AT_PALETTE } else if k == "entities" { AT_ENTITIES } else { AT_OTHER }
+                }
+                write_pretty(m[k], inner, level + 1, one_line, mut out)
+            }
+            if not one_line {
+                out.push('\n')
+                push_indent(level, mut out)
+            }
+            out.push('}')
+        },
+        ByteArray(v) => {
+            out.push_str("[B;")
+            for i in 0..v.len() {
+                out.push_str(if i == 0 { " " } else { ", " })
+                out.push_str("{v[i]}B")
+            }
+            out.push(']')
+        },
+        IntArray(v) => {
+            out.push_str("[I;")
+            for i in 0..v.len() {
+                out.push_str(if i == 0 { " " } else { ", " })
+                out.push_str("{v[i]}")
+            }
+            out.push(']')
+        },
+        LongArray(v) => {
+            out.push_str("[L;")
+            for i in 0..v.len() {
+                out.push_str(if i == 0 { " " } else { ", " })
+                out.push_str("{v[i]}L")
+            }
+            out.push(']')
+        },
+        _ => write_snbt(tag, mut out),
+    }
+}
+
+fn push_indent(level: usize, out: mut String) {
+    for _ in 0..level {
+        out.push_str("    ")
+    }
+}
+
+// A compound's keys in the order the layout writes them: a structure's own keys first, in the
+// order vanilla gives them, then the rest in Java's order.
+fn pretty_order(m: LinkedMap<String, Tag>, place: u8) -> List<String> {
+    var first = List<String>()
+    if place == AT_ROOT {
+        first = [String("DataVersion"), String("author"), String("size"), String("data"), String("entities"), String("palette"), String("palettes")]
+    } else if place == AT_BLOCK {
+        first = [String("pos"), String("state"), String("nbt")]
+    } else if place == AT_ENTITY {
+        first = [String("blockPos"), String("pos")]
+    }
+    var out = List<String>()
+    out.reserve(m.len())
+    for k in first {
+        if m.contains(k) {
+            out.push(k.copy())
+        }
+    }
+    let from = out.len()
+    var wide = false
+    for (k, _) in m {
+        if first.is_empty() or not first.contains(k) {
+            out.push(k.copy())
+            wide = wide or has_wide_rune(k)
+        }
+    }
+    if from == 0 {
+        if wide {
+            out.sort_by(|a, b| java_order(a, b))
+        } else {
+            out.sort()
+        }
+        return out
+    }
+    var rest = out[from..]
+    if wide {
+        rest.sort_by(|a, b| java_order(a, b))
+    } else {
+        rest.sort()
+    }
+    out.truncate(from)
+    out.extend(rest)
+    return out
+}
+
+// The layout leaves a key bare if it's letters, digits and `._+-`, whatever it starts with.
+fn pretty_bare(k: String) -> bool {
+    if k.is_empty() {
+        return false
+    }
+    for i in 0..k.len() {
+        if not bare_char(k.byte_at(i)) {
+            return false
+        }
+    }
+    return true
+}
+
+fn bare_char(c: u8) -> bool {
+    return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or (c >= b'0' and c <= b'9') or c == b'_' or c == b'-' or c == b'.' or c == b'+'
+}
+
+// --- SNBT parsing --------------------------------------------------------------------------------
+
+/// Why text isn't SNBT, and where.
+pub struct SnbtError {
+    pub message: String
+    /// The line, from 1.
+    pub line: usize
+    /// The rune on the line, from 1.
+    pub column: usize
+}
+
+impl Display for SnbtError {
+    fn show(self) {
+        print("line {self.line}, column {self.column}: {self.message}")
+    }
+}
+
+/// The tag in `text`, which is SNBT as vanilla 26.3's `TagParser` reads it in commands and
+/// `.snbt` files, with white space around it. That's numbers with their kind's letter, hex and
+/// binary integers, `_` between digits, strings quoted either way or bare, `true` and `false`,
+/// `bool(...)` and `uuid(...)`, arrays, lists of any kinds and compounds.
+pub fn parse_snbt(text: String) -> Tag ! SnbtError {
+    var at: usize = 0
+    var keys = new_keys()
+    let tag = try snbt_value(text, mut at, 0, mut keys)
+    skip_white(text, mut at)
+    if at < text.len() {
+        fail snbt_error(text, at, "{found(text, at)} after the tag, where the text should end")
+    }
+    return tag
+}
+
+fn snbt_error(t: String, at: usize, message: own String) -> SnbtError {
+    var line: usize = 1
+    var start: usize = 0
+    for i in 0..at {
+        if t.byte_at(i) == 10 {
+            line += 1
+            start = i + 1
+        }
+    }
+    var column: usize = 1
+    for i in start..at {
+        if (t.byte_at(i) & 0xC0) != 0x80 {
+            column += 1
+        }
+    }
+    return SnbtError { message: message, line: line, column: column }
+}
+
+// What's at byte `at`, for an error: the rune in backquotes, its number if it can't be seen,
+// such as a no-break space, or the end.
+fn found(t: String, at: usize) -> String {
+    if at >= t.len() {
+        return "the end"
+    }
+    let b = t.byte_at(at)
+    let n: usize = if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+    let s = t[at..at + n]
+    var r: u32 = if n == 1 { u32(b) } else if n == 2 { u32(b & 0x1F) } else if n == 3 { u32(b & 0x0F) } else { u32(b & 0x07) }
+    for i in 1..n {
+        r = (r << 6) | u32(t.byte_at(at + i) & 0x3F)
+    }
+    if r < 0x20 or (r >= 0x7F and r <= 0xA0) or r == 0xAD or (r >= 0x2000 and r <= 0x200F) or (r >= 0x2028 and r <= 0x202F) or (r >= 0x205F and r <= 0x2064) or r == 0x3000 or r == 0xFEFF {
+        return "U+{hex4(r)}"
+    }
+    return "`{s}`"
+}
+
+fn hex4(v: u32) -> String {
+    var out = String()
+    for i in 0u32..4 {
+        out.push(hex_digit(u8.wrap((v >> (12 - 4 * i)) & 15)))
+    }
+    return out
+}
+
+fn skip_white(t: String, at: mut usize) {
+    // Most bytes are printable ASCII, which isn't white space, and this much goes inline.
+    if at < t.len() {
+        let b = t.byte_at(at)
+        if b > 32 and b < 0x80 {
+            return
+        }
+    }
+    skip_white_slow(t, mut at)
+}
+
+fn skip_white_slow(t: String, at: mut usize) {
+    while at < t.len() {
+        let b = t.byte_at(at)
+        if b == 32 or (b >= 9 and b <= 13) or (b >= 28 and b <= 31) {
+            at += 1
+            continue
+        }
+        if b < 0x80 {
+            return
+        }
+        let n = white_len(t, at)
+        if n == 0 {
+            return
+        }
+        at += n
+    }
+}
+
+// How many bytes the white space at `at` takes, or 0 if there's none: Java's
+// `Character.isWhitespace`, which is what vanilla skips, and which isn't true of no-break spaces.
+fn white_len(t: String, at: usize) -> usize {
+    let b = t.byte_at(at)
+    if b == 32 or (b >= 9 and b <= 13) or (b >= 28 and b <= 31) {
+        return 1
+    }
+    if b < 0xE1 or b > 0xE3 or t.len() - at < 3 {
+        return 0
+    }
+    let b1 = t.byte_at(at + 1)
+    let b2 = t.byte_at(at + 2)
+    if b == 0xE1 {
+        return if b1 == 0x9A and b2 == 0x80 { 3 } else { 0 }
+    }
+    if b == 0xE3 {
+        return if b1 == 0x80 and b2 == 0x80 { 3 } else { 0 }
+    }
+    // U+2000 to U+200A but U+2007, a figure space that doesn't break, then U+2028, U+2029 and U+205F.
+    if b1 == 0x80 {
+        return if (b2 >= 0x80 and b2 <= 0x8A and b2 != 0x87) or b2 == 0xA8 or b2 == 0xA9 { 3 } else { 0 }
+    }
+    return if b1 == 0x81 and b2 == 0x9F { 3 } else { 0 }
+}
+
+// Where the white space at `at` ends.
+fn past_white(t: String, at: usize) -> usize {
+    var k = at
+    skip_white(t, mut k)
+    return k
+}
+
+fn is_digit(c: u8) -> bool {
+    return c >= b'0' and c <= b'9'
+}
+
+fn is_letter(c: u8) -> bool {
+    return (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z')
+}
+
+// Whether the bytes from `from` to `to` are `word`, in any case.
+fn is_word(t: String, from: usize, to: usize, word: str) -> bool {
+    if to - from != word.len() {
+        return false
+    }
+    for i in 0..word.len() {
+        var c = t.byte_at(from + i)
+        if c >= b'A' and c <= b'Z' {
+            c += 32
+        }
+        if c != word.byte_at(i) {
+            return false
+        }
+    }
+    return true
+}
+
+// A tag that's `depth` lists, compounds and operations in.
+fn snbt_value(t: String, at: mut usize, depth: usize, keys: mut List<String>) -> Tag ! SnbtError {
+    skip_white(t, mut at)
+    if at >= t.len() {
+        fail snbt_error(t, at, "the end, where a tag should be")
+    }
+    let c = t.byte_at(at)
+    if c == b'{' or c == b'[' {
+        if depth >= MAX_DEPTH {
+            fail snbt_error(t, at, "lists and compounds nest more than 512 deep")
+        }
+        if c == b'[' {
+            return try snbt_list(t, mut at, depth + 1, mut keys)
+        }
+        return Tag.Compound(try snbt_compound(t, mut at, depth + 1, mut keys))
+    }
+    if c == b'"' or c == b'\'' {
+        return Tag.String(try snbt_quoted(t, mut at))
+    }
+    if is_digit(c) or c == b'-' or c == b'+' or c == b'.' {
+        return try snbt_number(t, mut at, 32)
+    }
+    if not is_letter(c) and c != b'_' {
+        fail snbt_error(t, at, "{found(t, at)}, where a tag should be")
+    }
+    // A bare word: a string, `true` or `false` in any case, or an operation's name.
+    let start = at
+    while at < t.len() and bare_char(t.byte_at(at)) {
+        at += 1
+    }
+    let end = at
+    skip_white(t, mut at)
+    if at < t.len() and t.byte_at(at) == b'(' {
+        return try snbt_operation(t, mut at, t[start..end], start, depth, mut keys)
+    }
+    at = end
+    if is_word(t, start, end, "true") {
+        return Tag.Byte(1)
+    }
+    if is_word(t, start, end, "false") {
+        return Tag.Byte(0)
+    }
+    return Tag.String(t[start..end])
+}
+
+// A list, or an array if a kind's letter and `;` start it.
+fn snbt_list(t: String, at: mut usize, depth: usize, keys: mut List<String>) -> Tag ! SnbtError {
+    at += 1
+    skip_white(t, mut at)
+    if at < t.len() {
+        let k = t.byte_at(at)
+        if k == b'B' or k == b'I' or k == b'L' {
+            let after = past_white(t, at + 1)
+            if after < t.len() and t.byte_at(after) == b';' {
+                at = after + 1
+                return try snbt_array(t, mut at, k)
+            }
+        }
+    }
+    var items = List<Tag>()
+    if at < t.len() and t.byte_at(at) == b']' {
+        at += 1
+        return Tag.List(items)
+    }
+    loop {
+        items.push(try snbt_value(t, mut at, depth, mut keys))
+        if try snbt_next(t, mut at, b']', "a list") {
+            break
+        }
+    }
+    return Tag.List(items)
+}
+
+// After an element: true at the closing bracket, which may follow a last comma, and false at a
+// comma with more after it.
+fn snbt_next(t: String, at: mut usize, close: u8, what: String) -> bool ! SnbtError {
+    skip_white(t, mut at)
+    if at < t.len() and t.byte_at(at) == b',' {
+        at += 1
+        skip_white(t, mut at)
+        if at < t.len() and t.byte_at(at) == close {
+            at += 1
+            return true
+        }
+        return false
+    }
+    if at < t.len() and t.byte_at(at) == close {
+        at += 1
+        return true
+    }
+    fail snbt_error(t, at, "{found(t, at)} in {what}, where `,` or `{rune(close)}` should be")
+}
+
+// An array's integers, after its `;`. One without a letter takes the array's kind, and one with
+// its letter may be of a narrower kind.
+fn snbt_array(t: String, at: mut usize, kind: u8) -> Tag ! SnbtError {
+    let bits: u32 = if kind == b'B' { 8 } else if kind == b'I' { 32 } else { 64 }
+    var bytes = List<i8>()
+    var ints = List<i32>()
+    var longs = List<i64>()
+    skip_white(t, mut at)
+    if at < t.len() and t.byte_at(at) == b']' {
+        at += 1
+    } else {
+        loop {
+            skip_white(t, mut at)
+            let el_at = at
+            if at >= t.len() or not (is_digit(t.byte_at(at)) or t.byte_at(at) == b'-' or t.byte_at(at) == b'+' or t.byte_at(at) == b'.') {
+                fail snbt_error(t, at, "{found(t, at)} in an array, where an integer should be")
+            }
+            let x: i64 = match try snbt_number(t, mut at, bits) {
+                Byte(v) => i64(v),
+                Short(v) => if bits >= 16 { i64(v) } else { fail snbt_error(t, el_at, "a short in an array of bytes") },
+                Int(v) => if bits >= 32 { i64(v) } else { fail snbt_error(t, el_at, "an int in an array of bytes") },
+                Long(v) => if bits == 64 { v } else { fail snbt_error(t, el_at, "a long in an array of {array_of(bits)}") },
+                _ => fail snbt_error(t, el_at, "a float or a double in an array, which holds integers"),
+            }
+            if bits == 8 {
+                bytes.push(i8.wrap(x))
+            } else if bits == 32 {
+                ints.push(i32.wrap(x))
+            } else {
+                longs.push(x)
+            }
+            if try snbt_next(t, mut at, b']', "an array") {
+                break
+            }
+        }
+    }
+    return if bits == 8 { Tag.ByteArray(bytes) } else if bits == 32 { Tag.IntArray(ints) } else { Tag.LongArray(longs) }
+}
+
+fn array_of(bits: u32) -> str {
+    return if bits == 8 { "bytes" } else { "ints" }
+}
+
+fn snbt_compound(t: String, at: mut usize, depth: usize, keys: mut List<String>) -> LinkedMap<String, Tag> ! SnbtError {
+    at += 1
+    var m = LinkedMap<String, Tag>()
+    skip_white(t, mut at)
+    if at < t.len() and t.byte_at(at) == b'}' {
+        at += 1
+        return m
+    }
+    loop {
+        skip_white(t, mut at)
+        let key = try snbt_key(t, mut at, mut keys)
+        skip_white(t, mut at)
+        if at >= t.len() or t.byte_at(at) != b':' {
+            fail snbt_error(t, at, "{found(t, at)} after a key, where `:` should be")
+        }
+        at += 1
+        let value = try snbt_value(t, mut at, depth, mut keys)
+        m.insert(key, value)
+        if try snbt_next(t, mut at, b'}', "a compound") {
+            break
+        }
+    }
+    return m
+}
+
+// A key: quoted and not empty, or bare, letters, digits and `._+-` in any order. A key with no
+// escapes is interned, as the binary reader's are.
+fn snbt_key(t: String, at: mut usize, keys: mut List<String>) -> String ! SnbtError {
+    let start = at
+    if at < t.len() and (t.byte_at(at) == b'"' or t.byte_at(at) == b'\'') {
+        let q = t.byte_at(at)
+        var end = at + 1
+        while end < t.len() and t.byte_at(end) != q and t.byte_at(end) != b'\\' {
+            end += 1
+        }
+        if end < t.len() and t.byte_at(end) == q and end > at + 1 {
+            at = end + 1
+            return intern_key(t, start + 1, end, mut keys)
+        }
+        let k = try snbt_quoted(t, mut at)
+        if k.is_empty() {
+            fail snbt_error(t, start, "an empty key, which SNBT doesn't take")
+        }
+        return k
+    }
+    while at < t.len() and bare_char(t.byte_at(at)) {
+        at += 1
+    }
+    if at == start {
+        fail snbt_error(t, at, "{found(t, at)}, where a key should be")
+    }
+    return intern_key(t, start, at, mut keys)
+}
+
+// The text from `from` to `to`, interned, through the same 256 places the binary reader keeps.
+fn intern_key(t: String, from: usize, to: usize, keys: mut List<String>) -> String {
+    let n = to - from
+    if n > 64 {
+        return t[from..to]
+    }
+    var h: u32 = 2166136261
+    for i in from..to {
+        h = (h ^ u32(t.byte_at(i))).wrapping_mul(16777619)
+    }
+    let slot = usize(h >> 24)
+    if keys[slot].len() == n {
+        var same = true
+        for i in 0..n {
+            if keys[slot].byte_at(i) != t.byte_at(from + i) {
+                same = false
+                break
+            }
+        }
+        if same {
+            return keys[slot].copy()
+        }
+    }
+    let k = t[from..to].interned()
+    keys[slot] = k.copy()
+    return k
+}
+
+// A string in quotes, `"` or `'`, with its escapes. `\u` gives a UTF-16 unit, as Java's strings
+// hold, so two make a rune past U+FFFF, and one without its pair becomes `?`, as the binary
+// reader makes it.
+fn snbt_quoted(t: String, at: mut usize) -> String ! SnbtError {
+    let open = at
+    let q = t.byte_at(at)
+    at += 1
+    // Most strings have no escapes, and are their bytes.
+    var end = at
+    while end < t.len() and t.byte_at(end) != q and t.byte_at(end) != b'\\' {
+        end += 1
+    }
+    if end < t.len() and t.byte_at(end) == q {
+        let s = t[at..end]
+        at = end + 1
+        return s
+    }
+    var out = String()
+    var high: u32 = 0
+    var from = at
+    loop {
+        if at >= t.len() {
+            fail snbt_error(t, open, "a string that doesn't end")
+        }
+        let c = t.byte_at(at)
+        if c != q and c != b'\\' {
+            at += 1
+            continue
+        }
+        if at > from {
+            if high != 0 {
+                out.push('?')
+                high = 0
+            }
+            out.push_str(t[from..at])
+        }
+        at += 1
+        if c == q {
+            break
+        }
+        let esc = at - 1
+        // Vanilla takes white space between `\` and the escape's letter.
+        skip_white(t, mut at)
+        if at >= t.len() {
+            fail snbt_error(t, open, "a string that doesn't end")
+        }
+        let e = t.byte_at(at)
+        at += 1
+        if e == b'\\' or e == b'\'' or e == b'"' {
+            push_unit(mut out, mut high, u32(e))
+        } else if e == b'b' {
+            push_unit(mut out, mut high, 8)
+        } else if e == b's' {
+            push_unit(mut out, mut high, 32)
+        } else if e == b't' {
+            push_unit(mut out, mut high, 9)
+        } else if e == b'n' {
+            push_unit(mut out, mut high, 10)
+        } else if e == b'f' {
+            push_unit(mut out, mut high, 12)
+        } else if e == b'r' {
+            push_unit(mut out, mut high, 13)
+        } else if e == b'x' or e == b'u' or e == b'U' {
+            let n: usize = if e == b'x' { 2 } else if e == b'u' { 4 } else { 8 }
+            var v: u32 = 0
+            for i in 0..n {
+                let d = if at + i < t.len() { digit_value(t.byte_at(at + i)) } else { 99 }
+                if d >= 16 {
+                    fail snbt_error(t, esc, "`\\{rune(e)}` takes {n} hexadecimal digits")
+                }
+                v = v * 16 + d
+            }
+            at += n
+            if v > 0x10FFFF {
+                fail snbt_error(t, esc, "U+{t[at - n..at]} is past the last Unicode character")
+            }
+            if v >= 0x10000 {
+                if high != 0 {
+                    out.push('?')
+                    high = 0
+                }
+                out.push(rune.try_from(v)!)
+            } else {
+                push_unit(mut out, mut high, v)
+            }
+        } else if e == b'N' {
+            fail snbt_error(t, esc, "`\\N\{...\}` names a character, which std.nbt can't look up yet")
+        } else {
+            fail snbt_error(t, esc, "`\\` then {found(t, at - 1)} isn't an escape SNBT has")
+        }
+        from = at
+    }
+    if high != 0 {
+        out.push('?')
+    }
+    return out
+}
+
+// Adds a UTF-16 unit to `out`, pairing surrogates, with `high` a high one waiting for its low one.
+fn push_unit(out: mut String, high: mut u32, u: u32) {
+    if u >= 0xDC00 and u <= 0xDFFF and high != 0 {
+        out.push(rune.try_from(0x10000 + ((high - 0xD800) << 10) + (u - 0xDC00))!)
+        high = 0
+        return
+    }
+    if high != 0 {
+        out.push('?')
+        high = 0
+    }
+    if u >= 0xD800 and u <= 0xDBFF {
+        high = u
+    } else if u >= 0xDC00 and u <= 0xDFFF {
+        out.push('?')
+    } else {
+        out.push(rune.try_from(u)!)
+    }
+}
+
+// `name(...)`, at the `(`: vanilla's `bool(x)`, which is 1b if `x` is a number other than 0, and
+// `uuid(s)`, the four ints of a UUID, as entities keep theirs.
+fn snbt_operation(t: String, at: mut usize, name: String, start: usize, depth: usize, keys: mut List<String>) -> Tag ! SnbtError {
+    if depth >= MAX_DEPTH {
+        fail snbt_error(t, start, "lists and compounds nest more than 512 deep")
+    }
+    at += 1
+    var args = List<Tag>()
+    skip_white(t, mut at)
+    if at < t.len() and t.byte_at(at) == b')' {
+        at += 1
+    } else {
+        loop {
+            args.push(try snbt_value(t, mut at, depth + 1, mut keys))
+            if try snbt_next(t, mut at, b')', "`{name}(...)`") {
+                break
+            }
+        }
+    }
+    if name == "bool" and args.len() == 1 {
+        let truth = match args[0] {
+            Byte(v) => v != 0,
+            Short(v) => v != 0,
+            Int(v) => v != 0,
+            Long(v) => v != 0,
+            Float(v) => v != 0.0,
+            Double(v) => v != 0.0,
+            _ => fail snbt_error(t, start, "bool() takes a number or a boolean"),
+        }
+        return Tag.Byte(if truth { 1 } else { 0 })
+    }
+    if name == "uuid" and args.len() == 1 {
+        if let String(s) = args[0] {
+            if let ints = java_uuid(s) {
+                return Tag.IntArray(ints)
+            }
+            fail snbt_error(t, start, "uuid() takes a UUID, and `{s}` isn't one")
+        }
+        fail snbt_error(t, start, "uuid() takes a string")
+    }
+    fail snbt_error(t, start, "there's no `{name}` of {args.len()} arguments: SNBT has bool(x) and uuid(s)")
+}
+
+// The UUID in `s` as Java's `UUID.fromString` reads it, as its four ints: at most 36 characters,
+// five fields of hexadecimal between `-`, each a Java long, cut to 32, 16, 16, 16 and 48 bits.
+fn java_uuid(s: String) -> List<i32>? {
+    if s.len() > 36 {
+        return none
+    }
+    var parts = List<u64>()
+    var from: usize = 0
+    for i in 0..s.len() + 1 {
+        if i == s.len() or s.byte_at(i) == b'-' {
+            match i64.parse_radix(s[from..i], 16) {
+                some(v) => parts.push(u64.wrap(v)),
+                none => return none,
+            }
+            from = i + 1
+        }
+    }
+    if parts.len() != 5 {
+        return none
+    }
+    let most = ((parts[0] & 0xFFFFFFFF) << 32) | ((parts[1] & 0xFFFF) << 16) | (parts[2] & 0xFFFF)
+    let least = ((parts[3] & 0xFFFF) << 48) | (parts[4] & 0xFFFFFFFFFFFF)
+    return some([i32.wrap(most >> 32), i32.wrap(most & 0xFFFFFFFF), i32.wrap(least >> 32), i32.wrap(least & 0xFFFFFFFF)])
+}
+
+// A number at `at`, which is a digit, a sign or `.`. An integer without its kind's letter is of
+// `bits`: an int, or an array's kind. Vanilla takes white space between a number's parts, as in
+// `- 1 . 5 e 3 f`, though not inside a run of digits.
+fn snbt_number(t: String, at: mut usize, bits: u32) -> Tag ! SnbtError {
+    let start = at
+    var neg = false
+    if t.byte_at(at) == b'-' or t.byte_at(at) == b'+' {
+        neg = t.byte_at(at) == b'-'
+        at = past_white(t, at + 1)
+    }
+    // A hex or binary integer, after its `0x` or `0b`.
+    if at < t.len() and t.byte_at(at) == b'0' {
+        let x = past_white(t, at + 1)
+        var radix: u32 = 0
+        var digits_at = x
+        if x < t.len() and (t.byte_at(x) == b'x' or t.byte_at(x) == b'X') {
+            radix = 16
+            digits_at = past_white(t, x + 1)
+        } else if x < t.len() and (t.byte_at(x) == b'b' or t.byte_at(x) == b'B') {
+            let d = past_white(t, x + 1)
+            if d < t.len() and (t.byte_at(d) == b'0' or t.byte_at(d) == b'1') {
+                radix = 2
+                digits_at = d
+            }
+        }
+        if radix != 0 {
+            at = digits_at
+            let n = try scan_digits(t, mut at, radix)
+            if n == 0 {
+                fail snbt_error(t, at, "{found(t, at)}, where a hexadecimal digit should be")
+            }
+            let mag = digits_value(t, digits_at, at, radix)
+            return try snbt_integer(t, mut at, start, neg, mag, radix, bits)
+        }
+    }
+    let w0 = at
+    let wn = try scan_digits(t, mut at, 10)
+    let w1 = at
+    // Most numbers are plain ints, ended by `,`, `]` or `}`, which fit an int at 9 digits.
+    if bits == 32 and wn > 0 and wn <= 9 and w1 - w0 == wn and at < t.len() and not (wn > 1 and t.byte_at(w0) == b'0') {
+        let c = t.byte_at(at)
+        if c == b',' or c == b']' or c == b'}' {
+            var v: i32 = 0
+            for i in w0..w1 {
+                v = v * 10 + i32(t.byte_at(i) - b'0')
+            }
+            return Tag.Int(if neg { -v } else { v })
+        }
+    }
+    var float = false
+    var f0 = at
+    var f1 = at
+    let dot = past_white(t, at)
+    if dot < t.len() and t.byte_at(dot) == b'.' {
+        at = dot + 1
+        let f = past_white(t, at)
+        if f < t.len() and is_digit(t.byte_at(f)) {
+            at = f
+            f0 = f
+            _ = try scan_digits(t, mut at, 10)
+        } else {
+            f0 = at
+        }
+        f1 = at
+        if wn == 0 and f1 == f0 {
+            fail snbt_error(t, at, "{found(t, at)}, where a digit should be")
+        }
+        float = true
+    } else if wn == 0 {
+        fail snbt_error(t, at, "{found(t, at)}, where a digit should be")
+    }
+    // An exponent, where digits follow the `e` and its sign.
+    var e0 = at
+    var e1 = at
+    var e_neg = false
+    let e = past_white(t, at)
+    if e < t.len() and (t.byte_at(e) == b'e' or t.byte_at(e) == b'E') {
+        var k = past_white(t, e + 1)
+        var sign_neg = false
+        if k < t.len() and (t.byte_at(k) == b'+' or t.byte_at(k) == b'-') {
+            sign_neg = t.byte_at(k) == b'-'
+            k = past_white(t, k + 1)
+        }
+        if k < t.len() and is_digit(t.byte_at(k)) {
+            at = k
+            e0 = k
+            _ = try scan_digits(t, mut at, 10)
+            e1 = at
+            e_neg = sign_neg
+            float = true
+        }
+    }
+    var single = false
+    let s = past_white(t, at)
+    if s < t.len() {
+        let c = t.byte_at(s)
+        if c == b'f' or c == b'F' {
+            single = true
+            float = true
+            at = s + 1
+        } else if c == b'd' or c == b'D' {
+            float = true
+            at = s + 1
+        }
+    }
+    if float {
+        if let v = fast_decimal(t, w0, w1, f0, f1, e0, e1, e_neg, single) {
+            if single {
+                let f = f32.nearest(v)
+                return Tag.Float(if f == 0.0 { 0.0 } else if neg { -f } else { f })
+            }
+            return Tag.Double(if v == 0.0 { 0.0 } else if neg { -v } else { v })
+        }
+        // The number's text as Java reads it, without `_` and white space.
+        var text = String()
+        text.reserve(w1 - w0 + f1 - f0 + e1 - e0 + 3)
+        push_digits(t, w0, w1, mut text)
+        text.push('.')
+        push_digits(t, f0, f1, mut text)
+        if e1 > e0 {
+            text.push('e')
+            text.push(if e_neg { '-' } else { '+' })
+            push_digits(t, e0, e1, mut text)
+        }
+        if single {
+            let v = f32.parse(text)!
+            if v.abs() == f32.INFINITY {
+                fail snbt_error(t, start, "{t[start..at]} is too big for a float")
+            }
+            // Vanilla's `FloatTag.valueOf` gives its zero for -0.0.
+            return Tag.Float(if v == 0.0 { 0.0 } else if neg { -v } else { v })
+        }
+        let v = f64.parse(text)!
+        if v.abs() == f64.INFINITY {
+            fail snbt_error(t, start, "{t[start..at]} is too big for a double")
+        }
+        return Tag.Double(if v == 0.0 { 0.0 } else if neg { -v } else { v })
+    }
+    if wn > 1 and t.byte_at(w0) == b'0' {
+        fail snbt_error(t, start, "an integer can't start with 0, unless it's 0")
+    }
+    return try snbt_integer(t, mut at, start, neg, digits_value(t, w0, w1, 10), 10, bits)
+}
+
+// Moves `at` past a run of digits in `radix`, with `_` between them that must have a digit on
+// each side, and says how many digits there are.
+fn scan_digits(t: String, at: mut usize, radix: u32) -> usize ! SnbtError {
+    var n: usize = 0
+    while at < t.len() {
+        let c = t.byte_at(at)
+        if digit_value(c) < radix {
+            n += 1
+            at += 1
+        } else if c == b'_' and n > 0 {
+            var k = at
+            while k < t.len() and t.byte_at(k) == b'_' {
+                k += 1
+            }
+            if k >= t.len() or digit_value(t.byte_at(k)) >= radix {
+                fail snbt_error(t, k, "{found(t, k)} after `_`, where a digit should be")
+            }
+            at = k
+        } else {
+            break
+        }
+    }
+    return n
+}
+
+// The run of digits from `from` to `to` without its `_`, which scan_digits has checked.
+fn push_digits(t: String, from: usize, to: usize, out: mut String) {
+    for i in from..to {
+        let c = t.byte_at(i)
+        if c != b'_' {
+            out.push(rune(c))
+        }
+    }
+}
+
+// The number from its runs of digits, the whole part, the fraction and the exponent, if one
+// rounding makes it, as Java's would: Clinger's fast path. That's when the digits, as an integer,
+// and a power of ten are both exact, so one multiply or divide rounds them correctly: below 2^53
+// and up to 10^22 for a double, below 2^24 and up to 10^10 for a float, in float arithmetic. A
+// float comes back as the double that holds it exactly. Most numbers people write are such.
+fn fast_decimal(t: String, w0: usize, w1: usize, f0: usize, f1: usize, e0: usize, e1: usize, e_neg: bool, single: bool) -> f64? {
+    var m: u64 = 0
+    var digits: u32 = 0
+    var scale: i32 = 0
+    for i in w0..f1 {
+        if i >= w1 and i < f0 {
+            continue
+        }
+        let c = t.byte_at(i)
+        if c == b'_' {
+            continue
+        }
+        if i >= f0 {
+            scale -= 1
+        }
+        if m == 0 and c == b'0' {
+            continue
+        }
+        m = m * 10 + u64(c - b'0')
+        digits += 1
+        if digits > 15 {
+            return none
+        }
+    }
+    if e1 - e0 > 4 {
+        return none
+    }
+    var e: i32 = 0
+    for i in e0..e1 {
+        let c = t.byte_at(i)
+        if c != b'_' {
+            e = e * 10 + i32(c - b'0')
+        }
+    }
+    let k = scale + (if e_neg { -e } else { e })
+    if m == 0 {
+        return some(0.0)
+    }
+    if single {
+        if m >= 16777216 or k < -10 or k > 10 {
+            return none
+        }
+        var p: f32 = 1.0
+        for _ in 0..(if k < 0 { -k } else { k }) {
+            p *= 10.0
+        }
+        let x = f32.nearest(m)
+        return some(f64(if k < 0 { x / p } else { x * p }))
+    }
+    if k < -22 or k > 22 {
+        return none
+    }
+    var p: f64 = 1.0
+    for _ in 0..(if k < 0 { -k } else { k }) {
+        p *= 10.0
+    }
+    let x = f64.nearest(m)
+    return some(if k < 0 { x / p } else { x * p })
+}
+
+// The value of the digits from `from` to `to`, or none past a u64.
+fn digits_value(t: String, from: usize, to: usize, radix: u32) -> u64? {
+    var v: u64 = 0
+    let r = u64(radix)
+    for i in from..to {
+        let c = t.byte_at(i)
+        if c == b'_' {
+            continue
+        }
+        let d = u64(digit_value(c))
+        if v > (0xFFFFFFFFFFFFFFFFu64 - d) / r {
+            return none
+        }
+        v = v * r + d
+    }
+    return some(v)
+}
+
+fn digit_value(c: u8) -> u32 {
+    if c >= b'0' and c <= b'9' {
+        return u32(c - b'0')
+    }
+    if c >= b'a' and c <= b'f' {
+        return u32(c - b'a') + 10
+    }
+    if c >= b'A' and c <= b'F' {
+        return u32(c - b'A') + 10
+    }
+    return 99
+}
+
+// The kind a letter names, in bits, or 0 if it names none.
+fn kind_bits(c: u8) -> u32 {
+    return if c == b'b' or c == b'B' { 8 } else if c == b's' or c == b'S' { 16 } else if c == b'i' or c == b'I' { 32 } else if c == b'l' or c == b'L' { 64 } else { 0 }
+}
+
+// An integer's letters and range. `s` or `u` before the kind's letter makes it signed or
+// unsigned; a decimal one is signed and a hex or binary one unsigned without. An unsigned one
+// takes the kind's bits as they are, so `255ub` is -1b.
+fn snbt_integer(t: String, at: mut usize, start: usize, neg: bool, magnitude: u64?, radix: u32, default_bits: u32) -> Tag ! SnbtError {
+    var sign: u8 = 0
+    var bits = default_bits
+    let s = past_white(t, at)
+    if s < t.len() {
+        let c = t.byte_at(s)
+        let k = past_white(t, s + 1)
+        let next = if k < t.len() { kind_bits(t.byte_at(k)) } else { 0 }
+        if (c == b's' or c == b'S' or c == b'u' or c == b'U') and next > 0 {
+            sign = if c == b'u' or c == b'U' { b'u' } else { b's' }
+            bits = next
+            at = k + 1
+        } else if kind_bits(c) > 0 {
+            bits = kind_bits(c)
+            at = s + 1
+        }
+    }
+    let mag = match magnitude {
+        some(v) => v,
+        none => fail snbt_error(t, start, "{t[start..at]} is past the range of a long"),
+    }
+    if sign == b'u' or (sign == 0 and radix != 10) {
+        if neg {
+            fail snbt_error(t, start, if sign == b'u' { "{t[start..at]} is negative, and unsigned" } else { "{t[start..at]} is negative, which a hex or binary integer can only be with `s` before its kind's letter" })
+        }
+        if bits < 64 and mag >> bits != 0 {
+            fail snbt_error(t, start, "{t[start..at]} is past the range of {kind_name_of(bits)}")
+        }
+        return int_tag(i64.wrap(mag), bits)
+    }
+    let limit = 1u64 << (bits - 1)
+    if (neg and mag > limit) or (not neg and mag >= limit) {
+        fail snbt_error(t, start, "{t[start..at]} is past the range of {kind_name_of(bits)}")
+    }
+    let v = if neg { 0i64.wrapping_sub(i64.wrap(mag)) } else { i64.wrap(mag) }
+    return int_tag(v, bits)
+}
+
+fn kind_name_of(bits: u32) -> str {
+    return if bits == 8 { "a byte" } else if bits == 16 { "a short" } else if bits == 32 { "an int" } else { "a long" }
+}
+
+fn int_tag(v: i64, bits: u32) -> Tag {
+    return if bits == 8 { Tag.Byte(i8.wrap(v)) } else if bits == 16 { Tag.Short(i16.wrap(v)) } else if bits == 32 { Tag.Int(i32.wrap(v)) } else { Tag.Long(v) }
 }
