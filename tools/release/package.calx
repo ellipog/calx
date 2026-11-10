@@ -84,7 +84,8 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
 }
 
 // Every file under the folder `dir`, as `prefix/...`, in sorted order: the runtime's C and its
-// headers, and std's Calx and the tables it embeds.
+// headers, std's Calx, the tables and the font it embeds, and their notices. All of them, so a
+// file std starts to embed is never one the release leaves out.
 fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: String) ! String {
     let names = match list(dir) {
         ok(n) => n,
@@ -94,7 +95,7 @@ fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: Strin
         let path = "{dir}/{n}"
         if is_dir(path) {
             try add_tree(mut files, path, "{prefix}/{n}")
-        } else if n.ends_with(".c") or n.ends_with(".h") or n.ends_with(".calx") or n.ends_with(".bin") {
+        } else {
             files.push(("{prefix}/{n}", try load(path), 0o644))
         }
     }
