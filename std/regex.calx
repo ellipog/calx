@@ -1320,8 +1320,10 @@ fn add_thread(prog: Prog, p: mut Pike, w: usize, pc0: u32, at: usize, c: Around,
 }
 
 // The leftmost-first match from `from` up to `limit`, with its first `slots` slots in `p.best`,
-// or false if there's none. Anchored, it must start at `from`.
-fn pike_search(prog: Prog, p: mut Pike, text: String, from: usize, limit: usize, anchored: bool, slots: usize) -> bool {
+// or false if there's none. Anchored, it must start at `from`. `whole`, it must end at `limit`:
+// a thread that matches sooner just ends, so the most preferred way that reaches `limit` is the
+// one taken, as with `\A(?:p)\z`.
+fn pike_search(prog: Prog, p: mut Pike, text: String, from: usize, limit: usize, anchored: bool, whole: bool, slots: usize) -> bool {
     var now: usize = 0
     p.lens[0] = 0
     p.lens[1] = 0
@@ -1361,6 +1363,10 @@ fn pike_search(prog: Prog, p: mut Pike, text: String, from: usize, limit: usize,
             let ip = usize(pc)
             let op = prog.op[ip]
             if op == OP_MATCH {
+                if whole and at != limit {
+                    i += 1
+                    continue
+                }
                 let base = (off + ip) * slots
                 for k in 0..slots {
                     p.best[k] = p.caps[base + k]
@@ -2406,6 +2412,11 @@ pub struct Regex {
     before_ends: List<u8>
     // Which byte of `literal` is likely rarest, for looking for it.
     lit_rare: usize
+    // The DFA for `(?:pattern)\z`, which `full_match` reads from the start: with the match only at
+    // the end, no way through is cut for one that matched sooner. It's made the first time it's
+    // needed, `whole_made` says whether it has been.
+    whole: Dfa
+    whole_made: bool
     // For `Regex.python`: Python's matcher, which every search then runs instead.
     python_re: bool
     py: sre.Program
@@ -2469,7 +2480,7 @@ impl Regex {
                 lit_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
             }
         }
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, python_re: false, py: sre.empty() }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, whole: new_dfa(Node.Empty, false), whole_made: false, python_re: false, py: sre.empty() }
     }
 
     /// The pattern compiled as Python's `re.compile` compiles it, or the error it raises, with
@@ -2489,7 +2500,7 @@ impl Regex {
         let pike = new_pike(prog)
         let groups = py.group_count()
         let names = py.group_names()
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, python_re: true, py: py }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, whole: new_dfa(Node.Empty, false), whole_made: true, python_re: true, py: py }
     }
 
     /// The pattern as it was written.
@@ -2535,7 +2546,7 @@ impl Regex {
                 return self.span_at(text, 0) != none
             }
         }
-        return pike_search(self.prog, mut self.pike, text, 0, text.len(), false, 2)
+        return pike_search(self.prog, mut self.pike, text, 0, text.len(), false, false, 2)
     }
 
     /// The first match in `text`, as Python's `re.search` finds it.
@@ -2694,7 +2705,7 @@ impl Regex {
                 return some((start, end))
             }
         }
-        if pike_search(self.prog, mut self.pike, text, from, text.len(), false, 2) {
+        if pike_search(self.prog, mut self.pike, text, from, text.len(), false, false, 2) {
             return some((usize.wrap(self.pike.best[0]), usize.wrap(self.pike.best[1])))
         }
         return none
@@ -2805,7 +2816,7 @@ impl Regex {
             return some(Captures { groups: groups, names: self.names.copy() })
         }
         let slots = self.prog.slots
-        if pike_search(self.prog, mut self.pike, text, s, e, true, slots) {
+        if pike_search(self.prog, mut self.pike, text, s, e, true, false, slots) {
             return some(self.groups_of(text))
         }
         return none
@@ -2842,6 +2853,99 @@ impl Regex {
             }
         }
         return out
+    }
+
+    /// The match at the start of `text`, if one starts there: Python's `re.match`. It's the match
+    /// `find` would give if matches could only start there, so `a|ab` gives the `a` of `ab`.
+    pub fn match_start(mut self, text: String) -> Match? {
+        if let (s, e) = self.anchored_span(text, false) {
+            return some(Match { start: s, end: e, text: text[s..e] })
+        }
+        return none
+    }
+
+    /// The match that's the whole of `text`, if there's one: Python's `re.fullmatch`. It takes
+    /// the pattern's most preferred way through that ends at the end, so `a|ab` matches all of
+    /// `ab` where `match_start` stops after the `a`.
+    pub fn full_match(mut self, text: String) -> Match? {
+        if let (s, e) = self.anchored_span(text, true) {
+            return some(Match { start: s, end: e, text: text[s..e] })
+        }
+        return none
+    }
+
+    /// `match_start`'s match and its groups.
+    pub fn captures_start(mut self, text: String) -> Captures? {
+        if let (s, e) = self.anchored_span(text, false) {
+            return self.groups_at(text, s, e)
+        }
+        return none
+    }
+
+    /// `full_match`'s match and its groups.
+    pub fn full_captures(mut self, text: String) -> Captures? {
+        let span = self.anchored_span(text, true) else {
+            return none
+        }
+        if self.python_re or self.groups == 0 {
+            return self.groups_at(text, span.0, span.1)
+        }
+        // The groups of the way through that ends at the end, which a search that may end
+        // anywhere wouldn't take.
+        let slots = self.prog.slots
+        if pike_search(self.prog, mut self.pike, text, 0, text.len(), true, true, slots) {
+            return some(self.groups_of(text))
+        }
+        return none
+    }
+
+    // Where the match that starts at the start of `text` ends, which for `whole` has to be the
+    // end of `text`.
+    fn anchored_span(mut self, text: String, whole: bool) -> (usize, usize)? {
+        if self.python_re {
+            if self.py.match_at(text, 0, whole) {
+                return some(self.py.span())
+            }
+            return none
+        }
+        if let lit = self.literal {
+            if (whole and text == lit) or (not whole and text.starts_with(lit)) {
+                return some((0, lit.len()))
+            }
+            return none
+        }
+        if whole {
+            if not self.whole_made {
+                self.whole_made = true
+                match parse(self.source) {
+                    ok(parsed) => self.whole = new_dfa(Node.Concat([parsed.0, Node.Look(LOOK_END_TEXT)]), false),
+                    err(_) => {},
+                }
+            }
+            if self.whole.ok {
+                let e = self.whole.forward(text, 0, false, true)
+                if e == NO_MATCH {
+                    return none
+                }
+                if e != GAVE_UP {
+                    return some((0, text.len()))
+                }
+            }
+        } else if self.fwd.ok {
+            // The preferred match from the start ends where the DFA says, and with none, there's
+            // no match from the start at all.
+            let e = self.fwd.forward(text, 0, false, true)
+            if e == NO_MATCH {
+                return none
+            }
+            if e != GAVE_UP {
+                return some((0, usize.wrap(e)))
+            }
+        }
+        if pike_search(self.prog, mut self.pike, text, 0, text.len(), true, whole, 2) {
+            return some((usize.wrap(self.pike.best[0]), usize.wrap(self.pike.best[1])))
+        }
+        return none
     }
 
     /// `text` with its first match replaced by `with`, in which `$1` and `${1}` are group 1's

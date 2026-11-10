@@ -59,11 +59,27 @@ A `Regex` keeps what its searches work out for the next one, so one that searche
 | `re.count(text) -> usize` | How many `find_all` finds, without making them or copying their text |
 | `re.captures(text) -> Captures?`, `re.captures_at(text, from)` | The first match and its groups |
 | `re.captures_all(text) -> List<Captures>` | Every match and its groups |
+| `re.match_start(text) -> Match?`, `re.captures_start(text) -> Captures?` | The match at the start of the text, if one starts there, as Python's `re.match` finds it: the match `find` would give if matches could only start there, so `a\|ab` gives the `a` of `ab` |
+| `re.full_match(text) -> Match?`, `re.full_captures(text) -> Captures?` | The match that's the whole text, if there's one, as Python's `re.fullmatch` finds it: the way through the pattern it prefers of those that end at the end, so `a\|ab` matches all of `ab` |
 | `re.replace(text, with) -> String`, `re.replace_all(text, with)` | The text with its first match, or every match, replaced by the template `with`. See [Templates](#templates) |
 | `re.split(text) -> List<String>` | The parts between the matches, empty ones too, as Python's `re.split` gives them without groups |
 | `re.pattern()`, `{re}` | The pattern as it was written |
 | `re.group_count() -> usize` | The groups, not counting the whole match |
 | `re.group_names() -> List<String>` | Each group's name, in order, `""` for one without |
+
+```calx
+import std.regex.{Regex, RegexError}
+
+fn main() ! RegexError {
+    var id = try Regex.new("[a-z_]+:[a-z0-9_/]+")
+    println("{id.full_match("minecraft:stone") != none} {id.full_match("minecraft:stone!") != none} {id.match_start("minecraft:stone!")!.end}")    // out: true false 15
+    var alt = try Regex.new("a|ab")
+    println("{alt.match_start("ab")!.text} {alt.full_match("ab")!.text} {alt.match_start("ba") == none}")    // out: a ab true
+    var date = try Regex.new(#"(\d{4})-(\d{2})"#)
+    let c = date.full_captures("2026-11")!
+    println("{c.get(1) ?? ""} {c.get(2) ?? ""}")    // out: 2026 11
+}
+```
 
 ## Syntax
 
@@ -159,6 +175,7 @@ A count is at most 100000, and a pattern compiles to at most 2000000 instruction
 | --- | --- |
 | `find(text)`, `find_at(text, from)`, `is_match(text)`, `captures(text)` | `p.search(text)` and `p.search(text, pos)`, and the groups of the match it finds |
 | `find_all(text)`, `captures_all(text)`, `count(text)` | `p.finditer(text)`: an empty match right after a match is one, unless that match was empty too |
+| `match_start(text)`, `captures_start(text)`, `full_match(text)`, `full_captures(text)` | `p.match(text)` and `p.fullmatch(text)` |
 | `replace(text, with)`, `replace_all(text, with)` | `p.sub(with, text, count=1)` and `p.sub(with, text)`, with Python's templates |
 | `split(text)` | `p.split(text)`, with each group's text after each part |
 
@@ -202,7 +219,7 @@ Where it differs from Python:
 - Flags are written in the pattern, `(?i)`, `(?m)`, `(?s)`, `(?x)`, `(?a)` and the rest, as Python takes them inline: `re.compile(p, re.I | re.M)` is `Regex.python("(?im){p}")`.
 - `split` gives `""` for a group that took no part, where Python gives `None`.
 - There are no bytes patterns and no `re.LOCALE`, and `\N{name}` isn't read yet.
-- There's no `match` or `fullmatch` yet: `\A` and `\Z` anchor a pattern to the start and the end of the text.
+- `match` is a keyword in Calx, so `re.match` is `match_start`.
 
 It matches by backtracking, as Python does, so it isn't linear: a pattern such as `(a+)+b` takes time exponential in a run of `a`s with no `b`, there as here. For patterns that come from outside a program, `Regex.new` is the one that can't hang.
 

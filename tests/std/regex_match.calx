@@ -1,0 +1,117 @@
+// std.regex's match_start and full_match, and their groups, as Python's re.match and re.fullmatch
+// give them, for Regex.new and Regex.python alike (CLX-223). Each line out is what Python printed
+// for the same patterns and texts. build/scratch's rig matched Python on 384,000 more, random
+// patterns in the syntax both engines share.
+import std.regex.{Captures, Match, Regex}
+
+fn show(m: Match?) -> String {
+    if let x = m {
+        return "{x.start}-{x.end}"
+    }
+    return "none"
+}
+
+fn groups(c: Captures?) -> String {
+    let got = c else {
+        return "none"
+    }
+    var parts: List<String> = []
+    for g in 1..got.len() {
+        parts.push(got.get(g) ?? "-")
+    }
+    return parts.join(" ")
+}
+
+fn lines(rx: mut Regex, texts: List<String>) {
+    var spans: List<String> = []
+    var caps: List<String> = []
+    for t in texts {
+        spans.push("{show(rx.match_start(t))}/{show(rx.full_match(t))}")
+        caps.push("[{groups(rx.captures_start(t))}]/[{groups(rx.full_captures(t))}]")
+    }
+    println(spans.join(" "))
+    println(caps.join(" "))
+}
+
+fn main() {
+    let cases: List<(String, List<String>)> = [
+        ("a|ab", ["ab", "abc", "b", ""]),
+        ("(a+)(b*)", ["aab", "aabx", "xaab"]),
+        ("(a|ab)(c|bcd)(d*)", ["abcd", "abcdd", "abc"]),
+        ("x*", ["", "y", "xxy"]),
+        ("stone", ["stone", "stones", "ston"]),
+        ("(?i)k[a-z]+", ["KELVIN", "Kelvin!"]),
+        (#"(\w+)@(\w+)\.com"#, ["sam@example.com", "sam@example.com.au"]),
+        ("(a)|b", ["b", "ab"]),
+    ]
+    for python in [false, true] {
+        for (p, texts) in cases {
+            var rx = if python { Regex.python(p)! } else { Regex.new(p)! }
+            lines(mut rx, texts)
+        }
+    }
+    // out: 0-1/0-2 0-1/none none/none none/none
+    // out: []/[] []/[none] [none]/[none] [none]/[none]
+    // out: 0-3/0-3 0-3/none none/none
+    // out: [aa b]/[aa b] [aa b]/[none] [none]/[none]
+    // out: 0-4/0-4 0-5/0-5 0-3/0-3
+    // out: [a bcd ]/[a bcd ] [a bcd d]/[a bcd d] [ab c ]/[ab c ]
+    // out: 0-0/0-0 0-0/none 0-2/none
+    // out: []/[] []/[none] []/[none]
+    // out: 0-5/0-5 0-5/none none/none
+    // out: []/[] []/[none] [none]/[none]
+    // out: 0-6/0-6 0-6/none
+    // out: []/[] []/[none]
+    // out: 0-15/0-15 0-15/none
+    // out: [sam example]/[sam example] [sam example]/[none]
+    // out: 0-1/0-1 0-1/none
+    // out: [-]/[-] [a]/[none]
+    // out: 0-1/0-2 0-1/none none/none none/none
+    // out: []/[] []/[none] [none]/[none] [none]/[none]
+    // out: 0-3/0-3 0-3/none none/none
+    // out: [aa b]/[aa b] [aa b]/[none] [none]/[none]
+    // out: 0-4/0-4 0-5/0-5 0-3/0-3
+    // out: [a bcd ]/[a bcd ] [a bcd d]/[a bcd d] [ab c ]/[ab c ]
+    // out: 0-0/0-0 0-0/none 0-2/none
+    // out: []/[] []/[none] []/[none]
+    // out: 0-5/0-5 0-5/none none/none
+    // out: []/[] []/[none] [none]/[none]
+    // out: 0-6/0-6 0-6/none
+    // out: []/[] []/[none]
+    // out: 0-15/0-15 0-15/none
+    // out: [sam example]/[sam example] [sam example]/[none]
+    // out: 0-1/0-1 0-1/none
+    // out: [-]/[-] [a]/[none]
+
+    // Long texts, which the DFAs read, and where a full match fails only at the last byte.
+    var long = String()
+    for _ in 0..5000u32 {
+        long.push('a')
+    }
+    let bang = "{long}!"
+    for p in ["[a-z]+", "a*b", "(?:a|b)+"] {
+        var rx = Regex.new(p)!
+        var py = Regex.python(p)!
+        let a = "{show(rx.match_start(long))} {show(rx.full_match(long))} {show(rx.match_start(bang))} {show(rx.full_match(bang))}"
+        let b = "{show(py.match_start(long))} {show(py.full_match(long))} {show(py.match_start(bang))} {show(py.full_match(bang))}"
+        println("{p} {a} {a == b}")
+    }
+    // out: [a-z]+ 0-5000 0-5000 0-5000 none true
+    // out: a*b none none none none true
+    // out: (?:a|b)+ 0-5000 0-5000 0-5000 none true
+
+    // Python's own: lookahead, a backreference, lookbehind, and `$` before a last newline.
+    let own_cases: List<(String, List<String>)> = [(#"a(?=b)"#, ["ab", "a"]), (#"(\w)\w*\1"#, ["abca", "abcab"]), (#"(?<=a)b|a"#, ["ab"]), ("a$", ["a\n", "a"])]
+    for (p, texts) in own_cases {
+        var rx = Regex.python(p)!
+        var spans: List<String> = []
+        for t in texts {
+            spans.push("{show(rx.match_start(t))}/{show(rx.full_match(t))}")
+        }
+        println(spans.join(" "))
+    }
+    // out: 0-1/none none/none
+    // out: 0-4/0-4 0-4/none
+    // out: 0-1/none
+    // out: 0-1/none 0-1/0-1
+}
