@@ -116,17 +116,17 @@ The files were built from the parts that trip readers up:
 
 ## Speed
 
-These numbers are from our benchmark, so take them as rough:
+These numbers are from our benchmark:
 
-- **Machine:** an i9-13900K with other work running, the best of five runs.
-- **File:** 12.5 MB of INI text, 20,000 sections of 10 to 40 keys each, with comments and blank lines.
-- **Work:** each value is read with `get`, which gets its key by name.
+- **Machine:** an i9-13900K otherwise quiet, each program on its performance cores, the best of 20 runs taken in turns (12 for Python).
+- **File:** 13.0 MB of INI text, 20,000 sections of 10 to 40 keys each, with comments and blank lines.
+- **Work:** each value is read with `get`, which gets its key by name, for each key `keys` gives.
 - **Comparisons:** Python 3.14's `configparser`, and Rust 1.91 with the `rust-ini` crate 0.21.3, built for release with `x86-64-v3`.
 
 | Work | Calx | Python | Rust |
 | --- | --- | --- | --- |
-| Read | 71.7 ms | 2,491 ms | 242 ms |
-| Each value got | 44.6 ms | 989 ms | 38.0 ms |
-| Written | 25.9 ms | 714 ms | 69.9 ms |
+| Read | 65.5 ms | 1,657 ms | 213 ms |
+| Each value got | 39.5 ms | 740 ms | 38.2 ms |
+| Written | 22.8 ms | 420 ms | 61.0 ms |
 
 `rust-ini` reads its own kind of INI by default: a value goes on across lines only in quotes, not when the lines are indented, a `\` in a value starts an escape, keys are case-sensitive, and `%(name)s` stays as it is. The file has none of these, and all three read the same values from it. Rust's `get` hands back a view of the value, where Calx's and Python's give a copy, and Calx's also builds the list of each section's keys, as Python's `options` does.

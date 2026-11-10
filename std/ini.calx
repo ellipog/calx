@@ -313,14 +313,12 @@ impl Ini {
             if not self.tables.contains(section) {
                 return none
             }
-            if self.tables[section].contains(k) {
-                return some(self.tables[section][k].copy())
+            // The section's table as a view, so its name is looked up once more, not three times.
+            if let v = value_in(self.tables[section], k) {
+                return some(v)
             }
         }
-        if self.defaults.contains(k) {
-            return some(self.defaults[k].copy())
-        }
-        return none
+        return value_in(self.defaults, k)
     }
 
     /// The value of `key` in `section`, or in `[DEFAULT]` if the section doesn't have it, with each
@@ -553,6 +551,14 @@ impl Ini {
         }
         return out
     }
+}
+
+// A copy of `k`'s value in `table`, or `none`.
+fn value_in(table: LinkedMap<String, String>, k: String) -> String? {
+    if table.contains(k) {
+        return some(table[k].copy())
+    }
+    return none
 }
 
 // Whether `k` is ASCII with no capitals, which lowercasing leaves as it is.
