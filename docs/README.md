@@ -97,7 +97,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 26. [std.memory](std/memory.md): giving the system back the memory freed values held, for a program that's gone quiet after a busy while
 27. [std.path](std/path.md): paths as text, joined, taken apart, normalized and matched against globs such as `src/**/*.calx`, with Windows drives and shares
 28. [std.json](std/json.md): JSON parsed into a tree with the line and column of any mistake, read by JSON Pointers, written compact or indented with keys in order or sorted, exact 64-bit integers, and `@json`, which reads and writes a struct from its fields' types
-29. [std.regex](std/regex.md): regular expressions in Rust's syntax, found, counted, captured, replaced and split in time linear in the text, with Unicode classes and case folding
+29. [std.regex](std/regex.md): regular expressions in Rust's syntax, found, counted, captured, replaced and split in time linear in the text, with Unicode classes and case folding; and Python's `re` as it is, with `Regex.python`
 30. [std.cli](std/cli.md): `@cli`, which reads a program's command-line options, flags and arguments into a struct, with `--help` written from its docs
 31. [std.random](std/random.md): random numbers from a seed, the same on every system, or seeded from the system: integers, floats, normal values, shuffles, picks and samples
 32. [std.bytes](std/bytes.md): bytes as hex and base64 and back, finding bytes in bytes, and numbers read from and written to bytes in either byte order
@@ -126,6 +126,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors, and dictionaries trained from samples
 56. [std.font](std/font.md): TrueType and OpenType fonts and collections read as FreeType reads them, glyphs drawn antialiased by the exact area they cover, and text measured and drawn on images, as Pillow's `ImageFont` and `ImageDraw.text` do
 57. [std.wave](std/wave.md): WAV files read as Python's `wave` module reads them and written byte for byte as it writes them, floats too, with their samples as numbers instead of `struct.unpack`
+58. [std.text.python](std/text-python.md): Python's `repr` of strings and floats, and `str.isprintable`, as CPython 3.14 gives them, for messages that quote values as Python does
 
 ### Java compatibility
 

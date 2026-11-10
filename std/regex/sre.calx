@@ -1,0 +1,3161 @@
+/// Python's `re`, as CPython 3.14 reads and matches it, for std.regex's `Regex.python`. A pattern is
+/// parsed as re/_parser.py parses it, with its errors, compiled to sre's opcodes as
+/// re/_compiler.py compiles it, and matched by a backtracking machine that takes the steps
+/// Modules/_sre/sre_lib.h takes, so the match found and what each group holds are Python's.
+module std.regex.sre
+
+import std.text.python.{repr_str}
+import std.text.ucd.{ALNUM, ALNUM_LEN, DIGIT, DIGIT_LEN, PY_LOWER_FROM, PY_LOWER_FROM_LEN, PY_LOWER_TO, PY_SPACE, PY_SPACE_LEN, PY_UPPER_FROM, PY_UPPER_FROM_LEN, PY_UPPER_TO}
+
+// This follows CPython's re: Lib/re/_parser.py, Lib/re/_compiler.py and Lib/re/_casefix.py, and
+// Modules/_sre/sre_lib.h, under this notice:
+//
+//     Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+//     Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
+//
+//     PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
+//
+//     1. This LICENSE AGREEMENT is between the Python Software Foundation ("PSF"), and the
+//     Individual or Organization ("Licensee") accessing and otherwise using this software
+//     ("Python") in source or binary form and its associated documentation.
+//
+//     2. Subject to the terms and conditions of this License Agreement, PSF hereby grants Licensee
+//     a nonexclusive, royalty-free, world-wide license to reproduce, analyze, test, perform and/or
+//     display publicly, prepare derivative works, distribute, and otherwise use Python alone or in
+//     any derivative version, provided, however, that PSF's License Agreement and PSF's notice of
+//     copyright, i.e., "Copyright (c) 2001 Python Software Foundation; All Rights Reserved" are
+//     retained in Python alone or in any derivative version prepared by Licensee.
+//
+//     3. In the event Licensee prepares a derivative work that is based on or incorporates Python
+//     or any part thereof, and wants to make the derivative work available to others as provided
+//     herein, then Licensee hereby agrees to include in any such work a brief summary of the
+//     changes made to Python.
+//
+//     4. PSF is making Python available to Licensee on an "AS IS" basis.  PSF MAKES NO
+//     REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION,
+//     PSF MAKES NO AND DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS FOR
+//     ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON WILL NOT INFRINGE ANY THIRD PARTY RIGHTS.
+//
+//     5. PSF SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON FOR ANY INCIDENTAL,
+//     SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS A RESULT OF MODIFYING, DISTRIBUTING, OR
+//     OTHERWISE USING PYTHON, OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY
+//     THEREOF.
+//
+//     6. This License Agreement will automatically terminate upon a material breach of its terms
+//     and conditions.
+//
+//     7. Nothing in this License Agreement shall be deemed to create any relationship of agency,
+//     partnership, or joint venture between PSF and Licensee.  This License Agreement does not
+//     grant permission to use PSF trademarks or trade name in a trademark sense to endorse or
+//     promote products or services of Licensee, or any third party.
+//
+//     8. By copying, installing or otherwise using Python, Licensee agrees to be bound by the terms
+//     and conditions of this License Agreement.
+//
+// The changes: it's written anew in Calx. It matches UTF-8 text a rune at a time, where CPython
+// matches code points, and its positions are bytes. There are no bytes patterns and no LOCALE
+// flag, and `\N{name}` isn't read. The INFO block isn't compiled: what it's for, where a search
+// can skip to, is worked out from the parsed pattern and kept in the program, a literal prefix as
+// `_get_literal_prefix` finds it and the bytes a match can start with, further than its charset.
+// A branch's common prefix isn't taken out, and a rune set is kept as ranges, not bitmaps.
+
+// --- what it's made of --------------------------------------------------------------------------
+
+// Opcodes, numbered as sre's.
+const OP_FAILURE: u32 = 0
+const OP_SUCCESS: u32 = 1
+const OP_ANY: u32 = 2
+const OP_ANY_ALL: u32 = 3
+const OP_ASSERT: u32 = 4
+const OP_ASSERT_NOT: u32 = 5
+const OP_AT: u32 = 6
+const OP_BRANCH: u32 = 7
+const OP_GROUPREF: u32 = 11
+const OP_GROUPREF_EXISTS: u32 = 12
+const OP_IN: u32 = 13
+const OP_JUMP: u32 = 15
+const OP_LITERAL: u32 = 16
+const OP_MARK: u32 = 17
+const OP_MAX_UNTIL: u32 = 18
+const OP_MIN_UNTIL: u32 = 19
+const OP_NOT_LITERAL: u32 = 20
+const OP_REPEAT: u32 = 23
+const OP_REPEAT_ONE: u32 = 24
+const OP_MIN_REPEAT_ONE: u32 = 26
+const OP_ATOMIC_GROUP: u32 = 27
+const OP_POSSESSIVE_REPEAT: u32 = 28
+const OP_POSSESSIVE_REPEAT_ONE: u32 = 29
+const OP_GROUPREF_IGNORE: u32 = 30
+const OP_IN_IGNORE: u32 = 31
+const OP_LITERAL_IGNORE: u32 = 32
+const OP_NOT_LITERAL_IGNORE: u32 = 33
+const OP_GROUPREF_UNI_IGNORE: u32 = 38
+const OP_IN_UNI_IGNORE: u32 = 39
+const OP_LITERAL_UNI_IGNORE: u32 = 40
+const OP_NOT_LITERAL_UNI_IGNORE: u32 = 41
+
+// What `AT` looks at.
+const AT_BEGINNING: u32 = 0
+const AT_BEGINNING_LINE: u32 = 1
+const AT_BEGINNING_STRING: u32 = 2
+const AT_BOUNDARY: u32 = 3
+const AT_NON_BOUNDARY: u32 = 4
+const AT_END: u32 = 5
+const AT_END_LINE: u32 = 6
+const AT_END_STRING: u32 = 7
+const AT_UNI_BOUNDARY: u32 = 10
+const AT_UNI_NON_BOUNDARY: u32 = 11
+
+// Categories, as the parser gives them; the Unicode ones are 10 more.
+const CAT_DIGIT: u32 = 0
+const CAT_NOT_DIGIT: u32 = 1
+const CAT_SPACE: u32 = 2
+const CAT_NOT_SPACE: u32 = 3
+const CAT_WORD: u32 = 4
+const CAT_NOT_WORD: u32 = 5
+
+// Flags, valued as Python's.
+const F_IGNORECASE: u32 = 2
+const F_LOCALE: u32 = 4
+const F_MULTILINE: u32 = 8
+const F_DOTALL: u32 = 16
+const F_UNICODE: u32 = 32
+const F_VERBOSE: u32 = 64
+const F_ASCII: u32 = 256
+const TYPE_FLAGS: u32 = 292
+
+// How the repeat repeats.
+const GREEDY: u32 = 0
+const LAZY: u32 = 1
+const POSSESSIVE: u32 = 2
+
+const MAXREPEAT: u32 = 0xFFFFFFFF
+const MAXGROUPS: u64 = 1073741823
+// sre's MAXWIDTH, 2^64, which a u64 can't hold: widths stop at the largest one.
+const MAXWIDTH: u64 = 0xFFFFFFFFFFFFFFFF
+
+/// Why a pattern isn't one Python's `re.compile` takes: its message, and where in the pattern, a
+/// rune index from 0, or -1 where Python gives none.
+pub struct SreError {
+    pub message: String
+    pub pos: i64
+}
+
+// One item of a parsed pattern, as sre_parse's (op, av) pairs.
+enum Item {
+    Lit(u32)
+    NotLit(u32)
+    Any
+    In(List<SetItem>)
+    At(u32)
+    Branch(List<List<Item>>)
+    /// A group: its number, 0 for none, the flags it turns on and off, and what's in it.
+    Sub(u32, u32, u32, List<Item>)
+    /// A repeat: how, at least, at most, and what's repeated.
+    Rep(u32, u32, u32, List<Item>)
+    Ref(u32)
+    /// `(?(g)yes|no)`: the group, the yes part, the no part, and whether there's one.
+    RefExists(u32, List<Item>, List<Item>, bool)
+    /// A lookaround: whether it's positive, whether it looks behind, and what it looks for.
+    Look(bool, bool, List<Item>)
+    Atomic(List<Item>)
+    Fail
+}
+
+enum SetItem {
+    Negate
+    Lit(u32)
+    Range(u32, u32)
+    Cat(u32)
+}
+
+// --- Unicode, as Python has it ------------------------------------------------------------------
+
+fn in_alnum(r: u32) -> bool {
+    var lo: usize = 0
+    var hi = ALNUM_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > ALNUM[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < ALNUM[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+fn in_digit(r: u32) -> bool {
+    var lo: usize = 0
+    var hi = DIGIT_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > DIGIT[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < DIGIT[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+fn in_space(r: u32) -> bool {
+    var lo: usize = 0
+    var hi = PY_SPACE_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > PY_SPACE[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < PY_SPACE[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// The rune Python's `re` lowers `r` to, as _PyUnicode_ToLowercase gives it.
+fn lower(r: u32) -> u32 {
+    if r < 128 {
+        return if r >= 65 and r <= 90 { r + 32 } else { r }
+    }
+    var lo: usize = 0
+    var hi = PY_LOWER_FROM_LEN
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if PY_LOWER_FROM[mid] < r {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo < PY_LOWER_FROM_LEN and PY_LOWER_FROM[lo] == r {
+        return PY_LOWER_TO[lo]
+    }
+    return r
+}
+
+// The rune it uppers `r` to, as _PyUnicode_ToUppercase gives it.
+fn upper(r: u32) -> u32 {
+    if r < 128 {
+        return if r >= 97 and r <= 122 { r - 32 } else { r }
+    }
+    var lo: usize = 0
+    var hi = PY_UPPER_FROM_LEN
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if PY_UPPER_FROM[mid] < r {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    if lo < PY_UPPER_FROM_LEN and PY_UPPER_FROM[lo] == r {
+        return PY_UPPER_TO[lo]
+    }
+    return r
+}
+
+fn is_cased(r: u32) -> bool {
+    return lower(r) != r or upper(r) != r
+}
+
+fn ascii_lower(r: u32) -> u32 {
+    return if r >= 65 and r <= 90 { r + 32 } else { r }
+}
+
+fn ascii_cased(r: u32) -> bool {
+    return (r >= 65 and r <= 90) or (r >= 97 and r <= 122)
+}
+
+fn is_word(r: u32) -> bool {
+    if r < 128 {
+        return r == 95 or (r >= 48 and r <= 57) or ascii_cased(r)
+    }
+    return in_alnum(r)
+}
+
+fn is_word_ascii(r: u32) -> bool {
+    return r == 95 or (r >= 48 and r <= 57) or ascii_cased(r)
+}
+
+// Python 3.14's _casefix._EXTRA_CASES: each lowercase rune that uppers to the same as others,
+// and those others, which `(?i)` matches it with. Each row is the rune, how many others, and
+// the others.
+const EXTRA: [u32; 156] = [
+    0x69, 1, 0x131, 0x73, 1, 0x17F, 0xB5, 1, 0x3BC, 0x131, 1, 0x69, 0x17F, 1, 0x73,
+    0x345, 2, 0x3B9, 0x1FBE, 0x390, 1, 0x1FD3, 0x3B0, 1, 0x1FE3, 0x3B2, 1, 0x3D0,
+    0x3B5, 1, 0x3F5, 0x3B8, 1, 0x3D1, 0x3B9, 2, 0x345, 0x1FBE, 0x3BA, 1, 0x3F0,
+    0x3BC, 1, 0xB5, 0x3C0, 1, 0x3D6, 0x3C1, 1, 0x3F1, 0x3C2, 1, 0x3C3, 0x3C3, 1, 0x3C2,
+    0x3C6, 1, 0x3D5, 0x3D0, 1, 0x3B2, 0x3D1, 1, 0x3B8, 0x3D5, 1, 0x3C6, 0x3D6, 1, 0x3C0,
+    0x3F0, 1, 0x3BA, 0x3F1, 1, 0x3C1, 0x3F5, 1, 0x3B5, 0x432, 1, 0x1C80, 0x434, 1, 0x1C81,
+    0x43E, 1, 0x1C82, 0x441, 1, 0x1C83, 0x442, 2, 0x1C84, 0x1C85, 0x44A, 1, 0x1C86,
+    0x463, 1, 0x1C87, 0x1C80, 1, 0x432, 0x1C81, 1, 0x434, 0x1C82, 1, 0x43E, 0x1C83, 1, 0x441,
+    0x1C84, 2, 0x442, 0x1C85, 0x1C85, 2, 0x442, 0x1C84, 0x1C86, 1, 0x44A, 0x1C87, 1, 0x463,
+    0x1C88, 1, 0xA64B, 0x1E61, 1, 0x1E9B, 0x1E9B, 1, 0x1E61, 0x1FBE, 2, 0x345, 0x3B9,
+    0x1FD3, 1, 0x390, 0x1FE3, 1, 0x3B0, 0xA64B, 1, 0x1C88, 0xFB05, 1, 0xFB06, 0xFB06, 1, 0xFB05,
+]
+
+// The runes `(?i)` matches `l` with besides itself, from EXTRA; empty for most.
+fn extra_cases(l: u32) -> List<u32> {
+    var out = List<u32>()
+    if l < 0x69 {
+        return out
+    }
+    var i: usize = 0
+    while i < 156 {
+        let n = usize(EXTRA[i + 1])
+        if EXTRA[i] == l {
+            for k in 0..n {
+                out.push(EXTRA[i + 2 + k])
+            }
+            return out
+        }
+        i += 2 + n
+    }
+    return out
+}
+
+fn is_ascii_digit(r: u32) -> bool {
+    return r >= 48 and r <= 57
+}
+
+fn is_ascii_space(r: u32) -> bool {
+    return (r >= 9 and r <= 13) or r == 32
+}
+
+fn is_uni_digit(r: u32) -> bool {
+    if r < 128 {
+        return r >= 48 and r <= 57
+    }
+    return in_digit(r)
+}
+
+fn is_uni_space(r: u32) -> bool {
+    if r < 128 {
+        return (r >= 9 and r <= 13) or (r >= 28 and r <= 32)
+    }
+    return in_space(r)
+}
+
+// Whether `r` is in sre's category `cat`.
+fn category(cat: u32, r: u32) -> bool {
+    return match cat {
+        0 => is_ascii_digit(r),
+        1 => not is_ascii_digit(r),
+        2 => is_ascii_space(r),
+        3 => not is_ascii_space(r),
+        4 => is_word_ascii(r),
+        5 => not is_word_ascii(r),
+        6 => r == 10,
+        7 => r != 10,
+        10 => is_uni_digit(r),
+        11 => not is_uni_digit(r),
+        12 => is_uni_space(r),
+        13 => not is_uni_space(r),
+        14 => is_word(r),
+        15 => not is_word(r),
+        _ => false,
+    }
+}
+
+// --- the parser, as re/_parser.py ---------------------------------------------------------------
+
+// The current token: a rune, or a backslash and the rune after it, or none at the end.
+struct Tok {
+    has: bool
+    esc: bool
+    c: u32
+}
+
+struct Parser {
+    p: List<u32>
+    index: usize
+    next: Tok
+    flags: u32
+    names: Map<String, u32>
+    // Each group's width once it's closed, and whether it is; group 0 never is.
+    widths: List<(u64, u64)>
+    closed: List<bool>
+    group_names: List<String>
+    // `state.lookbehindgroups`: how many groups there were where the lookbehind being read
+    // started, or -1 outside one.
+    lookbehind: i64
+    // Where each `(?(n)` with a number names it, to check once every group is known.
+    ref_at: List<(u32, usize)>
+}
+
+fn digit_value(c: u32) -> u32 {
+    if c >= 48 and c <= 57 {
+        return c - 48
+    }
+    if c >= 97 and c <= 102 {
+        return c - 87
+    }
+    return c - 55
+}
+
+fn is_dec(c: u32) -> bool {
+    return c >= 48 and c <= 57
+}
+
+fn is_oct(c: u32) -> bool {
+    return c >= 48 and c <= 55
+}
+
+fn is_hex(c: u32) -> bool {
+    return is_dec(c) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)
+}
+
+fn runes_text(rs: List<u32>) -> String {
+    var s = String()
+    for c in rs {
+        s.push(rune.try_from(c) ?? '\u{FFFD}')
+    }
+    return s
+}
+
+// The token as Python's tokenizer has it, as text.
+fn tok_text(t: Tok) -> String {
+    var s = String()
+    if t.esc {
+        s.push('\\')
+    }
+    s.push(rune.try_from(t.c) ?? '\u{FFFD}')
+    return s
+}
+
+fn tok_len(t: Tok) -> usize {
+    return if t.esc { 2 } else { 1 }
+}
+
+fn is_alpha(c: u32) -> bool {
+    return ascii_cased(c) or (c >= 128 and in_alnum(c) and not in_digit(c))
+}
+
+// Whether `name` is a Python identifier, as `str.isidentifier` has it for the names people write:
+// a letter or `_`, then letters, digits and `_`.
+fn is_identifier(name: List<u32>) -> bool {
+    if name.is_empty() {
+        return false
+    }
+    for i in 0..name.len() {
+        let c = name[i]
+        let good = c == 95 or is_alpha(c) or (i > 0 and (is_dec(c) or (c >= 128 and in_alnum(c))))
+        if not good {
+            return false
+        }
+    }
+    return true
+}
+
+fn flag_of(c: u32) -> u32 {
+    return match c {
+        105 => F_IGNORECASE,
+        76 => F_LOCALE,
+        109 => F_MULTILINE,
+        115 => F_DOTALL,
+        120 => F_VERBOSE,
+        97 => F_ASCII,
+        117 => F_UNICODE,
+        _ => 0,
+    }
+}
+
+// A run of decimal digits as a number, which stops growing past what a repeat can count.
+fn number(ds: List<u32>) -> u64 {
+    var v: u64 = 0
+    for d in ds {
+        if v > 100000000000000 {
+            return MAXWIDTH
+        }
+        v = v * 10 + u64(d - 48)
+    }
+    return v
+}
+
+fn sat_add(a: u64, b: u64) -> u64 {
+    return if a > MAXWIDTH - b { MAXWIDTH } else { a + b }
+}
+
+fn sat_mul(a: u64, b: u64) -> u64 {
+    if a == 0 or b == 0 {
+        return 0
+    }
+    return if a > MAXWIDTH / b { MAXWIDTH } else { a * b }
+}
+
+// The fewest and most runes `items` can match, as `SubPattern.getwidth`.
+fn width(items: List<Item>, widths: List<(u64, u64)>) -> (u64, u64) {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    for it in items {
+        match it {
+            Item.Branch(alts) => {
+                var i = MAXWIDTH
+                var j: u64 = 0
+                for a in alts {
+                    let (l, h) = width(a, widths)
+                    i = i.min(l)
+                    j = j.max(h)
+                }
+                lo = sat_add(lo, i)
+                hi = sat_add(hi, j)
+            },
+            Item.Atomic(p) => {
+                let (i, j) = width(p, widths)
+                lo = sat_add(lo, i)
+                hi = sat_add(hi, j)
+            },
+            Item.Sub(_, _, _, p) => {
+                let (i, j) = width(p, widths)
+                lo = sat_add(lo, i)
+                hi = sat_add(hi, j)
+            },
+            Item.Rep(_, min, max, p) => {
+                let (i, j) = width(p, widths)
+                lo = sat_add(lo, sat_mul(i, u64(min)))
+                if max == MAXREPEAT and j != 0 {
+                    hi = MAXWIDTH
+                } else {
+                    hi = sat_add(hi, sat_mul(j, u64(max)))
+                }
+            },
+            Item.Lit(_) => {
+                lo = sat_add(lo, 1)
+                hi = sat_add(hi, 1)
+            },
+            Item.NotLit(_) => {
+                lo = sat_add(lo, 1)
+                hi = sat_add(hi, 1)
+            },
+            Item.Any => {
+                lo = sat_add(lo, 1)
+                hi = sat_add(hi, 1)
+            },
+            Item.In(_) => {
+                lo = sat_add(lo, 1)
+                hi = sat_add(hi, 1)
+            },
+            Item.Ref(g) => {
+                let w = widths[usize(g)]
+                lo = sat_add(lo, w.0)
+                hi = sat_add(hi, w.1)
+            },
+            Item.RefExists(_, yes, no, has_no) => {
+                let (yl, yh) = width(yes, widths)
+                var i = yl
+                var j = yh
+                if has_no {
+                    let (l, h) = width(no, widths)
+                    i = i.min(l)
+                    j = j.max(h)
+                } else {
+                    i = 0
+                }
+                lo = sat_add(lo, i)
+                hi = sat_add(hi, j)
+            },
+            _ => {},
+        }
+    }
+    return (lo, hi)
+}
+
+impl Parser {
+    fn advance(mut self) ! SreError {
+        let i = self.index
+        if i >= self.p.len() {
+            self.next = Tok { has: false, esc: false, c: 0 }
+            return
+        }
+        let ch = self.p[i]
+        if ch == 92 {
+            if i + 1 >= self.p.len() {
+                fail SreError { message: String("bad escape (end of pattern)"), pos: i64.wrap(self.p.len()) - 1 }
+            }
+            self.next = Tok { has: true, esc: true, c: self.p[i + 1] }
+            self.index = i + 2
+        } else {
+            self.next = Tok { has: true, esc: false, c: ch }
+            self.index = i + 1
+        }
+    }
+
+    fn tell(self) -> usize {
+        if not self.next.has {
+            return self.index
+        }
+        return self.index - tok_len(self.next)
+    }
+
+    fn error(self, message: String, offset: usize) -> SreError {
+        return SreError { message: message.copy(), pos: i64.wrap(self.tell()) - i64.wrap(offset) }
+    }
+
+    // Whether the next token is the plain rune `c`.
+    fn is(self, c: u32) -> bool {
+        return self.next.has and not self.next.esc and self.next.c == c
+    }
+
+    fn take(mut self, c: u32) -> bool ! SreError {
+        if self.is(c) {
+            try self.advance()
+            return true
+        }
+        return false
+    }
+
+    fn get(mut self) -> Tok ! SreError {
+        let t = self.next
+        try self.advance()
+        return t
+    }
+
+    fn seek(mut self, index: usize) ! SreError {
+        self.index = index
+        try self.advance()
+    }
+
+    // Up to `n` plain runes for which `kind` holds: 0 decimal, 1 octal, 2 hex.
+    fn get_while(mut self, n: usize, kind: u8) -> List<u32> ! SreError {
+        var out = List<u32>()
+        var k: usize = 0
+        while k < n {
+            let t = self.next
+            if not t.has or t.esc {
+                break
+            }
+            let fits = if kind == 0 { is_dec(t.c) } else if kind == 1 { is_oct(t.c) } else { is_hex(t.c) }
+            if not fits {
+                break
+            }
+            out.push(t.c)
+            try self.advance()
+            k += 1
+        }
+        return out
+    }
+
+    fn get_until(mut self, terminator: u32, name: str) -> List<u32> ! SreError {
+        var out = List<u32>()
+        loop {
+            let t = self.next
+            try self.advance()
+            if not t.has {
+                if out.is_empty() {
+                    fail self.error("missing {name}", 0)
+                }
+                fail self.error("missing {runes_text([terminator])}, unterminated name", out.len())
+            }
+            if not t.esc and t.c == terminator {
+                if out.is_empty() {
+                    fail self.error("missing {name}", 1)
+                }
+                break
+            }
+            if t.esc {
+                out.push(92)
+            }
+            out.push(t.c)
+        }
+        return out
+    }
+
+    fn check_group_name(self, name: List<u32>, offset: usize) ! SreError {
+        if not is_identifier(name) {
+            fail self.error("bad character in group name {repr_str(runes_text(name))}", name.len() + offset)
+        }
+    }
+
+    fn groups(self) -> usize {
+        return self.widths.len()
+    }
+
+    fn check_group(self, gid: usize) -> bool {
+        return gid < self.groups() and self.closed[gid]
+    }
+
+    fn check_lookbehind_group(self, gid: usize) ! SreError {
+        if self.lookbehind >= 0 {
+            if not self.check_group(gid) {
+                fail self.error(String("cannot refer to an open group"), 0)
+            }
+            if i64.wrap(gid) >= self.lookbehind {
+                fail self.error(String("cannot refer to group defined in the same lookbehind subpattern"), 0)
+            }
+        }
+    }
+
+    // `\x`, `\u` and `\U` and their digits, after the backslash and letter.
+    fn hex_escape(mut self, t: Tok) -> u32 ! SreError {
+        let c = t.c
+        let n: usize = if c == 120 { 2 } else if c == 117 { 4 } else { 8 }
+        let digits = try self.get_while(n, 2)
+        let text = "{tok_text(t)}{runes_text(digits)}"
+        if digits.len() != n {
+            fail self.error("incomplete escape {text}", 2 + digits.len())
+        }
+        var v: u32 = 0
+        for d in digits {
+            v = v * 16 + digit_value(d)
+        }
+        if c == 85 and v > 0x10FFFF {
+            fail self.error("bad escape {text}", 10)
+        }
+        return v
+    }
+
+    // A character class's escape, as `_class_escape`.
+    fn class_escape(mut self, t: Tok) -> SetItem ! SreError {
+        let c = t.c
+        match c {
+            97 => return SetItem.Lit(7),
+            98 => return SetItem.Lit(8),
+            102 => return SetItem.Lit(12),
+            110 => return SetItem.Lit(10),
+            114 => return SetItem.Lit(13),
+            116 => return SetItem.Lit(9),
+            118 => return SetItem.Lit(11),
+            92 => return SetItem.Lit(92),
+            100 => return SetItem.Cat(CAT_DIGIT),
+            68 => return SetItem.Cat(CAT_NOT_DIGIT),
+            115 => return SetItem.Cat(CAT_SPACE),
+            83 => return SetItem.Cat(CAT_NOT_SPACE),
+            119 => return SetItem.Cat(CAT_WORD),
+            87 => return SetItem.Cat(CAT_NOT_WORD),
+            _ => {},
+        }
+        if c == 120 or c == 117 or c == 85 {
+            return SetItem.Lit(try self.hex_escape(t))
+        }
+        if c == 78 {
+            fail self.error(String("\\N\{...\} names aren't supported"), 2)
+        }
+        if is_oct(c) {
+            let more = try self.get_while(2, 1)
+            var v = c - 48
+            for d in more {
+                v = v * 8 + (d - 48)
+            }
+            if v > 255 {
+                fail self.error("octal escape value {tok_text(t)}{runes_text(more)} outside of range 0-0o377", 2 + more.len())
+            }
+            return SetItem.Lit(v)
+        }
+        if is_dec(c) or ascii_cased(c) {
+            fail self.error("bad escape {tok_text(t)}", 2)
+        }
+        return SetItem.Lit(c)
+    }
+
+    // An escape outside a class, as `_escape`.
+    fn escape(mut self, t: Tok) -> Item ! SreError {
+        let c = t.c
+        match c {
+            65 => return Item.At(AT_BEGINNING_STRING),
+            98 => return Item.At(AT_BOUNDARY),
+            66 => return Item.At(AT_NON_BOUNDARY),
+            100 => return Item.In([SetItem.Cat(CAT_DIGIT)]),
+            68 => return Item.In([SetItem.Cat(CAT_NOT_DIGIT)]),
+            115 => return Item.In([SetItem.Cat(CAT_SPACE)]),
+            83 => return Item.In([SetItem.Cat(CAT_NOT_SPACE)]),
+            119 => return Item.In([SetItem.Cat(CAT_WORD)]),
+            87 => return Item.In([SetItem.Cat(CAT_NOT_WORD)]),
+            122 => return Item.At(AT_END_STRING),
+            90 => return Item.At(AT_END_STRING),
+            97 => return Item.Lit(7),
+            102 => return Item.Lit(12),
+            110 => return Item.Lit(10),
+            114 => return Item.Lit(13),
+            116 => return Item.Lit(9),
+            118 => return Item.Lit(11),
+            92 => return Item.Lit(92),
+            _ => {},
+        }
+        if c == 120 or c == 117 or c == 85 {
+            return Item.Lit(try self.hex_escape(t))
+        }
+        if c == 78 {
+            fail self.error(String("\\N\{...\} names aren't supported"), 2)
+        }
+        if c == 48 {
+            let more = try self.get_while(2, 1)
+            var v: u32 = 0
+            for d in more {
+                v = v * 8 + (d - 48)
+            }
+            return Item.Lit(v)
+        }
+        if is_dec(c) {
+            var text: List<u32> = [c]
+            if self.next.has and not self.next.esc and is_dec(self.next.c) {
+                let d = try self.get()
+                text.push(d.c)
+                if is_oct(text[0]) and is_oct(text[1]) and self.next.has and not self.next.esc and is_oct(self.next.c) {
+                    let e = try self.get()
+                    text.push(e.c)
+                    let v = (text[0] - 48) * 64 + (text[1] - 48) * 8 + (text[2] - 48)
+                    if v > 255 {
+                        fail self.error("octal escape value \\{runes_text(text)} outside of range 0-0o377", 4)
+                    }
+                    return Item.Lit(v)
+                }
+            }
+            var group: usize = 0
+            for d in text {
+                group = group * 10 + usize(d - 48)
+            }
+            if group < self.groups() {
+                if not self.check_group(group) {
+                    fail self.error(String("cannot refer to an open group"), 1 + text.len())
+                }
+                try self.check_lookbehind_group(group)
+                return Item.Ref(u32.wrap(group))
+            }
+            fail self.error("invalid group reference {group}", text.len())
+        }
+        if ascii_cased(c) {
+            fail self.error("bad escape {tok_text(t)}", 2)
+        }
+        return Item.Lit(c)
+    }
+
+    // An alternation, as `_parse_sub`.
+    fn parse_sub(mut self, verbose0: bool, nested: u32) -> List<Item> ! SreError {
+        var verbose = verbose0
+        var items = List<List<Item>>()
+        loop {
+            let first = nested == 0 and items.is_empty()
+            let item = try self.parse(verbose, nested + 1, first)
+            items.push(item)
+            if not (try self.take(124)) {
+                break
+            }
+            if nested == 0 {
+                verbose = self.flags & F_VERBOSE != 0
+            }
+        }
+        if items.len() == 1 {
+            return items.pop() ?? List<Item>()
+        }
+        // A branch of single runes and classes is a class.
+        var set = List<SetItem>()
+        var all = true
+        for item in items {
+            if item.len() != 1 {
+                all = false
+                break
+            }
+            match item[0] {
+                Item.Lit(c) => set.push(SetItem.Lit(c)),
+                Item.In(s) => {
+                    if is_negated(s) {
+                        all = false
+                        break
+                    }
+                    set.extend(s)
+                },
+                _ => {
+                    all = false
+                    break
+                },
+            }
+        }
+        if all {
+            return [Item.In(set)]
+        }
+        return [Item.Branch(items)]
+    }
+
+    // The quantifier `c` after what it repeats, as `_parse` reads one: the item it makes, or
+    // none when a `{` isn't one and is the rune.
+    fn repeat(mut self, sub: mut List<Item>, c: u32) -> bool ! SreError {
+        let here = self.tell()
+        var min: u32 = 0
+        var max: u32 = MAXREPEAT
+        if c == 63 {
+            max = 1
+        } else if c == 43 {
+            min = 1
+        } else if c == 123 {
+            if self.is(125) {
+                sub.push(Item.Lit(123))
+                return false
+            }
+            let all = self.p.len()
+            let lo = try self.get_while(all, 0)
+            var hi = List<u32>()
+            if try self.take(44) {
+                hi = try self.get_while(all, 0)
+            } else {
+                hi = lo.copy()
+            }
+            if not (try self.take(125)) {
+                sub.push(Item.Lit(123))
+                try self.seek(here)
+                return false
+            }
+            if not lo.is_empty() {
+                let v = number(lo)
+                if v >= u64(MAXREPEAT) {
+                    fail SreError { message: String("the repetition number is too large"), pos: -1 }
+                }
+                min = u32.wrap(v)
+            }
+            if not hi.is_empty() {
+                let v = number(hi)
+                if v >= u64(MAXREPEAT) {
+                    fail SreError { message: String("the repetition number is too large"), pos: -1 }
+                }
+                max = u32.wrap(v)
+                if max < min {
+                    fail self.error(String("min repeat greater than max repeat"), self.tell() - here)
+                }
+            }
+        }
+        let n = sub.len()
+        if n == 0 {
+            fail self.error(String("nothing to repeat"), self.tell() - here + 1)
+        }
+        match sub[n - 1] {
+            Item.At(_) => fail self.error(String("nothing to repeat"), self.tell() - here + 1),
+            Item.Rep(_, _, _, _) => fail self.error(String("multiple repeat"), self.tell() - here + 1),
+            _ => {},
+        }
+        let last = sub.pop() ?? Item.Fail
+        var body = List<Item>()
+        match last {
+            Item.Sub(g, add, del, p) => {
+                if g == 0 and add == 0 and del == 0 {
+                    body = p
+                } else {
+                    body.push(Item.Sub(g, add, del, p))
+                }
+            },
+            _ => body.push(last),
+        }
+        var kind = GREEDY
+        if try self.take(63) {
+            kind = LAZY
+        } else if try self.take(43) {
+            kind = POSSESSIVE
+        }
+        sub.push(Item.Rep(kind, min, max, body))
+        return true
+    }
+
+    // A group after its `(`, or `(?` and what follows, as `_parse` reads one, added to `sub`.
+    fn group(mut self, sub: mut List<Item>, verbose: mut bool, nested: u32, first: bool) ! SreError {
+        let start = self.tell() - 1
+        var capture = true
+        var atomic = false
+        var name = List<u32>()
+        var named = false
+        var add: u32 = 0
+        var del: u32 = 0
+        if try self.take(63) {
+            let ch = try self.get()
+            if not ch.has {
+                fail self.error(String("unexpected end of pattern"), 0)
+            }
+            let plain = not ch.esc
+            if plain and ch.c == 80 {
+                if try self.take(60) {
+                    name = try self.get_until(62, "group name")
+                    named = true
+                    try self.check_group_name(name, 1)
+                } else if try self.take(61) {
+                    name = try self.get_until(41, "group name")
+                    try self.check_group_name(name, 1)
+                    let gid = self.names.get(runes_text(name)) else {
+                        fail self.error("unknown group name {repr_str(runes_text(name))}", name.len() + 1)
+                    }
+                    if not self.check_group(usize(gid)) {
+                        fail self.error(String("cannot refer to an open group"), name.len() + 1)
+                    }
+                    try self.check_lookbehind_group(usize(gid))
+                    sub.push(Item.Ref(gid))
+                    return
+                } else {
+                    let d = try self.get()
+                    if not d.has {
+                        fail self.error(String("unexpected end of pattern"), 0)
+                    }
+                    fail self.error("unknown extension ?P{tok_text(d)}", tok_len(d) + 2)
+                }
+            } else if plain and ch.c == 58 {
+                capture = false
+            } else if plain and ch.c == 35 {
+                loop {
+                    if not self.next.has {
+                        fail self.error(String("missing ), unterminated comment"), self.tell() - start)
+                    }
+                    let u = try self.get()
+                    if not u.esc and u.c == 41 {
+                        break
+                    }
+                }
+                return
+            } else if plain and (ch.c == 61 or ch.c == 33 or ch.c == 60) {
+                var kind = ch
+                var behind = false
+                var saved: i64 = 0
+                if ch.c == 60 {
+                    kind = try self.get()
+                    if not kind.has {
+                        fail self.error(String("unexpected end of pattern"), 0)
+                    }
+                    if kind.esc or (kind.c != 61 and kind.c != 33) {
+                        fail self.error("unknown extension ?<{tok_text(kind)}", tok_len(kind) + 2)
+                    }
+                    behind = true
+                    saved = self.lookbehind
+                    if saved < 0 {
+                        self.lookbehind = i64.wrap(self.groups())
+                    }
+                }
+                let p = try self.parse_sub(verbose, nested + 1)
+                if behind and saved < 0 {
+                    self.lookbehind = -1
+                }
+                if not (try self.take(41)) {
+                    fail self.error(String("missing ), unterminated subpattern"), self.tell() - start)
+                }
+                if kind.c == 61 {
+                    sub.push(Item.Look(true, behind, p))
+                } else if not p.is_empty() {
+                    sub.push(Item.Look(false, behind, p))
+                } else {
+                    sub.push(Item.Fail)
+                }
+                return
+            } else if plain and ch.c == 40 {
+                let cond = try self.get_until(41, "group name")
+                var all_digits = true
+                for d in cond {
+                    if not is_dec(d) {
+                        all_digits = false
+                    }
+                }
+                var group: u32 = 0
+                if not all_digits {
+                    try self.check_group_name(cond, 1)
+                    let named_group = self.names.get(runes_text(cond)) else {
+                        fail self.error("unknown group name {repr_str(runes_text(cond))}", cond.len() + 1)
+                    }
+                    group = named_group
+                } else {
+                    let v = number(cond)
+                    if v == 0 {
+                        fail self.error(String("bad group number"), cond.len() + 1)
+                    }
+                    if v >= MAXGROUPS {
+                        fail self.error("invalid group reference {v}", cond.len() + 1)
+                    }
+                    group = u32.wrap(v)
+                    var seen = false
+                    for r in self.ref_at {
+                        if r.0 == group {
+                            seen = true
+                        }
+                    }
+                    if not seen {
+                        self.ref_at.push((group, self.tell() - cond.len() - 1))
+                    }
+                }
+                try self.check_lookbehind_group(usize(group))
+                let yes = try self.parse(verbose, nested + 1, false)
+                var no = List<Item>()
+                var has_no = false
+                if try self.take(124) {
+                    no = try self.parse(verbose, nested + 1, false)
+                    has_no = true
+                    if self.is(124) {
+                        fail self.error(String("conditional backref with more than two branches"), 0)
+                    }
+                }
+                if not (try self.take(41)) {
+                    fail self.error(String("missing ), unterminated subpattern"), self.tell() - start)
+                }
+                sub.push(Item.RefExists(group, yes, no, has_no))
+                return
+            } else if plain and ch.c == 62 {
+                capture = false
+                atomic = true
+            } else if plain and (flag_of(ch.c) != 0 or ch.c == 45) {
+                let (global, a, d) = try self.parse_flags(ch.c)
+                if global {
+                    if not first or not sub.is_empty() {
+                        fail self.error(String("global flags not at the start of the expression"), self.tell() - start)
+                    }
+                    verbose = self.flags & F_VERBOSE != 0
+                    return
+                }
+                add = a
+                del = d
+                capture = false
+            } else {
+                fail self.error("unknown extension ?{tok_text(ch)}", tok_len(ch) + 1)
+            }
+        }
+        var group: u32 = 0
+        if capture {
+            let gid = self.groups()
+            if named {
+                let key = runes_text(name)
+                if let old = self.names.get(key.copy()) {
+                    fail self.error("redefinition of group name {repr_str(key)} as group {gid}; was group {old}", name.len() + 1)
+                }
+                self.names.insert(key.copy(), u32.wrap(gid))
+                self.group_names.push(key)
+            } else {
+                self.group_names.push(String())
+            }
+            self.widths.push((0, 0))
+            self.closed.push(false)
+            group = u32.wrap(gid)
+        }
+        let sub_verbose = (verbose or add & F_VERBOSE != 0) and del & F_VERBOSE == 0
+        let p = try self.parse_sub(sub_verbose, nested + 1)
+        if not (try self.take(41)) {
+            fail self.error(String("missing ), unterminated subpattern"), self.tell() - start)
+        }
+        if capture {
+            self.widths[usize(group)] = width(p, self.widths)
+            self.closed[usize(group)] = true
+        }
+        if atomic {
+            sub.push(Item.Atomic(p))
+        } else {
+            sub.push(Item.Sub(group, add, del, p))
+        }
+    }
+
+    // A sequence, as `_parse`.
+    fn parse(mut self, verbose0: bool, nested: u32, first: bool) -> List<Item> ! SreError {
+        var verbose = verbose0
+        var sub = List<Item>()
+        loop {
+            let t = self.next
+            if not t.has {
+                break
+            }
+            if not t.esc and (t.c == 124 or t.c == 41) {
+                break
+            }
+            try self.advance()
+            if verbose and not t.esc {
+                if t.c == 32 or (t.c >= 9 and t.c <= 13) {
+                    continue
+                }
+                if t.c == 35 {
+                    loop {
+                        let u = try self.get()
+                        if not u.has or (not u.esc and u.c == 10) {
+                            break
+                        }
+                    }
+                    continue
+                }
+            }
+            if t.esc {
+                let e = try self.escape(t)
+                sub.push(e)
+                continue
+            }
+            let c = t.c
+            if c == 91 {
+                let k = try self.parse_class()
+                sub.push(k)
+            } else if c == 42 or c == 43 or c == 63 or c == 123 {
+                _ = try self.repeat(mut sub, c)
+            } else if c == 46 {
+                sub.push(Item.Any)
+            } else if c == 40 {
+                try self.group(mut sub, mut verbose, nested, first)
+            } else if c == 94 {
+                sub.push(Item.At(AT_BEGINNING))
+            } else if c == 36 {
+                sub.push(Item.At(AT_END))
+            } else {
+                sub.push(Item.Lit(c))
+            }
+        }
+        // Groups that neither capture nor set flags are what's in them.
+        var out = List<Item>()
+        for it in sub {
+            match it {
+                Item.Sub(g, add, del, p) => {
+                    if g == 0 and add == 0 and del == 0 {
+                        out.extend(p)
+                    } else {
+                        out.push(Item.Sub(g, add, del, p.copy()))
+                    }
+                },
+                _ => out.push(it.copy()),
+            }
+        }
+        return out
+    }
+
+    // A class after its `[`, as `_parse` reads one.
+    fn parse_class(mut self) -> Item ! SreError {
+        let here = self.tell() - 1
+        var set = List<SetItem>()
+        let negate = try self.take(94)
+        loop {
+            let t = try self.get()
+            if not t.has {
+                fail self.error(String("unterminated character set"), self.tell() - here)
+            }
+            if not t.esc and t.c == 93 and not set.is_empty() {
+                break
+            }
+            let code1 = if t.esc { try self.class_escape(t) } else { SetItem.Lit(t.c) }
+            if try self.take(45) {
+                let u = try self.get()
+                if not u.has {
+                    fail self.error(String("unterminated character set"), self.tell() - here)
+                }
+                if not u.esc and u.c == 93 {
+                    set.push(code1)
+                    set.push(SetItem.Lit(45))
+                    break
+                }
+                let code2 = if u.esc { try self.class_escape(u) } else { SetItem.Lit(u.c) }
+                let lo = lit_of(code1)
+                let hi = lit_of(code2)
+                if lo == NO_RUNE or hi == NO_RUNE or hi < lo {
+                    fail self.error("bad character range {tok_text(t)}-{tok_text(u)}", tok_len(t) + 1 + tok_len(u))
+                }
+                set.push(SetItem.Range(lo, hi))
+            } else {
+                set.push(code1)
+            }
+        }
+        if set.len() == 1 {
+            let c = lit_of(set[0])
+            if c != NO_RUNE {
+                return if negate { Item.NotLit(c) } else { Item.Lit(c) }
+            }
+        }
+        if negate {
+            set.insert(0, SetItem.Negate)
+        }
+        return Item.In(set)
+    }
+
+    // Inline flags after `(?` and `ch0`, as `_parse_flags`: whether they're global, as `(?x)`
+    // is, and the flags turned on and off.
+    fn parse_flags(mut self, ch0: u32) -> (bool, u32, u32) ! SreError {
+        var ch = ch0
+        var add: u32 = 0
+        var del: u32 = 0
+        if ch != 45 {
+            loop {
+                let flag = flag_of(ch)
+                if ch == 76 {
+                    fail self.error(String("bad inline flags: cannot use 'L' flag with a str pattern"), 0)
+                }
+                add = add | flag
+                if flag & TYPE_FLAGS != 0 and add & TYPE_FLAGS != flag {
+                    fail self.error(String("bad inline flags: flags 'a', 'u' and 'L' are incompatible"), 0)
+                }
+                let t = try self.get()
+                if not t.has {
+                    fail self.error(String("missing -, : or )"), 0)
+                }
+                ch = t.c
+                if not t.esc and (ch == 41 or ch == 45 or ch == 58) {
+                    break
+                }
+                if t.esc or flag_of(ch) == 0 {
+                    let msg = if not t.esc and is_alpha(ch) { "unknown flag" } else { "missing -, : or )" }
+                    fail self.error(String(msg), tok_len(t))
+                }
+            }
+        }
+        if ch == 41 {
+            self.flags = self.flags | add
+            return (true, 0, 0)
+        }
+        if ch == 45 {
+            let t = try self.get()
+            if not t.has {
+                fail self.error(String("missing flag"), 0)
+            }
+            ch = t.c
+            if t.esc or flag_of(ch) == 0 {
+                let msg = if not t.esc and is_alpha(ch) { "unknown flag" } else { "missing flag" }
+                fail self.error(String(msg), tok_len(t))
+            }
+            loop {
+                let flag = flag_of(ch)
+                if flag & TYPE_FLAGS != 0 {
+                    fail self.error(String("bad inline flags: cannot turn off flags 'a', 'u' and 'L'"), 0)
+                }
+                del = del | flag
+                let u = try self.get()
+                if not u.has {
+                    fail self.error(String("missing :"), 0)
+                }
+                ch = u.c
+                if not u.esc and ch == 58 {
+                    break
+                }
+                if u.esc or flag_of(ch) == 0 {
+                    let msg = if not u.esc and is_alpha(ch) { "unknown flag" } else { "missing :" }
+                    fail self.error(String(msg), tok_len(u))
+                }
+            }
+        }
+        if add & del != 0 {
+            fail self.error(String("bad inline flags: flag turned on and off"), 1)
+        }
+        return (false, add, del)
+    }
+}
+
+const NO_RUNE: u32 = 0xFFFFFFFF
+
+fn lit_of(s: SetItem) -> u32 {
+    return match s {
+        SetItem.Lit(c) => c,
+        _ => NO_RUNE,
+    }
+}
+
+fn is_negated(s: List<SetItem>) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    return match s[0] {
+        SetItem.Negate => true,
+        _ => false,
+    }
+}
+
+// --- the compiler, as re/_compiler.py -----------------------------------------------------------
+
+// A rune set, as sre's charset checks one: the runes in `ranges`, those in the categories, and
+// those in a range of `uni` or whose uppercase is, RANGE_UNI_IGNORE; or every other rune, if
+// `negate`.
+struct CharSet {
+    negate: bool
+    ranges: List<u32>
+    cats: List<u32>
+    uni: List<u32>
+}
+
+fn set_has(s: CharSet, r: u32) -> bool {
+    var lo: usize = 0
+    var hi = s.ranges.len() / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > s.ranges[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < s.ranges[2 * mid] {
+            hi = mid
+        } else {
+            return not s.negate
+        }
+    }
+    for c in s.cats {
+        if category(c, r) {
+            return not s.negate
+        }
+    }
+    var i: usize = 0
+    while i < s.uni.len() {
+        let u = upper(r)
+        if (s.uni[i] <= r and r <= s.uni[i + 1]) or (s.uni[i] <= u and u <= s.uni[i + 1]) {
+            return not s.negate
+        }
+        i += 2
+    }
+    return s.negate
+}
+
+// Ranges, as pairs, sorted and with those that touch joined.
+fn merged(pairs: own List<u64>) -> List<u32> {
+    var sorted = pairs
+    sorted.sort()
+    var out = List<u32>()
+    for p in sorted {
+        let lo = u32.wrap(p >> 32)
+        let hi = u32.wrap(p & 0xFFFFFFFF)
+        let n = out.len()
+        if n > 0 and u64(lo) <= u64(out[n - 1]) + 1 {
+            if hi > out[n - 1] {
+                out[n - 1] = hi
+            }
+        } else {
+            out.push(lo)
+            out.push(hi)
+        }
+    }
+    return out
+}
+
+fn pair(lo: u32, hi: u32) -> u64 {
+    return (u64(lo) << 32) | u64(hi)
+}
+
+// What a class compiles to.
+const SET_SOME: u32 = 0
+const SET_ALL: u32 = 1
+const SET_NONE: u32 = 2
+
+struct Compiler {
+    code: List<u32>
+    sets: List<CharSet>
+    widths: List<(u64, u64)>
+}
+
+fn simple(p: List<Item>) -> bool {
+    if p.len() != 1 {
+        return false
+    }
+    return match p[0] {
+        Item.Lit(_) => true,
+        Item.NotLit(_) => true,
+        Item.Any => true,
+        Item.In(_) => true,
+        Item.Sub(g, _, _, q) => g == 0 and simple(q),
+        _ => false,
+    }
+}
+
+fn combine_flags(flags: u32, add: u32, del: u32) -> u32 {
+    var f = flags
+    if add & TYPE_FLAGS != 0 {
+        f = f & (0xFFFFFFFF ^ TYPE_FLAGS)
+    }
+    return (f | add) & (0xFFFFFFFF ^ del)
+}
+
+impl Compiler {
+    fn emit(mut self, v: u32) {
+        self.code.push(v)
+    }
+
+    // A skip to fill in later: where it is.
+    fn hole(mut self) -> usize {
+        self.code.push(0)
+        return self.code.len() - 1
+    }
+
+    // Fills in the skip at `at` to here.
+    fn fill(mut self, at: usize) {
+        self.code[at] = u32.wrap(self.code.len() - at)
+    }
+
+    // A class as `_optimize_charset` makes one: what it is, the set it adds if some, and
+    // whether case matters to it.
+    fn charset(mut self, items: List<SetItem>, flags: u32) -> (u32, u32, bool) {
+        let ignore = flags & F_IGNORECASE != 0
+        let uni = flags & F_UNICODE != 0
+        var negate = false
+        var pairs = List<u64>()
+        var cats = List<u32>()
+        var unis = List<u32>()
+        var hascased = false
+        for it in items {
+            match it {
+                SetItem.Negate => negate = true,
+                SetItem.Lit(c) => {
+                    if ignore {
+                        let l = if uni { lower(c) } else { ascii_lower(c) }
+                        pairs.push(pair(l, l))
+                        if uni and l < 0x10000 {
+                            for k in extra_cases(l) {
+                                pairs.push(pair(k, k))
+                            }
+                        }
+                        if not hascased and (if uni { is_cased(l) } else { ascii_cased(l) }) {
+                            hascased = true
+                        }
+                    } else {
+                        pairs.push(pair(c, c))
+                    }
+                },
+                SetItem.Range(lo, hi) => {
+                    if ignore {
+                        var big = false
+                        var i = lo
+                        while i <= hi {
+                            let l = if uni { lower(i) } else { ascii_lower(i) }
+                            if l >= 0x10000 {
+                                big = true
+                                break
+                            }
+                            pairs.push(pair(l, l))
+                            if uni {
+                                for k in extra_cases(l) {
+                                    pairs.push(pair(k, k))
+                                }
+                            }
+                            i += 1
+                        }
+                        if big {
+                            if uni {
+                                unis.push(lo)
+                                unis.push(hi)
+                            } else {
+                                pairs.push(pair(lo, hi))
+                            }
+                            hascased = true
+                        } else if not hascased {
+                            var k = lo
+                            while k <= hi {
+                                if (if uni { is_cased(k) } else { ascii_cased(k) }) {
+                                    hascased = true
+                                    break
+                                }
+                                k += 1
+                            }
+                        }
+                    } else {
+                        pairs.push(pair(lo, hi))
+                    }
+                },
+                SetItem.Cat(cat) => {
+                    if cats.contains(cat ^ 1) {
+                        return (if negate { SET_NONE } else { SET_ALL }, 0, false)
+                    }
+                    cats.push(cat)
+                },
+            }
+        }
+        var mapped = List<u32>()
+        for c in cats {
+            mapped.push(if uni { c + 10 } else { c })
+        }
+        self.sets.push(CharSet { negate: negate, ranges: merged(pairs), cats: mapped, uni: unis })
+        return (SET_SOME, u32.wrap(self.sets.len() - 1), hascased)
+    }
+
+    fn literal(mut self, op: u32, c: u32, flags: u32) {
+        if flags & F_IGNORECASE == 0 {
+            self.emit(op)
+            self.emit(c)
+            return
+        }
+        let uni = flags & F_UNICODE != 0
+        if not (if uni { is_cased(c) } else { ascii_cased(c) }) {
+            self.emit(op)
+            self.emit(c)
+            return
+        }
+        if not uni {
+            self.emit(if op == OP_LITERAL { OP_LITERAL_IGNORE } else { OP_NOT_LITERAL_IGNORE })
+            self.emit(ascii_lower(c))
+            return
+        }
+        let lo = lower(c)
+        let extra = extra_cases(lo)
+        if extra.is_empty() {
+            self.emit(if op == OP_LITERAL { OP_LITERAL_UNI_IGNORE } else { OP_NOT_LITERAL_UNI_IGNORE })
+            self.emit(lo)
+            return
+        }
+        var pairs: List<u64> = [pair(lo, lo)]
+        for k in extra {
+            pairs.push(pair(k, k))
+        }
+        self.sets.push(CharSet { negate: op == OP_NOT_LITERAL, ranges: merged(pairs), cats: [], uni: [] })
+        let index = u32.wrap(self.sets.len() - 1)
+        self.emit(OP_IN_UNI_IGNORE)
+        self.emit(index)
+    }
+
+    fn items(mut self, items: List<Item>, flags: u32) ! SreError {
+        for it in items {
+            match it {
+                Item.Lit(c) => self.literal(OP_LITERAL, c, flags),
+                Item.NotLit(c) => self.literal(OP_NOT_LITERAL, c, flags),
+                Item.In(set) => {
+                    let (kind, index, hascased) = self.charset(set, flags)
+                    if kind == SET_NONE {
+                        self.emit(OP_FAILURE)
+                    } else if kind == SET_ALL {
+                        self.emit(OP_ANY_ALL)
+                    } else {
+                        let op = if not hascased { OP_IN } else if flags & F_UNICODE == 0 { OP_IN_IGNORE } else { OP_IN_UNI_IGNORE }
+                        self.emit(op)
+                        self.emit(index)
+                    }
+                },
+                Item.Any => self.emit(if flags & F_DOTALL != 0 { OP_ANY_ALL } else { OP_ANY }),
+                Item.Rep(kind, min, max, body) => {
+                    if simple(body) {
+                        self.emit(if kind == GREEDY { OP_REPEAT_ONE } else if kind == LAZY { OP_MIN_REPEAT_ONE } else { OP_POSSESSIVE_REPEAT_ONE })
+                        let skip = self.hole()
+                        self.emit(min)
+                        self.emit(max)
+                        try self.items(body, flags)
+                        self.emit(OP_SUCCESS)
+                        self.fill(skip)
+                    } else {
+                        self.emit(if kind == POSSESSIVE { OP_POSSESSIVE_REPEAT } else { OP_REPEAT })
+                        let skip = self.hole()
+                        self.emit(min)
+                        self.emit(max)
+                        try self.items(body, flags)
+                        self.fill(skip)
+                        self.emit(if kind == GREEDY { OP_MAX_UNTIL } else if kind == LAZY { OP_MIN_UNTIL } else { OP_SUCCESS })
+                    }
+                },
+                Item.Sub(g, add, del, body) => {
+                    if g != 0 {
+                        self.emit(OP_MARK)
+                        self.emit((g - 1) * 2)
+                    }
+                    try self.items(body, combine_flags(flags, add, del))
+                    if g != 0 {
+                        self.emit(OP_MARK)
+                        self.emit((g - 1) * 2 + 1)
+                    }
+                },
+                Item.Atomic(body) => {
+                    self.emit(OP_ATOMIC_GROUP)
+                    let skip = self.hole()
+                    try self.items(body, flags)
+                    self.emit(OP_SUCCESS)
+                    self.fill(skip)
+                },
+                Item.Fail => self.emit(OP_FAILURE),
+                Item.Look(positive, behind, body) => {
+                    self.emit(if positive { OP_ASSERT } else { OP_ASSERT_NOT })
+                    let skip = self.hole()
+                    if not behind {
+                        self.emit(0)
+                    } else {
+                        let (lo, hi) = width(body, self.widths)
+                        if lo > 0xFFFFFFFF {
+                            fail SreError { message: String("looks too much behind"), pos: -1 }
+                        }
+                        if lo != hi {
+                            fail SreError { message: String("look-behind requires fixed-width pattern"), pos: -1 }
+                        }
+                        self.emit(u32.wrap(lo))
+                    }
+                    try self.items(body, flags)
+                    self.emit(OP_SUCCESS)
+                    self.fill(skip)
+                },
+                Item.At(a0) => {
+                    var a = a0
+                    if flags & F_MULTILINE != 0 {
+                        if a == AT_BEGINNING {
+                            a = AT_BEGINNING_LINE
+                        } else if a == AT_END {
+                            a = AT_END_LINE
+                        }
+                    }
+                    if flags & F_UNICODE != 0 {
+                        if a == AT_BOUNDARY {
+                            a = AT_UNI_BOUNDARY
+                        } else if a == AT_NON_BOUNDARY {
+                            a = AT_UNI_NON_BOUNDARY
+                        }
+                    }
+                    self.emit(OP_AT)
+                    self.emit(a)
+                },
+                Item.Branch(alts) => {
+                    self.emit(OP_BRANCH)
+                    var tails = List<usize>()
+                    for alt in alts {
+                        let skip = self.hole()
+                        try self.items(alt, flags)
+                        self.emit(OP_JUMP)
+                        tails.push(self.hole())
+                        self.fill(skip)
+                    }
+                    self.emit(OP_FAILURE)
+                    for t in tails {
+                        self.fill(t)
+                    }
+                },
+                Item.Ref(g) => {
+                    let op = if flags & F_IGNORECASE == 0 { OP_GROUPREF } else if flags & F_UNICODE == 0 { OP_GROUPREF_IGNORE } else { OP_GROUPREF_UNI_IGNORE }
+                    self.emit(op)
+                    self.emit(g - 1)
+                },
+                Item.RefExists(g, yes, no, has_no) => {
+                    self.emit(OP_GROUPREF_EXISTS)
+                    self.emit(g - 1)
+                    let skip_yes = self.hole()
+                    try self.items(yes, flags)
+                    if has_no and not no.is_empty() {
+                        self.emit(OP_JUMP)
+                        let skip_no = self.hole()
+                        self.code[skip_yes] = u32.wrap(self.code.len() - skip_yes + 1)
+                        try self.items(no, flags)
+                        self.fill(skip_no)
+                    } else {
+                        self.code[skip_yes] = u32.wrap(self.code.len() - skip_yes + 1)
+                    }
+                },
+            }
+        }
+    }
+}
+
+// --- the matcher, as sre_lib.h ------------------------------------------------------------------
+
+// Where a context goes back to when what it jumped into returns, as sre's JUMP_ values.
+const J_NONE: u32 = 0
+const J_MAX_UNTIL_1: u32 = 1
+const J_MAX_UNTIL_2: u32 = 2
+const J_MAX_UNTIL_3: u32 = 3
+const J_MIN_UNTIL_1: u32 = 4
+const J_MIN_UNTIL_2: u32 = 5
+const J_MIN_UNTIL_3: u32 = 6
+const J_REPEAT: u32 = 7
+const J_REPEAT_ONE_1: u32 = 8
+const J_REPEAT_ONE_2: u32 = 9
+const J_MIN_REPEAT_ONE: u32 = 10
+const J_BRANCH: u32 = 11
+const J_ASSERT: u32 = 12
+const J_ASSERT_NOT: u32 = 13
+const J_POSS_REPEAT_1: u32 = 14
+const J_POSS_REPEAT_2: u32 = 15
+const J_ATOMIC_GROUP: u32 = 16
+
+// What the machine does next: the labels of sre's match function that a loop goes back to.
+const S_DISPATCH: u8 = 0
+const S_EXIT: u8 = 1
+const S_BRANCH: u8 = 2
+const S_REPEAT_ONE_1: u8 = 3
+const S_REPEAT_ONE_2: u8 = 4
+const S_MIN_REPEAT_ONE: u8 = 5
+const S_POSS_1: u8 = 6
+const S_POSS_2: u8 = 7
+const S_POSS_END: u8 = 8
+const S_MAX_UNTIL_TAIL: u8 = 9
+
+// A repeat's context, as SRE_REPEAT.
+struct Rep {
+    count: i64
+    // Where the REPEAT's operands are: its skip, then its least and most.
+    pat: usize
+    prev: i64
+    last_ptr: i64
+}
+
+// A match context, as SRE(match_context).
+struct Ctx {
+    count: i64
+    chr: u32
+    rep: i64
+    lastmark: i64
+    lastindex: i64
+    pat: usize
+    ptr: usize
+    toplevel: bool
+    jump: u32
+}
+
+// The rune at byte `i` of `s` and how many bytes it takes.
+fn decode(s: String, i: usize) -> (u32, usize) {
+    let b0 = u32(s.byte_at(i))
+    if b0 < 0x80 {
+        return (b0, 1)
+    }
+    if b0 < 0xE0 {
+        return (((b0 & 0x1F) << 6) | (u32(s.byte_at(i + 1)) & 0x3F), 2)
+    }
+    if b0 < 0xF0 {
+        return (((b0 & 0x0F) << 12) | ((u32(s.byte_at(i + 1)) & 0x3F) << 6) | (u32(s.byte_at(i + 2)) & 0x3F), 3)
+    }
+    return (((b0 & 0x07) << 18) | ((u32(s.byte_at(i + 1)) & 0x3F) << 12) | ((u32(s.byte_at(i + 2)) & 0x3F) << 6) | (u32(s.byte_at(i + 3)) & 0x3F), 4)
+}
+
+fn next_pos(s: String, i: usize) -> usize {
+    let b = s.byte_at(i)
+    if b < 0x80 {
+        return i + 1
+    }
+    if b < 0xE0 {
+        return i + 2
+    }
+    if b < 0xF0 {
+        return i + 3
+    }
+    return i + 4
+}
+
+fn prev_pos(s: String, i: usize) -> usize {
+    var j = i - 1
+    while j > 0 and s.byte_at(j) >= 0x80 and s.byte_at(j) < 0xC0 {
+        j -= 1
+    }
+    return j
+}
+
+// Whether byte `ptr` of `text` is where `AT` code `a` holds.
+fn at_holds(text: String, ptr: usize, a: u32) -> bool {
+    let end = text.len()
+    if a == AT_BEGINNING or a == AT_BEGINNING_STRING {
+        return ptr == 0
+    }
+    if a == AT_BEGINNING_LINE {
+        return ptr == 0 or text.byte_at(ptr - 1) == 10
+    }
+    if a == AT_END {
+        return (ptr + 1 == end and text.byte_at(ptr) == 10) or ptr == end
+    }
+    if a == AT_END_LINE {
+        return ptr == end or text.byte_at(ptr) == 10
+    }
+    if a == AT_END_STRING {
+        return ptr == end
+    }
+    let uni = a == AT_UNI_BOUNDARY or a == AT_UNI_NON_BOUNDARY
+    var that = false
+    if ptr > 0 {
+        let (r, _) = decode(text, prev_pos(text, ptr))
+        that = if uni { is_word(r) } else { is_word_ascii(r) }
+    }
+    var this = false
+    if ptr < end {
+        let (r, _) = decode(text, ptr)
+        this = if uni { is_word(r) } else { is_word_ascii(r) }
+    }
+    if a == AT_BOUNDARY or a == AT_UNI_BOUNDARY {
+        return this != that
+    }
+    return this == that
+}
+
+// Where `n` runes before byte `i` is, or -1 if there aren't that many.
+fn step_back(s: String, i: usize, n: u32) -> i64 {
+    var at = i
+    var k: u32 = 0
+    while k < n {
+        if at == 0 {
+            return -1
+        }
+        at = prev_pos(s, at)
+        k += 1
+    }
+    return i64.wrap(at)
+}
+
+/// A pattern compiled as Python compiles it, and what its last search found.
+pub struct Program {
+    code: List<u32>
+    sets: List<CharSet>
+    groups: usize
+    names: List<String>
+    marks: List<i64>
+    lastmark: i64
+    lastindex: i64
+    reps: List<Rep>
+    repeat: i64
+    data: List<i64>
+    ctxs: List<Ctx>
+    sptr: usize
+    start: usize
+    must_advance: bool
+    match_all: bool
+    // Where a search skips to, as sre's INFO block has it and more; see `plan_skips`. The fewest
+    // runes a match takes; the UTF-8 of the literal every match starts with, and whether that's
+    // the whole pattern, without a group; and the bytes a match can start with, `first_count` of
+    // them, which with three or fewer are `first_bytes`, one a byte, or an empty table for any.
+    min_width: u64
+    prefix: List<u8>
+    prefix_rare: usize
+    literal: bool
+    first: List<u8>
+    first_count: u32
+    first_bytes: u32
+}
+
+// In the runtime, as std.regex uses them: where bytes are found fast. More than `len` for none.
+extern "C" {
+    fn cx_bytes_rare(needle: *const u8, n: usize) -> usize
+    fn cx_bytes_find_rare(hay: *const u8, len: usize, needle: *const u8, n: usize, k: usize) -> usize
+    fn cx_rx_skip(hay: *const u8, len: usize, from: usize, set: *const u8, count: u32, bytes: u32) -> usize
+}
+
+/// `pattern` compiled as Python's `re.compile` compiles it, or the error Python gives for it.
+pub fn compile(pattern: String) -> Program ! SreError {
+    var runes = List<u32>()
+    for r in pattern.runes() {
+        runes.push(u32(r))
+    }
+    var ps = Parser { p: runes, index: 0, next: Tok { has: false, esc: false, c: 0 }, flags: 0, names: Map<String, u32>(), widths: [(0, 0)], closed: [false], group_names: List<String>(), lookbehind: -1, ref_at: List<(u32, usize)>() }
+    try ps.advance()
+    let items = try ps.parse_sub(false, 0)
+    if ps.flags & F_ASCII == 0 {
+        ps.flags = ps.flags | F_UNICODE
+    } else if ps.flags & F_UNICODE != 0 {
+        fail SreError { message: String("ASCII and UNICODE flags are incompatible"), pos: -1 }
+    }
+    if ps.next.has {
+        fail ps.error(String("unbalanced parenthesis"), 0)
+    }
+    for r in ps.ref_at {
+        if usize(r.0) >= ps.groups() {
+            fail SreError { message: "invalid group reference {r.0}", pos: i64.wrap(r.1) }
+        }
+    }
+    var c = Compiler { code: List<u32>(), sets: List<CharSet>(), widths: ps.widths.copy() }
+    try c.items(items, ps.flags)
+    c.emit(OP_SUCCESS)
+    let groups = ps.groups() - 1
+    var prog = Program { code: c.code, sets: c.sets, groups: groups, names: ps.group_names, marks: [-1i64; groups * 2], lastmark: -1, lastindex: -1, reps: List<Rep>(), repeat: -1, data: List<i64>(), ctxs: List<Ctx>(), sptr: 0, start: 0, must_advance: false, match_all: false, min_width: 0, prefix: List<u8>(), prefix_rare: 0, literal: false, first: List<u8>(), first_count: 0, first_bytes: 0 }
+    prog.plan_skips(items, ps.flags, ps.widths)
+    return prog
+}
+
+/// A program that matches the empty string, for a `Regex` that isn't Python's.
+pub fn empty() -> Program {
+    return Program { code: [OP_SUCCESS], sets: List<CharSet>(), groups: 0, names: List<String>(), marks: List<i64>(), lastmark: -1, lastindex: -1, reps: List<Rep>(), repeat: -1, data: List<i64>(), ctxs: List<Ctx>(), sptr: 0, start: 0, must_advance: false, match_all: false, min_width: 0, prefix: List<u8>(), prefix_rare: 0, literal: false, first: List<u8>(), first_count: 0, first_bytes: 0 }
+}
+
+// --- where a search can start -------------------------------------------------------------------
+
+// The runes every match of `items` starts with, added to `out`, as `_get_literal_prefix` finds
+// them: literals for which case doesn't matter, into groups. Whether they're all of `items`, and
+// `group` set if a group is among them.
+fn literal_prefix(items: List<Item>, flags: u32, out: mut List<u32>, group: mut bool) -> bool {
+    for it in items {
+        match it {
+            Item.Lit(c) => {
+                if flags & F_IGNORECASE != 0 and (if flags & F_UNICODE != 0 { is_cased(c) } else { ascii_cased(c) }) {
+                    return false
+                }
+                out.push(c)
+            },
+            Item.Sub(g, add, del, body) => {
+                if g != 0 {
+                    group = true
+                }
+                if not literal_prefix(body, combine_flags(flags, add, del), mut out, mut group) {
+                    return false
+                }
+            },
+            _ => return false,
+        }
+    }
+    return true
+}
+
+// What `first_bytes` found of a part of a pattern: that a match can start with any byte; that the
+// bytes it marked are all a match can start with; or that the part can match nothing, so what
+// comes after it can start the match too.
+const FIRST_ANY: u8 = 0
+const FIRST_DONE: u8 = 1
+const FIRST_ON: u8 = 2
+
+// Marks in `set` each byte a match of `items` can start with: the first byte of each rune that the
+// first rune-taking item can take, past assertions and lookaround, which take none, into groups,
+// and into the alternatives of a branch. It's more than sre's charset, which it only finds for a
+// literal, a branch of literals or a class first, and none for case-insensitive ones.
+fn first_bytes(items: List<Item>, flags: u32, widths: List<(u64, u64)>, set: mut List<u8>) -> u8 {
+    for it in items {
+        var r = FIRST_ANY
+        match it {
+            Item.At(_) => r = FIRST_ON,
+            Item.Look(_, _, _) => r = FIRST_ON,
+            Item.Fail => r = FIRST_DONE,
+            Item.Sub(_, add, del, body) => r = first_bytes(body, combine_flags(flags, add, del), widths, mut set),
+            Item.Atomic(body) => r = first_bytes(body, flags, widths, mut set),
+            Item.Branch(alts) => {
+                r = FIRST_DONE
+                for alt in alts {
+                    let k = first_bytes(alt, flags, widths, mut set)
+                    if k == FIRST_ANY {
+                        return FIRST_ANY
+                    }
+                    if k == FIRST_ON {
+                        r = FIRST_ON
+                    }
+                }
+            },
+            Item.Rep(_, min, _, body) => {
+                let k = first_bytes(body, flags, widths, mut set)
+                if k == FIRST_ANY {
+                    return FIRST_ANY
+                }
+                r = if min == 0 { FIRST_ON } else { k }
+            },
+            Item.Ref(_) => return FIRST_ANY,
+            Item.RefExists(_, _, _, _) => return FIRST_ANY,
+            _ => r = if one_bytes(it, flags, widths, mut set) { FIRST_DONE } else { FIRST_ANY },
+        }
+        if r != FIRST_ON {
+            return r
+        }
+    }
+    return FIRST_ON
+}
+
+// The first byte of rune `r`'s UTF-8.
+fn lead_byte(r: u32) -> usize {
+    if r < 0x80 {
+        return usize(r)
+    }
+    if r < 0x800 {
+        return usize(0xC0 | (r >> 6))
+    }
+    if r < 0x10000 {
+        return usize(0xE0 | (r >> 12))
+    }
+    return usize(0xF0 | (r >> 18))
+}
+
+// Marks in `set` the first bytes of the runes the one-rune item `it` takes. It's compiled alone and
+// asked of each ASCII rune with the matcher's own test, so it's what the match does; past ASCII,
+// it's the lead bytes of a literal or of a plain class's ranges, and any lead byte otherwise.
+fn one_bytes(it: Item, flags: u32, widths: List<(u64, u64)>, set: mut List<u8>) -> bool {
+    var c = Compiler { code: List<u32>(), sets: List<CharSet>(), widths: widths.copy() }
+    let items: List<Item> = [it.copy()]
+    match c.items(items, flags) {
+        ok => {},
+        err(_) => return false,
+    }
+    let op = c.code[0]
+    if op == OP_FAILURE {
+        return true
+    }
+    let known = op == OP_LITERAL or op == OP_NOT_LITERAL or op == OP_ANY or op == OP_ANY_ALL or op == OP_IN or op == OP_IN_IGNORE or op == OP_LITERAL_IGNORE or op == OP_NOT_LITERAL_IGNORE or op == OP_IN_UNI_IGNORE or op == OP_LITERAL_UNI_IGNORE or op == OP_NOT_LITERAL_UNI_IGNORE
+    if not known {
+        return false
+    }
+    c.emit(OP_SUCCESS)
+    var p = empty()
+    p.code = c.code
+    p.sets = c.sets
+    for b in 0..128u32 {
+        if p.one(0, b) {
+            set[usize(b)] = 1
+        }
+    }
+    if op == OP_LITERAL {
+        let r = p.code[1]
+        if r >= 0x80 {
+            set[lead_byte(r)] = 1
+        }
+        return true
+    }
+    if op == OP_IN {
+        let s = p.sets[usize(p.code[1])].copy()
+        if not s.negate and s.cats.is_empty() and s.uni.is_empty() {
+            var i: usize = 0
+            while i + 1 < s.ranges.len() {
+                let hi = s.ranges[i + 1]
+                if hi >= 0x80 {
+                    let lo: u32 = if s.ranges[i] < 0x80 { 0x80 } else { s.ranges[i] }
+                    for b in lead_byte(lo)..lead_byte(hi) + 1 {
+                        set[b] = 1
+                    }
+                }
+                i += 2
+            }
+            return true
+        }
+    }
+    for b in 0xC0..0x100usize {
+        set[b] = 1
+    }
+    return true
+}
+
+impl Program {
+    // Works out where searches can skip to. Only patterns whose matches take a rune or more get
+    // skips, as in sre, so an empty match, which `must_advance` could refuse, is never skipped.
+    fn plan_skips(mut self, items: List<Item>, flags: u32, widths: List<(u64, u64)>) {
+        let (lo, _) = width(items, widths)
+        self.min_width = lo
+        if lo == 0 {
+            return
+        }
+        var runes = List<u32>()
+        var group = false
+        let all = literal_prefix(items, flags, mut runes, mut group)
+        if not runes.is_empty() {
+            var bytes = List<u8>()
+            for r in runes {
+                if r < 0x80 {
+                    bytes.push(u8.wrap(r))
+                } else if r < 0x800 {
+                    bytes.push(u8.wrap(0xC0 | (r >> 6)))
+                    bytes.push(u8.wrap(0x80 | (r & 0x3F)))
+                } else if r < 0x10000 {
+                    bytes.push(u8.wrap(0xE0 | (r >> 12)))
+                    bytes.push(u8.wrap(0x80 | ((r >> 6) & 0x3F)))
+                    bytes.push(u8.wrap(0x80 | (r & 0x3F)))
+                } else {
+                    bytes.push(u8.wrap(0xF0 | (r >> 18)))
+                    bytes.push(u8.wrap(0x80 | ((r >> 12) & 0x3F)))
+                    bytes.push(u8.wrap(0x80 | ((r >> 6) & 0x3F)))
+                    bytes.push(u8.wrap(0x80 | (r & 0x3F)))
+                }
+            }
+            self.prefix = bytes
+            self.literal = all and not group
+            unsafe {
+                self.prefix_rare = cx_bytes_rare(self.prefix.as_ptr(), self.prefix.len())
+            }
+            return
+        }
+        var set: List<u8> = [0; 256]
+        if first_bytes(items, flags, widths, mut set) != FIRST_DONE {
+            return
+        }
+        var count: u32 = 0
+        var bytes: u32 = 0
+        for b in 0..256u32 {
+            if set[usize(b)] != 0 {
+                if count < 3 {
+                    bytes = bytes | (b << (8 * count))
+                }
+                count += 1
+            }
+        }
+        // A table that takes most bytes skips little and costs a lookup a byte.
+        if count <= 200 {
+            self.first = set
+            self.first_count = count
+            self.first_bytes = bytes
+        }
+    }
+}
+
+/// A piece of a replacement template: text as it is, or the number of the group whose text goes
+/// there, 0 for the whole match.
+pub enum Part {
+    Text(String)
+    Group(usize)
+}
+
+/// `template` read as Python's `re.sub` reads a replacement for a pattern with `groups` groups
+/// named `names`: `\1` to `\99` and `\g<1>` are a group by number, `\g<name>` by name, `\0`, `\012`
+/// and `\101` are octal, `\n` and the other escapes of Python's strings are what they are, and
+/// another `\` before a rune that isn't a letter stays as it is. Or the error Python gives for it,
+/// as `parse_template` raises it.
+pub fn template(with: String, groups: usize, names: List<String>) -> List<Part> ! SreError {
+    var runes = List<u32>()
+    for r in with.runes() {
+        runes.push(u32(r))
+    }
+    var s = Parser { p: runes, index: 0, next: Tok { has: false, esc: false, c: 0 }, flags: 0, names: Map<String, u32>(), widths: [(0, 0)], closed: [false], group_names: List<String>(), lookbehind: -1, ref_at: List<(u32, usize)>() }
+    try s.advance()
+    var out = List<Part>()
+    var lit = List<u32>()
+    loop {
+        let t = try s.get()
+        if not t.has {
+            break
+        }
+        if not t.esc {
+            lit.push(t.c)
+            continue
+        }
+        let c = t.c
+        if c == 103 {
+            // \g<...>
+            if not (try s.take(60)) {
+                fail s.error(String("missing <"), 0)
+            }
+            let name = try s.get_until(62, "group name")
+            var index: usize = 0
+            var ascii_digits = true
+            for d in name {
+                if not is_dec(d) {
+                    ascii_digits = false
+                }
+            }
+            if ascii_digits {
+                // int(name), and Python's error for one too big, with the number as int() writes it.
+                var k: usize = 0
+                while k + 1 < name.len() and name[k] == 48 {
+                    k += 1
+                }
+                let digits = name[k..].copy()
+                var big = digits.len() > 10
+                if not big {
+                    var v: u64 = 0
+                    for d in digits {
+                        v = v * 10 + u64(d - 48)
+                    }
+                    big = v >= MAXGROUPS
+                    index = usize.wrap(v)
+                }
+                if big {
+                    fail s.error("invalid group reference {runes_text(digits)}", name.len() + 1)
+                }
+            } else {
+                try s.check_group_name(name, 1)
+                let key = runes_text(name)
+                var found = false
+                for g in 0..names.len() {
+                    if names[g] == key {
+                        index = g + 1
+                        found = true
+                        break
+                    }
+                }
+                if not found {
+                    fail SreError { message: "unknown group name {repr_str(key)}", pos: -1 }
+                }
+            }
+            if index > groups {
+                fail s.error("invalid group reference {index}", name.len() + 1)
+            }
+            push_text(mut out, mut lit)
+            out.push(Part.Group(index))
+        } else if c == 48 {
+            // \0, \0o and \0oo: octal, the low byte of it.
+            var v: u32 = 0
+            for _ in 0..2 {
+                if s.next.has and not s.next.esc and is_oct(s.next.c) {
+                    v = v * 8 + (s.next.c - 48)
+                    try s.advance()
+                } else {
+                    break
+                }
+            }
+            lit.push(v & 0xFF)
+        } else if is_dec(c) {
+            var digits: List<u32> = [c]
+            var octal = false
+            if s.next.has and not s.next.esc and is_dec(s.next.c) {
+                digits.push(s.next.c)
+                try s.advance()
+                if is_oct(c) and is_oct(digits[1]) and s.next.has and not s.next.esc and is_oct(s.next.c) {
+                    digits.push(s.next.c)
+                    try s.advance()
+                    octal = true
+                    let v = (c - 48) * 64 + (digits[1] - 48) * 8 + (digits[2] - 48)
+                    if v > 255 {
+                        fail s.error("octal escape value \\{runes_text(digits)} outside of range 0-0o377", 4)
+                    }
+                    lit.push(v)
+                }
+            }
+            if not octal {
+                var index: usize = 0
+                for d in digits {
+                    index = index * 10 + usize(d - 48)
+                }
+                if index > groups {
+                    fail s.error("invalid group reference {index}", digits.len())
+                }
+                push_text(mut out, mut lit)
+                out.push(Part.Group(index))
+            }
+        } else {
+            let e: u32 = match c {
+                97 => 7,
+                98 => 8,
+                102 => 12,
+                110 => 10,
+                114 => 13,
+                116 => 9,
+                118 => 11,
+                92 => 92,
+                _ => NO_RUNE,
+            }
+            if e != NO_RUNE {
+                lit.push(e)
+            } else if (c >= 65 and c <= 90) or (c >= 97 and c <= 122) {
+                fail s.error("bad escape \\{runes_text([c])}", 2)
+            } else {
+                lit.push(92)
+                lit.push(c)
+            }
+        }
+    }
+    push_text(mut out, mut lit)
+    return out
+}
+
+// The runes kept so far, as a text part, if there are any.
+fn push_text(out: mut List<Part>, lit: mut List<u32>) {
+    if not lit.is_empty() {
+        out.push(Part.Text(runes_text(lit)))
+        lit.clear()
+    }
+}
+
+impl Program {
+    /// How many groups the pattern has, not counting the whole match.
+    pub fn group_count(self) -> usize {
+        return self.groups
+    }
+
+    /// Each group's name, `""` for one without.
+    pub fn group_names(self) -> List<String> {
+        return self.names.copy()
+    }
+
+    /// Where the last match found is, in bytes.
+    pub fn span(self) -> (usize, usize) {
+        return (self.start, self.sptr)
+    }
+
+    /// Where group `g`, from 1, is in the last match, if it took part.
+    pub fn group(self, g: usize) -> (usize, usize)? {
+        let j = (g - 1) * 2
+        if i64.wrap(j + 1) <= self.lastmark and self.marks[j] >= 0 and self.marks[j + 1] >= 0 {
+            return some((usize.wrap(self.marks[j]), usize.wrap(self.marks[j + 1])))
+        }
+        return none
+    }
+
+    fn reset(mut self) {
+        self.lastmark = -1
+        self.lastindex = -1
+        self.repeat = -1
+        self.data.clear()
+        self.reps.clear()
+    }
+
+    /// Whether the pattern matches somewhere from byte `from` of `text`, as Python's search does,
+    /// with an empty match at `from` refused when `must_advance`, as `finditer` refuses one right
+    /// after another empty one. `span` and `group` then give where.
+    pub fn search(mut self, text: String, from: usize, must_advance: bool) -> bool {
+        self.reset()
+        self.match_all = false
+        let end = text.len()
+        if from > end {
+            return false
+        }
+        if self.min_width > 0 {
+            // No match is empty, so `must_advance` refuses none, as in sre's searches by prefix
+            // and charset. A text with fewer bytes than the match takes runes has none.
+            self.must_advance = false
+            if u64(end - from) < self.min_width {
+                return false
+            }
+            if not self.prefix.is_empty() {
+                return self.search_prefix(text, from)
+            }
+            if not self.first.is_empty() {
+                return self.search_first(text, from)
+            }
+        }
+        var ptr = from
+        self.must_advance = must_advance
+        self.start = ptr
+        self.sptr = ptr
+        var status = self.run(text, true)
+        self.must_advance = false
+        if not status and self.code[0] == OP_AT and (self.code[1] == AT_BEGINNING or self.code[1] == AT_BEGINNING_STRING) {
+            return false
+        }
+        while not status and ptr < end {
+            ptr = next_pos(text, ptr)
+            self.lastmark = -1
+            self.lastindex = -1
+            self.start = ptr
+            self.sptr = ptr
+            status = self.run(text, false)
+        }
+        return status
+    }
+
+    // A search for a pattern every match of which starts with `prefix`: a match tried at each
+    // place the prefix is, or none needed when the prefix is the pattern. A place it is is where a
+    // rune starts, since UTF-8 is found only there.
+    fn search_prefix(mut self, text: String, from: usize) -> bool {
+        let n = text.len()
+        let m = self.prefix.len()
+        var at = from
+        while at + m <= n {
+            var k: usize = 0
+            unsafe {
+                k = cx_bytes_find_rare(text.as_ptr().add(at), n - at, self.prefix.as_ptr(), m, self.prefix_rare)
+            }
+            if k > n - at {
+                return false
+            }
+            k += at
+            self.lastmark = -1
+            self.lastindex = -1
+            self.start = k
+            if self.literal {
+                self.sptr = k + m
+                return true
+            }
+            self.sptr = k
+            if self.run(text, false) {
+                return true
+            }
+            at = k + 1
+        }
+        return false
+    }
+
+    // A search that tries a match only where a byte a match can start with is.
+    fn search_first(mut self, text: String, from: usize) -> bool {
+        let n = text.len()
+        var at = from
+        while at < n {
+            var k: usize = 0
+            unsafe {
+                k = cx_rx_skip(text.as_ptr(), n, at, self.first.as_ptr(), self.first_count, self.first_bytes)
+            }
+            if k >= n {
+                return false
+            }
+            self.lastmark = -1
+            self.lastindex = -1
+            self.start = k
+            self.sptr = k
+            if self.run(text, false) {
+                return true
+            }
+            at = next_pos(text, k)
+        }
+        return false
+    }
+
+    /// Whether the pattern matches at byte `at` of `text`, as Python's `match` does, or matches
+    /// all of the rest, as `fullmatch` does.
+    pub fn match_at(mut self, text: String, at: usize, full: bool) -> bool {
+        self.reset()
+        if at > text.len() {
+            return false
+        }
+        self.match_all = full
+        self.must_advance = false
+        self.start = at
+        self.sptr = at
+        return self.run(text, true)
+    }
+
+    fn jump(mut self, j: u32, save: usize, ptr: usize, toplevel: bool) {
+        let t = self.ctxs.len() - 1
+        self.ctxs[t].pat = save
+        self.ctxs[t].ptr = ptr
+        self.ctxs.push(Ctx { count: 0, chr: 0, rep: -1, lastmark: -1, lastindex: -1, pat: 0, ptr: 0, toplevel: toplevel, jump: j })
+    }
+
+    fn save_lastmark(mut self) {
+        let t = self.ctxs.len() - 1
+        self.ctxs[t].lastmark = self.lastmark
+        self.ctxs[t].lastindex = self.lastindex
+    }
+
+    fn restore_lastmark(mut self) {
+        let t = self.ctxs.len() - 1
+        self.lastmark = self.ctxs[t].lastmark
+        self.lastindex = self.ctxs[t].lastindex
+    }
+
+    // MARK_PUSH, MARK_POP and the rest, with the lastmark the context saved.
+    fn push_marks(mut self) {
+        let lm = self.ctxs[self.ctxs.len() - 1].lastmark
+        if lm >= 0 {
+            for k in 0..usize.wrap(lm + 1) {
+                self.data.push(self.marks[k])
+            }
+        }
+    }
+
+    fn pop_marks(mut self, discard: bool) {
+        let lm = self.ctxs[self.ctxs.len() - 1].lastmark
+        if lm >= 0 {
+            let n = usize.wrap(lm + 1)
+            let base = self.data.len() - n
+            for k in 0..n {
+                self.marks[k] = self.data[base + k]
+            }
+            if discard {
+                self.data.truncate(base)
+            }
+        }
+    }
+
+    fn discard_marks(mut self) {
+        let lm = self.ctxs[self.ctxs.len() - 1].lastmark
+        if lm >= 0 {
+            let n = self.data.len() - usize.wrap(lm + 1)
+            self.data.truncate(n)
+        }
+    }
+
+    // Whether the one-rune op at `q` takes `r`.
+    fn one(self, q: usize, r: u32) -> bool {
+        let op = self.code[q]
+        let a = self.code[q + 1]
+        return match op {
+            16 => r == a,
+            20 => r != a,
+            2 => r != 10,
+            3 => true,
+            13 => set_has(self.sets[usize(a)], r),
+            32 => ascii_lower(r) == a,
+            40 => lower(r) == a,
+            33 => ascii_lower(r) != a,
+            41 => lower(r) != a,
+            31 => set_has(self.sets[usize(a)], ascii_lower(r)),
+            39 => set_has(self.sets[usize(a)], lower(r)),
+            _ => false,
+        }
+    }
+
+    // How many runes from `from` the one-rune op at `q` takes, up to `max`, and where they end.
+    fn count(self, text: String, q: usize, max: u32, from: usize) -> (i64, usize) {
+        let end = text.len()
+        let lim: i64 = if max == MAXREPEAT { i64.MAX } else { i64(max) }
+        var n: i64 = 0
+        var at = from
+        while n < lim and at < end {
+            let b = text.byte_at(at)
+            var r = u32(b)
+            var len: usize = 1
+            if b >= 0x80 {
+                let (d, k) = decode(text, at)
+                r = d
+                len = k
+            }
+            if not self.one(q, r) {
+                break
+            }
+            at += len
+            n += 1
+        }
+        return (n, at)
+    }
+
+    // Whether group `i`'s text, from the marks, is at `ptr`, and where it ends there: `lowering`
+    // 0 as it is, 1 ASCII-lowered, 2 lowered.
+    fn group_ref(self, text: String, i: u32, ptr: usize, lowering: u8) -> i64 {
+        let g2 = i64(i) * 2
+        if g2 >= self.lastmark {
+            return -1
+        }
+        let ms = self.marks[usize.wrap(g2)]
+        let me = self.marks[usize.wrap(g2 + 1)]
+        if ms < 0 or me < 0 or me < ms {
+            return -1
+        }
+        let end = text.len()
+        var q = usize.wrap(ms)
+        let e = usize.wrap(me)
+        var at = ptr
+        if lowering == 0 {
+            if at + (e - q) > end {
+                return -1
+            }
+            while q < e {
+                if text.byte_at(at) != text.byte_at(q) {
+                    return -1
+                }
+                q += 1
+                at += 1
+            }
+            return i64.wrap(at)
+        }
+        while q < e {
+            if at >= end {
+                return -1
+            }
+            let (a, an) = decode(text, at)
+            let (b, bn) = decode(text, q)
+            let same = if lowering == 1 { ascii_lower(a) == ascii_lower(b) } else { lower(a) == lower(b) }
+            if not same {
+                return -1
+            }
+            at += an
+            q += bn
+        }
+        return i64.wrap(at)
+    }
+
+    // sre's match function: whether the program matches at `sptr`, with `sptr` moved to where
+    // the match ends.
+    fn run(mut self, text: String, toplevel: bool) -> bool {
+        let end = text.len()
+        self.ctxs.clear()
+        self.ctxs.push(Ctx { count: 0, chr: 0, rep: -1, lastmark: -1, lastindex: -1, pat: 0, ptr: 0, toplevel: toplevel, jump: J_NONE })
+        var pat: usize = 0
+        var ptr = self.sptr
+        var st = S_DISPATCH
+        var ret = false
+        loop {
+            if st == S_EXIT {
+                let child = self.ctxs.pop() ?? panic("sre: no context to return from")
+                if self.ctxs.is_empty() {
+                    return ret
+                }
+                let t = self.ctxs.len() - 1
+                pat = self.ctxs[t].pat
+                ptr = self.ctxs[t].ptr
+                st = S_DISPATCH
+                let j = child.jump
+                let rep = self.ctxs[t].rep
+                if j == J_BRANCH {
+                    if ret {
+                        if self.repeat >= 0 {
+                            self.discard_marks()
+                        }
+                        st = S_EXIT
+                        continue
+                    }
+                    if self.repeat >= 0 {
+                        self.pop_marks(false)
+                    }
+                    self.restore_lastmark()
+                    pat = pat + usize(self.code[pat])
+                    st = S_BRANCH
+                } else if j == J_REPEAT_ONE_1 or j == J_REPEAT_ONE_2 {
+                    if ret {
+                        if self.repeat >= 0 {
+                            self.discard_marks()
+                        }
+                        st = S_EXIT
+                        continue
+                    }
+                    if self.repeat >= 0 {
+                        self.pop_marks(false)
+                    }
+                    self.restore_lastmark()
+                    if self.ctxs[t].count > 0 {
+                        ptr = prev_pos(text, ptr)
+                    }
+                    self.ctxs[t].count -= 1
+                    st = if j == J_REPEAT_ONE_1 { S_REPEAT_ONE_1 } else { S_REPEAT_ONE_2 }
+                } else if j == J_MIN_REPEAT_ONE {
+                    if ret {
+                        if self.repeat >= 0 {
+                            self.discard_marks()
+                        }
+                        st = S_EXIT
+                        continue
+                    }
+                    if self.repeat >= 0 {
+                        self.pop_marks(false)
+                    }
+                    self.restore_lastmark()
+                    self.sptr = ptr
+                    let (c, np) = self.count(text, pat + 3, 1, ptr)
+                    if c == 0 {
+                        if self.repeat >= 0 {
+                            self.discard_marks()
+                        }
+                        ret = false
+                        st = S_EXIT
+                        continue
+                    }
+                    ptr = np
+                    self.ctxs[t].count += 1
+                    st = S_MIN_REPEAT_ONE
+                } else if j == J_REPEAT {
+                    self.repeat = self.reps[usize.wrap(rep)].prev
+                    self.reps.truncate(usize.wrap(rep))
+                    st = S_EXIT
+                } else if j == J_MAX_UNTIL_1 or j == J_MIN_UNTIL_1 {
+                    if ret {
+                        st = S_EXIT
+                        continue
+                    }
+                    self.reps[usize.wrap(rep)].count = self.ctxs[t].count - 1
+                    self.sptr = ptr
+                    st = S_EXIT
+                } else if j == J_MAX_UNTIL_2 {
+                    self.reps[usize.wrap(rep)].last_ptr = self.data.pop() ?? -1
+                    if ret {
+                        self.discard_marks()
+                        st = S_EXIT
+                        continue
+                    }
+                    self.pop_marks(true)
+                    self.restore_lastmark()
+                    self.reps[usize.wrap(rep)].count = self.ctxs[t].count - 1
+                    self.sptr = ptr
+                    st = S_MAX_UNTIL_TAIL
+                } else if j == J_MAX_UNTIL_3 {
+                    self.repeat = rep
+                    if not ret {
+                        self.sptr = ptr
+                    }
+                    st = S_EXIT
+                } else if j == J_MIN_UNTIL_2 {
+                    let of_tail = self.repeat
+                    self.repeat = rep
+                    if ret {
+                        if of_tail >= 0 {
+                            self.discard_marks()
+                        }
+                        st = S_EXIT
+                        continue
+                    }
+                    if of_tail >= 0 {
+                        self.pop_marks(true)
+                    }
+                    self.restore_lastmark()
+                    self.sptr = ptr
+                    let r = usize.wrap(rep)
+                    let max = self.code[self.reps[r].pat + 2]
+                    if (self.ctxs[t].count >= i64(max) and max != MAXREPEAT) or i64.wrap(self.sptr) == self.reps[r].last_ptr {
+                        st = S_EXIT
+                        continue
+                    }
+                    self.reps[r].count = self.ctxs[t].count
+                    self.data.push(self.reps[r].last_ptr)
+                    self.reps[r].last_ptr = i64.wrap(self.sptr)
+                    let body = self.reps[r].pat + 3
+                    let tl = self.ctxs[t].toplevel
+                    self.jump(J_MIN_UNTIL_3, pat, ptr, tl)
+                    pat = body
+                    ptr = self.sptr
+                } else if j == J_MIN_UNTIL_3 {
+                    self.reps[usize.wrap(rep)].last_ptr = self.data.pop() ?? -1
+                    if ret {
+                        st = S_EXIT
+                        continue
+                    }
+                    self.reps[usize.wrap(rep)].count = self.ctxs[t].count - 1
+                    self.sptr = ptr
+                    st = S_EXIT
+                } else if j == J_ASSERT {
+                    if not ret {
+                        st = S_EXIT
+                        continue
+                    }
+                    pat = pat + usize(self.code[pat])
+                } else if j == J_ASSERT_NOT {
+                    if ret {
+                        if self.repeat >= 0 {
+                            self.discard_marks()
+                        }
+                        ret = false
+                        st = S_EXIT
+                        continue
+                    }
+                    if self.repeat >= 0 {
+                        self.pop_marks(true)
+                    }
+                    self.restore_lastmark()
+                    pat = pat + usize(self.code[pat])
+                } else if j == J_ATOMIC_GROUP {
+                    if not ret {
+                        self.sptr = ptr
+                        st = S_EXIT
+                        continue
+                    }
+                    pat = pat + usize(self.code[pat])
+                    ptr = self.sptr
+                } else if j == J_POSS_REPEAT_1 {
+                    if ret {
+                        self.ctxs[t].count += 1
+                        st = S_POSS_1
+                    } else {
+                        self.sptr = ptr
+                        self.repeat = self.reps[usize.wrap(rep)].prev
+                        self.reps.truncate(usize.wrap(rep))
+                        st = S_EXIT
+                    }
+                } else if j == J_POSS_REPEAT_2 {
+                    if ret {
+                        self.discard_marks()
+                        self.ctxs[t].count += 1
+                        st = S_POSS_2
+                    } else {
+                        self.pop_marks(true)
+                        self.restore_lastmark()
+                        self.sptr = ptr
+                        st = S_POSS_END
+                    }
+                }
+                continue
+            }
+            let t = self.ctxs.len() - 1
+            if st == S_BRANCH {
+                let skip = usize(self.code[pat])
+                if skip == 0 {
+                    if self.repeat >= 0 {
+                        self.discard_marks()
+                    }
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                let first = self.code[pat + 1]
+                if first == OP_LITERAL or first == OP_IN {
+                    var reject = ptr >= end
+                    if not reject {
+                        let (r, _) = decode(text, ptr)
+                        reject = if first == OP_LITERAL { r != self.code[pat + 2] } else { not set_has(self.sets[usize(self.code[pat + 2])], r) }
+                    }
+                    if reject {
+                        pat = pat + skip
+                        continue
+                    }
+                }
+                self.sptr = ptr
+                let tl = self.ctxs[t].toplevel
+                self.jump(J_BRANCH, pat, ptr, tl)
+                pat = pat + 1
+                ptr = self.sptr
+                st = S_DISPATCH
+                continue
+            }
+            if st == S_REPEAT_ONE_1 or st == S_REPEAT_ONE_2 {
+                let p = pat
+                let min = i64(self.code[p + 1])
+                if st == S_REPEAT_ONE_1 {
+                    let chr = self.ctxs[t].chr
+                    while self.ctxs[t].count >= min {
+                        if ptr < end {
+                            let (r, _) = decode(text, ptr)
+                            if r == chr {
+                                break
+                            }
+                        }
+                        if self.ctxs[t].count > 0 {
+                            ptr = prev_pos(text, ptr)
+                        }
+                        self.ctxs[t].count -= 1
+                    }
+                }
+                if self.ctxs[t].count < min {
+                    if self.repeat >= 0 {
+                        self.discard_marks()
+                    }
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                self.sptr = ptr
+                let tl = self.ctxs[t].toplevel
+                self.jump(if st == S_REPEAT_ONE_1 { J_REPEAT_ONE_1 } else { J_REPEAT_ONE_2 }, p, ptr, tl)
+                pat = p + usize(self.code[p])
+                ptr = self.sptr
+                st = S_DISPATCH
+                continue
+            }
+            if st == S_MIN_REPEAT_ONE {
+                let p = pat
+                let max = self.code[p + 2]
+                if max == MAXREPEAT or self.ctxs[t].count <= i64(max) {
+                    self.sptr = ptr
+                    let tl = self.ctxs[t].toplevel
+                    self.jump(J_MIN_REPEAT_ONE, p, ptr, tl)
+                    pat = p + usize(self.code[p])
+                    ptr = self.sptr
+                    st = S_DISPATCH
+                } else {
+                    if self.repeat >= 0 {
+                        self.discard_marks()
+                    }
+                    ret = false
+                    st = S_EXIT
+                }
+                continue
+            }
+            if st == S_POSS_1 {
+                let p = pat
+                if self.ctxs[t].count < i64(self.code[p + 1]) {
+                    self.jump(J_POSS_REPEAT_1, p, ptr, false)
+                    pat = p + 3
+                    ptr = self.sptr
+                    st = S_DISPATCH
+                } else {
+                    // sre's NULL: no place a match can end.
+                    ptr = end + 1
+                    st = S_POSS_2
+                }
+                continue
+            }
+            if st == S_POSS_2 {
+                let p = pat
+                let max = self.code[p + 2]
+                if (self.ctxs[t].count < i64(max) or max == MAXREPEAT) and self.sptr != ptr {
+                    self.save_lastmark()
+                    self.push_marks()
+                    ptr = self.sptr
+                    self.jump(J_POSS_REPEAT_2, p, ptr, false)
+                    pat = p + 3
+                    ptr = self.sptr
+                    st = S_DISPATCH
+                } else {
+                    st = S_POSS_END
+                }
+                continue
+            }
+            if st == S_POSS_END {
+                let rep = usize.wrap(self.ctxs[t].rep)
+                self.repeat = self.reps[rep].prev
+                self.reps.truncate(rep)
+                pat = pat + usize(self.code[pat]) + 1
+                ptr = self.sptr
+                st = S_DISPATCH
+                continue
+            }
+            if st == S_MAX_UNTIL_TAIL {
+                let rep = usize.wrap(self.ctxs[t].rep)
+                self.repeat = self.reps[rep].prev
+                let tl = self.ctxs[t].toplevel
+                self.jump(J_MAX_UNTIL_3, pat, ptr, tl)
+                ptr = self.sptr
+                st = S_DISPATCH
+                continue
+            }
+
+            // S_DISPATCH: the op at `pat`.
+            let op = self.code[pat]
+            let p = pat + 1
+            if op == OP_MARK {
+                let i = i64(self.code[p])
+                if i & 1 == 1 {
+                    self.lastindex = i / 2 + 1
+                }
+                if i > self.lastmark {
+                    var k = self.lastmark + 1
+                    while k < i {
+                        self.marks[usize.wrap(k)] = -1
+                        k += 1
+                    }
+                    self.lastmark = i
+                }
+                self.marks[usize.wrap(i)] = i64.wrap(ptr)
+                pat = p + 1
+            } else if op == OP_LITERAL or op == OP_NOT_LITERAL or op == OP_IN or op == OP_ANY or op == OP_ANY_ALL or op == OP_LITERAL_IGNORE or op == OP_LITERAL_UNI_IGNORE or op == OP_NOT_LITERAL_IGNORE or op == OP_NOT_LITERAL_UNI_IGNORE or op == OP_IN_IGNORE or op == OP_IN_UNI_IGNORE {
+                if ptr >= end {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                let b = text.byte_at(ptr)
+                var r = u32(b)
+                var len: usize = 1
+                if b >= 0x80 {
+                    let (d, k) = decode(text, ptr)
+                    r = d
+                    len = k
+                }
+                if not self.one(pat, r) {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                ptr += len
+                pat = if op == OP_ANY or op == OP_ANY_ALL { p } else { p + 1 }
+            } else if op == OP_SUCCESS {
+                if self.ctxs[t].toplevel and ((self.match_all and ptr != end) or (self.must_advance and ptr == self.start)) {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                self.sptr = ptr
+                ret = true
+                st = S_EXIT
+            } else if op == OP_AT {
+                if not at_holds(text, ptr, self.code[p]) {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                pat = p + 1
+            } else if op == OP_JUMP {
+                pat = p + usize(self.code[p])
+            } else if op == OP_BRANCH {
+                self.save_lastmark()
+                if self.repeat >= 0 {
+                    self.push_marks()
+                }
+                pat = p
+                st = S_BRANCH
+            } else if op == OP_REPEAT_ONE or op == OP_MIN_REPEAT_ONE or op == OP_POSSESSIVE_REPEAT_ONE {
+                let min = self.code[p + 1]
+                let max = self.code[p + 2]
+                if usize(min) > end - ptr {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                self.sptr = ptr
+                let toplevel_here = self.ctxs[t].toplevel
+                if op == OP_MIN_REPEAT_ONE {
+                    self.ctxs[t].count = 0
+                    if min != 0 {
+                        let (c, np) = self.count(text, p + 3, min, ptr)
+                        if c < i64(min) {
+                            ret = false
+                            st = S_EXIT
+                            continue
+                        }
+                        self.ctxs[t].count = c
+                        ptr = np
+                    }
+                    let tail = p + usize(self.code[p])
+                    if self.code[tail] == OP_SUCCESS and not (toplevel_here and ((self.match_all and ptr != end) or (self.must_advance and ptr == self.start))) {
+                        self.sptr = ptr
+                        ret = true
+                        st = S_EXIT
+                        continue
+                    }
+                    self.save_lastmark()
+                    if self.repeat >= 0 {
+                        self.push_marks()
+                    }
+                    pat = p
+                    st = S_MIN_REPEAT_ONE
+                    continue
+                }
+                let (c, np) = self.count(text, p + 3, max, ptr)
+                self.ctxs[t].count = c
+                ptr = np
+                if c < i64(min) {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                let tail = p + usize(self.code[p])
+                if self.code[tail] == OP_SUCCESS and ptr == end and not (toplevel_here and self.must_advance and ptr == self.start) {
+                    self.sptr = ptr
+                    ret = true
+                    st = S_EXIT
+                    continue
+                }
+                if op == OP_POSSESSIVE_REPEAT_ONE {
+                    pat = tail
+                    continue
+                }
+                self.save_lastmark()
+                if self.repeat >= 0 {
+                    self.push_marks()
+                }
+                pat = p
+                if self.code[tail] == OP_LITERAL {
+                    self.ctxs[t].chr = self.code[tail + 1]
+                    st = S_REPEAT_ONE_1
+                } else {
+                    st = S_REPEAT_ONE_2
+                }
+            } else if op == OP_REPEAT {
+                let rep = i64.wrap(self.reps.len())
+                self.reps.push(Rep { count: -1, pat: p, prev: self.repeat, last_ptr: -1 })
+                self.repeat = rep
+                self.ctxs[t].rep = rep
+                self.sptr = ptr
+                let tl = self.ctxs[t].toplevel
+                self.jump(J_REPEAT, p, ptr, tl)
+                pat = p + usize(self.code[p])
+                ptr = self.sptr
+            } else if op == OP_MAX_UNTIL or op == OP_MIN_UNTIL {
+                let rep = self.repeat
+                if rep < 0 {
+                    panic("sre: an UNTIL outside a REPEAT")
+                }
+                let r = usize.wrap(rep)
+                self.ctxs[t].rep = rep
+                self.sptr = ptr
+                let count = self.reps[r].count + 1
+                self.ctxs[t].count = count
+                let rp = self.reps[r].pat
+                let min = self.code[rp + 1]
+                let max = self.code[rp + 2]
+                let tl = self.ctxs[t].toplevel
+                if count < i64(min) {
+                    self.reps[r].count = count
+                    self.jump(if op == OP_MAX_UNTIL { J_MAX_UNTIL_1 } else { J_MIN_UNTIL_1 }, p, ptr, tl)
+                    pat = rp + 3
+                    ptr = self.sptr
+                    continue
+                }
+                if op == OP_MAX_UNTIL {
+                    if (count < i64(max) or max == MAXREPEAT) and i64.wrap(self.sptr) != self.reps[r].last_ptr {
+                        self.reps[r].count = count
+                        self.save_lastmark()
+                        self.push_marks()
+                        self.data.push(self.reps[r].last_ptr)
+                        self.reps[r].last_ptr = i64.wrap(self.sptr)
+                        self.jump(J_MAX_UNTIL_2, p, ptr, tl)
+                        pat = rp + 3
+                        ptr = self.sptr
+                        continue
+                    }
+                    pat = p
+                    st = S_MAX_UNTIL_TAIL
+                    continue
+                }
+                self.repeat = self.reps[r].prev
+                self.save_lastmark()
+                if self.repeat >= 0 {
+                    self.push_marks()
+                }
+                self.jump(J_MIN_UNTIL_2, p, ptr, tl)
+                pat = p
+                ptr = self.sptr
+            } else if op == OP_POSSESSIVE_REPEAT {
+                self.sptr = ptr
+                let rep = i64.wrap(self.reps.len())
+                self.reps.push(Rep { count: -1, pat: 0, prev: self.repeat, last_ptr: -1 })
+                self.repeat = rep
+                self.ctxs[t].rep = rep
+                self.ctxs[t].count = 0
+                pat = p
+                st = S_POSS_1
+            } else if op == OP_ATOMIC_GROUP {
+                self.sptr = ptr
+                self.jump(J_ATOMIC_GROUP, p, ptr, false)
+                pat = p + 1
+                ptr = self.sptr
+            } else if op == OP_GROUPREF or op == OP_GROUPREF_IGNORE or op == OP_GROUPREF_UNI_IGNORE {
+                let lowering: u8 = if op == OP_GROUPREF { 0 } else if op == OP_GROUPREF_IGNORE { 1 } else { 2 }
+                let e = self.group_ref(text, self.code[p], ptr, lowering)
+                if e < 0 {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                ptr = usize.wrap(e)
+                pat = p + 1
+            } else if op == OP_GROUPREF_EXISTS {
+                let g2 = i64(self.code[p]) * 2
+                var exists = g2 < self.lastmark
+                if exists {
+                    let ms = self.marks[usize.wrap(g2)]
+                    let me = self.marks[usize.wrap(g2 + 1)]
+                    exists = ms >= 0 and me >= 0 and me >= ms
+                }
+                pat = if exists { p + 2 } else { p + usize(self.code[p + 1]) }
+            } else if op == OP_ASSERT {
+                let q = step_back(text, ptr, self.code[p + 1])
+                if q < 0 {
+                    ret = false
+                    st = S_EXIT
+                    continue
+                }
+                self.sptr = usize.wrap(q)
+                self.jump(J_ASSERT, p, ptr, false)
+                pat = p + 2
+                ptr = self.sptr
+            } else if op == OP_ASSERT_NOT {
+                let q = step_back(text, ptr, self.code[p + 1])
+                if q >= 0 {
+                    self.sptr = usize.wrap(q)
+                    self.save_lastmark()
+                    if self.repeat >= 0 {
+                        self.push_marks()
+                    }
+                    self.jump(J_ASSERT_NOT, p, ptr, false)
+                    pat = p + 2
+                    ptr = self.sptr
+                } else {
+                    pat = p + usize(self.code[p])
+                }
+            } else {
+                ret = false
+                st = S_EXIT
+            }
+        }
+    }
+}

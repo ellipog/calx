@@ -1,11 +1,13 @@
 ---
 title: std.regex
-description: Regular expressions in Rust's syntax, found, captured, replaced and split in time linear in the text, whatever the pattern, with Unicode classes and case folding.
+description: Regular expressions in Rust's syntax, found, captured, replaced and split in time linear in the text, whatever the pattern, with Unicode classes and case folding; and Python's re as it is, with Regex.python.
 ---
 
 # `std.regex`
 
 Regular expressions, as scripts use Python's `re` and Rust's `regex`: matches found, captured, replaced and counted, and text split by them. The syntax is Rust's. Every search takes time in proportion to the text's length times the pattern's, whatever the two are, so no pattern can hang a program on hostile text. That's the promise RE2, Go and Rust make, and it's why there's no lookaround and no backreferences, which can't keep it.
+
+[`Regex.python`](#pythons-re) is the other way: Python's `re` as CPython 3.14 has it, with its syntax, its lookaround and backreferences, and the matches, groups, templates and errors Python gives, for scripts that move from Python and patterns written for it.
 
 ```calx
 import std.regex.{Regex, RegexError}
@@ -46,7 +48,8 @@ A `Regex` keeps what its searches work out for the next one, so one that searche
 | Item | Gives |
 | --- | --- |
 | `Regex.new(pattern: String) -> Regex ! RegexError` | The pattern compiled, or why it isn't one |
-| `RegexError` | `message`, and the `column` in the pattern, in runes from 1. `{e}` is `column 4: ...` |
+| `Regex.python(pattern: String) -> Regex ! RegexError` | The pattern compiled as Python's `re.compile` compiles it, or the error it raises. Every method then does what Python's does: see [Python's `re`](#pythons-re) |
+| `RegexError` | `message`, and the `column` in the pattern, in runes from 1. `{e}` is `column 4: ...`. For `Regex.python`, an error Python gives no place for has column 0, and `{e}` is the message alone |
 | `Match` | `start` and `end`, byte offsets, and `text`, a copy of the matched text |
 | `Captures` | A match's groups. `c.get(i)` and `c.name(name)` are a group's text, `c.span(i)` its `(start, end)`, `none` for a group that took no part; `c.groups[i]` is the `Match?`, and `c.len()` the groups and the whole match, which is group 0 |
 | `re.is_match(text) -> bool` | Whether there's a match anywhere |
@@ -148,6 +151,61 @@ fn main() {
 
 A count is at most 100000, and a pattern compiles to at most 2000000 instructions: `x{1,100000}` is better written `x+`.
 
+## Python's `re`
+
+`Regex.python(pattern)` compiles the pattern as Python 3.14's `re.compile` does, with Python's syntax: lookahead and lookbehind, backreferences such as `\1` and `(?P=name)`, atomic groups, possessive quantifiers, conditionals such as `(?(1)>|$)`, Python's `$`, and Python's classes and case folding. The `Regex` it gives has the same methods, and each finds what Python's would:
+
+| Method | As Python's |
+| --- | --- |
+| `find(text)`, `find_at(text, from)`, `is_match(text)`, `captures(text)` | `p.search(text)` and `p.search(text, pos)`, and the groups of the match it finds |
+| `find_all(text)`, `captures_all(text)`, `count(text)` | `p.finditer(text)`: an empty match right after a match is one, unless that match was empty too |
+| `replace(text, with)`, `replace_all(text, with)` | `p.sub(with, text, count=1)` and `p.sub(with, text)`, with Python's templates |
+| `split(text)` | `p.split(text)`, with each group's text after each part |
+
+```calx
+import std.regex.{Regex, RegexError}
+
+fn main() ! RegexError {
+    // A backreference: words that end with the letter they start with.
+    var same = try Regex.python(#"\b(\w)\w*\1\b"#)
+    for m in same.find_all("level noon test radar abc") {
+        println(m.text)
+    }
+    // out: level
+    // out: noon
+    // out: test
+    // out: radar
+
+    // Lookbehind, and a template as re.sub reads it.
+    var price = try Regex.python(#"(?<=\$)(\d+)\.(\d{2})"#)
+    println(price.replace_all("tea $3.50, cake $12.05", #"\1,\2"#))    // out: tea $3,50, cake $12,05
+
+    // Python's empty matches, and split with its groups.
+    var star = try Regex.python("x*")
+    println(star.replace_all("abxd", "-"))    // out: -a-b--d-
+    var sep = try Regex.python(#"\s*([,;])\s*"#)
+    println(sep.split("a , b;c").join("|"))    // out: a|,|b|;|c
+
+    // Python's errors, at Python's places.
+    match Regex.python("(?P<1x>a)") {
+        ok(_) => {},
+        err(e) => println("{e}"),    // out: column 5: bad character in group name '1x'
+    }
+}
+```
+
+A template is Python's: `\1` to `\99` and `\g<1>` are a group by number, `\g<name>` by name and `\g<0>` the whole match; `\n`, `\t` and Python's other escapes are what they are, `\0` and `\101` are octal, and a `\` before something else that isn't a letter stays. A group that took no part is empty there. A template Python refuses, such as `\q` or `\3` for a pattern with two groups, panics with the error Python raises, at the call.
+
+Where it differs from Python:
+
+- Places in the text are byte offsets into its UTF-8, as everywhere in Calx, where Python counts code points. The matches are the same text.
+- Flags are written in the pattern, `(?i)`, `(?m)`, `(?s)`, `(?x)`, `(?a)` and the rest, as Python takes them inline: `re.compile(p, re.I | re.M)` is `Regex.python("(?im){p}")`.
+- `split` gives `""` for a group that took no part, where Python gives `None`.
+- There are no bytes patterns and no `re.LOCALE`, and `\N{name}` isn't read yet.
+- There's no `match` or `fullmatch` yet: `\A` and `\Z` anchor a pattern to the start and the end of the text.
+
+It matches by backtracking, as Python does, so it isn't linear: a pattern such as `(a+)+b` takes time exponential in a run of `a`s with no `b`, there as here. For patterns that come from outside a program, `Regex.new` is the one that can't hang.
+
 ## How it works
 
 `std.regex` is written in Calx: [std/regex.calx](../../std/regex.calx), with the Unicode tables in [std/text/ucd.calx](../../std/text/ucd.calx), which [tools/unicode/gen_ucd.calx](../../tools/unicode/gen_ucd.calx) writes from the Unicode Character Database's own files, version 16.0.0.
@@ -157,3 +215,10 @@ A count is at most 100000, and a pattern compiles to at most 2000000 instruction
 - A search runs the DFAs, then, only if it wants the groups, the Pike VM over the match alone. `find` and `count` never run it. A DFA that can't decide gives up and the Pike VM searches instead: that's only when Unicode `\b` meets a byte that isn't ASCII, which the DFAs don't judge.
 - Before the DFAs read a byte, the search skips to where a match can be. A pattern that's only a literal is found as `String.find` finds text. A pattern every match of which starts with a literal, such as `(?m)^player\d+`, is found at each place the literal is, where a search anchored there finds the match's end. One whose matches start with one of a few bytes, such as `(?i)steve`, skips to the next of those bytes whenever the DFA is back to looking for a start. One with a literal inside every match, such as the `-` in `\d{4}-\d{2}`, is found from the literal: the DFA for the part before it reads back from each place it is, and the forward DFA reads on from where that part starts. When the part before can take the literal's first byte, as `\w+` can in `\b\w+ing\b`, the search skips ahead instead to the earliest a match with the literal's next place can start, the byte after the last one before it that the part can't take. Skips that turn out shorter than 8 bytes on average stop, and a search from a literal that would read the same bytes again gives up and starts over without it, so a skip never makes a search slower than reading every byte.
 - Finding text, in `String.find` and these skips, tests 32 places at a time with AVX2, or 16 with SSE2, for the needle's two rarest bytes, and compares the rest only where both are.
+
+`Regex.python` is [std/regex/sre.calx](../../std/regex/sre.calx), which follows CPython's own `re`, under the Python Software Foundation's license, whose notice it keeps:
+
+- The parser is `re/_parser.py`'s, with its errors and their places, and the compiler `re/_compiler.py`'s, to sre's opcodes, numbered as sre numbers them, with Python's case folding from `re/_casefix.py` and its classes: `\d` is Unicode's decimal digits, `\s` what `str.isspace` takes and `\w` what `str.isalnum` takes and `_`. Python's lower and upper case, white space and printable runes are tables in std/text/ucd.calx, from the same Unicode Character Database.
+- The matcher is a backtracking machine that takes the steps `Modules/_sre/sre_lib.h` takes, with the same marks for the groups, the same protection against repeating an empty match, and the same order of trying, so what it finds and what each group holds are Python's. It keeps its own stack rather than recursing, so a deep pattern can't overflow the program's.
+- A search skips to where a match can start, as sre's INFO block has it and further. A pattern every match of which starts with a literal is found at each place the literal is, as `String.find` finds text, and one that's only a literal needs no matching at all. Otherwise the bytes a match can start with are worked out from the pattern, past groups, lookaround and assertions, into branches and through case-insensitive literals, and the search skips to the next of them. Only patterns that can't match nothing skip, so Python's rule for empty matches is never passed over.
+- It was checked against CPython 3.14's `re` on tens of thousands of random patterns, with texts of Python's tricky runes, for the same matches, groups, `finditer`, `split` and `sub` results and the same errors at the same places.

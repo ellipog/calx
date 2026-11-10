@@ -1,0 +1,10 @@
+// A template Python's re.sub refuses panics with Python's error, where Python raises it
+// (CLX-221).
+
+import std.regex.{Regex}
+
+fn main() {
+    var re = Regex.python("(a)")!
+    println(re.replace_all("ab", #"<\1>"#))    // out: <a>b
+    _ = re.replace_all("ab", #"\q"#)    // panic: bad escape \q at position 0
+}

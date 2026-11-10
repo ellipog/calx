@@ -1,0 +1,97 @@
+// std.regex's Regex.python: Python's re as CPython 3.14 has it. Each line out is what Python gives
+// for the same pattern and text, with places in bytes: groups, backreferences, lookaround, atomic
+// groups, possessive repeats and conditionals; finditer's empty matches; sub's templates; split
+// with groups; Python's case folding and classes; and its errors, with where. The long text at the
+// end takes the searches' skips, by a literal prefix and by the bytes a match can start with
+// (CLX-221).
+import std.regex.{Regex, Match}
+
+fn spans(ms: List<Match>) -> String {
+    var parts = List<String>()
+    for m in ms {
+        parts.push("{m.start}-{m.end}")
+    }
+    return parts.join(" ")
+}
+
+fn texts(ms: List<Match>) -> String {
+    var parts = List<String>()
+    for m in ms {
+        parts.push(m.text.copy())
+    }
+    return parts.join(" ")
+}
+
+fn all(pattern: String, text: String) -> String {
+    var re = Regex.python(pattern)!
+    return spans(re.find_all(text))
+}
+
+fn refused(pattern: String) -> String {
+    return match Regex.python(pattern) {
+        ok(_) => String("compiled"),
+        err(e) => "{e}",
+    }
+}
+
+fn main() {
+    var date = Regex.python(#"(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"#)!
+    let log = "left 2026-11-07, back 2026-12-01"
+    println("{date.is_match(log)} {date.count(log)} {date.group_count()} {date.group_names().join(",")}")    // out: true 2 3 y,m,d
+    if let c = date.captures(log) {
+        println("{c.span(0)} {c.get(0)} {c.name("y")} {c.get(2)}")    // out: some((5, 15)) some(2026-11-07) some(2026) some(11)
+    }
+    println(date.replace_all(log, #"\g<d>/\2/\1"#))    // out: left 07/11/2026, back 01/12/2026
+
+    // Backreferences, lookaround, atomic groups, possessive repeats and conditionals.
+    var doubled = Regex.python(#"(\w)\1"#)!
+    println(doubled.replace_all("aabbcd ee", #"<\g<0>>"#))    // out: <aa><bb>cd <ee>
+    println(all(#"(?<=id=)\d+"#, "id=12 x=3 id=456"))    // out: 3-5 13-16
+    println(all(#"\b(?!the\b)\w+"#, "the cat the hat"))    // out: 4-7 12-15
+    println(all(#"(?<!\d)\d{2}(?!\d)"#, "1 22 333 44"))    // out: 2-4 9-11
+    var atomic = Regex.python("(?>a+)ab")!
+    var possessive = Regex.python("a++a")!
+    println("{atomic.is_match("aaab")} {possessive.is_match("aaa")}")    // out: false false
+    var cond = Regex.python(#"(<)?\w+(?(1)>|$)"#)!
+    println(texts(cond.find_all("<a> b <c")))    // out: <a> c
+
+    // An empty match right after a match is one, as in Python, unless that match was empty too.
+    var star = Regex.python("x*")!
+    println("{spans(star.find_all("abxd"))} {star.replace_all("abxd", "-")} {star.split("abxd").join("|")}")    // out: 0-0 1-1 2-3 3-3 4-4 -a-b--d- |a|b||d|
+    var seps = Regex.python("(,)|(;)")!
+    println(seps.split("a,b;c").join("|"))    // out: a|,||b||;|c
+    println("{all("$", "a\nb\n")} / {all("(?m)$", "a\nb\n")}")    // out: 3-3 4-4 / 1-1 3-3 4-4
+
+    // Python's case folding and classes.
+    println(all("(?i)k", "kK\u{212A}"))    // out: 0-1 1-2 2-5
+    println(all("(?i)\u{DF}", "\u{DF}\u{1E9E} ss"))    // out: 0-2 2-5
+    println(all("(?i)s", "sS\u{17F}"))    // out: 0-1 1-2 2-4
+    println("{all(#"\w+"#, "été café")} / {all(#"\d"#, "4\u{664}x")} / {all(#"\s"#, "a\u{1C}b c")}")    // out: 0-5 6-11 / 0-1 1-3 / 1-2 3-4
+    println(all(#"(?a)\w+"#, "été cafe"))    // out: 2-3 6-10
+
+    // Templates: a group that took no part is empty, and escapes are Python's.
+    var opt = Regex.python("(a)(b)?")!
+    println(opt.replace_all("ab a", #"[\1|\2]"#))    // out: [a|b] [a|]
+    var esc = Regex.python("a")!
+    let escaped = esc.replace("a", #"\.\t\\"#)
+    println("{escaped == "\\.\t\\"}")    // out: true
+
+    // Python's errors, at Python's places, in runes from 1; some have none.
+    println("{refused("(a")} / {refused(#"a{3,2}"#)} / {refused("(?<=a+)b")}")    // out: column 1: missing ), unterminated subpattern / column 3: min repeat greater than max repeat / look-behind requires fixed-width pattern
+    println("{refused(#"\1(a)"#)} / {refused("(?P<1x>a)")} / {refused("a**")} / {refused("[z-a]")}")    // out: column 2: invalid group reference 1 / column 5: bad character in group name '1x' / column 3: multiple repeat / column 2: bad character range z-a
+    println("{refused(#"\q"#)} / {refused("(?i")} / {refused("x(?i)y")}")    // out: column 1: bad escape \q / column 4: missing -, : or ) / column 2: global flags not at the start of the expression
+
+    // A long text, where the searches skip to a literal prefix or to the bytes a match can start
+    // with: the counts are Python's.
+    var text = String()
+    for i in 0..3000u32 {
+        text.push_str("player{i % 97} joined at 2026-11-{i % 28 + 1} from 10.0.{i % 256}.{i % 7}, mail steve{i % 9}@example.com, mining\n")
+    }
+    let patterns: List<String> = ["example", "player9", "(?m)^player9", #"\d{4}-\d{2}"#, #"(\d+)\.(\d+)\.(\d+)\.(\d+)"#, "(?i)STEVE", #"\b\w+ing\b"#, #"\w+@\w+"#, "[0-9]x", #"(?<=steve)\d"#, "(?i)mail|join", #"(\d)\1"#]
+    var counts = List<String>()
+    for p in patterns {
+        var r = Regex.python(p)!
+        counts.push("{r.count(text)}")
+    }
+    println(counts.join(" "))    // out: 3000 241 241 3000 3000 3000 3000 3000 0 3000 6000 3961
+}

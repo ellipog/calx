@@ -18,6 +18,14 @@
 //   rune folds with its full case folding when that's one rune, CaseFolding.txt's C entries, and
 //   otherwise with its full lowercase when that's one rune, as an S entry has it, so the dotless i,
 //   whose only folding is Turkic, folds with nothing.
+// - PY_LOWER and PY_UPPER, the one rune Python's `re` lowers or uppers a rune to, as CPython's
+//   _PyUnicode_ToLowercase and _PyUnicode_ToUppercase give it: the first rune of the full mapping
+//   in SpecialCasing.txt's lines without a condition, or else the simple mapping, so `ß` uppers to
+//   `S`. A rune is cased for `re` when either moves it.
+// - PY_SPACE, Python's `str.isspace` and `re`'s `\s`: the runes whose bidirectional class is WS, B
+//   or S, or whose category is Zs.
+// - PY_PRINT, Python's `str.isprintable`, which `repr` keeps as they are: the space, and the runes
+//   whose category isn't C or Z.
 import std.env
 import std.fs
 import std.http
@@ -236,7 +244,12 @@ fn main() {
     for c in 0u32..(MAX + 1) {
         lower.push(c)
     }
+    var upper: List<u32> = []
+    for c in 0u32..(MAX + 1) {
+        upper.push(c)
+    }
     var numeric: List<bool> = [false; size]
+    var py_space: List<bool> = [false; size]
     var first: u32? = none
     for r in rows(ucd_file(cache.copy(), String("UnicodeData.txt"))) {
         let c = hex(r[0].copy())
@@ -248,13 +261,20 @@ fn main() {
         for k in lo..(c + 1) {
             category[usize(k)] = r[2].copy()
             numeric[usize(k)] = not r[6].is_empty() or not r[7].is_empty() or not r[8].is_empty()
+            py_space[usize(k)] = r[4] == "WS" or r[4] == "B" or r[4] == "S" or r[2] == "Zs"
         }
         if not r[13].is_empty() {
             lower[usize(c)] = hex(r[13].copy())
         }
+        if not r[12].is_empty() {
+            upper[usize(c)] = hex(r[12].copy())
+        }
     }
-    // Full lowercase that isn't one rune, from SpecialCasing.txt's lines without a condition.
+    // Full lowercase that isn't one rune, from SpecialCasing.txt's lines without a condition, and
+    // Python's one-rune lowercase and uppercase, the first rune of those lines' mappings.
     var lower_many: List<bool> = [false; size]
+    var py_lower = lower.copy()
+    var py_upper = upper.copy()
     for r in rows(ucd_file(cache.copy(), String("SpecialCasing.txt"))) {
         if r.len() >= 5 and r[4].is_empty() {
             let to = r[1].split_whitespace()
@@ -264,6 +284,8 @@ fn main() {
             } else {
                 lower_many[usize(c)] = true
             }
+            py_lower[usize(c)] = hex(to[0].copy())
+            py_upper[usize(c)] = hex(r[3].split_whitespace()[0].copy())
         }
     }
     // Full case folding: C entries are one rune, F entries more.
@@ -340,9 +362,35 @@ fn main() {
     }
     pairs.sort()
 
+    // Python's: the runes its case mappings move, each with where it goes, and its classes.
+    var lower_from: List<u32> = []
+    var lower_to: List<u32> = []
+    var upper_from: List<u32> = []
+    var upper_to: List<u32> = []
+    var is_print: List<bool> = [false; size]
+    for c in 0u32..(MAX + 1) {
+        if c >= 0xD800 and c <= 0xDFFF {
+            continue
+        }
+        let i = usize(c)
+        if py_lower[i] != c {
+            lower_from.push(c)
+            lower_to.push(py_lower[i])
+        }
+        if py_upper[i] != c {
+            upper_from.push(c)
+            upper_to.push(py_upper[i])
+        }
+        let cat = category[i].copy()
+        is_print[i] = c == 32 or not (cat.starts_with("C") or cat.starts_with("Z"))
+    }
+    let py_spaces = ranges(py_space)
+    let py_print = ranges(is_print)
+
     let parts: List<String> = [
         String("/// Tables from the Unicode Character Database, for `std.regex`: the runes `\\w`, `\\d` and `\\s`"),
-        String("/// match, and simple case folding; and for std.textwrap, Python's `str.isalnum`."),
+        String("/// match, and simple case folding; for std.textwrap, Python's `str.isalnum`; and for `Regex.python`"),
+        String("/// and std.json.schema, the case mappings, `str.isspace` and `str.isprintable` of Python's `re` and `repr`."),
         "/// Written by tools/unicode/gen_ucd.calx from Unicode {VERSION}; don't edit by hand.",
         String("module std.text.ucd"),
         String(),
@@ -353,8 +401,14 @@ fn main() {
         table("ALNUM", "The runes Python's `str.isalnum` is true for, the letters and those with a numeric value, as ranges.", flat(alnum)),
         table("FOLD_FROM", "Each rune that case folding puts with others, in order.", pairs.map(|p| p.0)),
         table("FOLD_NEXT", "The next rune in `FOLD_FROM[i]`'s orbit: the smallest past it, or else the smallest.", pairs.map(|p| p.1)),
+        table("PY_LOWER_FROM", "Each rune Python's `re` lowers to another, in order.", lower_from),
+        table("PY_LOWER_TO", "The rune `PY_LOWER_FROM[i]` lowers to.", lower_to),
+        table("PY_UPPER_FROM", "Each rune Python's `re` uppers to another, in order.", upper_from),
+        table("PY_UPPER_TO", "The rune `PY_UPPER_FROM[i]` uppers to.", upper_to),
+        table("PY_SPACE", "The runes Python's `str.isspace` is true for, as ranges.", flat(py_spaces)),
+        table("PY_PRINT", "The runes Python's `str.isprintable` is true for, as ranges.", flat(py_print)),
     ]
     let out = "{root}/std/text/ucd.calx"
     fs.write_text(out.copy(), parts.join("\n"))!
-    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds")
+    println("{out}: {word.len()} word ranges, {digit.len()} digit, {space.len()} space, {alnum.len()} alnum, {pairs.len()} folds, {lower_from.len()} lower, {upper_from.len()} upper, {py_spaces.len()} py space, {py_print.len()} printable")
 }

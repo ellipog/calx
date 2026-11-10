@@ -2,9 +2,12 @@
 /// and replaced, and text split by them. Every search takes time in proportion to the text's
 /// length times the pattern's, whatever either is, so no pattern can hang a program on hostile
 /// text, which is the promise RE2, Go and Rust make. That's why there are no backreferences or
-/// lookaround, which can't keep it. See docs/std/regex.md.
+/// lookaround, which can't keep it. `Regex.python` is the other way: Python's `re` as it is, with
+/// its syntax, backreferences and lookaround, by its backtracking matcher. See docs/std/regex.md.
 module std.regex
 
+import std.regex.sre
+import std.regex.sre.{Part}
 import std.text.ucd.{WORD, WORD_LEN, DIGIT, SPACE, FOLD_FROM, FOLD_FROM_LEN, FOLD_NEXT}
 
 // In the runtime: where bytes are found fast, for the searches' skips. More than `len` for none.
@@ -14,16 +17,20 @@ extern "C" {
     fn cx_rx_skip(hay: *const u8, len: usize, from: usize, set: *const u8, count: u32, bytes: u32) -> usize
 }
 
-/// Why a pattern isn't one `Regex.new` takes.
+/// Why a pattern isn't one `Regex.new` or `Regex.python` takes.
 pub struct RegexError {
     pub message: String
-    /// The rune in the pattern where it's wrong, from 1.
+    /// The rune in the pattern where it's wrong, from 1, or 0 where Python's `re` names no place.
     pub column: usize
 }
 
 impl Display for RegexError {
     fn show(self) {
-        print("column {self.column}: {self.message}")
+        if self.column == 0 {
+            print(self.message)
+        } else {
+            print("column {self.column}: {self.message}")
+        }
     }
 }
 
@@ -2399,6 +2406,9 @@ pub struct Regex {
     before_ends: List<u8>
     // Which byte of `literal` is likely rarest, for looking for it.
     lit_rare: usize
+    // For `Regex.python`: Python's matcher, which every search then runs instead.
+    python_re: bool
+    py: sre.Program
 }
 
 // Whether byte `b` is inside a rune, not the start of one.
@@ -2459,7 +2469,27 @@ impl Regex {
                 lit_rare = cx_bytes_rare(lit.as_ptr(), lit.len())
             }
         }
-        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare }
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: usize(groups), names: names, literal: literal, fwd: fwd, rev: rev, inner: inner, inner_rare: inner_rare, before: before, before_ends: before_ends, lit_rare: lit_rare, python_re: false, py: sre.empty() }
+    }
+
+    /// The pattern compiled as Python's `re.compile` compiles it, or the error it raises, with
+    /// its message and place. Its syntax is Python's, backreferences, lookaround, atomic groups,
+    /// possessive quantifiers and conditionals too, and each method then finds what Python's
+    /// would: `find` as `search`, `find_all` and `captures_all` as `finditer`, `replace_all` as
+    /// `sub` with Python's templates, `split` as `split`. It matches by backtracking, as Python
+    /// does, so a pattern can take time exponential in the text, as it would there.
+    pub fn python(pattern: String) -> Regex ! RegexError {
+        var py = sre.empty()
+        match sre.compile(pattern) {
+            ok(p) => py = p,
+            err(e) => fail RegexError { message: e.message, column: if e.pos < 0 { 0 } else { usize.wrap(e.pos) + 1 } },
+        }
+        var prog = Prog { op: List<u8>(), a: List<u32>(), b: List<u32>(), next: List<u32>(), classes: List<RuneClass>(), start: 0, slots: 2, too_big: false }
+        prog.start = prog.emit(OP_MATCH, 0, 0, 0)
+        let pike = new_pike(prog)
+        let groups = py.group_count()
+        let names = py.group_names()
+        return Regex { source: pattern.copy(), prog: prog, pike: pike, groups: groups, names: names, literal: none, fwd: new_dfa(Node.Empty, false), rev: new_dfa(Node.Empty, true), inner: List<u8>(), inner_rare: 0, before: new_dfa(Node.Empty, true), before_ends: List<u8>(), lit_rare: 0, python_re: true, py: py }
     }
 
     /// The pattern as it was written.
@@ -2479,6 +2509,9 @@ impl Regex {
 
     /// Whether the pattern matches anywhere in `text`.
     pub fn is_match(mut self, text: String) -> bool {
+        if self.python_re {
+            return self.py.search(text, 0, false)
+        }
         if let lit = self.literal {
             return text.contains(lit)
         }
@@ -2606,6 +2639,12 @@ impl Regex {
         if from > text.len() {
             return none
         }
+        if self.python_re {
+            if self.py.search(text, from, false) {
+                return some(self.py.span())
+            }
+            return none
+        }
         if let lit = self.literal {
             let n = text.len()
             var k: usize = 0
@@ -2663,6 +2702,8 @@ impl Regex {
 
     /// Every match in `text`, one after another, none overlapping. An empty match right after
     /// another isn't one, as in Rust, so `a*` finds `aaa` in `baaa` once, not an empty match after.
+    /// For `Regex.python` they're what `finditer` finds, where only an empty match right after an
+    /// empty one isn't one.
     pub fn find_all(mut self, text: String) -> List<Match> {
         var out = List<Match>()
         var at: usize = 0
@@ -2692,8 +2733,19 @@ impl Regex {
     }
 
     // The next match from `at` in a walk over every match, which moves `at` past it. `last_end` is
-    // where the last one ended, which an empty match can't be.
+    // where the last one ended, which an empty match can't be. Python's walk refuses an empty
+    // match only right after an empty one, so for it `last_end` is where the last one ended only
+    // if it was empty.
     fn next_span(mut self, text: String, at: mut usize, last_end: mut usize) -> (usize, usize)? {
+        if self.python_re {
+            if at > text.len() or not self.py.search(text, at, at == last_end) {
+                return none
+            }
+            let (s, e) = self.py.span()
+            last_end = if s == e { e } else { usize.wrap(UNSET) }
+            at = e
+            return some((s, e))
+        }
         while at <= text.len() {
             if let (s, e) = self.span_at(text, at) {
                 if s == e and s == last_end {
@@ -2733,6 +2785,20 @@ impl Regex {
     // The groups of the match from `s` to `e`. The DFAs find where a match is, and the Pike VM,
     // run over it alone, its groups, when it has any.
     fn groups_at(mut self, text: String, s: usize, e: usize) -> Captures? {
+        if self.python_re {
+            // Python's matcher found the groups with the match, which was the last it found.
+            var groups = List<Match?>()
+            groups.reserve(self.groups + 1)
+            groups.push(some(Match { start: s, end: e, text: text[s..e] }))
+            for g in 1..self.groups + 1 {
+                if let (a, b) = self.py.group(g) {
+                    groups.push(some(Match { start: a, end: b, text: text[a..b] }))
+                } else {
+                    groups.push(none)
+                }
+            }
+            return some(Captures { groups: groups, names: self.names.copy() })
+        }
         if self.groups == 0 {
             var groups = List<Match?>()
             groups.push(some(Match { start: s, end: e, text: text[s..e] }))
@@ -2780,16 +2846,62 @@ impl Regex {
 
     /// `text` with its first match replaced by `with`, in which `$1` and `${1}` are group 1's
     /// text, `${name}` and `$name` the named group's, `$0` the whole match's, and `$$` a `$`.
+    /// For `Regex.python` the template is Python's, as `re.sub` reads it: `\1` and `\g<1>`,
+    /// `\g<name>`, `\g<0>`, and `\n` and the other escapes. A template Python would refuse
+    /// panics with Python's error, as Python raises it.
+    @track_caller
     pub fn replace(mut self, text: String, with: String) -> String {
         return self.replace_n(text, with, 1)
     }
 
     /// `text` with every match replaced by `with`, as `replace` replaces one.
+    @track_caller
     pub fn replace_all(mut self, text: String, with: String) -> String {
         return self.replace_n(text, with, usize.wrap(UNSET))
     }
 
+    // `re.sub` with Python's template.
+    @track_caller
+    fn python_sub(mut self, text: String, with: String, limit: usize) -> String {
+        let parts = match sre.template(with, self.groups, self.names) {
+            ok(p) => p,
+            err(e) => panic(if e.pos < 0 { e.message } else { "{e.message} at position {e.pos}" }),
+        }
+        var out = String()
+        var kept: usize = 0
+        var count: usize = 0
+        var at: usize = 0
+        var last_end = usize.wrap(UNSET)
+        while count < limit {
+            if let (s, e) = self.next_span(text, mut at, mut last_end) {
+                out.push_str(text[kept..s])
+                for part in parts {
+                    match part {
+                        Part.Text(t) => out.push_str(t),
+                        Part.Group(g) => {
+                            if g == 0 {
+                                out.push_str(text[s..e])
+                            } else if let (a, b) = self.py.group(g) {
+                                out.push_str(text[a..b])
+                            }
+                        },
+                    }
+                }
+                kept = e
+                count += 1
+            } else {
+                break
+            }
+        }
+        out.push_str(text[kept..])
+        return out
+    }
+
+    @track_caller
     fn replace_n(mut self, text: String, with: String, limit: usize) -> String {
+        if self.python_re {
+            return self.python_sub(text, with, limit)
+        }
         var out = String()
         var kept: usize = 0
         var count: usize = 0
@@ -2815,7 +2927,8 @@ impl Regex {
     }
 
     /// The parts of `text` between its matches, as Python's `re.split` gives them without groups,
-    /// empty parts too.
+    /// empty parts too. For `Regex.python`, as `re.split` gives them with its groups: after each
+    /// part, each group's text, `""` for one that took no part, where Python has `None`.
     pub fn split(mut self, text: String) -> List<String> {
         var out = List<String>()
         var kept: usize = 0
@@ -2824,6 +2937,15 @@ impl Regex {
         loop {
             if let (s, e) = self.next_span(text, mut at, mut last_end) {
                 out.push(text[kept..s])
+                if self.python_re {
+                    for g in 1..self.groups + 1 {
+                        if let (a, b) = self.py.group(g) {
+                            out.push(text[a..b])
+                        } else {
+                            out.push(String())
+                        }
+                    }
+                }
                 kept = e
             } else {
                 break
