@@ -1,0 +1,25 @@
+// `calx test` on a file of tests with no `fn main`, whose C's `main` only runs the test it's
+// given (CLX-243). It crashed the compiler, looking for the error a failing `main` shows.
+import std.env.{variable}
+import std.fs.{remove_dir_all, temp_dir, write_text, separator}
+import std.process.{Command}
+
+fn main() {
+    let exe = variable("CALX") ?? String("calx")
+    let dir = temp_dir()!
+    write_text("{dir}{separator()}checks.calx", "@test\nfn adds() \{\n    assert(1 + 1 == 2)\n\}\n\n@test\nfn counts() \{\n    assert(\"ab\".len() == 2)\n\}\n")!
+    match Command.new(exe).args(["test", "checks.calx"]).dir(dir.copy()).output() {
+        ok(o) => {
+            for line in o.text().lines() {
+                if line.starts_with("ok") {
+                    println(line)
+                }
+            }
+            // out: ok    adds
+            // out: ok    counts
+            println("{o.error_text().trim_end()} [{o.status}]")    // out:  [exited with status 0]
+        },
+        err(e) => println("{e}"),
+    }
+    remove_dir_all(dir)!
+}

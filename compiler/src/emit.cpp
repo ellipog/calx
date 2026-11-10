@@ -299,8 +299,9 @@ private:
         for (Item* f : p.externs) all.merge(fns_.at(f).sig_uses);
         // A constant's value can name other constants.
         for (std::size_t i = 0; i < all.consts.size(); i++) all.merge(consts_.at(all.consts[i]).uses);
-        // A `main` that fails shows its error.
-        if (p.has_main && prog_.main->result_type->is_result) {
+        // A `main` that fails shows its error. A file of tests may have none, and its C's `main`
+        // runs a test instead.
+        if (p.has_main && prog_.main && prog_.main->result_type->is_result) {
             const Type* rt = prog_.main->result_type;
             all.add_type(rt);
             if (show_glue(rt->args[1])) all.add_show(rt->args[1]);
