@@ -1,0 +1,45 @@
+// A program of 240 modules, built into a cache at a long path, has a link command longer than
+// the 32,767 characters Windows starts a program with, so calx gives the linker its arguments in a
+// response file (CLX-208). It links and runs. On Linux, whose limit is far higher, it's an ordinary
+// build.
+import std.env.{variable}
+import std.fs.{make_dir_all, remove_dir_all, separator, temp_dir, write_text}
+import std.process.{Command}
+
+fn main() {
+    let calx = variable("CALX") ?? String("calx")
+    let s = separator()
+    let dir = "{temp_dir()!}{s}link-long"
+    // The cache's path comes to 130 characters, so each object's is over 170, 41,000 for all of
+    // them, and the files calx writes there stay under the 260 Windows' paths are limited to.
+    var cache = "{dir}{s}cache"
+    while cache.len() < 130 {
+        var part = String()
+        while part.len() < 60 and cache.len() + 1 + part.len() < 130 {
+            part.push_str("c")
+        }
+        cache = "{cache}{s}{part}"
+    }
+    make_dir_all(cache.copy())!
+    let n = 240
+    var text = String()
+    for i in 0..n {
+        write_text("{dir}{s}m{i}.calx", "pub fn g{i}(x: i64) -> i64 \{\n    return x + {i}\n\}\n")!
+        text.push_str("import m{i}.\{g{i}\}\n")
+    }
+    text.push_str("\nfn main() \{\n    var t: i64 = 0\n")
+    for i in 0..n {
+        text.push_str("    t = g{i}(t)\n")
+    }
+    text.push_str("    println(\"\{t\}\")\n\}\n")
+    write_text("{dir}{s}main.calx", text)!
+    let build = Command.new(calx.copy()).args(["build", "main.calx", "-o", "main.exe"]).dir(dir.copy())
+    let built = build.env("CALX_CACHE", cache.copy()).output()!
+    println("built: {built.status}")    // out: built: exited with status 0
+    if not built.status.success() {
+        println(built.error_text())
+    }
+    // 0 + 1 + ... + 239
+    println(Command.new("{dir}{s}main.exe").read()!.trim())    // out: 28680
+    remove_dir_all(dir)!
+}

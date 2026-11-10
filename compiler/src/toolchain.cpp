@@ -799,6 +799,47 @@ void print_file(const std::string& path) {
 // line, which costs about 18 ms of starting clang each time. So the first link asks it once with
 // `-###`, and caches the answer as a template, and later links run the linker straight from it
 // (D64). If a cached command fails, say because Visual Studio moved, the driver works it out again.
+// Windows starts no program with a command line over 32,767 characters, and a link of a few hundred
+// modules from a cache with a long path passes that: Calcite's server, 320 objects, came to 38,334
+// (CLX-208). Then its arguments go in the response file `rsp`, which clang and lld-link both read
+// as `@rsp`, quoted as a Windows command line is.
+static std::vector<std::string> fit_command(const std::vector<std::string>& args, const std::string& rsp) {
+#ifdef _WIN32
+    std::size_t n = 0;
+    for (const std::string& a : args) n += a.size() + 3;
+    if (n < 30000 || args.empty()) return args;
+    std::string text;
+    for (std::size_t i = 1; i < args.size(); i++) {
+        const std::string& a = args[i];
+        if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) {
+            text += a;
+        } else {
+            text += '"';
+            std::size_t backslashes = 0;
+            for (char c : a) {
+                if (c == '\\') {
+                    backslashes++;
+                    continue;
+                }
+                text.append(c == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+                text += c;
+                backslashes = 0;
+            }
+            text.append(backslashes * 2, '\\');
+            text += '"';
+        }
+        text += '\n';
+    }
+    if (!write_file_atomic(rsp, text)) return args;
+    // The clang driver reads a response file as a Unix shell would, backslashes and all, unless
+    // told otherwise; lld-link takes the same flag.
+    return {args[0], "--rsp-quoting=windows", "@" + rsp};
+#else
+    (void)rsp;
+    return args;
+#endif
+}
+
 bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, const std::string& output,
                   const std::vector<std::string>& link_flags, bool verbose) {
     // An object another build's trim deleted is made again by the caller, which links once more,
@@ -818,7 +859,24 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
     std::vector<std::string_view> key_parts(key_text.begin(), key_text.end());
     std::string template_path = (fs::path(tc.cache) / "link" / (hash_hex(key_parts) + ".txt")).string();
     std::string log = output + ".log";
+    std::string rsp = output + ".rsp";
     std::error_code ec;
+
+    // Runs a step of the link, its output to `to` or the compiler's own, through a response file
+    // when it's too long for a command line.
+    auto run = [&](const std::vector<std::string>& args, const std::string* to) {
+        std::vector<std::string> fit = fit_command(args, rsp);
+        int status = to ? run_to_file(fit, *to) : run_process(fit);
+        if (fit != args) fs::remove(rsp, ec);
+        return status;
+    };
+    // The driver linking by itself, the last thing to try, which says so if it can't even start.
+    auto by_driver = [&]() {
+        if (verbose) print_command(driver);
+        int status = run(driver, nullptr);
+        if (status < 0) std::fprintf(stderr, "calx: couldn't start %s to link\n", tc.clang.c_str());
+        return status == 0;
+    };
 
     auto fill = [&](const std::vector<std::string>& tmpl) {
         std::vector<std::string> args;
@@ -842,7 +900,7 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
         }
         args = fill(std::move(args));
         if (verbose) print_command(args);
-        if (!args.empty() && run_to_file(args, log) == 0) {
+        if (!args.empty() && run(args, &log) == 0) {
             if (verbose) print_file(log);
             fs::remove(log, ec);
             return true;
@@ -855,7 +913,7 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
     std::vector<std::string> ask = driver;
     ask.push_back("-###");
     std::vector<std::vector<std::string>> commands;
-    if (run_to_file(ask, log) == 0) {
+    if (run(ask, &log) == 0) {
         std::string text;
         if (read_file(log, text)) commands = parse_commands(text);
     }
@@ -867,12 +925,9 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
         if (!file_exists(args[0]) && file_exists(args[0] + ".exe")) args[0] += ".exe";
 #endif
         if (verbose) print_command(args);
-        int status = run_process(args);
+        int status = run(args, nullptr);
         if (status > 0) return false;
-        if (status < 0) {
-            if (verbose) print_command(driver);
-            return run_process(driver) == 0;
-        }
+        if (status < 0) return by_driver();
         // Cached only if the inputs appear once each, whole and in order, so one placeholder can
         // stand for them, and the template rebuilds this command.
         std::vector<std::string> tmpl;
@@ -896,8 +951,7 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
         }
         return true;
     }
-    if (verbose) print_command(driver);
-    return run_process(driver) == 0;
+    return by_driver();
 }
 
 // What the cache keeps (D64). On Windows a debug program and its PDB take under 1 MB, and a
