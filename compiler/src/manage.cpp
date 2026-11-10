@@ -93,9 +93,23 @@ std::wstring lower(std::wstring s) {
     return s;
 }
 
+// A function of a system DLL that only `calx uninstall` needs, loaded when it does: a program
+// that imports USER32 takes about 3 ms longer to start, and one that imports ADVAPI32 about half a
+// millisecond, which every `calx` would.
+template <typename F>
+F system_fn(const wchar_t* dll, const char* name) {
+    HMODULE m = LoadLibraryW(dll);
+    return m ? reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(m, name))) : nullptr;
+}
+
 // Takes `bin` out of the user's Path in the registry, where the install script put it, and tells
 // running programs the environment changed. Whether it was there.
 bool remove_from_path(const fs::path& bin) {
+    auto RegOpenKeyExW = system_fn<decltype(&::RegOpenKeyExW)>(L"advapi32.dll", "RegOpenKeyExW");
+    auto RegQueryValueExW = system_fn<decltype(&::RegQueryValueExW)>(L"advapi32.dll", "RegQueryValueExW");
+    auto RegSetValueExW = system_fn<decltype(&::RegSetValueExW)>(L"advapi32.dll", "RegSetValueExW");
+    auto RegCloseKey = system_fn<decltype(&::RegCloseKey)>(L"advapi32.dll", "RegCloseKey");
+    if (!RegOpenKeyExW || !RegQueryValueExW || !RegSetValueExW || !RegCloseKey) return false;
     HKEY key;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) return false;
     DWORD type = 0, size = 0;
@@ -124,9 +138,11 @@ bool remove_from_path(const fs::path& bin) {
             if (removed) {
                 RegSetValueExW(key, L"Path", 0, type == REG_EXPAND_SZ ? REG_EXPAND_SZ : REG_SZ,
                                reinterpret_cast<const BYTE*>(kept.c_str()), static_cast<DWORD>((kept.size() + 1) * sizeof(wchar_t)));
-                DWORD_PTR result;
-                SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG,
-                                    2000, &result);
+                if (auto send = system_fn<decltype(&::SendMessageTimeoutW)>(L"user32.dll", "SendMessageTimeoutW")) {
+                    DWORD_PTR result;
+                    send(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG, 2000,
+                         &result);
+                }
             }
         }
     }
