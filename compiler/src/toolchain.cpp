@@ -1297,8 +1297,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // Release builds compile each file to LLVM bitcode, and optimize the program as a whole when
     // it links (ThinLTO), so a small function inlines into every module that calls it, as it would
     // within one, and so do the runtime's. Only lld can; without it each file is optimized alone
-    // (D99).
-    bool lto = mode == BuildMode::release && tc.lld;
+    // (D99). `CALX_LTO=0` turns it off, for test runs that build many programs: each file is then
+    // machine code, kept in the object cache, so a build that finds all its files there only
+    // links, where ThinLTO makes the machine code again in every link.
+    bool lto = mode == BuildMode::release && tc.lld && env("CALX_LTO") != "0";
     if (lto) flags.push_back("-flto=thin");
     if (library) {
         flags.push_back("-DCX_LIBRARY");
