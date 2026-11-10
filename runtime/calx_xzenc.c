@@ -26,6 +26,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -324,6 +325,17 @@ static inline void mf_next(mf_t* f) {
     cx_u32 h3 = (t_ ^ ((cx_u32)(cur)[2] << 8)) & (HEAD3 - 1);                      \
     cx_u32 h4 = (v_ * 0x9E3779B1u) >> (32 - f->hash_bits);
 
+/* Both of a node's children, and the text at each, start coming in while the node's own text is
+ * compared, so the step down finds them ready whichever way it goes. */
+#define BT_AHEAD(pair, len)                                       \
+    {                                                             \
+        cx_u32 a_ = (pair)[0], b_ = (pair)[1];                    \
+        __builtin_prefetch(son + 2 * (a_ & mask));                \
+        __builtin_prefetch(son + 2 * (b_ & mask));                \
+        __builtin_prefetch(cur - (f->pos - a_) + (len));          \
+        __builtin_prefetch(cur - (f->pos - b_) + (len));          \
+    }
+
 /* Puts the position into the tree whose root is `cand`, without noting matches: the search for its
  * place, which stops at `limit` bytes in common, or at `depth` steps. */
 static void bt_skip(mf_t* f, cx_u32 cand, cx_u32 limit) {
@@ -342,6 +354,7 @@ static void bt_skip(mf_t* f, cx_u32 cand, cx_u32 limit) {
         cx_u32* pair = son + 2 * (cand & mask);
         const cx_u8* pb = cur - delta;
         cx_u32 len = len0 < len1 ? len0 : len1;
+        BT_AHEAD(pair, len)
         if (pb[len] == cur[len]) {
             len = common(pb, cur, len + 1, limit);
             if (len == limit) {
@@ -381,6 +394,7 @@ static cx_u32 bt_find(mf_t* f, cx_u32 cand, cx_u32 limit, cx_u32 best, match_t* 
         cx_u32* pair = son + 2 * (cand & mask);
         const cx_u8* pb = cur - delta;
         cx_u32 len = len0 < len1 ? len0 : len1;
+        BT_AHEAD(pair, len)
         if (pb[len] == cur[len]) {
             len = common(pb, cur, len + 1, limit);
             if (len > best) {
@@ -432,6 +446,12 @@ static cx_u32 hc_find(mf_t* f, cx_u32 cand, cx_u32 limit, cx_u32 best, match_t* 
     }
 }
 
+/* The four-byte head a search starts from starts coming in two positions before it, which measured
+ * best: one and four positions were slower, and so was fetching the tree's first node too. */
+static inline void mf_ahead(const mf_t* f, const cx_u8* cur, cx_u32 avail) {
+    if (avail >= 6) __builtin_prefetch(f->head4 + ((load32(cur + 2) * 0x9E3779B1u) >> (32 - f->hash_bits)));
+}
+
 /* The matches at the next position, shortest first, into m, and moves on: how many there are. The
  * longest is followed past `nice` to the longest a match can be. */
 static cx_u32 mf_find(mf_t* f, match_t* m) {
@@ -443,6 +463,7 @@ static cx_u32 mf_find(mf_t* f, match_t* m) {
     }
     const cx_u8* cur = f->base + f->pos;
     HASHES(cur)
+    mf_ahead(f, cur, avail);
     const cx_u32 short_reach = f->reach < SHORT_REACH ? f->reach : SHORT_REACH;
     cx_u32 d2 = f->pos - f->head2[h2], d3 = f->pos - f->head3[h3], cand = f->head4[h4];
     f->head2[h2] = f->head3[h3] = f->head4[h4] = f->pos;
@@ -488,6 +509,7 @@ static void mf_skip(mf_t* f, cx_u32 n) {
         }
         const cx_u8* cur = f->base + f->pos;
         HASHES(cur)
+        mf_ahead(f, cur, limit);
         cx_u32 cand = f->head4[h4];
         f->head2[h2] = f->head3[h3] = f->head4[h4] = f->pos;
         if (f->bt) bt_skip(f, cand, limit);
@@ -1385,6 +1407,20 @@ static void coder_free(coder_t* c) {
     c->tables = 0;
 }
 
+/* Asks Linux to back the tables at p with 2 MiB pages, which most systems give only when asked. A
+ * search's steps land all over tens of MiB of trees, and with 4 KiB pages most of them miss the
+ * TLB as well as the cache. Windows gives large pages only to accounts allowed to lock memory. */
+static void big_pages(void* p, cx_usize n) {
+#ifdef MADV_HUGEPAGE
+    const uintptr_t big = (uintptr_t)2 << 20;
+    uintptr_t from = ((uintptr_t)p + big - 1) & ~(big - 1), to = ((uintptr_t)p + n) & ~(big - 1);
+    if (to > from) madvise((void*)from, to - from, MADV_HUGEPAGE);
+#else
+    (void)p;
+    (void)n;
+#endif
+}
+
 static void coder_ready(coder_t* c, const params_t* pr, mf_shape_t s) {
     if (!c->e) c->e = (enc_t*)cx_alloc(sizeof(enc_t));
     cx_usize bytes = mf_bytes(pr, s);
@@ -1394,6 +1430,7 @@ static void coder_ready(coder_t* c, const params_t* pr, mf_shape_t s) {
     }
     if (!c->tables) {
         c->tables = (cx_u32*)cx_alloc(bytes);
+        big_pages(c->tables, bytes);
         c->bytes = bytes;
         c->shape = s;
     }
@@ -1827,8 +1864,10 @@ static void block_shared(const params_t* pr, slice_t* s, cx_u64 n) {
     f.ranges = (cx_u32)(workers * 2 < RANGES_MAX ? workers * 2 : RANGES_MAX);
     cx_usize head_bytes = ((cx_usize)1 << sh.hash_bits) * sizeof(cx_u32), son_bytes = ((cx_usize)f.size << pr->bt) * sizeof(cx_u32);
     f.head4 = (cx_u32*)cx_alloc(head_bytes);
+    big_pages(f.head4, head_bytes);
     memset(f.head4, 0, head_bytes);
     f.son = (cx_u32*)cx_alloc(son_bytes);
+    big_pages(f.son, son_bytes);
     window_t w[2];
     memset(w, 0, sizeof w);
     for (int t = 0; t < 2; t++) {
