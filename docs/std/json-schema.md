@@ -35,13 +35,54 @@ fn main() ! JsonError {
 | --- | --- | --- |
 | `Validator.new(schema, draft)` | `Draft7Validator(schema)` and the others | A validator for `schema` under `draft`'s keywords and types |
 | `Validator.with_registry(schema, draft, registry)` | `Draft7Validator(schema, registry=registry)` | One whose `$ref`s can find the schemas in `registry` too |
-| `v.with_formats()` | `format_checker=FormatChecker()` | The same validator, checking `format` too. Only the `regex` format is checked so far |
+| `v.with_formats()` | `format_checker=FormatChecker()` | The same validator, checking `format` too, as Python does with jsonschema alone installed ([formats](#formats)) |
 | `v.iter_errors(instance) -> List<ValidationError> ! SchemaFault` | `list(v.iter_errors(instance))` | Every error, in Python's order |
 | `v.is_valid(instance) -> bool ! SchemaFault` | `v.is_valid(instance)` | Whether there are none. It stops at the first and makes no messages |
 | `v.validate(instance) -> ValidationError? ! SchemaFault` | `v.validate(instance)` | The first error, which Python raises, or `none` |
 | `Draft` | the validator classes | `Draft3`, `Draft4`, `Draft6`, `Draft7`, `Draft201909` and `Draft202012` |
 
 A validator keeps what it has worked out between calls, such as the regexes it has compiled and the meta-schemas it has read, so one made once and used for many values is the fast way, as in Python.
+
+## Formats
+
+`format` is only a note unless the validator is made `with_formats()`. Then a string that isn't of its format is an error, `'1.2.03.4' is not a 'ipv4'`, as with Python's `FormatChecker()` when jsonschema is installed alone. These are the formats it checks, each as Python reads it. A value that isn't a string, and a format not in the list, always passes.
+
+| Format | A string is one when |
+| --- | --- |
+| `date` | It's `YYYY-MM-DD` in ASCII digits and a day `datetime.date` has, from year 1 |
+| `email`, `idn-email` | It has an `@` |
+| `ipv4` | `ipaddress.IPv4Address` reads it: four decimal octets up to 255, none with a leading zero |
+| `ipv6` | `ipaddress.IPv6Address` reads it, with no scope after a `%` |
+| `regex` | It compiles as a Python regex, with [`Regex.python`](regex.md#pythons-re) |
+| `time` | `datetime.strptime(s, "%H:%M:%S")` reads it: draft 3's check, which replaces the others' in `FormatChecker()`. So `1:2:3` is a time, any Unicode digit counts, and `12:00:00Z` isn't one |
+| `uuid` | `uuid.UUID` reads it, and it has `-` at runes 8, 13, 18 and 23. `UUID` reads the hex with Python's `int`, so a `+` or a Unicode digit can stand where a hex digit is |
+
+The other formats Python can check, such as `date-time`, `hostname`, `uri` and `json-pointer`, need a library of their own there, so they pass here as they do with jsonschema alone ([CLX-226](https://acta.aaenz.no/aaen-studios/clx#CLX-226)).
+
+`std.json.schema.formats` has the checks on their own, for one string: `is_date`, `is_email`, `is_ipv4`, `is_ipv6`, `is_time` and `is_uuid`, each giving a `bool`.
+
+```calx
+import std.json
+import std.json.{JsonError}
+import std.json.schema.{Draft, Validator}
+import std.json.schema.formats
+
+fn main() ! JsonError {
+    let schema = try json.parse(#"{"properties": {"ip": {"format": "ipv4"}, "day": {"format": "date"}}}"#)
+    var v = Validator.new(schema, Draft.Draft202012).with_formats()
+    match v.iter_errors(try json.parse(#"{"ip": "10.0.0.256", "day": "2024-02-30"}"#)) {
+        ok(errors) => {
+            for e in errors {
+                println("{e.json_path()}: {e.message}")
+            }
+        },
+        err(f) => println("{f}"),
+    }
+    // out: $.ip: '10.0.0.256' is not a 'ipv4'
+    // out: $.day: '2024-02-30' is not a 'date'
+    println("{formats.is_ipv6("::ffff:10.0.0.1")} {formats.is_date("2024-02-29")}")    // out: true true
+}
+```
 
 ## Errors
 
@@ -127,13 +168,12 @@ What Python raises instead of giving errors comes back as a `SchemaFault`, whose
 ## Where it differs
 
 - Integers past the range of a `u64` are floats in [`std.json`](json.md), so a message shows `1e+20` where Python shows `100000000000000000000`.
-- Only the `regex` format is checked by `with_formats`: the others Python checks, such as `date`, `email` and `ipv4`, pass.
 - Two of Python's results depend on the order of a set, which changes from run to run: the order of the unexpected names in `additionalProperties`' message from `check_schema`, and which broken resource a registry's crawl stops at first. Here each is one of the orders Python gives.
 - `best_match` never fails. Python's raises `TypeError: unhashable type: 'dict'` when an error's schema is a draft 3 one whose `type` holds a schema, since it asks its type checker about that schema as if it were a type's name.
 
 ## How it's built
 
-[std/json/schema.calx](../../std/json/schema.calx), in Calx, written from jsonschema's and referencing's behaviour and checked against them: every draft's tests in the [JSON-Schema-Test-Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), and 5,400 more of schemas broken on purpose, references across registries and real configuration files, 16,810 results in all, with the errors, their messages, paths, values and contexts, `best_match`, `check_schema` and the faults compared. All are the same but the integers past `u64` above.
+[std/json/schema.calx](../../std/json/schema.calx), in Calx, written from jsonschema's and referencing's behaviour and checked against them: every draft's tests in the [JSON-Schema-Test-Suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite), and 5,400 more of schemas broken on purpose, references across registries and real configuration files, 16,810 results in all, with the errors, their messages, paths, values and contexts, `best_match`, `check_schema` and the faults compared. All are the same but the integers past `u64` above. The formats were checked against `FormatChecker()` on the suite's format tests and 560,000 random strings near good ones, all with the same answers.
 
 A schema is read once into a table of nodes, each object's keywords numbered, so a check never looks a keyword up by name. The meta-schemas are read and crawled only when a `$ref` reaches them, and a `$ref` is resolved once for each place it's reached from, then remembered for the rest of the check.
 

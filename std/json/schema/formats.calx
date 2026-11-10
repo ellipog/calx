@@ -1,0 +1,370 @@
+/// The checks of jsonschema 4.26's `FormatChecker()` that need no other library: whether a
+/// string is an `email`, an `ipv4` or `ipv6` address, a `date`, a `time` or a `uuid` as Python's
+/// `ipaddress`, `datetime` and `uuid` read one. std.json.schema's `with_formats()` uses them, and
+/// they're here for code that checks one string.
+module std.json.schema.formats
+
+import std.text.python.{is_space}
+import std.text.ucd.{DIGIT, DIGIT_LEN}
+
+/// `email` and `idn-email`: whether `s` has an `@`, all jsonschema asks.
+pub fn is_email(s: String) -> bool {
+    return s.contains("@")
+}
+
+/// `ipv4`: whether `ipaddress.IPv4Address(s)` reads `s`: four decimal octets of ASCII digits, each
+/// up to 255 and with no leading zero.
+pub fn is_ipv4(s: String) -> bool {
+    var octets: usize = 0
+    var start: usize = 0
+    var i: usize = 0
+    while i <= s.len() {
+        if i == s.len() or s.byte_at(i) == b'.' {
+            if not octet(s, start, i) {
+                return false
+            }
+            octets += 1
+            start = i + 1
+        }
+        i += 1
+    }
+    return octets == 4
+}
+
+// Python's `_parse_octet` of the bytes from `a` up to `b`.
+fn octet(s: String, a: usize, b: usize) -> bool {
+    if a == b or b - a > 3 {
+        return false
+    }
+    var v: u32 = 0
+    for i in a..b {
+        let c = s.byte_at(i)
+        if c < b'0' or c > b'9' {
+            return false
+        }
+        v = v * 10 + u32(c - b'0')
+    }
+    return v <= 255 and not (b - a > 1 and s.byte_at(a) == b'0')
+}
+
+/// `ipv6`: whether `ipaddress.IPv6Address(s)` reads `s` with no scope after a `%`: up to eight
+/// groups of up to four hex digits, one `::` standing for groups of zeros, and an IPv4 address
+/// allowed as the last 32 bits.
+pub fn is_ipv6(s: String) -> bool {
+    // A scope is an error or, after a good address, makes jsonschema say no; so does a `/`.
+    if s.is_empty() or s.contains("%") or s.contains("/") {
+        return false
+    }
+    var parts = s.split(":")
+    // `split(':', maxsplit=9)` leaves the rest in a tenth part, which is never an address.
+    if parts.len() < 3 or parts.len() > 10 {
+        return false
+    }
+    if parts[parts.len() - 1].contains(".") {
+        let last = parts.pop() ?? String()
+        if not is_ipv4(last) {
+            return false
+        }
+        parts.push(String("0"))
+        parts.push(String("0"))
+    }
+    if parts.len() > 9 {
+        return false
+    }
+    let n = parts.len()
+    var skip: usize = 0
+    var skips = false
+    for i in 1..n - 1 {
+        if parts[i].is_empty() {
+            if skips {
+                return false
+            }
+            skip = i
+            skips = true
+        }
+    }
+    var hi = n
+    var lo: usize = 0
+    if skips {
+        hi = skip
+        lo = n - skip - 1
+        if parts[0].is_empty() {
+            hi -= 1
+            if hi != 0 {
+                return false
+            }
+        }
+        if parts[n - 1].is_empty() {
+            lo -= 1
+            if lo != 0 {
+                return false
+            }
+        }
+        if hi + lo >= 8 {
+            return false
+        }
+    } else if n != 8 or parts[0].is_empty() or parts[n - 1].is_empty() {
+        return false
+    }
+    for i in 0..hi {
+        if not hextet(parts[i]) {
+            return false
+        }
+    }
+    for i in n - lo..n {
+        if not hextet(parts[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+// Python's `_parse_hextet`: one to four ASCII hex digits.
+fn hextet(h: String) -> bool {
+    if h.is_empty() or h.len() > 4 {
+        return false
+    }
+    for i in 0..h.len() {
+        if hex_digit(h.byte_at(i)) < 0 {
+            return false
+        }
+    }
+    return true
+}
+
+fn hex_digit(c: u8) -> i32 {
+    if c >= b'0' and c <= b'9' {
+        return i32(c - b'0')
+    }
+    if c >= b'a' and c <= b'f' {
+        return i32(c - b'a') + 10
+    }
+    if c >= b'A' and c <= b'F' {
+        return i32(c - b'A') + 10
+    }
+    return -1
+}
+
+/// `date`: whether `s` is `YYYY-MM-DD` in ASCII digits, a day `datetime.date` has, from year 1.
+pub fn is_date(s: String) -> bool {
+    if s.len() != 10 or s.byte_at(4) != b'-' or s.byte_at(7) != b'-' {
+        return false
+    }
+    for i in [0usize, 1, 2, 3, 5, 6, 8, 9] {
+        let c = s.byte_at(i)
+        if c < b'0' or c > b'9' {
+            return false
+        }
+    }
+    let year = number(s, 0, 4)
+    let month = number(s, 5, 7)
+    let day = number(s, 8, 10)
+    return year >= 1 and month >= 1 and month <= 12 and day >= 1 and day <= days_in(year, month)
+}
+
+fn number(s: String, a: usize, b: usize) -> u32 {
+    var v: u32 = 0
+    for i in a..b {
+        v = v * 10 + u32(s.byte_at(i) - b'0')
+    }
+    return v
+}
+
+fn days_in(year: u32, month: u32) -> u32 {
+    if month == 2 {
+        return if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) { 29 } else { 28 }
+    }
+    return if month == 4 or month == 6 or month == 9 or month == 11 { 30 } else { 31 }
+}
+
+/// `time`: whether `datetime.strptime(s, "%H:%M:%S")` reads `s`, the check `FormatChecker()`
+/// has for `time`. An hour, a minute and a second of one or two digits, which can be any
+/// Unicode decimal digits, as Python's `\d` matches them, and a one-digit hour can have a space
+/// before it. A second of 60 or 61 matches, then isn't one `datetime` has.
+pub fn is_time(s: String) -> bool {
+    var rs = List<u32>()
+    for r in s.runes() {
+        rs.push(u32(r))
+    }
+    // Python's regex tries each choice for the hour, the minute and the second in its order, and
+    // takes the first that matches from the start; what's left after it is an error.
+    for h in 0..4 {
+        let m0 = hour(rs, h)
+        if m0 < 0 or usize.wrap(m0) >= rs.len() or rs[usize.wrap(m0)] != 0x3A {
+            continue
+        }
+        for m in 0..2 {
+            let s0 = minute(rs, usize.wrap(m0) + 1, m)
+            if s0 < 0 or usize.wrap(s0) >= rs.len() or rs[usize.wrap(s0)] != 0x3A {
+                continue
+            }
+            let a = usize.wrap(s0) + 1
+            for k in 0..3 {
+                let end = second(rs, a, k)
+                if end < 0 {
+                    continue
+                }
+                // `6[0-1]` is a second `datetime` doesn't have.
+                return usize.wrap(end) == rs.len() and k != 0
+            }
+        }
+    }
+    return false
+}
+
+// Where `%H`'s choice `k` ends, matched from the start, or -1:
+// `2[0-3]`, `[0-1]\d`, `\d` and ` \d`.
+fn hour(rs: List<u32>, k: i32) -> i64 {
+    let n = rs.len()
+    if k == 0 {
+        return if n >= 2 and rs[0] == 0x32 and rs[1] >= 0x30 and rs[1] <= 0x33 { 2 } else { -1 }
+    }
+    if k == 1 {
+        return if n >= 2 and (rs[0] == 0x30 or rs[0] == 0x31) and decimal(rs[1]) >= 0 { 2 } else { -1 }
+    }
+    if k == 2 {
+        return if n >= 1 and decimal(rs[0]) >= 0 { 1 } else { -1 }
+    }
+    return if n >= 2 and rs[0] == 0x20 and decimal(rs[1]) >= 0 { 2 } else { -1 }
+}
+
+// Where `%M`'s choice `k` ends, from `a`, or -1: `[0-5]\d` and `\d`.
+fn minute(rs: List<u32>, a: usize, k: i32) -> i64 {
+    let n = rs.len()
+    if k == 0 {
+        return if a + 1 < n and rs[a] >= 0x30 and rs[a] <= 0x35 and decimal(rs[a + 1]) >= 0 { i64.wrap(a + 2) } else { -1 }
+    }
+    return if a < n and decimal(rs[a]) >= 0 { i64.wrap(a + 1) } else { -1 }
+}
+
+// Where `%S`'s choice `k` ends, from `a`, or -1: `6[0-1]`, `[0-5]\d` and `\d`.
+fn second(rs: List<u32>, a: usize, k: i32) -> i64 {
+    let n = rs.len()
+    if k == 0 {
+        return if a + 1 < n and rs[a] == 0x36 and (rs[a + 1] == 0x30 or rs[a + 1] == 0x31) { i64.wrap(a + 2) } else { -1 }
+    }
+    return minute(rs, a, k - 1)
+}
+
+// The value of a Unicode decimal digit, what Python's `\d` and `int` take, or -1. Each run of
+// them starts at a 0 and holds whole runs of ten.
+fn decimal(r: u32) -> i32 {
+    if r < 0x80 {
+        return if r >= 0x30 and r <= 0x39 { i32.wrap(r - 0x30) } else { -1 }
+    }
+    var lo: usize = 0
+    var hi = DIGIT_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > DIGIT[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < DIGIT[2 * mid] {
+            hi = mid
+        } else {
+            return i32.wrap((r - DIGIT[2 * mid]) % 10)
+        }
+    }
+    return -1
+}
+
+/// `uuid`: whether `uuid.UUID(s)` reads `s` and it has `-` at runes 8, 13, 18 and 23, as
+/// jsonschema asks. `UUID` takes out `urn:`, `uuid:`, the `{` and `}` at the ends and every `-`,
+/// then reads the 32 runes left with Python's `int(h, 16)`, which takes a sign, a `0x`,
+/// underscores between digits, white space at the ends and any Unicode decimal digits.
+pub fn is_uuid(s: String) -> bool {
+    let h = strip_braces(s.replace("urn:", "").replace("uuid:", "")).replace("-", "")
+    var rs = List<u32>()
+    for r in h.runes() {
+        rs.push(u32(r))
+    }
+    if rs.len() != 32 or not py_hex_int(rs) {
+        return false
+    }
+    var at: usize = 0
+    for r in s.runes() {
+        if (at == 8 or at == 13 or at == 18 or at == 23) and u32(r) != 0x2D {
+            return false
+        }
+        at += 1
+        if at > 23 {
+            break
+        }
+    }
+    return true
+}
+
+// `s.strip('{}')`.
+fn strip_braces(s: String) -> String {
+    var a: usize = 0
+    var b = s.len()
+    while a < b and (s.byte_at(a) == b'{' or s.byte_at(a) == b'}') {
+        a += 1
+    }
+    while b > a and (s.byte_at(b - 1) == b'{' or s.byte_at(b - 1) == b'}') {
+        b -= 1
+    }
+    return s[a..b]
+}
+
+// Whether Python's `int(text, 16)` reads the runes `rs`. It first makes them ASCII: a rune below
+// 127 stays, other white space becomes a space and another decimal digit its digit; anything else
+// is an error. Then come white space, a sign, a `0x` and one `_` after it, hex digits with single
+// `_`s between them, and white space, as CPython's `PyLong_FromString` reads them.
+fn py_hex_int(rs: List<u32>) -> bool {
+    var a = List<u8>()
+    for r in rs {
+        if r < 127 {
+            a.push(u8.wrap(r))
+        } else if is_space(r) {
+            a.push(b' ')
+        } else {
+            let d = decimal(r)
+            if d < 0 {
+                return false
+            }
+            a.push(b'0' + u8.wrap(d))
+        }
+    }
+    let n = a.len()
+    var i: usize = 0
+    while i < n and c_space(a[i]) {
+        i += 1
+    }
+    if i < n and (a[i] == b'+' or a[i] == b'-') {
+        i += 1
+    }
+    if i + 1 < n and a[i] == b'0' and (a[i + 1] == b'x' or a[i + 1] == b'X') {
+        i += 2
+        if i < n and a[i] == b'_' {
+            i += 1
+        }
+    }
+    if i < n and a[i] == b'_' {
+        return false
+    }
+    var digits: usize = 0
+    var prev: u8 = 0
+    while i < n and (hex_digit(a[i]) >= 0 or a[i] == b'_') {
+        if a[i] == b'_' {
+            if prev == b'_' {
+                return false
+            }
+        } else {
+            digits += 1
+        }
+        prev = a[i]
+        i += 1
+    }
+    if prev == b'_' or digits == 0 {
+        return false
+    }
+    while i < n and c_space(a[i]) {
+        i += 1
+    }
+    return i == n
+}
+
+// C's `isspace` in the C locale, CPython's `Py_ISSPACE`.
+fn c_space(c: u8) -> bool {
+    return c == b' ' or (c >= 9 and c <= 13)
+}

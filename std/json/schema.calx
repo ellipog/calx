@@ -7,6 +7,7 @@ module std.json.schema
 import std.bigint.{BigInt}
 import std.json
 import std.json.{Json}
+import std.json.schema.formats as fmt
 import std.json.schema.meta
 import std.regex.{Regex}
 import std.text.python.{is_space, repr_float_into, repr_str, repr_str_into}
@@ -167,7 +168,8 @@ impl Validator {
     }
 
     /// The same validator, checking `format` too, as one given `format_checker=FormatChecker()`
-    /// is. Only the `regex` format is checked so far.
+    /// is with jsonschema alone installed: `date`, `email`, `idn-email`, `ipv4`, `ipv6`, `regex`,
+    /// `time` and `uuid`. Other formats pass.
     pub fn with_formats(own self) -> Validator {
         var v = self
         v.formats = true
@@ -2926,22 +2928,51 @@ fn kw_format(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fa
         let t = py_type(g, v)
         fail type_error("cannot use '{t}' as a dict key (unhashable type: '{t}')")
     }
-    if k != K_STR or g.nodes[usize(v)].s != "regex" {
+    if k != K_STR {
         return
     }
     let Json.Str(s) = inst else {
         return
     }
-    match search(mut cx, s, "") {
-        ok(_) => {},
-        err(_) => {
-            if quiet(cx) {
-                out.push(blank())
-            } else {
-                out.push(err_at(ev, "format", Value.Node(v), inst, "{repr(inst)} is not a {repr_node(g, v)}"))
-            }
-        },
+    if conforms(mut cx, g.nodes[usize(v)].s, s) {
+        return
     }
+    if quiet(cx) {
+        out.push(blank())
+    } else {
+        out.push(err_at(ev, "format", Value.Node(v), inst, "{repr(inst)} is not a {repr_node(g, v)}"))
+    }
+}
+
+// Whether `s` is of the format `name`, as `FormatChecker()` checks it with jsonschema alone
+// installed: `date`, `email`, `idn-email`, `ipv4`, `ipv6`, `regex`, `time` and `uuid`. Any other
+// format passes.
+fn conforms(cx: mut Ctx, name: String, s: String) -> bool {
+    if name == "regex" {
+        return match search(mut cx, s, "") {
+            ok(_) => true,
+            err(_) => false,
+        }
+    }
+    if name == "email" or name == "idn-email" {
+        return fmt.is_email(s)
+    }
+    if name == "ipv4" {
+        return fmt.is_ipv4(s)
+    }
+    if name == "ipv6" {
+        return fmt.is_ipv6(s)
+    }
+    if name == "date" {
+        return fmt.is_date(s)
+    }
+    if name == "time" {
+        return fmt.is_time(s)
+    }
+    if name == "uuid" {
+        return fmt.is_uuid(s)
+    }
+    return true
 }
 
 fn kw_contains(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
