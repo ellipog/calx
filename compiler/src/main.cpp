@@ -748,6 +748,10 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> c_sources;
     for (CFile& f : files) c_sources.push_back(std::move(f.text));
+    // The checked program isn't needed past here, and is left for the system to free as the
+    // process ends: freeing its many small pieces one at a time took a cached build of a program
+    // that uses std.regex half a millisecond (CLX-240).
+    (void)front.release();
     BuildResult b = build_program(tc, c_sources, opt.mode, opt.library ? BuildKind::library : BuildKind::program, opt.verbose);
     if (!b.ok) return 1;
     if (opt.timings) {

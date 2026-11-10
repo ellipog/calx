@@ -124,8 +124,10 @@ private:
 
     // --- locals and their states -------------------------------------------------------------
 
+    // try_emplace, which makes a node only for a new local: emplace makes one every time, to free
+    // it again when the local has its number, which was a tenth of this pass (CLX-240).
     std::uint32_t id(Local* l) {
-        auto [it, fresh] = ids_.emplace(l, static_cast<std::uint32_t>(locals_.size()));
+        auto [it, fresh] = ids_.try_emplace(l, static_cast<std::uint32_t>(locals_.size()));
         if (fresh) {
             locals_.push_back(l);
             moved_at_.push_back(Span{});

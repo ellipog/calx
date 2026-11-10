@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace calx {
 
@@ -353,19 +354,20 @@ private:
 
     // Whether the folders and file a module names exist with exactly those letters, so `import
     // Util` finds `util.calx` on neither Windows nor Linux.
+    // Each folder is listed once in a build, where listing std's for each import took a program
+    // that uses std.regex a millisecond (CLX-240).
     bool exact_case(const fs::path& base, const Slice<Name>& parts) const {
         fs::path dir = base.empty() ? fs::path(".") : base;
         for (std::size_t i = 0; i < parts.size(); i++) {
             std::string want = std::string(text(parts[i])) + (i + 1 == parts.size() ? ".calx" : "");
-            bool found = false;
-            std::error_code ec;
-            for (fs::directory_iterator d(long_path(dir.string()), ec), end; !ec && d != end; d.increment(ec)) {
-                if (d->path().filename().string() == want) {
-                    found = true;
-                    break;
+            auto [listing, fresh] = listings_.try_emplace(dir.string());
+            if (fresh) {
+                std::error_code ec;
+                for (fs::directory_iterator d(long_path(dir.string()), ec), end; !ec && d != end; d.increment(ec)) {
+                    listing->second.insert(d->path().filename().string());
                 }
             }
-            if (!found) return false;
+            if (!listing->second.count(want)) return false;
             dir /= want;
         }
         return true;
@@ -386,6 +388,7 @@ private:
     std::string home_, home_error_;
     fs::path root_;
     std::unordered_map<std::string, Module*> by_name_;
+    mutable std::unordered_map<std::string, std::unordered_set<std::string>> listings_;  // each folder's names
     std::unordered_map<Module*, int> state_;  // 1 while visiting, 2 once done
     std::vector<Module*> stack_;
     std::vector<Module*> order_;

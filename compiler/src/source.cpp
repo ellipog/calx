@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 namespace calx {
 
@@ -54,18 +52,8 @@ std::string_view SourceFile::line_text(std::uint32_t line) const {
 }
 
 std::uint32_t Sources::load(const std::string& path) {
-    std::ifstream in(long_path(path), std::ios::binary | std::ios::ate);
-    if (!in) return 0;
-    // Read straight into the text, at its size, rather than through a string stream, which
-    // copies it twice.
-    std::streamoff size = in.tellg();
     std::string text;
-    if (size > 0) {
-        text.resize(static_cast<std::size_t>(size));
-        in.seekg(0);
-        in.read(text.data(), size);
-        text.resize(static_cast<std::size_t>(in.gcount()));
-    }
+    if (!read_file(path, text)) return 0;
     return add(path, std::move(text));
 }
 

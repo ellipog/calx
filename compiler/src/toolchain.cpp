@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -21,6 +22,7 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -68,6 +70,32 @@ std::string unique_stamp() {
 
 namespace {
 
+// Whether `p` is a file, or a link to one, asked with one call. std::filesystem opens the file
+// on Windows to ask, which took every build a millisecond to search PATH for clang (CLX-240).
+bool plain_file(const fs::path& p) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+// Makes the folder `p` and those it's in, unless it's there, which is asked with one call where
+// making them asks the system for each folder on the way (CLX-240).
+void make_dirs(const fs::path& p) {
+#ifdef _WIN32
+    DWORD a = GetFileAttributesW(p.c_str());
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) return;
+#else
+    struct stat st;
+    if (::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return;
+#endif
+    std::error_code ec;
+    fs::create_directories(p, ec);
+}
+
 std::string find_on_path(const std::string& name) {
     std::string path = env("PATH");
     std::size_t start = 0;
@@ -76,8 +104,7 @@ std::string find_on_path(const std::string& name) {
         if (end == std::string::npos) end = path.size();
         if (end > start) {
             fs::path candidate = fs::path(path.substr(start, end - start)) / (name + kExe);
-            std::error_code ec;
-            if (fs::is_regular_file(candidate, ec)) return candidate.string();
+            if (plain_file(candidate)) return candidate.string();
         }
         start = end + 1;
     }
@@ -306,10 +333,7 @@ int finish(pid_t pid) {
 }
 #endif
 
-bool has_runtime(const fs::path& home) {
-    std::error_code ec;
-    return fs::is_regular_file(home / "runtime" / "calx_rt.h", ec);
-}
+bool has_runtime(const fs::path& home) { return plain_file(home / "runtime" / "calx_rt.h"); }
 
 }  // namespace
 
@@ -400,16 +424,16 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     }
     std::error_code ec;
     fs::path clang_path = fs::absolute(tc.clang, ec);
-    if (!fs::is_regular_file(clang_path, ec)) {
+    if (!plain_file(clang_path)) {
         error = "clang isn't at " + tc.clang;
         return false;
     }
     tc.clang = clang_path.string();
     fs::path dir = clang_path.parent_path();
 #ifdef _WIN32
-    tc.lld = fs::is_regular_file(dir / "lld-link.exe", ec) || !find_on_path("lld-link").empty();
+    tc.lld = plain_file(dir / "lld-link.exe") || !find_on_path("lld-link").empty();
 #else
-    tc.lld = fs::is_regular_file(dir / "ld.lld", ec) || !find_on_path("ld.lld").empty();
+    tc.lld = plain_file(dir / "ld.lld") || !find_on_path("ld.lld").empty();
 #endif
     auto size = fs::file_size(clang_path, ec);
     auto time = fs::last_write_time(clang_path, ec).time_since_epoch().count();
@@ -419,23 +443,33 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
     if (tc.home.empty()) return false;
 
     tc.cache = cache_dir();
-    fs::create_directories(fs::path(tc.cache) / "obj", ec);
-    fs::create_directories(fs::path(tc.cache) / "bin", ec);
+    make_dirs(fs::path(tc.cache) / "obj");
+    make_dirs(fs::path(tc.cache) / "bin");
     return true;
 }
 
 std::string hash_hex(const std::vector<std::string_view>& parts) {
-    // Two 64-bit FNV-1a lanes with different bases, over each part and its length.
+    // Two 64-bit lanes over each part, eight bytes a step, and its length. Each step is a multiply
+    // and an xor-shift, both one-to-one, so no two words leave a lane the same. A byte a step took
+    // a cached build of a program that uses std.regex 10 ms of hashing (CLX-240).
     std::uint64_t a = 0xcbf29ce484222325ull, b = 0x84222325cbf29ce4ull;
-    auto mix = [&](unsigned char c) {
-        a = (a ^ c) * 0x100000001b3ull;
-        b = (b ^ c) * 0x100000001b3ull;
+    auto step = [&](std::uint64_t w) {
+        a = (a ^ w) * 0x9e3779b97f4a7c15ull;
+        a ^= a >> 32;
+        b = (b ^ ((w << 23) | (w >> 41))) * 0xc2b2ae3d27d4eb4full;
         b ^= b >> 29;
     };
     for (std::string_view p : parts) {
-        for (unsigned char c : p) mix(c);
-        std::uint64_t n = p.size();
-        for (int i = 0; i < 8; i++) mix(static_cast<unsigned char>(n >> (8 * i)));
+        std::size_t n = p.size(), i = 0;
+        for (; i + 8 <= n; i += 8) {
+            std::uint64_t w;
+            std::memcpy(&w, p.data() + i, 8);
+            step(w);
+        }
+        std::uint64_t tail = 0;
+        if (i < n) std::memcpy(&tail, p.data() + i, n - i);
+        step(tail);
+        step(n);
     }
     char buf[33];
     std::snprintf(buf, sizeof buf, "%016llx%016llx", static_cast<unsigned long long>(a),
@@ -738,18 +772,89 @@ int run_parallel(const std::vector<std::vector<std::string>>& commands) {
     return result;
 }
 
-bool read_file(const std::string& path, std::string& out) {
-    std::ifstream in(long_path(path), std::ios::binary | std::ios::ate);
-    if (!in) return false;
-    // Straight into `out` at its size, rather than through a string stream, which copies it twice.
-    std::streamoff size = in.tellg();
-    out.clear();
-    if (size > 0) {
-        out.resize(static_cast<std::size_t>(size));
-        in.seekg(0);
-        in.read(out.data(), size);
-        out.resize(static_cast<std::size_t>(in.gcount()));
+namespace {
+
+// A file open to read, with the system's own calls, closed as it goes.
+class InFile {
+public:
+    explicit InFile(const std::string& path) {
+#ifdef _WIN32
+        h_ = CreateFileW(long_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        LARGE_INTEGER size;
+        if (h_ != INVALID_HANDLE_VALUE && GetFileSizeEx(h_, &size)) {
+            size_ = static_cast<std::uint64_t>(size.QuadPart);
+            ok_ = true;
+        }
+#else
+        fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        struct stat st;
+        if (fd_ >= 0 && ::fstat(fd_, &st) == 0 && !S_ISDIR(st.st_mode)) {
+            size_ = static_cast<std::uint64_t>(st.st_size);
+            ok_ = true;
+        }
+#endif
     }
+    ~InFile() {
+#ifdef _WIN32
+        if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
+#else
+        if (fd_ >= 0) ::close(fd_);
+#endif
+    }
+    InFile(const InFile&) = delete;
+    InFile& operator=(const InFile&) = delete;
+
+    bool ok() const { return ok_; }
+    std::uint64_t size() const { return size_; }
+
+    // Fills `to` with the next `n` bytes, or as many as are left; how many it read, or -1 if
+    // reading failed.
+    long long fill(char* to, std::size_t n) {
+        std::size_t got = 0;
+        while (got < n) {
+#ifdef _WIN32
+            DWORD want = static_cast<DWORD>(std::min<std::size_t>(n - got, 1u << 30)), r = 0;
+            if (!ReadFile(h_, to + got, want, &r, nullptr)) return -1;
+#else
+            ssize_t r = ::read(fd_, to + got, n - got);
+            if (r < 0 && errno == EINTR) continue;
+            if (r < 0) return -1;
+#endif
+            if (r == 0) break;
+            got += static_cast<std::size_t>(r);
+        }
+        return static_cast<long long>(got);
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+#else
+    int fd_ = -1;
+#endif
+    std::uint64_t size_ = 0;
+    bool ok_ = false;
+};
+
+// Compared a block at a time, so a file the size of a program's PDB isn't read into memory
+// whole only to be compared (CLX-240).
+constexpr std::size_t kBlock = 64 * 1024;
+
+}  // namespace
+
+// Straight into `out` at its size, with the system's own calls: through a stream, reading the
+// sources, the runtime and a program twice over took a cached build of a program that uses
+// std.regex 2 ms (CLX-240).
+bool read_file(const std::string& path, std::string& out) {
+    out.clear();
+    InFile f(path);
+    if (!f.ok()) return false;
+    if (f.size() == 0) return true;
+    out.resize(static_cast<std::size_t>(f.size()));
+    long long got = f.fill(out.data(), out.size());
+    if (got < 0) return false;
+    out.resize(static_cast<std::size_t>(got));
     return true;
 }
 
@@ -771,10 +876,7 @@ bool write_file_atomic(const std::string& path, const std::string& data) {
     return true;
 }
 
-bool file_exists(const std::string& path) {
-    std::error_code ec;
-    return fs::is_regular_file(long_path(path), ec);
-}
+bool file_exists(const std::string& path) { return plain_file(long_path(path)); }
 
 namespace {
 
@@ -1184,18 +1286,45 @@ const char* library_suffix() { return kLib; }
 
 // Whether the file at `path` holds exactly `bytes`.
 bool same_file(const std::string& path, const std::string& bytes) {
-    std::error_code ec;
-    auto size = fs::file_size(long_path(path), ec);
-    if (ec || size != bytes.size()) return false;
-    std::string have;
-    return read_file(path, have) && have == bytes;
+    InFile f(path);
+    if (!f.ok() || f.size() != bytes.size()) return false;
+    std::unique_ptr<char[]> block(new char[kBlock]);
+    for (std::size_t at = 0; at < bytes.size();) {
+        std::size_t want = std::min(kBlock, bytes.size() - at);
+        if (f.fill(block.get(), want) != static_cast<long long>(want)) return false;
+        if (std::memcmp(block.get(), bytes.data() + at, want) != 0) return false;
+        at += want;
+    }
+    return true;
 }
+
+#ifdef _WIN32
+namespace {
+
+// Whether the files at `a` and `b` hold the same bytes: a program's PDB and the one beside it.
+bool same_files(const std::string& a, const std::string& b) {
+    InFile x(a), y(b);
+    if (!x.ok() || !y.ok() || x.size() != y.size()) return false;
+    std::unique_ptr<char[]> block(new char[2 * kBlock]);
+    char* bx = block.get();
+    char* by = bx + kBlock;
+    for (std::uint64_t at = 0; at < x.size();) {
+        std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(kBlock, x.size() - at));
+        if (x.fill(bx, want) != static_cast<long long>(want) || y.fill(by, want) != static_cast<long long>(want)) return false;
+        if (std::memcmp(bx, by, want) != 0) return false;
+        at += want;
+    }
+    return true;
+}
+
+}  // namespace
+#endif
 
 bool place_build(const std::string& built, const std::string& out, std::string& error) {
     std::error_code ec;
     // The output's folder is made if it isn't there, as `-o build/app` expects.
     fs::path parent = fs::path(out).parent_path();
-    if (!parent.empty()) fs::create_directories(long_path(parent.string()), ec);
+    if (!parent.empty()) make_dirs(long_path(parent.string()));
     // A file that already holds what it would get is left as it is, but for its time, which is
     // now, as a build's output's is. Writing a program on Windows has it scanned again, which took
     // a small program's build 20 ms, and a program that's running can't be written over.
@@ -1256,12 +1385,18 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         fs::path to = fs::path(out).replace_extension(".pdb");
         std::string name = to.filename().string();
         if (name.size() + 1 > room || !file_exists(pdb)) break;
-        std::string pdb_bytes;
-        if (!read_file(pdb, pdb_bytes)) {
-            error = "can't read " + pdb;
-            return false;
+        // Compared file to file, and read only when it's changed: a release build's PDB is several
+        // MB (CLX-240).
+        if (same_files(pdb, to.string())) {
+            fs::last_write_time(long_path(to.string()), fs::file_time_type::clock::now(), ec);
+        } else {
+            std::string pdb_bytes;
+            if (!read_file(pdb, pdb_bytes)) {
+                error = "can't read " + pdb;
+                return false;
+            }
+            if (!put(to.string(), pdb_bytes)) return false;
         }
-        if (!put(to.string(), pdb_bytes)) return false;
         image.replace(name_at, room, name + std::string(room - name.size(), '\0'));
         break;
     }
@@ -1300,6 +1435,8 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     rt_h += sort_h;
     rt_h += btree_h;
     rt_h += heap_h;
+    // The headers' 160 KB are in every file's key, hashed once here rather than again for each.
+    const std::string rt_hash = hash_hex({"runtime-header", rt_h});
     // Java's semantics hold in every mode: wrapping, no contraction (D63, CALX_SPEC.md).
     // Line tables in both modes, so debuggers and profilers show Calx lines through `#line`.
     // They don't change the generated code.
@@ -1350,7 +1487,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     for (const std::string& f : flags) flag_text += f + " ";
 
     std::string obj_dir = (fs::path(tc.cache) / "obj").string();
-    std::string rt_key = hash_hex({"runtime", rt_h, rt_c, flag_text, tc.identity});
+    std::string rt_key = hash_hex({"runtime", rt_hash, rt_c, flag_text, tc.identity});
     std::string rt_obj = (fs::path(obj_dir) / (rt_key + ".o")).string();
     std::vector<std::string> keys, objs;
     std::string all_keys = rt_key;
@@ -1373,13 +1510,17 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             used.insert(s.substr(at, e - at));
         }
     }
-    // Whether the C has one of `names` anywhere: a name of the runtime's that starts with it.
+    // Whether the C has one of `names` anywhere: a name of the runtime's that starts with it. The
+    // names it has are sorted, so those that start with one are together, from the first that
+    // isn't less than it, rather than each part going over all of them (CLX-240).
+    std::vector<std::string_view> sorted_used(used.begin(), used.end());
+    std::sort(sorted_used.begin(), sorted_used.end());
     auto calls = [&](std::initializer_list<const char*> names) {
         if (opens) return true;
-        for (std::string_view u : used) {
-            for (const char* n : names) {
-                if (u.substr(0, std::strlen(n)) == n) return true;
-            }
+        for (const char* n : names) {
+            std::string_view want = n;
+            auto it = std::lower_bound(sorted_used.begin(), sorted_used.end(), want);
+            if (it != sorted_used.end() && it->substr(0, want.size()) == want) return true;
         }
         return false;
     };
@@ -1388,7 +1529,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     auto part = [&](const char* file) {
         std::string text;
         if (!read_file((runtime / file).string(), text)) return false;
-        std::string key = hash_hex({"runtime-part", file, rt_h, text, flag_text, tc.identity});
+        std::string key = hash_hex({"runtime-part", file, rt_hash, text, flag_text, tc.identity});
         parts.push_back({file, (fs::path(obj_dir) / (key + ".o")).string()});
         all_keys += " " + key;
         part_texts.push_back(std::move(text));
@@ -1471,7 +1612,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }
-    std::string alloc_key = hash_hex({"runtime-alloc", rt_h, alloc_c, flag_text, tc.identity});
+    std::string alloc_key = hash_hex({"runtime-alloc", rt_hash, alloc_c, flag_text, tc.identity});
     std::string alloc_obj = (fs::path(obj_dir) / (alloc_key + ".o")).string();
     all_keys += " " + alloc_key;
     // A program that asks for its build ID (std.build) gets it from a file of its own: a hash of
@@ -1488,7 +1629,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
                             hash_hex(id_parts) + "\"; }\n");
     }
     for (const std::string& c : c_sources) {
-        keys.push_back(hash_hex({"module", c, rt_h, flag_text, tc.identity}));
+        keys.push_back(hash_hex({"module", c, rt_hash, flag_text, tc.identity}));
         objs.push_back((fs::path(obj_dir) / (keys.back() + ".o")).string());
         all_keys += " " + keys.back();
     }
