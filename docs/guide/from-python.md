@@ -211,6 +211,7 @@ fn main() ! Error {
 | `hashlib.sha256(b).hexdigest()` | `hex(sha256(b))`, with [`std.hash`](../std/hash.md) and [`std.bytes`](../std/bytes.md) |
 | `base64.b64encode(b)` | `base64(b)` from [`std.bytes`](../std/bytes.md) |
 | `zipfile`, `tarfile`, `gzip` | [`std.zip`](../std/zip.md), [`std.tar`](../std/tar.md), [`std.zlib`](../std/zlib.md) |
+| nbtlib's `nbtlib.load(p)`, `f.save()`, `f["Data"]["DayTime"]`, `str(tag)` | `NbtFile.open(p)`, `f.save(p)`, `f.root.get("Data")!.get("DayTime")` or a `match` in place, and `"{tag}"` from [`std.nbt`](../std/nbt.md), with vanilla's SNBT, and 20 to 66 times as fast on [its benchmark](../std/nbt.md#speed) |
 | `lzma.decompress(b)` | `decompress(b)` from [`std.xz`](../std/xz.md), with the same errors and a limit if it's given |
 | `lzma.compress(b, preset=9)` | `compress(b, 9)` from [`std.xz`](../std/xz.md), on all the processors, the same bytes on any machine |
 | `LZMADecompressor()`, `lzma.open(path)` to read | `Decompressor.new()` from [`std.xz`](../std/xz.md#a-piece-at-a-time): `d.add(piece)`, then `d.finish()`, which reads every stream as `lzma.open` does |

@@ -42,6 +42,7 @@ fn main() {
 - `decode` accepts exactly what Java's `readUTF` accepts: a plain zero byte, and longer forms than needed, such as `C1 81` for `A`. It rejects four-byte UTF-8, which Java writes as two surrogates.
 - A surrogate without its pair is text Java can hold but UTF-8 can't, so `decode` makes it `?`. That's what Java writes for one in UTF-8, as the protocol does.
 - `decode` takes offsets, so it reads a string where it sits in a packet or a file, with nothing copied out first.
+- Most text is the same in Modified UTF-8 as in UTF-8, so `decode` copies bytes that are valid UTF-8 with no four-byte forms in one go, and decodes the rest a character at a time. [`std.nbt`](nbt.md) reads its strings so.
 - The length prefix isn't part of it, since NBT and the protocol each write their own.
 - `encode` and `encoded_len` matched Java 25's `writeUTF` on 20,000 random strings, and `decode` matched `readUTF` on 30,000 random byte strings, 13,628 of them valid, accepting and rejecting the same ones.
 

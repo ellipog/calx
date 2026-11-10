@@ -303,7 +303,7 @@ fn main() {
 ```
 
 - Only names are kept, since they're never freed: text of 1 to 64 bytes, up to 65,536 of them and 1 MiB in all. Empty text, longer text and text past those limits comes back as an ordinary copy, so `interned` is always safe to call, and saves memory only for text that repeats.
-- [`std.xml`](../std/xml.md) interns tags and attribute names, and [`std.json`](../std/json.md) object keys.
+- [`std.xml`](../std/xml.md) interns tags and attribute names, [`std.json`](../std/json.md) object keys, and [`std.nbt`](../std/nbt.md) compound keys.
 - Any thread can call it. Each thread keeps the last names it was given, so a name it has met before costs a hash and a compare, and takes no lock.
 
 ## Printing

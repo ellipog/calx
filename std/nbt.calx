@@ -1,0 +1,980 @@
+/// NBT, the binary format Minecraft keeps its data in: `level.dat`, players' files, structures and
+/// each chunk of a region file. Tags are read and written as vanilla 26.3's `NbtIo` reads and
+/// writes them, files gzipped, zlib-compressed or plain, and shown as SNBT as its `toString`
+/// shows them. A compound keeps its keys in the order they were read or put, as a Python dict
+/// does, so the NBT of a file read and written back is the same, byte for byte.
+module std.nbt
+
+import std.bytes.{i16_be, i32_be, i64_be, put_i16_be, put_i32_be, put_i64_be, put_u16_be, put_u32_be, put_u64_be, u16_be, u32_be, u64_be}
+import std.fs
+import std.text.mutf8
+import std.zlib
+
+/// One NBT value: a number, a string, an array, a list of tags or a compound of named ones.
+pub enum Tag {
+    /// The tag that ends a compound in the binary format. `decode_any` gives it for a lone 0, as
+    /// vanilla's `readAnyTag` gives its `EndTag`, which a packet sends for "no data"; nothing
+    /// else holds one.
+    End
+    Byte(i8)
+    Short(i16)
+    Int(i32)
+    Long(i64)
+    Float(f32)
+    Double(f64)
+    ByteArray(List<i8>)
+    String(String)
+    /// Tags of any kinds. Vanilla's lists hold one kind, but since 1.21.5 a list of several is
+    /// written as compounds, each holding its tag under the empty key, and read back as it was.
+    List(List<Tag>)
+    /// Named tags, in the order their keys were read or put.
+    Compound(LinkedMap<String, Tag>)
+    IntArray(List<i32>)
+    LongArray(List<i64>)
+}
+
+/// Why bytes aren't NBT, said as vanilla says it where it says something.
+pub enum NbtError {
+    /// The bytes end before the tag does.
+    Truncated
+    /// A tag's kind, the byte at `at`, isn't one of NBT's 13.
+    BadKind { kind: u8, at: usize }
+    /// The string whose length is at `at` isn't Java's Modified UTF-8.
+    BadString(usize)
+    /// The length at `at` of a list or an array is below 0.
+    NegativeLength { length: i32, at: usize }
+    /// The list at `at` has elements but no kind for them: vanilla's "Missing type on ListTag".
+    ListWithoutKind(usize)
+    /// Lists and compounds nest more than 512 deep, at `at`: vanilla's limit.
+    TooDeep(usize)
+    /// The root isn't a compound, which a file's must be.
+    NotCompound
+    /// The gzip or zlib stream around the NBT is broken.
+    Compressed(zlib.Error)
+}
+
+impl Display for NbtError {
+    fn show(self) {
+        match self {
+            Truncated => print("the NBT ends early"),
+            BadKind { kind, at } => print("byte {at}: {kind} isn't a kind of tag"),
+            BadString(at) => print("byte {at}: a string that isn't Modified UTF-8"),
+            NegativeLength { length, at } => print("byte {at}: a length of {length}"),
+            ListWithoutKind(at) => print("byte {at}: a list with elements but no kind for them"),
+            TooDeep(at) => print("byte {at}: lists and compounds nest more than 512 deep"),
+            NotCompound => print("the root tag isn't a compound"),
+            Compressed(e) => print("the compressed NBT is broken: {e}"),
+        }
+    }
+}
+
+/// How a file's NBT is compressed.
+pub enum Compression {
+    /// Not at all, as vanilla's `NbtIo.write` writes it.
+    None
+    /// Gzip, as `level.dat`, players' files and structures are, written by `NbtIo.writeCompressed`.
+    Gzip
+    /// Zlib, as most chunks in a region file are.
+    Zlib
+}
+
+const END: u8 = 0
+const BYTE: u8 = 1
+const SHORT: u8 = 2
+const INT: u8 = 3
+const LONG: u8 = 4
+const FLOAT: u8 = 5
+const DOUBLE: u8 = 6
+const BYTE_ARRAY: u8 = 7
+const STRING: u8 = 8
+const LIST: u8 = 9
+const COMPOUND: u8 = 10
+const INT_ARRAY: u8 = 11
+const LONG_ARRAY: u8 = 12
+
+/// How deep lists and compounds may nest, vanilla's `NbtAccounter` limit.
+const MAX_DEPTH: usize = 512
+
+// --- reading -------------------------------------------------------------------------------------
+
+/// A tag as vanilla's `NbtIo.readAnyTag` reads it, as packets send it since 1.20.2: its kind,
+/// then its value, with no name. Reads from `at`, and moves `at` past the tag.
+pub fn decode_any(bytes: List<u8>, at: mut usize) -> Tag ! NbtError {
+    try need(bytes, at, 1)
+    let kind_at = at
+    let kind = bytes[at]
+    at += 1
+    if kind == END {
+        return Tag.End
+    }
+    var keys = new_keys()
+    return try payload(bytes, mut at, kind, kind_at, 0, mut keys)
+}
+
+/// A named tag, as a file holds its root and vanilla's `NbtIo.read` reads it: its kind, its name,
+/// then its value. Reads from `at`, and moves `at` past it. A lone 0, the end tag, has no name.
+pub fn decode_named(bytes: List<u8>, at: mut usize) -> (String, Tag) ! NbtError {
+    try need(bytes, at, 1)
+    let kind_at = at
+    let kind = bytes[at]
+    at += 1
+    if kind == END {
+        return (String(), Tag.End)
+    }
+    let name = try read_string(bytes, mut at)
+    var keys = new_keys()
+    let tag = try payload(bytes, mut at, kind, kind_at, 0, mut keys)
+    return (name, tag)
+}
+
+// The keys a read has met, in 256 places by a hash of their bytes. A file's compounds repeat the
+// same few keys, so most are found here, interned: a copy costs no memory, and they aren't
+// decoded again or freed with their compounds.
+fn new_keys() -> List<String> {
+    var keys = List<String>()
+    keys.reserve(256)
+    for _ in 0..256 {
+        keys.push(String())
+    }
+    return keys
+}
+
+fn read_key(b: List<u8>, at: mut usize, keys: mut List<String>) -> String ! NbtError {
+    try need(b, at, 2)
+    let n = usize(u16_be(b, at))
+    // Interning keeps text of 1 to 64 bytes.
+    if n == 0 or n > 64 {
+        return try read_string(b, mut at)
+    }
+    let from = at + 2
+    try need(b, from, n)
+    var h: u32 = 2166136261
+    for i in from..from + n {
+        h = (h ^ u32(b[i])).wrapping_mul(16777619)
+    }
+    let slot = usize(h >> 24)
+    if keys[slot].len() == n {
+        var same = true
+        for i in 0..n {
+            if keys[slot].byte_at(i) != b[from + i] {
+                same = false
+                break
+            }
+        }
+        if same {
+            at = from + n
+            return keys[slot].copy()
+        }
+    }
+    let k = (try read_string(b, mut at)).interned()
+    keys[slot] = k.copy()
+    return k
+}
+
+fn need(b: List<u8>, at: usize, n: usize) ! NbtError {
+    if b.len() - at < n {
+        fail NbtError.Truncated
+    }
+}
+
+fn read_string(b: List<u8>, at: mut usize) -> String ! NbtError {
+    try need(b, at, 2)
+    let start = at
+    let n = usize(u16_be(b, at))
+    at += 2
+    try need(b, at, n)
+    let s = match mutf8.decode(b, at, at + n) {
+        ok(s) => s,
+        err(_) => fail NbtError.BadString(start),
+    }
+    at += n
+    return s
+}
+
+// The length of a list or an array, at `at`, which must be 0 or more.
+fn read_length(b: List<u8>, at: mut usize) -> usize ! NbtError {
+    try need(b, at, 4)
+    let n = i32_be(b, at)
+    if n < 0 {
+        fail NbtError.NegativeLength { length: n, at: at }
+    }
+    at += 4
+    return usize.wrap(n)
+}
+
+// The value of a tag of `kind`, whose kind byte is at `kind_at`, `depth` lists and compounds in.
+fn payload(b: List<u8>, at: mut usize, kind: u8, kind_at: usize, depth: usize, keys: mut List<String>) -> Tag ! NbtError {
+    if kind == COMPOUND {
+        return Tag.Compound(try read_compound(b, mut at, kind_at, depth, mut keys))
+    }
+    if kind == LIST {
+        return Tag.List(try read_list(b, mut at, kind_at, depth, mut keys))
+    }
+    return try leaf(b, mut at, kind, kind_at)
+}
+
+// A tag that holds no tags. Lists and compounds build theirs in place, rather than through a
+// `Tag ! NbtError` given back from each level, which cost a third of the time in copies.
+fn leaf(b: List<u8>, at: mut usize, kind: u8, kind_at: usize) -> Tag ! NbtError {
+    match kind {
+        BYTE => {
+            try need(b, at, 1)
+            at += 1
+            return Tag.Byte(i8.wrap(b[at - 1]))
+        },
+        SHORT => {
+            try need(b, at, 2)
+            at += 2
+            return Tag.Short(i16_be(b, at - 2))
+        },
+        INT => {
+            try need(b, at, 4)
+            at += 4
+            return Tag.Int(i32_be(b, at - 4))
+        },
+        LONG => {
+            try need(b, at, 8)
+            at += 8
+            return Tag.Long(i64_be(b, at - 8))
+        },
+        FLOAT => {
+            try need(b, at, 4)
+            at += 4
+            return Tag.Float(float_at(b, at - 4))
+        },
+        DOUBLE => {
+            try need(b, at, 8)
+            at += 8
+            return Tag.Double(double_at(b, at - 8))
+        },
+        BYTE_ARRAY => {
+            let n = try read_length(b, mut at)
+            try need(b, at, n)
+            var out = List<i8>()
+            out.reserve(n)
+            for i in at..at + n {
+                out.push(i8.wrap(b[i]))
+            }
+            at += n
+            return Tag.ByteArray(out)
+        },
+        STRING => return Tag.String(try read_string(b, mut at)),
+        INT_ARRAY => {
+            let n = try read_length(b, mut at)
+            try need(b, at, n * 4)
+            var out = List<i32>()
+            out.reserve(n)
+            for i in 0..n {
+                out.push(i32_be(b, at + i * 4))
+            }
+            at += n * 4
+            return Tag.IntArray(out)
+        },
+        LONG_ARRAY => {
+            let n = try read_length(b, mut at)
+            try need(b, at, n * 8)
+            var out = List<i64>()
+            out.reserve(n)
+            for i in 0..n {
+                out.push(i64_be(b, at + i * 8))
+            }
+            at += n * 8
+            return Tag.LongArray(out)
+        },
+        _ => fail NbtError.BadKind { kind: kind, at: kind_at },
+    }
+}
+
+// Vanilla's `FloatTag.valueOf` and `DoubleTag.valueOf` give their zero for -0.0, so -0.0 reads as 0.0.
+fn float_at(b: List<u8>, at: usize) -> f32 {
+    let f = f32.from_bits(u32_be(b, at))
+    return if f == 0.0 { 0.0 } else { f }
+}
+
+fn double_at(b: List<u8>, at: usize) -> f64 {
+    let d = f64.from_bits(u64_be(b, at))
+    return if d == 0.0 { 0.0 } else { d }
+}
+
+// A compound's tags, up to its end tag, whose kind byte is at `kind_at`.
+fn read_compound(b: List<u8>, at: mut usize, kind_at: usize, depth: usize, keys: mut List<String>) -> LinkedMap<String, Tag> ! NbtError {
+    if depth >= MAX_DEPTH {
+        fail NbtError.TooDeep(kind_at)
+    }
+    var m = LinkedMap<String, Tag>()
+    loop {
+        try need(b, at, 1)
+        let k_at = at
+        let k = b[at]
+        at += 1
+        if k == END {
+            break
+        }
+        if k > LONG_ARRAY {
+            fail NbtError.BadKind { kind: k, at: k_at }
+        }
+        let name = try read_key(b, mut at, mut keys)
+        if k == COMPOUND {
+            m.insert(name, Tag.Compound(try read_compound(b, mut at, k_at, depth + 1, mut keys)))
+        } else if k == LIST {
+            m.insert(name, Tag.List(try read_list(b, mut at, k_at, depth + 1, mut keys)))
+        } else {
+            m.insert(name, try leaf(b, mut at, k, k_at))
+        }
+    }
+    return m
+}
+
+// A list's tags, whose kind byte is at `kind_at`. Numbers are read in a loop of their own, once
+// there are bytes enough for all of them.
+fn read_list(b: List<u8>, at: mut usize, kind_at: usize, depth: usize, keys: mut List<String>) -> List<Tag> ! NbtError {
+    if depth >= MAX_DEPTH {
+        fail NbtError.TooDeep(kind_at)
+    }
+    try need(b, at, 1)
+    let elem_at = at
+    let elem = b[at]
+    at += 1
+    let n = try read_length(b, mut at)
+    if elem == END and n > 0 {
+        fail NbtError.ListWithoutKind(kind_at)
+    }
+    // An empty list's kind isn't looked at, as vanilla doesn't look.
+    var items = List<Tag>()
+    if n == 0 {
+        return items
+    }
+    if elem > LONG_ARRAY {
+        fail NbtError.BadKind { kind: elem, at: elem_at }
+    }
+    // Each element takes a byte at least, so a length past what's left is cut short.
+    items.reserve(if n < b.len() - at { n } else { b.len() - at })
+    let size: usize = match elem {
+        BYTE => 1,
+        SHORT => 2,
+        INT => 4,
+        FLOAT => 4,
+        LONG => 8,
+        DOUBLE => 8,
+        _ => 0,
+    }
+    if size > 0 {
+        try need(b, at, n * size)
+        // A loop for each kind, so each builds its one variant straight into the list.
+        let p = at
+        at += n * size
+        match elem {
+            BYTE => {
+                for i in 0..n {
+                    items.push(Tag.Byte(i8.wrap(b[p + i])))
+                }
+            },
+            SHORT => {
+                for i in 0..n {
+                    items.push(Tag.Short(i16_be(b, p + i * 2)))
+                }
+            },
+            INT => {
+                for i in 0..n {
+                    items.push(Tag.Int(i32_be(b, p + i * 4)))
+                }
+            },
+            FLOAT => {
+                for i in 0..n {
+                    items.push(Tag.Float(float_at(b, p + i * 4)))
+                }
+            },
+            LONG => {
+                for i in 0..n {
+                    items.push(Tag.Long(i64_be(b, p + i * 8)))
+                }
+            },
+            _ => {
+                for i in 0..n {
+                    items.push(Tag.Double(double_at(b, p + i * 8)))
+                }
+            },
+        }
+        return items
+    }
+    if elem == COMPOUND {
+        for _ in 0..n {
+            var m = try read_compound(b, mut at, elem_at, depth + 1, mut keys)
+            // A list of several kinds is written as compounds each holding a tag under the
+            // empty key, and read back unwrapped, as vanilla's `addAndUnwrap` does.
+            if is_wrapper(m) {
+                items.push(m.remove("")!)
+            } else {
+                items.push(Tag.Compound(m))
+            }
+        }
+    } else if elem == LIST {
+        for _ in 0..n {
+            items.push(Tag.List(try read_list(b, mut at, elem_at, depth + 1, mut keys)))
+        }
+    } else {
+        for _ in 0..n {
+            items.push(try leaf(b, mut at, elem, elem_at))
+        }
+    }
+    return items
+}
+
+// Whether `m` is a wrapper: one tag, under the empty key.
+fn is_wrapper(m: LinkedMap<String, Tag>) -> bool {
+    return m.len() == 1 and m.contains("")
+}
+
+// --- writing -------------------------------------------------------------------------------------
+
+/// Adds `tag` to `out` as vanilla's `NbtIo.writeAnyTag` writes it, as packets send it: its kind,
+/// then its value, with no name. `Tag.End` is the one byte 0.
+pub fn encode_any(tag: Tag, out: mut List<u8>) {
+    out.push(tag.id())
+    if tag.id() != END {
+        put_payload(tag, mut out)
+    }
+}
+
+/// Adds `tag` to `out` named `name`, as a file holds its root: its kind, its name, then its value.
+/// Vanilla's `NbtIo.write` writes a compound so, with the empty name.
+pub fn encode_named(name: String, tag: Tag, out: mut List<u8>) {
+    out.push(tag.id())
+    if tag.id() != END {
+        put_string(name, mut out)
+        put_payload(tag, mut out)
+    }
+}
+
+fn put_string(s: String, out: mut List<u8>) {
+    let n = mutf8.encoded_len(s)
+    if n > 65535 {
+        panic("NBT can't hold a string of {n} bytes in Modified UTF-8, past 65535, as Java's writeUTF can't")
+    }
+    put_u16_be(mut out, u16.wrap(n))
+    mutf8.encode(s, mut out)
+}
+
+// How a list is written: its elements' kind, and whether each goes in a wrapper compound, as
+// vanilla writes a list of several kinds, or of compounds one of which is itself a wrapper.
+fn list_kind(items: List<Tag>) -> (u8, bool) {
+    if items.is_empty() {
+        return (END, false)
+    }
+    let first = items[0].id()
+    var wrap = false
+    for item in items {
+        if item.id() != first {
+            return (COMPOUND, true)
+        }
+        if let Compound(m) = item {
+            wrap = wrap or is_wrapper(m)
+        }
+    }
+    return (first, wrap)
+}
+
+fn put_payload(tag: Tag, out: mut List<u8>) {
+    match tag {
+        End => panic("an end tag can't be in a list or a compound"),
+        Byte(v) => out.push(u8.wrap(v)),
+        Short(v) => put_i16_be(mut out, v),
+        Int(v) => put_i32_be(mut out, v),
+        Long(v) => put_i64_be(mut out, v),
+        // Java's `writeFloat` and `writeDouble` write every NaN as the one NaN.
+        Float(v) => put_u32_be(mut out, if v.is_nan() { 0x7FC00000u32 } else { v.to_bits() }),
+        Double(v) => put_u64_be(mut out, if v.is_nan() { 0x7FF8000000000000u64 } else { v.to_bits() }),
+        ByteArray(v) => {
+            put_i32_be(mut out, i32.wrap(v.len()))
+            out.reserve(v.len())
+            for x in v {
+                out.push(u8.wrap(x))
+            }
+        },
+        String(s) => put_string(s, mut out),
+        List(items) => {
+            let (kind, wrap) = list_kind(items)
+            out.push(kind)
+            put_i32_be(mut out, i32.wrap(items.len()))
+            for item in items {
+                if not wrap {
+                    put_payload(item, mut out)
+                    continue
+                }
+                if let Compound(m) = item {
+                    if not is_wrapper(m) {
+                        put_payload(item, mut out)
+                        continue
+                    }
+                }
+                if item.id() == END {
+                    panic("an end tag can't be in a list or a compound")
+                }
+                out.push(item.id())
+                out.push(0)
+                out.push(0)
+                put_payload(item, mut out)
+                out.push(END)
+            }
+        },
+        Compound(m) => {
+            for (k, v) in m {
+                if v.id() == END {
+                    panic("an end tag can't be in a list or a compound")
+                }
+                out.push(v.id())
+                put_string(k, mut out)
+                put_payload(v, mut out)
+            }
+            out.push(END)
+        },
+        IntArray(v) => {
+            put_i32_be(mut out, i32.wrap(v.len()))
+            out.reserve(v.len() * 4)
+            for x in v {
+                put_i32_be(mut out, x)
+            }
+        },
+        LongArray(v) => {
+            put_i32_be(mut out, i32.wrap(v.len()))
+            out.reserve(v.len() * 8)
+            for x in v {
+                put_i64_be(mut out, x)
+            }
+        },
+    }
+}
+
+// --- files ---------------------------------------------------------------------------------------
+
+/// An NBT file: its root compound, the root's name, and how it's compressed.
+pub struct NbtFile {
+    /// The root's name, which is empty in what vanilla writes, and which it ignores when it reads.
+    pub name: String
+    /// The root, a `Tag.Compound`.
+    pub root: Tag
+    /// How the file was compressed when read, and how `encode` and `save` compress it.
+    pub compression: Compression
+}
+
+impl NbtFile {
+    /// A file of `root`, a compound, named "" and gzipped, as vanilla's `writeCompressed` writes one.
+    pub fn new(root: own Tag) -> NbtFile {
+        return NbtFile { name: String(), root: root, compression: Compression.Gzip }
+    }
+
+    /// The NBT file at `path`, gzipped, zlib-compressed or plain, told apart by their first bytes.
+    pub fn open(path: String) -> NbtFile ! Error {
+        let bytes = try fs.read(path.copy()).context("reading {path}")
+        return match NbtFile.decode(bytes) {
+            ok(f) => f,
+            err(e) => fail "reading {path}: {e}",
+        }
+    }
+
+    /// The NBT file in `bytes`: gzip if they start `1F 8B`, zlib if they start with a zlib header,
+    /// and plain otherwise. Its root must be a compound, as vanilla's `NbtIo.read` wants. Bytes
+    /// after the root are ignored, as vanilla ignores them.
+    pub fn decode(bytes: List<u8>) -> NbtFile ! NbtError {
+        let compression = compression_of(bytes)
+        var at: usize = 0
+        let (name, root) = match compression {
+            Compression.None => try decode_named(bytes, mut at),
+            Compression.Gzip => try decode_named(try inflate(bytes, zlib.Format.Gzip), mut at),
+            Compression.Zlib => try decode_named(try inflate(bytes, zlib.Format.Zlib), mut at),
+        }
+        if root.id() != COMPOUND {
+            fail NbtError.NotCompound
+        }
+        return NbtFile { name: name, root: root, compression: compression }
+    }
+
+    /// The file's bytes, compressed as `compression` says, gzip and zlib at level 6, as Java's
+    /// streams compress by default.
+    pub fn encode(self) -> List<u8> {
+        var out = List<u8>()
+        encode_named(self.name, self.root, mut out)
+        return match self.compression {
+            Compression.None => out,
+            Compression.Gzip => zlib.compress(out, zlib.Format.Gzip, 6),
+            Compression.Zlib => zlib.compress(out, zlib.Format.Zlib, 6),
+        }
+    }
+
+    /// Writes the file to `path`.
+    pub fn save(self, path: String) ! Error {
+        try fs.write(path.copy(), self.encode()).context("writing {path}")
+    }
+}
+
+fn compression_of(b: List<u8>) -> Compression {
+    if b.len() >= 2 and b[0] == 0x1F and b[1] == 0x8B {
+        return Compression.Gzip
+    }
+    if b.len() >= 2 and b[0] % 16 == 8 and b[0] / 16 <= 7 and (u32(b[0]) * 256 + u32(b[1])) % 31 == 0 {
+        return Compression.Zlib
+    }
+    return Compression.None
+}
+
+fn inflate(b: List<u8>, format: zlib.Format) -> List<u8> ! NbtError {
+    // Deflate makes at most 1032 bytes of each, so this limit is none.
+    return match zlib.decompress(b, format, b.len() * 1032 + 1024) {
+        ok(out) => out,
+        err(e) => fail NbtError.Compressed(e),
+    }
+}
+
+// --- reading values ------------------------------------------------------------------------------
+
+impl Tag {
+    /// The kind's number in the binary format: 0 for an end tag, 1 for a byte, up to 12 for a long
+    /// array.
+    pub fn id(self) -> u8 {
+        return match self {
+            End => END,
+            Byte(_) => BYTE,
+            Short(_) => SHORT,
+            Int(_) => INT,
+            Long(_) => LONG,
+            Float(_) => FLOAT,
+            Double(_) => DOUBLE,
+            ByteArray(_) => BYTE_ARRAY,
+            String(_) => STRING,
+            List(_) => LIST,
+            Compound(_) => COMPOUND,
+            IntArray(_) => INT_ARRAY,
+            LongArray(_) => LONG_ARRAY,
+        }
+    }
+
+    /// The kind's name, as vanilla's `TagType.getName` gives it: `BYTE`, `INT[]`, `COMPOUND`.
+    pub fn kind_name(self) -> String {
+        return match self {
+            End => "END",
+            Byte(_) => "BYTE",
+            Short(_) => "SHORT",
+            Int(_) => "INT",
+            Long(_) => "LONG",
+            Float(_) => "FLOAT",
+            Double(_) => "DOUBLE",
+            ByteArray(_) => "BYTE[]",
+            String(_) => "STRING",
+            List(_) => "LIST",
+            Compound(_) => "COMPOUND",
+            IntArray(_) => "INT[]",
+            LongArray(_) => "LONG[]",
+        }
+    }
+
+    /// A copy of the tag at `key`, if this is a compound that has one. A `match` on the tag reads
+    /// it in place instead, without the copy.
+    pub fn get(self, key: String) -> Tag? {
+        return match self {
+            Compound(m) => if m.contains(key) { some(m[key].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// A copy of element `i`, if this is a list that long.
+    pub fn at(self, i: usize) -> Tag? {
+        return match self {
+            List(items) => if i < items.len() { some(items[i].copy()) } else { none },
+            _ => none,
+        }
+    }
+
+    /// The number, if this is a byte, a short, an int or a long.
+    pub fn as_int(self) -> i64? {
+        return match self {
+            Byte(v) => some(i64(v)),
+            Short(v) => some(i64(v)),
+            Int(v) => some(i64(v)),
+            Long(v) => some(v),
+            _ => none,
+        }
+    }
+
+    /// The number, if this is one of any kind, as the nearest `f64`.
+    pub fn as_float(self) -> f64? {
+        return match self {
+            Byte(v) => some(f64(v)),
+            Short(v) => some(f64(v)),
+            Int(v) => some(f64(v)),
+            Long(v) => some(f64.nearest(v)),
+            Float(v) => some(f64(v)),
+            Double(v) => some(v),
+            _ => none,
+        }
+    }
+
+    /// Whether the number isn't 0, if this is a byte, a short, an int or a long. NBT keeps a
+    /// boolean as a byte, 1 or 0.
+    pub fn as_bool(self) -> bool? {
+        return match self.as_int() {
+            some(v) => some(v != 0),
+            none => none,
+        }
+    }
+
+    /// The text, if this is a string.
+    pub fn as_str(self) -> String? {
+        return match self {
+            String(s) => some(s.copy()),
+            _ => none,
+        }
+    }
+
+    /// How many tags a list or a compound holds, or numbers an array does. Anything else holds none.
+    pub fn len(self) -> usize {
+        return match self {
+            ByteArray(v) => v.len(),
+            List(items) => items.len(),
+            Compound(m) => m.len(),
+            IntArray(v) => v.len(),
+            LongArray(v) => v.len(),
+            _ => 0,
+        }
+    }
+
+    /// A compound's keys, in order, or none for anything else.
+    pub fn keys(self) -> List<String> {
+        var out = List<String>()
+        if let Compound(m) = self {
+            out.reserve(m.len())
+            for (k, _) in m {
+                out.push(k.copy())
+            }
+        }
+        return out
+    }
+
+    // --- changing ---
+
+    /// Puts `value` at `key`, if this is a compound, and says whether it is. A key that's there
+    /// keeps its place and gets the new value.
+    pub fn insert(mut self, key: own String, value: own Tag) -> bool {
+        if let Compound(m) = mut self {
+            m.insert(key, value)
+            return true
+        }
+        return false
+    }
+
+    /// Takes the tag at `key` out, if this is a compound that has one.
+    pub fn remove(mut self, key: String) -> Tag? {
+        if let Compound(m) = mut self {
+            return m.remove(key)
+        }
+        return none
+    }
+
+    /// Adds `value` at the end, if this is a list, and says whether it is.
+    pub fn push(mut self, value: own Tag) -> bool {
+        if let List(items) = mut self {
+            items.push(value)
+            return true
+        }
+        return false
+    }
+
+    // --- SNBT ---
+
+    /// The tag as SNBT, as vanilla's `Tag.toString` writes it: compact, with a compound's keys in
+    /// Java's order of strings and quoted only where they must be, and each number with its
+    /// kind's letter: `{Count:1b,id:"minecraft:stone",Pos:[1.5d,64.0d,-3.0d]}`.
+    pub fn to_snbt(self) -> String {
+        var out = String()
+        write_snbt(self, mut out)
+        return out
+    }
+}
+
+/// `{tag}` is the tag as SNBT, as `to_snbt` writes it.
+impl Display for Tag {
+    fn show(self) {
+        print(self.to_snbt())
+    }
+}
+
+// --- SNBT ----------------------------------------------------------------------------------------
+
+fn write_snbt(tag: Tag, out: mut String) {
+    match tag {
+        End => out.push_str("END"),
+        Byte(v) => out.push_str("{v}b"),
+        Short(v) => out.push_str("{v}s"),
+        Int(v) => out.push_str("{v}"),
+        Long(v) => out.push_str("{v}L"),
+        Float(v) => out.push_str("{v}f"),
+        Double(v) => out.push_str("{v}d"),
+        ByteArray(v) => {
+            out.push_str("[B;")
+            for i in 0..v.len() {
+                if i > 0 {
+                    out.push(',')
+                }
+                out.push_str("{v[i]}B")
+            }
+            out.push(']')
+        },
+        String(s) => quote(s, mut out),
+        List(items) => {
+            out.push('[')
+            for i in 0..items.len() {
+                if i > 0 {
+                    out.push(',')
+                }
+                write_snbt(items[i], mut out)
+            }
+            out.push(']')
+        },
+        Compound(m) => {
+            var keys = List<String>()
+            keys.reserve(m.len())
+            var wide = false
+            for (k, _) in m {
+                keys.push(k.copy())
+                wide = wide or has_wide_rune(k)
+            }
+            // Java orders strings by their UTF-16 units, which is the order of their UTF-8 bytes
+            // but where a rune past U+FFFF meets one from U+E000 to U+FFFF.
+            if wide {
+                keys.sort_by(|a, b| java_order(a, b))
+            } else {
+                keys.sort()
+            }
+            out.push('{')
+            for i in 0..keys.len() {
+                if i > 0 {
+                    out.push(',')
+                }
+                write_key(keys[i], mut out)
+                out.push(':')
+                write_snbt(m[keys[i]], mut out)
+            }
+            out.push('}')
+        },
+        IntArray(v) => {
+            out.push_str("[I;")
+            for i in 0..v.len() {
+                if i > 0 {
+                    out.push(',')
+                }
+                out.push_str("{v[i]}")
+            }
+            out.push(']')
+        },
+        LongArray(v) => {
+            out.push_str("[L;")
+            for i in 0..v.len() {
+                if i > 0 {
+                    out.push(',')
+                }
+                out.push_str("{v[i]}L")
+            }
+            out.push(']')
+        },
+    }
+}
+
+fn has_wide_rune(s: String) -> bool {
+    for i in 0..s.len() {
+        if s.byte_at(i) >= 0xF0 {
+            return true
+        }
+    }
+    return false
+}
+
+// Java's `String.compareTo`: by UTF-16 units.
+fn java_order(a: String, b: String) -> Ordering {
+    var x = List<char>()
+    for c in a.chars() {
+        x.push(c)
+    }
+    var y = List<char>()
+    for c in b.chars() {
+        y.push(c)
+    }
+    return x.cmp(y)
+}
+
+// A key as vanilla writes it: bare if it's letters, digits and `._+-`, starting with a letter,
+// `.` or `_`, and isn't `true` or `false` in any case; quoted otherwise.
+fn write_key(k: String, out: mut String) {
+    if bare_key(k) {
+        out.push_str(k)
+    } else {
+        quote(k, mut out)
+    }
+}
+
+fn bare_key(k: String) -> bool {
+    if k.is_empty() {
+        return false
+    }
+    for i in 0..k.len() {
+        let c = k.byte_at(i)
+        let letter = (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z') or c == b'.' or c == b'_'
+        if not letter and (i == 0 or not ((c >= b'0' and c <= b'9') or c == b'+' or c == b'-')) {
+            return false
+        }
+    }
+    let low = k.to_lower_root()
+    return low != "true" and low != "false"
+}
+
+// `s` in quotes, as vanilla's `StringTag.quoteAndEscape` writes it: in `"`, or in `'` if the first
+// quote in it is `"`, with that quote, `\` and control characters escaped.
+fn quote(s: String, out: mut String) {
+    var q: u8 = 0
+    for i in 0..s.len() {
+        let c = s.byte_at(i)
+        if c == b'"' {
+            q = b'\''
+            break
+        }
+        if c == b'\'' {
+            q = b'"'
+            break
+        }
+    }
+    if q == 0 {
+        q = b'"'
+    }
+    out.push(rune(q))
+    var from: usize = 0
+    for i in 0..s.len() {
+        let c = s.byte_at(i)
+        if c >= 0x20 and c != q and c != b'\\' {
+            continue
+        }
+        out.push_str(s[from..i])
+        from = i + 1
+        if c == q or c == b'\\' {
+            out.push('\\')
+            out.push(rune(c))
+        } else if c == 8 {
+            out.push_str("\\b")
+        } else if c == 9 {
+            out.push_str("\\t")
+        } else if c == 10 {
+            out.push_str("\\n")
+        } else if c == 12 {
+            out.push_str("\\f")
+        } else if c == 13 {
+            out.push_str("\\r")
+        } else {
+            out.push_str("\\x")
+            out.push(hex_digit(c / 16))
+            out.push(hex_digit(c % 16))
+        }
+    }
+    out.push_str(s[from..s.len()])
+    out.push(rune(q))
+}
+
+fn hex_digit(v: u8) -> rune {
+    return rune(if v < 10 { v + 48 } else { v + 55 })
+}

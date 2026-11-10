@@ -1,0 +1,135 @@
+// std.nbt reads, writes and shows NBT as vanilla 26.3's NbtIo and Tag.toString do: each line here
+// is what vanilla gave for the same bytes or tags (CLX-230).
+import std.nbt.{Tag, NbtFile, NbtError, Compression, decode_any, encode_any, decode_named}
+import std.bytes.{hex, from_hex}
+
+fn any(text: String) -> String {
+    var at: usize = 0
+    let b = from_hex(text)!
+    return match decode_any(b, mut at) {
+        ok(t) => {
+            var out = List<u8>()
+            encode_any(t, mut out)
+            "{t} {hex(out)} left {b.len() - at}"
+        },
+        err(e) => "error: {e}",
+    }
+}
+
+fn nested(lists: bool, n: usize) -> String {
+    var s = String()
+    if lists {
+        s.push_str("0909")
+        s.push_str("00000001")
+        for _ in 0..n - 2 {
+            s.push_str("0900000001")
+        }
+        s.push_str("0000000000")
+    } else {
+        s.push_str("0a")
+        for _ in 0..n - 1 {
+            s.push_str("0a000161")
+        }
+        for _ in 0..n {
+            s.push_str("00")
+        }
+    }
+    return s
+}
+
+fn main() {
+    // Keys in Java's order, bare where they can be, and each number with its letter.
+    var m = LinkedMap<String, Tag>()
+    for k in ["b", "a", "zz", "c", "A", "+a", ".a", "9x", "_a", "a+b", "true", "e", "é", "k'", "k\""] {
+        m.insert(String(k), Tag.Byte(1))
+    }
+    m.insert(String("n"), Tag.List([Tag.Short(2), Tag.Long(3), Tag.Float(1.0e10), Tag.Double(0.001)]))
+    m.insert(String("arr"), Tag.List([Tag.ByteArray([1i8, -2]), Tag.IntArray([]), Tag.LongArray([5i64])]))
+    let t = Tag.Compound(m)
+    println("{t}")
+    // out: {"+a":1b,.a:1b,"9x":1b,A:1b,_a:1b,a:1b,a+b:1b,arr:[[B;1B,-2B],[I;],[L;5L]],b:1b,c:1b,e:1b,'k"':1b,"k'":1b,n:[2s,3L,1.0E10f,0.001d],"true":1b,zz:1b,"é":1b}
+
+    // Strings quoted with the quote they don't start with, and control characters escaped.
+    var shown = List<String>()
+    for s in ["it's", "say \"hi\"", "a\"b'c", "\\", "\u{0}\u{1}\u{7}\u{8}\t\n\u{b}\u{c}\r\u{1b}é"] {
+        shown.push(Tag.String(String(s)).to_snbt())
+    }
+    println(shown.join(" "))
+    // out: "it's" 'say "hi"' 'a"b\'c' "\\" "\x00\x01\x07\b\t\n\x0B\f\r\x1Bé"
+
+    // A list of several kinds goes as compounds that each wrap a tag under the empty key, and
+    // comes back unwrapped; so does a compound list's element that looks like a wrapper.
+    println(any("090a00000002030000000000010008000000016100"))    // out: [1,"a"] 090a00000002030000000000010008000000016100 left 0
+    println(any("090a000000010300000000000100"))    // out: [1] 09030000000100000001 left 0
+    println(any("090a000000020300000000000100030001610000000200"))    // out: [1,{a:2}] 090a000000020300000000000100030001610000000200 left 0
+    println(any("090a000000010a0000030000000000050000"))    // out: [{"":5}] 090a000000010a0000030000000000050000 left 0
+    // An empty list is written without a kind, and a kind past 12 isn't looked at in one.
+    println(any("090300000000"))    // out: [] 090000000000 left 0
+    println(any("090d00000000"))    // out: [] 090000000000 left 0
+    // Every NaN is written as the one NaN, -0.0 reads as 0.0, and bytes after the tag are left.
+    println(any("057f800001"))    // out: NaNf 057fc00000 left 0
+    println(any("068000000000000000"))    // out: 0.0d 060000000000000000 left 0
+    println(any("067ff0000000000000"))    // out: Infinityd 067ff0000000000000 left 0
+    println(any("010507"))    // out: 5b 0105 left 1
+    // A key given twice keeps its place and takes the last value.
+    println(any("0a0300016100000001030001620000000303000161000000020000"))    // out: {a:2,b:3} 0a0300016100000002030001620000000300 left 1
+    // Modified UTF-8: a zero is C0 80, and a rune past U+FFFF two surrogates.
+    println(any("080002c080"))    // out: "\x00" 080002c080 left 0
+    println(any("080006eda0bdedb880"))    // out: "😀" 080006eda0bdedb880 left 0
+    println(any("00"))    // out: END 00 left 0
+
+    // What vanilla rejects.
+    println(any("090000000002"))    // out: error: byte 0: a list with elements but no kind for them
+    println(any("0903ffffffff"))    // out: error: byte 2: a length of -1
+    println(any("07ffffffff"))    // out: error: byte 1: a length of -1
+    println(any("08000180"))    // out: error: byte 1: a string that isn't Modified UTF-8
+    println(any("080004f09f9880"))    // out: error: byte 1: a string that isn't Modified UTF-8
+    println(any("0a0d000161"))    // out: error: byte 1: 13 isn't a kind of tag
+    println(any("0a0300016100000001"))    // out: error: the NBT ends early
+    println("{any(nested(true, 512)).starts_with("[[[[")}")    // out: true
+    println(any(nested(true, 513)))    // out: error: byte 2556: lists and compounds nest more than 512 deep
+    println("{any(nested(false, 512)).starts_with("\{a:\{a:")}")    // out: true
+    println(any(nested(false, 513)))    // out: error: byte 2045: lists and compounds nest more than 512 deep
+
+    // A file: its root's name kept, its compression found from its first bytes.
+    var level = Tag.Compound(LinkedMap())
+    var data = Tag.Compound(LinkedMap())
+    _ = data.insert(String("LevelName"), Tag.String("World"))
+    _ = data.insert(String("DayTime"), Tag.Long(6000))
+    _ = level.insert(String("Data"), data)
+    for c in [Compression.Gzip, Compression.Zlib, Compression.None] {
+        var f = NbtFile.new(level.copy())
+        f.name = String("root")
+        f.compression = c
+        let bytes = f.encode()
+        let back = NbtFile.decode(bytes)!
+        println("{hex(bytes[0..2])} {back.name} {back.compression == c} {back.root == level}")
+    }
+    // out: 1f8b root true true
+    // out: 789c root true true
+    // out: 0a00 root true true
+    match NbtFile.decode(from_hex("0300000000000001")!) {
+        ok(_) => println("ok"),
+        err(e) => println("{e} {e == NbtError.NotCompound}"),    // out: the root tag isn't a compound true
+    }
+    var at: usize = 0
+    let (name, root) = decode_named(from_hex("0a0004726f6f74030001780000000100")!, mut at)!
+    println("{name} {root} {at}")    // out: root {x:1} 16
+
+    // Reading values, and changing a tree where it is.
+    let d = level.get("Data")!
+    println("{d.get("LevelName")!.as_str()} {d.get("DayTime")!.as_int()} {d.get("nope")} {d.keys()} {d.kind_name()}")
+    // out: some(World) some(6000) none [LevelName, DayTime] COMPOUND
+    println("{Tag.Byte(1).as_bool()} {Tag.Short(-3).as_float()} {Tag.String("x").as_int()} {Tag.IntArray([1, 2]).len()}")
+    // out: some(true) some(-3.0) none 2
+    if let Compound(top) = mut level {
+        if let Compound(inner) = mut top["Data"] {
+            inner.insert(String("DayTime"), Tag.Long(0))
+            _ = inner.remove("LevelName")
+        }
+    }
+    var items = Tag.List(List())
+    _ = items.push(Tag.Int(1))
+    _ = level.insert(String("Items"), items)
+    println("{level}")    // out: {Data:{DayTime:0L},Items:[1]}
+}
