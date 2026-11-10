@@ -1,6 +1,8 @@
 #include "lexer.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace calx {
@@ -39,6 +41,24 @@ constexpr Keyword kKeywords[] = {
 bool is_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 bool is_ident_char(char c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+// The first byte of `s` from `p` up to `end` that's `a`, `b` or `c`, or `end`. It looks at eight
+// bytes at a time, since a raw string can be a table of hundreds of KB.
+std::uint32_t find_any3(std::string_view s, std::uint32_t p, std::uint32_t end, char a, char b, char c) {
+    const std::uint64_t ones = 0x0101010101010101ull, highs = 0x8080808080808080ull;
+    const std::uint64_t wa = ones * static_cast<unsigned char>(a), wb = ones * static_cast<unsigned char>(b),
+                        wc = ones * static_cast<unsigned char>(c);
+    // Nonzero exactly when one of x's bytes is zero.
+    auto zero = [&](std::uint64_t x) { return (x - ones) & ~x & highs; };
+    while (p + 8 <= end) {
+        std::uint64_t w;
+        std::memcpy(&w, s.data() + p, 8);
+        if (zero(w ^ wa) | zero(w ^ wb) | zero(w ^ wc)) break;
+        p += 8;
+    }
+    while (p < end && s[p] != a && s[p] != b && s[p] != c) p++;
+    return p;
+}
 
 int digit_value(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -584,6 +604,9 @@ private:
         std::uint32_t close = 0;
         bool found = false;
         for (std::uint32_t p = first; p < end_;) {
+            // Only a quote, a `#` or a line break can matter, so the rest is passed over at once.
+            p = find_any3(src_, p, end_, '"', '#', '\n');
+            if (p >= end_) break;
             if (closes_at(p)) {
                 close = p;
                 found = true;
@@ -680,8 +703,10 @@ private:
                 p = pos_;
                 continue;
             }
-            text += ch;
-            p++;
+            // The text up to the next line break or `#`, at once.
+            std::uint32_t q = find_any3(src_, p + 1, end, '\n', '\r', '#');
+            text.append(src_.data() + p, q - p);
+            p = q;
         }
         flush_text();
         pos_ = close + 1 + hashes;

@@ -28,20 +28,33 @@ const std::unordered_set<std::string_view>& c_reserved() {
 }
 
 std::string c_string_literal(std::string_view s) {
-    std::string out = "\"";
-    for (unsigned char c : s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out += '"';
+    // Runs of bytes that need no escape go in whole: a table of text, such as std.unicode.names',
+    // is hundreds of KB of them.
+    std::size_t i = 0, n = s.size();
+    while (i < n) {
+        std::size_t j = i;
+        while (j < n) {
+            unsigned char c = static_cast<unsigned char>(s[j]);
+            if (c < 0x20 || c >= 0x7F || c == '"' || c == '\\' || c == '?') break;
+            j++;
+        }
+        out.append(s.data() + i, j - i);
+        if (j == n) break;
+        unsigned char c = static_cast<unsigned char>(s[j]);
         if (c == '"' || c == '\\') {
             out += '\\';
             out += static_cast<char>(c);
         } else if (c == '?') {
             out += "\\?";  // never a trigraph
-        } else if (c >= 0x20 && c < 0x7F) {
-            out += static_cast<char>(c);
         } else {
-            char buf[8];
-            std::snprintf(buf, sizeof buf, "\\%03o", c);
-            out += buf;
+            char buf[4] = {'\\', static_cast<char>('0' + (c >> 6)), static_cast<char>('0' + ((c >> 3) & 7)),
+                           static_cast<char>('0' + (c & 7))};
+            out.append(buf, 4);
         }
+        i = j + 1;
     }
     out += '"';
     return out;

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -14,8 +15,14 @@ SourceFile::SourceFile(std::string p, std::string t) : path(std::move(p)), text(
     // The first line starts after a byte order mark, which the lexer skips, so its columns are
     // counted as editors count them, which don't show one.
     line_starts.push_back(has_bom(text) ? 3 : 0);
-    for (std::uint32_t i = 0; i < text.size(); i++) {
-        if (text[i] == '\n') line_starts.push_back(i + 1);
+    // memchr finds each line end many bytes at a time, which counts for a table of hundreds of KB.
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    for (const char* p = begin; p < end;) {
+        const void* nl = std::memchr(p, '\n', static_cast<std::size_t>(end - p));
+        if (!nl) break;
+        p = static_cast<const char*>(nl) + 1;
+        line_starts.push_back(static_cast<std::uint32_t>(p - begin));
     }
 }
 
@@ -47,11 +54,19 @@ std::string_view SourceFile::line_text(std::uint32_t line) const {
 }
 
 std::uint32_t Sources::load(const std::string& path) {
-    std::ifstream in(long_path(path), std::ios::binary);
+    std::ifstream in(long_path(path), std::ios::binary | std::ios::ate);
     if (!in) return 0;
-    std::ostringstream buf;
-    buf << in.rdbuf();
-    return add(path, buf.str());
+    // Read straight into the text, at its size, rather than through a string stream, which
+    // copies it twice.
+    std::streamoff size = in.tellg();
+    std::string text;
+    if (size > 0) {
+        text.resize(static_cast<std::size_t>(size));
+        in.seekg(0);
+        in.read(text.data(), size);
+        text.resize(static_cast<std::size_t>(in.gcount()));
+    }
+    return add(path, std::move(text));
 }
 
 std::uint32_t Sources::add(std::string path, std::string text) {

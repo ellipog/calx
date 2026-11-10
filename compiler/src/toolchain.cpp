@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -11,6 +12,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -737,11 +739,17 @@ int run_parallel(const std::vector<std::vector<std::string>>& commands) {
 }
 
 bool read_file(const std::string& path, std::string& out) {
-    std::ifstream in(long_path(path), std::ios::binary);
+    std::ifstream in(long_path(path), std::ios::binary | std::ios::ate);
     if (!in) return false;
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    out = ss.str();
+    // Straight into `out` at its size, rather than through a string stream, which copies it twice.
+    std::streamoff size = in.tellg();
+    out.clear();
+    if (size > 0) {
+        out.resize(static_cast<std::size_t>(size));
+        in.seekg(0);
+        in.read(out.data(), size);
+        out.resize(static_cast<std::size_t>(in.gcount()));
+    }
     return true;
 }
 
@@ -1174,31 +1182,61 @@ std::string library_attach_c(const RuntimeApi& api) {
 
 const char* library_suffix() { return kLib; }
 
+// Whether the file at `path` holds exactly `bytes`.
+bool same_file(const std::string& path, const std::string& bytes) {
+    std::error_code ec;
+    auto size = fs::file_size(long_path(path), ec);
+    if (ec || size != bytes.size()) return false;
+    std::string have;
+    return read_file(path, have) && have == bytes;
+}
+
 bool place_build(const std::string& built, const std::string& out, std::string& error) {
     std::error_code ec;
     // The output's folder is made if it isn't there, as `-o build/app` expects.
     fs::path parent = fs::path(out).parent_path();
     if (!parent.empty()) fs::create_directories(long_path(parent.string()), ec);
+    // A file that already holds what it would get is left as it is, but for its time, which is
+    // now, as a build's output's is. Writing a program on Windows has it scanned again, which took
+    // a small program's build 20 ms, and a program that's running can't be written over.
+    auto put = [&](const std::string& path, const std::string& bytes) {
+        if (same_file(path, bytes)) {
+            fs::last_write_time(long_path(path), fs::file_time_type::clock::now(), ec);
+            return true;
+        }
+        if (!write_file_atomic(path, bytes)) {
+            error = "can't write " + path;
+            return false;
+        }
+        return true;
+    };
+    std::string image;
+    if (!read_file(built, image)) {
+        error = "can't read " + built;
+        return false;
+    }
+#ifndef _WIN32
+    if (same_file(out, image)) {
+        fs::last_write_time(long_path(out), fs::file_time_type::clock::now(), ec);
+        return true;
+    }
+    // Copied, so it keeps its permission to run.
     fs::copy_file(long_path(built), long_path(out), fs::copy_options::overwrite_existing, ec);
     if (ec) {
         error = "can't write " + out + ": " + ec.message();
         return false;
     }
-#ifdef _WIN32
+    (void)put;
+#else
     // The image names its PDB by the path it was linked with, in the cache, which a later build
     // can trim. So the PDB goes beside it as `out.pdb`, and the image names that instead: the
     // name alone, which debuggers and dbghelp look for beside the image.
-    std::string image;
-    if (!read_file(out, image)) {
-        error = "can't read " + out;
-        return false;
-    }
     auto u16 = [&](std::size_t at) -> std::uint32_t {
         return at + 2 <= image.size() ? static_cast<unsigned char>(image[at]) | static_cast<unsigned char>(image[at + 1]) << 8 : 0;
     };
     auto u32 = [&](std::size_t at) -> std::uint32_t { return u16(at) | u16(at + 2) << 16; };
     std::size_t pe = u32(0x3C);
-    if (image.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return true;
+    if (image.compare(pe, 4, std::string("PE\0\0", 4)) != 0) return put(out, image);
     std::size_t opt = pe + 24;
     std::size_t dirs = opt + (u16(opt) == 0x20B ? 112 : 96);
     std::uint32_t debug_rva = u32(dirs + 6 * 8), debug_size = u32(dirs + 6 * 8 + 4);
@@ -1209,7 +1247,7 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         std::uint32_t vsize = u32(s + 8), va = u32(s + 12), rsize = u32(s + 16), raw = u32(s + 20);
         if (debug_rva >= va && debug_rva < va + std::max(vsize, rsize)) debug = debug_rva - va + raw;
     }
-    if (!debug) return true;
+    if (!debug) return put(out, image);
     for (std::size_t e = debug; e + 28 <= debug + debug_size && e + 28 <= image.size(); e += 28) {
         std::uint32_t type = u32(e + 12), size = u32(e + 16), at = u32(e + 24);
         if (type != 2 || at + size > image.size() || size < 25 || image.compare(at, 4, "RSDS") != 0) continue;
@@ -1217,19 +1255,17 @@ bool place_build(const std::string& built, const std::string& out, std::string& 
         std::string pdb = image.substr(name_at, image.find('\0', name_at) - name_at);
         fs::path to = fs::path(out).replace_extension(".pdb");
         std::string name = to.filename().string();
-        if (name.size() + 1 > room || !file_exists(pdb)) return true;
-        fs::copy_file(long_path(pdb), long_path(to.string()), fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            error = "can't write " + to.string() + ": " + ec.message();
+        if (name.size() + 1 > room || !file_exists(pdb)) break;
+        std::string pdb_bytes;
+        if (!read_file(pdb, pdb_bytes)) {
+            error = "can't read " + pdb;
             return false;
         }
+        if (!put(to.string(), pdb_bytes)) return false;
         image.replace(name_at, room, name + std::string(room - name.size(), '\0'));
-        if (!write_file_atomic(out, image)) {
-            error = "can't write " + out;
-            return false;
-        }
-        return true;
+        break;
     }
+    if (!put(out, image)) return false;
 #endif
     return true;
 }
@@ -1324,11 +1360,25 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     // the tables that change the case of text (D117), the hashes, crypto, zlib, lz4 and HTTP (D118),
     // threads and their queues (D121), files, the text methods, and printing floats, with its
     // table of powers of ten.
+    // Which parts a program calls is found from the runtime's names in its C: each `cx_` and the
+    // name after it, with the `(` that follows if one does, gathered in one pass. A search of all
+    // the C for each part's names took a program that uses std.regex 24 ms of every build.
+    std::unordered_set<std::string_view> used;
+    for (const std::string& c : c_sources) {
+        std::string_view s = c;
+        for (std::size_t at = s.find("cx_"); at != std::string_view::npos; at = s.find("cx_", at + 1)) {
+            std::size_t e = at + 3;
+            while (e < s.size() && (std::isalnum(static_cast<unsigned char>(s[e])) || s[e] == '_')) e++;
+            if (e < s.size() && s[e] == '(') e++;
+            used.insert(s.substr(at, e - at));
+        }
+    }
+    // Whether the C has one of `names` anywhere: a name of the runtime's that starts with it.
     auto calls = [&](std::initializer_list<const char*> names) {
         if (opens) return true;
-        for (const std::string& c : c_sources) {
+        for (std::string_view u : used) {
             for (const char* n : names) {
-                if (c.find(n) != std::string::npos) return true;
+                if (u.substr(0, std::strlen(n)) == n) return true;
             }
         }
         return false;

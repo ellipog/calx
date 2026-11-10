@@ -239,7 +239,8 @@ On Windows, debug builds use the C runtime DLL that comes with Visual Studio, si
 
 Building should take moments, so the command avoids every step it can:
 
-- The front end checks the whole program every time. It's fast enough that tracking what to skip would cost more. Big tables of numbers, as the standard library's Unicode modules hold, are most of its work: a file's tokens get room for one every two bytes at the start, so they're never copied as the list grows, and its syntax tree goes into memory that isn't zeroed first, since every node sets its own fields. That took std.unicode's 70,000 numbers from 26 ms to 18 ms.
+- The front end checks the whole program every time. It's fast enough that tracking what to skip would cost more. Big tables of numbers, as the standard library's Unicode modules hold, are most of its work: a file's tokens get room for one every two bytes at the start, so they're never copied as the list grows, and its syntax tree goes into memory that isn't zeroed first, since every node sets its own fields. That took std.unicode's 70,000 numbers from 26 ms to 18 ms. Each file is read straight into memory, its lines are found with `memchr`, and raw strings are scanned eight bytes at a time, which took std.unicode.names' 491 KB of tables from 3.8 ms to 1.9 ms.
+- **The runtime's parts are found in one pass.** Parts of the runtime that only some programs call, such as networking, zlib or the text methods, are linked only into those, and which they are comes from the runtime's names in the program's C, gathered in one pass over it. A search of all the C for each part's names took a program that uses std.regex 24 ms of every build.
 - **One C file per module.** Each holds exactly what its module uses, so its text changes only when that does ([modules](modules.md#in-c)). The files that changed compile in parallel.
 - **The object cache.** clang's output is cached under a hash of the C text, the flags and the clang executable. When a file's C is unchanged, clang doesn't run for it.
 - **The runtime is compiled once** per build mode and clang version, then reused from the cache.
@@ -276,7 +277,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 
 The cache keeps the 64 programs and 1024 compiled files used most recently, and at most 256 MB of each, or as many megabytes of each as `CALX_CACHE_MB` says, and deletes the rest after each build. It keeps the code attributes generated for the 256 programs that used it most recently. Anything used in the last 10 minutes stays, past those limits, since a build running beside this one may need it. lld keeps at most 512 MB of release builds' machine code in its `lto` folder. Deleting the cache is always safe.
 
-`calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself.
+`calx build` copies what it built out of the cache. On Windows, the program's line tables are in a PDB, which goes beside it with the same name, as `hello.pdb`, so stack traces and debuggers still find them after the cache lets the program go. On Linux they're in the executable itself. A file that already holds what it would get isn't written again, only given the time now. So a build that changed nothing writes nothing, a program that's running doesn't stop it, and Windows doesn't scan the program again, which took 20 ms of each build. A cached `calx build` of a small program that uses std.regex took 84 ms before these changes and takes 46 ms.
 
 ## Checking the toolchain
 
