@@ -1369,9 +1369,38 @@ struct CharSet {
     ranges: List<u32>
     cats: List<u32>
     uni: List<u32>
+    // Whether each ASCII rune is in it, worked out when it's made: bit `r` of `low` for the
+    // first 64, of `high` for the rest.
+    low: u64
+    high: u64
+}
+
+fn char_set(negate: bool, ranges: own List<u32>, cats: own List<u32>, uni: own List<u32>) -> CharSet {
+    var s = CharSet { negate: negate, ranges: ranges, cats: cats, uni: uni, low: 0, high: 0 }
+    for r in 0u32..128 {
+        if set_has_any(s, r) {
+            if r < 64 {
+                s.low |= 1u64 << u64(r)
+            } else {
+                s.high |= 1u64 << u64(r - 64)
+            }
+        }
+    }
+    return s
 }
 
 fn set_has(s: CharSet, r: u32) -> bool {
+    if r < 64 {
+        return (s.low >> u64(r)) & 1 != 0
+    }
+    if r < 128 {
+        return (s.high >> u64(r - 64)) & 1 != 0
+    }
+    return set_has_any(s, r)
+}
+
+// Whether `r` is in the set, worked out from its ranges, categories and case ranges.
+fn set_has_any(s: CharSet, r: u32) -> bool {
     var lo: usize = 0
     var hi = s.ranges.len() / 2
     while lo < hi {
@@ -1555,7 +1584,7 @@ impl Compiler {
         for c in cats {
             mapped.push(if uni { c + 10 } else { c })
         }
-        self.sets.push(CharSet { negate: negate, ranges: merged(pairs), cats: mapped, uni: unis })
+        self.sets.push(char_set(negate, merged(pairs), mapped, unis))
         return (SET_SOME, u32.wrap(self.sets.len() - 1), hascased)
     }
 
@@ -1587,7 +1616,7 @@ impl Compiler {
         for k in extra {
             pairs.push(pair(k, k))
         }
-        self.sets.push(CharSet { negate: op == OP_NOT_LITERAL, ranges: merged(pairs), cats: [], uni: [] })
+        self.sets.push(char_set(op == OP_NOT_LITERAL, merged(pairs), List<u32>(), List<u32>()))
         let index = u32.wrap(self.sets.len() - 1)
         self.emit(OP_IN_UNI_IGNORE)
         self.emit(index)
@@ -2532,6 +2561,48 @@ impl Program {
         let lim: i64 = if max == MAXREPEAT { i64.MAX } else { i64(max) }
         var n: i64 = 0
         var at = from
+        let op = self.code[q]
+        // `.` and `(?s).`: every rune to the line's end, found as a byte, or to the text's, then
+        // the runes counted, with no test of each.
+        if op == OP_ANY or op == OP_ANY_ALL {
+            var stop = end
+            if op == OP_ANY {
+                if let k = text[from..].find("\n") {
+                    stop = from + k
+                }
+            }
+            while n < lim and at < stop {
+                let b = text.byte_at(at)
+                at += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+                n += 1
+            }
+            return (n, at)
+        }
+        // A set: ASCII by its bitmaps, a byte at a time, the rest decoded.
+        if op == OP_IN {
+            let k = usize(self.code[q + 1])
+            let low = self.sets[k].low
+            let high = self.sets[k].high
+            while n < lim and at < end {
+                let b = text.byte_at(at)
+                if b < 0x80 {
+                    let r = u64(b)
+                    let bit = if r < 64 { (low >> r) & 1 } else { (high >> (r - 64)) & 1 }
+                    if bit == 0 {
+                        break
+                    }
+                    at += 1
+                } else {
+                    let (d, len) = decode(text, at)
+                    if not set_has_any(self.sets[k], d) {
+                        break
+                    }
+                    at += len
+                }
+                n += 1
+            }
+            return (n, at)
+        }
         while n < lim and at < end {
             let b = text.byte_at(at)
             var r = u32(b)

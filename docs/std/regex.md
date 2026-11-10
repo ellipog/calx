@@ -260,4 +260,19 @@ It matches by backtracking, as Python does, so it isn't linear: a pattern such a
 - The parser is `re/_parser.py`'s, with its errors and their places, and the compiler `re/_compiler.py`'s, to sre's opcodes, numbered as sre numbers them, with Python's case folding from `re/_casefix.py` and its classes: `\d` is Unicode's decimal digits, `\s` what `str.isspace` takes and `\w` what `str.isalnum` takes and `_`. Python's lower and upper case, white space and printable runes are tables in std/text/ucd.calx, from the same Unicode Character Database. `\N{name}` is looked up as `unicodedata.lookup` looks it up, by [std.unicode.names](unicode-names.md), with `lookup_rune`, whose tables add 347 KB to a program that uses std.regex: on Windows such a program is 740 KB in a release build.
 - The matcher is a backtracking machine that takes the steps `Modules/_sre/sre_lib.h` takes, with the same marks for the groups, the same protection against repeating an empty match, and the same order of trying, so what it finds and what each group holds are Python's. It keeps its own stack rather than recursing, so a deep pattern can't overflow the program's.
 - A search skips to where a match can start, as sre's INFO block has it and further. A pattern every match of which starts with a literal is found at each place the literal is, as `String.find` finds text, and one that's only a literal needs no matching at all. Otherwise the bytes a match can start with are worked out from the pattern, past groups, lookaround and assertions, into branches and through case-insensitive literals, and the search skips to the next of them. Only patterns that can't match nothing skip, so Python's rule for empty matches is never passed over.
+- A repeat of one rune, such as `\w+`, `\d{4}` or `.*`, takes its runes in a loop of its own kind ([CLX-225](https://acta.aaenz.no/aaen-studios/clx#CLX-225)). `.` finds the line's end as a byte and counts the runes before it, testing none. A class tests an ASCII byte against a bitmap of the ASCII runes it holds, made when it's compiled, and decodes only the rest; it does so wherever it's tested.
 - It was checked against CPython 3.14's `re` on tens of thousands of random patterns, with texts of Python's tricky runes, for the same matches, groups, `finditer`, `split` and `sub` results and the same errors at the same places.
+
+On our benchmark, 200,000 lines of a server's log, 17 MB, on an i9-13900K's performance cores, the best of 3 to 5 runs, against Python 3.14's `re`. Where Python counts `finditer`'s matches, Calx makes `captures_all`, which copies each match's text and groups, except in the first row:
+
+| Pattern | Calx | Python |
+| --- | --- | --- |
+| `(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) \[(\w+)\] (\w+): (.*)`, matches counted with `count` | 44 ms | 64 ms |
+| The same, every group read | 79 ms | 106 ms |
+| `\b\w+ing\b` | 185 ms | 367 ms |
+| `(?i)error\|warning` | 58 ms | 192 ms |
+| `\s+`, each replaced by a space | 73 ms | 359 ms |
+| `(\w)\1` | 200 ms | 319 ms |
+| `(?<=id=)\d+` | 63 ms | 115 ms |
+| `Steve` | 5.2 ms | 7.9 ms |
+| `[\[\]:]`, split | 28 ms | 120 ms |
