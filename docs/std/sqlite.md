@@ -145,16 +145,16 @@ A value is read from a row in one call for a number, and in two for text or byte
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs, on a database in memory. The table has 200,000 rows of an integer key, a name, an integer and a float. The comparisons are Python 3.14's `sqlite3`, which has SQLite 3.50.4, and Rust 1.91 with rusqlite 0.37, which builds its own SQLite 3.50.2, built for release with `x86-64-v3`:
+On our benchmark, an i9-13900K with a little other work running, each program on its performance cores, the best of 25 runs taken in turns, on a database in memory. The table has 200,000 rows of an integer key, a name from 1,000, an integer and a float. The comparisons are Python 3.14's `sqlite3`, which has SQLite 3.50.4, and Rust 1.91 with rusqlite 0.37, which builds its own SQLite 3.50.2, built for release with `x86-64-v3`:
 
 | Work | Calx | Python | Rust `rusqlite` |
 | --- | --- | --- | --- |
-| `execute_many`, 200,000 rows | 40.7 ms | 229 ms | |
-| `execute` 200,000 times, in a transaction | 46.1 ms | 153 ms | |
-| A prepared statement, bound and run 200,000 times | 36.4 ms | | 47.5 ms |
-| `query`, every row as values | 15.0 ms | 110 ms | 35.8 ms, or 24.7 ms as tuples |
-| Stepping through a query's 95,000 rows | 4.0 ms | 31.1 ms | 4.8 ms |
-| `GROUP BY` over the table | 33.0 ms | 41.0 ms | 40.1 ms |
+| `execute_many`, 200,000 rows | 41.3 ms | 93.1 ms | |
+| `execute` 200,000 times, in a transaction | 49.2 ms | 211 ms | |
+| A prepared statement, bound and run 200,000 times | 41.8 ms | | 64.6 ms |
+| `query`, every row as values | 16.0 ms | 106 ms | 29.8 ms, or 24.0 ms as tuples |
+| Stepping through a query's 95,000 rows, reading a number from each | 5.3 ms | 51.3 ms | 6.8 ms |
+| `GROUP BY` the name, with a count, a sum and an average | 54.2 ms | 62.6 ms | 60.6 ms |
 
 - Python's times are `executemany`, `execute` in a loop between `BEGIN` and `COMMIT`, `fetchall`, and a loop over the cursor.
 - Rust's are `prepare_cached` and `execute` in a transaction, `query_map` into `Vec<Vec<Value>>` or into tuples of the columns' types, and `Rows::next`.
