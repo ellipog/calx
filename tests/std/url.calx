@@ -1,7 +1,7 @@
 // std.url: percent-encoding as Python's urllib.parse gives it, and URLs taken apart and joined as
 // RFC 3986 says (CLX-150). build/scratch's wider check matched Python on 5,106 random cases.
 
-import std.url.{Url, encode, encode_plus, decode, decode_plus, form_encode, form_decode}
+import std.url.{Url, encode, encode_plus, decode, decode_plus, form_encode, form_decode, urldefrag, urljoin, urlsplit, urlunsplit}
 
 fn pairs(text: String) -> String {
     var out: List<String> = []
@@ -84,4 +84,38 @@ fn main() ! String {
         ok(_) => println("joined"),
         err(e) => println(e),    // out: the port `x` isn't a number
     }
+
+    // Python's own urljoin, urlsplit, urlunsplit and urldefrag, corners and all (CLX-220): these
+    // lines are what Python 3.14 prints for the same calls.
+    var joined: List<String> = []
+    for (b, r) in [("http://a/b/c/d;p?q", "../../../g"), ("http://a/b/c", ""), ("urn:example:root", "item.json"), ("http://a/b?q#f", "?"), ("http://a/b?q#f", "#"), ("file:///etc/hosts", "passwd"), ("http://a/b/", "//c/./d/../e"), ("tag:x", "#frag"), ("http://a/b/c", "g?y/../x"), ("https://h", "a/./b/..")] {
+        joined.push("[{try urljoin(b, r)}]")
+    }
+    println(joined.join(" "))    // out: [http://a/g] [http://a/b/c] [item.json] [http://a/b?] [http://a/b?q#] [file:///etc/passwd] [http://c/./d/../e] [#frag] [http://a/b/g?y/../x] [https://h/a/]
+    for text in [" \thttp://H/a\nb?c#d", "HTTP://u:p@[::1]:80/x", "mailto:a@b", "//h/p", "a:b"] {
+        let p = try urlsplit(text)
+        println("[{p.scheme}] [{p.netloc}] [{p.path}] [{p.query}] [{p.fragment}] {urlunsplit(p)}")
+    }
+    // out: [http] [H] [/ab] [c] [d] http://H/ab?c#d
+    // out: [http] [u:p@[::1]:80] [/x] [] [] http://u:p@[::1]:80/x
+    // out: [mailto] [] [a@b] [] [] mailto:a@b
+    // out: [] [h] [/p] [] [] //h/p
+    // out: [a] [] [b] [] [] a:b
+    for text in ["http://[::1/x", "http://a]/", "http://[zz]/", "http://[v1.x]/"] {
+        match urlsplit(text) {
+            ok(p) => println("ok {urlunsplit(p)}"),
+            err(e) => println(e),
+        }
+    }
+    // out: Invalid IPv6 URL
+    // out: Invalid IPv6 URL
+    // out: 'zz' does not appear to be an IPv4 or IPv6 address
+    // out: ok http://[v1.x]/
+    for text in ["a#b#c", "a", "http://h/p?q#"] {
+        let (rest, fragment) = try urldefrag(text)
+        println("[{rest}] [{fragment}]")
+    }
+    // out: [a] [b#c]
+    // out: [a] []
+    // out: [http://h/p?q] []
 }

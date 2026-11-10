@@ -108,7 +108,7 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 37. [std.image](std/image.md): images read from PNG, JPEG and ICO files, resized, blurred, cropped, turned, drawn on with lines, shapes and text, blended, quantized and written back, with Pillow's pixels and Pillow's JPEG bytes
 38. [std.image.png](std/image-png.md): PNG files read and written as libpng does it, every color type and bit depth, interlaced or not
 39. [std.image.jpeg](std/image-jpeg.md): JPEG files read as libjpeg-turbo reads them, baseline and progressive, and written byte for byte as Pillow writes them
-40. [std.url](std/url.md): percent-encoding and form bodies as Python's `urllib.parse` gives them, and URLs taken apart, put back together and joined as RFC 3986 says
+40. [std.url](std/url.md): percent-encoding and form bodies as Python's `urllib.parse` gives them, and URLs taken apart, put back together and joined as RFC 3986 says, or exactly as Python's `urlsplit` and `urljoin` do
 41. [std.uuid](std/uuid.md): UUIDs at random, from a name, and as Java's `nameUUIDFromBytes` makes them, read and written as text and bytes
 42. [std.csv](std/csv.md): CSV read as Python's `csv.reader` and `DictReader` read it, quirks included, a row at a time or all at once, and written as `csv.writer` writes it
 43. [std.xml](std/xml.md): XML read into a tree as Python's ElementTree reads it, with the line and column of what isn't well-formed, elements found by ElementTree's paths, and trees written back plain or indented
@@ -126,7 +126,8 @@ The `std` modules, one page each ([modules](reference/modules.md#the-standard-li
 55. [std.zstd](std/zstd.md): Zstandard files decompressed as Python's `compression.zstd` reads them, with checksums, skippable frames and dictionaries, compressed at `zstd`'s levels, with or without a dictionary, big ones on all the processors, and dictionaries trained from samples
 56. [std.font](std/font.md): TrueType and OpenType fonts and collections read as FreeType reads them, glyphs drawn antialiased by the exact area they cover, and text measured and drawn on images, as Pillow's `ImageFont` and `ImageDraw.text` do
 57. [std.wave](std/wave.md): WAV files read as Python's `wave` module reads them and written byte for byte as it writes them, floats too, with their samples as numbers instead of `struct.unpack`
-58. [std.text.python](std/text-python.md): Python's `repr` of strings and floats, and `str.isprintable`, as CPython 3.14 gives them, for messages that quote values as Python does
+58. [std.text.python](std/text-python.md): Python's `repr` of strings and floats, `str.isprintable` and `str.isspace`, as CPython 3.14 gives them, for messages that quote values as Python does
+59. [std.json.schema](std/json-schema.md): JSON Schema checked as Python's jsonschema checks it, drafts 3 to 2020-12, with the same errors, messages, paths and order, and `$ref`s found as the referencing library finds them
 
 ### Java compatibility
 

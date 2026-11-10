@@ -1,0 +1,178 @@
+// std.json.schema: JSON Schema checked as Python's jsonschema 4.26 checks it (CLX-220). Each line
+// expected below is what jsonschema itself printed for the same calls.
+
+import std.json
+import std.json.{Json}
+import std.json.schema.{Draft, PathPart, Registry, SchemaChecker, SchemaFault, ValidationError, Validator, best_match, check_schema, validate, validator_for}
+
+fn parse(text: String) -> Json {
+    return json.parse(text)!
+}
+
+fn steps(parts: List<PathPart>) -> String {
+    var out: List<String> = []
+    for p in parts {
+        out.push("{p}")
+    }
+    return out.join("/")
+}
+
+fn show(e: ValidationError) -> String {
+    return "{e.json_path()} {e.keyword.copy() ?? "?"} {e.message} | {steps(e.absolute_schema_path)}"
+}
+
+fn messages(errors: List<ValidationError>) -> String {
+    var out: List<String> = []
+    for e in errors {
+        out.push(e.message.copy())
+    }
+    return "[{out.join("; ")}]"
+}
+
+fn draft_name(d: Draft) -> String {
+    return match d {
+        Draft.Draft3 => "Draft3Validator",
+        Draft.Draft4 => "Draft4Validator",
+        Draft.Draft6 => "Draft6Validator",
+        Draft.Draft7 => "Draft7Validator",
+        Draft.Draft201909 => "Draft201909Validator",
+        Draft.Draft202012 => "Draft202012Validator",
+    }
+}
+
+fn first_line(text: String) -> String {
+    for line in text.split("\n") {
+        if not line.is_empty() {
+            return line.copy()
+        }
+    }
+    return String()
+}
+
+fn main() ! SchemaFault {
+    let shop_text = ##"
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["name", "price", "tags"],
+            "additionalProperties": false,
+            "properties": {
+                "name": {"type": "string", "pattern": "^[a-z]+$"},
+                "price": {"type": "number", "exclusiveMinimum": 0},
+                "tags": {"type": "array", "items": {"$ref": "#/$defs/tag"}, "uniqueItems": true},
+                "size": {"enum": ["S", "M", "L", 42, null]},
+                "extra": {"anyOf": [{"type": "integer"}, {"type": "string", "maxLength": 3}]}
+            },
+            "$defs": {"tag": {"type": "string", "minLength": 2}}
+        }
+        "##
+    let shop = parse(shop_text)
+    let item = parse(#"{"name": "Café", "price": 0, "tags": ["a", "bb", "bb"], "size": 1.5, "extra": "long", "color": "red"}"#)
+
+    // Every error, in jsonschema's order, with its messages and paths.
+    var v = Validator.new(shop, Draft.Draft202012)
+    for e in try v.iter_errors(item) {
+        println(show(e))
+    }
+    // out: $ additionalProperties Additional properties are not allowed ('color' was unexpected) | additionalProperties
+    // out: $.name pattern 'Café' does not match '^[a-z]+$' | properties/name/pattern
+    // out: $.price exclusiveMinimum 0 is less than or equal to the minimum of 0 | properties/price/exclusiveMinimum
+    // out: $.tags[0] minLength 'a' is too short | properties/tags/items/minLength
+    // out: $.tags uniqueItems ['a', 'bb', 'bb'] has non-unique elements | properties/tags/uniqueItems
+    // out: $.size enum 1.5 is not one of ['S', 'M', 'L', 42, None] | properties/size/enum
+    // out: $.extra anyOf 'long' is not valid under any of the given schemas | properties/extra/anyOf
+
+    // is_valid, validate's first error, and best_match, which looks into anyOf's context.
+    println("{try v.is_valid(parse(#"{"name": "tea", "price": 2.5, "tags": ["hot", "green"]}"#))} {try v.is_valid(item)}")    // out: true false
+    let first = (try v.validate(item))!
+    println(show(first))    // out: $ additionalProperties Additional properties are not allowed ('color' was unexpected) | additionalProperties
+    let best = best_match(try v.iter_errors(parse(#"{"name": "tea", "price": 1, "tags": [], "extra": 1.5}"#)))!
+    println("{show(best)} {best.context.len()} {best.context[1].message}")    // out: $.extra anyOf 1.5 is not valid under any of the given schemas | properties/extra/anyOf 2 1.5 is not of type 'string'
+
+    // An error's paths and values, and Python's str of it, its lines joined here with " | ".
+    let e = (try v.validate(parse(#"{"name": "tea", "price": 1, "tags": ["ok", 7]}"#)))!
+    println("{steps(e.path)} {steps(e.absolute_path)} {steps(e.schema_path)} {e.instance} {e.schema}")    // out: tags/1 tags/1 properties/tags/items/type 7 {"type":"string","minLength":2}
+    println("{e}".replace("\n", " | "))    // out: 7 is not of type 'string' |  | Failed validating 'type' in schema['properties']['tags']['items']: |     {'type': 'string', 'minLength': 2} |  | On instance['tags'][1]: |     7
+
+    // Draft 4's boolean exclusiveMaximum, and draft 7's if, then and else.
+    var d4 = Validator.new(parse(#"{"maximum": 5, "exclusiveMaximum": true}"#), Draft.Draft4)
+    println("{messages(try d4.iter_errors(Json.Int(5)))} {messages(try d4.iter_errors(Json.Float(4.5)))}")    // out: [5 is greater than or equal to the maximum of 5] []
+    var d7 = Validator.new(parse(#"{"if": {"properties": {"kind": {"const": "block"}}}, "then": {"required": ["hardness"]}, "else": {"not": {"required": ["hardness"]}}}"#), Draft.Draft7)
+    for text in [#"{"kind": "block"}"#, #"{"kind": "item", "hardness": 1}"#, #"{"kind": "block", "hardness": 2}"#] {
+        var shown: List<String> = []
+        for x in try d7.iter_errors(parse(text)) {
+            shown.push(show(x))
+        }
+        println("[{shown.join("; ")}]")
+    }
+    // out: [$ required 'hardness' is a required property | then/required]
+    // out: [$ not {'kind': 'item', 'hardness': 1} should not be valid under {'required': ['hardness']} | else/not]
+    // out: []
+
+    // A registry: a $ref to another schema by its URI, and the refs in it found from its $id.
+    var reg = Registry.new()
+    reg.add("https://example.com/pos.json", parse(##"{"$id": "https://example.com/pos.json", "type": "object", "properties": {"y": {"$ref": "#/$defs/height"}}, "$defs": {"height": {"type": "integer", "minimum": -64, "maximum": 320}}}"##), Draft.Draft7)
+    var rv = Validator.with_registry(parse(#"{"type": "array", "items": {"$ref": "https://example.com/pos.json"}}"#), Draft.Draft7, reg)
+    for x in try rv.iter_errors(parse(#"[{"y": 400}, {"y": 1.5}, {"y": -64}]"#)) {
+        println(show(x))
+    }
+    // out: $[0].y maximum 400 is greater than the maximum of 320 | items/properties/y/maximum
+    // out: $[1].y type 1.5 is not of type 'integer' | items/properties/y/type
+
+    // check_schema gives a SchemaError, and a SchemaChecker kept checks many with one meta-schema.
+    var checker = SchemaChecker.new(Draft.Draft7)
+    for text in [#"{"type": "strin"}"#, #"{"minimum": "x"}"#, #"{"properties": {"a": {"type": 7}}}"#, #"{"type": "string"}"#] {
+        let schema = parse(text)
+        let found = try check_schema(schema, Draft.Draft7)
+        let again = try checker.check(schema)
+        if let se = found {
+            println("{if se.schema_error { "SchemaError" } else { "ValidationError" }} {se.keyword.copy() ?? "?"} {se.message} | {steps(se.absolute_schema_path)} | {steps(se.absolute_path)} {again!.message == se.message}")
+        } else {
+            println("ok {again == none}")
+        }
+    }
+    // out: SchemaError anyOf 'strin' is not valid under any of the given schemas | properties/type/anyOf | type true
+    // out: SchemaError type 'x' is not of type 'number' | properties/minimum/type | minimum true
+    // out: SchemaError anyOf 7 is not valid under any of the given schemas | properties/properties/additionalProperties/properties/type/anyOf | properties/a/type true
+    // out: ok true
+
+    // validator_for, and validate, which checks the schema first.
+    for text in [#"{"$schema": "http://json-schema.org/draft-04/schema#"}"#, #"{"$schema": "https://json-schema.org/draft/2019-09/schema"}"#, "\{\}", #"{"$schema": "https://example.com/unknown"}"#] {
+        println(draft_name(try validator_for(parse(text), Draft.Draft7)))
+    }
+    // out: Draft4Validator
+    // out: Draft201909Validator
+    // out: Draft7Validator
+    // out: Draft7Validator
+    println((try validate(parse("[1, 2, 1]"), parse(#"{"$schema": "http://json-schema.org/draft-07/schema#", "uniqueItems": true, "maxItems": 2}"#)))!.message)    // out: [1, 2, 1] has non-unique elements
+    let bad = (try validate(Json.Int(1), parse(#"{"type": "nope", "$schema": "http://json-schema.org/draft-07/schema#"}"#)))!
+    println("{if bad.schema_error { "SchemaError" } else { "ValidationError" }} {bad.message}")    // out: SchemaError 'nope' is not valid under any of the given schemas
+
+    // Faults: what Python raises instead of giving errors.
+    for text in [#"{"$ref": "other.json"}"#, ##"{"$ref": "#/$defs/missing"}"##, #"{"pattern": "("}"#, #"{"type": "nope"}"#, #"{"minLength": "3"}"#] {
+        var fv = Validator.new(parse(text), Draft.Draft202012)
+        match fv.iter_errors(Json.Str("abc")) {
+            ok(errs) => println("errors {errs.len()}"),
+            err(f) => println("{f.kind} {first_line(f.message)}"),
+        }
+    }
+    // out: Unresolvable Unresolvable: other.json
+    // out: PointerToNowhere PointerToNowhere: '/$defs/missing' does not exist within {'$ref': '#/$defs/missing'}
+    // out: PatternError missing ), unterminated subpattern at position 0
+    // out: UnknownType Unknown type 'nope' for validator with schema:
+    // out: TypeError '<' not supported between instances of 'int' and 'str'
+
+    // Python's repr in messages, the regex format, and $dynamicRef.
+    var ev = Validator.new(parse(#"{"enum": [1, "x", null, true, {"a": [1.0, 2.5e-7]}]}"#), Draft.Draft202012)
+    println(messages(try ev.iter_errors(parse(#"{"é": 1e20, "b": [false]}"#))))    // out: [{'é': 1e+20, 'b': [False]} is not one of [1, 'x', None, True, {'a': [1.0, 2.5e-07]}]]
+    var formats = Validator.new(parse(#"{"format": "regex"}"#), Draft.Draft202012).with_formats()
+    var plain = Validator.new(parse(#"{"format": "regex"}"#), Draft.Draft202012)
+    println("{messages(try formats.iter_errors(Json.Str("(")))} {messages(try plain.iter_errors(Json.Str("(")))}")    // out: ['(' is not a 'regex'] []
+    var trees = Registry.new()
+    trees.add("https://example.com/tree", parse(##"{"$id": "https://example.com/tree", "$dynamicAnchor": "node", "type": "object", "properties": {"data": true, "children": {"type": "array", "items": {"$dynamicRef": "#node"}}}}"##), Draft.Draft202012)
+    var strict = Validator.with_registry(parse(#"{"$id": "https://example.com/strict-tree", "$dynamicAnchor": "node", "$ref": "tree", "unevaluatedProperties": false}"#), Draft.Draft202012, trees)
+    for x in try strict.iter_errors(parse(#"{"children": [{"daat": 1}]}"#)) {
+        println(show(x))
+    }
+    // out: $.children[0] unevaluatedProperties Unevaluated properties are not allowed ('daat' was unexpected) | properties/children/items/$dynamicRef/unevaluatedProperties
+}

@@ -2,7 +2,28 @@
 /// quote values as Python would: `Regex.python`'s errors and std.json.schema's.
 module std.text.python
 
-import std.text.ucd.{PY_PRINT, PY_PRINT_LEN}
+import std.text.ucd.{PY_PRINT, PY_PRINT_LEN, PY_SPACE, PY_SPACE_LEN}
+
+/// Whether Python's `str.isspace` is true for `r`: what `strip`, `split()` and `re`'s `\s` take
+/// as white space.
+pub fn is_space(r: u32) -> bool {
+    if r < 0x80 {
+        return r == 32 or (r >= 9 and r <= 13) or (r >= 0x1C and r <= 0x1F)
+    }
+    var lo: usize = 0
+    var hi = PY_SPACE_LEN / 2
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if r > PY_SPACE[2 * mid + 1] {
+            lo = mid + 1
+        } else if r < PY_SPACE[2 * mid] {
+            hi = mid
+        } else {
+            return true
+        }
+    }
+    return false
+}
 
 /// Whether Python's `str.isprintable` is true for `r`, so that `repr` keeps it as it is.
 pub fn is_printable(r: u32) -> bool {

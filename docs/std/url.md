@@ -100,6 +100,38 @@ fn main() ! String {
 
 `Url.parse` is also stricter than `urlsplit` in two ways: text after an IPv6 address's `]` must be a port, where Python ignores it, and it doesn't take the spaces, tabs and newlines out that Python strips.
 
+## Python's `urlsplit` and `urljoin`
+
+When a result has to be Python's to the letter, corners and all, as std.json.schema's `$ref`s are, these four give exactly what `urllib.parse`'s functions of those names give, and fail with the text of the `ValueError` they raise:
+
+```calx
+import std.url.{urljoin, urldefrag, urlsplit, urlunsplit}
+
+fn main() ! String {
+    println(try urljoin("http://a/b/c", "../d?x"))    // out: http://a/d?x
+    println(try urljoin("http://a/b#f", ""))    // out: http://a/b#f
+    println(try urljoin("urn:example:root", "item.json"))    // out: item.json
+    let (url, fragment) = try urldefrag("schema.json#/definitions/item")
+    println("{url} {fragment}")    // out: schema.json /definitions/item
+    let parts = try urlsplit("HTTPS://user@host:8080/p?q=1#top")
+    println("{parts.scheme} {parts.netloc} {parts.path} {parts.query} {parts.fragment}")    // out: https user@host:8080 /p q=1 top
+    println(urlunsplit(parts))    // out: https://user@host:8080/p?q=1#top
+    match urlsplit("http://[::1/x") {
+        ok(_) => {},
+        err(e) => println(e),    // out: Invalid IPv6 URL
+    }
+}
+```
+
+| Function | Gives |
+| --- | --- |
+| `urlsplit(url) -> SplitUrl ! String` | `urlsplit(url)`: a `SplitUrl` with `scheme`, `netloc`, `path`, `query` and `fragment`, `""` for a part that isn't there. It strips leading spaces and controls and takes out tabs and line breaks, and fails as Python does for a bracket without its pair, a bracketed host that isn't an IPv6 or IPvFuture address, or a netloc that NFKC turns into one with more delimiters |
+| `urlunsplit(parts: SplitUrl) -> String` | `urlunsplit(parts)`, which is `geturl()`: an empty query or fragment loses its `?` or `#` |
+| `urljoin(base, url) -> String ! String` | `urljoin(base, url)`: a scheme Python doesn't take as relative, such as `urn:` or `mailto:`, makes `url` stand for itself, `..` above the root is dropped, and an empty query or fragment keeps its `?` or `#` |
+| `urldefrag(url) -> (String, String) ! String` | `urldefrag(url)`: the URL without its fragment, and the fragment, `""` if there's none |
+
+They were checked against Python 3.14 on 30,000 random pairs of URLs with odd schemes, hosts in brackets, dots, empty parts, stray `?` and `#`, and the characters Python strips, for 120,000 results, every one the same, errors too.
+
 ## How it's built
 
 [std/url.calx](../../std/url.calx), in Calx, written from RFC 3986 and checked against Python 3.14's `urllib.parse`: 5,106 random cases of quoting, unquoting, forms, joins and parts, with none different but the corners above. The URL is split by offsets in one pass, so the only text made is the parts', and a path is only taken apart for its `.` and `..` when it has one.

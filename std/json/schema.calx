@@ -1,0 +1,4797 @@
+/// JSON Schema, checked as Python's jsonschema 4.26 checks it: a `Validator` for drafts 3, 4, 6, 7,
+/// 2019-09 and 2020-12 gives the errors `Draft7Validator(schema).iter_errors(instance)` and the
+/// others give, with the same messages, paths and order, and finds `$ref`s as the referencing
+/// library finds them, in a `Registry` of schemas and the drafts' meta-schemas.
+module std.json.schema
+
+import std.bigint.{BigInt}
+import std.json
+import std.json.{Json}
+import std.json.schema.meta
+import std.regex.{Regex}
+import std.text.python.{is_space, repr_float_into, repr_str, repr_str_into}
+import std.url.{decode, urldefrag, urljoin, urlsplit, urlunsplit}
+
+// --- what's public -------------------------------------------------------------------------------
+
+/// A draft of JSON Schema, and the validator jsonschema has for it: `Draft.Draft7` is
+/// `Draft7Validator`, with draft 7's keywords, types and meta-schema.
+pub enum Draft {
+    Draft3
+    Draft4
+    Draft6
+    Draft7
+    Draft201909
+    Draft202012
+}
+
+/// A step in a path to a value: a member's name, or an element's index.
+pub enum PathPart {
+    Key(String)
+    Index(usize)
+}
+
+/// `{part}` is the name or the index, as Python's `str` gives it.
+impl Display for PathPart {
+    fn show(self) {
+        match self {
+            PathPart.Key(k) => print(k),
+            PathPart.Index(i) => print("{i}"),
+        }
+    }
+}
+
+/// Paths order as Python orders them: names by their code points and indexes by their value.
+/// Python can't compare a name with an index, which never happens in one instance's paths; here
+/// an index comes first.
+impl Order for PathPart {
+    fn cmp(self, other: Self) -> Ordering {
+        return match self {
+            PathPart.Key(a) => match other {
+                PathPart.Key(b) => text_cmp(a, b),
+                PathPart.Index(_) => Ordering.Greater,
+            },
+            PathPart.Index(i) => match other {
+                PathPart.Key(_) => Ordering.Less,
+                PathPart.Index(j) => if i < j { Ordering.Less } else if i > j { Ordering.Greater } else { Ordering.Equal },
+            },
+        }
+    }
+}
+
+/// What's wrong with an instance, as jsonschema's `ValidationError` says it, or with a schema,
+/// as its `SchemaError` does.
+pub struct ValidationError {
+    /// What's wrong: `'name' is a required property`.
+    pub message: String
+    /// The keyword that failed, which jsonschema calls `validator`: `required`. `none` for a
+    /// `false` schema.
+    pub keyword: String?
+    /// The keyword's value in the schema: `["name"]`. `null` for a `false` schema.
+    pub validator_value: Json
+    /// The value that failed.
+    pub instance: Json
+    /// The schema the keyword is in.
+    pub schema: Json
+    /// Where `instance` is, from the value checked, or for an error in another's `context`, from
+    /// that error's instance.
+    pub path: List<PathPart>
+    /// Where `instance` is in the value checked.
+    pub absolute_path: List<PathPart>
+    /// The way to the keyword in the schema, the keyword last, as `path` counts it.
+    pub schema_path: List<PathPart>
+    /// The way to the keyword from the schema's root.
+    pub absolute_schema_path: List<PathPart>
+    /// For `anyOf`, `oneOf` and draft 3's `type`, the errors of each schema tried.
+    pub context: List<ValidationError>
+    /// Whether this is a `SchemaError`: what `check_schema` found wrong with a schema.
+    pub schema_error: bool
+    // The draft whose types `best_match` checks `instance` against.
+    draft: Draft
+}
+
+/// Why validating couldn't go on, as the exception jsonschema raises: a `$ref` that leads
+/// nowhere, a `type` it doesn't know, a `pattern` that isn't a regex, or a schema too broken to
+/// read, such as a `minimum` that's a string.
+pub struct SchemaFault {
+    /// The exception's class: `Unresolvable`, `PointerToNowhere`, `NoSuchAnchor`,
+    /// `InvalidAnchor`, `UnknownType`, `PatternError`, `TypeError`, `ValueError`,
+    /// `AttributeError` or `ZeroDivisionError`.
+    pub kind: String
+    /// What Python's `str` of it gives: `Unresolvable: other.json#/a`.
+    pub message: String
+}
+
+/// `{fault}` is its message.
+impl Display for SchemaFault {
+    fn show(self) {
+        print(self.message)
+    }
+}
+
+/// Schemas that `$ref`s can find by their URIs, besides the drafts' meta-schemas, which every
+/// validator has: the `referencing.Registry` that a validator is given.
+pub struct Registry {
+    entries: List<Entry>
+}
+
+// A schema added to a registry: `Resource.from_contents(contents, default_specification=spec)`.
+struct Entry {
+    uri: String
+    contents: Json
+    spec: Draft
+    fault: SchemaFault?
+}
+
+impl Registry {
+    /// An empty registry: Python's `Registry()`.
+    pub fn new() -> Registry {
+        return Registry { entries: List<Entry>() }
+    }
+
+    /// Adds `contents` as the schema at `uri`: Python's
+    /// `registry.with_resource(uri, Resource.from_contents(contents, default_specification=d))`.
+    /// Its draft is the one its `$schema` names, or `default`. A `#` at the end of `uri` is
+    /// dropped, as Python drops it.
+    pub fn add(mut self, uri: String, contents: Json, default: Draft) {
+        var spec = default
+        var bad: SchemaFault? = none
+        match detect(contents, default) {
+            ok(d) => spec = d,
+            err(f) => bad = some(f),
+        }
+        self.entries.push(Entry { uri: strip_hash(uri), contents: contents.copy(), spec: spec, fault: bad })
+    }
+}
+
+/// A schema ready to check values with, as one of jsonschema's validator classes: errors come in
+/// the order Python gives them, with its messages.
+pub struct Validator {
+    draft: Draft
+    formats: bool
+    graph: Graph
+    cx: Ctx
+}
+
+impl Validator {
+    /// A validator for `schema` under `draft`: `Draft7Validator(schema)`. `$ref`s find the parts
+    /// of `schema` and the drafts' meta-schemas; nothing is fetched.
+    pub fn new(schema: Json, draft: Draft) -> Validator {
+        return Validator { draft: draft, formats: false, graph: build(schema, draft, List<Entry>()), cx: new_ctx() }
+    }
+
+    /// A validator whose `$ref`s can also find the schemas in `registry`:
+    /// `Draft7Validator(schema, registry=registry)`.
+    pub fn with_registry(schema: Json, draft: Draft, registry: Registry) -> Validator {
+        return Validator { draft: draft, formats: false, graph: build(schema, draft, registry.entries), cx: new_ctx() }
+    }
+
+    /// The same validator, checking `format` too, as one given `format_checker=FormatChecker()`
+    /// is. Only the `regex` format is checked so far.
+    pub fn with_formats(own self) -> Validator {
+        var v = self
+        v.formats = true
+        return v
+    }
+
+    /// Each thing wrong with `instance`, in the order jsonschema's `iter_errors` gives them, or
+    /// the fault that stopped it.
+    pub fn iter_errors(mut self, instance: Json) -> List<ValidationError> ! SchemaFault {
+        let fails = try self.collect(instance, MAX, false)
+        var out = List<ValidationError>()
+        out.reserve(fails.len())
+        for f in fails {
+            out.push(publish(self.graph, f, List<PathPart>(), List<PathPart>(), false))
+        }
+        return out
+    }
+
+    /// Whether `instance` is valid: `is_valid`, which stops at the first error.
+    pub fn is_valid(mut self, instance: Json) -> bool ! SchemaFault {
+        let fails = try self.collect(instance, 1, true)
+        return fails.is_empty()
+    }
+
+    /// The first thing wrong with `instance`, or `none` if it's valid: what `validate` raises.
+    pub fn validate(mut self, instance: Json) -> ValidationError? ! SchemaFault {
+        let fails = try self.collect(instance, 1, false)
+        for f in fails {
+            return some(publish(self.graph, f, List<PathPart>(), List<PathPart>(), false))
+        }
+        return none
+    }
+
+    // Up to `limit` errors. When a `$ref` needs the registry crawled, or reaches meta-schemas that
+    // aren't in yet, that's done and the walk starts again, which then goes as it would have with
+    // them from the start: nothing it did before is kept. When `counting`, the errors are only
+    // counted: the walk is the same, but no messages or paths are made.
+    fn collect(mut self, instance: Json, limit: usize, counting: bool) -> List<Fail> ! SchemaFault {
+        if let f = self.graph.fault {
+            fail f.copy()
+        }
+        loop {
+            reset_ctx(mut self.cx, self.formats)
+            if counting {
+                self.cx.quiet = 1
+            }
+            let base = intern(mut self.cx, self.graph.root_uri)
+            let root = St { cls: self.draft, schema: self.graph.root, res: Resolver { base: base, prev: -1, crawled: false } }
+            var out = List<Fail>()
+            match run(self.graph, mut self.cx, root, instance, mut out, limit) {
+                ok => return out,
+                err(e) => {
+                    if e.kind == "NeedMeta" {
+                        add_meta(mut self.graph, u32.parse(e.message) ?? ALL_META)
+                        continue
+                    }
+                    if e.kind == "NeedCrawl" {
+                        crawl_all(mut self.graph)
+                        continue
+                    }
+                    fail e
+                },
+            }
+        }
+    }
+}
+
+/// The first thing wrong with `schema` as a schema of `draft`, checked against the draft's
+/// meta-schema with its formats: what `Draft7Validator.check_schema(schema)` raises, as a
+/// `ValidationError` with `schema_error` set. `none` if it's a schema.
+pub fn check_schema(schema: Json, draft: Draft) -> ValidationError? ! SchemaFault {
+    var checker = SchemaChecker.new(draft)
+    return try checker.check(schema)
+}
+
+/// What `check_schema` checks with, kept to check many schemas: the validator for a draft's
+/// meta-schema, with its formats, which `check_schema` makes each time it's called.
+pub struct SchemaChecker {
+    v: Validator
+}
+
+impl SchemaChecker {
+    /// The checker for schemas of `draft`.
+    pub fn new(draft: Draft) -> SchemaChecker {
+        let doc = match json.parse(meta.text(meta_index(draft))) {
+            ok(d) => d,
+            err(_) => Json.Null,
+        }
+        // Each meta-schema names its own draft.
+        let cls = match detect(doc, draft) {
+            ok(d) => d,
+            err(_) => draft,
+        }
+        var v = Validator.new(doc, cls)
+        v.formats = true
+        return SchemaChecker { v: v }
+    }
+
+    /// The first thing wrong with `schema`, as `check_schema` gives it.
+    pub fn check(mut self, schema: Json) -> ValidationError? ! SchemaFault {
+        let fails = try self.v.collect(schema, 1, false)
+        for f in fails {
+            return some(publish(self.v.graph, f, List<PathPart>(), List<PathPart>(), true))
+        }
+        return none
+    }
+}
+
+/// The draft `schema`'s `$schema` names, or `default` if it names none jsonschema knows:
+/// `validator_for(schema, default=...)`.
+pub fn validator_for(schema: Json, default: Draft) -> Draft ! SchemaFault {
+    return match schema {
+        Json.Bool(_) => default,
+        Json.Object(members) => {
+            if not members.contains("$schema") {
+                return default
+            }
+            return try dialect_draft(members["$schema"], default)
+        },
+        _ => {
+            fail type_error("argument of type '{py_type_json(schema)}' is not a container or iterable")
+        },
+    }
+}
+
+/// The error among `errors` that most likely says what's wrong, as jsonschema's `best_match`
+/// picks it: one nearest the instance's root, and in an `anyOf` or `oneOf`, the one in its
+/// `context` that stands out. `none` if there are none.
+pub fn best_match(errors: List<ValidationError>) -> ValidationError? {
+    if errors.is_empty() {
+        return none
+    }
+    var best: usize = 0
+    for i in 1..errors.len() {
+        if relevance_cmp(errors[i], errors[best]) > 0 {
+            best = i
+        }
+    }
+    return some(best_within(errors[best]))
+}
+
+/// Checks `schema` against its meta-schema, then `instance` against `schema`, as jsonschema's
+/// `validate(instance, schema)` does: the draft is the one `$schema` names, or 2020-12, and what
+/// comes back is the schema's first error, or the instance's `best_match`. `none` if both are
+/// valid.
+pub fn validate(instance: Json, schema: Json) -> ValidationError? ! SchemaFault {
+    let cls = try validator_for(schema, Draft.Draft202012)
+    if let e = try check_schema(schema, cls) {
+        return some(e)
+    }
+    var v = Validator.new(schema, cls)
+    let errors = try v.iter_errors(instance)
+    return best_match(errors)
+}
+
+impl ValidationError {
+    /// `absolute_path` as a JSONPath, as `json_path` writes it: `$.quests[2]['display name']`.
+    pub fn json_path(self) -> String {
+        var out = String("$")
+        for p in self.absolute_path {
+            match p {
+                PathPart.Index(i) => out.push_str("[{i}]"),
+                PathPart.Key(k) => {
+                    if plain_name(k) {
+                        out.push('.')
+                        out.push_str(k)
+                    } else {
+                        out.push_str("['")
+                        out.push_str(k.replace("\\", "\\\\").replace("'", "\\'"))
+                        out.push_str("']")
+                    }
+                },
+            }
+        }
+        return out
+    }
+}
+
+/// `{error}` is what Python's `str` of the error gives: the message, then the keyword and where it
+/// is in the schema, the schema, and where the instance is and the instance, both as `pprint`
+/// writes them.
+impl Display for ValidationError {
+    fn show(self) {
+        let schema_word = if self.schema_error { "metaschema" } else { "schema" }
+        let instance_word = if self.schema_error { "schema" } else { "instance" }
+        var at = List<PathPart>()
+        for i in 0..self.schema_path.len() {
+            if i + 1 < self.schema_path.len() {
+                at.push(self.schema_path[i].copy())
+            }
+        }
+        var t = String("            ")
+        t.push_str(self.message)
+        t.push_str("\n\n            Failed validating ")
+        match self.keyword {
+            some(k) => repr_str_into(mut t, k),
+            none => t.push_str("None"),
+        }
+        t.push_str(" in ")
+        t.push_str(format_as_index(schema_word, at))
+        t.push_str(":\n                ")
+        t.push_str(pretty(self.schema))
+        t.push_str("\n\n            On ")
+        t.push_str(format_as_index(instance_word, self.path))
+        t.push_str(":\n                ")
+        t.push_str(pretty(self.instance))
+        t.push_str("\n            ")
+        print(dedent(rstrip(t)))
+    }
+}
+
+// --- schemas as nodes ----------------------------------------------------------------------------
+
+// A schema is kept as nodes in one list, so that a `$ref` can name any part of any schema by its
+// number while the instance is walked.
+
+const K_NULL: u8 = 0
+const K_BOOL: u8 = 1
+const K_INT: u8 = 2
+const K_UINT: u8 = 3
+const K_FLOAT: u8 = 4
+const K_STR: u8 = 5
+const K_ARRAY: u8 = 6
+const K_OBJECT: u8 = 7
+
+const MAX: usize = 4294967295
+
+struct Node {
+    kind: u8
+    b: bool
+    i: i64
+    u: u64
+    f: f64
+    s: String
+    // An object's keys and an array's or object's values, in order.
+    keys: List<String>
+    kids: List<u32>
+    // Each key's keyword number, 0 for one that's no keyword.
+    kws: List<u8>
+    // The keys' places, for an object with more than a few.
+    index: Map<String, u32>
+    // Which of the keys a walk asks about at every schema an object has: `F_ID` and the others.
+    // For a string, the number of the type it names, as `type_code` gives it.
+    flags: u8
+}
+
+const F_ID: u8 = 1
+const F_OLD_ID: u8 = 2
+const F_SCHEMA: u8 = 4
+
+fn scalar(k: u8) -> Node {
+    return Node {
+        kind: k, b: false, i: 0, u: 0, f: 0.0, s: String(), keys: List<String>(),
+        kids: List<u32>(), kws: List<u8>(), index: Map<String, u32>(), flags: 0,
+    }
+}
+
+fn key_flag(k: String) -> u8 {
+    if k == "$id" {
+        return F_ID
+    }
+    if k == "id" {
+        return F_OLD_ID
+    }
+    if k == "$schema" {
+        return F_SCHEMA
+    }
+    return 0
+}
+
+// Adds `v` and what's in it, and gives its number.
+fn add_json(g: mut Graph, v: Json) -> u32 {
+    var node = scalar(K_NULL)
+    match v {
+        Json.Null => {},
+        Json.Bool(b) => {
+            node.kind = K_BOOL
+            node.b = b
+        },
+        Json.Int(i) => {
+            node.kind = K_INT
+            node.i = i
+        },
+        Json.UInt(u) => {
+            node.kind = K_UINT
+            node.u = u
+        },
+        Json.Float(f) => {
+            node.kind = K_FLOAT
+            node.f = f
+        },
+        Json.Str(s) => {
+            node.kind = K_STR
+            node.s = s.copy()
+            node.flags = type_code(s)
+        },
+        Json.Array(items) => {
+            node.kind = K_ARRAY
+            node.kids.reserve(items.len())
+            for x in items {
+                node.kids.push(add_json(mut g, x))
+            }
+        },
+        Json.Object(members) => {
+            node.kind = K_OBJECT
+            node.keys.reserve(members.len())
+            node.kids.reserve(members.len())
+            for (k, x) in members {
+                node.keys.push(k.copy())
+                node.kws.push(kw_id(k))
+                node.flags = node.flags | key_flag(k)
+                node.kids.push(add_json(mut g, x))
+            }
+            if members.len() > 8 {
+                for j in 0..node.keys.len() {
+                    node.index.insert(node.keys[j].copy(), u32.wrap(j))
+                }
+            }
+        },
+    }
+    g.nodes.push(node)
+    return u32.wrap(g.nodes.len() - 1)
+}
+
+// The node as JSON again.
+fn node_json(g: Graph, n: u32) -> Json {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_NULL {
+        return Json.Null
+    }
+    if k == K_BOOL {
+        return Json.Bool(g.nodes[i].b)
+    }
+    if k == K_INT {
+        return Json.Int(g.nodes[i].i)
+    }
+    if k == K_UINT {
+        return Json.UInt(g.nodes[i].u)
+    }
+    if k == K_FLOAT {
+        return Json.Float(g.nodes[i].f)
+    }
+    if k == K_STR {
+        return Json.Str(g.nodes[i].s.copy())
+    }
+    if k == K_ARRAY {
+        var items = List<Json>()
+        items.reserve(g.nodes[i].kids.len())
+        for c in g.nodes[i].kids {
+            items.push(node_json(g, c))
+        }
+        return Json.Array(items)
+    }
+    var members = LinkedMap<String, Json>()
+    for j in 0..g.nodes[i].keys.len() {
+        members.insert(g.nodes[i].keys[j].copy(), node_json(g, g.nodes[i].kids[j]))
+    }
+    return Json.Object(members)
+}
+
+fn kind(g: Graph, n: u32) -> u8 {
+    return g.nodes[usize(n)].kind
+}
+
+fn is_object(g: Graph, n: u32) -> bool {
+    return g.nodes[usize(n)].kind == K_OBJECT
+}
+
+// The value of member `key`, if `n` is an object that has it.
+fn member(g: Graph, n: u32, key: String) -> u32? {
+    let i = usize(n)
+    if g.nodes[i].kind != K_OBJECT {
+        return none
+    }
+    if g.nodes[i].keys.len() > 8 {
+        if g.nodes[i].index.contains(key) {
+            return some(g.nodes[i].kids[usize(g.nodes[i].index[key])])
+        }
+        return none
+    }
+    for j in 0..g.nodes[i].keys.len() {
+        if g.nodes[i].keys[j] == key {
+            return some(g.nodes[i].kids[j])
+        }
+    }
+    return none
+}
+
+// Python's `schema.get(key)`: the member's value, or `none` if it isn't there or is `null`.
+fn get_value(g: Graph, n: u32, key: String) -> u32? {
+    let v = member(g, n, key) else {
+        return none
+    }
+    if kind(g, v) == K_NULL {
+        return none
+    }
+    return some(v)
+}
+
+// How many elements or members the node has.
+fn count(g: Graph, n: u32) -> usize {
+    return g.nodes[usize(n)].kids.len()
+}
+
+fn kid(g: Graph, n: u32, j: usize) -> u32 {
+    return g.nodes[usize(n)].kids[j]
+}
+
+// --- keywords ------------------------------------------------------------------------------------
+
+const KW_REF: u8 = 1
+const KW_DYNAMIC_REF: u8 = 2
+const KW_RECURSIVE_REF: u8 = 3
+const KW_ADDITIONAL_ITEMS: u8 = 4
+const KW_ADDITIONAL_PROPERTIES: u8 = 5
+const KW_ALL_OF: u8 = 6
+const KW_ANY_OF: u8 = 7
+const KW_CONST: u8 = 8
+const KW_CONTAINS: u8 = 9
+const KW_DEPENDENCIES: u8 = 10
+const KW_DEPENDENT_REQUIRED: u8 = 11
+const KW_DEPENDENT_SCHEMAS: u8 = 12
+const KW_DISALLOW: u8 = 13
+const KW_DIVISIBLE_BY: u8 = 14
+const KW_ENUM: u8 = 15
+const KW_EXCLUSIVE_MAXIMUM: u8 = 16
+const KW_EXCLUSIVE_MINIMUM: u8 = 17
+const KW_EXTENDS: u8 = 18
+const KW_FORMAT: u8 = 19
+const KW_IF: u8 = 20
+const KW_ITEMS: u8 = 21
+const KW_MAX_ITEMS: u8 = 22
+const KW_MAX_LENGTH: u8 = 23
+const KW_MAX_PROPERTIES: u8 = 24
+const KW_MAXIMUM: u8 = 25
+const KW_MIN_ITEMS: u8 = 26
+const KW_MIN_LENGTH: u8 = 27
+const KW_MIN_PROPERTIES: u8 = 28
+const KW_MINIMUM: u8 = 29
+const KW_MULTIPLE_OF: u8 = 30
+const KW_NOT: u8 = 31
+const KW_ONE_OF: u8 = 32
+const KW_PATTERN: u8 = 33
+const KW_PATTERN_PROPERTIES: u8 = 34
+const KW_PREFIX_ITEMS: u8 = 35
+const KW_PROPERTIES: u8 = 36
+const KW_PROPERTY_NAMES: u8 = 37
+const KW_REQUIRED: u8 = 38
+const KW_TYPE: u8 = 39
+const KW_UNEVALUATED_ITEMS: u8 = 40
+const KW_UNEVALUATED_PROPERTIES: u8 = 41
+const KW_UNIQUE_ITEMS: u8 = 42
+
+fn kw_id(k: String) -> u8 {
+    if k.is_empty() {
+        return 0
+    }
+    let c = k.byte_at(0)
+    if c == b'$' {
+        if k == "$ref" { return KW_REF }
+        if k == "$dynamicRef" { return KW_DYNAMIC_REF }
+        if k == "$recursiveRef" { return KW_RECURSIVE_REF }
+        return 0
+    }
+    if c == b'a' {
+        if k == "additionalItems" { return KW_ADDITIONAL_ITEMS }
+        if k == "additionalProperties" { return KW_ADDITIONAL_PROPERTIES }
+        if k == "allOf" { return KW_ALL_OF }
+        if k == "anyOf" { return KW_ANY_OF }
+        return 0
+    }
+    if c == b'c' {
+        if k == "const" { return KW_CONST }
+        if k == "contains" { return KW_CONTAINS }
+        return 0
+    }
+    if c == b'd' {
+        if k == "dependencies" { return KW_DEPENDENCIES }
+        if k == "dependentRequired" { return KW_DEPENDENT_REQUIRED }
+        if k == "dependentSchemas" { return KW_DEPENDENT_SCHEMAS }
+        if k == "disallow" { return KW_DISALLOW }
+        if k == "divisibleBy" { return KW_DIVISIBLE_BY }
+        return 0
+    }
+    if c == b'e' {
+        if k == "enum" { return KW_ENUM }
+        if k == "exclusiveMaximum" { return KW_EXCLUSIVE_MAXIMUM }
+        if k == "exclusiveMinimum" { return KW_EXCLUSIVE_MINIMUM }
+        if k == "extends" { return KW_EXTENDS }
+        return 0
+    }
+    if k == "format" { return KW_FORMAT }
+    if k == "if" { return KW_IF }
+    if k == "items" { return KW_ITEMS }
+    if c == b'm' {
+        if k == "maxItems" { return KW_MAX_ITEMS }
+        if k == "maxLength" { return KW_MAX_LENGTH }
+        if k == "maxProperties" { return KW_MAX_PROPERTIES }
+        if k == "maximum" { return KW_MAXIMUM }
+        if k == "minItems" { return KW_MIN_ITEMS }
+        if k == "minLength" { return KW_MIN_LENGTH }
+        if k == "minProperties" { return KW_MIN_PROPERTIES }
+        if k == "minimum" { return KW_MINIMUM }
+        if k == "multipleOf" { return KW_MULTIPLE_OF }
+        return 0
+    }
+    if k == "not" { return KW_NOT }
+    if k == "oneOf" { return KW_ONE_OF }
+    if c == b'p' {
+        if k == "pattern" { return KW_PATTERN }
+        if k == "patternProperties" { return KW_PATTERN_PROPERTIES }
+        if k == "prefixItems" { return KW_PREFIX_ITEMS }
+        if k == "properties" { return KW_PROPERTIES }
+        if k == "propertyNames" { return KW_PROPERTY_NAMES }
+        return 0
+    }
+    if k == "required" { return KW_REQUIRED }
+    if k == "type" { return KW_TYPE }
+    if k == "unevaluatedItems" { return KW_UNEVALUATED_ITEMS }
+    if k == "unevaluatedProperties" { return KW_UNEVALUATED_PROPERTIES }
+    if k == "uniqueItems" { return KW_UNIQUE_ITEMS }
+    return 0
+}
+
+// Whether draft `d`'s validator has keyword `k`: its `VALIDATORS`, as bits.
+fn has_kw(d: Draft, k: u8) -> bool {
+    if k == 0 {
+        return false
+    }
+    let mask: u64 = match d {
+        Draft.Draft3 => 0x4962eece432,
+        Draft.Draft4 => 0x4d7ffe884f2,
+        Draft.Draft6 => 0x4f7ffeb87f2,
+        Draft.Draft7 => 0x4f7fffb87f2,
+        Draft.Draft201909 => 0x7f7fffb9bfa,
+        Draft.Draft202012 => 0x7fffffb9be6,
+    }
+    return ((mask >> u64(k)) & 1) == 1
+}
+
+// The draft's year or number, for comparing drafts.
+fn rank(d: Draft) -> u32 {
+    return match d {
+        Draft.Draft3 => 3,
+        Draft.Draft4 => 4,
+        Draft.Draft6 => 6,
+        Draft.Draft7 => 7,
+        Draft.Draft201909 => 2019,
+        Draft.Draft202012 => 2020,
+    }
+}
+
+// The draft's meta-schema's URI without its `#`: its dialect.
+fn dialect(d: Draft) -> String {
+    return match d {
+        Draft.Draft3 => "http://json-schema.org/draft-03/schema",
+        Draft.Draft4 => "http://json-schema.org/draft-04/schema",
+        Draft.Draft6 => "http://json-schema.org/draft-06/schema",
+        Draft.Draft7 => "http://json-schema.org/draft-07/schema",
+        Draft.Draft201909 => "https://json-schema.org/draft/2019-09/schema",
+        Draft.Draft202012 => "https://json-schema.org/draft/2020-12/schema",
+    }
+}
+
+// Where the draft's meta-schema is in std.json.schema.meta.
+fn meta_index(d: Draft) -> usize {
+    return match d {
+        Draft.Draft201909 => 0,
+        Draft.Draft202012 => 7,
+        Draft.Draft3 => 16,
+        Draft.Draft4 => 17,
+        Draft.Draft6 => 18,
+        Draft.Draft7 => 19,
+    }
+}
+
+fn all_drafts() -> List<Draft> {
+    return [Draft.Draft3, Draft.Draft4, Draft.Draft6, Draft.Draft7, Draft.Draft201909, Draft.Draft202012]
+}
+
+// The draft whose dialect `uri` is, as referencing's `specification_with` reads it.
+fn spec_with(uri: String) -> Draft? {
+    let u = strip_hash(uri)
+    for d in all_drafts() {
+        if u == dialect(d) {
+            return some(d)
+        }
+    }
+    return none
+}
+
+// The meta-schemas come in six groups, one a draft, as bits in the order of `rank`: draft 3's is
+// bit 0 and 2020-12's, with its vocabularies, bit 5. A validator loads a group only once a `$ref`
+// reaches it, so that most never parse one.
+const ALL_META: u32 = 63
+
+// The groups that might hold `uri`: its draft's, or all of them for another of json-schema.org's.
+fn meta_groups(uri: String) -> u32 {
+    if uri.starts_with("https://json-schema.org/draft/2020-12/") {
+        return 32
+    }
+    if uri.starts_with("https://json-schema.org/draft/2019-09/") {
+        return 16
+    }
+    if uri.starts_with("http://json-schema.org/draft-07/") {
+        return 8
+    }
+    if uri.starts_with("http://json-schema.org/draft-06/") {
+        return 4
+    }
+    if uri.starts_with("http://json-schema.org/draft-04/") {
+        return 2
+    }
+    if uri.starts_with("http://json-schema.org/draft-03/") {
+        return 1
+    }
+    if uri.starts_with("http://json-schema.org/") or uri.starts_with("https://json-schema.org/") {
+        return ALL_META
+    }
+    return 0
+}
+
+// The group of meta-schema `i` of std.json.schema.meta.
+fn meta_group_of(i: usize) -> u32 {
+    if i < 7 {
+        return 16
+    }
+    if i < 16 {
+        return 32
+    }
+    return u32.wrap(1) << u32.wrap(i - 16)
+}
+
+// The fault that has the walk start again with the groups `uri` might be in, if any isn't loaded.
+fn check_meta(g: Graph, uri: String) ! SchemaFault {
+    let wanted = meta_groups(uri) & (ALL_META ^ g.meta)
+    if wanted != 0 {
+        fail fault("NeedMeta", "{wanted}")
+    }
+}
+
+// --- faults --------------------------------------------------------------------------------------
+
+fn fault(class: String, message: own String) -> SchemaFault {
+    return SchemaFault { kind: class.copy(), message: message }
+}
+
+fn type_error(message: own String) -> SchemaFault {
+    return fault("TypeError", message)
+}
+
+fn attr_error(t: String, name: String) -> SchemaFault {
+    return fault("AttributeError", "'{t}' object has no attribute '{name}'")
+}
+
+// A referencing error, as jsonschema wraps it: its class's name, then its message.
+fn unresolvable(class: String, message: String) -> SchemaFault {
+    return fault(class, "{class}: {message}")
+}
+
+
+// --- the registry, as nodes ----------------------------------------------------------------------
+
+struct Res {
+    node: u32
+    spec: Draft
+}
+
+struct Anc {
+    node: u32
+    spec: Draft
+    dynamic: bool
+}
+
+struct Graph {
+    nodes: List<Node>
+    // The resources and anchors before crawling, as the registry has them at first...
+    pre: Map<String, Res>
+    pre_anchors: Map<String, Anc>
+    // ...and after: each subschema with an id and each anchor found. Python crawls only when a
+    // `$ref` needs it, and so does this: `crawled` is whether it has.
+    post: Map<String, Res>
+    post_anchors: Map<String, Anc>
+    crawled: bool
+    uncrawled: List<String>
+    crawl_fault: SchemaFault?
+    // The groups of meta-schemas in it.
+    meta: u32
+    root: u32
+    root_uri: String
+    // What went wrong making the validator, which Python raises at once.
+    fault: SchemaFault?
+}
+
+fn empty_graph() -> Graph {
+    return Graph {
+        nodes: List<Node>(), pre: Map<String, Res>(), pre_anchors: Map<String, Anc>(),
+        post: Map<String, Res>(), post_anchors: Map<String, Anc>(), crawled: false,
+        uncrawled: List<String>(), crawl_fault: none, meta: 0, root: 0, root_uri: String(), fault: none,
+    }
+}
+
+fn anchor_key(uri: String, name: String) -> String {
+    return "{uri}\u{1}{name}"
+}
+
+// The registry a validator for `schema` has: the registry's schemas, then `schema` itself, at its
+// id. The meta-schemas come in later, as `$ref`s reach them.
+fn build(schema: Json, draft: Draft, entries: List<Entry>) -> Graph {
+    var g = empty_graph()
+    for e in entries {
+        if let f = e.fault {
+            if g.fault == none {
+                g.fault = some(f.copy())
+            }
+        }
+        let n = add_json(mut g, e.contents)
+        g.pre.insert(e.uri.copy(), Res { node: n, spec: e.spec })
+        add_uncrawled(mut g, e.uri)
+    }
+    let root = add_json(mut g, schema)
+    g.root = root
+    match res_id(g, draft, root) {
+        ok(id) => g.root_uri = id ?? String(),
+        err(f) => {
+            if g.fault == none {
+                g.fault = some(f)
+            }
+        },
+    }
+    let root_uri = g.root_uri.copy()
+    g.pre.insert(root_uri.copy(), Res { node: root, spec: draft })
+    add_uncrawled(mut g, root_uri)
+    return g
+}
+
+// Adds the meta-schemas of `groups`, as jsonschema-specifications' registry has them, crawled, under
+// what's registered: a schema at a meta-schema's URI stays.
+fn add_meta(g: mut Graph, groups: u32) {
+    let adding = groups & (ALL_META ^ g.meta)
+    g.meta = g.meta | adding
+    var items = List<CrawlItem>()
+    for i in 0..meta.COUNT {
+        if (meta_group_of(i) & adding) == 0 {
+            continue
+        }
+        match json.parse(meta.text(i)) {
+            ok(doc) => {
+                let n = add_json(mut g, doc)
+                let spec = match detect(doc, Draft.Draft202012) {
+                    ok(d) => d,
+                    err(_) => Draft.Draft202012,
+                }
+                match res_id(g, spec, n) {
+                    ok(id) => {
+                        if let u = id {
+                            items.push(CrawlItem { uri: u, node: n, spec: spec, text: false })
+                        }
+                    },
+                    err(_) => {},
+                }
+            },
+            err(_) => {},
+        }
+    }
+    var resources = Map<String, Res>()
+    for item in items {
+        resources.insert(item.uri.copy(), Res { node: item.node, spec: item.spec })
+    }
+    var anchors = Map<String, Anc>()
+    match crawl(g, mut resources, mut anchors, items) {
+        ok => {},
+        err(_) => {},
+    }
+    for (u, r) in resources {
+        if not g.pre.contains(u) {
+            g.pre.insert(u.copy(), r)
+        }
+    }
+    for (k, a) in anchors {
+        if not g.pre_anchors.contains(k) {
+            g.pre_anchors.insert(k.copy(), a)
+        }
+    }
+    g.crawled = false
+}
+
+// Crawls what's been registered, for the `$ref`s that need the registry crawled.
+fn crawl_all(g: mut Graph) {
+    var items = List<CrawlItem>()
+    for u in g.uncrawled {
+        let r = g.pre[u]
+        items.push(CrawlItem { uri: u.copy(), node: r.node, spec: r.spec, text: false })
+    }
+    var resources = g.pre.copy()
+    var anchors = g.pre_anchors.copy()
+    g.crawl_fault = none
+    match crawl(g, mut resources, mut anchors, items) {
+        ok => {
+            g.post = resources
+            g.post_anchors = anchors
+        },
+        err(f) => g.crawl_fault = some(f),
+    }
+    g.crawled = true
+}
+
+fn add_uncrawled(g: mut Graph, uri: String) {
+    for u in g.uncrawled {
+        if u == uri {
+            return
+        }
+    }
+    g.uncrawled.push(uri.copy())
+}
+
+// A resource still to crawl, found at `uri`. `text` marks a string a broken schema gave as a
+// subschema, which can't be crawled.
+struct CrawlItem {
+    uri: String
+    node: u32
+    spec: Draft
+    text: bool
+}
+
+// referencing's `Registry.crawl`: each resource's id joined to where it was found, its anchors,
+// and then its subresources, the last found first.
+fn crawl(g: Graph, resources: mut Map<String, Res>, anchors: mut Map<String, Anc>, items: own List<CrawlItem>) ! SchemaFault {
+    var todo = items
+    while let item = todo.pop() {
+        if item.text {
+            fail attr_error("str", "get")
+        }
+        var uri = item.uri.copy()
+        if let id = try res_id(g, item.spec, item.node) {
+            uri = try url_join(uri, id)
+            resources.insert(uri.copy(), Res { node: item.node, spec: item.spec })
+        }
+        let found = try anchors_in(g, item.spec, item.node)
+        for a in found {
+            anchors.insert(anchor_key(uri, a.name), Anc { node: item.node, spec: item.spec, dynamic: a.dynamic })
+        }
+        let subs = try subresources_of(g, item.spec, item.node)
+        for s in subs {
+            if s.text {
+                todo.push(CrawlItem { uri: uri.copy(), node: 0, spec: item.spec, text: true })
+            } else {
+                let spec = try detect_node(g, s.node, item.spec)
+                todo.push(CrawlItem { uri: uri.copy(), node: s.node, spec: spec, text: false })
+            }
+        }
+    }
+}
+
+// The draft a schema's `$schema` names, or `default`: referencing's `Specification.detect`.
+fn detect(v: Json, default: Draft) -> Draft ! SchemaFault {
+    return match v {
+        Json.Object(members) => {
+            if not members.contains("$schema") {
+                return default
+            }
+            return match members["$schema"] {
+                Json.Null => default,
+                Json.Str(s) => spec_with(s) ?? default,
+                _ => {
+                    fail attr_error(py_type_json(members["$schema"]), "rstrip")
+                },
+            }
+        },
+        _ => default,
+    }
+}
+
+fn detect_node(g: Graph, n: u32, default: Draft) -> Draft ! SchemaFault {
+    if not is_object(g, n) {
+        return default
+    }
+    let s = get_value(g, n, "$schema") else {
+        return default
+    }
+    if kind(g, s) != K_STR {
+        fail attr_error(py_type(g, s), "rstrip")
+    }
+    return spec_with(g.nodes[usize(s)].s) ?? default
+}
+
+// Python's `key in contents`, for any value.
+fn py_in(g: Graph, n: u32, key: String) -> bool ! SchemaFault {
+    let k = kind(g, n)
+    if k == K_OBJECT {
+        return member(g, n, key) != none
+    }
+    if k == K_ARRAY {
+        for c in g.nodes[usize(n)].kids {
+            if kind(g, c) == K_STR and g.nodes[usize(c)].s == key {
+                return true
+            }
+        }
+        return false
+    }
+    if k == K_STR {
+        return g.nodes[usize(n)].s.contains(key)
+    }
+    fail type_error("argument of type '{py_type(g, n)}' is not a container or iterable")
+}
+
+// A schema's id, as its draft's `id_of` gives it.
+fn id_of(g: Graph, spec: Draft, n: u32) -> String? ! SchemaFault {
+    let r = rank(spec)
+    let k = kind(g, n)
+    // An object with neither id key has no id in any draft.
+    if k == K_OBJECT and (g.nodes[usize(n)].flags & (F_ID | F_OLD_ID)) == 0 {
+        return none
+    }
+    if r >= 2019 {
+        if k == K_BOOL {
+            return none
+        }
+        if k != K_OBJECT {
+            fail attr_error(py_type(g, n), "get")
+        }
+        let id = get_value(g, n, "$id") else {
+            return none
+        }
+        if kind(g, id) != K_STR {
+            fail attr_error(py_type(g, id), "rstrip")
+        }
+        return some(g.nodes[usize(id)].s.copy())
+    }
+    if r >= 6 and k == K_BOOL {
+        return none
+    }
+    if try py_in(g, n, "$ref") {
+        return none
+    }
+    if k != K_OBJECT {
+        fail attr_error(py_type(g, n), "get")
+    }
+    let id = get_value(g, n, if r >= 6 { "$id" } else { "id" }) else {
+        return none
+    }
+    if kind(g, id) != K_STR {
+        fail attr_error(py_type(g, id), "startswith")
+    }
+    let s = g.nodes[usize(id)].s.copy()
+    if s.starts_with("#") {
+        return none
+    }
+    return some(s)
+}
+
+// `Resource.id()`: the id without the `#`s at its end.
+fn res_id(g: Graph, spec: Draft, n: u32) -> String? ! SchemaFault {
+    let id = try id_of(g, spec, n) else {
+        return none
+    }
+    return some(strip_hash(id))
+}
+
+struct Found {
+    name: String
+    dynamic: bool
+}
+
+// The anchors a schema has, as its draft's `anchors_in` finds them.
+fn anchors_in(g: Graph, spec: Draft, n: u32) -> List<Found> ! SchemaFault {
+    var out = List<Found>()
+    let r = rank(spec)
+    let k = kind(g, n)
+    if k == K_BOOL and r >= 6 {
+        return out
+    }
+    if k != K_OBJECT {
+        fail attr_error(py_type(g, n), "get")
+    }
+    if r >= 2019 {
+        if let a = get_value(g, n, "$anchor") {
+            if kind(g, a) == K_STR {
+                out.push(Found { name: g.nodes[usize(a)].s.copy(), dynamic: false })
+            }
+        }
+        if r == 2020 {
+            if let a = get_value(g, n, "$dynamicAnchor") {
+                if kind(g, a) == K_STR {
+                    out.push(Found { name: g.nodes[usize(a)].s.copy(), dynamic: true })
+                }
+            }
+        }
+        return out
+    }
+    let id = member(g, n, if r >= 6 { "$id" } else { "id" }) else {
+        return out
+    }
+    if kind(g, id) != K_STR {
+        fail attr_error(py_type(g, id), "startswith")
+    }
+    let s = g.nodes[usize(id)].s.copy()
+    if s.starts_with("#") {
+        out.push(Found { name: s[1..].copy(), dynamic: false })
+    }
+    return out
+}
+
+struct SubRes {
+    node: u32
+    text: bool
+}
+
+// The keywords whose value is a subschema, whose elements are, and whose members' values are, in
+// each draft, as referencing lists them.
+fn in_value(spec: Draft) -> List<String> {
+    return match spec {
+        Draft.Draft202012 => ["additionalProperties", "contains", "contentSchema", "else", "if", "items", "not", "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties"],
+        Draft.Draft201909 => ["additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "not", "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties"],
+        Draft.Draft7 => ["additionalItems", "additionalProperties", "contains", "else", "if", "not", "propertyNames", "then"],
+        Draft.Draft6 => ["additionalItems", "additionalProperties", "contains", "not", "propertyNames"],
+        Draft.Draft4 => ["not"],
+        Draft.Draft3 => List<String>(),
+    }
+}
+
+fn in_subarray(spec: Draft) -> List<String> {
+    return match spec {
+        Draft.Draft202012 => ["allOf", "anyOf", "oneOf", "prefixItems"],
+        Draft.Draft3 => ["extends"],
+        _ => ["allOf", "anyOf", "oneOf"],
+    }
+}
+
+fn in_subvalues(spec: Draft) -> List<String> {
+    if rank(spec) >= 2019 {
+        return ["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"]
+    }
+    return ["definitions", "patternProperties", "properties"]
+}
+
+// Adds what Python's `yield from value` gives, for a value that should be a list of schemas.
+fn yield_from(g: Graph, v: u32, out: mut List<SubRes>) ! SchemaFault {
+    let k = kind(g, v)
+    if k == K_ARRAY {
+        for c in g.nodes[usize(v)].kids {
+            out.push(SubRes { node: c, text: false })
+        }
+    } else if k == K_OBJECT or k == K_STR {
+        // A dict gives its keys and a string its characters: strings, not schemas.
+        let n = if k == K_OBJECT { g.nodes[usize(v)].keys.len() } else { g.nodes[usize(v)].s.len() }
+        for _ in 0..n {
+            out.push(SubRes { node: 0, text: true })
+        }
+    } else {
+        fail type_error("'{py_type(g, v)}' object is not iterable")
+    }
+}
+
+// A schema's subresources, as its draft's `subresources_of` gives them.
+fn subresources_of(g: Graph, spec: Draft, n: u32) -> List<SubRes> ! SchemaFault {
+    var out = List<SubRes>()
+    let r = rank(spec)
+    if kind(g, n) != K_OBJECT {
+        return out
+    }
+    for k in in_value(spec) {
+        if let v = member(g, n, k) {
+            out.push(SubRes { node: v, text: false })
+        }
+    }
+    for k in in_subarray(spec) {
+        if let v = member(g, n, k) {
+            try yield_from(g, v, mut out)
+        }
+    }
+    for k in in_subvalues(spec) {
+        if let v = member(g, n, k) {
+            if kind(g, v) != K_OBJECT {
+                fail attr_error(py_type(g, v), "values")
+            }
+            for c in g.nodes[usize(v)].kids {
+                out.push(SubRes { node: c, text: false })
+            }
+        }
+    }
+    if r == 2020 {
+        return out
+    }
+    if let items = get_value(g, n, "items") {
+        let k = kind(g, items)
+        if k == K_ARRAY or k == K_STR {
+            try yield_from(g, items, mut out)
+        } else {
+            out.push(SubRes { node: items, text: false })
+        }
+    }
+    if r == 2019 {
+        return out
+    }
+    if let deps = get_value(g, n, "dependencies") {
+        if kind(g, deps) != K_OBJECT {
+            fail attr_error(py_type(g, deps), "values")
+        }
+        if count(g, deps) > 0 and kind(g, kid(g, deps, 0)) == K_OBJECT {
+            for c in g.nodes[usize(deps)].kids {
+                out.push(SubRes { node: c, text: false })
+            }
+        }
+    }
+    if r <= 4 {
+        for k in ["additionalItems", "additionalProperties"] {
+            if let v = member(g, n, k) {
+                if kind(g, v) == K_OBJECT {
+                    out.push(SubRes { node: v, text: false })
+                }
+            }
+        }
+    }
+    return out
+}
+
+// --- resolving references ------------------------------------------------------------------------
+
+// referencing's `Resolver`: the base URI, as a number in the context's list of them, the URIs it
+// came from, most recent first, as a list in the context, and whether its registry has been
+// crawled.
+struct Resolver {
+    base: u32
+    prev: i64
+    crawled: bool
+}
+
+struct Scope {
+    uri: u32
+    next: i64
+}
+
+struct Resolved {
+    node: u32
+    res: Resolver
+}
+
+fn url_join(base: String, url: String) -> String ! SchemaFault {
+    return match urljoin(base, url) {
+        ok(u) => u,
+        err(e) => {
+            fail fault("ValueError", e)
+        },
+    }
+}
+
+// `Resolver._evolve`: a resolver at `uri`, which remembers the base it came from.
+fn evolve_res(cx: mut Ctx, r: Resolver, uri: String, crawled: bool) -> Resolver {
+    let b = intern(mut cx, uri)
+    var prev = r.prev
+    if not cx.uris[usize(r.base)].is_empty() and (prev < 0 or b != r.base) {
+        cx.scopes.push(Scope { uri: r.base, next: prev })
+        prev = i64.wrap(cx.scopes.len() - 1)
+    }
+    return Resolver { base: b, prev: prev, crawled: crawled }
+}
+
+// `Resolver.in_subresource`: the resolver for a subschema, at its id if it has one. The `bool` is
+// whether that made a new resolver.
+fn in_subresource(g: Graph, cx: mut Ctx, r: Resolver, spec: Draft, n: u32) -> (Resolver, bool) ! SchemaFault {
+    let id = try res_id(g, spec, n) else {
+        return (r, false)
+    }
+    let base = try url_join(cx.uris[usize(r.base)], id)
+    let b = intern(mut cx, base)
+    return (Resolver { base: b, prev: r.prev, crawled: r.crawled }, true)
+}
+
+// `Registry.get_or_retrieve`: the resource at `uri`, and whether the registry is crawled now.
+fn retrieve(g: Graph, uri: String, crawled: bool, ref: String) -> (Res, bool) ! SchemaFault {
+    if not crawled {
+        if g.pre.contains(uri) {
+            return (g.pre[uri], false)
+        }
+    } else if g.post.contains(uri) {
+        return (g.post[uri], true)
+    }
+    // Without its meta-schemas, a meta-schema's URI isn't found where Python finds it, before
+    // crawling: they're added, and the walk starts again.
+    try check_meta(g, uri)
+    if not g.crawled {
+        fail fault("NeedCrawl", "")
+    }
+    if let f = g.crawl_fault {
+        fail f.copy()
+    }
+    if g.post.contains(uri) {
+        return (g.post[uri], true)
+    }
+    fail unresolvable("Unresolvable", ref)
+}
+
+// `Registry.anchor`: the anchor `name` in the resource at `uri`.
+fn find_anchor(g: Graph, uri: String, name: String, crawled: bool) -> (Anc, bool) ! SchemaFault {
+    let key = anchor_key(uri, name)
+    if not crawled {
+        if g.pre_anchors.contains(key) {
+            return (g.pre_anchors[key], false)
+        }
+    } else if g.post_anchors.contains(key) {
+        return (g.post_anchors[key], true)
+    }
+    try check_meta(g, uri)
+    if not g.crawled {
+        fail fault("NeedCrawl", "")
+    }
+    if let f = g.crawl_fault {
+        fail f.copy()
+    }
+    if g.post_anchors.contains(key) {
+        return (g.post_anchors[key], true)
+    }
+    let u = strip_hash(uri)
+    if not g.post.contains(u) {
+        try check_meta(g, u)
+        fail fault("NoSuchResource", repr_str(uri))
+    }
+    let res = g.post[u]
+    if let canonical = try res_id(g, res.spec, res.node) {
+        let key2 = anchor_key(canonical, name)
+        if g.post_anchors.contains(key2) {
+            return (g.post_anchors[key2], true)
+        }
+    }
+    if name.contains("/") {
+        fail unresolvable("InvalidAnchor", "'#{name}' is not a valid anchor, neither as a plain name anchor nor as a JSON Pointer. You may have intended to use '#/{name}', as the slash is required *before each segment* of a JSON pointer.")
+    }
+    fail unresolvable("NoSuchAnchor", "{repr_str(name)} does not exist within {repr_node(g, res.node)}")
+}
+
+// `Resolver.lookup`: what `ref` names, from `r`'s base.
+fn lookup(g: Graph, cx: mut Ctx, r: Resolver, ref: String) -> Resolved ! SchemaFault {
+    var uri = String()
+    var fragment = String()
+    if ref.starts_with("#") {
+        uri = cx.uris[usize(r.base)].copy()
+        fragment = ref[1..].copy()
+    } else {
+        let joined = try url_join(cx.uris[usize(r.base)], ref)
+        match urldefrag(joined) {
+            ok(parts) => {
+                uri = parts.0.copy()
+                fragment = parts.1.copy()
+            },
+            err(e) => {
+                fail fault("ValueError", e)
+            },
+        }
+    }
+    let (res, crawled) = try retrieve(g, uri, r.crawled, ref)
+    if fragment.starts_with("/") {
+        let r2 = evolve_res(mut cx, r, uri, crawled)
+        return try pointer(g, mut cx, res, fragment, r2)
+    }
+    if not fragment.is_empty() {
+        let (anc, crawled2) = try find_anchor(g, uri, fragment, crawled)
+        let r2 = evolve_res(mut cx, r, uri, crawled2)
+        if anc.dynamic {
+            return try dynamic_resolve(g, mut cx, anc, fragment, r2)
+        }
+        return Resolved { node: anc.node, res: r2 }
+    }
+    let r2 = evolve_res(mut cx, r, uri, crawled)
+    return Resolved { node: res.node, res: r2 }
+}
+
+// `DynamicAnchor.resolve`: the outermost schema in the dynamic scope with the same dynamic
+// anchor, or this one.
+fn dynamic_resolve(g: Graph, cx: mut Ctx, anc: Anc, name: String, r: Resolver) -> Resolved ! SchemaFault {
+    var node = anc.node
+    var spec = anc.spec
+    var s = r.prev
+    while s >= 0 {
+        let at = usize.wrap(s)
+        let uri = cx.uris[usize(cx.scopes[at].uri)].copy()
+        s = cx.scopes[at].next
+        match find_anchor(g, uri, name, r.crawled) {
+            ok(found) => {
+                if found.0.dynamic {
+                    node = found.0.node
+                    spec = found.0.spec
+                }
+            },
+            err(f) => {
+                if f.kind != "NoSuchAnchor" {
+                    fail f
+                }
+            },
+        }
+    }
+    let (r2, _) = try in_subresource(g, mut cx, r, spec, node)
+    return Resolved { node: node, res: r2 }
+}
+
+// referencing's `lookup_recursive_ref`, for draft 2019-09's `$recursiveRef`.
+fn lookup_recursive(g: Graph, cx: mut Ctx, r: Resolver) -> Resolved ! SchemaFault {
+    var resolved = try lookup(g, mut cx, r, "#")
+    if recursive_anchor(g, resolved.node) {
+        var s = r.prev
+        while s >= 0 {
+            let at = usize.wrap(s)
+            let uri = cx.uris[usize(cx.scopes[at].uri)].copy()
+            s = cx.scopes[at].next
+            let next = try lookup(g, mut cx, r, uri)
+            if not recursive_anchor(g, next.node) {
+                break
+            }
+            resolved = next
+        }
+    }
+    return resolved
+}
+
+fn recursive_anchor(g: Graph, n: u32) -> bool {
+    if not is_object(g, n) {
+        return false
+    }
+    let a = member(g, n, "$recursiveAnchor") else {
+        return false
+    }
+    return truthy(g, a)
+}
+
+// Python's `int(text)`, for a JSON Pointer's step into an array: white space around it, a sign,
+// and digits with single `_`s between them. `none` if it isn't one; a number too big for an `i64`
+// is `i64.MAX`, which no array reaches.
+fn py_int(text: String) -> i64? {
+    var runes = List<rune>()
+    for r in text.runes() {
+        runes.push(r)
+    }
+    var a: usize = 0
+    var b = runes.len()
+    while a < b and is_space(u32(runes[a])) {
+        a += 1
+    }
+    while b > a and is_space(u32(runes[b - 1])) {
+        b -= 1
+    }
+    var negative = false
+    if a < b and (runes[a] == '+' or runes[a] == '-') {
+        negative = runes[a] == '-'
+        a += 1
+    }
+    if a >= b {
+        return none
+    }
+    var v: i64 = 0
+    var big = false
+    var last_digit = false
+    for i in a..b {
+        let r = runes[i]
+        if r == '_' {
+            if not last_digit or i + 1 >= b {
+                return none
+            }
+            last_digit = false
+            continue
+        }
+        if r < '0' or r > '9' {
+            return none
+        }
+        last_digit = true
+        let d = i64(u32(r) - 48)
+        if v > 922337203685477579 {
+            big = true
+        } else {
+            v = v * 10 + d
+        }
+    }
+    if big {
+        return some(9223372036854775807)
+    }
+    return some(if negative { 0 - v } else { v })
+}
+
+// `Resource.pointer`: the part of `res` the JSON Pointer names, with the resolver each subschema
+// with an id on the way gives.
+fn pointer(g: Graph, cx: mut Ctx, res: Res, ptr: String, r: Resolver) -> Resolved ! SchemaFault {
+    var contents = res.node
+    var rr = r
+    var segments = List<PathPart>()
+    let text = decode(ptr[1..])
+    for seg in text.split("/") {
+        let k = kind(g, contents)
+        if k == K_ARRAY or k == K_STR {
+            let idx = py_int(seg) else {
+                fail fault("ValueError", "invalid literal for int() with base 10: {repr_str(seg)}")
+            }
+            let len = if k == K_ARRAY { i64.wrap(count(g, contents)) } else { i64.wrap(rune_len(g.nodes[usize(contents)].s)) }
+            var at = idx
+            if at < 0 {
+                at += len
+            }
+            if at < 0 or at >= len {
+                fail unresolvable("PointerToNowhere", pointer_message(g, ptr, res.node))
+            }
+            if k == K_STR {
+                fail attr_error("str", "get")
+            }
+            contents = kid(g, contents, usize.wrap(at))
+            segments.push(PathPart.Index(usize.wrap(at)))
+        } else if k == K_OBJECT {
+            let key = seg.replace("~1", "/").replace("~0", "~")
+            let next = member(g, contents, key) else {
+                fail unresolvable("PointerToNowhere", pointer_message(g, ptr, res.node))
+            }
+            contents = next
+            segments.push(PathPart.Key(key))
+        } else {
+            fail type_error("'{py_type(g, contents)}' object is not subscriptable")
+        }
+        let (r2, changed) = try maybe_in_subresource(g, mut cx, res.spec, segments, rr, contents)
+        rr = r2
+        if changed {
+            segments.clear()
+        }
+    }
+    return Resolved { node: contents, res: rr }
+}
+
+fn pointer_message(g: Graph, ptr: String, n: u32) -> String {
+    var m = "{repr_str(ptr)} does not exist within {repr_node(g, n)}"
+    if ptr == "/" {
+        m.push_str(". The pointer '/' is a valid JSON Pointer but it points to an empty string property ''. If you intended to point to the entire resource, you should use '#'.")
+    }
+    return m
+}
+
+// What `key` holds in `spec`'s schemas, as `maybe_in_subresource` sees it: 1 a subschema, 2 a list
+// of them, 3 a dict of them, 0 none of these. These are `in_value`, `in_subarray` and
+// `in_subvalues`, checked without making the lists, but with `additionalItems` and
+// `additionalProperties` holding subschemas in drafts 3 and 4 too, as they do there.
+fn walk_class(spec: Draft, key: String) -> u8 {
+    let r = rank(spec)
+    if r <= 4 {
+        if key == "additionalItems" or key == "additionalProperties" or (r == 4 and key == "not") {
+            return 1
+        }
+    } else {
+        if key == "additionalProperties" or key == "contains" or key == "not" or key == "propertyNames" {
+            return 1
+        }
+        if r != 2020 and key == "additionalItems" {
+            return 1
+        }
+        if r >= 7 and (key == "if" or key == "then" or key == "else") {
+            return 1
+        }
+        if r >= 2019 and (key == "contentSchema" or key == "unevaluatedItems" or key == "unevaluatedProperties") {
+            return 1
+        }
+        if r == 2020 and key == "items" {
+            return 1
+        }
+    }
+    if key == "allOf" or key == "anyOf" or key == "oneOf" {
+        return if r == 3 { 0 } else { 2 }
+    }
+    if (r == 3 and key == "extends") or (r == 2020 and key == "prefixItems") {
+        return 2
+    }
+    if key == "definitions" or key == "patternProperties" or key == "properties" {
+        return 3
+    }
+    if r >= 2019 and (key == "$defs" or key == "dependentSchemas") {
+        return 3
+    }
+    return 0
+}
+
+// `maybe_in_subresource`: the resolver for the subschema at the end of `segments`, if the way
+// there is through keywords that hold subschemas.
+fn maybe_in_subresource(g: Graph, cx: mut Ctx, spec: Draft, segments: List<PathPart>, r: Resolver, target: u32) -> (Resolver, bool) ! SchemaFault {
+    let r0 = rank(spec)
+    var i: usize = 0
+    while i < segments.len() {
+        match segments[i] {
+            PathPart.Index(_) => return (r, false),
+            PathPart.Key(seg) => {
+                if r0 != 2020 and is_object(g, target) and (seg == "items" or (r0 <= 7 and seg == "dependencies")) {
+                    return try in_subresource(g, mut cx, r, spec, target)
+                }
+                let c = walk_class(spec, seg)
+                if c == 0 {
+                    return (r, false)
+                }
+                if c > 1 {
+                    if i + 1 >= segments.len() {
+                        return (r, false)
+                    }
+                    i += 1
+                }
+            },
+        }
+        i += 1
+    }
+    return try in_subresource(g, mut cx, r, spec, target)
+}
+
+// --- walking an instance -------------------------------------------------------------------------
+
+// What a walk keeps: the URIs resolvers have been at, the dynamic scopes, the regexes compiled so
+// far, and whether errors are only being counted, as in `is_valid`, so need no message.
+struct Ctx {
+    uris: List<String>
+    uri_ids: Map<String, u32>
+    scopes: List<Scope>
+    // The `$ref`s looked up so far, by the reference's node and the base URI, each the first of a
+    // chain through `ref_hits` of the other things a lookup depends on.
+    refs: Map<u64, u32>
+    ref_hits: List<RefHit>
+    rx: List<Regex>
+    rx_ids: Map<String, i64>
+    rx_errs: List<SchemaFault>
+    quiet: u32
+    formats: bool
+}
+
+struct RefHit {
+    prev: i64
+    crawled: bool
+    found: Resolved
+    next: i64
+}
+
+fn new_ctx() -> Ctx {
+    return Ctx {
+        uris: List<String>(), uri_ids: Map<String, u32>(), scopes: List<Scope>(),
+        refs: Map<u64, u32>(), ref_hits: List<RefHit>(), rx: List<Regex>(),
+        rx_ids: Map<String, i64>(), rx_errs: List<SchemaFault>(), quiet: 0, formats: false,
+    }
+}
+
+fn reset_ctx(cx: mut Ctx, formats: bool) {
+    cx.uris.clear()
+    cx.uri_ids.clear()
+    cx.scopes.clear()
+    cx.refs.clear()
+    cx.ref_hits.clear()
+    cx.quiet = 0
+    cx.formats = formats
+    _ = intern(mut cx, "")
+}
+
+// `lookup` of the `$ref` or `$dynamicRef` string at node `v`, remembered for the walk. What a lookup
+// gives depends only on the reference, the resolver and the registry, which doesn't change while a
+// walk goes; the scopes a resolver points into are never changed, only added to, so a resolver
+// found before is as good as one made again.
+fn lookup_ref(g: Graph, cx: mut Ctx, r: Resolver, v: u32) -> Resolved ! SchemaFault {
+    let key = (u64(v) << 32) | u64(r.base)
+    var first: i64 = -1
+    if cx.refs.contains(key) {
+        first = i64(cx.refs[key])
+        var at = first
+        while at >= 0 {
+            let h = cx.ref_hits[usize.wrap(at)]
+            if h.prev == r.prev and h.crawled == r.crawled {
+                return h.found
+            }
+            at = h.next
+        }
+    }
+    let found = try lookup(g, mut cx, r, g.nodes[usize(v)].s)
+    cx.ref_hits.push(RefHit { prev: r.prev, crawled: r.crawled, found: found, next: first })
+    cx.refs.insert(key, u32.wrap(cx.ref_hits.len() - 1))
+    return found
+}
+
+fn intern(cx: mut Ctx, uri: String) -> u32 {
+    if cx.uri_ids.contains(uri) {
+        return cx.uri_ids[uri]
+    }
+    let id = u32.wrap(cx.uris.len())
+    cx.uris.push(uri.copy())
+    cx.uri_ids.insert(uri.copy(), id)
+    return id
+}
+
+// Python's `re.search(pattern, text)`, with the pattern compiled once.
+fn search(cx: mut Ctx, pattern: String, text: String) -> bool ! SchemaFault {
+    if not cx.rx_ids.contains(pattern) {
+        match Regex.python(pattern) {
+            ok(re) => {
+                cx.rx.push(re)
+                cx.rx_ids.insert(pattern.copy(), i64.wrap(cx.rx.len() - 1))
+            },
+            err(e) => {
+                cx.rx_errs.push(fault("PatternError", pattern_message(pattern, e.message, e.column)))
+                cx.rx_ids.insert(pattern.copy(), 0 - i64.wrap(cx.rx_errs.len()))
+            },
+        }
+    }
+    let at = cx.rx_ids[pattern]
+    if at < 0 {
+        fail cx.rx_errs[usize.wrap(-1 - at)].copy()
+    }
+    return cx.rx[usize.wrap(at)].is_match(text)
+}
+
+// `re.error`'s text: the message, where in the pattern, and its line and column if it has lines.
+fn pattern_message(pattern: String, message: String, column: usize) -> String {
+    if column == 0 {
+        return message.copy()
+    }
+    let pos = column - 1
+    var m = "{message} at position {pos}"
+    if pattern.contains("\n") {
+        var line: usize = 1
+        var col: usize = 1
+        var i: usize = 0
+        for r in pattern.runes() {
+            if i == pos {
+                break
+            }
+            if r == '\n' {
+                line += 1
+                col = 1
+            } else {
+                col += 1
+            }
+            i += 1
+        }
+        m.push_str(" (line {line}, column {col})")
+    }
+    return m
+}
+
+// A validator: its draft, its schema, and its resolver.
+struct St {
+    cls: Draft
+    schema: u32
+    res: Resolver
+}
+
+// A step `descend` adds to the front of its errors' paths, named without copying its text, which
+// only an error needs: none (0), an index (1), key `j` of node `n` (2), the instance's key given
+// beside it (3), `then` (4) or `else` (5).
+struct At {
+    kind: u8
+    n: u32
+    j: usize
+}
+
+fn no_at() -> At {
+    return At { kind: 0, n: 0, j: 0 }
+}
+
+fn at_index(i: usize) -> At {
+    return At { kind: 1, n: 0, j: i }
+}
+
+fn at_key() -> At {
+    return At { kind: 3, n: 0, j: 0 }
+}
+
+fn at_part(g: Graph, at: At, key: String) -> PathPart {
+    if at.kind == 1 {
+        return PathPart.Index(at.j)
+    }
+    if at.kind == 2 {
+        return PathPart.Key(g.nodes[usize(at.n)].keys[at.j].copy())
+    }
+    if at.kind == 3 {
+        return PathPart.Key(key.copy())
+    }
+    return PathPart.Key(if at.kind == 4 { String("then") } else { String("else") })
+}
+
+// A keyword's value as an error records it: a node, a number jsonschema worked out, or `None`.
+enum Value {
+    Node(u32)
+    Int(i64)
+    Nothing
+}
+
+// An error as the walk makes it, its paths backwards so that each level adds to their end.
+struct Fail {
+    message: String
+    keyword: String?
+    value: Value
+    instance: Json
+    schema: u32
+    draft: Draft
+    rpath: List<PathPart>
+    rspath: List<PathPart>
+    context: List<Fail>
+}
+
+fn blank() -> Fail {
+    return Fail {
+        message: String(), keyword: none, value: Value.Nothing, instance: Json.Null, schema: 0,
+        draft: Draft.Draft202012, rpath: List<PathPart>(), rspath: List<PathPart>(), context: List<Fail>(),
+    }
+}
+
+fn err_at(ev: St, name: String, v: Value, inst: Json, message: own String) -> Fail {
+    return Fail {
+        message: message, keyword: some(name.copy()), value: v, instance: inst.copy(), schema: ev.schema,
+        draft: ev.cls, rpath: List<PathPart>(), rspath: List<PathPart>(), context: List<Fail>(),
+    }
+}
+
+fn quiet(cx: Ctx) -> bool {
+    return cx.quiet > 0
+}
+
+fn push_false(cx: Ctx, st: St, n: u32, inst: Json, out: mut List<Fail>) {
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    out.push(Fail {
+        message: "False schema does not allow {repr(inst)}", keyword: none, value: Value.Nothing,
+        instance: inst.copy(), schema: n, draft: st.cls, rpath: List<PathPart>(), rspath: List<PathPart>(),
+        context: List<Fail>(),
+    })
+}
+
+// `Validator.iter_errors` for the validator `st`.
+fn run(g: Graph, cx: mut Ctx, st: St, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let n = st.schema
+    if kind(g, n) == K_BOOL {
+        if not g.nodes[usize(n)].b and out.len() < limit {
+            push_false(cx, st, n, inst, mut out)
+        }
+        return
+    }
+    try walk(g, mut cx, st.cls, st, inst, no_at(), no_at(), "", mut out, limit)
+}
+
+// The keywords of `ev`'s schema, as `outer`'s `applicable_validators` gives them and `ev`'s draft
+// has them, each error given its keyword, and `path` and `spath` at the front of its paths.
+fn walk(g: Graph, cx: mut Ctx, outer: Draft, ev: St, inst: Json, path: At, spath: At, key: String, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let n = ev.schema
+    let ni = usize(n)
+    if g.nodes[ni].kind != K_OBJECT {
+        fail attr_error(py_type(g, n), if rank(outer) <= 7 { "get" } else { "items" })
+    }
+    var from: usize = 0
+    var to = g.nodes[ni].keys.len()
+    if rank(outer) <= 7 {
+        for j in 0..to {
+            if g.nodes[ni].kws[j] == KW_REF {
+                if kind(g, g.nodes[ni].kids[j]) != K_NULL {
+                    from = j
+                    to = j + 1
+                }
+                break
+            }
+        }
+    }
+    for j in from..to {
+        if out.len() >= limit {
+            return
+        }
+        let k = g.nodes[ni].kws[j]
+        if not has_kw(ev.cls, k) {
+            continue
+        }
+        let before = out.len()
+        try keyword(g, mut cx, ev, k, g.nodes[ni].kids[j], inst, mut out, limit)
+        if not quiet(cx) {
+            for e in before..out.len() {
+                if k != KW_IF and k != KW_REF {
+                    out[e].rspath.push(PathPart.Key(g.nodes[ni].keys[j].copy()))
+                }
+                if path.kind != 0 {
+                    out[e].rpath.push(at_part(g, path, key))
+                }
+                if spath.kind != 0 {
+                    out[e].rspath.push(at_part(g, spath, key))
+                }
+            }
+        }
+    }
+}
+
+// `Validator.descend`: `inst` against subschema `n`, at `n`'s id unless `resolver` is given.
+fn descend(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, path: At, spath: At, key: String, resolver: Resolver?, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    if n == TEXT {
+        fail attr_error("str", "get")
+    }
+    if kind(g, n) == K_BOOL {
+        if not g.nodes[usize(n)].b and out.len() < limit {
+            push_false(cx, st, n, inst, mut out)
+        }
+        return
+    }
+    // A subschema with no id and no `$schema`, the usual kind, keeps the resolver and draft.
+    if resolver == none and g.nodes[usize(n)].kind == K_OBJECT and (g.nodes[usize(n)].flags & (F_ID | F_OLD_ID | F_SCHEMA)) == 0 {
+        try walk(g, mut cx, st.cls, St { cls: st.cls, schema: n, res: st.res }, inst, path, spath, key, mut out, limit)
+        return
+    }
+    var res = st.res
+    if let r = resolver {
+        res = r
+    } else {
+        let (r2, _) = try in_subresource(g, mut cx, st.res, st.cls, n)
+        res = r2
+    }
+    let cls = try validator_for_node(g, n, st.cls)
+    let ev = St { cls: cls, schema: n, res: res }
+    try walk(g, mut cx, st.cls, ev, inst, path, spath, key, mut out, limit)
+}
+
+// `validator.evolve(schema=n).is_valid(inst)`: the same resolver, and `n`'s own draft's keywords.
+fn evolve_valid(g: Graph, cx: mut Ctx, st: St, n: u32, inst: Json) -> bool ! SchemaFault {
+    if n == TEXT {
+        fail attr_error("str", "get")
+    }
+    let cls = try validator_for_node(g, n, st.cls)
+    let ev = St { cls: cls, schema: n, res: st.res }
+    var errs = List<Fail>()
+    cx.quiet += 1
+    try run(g, mut cx, ev, inst, mut errs, 1)
+    cx.quiet -= 1
+    return errs.is_empty()
+}
+
+// Whether `validator.descend(inst, n)` gives no first error.
+fn descend_valid(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32) -> bool ! SchemaFault {
+    var errs = List<Fail>()
+    cx.quiet += 1
+    try descend(g, mut cx, st, inst, n, no_at(), no_at(), "", none, mut errs, 1)
+    cx.quiet -= 1
+    return errs.is_empty()
+}
+
+// Every error of `validator.descend(inst, n, schema_path=spath)`, as `list(...)` takes them.
+fn descend_all(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, spath: At) -> List<Fail> ! SchemaFault {
+    var errs = List<Fail>()
+    try descend(g, mut cx, st, inst, n, no_at(), spath, "", none, mut errs, MAX)
+    return errs
+}
+
+// `validator_for(schema, default)`, for a node.
+fn validator_for_node(g: Graph, n: u32, default: Draft) -> Draft ! SchemaFault {
+    let k = kind(g, n)
+    if k == K_BOOL {
+        return default
+    }
+    if k == K_OBJECT {
+        if (g.nodes[usize(n)].flags & F_SCHEMA) == 0 {
+            return default
+        }
+        let s = member(g, n, "$schema") else {
+            return default
+        }
+        return try dialect_draft(node_json(g, s), default)
+    }
+    if try py_in(g, n, "$schema") {
+        fail type_error("list indices must be integers or slices, not str")
+    }
+    return default
+}
+
+// The draft whose meta-schema `uri` is, normalized as jsonschema's `URIDict` does it, through
+// `urlsplit(uri).geturl()`, or `default`.
+fn dialect_draft(uri: Json, default: Draft) -> Draft ! SchemaFault {
+    var text = String()
+    match uri {
+        Json.Str(s) => text = s.copy(),
+        _ => {
+            if py_truthy(uri) {
+                fail attr_error(py_type_json(uri), "decode")
+            }
+        },
+    }
+    let normal = match urlsplit(text) {
+        ok(parts) => urlunsplit(parts),
+        err(e) => {
+            fail fault("ValueError", e)
+        },
+    }
+    for d in all_drafts() {
+        if normal == dialect(d) {
+            return d
+        }
+    }
+    return default
+}
+
+// --- the keywords --------------------------------------------------------------------------------
+
+// Keyword `k`, with value `v`, of validator `ev`, as jsonschema's function for it in `ev`'s
+// draft checks `inst`.
+fn keyword(g: Graph, cx: mut Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let r = rank(ev.cls)
+    if k == KW_TYPE {
+        if r == 3 {
+            try kw_type3(g, mut cx, ev, v, inst, mut out)
+            return
+        }
+        try kw_type(g, cx, ev, v, inst, mut out)
+        return
+    }
+    if k == KW_PROPERTIES {
+        try kw_properties(g, mut cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_REQUIRED {
+        try kw_required(g, cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_REF or k == KW_DYNAMIC_REF {
+        if kind(g, v) != K_STR {
+            fail attr_error(py_type(g, v), "startswith")
+        }
+        let resolved = try lookup_ref(g, mut cx, ev.res, v)
+        try descend(g, mut cx, ev, inst, resolved.node, no_at(), no_at(), "", some(resolved.res), mut out, limit)
+        return
+    }
+    if k == KW_RECURSIVE_REF {
+        let resolved = try lookup_recursive(g, mut cx, ev.res)
+        try descend(g, mut cx, ev, inst, resolved.node, no_at(), no_at(), "", some(resolved.res), mut out, limit)
+        return
+    }
+    if k == KW_ITEMS {
+        try kw_items(g, mut cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_ADDITIONAL_PROPERTIES {
+        try kw_additional_properties(g, mut cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_ENUM {
+        try kw_enum(g, cx, ev, v, inst, mut out)
+        return
+    }
+    if k == KW_CONST {
+        if not equal_node(g, v, inst) {
+            if quiet(cx) {
+                out.push(blank())
+            } else {
+                out.push(err_at(ev, "const", Value.Node(v), inst, "{repr_node(g, v)} was expected"))
+            }
+        }
+        return
+    }
+    if k == KW_ALL_OF {
+        let subs = try schema_list(g, v)
+        for i in 0..subs.len() {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, inst, subs[i], no_at(), at_index(i), "", none, mut out, limit)
+        }
+        return
+    }
+    if k == KW_ANY_OF {
+        let subs = try schema_list(g, v)
+        var all = List<Fail>()
+        for i in 0..subs.len() {
+            let errs = try descend_all(g, mut cx, ev, inst, subs[i], at_index(i))
+            if errs.is_empty() {
+                return
+            }
+            if not quiet(cx) {
+                all.extend(errs)
+            }
+        }
+        if quiet(cx) {
+            out.push(blank())
+            return
+        }
+        var e = err_at(ev, "anyOf", Value.Node(v), inst, "{repr(inst)} is not valid under any of the given schemas")
+        e.context = all
+        out.push(e)
+        return
+    }
+    if k == KW_ONE_OF {
+        try kw_one_of(g, mut cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_NOT {
+        if try evolve_valid(g, mut cx, ev, v, inst) {
+            if quiet(cx) {
+                out.push(blank())
+            } else {
+                out.push(err_at(ev, "not", Value.Node(v), inst, "{repr(inst)} should not be valid under {repr_node(g, v)}"))
+            }
+        }
+        return
+    }
+    if k == KW_IF {
+        if try evolve_valid(g, mut cx, ev, v, inst) {
+            if let then = member(g, ev.schema, "then") {
+                try descend(g, mut cx, ev, inst, then, no_at(), At { kind: 4, n: 0, j: 0 }, "", none, mut out, limit)
+            }
+        } else if let other = member(g, ev.schema, "else") {
+            try descend(g, mut cx, ev, inst, other, no_at(), At { kind: 5, n: 0, j: 0 }, "", none, mut out, limit)
+        }
+        return
+    }
+    if k == KW_MINIMUM or k == KW_MAXIMUM or k == KW_EXCLUSIVE_MINIMUM or k == KW_EXCLUSIVE_MAXIMUM {
+        try kw_bound(g, cx, ev, k, v, inst, mut out)
+        return
+    }
+    if k == KW_MULTIPLE_OF or k == KW_DIVISIBLE_BY {
+        try kw_multiple_of(g, cx, ev, k, v, inst, mut out)
+        return
+    }
+    if k == KW_MIN_LENGTH or k == KW_MAX_LENGTH or k == KW_MIN_ITEMS or k == KW_MAX_ITEMS or k == KW_MIN_PROPERTIES or k == KW_MAX_PROPERTIES {
+        try kw_size(g, cx, ev, k, v, inst, mut out)
+        return
+    }
+    if k == KW_PATTERN {
+        if let Json.Str(s) = inst {
+            if kind(g, v) != K_STR {
+                let t = py_type(g, v)
+                if t == "list" or t == "dict" {
+                    fail type_error("cannot use 'tuple' as a dict key (unhashable type: '{t}')")
+                }
+                fail type_error("first argument must be string or compiled pattern")
+            }
+            if not try search(mut cx, g.nodes[usize(v)].s, s) {
+                if quiet(cx) {
+                    out.push(blank())
+                } else {
+                    out.push(err_at(ev, "pattern", Value.Node(v), inst, "{repr(inst)} does not match {repr_node(g, v)}"))
+                }
+            }
+        }
+        return
+    }
+    if k == KW_PATTERN_PROPERTIES {
+        if let Json.Object(members) = inst {
+            if kind(g, v) != K_OBJECT {
+                fail attr_error(py_type(g, v), "items")
+            }
+            for j in 0..count(g, v) {
+                let sub = kid(g, v, j)
+                for (key, value) in members {
+                    if out.len() >= limit {
+                        return
+                    }
+                    if try search(mut cx, g.nodes[usize(v)].keys[j], key) {
+                        try descend(g, mut cx, ev, value, sub, at_key(), At { kind: 2, n: v, j: j }, key, none, mut out, limit)
+                    }
+                }
+            }
+        }
+        return
+    }
+    if k == KW_PROPERTY_NAMES {
+        if let Json.Object(members) = inst {
+            for (key, _) in members {
+                if out.len() >= limit {
+                    return
+                }
+                let name = Json.Str(key.copy())
+                try descend(g, mut cx, ev, name, v, no_at(), no_at(), "", none, mut out, limit)
+            }
+        }
+        return
+    }
+    if k == KW_UNIQUE_ITEMS {
+        if truthy(g, v) {
+            if let Json.Array(items) = inst {
+                if not uniq(items) {
+                    if quiet(cx) {
+                        out.push(blank())
+                    } else {
+                        out.push(err_at(ev, "uniqueItems", Value.Node(v), inst, "{repr(inst)} has non-unique elements"))
+                    }
+                }
+            }
+        }
+        return
+    }
+    if k == KW_FORMAT {
+        if cx.formats {
+            try kw_format(g, mut cx, ev, v, inst, mut out)
+        }
+        return
+    }
+    if k == KW_CONTAINS {
+        try kw_contains(g, mut cx, ev, v, inst, mut out)
+        return
+    }
+    if k == KW_PREFIX_ITEMS {
+        if let Json.Array(items) = inst {
+            let subs = try schema_list(g, v)
+            var i: usize = 0
+            while i < items.len() and i < subs.len() {
+                if out.len() >= limit {
+                    return
+                }
+                try descend(g, mut cx, ev, items[i], subs[i], at_index(i), at_index(i), "", none, mut out, limit)
+                i += 1
+            }
+        }
+        return
+    }
+    if k == KW_ADDITIONAL_ITEMS {
+        try kw_additional_items(g, mut cx, ev, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_DEPENDENCIES or k == KW_DEPENDENT_REQUIRED or k == KW_DEPENDENT_SCHEMAS {
+        try kw_dependencies(g, mut cx, ev, k, v, inst, mut out, limit)
+        return
+    }
+    if k == KW_UNEVALUATED_ITEMS {
+        try kw_unevaluated_items(g, mut cx, ev, v, inst, mut out)
+        return
+    }
+    if k == KW_UNEVALUATED_PROPERTIES {
+        try kw_unevaluated_properties(g, mut cx, ev, v, inst, mut out)
+        return
+    }
+    if k == KW_DISALLOW {
+        var types = List<u32>()
+        if kind(g, v) == K_ARRAY {
+            for c in g.nodes[usize(v)].kids {
+                types.push(c)
+            }
+        } else if kind(g, v) == K_STR {
+            types.push(v)
+        } else {
+            fail type_error("'{py_type(g, v)}' object is not iterable")
+        }
+        for t in types {
+            if out.len() >= limit {
+                return
+            }
+            var one = List<u32>()
+            one.push(t)
+            var errs = List<Fail>()
+            cx.quiet += 1
+            try type3(g, mut cx, ev, one, inst, mut errs)
+            cx.quiet -= 1
+            if errs.is_empty() {
+                if quiet(cx) {
+                    out.push(blank())
+                } else {
+                    out.push(err_at(ev, "disallow", Value.Node(v), inst, "{repr_node(g, t)} is disallowed for {repr(inst)}"))
+                }
+            }
+        }
+        return
+    }
+    if k == KW_EXTENDS {
+        if is_object(g, v) {
+            try descend(g, mut cx, ev, inst, v, no_at(), no_at(), "", none, mut out, limit)
+            return
+        }
+        let subs = try schema_list(g, v)
+        for i in 0..subs.len() {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, inst, subs[i], no_at(), at_index(i), "", none, mut out, limit)
+        }
+        return
+    }
+}
+
+// What `for x in v` gives where a list of schemas should be: its elements, or for a dict its keys
+// and for a string its characters, which are strings and no schemas, so `TEXT`; or Python's
+// `TypeError` for a value it can't iterate.
+fn schema_list(g: Graph, v: u32) -> List<u32> ! SchemaFault {
+    var out = List<u32>()
+    let k = kind(g, v)
+    if k == K_ARRAY {
+        for c in g.nodes[usize(v)].kids {
+            out.push(c)
+        }
+        return out
+    }
+    if k == K_OBJECT or k == K_STR {
+        let n = if k == K_OBJECT { count(g, v) } else { rune_len(g.nodes[usize(v)].s) }
+        for _ in 0..n {
+            out.push(TEXT)
+        }
+        return out
+    }
+    fail type_error("'{py_type(g, v)}' object is not iterable")
+}
+
+// A string where a schema should be, from `schema_list`: reading it as one fails, in Python, at
+// its `.get`.
+const TEXT: u32 = 4294967295
+
+// The items of `for each in v`, for keywords that list names: a node, or text for a dict's key or
+// a string's character.
+struct Item {
+    node: u32
+    text: String
+}
+
+fn name_list(g: Graph, v: u32) -> List<Item> ! SchemaFault {
+    var out = List<Item>()
+    let i = usize(v)
+    let k = g.nodes[i].kind
+    if k == K_ARRAY {
+        for c in g.nodes[i].kids {
+            out.push(Item { node: c, text: String() })
+        }
+    } else if k == K_OBJECT {
+        for key in g.nodes[i].keys {
+            out.push(Item { node: TEXT, text: key.copy() })
+        }
+    } else if k == K_STR {
+        for r in g.nodes[i].s.runes() {
+            out.push(Item { node: TEXT, text: "{r}" })
+        }
+    } else {
+        fail type_error("'{py_type(g, v)}' object is not iterable")
+    }
+    return out
+}
+
+// Python's `item in instance`, for an object instance: `none` for a key that's there, or else the
+// item's repr for a message; a list or dict can't be a key at all.
+fn missing_from(g: Graph, item: Item, members: LinkedMap<String, Json>) -> String? ! SchemaFault {
+    if item.node == TEXT {
+        if members.contains(item.text) {
+            return none
+        }
+        return some(repr_str(item.text))
+    }
+    let k = kind(g, item.node)
+    if k == K_STR {
+        if members.contains(g.nodes[usize(item.node)].s) {
+            return none
+        }
+    } else if k == K_ARRAY or k == K_OBJECT {
+        let t = py_type(g, item.node)
+        fail type_error("cannot use '{t}' as a dict key (unhashable type: '{t}')")
+    }
+    return some(repr_node(g, item.node))
+}
+
+// Whether `inst` is of the type named `name` in `ev`'s draft, or the `UnknownType` fault.
+fn is_type_named(g: Graph, ev: St, inst: Json, name: String) -> bool ! SchemaFault {
+    let r = type_check(ev.cls, inst, name)
+    if r == 2 {
+        fail unknown_type(g, ev, inst, Json.Str(name.copy()))
+    }
+    return r == 1
+}
+
+fn unknown_type(g: Graph, ev: St, inst: Json, t: Json) -> SchemaFault {
+    var m = String("            Unknown type ")
+    m.push_str(repr(t))
+    m.push_str(" for validator with schema:\n                ")
+    m.push_str(pretty(node_json(g, ev.schema)))
+    m.push_str("\n\n            While checking instance:\n                ")
+    m.push_str(pretty(inst))
+    m.push_str("\n            ")
+    return fault("UnknownType", dedent(rstrip(m)))
+}
+
+// `is_type(inst, t)` for a type that's a node: a name, or something a type checker can't hold.
+fn is_type_node(g: Graph, ev: St, inst: Json, t: u32) -> bool ! SchemaFault {
+    let k = kind(g, t)
+    if k == K_STR {
+        let r = code_check(ev.cls, inst, g.nodes[usize(t)].flags)
+        if r == 2 {
+            fail unknown_type(g, ev, inst, Json.Str(g.nodes[usize(t)].s.copy()))
+        }
+        return r == 1
+    }
+    if k == K_ARRAY or k == K_OBJECT {
+        fail type_error("unhashable type: '{py_type(g, t)}'")
+    }
+    fail unknown_type(g, ev, inst, node_json(g, t))
+}
+
+// The number of a type name: 1 to 8 for "array", "boolean", "integer", "null", "number", "object",
+// "string" and "any", 0 for any other text. A string node keeps its own in `flags`.
+fn type_code(name: String) -> u8 {
+    return match name {
+        "array" => 1,
+        "boolean" => 2,
+        "integer" => 3,
+        "null" => 4,
+        "number" => 5,
+        "object" => 6,
+        "string" => 7,
+        "any" => 8,
+        _ => 0,
+    }
+}
+
+// 1 if `inst` is of type `name` in draft `d`, 0 if not, 2 if the draft has no such type.
+fn type_check(d: Draft, inst: Json, name: String) -> u8 {
+    return code_check(d, inst, type_code(name))
+}
+
+// `type_check` for the type with number `code`.
+fn code_check(d: Draft, inst: Json, code: u8) -> u8 {
+    let yes = match code {
+        1 => match inst {
+            Json.Array(_) => true,
+            _ => false,
+        },
+        2 => match inst {
+            Json.Bool(_) => true,
+            _ => false,
+        },
+        3 => match inst {
+            Json.Int(_) => true,
+            Json.UInt(_) => true,
+            Json.Float(f) => rank(d) >= 6 and f - f == 0.0 and f.floor() == f,
+            _ => false,
+        },
+        4 => match inst {
+            Json.Null => true,
+            _ => false,
+        },
+        5 => match inst {
+            Json.Int(_) => true,
+            Json.UInt(_) => true,
+            Json.Float(_) => true,
+            _ => false,
+        },
+        6 => match inst {
+            Json.Object(_) => true,
+            _ => false,
+        },
+        7 => match inst {
+            Json.Str(_) => true,
+            _ => false,
+        },
+        8 => {
+            if rank(d) != 3 {
+                return 2
+            }
+            true
+        },
+        _ => return 2,
+    }
+    return if yes { 1 } else { 0 }
+}
+
+fn kw_type(g: Graph, cx: Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let k = kind(g, v)
+    if k == K_STR {
+        if try is_type_node(g, ev, inst, v) {
+            return
+        }
+    } else if k == K_ARRAY {
+        for c in g.nodes[usize(v)].kids {
+            if try is_type_node(g, ev, inst, c) {
+                return
+            }
+        }
+    } else if k == K_OBJECT {
+        for key in g.nodes[usize(v)].keys {
+            if try is_type_named(g, ev, inst, key) {
+                return
+            }
+        }
+    } else {
+        fail type_error("'{py_type(g, v)}' object is not iterable")
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    var reprs = String()
+    if k == K_STR {
+        reprs = repr_node(g, v)
+    } else if k == K_ARRAY {
+        for c in g.nodes[usize(v)].kids {
+            if not reprs.is_empty() {
+                reprs.push_str(", ")
+            }
+            repr_node_into(mut reprs, g, c)
+        }
+    } else {
+        for key in g.nodes[usize(v)].keys {
+            if not reprs.is_empty() {
+                reprs.push_str(", ")
+            }
+            repr_str_into(mut reprs, key)
+        }
+    }
+    out.push(err_at(ev, "type", Value.Node(v), inst, "{repr(inst)} is not of type {reprs}"))
+}
+
+// Draft 3's `type`: names, or schemas the instance may match instead.
+fn kw_type3(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    var types = List<u32>()
+    if kind(g, v) == K_ARRAY {
+        for c in g.nodes[usize(v)].kids {
+            types.push(c)
+        }
+    } else if kind(g, v) == K_STR {
+        types.push(v)
+    } else {
+        fail type_error("'{py_type(g, v)}' object is not iterable")
+    }
+    let before = out.len()
+    try type3(g, mut cx, ev, types, inst, mut out)
+    if out.len() > before and not quiet(cx) {
+        out[before].value = Value.Node(v)
+    }
+}
+
+// `type_draft3` for the types `types`, adding its error, if any, to `out`.
+fn type3(g: Graph, cx: mut Ctx, ev: St, types: List<u32>, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    var all = List<Fail>()
+    for i in 0..types.len() {
+        let t = types[i]
+        if is_object(g, t) {
+            let errs = try descend_all(g, mut cx, ev, inst, t, at_index(i))
+            if errs.is_empty() {
+                return
+            }
+            if not quiet(cx) {
+                all.extend(errs)
+            }
+        } else if try is_type_node(g, ev, inst, t) {
+            return
+        }
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    var reprs = String()
+    for t in types {
+        if not reprs.is_empty() {
+            reprs.push_str(", ")
+        }
+        if let name = member(g, t, "name") {
+            repr_node_into(mut reprs, g, name)
+        } else {
+            repr_node_into(mut reprs, g, t)
+        }
+    }
+    var e = err_at(ev, "type", Value.Nothing, inst, "{repr(inst)} is not of type {reprs}")
+    e.context = all
+    out.push(e)
+}
+
+fn kw_properties(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    if kind(g, v) != K_OBJECT {
+        fail attr_error(py_type(g, v), "items")
+    }
+    for j in 0..count(g, v) {
+        if out.len() >= limit {
+            return
+        }
+        let sub = kid(g, v, j)
+        if members.contains(g.nodes[usize(v)].keys[j]) {
+            try descend(g, mut cx, ev, members[g.nodes[usize(v)].keys[j]], sub, At { kind: 2, n: v, j: j }, At { kind: 2, n: v, j: j }, "", none, mut out, limit)
+        } else if rank(ev.cls) == 3 and is_object(g, sub) {
+            let key = g.nodes[usize(v)].keys[j].copy()
+            let req = member(g, sub, "required") else {
+                continue
+            }
+            if truthy(g, req) {
+                if quiet(cx) {
+                    out.push(blank())
+                } else {
+                    var e = err_at(ev, "required", Value.Node(req), inst, "{repr_str(key)} is a required property")
+                    e.rspath.push(PathPart.Key("required"))
+                    e.rspath.push(PathPart.Key(key.copy()))
+                    e.rpath.push(PathPart.Key(key.copy()))
+                    out.push(e)
+                }
+            }
+        }
+    }
+}
+
+fn kw_required(g: Graph, cx: Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    if kind(g, v) == K_ARRAY {
+        // The usual case, without making items.
+        for c in g.nodes[usize(v)].kids {
+            if out.len() >= limit {
+                return
+            }
+            if kind(g, c) == K_STR and members.contains(g.nodes[usize(c)].s) {
+                continue
+            }
+            let shown = try missing_from(g, Item { node: c, text: String() }, members) else {
+                continue
+            }
+            if quiet(cx) {
+                out.push(blank())
+            } else {
+                out.push(err_at(ev, "required", Value.Node(v), inst, "{shown} is a required property"))
+            }
+        }
+        return
+    }
+    for item in try name_list(g, v) {
+        if out.len() >= limit {
+            return
+        }
+        let shown = try missing_from(g, item, members) else {
+            continue
+        }
+        if quiet(cx) {
+            out.push(blank())
+        } else {
+            out.push(err_at(ev, "required", Value.Node(v), inst, "{shown} is a required property"))
+        }
+    }
+}
+
+fn kw_enum(g: Graph, cx: Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let k = kind(g, v)
+    if k == K_ARRAY or k == K_OBJECT {
+        if k == K_ARRAY {
+            for c in g.nodes[usize(v)].kids {
+                if equal_node(g, c, inst) {
+                    return
+                }
+            }
+        } else if let Json.Str(s) = inst {
+            for key in g.nodes[usize(v)].keys {
+                if key == s {
+                    return
+                }
+            }
+        }
+    } else if k == K_STR {
+        if let Json.Str(s) = inst {
+            if rune_len(s) == 1 and g.nodes[usize(v)].s.contains(s) {
+                return
+            }
+        }
+    } else {
+        fail type_error("'{py_type(g, v)}' object is not iterable")
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    out.push(err_at(ev, "enum", Value.Node(v), inst, "{repr(inst)} is not one of {repr_node(g, v)}"))
+}
+
+fn kw_one_of(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, _limit: usize) ! SchemaFault {
+    let subs = try schema_list(g, v)
+    var all = List<Fail>()
+    var first: usize = subs.len()
+    for i in 0..subs.len() {
+        let errs = try descend_all(g, mut cx, ev, inst, subs[i], at_index(i))
+        if errs.is_empty() {
+            first = i
+            break
+        }
+        if not quiet(cx) {
+            all.extend(errs)
+        }
+    }
+    if first == subs.len() {
+        if quiet(cx) {
+            out.push(blank())
+            return
+        }
+        var e = err_at(ev, "oneOf", Value.Node(v), inst, "{repr(inst)} is not valid under any of the given schemas")
+        e.context = all
+        out.push(e)
+        return
+    }
+    var more = List<u32>()
+    for i in first + 1..subs.len() {
+        if try evolve_valid(g, mut cx, ev, subs[i], inst) {
+            more.push(subs[i])
+        }
+    }
+    if more.is_empty() {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    more.push(subs[first])
+    var reprs = String()
+    for m in more {
+        if not reprs.is_empty() {
+            reprs.push_str(", ")
+        }
+        repr_node_into(mut reprs, g, m)
+    }
+    out.push(err_at(ev, "oneOf", Value.Node(v), inst, "{repr(inst)} is valid under each of {reprs}"))
+}
+
+// minimum, maximum, exclusiveMinimum and exclusiveMaximum, and draft 3's and 4's minimum and
+// maximum, which read exclusiveMinimum and exclusiveMaximum as flags.
+fn kw_bound(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let x = num_json(inst) else {
+        return
+    }
+    let legacy = rank(ev.cls) <= 4
+    // Whether the bound is a maximum, and whether reaching it is an error too.
+    var upper = false
+    var strict = false
+    if k == KW_MINIMUM {
+        if legacy {
+            if let flag = member(g, ev.schema, "exclusiveMinimum") {
+                strict = truthy(g, flag)
+            }
+        }
+    } else if k == KW_MAXIMUM {
+        upper = true
+        if legacy {
+            if let flag = member(g, ev.schema, "exclusiveMaximum") {
+                strict = truthy(g, flag)
+            }
+        }
+    } else if k == KW_EXCLUSIVE_MINIMUM {
+        strict = true
+    } else {
+        upper = true
+        strict = true
+    }
+    let y = num_node(g, v) else {
+        let op = if upper { if strict { ">=" } else { ">" } } else { if strict { "<=" } else { "<" } }
+        let x_type = if x.kind == K_FLOAT { "float" } else { "int" }
+        fail type_error("'{op}' not supported between instances of '{x_type}' and '{py_type(g, v)}'")
+    }
+    let c = cmp_num(x, y)
+    let failed = if upper { c > 0 or (strict and c == 0) } else { c < 0 or (strict and c == 0) }
+    if not failed {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    let words = if upper { if strict { "greater than or equal to" } else { "greater than" } } else { if strict { "less than or equal to" } else { "less than" } }
+    let name = if upper { "maximum" } else { "minimum" }
+    let kw = if k == KW_MINIMUM { "minimum" } else if k == KW_MAXIMUM { "maximum" } else if k == KW_EXCLUSIVE_MINIMUM { "exclusiveMinimum" } else { "exclusiveMaximum" }
+    out.push(err_at(ev, kw, Value.Node(v), inst, "{repr(inst)} is {words} the {name} of {repr_node(g, v)}"))
+}
+
+fn kw_multiple_of(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let x = num_json(inst) else {
+        return
+    }
+    let dk = kind(g, v)
+    var failed = false
+    if dk == K_FLOAT {
+        let d = g.nodes[usize(v)].f
+        if d == 0.0 {
+            fail fault("ZeroDivisionError", "division by zero")
+        }
+        let q = num_f64(x) / d
+        if q - q != 0.0 {
+            if q.is_nan() {
+                fail fault("ValueError", "cannot convert float NaN to integer")
+            }
+            if x.kind == K_FLOAT and x.f - x.f != 0.0 {
+                fail fault("OverflowError", "cannot convert Infinity to integer ratio")
+            }
+            failed = not exact_multiple(x, d)
+        } else {
+            failed = q.floor() != q
+        }
+    } else if dk == K_INT or dk == K_UINT or dk == K_BOOL {
+        let d = num_node(g, v) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+        if num_is_zero(d) {
+            fail fault("ZeroDivisionError", "division by zero")
+        }
+        if x.kind == K_FLOAT {
+            let r = x.f % num_f64(d)
+            failed = r != 0.0 and not r.is_nan()
+            if x.f - x.f != 0.0 {
+                failed = true
+            }
+        } else {
+            failed = not int_divides(d, x)
+        }
+    } else {
+        fail type_error("unsupported operand type(s) for %: '{py_type_json(inst)}' and '{py_type(g, v)}'")
+    }
+    if not failed {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    let kw = if k == KW_MULTIPLE_OF { "multipleOf" } else { "divisibleBy" }
+    out.push(err_at(ev, kw, Value.Node(v), inst, "{repr(inst)} is not a multiple of {str_node(g, v)}"))
+}
+
+// minLength and the other limits on a size.
+fn kw_size(g: Graph, cx: Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    var size: usize = 0
+    var kw = "minLength"
+    match inst {
+        Json.Str(s) => {
+            if k != KW_MIN_LENGTH and k != KW_MAX_LENGTH {
+                return
+            }
+            size = rune_len(s)
+            kw = if k == KW_MIN_LENGTH { "minLength" } else { "maxLength" }
+        },
+        Json.Array(items) => {
+            if k != KW_MIN_ITEMS and k != KW_MAX_ITEMS {
+                return
+            }
+            size = items.len()
+            kw = if k == KW_MIN_ITEMS { "minItems" } else { "maxItems" }
+        },
+        Json.Object(members) => {
+            if k != KW_MIN_PROPERTIES and k != KW_MAX_PROPERTIES {
+                return
+            }
+            size = members.len()
+            kw = if k == KW_MIN_PROPERTIES { "minProperties" } else { "maxProperties" }
+        },
+        _ => return,
+    }
+    let at_least = k == KW_MIN_LENGTH or k == KW_MIN_ITEMS or k == KW_MIN_PROPERTIES
+    let n = Num { kind: K_INT, i: i64.wrap(size), u: 0, f: 0.0 }
+    let c = try cmp_num_node(n, "int", g, v, if at_least { "<" } else { ">" })
+    if (at_least and c >= 0) or (not at_least and c <= 0) {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    var words = ""
+    if at_least {
+        if eq_int_node(g, v, 1) {
+            words = "should be non-empty"
+        } else if k == KW_MIN_PROPERTIES {
+            words = "does not have enough properties"
+        } else {
+            words = "is too short"
+        }
+    } else {
+        if eq_int_node(g, v, 0) {
+            words = "is expected to be empty"
+        } else if k == KW_MAX_PROPERTIES {
+            words = "has too many properties"
+        } else {
+            words = "is too long"
+        }
+    }
+    out.push(err_at(ev, kw, Value.Node(v), inst, "{repr(inst)} {words}"))
+}
+
+fn kw_format(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let k = kind(g, v)
+    if k == K_ARRAY or k == K_OBJECT {
+        let t = py_type(g, v)
+        fail type_error("cannot use '{t}' as a dict key (unhashable type: '{t}')")
+    }
+    if k != K_STR or g.nodes[usize(v)].s != "regex" {
+        return
+    }
+    let Json.Str(s) = inst else {
+        return
+    }
+    match search(mut cx, s, "") {
+        ok(_) => {},
+        err(_) => {
+            if quiet(cx) {
+                out.push(blank())
+            } else {
+                out.push(err_at(ev, "format", Value.Node(v), inst, "{repr(inst)} is not a {repr_node(g, v)}"))
+            }
+        },
+    }
+}
+
+fn kw_contains(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let Json.Array(items) = inst else {
+        return
+    }
+    if rank(ev.cls) <= 7 {
+        for x in items {
+            if try evolve_valid(g, mut cx, ev, v, x) {
+                return
+            }
+        }
+        if quiet(cx) {
+            out.push(blank())
+        } else {
+            out.push(err_at(ev, "contains", Value.Node(v), inst, "None of {repr(inst)} are valid under the given schema"))
+        }
+        return
+    }
+    // `validator.evolve(schema=contains)`, made before the items are looked at.
+    let contains_cls = try validator_for_node(g, v, ev.cls)
+    if kind(g, v) != K_BOOL and not is_object(g, v) {
+        fail attr_error(py_type(g, v), if rank(contains_cls) <= 7 { "get" } else { "items" })
+    }
+    var matches: i64 = 0
+    let min_node = member(g, ev.schema, "minContains")
+    let max_node = member(g, ev.schema, "maxContains")
+    for x in items {
+        if try evolve_valid(g, mut cx, ev, v, x) {
+            matches += 1
+            let over = if let m = max_node {
+                try cmp_num_node(Num { kind: K_INT, i: matches, u: 0, f: 0.0 }, "int", g, m, ">") > 0
+            } else {
+                matches > i64.wrap(items.len())
+            }
+            if over {
+                if quiet(cx) {
+                    out.push(blank())
+                    return
+                }
+                var shown = "{items.len()}"
+                var value = Value.Int(i64.wrap(items.len()))
+                if let m = max_node {
+                    shown = str_node(g, m)
+                    value = Value.Node(m)
+                }
+                out.push(err_at(ev, "maxContains", value, inst, "Too many items match the given schema (expected at most {shown})"))
+                return
+            }
+        }
+    }
+    let under = if let m = min_node {
+        try cmp_num_node(Num { kind: K_INT, i: matches, u: 0, f: 0.0 }, "int", g, m, "<") < 0
+    } else {
+        matches < 1
+    }
+    if not under {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    if matches == 0 {
+        out.push(err_at(ev, "contains", Value.Node(v), inst, "{repr(inst)} does not contain items matching the given schema"))
+        return
+    }
+    var shown = String("1")
+    var value = Value.Int(1)
+    if let m = min_node {
+        shown = str_node(g, m)
+        value = Value.Node(m)
+    }
+    out.push(err_at(ev, "minContains", value, inst, "Too few items match the given schema (expected at least {shown} but only {matches} matched)"))
+}
+
+fn kw_items(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Array(items) = inst else {
+        return
+    }
+    let r = rank(ev.cls)
+    if r == 2020 {
+        var prefix: usize = 0
+        if let p = member(g, ev.schema, "prefixItems") {
+            prefix = try py_len(g, p)
+        }
+        if items.len() <= prefix {
+            return
+        }
+        let extra = items.len() - prefix
+        if kind(g, v) == K_BOOL and not g.nodes[usize(v)].b {
+            if quiet(cx) {
+                out.push(blank())
+                return
+            }
+            let rest = if extra != 1 { repr_tail(items, prefix) } else { repr(items[prefix]) }
+            let word = if prefix != 1 { "items" } else { "item" }
+            out.push(err_at(ev, "items", Value.Node(v), inst, "Expected at most {prefix} {word} but found {extra} extra: {rest}"))
+            return
+        }
+        for i in prefix..items.len() {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, items[i], v, at_index(i), no_at(), "", none, mut out, limit)
+        }
+        return
+    }
+    let by_index = if r <= 4 { not is_object(g, v) } else { kind(g, v) == K_ARRAY }
+    if by_index {
+        let subs = try schema_list(g, v)
+        var i: usize = 0
+        while i < items.len() and i < subs.len() {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, items[i], subs[i], at_index(i), at_index(i), "", none, mut out, limit)
+            i += 1
+        }
+        return
+    }
+    for i in 0..items.len() {
+        if out.len() >= limit {
+            return
+        }
+        try descend(g, mut cx, ev, items[i], v, at_index(i), no_at(), "", none, mut out, limit)
+    }
+}
+
+fn kw_additional_items(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Array(items) = inst else {
+        return
+    }
+    let it = member(g, ev.schema, "items") else {
+        return
+    }
+    if is_object(g, it) {
+        return
+    }
+    let len_items = try py_len(g, it)
+    if is_object(g, v) {
+        for i in len_items..items.len() {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, items[i], v, at_index(i), no_at(), "", none, mut out, limit)
+        }
+        return
+    }
+    if truthy(g, v) or items.len() <= len_items {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    let (shown, verb) = extras_json(items, len_items)
+    out.push(err_at(ev, "additionalItems", Value.Node(v), inst, "Additional items are not allowed ({shown} {verb} unexpected)"))
+}
+
+fn kw_additional_properties(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    let props = member(g, ev.schema, "properties")
+    var patterns = String()
+    let pats = member(g, ev.schema, "patternProperties")
+    if let p = pats {
+        if is_object(g, p) {
+            for j in 0..count(g, p) {
+                if j > 0 {
+                    patterns.push('|')
+                }
+                patterns.push_str(g.nodes[usize(p)].keys[j])
+            }
+        }
+    }
+    var extras = List<String>()
+    for (key, _) in members {
+        if let p = props {
+            if try py_in(g, p, key) {
+                continue
+            }
+        }
+        if not patterns.is_empty() and try search(mut cx, patterns, key) {
+            continue
+        }
+        extras.push(key.copy())
+    }
+    if is_object(g, v) {
+        for key in extras {
+            if out.len() >= limit {
+                return
+            }
+            try descend(g, mut cx, ev, members[key], v, at_key(), no_at(), key, none, mut out, limit)
+        }
+        return
+    }
+    if truthy(g, v) or extras.is_empty() {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    sort_texts(mut extras)
+    if let p = pats {
+        let verb = if extras.len() == 1 { "does" } else { "do" }
+        var joined = String()
+        for x in extras {
+            if not joined.is_empty() {
+                joined.push_str(", ")
+            }
+            repr_str_into(mut joined, x)
+        }
+        var names = List<String>()
+        if is_object(g, p) {
+            for key in g.nodes[usize(p)].keys {
+                names.push(key.copy())
+            }
+        }
+        sort_texts(mut names)
+        var shown = String()
+        for x in names {
+            if not shown.is_empty() {
+                shown.push_str(", ")
+            }
+            repr_str_into(mut shown, x)
+        }
+        out.push(err_at(ev, "additionalProperties", Value.Node(v), inst, "{joined} {verb} not match any of the regexes: {shown}"))
+        return
+    }
+    let (shown, verb) = extras_texts(extras)
+    out.push(err_at(ev, "additionalProperties", Value.Node(v), inst, "Additional properties are not allowed ({shown} {verb} unexpected)"))
+}
+
+// dependencies, dependentRequired and dependentSchemas.
+fn kw_dependencies(g: Graph, cx: mut Ctx, ev: St, k: u8, v: u32, inst: Json, out: mut List<Fail>, limit: usize) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    if kind(g, v) != K_OBJECT {
+        fail attr_error(py_type(g, v), "items")
+    }
+    let r = rank(ev.cls)
+    let kw = if k == KW_DEPENDENCIES { "dependencies" } else if k == KW_DEPENDENT_REQUIRED { "dependentRequired" } else { "dependentSchemas" }
+    for j in 0..count(g, v) {
+        if out.len() >= limit {
+            return
+        }
+        let property = g.nodes[usize(v)].keys[j].copy()
+        if not members.contains(property) {
+            continue
+        }
+        let dep = kid(g, v, j)
+        let dk = kind(g, dep)
+        var names = false
+        if k == KW_DEPENDENT_REQUIRED {
+            names = true
+        } else if k == KW_DEPENDENCIES {
+            names = if r == 3 { dk != K_OBJECT } else { dk == K_ARRAY }
+        }
+        if not names {
+            try descend(g, mut cx, ev, inst, dep, no_at(), At { kind: 2, n: v, j: j }, "", none, mut out, limit)
+            continue
+        }
+        if dk == K_STR and r == 3 {
+            if not members.contains(g.nodes[usize(dep)].s) {
+                if quiet(cx) {
+                    out.push(blank())
+                } else {
+                    out.push(err_at(ev, kw, Value.Node(v), inst, "{repr_node(g, dep)} is a dependency of {repr_str(property)}"))
+                }
+            }
+            continue
+        }
+        for each in try name_list(g, dep) {
+            if out.len() >= limit {
+                return
+            }
+            let shown = try missing_from(g, each, members) else {
+                continue
+            }
+            if quiet(cx) {
+                out.push(blank())
+            } else {
+                out.push(err_at(ev, kw, Value.Node(v), inst, "{shown} is a dependency of {repr_str(property)}"))
+            }
+        }
+    }
+}
+
+fn kw_unevaluated_items(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let Json.Array(items) = inst else {
+        return
+    }
+    var marks = List<bool>()
+    for _ in 0..items.len() {
+        marks.push(false)
+    }
+    if rank(ev.cls) == 2020 {
+        try evaluated_items(g, mut cx, ev, inst, ev.schema, mut marks)
+    } else {
+        try evaluated_items_2019(g, mut cx, ev, inst, ev.schema, mut marks)
+    }
+    var shown = String()
+    var n: usize = 0
+    for i in 0..items.len() {
+        if marks[i] {
+            continue
+        }
+        if n > 0 {
+            shown.push_str(", ")
+        }
+        repr_into(mut shown, items[i])
+        n += 1
+    }
+    if n == 0 {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    let verb = if n == 1 { "was" } else { "were" }
+    out.push(err_at(ev, "unevaluatedItems", Value.Node(v), inst, "Unevaluated items are not allowed ({shown} {verb} unexpected)"))
+}
+
+fn kw_unevaluated_properties(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut List<Fail>) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    var keys = Set<String>()
+    if rank(ev.cls) == 2020 {
+        try evaluated_keys(g, mut cx, ev, inst, ev.schema, mut keys)
+    } else {
+        try evaluated_keys_2019(g, mut cx, ev, inst, ev.schema, mut keys)
+    }
+    var bad = List<String>()
+    for (key, value) in members {
+        if keys.contains(key) {
+            continue
+        }
+        var errs = List<Fail>()
+        cx.quiet += 1
+        try descend(g, mut cx, ev, value, v, at_key(), at_key(), key, none, mut errs, MAX)
+        cx.quiet -= 1
+        for _ in 0..errs.len() {
+            bad.push(key.copy())
+        }
+    }
+    if bad.is_empty() {
+        return
+    }
+    if quiet(cx) {
+        out.push(blank())
+        return
+    }
+    if kind(g, v) == K_BOOL and not g.nodes[usize(v)].b {
+        sort_texts(mut bad)
+        let (shown, verb) = extras_texts(bad)
+        out.push(err_at(ev, "unevaluatedProperties", Value.Node(v), inst, "Unevaluated properties are not allowed ({shown} {verb} unexpected)"))
+        return
+    }
+    let (shown, verb) = extras_texts(bad)
+    out.push(err_at(ev, "unevaluatedProperties", Value.Node(v), inst, "Unevaluated properties are not valid under the given schema ({shown} {verb} unevaluated and invalid)"))
+}
+
+// A schema `$ref` or `$dynamicRef` points to, and the validator for it, as
+// `validator.evolve(schema=resolved.contents, _resolver=resolved.resolver)` makes it.
+fn follow(g: Graph, cx: mut Ctx, st: St, ref: u32) -> St ! SchemaFault {
+    if kind(g, ref) != K_STR {
+        fail attr_error(py_type(g, ref), "startswith")
+    }
+    let resolved = try lookup_ref(g, mut cx, st.res, ref)
+    let cls = try validator_for_node(g, resolved.node, st.cls)
+    return St { cls: cls, schema: resolved.node, res: resolved.res }
+}
+
+fn follow_recursive(g: Graph, cx: mut Ctx, st: St) -> St ! SchemaFault {
+    let resolved = try lookup_recursive(g, mut cx, st.res)
+    let cls = try validator_for_node(g, resolved.node, st.cls)
+    return St { cls: cls, schema: resolved.node, res: resolved.res }
+}
+
+// `find_evaluated_item_indexes_by_schema`, 2020-12's: marks the items `n` evaluates.
+fn evaluated_items(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, marks: mut List<bool>) ! SchemaFault {
+    if not is_object(g, n) {
+        return
+    }
+    if member(g, n, "items") != none {
+        for i in 0..marks.len() {
+            marks[i] = true
+        }
+        return
+    }
+    if let ref = get_value(g, n, "$ref") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_items(g, mut cx, st2, inst, st2.schema, mut marks)
+    }
+    if let ref = get_value(g, n, "$dynamicRef") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_items(g, mut cx, st2, inst, st2.schema, mut marks)
+    }
+    if let p = member(g, n, "prefixItems") {
+        let len = try py_len(g, p)
+        for i in 0..marks.len() {
+            if i < len {
+                marks[i] = true
+            }
+        }
+    }
+    try evaluated_items_if(g, mut cx, st, inst, n, mut marks, true)
+    try evaluated_items_tail(g, mut cx, st, inst, n, mut marks, true)
+}
+
+// The 2019-09 one, which reads `items`, `additionalItems` and `$recursiveRef`.
+fn evaluated_items_2019(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, marks: mut List<bool>) ! SchemaFault {
+    if not is_object(g, n) {
+        return
+    }
+    if let ref = get_value(g, n, "$ref") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_items_2019(g, mut cx, st2, inst, st2.schema, mut marks)
+    }
+    if member(g, n, "$recursiveRef") != none {
+        let st2 = try follow_recursive(g, mut cx, st)
+        try evaluated_items_2019(g, mut cx, st2, inst, st2.schema, mut marks)
+    }
+    if let it = member(g, n, "items") {
+        if member(g, n, "additionalItems") != none or is_object(g, it) {
+            for i in 0..marks.len() {
+                marks[i] = true
+            }
+            return
+        }
+        let len = try py_len(g, it)
+        for i in 0..marks.len() {
+            if i < len {
+                marks[i] = true
+            }
+        }
+    }
+    try evaluated_items_if(g, mut cx, st, inst, n, mut marks, false)
+    try evaluated_items_tail(g, mut cx, st, inst, n, mut marks, false)
+}
+
+fn evaluated_items_at(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, marks: mut List<bool>, latest: bool) ! SchemaFault {
+    if latest {
+        try evaluated_items(g, mut cx, st, inst, n, mut marks)
+    } else {
+        try evaluated_items_2019(g, mut cx, st, inst, n, mut marks)
+    }
+}
+
+fn evaluated_items_if(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, marks: mut List<bool>, latest: bool) ! SchemaFault {
+    let cond = member(g, n, "if") else {
+        return
+    }
+    if try evolve_valid(g, mut cx, st, cond, inst) {
+        try evaluated_items_at(g, mut cx, st, inst, cond, mut marks, latest)
+        if let then = member(g, n, "then") {
+            try evaluated_items_at(g, mut cx, st, inst, then, mut marks, latest)
+        }
+    } else if let other = member(g, n, "else") {
+        try evaluated_items_at(g, mut cx, st, inst, other, mut marks, latest)
+    }
+}
+
+fn evaluated_items_tail(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, marks: mut List<bool>, latest: bool) ! SchemaFault {
+    let Json.Array(items) = inst else {
+        return
+    }
+    for name in ["contains", "unevaluatedItems"] {
+        if let sub = member(g, n, name) {
+            for i in 0..items.len() {
+                if try evolve_valid(g, mut cx, st, sub, items[i]) {
+                    marks[i] = true
+                }
+            }
+        }
+    }
+    for name in ["allOf", "oneOf", "anyOf"] {
+        if let list = member(g, n, name) {
+            let subs = try schema_list(g, list)
+            for sub in subs {
+                if try descend_valid(g, mut cx, st, inst, sub) {
+                    try evaluated_items_at(g, mut cx, st, inst, sub, mut marks, latest)
+                }
+            }
+        }
+    }
+}
+
+// `find_evaluated_property_keys_by_schema`, 2020-12's: the keys `n` evaluates.
+fn evaluated_keys(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, keys: mut Set<String>) ! SchemaFault {
+    if not is_object(g, n) {
+        return
+    }
+    let Json.Object(members) = inst else {
+        return
+    }
+    if let ref = get_value(g, n, "$ref") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_keys(g, mut cx, st2, inst, st2.schema, mut keys)
+    }
+    if let ref = get_value(g, n, "$dynamicRef") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_keys(g, mut cx, st2, inst, st2.schema, mut keys)
+    }
+    if let props = get_value(g, n, "properties") {
+        if is_object(g, props) {
+            for key in g.nodes[usize(props)].keys {
+                if members.contains(key) {
+                    keys.insert(key.copy())
+                }
+            }
+        }
+    }
+    for name in ["additionalProperties", "unevaluatedProperties"] {
+        if let sub = get_value(g, n, name) {
+            for (key, value) in members {
+                if try descend_valid(g, mut cx, st, value, sub) {
+                    keys.insert(key.copy())
+                }
+            }
+        }
+    }
+    try evaluated_keys_tail(g, mut cx, st, inst, n, mut keys, true)
+}
+
+// The 2019-09 one.
+fn evaluated_keys_2019(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, keys: mut Set<String>) ! SchemaFault {
+    if not is_object(g, n) {
+        return
+    }
+    let Json.Object(members) = inst else {
+        return
+    }
+    if let ref = get_value(g, n, "$ref") {
+        let st2 = try follow(g, mut cx, st, ref)
+        try evaluated_keys_2019(g, mut cx, st2, inst, st2.schema, mut keys)
+    }
+    if member(g, n, "$recursiveRef") != none {
+        let st2 = try follow_recursive(g, mut cx, st)
+        try evaluated_keys_2019(g, mut cx, st2, inst, st2.schema, mut keys)
+    }
+    for name in ["properties", "additionalProperties", "unevaluatedProperties"] {
+        if let value = member(g, n, name) {
+            if kind(g, value) == K_BOOL {
+                if g.nodes[usize(value)].b {
+                    for (key, _) in members {
+                        keys.insert(key.copy())
+                    }
+                }
+            } else if is_object(g, value) {
+                for key in g.nodes[usize(value)].keys {
+                    if members.contains(key) {
+                        keys.insert(key.copy())
+                    }
+                }
+            }
+        }
+    }
+    try evaluated_keys_tail(g, mut cx, st, inst, n, mut keys, false)
+}
+
+fn evaluated_keys_at(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, keys: mut Set<String>, latest: bool) ! SchemaFault {
+    if latest {
+        try evaluated_keys(g, mut cx, st, inst, n, mut keys)
+    } else {
+        try evaluated_keys_2019(g, mut cx, st, inst, n, mut keys)
+    }
+}
+
+// patternProperties, dependentSchemas, allOf, oneOf, anyOf, and if, then and else.
+fn evaluated_keys_tail(g: Graph, cx: mut Ctx, st: St, inst: Json, n: u32, keys: mut Set<String>, latest: bool) ! SchemaFault {
+    let Json.Object(members) = inst else {
+        return
+    }
+    if let pats = member(g, n, "patternProperties") {
+        if is_object(g, pats) {
+            for (key, _) in members {
+                for pattern in g.nodes[usize(pats)].keys {
+                    if try search(mut cx, pattern, key) {
+                        keys.insert(key.copy())
+                    }
+                }
+            }
+        }
+    }
+    if let deps = member(g, n, "dependentSchemas") {
+        if is_object(g, deps) {
+            for j in 0..count(g, deps) {
+                if members.contains(g.nodes[usize(deps)].keys[j]) {
+                    try evaluated_keys_at(g, mut cx, st, inst, kid(g, deps, j), mut keys, latest)
+                }
+            }
+        }
+    }
+    for name in ["allOf", "oneOf", "anyOf"] {
+        if let list = member(g, n, name) {
+            let subs = try schema_list(g, list)
+            for sub in subs {
+                if try descend_valid(g, mut cx, st, inst, sub) {
+                    try evaluated_keys_at(g, mut cx, st, inst, sub, mut keys, latest)
+                }
+            }
+        }
+    }
+    let cond = member(g, n, "if") else {
+        return
+    }
+    if try evolve_valid(g, mut cx, st, cond, inst) {
+        try evaluated_keys_at(g, mut cx, st, inst, cond, mut keys, latest)
+        if let then = member(g, n, "then") {
+            try evaluated_keys_at(g, mut cx, st, inst, then, mut keys, latest)
+        }
+    } else if let other = member(g, n, "else") {
+        try evaluated_keys_at(g, mut cx, st, inst, other, mut keys, latest)
+    }
+}
+
+// --- JSON values as Python sees them -------------------------------------------------------------
+
+fn py_type_json(v: Json) -> String {
+    return match v {
+        Json.Null => "NoneType",
+        Json.Bool(_) => "bool",
+        Json.Int(_) => "int",
+        Json.UInt(_) => "int",
+        Json.Float(_) => "float",
+        Json.Str(_) => "str",
+        Json.Array(_) => "list",
+        Json.Object(_) => "dict",
+    }
+}
+
+fn py_type(g: Graph, n: u32) -> String {
+    let k = kind(g, n)
+    if k == K_NULL {
+        return "NoneType"
+    }
+    if k == K_BOOL {
+        return "bool"
+    }
+    if k == K_INT or k == K_UINT {
+        return "int"
+    }
+    if k == K_FLOAT {
+        return "float"
+    }
+    if k == K_STR {
+        return "str"
+    }
+    if k == K_ARRAY {
+        return "list"
+    }
+    return "dict"
+}
+
+// Python's `repr`.
+fn repr(v: Json) -> String {
+    var out = String()
+    repr_into(mut out, v)
+    return out
+}
+
+fn repr_into(out: mut String, v: Json) {
+    match v {
+        Json.Null => out.push_str("None"),
+        Json.Bool(b) => out.push_str(if b { "True" } else { "False" }),
+        Json.Int(i) => out.push_str("{i}"),
+        Json.UInt(u) => out.push_str("{u}"),
+        Json.Float(f) => repr_float_into(mut out, f),
+        Json.Str(s) => repr_str_into(mut out, s),
+        Json.Array(items) => {
+            out.push('[')
+            for i in 0..items.len() {
+                if i > 0 {
+                    out.push_str(", ")
+                }
+                repr_into(mut out, items[i])
+            }
+            out.push(']')
+        },
+        Json.Object(members) => {
+            out.push('{')
+            var first = true
+            for (k, x) in members {
+                if not first {
+                    out.push_str(", ")
+                }
+                first = false
+                repr_str_into(mut out, k)
+                out.push_str(": ")
+                repr_into(mut out, x)
+            }
+            out.push('}')
+        },
+    }
+}
+
+fn repr_node(g: Graph, n: u32) -> String {
+    var out = String()
+    repr_node_into(mut out, g, n)
+    return out
+}
+
+fn repr_node_into(out: mut String, g: Graph, n: u32) {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_NULL {
+        out.push_str("None")
+    } else if k == K_BOOL {
+        out.push_str(if g.nodes[i].b { "True" } else { "False" })
+    } else if k == K_INT {
+        out.push_str("{g.nodes[i].i}")
+    } else if k == K_UINT {
+        out.push_str("{g.nodes[i].u}")
+    } else if k == K_FLOAT {
+        repr_float_into(mut out, g.nodes[i].f)
+    } else if k == K_STR {
+        repr_str_into(mut out, g.nodes[i].s)
+    } else if k == K_ARRAY {
+        out.push('[')
+        for j in 0..g.nodes[i].kids.len() {
+            if j > 0 {
+                out.push_str(", ")
+            }
+            repr_node_into(mut out, g, g.nodes[i].kids[j])
+        }
+        out.push(']')
+    } else {
+        out.push('{')
+        for j in 0..g.nodes[i].keys.len() {
+            if j > 0 {
+                out.push_str(", ")
+            }
+            repr_str_into(mut out, g.nodes[i].keys[j])
+            out.push_str(": ")
+            repr_node_into(mut out, g, g.nodes[i].kids[j])
+        }
+        out.push('}')
+    }
+}
+
+// Python's `str`: a string as it is, anything else as `repr` writes it.
+fn str_node(g: Graph, n: u32) -> String {
+    if kind(g, n) == K_STR {
+        return g.nodes[usize(n)].s.copy()
+    }
+    return repr_node(g, n)
+}
+
+// `repr(items[from:])`.
+fn repr_tail(items: List<Json>, from: usize) -> String {
+    var out = String("[")
+    for i in from..items.len() {
+        if i > from {
+            out.push_str(", ")
+        }
+        repr_into(mut out, items[i])
+    }
+    out.push(']')
+    return out
+}
+
+// Python's truth: `false`, `null`, 0, `""`, `[]` and `\{\}` are false.
+fn truthy(g: Graph, n: u32) -> bool {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_NULL {
+        return false
+    }
+    if k == K_BOOL {
+        return g.nodes[i].b
+    }
+    if k == K_INT {
+        return g.nodes[i].i != 0
+    }
+    if k == K_UINT {
+        return true
+    }
+    if k == K_FLOAT {
+        return g.nodes[i].f != 0.0
+    }
+    if k == K_STR {
+        return not g.nodes[i].s.is_empty()
+    }
+    return not g.nodes[i].kids.is_empty()
+}
+
+fn py_truthy(v: Json) -> bool {
+    return match v {
+        Json.Null => false,
+        Json.Bool(b) => b,
+        Json.Int(i) => i != 0,
+        Json.UInt(_) => true,
+        Json.Float(f) => f != 0.0,
+        Json.Str(s) => not s.is_empty(),
+        Json.Array(items) => not items.is_empty(),
+        Json.Object(members) => not members.is_empty(),
+    }
+}
+
+// Python's `len`, of a schema's value.
+fn py_len(g: Graph, n: u32) -> usize ! SchemaFault {
+    let k = kind(g, n)
+    if k == K_STR {
+        return rune_len(g.nodes[usize(n)].s)
+    }
+    if k == K_ARRAY or k == K_OBJECT {
+        return count(g, n)
+    }
+    fail type_error("object of type '{py_type(g, n)}' has no len()")
+}
+
+fn rune_len(s: String) -> usize {
+    var n: usize = 0
+    for i in 0..s.len() {
+        if (s.byte_at(i) & 0xC0) != 0x80 {
+            n += 1
+        }
+    }
+    return n
+}
+
+// --- numbers, compared exactly -------------------------------------------------------------------
+
+struct Num {
+    kind: u8
+    i: i64
+    u: u64
+    f: f64
+}
+
+// The instance's number, if it's one: bools aren't, to jsonschema.
+fn num_json(v: Json) -> Num? {
+    return match v {
+        Json.Int(i) => some(Num { kind: K_INT, i: i, u: 0, f: 0.0 }),
+        Json.UInt(u) => some(Num { kind: K_UINT, i: 0, u: u, f: 0.0 }),
+        Json.Float(f) => some(Num { kind: K_FLOAT, i: 0, u: 0, f: f }),
+        _ => none,
+    }
+}
+
+// A schema's number, a bool counting as 0 or 1, as in Python's comparisons.
+fn num_node(g: Graph, n: u32) -> Num? {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_INT {
+        return some(Num { kind: K_INT, i: g.nodes[i].i, u: 0, f: 0.0 })
+    }
+    if k == K_UINT {
+        return some(Num { kind: K_UINT, i: 0, u: g.nodes[i].u, f: 0.0 })
+    }
+    if k == K_FLOAT {
+        return some(Num { kind: K_FLOAT, i: 0, u: 0, f: g.nodes[i].f })
+    }
+    if k == K_BOOL {
+        return some(Num { kind: K_INT, i: if g.nodes[i].b { 1 } else { 0 }, u: 0, f: 0.0 })
+    }
+    return none
+}
+
+fn num_f64(x: Num) -> f64 {
+    if x.kind == K_INT {
+        return f64.nearest(x.i)
+    }
+    if x.kind == K_UINT {
+        return f64.nearest(x.u)
+    }
+    return x.f
+}
+
+fn num_is_zero(x: Num) -> bool {
+    if x.kind == K_INT {
+        return x.i == 0
+    }
+    if x.kind == K_UINT {
+        return x.u == 0
+    }
+    return x.f == 0.0
+}
+
+fn sign(c: bool, d: bool) -> i32 {
+    return if c { -1 } else if d { 1 } else { 0 }
+}
+
+// -1, 0 or 1 as `i` is less than, equal to or more than `f`, exactly.
+fn cmp_i_f(i: i64, f: f64) -> i32 {
+    if f >= 9223372036854775808.0 {
+        return -1
+    }
+    if f < -9223372036854775808.0 {
+        return 1
+    }
+    let t = f.floor()
+    let ti = i64.saturate(t)
+    if i != ti {
+        return sign(i < ti, i > ti)
+    }
+    return if f > t { -1 } else { 0 }
+}
+
+fn cmp_u_f(u: u64, f: f64) -> i32 {
+    if f >= 18446744073709551616.0 {
+        return -1
+    }
+    if f < 9223372036854775808.0 {
+        return 1
+    }
+    let tu = u64.wrap(i64.saturate(f - 9223372036854775808.0)) + 9223372036854775808
+    return sign(u < tu, u > tu)
+}
+
+fn cmp_num(a: Num, b: Num) -> i32 {
+    if a.kind == K_FLOAT and b.kind == K_FLOAT {
+        return sign(a.f < b.f, a.f > b.f)
+    }
+    if a.kind == K_FLOAT {
+        return 0 - cmp_num(b, a)
+    }
+    if b.kind == K_FLOAT {
+        if a.kind == K_INT {
+            return cmp_i_f(a.i, b.f)
+        }
+        return cmp_u_f(a.u, b.f)
+    }
+    if a.kind == K_INT and b.kind == K_INT {
+        return sign(a.i < b.i, a.i > b.i)
+    }
+    if a.kind == K_UINT and b.kind == K_UINT {
+        return sign(a.u < b.u, a.u > b.u)
+    }
+    // A `UInt` is past every `i64`.
+    return if a.kind == K_INT { -1 } else { 1 }
+}
+
+// `x <op> n`, for a schema's `n`: its comparison, or Python's `TypeError` if `n` isn't a number.
+fn cmp_num_node(x: Num, x_type: String, g: Graph, n: u32, op: String) -> i32 ! SchemaFault {
+    let y = num_node(g, n) else {
+        fail type_error("'{op}' not supported between instances of '{x_type}' and '{py_type(g, n)}'")
+    }
+    return cmp_num(x, y)
+}
+
+// Python's `n == v`, for a schema's `n` and a small integer.
+fn eq_int_node(g: Graph, n: u32, v: i64) -> bool {
+    let y = num_node(g, n) else {
+        return false
+    }
+    return cmp_num(y, Num { kind: K_INT, i: v, u: 0, f: 0.0 }) == 0
+}
+
+fn num_big(x: Num) -> BigInt {
+    if x.kind == K_UINT {
+        return BigInt.from(x.u)
+    }
+    return BigInt.from(x.i)
+}
+
+// Whether integer `d` divides integer `x`: Python's `x % d` being 0.
+fn int_divides(d: Num, x: Num) -> bool {
+    if d.kind == K_INT and x.kind == K_INT {
+        if d.i == -1 or d.i == 1 {
+            return true
+        }
+        return x.i % d.i == 0
+    }
+    let (_, r) = num_big(x).div_rem(num_big(d))
+    return r.is_zero()
+}
+
+// A finite float as an integer times a power of two.
+fn float_parts(f: f64) -> (BigInt, i64) {
+    let bits = f.to_bits()
+    let negative = (bits >> 63) == 1
+    let e = i64.wrap((bits >> 52) & 0x7FF)
+    var m = bits & 0xFFFFFFFFFFFFF
+    var exp: i64 = 0
+    if e == 0 {
+        exp = -1074
+    } else {
+        m = m | 0x10000000000000
+        exp = e - 1075
+    }
+    var big = BigInt.from(m)
+    if negative {
+        big = -big
+    }
+    return (big, exp)
+}
+
+// Whether `x / d` is a whole number, exactly: Python's `Fraction(x) / Fraction(d)` having a
+// denominator of 1.
+fn exact_multiple(x: Num, d: f64) -> bool {
+    var xm = BigInt.zero()
+    var xe: i64 = 0
+    if x.kind == K_FLOAT {
+        let (m, e) = float_parts(x.f)
+        xm = m
+        xe = e
+    } else {
+        xm = num_big(x)
+    }
+    let (dm, de) = float_parts(d)
+    var num = xm
+    var den = dm
+    let shift = xe - de
+    if shift >= 0 {
+        num = num.shl(u64.wrap(shift))
+    } else {
+        den = den.shl(u64.wrap(0 - shift))
+    }
+    let (_, r) = num.div_rem(den)
+    return r.is_zero()
+}
+
+// --- equality ------------------------------------------------------------------------------------
+
+// jsonschema's `equal`: Python's `==`, but for `true` and 1, and `false` and 0, which differ.
+fn equal_json(a: Json, b: Json) -> bool {
+    match a {
+        Json.Str(s) => {
+            return match b {
+                Json.Str(t) => s == t,
+                _ => false,
+            }
+        },
+        Json.Array(xs) => {
+            return match b {
+                Json.Array(ys) => {
+                    if xs.len() != ys.len() {
+                        return false
+                    }
+                    for i in 0..xs.len() {
+                        if not equal_json(xs[i], ys[i]) {
+                            return false
+                        }
+                    }
+                    true
+                },
+                _ => false,
+            }
+        },
+        Json.Object(xs) => {
+            return match b {
+                Json.Object(ys) => {
+                    if xs.len() != ys.len() {
+                        return false
+                    }
+                    for (k, x) in xs {
+                        if not ys.contains(k) or not equal_json(x, ys[k]) {
+                            return false
+                        }
+                    }
+                    true
+                },
+                _ => false,
+            }
+        },
+        Json.Bool(p) => {
+            return match b {
+                Json.Bool(q) => p == q,
+                _ => false,
+            }
+        },
+        Json.Null => {
+            return match b {
+                Json.Null => true,
+                _ => false,
+            }
+        },
+        _ => {
+            let x = num_json(a) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+            let y = num_json(b) else {
+                return false
+            }
+            return cmp_num(x, y) == 0
+        },
+    }
+}
+
+fn equal_node(g: Graph, n: u32, b: Json) -> bool {
+    let i = usize(n)
+    let k = g.nodes[i].kind
+    if k == K_STR {
+        return match b {
+            Json.Str(t) => g.nodes[i].s == t,
+            _ => false,
+        }
+    }
+    if k == K_ARRAY {
+        return match b {
+            Json.Array(ys) => {
+                if g.nodes[i].kids.len() != ys.len() {
+                    return false
+                }
+                for j in 0..ys.len() {
+                    if not equal_node(g, g.nodes[i].kids[j], ys[j]) {
+                        return false
+                    }
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+    if k == K_OBJECT {
+        return match b {
+            Json.Object(ys) => {
+                if g.nodes[i].keys.len() != ys.len() {
+                    return false
+                }
+                for j in 0..g.nodes[i].keys.len() {
+                    let key = g.nodes[i].keys[j].copy()
+                    if not ys.contains(key) or not equal_node(g, g.nodes[i].kids[j], ys[key]) {
+                        return false
+                    }
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+    if k == K_BOOL {
+        return match b {
+            Json.Bool(q) => g.nodes[i].b == q,
+            _ => false,
+        }
+    }
+    if k == K_NULL {
+        return match b {
+            Json.Null => true,
+            _ => false,
+        }
+    }
+    let x = num_node(g, n) ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+    let y = num_json(b) else {
+        return false
+    }
+    return cmp_num(x, y) == 0
+}
+
+// Python's own `==`, where `true` is 1: what sorting compares with.
+fn py_eq(a: Json, b: Json) -> bool {
+    let na = py_num(a)
+    let nb = py_num(b)
+    if na != none or nb != none {
+        let p = na else {
+            return false
+        }
+        let q = nb else {
+            return false
+        }
+        return cmp_num(p, q) == 0
+    }
+    match a {
+        Json.Str(s) => {
+            return match b {
+                Json.Str(t) => s == t,
+                _ => false,
+            }
+        },
+        Json.Null => {
+            return match b {
+                Json.Null => true,
+                _ => false,
+            }
+        },
+        Json.Array(xs) => {
+            return match b {
+                Json.Array(ys) => {
+                    if xs.len() != ys.len() {
+                        return false
+                    }
+                    for i in 0..xs.len() {
+                        if not py_eq(xs[i], ys[i]) {
+                            return false
+                        }
+                    }
+                    true
+                },
+                _ => false,
+            }
+        },
+        Json.Object(xs) => {
+            return match b {
+                Json.Object(ys) => {
+                    if xs.len() != ys.len() {
+                        return false
+                    }
+                    for (k, x) in xs {
+                        if not ys.contains(k) or not py_eq(x, ys[k]) {
+                            return false
+                        }
+                    }
+                    true
+                },
+                _ => false,
+            }
+        },
+        _ => return false,
+    }
+}
+
+fn py_num(v: Json) -> Num? {
+    return match v {
+        Json.Bool(b) => some(Num { kind: K_INT, i: if b { 1 } else { 0 }, u: 0, f: 0.0 }),
+        _ => num_json(v),
+    }
+}
+
+// Python's `a < b`, or `none` where Python raises a `TypeError`.
+fn py_lt(a: Json, b: Json) -> bool? {
+    let x = py_num(a)
+    let y = py_num(b)
+    if x != none and y != none {
+        let p = x ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+        let q = y ?? Num { kind: K_INT, i: 0, u: 0, f: 0.0 }
+        return some(cmp_num(p, q) < 0)
+    }
+    match a {
+        Json.Str(s) => {
+            return match b {
+                Json.Str(t) => some(text_cmp(s, t) == Ordering.Less),
+                _ => none,
+            }
+        },
+        Json.Array(xs) => {
+            return match b {
+                Json.Array(ys) => {
+                    var i: usize = 0
+                    while i < xs.len() and i < ys.len() {
+                        if not py_eq(xs[i], ys[i]) {
+                            return py_lt(xs[i], ys[i])
+                        }
+                        i += 1
+                    }
+                    some(xs.len() < ys.len())
+                },
+                _ => none,
+            }
+        },
+        _ => return none,
+    }
+}
+
+// jsonschema's `uniq`: whether no two elements are `equal`. As in Python, the elements are sorted
+// first, if they can be, and only neighbours compared.
+fn uniq(items: List<Json>) -> bool {
+    let n = items.len()
+    if n < 2 {
+        return true
+    }
+    var sortable = true
+    var texts = true
+    var numbers = true
+    for x in items {
+        match x {
+            Json.Bool(_) => sortable = false,
+            Json.Str(_) => numbers = false,
+            Json.Int(_) => texts = false,
+            Json.UInt(_) => texts = false,
+            Json.Float(_) => texts = false,
+            _ => {
+                texts = false
+                numbers = false
+            },
+        }
+    }
+    // Strings alone, or numbers alone, are in a total order that agrees with `==`, so the sorted
+    // neighbours have a pair alike exactly when any two are: a short list needn't be sorted.
+    if sortable and (texts or numbers) and n <= 16 {
+        for i in 1..n {
+            for j in 0..i {
+                if equal_json(items[j], items[i]) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+    if sortable {
+        var order = List<usize>()
+        for i in 0..n {
+            order.push(i)
+        }
+        var scratch = List<usize>()
+        for i in 0..n {
+            scratch.push(i)
+        }
+        if merge_sort(items, mut order, mut scratch, 0, n) {
+            for i in 1..n {
+                if equal_json(items[order[i - 1]], items[order[i]]) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+    for i in 0..n {
+        for j in 0..i {
+            if equal_json(items[j], items[i]) {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+// Sorts `order[from..to]` by Python's `<` on the items, stably; false if two can't be compared.
+fn merge_sort(items: List<Json>, order: mut List<usize>, scratch: mut List<usize>, from: usize, to: usize) -> bool {
+    if to - from < 2 {
+        return true
+    }
+    let mid = from + (to - from) / 2
+    if not merge_sort(items, mut order, mut scratch, from, mid) or not merge_sort(items, mut order, mut scratch, mid, to) {
+        return false
+    }
+    var i = from
+    var j = mid
+    var k = from
+    while i < mid and j < to {
+        let lt = py_lt(items[order[j]], items[order[i]]) else {
+            return false
+        }
+        if lt {
+            scratch[k] = order[j]
+            j += 1
+        } else {
+            scratch[k] = order[i]
+            i += 1
+        }
+        k += 1
+    }
+    while i < mid {
+        scratch[k] = order[i]
+        i += 1
+        k += 1
+    }
+    while j < to {
+        scratch[k] = order[j]
+        j += 1
+        k += 1
+    }
+    for x in from..to {
+        order[x] = scratch[x]
+    }
+    return true
+}
+
+// --- text ----------------------------------------------------------------------------------------
+
+// Strings in Python's order, which is their code points', and so their UTF-8 bytes'.
+fn text_cmp(a: String, b: String) -> Ordering {
+    let n = if a.len() < b.len() { a.len() } else { b.len() }
+    for i in 0..n {
+        let x = a.byte_at(i)
+        let y = b.byte_at(i)
+        if x != y {
+            return if x < y { Ordering.Less } else { Ordering.Greater }
+        }
+    }
+    if a.len() == b.len() {
+        return Ordering.Equal
+    }
+    return if a.len() < b.len() { Ordering.Less } else { Ordering.Greater }
+}
+
+fn sort_texts(xs: mut List<String>) {
+    xs.sort_by(|a, b| text_cmp(a, b))
+}
+
+fn strip_hash(s: String) -> String {
+    var end = s.len()
+    while end > 0 and s.byte_at(end - 1) == b'#' {
+        end -= 1
+    }
+    return s[..end].copy()
+}
+
+// `_utils.extras_msg`: the reprs, and `was` or `were`.
+fn extras_texts(xs: List<String>) -> (String, String) {
+    var shown = String()
+    for x in xs {
+        if not shown.is_empty() {
+            shown.push_str(", ")
+        }
+        repr_str_into(mut shown, x)
+    }
+    return (shown, if xs.len() == 1 { String("was") } else { String("were") })
+}
+
+fn extras_json(items: List<Json>, from: usize) -> (String, String) {
+    var shown = String()
+    for i in from..items.len() {
+        if i > from {
+            shown.push_str(", ")
+        }
+        repr_into(mut shown, items[i])
+    }
+    return (shown, if items.len() - from == 1 { String("was") } else { String("were") })
+}
+
+// Whether a name matches `^[a-zA-Z][a-zA-Z0-9_]*$`, as Python's `re.match` reads it, which lets
+// one `\n` end it.
+fn plain_name(k: String) -> bool {
+    var n = k.len()
+    if n > 0 and k.byte_at(n - 1) == b'\n' {
+        n -= 1
+    }
+    if n == 0 {
+        return false
+    }
+    for i in 0..n {
+        let c = k.byte_at(i)
+        let letter = (c >= b'a' and c <= b'z') or (c >= b'A' and c <= b'Z')
+        if i == 0 and not letter {
+            return false
+        }
+        if not letter and not (c >= b'0' and c <= b'9') and c != b'_' {
+            return false
+        }
+    }
+    return true
+}
+
+// `_utils.format_as_index`: `schema['properties']['a']`.
+fn format_as_index(word: String, parts: List<PathPart>) -> String {
+    var out = word.copy()
+    if parts.is_empty() {
+        return out
+    }
+    out.push('[')
+    for i in 0..parts.len() {
+        if i > 0 {
+            out.push_str("][")
+        }
+        match parts[i] {
+            PathPart.Key(k) => repr_str_into(mut out, k),
+            PathPart.Index(j) => out.push_str("{j}"),
+        }
+    }
+    out.push(']')
+    return out
+}
+
+fn runes_of(s: String) -> List<rune> {
+    var out = List<rune>()
+    for r in s.runes() {
+        out.push(r)
+    }
+    return out
+}
+
+fn is_space_text(s: String) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for r in s.runes() {
+        if not is_space(u32(r)) {
+            return false
+        }
+    }
+    return true
+}
+
+fn rstrip(s: String) -> String {
+    let rs = runes_of(s)
+    var end = rs.len()
+    while end > 0 and is_space(u32(rs[end - 1])) {
+        end -= 1
+    }
+    var out = String()
+    for i in 0..end {
+        out.push(rs[i])
+    }
+    return out
+}
+
+fn lstrip(s: String) -> String {
+    let rs = runes_of(s)
+    var start: usize = 0
+    while start < rs.len() and is_space(u32(rs[start])) {
+        start += 1
+    }
+    var out = String()
+    for i in start..rs.len() {
+        out.push(rs[i])
+    }
+    return out
+}
+
+// Python's `str.splitlines(keepends=True)`.
+fn split_lines(s: String) -> List<String> {
+    var out = List<String>()
+    let rs = runes_of(s)
+    var line = String()
+    var i: usize = 0
+    while i < rs.len() {
+        let r = rs[i]
+        line.push(r)
+        let c = u32(r)
+        var ends = c == 10 or c == 11 or c == 12 or c == 0x1C or c == 0x1D or c == 0x1E or c == 0x85 or c == 0x2028 or c == 0x2029
+        if c == 13 {
+            ends = true
+            if i + 1 < rs.len() and rs[i + 1] == '\n' {
+                line.push('\n')
+                i += 1
+            }
+        }
+        if ends {
+            out.push(line)
+            line = String()
+        }
+        i += 1
+    }
+    if not line.is_empty() {
+        out.push(line)
+    }
+    return out
+}
+
+// `textwrap.dedent`.
+fn dedent(text: String) -> String {
+    let lines = text.split("\n")
+    var lo: i64 = -1
+    var hi: i64 = -1
+    for i in 0..lines.len() {
+        if lines[i].is_empty() or is_space_text(lines[i]) {
+            continue
+        }
+        if lo < 0 or text_cmp(lines[i], lines[usize.wrap(lo)]) == Ordering.Less {
+            lo = i64.wrap(i)
+        }
+        if hi < 0 or text_cmp(lines[i], lines[usize.wrap(hi)]) == Ordering.Greater {
+            hi = i64.wrap(i)
+        }
+    }
+    var margin: usize = 0
+    if lo >= 0 {
+        let a = lines[usize.wrap(lo)].copy()
+        let b = lines[usize.wrap(hi)].copy()
+        while margin < a.len() {
+            let c = a.byte_at(margin)
+            if margin >= b.len() or c != b.byte_at(margin) or (c != b' ' and c != b'\t') {
+                break
+            }
+            margin += 1
+        }
+    }
+    var out = String()
+    for i in 0..lines.len() {
+        if i > 0 {
+            out.push('\n')
+        }
+        if not is_space_text(lines[i]) and lines[i].len() >= margin {
+            out.push_str(lines[i][margin..])
+        }
+    }
+    return out
+}
+
+// `_pretty`: `pprint.pformat(v, width=72, sort_dicts=False)`, its lines after the first indented
+// by 16 spaces.
+fn pretty(v: Json) -> String {
+    var out = String()
+    pp(mut out, v, 0, 0, 0)
+    var indented = String()
+    for line in split_lines(out) {
+        if not is_space_text(line) {
+            indented.push_str("                ")
+        }
+        indented.push_str(line)
+    }
+    return lstrip(indented)
+}
+
+fn spaces(out: mut String, n: i64) {
+    var i: i64 = 0
+    while i < n {
+        out.push(' ')
+        i += 1
+    }
+}
+
+// `PrettyPrinter._format`, with an indent of 1 and a width of 72.
+fn pp(out: mut String, v: Json, indent: i64, allowance: i64, level: i64) {
+    let rep = repr(v)
+    if i64.wrap(rune_len(rep)) <= 72 - indent - allowance {
+        out.push_str(rep)
+        return
+    }
+    match v {
+        Json.Object(members) => {
+            out.push('{')
+            let n = members.len()
+            let ind = indent + 1
+            var i: usize = 0
+            for (k, x) in members {
+                let last = i + 1 == n
+                let krep = repr_str(k)
+                out.push_str(krep)
+                out.push_str(": ")
+                pp(mut out, x, ind + i64.wrap(rune_len(krep)) + 2, if last { allowance + 1 } else { 1 }, level + 1)
+                if not last {
+                    out.push_str(",\n")
+                    spaces(mut out, ind)
+                }
+                i += 1
+            }
+            out.push('}')
+        },
+        Json.Array(items) => {
+            out.push('[')
+            let ind = indent + 1
+            for i in 0..items.len() {
+                if i > 0 {
+                    out.push_str(",\n")
+                    spaces(mut out, ind)
+                }
+                let last = i + 1 == items.len()
+                pp(mut out, items[i], ind, if last { allowance + 1 } else { 1 }, level + 1)
+            }
+            out.push(']')
+        },
+        Json.Str(s) => pp_str(mut out, s, indent, allowance, level + 1),
+        _ => out.push_str(rep),
+    }
+}
+
+// `PrettyPrinter._pprint_str`: a long string as pieces broken after white space, one a line.
+fn pp_str(out: mut String, s: String, indent0: i64, allowance0: i64, level: i64) {
+    if s.is_empty() {
+        out.push_str(repr_str(s))
+        return
+    }
+    var indent = indent0
+    var allowance = allowance0
+    if level == 1 {
+        indent += 1
+        allowance += 1
+    }
+    let lines = split_lines(s)
+    var chunks = List<String>()
+    var max_width1 = 72 - indent
+    let max_width = 72 - indent
+    var rep = String()
+    for i in 0..lines.len() {
+        rep = repr_str(lines[i])
+        if i + 1 == lines.len() {
+            max_width1 -= allowance
+        }
+        if i64.wrap(rune_len(rep)) <= max_width1 {
+            chunks.push(rep.copy())
+            continue
+        }
+        let parts = word_parts(lines[i])
+        var max_width2 = max_width
+        var current = String()
+        for j in 0..parts.len() {
+            var candidate = current.copy()
+            candidate.push_str(parts[j])
+            if j + 1 == parts.len() and i + 1 == lines.len() {
+                max_width2 -= allowance
+            }
+            if i64.wrap(rune_len(repr_str(candidate))) > max_width2 {
+                if not current.is_empty() {
+                    chunks.push(repr_str(current))
+                }
+                current = parts[j].copy()
+            } else {
+                current = candidate
+            }
+        }
+        if not current.is_empty() {
+            chunks.push(repr_str(current))
+        }
+    }
+    if chunks.len() == 1 {
+        out.push_str(rep)
+        return
+    }
+    if level == 1 {
+        out.push('(')
+    }
+    for i in 0..chunks.len() {
+        if i > 0 {
+            out.push('\n')
+            spaces(mut out, indent)
+        }
+        out.push_str(chunks[i])
+    }
+    if level == 1 {
+        out.push(')')
+    }
+}
+
+// `re.findall(r'\S*\s*', line)` without its last, empty, match.
+fn word_parts(line: String) -> List<String> {
+    var out = List<String>()
+    let rs = runes_of(line)
+    var i: usize = 0
+    while i < rs.len() {
+        var part = String()
+        while i < rs.len() and not is_space(u32(rs[i])) {
+            part.push(rs[i])
+            i += 1
+        }
+        while i < rs.len() and is_space(u32(rs[i])) {
+            part.push(rs[i])
+            i += 1
+        }
+        out.push(part)
+    }
+    return out
+}
+
+// --- errors as they're given out -----------------------------------------------------------------
+
+fn publish(g: Graph, f: Fail, parent_path: List<PathPart>, parent_spath: List<PathPart>, schema_error: bool) -> ValidationError {
+    var path = List<PathPart>()
+    var i = f.rpath.len()
+    while i > 0 {
+        i -= 1
+        path.push(f.rpath[i].copy())
+    }
+    var spath = List<PathPart>()
+    i = f.rspath.len()
+    while i > 0 {
+        i -= 1
+        spath.push(f.rspath[i].copy())
+    }
+    var abs_path = parent_path.copy()
+    for p in path {
+        abs_path.push(p.copy())
+    }
+    var abs_spath = parent_spath.copy()
+    for p in spath {
+        abs_spath.push(p.copy())
+    }
+    var context = List<ValidationError>()
+    for c in f.context {
+        // Python makes only the error itself a SchemaError: what it found under it stay ValidationErrors.
+        context.push(publish(g, c, abs_path, abs_spath, false))
+    }
+    let value = match f.value {
+        Value.Node(n) => node_json(g, n),
+        Value.Int(n) => Json.Int(n),
+        Value.Nothing => Json.Null,
+    }
+    return ValidationError {
+        message: f.message.copy(), keyword: f.keyword.copy(), validator_value: value,
+        instance: f.instance.copy(), schema: node_json(g, f.schema), path: path,
+        absolute_path: abs_path, schema_path: spath, absolute_schema_path: abs_spath,
+        context: context, schema_error: schema_error, draft: f.draft,
+    }
+}
+
+// How `relevance` orders two errors: 1 if `a` is the better match, -1 if `b` is, 0 if neither.
+fn relevance_cmp(a: ValidationError, b: ValidationError) -> i32 {
+    if a.path.len() != b.path.len() {
+        return if a.path.len() < b.path.len() { 1 } else { -1 }
+    }
+    for i in 0..a.path.len() {
+        let c = a.path[i].cmp(b.path[i])
+        if c != Ordering.Equal {
+            return if c == Ordering.Less { -1 } else { 1 }
+        }
+    }
+    let wa = not weak(a.keyword)
+    let wb = not weak(b.keyword)
+    if wa != wb {
+        return if wa { 1 } else { -1 }
+    }
+    let ta = not matches_type(a)
+    let tb = not matches_type(b)
+    if ta != tb {
+        return if ta { 1 } else { -1 }
+    }
+    return 0
+}
+
+fn weak(name: String?) -> bool {
+    return match name {
+        some(k) => k == "anyOf" or k == "oneOf",
+        none => false,
+    }
+}
+
+// `_matches_type`: whether the instance is of a type its schema's `type` names.
+fn matches_type(e: ValidationError) -> bool {
+    let Json.Object(members) = e.schema else {
+        return false
+    }
+    if not members.contains("type") {
+        return false
+    }
+    return match members["type"] {
+        Json.Str(t) => type_check(e.draft, e.instance, t) == 1,
+        Json.Array(ts) => {
+            for t in ts {
+                if let Json.Str(name) = t {
+                    if type_check(e.draft, e.instance, name) == 1 {
+                        return true
+                    }
+                }
+            }
+            false
+        },
+        Json.Object(ts) => {
+            for (name, _) in ts {
+                if type_check(e.draft, e.instance, name) == 1 {
+                    return true
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+// `best_match`'s way down into an error's context, while one error there stands out.
+fn best_within(e: ValidationError) -> ValidationError {
+    if e.context.is_empty() {
+        return e.copy()
+    }
+    var first: usize = 0
+    for i in 1..e.context.len() {
+        if relevance_cmp(e.context[i], e.context[first]) < 0 {
+            first = i
+        }
+    }
+    if e.context.len() >= 2 {
+        var second: usize = if first == 0 { 1 } else { 0 }
+        for i in 0..e.context.len() {
+            if i == first or i == second {
+                continue
+            }
+            if relevance_cmp(e.context[i], e.context[second]) < 0 {
+                second = i
+            }
+        }
+        if relevance_cmp(e.context[first], e.context[second]) == 0 {
+            return e.copy()
+        }
+    }
+    return best_within(e.context[first])
+}

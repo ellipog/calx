@@ -1,9 +1,12 @@
 /// URLs as text: percent-encoding and decoding as Python's `urllib.parse` quotes and unquotes,
 /// form bodies as `urlencode` writes them and `parse_qsl` reads them, and URLs taken apart, put
-/// back together and resolved against a base, as RFC 3986 says and `urljoin` does.
+/// back together and resolved against a base, as RFC 3986 says and `urljoin` does, or, with
+/// `urlsplit`, `urlunsplit`, `urljoin` and `urldefrag`, as Python's functions of those names do,
+/// corners and all.
 module std.url
 
 import std.text.utf8.{decode_lossy_unicode}
+import std.unicode.{normalize, Form}
 
 /// The text percent-encoded, as Python's `quote`: each byte of its UTF-8 as `%XX`, in uppercase
 /// hex, except letters, digits, `_`, `.`, `-` and `~`, which are never encoded, and the ASCII
@@ -485,4 +488,417 @@ fn unquote(text: String, plus: bool) -> String {
         i += 1
     }
     return decode_lossy_unicode(out, 0, out.len())
+}
+
+// --- Python's urllib.parse, as it is ------------------------------------------------------------
+//
+// These follow CPython 3.14's Lib/urllib/parse.py and, for a host in brackets, Lib/ipaddress.py,
+// under the Python Software Foundation License, Version 2, whose notice is in
+// std/regex/sre.calx. They're written anew in Calx.
+
+/// A URL split as Python's `urlsplit` splits it: `scheme://netloc/path?query#fragment`, with `""`
+/// for each part that isn't there, and the scheme in lowercase.
+pub struct SplitUrl {
+    pub scheme: String
+    pub netloc: String
+    pub path: String
+    pub query: String
+    pub fragment: String
+}
+
+/// `url` split as Python's `urlsplit(url)` splits it, or the `ValueError` it raises: for a
+/// netloc with one bracket and not the other, an IPv6 address in brackets that isn't one, or a
+/// netloc whose NFKC form has a `/`, `?`, `#`, `@` or `:` it didn't have.
+pub fn urlsplit(url: String) -> SplitUrl ! String {
+    let p = try split_python(url)
+    return SplitUrl { scheme: p.scheme ?? String(), netloc: p.netloc ?? String(), path: p.path, query: p.query ?? String(), fragment: p.fragment ?? String() }
+}
+
+/// The parts put back together as Python's `urlunsplit` and `geturl` put them: an empty query
+/// or fragment leaves out its `?` or `#`, and a scheme that has a netloc in Python, such as
+/// `file`, keeps its `//` with an empty one.
+pub fn urlunsplit(parts: SplitUrl) -> String {
+    var netloc: String? = none
+    if not parts.netloc.is_empty() {
+        netloc = some(parts.netloc.copy())
+    } else if not parts.scheme.is_empty() and in_list(USES_NETLOC, parts.scheme) and (parts.path.is_empty() or parts.path.starts_with("/")) {
+        netloc = some(String())
+    }
+    let scheme: String? = if parts.scheme.is_empty() { none } else { some(parts.scheme.copy()) }
+    let query: String? = if parts.query.is_empty() { none } else { some(parts.query.copy()) }
+    let fragment: String? = if parts.fragment.is_empty() { none } else { some(parts.fragment.copy()) }
+    return unsplit_python(scheme, netloc, parts.path, query, fragment)
+}
+
+/// `url` read relative to `base` as Python's `urljoin(base, url)` reads it, or the `ValueError`
+/// it raises. Unlike `Url.join`, it's Python's to the letter: a scheme Python doesn't take as
+/// relative, such as `urn:`, makes `url` stand for itself, `..` above the root is dropped, and an
+/// empty query or fragment keeps its `?` or `#`.
+pub fn urljoin(base: String, url: String) -> String ! String {
+    if base.is_empty() {
+        return url.copy()
+    }
+    if url.is_empty() {
+        return base.copy()
+    }
+    let b = try split_python(base)
+    let u = try split_python(url)
+    var scheme = u.scheme.copy()
+    if scheme == none {
+        scheme = b.scheme.copy()
+    }
+    let s = scheme.copy() ?? String()
+    if scheme != b.scheme or (not s.is_empty() and not in_list(USES_RELATIVE, s)) {
+        return url.copy()
+    }
+    var netloc = u.netloc.copy()
+    if s.is_empty() or in_list(USES_NETLOC, s) {
+        if not (netloc.copy() ?? String()).is_empty() {
+            return unsplit_python(scheme, netloc, u.path, u.query, u.fragment)
+        }
+        netloc = b.netloc.copy()
+    }
+    if u.path.is_empty() {
+        var query = u.query.copy()
+        var fragment = u.fragment.copy()
+        if query == none {
+            query = b.query.copy()
+            if fragment == none {
+                fragment = b.fragment.copy()
+            }
+        }
+        return unsplit_python(scheme, netloc, b.path, query, fragment)
+    }
+    var base_parts = b.path.split("/")
+    if base_parts[base_parts.len() - 1] != "" {
+        // The last part isn't a directory, so it isn't taken into account.
+        _ = base_parts.pop()
+    }
+    var segments = List<String>()
+    if u.path.starts_with("/") {
+        segments = u.path.split("/")
+    } else {
+        var all = base_parts
+        all.extend(u.path.split("/"))
+        // Empty parts between the first and the last would make doubled slashes.
+        for i in 0..all.len() {
+            if i == 0 or i == all.len() - 1 or not all[i].is_empty() {
+                segments.push(all[i].copy())
+            }
+        }
+    }
+    var resolved = List<String>()
+    for seg in segments {
+        if seg == ".." {
+            _ = resolved.pop()
+        } else if seg != "." {
+            resolved.push(seg.copy())
+        }
+    }
+    let last = segments[segments.len() - 1].copy()
+    if last == "." or last == ".." {
+        resolved.push(String())
+    }
+    var path = resolved.join("/")
+    if path.is_empty() {
+        path = String("/")
+    }
+    return unsplit_python(scheme, netloc, path, u.query, u.fragment)
+}
+
+/// `url` without its fragment, and the fragment, as Python's `urldefrag(url)` gives them: `""`
+/// for none, and the URL as it is when it has no `#`.
+pub fn urldefrag(url: String) -> (String, String) ! String {
+    if not url.contains("#") {
+        return (url.copy(), String())
+    }
+    let p = try split_python(url)
+    return (unsplit_python(p.scheme, p.netloc, p.path, p.query, none), p.fragment ?? String())
+}
+
+const USES_RELATIVE: str = ",ftp,http,gopher,nntp,imap,wais,file,https,shttp,mms,prospero,rtsp,rtsps,rtspu,sftp,svn,svn+ssh,ws,wss,"
+const USES_NETLOC: str = ",ftp,http,gopher,nntp,telnet,imap,wais,file,mms,https,shttp,snews,prospero,rtsp,rtsps,rtspu,rsync,svn,svn+ssh,sftp,nfs,git,git+ssh,ws,wss,itms-services,"
+
+// Whether `s` is one of the names in `list`, which has a comma before and after each.
+fn in_list(list: str, s: String) -> bool {
+    return list.contains(",{s},")
+}
+
+// The parts as `_urlsplit` gives them, `none` where it gives `None`.
+struct PyParts {
+    scheme: String?
+    netloc: String?
+    path: String
+    query: String?
+    fragment: String?
+}
+
+fn is_scheme_byte(b: u8) -> bool {
+    return (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'+' or b == b'-' or b == b'.'
+}
+
+// Python's `_urlsplit(url, None, True)`.
+fn split_python(text: String) -> PyParts ! String {
+    // Leading C0 controls and spaces go, and tabs and line breaks anywhere.
+    var start: usize = 0
+    while start < text.len() and text.byte_at(start) <= 0x20 {
+        start += 1
+    }
+    var url = String()
+    for r in text[start..].runes() {
+        if r != '\t' and r != '\r' and r != '\n' {
+            url.push(r)
+        }
+    }
+    var scheme: String? = none
+    if let i = url.find(":") {
+        let first = url.byte_at(0)
+        if i > 0 and ((first >= b'a' and first <= b'z') or (first >= b'A' and first <= b'Z')) {
+            var all = true
+            for k in 0..i {
+                if not is_scheme_byte(url.byte_at(k)) {
+                    all = false
+                    break
+                }
+            }
+            if all {
+                scheme = some(url[..i].to_lower_root())
+                url = url[i + 1..]
+            }
+        }
+    }
+    var netloc: String? = none
+    if url.starts_with("//") {
+        var delim = url.len()
+        for k in 2..url.len() {
+            let b = url.byte_at(k)
+            if b == b'/' or b == b'?' or b == b'#' {
+                delim = k
+                break
+            }
+        }
+        let n = url[2..delim]
+        url = url[delim..]
+        let open = n.contains("[")
+        let close = n.contains("]")
+        if open != close {
+            fail String("Invalid IPv6 URL")
+        }
+        if open and close {
+            try check_bracketed_netloc(n)
+        }
+        netloc = some(n)
+    }
+    var fragment: String? = none
+    if let (u, f) = url.split_once("#") {
+        fragment = some(f.copy())
+        url = u.copy()
+    }
+    var query: String? = none
+    if let (u, q) = url.split_once("?") {
+        query = some(q.copy())
+        url = u.copy()
+    }
+    if let n = netloc {
+        try check_netloc(n)
+    }
+    return PyParts { scheme, netloc, path: url, query, fragment }
+}
+
+// Python's `_urlunsplit`.
+fn unsplit_python(scheme: String?, netloc: String?, path: String, query: String?, fragment: String?) -> String {
+    var url = path.copy()
+    if let n = netloc {
+        if not url.is_empty() and not url.starts_with("/") {
+            url = "/{url}"
+        }
+        url = "//{n}{url}"
+    } else if url.starts_with("//") {
+        url = "//{url}"
+    }
+    if let s = scheme {
+        if not s.is_empty() {
+            url = "{s}:{url}"
+        }
+    }
+    if let q = query {
+        url.push('?')
+        url.push_str(q)
+    }
+    if let f = fragment {
+        url.push('#')
+        url.push_str(f)
+    }
+    return url
+}
+
+// `_checknetloc`: a netloc that isn't ASCII mustn't gain a `/`, `?`, `#`, `@` or `:` under NFKC.
+fn check_netloc(netloc: String) ! String {
+    var ascii = true
+    for i in 0..netloc.len() {
+        if netloc.byte_at(i) >= 0x80 {
+            ascii = false
+        }
+    }
+    if ascii {
+        return
+    }
+    let n = netloc.replace("@", "").replace(":", "").replace("#", "").replace("?", "")
+    let nfkc = normalize(n, Form.NFKC)
+    if nfkc == n {
+        return
+    }
+    let marks: List<String> = ["/", "?", "#", "@", ":"]
+    for c in marks {
+        if nfkc.contains(c) {
+            fail "netloc '{netloc}' contains invalid characters under NFKC normalization"
+        }
+    }
+}
+
+// `_check_bracketed_netloc`: what's in brackets has to be an IPv6 address or an IPvFuture one.
+fn check_bracketed_netloc(netloc: String) ! String {
+    var hostport = netloc.copy()
+    if let k = netloc.find_last("@") {
+        hostport = netloc[k + 1..]
+    }
+    var host = String()
+    if let (before, bracketed) = hostport.split_once("[") {
+        if not before.is_empty() {
+            fail String("Invalid IPv6 URL")
+        }
+        var port = String()
+        if let (h, p) = bracketed.split_once("]") {
+            host = h.copy()
+            port = p.copy()
+        } else {
+            host = bracketed.copy()
+        }
+        if not port.is_empty() and not port.starts_with(":") {
+            fail String("Invalid IPv6 URL")
+        }
+    } else if let (h, _) = hostport.split_once(":") {
+        host = h.copy()
+    } else {
+        host = hostport.copy()
+    }
+    if host.starts_with("v") {
+        // \Av[a-fA-F0-9]+\..+\z
+        var i: usize = 1
+        while i < host.len() and hex_value(host.byte_at(i)) != none {
+            i += 1
+        }
+        if i == 1 or i >= host.len() or host.byte_at(i) != b'.' or i + 1 >= host.len() {
+            fail String("IPvFuture address is invalid")
+        }
+        return
+    }
+    if is_ipv4(host) {
+        fail String("An IPv4 address cannot be in brackets")
+    }
+    if not is_ipv6(host) {
+        fail "'{host}' does not appear to be an IPv4 or IPv6 address"
+    }
+}
+
+// Whether `s` is an IPv4 address as Python's `ipaddress` reads one: four decimal octets up to 255,
+// none with a leading zero.
+fn is_ipv4(s: String) -> bool {
+    let octets = s.split(".")
+    if octets.len() != 4 {
+        return false
+    }
+    for o in octets {
+        if o.is_empty() or o.len() > 3 {
+            return false
+        }
+        var v: u32 = 0
+        for i in 0..o.len() {
+            let b = o.byte_at(i)
+            if b < b'0' or b > b'9' {
+                return false
+            }
+            v = v * 10 + u32(b - b'0')
+        }
+        if (o.len() > 1 and o.byte_at(0) == b'0') or v > 255 {
+            return false
+        }
+    }
+    return true
+}
+
+// Whether `s` is an IPv6 address as Python's `ipaddress` reads one, with a scope after `%` and
+// an IPv4 address as its last 32 bits allowed.
+fn is_ipv6(text: String) -> bool {
+    var s = text.copy()
+    if let (a, scope) = text.split_once("%") {
+        if scope.is_empty() or scope.contains("%") {
+            return false
+        }
+        s = a.copy()
+    }
+    if s.is_empty() {
+        return false
+    }
+    var parts = s.split(":")
+    if parts.len() < 3 {
+        return false
+    }
+    if parts[parts.len() - 1].contains(".") {
+        let last = parts.pop() ?? String()
+        if not is_ipv4(last) {
+            return false
+        }
+        parts.push(String("0"))
+        parts.push(String("0"))
+    }
+    if parts.len() > 9 {
+        return false
+    }
+    var skip: i64 = -1
+    for i in 1..parts.len() - 1 {
+        if parts[i].is_empty() {
+            if skip >= 0 {
+                return false
+            }
+            skip = i64.wrap(i)
+        }
+    }
+    var hi = parts.len()
+    var lo: usize = 0
+    if skip >= 0 {
+        hi = usize.wrap(skip)
+        lo = parts.len() - hi - 1
+        if parts[0].is_empty() {
+            if hi != 1 {
+                return false
+            }
+            hi = 0
+        }
+        if parts[parts.len() - 1].is_empty() {
+            if lo != 1 {
+                return false
+            }
+            lo = 0
+        }
+        if hi + lo + 1 > 8 {
+            return false
+        }
+    } else if parts.len() != 8 or parts[0].is_empty() or parts[7].is_empty() {
+        return false
+    }
+    for i in 0..parts.len() {
+        if i < hi or i >= parts.len() - lo {
+            let h = parts[i].copy()
+            if h.len() > 4 {
+                return false
+            }
+            for k in 0..h.len() {
+                if hex_value(h.byte_at(k)) == none {
+                    return false
+                }
+            }
+        }
+    }
+    return true
 }
