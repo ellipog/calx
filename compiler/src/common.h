@@ -26,7 +26,9 @@ public:
         std::size_t at = (used_ + align - 1) & ~(align - 1);
         if (blocks_.empty() || at + size > capacity_) {
             std::size_t want = size + align > kBlock ? size + align : kBlock;
-            blocks_.push_back(std::make_unique<std::byte[]>(want));
+            // Not zeroed: everything is built in place by `make` or `copy`, which set every byte
+            // they use, so zeroing first would only write each block twice.
+            blocks_.push_back(std::unique_ptr<std::byte[]>(new std::byte[want]));
             capacity_ = want;
             at = (reinterpret_cast<std::uintptr_t>(blocks_.back().get()) % align == 0)
                      ? 0

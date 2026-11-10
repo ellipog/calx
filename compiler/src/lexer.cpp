@@ -81,6 +81,9 @@ public:
     }
 
     std::vector<Token> run() {
+        // Room for a token every two bytes, which even a table of numbers rarely passes, so a big
+        // file's tokens aren't copied as the list grows. Pages that go unused cost nothing.
+        out_.reserve((end_ - pos_) / 2 + 8);
         bool space = false;
         while (true) {
             space |= skip_space_and_comments();
