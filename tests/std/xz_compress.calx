@@ -109,6 +109,18 @@ fn main() {
         same = same and compress(big.copy(), p) == packed
         set_workers(had)
     }
+    // .lzma is one stream, parsed on one thread, but with binary trees the threads find its
+    // matches: the same bytes on any number of workers, with a dictionary longer than the text and,
+    // at preset 0 with `extreme`, shorter.
+    for p in [4u32, 0] {
+        let packed = compress(big.copy(), p, Check.Crc64, Format.Alone, p == 0)
+        same = same and back(packed.copy(), big, Format.Alone)
+        set_workers(1)
+        same = same and compress(big.copy(), p, Check.Crc64, Format.Alone, p == 0) == packed
+        set_workers(3)
+        same = same and compress(big.copy(), p, Check.Crc64, Format.Alone, p == 0) == packed
+        set_workers(had)
+    }
     println("{same}")    // out: true
 
     // A .tar.xz.

@@ -16,7 +16,8 @@
  * For presets 4 to 9, whose binary trees take in text slowly, the threads share the trees out by
  * hash, find all the block's matches, and then parse the slices from them. What comes out is one
  * LZMA2 stream that any decoder reads in order, a few bytes bigger for each reset, and the same
- * however many threads made it. */
+ * however many threads made it. A .lzma file is one LZMA stream with no resets, so one thread parses
+ * it, from the matches the threads find a window ahead. */
 #include "calx_rt.h"
 
 #include <stddef.h>
@@ -553,17 +554,24 @@ static inline const cx_u8* note_count(const cx_u8* q, cx_u32* n) {
     return q + 3;
 }
 
+struct window_s;
+
 typedef struct {
     const cx_u8* data;
     cx_usize len, pos;
-    cx_u32 size, reach, nice, dist_bits, wide;
-    /* The window's positions' shares, from `a`, and where each share's notes are read next. */
+    cx_u32 size, reach, nice, dist_bits, wide, ranges;
+    /* The window's positions' shares, from `a` to `b`, and where each share's notes are read next.
+     * .lzma's one parse goes on from window to window in a ring of WINDOWS, `at` the one it's in. */
     const cx_u8* owner;
-    cx_usize a;
+    cx_usize a, b;
+    struct window_s* ring;
+    cx_u32 at;
     const cx_u8* cur[RANGES_MAX];
     cx_u32 head2[HEAD2];
     cx_u32 head3[HEAD3];
 } reader_t;
+
+static void rd_turn(reader_t* r);
 
 /* Takes the position at `p` into the two- and three-byte hashes, if it has four bytes. */
 static inline int rd_heads(reader_t* r, cx_usize p, cx_u32* d2, cx_u32* d3) {
@@ -587,6 +595,7 @@ static cx_u32 rd_find(reader_t* r, match_t* m) {
     const cx_u32 avail = left < MATCH_MAX ? (cx_u32)left : MATCH_MAX;
     const cx_u32 limit = avail < r->nice ? avail : r->nice;
     const cx_u8* cur = r->data + p;
+    while (p >= r->b) rd_turn(r);
     const cx_u8** at = &r->cur[r->owner[p - r->a]];
     cx_u32 noted;
     const cx_u8* q = note_count(*at, &noted);
@@ -644,6 +653,7 @@ static void rd_skip(reader_t* r, cx_u32 n) {
         const cx_usize p = r->pos++;
         cx_u32 d2, d3;
         if (!rd_heads(r, p, &d2, &d3)) continue;
+        while (p >= r->b) rd_turn(r);
         const cx_u8** at = &r->cur[r->owner[p - r->a]];
         cx_u32 noted;
         const cx_u8* q = note_count(*at, &noted);
@@ -1578,14 +1588,16 @@ static void block_lzma2(coder_t* c, const params_t* pr, slice_t* s, cx_u64 n, cx
     }
 }
 
-/* Codes the slice as one LZMA stream, for .lzma. */
-static void slice_lzma1(coder_t* c, const params_t* pr, slice_t* s) {
-    enc_t* e = c->e;
-    coder_start(c, pr, s->data, 0, s->len);
+/* .lzma's one LZMA stream, coded into the slice's buffer: started, taken on from *at to `until`, and
+ * ended. */
+static void lzma1_start(enc_t* e, slice_t* s) {
     buf_room(&s->out, 65536);
     rc_start(&e->rc, s->out.p);
-    cx_usize pos = 0;
-    while (pos < s->len) {
+}
+
+static void lzma1_run(enc_t* e, slice_t* s, cx_usize* at, cx_usize until) {
+    cx_usize pos = *at;
+    while (pos < until) {
         /* Room for the most a parse can take. */
         if (s->out.cap - e->rc.n < (cx_usize)OPTS * CODE_PER_BYTE + 2 * SYMBOL_CODE + e->rc.pending) {
             s->out.len = e->rc.n;
@@ -1598,15 +1610,28 @@ static void slice_lzma1(coder_t* c, const params_t* pr, slice_t* s) {
         encode(e, pos, len, back);
         pos += len;
     }
+    *at = pos;
+}
+
+static void lzma1_end(enc_t* e, slice_t* s) {
     rc_flush(&e->rc);
     s->out.len = e->rc.n;
+}
+
+/* Codes the slice as one LZMA stream, for .lzma, with a match finder of its own. */
+static void slice_lzma1(coder_t* c, const params_t* pr, slice_t* s) {
+    coder_start(c, pr, s->data, 0, s->len);
+    lzma1_start(c->e, s);
+    cx_usize pos = 0;
+    lzma1_run(c->e, s, &pos, s->len);
+    lzma1_end(c->e, s);
 }
 
 /* --- jobs ------------------------------------------------------------------------------------ */
 
 typedef struct {
     params_t pr;
-    int alone, shared, per_slice;
+    int alone, shared, alone_shared, per_slice;
     cx_u64 blocks, slices, groups;
     slice_t* s;
     cx_u64* first; /* each block's first slice, and the slice count at the end */
@@ -1661,7 +1686,7 @@ typedef struct {
 
 /* A window of the block's text, a few slices long: its positions' shares, its slices, and each
  * share's notes, with where each slice's start is in them. */
-typedef struct {
+typedef struct window_s {
     shared_t* f;
     cx_usize a, b;
     cx_u8* owner;
@@ -1672,6 +1697,19 @@ typedef struct {
     cx_usize* marks;
     cx_usize marks_cap;
 } window_t;
+
+/* .lzma's parse keeps a ring of three windows: the one being found, the one it's parsing, and the
+ * one before, which it may still be finishing. */
+#define WINDOWS 3
+
+/* Moves the reader on to the next window of its ring, from the start of each share's notes. */
+static void rd_turn(reader_t* r) {
+    const window_t* w = &r->ring[++r->at % WINDOWS];
+    r->owner = w->owner;
+    r->a = w->a;
+    r->b = w->b;
+    for (cx_u32 k = 0; k < r->ranges; k++) r->cur[k] = w->notes[k].p;
+}
 
 /* A step: the matches of one window found while the slices of the one before are parsed. */
 typedef struct {
@@ -1769,8 +1807,10 @@ static void parse_slice(window_t* w, cx_u64 k, enc_t* e, reader_t* rd, cx_u8* sc
     rd->nice = f->pr->nice;
     rd->dist_bits = f->dist_bits;
     rd->wide = f->wide;
+    rd->ranges = f->ranges;
     rd->owner = w->owner;
     rd->a = w->a;
+    rd->b = (cx_usize)-1; /* a slice is parsed within its window */
     for (cx_u32 r = 0; r < f->ranges; r++) rd->cur[r] = w->notes[r].p + w->marks[r * w->nslices + k];
     /* The two- and three-byte hashes from as far before the slice as they reach. */
     cx_usize from = s->start > SHORT_REACH ? s->start - SHORT_REACH : 0;
@@ -1838,43 +1878,66 @@ static void window_free(window_t* w) {
     cx_free(w->notes, w->f->ranges * sizeof(buf_t));
 }
 
+static cx_usize shared_head_bytes(const shared_t* f) {
+    return ((cx_usize)1 << f->hash_bits) * sizeof(cx_u32);
+}
+
+static cx_usize shared_son_bytes(const shared_t* f) {
+    return ((cx_usize)f->size << f->pr->bt) * sizeof(cx_u32);
+}
+
+/* Sets up the trees the threads share, for the text of `len` bytes at data, each of whose windows
+ * is at most `window` bytes. The threads walk different positions at once, so when the text is
+ * longer than the cyclic buffer, one ahead would write over the nodes of positions another still
+ * reads. So the threads all finish a window before the next, and the buffer has room for the
+ * dictionary and a window. */
+static void shared_start(shared_t* f, const params_t* pr, const cx_u8* data, cx_usize len, cx_usize window) {
+    memset(f, 0, sizeof *f);
+    f->pr = pr;
+    f->data = data;
+    f->len = len;
+    mf_shape_t sh = mf_shape(pr, len);
+    f->size = len > sh.size ? pow2_at_least((cx_u64)sh.size + window) : sh.size;
+    f->reach = sh.size - 1;
+    f->hash_bits = sh.hash_bits;
+    /* A noted match is nearer than the reach and no longer than the nice length. */
+    f->dist_bits = bits_for(f->reach);
+    f->wide = f->dist_bits + bits_for(pr->nice - 4) > 32 ? 5 : 4;
+    cx_usize workers = cx_workers();
+    f->ranges = (cx_u32)(workers * 2 < RANGES_MAX ? workers * 2 : RANGES_MAX);
+    f->head4 = (cx_u32*)cx_alloc(shared_head_bytes(f));
+    big_pages(f->head4, shared_head_bytes(f));
+    memset(f->head4, 0, shared_head_bytes(f));
+    f->son = (cx_u32*)cx_alloc(shared_son_bytes(f));
+    big_pages(f->son, shared_son_bytes(f));
+}
+
+static void shared_free(shared_t* f) {
+    cx_free(f->son, shared_son_bytes(f));
+    cx_free(f->head4, shared_head_bytes(f));
+}
+
+/* Windows with notes for each of the shared trees' shares. */
+static void windows_start(window_t* w, int n, shared_t* f) {
+    memset(w, 0, n * sizeof(window_t));
+    for (int t = 0; t < n; t++) {
+        w[t].f = f;
+        w[t].notes = (buf_t*)cx_alloc(f->ranges * sizeof(buf_t));
+        memset(w[t].notes, 0, f->ranges * sizeof(buf_t));
+    }
+}
+
 /* Compresses the block whose slices are s[0..n) with all the threads finding its matches, a
  * window of slices at a time, each window's matches found while the one before is parsed. */
 static void block_shared(const params_t* pr, slice_t* s, cx_u64 n) {
-    shared_t f;
-    memset(&f, 0, sizeof f);
-    f.pr = pr;
-    f.data = s[0].data;
-    f.len = s[0].len;
-    /* The threads walk different positions at once, so when the text is longer than the cyclic
-     * buffer, one ahead would write over the nodes of positions another still reads. So the threads
-     * all finish a window before the next, and the buffer has room for the dictionary and a
-     * window. */
-    mf_shape_t sh = mf_shape(pr, f.len);
-    int wraps = f.len > sh.size;
+    const mf_shape_t sh = mf_shape(pr, s[0].len);
     const cx_usize first_len = s[0].end - s[0].start + 1; /* the slices differ by a byte at most */
-    const cx_usize window_max = wraps ? (sh.size > first_len ? sh.size : first_len) : (cx_usize)1 << 24;
-    f.size = wraps ? pow2_at_least((cx_u64)sh.size + window_max) : sh.size;
-    f.reach = sh.size - 1;
-    f.hash_bits = sh.hash_bits;
-    /* A noted match is nearer than the reach and no longer than the nice length. */
-    f.dist_bits = bits_for(f.reach);
-    f.wide = f.dist_bits + bits_for(pr->nice - 4) > 32 ? 5 : 4;
-    cx_usize workers = cx_workers();
-    f.ranges = (cx_u32)(workers * 2 < RANGES_MAX ? workers * 2 : RANGES_MAX);
-    cx_usize head_bytes = ((cx_usize)1 << sh.hash_bits) * sizeof(cx_u32), son_bytes = ((cx_usize)f.size << pr->bt) * sizeof(cx_u32);
-    f.head4 = (cx_u32*)cx_alloc(head_bytes);
-    big_pages(f.head4, head_bytes);
-    memset(f.head4, 0, head_bytes);
-    f.son = (cx_u32*)cx_alloc(son_bytes);
-    big_pages(f.son, son_bytes);
+    const cx_usize window_max = s[0].len > sh.size ? (sh.size > first_len ? sh.size : first_len) : (cx_usize)1 << 24;
+    shared_t f;
+    shared_start(&f, pr, s[0].data, s[0].len, window_max);
+    const cx_usize workers = cx_workers();
     window_t w[2];
-    memset(w, 0, sizeof w);
-    for (int t = 0; t < 2; t++) {
-        w[t].f = &f;
-        w[t].notes = (buf_t*)cx_alloc(f.ranges * sizeof(buf_t));
-        memset(w[t].notes, 0, f.ranges * sizeof(buf_t));
-    }
+    windows_start(w, 2, &f);
     /* Windows of as many slices as there are workers, and no more text than window_max. */
     window_t* prev = 0;
     int t = 0;
@@ -1894,8 +1957,87 @@ static void block_shared(const params_t* pr, slice_t* s, cx_u64 n) {
     }
     window_free(&w[0]);
     window_free(&w[1]);
-    cx_free(f.son, son_bytes);
-    cx_free(f.head4, head_bytes);
+    shared_free(&f);
+}
+
+/* .lzma's windows: small, as its one parse can't start on a window until it's found, and the
+ * threads find one in a few milliseconds while the parse takes about a tenth of a second. */
+#define ALONE_WINDOW ((cx_usize)1 << 20)
+/* How far past a fresh parse's position it may read matches: the most it looks ahead, and a
+ * match's length past that. */
+#define PARSE_REACH ((cx_usize)OPTS + MATCH_MAX + 1)
+
+/* A step of .lzma: the matches of one window found, and the parse taken on to `until`. */
+typedef struct {
+    window_t* find;
+    int parse;
+    enc_t* e;
+    slice_t* s;
+    cx_usize* pos;
+    cx_usize until;
+} alone_step_t;
+
+static void alone_body(void* v, cx_u64 begin, cx_u64 end) {
+    alone_step_t* st = (alone_step_t*)v;
+    for (cx_u64 i = begin; i < end; i++) {
+        if (st->parse && i == 0) lzma1_run(st->e, st->s, st->pos, st->until);
+        else find_range(st->find, (cx_u32)(i - (cx_u64)st->parse));
+    }
+}
+
+/* Compresses .lzma's one stream with all the threads finding its matches, a window at a time, and
+ * one parsing it from their notes. While the threads find a window, the parse goes on through the
+ * ones before, up to as far before the last one found as it may read on. It finds the same matches
+ * as one thread, so it writes the same bytes. */
+static void alone_shared(const params_t* pr, slice_t* s) {
+    shared_t f;
+    shared_start(&f, pr, s->data, s->len, ALONE_WINDOW);
+    const cx_usize nw = (s->len + ALONE_WINDOW - 1) / ALONE_WINDOW;
+    slice_t* ws = (slice_t*)cx_alloc(nw * sizeof(slice_t));
+    memset(ws, 0, nw * sizeof(slice_t));
+    for (cx_usize k = 0; k < nw; k++) {
+        ws[k].start = k * ALONE_WINDOW;
+        ws[k].end = k + 1 < nw ? (k + 1) * ALONE_WINDOW : s->len;
+    }
+    window_t ring[WINDOWS];
+    windows_start(ring, WINDOWS, &f);
+    enc_t* e = (enc_t*)cx_alloc(sizeof(enc_t));
+    reader_t* rd = (reader_t*)cx_alloc(sizeof(reader_t));
+    memset(rd->head2, 0, sizeof rd->head2);
+    memset(rd->head3, 0, sizeof rd->head3);
+    rd->data = f.data;
+    rd->len = f.len;
+    rd->pos = 0;
+    rd->size = f.size;
+    rd->reach = f.reach;
+    rd->nice = pr->nice;
+    rd->dist_bits = f.dist_bits;
+    rd->wide = f.wide;
+    rd->ranges = f.ranges;
+    rd->ring = ring;
+    rd->at = (cx_u32)-1; /* the first position it reads turns it to ring[0] */
+    rd->a = rd->b = 0;
+    enc_setup(e, pr, f.data);
+    e->rd = rd;
+    lzma1_start(e, s);
+    cx_usize pos = 0;
+    for (cx_usize k = 0; k <= nw; k++) {
+        window_t* find = 0;
+        if (k < nw) {
+            find = &ring[k % WINDOWS];
+            window_start(find, &ws[k], 1);
+        }
+        alone_step_t st = {find, k > 0, e, s, &pos, 0};
+        if (k == nw) st.until = s->len;
+        else if (k > 0) st.until = ws[k - 1].end > PARSE_REACH ? ws[k - 1].end - PARSE_REACH : 0;
+        cx_parallel((cx_u64)st.parse + (find ? f.ranges : 0), alone_body, &st);
+    }
+    lzma1_end(e, s);
+    cx_free(rd, sizeof(reader_t));
+    cx_free(e, sizeof(enc_t));
+    for (int t = 0; t < WINDOWS; t++) window_free(&ring[t]);
+    cx_free(ws, nw * sizeof(slice_t));
+    shared_free(&f);
 }
 
 /* opt: the dictionary size, lc, lp, pb, whether the parser is the fast one, the nice length,
@@ -1949,6 +2091,15 @@ cx_u64 cx_xze_start(const cx_u8* in, cx_u64 n, const cx_u64* opt, cx_u64* sizes)
         const cx_u64 need = trees + ((cx_u64)sizeof(cx_u32) << sh.hash_bits) + 2 * 12 * window;
         if (need > phys_memory() / 2) j->shared = 0;
     }
+    /* .lzma is one stream, parsed on one thread, but the threads can still find its matches, with
+     * trees of room for the dictionary and a window of 1 MiB more, and three windows' notes. */
+    j->alone_shared = j->alone && pr->bt && workers > 1 && n >= ((cx_u64)1 << 18) && n <= ((cx_u64)1 << 31);
+    if (j->alone_shared) {
+        const mf_shape_t sh = mf_shape(pr, n);
+        const cx_u64 size = n > sh.size ? pow2_at_least((cx_u64)sh.size + ALONE_WINDOW) : sh.size;
+        const cx_u64 need = size * 2 * sizeof(cx_u32) + ((cx_u64)sizeof(cx_u32) << sh.hash_bits) + WINDOWS * 12 * ALONE_WINDOW;
+        if (need > phys_memory() / 2) j->alone_shared = 0;
+    }
     j->per_slice = !j->alone && !pr->bt && workers > 1 && j->blocks < workers;
     const int sliced = !j->alone;
     j->first = (cx_u64*)cx_alloc((j->blocks + 1) * sizeof(cx_u64));
@@ -2001,6 +2152,8 @@ cx_u64 cx_xze_start(const cx_u8* in, cx_u64 n, const cx_u64* opt, cx_u64* sizes)
     j->groups = groups ? groups : 1;
     if (j->shared) {
         for (cx_u64 b = 0; b < j->blocks; b++) block_shared(pr, j->s + j->first[b], j->first[b + 1] - j->first[b]);
+    } else if (j->alone_shared) {
+        alone_shared(pr, &j->s[0]);
     } else if (total) {
         cx_parallel(j->groups, job_body, j);
     }
