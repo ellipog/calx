@@ -1,0 +1,38 @@
+// std.image.jpeg's writer against Pillow's bytes, at sizes that leave blocks past the image's edge,
+// in every sampling, with and without tables made for the image (CLX-148). Release builds take the
+// AVX2 code and debug builds the plain C; both must give these. The CRCs are of the files Pillow
+// 12.3 writes for the same pixels.
+
+import std.image.jpeg.{Sampling}
+import std.image.{Color, Image, Kind}
+import std.zlib.{crc32}
+
+// r = x * 17 + y * 3, g = y * 29 + x, b = x * y * 7, each mod 256, as in image.calx.
+fn gradient(w: usize, h: usize) -> Image {
+    var im = Image.new(w, h, Kind.Rgb, Color.rgb(0, 0, 0))
+    for y in 0usize..h {
+        for x in 0usize..w {
+            im.set(x, y, Color.rgb(u8.wrap(x * 17 + y * 3), u8.wrap(y * 29 + x), u8.wrap(x * y * 7)))
+        }
+    }
+    return im
+}
+
+fn show(bytes: List<u8>) -> String {
+    return "{bytes.len()} {crc32(bytes)}"
+}
+
+fn main() {
+    // 37 by 23: three MCUs across and two down at 4:2:0, so a column and a row of blocks past the
+    // edge.
+    let g = gradient(37, 23)
+    println(show(g.encode_jpeg(75, Sampling.S420)))    // out: 1066 1004398126
+    println(show(g.encode_jpeg(90, Sampling.S422)))    // out: 1519 3562974242
+    println(show(g.encode_jpeg(50, Sampling.S444, true)))    // out: 817 1722679445
+    println(show(g.encode_jpeg(100, Sampling.S420)))    // out: 2296 1615508730
+    let big = gradient(70, 45)
+    println(show(big.encode_jpeg(75, Sampling.S420, true)))    // out: 1829 2279385149
+    // Gray: one block an MCU, and an odd number of them across.
+    println(show(g.to(Kind.Gray).encode_jpeg(75)))    // out: 617 2651636223
+    println(show(big.to(Kind.Gray).encode_jpeg(30, Sampling.S420, true)))    // out: 721 3565602270
+}

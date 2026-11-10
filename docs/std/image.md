@@ -193,19 +193,19 @@ Times for a 1600 × 900 photo, the README's banner scaled up with Lanczos and sa
 
 | Work | Calx | Pillow |
 | --- | --- | --- |
-| Reading a baseline JPEG | 3.1 ms | 3.5 ms |
-| Reading a progressive JPEG, the banner itself, 1376 × 768 | 5.8 ms | 6.8 ms |
-| Writing a JPEG at quality 75 | 3.5 ms | 2.3 ms |
-| Reading a PNG | 12.1 ms | 17.4 ms |
-| Writing a PNG at level 6 | 60 ms | 95 ms |
+| Reading a baseline JPEG | 3.1 ms | 3.6 ms |
+| Reading a progressive JPEG, the banner itself, 1376 × 768 | 5.8 ms | 6.9 ms |
+| Writing a JPEG at quality 75 | 1.4 ms | 2.3 ms |
+| Reading a PNG | 12.2 ms | 17.5 ms |
+| Writing a PNG at level 6 | 58 ms | 95 ms |
 | Lanczos to 800 × 450 | 8.5 ms | 10.7 ms |
-| Bicubic to 400 × 225 | 4.9 ms | 5.3 ms |
-| Bilinear up to 3200 × 1800 | 21.3 ms | 24.2 ms |
-| Gaussian blur, radius 6 | 12.5 ms | 23.0 ms |
-| Box blur, radius 2 | 4.4 ms | 9.6 ms |
-| To gray | 0.63 ms | 1.07 ms |
+| Bicubic to 400 × 225 | 4.8 ms | 5.3 ms |
+| Bilinear up to 3200 × 1800 | 21.4 ms | 24.3 ms |
+| Gaussian blur, radius 6 | 12.4 ms | 23.0 ms |
+| Box blur, radius 2 | 4.3 ms | 9.5 ms |
+| To gray | 0.61 ms | 1.02 ms |
 
-Writing JPEGs is the one place Pillow is ahead: libjpeg-turbo's encoder is hand-written SIMD.
+Writing a JPEG does its pixel work with AVX2, as libjpeg-turbo's hand-written SIMD does: [std.image.jpeg](image-jpeg.md#how-its-built) has how, and its other settings' times.
 
 ## See also
 

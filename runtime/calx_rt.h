@@ -846,6 +846,27 @@ CX_FN(cx_usize, cx_lz4_bound, (cx_usize n));
 CX_FN(cx_usize, cx_lz4_compress, (const cx_u8* in, cx_usize n, cx_u8* out));
 CX_FN(cx_i32, cx_lz4_decode, (const cx_u8* in, cx_usize n, cx_usize* state, cx_u8* out, cx_usize end, cx_bool last));
 
+/* The pixel work of std.image.jpeg's encoder, in calx_jpeg.c (CLX-148). `cx_jpg_divisors` turns 64
+ * quantizers (1 to 255, row order) into the 192 values the DCT divides by. `cx_jpg_fdct2` puts
+ * the blocks of 8 by 8 samples at a and b, rows `stride` bytes apart, through the DCT and divides
+ * them by q, into oa and ob in row order, and gives each one's nonzero AC coefficients as bits in
+ * zigzag order in masks; `cx_jpg_fdct1` does one block and gives its mask. `cx_jpg_ycc` turns n
+ * RGB pixels into Y, Cb and Cr. `cx_jpg_down22` averages 2n samples of two rows into n, and
+ * `cx_jpg_down21` 2n of one. `cx_jpg_huff` Huffman-codes `mcus` MCUs of blocks, each `luma` luma
+ * blocks and then a block of each other component, onto out from len, which has 512 bytes a
+ * block to spare, and gives the new length. Its tables are the luma and chroma ones, 1024 numbers
+ * each: the DC codes, their lengths, the AC codes and theirs. st carries the bits not yet
+ * written, their count and the three DC predictions from call to call; `cx_jpg_huff_end` pads
+ * and writes the last of them. */
+CX_FN(void, cx_jpg_divisors, (const cx_u16* table, cx_u16* q));
+CX_FN(void, cx_jpg_fdct2, (const cx_u8* a, const cx_u8* b, cx_usize stride, const cx_u16* q, cx_i16* oa, cx_i16* ob, cx_u64* masks));
+CX_FN(cx_u64, cx_jpg_fdct1, (const cx_u8* a, cx_usize stride, const cx_u16* q, cx_i16* oa));
+CX_FN(void, cx_jpg_ycc, (const cx_u8* rgb, cx_usize n, cx_u8* y, cx_u8* cb, cx_u8* cr));
+CX_FN(void, cx_jpg_down22, (const cx_u8* r0, const cx_u8* r1, cx_usize n, cx_u8* out));
+CX_FN(void, cx_jpg_down21, (const cx_u8* r0, cx_usize n, cx_u8* out));
+CX_FN(cx_usize, cx_jpg_huff, (cx_u8* out, cx_usize len, cx_u64* st, const cx_u32* tabs, const cx_i16* coefs, const cx_u64* masks, cx_usize mcus, cx_usize luma, cx_usize ncomp));
+CX_FN(cx_usize, cx_jpg_huff_end, (cx_u8* out, cx_usize len, cx_u64* st));
+
 /* std.log's shared settings, in calx_log.c (CLX-172): the root logger's level, format, date format
  * and log file, which the whole program shares, as Python's logging module's root logger. */
 CX_FN(cx_i32, cx_log_config, (cx_i32 level, const cx_u8* format, cx_usize format_len, const cx_u8* datefmt, cx_usize datefmt_len,

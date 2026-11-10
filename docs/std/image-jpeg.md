@@ -68,3 +68,23 @@ The file starts with a JFIF header, and its quantization and Huffman tables come
 | `S420` | half width and half height: the default, and what cameras write | `2` |
 
 Progressive JPEGs aren't written yet.
+
+## How it's built
+
+The reader and the file's layout are Calx, in [std/image/jpeg.calx](../../std/image/jpeg.calx). The writer's pixel work and Huffman coding are C, in [runtime/calx_jpeg.c](../../runtime/calx_jpeg.c), which is linked only into programs that write JPEGs. Both use libjpeg's arithmetic, so the bytes are Pillow's:
+
+- RGB to YCbCr in 16-bit fixed point.
+- The chroma averaged with its alternating rounding.
+- The accurate integer forward DCT, each coefficient divided by its quantizer times 8, a half rounded away from zero.
+
+The image is worked through one row of MCUs at a time, as libjpeg does, so the samples stay in the cache. On processors with AVX2, which release builds target, two blocks go through the DCT at once in 16-bit lanes. Every sum the DCT adds in 16 bits fits, and the division is two 16-bit multiplies that are exact for every quantizer and coefficient. The results are the same integers as the plain C, which other builds use. Both match Pillow's files byte for byte on 350 cases: images from 1 × 1 to 1600 × 900, at several qualities, all three samplings, and both kinds of tables. The tests check some of them in debug and release builds.
+
+Writing the 1600 × 900 photo of [std.image's timings](image.md#speed), in the same conditions, best of 60 runs, against Pillow 12.3:
+
+| Settings | Calx | Pillow |
+| --- | --- | --- |
+| Quality 75, `S420` | 1.26 ms | 1.97 ms |
+| Quality 90, `S444` | 2.40 ms | 3.40 ms |
+| Quality 75, `S422` | 1.45 ms | 2.30 ms |
+| Quality 75, `S420`, `optimize` | 1.62 ms | 5.03 ms |
+| Quality 75, gray | 0.71 ms | 1.65 ms |

@@ -8,6 +8,19 @@
 /// `std.image` reads and writes JPEGs with these, and most programs use it instead.
 module std.image.jpeg
 
+// The encoder's pixel work and Huffman coding, in runtime/calx_jpeg.c: libjpeg's arithmetic,
+// two blocks at once on processors with AVX2.
+extern "C" {
+    fn cx_jpg_divisors(table: *const u16, q: *u16)
+    fn cx_jpg_fdct2(a: *const u8, b: *const u8, stride: usize, q: *const u16, oa: *i16, ob: *i16, masks: *u64)
+    fn cx_jpg_fdct1(a: *const u8, stride: usize, q: *const u16, oa: *i16) -> u64
+    fn cx_jpg_ycc(rgb: *const u8, n: usize, y: *u8, cb: *u8, cr: *u8)
+    fn cx_jpg_down22(r0: *const u8, r1: *const u8, n: usize, out: *u8)
+    fn cx_jpg_down21(r0: *const u8, n: usize, out: *u8)
+    fn cx_jpg_huff(out: *u8, len: usize, st: *u64, tabs: *const u32, coefs: *const i16, masks: *const u64, mcus: usize, luma: usize, ncomp: usize) -> usize
+    fn cx_jpg_huff_end(out: *u8, len: usize, st: *u64) -> usize
+}
+
 /// A JPEG's pixels, 8 bits a channel.
 pub struct Decoded {
     /// How many pixels across.
@@ -1349,190 +1362,165 @@ fn optimal(counts: List<u64>) -> Coder {
     return coder(lengths, values)
 }
 
-// The bits of the entropy-coded data, a byte 0xFF followed by 0, as JPEG stuffs it.
-struct Writer {
-    out: List<u8>
-    acc: u64
-    n: u32
-}
-
-impl Writer {
-    // Adds `size` bits, at most 27, the low bits of `code`, which has no others set, writing
-    // them out four bytes at a time.
-    fn put(mut self, code: u32, size: u32) {
-        self.acc = self.acc << size | u64(code)
-        self.n += size
-        if self.n >= 32 {
-            self.n -= 32
-            let word = u32.wrap(self.acc >> self.n)
-            // Whether any byte is 0xFF: a zero byte in its complement.
-            let inv = ~word
-            if (inv - 0x01010101) & ~inv & 0x80808080 == 0 {
-                self.out.reserve(4)
-                unsafe {
-                    let at = self.out.len()
-                    let p = self.out.as_mut_ptr().add(at)
-                    p.write(u8.wrap(word >> 24))
-                    p.add(1).write(u8.wrap(word >> 16))
-                    p.add(2).write(u8.wrap(word >> 8))
-                    p.add(3).write(u8.wrap(word))
-                    self.out.set_len(at + 4)
-                }
-            } else {
-                for shift in [24u32, 16, 8, 0] {
-                    let b = u8.wrap(word >> shift)
-                    self.out.push(b)
-                    if b == 0xFF {
-                        self.out.push(0)
-                    }
-                }
-            }
-        }
-    }
-
-    // The last byte filled out with ones, as libjpeg pads it, and the bytes still held written.
-    fn flush(mut self) {
-        self.put(0x7F, 7)
-        while self.n >= 8 {
-            self.n -= 8
-            let b = u8.wrap(self.acc >> self.n)
-            self.out.push(b)
-            if b == 0xFF {
-                self.out.push(0)
-            }
-        }
-        self.n = 0
-        self.acc = 0
-    }
-}
-
 fn magnitude(v: i32) -> u32 {
     let a = if v < 0 { -v } else { v }
     return u32.wrap(32 - a.leading_zeros())
 }
 
-// One block of a plane through libjpeg's forward DCT and quantization, onto the end of `out`:
-// the rows as sums of the matrix's rows, eight outputs at once, then the columns as libjpeg
-// does them, eight at once. Each coefficient is divided by its quantizer times 8, rounding a
-// half away from zero, by a multiply and a shift that give the quotient exactly.
-fn fdct_block(plane: List<u8>, at: usize, stride: usize, divisor: [i32; 64], recip: [u32; 64], out: mut List<i16>) {
-    var ws: [i32; 64] = [0; 64]
-    let start = out.len()
-    out.reserve(64)
-    unsafe {
-        let src = plane.as_ptr().add(at)
-        let wp = ws.as_mut_ptr()
-        // The rows, eight at once: the samples are read across, so each row is a column here,
-        // and put back as rows after.
-        var tr: [i32; 64] = [0; 64]
-        let tp = tr.as_mut_ptr()
-        for r in 0usize..8 {
-            let row = src.add(r * stride)
-            for j in 0usize..8 {
-                tp.add(j * 8 + r).write(i32(row.add(j).read()) - 128)
+// The samples of one MCU row at a time, as libjpeg works through an image, so they stay in the
+// cache: Y, Cb and Cr at full size, each row repeated out to whole MCUs, and the chroma averaged
+// down.
+struct Strips {
+    width: usize
+    height: usize
+    ncomp: usize
+    hmax: usize
+    vmax: usize
+    mcus_x: usize
+    // Bytes a row, at full size and averaged down.
+    pw: usize
+    cw: usize
+    y: List<u8>
+    cb: List<u8>
+    cr: List<u8>
+    cbd: List<u8>
+    crd: List<u8>
+}
+
+impl Strips {
+    // MCU row `my`'s blocks through the DCT, into `blocks` and `masks` from block `start` on:
+    // each MCU's, component by component, the coefficients in row order, and the nonzero AC ones
+    // as bits in zigzag order, the order they're written.
+    fn row(mut self, pixels: List<u8>, my: usize, q: List<List<u16>>, blocks: mut List<i16>, masks: mut List<u64>, start: usize) {
+        let pw = self.pw
+        let cw = self.cw
+        let width = self.width
+        let hmax = self.hmax
+        let vmax = self.vmax
+        let ncomp = self.ncomp
+        let rows = 8 * vmax
+        let luma_blocks_x = (width + 7) / 8
+        let luma_blocks_y = (self.height + 7) / 8
+        unsafe {
+            let s = pixels.as_ptr()
+            let d0 = self.y.as_mut_ptr()
+            let d1 = self.cb.as_mut_ptr()
+            let d2 = self.cr.as_mut_ptr()
+            for r in 0usize..rows {
+                // Below the image, its last row repeated.
+                let y = (my * rows + r).min(self.height - 1)
+                let o = r * pw
+                if ncomp == 1 {
+                    let src = s.add(y * width)
+                    for x in 0usize..width {
+                        d0.add(o + x).write(src.add(x).read())
+                    }
+                } else {
+                    // libjpeg's RGB to YCbCr, in 16-bit fixed point; Cb and Cr round just under
+                    // a half, so they never reach 256.
+                    cx_jpg_ycc(s.add(y * width * 3), width, d0.add(o), d1.add(o), d2.add(o))
+                }
+                if width < pw {
+                    let e0 = d0.add(o + width - 1).read()
+                    for x in width..pw {
+                        d0.add(o + x).write(e0)
+                    }
+                    if ncomp == 3 {
+                        let e1 = d1.add(o + width - 1).read()
+                        let e2 = d2.add(o + width - 1).read()
+                        for x in width..pw {
+                            d1.add(o + x).write(e1)
+                            d2.add(o + x).write(e2)
+                        }
+                    }
+                }
+            }
+            // The chroma averaged down, as libjpeg's jcsample.c does it, the rounding
+            // alternating.
+            let k1 = self.cb.as_ptr()
+            let k2 = self.cr.as_ptr()
+            if hmax > 1 {
+                let real = (self.height + vmax - 1) / vmax
+                let c1 = self.cbd.as_mut_ptr()
+                let c2 = self.crd.as_mut_ptr()
+                for r in 0usize..8 {
+                    if my * 8 + r < real {
+                        if vmax == 2 {
+                            cx_jpg_down22(k1.add(2 * r * pw), k1.add((2 * r + 1) * pw), cw, c1.add(r * cw))
+                            cx_jpg_down22(k2.add(2 * r * pw), k2.add((2 * r + 1) * pw), cw, c2.add(r * cw))
+                        } else {
+                            cx_jpg_down21(k1.add(r * pw), cw, c1.add(r * cw))
+                            cx_jpg_down21(k2.add(r * pw), cw, c2.add(r * cw))
+                        }
+                    } else {
+                        // Below the image, libjpeg repeats the last row it averaged, rather
+                        // than averaging repeated rows; that row is in this strip.
+                        let from = real - 1 - my * 8
+                        for x in 0usize..cw {
+                            c1.add(r * cw + x).write(c1.add(from * cw + x).read())
+                            c2.add(r * cw + x).write(c2.add(from * cw + x).read())
+                        }
+                    }
+                }
+            }
+            let y0 = self.y.as_ptr()
+            let out = blocks.as_mut_ptr()
+            let mk = masks.as_mut_ptr()
+            let q0 = q[0].as_ptr()
+            let q1 = q[1].as_ptr()
+            var at = start
+            if ncomp == 1 {
+                // One block an MCU: two MCUs at once.
+                var mx: usize = 0
+                while mx + 2 <= self.mcus_x {
+                    let a = y0.add(mx * 8)
+                    cx_jpg_fdct2(a, a.add(8), pw, q0, out.add(at * 64), out.add(at * 64 + 64), mk.add(at))
+                    at += 2
+                    mx += 2
+                }
+                if mx < self.mcus_x {
+                    mk.add(at).write(cx_jpg_fdct1(y0.add(mx * 8), pw, q0, out.add(at * 64)))
+                }
+                return
+            }
+            let p1 = if hmax > 1 { self.cbd.as_ptr() } else { self.cb.as_ptr() }
+            let p2 = if hmax > 1 { self.crd.as_ptr() } else { self.cr.as_ptr() }
+            for mx in 0usize..self.mcus_x {
+                let first = at
+                for by in 0usize..vmax {
+                    let y = my * vmax + by
+                    var bx: usize = 0
+                    while bx < hmax {
+                        let x = mx * hmax + bx
+                        let a = y0.add(by * 8 * pw + x * 8)
+                        if y >= luma_blocks_y or x >= luma_blocks_x {
+                            // A block past the image's edge in an MCU: zeros, with the DC of the
+                            // last real block, as libjpeg makes it: the one to the left, or for a
+                            // row of them, the MCU's last in the row above.
+                            let from = if y >= luma_blocks_y { first + (by - 1) * hmax + hmax - 1 } else { at - 1 }
+                            let o = out.add(at * 64)
+                            o.write(out.add(from * 64).read())
+                            for k in 1usize..64 {
+                                o.add(k).write(0)
+                            }
+                            mk.add(at).write(0)
+                            at += 1
+                            bx += 1
+                        } else if bx + 1 < hmax and x + 1 < luma_blocks_x {
+                            cx_jpg_fdct2(a, a.add(8), pw, q0, out.add(at * 64), out.add(at * 64 + 64), mk.add(at))
+                            at += 2
+                            bx += 2
+                        } else {
+                            mk.add(at).write(cx_jpg_fdct1(a, pw, q0, out.add(at * 64)))
+                            at += 1
+                            bx += 1
+                        }
+                    }
+                }
+                cx_jpg_fdct2(p1.add(mx * 8), p2.add(mx * 8), cw, q1, out.add(at * 64), out.add(at * 64 + 64), mk.add(at))
+                at += 2
             }
         }
-        for col in 0usize..8 {
-            let x0 = tp.add(col).read()
-            let x1 = tp.add(8 + col).read()
-            let x2 = tp.add(16 + col).read()
-            let x3 = tp.add(24 + col).read()
-            let x4 = tp.add(32 + col).read()
-            let x5 = tp.add(40 + col).read()
-            let x6 = tp.add(48 + col).read()
-            let x7 = tp.add(56 + col).read()
-            let tmp0 = x0 + x7
-            let tmp7 = x0 - x7
-            let tmp1 = x1 + x6
-            let tmp6 = x1 - x6
-            let tmp2 = x2 + x5
-            let tmp5 = x2 - x5
-            let tmp3 = x3 + x4
-            let tmp4 = x3 - x4
-            let tmp10 = tmp0 + tmp3
-            let tmp13 = tmp0 - tmp3
-            let tmp11 = tmp1 + tmp2
-            let tmp12 = tmp1 - tmp2
-            let z1 = (tmp12 + tmp13) * C0_541196100
-            let y1 = tmp4 + tmp7
-            let y2 = tmp5 + tmp6
-            let y3 = tmp4 + tmp6
-            let y4 = tmp5 + tmp7
-            let z5 = (y3 + y4) * C1_175875602
-            let w1 = y1 * -C0_899976223
-            let w2 = y2 * -C2_562915447
-            let w3 = y3 * -C1_961570560 + z5
-            let w4 = y4 * -C0_390180644 + z5
-            tp.add(col).write((tmp10 + tmp11) << 2)
-            tp.add(32 + col).write((tmp10 - tmp11) << 2)
-            tp.add(16 + col).write((z1 + tmp13 * C0_765366865 + 1024) >> 11)
-            tp.add(48 + col).write((z1 + tmp12 * -C1_847759065 + 1024) >> 11)
-            tp.add(56 + col).write((tmp4 * C0_298631336 + w1 + w3 + 1024) >> 11)
-            tp.add(40 + col).write((tmp5 * C2_053119869 + w2 + w4 + 1024) >> 11)
-            tp.add(24 + col).write((tmp6 * C3_072711026 + w2 + w3 + 1024) >> 11)
-            tp.add(8 + col).write((tmp7 * C1_501321110 + w1 + w4 + 1024) >> 11)
-        }
-        for r in 0usize..8 {
-            for k in 0usize..8 {
-                wp.add(r * 8 + k).write(tp.add(k * 8 + r).read())
-            }
-        }
-        for col in 0usize..8 {
-            let x0 = wp.add(col).read()
-            let x1 = wp.add(8 + col).read()
-            let x2 = wp.add(16 + col).read()
-            let x3 = wp.add(24 + col).read()
-            let x4 = wp.add(32 + col).read()
-            let x5 = wp.add(40 + col).read()
-            let x6 = wp.add(48 + col).read()
-            let x7 = wp.add(56 + col).read()
-            let tmp0 = x0 + x7
-            let tmp7 = x0 - x7
-            let tmp1 = x1 + x6
-            let tmp6 = x1 - x6
-            let tmp2 = x2 + x5
-            let tmp5 = x2 - x5
-            let tmp3 = x3 + x4
-            let tmp4 = x3 - x4
-            let tmp10 = tmp0 + tmp3
-            let tmp13 = tmp0 - tmp3
-            let tmp11 = tmp1 + tmp2
-            let tmp12 = tmp1 - tmp2
-            let z1 = (tmp12 + tmp13) * C0_541196100
-            let y1 = tmp4 + tmp7
-            let y2 = tmp5 + tmp6
-            let y3 = tmp4 + tmp6
-            let y4 = tmp5 + tmp7
-            let z5 = (y3 + y4) * C1_175875602
-            let w1 = y1 * -C0_899976223
-            let w2 = y2 * -C2_562915447
-            let w3 = y3 * -C1_961570560 + z5
-            let w4 = y4 * -C0_390180644 + z5
-            wp.add(col).write((tmp10 + tmp11 + 2) >> 2)
-            wp.add(32 + col).write((tmp10 - tmp11 + 2) >> 2)
-            wp.add(16 + col).write((z1 + tmp13 * C0_765366865 + 16384) >> 15)
-            wp.add(48 + col).write((z1 + tmp12 * -C1_847759065 + 16384) >> 15)
-            wp.add(56 + col).write((tmp4 * C0_298631336 + w1 + w3 + 16384) >> 15)
-            wp.add(40 + col).write((tmp5 * C2_053119869 + w2 + w4 + 16384) >> 15)
-            wp.add(24 + col).write((tmp6 * C3_072711026 + w2 + w3 + 16384) >> 15)
-            wp.add(8 + col).write((tmp7 * C1_501321110 + w1 + w4 + 16384) >> 15)
-        }
-        let dp = divisor.as_ptr()
-        let rp = recip.as_ptr()
-        var qs: [i16; 64] = [0; 64]
-        let qp = qs.as_mut_ptr()
-        for i in 0usize..64 {
-            let t = wp.add(i).read()
-            let a = u32.wrap((if t < 0 { -t } else { t }) + (dp.add(i).read() >> 1))
-            let q = i32.wrap(u32.wrap((u64(a) * u64(rp.add(i).read())) >> 32))
-            qp.add(i).write(i16.wrap(if t < 0 { -q } else { q }))
-        }
-        // In zigzag order, the order they're written.
-        let dst = out.as_mut_ptr().add(start)
-        for k in 0usize..64 {
-            dst.add(k).write(qp.add(NATURAL[k]).read())
-        }
-        out.set_len(start + 64)
     }
 }
 
@@ -1578,155 +1566,45 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
     }
     let mcus_x = (width + 8 * hmax - 1) / (8 * hmax)
     let mcus_y = (height + 8 * vmax - 1) / (8 * vmax)
-    // Each component at full size, the edge repeated to fill whole MCUs.
+    // Each component's rows at full size, the edge repeated to fill whole MCUs.
     let pw = mcus_x * hmax * 8
-    let ph = mcus_y * vmax * 8
-
-    var planes: List<List<u8>> = []
-    for _ in 0usize..ncomp {
-        var p: List<u8> = []
-        p.reserve(pw * ph)
-        unsafe {
-            p.set_len(pw * ph)
-        }
-        planes.push(p)
-    }
-    unsafe {
-        if ncomp == 1 {
-            let d = planes[0].as_mut_ptr()
-            let s = pixels.as_ptr()
-            for y in 0usize..height {
-                for x in 0usize..width {
-                    d.add(y * pw + x).write(s.add(y * width + x).read())
-                }
-            }
-        } else {
-            // libjpeg's RGB to YCbCr, in 16-bit fixed point; Cb and Cr round just under a half,
-            // so they never reach 256.
-            let d0 = planes[0].as_mut_ptr()
-            let d1 = planes[1].as_mut_ptr()
-            let d2 = planes[2].as_mut_ptr()
-            let s = pixels.as_ptr()
-            for y in 0usize..height {
-                let row = s.add(y * width * 3)
-                let o = y * pw
-                for x in 0usize..width {
-                    let r = i32(row.add(3 * x).read())
-                    let g = i32(row.add(3 * x + 1).read())
-                    let b = i32(row.add(3 * x + 2).read())
-                    d0.add(o + x).write(u8.wrap((19595 * r + 38470 * g + 7471 * b + 32768) >> 16))
-                    d1.add(o + x).write(u8.wrap((-11059 * r - 21709 * g + 32768 * b + 8421375) >> 16))
-                    d2.add(o + x).write(u8.wrap((32768 * r - 27439 * g - 5329 * b + 8421375) >> 16))
-                }
-            }
-        }
-        // The edges repeated out to whole MCUs.
-        for c in 0usize..ncomp {
-            let d = planes[c].as_mut_ptr()
-            for y in 0usize..height {
-                let edge = d.add(y * pw + width - 1).read()
-                for x in width..pw {
-                    d.add(y * pw + x).write(edge)
-                }
-            }
-            for y in height..ph {
-                for x in 0usize..pw {
-                    d.add(y * pw + x).write(d.add((height - 1) * pw + x).read())
-                }
-            }
-        }
-    }
-    // The chroma averaged down, as libjpeg's jcsample.c does it, the rounding alternating.
-    if hmax > 1 {
-        let cw = pw / hmax
-        let chh = ph / vmax
-        // Below the image, libjpeg repeats the last row it averaged, rather than averaging
-        // repeated rows.
-        let real = (height + vmax - 1) / vmax
-        for c in 1usize..3 {
-            var small: List<u8> = []
-            small.reserve(cw * chh)
-            unsafe {
-                small.set_len(cw * chh)
-                let s = planes[c].as_ptr()
-                let d = small.as_mut_ptr()
-                for y in 0usize..real {
-                    let a = s.add(y * vmax * pw)
-                    let o = d.add(y * cw)
-                    if vmax == 2 {
-                        for x in 0usize..cw {
-                            let sum = i32(a.add(2 * x).read()) + i32(a.add(2 * x + 1).read()) + i32(a.add(pw + 2 * x).read()) + i32(a.add(pw + 2 * x + 1).read())
-                            o.add(x).write(u8.wrap((sum + 1 + i32.wrap(x & 1)) >> 2))
-                        }
-                    } else {
-                        for x in 0usize..cw {
-                            let sum = i32(a.add(2 * x).read()) + i32(a.add(2 * x + 1).read())
-                            o.add(x).write(u8.wrap((sum + i32.wrap(x & 1)) >> 1))
-                        }
-                    }
-                }
-                for y in real..chh {
-                    for x in 0usize..cw {
-                        d.add(y * cw + x).write(d.add((real - 1) * cw + x).read())
-                    }
-                }
-            }
-            planes[c] = small
-        }
-    }
-    // Every block's quantized coefficients, in the order they're written: each MCU's blocks,
-    // component by component.
-    var divisors: List<[i32; 64]> = [[0; 64], [0; 64]]
-    var recips: List<[u32; 64]> = [[0; 64], [0; 64]]
+    let cw = pw / hmax
+    let full = if ncomp == 3 { pw * 8 * vmax } else { 0usize }
+    let small = if hmax > 1 { cw * 8 } else { 0usize }
+    var strips = Strips { width, height, ncomp, hmax, vmax, mcus_x, pw, cw, y: [0; pw * 8 * vmax], cb: [0; full], cr: [0; full], cbd: [0; small], crd: [0; small] }
+    var divisors: List<List<u16>> = []
     for t in 0usize..2 {
+        var table: List<u16> = [0; 64]
         for i in 0usize..64 {
-            let d = tables[t][i] << 3
-            divisors[t][i] = d
-            // Exact for every quotient here: the error, under d, times a dividend under 2^16, is
-            // under 2^32.
-            recips[t][i] = u32.wrap(4294967296 / u64.wrap(d) + 1)
+            table[i] = u16.wrap(tables[t][i])
         }
+        var div: List<u16> = [0; 192]
+        unsafe {
+            cx_jpg_divisors(table.as_ptr(), div.as_mut_ptr())
+        }
+        divisors.push(div)
     }
+    // An MCU row's blocks at a time, or, to make tables for the image, all of them first.
+    let row_blocks = mcus_x * (hmax * vmax + ncomp - 1)
+    let held = if optimize { mcus_y * row_blocks } else { row_blocks }
     var blocks: List<i16> = []
-    blocks.reserve(mcus_x * mcus_y * (hmax * vmax + ncomp - 1) * 64)
-    let luma_blocks_x = (width + 7) / 8
-    let luma_blocks_y = (height + 7) / 8
-    for my in 0usize..mcus_y {
-        for mx in 0usize..mcus_x {
-            for c in 0usize..ncomp {
-                let (h, v) = if c == 0 { (hmax, vmax) } else { (1usize, 1usize) }
-                let stride = if c == 0 { pw } else { pw / hmax }
-                let table = if c == 0 { 0usize } else { 1usize }
-                let mcu_start = blocks.len()
-                for by in 0usize..v {
-                    for bx in 0usize..h {
-                        let x = mx * h + bx
-                        let y = my * v + by
-                        if c == 0 and (x >= luma_blocks_x or y >= luma_blocks_y) {
-                            // A block past the image's edge in an MCU: zeros, with the average
-                            // of the last real block, as libjpeg makes it: the one to the left,
-                            // or for a row of them, the MCU's last in the row above.
-                            let from = if y >= luma_blocks_y { mcu_start + ((by - 1) * h + h - 1) * 64 } else { blocks.len() - 64 }
-                            let dc = blocks[from]
-                            blocks.push(dc)
-                            for _ in 1usize..64 {
-                                blocks.push(0)
-                            }
-                            continue
-                        }
-                        fdct_block(planes[c], y * 8 * stride + x * 8, stride, divisors[table], recips[table], mut blocks)
-                    }
-                }
-            }
-        }
+    var masks: List<u64> = []
+    blocks.reserve(held * 64)
+    masks.reserve(held)
+    unsafe {
+        blocks.set_len(held * 64)
+        masks.set_len(held)
     }
     // The Huffman tables: Annex K's, or ones made from how often each symbol comes.
     var dc_coders: List<Coder> = []
     var ac_coders: List<Coder> = []
     if optimize {
+        for my in 0usize..mcus_y {
+            strips.row(pixels, my, divisors, mut blocks, mut masks, my * row_blocks)
+        }
         var dc_counts: List<List<u64>> = [[0; 256], [0; 256]]
         var ac_counts: List<List<u64>> = [[0; 256], [0; 256]]
-        walk_blocks(blocks, ncomp, hmax, vmax, mcus_x * mcus_y, mut dc_counts, mut ac_counts)
+        walk_blocks(blocks, masks, ncomp, hmax, vmax, mcus_x * mcus_y, mut dc_counts, mut ac_counts)
         dc_coders.push(optimal(dc_counts[0]))
         ac_coders.push(optimal(ac_counts[0]))
         if ncomp > 1 {
@@ -1769,54 +1647,43 @@ pub fn encode(width: usize, height: usize, channels: usize, pixels: List<u8>, qu
         out.push(if c == 0 { 0x00u8 } else { 0x11u8 })
     }
     out.extend([0, 63, 0])
-    var w = Writer { out, acc: 0, n: 0 }
-    var preds: [i32; 3] = [0; 3]
-    var at: usize = 0
-    for _ in 0usize..mcus_x * mcus_y {
-        for c in 0usize..ncomp {
-            let count = if c == 0 { hmax * vmax } else { 1usize }
-            let t = if c == 0 { 0usize } else { 1usize }
-            for _ in 0usize..count {
-                let dc = i32(blocks[at])
-                let diff = dc - preds[c]
-                preds[c] = dc
-                let s = magnitude(diff)
-                // Each code and the bits after it go in at once: at most 27 bits.
-                let extra = u32.wrap(if diff < 0 { diff - 1 } else { diff }) & ((1u32 << s) - 1)
-                w.put(dc_coders[t].code[usize(s)] << s | extra, dc_coders[t].size[usize(s)] + s)
-                // The nonzero coefficients, found by a mask of them, as libjpeg-turbo finds them.
-                var mask = nonzero(blocks, at)
-                var last: u32 = 0
-                while mask != 0 {
-                    let k = u32.wrap(mask.trailing_zeros())
-                    mask &= mask - 1
-                    var run = k - last - 1
-                    while run > 15 {
-                        w.put(ac_coders[t].code[0xF0], ac_coders[t].size[0xF0])
-                        run -= 16
-                    }
-                    let v = i32(unsafe { blocks.as_ptr().add(at + usize(k)).read() })
-                    let m = magnitude(v)
-                    let sym = usize(run * 16 + m)
-                    let bits = u32.wrap(if v < 0 { v - 1 } else { v }) & ((1u32 << m) - 1)
-                    w.put(ac_coders[t].code[sym] << m | bits, ac_coders[t].size[sym] + m)
-                    last = k
-                }
-                if last < 63 {
-                    w.put(ac_coders[t].code[0], ac_coders[t].size[0])
-                }
-                at += 64
-            }
+    // Each table's DC codes, their lengths, its AC codes and theirs, for cx_jpg_huff.
+    var tabs: List<u32> = [0; 2048]
+    for t in 0usize..ntables {
+        for s in 0usize..256 {
+            tabs[t * 1024 + s] = dc_coders[t].code[s]
+            tabs[t * 1024 + 256 + s] = dc_coders[t].size[s]
+            tabs[t * 1024 + 512 + s] = ac_coders[t].code[s]
+            tabs[t * 1024 + 768 + s] = ac_coders[t].size[s]
         }
     }
-    w.flush()
-    var bytes = w.out
-    bytes.extend([0xFF, 0xD9])
-    return bytes
+    // The bits not yet written, their count, and the DC predictions.
+    var bits: List<u64> = [0; 5]
+    for my in 0usize..mcus_y {
+        var first: usize = 0
+        if optimize {
+            first = my * row_blocks
+        } else {
+            strips.row(pixels, my, divisors, mut blocks, mut masks, 0)
+        }
+        // A block's codes take at most 434 bytes, with every byte 0xFF.
+        out.reserve(row_blocks * 512 + 64)
+        unsafe {
+            let n = cx_jpg_huff(out.as_mut_ptr(), out.len(), bits.as_mut_ptr(), tabs.as_ptr(), blocks.as_ptr().add(first * 64), masks.as_ptr().add(first), mcus_x, hmax * vmax, ncomp)
+            out.set_len(n)
+        }
+    }
+    out.reserve(16)
+    unsafe {
+        let n = cx_jpg_huff_end(out.as_mut_ptr(), out.len(), bits.as_mut_ptr())
+        out.set_len(n)
+    }
+    out.extend([0xFF, 0xD9])
+    return out
 }
 
 // How often each DC and AC symbol comes, for tables made for the image.
-fn walk_blocks(blocks: List<i16>, ncomp: usize, hmax: usize, vmax: usize, mcus: usize, dc_counts: mut List<List<u64>>, ac_counts: mut List<List<u64>>) {
+fn walk_blocks(blocks: List<i16>, masks: List<u64>, ncomp: usize, hmax: usize, vmax: usize, mcus: usize, dc_counts: mut List<List<u64>>, ac_counts: mut List<List<u64>>) {
     var preds: [i32; 3] = [0; 3]
     var at: usize = 0
     for _ in 0usize..mcus {
@@ -1824,11 +1691,11 @@ fn walk_blocks(blocks: List<i16>, ncomp: usize, hmax: usize, vmax: usize, mcus: 
             let count = if c == 0 { hmax * vmax } else { 1usize }
             let t = if c == 0 { 0usize } else { 1usize }
             for _ in 0usize..count {
-                let dc = i32(blocks[at])
+                let dc = i32(blocks[at * 64])
                 let diff = dc - preds[c]
                 preds[c] = dc
                 dc_counts[t][usize(magnitude(diff))] += 1
-                var mask = nonzero(blocks, at)
+                var mask = masks[at]
                 var last: u32 = 0
                 while mask != 0 {
                     let k = u32.wrap(mask.trailing_zeros())
@@ -1838,29 +1705,17 @@ fn walk_blocks(blocks: List<i16>, ncomp: usize, hmax: usize, vmax: usize, mcus: 
                         ac_counts[t][0xF0] += 1
                         run -= 16
                     }
-                    let v = i32(blocks[at + usize(k)])
+                    let v = i32(blocks[at * 64 + NATURAL[usize(k)]])
                     ac_counts[t][usize(run * 16 + magnitude(v))] += 1
                     last = k
                 }
                 if last < 63 {
                     ac_counts[t][0] += 1
                 }
-                at += 64
+                at += 1
             }
         }
     }
-}
-
-// Which of a block's AC coefficients, in zigzag order from `at`, aren't zero: bit k for the k-th.
-fn nonzero(blocks: List<i16>, at: usize) -> u64 {
-    var mask: u64 = 0
-    unsafe {
-        let p = blocks.as_ptr().add(at)
-        for k in 1usize..64 {
-            mask |= (if p.add(k).read() != 0 { 1u64 } else { 0u64 }) << u64(k)
-        }
-    }
-    return mask
 }
 
 fn write_table(out: mut List<u8>, class: usize, id: usize, c: Coder) {
