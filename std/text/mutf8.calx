@@ -3,6 +3,10 @@
 /// its two UTF-16 surrogates, three bytes each, since Java's text is UTF-16 units.
 module std.text.mutf8
 
+extern "C" {
+    fn memcpy(to: *u8, from: *const u8, n: usize) -> *u8
+}
+
 /// Why bytes aren't Modified UTF-8. Decoding reports what Java's `readUTF` would reject.
 pub enum DecodeError {
     /// The bytes end inside a character.
@@ -51,6 +55,28 @@ pub fn encode(s: String, out: mut List<u8>) {
 pub fn decode(bytes: List<u8>, from: usize, to: usize) -> String ! DecodeError {
     if from > to or to > bytes.len() {
         panic("decode: {from}..{to} isn't inside {bytes.len()} bytes")
+    }
+    // Most text is UTF-8 as it stands, and decodes the same as Modified UTF-8 so long as no
+    // byte starts a four-byte form, which Java rejects: then the bytes are the string's. A zero
+    // written as `C0 80`, a surrogate pair, or a form longer than it needs to be isn't UTF-8, and
+    // goes the long way.
+    var four = false
+    for i in from..to {
+        four = four or bytes[i] >= 0xF0
+    }
+    if not four {
+        let n = to - from
+        var copy = List<u8>()
+        if n > 0 {
+            copy.reserve(n)
+            unsafe {
+                _ = memcpy(copy.as_mut_ptr(), bytes.as_ptr().add(from), n)
+                copy.set_len(n)
+            }
+        }
+        if let text = String.from_utf8(copy) {
+            return text
+        }
     }
     var out = String()
     out.reserve(to - from)
