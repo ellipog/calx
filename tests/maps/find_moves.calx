@@ -1,0 +1,30 @@
+// The names `m.find(k)` binds are views of the value in the map, so the map can't change while
+// they're in scope, and they can't be moved (CLX-228).
+fn main() {
+    var m = Map<i32, String>()
+    m.insert(1, String("one"))
+    if let v = m.find(1) {
+        m.insert(2, String("two"))  // error: `m` can't be changed while `v` is a view into it
+        println("{v}")
+    }
+    var xs = List<String>()
+    if let v = m.find(1) {
+        xs.push(v)                  // error: `v` is a view of the value in `m`, so it can't be moved; move a copy with `v.copy()`, or take the value out with `m.remove(key)`
+    }
+    var ys = List<List<i32>>()
+    var lists = Map<i32, List<i32>>()
+    lists.insert(1, [1])
+    if let v = mut lists.find(1) {
+        v.push(2)
+        ys.push(v)                  // error: `v` is a view of the value in `lists`, so it can't be moved; move a copy with `v.copy()`, or take the value out with `lists.remove(key)`
+    }
+    let w = m.find(1) else {
+        return
+    }
+    m.insert(3, String("three"))    // error: `m` can't be changed while `w` is a view into it
+    var u = m.find(1) else {        // error: a `var` owns its value, and what `m.find(...)` finds stays in `m`; change it there with `if let v = mut m.find(key) { ... }`, or take it out with `m.remove(key)`
+        return
+    }
+    u.push('!')
+    println("{w} {u} {xs.len()} {ys.len()}")
+}

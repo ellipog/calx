@@ -612,7 +612,7 @@ impl Json {
     /// value reads it in place instead, without the copy.
     pub fn get(self, key: String) -> Json? {
         return match self {
-            Json.Object(members) => if members.contains(key) { some(members[key].copy()) } else { none },
+            Json.Object(members) => if let v = members.find(key) { some(v.copy()) } else { none },
             _ => none,
         }
     }

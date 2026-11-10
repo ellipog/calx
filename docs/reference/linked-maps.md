@@ -29,7 +29,7 @@ fn main() {
 
 The order comes from what's done to the table, not from hashing, so one Calx type stands for Java's classes and for fastutil's, whatever the key type: `Long2ObjectLinkedOpenHashMap<V>`, `Object2IntLinkedOpenHashMap<K>` and `LongLinkedOpenHashSet` are all `LinkedMap` or `LinkedSet`. The key type needs [`Hash`](maps.md#hash), as a `Map`'s does.
 
-Both are built in. Indexing, `len`, `contains`, `get`, `remove`, `clear`, `reserve`, `capacity`, loops, printing, `copy()`, and moving and freeing work as [`Map`'s and `Set`'s](maps.md) do.
+Both are built in. Indexing, `len`, `contains`, `get`, [`find`](maps.md#finding-a-value), `remove`, `clear`, `reserve`, `capacity`, loops, printing, `copy()`, and moving and freeing work as [`Map`'s and `Set`'s](maps.md) do.
 
 ## The order
 
@@ -48,12 +48,12 @@ Both are built in. Indexing, `len`, `contains`, `get`, `remove`, `clear`, `reser
 | `new LinkedHashMap<>()`, `(n)`, `(n, f)` | `new Long2ObjectLinkedOpenHashMap<>()`, `(n)`, `(n, f)` | `LinkedMap<K, V>()`, and `reserve(n)` for the room |
 | `put(k, v)`, `add(x)` | `put(k, v)`, `add(x)` | `m.insert(k, v)`, `s.insert(x)` |
 | `putFirst(k, v)`, `putLast(k, v)`, `addFirst(x)`, `addLast(x)` | `putAndMoveToFirst(k, v)`, `putAndMoveToLast(k, v)`, `addAndMoveToFirst(x)`, `addAndMoveToLast(x)` | `insert_first`, `insert_last` |
-| `get(k)`, `containsKey(k)` | `get(k)`, `getInt(k)`, `containsKey(k)` | `m[k]`, `m.get(k)`, `m.contains(k)` |
+| `get(k)`, `containsKey(k)` | `get(k)`, `getInt(k)`, `containsKey(k)` | `m[k]`, `m.get(k)`, `if let v = m.find(k)`, `m.contains(k)` |
 | | `getAndMoveToFirst(k)`, `getAndMoveToLast(k)` | `move_to_first(k)`, then `m[k]` if it gives `true` |
 | `pollFirstEntry()`, `pollLastEntry()`, `removeFirst()`, `removeLast()` | `removeFirst()`, `removeLastInt()`, `removeFirstLong()` and the rest | `pop_first()`, `pop_last()` |
 | `firstEntry().getKey()`, `lastEntry().getKey()`, `getFirst()`, `getLast()` | `firstLongKey()`, `lastKey()`, `first()`, `lastInt()` and the rest | `first()`, `last()` |
 | `remove(k)` | `remove(k)`, `removeInt(k)` | `m.remove(k)` |
-| `merge(k, n, Integer::sum)`, `putIfAbsent`, `computeIfAbsent` | `addTo(k, n)`, `putIfAbsent`, `computeIfAbsent` | `if m.contains(k) { m[k] += n } else { m.insert(k, n) }`, and the like |
+| `merge(k, n, Integer::sum)`, `putIfAbsent`, `computeIfAbsent` | `addTo(k, n)`, `putIfAbsent`, `computeIfAbsent` | `if let v = mut m.find(k) { v += n } else { m.insert(k, n) }`, and the like |
 | `putAll(m2)`, `addAll(c)` | the same | `reserve(m2.len())`, then `insert` for each key of `m2`, in its order |
 | `new LinkedHashMap<>(m2)` | `clone()`, `new …(m2)` | `m.copy()` |
 | `new LinkedHashMap<>(n, f, true)`, which moves a key last when it's read | | `move_to_last(k)` where it's read |

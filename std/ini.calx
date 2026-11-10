@@ -555,8 +555,8 @@ impl Ini {
 
 // A copy of `k`'s value in `table`, or `none`.
 fn value_in(table: LinkedMap<String, String>, k: String) -> String? {
-    if table.contains(k) {
-        return some(table[k].copy())
+    if let v = table.find(k) {
+        return some(v.copy())
     }
     return none
 }

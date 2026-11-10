@@ -52,16 +52,16 @@ impl Element {
 
     /// A copy of the attribute `name`'s value, if it has one.
     pub fn get(self, name: String) -> String? {
-        if self.attributes.contains(name) {
-            return some(self.attributes[name].copy())
+        if let v = self.attributes.find(name) {
+            return some(v.copy())
         }
         return none
     }
 
     /// Sets the attribute `name`. One it had keeps its place.
     pub fn set(mut self, name: own String, value: own String) {
-        if self.attributes.contains(name) {
-            self.attributes[name] = value
+        if let old = mut self.attributes.find(name) {
+            old = value
         } else {
             self.attributes.insert(name, value)
         }
@@ -1277,8 +1277,8 @@ fn meets(parent: Element, i: usize, c: Element, step: Step) -> bool {
     for cond in step.conditions {
         let met = match cond {
             Condition.Has(name) => c.attributes.contains(name),
-            Condition.Is(name, value) => c.attributes.contains(name) and c.attributes[name] == value,
-            Condition.IsNot(name, value) => c.attributes.contains(name) and c.attributes[name] != value,
+            Condition.Is(name, value) => if let a = c.attributes.find(name) { a == value } else { false },
+            Condition.IsNot(name, value) => if let a = c.attributes.find(name) { a != value } else { false },
             Condition.Child(tag) => c.children.any(|x| x.tag == tag),
             Condition.ChildIs(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() == text),
             Condition.ChildIsNot(tag, text) => c.children.any(|x| x.tag == tag and x.all_text() != text),

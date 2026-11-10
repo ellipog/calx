@@ -31,7 +31,7 @@ fn main() {
 }
 ```
 
-Both are built in, like `Map` and `Set`. Indexing, loops, `==`, printing, `copy()`, and moving and freeing work the same way as theirs ([maps and sets](maps.md)). The key type needs [`JavaHash`](java-maps.md#javahash).
+Both are built in, like `Map` and `Set`. Indexing, [`find`](maps.md#finding-a-value), loops, `==`, printing, `copy()`, and moving and freeing work the same way as theirs ([maps and sets](maps.md)). The key type needs [`JavaHash`](java-maps.md#javahash).
 
 ## fastutil's classes
 
@@ -53,10 +53,10 @@ An integer key is placed by fastutil's `mix` of the number itself, as the primit
 | `new Long2ObjectOpenHashMap<>()`, `new LongOpenHashSet()` | `OpenHashMap<K, V>()`, `OpenHashSet<T>()` |
 | `new …(expected)`, `new …(expected, f)` | `OpenHashMap<K, V>(n)`, `OpenHashMap<K, V>(n, f)`, with `f` an `f32` |
 | `put(k, v)`, `add(x)` | `m.insert(k, v)`, `s.insert(x)` |
-| `get(k)`, `getInt(k)`, `containsKey(k)`, `contains(x)` | `m[k]` or `m.get(k)`, `m.contains(k)`, `s.contains(x)` |
+| `get(k)`, `getInt(k)`, `containsKey(k)`, `contains(x)` | `m[k]` or `m.get(k)`, `if let v = m.find(k)`, `m.contains(k)`, `s.contains(x)` |
 | `get(k)` after `defaultReturnValue(d)` | `m.get(k) ?? d` |
 | `remove(k)`, `removeInt(k)` | `m.remove(k)`, which gives the value or `none` |
-| `addTo(k, n)`, `putIfAbsent`, `computeIfAbsent`, `merge` | `if m.contains(k) { m[k] += n } else { m.insert(k, n) }`, and the like |
+| `addTo(k, n)`, `putIfAbsent`, `computeIfAbsent`, `merge` | `if let v = mut m.find(k) { v += n } else { m.insert(k, n) }`, and the like |
 | `size()`, `isEmpty()`, `clear()`, `trim()` | `len()`, `is_empty()`, `clear()`, `trim()` |
 | `putAll(m2)`, `addAll(c)` | `m.reserve(m2.len())`, then `m.insert` for each key of `m2`, in its order |
 | `new …(m2)`, `new …(c)` | `OpenHashMap<K, V>(m2.len())`, `reserve(m2.len())`, then the inserts |

@@ -1,0 +1,45 @@
+// `m.find(k)` is only what `if let`, `while let` or `let ... else` matches, on a map in a place,
+// and a `mut` view of what it finds needs a map that can change (CLX-228).
+fn make() -> Map<i32, String> {
+    return Map()
+}
+
+fn main() {
+    var m = Map<i32, String>()
+    m.insert(1, String("one"))
+    let a = m.find(1)            // error: `find` gives a view of the value where it is, so it's what `if let`, `while let` or `let ... else` matches: `if let v = m.find(key) { ... }`
+    match m.find(1) {            // error: `find` gives a view of the value where it is, so it's what `if let`, `while let` or `let ... else` matches: `if let v = m.find(key) { ... }`
+        some(s) => println("{s}")
+        none => println("none")
+    }
+    var counts = Map<i32, i32>()
+    println("{counts.find(1)}")  // error: `find` gives a view of the value where it is, so it's what `if let`, `while let` or `let ... else` matches: `if let v = m.find(key) { ... }`; `get` gives a copy
+    let fixed = Map<i32, i32>()
+    if let v = mut fixed.find(1) {  // error: `fixed` can't be changed; declare it with `var` to change it
+        v += 1
+    }
+    if let v = mut counts.find(1) {  // error: nothing is changed through the names `if let ... = mut` binds; match without `mut`
+        println("{v}")
+    }
+    if let v = make().find(1) {  // error: `find` looks in a map in a variable or a part of one, which the names hold; put the map in a variable first
+        println("{v}")
+    }
+    if let some(v) = m.find(1) {  // error: `if let x = opt` already unwraps the optional; match its value directly
+        println("{v}")
+    }
+    if let v = m.find("x") {     // error: expected `i32`, found `str`
+        println("{v}")
+    }
+    if let v = m.find(1, 2) {    // error: `find` takes one argument, the key
+        println("{v}")
+    }
+    let s = Set<i32>()
+    if let v = s.find(1) {       // error: `Set<i32>` has no method `find`
+        println("{v}")
+    }
+    if let v = mut m.find(1) {
+        m.clear()                // error: `m` can't be used while `if let ... = mut` changes `m.find(...)`; reach it through the names the pattern binds
+        v.push('x')
+    }
+    println("{a} {make().len()}")
+}

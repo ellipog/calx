@@ -26,7 +26,7 @@ fn main() {
 
 Minecraft, for example, keeps the sections its entities are in as a `LongAVLTreeSet` of their packed positions, x first, then z, then y, so a chunk's sections are one range of keys, and it sorts resources and names with `TreeMap` and `TreeSet`.
 
-Both are built in. Indexing, `len`, `is_empty`, `contains`, `get`, `remove`, `clear`, loops, printing, `copy()`, and moving and freeing work as [`Map`'s and `Set`'s](maps.md) do, and a loop goes in key order.
+Both are built in. Indexing, `len`, `is_empty`, `contains`, `get`, [`find`](maps.md#finding-a-value), `remove`, `clear`, loops, printing, `copy()`, and moving and freeing work as [`Map`'s and `Set`'s](maps.md) do, and a loop goes in key order.
 
 ## Keys
 
@@ -113,7 +113,7 @@ fn main() {
 | `new TreeMap<>()`, `new TreeSet<>()` | `new Long2ObjectRBTreeMap<>()`, `new LongAVLTreeSet()` and the rest | `SortedMap<K, V>()`, `SortedSet<T>()` |
 | `new TreeMap<>(comparator)` | `new …(comparator)` | a key type with that `Order` |
 | `put(k, v)`, `add(x)` | `put(k, v)`, `add(x)` | `m.insert(k, v)`, `s.insert(x)` |
-| `get(k)`, `containsKey(k)`, `contains(x)` | `get(k)`, `getInt(k)`, `containsKey(k)` | `m[k]`, `m.get(k)`, `m.contains(k)` |
+| `get(k)`, `containsKey(k)`, `contains(x)` | `get(k)`, `getInt(k)`, `containsKey(k)` | `m[k]`, `m.get(k)`, `if let v = m.find(k)`, `m.contains(k)` |
 | `remove(k)` | `remove(k)`, `removeInt(k)` | `m.remove(k)` |
 | `firstKey()`, `lastKey()`, `first()`, `last()` | `firstLongKey()`, `lastIntKey()`, `firstLong()` and the rest | `first()`, `last()` |
 | `pollFirstEntry()`, `pollLastEntry()`, `pollFirst()`, `pollLast()` | `firstLong()`, then `remove` | `pop_first()`, `pop_last()` |

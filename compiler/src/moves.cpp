@@ -351,6 +351,12 @@ private:
         std::string hint = copy_hint(l->type);
         auto it = view_of_.find(l);
         ViewOf why = it == view_of_.end() ? ViewOf::none : it->second;
+        if (auto f = found_.find(l); f != found_.end() && (why == ViewOf::part || why == ViewOf::mut_part)) {
+            // A value `m.find(k)` found, which stays in the map (CLX-228).
+            error(e->span, q(n) + " is a view of the value in " + q(f->second) + ", so it can't be moved; move a copy with " +
+                               q(n + ".copy()") + ", or take the value out with " + q(f->second + ".remove(key)") + hint);
+            return;
+        }
         switch (why) {
             case ViewOf::capture:
                 error(e->span, q(n) + " is what the closure reads from the code around it, where it is, so it can't be "
@@ -452,7 +458,7 @@ private:
             case ExprKind::self: return "self";
             case ExprKind::field:
                 return place_text(e->lhs) + "." + (e->is_tuple_index ? std::to_string(e->tuple_index) : std::string(text(e->member)));
-            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : "[...]");
+            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : e->map_find ? ".find(...)" : "[...]");
             case ExprKind::unwrap: return place_text(e->lhs) + "!";
             default: return "...";
         }
@@ -593,6 +599,15 @@ private:
         if (s->consumes && s->is_var && !whole && !hidden) {
             // A `var` changes, so it can't be a view, and this value can't be taken apart.
             std::string at = place_text(v);
+            if (v->kind == ExprKind::index && v->map_find) {
+                // What `m.find(k)` found stays in the map (CLX-228).
+                std::string m = place_text(v->lhs);
+                error(p->span, "a `var` owns its value, and what " + q(at) + " finds stays in " + q(m) + "; change it there with " +
+                                   q("if let v = mut " + m + ".find(key) { ... }") + ", or take it out with " +
+                                   q(m + ".remove(key)"));
+                bind(p, true, nullptr, at);
+                return;
+            }
             error(p->span, "a `var` owns its value, and " + q(at) + " can't be taken apart here; " +
                                (s->let_unwraps ? "take the value out with " + q(at + ".take()") + ", or change a copy, from "
                                                : "change a copy, from ") +
@@ -602,7 +617,7 @@ private:
         }
         s->consumes = s->consumes && (whole || hidden);
         if (s->consumes) take(whole ? root : hidden, v->span);
-        bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v));
+        bind(p, s->consumes, s->consumes || !root ? nullptr : root, place_text(v), ViewOf::part, v);
     }
 
     // Decides whether a `let` with a pattern takes its value apart: it does when one of the names
@@ -640,6 +655,7 @@ private:
             if (!l->owns) {
                 view_of_[l] = why;
                 part_of_[l] = whole;
+                if (place && place->kind == ExprKind::index && place->map_find) found_[l] = place_text(place->lhs);
                 if (root && !scan_) {
                     Borrow b{root, l, p->span, nullptr, {}, false};
                     if (why == ViewOf::mut_part && place) {
@@ -1405,6 +1421,7 @@ private:
     std::unordered_set<const Local*> moved_any_;
     std::unordered_map<const Local*, ViewOf> view_of_;
     std::unordered_map<const Local*, std::string> part_of_;
+    std::unordered_map<const Local*, std::string> found_;  // views of a value `m.find(k)` found: the map
 };
 
 }  // namespace

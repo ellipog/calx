@@ -11,8 +11,8 @@ description: "Map<K, V> and Set<T>, the native hash tables: methods, indexing, l
 fn main() {
     var counts = Map<String, i32>()
     for word in ["stone", "dirt", "stone"] {
-        if counts.contains(word) {
-            counts[word] += 1
+        if let n = mut counts.find(word) {
+            n += 1
         } else {
             counts.insert(String(word), 1)
         }
@@ -43,7 +43,8 @@ They're the native tables for code where the order of the keys can't be seen. Co
 | `m.insert(k, v)` | Adds `k` with the value `v`. If `k` is there, `v` replaces its value, and the old value and the `k` given are freed |
 | `m.remove(k)` | Removes `k` and gives its value, or `none` if it isn't there |
 | `m.contains(k)` | Whether `k` is there |
-| `m.get(k)` | A copy of `k`'s value, or `none`. The values must be `Copy`; others are read in place with `m[k]` |
+| `m.get(k)` | A copy of `k`'s value, or `none`. The values must be `Copy`; others are looked at where they are with [`find`](#finding-a-value) |
+| `m.find(k)` | `k`'s value where it is, or `none`, for `if let`, `while let` and `let ... else` to match ([finding a value](#finding-a-value)) |
 | `m.clear()` | Frees every key and value, keeping the memory |
 | `m.reserve(n)` | Makes room for `n` more keys, so the next inserts don't grow the table |
 | `s.insert(x)`, `s.remove(x)` | Adds or removes `x` in a set. Adding a value that's there frees the one given |
@@ -88,6 +89,47 @@ fn main() {
     health[1] -= 5
     println("{health[1]}")    // out: 15
     health[2] = 20            // panic: the key isn't in the map; add it with `insert`
+}
+```
+
+## Finding a value
+
+`m.find(k)` looks `k` up once and gives its value where it is, or `none` when it isn't there. It's what `if let`, `while let` or `let ... else` matches, and the names it binds are views of the value, as with an optional that's a field. So `if m.contains(k) { use(m[k]) }`, which hashes `k` twice, is `if let v = m.find(k) { use(v) }`, and it works for values that own memory, which `get` can't copy.
+
+- `if let v = mut m.find(k)` binds a `mut` view, which changes the value in the map. The map must be a `var` or a `mut` parameter.
+- While the names are in scope, the map can't change or move, so a view can't point at a value that's gone. With `mut`, the map is reached only through the names.
+- A name can't be moved out, since the value stays in the map. Take the value out with `remove`, or move a copy with `.copy()`.
+- `find` looks in a map that's a variable or a part of one, such as a field or a list's element.
+
+```calx
+fn main() {
+    var tags = Map<String, List<String>>()
+    tags.insert("stone", ["solid"])
+    if let t = mut tags.find("stone") {
+        t.push("grey")
+    }
+    if let t = tags.find("stone") {
+        println("{t}")              // out: [solid, grey]
+    }
+    if let t = tags.find("air") {
+        println("{t}")
+    } else {
+        println("no air")           // out: no air
+    }
+    let t = tags.find("stone") else {
+        return
+    }
+    println("{t.len()}")            // out: 2
+}
+```
+
+Using it anywhere else is an error, since there'd be nothing to hold the map while the view is used:
+
+```calx
+fn main() {
+    let m = Map<i32, String>()
+    let v = m.find(1)    // error: `find` gives a view of the value where it is, so it's what `if let`, `while let` or `let ... else` matches: `if let v = m.find(key) { ... }`
+    println("{v}")
 }
 ```
 
@@ -185,3 +227,4 @@ Two maps are equal when they have the same keys, with equal values; two sets whe
 - The table has a power-of-two number of slots, at least 4, and is at most 7/8 full. Removing a key leaves a deleted byte only when a lookup might have passed the slot; growing rebuilds without them.
 - The hash is a folded multiply: the key, xored with a fixed seed, multiplied by a 64-bit constant into 128 bits, the halves xored together. Every bit of the result depends on every bit of the key, so keys that differ only in their top bits, like packed coordinates, spread over the table. Strings are hashed 8 bytes at a time, and structs and tuples part by part.
 - `insert`, lookups and `remove` compile to inline C, specialized for the key and value types, so comparing two integer keys is one instruction and nothing is called through a pointer. Growing is a function of its own, since it's rare. Walking a table, to loop, free, copy, compare or print it, goes 16 control bytes at a time.
+- `m.find(k)` is the lookup `m[k]` does, giving a pointer to the value, or a null one where `m[k]` would panic. The pattern matches what it points at, and its names point into the slot, so nothing is copied.

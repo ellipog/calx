@@ -1,0 +1,172 @@
+// `m.find(k)` looks a key up once and gives a view of its value where it is, or `none`, for every
+// kind of table: read and `mut` views, `let ... else`, `while let`, generic code, values that are
+// optionals, and maps that are fields, parameters and elements (CLX-228). The debug build checks
+// that nothing is freed twice or leaked.
+struct Doc {
+    name: String,
+    tags: Map<String, List<String>>,
+}
+
+fn count(d: Doc, k: str) -> usize {
+    if let tags = d.tags.find(k) {
+        return tags.len()
+    }
+    return 0
+}
+
+fn tag(d: mut Doc, k: str, t: str) {
+    if let tags = mut d.tags.find(k) {
+        tags.push(String(t))
+        return
+    }
+    d.tags.insert(String(k), [String(t)])
+}
+
+fn name_of(m: Map<i32, String>, k: i32) -> String {
+    let s = m.find(k) else {
+        return String("nobody")
+    }
+    return s.copy()
+}
+
+fn size_of<K: Hash>(m: Map<K, List<i32>>, k: K) -> usize {
+    if let xs = m.find(k) {
+        return xs.len()
+    }
+    return 0
+}
+
+fn set_if_there<K: Hash, V: Copy>(m: mut Map<K, V>, k: K, v: V) -> bool {
+    if let x = mut m.find(k) {
+        x = v
+        return true
+    }
+    return false
+}
+
+fn main() {
+    var d = Doc { name: String("notes"), tags: Map() }
+    tag(mut d, "k", "x")
+    tag(mut d, "k", "y")
+    tag(mut d, "j", "z")
+    println("{count(d, "k")} {count(d, "j")} {count(d, "q")}")    // out: 2 1 0
+    println("{d.tags["k"]}")                                        // out: [x, y]
+
+    var names = Map<i32, String>()
+    names.insert(1, String("one"))
+    println("{name_of(names, 1)} {name_of(names, 2)}")              // out: one nobody
+
+    // A `Copy` value, changed through the view.
+    var n = Map<i32, i32>()
+    n.insert(3, 30)
+    if let v = mut n.find(3) {
+        v += 1
+    }
+    if let v = n.find(3) {
+        println("{v}")                                              // out: 31
+    }
+    if let v = n.find(4) {
+        println("{v}")
+    } else {
+        println("missing")                                          // out: missing
+    }
+
+    // `while let` looks the key up each time round.
+    var next = Map<i32, i32>()
+    next.insert(0, 2)
+    next.insert(2, 5)
+    next.insert(5, 9)
+    var at = 0
+    var path = List<i32>()
+    while let to = next.find(at) {
+        path.push(to)
+        at = to
+    }
+    println("{path}")                                               // out: [2, 5, 9]
+
+    // A pattern that's more than a name, matched against the value where it is.
+    var pairs = Map<String, (i32, String)>()
+    pairs.insert(String("p"), (7, String("seven")))
+    if let (num, word) = pairs.find("p") {
+        println("{num} {word}")                                     // out: 7 seven
+    }
+
+    // Values that are optionals: `none` is a value that's there.
+    var maybe = Map<i32, String?>()
+    maybe.insert(1, some(String("x")))
+    maybe.insert(2, none)
+    for k in 0..3 {
+        if let v = maybe.find(k) {
+            println("{k}: {v}")
+        } else {
+            println("{k}: missing")
+        }
+    }
+    // out: 0: missing
+    // out: 1: some(x)
+    // out: 2: none
+
+    var m = Map<String, List<i32>>()
+    m.insert(String("a"), [1, 2, 3])
+    var ids = Map<i32, List<i32>>()
+    ids.insert(4, [1])
+    println("{size_of(m, String("a"))} {size_of(m, String("b"))} {size_of(ids, 4)}")  // out: 3 0 1
+    var c = Map<i32, f64>()
+    c.insert(1, 1.5)
+    println("{set_if_there(mut c, 1, 2.5)} {set_if_there(mut c, 2, 2.5)} {c[1]}")    // out: true false 2.5
+
+    // A map that's an element of a list.
+    var shelves = [Map<i32, String>(), Map<i32, String>()]
+    shelves[1].insert(9, String("nine"))
+    if let s = mut shelves[1].find(9) {
+        s.push_str("!")
+    }
+    println("{shelves[1][9]}")                                      // out: nine!
+
+    // The other tables.
+    var tree = SortedMap<String, List<i32>>()
+    tree.insert(String("b"), [1, 2])
+    if let xs = mut tree.find("b") {
+        xs.push(3)
+    }
+    if let xs = tree.find("b") {
+        println("{xs}")                                             // out: [1, 2, 3]
+    }
+    if let xs = tree.find("a") {
+        println("{xs}")
+    }
+    var open = OpenHashMap<i64, String>()
+    open.insert(5, String("five"))
+    if let s = mut open.find(5) {
+        s.push('!')
+    }
+    if let s = open.find(5) {
+        println("{s}")                                              // out: five!
+    }
+    if let s = open.find(6) {
+        println("{s}")
+    }
+    var java = JavaHashMap<i32, String>()
+    java.insert(7, String("seven"))
+    if let s = mut java.find(7) {
+        s.push('!')
+    }
+    if let s = java.find(7) {
+        println("{s}")                                              // out: seven!
+    }
+    if let s = java.find(8) {
+        println("{s}")
+    }
+    var linked = LinkedMap<i32, String>()
+    linked.insert(8, String("eight"))
+    if let s = mut linked.find(8) {
+        s.push('!')
+    }
+    if let s = linked.find(8) {
+        println("{s}")                                              // out: eight!
+    }
+    if let s = linked.find(9) {
+        println("{s}")
+    }
+    println("{d.name}")                                             // out: notes
+}

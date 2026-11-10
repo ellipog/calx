@@ -144,6 +144,7 @@ fn main() ! Error {
 | `zip(xs, ys)` | `for (x, y) in xs.zip(ys)` |
 | `dict`, which keeps the order keys went in | `LinkedMap<K, V>` ([linked maps](../reference/linked-maps.md)). A `Map` is faster where the order doesn't matter |
 | `d.get(k, 0)` | `d.get(k) ?? 0` |
+| `v = d.get(k)`, then `if v is not None:` | `if let v = d.find(k) { ... }`, which works for values that own memory too, and `mut` changes them ([finding a value](../reference/maps.md#finding-a-value)) |
 | `set()` | `Set<T>`, or `LinkedSet<T>` to keep the order |
 | `collections.deque` | `Deque<T>` ([deques](../reference/deques.md)) |
 | `heapq` | `PriorityQueue<T>` ([priority queues](../reference/priority-queues.md)) |

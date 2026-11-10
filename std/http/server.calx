@@ -264,8 +264,8 @@ impl Server {
                     }
                     Received(c) => {
                         let id = c.id()
-                        if self.clients.contains(id) {
-                            _ = self.net.read(c, mut self.clients[id].buf)
+                        if let client = mut self.clients.find(id) {
+                            _ = self.net.read(c, mut client.buf)
                             self.ready.push_last(id)
                         } else {
                             var junk = List<u8>()

@@ -277,6 +277,8 @@ fn main() {
 
 A pattern that always matches is an error after `if let`: write `let`.
 
+`if let v = m.find(k)` matches a map's value where it is, or nothing when the key isn't there, from one lookup ([finding a value](maps.md#finding-a-value)).
+
 ## Changing the parts in place
 
 `match mut place { ... }`, `if let pattern = mut place` and `while let pattern = mut place` bind each name as a `mut` view of its part of `place`, so the arm changes the part where it is, as [`for x in mut xs`](control-flow.md#changing-the-elements) changes the elements. A tree of enums, such as JSON or NBT, is edited this way without copying what it holds ([CLX-233](https://acta.aaenz.no/aaen-studios/clx#CLX-233)):

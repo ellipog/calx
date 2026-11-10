@@ -4293,8 +4293,13 @@ $dropall    m->len = 0;
     // `if let p = v`. When it unwraps, `v` is an optional and `p` matches its value. `at` is
     // where the value is.
     Match let_match(Expr* e, std::string& at) {
-        at = e->by_mut ? part_place(e->cond) : scrutinee(e->cond, false, e->hidden);
         Match m;
+        if (e->cond->kind == ExprKind::index && e->cond->map_find) {
+            at = found_value(e->cond, m);
+            walk(e->let_pattern, at, m);
+            return m;
+        }
+        at = e->by_mut ? part_place(e->cond) : scrutinee(e->cond, false, e->hidden);
         std::string inner = at;
         if (e->let_unwraps) {
             m.tests.push_back(at + ".has");
@@ -4314,7 +4319,11 @@ $dropall    m->len = 0;
         // unless it's a place that owns memory, whose names are views into it.
         std::string t;
         Type* vt = s->value->type;
-        if (s->hidden) {
+        Match m;
+        std::string at;
+        if (s->value->kind == ExprKind::index && s->value->map_find) {
+            t = at = found_value(s->value, m);
+        } else if (s->hidden) {
             t = local_name(s->hidden);
             line(ctype(vt) + " " + t + " = " + value(s->value, vt) + ";");
         } else if (!is_copy(vt) && is_place(s->value) && !place_has_effects(s->value)) {
@@ -4323,11 +4332,12 @@ $dropall    m->len = 0;
             t = tmp();
             line(ctype(vt) + " " + t + " = " + value(s->value, vt) + ";");
         }
-        Match m;
-        std::string at = t;
-        if (s->let_unwraps) {
-            m.tests.push_back(t + ".has");
-            at += ".v";
+        if (at.empty()) {
+            at = t;
+            if (s->let_unwraps) {
+                m.tests.push_back(t + ".has");
+                at += ".v";
+            }
         }
         walk(s->pattern, at, m);
         if ((s->else_ || s->else_block) && !m.tests.empty()) {
@@ -4844,6 +4854,36 @@ $dropall    m->len = 0;
 
     // The address of a place, or of a temporary.
     std::string address(Expr* e) { return "&" + place(e); }
+
+    // `m.find(k)`: a pointer to the key's value, or a null one when the key isn't there, from one
+    // lookup (CLX-228). The map is found first, then the key, as for `m[k]`. The pointer isn't
+    // `const`, since `= mut m.find(k)` changes the value through it.
+    std::string find_pointer(Expr* e) {
+        Type* at = e->lhs->type;
+        std::string vp = ctype(at->elem) + "*";
+        std::string b = tmp(), k = tmp(), i = tmp();
+        std::string head = "({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k +
+                           " = " + lookup_value(e->rhs, at) + "; ";
+        if (at->table == TableKind::sorted) return head + "(" + vp + ")" + ctype(at) + "_at(" + b + ", " + k + "); })";
+        std::string found = table_fn("find", at) + "(" + b + ", " + k + ", " + lookup_hash(at, k) + ")";
+        if (at->table == TableKind::fastutil) {
+            return head + "cx_i64 " + i + " = " + found + "; " + i + " < 0 ? (" + vp + ")0 : (" + vp + ")&" + b + "->slots[" + i + "].f1; })";
+        }
+        if (at->table == TableKind::java) {
+            return head + "cx_i32 " + i + " = " + found + "; " + i + " < 0 ? (" + vp + ")0 : (" + vp + ")&" + b + "->nodes[" + i + "].v.f1; })";
+        }
+        return head + "cx_usize " + i + " = " + found + "; " + i + " == CX_NOT_FOUND ? (" + vp + ")0 : (" + vp + ")&" + b + "->slots[" + i +
+               "].f1; })";
+    }
+
+    // `if let` and `let ... else` of `m.find(k)`: the pointer, in a temporary, and the value it
+    // points at, which the pattern matches when the pointer isn't null.
+    std::string found_value(Expr* v, Match& m) {
+        std::string p = tmp();
+        line(ctype(v->lhs->type->elem) + "* " + p + " = " + find_pointer(v) + ";");
+        m.tests.push_back(p + " != 0");
+        return "(*" + p + ")";
+    }
 
     std::string place_or_value(Expr* e) {
         if (e->kind == ExprKind::field) {

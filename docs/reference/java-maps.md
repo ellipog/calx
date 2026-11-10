@@ -24,7 +24,7 @@ fn main() {
 }
 ```
 
-Both are built in, like `Map` and `Set`. Indexing, loops, `==`, printing, `copy()`, and moving and freeing work the same way as theirs ([maps and sets](maps.md)). The key type needs [`JavaHash`](#javahash).
+Both are built in, like `Map` and `Set`. Indexing, [`find`](maps.md#finding-a-value), loops, `==`, printing, `copy()`, and moving and freeing work the same way as theirs ([maps and sets](maps.md)). The key type needs [`JavaHash`](#javahash).
 
 ## Java's methods
 
@@ -34,7 +34,7 @@ Both are built in, like `Map` and `Set`. Indexing, loops, `==`, printing, `copy(
 | `new HashMap<>(n)`, `new HashSet<>(n)` | `JavaHashMap<K, V>(n)`, `JavaHashSet<T>(n)` |
 | `put(k, v)`, `add(x)` | `m.insert(k, v)`, `s.insert(x)` |
 | `computeIfAbsent(k, f)`, and `compute` and `merge` for a new key | `m.compute_if_absent(k, v)`: adds `k` with `v` if it isn't there, and says whether it did |
-| `get(k)`, `containsKey(k)`, `contains(x)` | `m[k]` or `m.get(k)`, `m.contains(k)`, `s.contains(x)` |
+| `get(k)`, `containsKey(k)`, `contains(x)` | `m[k]` or `m.get(k)`, `if let v = m.find(k)`, `m.contains(k)`, `s.contains(x)` |
 | `remove(k)` | `m.remove(k)`, which gives the value or `none` |
 | `size()`, `isEmpty()`, `clear()` | `len()`, `is_empty()`, `clear()` |
 | `putAll(m2)` | `m.reserve(m2.len())`, then `m.insert` for each key of `m2`, in its order |

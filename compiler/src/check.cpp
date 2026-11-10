@@ -2635,6 +2635,12 @@ private:
             c->only_interface = nullptr;
             c->from_operator = false;
         }
+        // So does `m.find(k)`, which the checker made an index (CLX-228).
+        if (e->map_find) {
+            c->kind = ExprKind::call;
+            c->lhs = c->rhs = nullptr;
+            c->map_find = false;
+        }
         return c;
     }
 
@@ -3523,6 +3529,7 @@ private:
             return false;
         }
         Type* vt;
+        if (has_else) find_at_ = s->value;
         if (has_else && declared && !is_bad(declared)) {
             // The type given is the pattern's: the optional's value, for an optional.
             vt = handled(s->value);
@@ -3534,6 +3541,7 @@ private:
         } else {
             vt = has_else ? handled(s->value, declared) : check(s->value, declared);
         }
+        find_at_ = nullptr;
         if (vt->kind == TypeKind::never) vt = T.error;
         if (vt->kind == TypeKind::unit) {
             error(s->value->span, "this has no value to bind");
@@ -3888,7 +3896,7 @@ private:
             case ExprKind::self: return "self";
             case ExprKind::field:
                 return place_text(e->lhs) + "." + (e->is_tuple_index ? std::to_string(e->tuple_index) : std::string(text(e->member)));
-            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : "[...]");
+            case ExprKind::index: return place_text(e->lhs) + (e->box_value ? ".value" : e->map_find ? ".find(...)" : "[...]");
             default: return "...";
         }
     }
@@ -6542,7 +6550,9 @@ private:
         if (e->let_pattern) {
             // `if let p = v`: the pattern's names are visible in the first block only.
             Pattern* p = e->let_pattern;
+            find_at_ = e->cond;
             Type* vt = handled(e->cond);
+            find_at_ = nullptr;
             if (vt->kind == TypeKind::never) vt = T.error;
             Type* pt = vt;
             if (vt->kind == TypeKind::optional) {
@@ -9729,6 +9739,42 @@ private:
         return "";
     }
 
+    // `m.find(k)`, only as what `if let`, `while let` or `let ... else` matches: the key's value
+    // where it is, or `none` when the key isn't there, found with one lookup (CLX-228). The names
+    // bound are views of the value, `mut` ones with `= mut m.find(k)`, and hold the map as a
+    // view of a part of it would. It becomes `m[k]` marked `map_find`, so it's a place in the map.
+    Type* find_method(Expr* e, Type* recv, Type* look) {
+        if (e != find_at_) {
+            error(e->callee->span, "`find` gives a view of the value where it is, so it's what `if let`, `while let` or "
+                                   "`let ... else` matches: " + q("if let v = m.find(key) { ... }") +
+                                   (is_copy(recv->elem) ? "; `get` gives a copy" : ""));
+            check_args(e);
+            return T.error;
+        }
+        if (e->args.size() != 1 || e->args[0].name || e->args[0].is_mut) {
+            error(e->span, "`find` takes one argument, the key");
+            check_args(e);
+            return T.error;
+        }
+        if (!place_root(e->callee->lhs)) {
+            error(e->callee->lhs->span, "`find` looks in a map in a variable or a part of one, which the names hold; put "
+                                        "the map in a variable first");
+            check_args(e);
+            return T.error;
+        }
+        Expr* key = e->args[0].value;
+        Type* kt = check(key, look);
+        if (!look && !is_bad(kt) && kt->kind != TypeKind::str && kt->kind != TypeKind::string) {
+            error(key->span, "a `String` key is looked up with a `str` or a `String`, not " + a_type(kt));
+        }
+        e->kind = ExprKind::index;
+        e->call = CallKind::none;
+        e->lhs = e->callee->lhs;
+        e->rhs = key;
+        e->map_find = true;
+        return T.optional_of(recv->elem);
+    }
+
     // `m.range(a..b)`, only as what a `for` loop goes over: the keys from `a` up to but not
     // including `b`, or to `b` with `a..=b`, and from the least or to the greatest when an end is
     // left out (D112). The ends are looked up as keys are.
@@ -10068,6 +10114,7 @@ private:
             else if (m == "remove") b = BMethod::remove, changes = true, params = {look}, result = map ? T.optional_of(recv->elem) : T.unit;
             else if (m == "contains") b = BMethod::contains, params = {look}, result = T.bool_;
             else if (m == "get" && map) b = BMethod::get, params = {look}, result = T.optional_of(recv->elem);
+            else if (m == "find" && map) return find_method(e, recv, look);
             else if (m == "clear") b = BMethod::clear, changes = true;
             // A tree grows a node at a time, so there's no room to make.
             else if (m == "reserve" && recv->table != TableKind::sorted) b = BMethod::reserve, changes = true, params = {T.usize};
@@ -10120,7 +10167,8 @@ private:
             }
             if (b == BMethod::get && !is_copy(recv->elem) && !is_bad(recv->elem)) {
                 error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(recv->elem) +
-                                           " owns memory; read it in place with `m[key]`");
+                                           " owns memory; look at it where it is with " + q("if let v = m.find(key)") +
+                                           ", or with `m[key]` when the key is there");
                 check_args(e);
                 return T.error;
             }
@@ -11125,6 +11173,7 @@ private:
     Item* error_context_fn_ = nullptr;
     Item* error_add_fn_ = nullptr;
     Expr* for_iter_ = nullptr;  // what the `for` loop being checked goes over
+    Expr* find_at_ = nullptr;   // what the `if let` or `let ... else` being checked matches, which can be `m.find(k)`
     const Expr* place_lhs_ = nullptr;  // the base of the field or index being checked
     int mut_loops_ = 0;                // `for ... in mut` loops and `match mut` arms around the code being checked
     std::unordered_set<std::uint64_t> mut_loop_errors_;  // where a place was used inside one, reported

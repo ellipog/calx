@@ -282,10 +282,10 @@ pub fn validator_for(schema: Json, default: Draft) -> Draft ! SchemaFault {
     return match schema {
         Json.Bool(_) => default,
         Json.Object(members) => {
-            if not members.contains("$schema") {
+            let s = members.find("$schema") else {
                 return default
             }
-            return try dialect_draft(members["$schema"], default)
+            return try dialect_draft(s, default)
         },
         _ => {
             fail type_error("argument of type '{py_type_json(schema)}' is not a container or iterable")
@@ -544,8 +544,8 @@ fn member(g: Graph, n: u32, key: String) -> u32? {
         return none
     }
     if g.nodes[i].keys.len() > 8 {
-        if g.nodes[i].index.contains(key) {
-            return some(g.nodes[i].kids[usize(g.nodes[i].index[key])])
+        if let at = g.nodes[i].index.find(key) {
+            return some(g.nodes[i].kids[usize(at)])
         }
         return none
     }
@@ -1027,14 +1027,14 @@ fn crawl(g: Graph, resources: mut Map<String, Res>, anchors: mut Map<String, Anc
 fn detect(v: Json, default: Draft) -> Draft ! SchemaFault {
     return match v {
         Json.Object(members) => {
-            if not members.contains("$schema") {
+            let s = members.find("$schema") else {
                 return default
             }
-            return match members["$schema"] {
+            return match s {
                 Json.Null => default,
-                Json.Str(s) => spec_with(s) ?? default,
+                Json.Str(text) => spec_with(text) ?? default,
                 _ => {
-                    fail attr_error(py_type_json(members["$schema"]), "rstrip")
+                    fail attr_error(py_type_json(s), "rstrip")
                 },
             }
         },
@@ -1341,11 +1341,11 @@ fn in_subresource(g: Graph, cx: mut Ctx, r: Resolver, spec: Draft, n: u32) -> (R
 // `Registry.get_or_retrieve`: the resource at `uri`, and whether the registry is crawled now.
 fn retrieve(g: Graph, uri: String, crawled: bool, ref: String) -> (Res, bool) ! SchemaFault {
     if not crawled {
-        if g.pre.contains(uri) {
-            return (g.pre[uri], false)
+        if let res = g.pre.get(uri) {
+            return (res, false)
         }
-    } else if g.post.contains(uri) {
-        return (g.post[uri], true)
+    } else if let res = g.post.get(uri) {
+        return (res, true)
     }
     // Without its meta-schemas, a meta-schema's URI isn't found where Python finds it, before
     // crawling: they're added, and the walk starts again.
@@ -1356,8 +1356,8 @@ fn retrieve(g: Graph, uri: String, crawled: bool, ref: String) -> (Res, bool) ! 
     if let f = g.crawl_fault {
         fail f.copy()
     }
-    if g.post.contains(uri) {
-        return (g.post[uri], true)
+    if let res = g.post.get(uri) {
+        return (res, true)
     }
     fail unresolvable("Unresolvable", ref)
 }
@@ -1366,11 +1366,11 @@ fn retrieve(g: Graph, uri: String, crawled: bool, ref: String) -> (Res, bool) ! 
 fn find_anchor(g: Graph, uri: String, name: String, crawled: bool) -> (Anc, bool) ! SchemaFault {
     let key = anchor_key(uri, name)
     if not crawled {
-        if g.pre_anchors.contains(key) {
-            return (g.pre_anchors[key], false)
+        if let anc = g.pre_anchors.get(key) {
+            return (anc, false)
         }
-    } else if g.post_anchors.contains(key) {
-        return (g.post_anchors[key], true)
+    } else if let anc = g.post_anchors.get(key) {
+        return (anc, true)
     }
     try check_meta(g, uri)
     if not g.crawled {
@@ -1379,19 +1379,18 @@ fn find_anchor(g: Graph, uri: String, name: String, crawled: bool) -> (Anc, bool
     if let f = g.crawl_fault {
         fail f.copy()
     }
-    if g.post_anchors.contains(key) {
-        return (g.post_anchors[key], true)
+    if let anc = g.post_anchors.get(key) {
+        return (anc, true)
     }
     let u = strip_hash(uri)
-    if not g.post.contains(u) {
+    let res = g.post.get(u) else {
         try check_meta(g, u)
         fail fault("NoSuchResource", repr_str(uri))
     }
-    let res = g.post[u]
     if let canonical = try res_id(g, res.spec, res.node) {
         let key2 = anchor_key(canonical, name)
-        if g.post_anchors.contains(key2) {
-            return (g.post_anchors[key2], true)
+        if let anc = g.post_anchors.get(key2) {
+            return (anc, true)
         }
     }
     if name.contains("/") {
@@ -1722,8 +1721,8 @@ fn reset_ctx(cx: mut Ctx, formats: bool) {
 fn lookup_ref(g: Graph, cx: mut Ctx, r: Resolver, v: u32) -> Resolved ! SchemaFault {
     let key = (u64(v) << 32) | u64(r.base)
     var first: i64 = -1
-    if cx.refs.contains(key) {
-        first = i64(cx.refs[key])
+    if let i = cx.refs.get(key) {
+        first = i64(i)
         var at = first
         while at >= 0 {
             let h = cx.ref_hits[usize.wrap(at)]
@@ -1740,8 +1739,8 @@ fn lookup_ref(g: Graph, cx: mut Ctx, r: Resolver, v: u32) -> Resolved ! SchemaFa
 }
 
 fn intern(cx: mut Ctx, uri: String) -> u32 {
-    if cx.uri_ids.contains(uri) {
-        return cx.uri_ids[uri]
+    if let id = cx.uri_ids.get(uri) {
+        return id
     }
     let id = u32.wrap(cx.uris.len())
     cx.uris.push(uri.copy())
@@ -2621,8 +2620,8 @@ fn kw_properties(g: Graph, cx: mut Ctx, ev: St, v: u32, inst: Json, out: mut Lis
             return
         }
         let sub = kid(g, v, j)
-        if members.contains(g.nodes[usize(v)].keys[j]) {
-            try descend(g, mut cx, ev, members[g.nodes[usize(v)].keys[j]], sub, At { kind: 2, n: v, j: j }, At { kind: 2, n: v, j: j }, "", none, mut out, limit)
+        if let value = members.find(g.nodes[usize(v)].keys[j]) {
+            try descend(g, mut cx, ev, value, sub, At { kind: 2, n: v, j: j }, At { kind: 2, n: v, j: j }, "", none, mut out, limit)
         } else if rank(ev.cls) == 3 and is_object(g, sub) {
             let key = g.nodes[usize(v)].keys[j].copy()
             let req = member(g, sub, "required") else {
@@ -3997,7 +3996,10 @@ fn equal_json(a: Json, b: Json) -> bool {
                         return false
                     }
                     for (k, x) in xs {
-                        if not ys.contains(k) or not equal_json(x, ys[k]) {
+                        let y = ys.find(k) else {
+                            return false
+                        }
+                        if not equal_json(x, y) {
                             return false
                         }
                     }
@@ -4060,8 +4062,10 @@ fn equal_node(g: Graph, n: u32, b: Json) -> bool {
                     return false
                 }
                 for j in 0..g.nodes[i].keys.len() {
-                    let key = g.nodes[i].keys[j].copy()
-                    if not ys.contains(key) or not equal_node(g, g.nodes[i].kids[j], ys[key]) {
+                    let y = ys.find(g.nodes[i].keys[j]) else {
+                        return false
+                    }
+                    if not equal_node(g, g.nodes[i].kids[j], y) {
                         return false
                     }
                 }
@@ -4138,7 +4142,10 @@ fn py_eq(a: Json, b: Json) -> bool {
                         return false
                     }
                     for (k, x) in xs {
-                        if not ys.contains(k) or not py_eq(x, ys[k]) {
+                        let y = ys.find(k) else {
+                            return false
+                        }
+                        if not py_eq(x, y) {
                             return false
                         }
                     }
@@ -4741,10 +4748,10 @@ fn matches_type(e: ValidationError) -> bool {
     let Json.Object(members) = e.schema else {
         return false
     }
-    if not members.contains("type") {
+    let types = members.find("type") else {
         return false
     }
-    return match members["type"] {
+    return match types {
         Json.Str(t) => type_check(e.draft, e.instance, t) == 1,
         Json.Array(ts) => {
             for t in ts {

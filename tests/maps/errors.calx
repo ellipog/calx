@@ -19,7 +19,7 @@ fn main() {
     println("{s[1]}")            // error: a set can't be indexed; ask whether it has a value with `contains`
     var m = Map<i32, String>()
     m.insert(1, "one")
-    let one = m.get(1)           // error: `get` copies the value out, so it needs values that are `Copy`, and `String` owns memory; read it in place with `m[key]`
+    let one = m.get(1)           // error: `get` copies the value out, so it needs values that are `Copy`, and `String` owns memory; look at it where it is with `if let v = m.find(key)`, or with `m[key]` when the key is there
     for (k, _) in m {
         m.insert(k + 1, "more")  // error: `m` can't be changed while a `for` loop goes over it
     }
