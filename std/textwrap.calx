@@ -4,6 +4,10 @@ module std.textwrap
 
 import std.text.ucd.{ALNUM, ALNUM_LEN, DIGIT, DIGIT_LEN}
 
+extern "C" {
+    fn cx_bytes_find_break(hay: *const u8, len: usize, from: usize) -> usize
+}
+
 /// How `wrap`, `fill` and `shorten` break text into lines: Python's `TextWrapper`, with its
 /// fields and defaults. Widths count runes, as Python counts characters.
 pub struct Wrapper {
@@ -153,22 +157,22 @@ pub fn indent_where(text: String, prefix: String, keep: Fn(String) -> bool) -> S
     var i: usize = 0
     let n = text.len()
     while start < n {
-        // The end of the line from `start`, past its line break.
+        // The end of the line from `start`, past its line break. Most bytes can't start one, so
+        // the bytes that can are found 16 at a time (CLX-188), and only those are looked at.
         i = start
         var end = n
         while i < n {
-            let b = text.byte_at(i)
-            // Most bytes can't start a line break: printable ASCII, and every lead byte but two.
-            if (b > 0x1E and b < 0x80) or (b >= 0x80 and b != 0xC2 and b != 0xE2) {
-                i += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
-                continue
+            i = unsafe { cx_bytes_find_break(text.as_ptr(), n, i) }
+            if i == n {
+                break
             }
             let k = line_break(text, i)
             if k > 0 {
                 end = i + k
                 break
             }
-            i += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4 }
+            let b = text.byte_at(i)
+            i += if b < 0x80 { 1 } else if b < 0xE0 { 2 } else { 3 }
         }
         let line = text[start..end]
         if keep(line) {

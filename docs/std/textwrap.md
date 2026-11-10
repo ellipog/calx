@@ -97,14 +97,16 @@ Python's `\w` is `str.isalnum` and `_`, which isn't Unicode's own word class: it
 
 ## Speed
 
-On our benchmark, an i9-13900K with other work running, so rough, the best of five runs. The prose is 5.4 MB in 9,000 paragraphs, and the code 2.3 MB of indented lines. The comparisons are Python 3.14's `textwrap`, and Rust 1.91 with the `textwrap` crate 0.16.4, built for release with `x86-64-v3`. Rust's defaults choose where lines break to make them even and break at Unicode's line break opportunities, so it was also run with Python's rules: each line as full as it goes, breaking at spaces and after hyphens.
+On our benchmark, an i9-13900K with a little other work running, each program on its performance cores, the best of 20 to 25 runs taken in turns (15 for Python). The prose is 5.4 MB in 9,000 paragraphs, and the code 2.3 MB of indented lines. The comparisons are Python 3.14's `textwrap`, and Rust 1.91 with the `textwrap` crate 0.16.4, built for release with `x86-64-v3`. Rust's defaults choose where lines break to make them even and break at Unicode's line break opportunities, so it was also run with Python's rules: each line as full as it goes, breaking at spaces and after hyphens.
 
 | Work | Calx | Python | Rust, Python's rules | Rust, defaults |
 | --- | --- | --- | --- | --- |
-| Each paragraph filled to 70 | 49.0 ms | 817 ms | 73.8 ms | 303 ms |
-| The whole prose wrapped to 70 | 62.0 ms | 1,199 ms | 90.6 ms | 321 ms |
-| Each paragraph shortened to 60 | 43.6 ms | 937 ms | | |
-| The code dedented | 4.7 ms | 23.2 ms | 6.5 ms | |
-| The code indented | 3.5 ms | 17.3 ms | 3.7 ms | |
+| Each paragraph filled to 70 | 39.0 ms | 553 ms | 58.1 ms | 172 ms |
+| The whole prose wrapped to 70 | 44.0 ms | 572 ms | 58.2 ms | 170 ms |
+| Each paragraph shortened to 60 | 32.3 ms | 463 ms | | |
+| The code dedented | 4.1 ms | 14.2 ms | 5.1 ms | |
+| The code indented | 2.0 ms | 8.2 ms | 2.7 ms | |
 
-Rust's `wrap` keeps the text's newlines, where Python's and Calx's make them spaces first, so it gives more lines for the whole prose, 91,936 to 79,080.
+Rust's `wrap` keeps the text's newlines, where Python's and Calx's make them spaces first, so it gives more lines for the whole prose, 136,668 to 78,292.
+
+`indent` finds the bytes that could start a line break 16 at a time with SSE2, and looks only at those: a control character, or the first byte of U+0085, U+2028 and U+2029. That took it from 2.6 ms to 2.0 ms, and it matched Python's `indent` on 6,000 more random texts with every kind of line break.

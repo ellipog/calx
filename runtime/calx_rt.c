@@ -1784,6 +1784,24 @@ cx_usize cx_bytes_find5(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, 
     while (p < end && *p != a && *p != b && *p != c && *p != d && *p != e) p++;
     return (cx_usize)(p - hay);
 }
+
+/* For std.textwrap: the first byte from `from` that could start a line break as Python's
+ * `splitlines` breaks lines, or `len`: a control below 0x1F, or 0xC2 or 0xE2, which lead U+0085 and
+ * U+2028 and U+2029. Each is ASCII or a lead byte, so it's always where a rune starts. */
+cx_usize cx_bytes_find_break(const cx_u8* hay, cx_usize len, cx_usize from) {
+    const cx_u8* p = hay + from;
+    const cx_u8* end = hay + len;
+#if defined(FIND_STEP)
+    while (end - p >= FIND_STEP) {
+        find_v w = *(const find_v*)p;
+        cx_u32 m = FIND_MASK(((w > (char)-1) & (w < (char)0x1F)) | (w == (char)0xC2) | (w == (char)0xE2));
+        if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        p += FIND_STEP;
+    }
+#endif
+    while (p < end && *p >= 0x1F && *p != 0xC2 && *p != 0xE2) p++;
+    return (cx_usize)(p - hay);
+}
 #undef RX_ONES
 #undef RX_HIGHS
 #undef RX_HAS_ZERO
