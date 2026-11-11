@@ -1,0 +1,97 @@
+// `parallel(pool) for` runs a loop on a pool of the program's own (CLX-71): over a range, a
+// list's elements and a slot map's values, with loops inside it, which run on the same pool, and
+// on a thread `Thread.spawn` started, which the pool moves to. Each gives what the main pool's
+// loop gives, as any `parallel for` gives the same result with any number of threads.
+import std.pool.{Pool}
+import std.thread.{Task}
+
+struct Sums {
+    pool: Pool
+    rows: List<List<i64>>
+    done: Sender<i64>
+}
+
+impl Task for Sums {
+    fn run(own self) {
+        var totals: List<i64> = [0; 64]
+        var rows = self.rows
+        parallel(self.pool) for k in 0usize..rows.len() {
+            var t: i64 = 0
+            for x in rows[k] {
+                t += x
+            }
+            totals[k] = t
+        }
+        parallel(self.pool) for r in mut rows {
+            parallel(self.pool) for i in 0usize..r.len() {
+                r[i] *= 2
+            }
+        }
+        var all: i64 = 0
+        for t in totals {
+            all += t
+        }
+        for r in rows {
+            all += r[0]
+        }
+        self.done.send(all)
+        self.pool.close()
+    }
+}
+
+fn main() {
+    let pool = Pool.new(3)
+    println("{pool.threads()}")    // out: 3
+    var squares: List<i64> = [0; 1000]
+    parallel(pool) for k in 0usize..squares.len() {
+        squares[k] = i64.wrap(k) * i64.wrap(k)
+    }
+    var cells: List<i32> = [1; 200]
+    parallel(pool) for c in mut cells {
+        c += 1
+    }
+    var mobs = SlotMap<i32>()
+    for i in 0..50 {
+        _ = mobs.insert(i)
+    }
+    parallel(pool) for m in mut mobs {
+        m *= 3
+    }
+    var sum: i64 = 0
+    for x in squares {
+        sum += x
+    }
+    var c2 = 0
+    for c in cells {
+        c2 += c
+    }
+    var m3 = 0
+    for m in mobs {
+        m3 += m
+    }
+    println("{sum} {c2} {m3}")    // out: 332833500 400 3675
+
+    // A pool of one thread runs its loops on the thread that reaches them.
+    let one = Pool.new(1)
+    var marks: List<i32> = [0; 10]
+    parallel(one) for k in 0usize..10 {
+        marks[k] = i32.wrap(k)
+    }
+    println("{marks[9]}")    // out: 9
+    one.close()
+
+    // The pool moves to a thread of its own, whose loops run on it.
+    var rows = List<List<i64>>()
+    for k in 0..64 {
+        var row = List<i64>()
+        for i in 0..100 {
+            row.push(i64(k * 100 + i))
+        }
+        rows.push(row)
+    }
+    var done = Receiver<i64>()
+    let t = unsafe { Thread.spawn(Sums { pool: Pool.new(4), rows, done: done.sender() }) }
+    println("{done.wait()}")    // out: some(20880000)
+    t.join()
+    pool.close()
+}

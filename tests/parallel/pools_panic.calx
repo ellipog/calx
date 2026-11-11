@@ -1,0 +1,23 @@
+// A panic in a loop on a pool of the program's reports the first iteration that panicked, after
+// the output of every iteration before it, as on the main pool (CLX-71).
+import std.pool.{Pool}
+
+fn main() {
+    let pool = Pool.new(4)
+    var xs = List<i32>()
+    for _ in 0..40 {
+        xs.push(0)
+    }
+    println("start")    // out: start
+    parallel(pool) for k in 0usize..xs.len() {
+        if k < 3 or k == 20 {
+            println("ran {k}")
+        }
+        // out: ran 0
+        // out: ran 1
+        // out: ran 2
+        // out: ran 20
+        xs[k] = 10 / ((i32.wrap(k) - 20) * (i32.wrap(k) - 30))    // panic: division by zero
+    }
+    pool.close()
+}

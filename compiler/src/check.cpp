@@ -131,6 +131,7 @@ public:
         n_Thread_ = ctx.names.intern("Thread");
         n_Library_ = ctx.names.intern("Library");
         n_Task_ = ctx.names.intern("Task");
+        n_Pool_ = ctx.names.intern("Pool");
         n_run_ = ctx.names.intern("run");
         n_SortedMap_ = ctx.names.intern("SortedMap");
         n_SortedSet_ = ctx.names.intern("SortedSet");
@@ -4713,7 +4714,7 @@ private:
     }
 
     void check_for(Stmt* s) {
-        if (s->pool) not_yet(s->pool->span, "pools for `parallel for`");
+        if (s->pool) check_pool(s->pool);
         Pattern* p = s->pattern;
         s->written = s->value;
         peel_adaptors(s);
@@ -10108,6 +10109,32 @@ private:
         }
     }
 
+    // `std.pool.Pool`, or null when the program doesn't have `std.pool`.
+    Item* pool_item() {
+        for (auto& [m, scope] : scopes_) {
+            if (module_name(m) != "std.pool") continue;
+            auto it = scope->items.find(n_Pool_);
+            if (it != scope->items.end() && it->second->kind == ItemKind::struct_) return it->second;
+        }
+        return nullptr;
+    }
+
+    // `parallel(pool) for`: the loop runs on `pool`, a `Pool` from `std.pool` in a variable or a
+    // part of one, which it only reads (CLX-71).
+    void check_pool(Expr* e) {
+        Type* t = check(e, nullptr);
+        if (is_bad(t)) return;
+        Item* pool = pool_item();
+        if (!pool || t->kind != TypeKind::struct_ || t->item != pool) {
+            error(e->span, "`parallel(...)` takes the pool the loop runs on, a `Pool` from `std.pool`, not " + a_type(t));
+            return;
+        }
+        if (!place_root(e)) {
+            error(e->span, "a `parallel(pool) for` runs on a pool in a variable, which it only reads; make it with " +
+                               q("let pool = Pool.new(4)") + ", and close it with " + q("pool.close()"));
+        }
+    }
+
     // `std.thread.Task`, or null when the program doesn't have `std.thread`, so nothing can
     // implement it.
     Item* task_iface() {
@@ -12086,7 +12113,7 @@ private:
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
     Name n_Box_, n_Shared_, n_value_;
     Name n_Deque_, n_SlotMap_, n_Handle_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
-    Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_, n_Library_;
+    Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_Pool_, n_run_, n_Library_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed

@@ -242,7 +242,30 @@ A `parallel for` over regions that send each other messages is how Calx runs act
 
 ## The threads
 
-By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that. On a thread that [`Thread.spawn`](../std/thread.md) started, every `parallel for` runs on that thread alone.
+By default, a `parallel for` runs on as many threads as there are logical processors the program may run on, counting the thread that reaches the loop. [`std.pool.set_workers(n)`](../std/pool.md) changes that. On a thread that [`Thread.spawn`](../std/thread.md) started, every `parallel for` runs on that thread alone, unless it names a pool.
+
+### On a pool of its own
+
+`parallel(pool) for` runs the loop on a [`Pool`](../std/pool.md#pools-of-its-own) the program made, rather than the main pool (CLX-71). That's how a thread that `Thread.spawn` started runs loops on threads, and how work such as a world generator's runs on threads of its own, without taking the main pool's from a server's ticks:
+
+```calx
+import std.pool.{Pool}
+
+fn main() {
+    let pool = Pool.new(4)
+    var heights: List<i32> = [0; 64]
+    parallel(pool) for k in 0usize..heights.len() {
+        heights[k] = i32.wrap(k % 8) * 10
+    }
+    pool.close()
+    println("{heights[63]}")    // out: 70
+}
+```
+
+- The pool is a variable or a part of one, which the loop only reads.
+- It gives the result the main pool would, as any `parallel for` gives the same result with any number of threads.
+- A loop inside one runs on the outer loop's pool, whichever it names, so its output and its panics go where the outer loop's do.
+- One thread at a time runs a loop on a pool; another thread that reaches a loop on it waits until that's done.
 
 Each thread's stack is 8 MiB, as the main thread's is, so an iteration can recurse as deep as the code outside the loop can (D135).
 
@@ -276,7 +299,7 @@ struct cx_par_game__main_3_c cx_t10 = {&regions, scale, (cx_u64)cx_t8};
 cx_parallel((cx_u64)cx_t9 - (cx_u64)cx_t8, cx_par_game__main_3, &cx_t10);
 ```
 
-The loop works out the range once, `cx_t8` to `cx_t9`, and if it isn't empty calls `cx_parallel(count, body, &context)` in the runtime, [runtime/calx_rt.c](../../runtime/calx_rt.c), which returns when every chunk has run.
+The loop works out the range once, `cx_t8` to `cx_t9`, and if it isn't empty calls `cx_parallel(count, body, &context)` in the runtime, [runtime/calx_rt.c](../../runtime/calx_rt.c), which returns when every chunk has run. A loop on a pool of the program's calls `cx_parallel_on(pool, count, body, &context)`, where `pool` is the runtime's pool in the `Pool`. Each pool, the main one too, is a struct of its own, with its top job, its inner loops' slots and its counters, so loops on two pools never share a cache line.
 
 A loop over elements passes the list's memory in the context instead, as `cx__at`, and the count is the list's length. Each iteration's view is a pointer to its element:
 
@@ -288,4 +311,4 @@ for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {
 }
 ```
 
-Still to build, in the [spec](../CALX_SPEC.md#parallel-loops): choosing a pool with `parallel(pool) for`.
+A loop over a slot map's values passes its slots, and skips the free ones. One over a map or a set passes the table, and goes over its slots, or a `JavaHashMap`'s bins, skipping the empty ones.

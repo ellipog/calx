@@ -277,19 +277,18 @@ Built: [std.mail](std/mail.md) (D115). An actor is a plain struct that a `parall
 
 ### Parallel loops
 
-Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). `parallel for x in mut xs { }` gives each iteration a mutable view of its own element, and nothing else in the body reaches `xs` ([over the elements](reference/parallel.md#over-the-elements), D116). A loop inside another gets the threads the outer one has no work for ([loops inside loops](reference/parallel.md#loops-inside-loops)). Still to build:
+Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). `parallel for k in a..b { }` runs on the runtime's pool, each iteration changing only places it indexes with `k`, and the capture check makes the result the same at any thread count (D21). `parallel for x in mut xs { }` gives each iteration a mutable view of its own element, and nothing else in the body reaches `xs` ([over the elements](reference/parallel.md#over-the-elements), D116). A loop inside another gets the threads the outer one has no work for ([loops inside loops](reference/parallel.md#loops-inside-loops)). A loop goes over a slot map's values, and a map's or a set's keys and values, with `in mut` over `m.values()` ([over slot maps, maps and sets](reference/parallel.md#over-slot-maps-maps-and-sets)), and `parallel(pool) for` runs on a `Pool` the program made ([on a pool of its own](reference/parallel.md#on-a-pool-of-its-own), CLX-71):
 
 ```calx
-fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
+fn step(pool: Pool, counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
     parallel(pool) for c in mut counters {
-        c.total += bonus.value.amount // bonus is Share, so every iteration may read it
+        c.total += bonus.value.amount // bonus is shared, so every iteration may read it
     }
 }
 ```
 
-- `parallel(pool) for` picks a pool, as above.
+Still to build:
 
-Built: going over a slot map's values, and a map's or a set's keys and values, with `in mut` over `m.values()` ([over slot maps, maps and sets](reference/parallel.md#over-slot-maps-maps-and-sets), CLX-71).
 - Reading values that are `Share` while something else changes the collection they came from, once shared values exist.
 
 ### Lockstep ticks

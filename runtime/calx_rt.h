@@ -146,9 +146,14 @@ CX_COLD CX_FN(void, cx_panic_set_len, (cx_usize length, cx_usize capacity, const
  * and this one, and returns once every iteration has run. Inside another `parallel for`, its
  * chunks go to the threads that are free, or all run on this one if none can take them. */
 CX_FN(void, cx_parallel, (cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx));
-/* How many threads `parallel for` uses, behind std.pool. */
+/* `parallel(pool) for` (CLX-71): as `cx_parallel`, on a pool std.pool's `Pool.new` made, whose
+ * `par_pool*` is `pool`. One thread at a time runs a loop on it; another waits. */
+CX_FN(void, cx_parallel_on, (cx_u64 pool, cx_u64 n, void (*body)(void* ctx, cx_u64 begin, cx_u64 end), void* ctx));
+/* How many threads `parallel for` uses, and pools of the program's, behind std.pool. */
 CX_FN(void, cx_set_workers, (cx_usize n));
 CX_FN(cx_usize, cx_workers, (void));
+CX_FN(cx_u64, cx_pool_new, (cx_usize threads));
+CX_FN(void, cx_pool_close, (cx_u64 pool));
 
 /* Memory, in calx_alloc.c (D95). A block is freed, or reallocated, with the size it was last
  * given, which the compiler always knows, so blocks have no header. Freeing a null pointer does

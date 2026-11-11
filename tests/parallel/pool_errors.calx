@@ -1,0 +1,16 @@
+// What `parallel(pool) for` checks (CLX-71): the pool is a `Pool` from `std.pool`, in a variable.
+import std.pool.{Pool}
+
+fn main() {
+    var xs: List<i32> = [0; 8]
+    parallel(4) for k in 0usize..xs.len() {    // error: `parallel(...)` takes the pool the loop runs on, a `Pool` from `std.pool`, not an `i32`
+        xs[k] = 1
+    }
+    parallel(Pool.new(2)) for k in 0usize..xs.len() {    // error: a `parallel(pool) for` runs on a pool in a variable, which it only reads; make it with `let pool = Pool.new(4)`, and close it with `pool.close()`
+        xs[k] = 2
+    }
+    let pool = Pool.new(2)
+    let copy = pool.copy()    // error: can't be copied
+    pool.close()
+    _ = copy
+}

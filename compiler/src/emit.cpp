@@ -4277,6 +4277,13 @@ $dropall    m->len = 0;
             bool pointer = cap.l->is_view || par_pointers_.count(cap.l);
             inits += (cap.by_value || pointer ? v : "&" + v) + ", ";
         }
+        // `parallel(pool) for`: the runtime's pool, from the `Pool`'s first field (CLX-71).
+        std::string run = "cx_parallel(";
+        if (s->pool) {
+            std::string pl = tmp();
+            line("cx_u64 " + pl + " = (" + place(s->pool) + ")" + member(s->pool->type, 0) + ";");
+            run = "cx_parallel_on(" + pl + ", ";
+        }
         if (elements) {
             // The elements, from the list or array worked out once, by index. Nothing in the body
             // changes it, so its length and memory stay as they are.
@@ -4294,7 +4301,7 @@ $dropall    m->len = 0;
                 line("if (" + arr + "->len) {");
                 indent_++;
                 line(ctx_t + " " + c + " = {" + inits + arr + ", 0};");
-                line("cx_parallel(" + n + ", " + name + ", &" + c + ");");
+                line(run + n + ", " + name + ", &" + c + ");");
                 indent_--;
                 line("}");
                 indent_--;
@@ -4306,7 +4313,7 @@ $dropall    m->len = 0;
             line("if (" + (slots ? arr + "->count" : n) + ") {");
             indent_++;
             line(ctx_t + " " + c + " = {" + inits + arr + (list ? "->ptr" : "->v") + ", 0};");
-            line("cx_parallel((cx_u64)" + n + ", " + name + ", &" + c + ");");
+            line(run + "(cx_u64)" + n + ", " + name + ", &" + c + ");");
             indent_--;
             line("}");
             indent_--;
@@ -4333,7 +4340,7 @@ $dropall    m->len = 0;
             n = count;
         }
         line(ctx_t + " " + c + " = {" + inits + "(cx_u64)" + lo + "};");
-        line("cx_parallel(" + n + ", " + name + ", &" + c + ");");
+        line(run + n + ", " + name + ", &" + c + ");");
         indent_--;
         line("}");
         indent_--;

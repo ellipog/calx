@@ -828,6 +828,8 @@ private:
             return;
         }
         Expr* it = s->value;
+        // `parallel(pool) for`: the pool is read first (CLX-71).
+        if (s->pool) expr(s->pool, Use::view);
         scopes_.emplace_back();
         Local* root = nullptr;
         Local* hidden = nullptr;
