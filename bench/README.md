@@ -163,7 +163,10 @@ The times are in [Scripting benchmarks](../docs/scripting-benchmarks.md).
 calx run bench/script.calx                        # 5 rounds of each, the tables in Markdown
 calx run bench/script.calx -- --only json,walk    # some of them
 calx run bench/script.calx -- --record            # written to bench/results/script-<os>.json
+calx run bench/script.calx -- --only start --record    # start recorded again, the others kept
 ```
+
+A record gives each benchmark's results the time and the commit they were recorded at. With `--only`, the benchmarks the run leaves out keep their results from the file.
 
 Each program is run as a fresh process, the languages taking turns, in the other order every other round. A program times its own steps, the best of 7, and prints them with a total its work came to, which must be the same in all three languages, or the runner stops. The tables give each step's best over the rounds, and for the whole process its CPU time and the most memory it held, the median over the rounds, from [`std.process`](../docs/std/process.md#what-it-used). It builds the Calx programs with `calx build --release`, the Rust ones with `-C opt-level=3`, one codegen unit, `panic = "abort"` and `x86-64-v3`, and thin LTO for the two with crates, and runs Python's own program, not the `py` launcher. Everything it makes goes in a folder of its own in the temp folder, removed at the end.
 

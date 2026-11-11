@@ -17,12 +17,14 @@
 // What it builds and the tree it walks go in a folder of its own in the temp folder, removed at
 // the end: under WSL that's on Linux's own file system, where through /mnt/c the walk would time
 // WSL's file sharing and every program would start from it. --record writes
-// bench/results/script-<os>.json, with the machine, the toolchains and the commit (D34).
+// bench/results/script-<os>.json, with the machine, the toolchains and the commit (D34), and each
+// benchmark's results with when and at which commit they were recorded. With --only, the other
+// benchmarks' results stay as the file has them, so one can be recorded again on its own.
 import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
 import std.cli.{cli}
 import std.env
 import std.fs
-import std.json.{Json, pretty}
+import std.json.{Json, parse, pretty}
 import std.process
 import std.process.{Command}
 import std.stats
@@ -187,8 +189,30 @@ fn median(v: List<f64>) -> f64 {
     return stats.median(v) ?? 0.0
 }
 
+// A benchmark's record as it starts: when and at which commit it was recorded.
+fn stamped(root: String) -> LinkedMap<String, Json> {
+    var r = LinkedMap<String, Json>()
+    r.insert("recorded", Json.Str(now_utc()))
+    r.insert("commit", commit(root))
+    return r
+}
+
+// The results `path` holds, if it's there and reads as a record.
+fn kept(path: String) -> Json {
+    let ok(read) = fs.read_text(path) else {
+        return Json.Null
+    }
+    let text = read else {
+        return Json.Null
+    }
+    let ok(doc) = parse(text) else {
+        return Json.Null
+    }
+    return doc.get("results") ?? Json.Null
+}
+
 // A benchmark's table, and its record.
-fn report(title: String, langs: List<Lang>) -> Json {
+fn report(title: String, langs: List<Lang>, root: String) -> Json {
     println("")
     println(title.copy())
     println("")
@@ -209,7 +233,7 @@ fn report(title: String, langs: List<Lang>) -> Json {
     }
     println(cpu)
     println(peak)
-    var r = LinkedMap<String, Json>()
+    var r = stamped(root)
     r.insert("title", Json.Str(title.copy()))
     for i in 0usize..3 {
         var m = LinkedMap<String, Json>()
@@ -297,7 +321,7 @@ fn start(root: String, work: String, calx: String, python: String, rounds: u32) 
     println("| Most memory held | {mb(started[0].2)} | {mb(started[1].2)} | {mb(started[2].2)} |")
     println("| Changed, then built and run: `calx run`, `rustc` and the program, `python` | {ms(changed[0])} | {ms(changed[1])} | {ms(started[2].0)} |")
     println("| Run again, unchanged | {ms(again[0])} | {ms(again[1])} | {ms(started[2].0)} |")
-    var r = LinkedMap<String, Json>()
+    var r = stamped(root)
     for i in 0usize..3 {
         var m = LinkedMap<String, Json>()
         m.insert("run_ms", Json.Float(round_to(started[i].0, 3)))
@@ -385,7 +409,7 @@ fn main() {
         } else {
             String("A tree of 10,000 files")
         }
-        results.insert(w.copy(), report(title, langs))
+        results.insert(w.copy(), report(title, langs, root.copy()))
     }
 
     if a.record {
@@ -393,14 +417,32 @@ fn main() {
         tc.insert("calx", Json.Str(output_of(Command.new(calx.copy()).arg("version")) ?? String()))
         tc.insert("rustc", Json.Str(output_of(Command.new("rustc").arg("--version")) ?? String()))
         tc.insert("python", Json.Str(output_of(Command.new(python.copy()).arg("--version")) ?? String()))
+        let out = "{root}/bench/results/script-{env.os()}.json"
+        // The benchmarks this run left out keep their results from the file, in the usual order.
+        let old = if want.len() < all.len() { kept(out.copy()) } else { Json.Null }
+        var merged = LinkedMap<String, Json>()
+        for w in all {
+            match results.remove(w.copy()) {
+                some(j) => {
+                    merged.insert(w.copy(), j)
+                }
+                none => {
+                    match old.get(w.copy()) {
+                        some(j) => {
+                            merged.insert(w.copy(), j)
+                        }
+                        none => {}
+                    }
+                }
+            }
+        }
         var r = LinkedMap<String, Json>()
         r.insert("recorded", Json.Str(now_utc()))
         r.insert("commit", commit(root.copy()))
         r.insert("machine", machine())
         r.insert("toolchain", Json.Object(tc))
         r.insert("rounds", Json.Int(i64(a.rounds)))
-        r.insert("results", Json.Object(results))
-        let out = "{root}/bench/results/script-{env.os()}.json"
+        r.insert("results", Json.Object(merged))
         fs.make_dir_all("{root}/bench/results")!
         fs.write_text(out.copy(), "{pretty(Json.Object(r), 2)}\n")!
         println("")
