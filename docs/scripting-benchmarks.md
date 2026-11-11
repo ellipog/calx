@@ -14,7 +14,7 @@ These are our benchmarks, of a few kinds of work, so they say how Calx does on w
 - Each program is run 5 times as a fresh process, the languages taking turns, in the other order every other round. A program times each of its steps, the best of 7, and the tables give each step's best over the 5 runs. The fastest of the three is in bold.
 - **CPU time** is what all the process's threads used, in the kernel and out, from its start to its end, generating its input included, and **memory** the most it held in RAM at once: its peak working set on Windows and its peak resident set on Linux. Both are the median of the 5 runs. Windows counts CPU time in ticks of its clock, every 15.6 ms, so a program that ends sooner shows 0 or 15.6 ms there.
 - On an Intel Core i9-13900K, with other programs open but otherwise quiet. Under Windows 11 everything ran on the performance cores, out of power throttling; under Ubuntu 26.04 in WSL2 on the same machine, on one of them, with `taskset`.
-- Calx at commit c98398f, built with clang 23. Rust 1.91.1 on Windows and 1.91.0 on Linux, with `-C opt-level=3`, one codegen unit, `panic = "abort"` and `target-cpu=x86-64-v3`, as Calx builds, and thin LTO for the two with crates. Python 3.14.6 on Windows and 3.14.4 on Linux.
+- Calx at commit 6e0437a, built with clang 23. Rust 1.91.1 on Windows and 1.91.0 on Linux, with `-C opt-level=3`, one codegen unit, `panic = "abort"` and `target-cpu=x86-64-v3`, as Calx builds, and thin LTO for the two with crates. Python 3.14.6 on Windows and 3.14.4 on Linux.
 
 ## Taking text apart
 
@@ -22,18 +22,18 @@ These are our benchmarks, of a few kinds of work, so they say how Calx does on w
 
 | Windows | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The fields, trimmed | **3.29 ms** | 8.60 ms | 93.5 ms |
-| The lines joined | **1.27 ms** | 5.40 ms | 14.7 ms |
-| A word replaced | **2.16 ms** | 3.42 ms | 5.46 ms |
-| CPU time, the whole run | **62.5 ms** | 125 ms | 797 ms |
-| Most memory held | 43.3 MB | **34.1 MB** | 71.8 MB |
+| The fields, trimmed | **3.25 ms** | 8.65 ms | 95.3 ms |
+| The lines joined | **1.25 ms** | 5.35 ms | 14.0 ms |
+| A word replaced | **2.15 ms** | 3.36 ms | 5.25 ms |
+| CPU time, the whole run | **62.5 ms** | 141 ms | 906 ms |
+| Most memory held | 43.3 MB | **33.7 MB** | 72.3 MB |
 
 | Linux | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The fields, trimmed | **3.87 ms** | 8.24 ms | 66.3 ms |
-| The lines joined | **1.31 ms** | 5.64 ms | 12.1 ms |
-| A word replaced | **2.31 ms** | 4.32 ms | 3.28 ms |
-| CPU time, the whole run | **75.5 ms** | 154 ms | 669 ms |
+| The fields, trimmed | **3.95 ms** | 8.35 ms | 69.4 ms |
+| The lines joined | **1.43 ms** | 5.87 ms | 13.3 ms |
+| A word replaced | **2.36 ms** | 4.55 ms | 3.68 ms |
+| CPU time, the whole run | **78.9 ms** | 162 ms | 709 ms |
 | Most memory held | 41.4 MB | **35.1 MB** | 69.3 MB |
 
 ## Writing numbers as text
@@ -42,21 +42,21 @@ These are our benchmarks, of a few kinds of work, so they say how Calx does on w
 
 | Windows | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| 200,000 doubles, `{v:.3}` | **7.56 ms** | 17.0 ms | 36.1 ms |
-| 200,000 integers, `{i:>8}` | **1.48 ms** | 3.61 ms | 29.2 ms |
-| A million integers, `{i}` | **5.48 ms** | 13.3 ms | 85.1 ms |
-| 200,000 doubles, `{v}` | **5.03 ms** | 12.0 ms | 65.8 ms |
-| CPU time, the whole run | **156 ms** | 328 ms | 1,688 ms |
-| Most memory held | 41.7 MB | **28.6 MB** | 134.6 MB |
+| 200,000 doubles, `{v:.3}` | **7.53 ms** | 16.5 ms | 36.2 ms |
+| 200,000 integers, `{i:>8}` | **1.47 ms** | 3.58 ms | 29.3 ms |
+| A million integers, `{i}` | **5.50 ms** | 13.0 ms | 84.7 ms |
+| 200,000 doubles, `{v}` | **5.01 ms** | 11.9 ms | 65.7 ms |
+| CPU time, the whole run | **156 ms** | 328 ms | 1,781 ms |
+| Most memory held | 41.7 MB | **28.6 MB** | 134.7 MB |
 
 | Linux | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| 200,000 doubles, `{v:.3}` | **8.38 ms** | 16.2 ms | 28.4 ms |
-| 200,000 integers, `{i:>8}` | **1.55 ms** | 3.90 ms | 25.5 ms |
-| A million integers, `{i}` | **5.69 ms** | 13.5 ms | 60.6 ms |
-| 200,000 doubles, `{v}` | **5.37 ms** | 11.7 ms | 54.3 ms |
-| CPU time, the whole run | **162 ms** | 330 ms | 1,411 ms |
-| Most memory held | 39.6 MB | **24.7 MB** | 142.0 MB |
+| 200,000 doubles, `{v:.3}` | **8.36 ms** | 16.3 ms | 28.8 ms |
+| 200,000 integers, `{i:>8}` | **1.56 ms** | 3.95 ms | 26.3 ms |
+| A million integers, `{i}` | **5.72 ms** | 13.6 ms | 61.7 ms |
+| 200,000 doubles, `{v}` | **5.44 ms** | 11.7 ms | 54.6 ms |
+| CPU time, the whole run | **165 ms** | 337 ms | 1,435 ms |
+| Most memory held | 39.6 MB | **24.7 MB** | 142.1 MB |
 
 [Printing](reference/printing.md#formats) says how Calx writes them.
 
@@ -66,22 +66,22 @@ These are our benchmarks, of a few kinds of work, so they say how Calx does on w
 
 | Windows | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| Parsed into a tree | **31.3 ms** | 73.6 ms | 113 ms |
-| Written back | **20.1 ms** | 24.1 ms | 103 ms |
-| Read into typed records | 55.8 ms | **26.2 ms** | 216 ms |
-| CPU time, the whole run | **891 ms** | 1,203 ms | 4,156 ms |
-| Most memory held | 292.0 MB | **215.4 MB** | 281.2 MB |
+| Parsed into a tree | **31.2 ms** | 74.8 ms | 117 ms |
+| Written back | **20.3 ms** | 24.8 ms | 105 ms |
+| Read into typed records | **14.5 ms** | 26.6 ms | 221 ms |
+| CPU time, the whole run | **594 ms** | 1,250 ms | 4,312 ms |
+| Most memory held | **201.0 MB** | 215.4 MB | 281.7 MB |
 
 | Linux | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| Parsed into a tree | **31.1 ms** | 34.7 ms | 78.2 ms |
-| Written back | 21.2 ms | **19.4 ms** | 88.1 ms |
-| Read into typed records | 55.2 ms | **18.3 ms** | 102 ms |
-| CPU time, the whole run | 928 ms | **757 ms** | 2,412 ms |
-| Most memory held | 290.2 MB | **231.5 MB** | 289.5 MB |
+| Parsed into a tree | **31.3 ms** | 35.0 ms | 80.4 ms |
+| Written back | 21.1 ms | **19.8 ms** | 88.7 ms |
+| Read into typed records | **15.2 ms** | 18.1 ms | 103 ms |
+| CPU time, the whole run | **619 ms** | 781 ms | 2,484 ms |
+| Most memory held | **199.2 MB** | 231.5 MB | 289.4 MB |
 
-- serde reads typed records straight from the text. Calx's `@json` reads them from the tree, which it parses first, so its typed read is the parse and more: 2.1 times serde's time on Windows and 3 times on Linux.
-- serde_json's parse takes twice as long on Windows as on Linux, where Calx's takes the same. Rust programs use each system's allocator. On Linux serde_json's parse takes 12% longer than Calx's, and its writing 9% less.
+- Both read typed records straight from the text, with no tree between: serde's derive, and `@json`'s `from_text`, which takes 55% of serde's time on Windows and 84% on Linux. With no tree, the Calx program also holds less memory than the Rust one at its most.
+- serde_json's parse takes twice as long on Windows as on Linux, where Calx's takes the same. Rust programs use each system's allocator. On Linux serde_json's parse takes 12% longer than Calx's, and its writing 6% less.
 
 ## A tree of files
 
@@ -89,16 +89,16 @@ These are our benchmarks, of a few kinds of work, so they say how Calx does on w
 
 | Windows | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The tree walked | **14.9 ms** | 16.1 ms | 30.5 ms |
-| `**/*.calx` found | **15.6 ms** | 17.0 ms | 42.9 ms |
+| The tree walked | **15.5 ms** | 16.3 ms | 29.9 ms |
+| `**/*.calx` found | **15.4 ms** | 17.4 ms | 41.7 ms |
 | CPU time, the whole run | **234 ms** | 250 ms | 562 ms |
-| Most memory held | 6.0 MB | **4.8 MB** | 13.1 MB |
+| Most memory held | 6.1 MB | **4.8 MB** | 13.3 MB |
 
 | Linux | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The tree walked | **1.62 ms** | 2.73 ms | 5.20 ms |
-| `**/*.calx` found | **1.87 ms** | 2.56 ms | 7.12 ms |
-| CPU time, the whole run | **29.6 ms** | 50.0 ms | 112 ms |
+| The tree walked | **1.65 ms** | 2.68 ms | 5.17 ms |
+| `**/*.calx` found | **1.90 ms** | 2.55 ms | 7.20 ms |
+| CPU time, the whole run | **29.7 ms** | 42.1 ms | 107 ms |
 | Most memory held | 3.6 MB | **2.9 MB** | 11.4 MB |
 
 All three take 6 to 9 times as long on Windows as on Linux.
@@ -109,25 +109,25 @@ All three take 6 to 9 times as long on Windows as on Linux.
 
 | Windows | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The program, built, run | **3.63 ms** | 3.93 ms | 17.4 ms |
+| The program, built, run | **3.75 ms** | 4.00 ms | 18.1 ms |
 | Its CPU time | 0 ms | 0 ms | 15.6 ms |
-| Most memory held | **3.9 MB** | 4.2 MB | 10.8 MB |
-| Changed, then run | 105 ms | 158 ms | **17.4 ms** |
-| Run again, unchanged | 26.7 ms | **4.25 ms** | 17.4 ms |
+| Most memory held | **3.9 MB** | 4.2 MB | 10.7 MB |
+| Changed, then run | 108 ms | 161 ms | **18.1 ms** |
+| Run again, unchanged | 26.4 ms | **4.42 ms** | 18.1 ms |
 
 | Linux | Calx | Rust | Python |
 | --- | --- | --- | --- |
-| The program, built, run | **0.29 ms** | 0.32 ms | 6.21 ms |
-| Its CPU time | **0.26 ms** | 0.28 ms | 6.45 ms |
-| Most memory held | 2.9 MB | 2.9 MB | 9.1 MB |
-| Changed, then run | 50.6 ms | 148 ms | **6.21 ms** |
-| Run again, unchanged | 15.4 ms | **0.35 ms** | 6.21 ms |
+| The program, built, run | **0.30 ms** | 0.31 ms | 6.25 ms |
+| Its CPU time | **0.27 ms** | 0.28 ms | 6.53 ms |
+| Most memory held | 2.9 MB | 2.9 MB | 9.0 MB |
+| Changed, then run | 52.0 ms | 153 ms | **6.25 ms** |
+| Run again, unchanged | 16.1 ms | **0.35 ms** | 6.25 ms |
 
 - Rust's last row is its program alone, built before; Python reads and compiles the script each time it runs it, so its rows are the same time.
-- `calx run` of a script it has built checks that nothing the script was built from has changed, and then runs what it built: 15 to 23 ms more than the program alone.
+- `calx run` of a script it has built checks that nothing the script was built from has changed, and then runs what it built: 16 to 23 ms more than the program alone.
 
 ## What they show
 
-On these benchmarks, Calx takes a quarter to two thirds of Rust's time to take text apart and write numbers, 7 to 41% less to walk a tree of files, and a little less to start. It parses JSON into a tree faster and writes it about as fast, but takes 2 to 3 times as long as serde to read typed records, as `@json` goes through the tree. Python takes 1.4 to 28 times as long as Calx at each step, least where its C does most of the work, as in replacing a word, but it runs a small script, changed or not, sooner than `calx run` does.
+On these benchmarks, Calx takes a quarter to two thirds of Rust's time to take text apart and write numbers, 5 to 38% less to walk a tree of files, and a little less to start. It parses JSON into a tree faster, writes it about as fast, and reads typed records in 55 to 84% of serde's time. Python takes 1.6 to 29 times as long as Calx at each step, least where its C does most of the work, as in replacing a word, but it runs a small script, changed or not, sooner than `calx run` does.
 
-Calx held 18 to 60% more memory than Rust on every benchmark but the smallest program.
+Calx held 18 to 60% more memory than Rust to take text apart, write numbers and walk a tree of files, and 7 to 14% less to read and write JSON. The smallest program held the same.

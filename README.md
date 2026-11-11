@@ -52,16 +52,16 @@ On the [scripting benchmarks](docs/scripting-benchmarks.md), against Rust and Py
 
 | | Platform | Calx | Rust | Python |
 | --- | --- | --- | --- | --- |
-| Taking 10.4 MB of CSV apart | Windows 11 | **6.72 ms** | 17.4 ms | 114 ms |
-| | Linux (WSL2) | **7.49 ms** | 18.2 ms | 81.7 ms |
-| Writing 1.6 million numbers as text | Windows 11 | **19.6 ms** | 45.9 ms | 216 ms |
-| | Linux (WSL2) | **21.0 ms** | 45.3 ms | 169 ms |
-| 12.6 MB of JSON parsed, written and read into records | Windows 11 | **107 ms** | 124 ms | 432 ms |
-| | Linux (WSL2) | 108 ms | **72.4 ms** | 268 ms |
-| A tree of 10,000 files walked and globbed | Windows 11 | **30.5 ms** | 33.1 ms | 73.4 ms |
-| | Linux (WSL2) | **3.49 ms** | 5.29 ms | 12.3 ms |
-| The smallest program, run | Windows 11 | **3.63 ms** | 3.93 ms | 17.4 ms |
-| | Linux (WSL2) | **0.29 ms** | 0.32 ms | 6.21 ms |
+| Taking 10.4 MB of CSV apart | Windows 11 | **6.65 ms** | 17.4 ms | 114 ms |
+| | Linux (WSL2) | **7.74 ms** | 18.8 ms | 86.3 ms |
+| Writing 1.6 million numbers as text | Windows 11 | **19.5 ms** | 45.0 ms | 216 ms |
+| | Linux (WSL2) | **21.1 ms** | 45.6 ms | 171 ms |
+| 12.6 MB of JSON parsed, written and read into records | Windows 11 | **65.9 ms** | 126 ms | 442 ms |
+| | Linux (WSL2) | **67.6 ms** | 73.0 ms | 272 ms |
+| A tree of 10,000 files walked and globbed | Windows 11 | **30.9 ms** | 33.7 ms | 71.6 ms |
+| | Linux (WSL2) | **3.56 ms** | 5.23 ms | 12.4 ms |
+| The smallest program, run | Windows 11 | **3.75 ms** | 4.00 ms | 18.1 ms |
+| | Linux (WSL2) | **0.30 ms** | 0.31 ms | 6.25 ms |
 
 ## Installing
 
