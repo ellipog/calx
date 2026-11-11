@@ -132,14 +132,17 @@ It was checked against fontTools on 22 fonts, Windows' and some CFF ones, from A
 
 ## Speed
 
-Arial, against Pillow 12.3 with FreeType 2.14.3, on the performance cores of an i9-13900K under Windows, best of 30 runs, 5 times in turns:
+Arial, on our benchmark, on the performance cores of an i9-13900K under Windows, best of 30 runs, 8 times in turns with the Rust crate fontdue 0.9.5, built for release with `target-cpu=x86-64-v3`, thin LTO and one codegen unit. Pillow 12.3, with FreeType 2.14.3, was timed the same way in an earlier run, 5 times in turns, when Calx took 0.18, 0.28, 0.65 and 0.43 ms for the last four rows:
 
-| Work | Calx | Pillow |
-| --- | --- | --- |
-| Opening the font | 0.02 ms | 0.06 ms |
-| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.18 ms | 4.33 ms |
-| The same at 24 pixels | 0.28 ms | 1.14 ms |
-| The same at 72 pixels | 0.65 ms | 1.62 ms |
-| A line of 180 characters at 16 pixels, drawn on an image | 0.43 ms | 10.96 ms |
+| Work | Calx | fontdue | Pillow |
+| --- | --- | --- | --- |
+| Opening the font | 0.02 ms | 14.52 ms | 0.06 ms |
+| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.17 ms | 0.03 ms | 4.33 ms |
+| The same at 24 pixels | 0.24 ms | 0.05 ms | 1.14 ms |
+| The same at 72 pixels | 0.54 ms | 0.12 ms | 1.62 ms |
+| A line of 180 characters at 16 pixels, drawn on an image | 0.41 ms | 0.08 ms | 10.96 ms |
 
-Pillow's times include FreeType's hinting, which Calx doesn't do.
+- fontdue reads every glyph's outline into lines of its own when it opens the font, which is most of its 14.5 ms, and draws from those, 4 to 6 times as fast as Calx, which reads a glyph's outline from the file each time it draws it. So a program that opens a font and draws fewer than 3,000 glyphs from it at 72 pixels, or 10,000 at 12, is done sooner in Calx.
+- fontdue's line is laid out by its own `Layout` and blended by the benchmark as `draw_text` blends, black over white.
+- Pillow's times include FreeType's hinting, which Calx doesn't do.
+- Drawing a line that crosses a row within one pixel from where it is on average, its middle, and taking the minimum and maximum of floats without a branch, made the drawing 5 to 17% faster than before ([CLX-217](https://acta.aaenz.no/aaen-studios/clx#CLX-217)).

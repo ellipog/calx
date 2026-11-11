@@ -65,7 +65,7 @@ fn main() {
 | Method | Meaning |
 | --- | --- |
 | `x.abs()` | The absolute value |
-| `x.min(y)`, `x.max(y)` | Java's `Math.min` and `Math.max`: NaN if either is NaN, and `-0.0` is less than `0.0`. Not C's `fmin`, which ignores NaN |
+| `x.min(y)`, `x.max(y)` | Java's `Math.min` and `Math.max`: NaN if either is NaN, and `-0.0` is less than `0.0`. Not C's `fmin`, which ignores NaN. They're IEEE 754-2019's `minimum` and `maximum`, which take no branch: six instructions with `x86-64-v3`, and fewer against a constant |
 | `x.sqrt()` | The square root, correctly rounded |
 | `x.floor()`, `x.ceil()` | Rounded down or up to an integer value, still a float |
 | `x.rint()` | Rounded to the nearest integer value, halves to the even one, still a float: Java's `Math.rint` |
