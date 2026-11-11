@@ -2921,9 +2921,15 @@ static void par_top(par_pool* p, cx_usize threads, cx_u64 base, cx_u64 n, par_bo
     }
     par_close(j);
     par_nudge(p);
-    /* Waits for each worker to let go of the job. */
+    /* Waits for each worker still taking chunks to let go of the job, as the next loop sets its
+     * ranges up again. One past its chunks only helps inner jobs, which have all ended, until it
+     * sees the job close, so it isn't waited for: on a machine where other programs want a
+     * processor, the system had often preempted one there, and the loop's end waited for it to
+     * run again (CLX-267). */
     for (cx_usize k = 0; k < workers; k++) {
-        for (unsigned spins = 0; __atomic_load_n(&p->lines[k]->in, __ATOMIC_SEQ_CST) >> 32 == w; spins++) {
+        for (unsigned spins = 0;; spins++) {
+            cx_u64 in = __atomic_load_n(&p->lines[k]->in, __ATOMIC_SEQ_CST);
+            if (in >> 32 != w || (cx_u32)in) break;
             if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic(p);
             if (spins < 4096) par_pause();
             else par_yield();

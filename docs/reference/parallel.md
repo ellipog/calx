@@ -269,7 +269,7 @@ fn main() {
 
 Each thread's stack is 8 MiB, as the main thread's is, so an iteration can recurse as deep as the code outside the loop can (D135).
 
-The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread. Each thread starts with an equal range of them, which it runs in order, and a thread that runs out takes half of what's left of another's. So a slow chunk doesn't hold the others up, and threads don't all wait on one counter (CLX-257). A thread says it has joined a loop, and then how many chunks it ran, in a cache line of its own, and the thread that started the loop adds those up. So joining a loop and leaving it write nothing another thread writes (CLX-258). A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
+The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread. Each thread starts with an equal range of them, which it runs in order, and a thread that runs out takes half of what's left of another's. So a slow chunk doesn't hold the others up, and threads don't all wait on one counter (CLX-257). A thread says it has joined a loop, and then how many chunks it ran, in a cache line of its own, and the thread that started the loop adds those up. So joining a loop and leaving it write nothing another thread writes (CLX-258). Once every chunk has run, that thread goes on, waiting only for threads still taking chunks, not for those that ran out and wait for the loop to close: on a machine where other programs want a processor, one of those was often preempted, and the loop's end waited for it to run again (CLX-267). A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
 
 Up to 64 inner loops can be open at once, each in a slot of its own that threads with nothing to do look at. A thread that has looked for a fifth of a millisecond and found nothing sleeps until an inner loop opens or the outer loop's last chunk finishes. With every slot taken, an inner loop runs on the thread that reaches it.
 
@@ -301,23 +301,24 @@ Joining and leaving through each thread's own cache line (CLX-258) took the loop
 
 #### Against Rayon
 
-The same loops in Rust with Rayon 1.12's `par_iter_mut().enumerate()`, built for x86-64-v3 as a Calx release build is, with thin LTO and one codegen unit (CLX-259). Same machine, at 10–16% load from other programs, so these are rough. The cheap loops and the 32 slow iterations are the best of 5 over three runs, taking turns; the rest are the median of 15 over two runs:
+The same loops in Rust with Rayon 1.12's `par_iter_mut().enumerate()`, built for x86-64-v3 as a Calx release build is, with thin LTO and one codegen unit (CLX-259). Same machine, at 6–33% load from other programs, so these are rough. The cheap loops and the 32 slow iterations are the best of 5 over three runs, taking turns; the rest are the median of 15 over two runs:
 
 | Loop | Calx | Rayon |
 | --- | --- | --- |
-| 16 cheap iterations | 0.09–0.10 µs | 7.1–8.4 µs |
-| 64 cheap iterations | 0.14 µs | 16.6–18.2 µs |
-| 256 cheap iterations | 0.28–0.31 µs | 24.5–25.6 µs |
-| 4,096 cheap iterations | 6.0–6.9 µs | 54–57 µs |
-| 1,048,576 cheap iterations | 36–38 µs | 158–168 µs |
-| 32 slow iterations | 46–66 µs | 54–58 µs |
-| 64 slow iterations | 96–118 µs | 111–114 µs |
-| 256 slow iterations | 296–302 µs | 259–260 µs |
-| 4,096 iterations of 1,000 rounds | 242–252 µs | 219–220 µs |
-| 256 uneven iterations | 394–429 µs | 367–371 µs |
+| 16 cheap iterations | 0.09 µs | 6.6–8.4 µs |
+| 64 cheap iterations | 0.14 µs | 16.3–18.8 µs |
+| 256 cheap iterations | 0.26–0.35 µs | 24.4–25.9 µs |
+| 4,096 cheap iterations | 5.2–6.3 µs | 53–58 µs |
+| 1,048,576 cheap iterations | 34–45 µs | 149–161 µs |
+| 32 slow iterations | 48–58 µs | 54–56 µs |
+| 64 slow iterations | 85–90 µs | 105–109 µs |
+| 256 slow iterations | 242–281 µs | 264–271 µs |
+| 4,096 iterations of 1,000 rounds | 204–217 µs | 219–225 µs |
+| 256 uneven iterations | 341–357 µs | 367–376 µs |
 
 - **Cheap loops cost a small fraction of what Rayon's do,** from about 80 times less at 16 to 256 iterations, where Calx runs them on the thread that reaches them, to 4 times less at a million. Rayon splits each loop into tasks for its pool however small it is.
-- **Loops of slow iterations come out the same at their best,** 238 µs each for 256 of them, but Calx's medians are 7 to 16% longer at 256 and more iterations, and about 10% shorter at 64.
+- **Loops of slow iterations come out level with Rayon's or shorter at the median,** from about the same at 256 slow iterations to 17% shorter at 64. They were 7 to 16% longer at 256 iterations and more until a loop's end stopped waiting for threads that had run out of chunks (CLX-267).
+- **On 24 threads, one a core,** with `set_workers(24)` and `RAYON_NUM_THREADS=24`, Calx's medians are 12 to 21% shorter: 288–293 µs against 326–334 µs for 256 slow iterations, 84 µs against 106–108 µs for 64, 230 µs against 253–257 µs for 4,096 of 1,000 rounds, and 385–392 µs against 464–470 µs for the uneven loop. With 8 logical processors left for other programs, Calx's medians are within 8% of its best.
 
 These are our benchmark's loops, not a general comparison.
 
