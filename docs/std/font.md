@@ -136,14 +136,19 @@ Arial, on our benchmark, on the performance cores of an i9-13900K under Windows,
 
 | Work | Calx | fontdue | Pillow |
 | --- | --- | --- | --- |
-| Opening the font | 0.02 ms | 14.46 ms | 0.06 ms |
-| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.11 ms | 0.03 ms | 4.33 ms |
-| The same at 24 pixels | 0.17 ms | 0.05 ms | 1.14 ms |
-| The same at 72 pixels | 0.38 ms | 0.12 ms | 1.62 ms |
-| A line of 180 characters at 16 pixels, drawn on an image | 0.23 ms | 0.09 ms | 10.96 ms |
+| Opening the font | 0.02 ms | 14.11 ms | 0.06 ms |
+| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.08 ms | 0.03 ms | 4.33 ms |
+| The same at 24 pixels | 0.13 ms | 0.05 ms | 1.14 ms |
+| The same at 72 pixels | 0.31 ms | 0.12 ms | 1.62 ms |
+| A line of 180 characters at 16 pixels, drawn on an image | 0.17 ms | 0.08 ms | 10.96 ms |
 
-- fontdue reads every glyph's outline into lines of its own when it opens the font, which is most of its 14.5 ms, and draws from those, 3 to 4 times as fast as Calx draws a glyph on its own, reading its outline from the file each time. So a program that opens a font and draws fewer than 5,000 glyphs from it at 72 pixels, or 17,000 at 12, is done sooner in Calx.
+- fontdue reads every glyph's outline into lines of its own when it opens the font, which is most of its 14 ms, and draws from those, 2.5 to 3 times as fast as Calx draws a glyph on its own, reading its outline from the file each time. So a program that opens a font and draws fewer than 7,000 glyphs from it at 72 pixels, or 24,000 at 12, is done sooner in Calx.
 - fontdue's line is laid out by its own `Layout` and blended by the benchmark as `draw_text` blends, black over white. fontdue draws each glyph with its pen on a whole pixel, and Calx at its pen's fraction of a pixel.
-- Since [CLX-262](https://acta.aaenz.no/aaen-studios/clx#CLX-262), drawing is 1.4 to 1.8 times as fast as before: a TrueType glyph's points go straight into lines, with no outline between and the box kept as they're cut; the lines are drawn as font-rs draws them; and the buffers stay from one glyph to the next. For a whole text, as `mask` and `draw_text` draw it, each glyph is cut into lines once and moved to each place it's drawn.
+- Since [CLX-262](https://acta.aaenz.no/aaen-studios/clx#CLX-262), drawing is 1.8 to 2.4 times as fast as before, with the same coverage:
+  - A TrueType glyph's points go straight into lines, with no outline between, and their coordinates are read without a branch on how each is stored.
+  - The box is kept as the lines are cut, from where each ends.
+  - The lines are drawn as font-rs draws them. A line within one row goes in from its ends, with nothing to divide.
+  - The buffers stay from one glyph to the next.
+  - For a whole text, as `mask` and `draw_text` draw it, each glyph is cut into lines once and moved to each place it's drawn, and the glyphs and the text's pixels are put together a row at a time.
 - Pillow's times include FreeType's hinting, which Calx doesn't do.
 - Drawing a line that crosses a row within one pixel from where it is on average, its middle, and taking the minimum and maximum of floats without a branch, made the drawing 5 to 17% faster than before ([CLX-217](https://acta.aaenz.no/aaen-studios/clx#CLX-217)).

@@ -784,34 +784,56 @@ impl Image {
         let x1 = (left + i64.wrap(m.width)).min(i64.wrap(self.w))
         let y1 = (top + i64.wrap(m.height)).min(i64.wrap(self.h))
         let colors = if alpha { ch - 1 } else { ch }
-        for row in y0..y1 {
-            for col in x0..x1 {
-                let c = u32(m.coverage[usize.wrap(row - top) * m.width + usize.wrap(col - left)])
-                if c == 0 {
-                    continue
-                }
-                // How much of the ink this pixel gets, 0 to 255.
-                let a = div255(c * u32(color.a) + 128)
-                if a == 0 {
-                    continue
-                }
-                let at = (usize.wrap(row) * self.w + usize.wrap(col)) * ch
-                if not alpha {
-                    for k in 0..colors {
-                        let v = u32(self.pixels[at + k])
-                        self.pixels[at + k] = u8.wrap(div255(v * (255 - a) + u32(ink[k]) * a + 128))
+        if x1 <= x0 or y1 <= y0 {
+            return
+        }
+        let n = usize.wrap(x1 - x0)
+        // (x0, y0) to (x1, y1) is inside both the image and the mask, so each place below is in
+        // both; a row is read and written through pointers, without a check at each (CLX-262).
+        unsafe {
+            let cov = m.coverage.as_ptr()
+            let px = self.pixels.as_mut_ptr()
+            for row in y0..y1 {
+                let src = cov.add(usize.wrap(row - top) * m.width + usize.wrap(x0 - left))
+                let dst = px.add((usize.wrap(row) * self.w + usize.wrap(x0)) * ch)
+                for i in 0..n {
+                    let c = u32(src.add(i).read())
+                    if c == 0 {
+                        continue
                     }
-                    continue
+                    // How much of the ink this pixel gets, 0 to 255.
+                    let a = div255(c * u32(color.a) + 128)
+                    if a == 0 {
+                        continue
+                    }
+                    let p = dst.add(i * ch)
+                    if ch == 3 and not alpha {
+                        // RGB, the usual case, with its three channels written out.
+                        let r = u32(p.read())
+                        let g = u32(p.add(1).read())
+                        let b = u32(p.add(2).read())
+                        p.write(u8.wrap(div255(r * (255 - a) + u32(ink[0]) * a + 128)))
+                        p.add(1).write(u8.wrap(div255(g * (255 - a) + u32(ink[1]) * a + 128)))
+                        p.add(2).write(u8.wrap(div255(b * (255 - a) + u32(ink[2]) * a + 128)))
+                        continue
+                    }
+                    if not alpha {
+                        for k in 0..colors {
+                            let v = u32(p.add(k).read())
+                            p.add(k).write(u8.wrap(div255(v * (255 - a) + u32(ink[k]) * a + 128)))
+                        }
+                        continue
+                    }
+                    // Over what's there: the ink's share, then the rest of what was there.
+                    let da = u32(p.add(colors).read())
+                    let keep = div255(da * (255 - a) + 128)
+                    let out_a = a + keep
+                    for k in 0..colors {
+                        let v = u32(p.add(k).read())
+                        p.add(k).write(u8.wrap((u32(ink[k]) * a + v * keep + out_a / 2) / out_a))
+                    }
+                    p.add(colors).write(u8.wrap(out_a))
                 }
-                // Over what's there: the ink's share, then the rest of what was there.
-                let da = u32(self.pixels[at + colors])
-                let keep = div255(da * (255 - a) + 128)
-                let out_a = a + keep
-                for k in 0..colors {
-                    let v = u32(self.pixels[at + k])
-                    self.pixels[at + k] = u8.wrap((u32(ink[k]) * a + v * keep + out_a / 2) / out_a)
-                }
-                self.pixels[at + colors] = u8.wrap(out_a)
             }
         }
     }
