@@ -1,0 +1,26 @@
+// A panic in a loop that runs on the thread that reaches it, since it was quick the times
+// before, reports the first iteration that panicked, after the output of every iteration before
+// it, as on the pool (CLX-257).
+import std.pool.{set_workers}
+
+fn step(xs: mut List<i32>, d: i32) {
+    parallel for k in 0usize..xs.len() {
+        if d == 0 and (k < 2 or k == 30) {
+            println("ran {k}")
+        }
+        xs[k] = 10 / ((i32.wrap(k) - 30 + d) * (i32.wrap(k) - 40 + d))    // panic: division by zero
+    }
+}
+
+fn main() {
+    set_workers(4)
+    var xs: List<i32> = [0; 64]
+    for _ in 0..100 {
+        step(mut xs, 100)
+    }
+    println("quick")    // out: quick
+    step(mut xs, 0)
+    // out: ran 0
+    // out: ran 1
+    // out: ran 30
+}

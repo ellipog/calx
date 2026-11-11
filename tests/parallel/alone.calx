@@ -1,0 +1,92 @@
+// A loop whose iterations were quick the last time runs on the thread that reaches it, and hands
+// what's left to the pool if they turn out slow (CLX-257). Either way it gives what one thread
+// running the iterations in order would, as any `parallel for` does.
+import std.pool.{Pool, set_workers}
+
+fn spin(k: usize, rounds: i32) -> u64 {
+    var h = u64(k) + 1
+    for _ in 0..rounds {
+        h = (h ^ (h >> 29)) * 0xBF58476D1CE4E5B9
+    }
+    return h
+}
+
+// Quick the first times, so it starts alone; slow the last time, so it hands off partway.
+fn pass(xs: mut List<u64>, rounds: i32) {
+    parallel for k in 0usize..xs.len() {
+        xs[k] = xs[k] ^ spin(k, rounds)
+        if rounds > 0 and k % 64 == 0 {
+            println("slow {k}")
+        }
+    }
+}
+
+// A loop inside a quick one.
+fn grid(rows: mut List<List<i32>>, round: i32) {
+    parallel for r in 0usize..rows.len() {
+        parallel for c in 0usize..rows[r].len() {
+            rows[r][c] += round
+        }
+        if round == 99 and r % 4 == 0 {
+            println("row {r}")
+        }
+    }
+}
+
+// A loop on a pool inside one on the same pool, which runs alone once it's known to be quick.
+fn twice(pool: Pool, xs: mut List<i32>) {
+    parallel(pool) for k in 0usize..xs.len() {
+        var inner: List<i32> = [0; 4]
+        parallel(pool) for j in 0usize..inner.len() {
+            inner[j] = i32.wrap(j) + 1
+        }
+        xs[k] += inner[0] + inner[3]
+    }
+}
+
+fn main() {
+    set_workers(8)
+    var xs: List<u64> = [0; 512]
+    for _ in 0..200 {
+        pass(mut xs, 0)
+    }
+    pass(mut xs, 3000)
+    // out: slow 0
+    // out: slow 64
+    // out: slow 128
+    // out: slow 192
+    // out: slow 256
+    // out: slow 320
+    // out: slow 384
+    // out: slow 448
+    var check: u64 = 0
+    for k in 0usize..xs.len() {
+        check ^= xs[k]
+    }
+    var want: u64 = 0
+    for k in 0usize..512 {
+        want ^= spin(k, 3000)
+    }
+    println("{check == want}")    // out: true
+
+    var rows: List<List<i32>> = []
+    for _ in 0..16 {
+        rows.push([0; 32])
+    }
+    for round in 0..100 {
+        grid(mut rows, round)
+    }
+    // out: row 0
+    // out: row 4
+    // out: row 8
+    // out: row 12
+    println("{rows[15][31]}")    // out: 4950
+
+    let pool = Pool.new(4)
+    var ys: List<i32> = [0; 64]
+    for _ in 0..100 {
+        twice(pool, mut ys)
+    }
+    println("{ys[63]}")    // out: 500
+    pool.close()
+}

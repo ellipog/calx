@@ -269,9 +269,33 @@ fn main() {
 
 Each thread's stack is 8 MiB, as the main thread's is, so an iteration can recurse as deep as the code outside the loop can (D135).
 
-The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread, which the threads take in order, so a slow chunk doesn't hold the others up. A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
+The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread. Each thread starts with an equal range of them, which it runs in order, and a thread that runs out takes half of what's left of another's. So a slow chunk doesn't hold the others up, and threads don't all wait on one counter (CLX-257). A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
 
 Up to 64 inner loops can be open at once, each in a slot of its own that threads with nothing to do look at. A thread that has looked for a fifth of a millisecond and found nothing sleeps until an inner loop opens or the outer loop's last chunk finishes. With every slot taken, an inner loop runs on the thread that reaches it.
+
+### Small loops
+
+Waking the threads and waiting for them all costs a few microseconds, which is more than a loop over a few hundred cheap elements takes on one thread. So a loop whose iterations each took less than half a microsecond the last time it ran starts on the thread that reaches it, in batches that double: one iteration, then two, then four (CLX-257).
+
+- **What's left goes to the pool once it looks big.** After each batch, the loop works out how long what's left would take at the rate so far. Once that's more than 3 µs, it hands what's left to the pool. A small loop costs about what a `for` does, and a big one starts on the pool an iteration or so late.
+- **A loop's first run starts on the pool,** and so does a loop whose iterations were slow last time.
+- **The time an iteration takes is kept for each loop.** It's measured on the thread that runs the loop, and kept in a table of 1,024 loops.
+- **It changes how long a loop takes, never what it does.** The output still comes in order, a panic still reports the first iteration that panicked, and the loops inside it still use the pool: the outer loop's pool, whichever it names.
+
+Per loop, on an i9-13900K with 32 threads, on a quiet machine. "Cheap" is `xs[k] += k` over `i64`s, a slow iteration is about 20 µs of hashing, and in the uneven loop iteration `k` hashes `200 * k` times. The cheap loops are the best of 5, the others the median of 15, each over three runs:
+
+| Loop | Before | After |
+| --- | --- | --- |
+| 16 cheap iterations | 2.5–2.6 µs | 0.09–0.11 µs |
+| 64 cheap iterations | 4.4–4.7 µs | 0.14–0.15 µs |
+| 256 cheap iterations | 11.0–11.3 µs | 0.25–0.27 µs |
+| 4,096 cheap iterations | 10.6–11.3 µs | 7.6–8.3 µs |
+| 1,048,576 cheap iterations | 47–53 µs | 34–40 µs |
+| 256 slow iterations | 239–251 µs | 254–261 µs |
+| 256 uneven iterations | 352–359 µs | 368–381 µs |
+
+- **The loop of 4,096 still goes to the pool.** On one thread, its elements would be in the other threads' caches from the run before, so its first batches look slow.
+- **Loops of slow iterations are about 4% slower at the median.** At their best they're the same as before.
 
 ## In C
 
