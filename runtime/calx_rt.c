@@ -2010,6 +2010,23 @@ void cx_panic_key(const char* at) {
     cx_panic_end();
 }
 
+void cx_print_handle(cx_handle h) {
+    write_bytes("Handle(", 7);
+    cx_print_u64(h.index);
+    write_bytes(", ", 2);
+    cx_print_u64(h.gen);
+    write_bytes(")", 1);
+}
+
+void cx_panic_handle(cx_handle h, const char* at) {
+    char text[128];
+    cx_panic_begin(at);
+    snprintf(text, sizeof text, "the slot map has no value for Handle(%u, %u): it was removed, or the handle is another map's",
+             (unsigned)h.index, (unsigned)h.gen);
+    panic_text(text);
+    cx_panic_end();
+}
+
 void cx_panic_marks(cx_usize marks, cx_usize length, const char* at) {
     char text[112];
     cx_panic_begin(at);

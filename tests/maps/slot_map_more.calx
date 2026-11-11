@@ -1,0 +1,96 @@
+// Slot maps (CLX-69) in a type that holds itself through one, in a generic struct, in a loop over a
+// value made there, through `while let` and `match`, and in queues; handles in a struct that
+// derives `Equal` and `Display`, and in an optional.
+struct Node {
+    name: String,
+    children: SlotMap<Node>,
+}
+
+struct Pool<T> {
+    items: SlotMap<T>,
+}
+
+impl<T> Pool<T> {
+    fn add(mut self, v: own T) -> Handle<T> {
+        return self.items.insert(v)
+    }
+}
+
+struct Ref {
+    h: Handle<i32>,
+    n: i32,
+}
+
+fn make() -> SlotMap<String> {
+    var m = SlotMap<String>()
+    _ = m.insert(String("x"))
+    _ = m.insert(String("y"))
+    return m
+}
+
+fn one() -> Handle<i32> {
+    var m = SlotMap<i32>()
+    return m.insert(5)
+}
+
+fn main() {
+    var root = Node { name: String("root"), children: SlotMap() }
+    let k = root.children.insert(Node { name: String("kid"), children: SlotMap() })
+    _ = root.children[k].children.insert(Node { name: String("grandkid"), children: SlotMap() })
+    println("{root.children[k].name} {root.children[k].children.len()}")    // out: kid 1
+
+    // Setting a value that owns memory frees the one it replaces.
+    var pool = Pool<String> { items: SlotMap() }
+    let a = pool.add(String("a"))
+    pool.items[a] = String("replaced")
+    println("{pool.items[a]}")    // out: replaced
+
+    let r = Ref { h: one(), n: 1 }
+    let r2 = Ref { h: one(), n: 2 }
+    println("{r} {r == r2} {r.h == r2.h}")    // out: Ref { h: Handle(0, 1), n: 1 } false true
+    let o: Handle<i32>? = some(r.h)
+    println("{o}")    // out: some(Handle(0, 1))
+
+    var made = List<String>()
+    for s in make() {
+        made.push(s.copy())
+    }
+    println("{made}")    // out: [x, y]
+
+    // A slot map of numbers is copied whole.
+    var nums = SlotMap<i32>()
+    let h1 = nums.insert(1)
+    _ = nums.insert(2)
+    let c = nums.copy()
+    println("{c} {c == nums}")    // out: {Handle(0, 1): 1, Handle(1, 1): 2} true
+    while let v = mut nums.find(h1) {
+        v += 1
+        if v > 3 {
+            break
+        }
+    }
+    println("{nums[h1]}")    // out: 4
+    match nums.remove(h1) {
+        some(v) => println("got {v}"),    // out: got 4
+        none => println("none"),
+    }
+
+    // A slot map of `Send` values goes in a queue, and so do handles.
+    var q = Receiver<SlotMap<i32>>()
+    var tx = q.sender()
+    tx.send(c)
+    tx.close()
+    if let got = q.next() {
+        println("sent {got.len()}")    // out: sent 2
+    }
+    var hq = Receiver<Handle<i32>>()
+    var htx = hq.sender()
+    htx.send(r.h)
+    htx.close()
+    if let got = hq.next() {
+        println("sent {got}")    // out: sent Handle(0, 1)
+    }
+    for (i, v) in nums.enumerate() {
+        println("{i} {v}")    // out: 0 2
+    }
+}

@@ -1,0 +1,37 @@
+// What a slot map and its handles check (CLX-69).
+struct Pos {
+    x: i32,
+}
+
+fn main() {
+    var m = SlotMap<String>()
+    let h = m.insert(String("a"))
+    var ps = SlotMap<Pos>()
+    let p = ps.insert(Pos { x: 1 })
+    _ = Handle<String>()    // error: a `Handle` comes from its slot map's `insert`
+    let unknown = SlotMap()    // error: can't tell what this slot map holds
+    let two: SlotMap<i32, i32> = SlotMap<i32>()    // error: `SlotMap` takes one generic argument, the type of its values: `SlotMap<Entity>`
+    let nothing: Handle<()>? = none    // error: a slot map can't hold `()`
+    _ = SlotMap<i32>(4)    // error: `SlotMap<T>()` takes no arguments; put the values in with `insert`
+    _ = m[0]    // error: expected `Handle<String>`
+    _ = m[p]    // error: expected `Handle<String>`, found `Handle<Pos>`
+    _ = m.get(h)    // error: `get` copies the value out, so it needs values that are `Copy`
+    m.push(String("b"))    // error: has no method `push`; a slot map's is `insert`, which gives the handle of the value
+    _ = m.keys()    // error: a slot map's keys are its handles, from `handles()`
+    let listed: SlotMap<i32> = [1, 2]    // error: a `SlotMap` isn't written as a list
+    _ = m.find(h)    // error: `find` gives a view of the value where it is
+    let keys = Set<SlotMap<i32>>()    // error: and a `SlotMap` has no `Hash`
+    _ = h.slot()    // error: `Handle<String>` has no method `slot`
+    let fixed = SlotMap<i32>()
+    _ = fixed.insert(1)    // error: `fixed` can't be changed; declare it with `var` to change it
+    _ = h < h
+    parallel for q in ps {    // error: a `parallel for` goes over a range of indexes
+        _ = q.x
+    }
+    _ = ps[p].x
+    _ = unknown
+    _ = listed
+    _ = keys
+    _ = two
+    _ = nothing
+}

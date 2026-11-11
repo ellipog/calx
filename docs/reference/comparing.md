@@ -44,6 +44,8 @@ fn main() {
 | `Deque<T>` | The same, from each one's first element ([deques](deques.md#whats-different)) |
 | `PriorityQueue<T>` | The same, in the order of their arrays ([priority queues](priority-queues.md#whats-different)) |
 | `Map<K, V>`, `Set<T>` | Both have the same keys, with equal values, in any order ([maps and sets](maps.md#comparing-and-printing)), and the other maps and sets the same way |
+| `SlotMap<T>` | The same handles reach equal values in both ([slot maps](slot-maps.md#comparing-and-printing)) |
+| `Handle<T>` | Both have the same index and generation |
 | `String` and `str` | Both hold the same bytes |
 | A float | As floats compare: `NaN` never equals anything, and `0.0 == -0.0` ([floats](floats.md)) |
 

@@ -1,0 +1,126 @@
+// `SlotMap<T>` holds values, each reached by the `Handle<T>` its `insert` gave back, which goes
+// stale once the value is removed, so a stale handle finds nothing rather than another value put
+// in the same slot (CLX-69). The debug build checks that nothing is freed twice or leaked.
+struct Pos {
+    x: i32,
+    y: i32,
+}
+
+struct Entity {
+    name: String,
+    pos: Pos,
+    hp: i32,
+}
+
+struct World {
+    entities: SlotMap<Entity>,
+    player: Handle<Entity>?,
+}
+
+fn spawn(w: mut World, name: str, x: i32) -> Handle<Entity> {
+    return w.entities.insert(Entity { name: String(name), pos: Pos { x, y: 0 }, hp: 10 })
+}
+
+fn total_hp(w: World) -> i32 {
+    var n = 0
+    for e in w.entities {
+        n += e.hp
+    }
+    return n
+}
+
+fn name_of(w: World, h: Handle<Entity>) -> String {
+    let e = w.entities.find(h) else {
+        return String("gone")
+    }
+    return e.name.copy()
+}
+
+// Generic code holds handles of any type.
+fn live<T>(m: SlotMap<T>, hs: List<Handle<T>>) -> usize {
+    var n: usize = 0
+    for h in hs {
+        if m.contains(h) {
+            n += 1
+        }
+    }
+    return n
+}
+
+fn main() {
+    var w = World { entities: SlotMap(), player: none }
+    let a = spawn(mut w, "ada", 1)
+    let b = spawn(mut w, "bo", 2)
+    let c = spawn(mut w, "cy", 3)
+    w.player = some(a)
+    println("{w.entities.len()} {a} {b} {c}")    // out: 3 Handle(0, 1) Handle(1, 1) Handle(2, 1)
+
+    // `m[h]` is a place, so a part of the value changes where it is.
+    w.entities[b].pos.x += 10
+    w.entities[b].hp -= 3
+    println("{w.entities[b].pos.x} {w.entities[b].hp} {total_hp(w)}")    // out: 12 7 27
+
+    // Removing gives the value back, and the handle goes stale.
+    let gone = w.entities.remove(b)
+    if let e = gone {
+        println("removed {e.name}")    // out: removed bo
+    }
+    println("{w.entities.contains(b)} {w.entities.remove(b)} {name_of(w, b)}")    // out: false none gone
+
+    // The next insert takes the freed slot, with the next generation, so `b` still finds nothing.
+    let d = spawn(mut w, "dee", 4)
+    println("{d} {w.entities.contains(b)} {name_of(w, d)} {w.entities.len()}")    // out: Handle(1, 3) false dee 3
+
+    // Changing values through `find`, and through a loop.
+    if let e = mut w.entities.find(c) {
+        e.hp = 1
+    }
+    for e in mut w.entities {
+        e.pos.y = e.pos.x * 2
+    }
+    var parts = List<String>()
+    for e in w.entities {
+        parts.push("{e.name}:{e.pos.y}:{e.hp}")
+    }
+    println("{parts.join(" ")}")    // out: ada:2:10 dee:8:10 cy:6:1
+
+    // The handles, in slot order, and generic code.
+    let hs = w.entities.handles()
+    println("{hs} {live(w.entities, [a, b, c, d])}")    // out: [Handle(0, 1), Handle(1, 3), Handle(2, 1)] 3
+
+    // A copy has the same handles; changing it leaves the first as it was.
+    var copy = w.entities.copy()
+    copy[a].hp = 99
+    println("{copy[a].hp} {w.entities[a].hp} {copy == w.entities}")    // out: 99 10 false
+    copy[a].hp = 10
+    println("{copy == w.entities}")    // out: true
+
+    // Clearing makes every handle stale.
+    copy.clear()
+    println("{copy.len()} {copy.is_empty()} {copy.contains(a)}")    // out: 0 true false
+    let e = copy.insert(Entity { name: String("eve"), pos: Pos { x: 0, y: 0 }, hp: 5 })
+    println("{e} {copy.contains(a)} {copy[e].name}")    // out: Handle(0, 3) false eve
+
+    // `get` copies a value that's `Copy`.
+    var nums = SlotMap<i32>()
+    let one = nums.insert(1)
+    let two = nums.insert(2)
+    nums[two] = 20
+    println("{nums.get(one)} {nums.get(two)} {nums}")    // out: some(1) some(20) {Handle(0, 1): 1, Handle(1, 1): 20}
+    _ = nums.remove(one)
+    println("{nums.get(one)} {one.index()} {one.generation()}")    // out: none 0 1
+    nums.reserve(100)
+    println("{nums.capacity() >= 100}")    // out: true
+
+    // Handles compare, order and hash as their two numbers.
+    var seen = Set<Handle<i32>>()
+    seen.insert(two)
+    seen.insert(two)
+    println("{seen.len()} {one < two} {one == one} {one != two}")    // out: 1 true true true
+    var order = [two, one]
+    order.sort()
+    println("{order}")    // out: [Handle(0, 1), Handle(1, 1)]
+    if let p = w.player {
+        println("{w.entities[p].name}")    // out: ada
+    }
+}

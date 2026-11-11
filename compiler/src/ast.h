@@ -206,6 +206,9 @@ enum class BMethod : std::uint8_t {
     reverse,  // a list's or an array's elements, in place, the last first
     // On a list or an array: its numbers added up, and its least and greatest element.
     list_sum, list_min, list_max,
+    // On a `SlotMap`, which has `insert`, `remove`, `get` and the rest too: a list of the handles
+    // of its values; and on a `Handle`, its slot's index and generation (CLX-69).
+    handles, handle_index, handle_generation,
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };

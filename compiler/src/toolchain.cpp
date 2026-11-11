@@ -1529,15 +1529,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         r.inputs.push_back(file.string());
         return read_file(file.string(), text);
     };
-    std::string rt_h, rt_c, sort_h, btree_h, heap_h;
+    std::string rt_h, rt_c, sort_h, btree_h, heap_h, slots_h;
     if (!read_runtime(runtime / "calx_rt.h", rt_h) || !read_runtime(runtime / "calx_rt.c", rt_c) ||
         !read_runtime(runtime / "calx_sort.h", sort_h) || !read_runtime(runtime / "calx_btree.h", btree_h) ||
-        !read_runtime(runtime / "calx_heap.h", heap_h)) {
+        !read_runtime(runtime / "calx_heap.h", heap_h) || !read_runtime(runtime / "calx_slots.h", slots_h)) {
         std::fprintf(stderr, "calx: can't read the runtime in %s\n", runtime.string().c_str());
         return r;
     }
-    // Any file may include the sort's template, the sorted tables' (D112) or the queues' (D113), so
-    // the keys cover them as they cover the header.
+    // Any file may include the sort's template, the sorted tables' (D112), the queues' (D113) or the
+    // slot maps' (CLX-69), so the keys cover them as they cover the header.
     // A library takes the runtime's functions from the program that opens it, and a program that
     // opens libraries has every one of them to give (D123).
     std::vector<std::string> c_sources = c_sources_in;
@@ -1554,6 +1554,7 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
     rt_h += sort_h;
     rt_h += btree_h;
     rt_h += heap_h;
+    rt_h += slots_h;
     // The headers' 160 KB are in every file's key, hashed once here rather than again for each.
     const std::string rt_hash = hash_hex({"runtime-header", rt_h});
     // Java's semantics hold in every mode: wrapping, no contraction (D63, CALX_SPEC.md).

@@ -91,6 +91,7 @@ Methods that change the length, such as `push` and `remove`, are a list's only: 
 - `Shared<T>` holds one value that every copy reads and nothing changes, so threads read it without a copy each ([shared values](shared.md)).
 - `ArenaList<T>` is a list whose memory is an `Arena`'s, freed all at once with the arena's other lists ([arenas](arenas.md)).
 - `Map<K, V>` and `Set<T>` are hash tables ([maps and sets](maps.md)), and `SortedMap<K, V>` and `SortedSet<T>` keep their keys in order ([sorted maps](sorted-maps.md)).
+- `SlotMap<T>` holds values, each reached by the `Handle<T>` its `insert` gave, which goes stale when the value is removed ([slot maps](slot-maps.md)).
 
 ## Structs, enums and tuples
 

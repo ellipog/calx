@@ -1324,6 +1324,19 @@ CX_INLINE void cx_lk_move(cx_u32* link, cx_usize i, cx_bool front) {
     else cx_lk_push_back(link, i);
 }
 CX_COLD CX_FN(void, cx_panic_key, (const char* at));
+/* A `Handle<T>`: the index of a slot in a `SlotMap<T>` and the generation it had when its value
+ * went in (CLX-69). The same struct for every `T`. */
+typedef struct {
+    cx_u32 index;
+    cx_u32 gen;
+} cx_handle;
+/* The handle as one number, which compares and hashes as the two do: the index, then the
+ * generation. */
+CX_INLINE cx_u64 cx_handle_key(cx_handle h) { return (cx_u64)h.index << 32 | h.gen; }
+/* Prints `Handle(3, 1)`. */
+CX_FN(void, cx_print_handle, (cx_handle h));
+/* `m[h]` with a handle whose value was removed. */
+CX_COLD CX_FN(void, cx_panic_handle, (cx_handle h, const char* at));
 /* `m.range(a..b)` on a `SortedMap` or a `SortedSet`, with `b` before `a` (D112). */
 CX_COLD CX_FN(void, cx_panic_range, (const char* at));
 /* A panic that says `message`, as `(a..b).step_by(0)` does (CLX-101). */

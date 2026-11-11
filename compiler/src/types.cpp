@@ -185,6 +185,31 @@ Type* Types::deque_of(Type* elem) {
     return t;
 }
 
+Type* Types::slot_map_of(Type* elem) {
+    auto it = slot_map_map_.find(elem);
+    if (it != slot_map_map_.end()) return it->second;
+    Type* t = make(TypeKind::slot_map, arena_.copy("SlotMap<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    t->has_pointer = elem->has_pointer;
+    t->scoped = elem->scoped;
+    slot_map_map_.emplace(elem, t);
+    compounds_.push_back(t);
+    return t;
+}
+
+// A handle is two numbers whatever its values are, so it's not a compound with glue of its own,
+// and it holds nothing of its type's: no pointer, and nothing scoped.
+Type* Types::handle_of(Type* elem) {
+    auto it = handle_map_.find(elem);
+    if (it != handle_map_.end()) return it->second;
+    Type* t = make(TypeKind::handle, arena_.copy("Handle<" + std::string(elem->name) + ">"));
+    t->elem = elem;
+    t->open = elem->open;
+    handle_map_.emplace(elem, t);
+    return t;
+}
+
 // A queue's ends are handles to the runtime's queue, the same C type whatever the messages are,
 // so they aren't compounds with glue of their own.
 Type* Types::sender_of(Type* elem) {
@@ -345,7 +370,7 @@ bool is_view_type(const Type* t) {
         case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
         case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-        case TypeKind::library: case TypeKind::dyn:
+        case TypeKind::library: case TypeKind::dyn: case TypeKind::slot_map:
             return true;
         case TypeKind::enum_: return t->has_data;
         case TypeKind::optional: return is_view_type(t->elem);
@@ -388,7 +413,7 @@ bool copy_walk(const Type* t, int depth, Seen& seen) {
     switch (t->kind) {
         case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-        case TypeKind::library: case TypeKind::dyn: return false;
+        case TypeKind::library: case TypeKind::dyn: case TypeKind::slot_map: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1, seen);
         case TypeKind::tuple:
@@ -424,6 +449,7 @@ bool send_walk(const Type* t, int depth, Seen& seen) {
         case TypeKind::dyn: return false;      // what it holds could be anything
         case TypeKind::param: return t->send_bound;
         case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+        case TypeKind::slot_map:
             return send_walk(t->elem, depth + 1, seen);
         case TypeKind::map: return send_walk(t->key, depth + 1, seen) && send_walk(t->elem, depth + 1, seen);
         case TypeKind::tuple:

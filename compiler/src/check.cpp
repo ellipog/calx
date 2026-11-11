@@ -102,7 +102,7 @@ public:
         for (const char* b : {"print", "println", "eprint", "eprintln", "panic", "assert"}) {
             builtin_names_.push_back(ctx.names.intern(b));
         }
-        for (const char* b : {"some", "ok", "err", "List", "Box", "Shared", "Deque", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
+        for (const char* b : {"some", "ok", "err", "List", "Box", "Shared", "Deque", "SlotMap", "Handle", "PriorityQueue", "Arena", "ArenaList", "Map", "Set", "JavaHashMap", "JavaHashSet", "OpenHashMap", "OpenHashSet", "LinkedMap", "LinkedSet", "SortedMap", "SortedSet", "Copy", "Send", "Sender", "Receiver", "Thread",
                               "Library", "Equal", "Display",
                               "Hash", "Order", "Ordering", "Hasher", "From", "JavaHash", "Iterator", "Add", "Sub", "Mul", "Div", "Rem",
                               "Neg"}) {
@@ -118,6 +118,8 @@ public:
         }
         n_List_ = ctx.names.intern("List");
         n_Deque_ = ctx.names.intern("Deque");
+        n_SlotMap_ = ctx.names.intern("SlotMap");
+        n_Handle_ = ctx.names.intern("Handle");
         n_PriorityQueue_ = ctx.names.intern("PriorityQueue");
         n_Box_ = ctx.names.intern("Box");
         n_Shared_ = ctx.names.intern("Shared");
@@ -505,6 +507,7 @@ private:
             case TypeKind::array:
             case TypeKind::pointer:
             case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::slot_map: case TypeKind::handle:
             case TypeKind::sender: case TypeKind::receiver: return private_part(t->elem);
             case TypeKind::map:
                 if (const Item* p = private_part(t->key)) return p;
@@ -2199,7 +2202,7 @@ private:
                 }
                 return contains(vars, t) && !s.count(const_cast<Type*>(t));
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
-            case TypeKind::sender: case TypeKind::receiver:
+            case TypeKind::slot_map: case TypeKind::handle: case TypeKind::sender: case TypeKind::receiver:
                 return unresolved(t->elem, vars, s);
             case TypeKind::map: return unresolved(t->key, vars, s) || unresolved(t->elem, vars, s);
             case TypeKind::tuple:
@@ -2250,6 +2253,8 @@ private:
                        : t->arena_list ? T.arena_list_of(subst(t->elem, s))
                                        : T.list_of(subst(t->elem, s));
             case TypeKind::deque: return T.deque_of(subst(t->elem, s));
+            case TypeKind::slot_map: return T.slot_map_of(subst(t->elem, s));
+            case TypeKind::handle: return T.handle_of(subst(t->elem, s));
             case TypeKind::sender: return T.sender_of(subst(t->elem, s));
             case TypeKind::receiver: return T.receiver_of(subst(t->elem, s));
             case TypeKind::map: return T.map_of(subst(t->key, s), subst(t->elem, s), t->table);
@@ -2304,7 +2309,7 @@ private:
         }
         switch (pattern->kind) {
             case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
-            case TypeKind::sender: case TypeKind::receiver:
+            case TypeKind::slot_map: case TypeKind::handle: case TypeKind::sender: case TypeKind::receiver:
                 return unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::map: return unify(pattern->key, actual->key, s, vars) && unify(pattern->elem, actual->elem, s, vars);
             case TypeKind::pointer:
@@ -2612,6 +2617,8 @@ private:
             case TypeKind::array: return mangle(t->elem) + "_arr" + std::to_string(t->length);
             case TypeKind::list: return mangle(t->elem) + (t->heap ? "_heap" : t->shared ? "_shared" : t->boxed ? "_box" : t->arena_list ? "_alist" : "_list");
             case TypeKind::deque: return mangle(t->elem) + "_deque";
+            case TypeKind::slot_map: return mangle(t->elem) + "_slots";
+            case TypeKind::handle: return mangle(t->elem) + "_handle";
             case TypeKind::sender: return mangle(t->elem) + "_sender";
             case TypeKind::receiver: return mangle(t->elem) + "_receiver";
             case TypeKind::map: return mangle(t->key) + "_" + mangle(t->elem) + table_suffix(t) + "map";
@@ -3152,6 +3159,17 @@ private:
                         return T.error;
                     }
                     return T.deque_of(elem);
+                }
+                if ((n == n_SlotMap_ || n == n_Handle_) && !env_type(n)) {
+                    bool map = n == n_SlotMap_;
+                    if (t->args.size() != 1) {
+                        error(t->span, map ? "`SlotMap` takes one generic argument, the type of its values: `SlotMap<Entity>`"
+                                           : "`Handle` takes one generic argument, the type of the values of its slot map: `Handle<Entity>`");
+                        return T.error;
+                    }
+                    Type* elem = resolve_type(t->args[0]);
+                    if (is_bad(elem) || !slot_elem(elem, t->args[0]->span)) return T.error;
+                    return map ? T.slot_map_of(elem) : T.handle_of(elem);
                 }
                 if (is_table_name(n) && !env_type(n)) {
                     bool map = is_map_name(n);
@@ -4740,7 +4758,9 @@ private:
             } else if (t->boxed) {
                 by_mut = false;
                 error(it->span, "a `for` loop doesn't go over a " + box_word(t) + ", which holds one value: " + q(place_text(it) + ".value"));
-            } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::set) {
+            } else if (t->kind == TypeKind::array || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::set ||
+                       t->kind == TypeKind::slot_map) {
+                // A slot map's values, in the order of their slots.
                 elem = t->elem;
                 borrowed = place_root(it);
             } else if (t->kind == TypeKind::map) {
@@ -4749,7 +4769,7 @@ private:
                 borrowed = place_root(it);
             } else if (!is_bad(t)) {
                 by_mut = false;
-                error(it->span, "a `for` loop goes over a range, an array, a list, a map or a set, not " + name_of(t) +
+                error(it->span, "a `for` loop goes over a range, an array, a list, a map, a set or a slot map, not " + name_of(t) +
                                     (t->kind == TypeKind::string || t->kind == TypeKind::str
                                          ? "; go over its runes with " + q("s.runes()") + ", or its UTF-16 units with " + q("s.chars()")
                                          : std::string()));
@@ -5642,6 +5662,11 @@ private:
                 return derived(t->elem, prop);
             // Java's `ArrayDeque` has neither `hashCode` nor `compareTo`.
             case TypeKind::deque: return prop != p_java_hash && prop != p_order && derived(t->elem, prop);
+            // Two slot maps are equal when the same handles reach equal values, and one is shown
+            // as a map of handles to values.
+            case TypeKind::slot_map: return (prop == p_equal || prop == p_display) && derived(t->elem, prop);
+            // A handle is its two numbers.
+            case TypeKind::handle: return prop != p_java_hash;
             case TypeKind::optional: case TypeKind::array: return prop != p_java_hash && derived(t->elem, prop);
             case TypeKind::map:
                 return prop != p_hash && prop != p_order && prop != p_java_hash && derived(t->key, prop) && derived(t->elem, prop);
@@ -5754,6 +5779,7 @@ private:
         }
         if (prop == p_order && leaf->kind == TypeKind::pointer) why = ", and pointers have no `Order`";
         if (prop == p_order && (leaf->kind == TypeKind::map || leaf->kind == TypeKind::set)) why = ", and maps and sets have no `Order`";
+        if (leaf->kind == TypeKind::slot_map) why = std::string(", and a `SlotMap` has no ") + names[prop];
         // Java's `PriorityQueue` has neither `hashCode` nor `compareTo` (D113).
         if ((prop == p_hash || prop == p_order) && leaf->heap) why = std::string(", and a `PriorityQueue` has no ") + names[prop];
         if (prop == p_java_hash) {
@@ -5793,6 +5819,9 @@ private:
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: return lacking_part(t->elem, prop, seen);
             case TypeKind::deque:
                 if (prop == p_order) return t;
+                return lacking_part(t->elem, prop, seen);
+            case TypeKind::slot_map:
+                if (prop != p_equal && prop != p_display) return t;
                 return lacking_part(t->elem, prop, seen);
             case TypeKind::map:
                 if (prop == p_hash || prop == p_order) return t;
@@ -6787,6 +6816,11 @@ private:
     }
 
     Type* index_type(Expr* e, Type* base) {
+        if (base->kind == TypeKind::slot_map) {
+            // `m[h]`: the value a handle reaches, which panics when it's been removed (CLX-69).
+            check(e->rhs, T.handle_of(base->elem));
+            return base->elem;
+        }
         if (base->kind == TypeKind::map) {
             // `m[key]`: the value of a key that's there. A `String` key can be a `str`.
             Type* look = lookup_key(base);
@@ -7164,6 +7198,13 @@ private:
             for (Expr* x : e->elems) check(x, expected->elem);
             if (e->repeat) check(e->repeat, T.usize);
             error(e->span, "a `PriorityQueue` isn't written as a list; make it with `PriorityQueue<T>()` and `push` each element");
+            return T.error;
+        }
+        if (expected && expected->kind == TypeKind::slot_map) {
+            for (Expr* x : e->elems) check(x, expected->elem);
+            if (e->repeat) check(e->repeat, T.usize);
+            error(e->span, "a `SlotMap` isn't written as a list, since each value's handle comes from its `insert`; make it with "
+                           "`SlotMap<T>()` and `insert` each value");
             return T.error;
         }
         if (expected && (expected->kind == TypeKind::list || expected->kind == TypeKind::deque)) return list_literal(e, expected);
@@ -8431,6 +8472,12 @@ private:
             if (text(n) == "some" && !find_local(n)) return some_call(e, expected);
             if (n == n_List_ && !find_local(n)) return list_call(e, expected);
             if (n == n_Deque_ && !find_local(n)) return deque_call(e, expected);
+            if (n == n_SlotMap_ && !find_local(n)) return slot_map_call(e, expected);
+            if (n == n_Handle_ && !find_local(n)) {
+                check_args(e);
+                error(callee->span, "a `Handle` comes from its slot map's `insert`: `let h = m.insert(v)`");
+                return T.error;
+            }
             if (n == n_PriorityQueue_ && !find_local(n)) return heap_call(e, expected);
             if (n == n_Box_ && !find_local(n)) return box_call(e, expected, false);
             if (n == n_Shared_ && !find_local(n)) return box_call(e, expected, true);
@@ -8628,7 +8675,8 @@ private:
             }
             if (recv->kind == TypeKind::string || recv->kind == TypeKind::str || recv->kind == TypeKind::list ||
                 recv->kind == TypeKind::deque || recv->kind == TypeKind::map || recv->kind == TypeKind::set ||
-                recv->kind == TypeKind::optional || recv->kind == TypeKind::array) {
+                recv->kind == TypeKind::optional || recv->kind == TypeKind::array || recv->kind == TypeKind::slot_map ||
+                recv->kind == TypeKind::handle) {
                 return builtin_method(e, recv);
             }
             if (recv->kind == TypeKind::pointer) return pointer_method(e, recv);
@@ -9818,6 +9866,47 @@ private:
         return t;
     }
 
+    // Whether a slot map can hold `elem`, and if not, why not at `at`.
+    bool slot_elem(Type* elem, Span at) {
+        if (elem->kind == TypeKind::unit || elem->kind == TypeKind::never) {
+            error(at, "a slot map can't hold " + name_of(elem));
+            return false;
+        }
+        return true;
+    }
+
+    // `SlotMap<Entity>()`: an empty slot map, from the generic argument or the type expected
+    // (CLX-69). It allocates nothing until a value goes in.
+    Type* slot_map_call(Expr* e, Type* expected) {
+        Expr* callee = e->callee;
+        callee->ref = Ref::type;
+        Type* t = nullptr;
+        if (callee->type_args.size() == 1) {
+            Type* elem = resolve_type(callee->type_args[0]);
+            if (is_bad(elem) || !slot_elem(elem, callee->type_args[0]->span)) return T.error;
+            t = T.slot_map_of(elem);
+        } else if (!callee->type_args.empty()) {
+            error(callee->span, "`SlotMap` takes one generic argument, the type of its values: `SlotMap<Entity>()`");
+            return T.error;
+        } else if (expected && expected->kind == TypeKind::slot_map) {
+            t = expected;
+        } else {
+            check_args(e);
+            if (expected && is_bad(expected)) return T.error;
+            error(e->span, "can't tell what this slot map holds; give it, as in `SlotMap<Entity>()`, or give the variable a type");
+            return T.error;
+        }
+        check_args(e);
+        if (!e->args.empty()) {
+            error(e->args[0].span, "`SlotMap<T>()` takes no arguments; put the values in with `insert`");
+            return T.error;
+        }
+        callee->named_type = t;
+        e->call = CallKind::construct;
+        e->is_const = true;
+        return t;
+    }
+
     // `Arena()` and `Arena(n)`: an arena whose first chunk holds at least `n` bytes (D114).
     Type* arena_call(Expr* e) {
         Expr* callee = e->callee;
@@ -9955,7 +10044,7 @@ private:
                 // A copy of a `Shared` is one more owner of the same value.
                 if (t->shared) return nullptr;
                 return handle_inside(t->elem, depth + 1, seen);
-            case TypeKind::optional: case TypeKind::array: case TypeKind::deque: case TypeKind::set:
+            case TypeKind::optional: case TypeKind::array: case TypeKind::deque: case TypeKind::set: case TypeKind::slot_map:
                 return handle_inside(t->elem, depth + 1, seen);
             case TypeKind::map:
                 if (const Type* h = handle_inside(t->key, depth + 1, seen)) return h;
@@ -10419,6 +10508,14 @@ private:
         if (m == "enumerate") return "; `enumerate` is only what a `for` loop goes over, as in `for (i, x) in xs.enumerate()`";
         if (m == "zip") return "; `zip` is only what a `for` loop goes over, as in `for (a, b) in xs.zip(ys)`";
         if (m == "rev") return "; `rev` is only what a `for` loop goes over, as in `for x in xs.rev()`";
+        return "";
+    }
+
+    static std::string slot_hint(std::string_view m) {
+        if (m == "push" || m == "add" || m == "put") return "; a slot map's is `insert`, which gives the handle of the value";
+        if (m == "keys") return "; a slot map's keys are its handles, from `handles()`";
+        if (m == "values") return "; go over the values with " + q("for v in m");
+        if (m == "size" || m == "length") return "; a slot map's is `len`";
         return "";
     }
 
@@ -10923,6 +11020,32 @@ private:
                 check_args(e);
                 return T.error;
             }
+        } else if (recv->kind == TypeKind::slot_map) {
+            // Values reached by the handles their inserts gave back (CLX-69). A handle is a key, as
+            // a map's is, so the names are a map's.
+            Type* el = recv->elem;
+            Type* h = T.handle_of(el);
+            if (m == "len") b = BMethod::len, result = T.usize;
+            else if (m == "is_empty") b = BMethod::is_empty, result = T.bool_;
+            else if (m == "capacity") b = BMethod::capacity, result = T.usize;
+            else if (m == "insert") b = BMethod::insert, changes = true, params = {el}, result = h;
+            else if (m == "remove") b = BMethod::remove, changes = true, params = {h}, result = T.optional_of(el);
+            else if (m == "contains") b = BMethod::contains, params = {h}, result = T.bool_;
+            else if (m == "get") b = BMethod::get, params = {h}, result = T.optional_of(el);
+            else if (m == "find") return find_method(e, recv, h);
+            else if (m == "clear") b = BMethod::clear, changes = true;
+            else if (m == "reserve") b = BMethod::reserve, changes = true, params = {T.usize};
+            else if (m == "handles") b = BMethod::handles, result = T.list_of(h);
+            if (b == BMethod::get && !is_copy(el) && !is_bad(el)) {
+                error(e->callee->span, "`get` copies the value out, so it needs values that are `Copy`, and " + name_of(el) +
+                                           " owns memory; look at it where it is with " + q("if let v = m.find(h)") +
+                                           ", or with `m[h]` when the handle's value is there");
+                check_args(e);
+                return T.error;
+            }
+        } else if (recv->kind == TypeKind::handle) {
+            if (m == "index") b = BMethod::handle_index, result = T.u32;
+            else if (m == "generation") b = BMethod::handle_generation, result = T.u32;
         } else if (recv->kind == TypeKind::array) {
             // An array's length is fixed, so it has the methods of a list that keep the length (CLX-142).
             Type* el = recv->elem;
@@ -10990,7 +11113,10 @@ private:
         }
         if (b == BMethod::none) {
             error(e->callee->span, name_of(recv) + " has no method " + q(m) +
-                                       (recv->kind == TypeKind::deque ? deque_hint(m) : recv->heap ? heap_hint(m) : loop_hint(m)));
+                                       (recv->kind == TypeKind::deque      ? deque_hint(m)
+                                        : recv->kind == TypeKind::slot_map ? slot_hint(m)
+                                        : recv->heap                       ? heap_hint(m)
+                                                                           : loop_hint(m)));
             check_args(e);
             return T.error;
         }
@@ -11511,7 +11637,7 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: case TypeKind::dyn: break;
+                case TypeKind::fn_: case TypeKind::dyn: case TypeKind::slot_map: break;
                 default: return;
             }
             int& st = state[t];
@@ -11541,12 +11667,15 @@ private:
                 if (!t->open) prog_.type_order.push_back(t);
                 return;
             }
-            if (t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::map || t->kind == TypeKind::set) {
+            if (t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::map || t->kind == TypeKind::set ||
+                t->kind == TypeKind::slot_map) {
                 // Its elements are behind a pointer, so it needs only their declaration. A map's
-                // `(K, V)`, which its functions read, is ordered once everything else is.
+                // `(K, V)`, which its functions read, is ordered once everything else is, and so is
+                // a slot map's value, which its slots hold.
                 st = 2;
                 if (!t->open) prog_.type_order.push_back(t);
                 if (t->kind == TypeKind::map) later.push_back(t->entry);
+                if (t->kind == TypeKind::slot_map) later.push_back(t->elem);
                 return;
             }
             if (st == 1) {
@@ -11901,7 +12030,7 @@ private:
     std::map<std::pair<Item*, std::vector<Type*>>, Item*> iface_instances_;
     Name n_JavaHashMap_, n_JavaHashSet_, n_OpenHashMap_, n_OpenHashSet_, n_LinkedMap_, n_LinkedSet_, n_JavaHash_, n_java_hash_, n_Send_;
     Name n_Box_, n_Shared_, n_value_;
-    Name n_Deque_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
+    Name n_Deque_, n_SlotMap_, n_Handle_, n_PriorityQueue_, n_SortedMap_, n_SortedSet_, n_Arena_, n_ArenaList_;
     Name n_Sender_, n_Receiver_, n_Thread_, n_Task_, n_run_, n_Library_;
     Name n_self_, n_underscore_, n_Self_, n_List_, n_Map_, n_Set_, n_Copy_, n_Equal_, n_Display_, n_Hash_, n_Order_,
         n_Ordering_, n_copy_, n_cmp_, n_ok_, n_err_;

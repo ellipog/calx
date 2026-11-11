@@ -117,8 +117,10 @@ Built: `Copy` ([Types](reference/types.md)), `Equal`, `Order` and `Display` ([Co
 
 `Handle<T>` is a generational reference into a slot map: a 32-bit index and a 32-bit generation. Using one gives `T?`-like access:
 
-- `map.get(h)` returns `none` if the object died or moved away.
+- `if let v = map.find(h)` finds nothing if the object died or moved away, and `map.get(h)` copies a `Copy` value out or gives `none`.
 - `map[h]` panics in that case. Calcite core uses this where a stale handle would be a bug.
+
+Built: [Slot maps](reference/slot-maps.md) (CLX-69).
 
 Handles are `Copy` and `Send`, which makes them the way to refer to an entity, player or chunk from anything that outlives one handler. Calcite's `PlayerRef` and `EntityRef` wrap handles with a UUID, so they still mean the same object after a region handoff.
 
@@ -253,7 +255,7 @@ Keys hash with `JavaHash`: Java's `hashCode` for each type. It's built into the 
 | `Map<K, V>`, `Set<T>` | A fast open-addressing hash map, for when order can't be seen. Built: [Maps and sets](reference/maps.md) |
 | `LinkedMap<K, V>`, `LinkedSet<T>` | A map or a set that iterates in the order keys went in, which is Java's and fastutil's too. Built: [Linked maps and sets](reference/linked-maps.md) |
 | `SortedMap<K, V>`, `SortedSet<T>` | A B+ tree map or set in key order, with ranges, which is Java's and fastutil's order too. Built: [Sorted maps and sets](reference/sorted-maps.md) |
-| `SlotMap<T>` | Storage behind `Handle<T>` |
+| `SlotMap<T>` | Storage behind `Handle<T>`. Built: [Slot maps](reference/slot-maps.md) |
 | `Deque<T>` | A growable ring, added to and taken from at both ends. Built: [Deques](reference/deques.md) |
 | `PriorityQueue<T>` | A binary heap, least first, in Java's order. Built: [Priority queues](reference/priority-queues.md) |
 | `Box<T>` | One value on the heap, for recursive types. Built: [Boxes](reference/boxes.md) |

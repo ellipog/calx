@@ -1,0 +1,10 @@
+// `m[h]` with a handle whose value was removed panics, as indexing past a list's end does, rather
+// than reading the value put in its slot since (CLX-69).
+fn main() {
+    var m = SlotMap<i32>()
+    let a = m.insert(1)
+    _ = m.remove(a)
+    let b = m.insert(2)
+    println("{m[b]} {b}")    // out: 2 Handle(0, 3)
+    println("{m[a]}")    // panic: the slot map has no value for Handle(0, 1): it was removed, or the handle is another map's
+}

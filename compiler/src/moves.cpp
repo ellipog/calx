@@ -1087,9 +1087,10 @@ private:
             }
             const char* how = k == TypeKind::list  ? "; take it out with `remove` or `swap_remove`, or move a copy with `.copy()`"
                             : k == TypeKind::deque ? "; take it out with `pop_first` or `pop_last`, or move a copy with `.copy()`"
-                            : k == TypeKind::map  ? "; take it out with `remove`, or move a copy with `.copy()`"
+                            : k == TypeKind::map || k == TypeKind::slot_map ? "; take it out with `remove`, or move a copy with `.copy()`"
                                                   : "; move a copy with `.copy()`";
-            error(e->span, std::string("can't move ") + (k == TypeKind::map ? "a value" : "an element") + " out of " +
+            bool keyed = k == TypeKind::map || k == TypeKind::slot_map;
+            error(e->span, std::string("can't move ") + (keyed ? "a value" : "an element") + " out of " +
                                q(place_text(base)) + how + copy_hint(e->type));
         } else if (!w.fields_only || !l->owns) {
             error(e->span, "can't move " + q(place_text(e)) + " out of " + q(r) +

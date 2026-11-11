@@ -1,0 +1,11 @@
+// A slot map keeps its values, so one moves out only through `remove` (CLX-69).
+fn main() {
+    var m = SlotMap<String>()
+    let h = m.insert(String("a"))
+    let s = m[h]    // error: can't move a value out of `m`; take it out with `remove`, or move a copy with `.copy()`
+    let t = m[h].copy()
+    let u = m.remove(h)
+    _ = s
+    _ = t
+    _ = u
+}

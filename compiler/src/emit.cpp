@@ -480,7 +480,7 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: case TypeKind::dyn: uses_->add_type(t); break;
+                case TypeKind::fn_: case TypeKind::dyn: case TypeKind::slot_map: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -501,6 +501,7 @@ private:
             case TypeKind::receiver: return "cx_Receiver";
             case TypeKind::thread: return "cx_Thread";
             case TypeKind::library: return "cx_Library";
+            case TypeKind::handle: return "cx_handle";
             case TypeKind::pointer: return ctype(t->elem) + (t->is_const ? " const*" : "*");
             // The addresses of what it captures, which its function reads (CLX-98).
             case TypeKind::closure: return "const void* const*";
@@ -514,6 +515,7 @@ private:
             case TypeKind::map:
             case TypeKind::set:
             case TypeKind::fn_:
+            case TypeKind::slot_map:
             case TypeKind::dyn: return compound_name(t);
         }
         return "void";
@@ -530,6 +532,7 @@ private:
             case TypeKind::optional: s = "cx_opt_" + part(t->elem); break;
             case TypeKind::list: s = (t->heap ? "cx_heap_" : t->shared ? "cx_shared_" : t->boxed ? "cx_box_" : t->arena_list ? "cx_alist_" : "cx_list_") + part(t->elem); break;
             case TypeKind::deque: s = "cx_deque_" + part(t->elem); break;
+            case TypeKind::slot_map: s = "cx_slots_" + part(t->elem); break;
             case TypeKind::map: s = table_prefix(t) + "map_" + part(t->key) + "_" + part(t->elem); break;
             case TypeKind::set: s = table_prefix(t) + "set_" + part(t->elem); break;
             case TypeKind::fn_:
@@ -569,7 +572,9 @@ private:
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
             case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::fn_: case TypeKind::dyn:
+            case TypeKind::slot_map:
                 return compound_name(t).substr(3);
+            case TypeKind::handle: return "handle";
             case TypeKind::string: return "String";
             case TypeKind::arena: return "Arena";
             case TypeKind::sender: return "Sender";
@@ -646,7 +651,7 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: case TypeKind::dyn: break;
+                case TypeKind::fn_: case TypeKind::dyn: case TypeKind::slot_map: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -655,7 +660,8 @@ private:
                 case TypeKind::enum_:
                     for (const VariantDecl& v : t->item->variants) for (const Type* x : v.types) close(x);
                     break;
-                case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set: close(t->elem); break;
+                case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
+                case TypeKind::slot_map: close(t->elem); break;
                 case TypeKind::map:
                     close(t->key);
                     close(t->elem);
@@ -711,6 +717,11 @@ private:
                     // A list's buffer as a ring, from `head` round to just before it, so a list's
                     // literal is a deque's too (D110).
                     out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; cx_usize head; };\n";
+                    break;
+                case TypeKind::slot_map:
+                    // Its slots, which `calx_slots.h` defines once every type is, the head of the
+                    // free ones' list, and how many hold values (CLX-69).
+                    out_ += "struct " + ctype(t) + " { struct " + ctype(t) + "_slot* ptr; cx_usize len; cx_usize cap; cx_u32 free; cx_u32 count; };\n";
                     break;
                 case TypeKind::dyn:
                     // The value's address, on the heap or where it is, and its type's table.
@@ -821,9 +832,10 @@ private:
     static std::string no_debug(const std::string& text) { return kNoDebugPush + text + kNoDebugPop; }
 
     void emit_glue(const std::vector<const Type*>& order) {
-        std::vector<const Type*> owning, eqs, shows, hashes, cmps, tables, heaps;
+        std::vector<const Type*> owning, eqs, shows, hashes, cmps, tables, heaps, slot_maps;
         for (const Type* t : order) {
             if (t->heap) heaps.push_back(t);
+            if (t->kind == TypeKind::slot_map) slot_maps.push_back(t);
             if (!is_copy(t)) owning.push_back(t);
             if (equated_.count(t)) eqs.push_back(t);
             if (shown_.count(t)) shows.push_back(t);
@@ -832,7 +844,7 @@ private:
             if (is_table(t)) tables.push_back(t);
         }
         if (owning.empty() && eqs.empty() && shows.empty() && cmps.empty() && tables.empty() && heaps.empty() && sorted_.empty() &&
-            sort_bys_.empty()) {
+            sort_bys_.empty() && slot_maps.empty()) {
             return;
         }
         for (const Type* t : owning) {
@@ -846,6 +858,7 @@ private:
         for (const Type* t : cmps) out_ += "static inline int " + cmp_fn(t) + "(" + ctype(t) + " a, " + ctype(t) + " b);\n";
         for (const Type* t : tables) out_ += table_decls(t);
         for (const Type* t : heaps) out_ += heap_decls(t);
+        for (const Type* t : slot_maps) out_ += slots_decls(t);
         for (const Type* t : owning) {
             out_ += "static inline void " + drop_fn(t) + "(" + ctype(t) + "* p) {\n" + drop_body(t) + "}\n";
             out_ += "static inline " + ctype(t) + " " + copy_fn(t) + "(const " + ctype(t) + "* p) {\n" + copy_body(t) + "}\n";
@@ -929,6 +942,10 @@ private:
         if (t->kind == TypeKind::str) return "cx_str_cmp(" + a + ", " + b + ")";
         if (t->kind == TypeKind::string) return "cx_str_cmp(cx_sv(" + a + "), cx_sv(" + b + "))";
         if (has_cmp_glue(t)) return cmp_fn(t) + "(" + a + ", " + b + ")";
+        if (t->kind == TypeKind::handle) {
+            std::string x = "cx_handle_key(" + a + ")", y = "cx_handle_key(" + b + ")";
+            return "((" + x + " > " + y + ") - (" + x + " < " + y + "))";
+        }
         return "((" + a + " > " + b + ") - (" + a + " < " + b + "))";
     }
 
@@ -971,6 +988,7 @@ private:
             }
         }
         if (t->kind == TypeKind::str || t->kind == TypeKind::string || has_cmp_glue(t)) return "(" + compare(t, a, b) + " < 0)";
+        if (t->kind == TypeKind::handle) return "(cx_handle_key(" + a + ") < cx_handle_key(" + b + "))";
         return "(" + a + " < " + b + ")";
     }
 
@@ -1272,6 +1290,7 @@ private:
     std::string hash_word(const Type* t, const std::string& v) {
         if (t->kind == TypeKind::str || t->kind == TypeKind::string || hash_glue(t)) return hash_value(t, v);
         if (is_int(t) && t->is_signed) return "(cx_u64)(cx_i64)(" + v + ")";
+        if (t->kind == TypeKind::handle) return "cx_handle_key(" + v + ")";
         return "(cx_u64)(" + v + ")";
     }
 
@@ -1390,6 +1409,51 @@ private:
                 return head + ctype(mt) + " " + v + " = " + value(e->args[0].value, mt) + "; " + l + "_remove_marked(" + p + ", " + v + ".ptr, " + v +
                        ".len, " + location(e->span) + "); })";
             }
+            default: return "0";
+        }
+    }
+
+    // --- slot maps (CLX-69) ------------------------------------------------------------------------
+
+    // A slot map's functions, from the template `calx_slots.h`. They come before the glue's
+    // bodies, which free and copy a slot map with them.
+    std::string slots_decls(const Type* t) {
+        const Type* el = t->elem;
+        std::string c = ctype(t);
+        std::string s = "#define CX_SL_T " + c + "\n#define CX_SL_NAME " + c + "\n#define CX_SL_E " + ctype(el) + "\n";
+        if (!is_copy(el)) s += "#define CX_SL_DROP(cx_p) " + drop_fn(el) + "(cx_p)\n#define CX_SL_COPY(cx_p) " + copy_fn(el) + "(cx_p)\n";
+        return s + no_debug("#include \"calx_slots.h\"\n");
+    }
+
+    // `m.insert(v)` and the rest of a slot map's methods.
+    std::string slots_method(Expr* e) {
+        Expr* recv = e->callee->lhs;
+        Type* t = recv->type;
+        Type* et = t->elem;
+        std::string m = ctype(t), el = ctype(et), p = tmp(), v = tmp(), r = tmp(), f = tmp();
+        auto arg = [&](std::size_t k) { return value(e->args[k].value, e->args[k].value->type); };
+        std::string head = "({ " + m + "* " + p + " = " + address(recv) + "; ";
+        std::string view = "({ const " + m + "* " + p + " = " + address(recv) + "; ";
+        std::string o = e->type ? ctype(e->type) : "";
+        switch (e->bmethod) {
+            case BMethod::len: return "((cx_usize)(" + expr(recv) + ").count)";
+            case BMethod::is_empty: return "((" + expr(recv) + ").count == 0)";
+            case BMethod::capacity: return "(" + expr(recv) + ").cap";
+            case BMethod::insert: return head + el + " " + v + " = " + value(e->args[0].value, et) + "; " + m + "_insert(" + p + ", " + v + "); })";
+            case BMethod::remove:
+                return head + "cx_handle " + v + " = " + arg(0) + "; " + o + " " + r + " = {0}; " + r + ".has = " + m + "_take(" + p + ", " +
+                       v + ", &" + r + ".v); " + r + "; })";
+            case BMethod::contains: return view + "cx_handle " + v + " = " + arg(0) + "; " + m + "_find(" + p + ", " + v + ") != 0; })";
+            case BMethod::get:
+                return view + "cx_handle " + v + " = " + arg(0) + "; const " + el + "* " + f + " = " + m + "_find(" + p + ", " + v + "); " + o +
+                       " " + r + " = {0}; if (" + f + ") { " + r + ".v = *" + f + "; " + r + ".has = 1; } " + r + "; })";
+            case BMethod::clear: return head + m + "_clear(" + p + "); })";
+            case BMethod::reserve: return head + "cx_usize " + v + " = " + arg(0) + "; " + m + "_reserve(" + p + ", " + v + "); })";
+            case BMethod::handles:
+                // A list just big enough.
+                return view + o + " " + r + " = {0}; if (" + p + "->count) { " + r + ".ptr = (cx_handle*)cx_alloc(" + p +
+                       "->count * sizeof(cx_handle)); " + r + ".len = " + r + ".cap = " + p + "->count; " + m + "_handles(" + p + ", " + r +
+                       ".ptr); } " + r + "; })";
             default: return "0";
         }
     }
@@ -2467,6 +2531,12 @@ $dropall    m->len = 0;
             case TypeKind::list:
                 return "    if (a.len != b.len) return 0;\n    for (cx_usize i = 0; i < a.len; i++) {\n        if (!" +
                        equal(t->elem, "a.ptr[i]", "b.ptr[i]") + ") return 0;\n    }\n    return 1;\n";
+            case TypeKind::slot_map:
+                // The same handles reach equal values: as many values, and each of `a`'s at the
+                // same slot and generation in `b`.
+                return "    if (a.count != b.count) return 0;\n    for (cx_usize i = 0; i < a.len; i++) {\n        if (!(a.ptr[i].gen & 1)) "
+                       "continue;\n        if (i >= b.len || b.ptr[i].gen != a.ptr[i].gen || !" +
+                       equal(t->elem, "a.ptr[i].v", "b.ptr[i].v") + ") return 0;\n    }\n    return 1;\n";
             case TypeKind::deque:
                 // In order from each one's first element, wherever that is in its ring.
                 return "    if (a.len != b.len) return 0;\n    for (cx_usize i = 0, j = a.head, k = b.head; i < a.len; i++, j = j + 1 == a.cap ? 0 : j + 1, "
@@ -2594,6 +2664,12 @@ $dropall    m->len = 0;
                 return print("[") + "    for (cx_usize i = 0; i < " + n + "; i++) {\n        if (i) cx_print_str(" +
                        str_const(", ") + ");\n        " + show_value(t->elem, at) + "\n    }\n" + print("]");
             }
+            case TypeKind::slot_map:
+                // `{Handle(0, 1): a, Handle(2, 3): b}`, a map of handles to values, in slot order.
+                return print("{") + "    cx_bool first = 1;\n    for (cx_usize i = 0; i < v.len; i++) {\n        if (!(v.ptr[i].gen & 1)) continue;\n"
+                       "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        cx_print_handle((cx_handle){(cx_u32)i, "
+                       "v.ptr[i].gen});\n        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, "v.ptr[i].v") +
+                       "\n    }\n" + print("}");
             case TypeKind::deque:
                 // `[1, 2]`, from the first element, as Java's `ArrayDeque` prints.
                 return print("[") + "    for (cx_usize i = 0, j = v.head; i < v.len; i++, j = j + 1 == v.cap ? 0 : j + 1) {\n        if (i) cx_print_str(" +
@@ -2663,7 +2739,7 @@ $dropall    m->len = 0;
     static bool has_glue(const Type* t) {
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return true;
+            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::slot_map: return true;
             case TypeKind::enum_: return t->has_data;
             default: return false;
         }
@@ -2678,7 +2754,8 @@ $dropall    m->len = 0;
                 for (const VariantDecl& v : t->item->variants) out.insert(out.end(), v.types.begin(), v.types.end());
                 break;
             case TypeKind::tuple: out.assign(t->elems.begin(), t->elems.end()); break;
-            case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::optional: case TypeKind::set: out.push_back(t->elem); break;
+            case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::optional: case TypeKind::set:
+            case TypeKind::slot_map: out.push_back(t->elem); break;
             case TypeKind::map:
                 out.push_back(t->key);
                 out.push_back(t->elem);
@@ -2722,6 +2799,7 @@ $dropall    m->len = 0;
                 }
                 s += "    cx_free(p->ptr, p->cap * sizeof(*p->ptr));\n";
                 break;
+            case TypeKind::slot_map: s += "    " + ctype(t) + "_drop(p);\n"; break;
             case TypeKind::map:
             case TypeKind::set:
                 if (t->table == TableKind::sorted) {
@@ -2843,6 +2921,7 @@ $dropall    m->len = 0;
                 else s += "    for (cx_usize i = 0; i < p->len; i++) r.ptr[i] = " + copy_fn(t->elem) + "(&p->ptr[i]);\n";
                 break;
             }
+            case TypeKind::slot_map: return "    return " + c + "_copy(p);\n";
             case TypeKind::deque: {
                 // In order from the first element, so the copy's ring starts at 0 (D110).
                 std::string e = ctype(t->elem);
@@ -2909,7 +2988,9 @@ $dropall    m->len = 0;
                 if (t->has_data) return show_fn(t) + "(" + v + ");";
                 return "cx_print_str(" + enum_name_fn(t) + "(" + v + "));";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: return show_fn(t) + "(" + v + ");";
+            case TypeKind::optional: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::slot_map:
+                return show_fn(t) + "(" + v + ");";
+            case TypeKind::handle: return "cx_print_handle(" + v + ");";
             default: return "";
         }
     }
@@ -3961,6 +4042,12 @@ $dropall    m->len = 0;
                 indent_++;
                 line("cx_usize " + i + " = " + g + " + (cx_usize)__builtin_ctz(" + bits + ");");
                 bins = true;
+            } else if (at->kind == TypeKind::slot_map) {
+                // Slot by slot, past the free ones, whose generations are even (CLX-69).
+                elem_at = arr + "->ptr[" + i + "].v";
+                line("for (cx_usize " + i + " = 0; " + i + " < " + arr + "->len; " + i + "++) {");
+                indent_++;
+                line("if (!(" + arr + "->ptr[" + i + "].gen & 1)) continue;");
             } else if (at->kind == TypeKind::deque) {
                 // From the first element to the end of the buffer, then on from its start: at most
                 // two runs, each a plain loop (D110).
@@ -4014,7 +4101,8 @@ $dropall    m->len = 0;
             // tree walk a third of its time (CLX-197).
             bool in_place = !var.empty() && !s->iter_mut && !s->zip_with && !s->enumerate && !is_copy(elem) &&
                             is_view_type(elem) &&
-                            (at->kind == TypeKind::list || at->kind == TypeKind::array || at->kind == TypeKind::deque);
+                            (at->kind == TypeKind::list || at->kind == TypeKind::array || at->kind == TypeKind::deque ||
+                             at->kind == TypeKind::slot_map);
             if (!var.empty() && s->iter_mut) {
                 line(ctype(elem) + "* " + var + " = &" + elem_at + ";");
             } else if (in_place) {
@@ -4632,7 +4720,7 @@ $dropall    m->len = 0;
             if (e->kind == ExprKind::unwrap) return true;
             if (e->kind == ExprKind::index && !e->box_value &&
                 (!e->rhs->has_bits || e->lhs->type->kind == TypeKind::list || e->lhs->type->kind == TypeKind::deque ||
-                 e->lhs->type->kind == TypeKind::map)) {
+                 e->lhs->type->kind == TypeKind::map || e->lhs->type->kind == TypeKind::slot_map)) {
                 return true;
             }
             e = e->lhs;
@@ -4768,7 +4856,7 @@ $dropall    m->len = 0;
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
             case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map:
             case TypeKind::set: case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-            case TypeKind::library: case TypeKind::dyn:
+            case TypeKind::library: case TypeKind::dyn: case TypeKind::slot_map: case TypeKind::handle:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -5090,6 +5178,11 @@ $dropall    m->len = 0;
     // `const`, since `= mut m.find(k)` changes the value through it.
     std::string find_pointer(Expr* e) {
         Type* at = e->lhs->type;
+        if (at->kind == TypeKind::slot_map) {
+            std::string b = tmp();
+            return "({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + ctype(at) + "_find(" + b + ", " +
+                   value(e->rhs, e->rhs->type) + "); })";
+        }
         std::string vp = ctype(at->elem) + "*";
         std::string b = tmp(), k = tmp(), i = tmp();
         std::string head = "({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + lookup_ctype(at) + " " + k +
@@ -5149,6 +5242,12 @@ $dropall    m->len = 0;
                    lookup_value(e->rhs, at) + "; cx_usize " + i + " = " + table_fn("find", at) + "(" + b + ", " + k + ", " +
                    lookup_hash(at, k) + "); if (__builtin_expect(" + i + " == CX_NOT_FOUND, 0)) cx_panic_key(" +
                    location(e->rhs->span) + "); &" + own_slot(at, b + "->", i) + ".f1; }))";
+        }
+        if (at->kind == TypeKind::slot_map) {
+            // The map is found first, then the handle. A handle whose value was removed panics.
+            std::string b = tmp();
+            return "(*({ const " + ctype(at) + "* " + b + " = " + address(e->lhs) + "; " + ctype(at) + "_at(" + b + ", " +
+                   value(e->rhs, e->rhs->type) + ", " + location(e->rhs->span) + "); }))";
         }
         if (at->kind == TypeKind::deque) {
             // The deque is found first, then the index, which counts from its first element round
@@ -5226,6 +5325,10 @@ $dropall    m->len = 0;
             return wrap(decls, "(cx_str_cmp(" + v[0] + ", " + v[1] + ")" + (op == Op::lt ? " < 0)" : op == Op::le ? " <= 0)" : op == Op::gt ? " > 0)" : " >= 0)"));
         }
         std::vector<std::string> v = sequence({{e->lhs, lt}, {e->rhs, rt}}, decls);
+        if (lt->kind == TypeKind::handle) {
+            // Its two numbers as one: the index, then the generation (CLX-69).
+            return wrap(decls, operate(op, lt, rt, "cx_handle_key(" + v[0] + ")", "cx_handle_key(" + v[1] + ")", e->rhs, e->span));
+        }
         if ((op == Op::eq || op == Op::ne) && eq_glue(lt)) {
             return wrap(decls, (op == Op::ne ? "(!" : "(") + equal(lt, v[0], v[1]) + ")");
         }
@@ -5247,8 +5350,9 @@ $dropall    m->len = 0;
                 if (t->has_data) return eq_fn(t) + "(" + a + ", " + b + ")";
                 return "(" + a + " == " + b + ")";
             case TypeKind::struct_: case TypeKind::tuple: case TypeKind::array: case TypeKind::list:
-            case TypeKind::deque: case TypeKind::map: case TypeKind::set:
+            case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::slot_map:
                 return eq_fn(t) + "(" + a + ", " + b + ")";
+            case TypeKind::handle: return "(cx_handle_key(" + a + ") == cx_handle_key(" + b + "))";
             default: return "(" + a + " == " + b + ")";
         }
     }
@@ -5595,7 +5699,9 @@ $dropall    m->len = 0;
     }
 
     std::string construct(Type* t) {
-        if (t->kind == TypeKind::string || t->kind == TypeKind::list || t->kind == TypeKind::deque) return "((" + ctype(t) + "){0})";
+        if (t->kind == TypeKind::string || t->kind == TypeKind::list || t->kind == TypeKind::deque || t->kind == TypeKind::slot_map) {
+            return "((" + ctype(t) + "){0})";
+        }
         // An empty table points at the shared control bytes, so a lookup needs no check for it.
         if (is_table(t) && !own_table(t)) return "((" + ctype(t) + "){0})";
         if (is_table(t)) return "((" + ctype(t) + "){ .ctrl = (cx_u8*)cx_table_empty })";
@@ -6519,6 +6625,8 @@ $dropall    m->len = 0;
                 return;
             case TypeKind::list: inner(t->heap ? "heap" : t->shared ? "shared" : t->boxed ? "box" : t->arena_list ? "arena_list" : "list", t->elem); return;
             case TypeKind::deque: inner("deque", t->elem); return;
+            case TypeKind::slot_map: inner("slot_map", t->elem); return;
+            case TypeKind::handle: inner("handle", t->elem); return;
             case TypeKind::set: inner(("set" + std::to_string(static_cast<int>(t->table))).c_str(), t->elem); return;
             case TypeKind::map:
                 s += "map" + std::to_string(static_cast<int>(t->table));
@@ -6831,6 +6939,8 @@ $dropall    m->len = 0;
         }
         if (is_table(t)) return table_method(e);
         if (t->kind == TypeKind::deque) return deque_method(e);
+        if (t->kind == TypeKind::slot_map) return slots_method(e);
+        if (t->kind == TypeKind::handle) return "(" + expr(recv) + (e->bmethod == BMethod::handle_index ? ").index" : ").gen");
         if (t->heap) {
             switch (e->bmethod) {
                 case BMethod::push: case BMethod::pop: case BMethod::peek: case BMethod::remove: case BMethod::remove_marked:

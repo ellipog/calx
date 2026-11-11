@@ -53,6 +53,13 @@ enum class TypeKind : std::uint8_t {
     // heap, and whose methods it calls through a table of that type's functions (CLX-72). In C
     // it's the value's address and the table's.
     dyn,
+    // `SlotMap<T>`: values it owns in slots, each reached by the `Handle<T>` its insert gave
+    // back, which goes stale once the value is removed, since its slot's generation moves on
+    // (CLX-69). In C it's a growable array of slots and the head of a list through the free ones.
+    slot_map,
+    // `Handle<T>`: a slot's index and generation in a `SlotMap<T>`. It's two numbers, so it's
+    // copied, compared, hashed and sent as one.
+    handle,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -151,6 +158,8 @@ public:
     Type* optional_of(Type* elem);
     Type* list_of(Type* elem);
     Type* deque_of(Type* elem);
+    Type* slot_map_of(Type* elem);
+    Type* handle_of(Type* elem);
     Type* heap_of(Type* elem);
     Type* box_of(Type* elem);
     Type* shared_of(Type* elem);
@@ -184,6 +193,8 @@ private:
     std::map<Type*, Type*> optional_map_;
     std::map<Type*, Type*> list_map_;
     std::map<Type*, Type*> deque_map_;
+    std::map<Type*, Type*> slot_map_map_;
+    std::map<Type*, Type*> handle_map_;
     std::map<Type*, Type*> heap_map_;
     std::map<Type*, Type*> box_map_;
     std::map<Type*, Type*> shared_map_;

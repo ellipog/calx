@@ -52,18 +52,19 @@ What's built, one page per feature:
 24. [Maps and sets](reference/maps.md): `Map<K, V>` and `Set<T>`, their methods, indexing, loops, deterministic order, `Hash`, and their C
 25. [Linked maps and sets](reference/linked-maps.md): `LinkedMap<K, V>` and `LinkedSet<T>`, in the order keys went in, their ends, Java's and fastutil's methods written in Calx, and their C
 26. [Sorted maps and sets](reference/sorted-maps.md): `SortedMap<K, V>` and `SortedSet<T>`, in key order, their ends, the nearest keys, ranges, Java's and fastutil's methods written in Calx, and their C
-27. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
-28. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
-29. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
-30. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, naming the interface, generic interfaces, and operators on a type of one's own
-31. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
-32. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
-33. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
-34. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
-35. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
-36. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
-37. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
-38. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
+27. [Slot maps](reference/slot-maps.md): `SlotMap<T>` and `Handle<T>`, values reached by handles that go stale when the value is removed, `m[h]` as a place, loops, generations, Rust's names for the methods, and their C
+28. [Ownership](reference/ownership.md): `Copy`, moves, views, partial moves, when values are freed, and their C
+29. [Arenas](reference/arenas.md): `Arena` and `ArenaList<T>`, lists freed all at once, the rules that keep them safe without lifetimes, parallel loops, and their C
+30. [Generics](reference/generics.md): generic functions and types, inference, bounds, `Copy`, `Equal`, `Display`, `Hash` and `JavaHash`, and their C
+31. [Interfaces](reference/interfaces.md): methods, constants and defaults, impls, naming the interface, generic interfaces, and operators on a type of one's own
+32. [Comparing and printing](reference/comparing.md): the derived `Equal` and `Display`, `==` and `{x}` on every type, and their bounds
+33. [Modules](reference/modules.md): files as modules, imports, `pub`, and one C file per module
+34. [Printing and panics](reference/printing.md): print, println, eprint, eprintln, formats such as `{x:.2}` and `{n:>8}`, assert and panic, and `@track_caller`
+35. [Unsafe code and C functions](reference/unsafe.md): `unsafe` blocks and functions, raw pointers, and calling C
+36. [Libraries](reference/libraries.md): `calx build --lib`, `@export`, opening a library while a program runs, types checked down to the fields, and the one runtime they share
+37. [Attributes](reference/attributes.md): attributes a library defines as Calx functions the compiler runs, their arguments, attributes on fields, the code they generate, the cache, and `calx expand`
+38. [Parallel loops](reference/parallel.md): `parallel for` over a range or a list's elements, the capture check, and the same result with any number of threads
+39. [Strictness](reference/strictness.md): the rules that make the checker stricter than Rust's
 
 ### Standard library
 

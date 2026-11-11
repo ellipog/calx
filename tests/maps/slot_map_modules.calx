@@ -1,0 +1,40 @@
+// A slot map and its handles across modules (CLX-69): each module's C file has the slot map's
+// functions of its own, and a handle made in one reaches the value in another.
+// file: main.calx
+import world.{World, Mob, spawn, names}
+
+fn main() {
+    var w = World { mobs: SlotMap(), boss: none }
+    let a = spawn(mut w, "zombie")
+    let b = spawn(mut w, "creeper")
+    w.mobs[a].hp -= 5
+    w.boss = some(b)
+    _ = w.mobs.remove(a)
+    let c = w.mobs.insert(Mob { name: String("skeleton"), hp: 20 })
+    println("{names(w)} {c} {w.mobs.contains(a)}")    // out: [skeleton, creeper] Handle(0, 3) false
+    if let boss = w.boss {
+        println("{w.mobs[boss].name} {w.mobs[boss].hp}")    // out: creeper 20
+    }
+}
+// file: world.calx
+pub struct Mob {
+    pub name: String,
+    pub hp: i32,
+}
+
+pub struct World {
+    pub mobs: SlotMap<Mob>,
+    pub boss: Handle<Mob>?,
+}
+
+pub fn spawn(w: mut World, name: str) -> Handle<Mob> {
+    return w.mobs.insert(Mob { name: String(name), hp: 20 })
+}
+
+pub fn names(w: World) -> List<String> {
+    var out = List<String>()
+    for m in w.mobs {
+        out.push(m.name.copy())
+    }
+    return out
+}
