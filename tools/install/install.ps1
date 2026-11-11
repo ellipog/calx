@@ -282,8 +282,15 @@ if ($env:CALX_NO_MODIFY_PATH -ne '1') {
 # The toolchain programs are built with is a download of its own, since it changes only with LLVM
 # (CLX-110, CLX-251). calx-update fetches it when the one here isn't the one the release names in
 # toolchain.txt, and unpacks the .tar.xz, which Windows' own tools may not read.
+# CALX_INSTALLER=1 has it leave out its closing line, as install.sh says the same steps (CLX-265); it's
+# taken away after, since `irm | iex` runs this in the caller's session.
 if (Test-Path (Join-Path $root 'toolchain.txt')) {
-    & (Join-Path $bin 'calx-update.exe') --home $root --current $version --toolchain
+    $env:CALX_INSTALLER = '1'
+    try {
+        & (Join-Path $bin 'calx-update.exe') --home $root --current $version --toolchain
+    } finally {
+        Remove-Item Env:CALX_INSTALLER -ErrorAction SilentlyContinue
+    }
     if ($LASTEXITCODE -ne 0) { Stop-Install 'the toolchain didn''t install; `calx update --toolchain` tries again' }
 }
 

@@ -20,7 +20,8 @@
 // VERSION (CLX-110, CLX-251). An update downloads it only when toolchain/VERSION isn't that
 // VERSION, which is when LLVM changes, and keeps the one it replaces for `--rollback`.
 // `--toolchain` installs the one the installed release names, if it isn't there: the install
-// scripts run that, and it mends an installation whose toolchain went missing.
+// scripts run that, and it mends an installation whose toolchain went missing. With CALX_INSTALLER=1,
+// as install.ps1 runs it, it leaves out its closing line, since the script says the rest.
 
 import std.env.{args, variable}
 import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
@@ -303,6 +304,9 @@ fn install_toolchain(o: Options, l: Look) ! String {
     let work = "{o.home}/.update"
     let dir = try fetch_toolchain(o.home, o.home, tag_of(o.current), work, l)
     if dir.is_empty() {
+        if installing() {
+            return
+        }
         if l.color {
             done(l, "The toolchain, {note.name}, is installed")
         } else {
@@ -316,11 +320,23 @@ fn install_toolchain(o: Options, l: Look) ! String {
     try place_toolchain(o.home, dir, aside)
     try clear(aside)
     try clear("{work}/toolchain")
+    // Under an install script, which says what it installed itself, the downloaded and unpacked
+    // lines are enough, as install.sh's own are (CLX-265).
+    if installing() {
+        return
+    }
     if l.color {
         done(l, bold(l, "Installed the toolchain, {note.name}"))
     } else {
         println("Installed the toolchain, {note.name}.")
     }
+}
+
+// Whether an install script runs this: install.ps1 sets CALX_INSTALLER=1 around `--toolchain`. An
+// environment variable rather than a flag, so a new script with an older calx-update, which turns
+// down flags it doesn't know, still installs.
+fn installing() -> bool {
+    return (variable("CALX_INSTALLER") ?? String()) == "1"
 }
 
 // The releases page of Calx's repository, or CALX_RELEASES, for a mirror or a test.
