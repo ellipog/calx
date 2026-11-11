@@ -27,7 +27,9 @@
  * Bigger blocks come from the system, rounded to four sizes for each doubling, and a freed one
  * waits in a cache for the next block of its size, up to 256 MiB in all. The Windows heap gives
  * big freed blocks back to the system, so a table that grew and was freed would fault on every
- * page of the next one; from the cache, its pages are still there.
+ * page of the next one; from the cache, its pages are still there. A big block that grows moves
+ * into a cached one big enough, leaving itself cached in its place, or grows where it is, so the
+ * blocks it grew through don't pile up in the cache (CLX-264).
  *
  * Debug builds use malloc instead, with a header that holds each block's size, so a free with
  * the wrong size or a second free stops the program: either is a compiler bug. So do builds
@@ -841,42 +843,226 @@ static __attribute__((noinline)) void* refill(heap* h, unsigned c) {
 
 /* --- big blocks ------------------------------------------------------------------------- */
 
+/* A big block's span is what the system holds for it, which can be more than the size its owner
+ * knows: a list that grew into a bigger block than it asked for, or took one from the cache that
+ * was bigger. So each one's span is kept here, by its address, from when the system gives it out
+ * to when it takes it back, under large_lock with the cache (CLX-264). */
 static int large_lock;
 static void* large_free[LARGE_CLASSES];
 static cx_usize cached;
 
-static void* large_alloc(cx_usize n) {
-    if (n > HUGE_BLOCK) return os_alloc(pages(n));
-    unsigned c = large_class(n);
-    if (__atomic_load_n(&large_free[c], __ATOMIC_RELAXED)) {
-        lock(&large_lock);
-        void* p = large_free[c];
-        if (p) {
-            __atomic_store_n(&large_free[c], *(void**)p, __ATOMIC_RELAXED);
-            cached -= large_size(c);
-        }
-        unlock(&large_lock);
-        if (p) return p;
+static void** span_key;
+static cx_usize* span_size;
+static cx_usize span_cap, span_used;
+#define SPAN_GONE ((void*)1)
+
+/* A free or a growth of a big block the table doesn't have: a bug in the compiler or here. */
+static CX_COLD __attribute__((noreturn)) void span_lost(void) {
+    fputs("calx: a big block the allocator doesn't know was freed or grown; this is a bug in calx, please report it\n",
+          stderr);
+    fflush(stderr);
+    _Exit(102);
+}
+
+static inline cx_usize span_slot(const void* p, cx_usize cap) {
+    return (cx_usize)(((cx_u64)(cx_usize)p >> 12) * 0x9E3779B97F4A7C15ull >> 20) & (cap - 1);
+}
+
+/* The span of `p`, which must be a big block the system gave out. Under large_lock. */
+static cx_usize span_of(const void* p) {
+    for (cx_usize i = span_slot(p, span_cap);; i = (i + 1) & (span_cap - 1)) {
+        if (span_key[i] == p) return span_size[i];
+        if (!span_key[i]) span_lost();
     }
-    return os_alloc(large_size(c));
+}
+
+static void span_put(void* p, cx_usize size);
+
+/* Doubles the table, without the slots of blocks gone. Under large_lock. */
+static void span_grow(void) {
+    void** keys = span_key;
+    cx_usize* sizes = span_size;
+    cx_usize cap = span_cap;
+    span_cap = cap ? cap * 2 : 1024;
+    while (span_used * 2 >= span_cap) span_cap *= 2;
+    span_key = (void**)os_alloc(span_cap * sizeof(void*));
+    span_size = (cx_usize*)os_alloc(span_cap * sizeof(cx_usize));
+    span_used = 0;
+    for (cx_usize i = 0; i < cap; i++) {
+        if (keys[i] && keys[i] != SPAN_GONE) span_put(keys[i], sizes[i]);
+    }
+    if (cap) {
+        os_free(keys, cap * sizeof(void*));
+        os_free(sizes, cap * sizeof(cx_usize));
+    }
+}
+
+/* Notes `p`'s span, or changes it. Under large_lock. */
+static void span_put(void* p, cx_usize size) {
+    if ((span_used + 1) * 2 > span_cap) span_grow();
+    cx_usize gone = (cx_usize)-1;
+    for (cx_usize i = span_slot(p, span_cap);; i = (i + 1) & (span_cap - 1)) {
+        if (span_key[i] == p) {
+            span_size[i] = size;
+            return;
+        }
+        if (span_key[i] == SPAN_GONE && gone == (cx_usize)-1) gone = i;
+        if (!span_key[i]) {
+            if (gone != (cx_usize)-1) {
+                i = gone;
+            } else {
+                span_used++;
+            }
+            span_key[i] = p;
+            span_size[i] = size;
+            return;
+        }
+    }
+}
+
+/* Forgets `p`, which the system takes back. Under large_lock. */
+static void span_drop(const void* p) {
+    for (cx_usize i = span_slot(p, span_cap);; i = (i + 1) & (span_cap - 1)) {
+        if (span_key[i] == p) {
+            span_key[i] = SPAN_GONE;
+            return;
+        }
+        if (!span_key[i]) span_lost();
+    }
+}
+
+/* The bytes the system holds for a big block of `n`: its size's, or a huge one's pages. */
+static inline cx_usize large_span(cx_usize n) { return n > HUGE_BLOCK ? pages(n) : large_size(large_class(n)); }
+
+/* A block from the cache whose span is size `c`'s or up to `more` sizes bigger, taken out of it,
+ * with its span in `*span`; or NULL. Under large_lock. */
+static void* take_cached(unsigned c, unsigned more, cx_usize* span) {
+    unsigned last = c + more < LARGE_CLASSES ? c + more : LARGE_CLASSES - 1;
+    for (unsigned k = c; k <= last; k++) {
+        void* p = large_free[k];
+        if (p) {
+            __atomic_store_n(&large_free[k], *(void**)p, __ATOMIC_RELAXED);
+            cached -= large_size(k);
+            *span = large_size(k);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Gives `p`, whose span is `span`, to the cache, or back to the system once the cache is full.
+ * Under large_lock; returns the block for the system to take back, after the lock, or NULL. */
+static void* keep_block(void* p, cx_usize span) {
+    if (span <= HUGE_BLOCK && cached + span <= CACHE_MAX) {
+        unsigned c = large_class(span);
+        *(void**)p = large_free[c];
+        __atomic_store_n(&large_free[c], p, __ATOMIC_RELAXED);
+        cached += span;
+        return NULL;
+    }
+    span_drop(p);
+    return p;
+}
+
+/* A fresh block takes a cached one of its size or the next, at most a quarter bigger, or one the
+ * system gives. */
+static void* large_alloc(cx_usize n) {
+    cx_usize span = large_span(n);
+    void* p = NULL;
+    lock(&large_lock);
+    if (n <= HUGE_BLOCK) p = take_cached(large_class(n), 1, &span);
+    unlock(&large_lock);
+    if (p) return p;
+    p = os_alloc(span);
+    lock(&large_lock);
+    span_put(p, span);
+    unlock(&large_lock);
+    return p;
 }
 
 static void large_release(void* p, cx_usize n) {
-    if (n > HUGE_BLOCK) {
-        os_free(p, pages(n));
-        return;
-    }
-    unsigned c = large_class(n);
-    cx_usize size = large_size(c);
+    (void)n;
     lock(&large_lock);
-    if (cached + size <= CACHE_MAX) {
-        *(void**)p = large_free[c];
-        __atomic_store_n(&large_free[c], p, __ATOMIC_RELAXED);
-        cached += size;
-        p = NULL;
-    }
+    cx_usize span = span_of(p);
+    void* gone = keep_block(p, span);
     unlock(&large_lock);
-    if (p) os_free(p, size);
+    if (gone) os_free(gone, span);
+}
+
+#ifdef _WIN32
+/* Commits the pages from `have` to `want` bytes into `p`, if they're the rest of its reservation
+ * and not in use. */
+static int grow_in_place(cx_u8* p, cx_usize have, cx_usize want) {
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery(p + have, &m, sizeof m)) return 0;
+    if (m.AllocationBase != p || m.State != MEM_RESERVE || m.RegionSize < want - have) return 0;
+    return VirtualAlloc(p + have, want - have, MEM_COMMIT, PAGE_READWRITE) != NULL;
+}
+#endif
+
+/* A big block that grows, to `n` bytes from `old`, with its first `keep` bytes (CLX-264). Every
+ * block it grew out of waited in the cache for the next of its size, once, so a string built and
+ * dropped over and over held itself and one block of each size it grew through, twice what it
+ * needed. Now, in this order:
+ *
+ * - A block whose span already holds `n` stays as it is.
+ * - A cached block up to 16 times bigger is taken, and this one goes to the cache: its pages are
+ *   there already, so the copy costs less than the system's first touch of new ones, and the
+ *   blocks a loop builds and drops go round the same few, which settle at the sizes it needs.
+ * - Otherwise it grows where it is: Linux moves its pages with mremap, without a copy, and on
+ *   Windows it commits more of its reservation, which a block that had to move has room in for
+ *   three more doublings. */
+static void* large_grow(void* p, cx_usize old, cx_usize n, cx_usize keep) {
+    cx_usize want = large_span(n);
+    lock(&large_lock);
+    cx_usize have = span_of(p);
+    if (have >= want) {
+        unlock(&large_lock);
+        return p;
+    }
+    cx_usize got = 0;
+    void* q = n <= HUGE_BLOCK ? take_cached(large_class(n), 16, &got) : NULL;
+    if (q) {
+        unlock(&large_lock);
+        /* Copied before the cache links the block in through its first bytes. */
+        memcpy(q, p, keep < old ? keep : old);
+        lock(&large_lock);
+        void* gone = keep_block(p, have);
+        unlock(&large_lock);
+        if (gone) os_free(gone, have);
+        return q;
+    }
+    /* The old address leaves the table before the system can give it out again. */
+    span_drop(p);
+    unlock(&large_lock);
+#ifdef _WIN32
+    if (!grow_in_place((cx_u8*)p, have, want)) {
+        /* Reserving costs addresses, not memory, so the room is free until it's committed. */
+        q = want <= ((cx_usize)1 << 40) ? VirtualAlloc(NULL, want * 8, MEM_RESERVE, PAGE_READWRITE) : NULL;
+        if (q && !VirtualAlloc(q, want, MEM_COMMIT, PAGE_READWRITE)) {
+            VirtualFree(q, 0, MEM_RELEASE);
+            q = NULL;
+        }
+        if (!q) q = os_alloc(want);
+        memcpy(q, p, keep < old ? keep : old);
+        os_free(p, have);
+    } else {
+        q = p;
+    }
+#else
+    /* mremap moves only a range that's one mapping, and a block isn't once part of it has other
+     * flags, as std.xz's tables have for 2 MiB pages; then it's copied. */
+    q = mremap(p, have, want, MREMAP_MAYMOVE);
+    if (q == MAP_FAILED) {
+        q = os_alloc(want);
+        memcpy(q, p, keep < old ? keep : old);
+        os_free(p, have);
+    }
+#endif
+    lock(&large_lock);
+    span_put(q, want);
+    unlock(&large_lock);
+    return q;
 }
 
 /* Gives back every big block the cache holds. Returns the bytes. */
@@ -886,6 +1072,7 @@ static cx_usize trim_large(void) {
     for (unsigned c = 0; c < LARGE_CLASSES; c++) {
         lists[c] = large_free[c];
         __atomic_store_n(&large_free[c], NULL, __ATOMIC_RELAXED);
+        for (void* p = lists[c]; p; p = *(void**)p) span_drop(p);
     }
     cx_usize bytes = cached;
     cached = 0;
@@ -942,6 +1129,7 @@ void* cx_realloc_keep(void* p, cx_usize old, cx_usize n, cx_usize keep) {
     } else if (old > SMALL_MAX && n > SMALL_MAX && old <= HUGE_BLOCK && n <= HUGE_BLOCK) {
         if (large_class(old) == large_class(n)) return p;
     }
+    if (old > SMALL_MAX && n > old) return large_grow(p, old, n, keep);
     void* q = cx_alloc(n);
     const cx_usize most = old < n ? old : n;
     memcpy(q, p, keep < most ? keep : most);

@@ -37,7 +37,7 @@ How it finds what it can give back:
 - **Pages still in use** keep only the parts their blocks are on. A page's blocks in the list are mapped, and each 4 KiB of it, a page of the system's, that holds only free blocks, or none, goes back. Its blocks leave the list, and count as free once the page's last block is, when the whole page goes. Blocks of 4 KiB or more always free the system pages inside them; smaller ones free those they fill.
 - **What stays:** each busy thread keeps up to 64 KiB of free blocks of each size for itself, without a lock, so those stay, and so do the 4 KiB parts of pages with a block in use on them.
 - **The calling thread** shares its own free blocks first.
-- **Big blocks**, over 32 KiB, kept for the next block of their size go back too, up to 256 MiB of them.
+- **Big blocks**, over 32 KiB, kept for the next block of their size go back too, up to 256 MiB of them. A big block that grows takes a kept one if there's one big enough, and leaves its own kept in its place, so growing doesn't add to them ([ownership](../reference/ownership.md#in-c)).
 
 The allocator also trims on its own. After every 64 MiB of new pages, a thread that takes a page trims the size whose list holds the most, if that's 16 MiB or more. So memory one size freed goes to the others while the program is busy. `trim()` is for when it's quiet, and nothing takes new pages to set that off.
 
