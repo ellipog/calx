@@ -49,6 +49,10 @@ enum class TypeKind : std::uint8_t {
     // only ever an argument: it's never stored, returned, sent or copied by the program. In C it's
     // the addresses of what it captures, which its function reads.
     closure,
+    // `dyn Shape`: a value of any type that implements the interface `item`, which it owns on the
+    // heap, and whose methods it calls through a table of that type's functions (CLX-72). In C
+    // it's the value's address and the table's.
+    dyn,
 };
 
 // Which hash table a map or a set is: Calx's own, Java's `HashMap` (D105), fastutil's open hash
@@ -65,8 +69,8 @@ struct Type {
     Type* key = nullptr;     // map: the keys
     Type* entry = nullptr;   // map: `(K, V)`, what the table holds and a `for` loop goes over
     std::uint64_t length = 0;
-    Slice<Type*> elems;      // tuple; fn_: the parameters
-    Slice<std::uint8_t> modes; // fn_: each parameter's mode, a ParamMode
+    Slice<Type*> elems;      // tuple; fn_: the parameters; dyn: its table's functions, as `fn` types without the receiver
+    Slice<std::uint8_t> modes; // fn_: each parameter's mode, a ParamMode; dyn: each function's receiver's
     bool unsafe_fn = false;  // fn_: `unsafe fn`, which only `unsafe` code can call
     Item* item = nullptr;    // struct_, enum_
     Type* repr = nullptr;    // enum_: the integer type of its tag
@@ -156,6 +160,8 @@ public:
     Type* fn_of(const std::vector<Type*>& params, const std::vector<std::uint8_t>& modes, Type* result, bool is_unsafe);
     // A new closure's type, for the function `item`, called as `call`.
     Type* closure_of(Item* item, Type* call, std::string_view name);
+    // `dyn I`, for the interface `iface`, or an instance of a generic one such as `Into<i64>`.
+    Type* dyn_of(Item* iface, std::string_view name, bool open);
     // The function types made so far, in the order they were made.
     const std::vector<Type*>& fn_types() const { return fns_; }
     // The arrays, optionals, tuples, lists, maps and sets made so far, in the order they were made.
@@ -183,6 +189,7 @@ private:
     std::map<std::vector<Type*>, Type*> tuple_map_;
     std::map<std::pair<Type*, bool>, Type*> pointer_map_;
     std::map<std::tuple<std::vector<Type*>, std::vector<std::uint8_t>, Type*, bool>, Type*> fn_map_;
+    std::map<Item*, Type*> dyn_map_;
     std::vector<Type*> compounds_;
     std::vector<Type*> fns_;
 };

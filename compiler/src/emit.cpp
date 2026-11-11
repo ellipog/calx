@@ -6,6 +6,8 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -157,6 +159,7 @@ public:
             // After the functions' declarations, as a type's glue can call what it writes for itself.
             out_ += kNoDebugPush;
             emit_glue(order);
+            for (const DynTable* d : all.dyns) out_ += dyn_table_text(*d);
             out_ += kNoDebugPop;
             for (Item* f : p.defs) {
                 const FnOut& o = fns_.at(f);
@@ -216,6 +219,16 @@ private:
         return out;
     }
 
+    // The table a `dyn` (CLX-72) calls a type's functions through, which each file that makes a
+    // `dyn` of the type defines for itself: the type's own drop and copy, then for each method a
+    // function that takes the value's address as `void*` and calls the type's own.
+    struct DynTable {
+        const Type* dyn;
+        const Type* t;
+        std::vector<Item*> fns;
+        std::string name;
+    };
+
     // What a function's or constant's C names, so each file can declare exactly that.
     struct Uses {
         std::vector<const Type*> types;    // structs, enums, arrays, optionals and tuples
@@ -228,6 +241,7 @@ private:
         std::vector<const Type*> hashes;   // the types a hand-written `hash` adds with a function of their own
         std::vector<const Type*> sorts;    // the element types of the lists it sorts
         std::vector<const void*> sort_bys; // the closures, or the function types, `sort_by` calls (CLX-98)
+        std::vector<const DynTable*> dyns; // the tables of the `dyn`s it makes (CLX-72)
         std::unordered_set<const void*> seen;
 
         bool has(const void* p) const { return seen.count(p) != 0; }
@@ -263,6 +277,9 @@ private:
         void add_sort_by(const void* k) {
             if (seen.insert(static_cast<const char*>(k) + 6).second) sort_bys.push_back(k);
         }
+        void add_dyn(const DynTable* d) {
+            if (seen.insert(d).second) dyns.push_back(d);
+        }
         void merge(const Uses& o) {
             for (const Type* t : o.types) add_type(t);
             for (Item* f : o.fns) add_fn(f);
@@ -274,6 +291,7 @@ private:
             for (const Type* t : o.sorts) add_sort(t);
             for (const void* k : o.sort_bys) add_sort_by(k);
             for (const Type* t : o.hashes) add_hash(t);
+            for (const DynTable* d : o.dyns) add_dyn(d);
         }
     };
 
@@ -462,7 +480,7 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: uses_->add_type(t); break;
+                case TypeKind::fn_: case TypeKind::dyn: uses_->add_type(t); break;
                 default: break;
             }
         }
@@ -495,7 +513,8 @@ private:
             case TypeKind::deque:
             case TypeKind::map:
             case TypeKind::set:
-            case TypeKind::fn_: return compound_name(t);
+            case TypeKind::fn_:
+            case TypeKind::dyn: return compound_name(t);
         }
         return "void";
     }
@@ -521,6 +540,13 @@ private:
                 }
                 s += "__" + (t->elem->kind == TypeKind::unit ? std::string("unit") : part(t->elem));
                 break;
+            case TypeKind::dyn: {
+                // `cx_dyn_Shape`, `cx_dyn_Into_i64`: the interface and its arguments.
+                const Item* g = t->item->origin ? t->item->origin : t->item;
+                s = "cx_dyn_" + std::string(text(g->name));
+                for (const Type* a : t->item->type_args) s += "_" + part(a);
+                break;
+            }
             default:
                 s = "cx_tup" + std::to_string(t->elems.size());
                 for (const Type* e : t->elems) s += "_" + part(e);
@@ -542,7 +568,7 @@ private:
         switch (t->kind) {
             case TypeKind::struct_: case TypeKind::enum_: return std::string(t->item->c_name);
             case TypeKind::array: case TypeKind::optional: case TypeKind::tuple: case TypeKind::list:
-            case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::fn_:
+            case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::fn_: case TypeKind::dyn:
                 return compound_name(t).substr(3);
             case TypeKind::string: return "String";
             case TypeKind::arena: return "Arena";
@@ -620,7 +646,7 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::enum_: case TypeKind::array: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: break;
+                case TypeKind::fn_: case TypeKind::dyn: break;
                 default: return;
             }
             if (!need.insert(t).second) return;
@@ -686,6 +712,10 @@ private:
                     // literal is a deque's too (D110).
                     out_ += "struct " + ctype(t) + " { " + ctype(t->elem) + "* ptr; cx_usize len; cx_usize cap; cx_usize head; };\n";
                     break;
+                case TypeKind::dyn:
+                    // The value's address, on the heap or where it is, and its type's table.
+                    out_ += "struct " + ctype(t) + " { void* data; const struct " + ctype(t) + "_vt* vt; };\n";
+                    break;
                 case TypeKind::map:
                 case TypeKind::set:
                     if (t->table == TableKind::sorted) {
@@ -750,6 +780,22 @@ private:
             if (is_table(t) && t->table == TableKind::java) {
                 out_ += "struct " + jnode(t) + " { cx_i32 hash; cx_i32 next; " + ctype(slot_type(t)) + " v; };\n";
             }
+        }
+        // A `dyn`'s table: drop, which frees the value too, copy, which makes a new one, then
+        // each method, which takes the value's address first (CLX-72).
+        for (const Type* t : order) {
+            if (t->kind != TypeKind::dyn) continue;
+            out_ += "struct " + ctype(t) + "_vt { void (*drop)(void*); void* (*copy)(const void*);";
+            for (std::size_t k = 0; k < t->elems.size(); k++) {
+                const Type* ft = t->elems[k];
+                out_ += " " + ctype(ft->elem) + " (*m" + std::to_string(k) + ")(" +
+                        (static_cast<ParamMode>(t->modes[k]) == ParamMode::mut ? "void*" : "const void*");
+                for (std::size_t i = 0; i < ft->elems.size(); i++) {
+                    out_ += ", " + param_ctype(ft->elems[i], static_cast<ParamMode>(ft->modes[i]));
+                }
+                out_ += ");";
+            }
+            out_ += " };\n";
         }
         for (const Type* t : order) {
             if (t->kind != TypeKind::enum_ || t->has_data || !printed_.count(t)) continue;
@@ -2710,6 +2756,8 @@ $dropall    m->len = 0;
                 s += "    for (cx_usize i = 0; i < " + std::to_string(t->length) + "; i++) " + drop_fn(t->elem) + "(&p->v[i]);\n";
                 break;
             case TypeKind::optional: s += "    if (p->has) " + drop_fn(t->elem) + "(&p->v);\n"; break;
+            // One that was moved out of has no table.
+            case TypeKind::dyn: s += "    if (p->vt) p->vt->drop(p->data);\n"; break;
             case TypeKind::enum_: {
                 s += "    switch (p->tag) {\n";
                 const Slice<VariantDecl>& vs = t->item->variants;
@@ -2822,6 +2870,7 @@ $dropall    m->len = 0;
                      "(&p->v[i]);\n";
                 break;
             case TypeKind::optional: s += "    if (p->has) r.v = " + copy_fn(t->elem) + "(&p->v);\n"; break;
+            case TypeKind::dyn: s += "    if (p->vt) r.data = p->vt->copy(p->data);\n"; break;
             case TypeKind::enum_: {
                 s += "    switch (p->tag) {\n";
                 const Slice<VariantDecl>& vs = t->item->variants;
@@ -4621,6 +4670,10 @@ $dropall    m->len = 0;
         for (int i = 0; i < static_cast<int>(ops.size()); i++) {
             const Operand& o = ops[i];
             bool in_order = i < last || (i == last && held);
+            if (o.pass == Pass::address && o.e->to_dyn) {
+                out.push_back(dyn_view(o.e, in_order, decls));
+                continue;
+            }
             if (o.pass == Pass::address) {
                 // A `str` for a `String` is a new `String` viewing its bytes, kept in a temporary.
                 if ((is_place(o.e) || o.e->temp) && !o.e->str_view) {
@@ -4715,7 +4768,7 @@ $dropall    m->len = 0;
             case TypeKind::struct_: case TypeKind::array: case TypeKind::str: case TypeKind::optional:
             case TypeKind::tuple: case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map:
             case TypeKind::set: case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-            case TypeKind::library:
+            case TypeKind::library: case TypeKind::dyn:
                 return "(" + ctype(t) + "){0}";
             case TypeKind::enum_: return t->has_data ? "(" + ctype(t) + "){0}" : "(" + ctype(t) + ")0";
             default: return "(" + ctype(t) + ")0";
@@ -4780,8 +4833,139 @@ $dropall    m->len = 0;
     // An expression, with what the ownership pass decided about it: a new value kept for the
     // statement, a move that zeroes what it leaves, or a field moved out of a new value.
     std::string expr(Expr* e) {
+        if (e->to_dyn) return dyn_box(e);
+        return expr_plain(e);
+    }
+
+    std::string expr_plain(Expr* e) {
         if (e->temp && !frames_.empty()) return temp_of(e);
         return expr_value(e);
+    }
+
+    // --- `dyn` (CLX-72) -------------------------------------------------------------------------
+
+    // The table for the value `e`, which becomes a `dyn`, noted for its function's file.
+    const DynTable& dyn_table(Expr* e) {
+        auto key = std::make_pair(static_cast<const Type*>(e->to_dyn), static_cast<const Type*>(e->type));
+        std::unique_ptr<DynTable>& d = dyn_tables_[key];
+        if (!d) {
+            d = std::make_unique<DynTable>();
+            d->dyn = e->to_dyn;
+            d->t = e->type;
+            d->fns.assign(e->dyn_fns.begin(), e->dyn_fns.end());
+            std::string name = "cx_vtab_" + part(e->to_dyn) + "__" + part(e->type);
+            d->name = name;
+            for (int i = 2; !dyn_names_.insert(d->name).second; i++) d->name = name + "_" + std::to_string(i);
+        }
+        (void)ctype(e->type);
+        (void)ctype(e->to_dyn);
+        if (uses_) {
+            uses_->add_dyn(d.get());
+            for (Item* f : d->fns) uses_->add_fn(f);
+        }
+        return *d;
+    }
+
+    // `e` as a `dyn` that owns it: the value, moved to the heap, and its type's table.
+    std::string dyn_box(Expr* e) {
+        const DynTable& d = dyn_table(e);
+        std::string c = ctype(e->type), v = tmp(), p = tmp();
+        return "({ " + c + " " + v + " = " + expr_plain(e) + "; " + c + "* " + p + " = (" + c + "*)cx_alloc(sizeof(" + c + ")); *" +
+               p + " = " + v + "; (" + ctype(e->to_dyn) + "){ " + p + ", &" + d.name + " }; })";
+    }
+
+    // `e`, passed as a `dyn` that's only looked at: the address of a `dyn` of where it is, or of a
+    // temporary it's kept in for the statement, so nothing is moved or allocated.
+    std::string dyn_view(Expr* e, bool in_order, std::string& decls) {
+        const DynTable& d = dyn_table(e);
+        std::string c = ctype(e->type), a;
+        if (is_place(e) || e->temp) {
+            a = "&" + place(e);
+            if (in_order && (e->temp || place_has_effects(e))) {
+                std::string t = tmp();
+                decls += c + "* " + t + " = " + a + "; ";
+                a = t;
+            }
+        } else {
+            std::string t = tmp();
+            decls += c + " " + t + " = " + expr_plain(e) + "; ";
+            a = "&" + t;
+        }
+        return "&(" + ctype(e->to_dyn) + "){ (void*)" + a + ", &" + d.name + " }";
+    }
+
+    // `d.m(...)` on a `dyn`: its table's function, given the value's address first.
+    std::string dyn_call(Expr* e) {
+        Type* dt = e->callee->lhs->type;
+        std::uint32_t k = e->field_index;
+        const Type* ft = dt->elems[k];
+        bool mut_self = static_cast<ParamMode>(dt->modes[k]) == ParamMode::mut;
+        auto op = [&](Expr* x, std::size_t p) -> Operand {
+            if (p == 0) return {x, dt, Pass::address};
+            Type* t = ft->elems[p - 1];
+            auto m = static_cast<ParamMode>(ft->modes[p - 1]);
+            bool view = m == ParamMode::mut || (m == ParamMode::read && is_view_type(t));
+            return {x, t, view ? Pass::address : Pass::value};
+        };
+        std::vector<Expr*> source{e->callee->lhs};
+        for (const Arg& a : e->args) source.push_back(a.value);
+        std::vector<Operand> ops;
+        std::vector<std::size_t> param_of;
+        for (Expr* x : source) {
+            std::size_t p = 0;
+            for (std::size_t i = 0; i < e->ordered_args.size(); i++) {
+                if (e->ordered_args[i] == x) p = i;
+            }
+            ops.push_back(op(x, p));
+            param_of.push_back(p);
+        }
+        for (std::size_t i = 0; i < e->ordered_args.size(); i++) {
+            Expr* x = e->ordered_args[i];
+            if (std::find(source.begin(), source.end(), x) != source.end()) continue;
+            ops.push_back(op(x, i));
+            param_of.push_back(i);
+        }
+        std::string decls;
+        std::vector<std::string> v = sequence(ops, decls);
+        std::vector<std::string> by_param(e->ordered_args.size());
+        for (std::size_t i = 0; i < v.size(); i++) by_param[param_of[i]] = v[i];
+        std::string r = tmp();
+        decls += std::string(mut_self ? "" : "const ") + ctype(dt) + "* " + r + " = " + by_param[0] + "; ";
+        std::string s = r + "->vt->m" + std::to_string(k) + "(" + r + "->data";
+        for (std::size_t i = 1; i < by_param.size(); i++) s += ", " + by_param[i];
+        return wrap(decls, s + ")");
+    }
+
+    // A table's C: its type's drop and copy, a function for each method, and the table.
+    std::string dyn_table_text(const DynTable& d) {
+        const Type* t = d.t;
+        const Type* dt = d.dyn;
+        std::string c = ctype(t), n = d.name;
+        std::string s = "static void " + n + "_drop(void* p) {" + (is_copy(t) ? std::string() : " " + drop_fn(t) + "((" + c + "*)p);") +
+                        " cx_free(p, sizeof(" + c + ")); }\n";
+        s += "static void* " + n + "_copy(const void* p) { " + c + "* q = (" + c + "*)cx_alloc(sizeof(" + c + ")); *q = " +
+             (is_copy(t) ? "*(const " + c + "*)p" : copy_fn(t) + "((const " + c + "*)p)") + "; return q; }\n";
+        std::string fields = n + "_drop, " + n + "_copy";
+        for (std::size_t k = 0; k < d.fns.size() && k < dt->elems.size(); k++) {
+            const Item* f = d.fns[k];
+            const Type* ft = dt->elems[k];
+            bool mut_self = static_cast<ParamMode>(dt->modes[k]) == ParamMode::mut;
+            std::string ps = std::string(mut_self ? "void*" : "const void*") + " cx_s";
+            const Local* self = f->params[0].local;
+            std::string args = self->is_view ? "(" + std::string(mut_self ? "" : "const ") + c + "*)cx_s" : "*(const " + c + "*)cx_s";
+            for (std::size_t i = 0; i < ft->elems.size(); i++) {
+                std::string a = "a" + std::to_string(i);
+                ps += ", " + param_ctype(ft->elems[i], static_cast<ParamMode>(ft->modes[i])) + " " + a;
+                args += ", " + a;
+            }
+            if (f->track_caller) args += ", " + c_string_literal("<dyn>") + " \"\\000\" " + c_string_literal("<dyn>");
+            bool none = ft->elem->kind == TypeKind::unit || ft->elem->kind == TypeKind::never;
+            std::string m = n + "_m" + std::to_string(k);
+            s += "static " + ctype(ft->elem) + " " + m + "(" + ps + ") { " + (none ? "" : "return ") + std::string(f->c_name) + "(" +
+                 args + "); }\n";
+            fields += ", " + m;
+        }
+        return s + "static const struct " + ctype(dt) + "_vt " + n + " = { " + fields + " };\n";
     }
 
     std::string expr_value(Expr* e) {
@@ -5192,6 +5376,7 @@ $dropall    m->len = 0;
             case CallKind::fn:
             case CallKind::method: return fn_call(e);
             case CallKind::value: return value_call(e);
+            case CallKind::dyn: return dyn_call(e);
             default: return "0";
         }
     }
@@ -6924,6 +7109,8 @@ $dropall    m->len = 0;
     std::vector<Frame> frames_;                                 // the statements being emitted, innermost last
     std::unordered_map<std::uint32_t, std::size_t> loop_frames_;  // a loop's id: how many frames are outside it
     mutable std::unordered_set<std::string> compound_used_;
+    std::map<std::pair<const Type*, const Type*>, std::unique_ptr<DynTable>> dyn_tables_;  // by `dyn` and type
+    std::unordered_set<std::string> dyn_names_;
     mutable std::unordered_map<const Local*, std::vector<std::string>> copied_memo_;  // `copied`'s answers
 };
 

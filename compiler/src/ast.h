@@ -156,6 +156,10 @@ enum class CallKind : std::uint8_t {
     prim_static, // `i32.parse(s)`, `f64.from_bits(b)`, `String.from_utf8(bytes)`: `prim` says which
     value,       // `f(x)` where `f` is a function value (D122), `callee` of type `fn(...)`
     context,     // `f().context(text)`: `f`'s error as an `Error`, with `text`; `item` makes it (CLX-95)
+    // `d.method()` on a `dyn I`, through its table (CLX-72): `lhs` of the callee is the receiver,
+    // `item` the interface's function, and `field_index` its place in the table, whose functions'
+    // types are the `dyn` type's `elems`.
+    dyn,
 };
 
 enum class BMethod : std::uint8_t {
@@ -284,6 +288,10 @@ struct Expr {
                                  // which none of them mentions, with no string between
     bool str_view = false;       // a `str` passed for a `String` that's only looked at: it goes as
                                  // a `String` viewing the same bytes (CLX-141)
+    // A value that becomes a `dyn I` where it's used: the `dyn` type, and for each of the methods
+    // in its table, the function its own type has (CLX-72). It keeps its own type, as `type`.
+    Type* to_dyn = nullptr;
+    Slice<Item*> dyn_fns;
     // call: written `Iface.method(x, ...)` and rewritten as `x.method(...)` that looks only in
     // that interface. A copy for an instance keeps the rewrite.
     Item* only_interface = nullptr;

@@ -1,0 +1,88 @@
+// `dyn` (CLX-72) with generic code, generic impls, optionals, maps, `if`, and an interface from
+// another module, whose functions are called through tables this module makes.
+// file: main.calx
+import shapes.{Shape, Circle, describe}
+
+struct Wrapper<T> {
+    inner: T,
+    extra: f64,
+}
+
+impl<T: Shape> Shape for Wrapper<T> {
+    fn area(self) -> f64 {
+        return self.inner.area() + self.extra
+    }
+
+    fn take(mut self, label: own String) {
+        self.inner.take(label)
+    }
+}
+
+struct Named {
+    label: String,
+}
+
+impl Shape for Named {
+    fn area(self) -> f64 {
+        return f64.nearest(self.label.len())
+    }
+
+    fn take(mut self, label: own String) {
+        self.label = label
+    }
+}
+
+// In a generic function, each copy makes its own type's table.
+fn boxed<T: Shape>(x: own T) -> dyn Shape {
+    return x
+}
+
+fn main() {
+    let w = Wrapper { inner: Circle { r: 1.0 }, extra: 0.5 }
+    println(describe(w))    // out: 3.5
+    let b = boxed(Named { label: "four" })
+    println(describe(b))    // out: 4.0
+    var maybe: dyn Shape? = none
+    println("{maybe == none}")    // out: true
+    maybe = some(Circle { r: 2.0 })
+    if let s = maybe {
+        println(describe(s))    // out: 12.0
+    }
+    var byname = Map<String, dyn Shape>()
+    byname.insert("c", Circle { r: 1.0 })
+    byname.insert("n", Named { label: "ab" })
+    println(describe(byname["n"]))    // out: 2.0
+    let big = byname.len() > 1
+    var picked: dyn Shape = if big { Named { label: "abc" } } else { Circle { r: 0.0 } }
+    println(describe(picked))    // out: 3.0
+    picked.take("hello")
+    println(describe(picked))    // out: 5.0
+    var list: List<dyn Shape> = [w, b]
+    let last = list.pop()
+    println("{list.len()} {last!.area()}")    // out: 1 4.0
+}
+
+// file: shapes.calx
+pub interface Shape {
+    fn area(self) -> f64
+
+    fn take(mut self, label: own String)
+}
+
+pub struct Circle {
+    pub r: f64,
+}
+
+impl Shape for Circle {
+    fn area(self) -> f64 {
+        return 3.0 * self.r * self.r
+    }
+
+    fn take(mut self, label: own String) {
+        self.r = f64.nearest(label.len())
+    }
+}
+
+pub fn describe(s: dyn Shape) -> String {
+    return "{s.area()}"
+}

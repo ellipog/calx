@@ -329,12 +329,23 @@ Type* Types::closure_of(Item* item, Type* call, std::string_view name) {
     return t;
 }
 
+Type* Types::dyn_of(Item* iface, std::string_view name, bool open) {
+    auto it = dyn_map_.find(iface);
+    if (it != dyn_map_.end()) return it->second;
+    Type* t = make(TypeKind::dyn, name);
+    t->item = iface;
+    t->open = open;
+    dyn_map_.emplace(iface, t);
+    compounds_.push_back(t);
+    return t;
+}
+
 bool is_view_type(const Type* t) {
     switch (t->kind) {
         case TypeKind::struct_: case TypeKind::array: case TypeKind::tuple: case TypeKind::string:
         case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set: case TypeKind::param:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-        case TypeKind::library:
+        case TypeKind::library: case TypeKind::dyn:
             return true;
         case TypeKind::enum_: return t->has_data;
         case TypeKind::optional: return is_view_type(t->elem);
@@ -377,7 +388,7 @@ bool copy_walk(const Type* t, int depth, Seen& seen) {
     switch (t->kind) {
         case TypeKind::string: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
         case TypeKind::arena: case TypeKind::sender: case TypeKind::receiver: case TypeKind::thread:
-        case TypeKind::library: return false;
+        case TypeKind::library: case TypeKind::dyn: return false;
         case TypeKind::param: return t->copy_bound;
         case TypeKind::array: case TypeKind::optional: return copy_walk(t->elem, depth + 1, seen);
         case TypeKind::tuple:
@@ -410,6 +421,7 @@ bool send_walk(const Type* t, int depth, Seen& seen) {
     switch (t->kind) {
         case TypeKind::pointer: return false;
         case TypeKind::closure: return false;  // it reads its captures where they are
+        case TypeKind::dyn: return false;      // what it holds could be anything
         case TypeKind::param: return t->send_bound;
         case TypeKind::array: case TypeKind::optional: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
             return send_walk(t->elem, depth + 1, seen);

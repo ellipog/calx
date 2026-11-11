@@ -1,0 +1,125 @@
+// `dyn I` (CLX-72): a value of any type that implements `I`, which owns it on the heap and calls
+// its methods through a table of its type's functions. A value becomes one where a `dyn` is
+// wanted: in a variable, a list, a field, a return, or an argument, where one that's only looked
+// at is a view of where it is, with nothing moved or allocated.
+
+interface Shape {
+    fn area(self) -> f64
+
+    fn name(self) -> String {
+        return "shape"
+    }
+
+    fn grow(mut self, by: f64)
+}
+
+struct Circle {
+    r: f64,
+}
+
+struct Square {
+    side: f64,
+    label: String,
+}
+
+impl Shape for Circle {
+    fn area(self) -> f64 {
+        return 3.0 * self.r * self.r
+    }
+
+    fn grow(mut self, by: f64) {
+        self.r += by
+    }
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+
+    fn name(self) -> String {
+        return self.label.copy()
+    }
+
+    fn grow(mut self, by: f64) {
+        self.side += by
+        self.label.push_str("+")
+    }
+}
+
+// An integer can be one too, passed by value to its own functions.
+impl Shape for i32 {
+    fn area(self) -> f64 {
+        return f64(self)
+    }
+
+    fn grow(mut self, by: f64) {
+        self += i32.saturate(by)
+    }
+}
+
+fn describe(s: dyn Shape) -> String {
+    return "{s.name()} {s.area()}"
+}
+
+fn total(shapes: List<dyn Shape>) -> f64 {
+    var sum = 0.0
+    for s in shapes {
+        sum += s.area()
+    }
+    return sum
+}
+
+fn biggest(a: f64) -> dyn Shape {
+    if a > 10.0 {
+        return Square { side: a, label: "big" }
+    }
+    return Circle { r: a }
+}
+
+struct Scene {
+    main: dyn Shape,
+    rest: List<dyn Shape>,
+}
+
+interface Into<T> {
+    fn into(self) -> T
+}
+
+impl Into<i64> for Circle {
+    fn into(self) -> i64 {
+        return i64.saturate(self.r)
+    }
+}
+
+fn main() {
+    let c = Circle { r: 1.0 }
+    let sq = Square { side: 2.0, label: "sq" }
+    // Looked at where they are: `c` and `sq` are still here after.
+    println(describe(c))    // out: shape 3.0
+    println(describe(sq))    // out: sq 4.0
+    println(describe(5))    // out: shape 5.0
+    println("{c.r} {sq.label}")    // out: 1.0 sq
+    var shapes: List<dyn Shape> = [Circle { r: 2.0 }, sq, 7]
+    shapes.push(Circle { r: 0.5 })
+    println("{total(shapes)}")    // out: 23.75
+    for s in mut shapes {
+        s.grow(1.0)
+    }
+    println("{total(shapes)}")    // out: 50.75
+    println(shapes[1].name())    // out: sq+
+    var d: dyn Shape = Circle { r: 1.0 }
+    println("{d.area()}")    // out: 3.0
+    d = Square { side: 3.0, label: "new" }
+    println(describe(d))    // out: new 9.0
+    // A copy owns a value of its own.
+    var e = d.copy()
+    e.grow(1.0)
+    println("{d.area()} {e.area()} {e.name()}")    // out: 9.0 16.0 new+
+    println(describe(biggest(20.0)))    // out: big 400.0
+    println(describe(biggest(2.0)))    // out: shape 12.0
+    let scene = Scene { main: Circle { r: 1.0 }, rest: [Square { side: 1.0, label: "a" }] }
+    println("{scene.main.area() + total(scene.rest)}")    // out: 4.0
+    let n: dyn Into<i64> = Circle { r: 7.9 }
+    println("{n.into()}")    // out: 7
+}

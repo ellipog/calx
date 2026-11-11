@@ -1146,11 +1146,12 @@ private:
         std::size_t held = borrows_.size();
         switch (e->call) {
             case CallKind::fn:
-            case CallKind::method: {
+            case CallKind::method:
+            case CallKind::dyn: {
                 Item* f = e->item;
                 // In the order they run: the receiver, then the arguments as written.
                 std::vector<Expr*> src;
-                if (e->call == CallKind::method) src.push_back(e->callee->lhs);
+                if (e->call != CallKind::fn) src.push_back(e->callee->lhs);
                 for (const Arg& a : e->args) src.push_back(a.value);
                 for (Expr* x : src) {
                     ParamMode m = ParamMode::read;

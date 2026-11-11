@@ -1,6 +1,6 @@
 ---
 title: Interfaces
-description: Interfaces with methods, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; and naming the interface.
+description: Interfaces with methods, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; dyn values of any type with an interface; and naming the interface.
 ---
 
 # Interfaces
@@ -232,6 +232,89 @@ fn main() {
 - [`Iterator<T>`](control-flow.md#iterators) is another, with `fn next(mut self) -> T?`, which a `for` loop calls until it gives `none`.
 - So are the [operators'](#operators): `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>` and `Rem<T>`.
 
+## Holding any type: `dyn`
+
+A generic parameter is one type for each copy of the code. `dyn Shape` is a value of any type that implements `Shape`, so a list can hold a circle and a square together, a field can hold either, and a function can return either (CLX-72):
+
+```calx
+interface Shape {
+    fn area(self) -> f64
+
+    fn name(self) -> String {
+        return "shape"
+    }
+
+    fn grow(mut self, by: f64)
+}
+
+struct Circle {
+    r: f64,
+}
+
+struct Square {
+    side: f64,
+}
+
+impl Shape for Circle {
+    fn area(self) -> f64 {
+        return 3.0 * self.r * self.r
+    }
+
+    fn grow(mut self, by: f64) {
+        self.r += by
+    }
+}
+
+impl Shape for Square {
+    fn area(self) -> f64 {
+        return self.side * self.side
+    }
+
+    fn name(self) -> String {
+        return "square"
+    }
+
+    fn grow(mut self, by: f64) {
+        self.side += by
+    }
+}
+
+fn describe(s: dyn Shape) -> String {
+    return "{s.name()} {s.area()}"
+}
+
+fn pick(big: bool) -> dyn Shape {
+    if big {
+        return Square { side: 10.0 }
+    }
+    return Circle { r: 1.0 }
+}
+
+fn main() {
+    let c = Circle { r: 1.0 }
+    println(describe(c))    // out: shape 3.0
+    var shapes: List<dyn Shape> = [c, Square { side: 2.0 }]
+    shapes.push(pick(true))
+    for s in mut shapes {
+        s.grow(1.0)
+    }
+    for s in shapes {
+        println(describe(s))
+    }
+    // out: shape 12.0
+    // out: square 9.0
+    // out: square 121.0
+}
+```
+
+- A value becomes a `dyn Shape` wherever one is wanted, when its type implements `Shape`: in a variable, a list, a field, a return, or an argument. There's nothing to write.
+- A `dyn` owns its value, on the heap, so making one in a variable, a list or a field moves the value there. An argument for a parameter that only looks at it, as `describe`'s, is a view of the value where it is: `c` is still `c` after `describe(c)`, and nothing is allocated.
+- It calls the methods that take `self` or `mut self` and mention `Self` nowhere else, the interface's defaults included. A function without `self`, one that takes `own self`, one that takes or gives back a `Self`, a generic one, and a constant aren't in its table, since which type it holds isn't known, and calling one says why.
+- `.copy()` copies the value it holds, so every type that becomes a `dyn` must be one that can be copied: a type holding a `Thread` or a `Library` can't.
+- It can't be compared, shown in a string, hashed or ordered, since those depend on the type it holds; give the interface a method for what's needed, such as `fn label(self) -> String`.
+- A generic interface takes its arguments: `dyn Into<i64>`.
+- A `mut dyn Shape` parameter can be given a value of another type, so its argument must be a `dyn Shape` variable already, not a `Circle`.
+
 ## Operators
 
 `+`, `-`, `*`, `/` and `%` on a struct or an enum call its impl of `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>` or `Rem<T>`, where `T` is the type on the right, and a prefix `-` calls `Neg`. They're built in, as `Equal` is (CLX-143):
@@ -304,11 +387,14 @@ Besides mismatched and missing members (D72):
 
 - Implementing the same interface twice for a type, or a generic interface twice with the same arguments.
 - A member that isn't in the interface.
-- An interface used as a type, as in `fn f(s: Shape)`. Take a generic parameter with it as a bound instead: `fn f<T: Shape>(s: T)`.
+- An interface used as a type, as in `fn f(s: Shape)`. Take a generic parameter with it as a bound instead, `fn f<T: Shape>(s: T)`, or a [`dyn Shape`](#holding-any-type-dyn) to take any type with it.
+- A call through a `dyn` of a function that isn't in its table, and a value for a `dyn` whose type doesn't implement the interface.
 - An impl that's never used, when neither the interface nor the type is `pub`.
 
 ## In C
 
 Interface calls are direct calls. Generic code has a copy for each type, and each impl's functions are plain C functions named for the type and the interface, such as `Lift__Up__go`, and for a generic interface's arguments too, such as `Meters__Into_i64__into`. Constants are inlined. Nothing is looked up at run time, even when a call chooses between impls: the checker chooses. An operator is such a call too, `a + b` being `Vec2__Add_Vec2__add(&a, &b)`, and in a generic function's copy for a number, it's the number's own `+`.
 
-`dyn Shape`, for holding values of different types together, is designed but not built yet, along with associated types ([spec](../CALX_SPEC.md#interfaces-and-generics)).
+A `dyn Shape` is two addresses: its value's, and a table of its type's functions, which is a constant. The table has the type's drop and copy, then each method in the order the interface declares them, and a call is one load and an indirect call: `s.area()` is `s->vt->m0(s->data)`. A view for an argument that's only looked at is a `dyn` made in place, with the value's own address. Each file that makes a `dyn` of a type has that type's table, so a program has one for each type and interface it uses together.
+
+Associated types are designed but not built yet ([spec](../CALX_SPEC.md#interfaces-and-generics)).

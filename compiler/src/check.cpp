@@ -232,6 +232,10 @@ public:
         }
         instance_mode_ = false;
         for (Item* c : closure_items_) prog_.fns.push_back(c);
+        for (std::size_t i = 0; i < T.compounds().size(); i++) {
+            Type* t = T.compounds()[i];
+            if (t->kind == TypeKind::dyn && !t->open) dyn_signatures(t);
+        }
         order_types();
         for (Type* t : T.compounds()) {
             if (t->table == TableKind::java && !t->open && orderable(t->kind == TypeKind::map ? t->key : t->elem)) {
@@ -1909,6 +1913,9 @@ private:
             case TypeKind::struct_: case TypeKind::enum_:
                 for (Type* a : t->args) if (unresolved(a, vars, s)) return true;
                 return false;
+            case TypeKind::dyn:
+                for (Type* a : t->item->type_args) if (unresolved(a, vars, s)) return true;
+                return false;
             default: return false;
         }
     }
@@ -1958,6 +1965,11 @@ private:
                 for (Type* a : t->args) args.push_back(subst(a, s));
                 return instance_type(t->generic, args);
             }
+            case TypeKind::dyn: {
+                std::vector<Type*> args;
+                for (Type* a : t->item->type_args) args.push_back(subst(a, s));
+                return dyn_type(iface_instance(iface_root(t->item), args));
+            }
             default: return t;
         }
     }
@@ -2004,6 +2016,12 @@ private:
                 if (pattern->generic != actual->generic) return false;
                 for (std::size_t i = 0; i < pattern->args.size(); i++) {
                     if (!unify(pattern->args[i], actual->args[i], s, vars)) return false;
+                }
+                return true;
+            case TypeKind::dyn:
+                if (iface_root(pattern->item) != iface_root(actual->item)) return false;
+                for (std::size_t i = 0; i < pattern->item->type_args.size(); i++) {
+                    if (!unify(pattern->item->type_args[i], actual->item->type_args[i], s, vars)) return false;
                 }
                 return true;
             default: return pattern == actual;
@@ -2304,6 +2322,7 @@ private:
                 std::string prefix = std::string(t->item->module->prefix) + "__";
                 return n.compare(0, prefix.size(), prefix) == 0 ? n.substr(prefix.size()) : n;
             }
+            case TypeKind::dyn: return "dyn_" + iface_mangle(t->item);
             default: return std::string(t->name);
         }
     }
@@ -2874,7 +2893,8 @@ private:
                     } else if (it && it->kind == ItemKind::interface) {
                         it->used = true;
                         error(t->span, q(text(n)) + " is an interface, not a type; take a generic parameter with it as a "
-                                                    "bound, such as " + q("<T: " + std::string(text(n)) + ">"));
+                                                    "bound, such as " + q("<T: " + std::string(text(n)) + ">") +
+                                                    ", or hold a value of any type with it as " + q("dyn " + std::string(text(n))));
                         return T.error;
                     } else if (it) {
                         error(t->span, q(text(n)) + " isn't a type");
@@ -3003,9 +3023,153 @@ private:
                 }
                 return T.pointer_of(inner, t->is_const);
             }
-            case TypeExprKind::dyn: not_yet(t->span, "`dyn` types"); return T.error;
+            case TypeExprKind::dyn: {
+                // `dyn Shape`: a value of any type with `Shape` (CLX-72).
+                if (t->inner->kind != TypeExprKind::named || t->inner->path.parts.size() != 1) {
+                    error(t->span, "`dyn` takes an interface, as in `dyn Shape`");
+                    return T.error;
+                }
+                Item* iface = resolve_interface(t->inner);
+                return iface ? dyn_type(iface) : T.error;
+            }
         }
         return T.error;
+    }
+
+    // `dyn I`, for an interface or an instance of a generic one.
+    Type* dyn_type(Item* iface) {
+        bool open = false;
+        for (Type* a : iface->type_args) open = open || a->open;
+        return T.dyn_of(iface, ctx_.arena.copy("dyn " + iface_text(iface)), open);
+    }
+
+    // --- `dyn` (CLX-72) ---------------------------------------------------------------------
+    //
+    // A `dyn I` holds a value of any type that implements `I`, and calls its methods through a
+    // table of that type's functions. The table has the methods that take `self` or `mut self`
+    // and mention `Self` nowhere else, in the order the interface declares them; a function
+    // without `self`, a constant, and a method that takes or gives back a `Self` can't be called
+    // through it, since which type it is isn't known.
+
+    // Why the interface's function `f` can't be in a table, or empty if it can.
+    std::string not_in_table(const Item* f) const {
+        const Item* g = iface_root(f->interface_item);
+        Type* self = g->type_params[0];
+        if (f->params.empty() || text(f->params[0].name) != "self") return "it doesn't take `self`";
+        if (f->params[0].mode == ParamMode::own) return "it takes `own self`, and the value stays in the `dyn`";
+        for (std::size_t i = 1; i < f->params.size(); i++) {
+            if (f->params[i].local && mentions_any(f->params[i].local->type, Slice<Type*>({&self, 1}))) {
+                return "its parameter " + q(text(f->params[i].name)) + " mentions `Self`";
+            }
+        }
+        if (f->result_type && mentions_any(f->result_type, Slice<Type*>({&self, 1}))) return "what it gives back mentions `Self`";
+        if (!f->generics.empty()) return "it's generic";
+        return "";
+    }
+
+    // The interface's functions in a `dyn`'s table, in order.
+    std::vector<Item*> dyn_methods(const Item* iface) {
+        std::vector<Item*> out;
+        for (Item* m : iface_root(iface)->members) {
+            if (m->kind != ItemKind::fn) continue;
+            check_signature(m);
+            if (not_in_table(m).empty()) out.push_back(m);
+        }
+        return out;
+    }
+
+    // The functions `t` has for the methods in a `dyn I`'s table, its own or the interface's
+    // defaults, made for `t`.
+    std::vector<Item*> dyn_table(Type* t, Item* iface, Span site) {
+        std::vector<Item*> out;
+        std::vector<Type*> args{t};
+        args.insert(args.end(), iface->type_args.begin(), iface->type_args.end());
+        for (Item* f : dyn_methods(iface)) {
+            Item* x = impl_fn(f, args, site);
+            if (!x) return {};
+            out.push_back(x);
+        }
+        return out;
+    }
+
+    // `e`, of type `t`, where a `dyn I` is wanted: it becomes one when `t` implements `I`.
+    bool to_dyn(Expr* e, Type* t, Type* want) {
+        if (t->kind == TypeKind::dyn || t->kind == TypeKind::never) return false;
+        if (t->scoped || t->kind == TypeKind::closure || handle_inside(t)) return false;
+        if (!satisfies(t, want->item)) return false;
+        e->to_dyn = want;
+        e->dyn_fns = {};
+        if (!t->open && !want->open) {
+            std::vector<Item*> fns = dyn_table(t, want->item, e->span);
+            e->dyn_fns = ctx_.arena.copy(fns);
+        }
+        return true;
+    }
+
+    // A `mut dyn I` parameter can be given a new value, so its argument must be a `dyn I` already.
+    void mut_dyn(Expr* v) {
+        error(v->span, "a `mut` parameter of type " + name_of(v->to_dyn) + " takes a variable of that type, since it can be given "
+                       "a value of another; this is " + a_type(v->type));
+        if (Local* root = place_root(v)) root->used = root->mutated = true;
+    }
+
+    // `d.m(...)` on a `dyn I`: the interface's function, called through the table. Its arguments
+    // are checked as for any call of it, with the interface's arguments in place of its
+    // parameters and `Self` left as it is, since which type it is isn't known.
+    Type* dyn_call(Expr* e, Type* recv, Type* expected) {
+        Expr* callee = e->callee;
+        Item* iface = recv->item;
+        Item* g = iface_root(iface);
+        Item* f = interface_member(g, callee->member);
+        if (!f || f->kind != ItemKind::fn) {
+            error(callee->span, name_of(recv) + " has no method " + q(text(callee->member)) +
+                                    (f ? "; " + q(text(f->name)) + " is a constant of the interface, which a `dyn` doesn't have"
+                                       : std::string()));
+            check_args(e);
+            return T.error;
+        }
+        std::vector<Item*> table = dyn_methods(iface);
+        auto at = std::find(table.begin(), table.end(), f);
+        if (at == table.end()) {
+            error(callee->span, q(text(f->name)) + " can't be called through a `dyn`, since " + not_in_table(f));
+            check_args(e);
+            return T.error;
+        }
+        Subst s{{g->type_params[0], g->type_params[0]}};
+        for (std::size_t k = 1; k < g->type_params.size() && k - 1 < iface->type_args.size(); k++) {
+            s[g->type_params[k]] = iface->type_args[k - 1];
+        }
+        dyn_self_ = true;
+        Type* result = fn_call(e, f, callee->lhs, expected, std::move(s), callee->type_args);
+        e->call = CallKind::dyn;
+        e->item = f;
+        e->field_index = static_cast<std::uint32_t>(at - table.begin());
+        return result;
+    }
+
+    // The functions in a `dyn I`'s table, for C: each as a `fn` type without its receiver, and
+    // in `modes` whether it takes `mut self`.
+    void dyn_signatures(Type* t) {
+        Item* g = iface_root(t->item);
+        Subst s;
+        for (std::size_t k = 1; k < g->type_params.size() && k - 1 < t->item->type_args.size(); k++) {
+            s[g->type_params[k]] = t->item->type_args[k - 1];
+        }
+        std::vector<Type*> fns;
+        std::vector<std::uint8_t> recv;
+        for (Item* f : dyn_methods(t->item)) {
+            std::vector<Type*> params;
+            std::vector<std::uint8_t> modes;
+            for (std::size_t i = 1; i < f->params.size(); i++) {
+                params.push_back(f->params[i].local ? subst(f->params[i].local->type, s) : T.error);
+                modes.push_back(static_cast<std::uint8_t>(f->params[i].mode));
+            }
+            Type* result = f->result_type ? subst(f->result_type, s) : T.unit;
+            fns.push_back(T.fn_of(params, modes, result, false));
+            recv.push_back(static_cast<std::uint8_t>(f->params[0].mode));
+        }
+        t->elems = ctx_.arena.copy(fns);
+        t->modes = ctx_.arena.copy(recv);
     }
 
     // `T?`, or an error for the types an optional can't hold.
@@ -4511,6 +4675,11 @@ private:
         }
         if (t->is_result && e != result_ok_) t = result_value(e);
         e->type = t;
+        e->to_dyn = nullptr;
+        // CLX-72: a value whose type implements `I`, where a `dyn I` is wanted, becomes one.
+        if (expected && expected->kind == TypeKind::dyn && !is_bad(t) && t != expected && to_dyn(e, t, expected)) {
+            return expected;
+        }
         // CLX-141: a `str` argument for a `String` parameter that's only looked at is a `String`
         // viewing the same bytes. It keeps its type, so it's worked out as the `str` it is.
         if (e == str_view_ok_ && t == T.str && expected == T.string) {
@@ -4663,6 +4832,12 @@ private:
         } else if (got->kind == TypeKind::optional && got->elem == want) {
             msg += is_some_call(e) ? std::string("; `some(...)` makes an optional, so remove it")
                                    : std::string("; unwrap it with `??`, `!`, `if let` or `let ... else`");
+        } else if (want->kind == TypeKind::dyn && got->kind != TypeKind::dyn) {
+            const Type* h = handle_inside(got);
+            msg += got->scoped || got->kind == TypeKind::closure
+                       ? "; " + a_type(got) + " can't be kept in a `dyn`"
+                   : h ? "; a `dyn` can be copied, and " + name_of(got) + (h == got ? " can't" : " holds " + name_of(h) + ", which can't")
+                       : ", which doesn't implement " + q(iface_text(want->item));
         }
         error(e->span, msg);
     }
@@ -5535,7 +5710,10 @@ private:
             }
             Type* got = check(a.value, ft->elems[i]);
             if (is_bad(got)) ok = false;
-            if (ft->modes[i] == static_cast<std::uint8_t>(ParamMode::mut)) {
+            if (ft->modes[i] == static_cast<std::uint8_t>(ParamMode::mut) && a.value->to_dyn) {
+                mut_dyn(a.value);
+                is_mut[i] = true;
+            } else if (ft->modes[i] == static_cast<std::uint8_t>(ParamMode::mut)) {
                 if (!a.is_mut) {
                     error(a.value->span, "this function can change its argument " + std::to_string(i + 1) + ", so pass it as " +
                                              q("mut ...") + " to show that");
@@ -7952,6 +8130,7 @@ private:
                 return handle_method(e, recv);
             }
             if (recv->kind == TypeKind::library && callee->member != n_copy_) return library_method(e, expected);
+            if (recv->kind == TypeKind::dyn && callee->member != n_copy_) return dyn_call(e, recv, expected);
             if (!callee->type_args.empty() && !lookup(recv, callee->member, e->only_interface).fn) {
                 error(callee->type_args[0]->span, q(text(callee->member)) + " doesn't take generic arguments");
                 check_args(e);
@@ -8258,6 +8437,9 @@ private:
     Type* fn_call(Expr* e, Item* f, Expr* receiver, Type* expected = nullptr, Subst s = {},
                   Slice<TypeExpr*> type_args = {}) {
         check_signature(f);
+        // Through a `dyn`, `Self` is no type in particular, so there's no instance to make.
+        bool through_dyn = dyn_self_;
+        dyn_self_ = false;
         e->call = receiver ? CallKind::method : CallKind::fn;
         e->item = f;
         if (f->is_extern) {
@@ -8380,7 +8562,9 @@ private:
                 str_view_ok_ = saved_view;
                 if (is_bad(got)) bad_arg = true;
             }
-            if (p.mode == ParamMode::mut) {
+            if (p.mode == ParamMode::mut && a.value->to_dyn) {
+                mut_dyn(a.value);
+            } else if (p.mode == ParamMode::mut) {
                 if (!a.is_mut) {
                     error(a.value->span, q(text(f->name)) + " can change " + q(text(p.name)) + ", so pass it as " +
                                              q("mut ...") + " to show that");
@@ -8441,6 +8625,7 @@ private:
             args.push_back(it->second);
         }
         if (!ok) return T.error;
+        if (through_dyn) return subst(result, s);
         if (!check_bounds(vars, args, e->span, q(text(f->name)))) return T.error;
         result = subst(result, s);
         bool open = false;
@@ -10881,11 +11066,18 @@ private:
             switch (t->kind) {
                 case TypeKind::struct_: case TypeKind::array: case TypeKind::enum_: case TypeKind::optional:
                 case TypeKind::tuple: case TypeKind::list: case TypeKind::deque: case TypeKind::map: case TypeKind::set:
-                case TypeKind::fn_: break;
+                case TypeKind::fn_: case TypeKind::dyn: break;
                 default: return;
             }
             int& st = state[t];
             if (st == 2) return;
+            if (t->kind == TypeKind::dyn) {
+                // Two addresses: its table's types, which name what its functions take, come
+                // after every other type.
+                st = 2;
+                if (!t->open) prog_.type_order.push_back(t);
+                return;
+            }
             if (t->kind == TypeKind::fn_) {
                 // It needs only the declarations of what it takes and gives, but its C type names
                 // the function types among them, so those come first (D122).
@@ -11330,6 +11522,7 @@ private:
     bool defaults_ready_ = false;
     bool defer_bounds_ = false;
     bool instance_mode_ = false;
+    bool dyn_self_ = false;  // the next `fn_call` is through a `dyn`, from `dyn_call`
 };
 
 }  // namespace

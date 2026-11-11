@@ -1,0 +1,63 @@
+// What a `dyn` can't do (CLX-72).
+
+interface Shape {
+    const SIDES: i32
+
+    fn area(self) -> f64
+
+    fn make() -> Self
+
+    fn same(self, other: Self) -> bool
+
+    fn into_parts(own self) -> f64
+
+    fn scaled(self, by: f64) -> Self
+}
+
+struct Circle {
+    r: f64,
+}
+
+impl Shape for Circle {
+    const SIDES: i32 = 0
+
+    fn area(self) -> f64 {
+        return self.r
+    }
+
+    fn make() -> Self {
+        return Circle { r: 1.0 }
+    }
+
+    fn same(self, other: Self) -> bool {
+        return self.r == other.r
+    }
+
+    fn into_parts(own self) -> f64 {
+        return self.r
+    }
+
+    fn scaled(self, by: f64) -> Self {
+        return Circle { r: self.r * by }
+    }
+}
+
+fn change(s: mut dyn Shape) {
+    s = Circle { r: 2.0 }
+}
+
+fn main() {
+    let d: dyn Shape = Circle { r: 1.0 }
+    _ = d.area()
+    _ = d.same(Circle { r: 1.0 })    // error: `same` can't be called through a `dyn`, since its parameter `other` mentions `Self`
+    _ = d.into_parts()    // error: `into_parts` can't be called through a `dyn`, since it takes `own self`
+    _ = d.scaled(2.0)    // error: `scaled` can't be called through a `dyn`, since what it gives back mentions `Self`
+    _ = d.SIDES()    // error: `SIDES` is a constant of the interface, which a `dyn` doesn't have
+    _ = d.perimeter()    // error: `dyn Shape` has no method `perimeter`
+    let _n: dyn Shape = 5u8    // error: which doesn't implement `Shape`
+    var c = Circle { r: 1.0 }
+    change(mut c)    // error: a `mut` parameter of type `dyn Shape` takes a variable of that type
+    let e: dyn Shape = Circle { r: 1.0 }
+    _ = d == e    // error: `==`
+    println("{d}")    // error: can't be shown
+}
