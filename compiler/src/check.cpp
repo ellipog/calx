@@ -1497,7 +1497,7 @@ private:
             return nullptr;
         }
         if (iface && !nominal && !is_numeric(t) && t->kind != TypeKind::bool_ && t->kind != TypeKind::char_ &&
-            t->kind != TypeKind::rune && t->kind != TypeKind::str) {
+            t->kind != TypeKind::rune && t->kind != TypeKind::str && t->kind != TypeKind::list) {
             not_yet(impl->self_type->span, "interfaces for this kind of type");
             return nullptr;
         }
@@ -1615,6 +1615,13 @@ private:
             if (info->members.count(m->name)) {
                 error(m->name_span, name_of(t) + " already has " + (m->kind == ItemKind::fn ? "a function" : "a constant") +
                                         " named " + q(text(m->name)) + " here");
+                continue;
+            }
+            // A list's own methods come first in a call, so an impl's of the same name would
+            // only run through generic code: `xs.len()` and a generic `x.len()` would differ.
+            if (t->kind == TypeKind::list && m->kind == ItemKind::fn && list_method(text(m->name))) {
+                error(m->name_span, "a list has a method " + q(text(m->name)) + " of its own, so an impl for " + name_of(t) +
+                                        " can't have one; give the interface's another name");
                 continue;
             }
             // An interface's members carry its name in C, so a profile or a stack trace says which
@@ -2496,6 +2503,9 @@ private:
     static const void* head(const Type* t) {
         if (t->generic) return t->generic;
         if (t->item) return t->item;
+        // Every list is one head, so `impl<T: X> X for List<T>` is found for a `List<Player>`.
+        static const char list_head = 0;
+        if (t->kind == TypeKind::list) return &list_head;
         return t;
     }
 
@@ -11325,6 +11335,18 @@ private:
             error(lhs->span, "`extend` changes " + name_of(recv) + ", so call it on a variable");
         }
         return T.unit;
+    }
+
+    // Whether a list has a method named `m` of its own, as `builtin_method` reads them.
+    static bool list_method(std::string_view m) {
+        static const char* const names[] = {
+            "len",     "is_empty", "capacity", "push",    "pop",       "clear",      "insert", "remove",  "swap_remove",
+            "swap",    "truncate", "reserve",  "contains", "sort",     "reverse",    "sum",    "min",     "max",
+            "extend",  "as_ptr",   "as_mut_ptr", "set_len", "to_list", "join",       "copy",   "enumerate", "iter"};
+        for (const char* n : names) {
+            if (m == n) return true;
+        }
+        return closure_method(m) != BMethod::none;
     }
 
     // The methods of a list that call a closure, or a function, on its elements (CLX-98).

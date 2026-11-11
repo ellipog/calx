@@ -1,0 +1,60 @@
+// An interface implemented for lists: for every `List<T>` whose elements have it, for one list
+// type, through generic code and on a list directly, with functions that take no `self`, and
+// nested, a `List<List<T>>` (CLX-263).
+interface Total {
+    fn total(self) -> i64
+    fn zero() -> Self
+}
+
+interface Named {
+    fn label(self) -> String
+}
+
+struct Coin {
+    value: i64
+}
+
+impl Total for Coin {
+    fn total(self) -> i64 {
+        return self.value
+    }
+    fn zero() -> Coin {
+        return Coin { value: 0 }
+    }
+}
+
+impl<T: Total> Total for List<T> {
+    fn total(self) -> i64 {
+        var n: i64 = 0
+        for x in self {
+            n += x.total()
+        }
+        return n
+    }
+    fn zero() -> List<T> {
+        return List<T>()
+    }
+}
+
+impl Named for List<i32> {
+    fn label(self) -> String {
+        return "{self.len()} numbers"
+    }
+}
+
+fn sum_of<T: Total>(x: T) -> i64 {
+    return x.total()
+}
+
+fn zero_of<T: Total>() -> T {
+    return T.zero()
+}
+
+fn main() {
+    let coins: List<Coin> = [Coin { value: 2 }, Coin { value: 5 }]
+    let piles: List<List<Coin>> = [[Coin { value: 1 }], [Coin { value: 3 }, Coin { value: 4 }]]
+    println("{coins.total()} {sum_of(piles)} {sum_of(coins)}")        // out: 7 8 7
+    println("{zero_of<List<Coin>>().len()} {zero_of<Coin>().value}")   // out: 0 0
+    let xs: List<i32> = [1, 2, 3]
+    println(xs.label())                                                // out: 3 numbers
+}

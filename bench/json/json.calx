@@ -1,6 +1,7 @@
 // JSON as a script reads and writes it: 100,000 records parsed into a tree, written back as
-// compact text, and parsed into structs with `@json`. bench/json/rust and json.py do the same.
-import std.json.{json, Json, JsonError, parse as parse_json}
+// compact text, and read into structs with `@json`, straight from the text. bench/json/rust and
+// json.py do the same.
+import std.json.{json, from_text, JsonError, parse as parse_json}
 import std.time.{Instant}
 
 @json
@@ -40,13 +41,7 @@ fn main() ! JsonError {
         let t1 = unsafe { Instant.now() }
         let out = "{tree}"
         let t2 = unsafe { Instant.now() }
-        var players = List<Player>()
-        if let Json.Array(items) = try parse_json(text) {
-            players.reserve(items.len())
-            for item in items {
-                players.push(try Player.from_json(item))
-            }
-        }
+        let players = try from_text<List<Player>>(text)
         let t3 = unsafe { Instant.now() }
         total += tree.len() + out.len() + players.len() + usize.wrap(players[99999].level)
         parse = parse.min(t1.nanos_since(t0) / 1000)

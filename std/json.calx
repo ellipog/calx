@@ -1,6 +1,6 @@
 /// JSON: text parsed into a tree of values, with the line and column of what's wrong when it isn't
 /// JSON, values written back as compact or indented text, and `@json`, which writes a struct's
-/// `to_json` and `from_json`.
+/// `to_json` and its `FromJson`, to read it from a tree or straight from text.
 module std.json
 
 import std.meta.{EnumDecl, Field, Generated, StructDecl, TypeKind, TypeRef}
@@ -880,6 +880,297 @@ pub fn json_string(value: Json, what: String) -> String ! JsonError {
     fail json_expected(value, "a string", what)
 }
 
+// --- reading straight from text ------------------------------------------------------------------
+
+/// What `@json` and `@json_enum` give a type, and lists of them have: reading it from a `Json`
+/// tree, and straight from text, which `from_text` does.
+pub interface FromJson {
+    /// The value JSON describes, whose errors start with the type's name.
+    fn from_json(value: Json) -> Self ! JsonError
+    /// The same for a value deep in a document, whose errors start with `path`.
+    fn from_json_at(value: Json, path: String) -> Self ! JsonError
+    /// The value at byte `at` of `text`, nested `depth` deep, read from the text without a tree,
+    /// with `at` moved past it; or `none` where the text isn't plainly one, which the tree then
+    /// says why, or reads the long way.
+    fn read_json(text: String, at: mut usize, depth: usize) -> Self?
+}
+
+/// The `T` JSON text describes, read straight from the text: `from_text<List<Player>>(text)`.
+/// Text that isn't plainly a `T`, with escapes in its keys, say, or that isn't one at all, is read
+/// into a tree first, so its errors are `parse`'s and `T.from_json`'s.
+pub fn from_text<T: FromJson>(text: String) -> T ! JsonError {
+    var at: usize = 0
+    skip_space(text, mut at)
+    if let v = T.read_json(text, mut at, 0) {
+        skip_space(text, mut at)
+        if at == text.len() {
+            return v
+        }
+    }
+    let value = try parse(text)
+    return try T.from_json(value)
+}
+
+impl<T: FromJson> FromJson for List<T> {
+    fn from_json(value: Json) -> List<T> ! JsonError {
+        return try list_from_json<T>(value, "")
+    }
+
+    fn from_json_at(value: Json, path: String) -> List<T> ! JsonError {
+        return try list_from_json<T>(value, path)
+    }
+
+    fn read_json(text: String, at: mut usize, depth: usize) -> List<T>? {
+        if not json_read_array(text, mut at, depth) {
+            return none
+        }
+        var out = List<T>()
+        var more = not json_read_empty(text, mut at, 93)
+        while more {
+            let v = T.read_json(text, mut at, depth + 1) else return none
+            out.push(v)
+            let next = json_read_more(text, mut at, 93) else return none
+            more = next
+        }
+        return some(out)
+    }
+}
+
+// A list read from the tree. At the top, its path is empty, and its items' are `[0]` and on.
+fn list_from_json<T: FromJson>(value: Json, path: String) -> List<T> ! JsonError {
+    if let Json.Array(items) = value {
+        var out = List<T>()
+        out.reserve(items.len())
+        for (i, x) in items.enumerate() {
+            out.push(try T.from_json_at(x, "{path}[{i}]"))
+        }
+        return out
+    }
+    if path.is_empty() {
+        fail JsonError { message: "the text should be an array, not {value.kind()}", line: 0, column: 0 }
+    }
+    fail json_expected(value, "an array", path)
+}
+
+// What `read_json`'s code calls, which `@json` writes. Each reads at byte `at` of `text`, and
+// gives `none` or `false` where the text isn't plainly what it reads, which is then read again
+// through the tree, so none of them says why.
+
+/// Whether an object that may nest `depth` deep starts at `at`; if so, moves past its `{` and
+/// the white space after it.
+pub fn json_read_object(text: String, at: mut usize, depth: usize) -> bool {
+    if depth >= MAX_DEPTH or at >= text.len() or text.byte_at(at) != 123 {
+        return false
+    }
+    at += 1
+    skip_space(text, mut at)
+    return true
+}
+
+/// The same for an array and its `[`.
+pub fn json_read_array(text: String, at: mut usize, depth: usize) -> bool {
+    if depth >= MAX_DEPTH or at >= text.len() or text.byte_at(at) != 91 {
+        return false
+    }
+    at += 1
+    skip_space(text, mut at)
+    return true
+}
+
+/// Whether the byte at `at` is `close`, `}` or `]`, where an object or an array that has just
+/// started ends at once; if so, moves past it.
+pub fn json_read_empty(text: String, at: mut usize, close: u8) -> bool {
+    if at < text.len() and text.byte_at(at) == close {
+        at += 1
+        return true
+    }
+    return false
+}
+
+/// After a member or an item, past the white space: `some(true)` at a `,`, moving past it and the
+/// white space after it, and `some(false)` at `close`, moving past it.
+pub fn json_read_more(text: String, at: mut usize, close: u8) -> bool? {
+    skip_space(text, mut at)
+    if at < text.len() {
+        let b = text.byte_at(at)
+        if b == 44 {
+            at += 1
+            skip_space(text, mut at)
+            return some(true)
+        }
+        if b == close {
+            at += 1
+            return some(false)
+        }
+    }
+    return none
+}
+
+/// A string without escapes: where its text starts, with `end` where it ends, and `at` past its
+/// closing quote.
+pub fn json_read_name(text: String, at: mut usize, end: mut usize) -> usize? {
+    if at >= text.len() or text.byte_at(at) != 34 {
+        return none
+    }
+    let start = at + 1
+    var i = start
+    while i < text.len() {
+        let b = text.byte_at(i)
+        if b == 34 {
+            end = i
+            at = i + 1
+            return some(start)
+        }
+        if b == 92 or b < 0x20 {
+            return none
+        }
+        i += 1
+    }
+    return none
+}
+
+/// A member's key, as `json_read_name` reads it, with `at` past the `:` after it and the white
+/// space around that.
+pub fn json_read_key(text: String, at: mut usize, end: mut usize) -> usize? {
+    let start = json_read_name(text, mut at, mut end) else return none
+    skip_space(text, mut at)
+    if at >= text.len() or text.byte_at(at) != 58 {
+        return none
+    }
+    at += 1
+    skip_space(text, mut at)
+    return some(start)
+}
+
+/// Whether `null` is at `at`; if so, moves past it.
+pub fn json_read_null(text: String, at: mut usize) -> bool {
+    if word(text, at, "null") {
+        at += 4
+        return true
+    }
+    return false
+}
+
+/// `true` or `false`.
+pub fn json_read_bool(text: String, at: mut usize) -> bool? {
+    if word(text, at, "true") {
+        at += 4
+        return some(true)
+    }
+    if word(text, at, "false") {
+        at += 5
+        return some(false)
+    }
+    return none
+}
+
+/// An integer from `min` to `max`.
+pub fn json_read_int(text: String, at: mut usize, min: i64, max: i64) -> i64? {
+    // Most are a few digits, read here; the rest are read as `parse` reads them.
+    var i = at
+    let negative = i < text.len() and text.byte_at(i) == 45
+    if negative {
+        i += 1
+    }
+    let digits = i
+    var mag: i64 = 0
+    while i < text.len() and i - digits < 18 {
+        let b = text.byte_at(i)
+        if b < 48 or b > 57 {
+            break
+        }
+        mag = mag * 10 + i64(b - 48)
+        i += 1
+    }
+    // Digits that don't start with a `0` and go on, with nothing after them that makes the number
+    // longer or not whole.
+    let some_digits = i > digits and (i - digits == 1 or text.byte_at(digits) != 48)
+    if some_digits and (i >= text.len() or not number_goes_on(text.byte_at(i))) {
+        let n = if negative { 0 - mag } else { mag }
+        if n < min or n > max {
+            return none
+        }
+        at = i
+        return some(n)
+    }
+    let v = read_number(text, mut at) else return none
+    if let Json.Int(n) = v {
+        if n >= min and n <= max {
+            return some(n)
+        }
+    }
+    return none
+}
+
+// Whether the byte after a number's digits makes it more: another digit, a `.` or an exponent.
+fn number_goes_on(b: u8) -> bool {
+    return (b >= 48 and b <= 57) or b == 46 or b == 101 or b == 69
+}
+
+// A number, as `parse` reads it.
+fn read_number(text: String, at: mut usize) -> Json? {
+    if at >= text.len() {
+        return none
+    }
+    let b = text.byte_at(at)
+    if b != 45 and (b < 48 or b > 57) {
+        return none
+    }
+    let ok(v) = parse_number(text, mut at) else {
+        return none
+    }
+    return some(v)
+}
+
+/// A `u64`.
+pub fn json_read_u64(text: String, at: mut usize) -> u64? {
+    let v = read_number(text, mut at) else return none
+    return match v {
+        Json.Int(n) => if n >= 0 { some(u64.wrap(n)) } else { none },
+        Json.UInt(n) => some(n),
+        _ => none,
+    }
+}
+
+/// A number, as an `f64`.
+pub fn json_read_f64(text: String, at: mut usize) -> f64? {
+    let v = read_number(text, mut at) else return none
+    return match v {
+        Json.Int(n) => some(f64.nearest(n)),
+        Json.UInt(n) => some(f64.nearest(n)),
+        Json.Big(digits) => some(f64.parse(digits) ?? 0.0),
+        Json.Float(f) => some(f),
+        _ => none,
+    }
+}
+
+/// A string, with its escapes decoded.
+pub fn json_read_str(text: String, at: mut usize) -> String? {
+    if at >= text.len() or text.byte_at(at) != 34 {
+        return none
+    }
+    let ok(s) = parse_string(text, mut at) else {
+        return none
+    }
+    return some(s)
+}
+
+/// Any value, nested `depth` deep, as `parse` reads it.
+pub fn json_read_value(text: String, at: mut usize, depth: usize) -> Json? {
+    let ok(v) = parse_value(text, mut at, depth) else {
+        return none
+    }
+    return some(v)
+}
+
+/// Whether a value nested `depth` deep is at `at`, which it moves past: a member no field reads.
+pub fn json_read_skip(text: String, at: mut usize, depth: usize) -> bool {
+    if let ok(_) = parse_value(text, mut at, depth) {
+        return true
+    }
+    return false
+}
+
 // --- @json ---------------------------------------------------------------------------------------
 
 /// The error for a string at `path` that names none of an enum's variants, `names`.
@@ -891,8 +1182,8 @@ pub fn json_not_one_of(value: Json, names: String, path: String) -> JsonError {
     return json_expected(value, "one of {names}", path)
 }
 
-/// Writes `to_json(self) -> Json` and `from_json(value: Json) -> Self ! JsonError` for a struct,
-/// and `to_json_text` and `from_json_text` beside them, from its fields' types. See
+/// Writes `to_json(self) -> Json`, `to_json_text` and `from_json_text` for a struct, and its
+/// `FromJson`, which reads it from a tree or straight from text, from its fields' types. See
 /// docs/std/json.md.
 @attribute("json_key")
 pub fn json(decl: StructDecl) -> Generated ! String {
@@ -902,6 +1193,12 @@ pub fn json(decl: StructDecl) -> Generated ! String {
     var w = Writer { owner: decl.name.copy(), helpers: String(), next: 0, uses: List<String>() }
     var to = String()
     var from = String()
+    // `read_json`'s parts: a slot for each field, the code that reads each member into its slot,
+    // and the struct made from the slots.
+    var slots = String()
+    var reads = String()
+    var takes = String()
+    var made = String()
     for f in decl.fields {
         let key = try json_key(f)
         let at = #""{path}.#{key}""#
@@ -912,7 +1209,8 @@ pub fn json(decl: StructDecl) -> Generated ! String {
         // A missing member is `none` for an optional, the field's default if it has one, and an
         // error otherwise.
         var missing = String()
-        if f.ty.kind == TypeKind.Optional {
+        let optional = f.ty.kind == TypeKind.Optional
+        if optional {
             missing.push_str("none")
         } else if not f.default.is_empty() {
             missing.push_str(f.default)
@@ -924,11 +1222,41 @@ pub fn json(decl: StructDecl) -> Generated ! String {
         }
         from.push_str(#"            #{f.name}: if members.contains("#{key}") { #{get} } else { #{missing} },"#)
         from.push('\n')
+        // An optional field's slot is the field's own type, since `null` and a missing member are
+        // both `none`; another's holds the value once its member is read.
+        let slot = "json_f_{f.name}"
+        let slot_type = if optional { f.ty.text.copy() } else { "{f.ty.text}?" }
+        slots.push_str("        var {slot}: {slot_type} = none\n")
+        let read = if optional {
+            try w.reader(f.ty, "{slot} = ", "", "depth + 1")
+        } else {
+            try w.reader(f.ty, "{slot} = some(", ")", "depth + 1")
+        }
+        if not reads.is_empty() {
+            reads.push_str(" else ")
+        }
+        reads.push_str("if text[json_key..json_end] == \"{key}\" \{\n{read}\n            \}")
+        if optional {
+            made.push_str("            {f.name}: {slot},\n")
+        } else if not f.default.is_empty() {
+            made.push_str("            {f.name}: {slot} ?? {f.default},\n")
+        } else {
+            takes.push_str("        let json_r_{f.name} = {slot} else return none\n")
+            made.push_str("            {f.name}: json_r_{f.name},\n")
+        }
     }
-    w.use_name("Json")
-    w.use_name("JsonError")
-    w.use_name("json_expected")
-    w.use_name("parse as json_parse")
+    // A member no field reads is read all the same, so text that isn't JSON is never taken.
+    let skip = "if not json_read_skip(text, mut at, depth + 1) \{\n                return none\n            \}"
+    let key_name = if reads.is_empty() { "_json_key" } else { "json_key" }
+    if reads.is_empty() {
+        reads.push_str(skip)
+    } else {
+        reads.push_str(" else \{\n{skip}\n            \}")
+    }
+    for name in ["Json", "JsonError", "json_expected", "FromJson", "from_text as json_from_text", "json_read_object",
+        "json_read_empty", "json_read_key", "json_read_more", "json_read_skip"] {
+        w.use_name(name)
+    }
     var g = Generated.new()
     g.add(w.imports())
     g.add(#"
@@ -944,14 +1272,22 @@ pub fn json(decl: StructDecl) -> Generated ! String {
                 return "{self.to_json()}"
             }
 
+            /// The value JSON text describes, read straight from the text, as `from_text` reads
+            /// it, with `from_json`'s errors.
+            pub fn from_json_text(text: String) -> #{decl.name} ! JsonError {
+                return try json_from_text<#{decl.name}>(text)
+            }
+        }
+
+        impl FromJson for #{decl.name} {
             /// The value JSON describes, as `@json` reads it: an object with a member for each
             /// field, whose others are passed over.
-            pub fn from_json(value: Json) -> #{decl.name} ! JsonError {
+            fn from_json(value: Json) -> #{decl.name} ! JsonError {
                 return try #{decl.name}.from_json_at(value, "#{decl.name}")
             }
 
             /// The same, for the value at `path` in a bigger document, which errors name.
-            pub fn from_json_at(value: Json, path: String) -> #{decl.name} ! JsonError {
+            fn from_json_at(value: Json, path: String) -> #{decl.name} ! JsonError {
                 if let Json.Object(members) = value {
                     return #{decl.name} {
         #{from}            }
@@ -959,10 +1295,21 @@ pub fn json(decl: StructDecl) -> Generated ! String {
                 fail json_expected(value, "an object", path)
             }
 
-            /// The value JSON text describes, as `from_json` reads it.
-            pub fn from_json_text(text: String) -> #{decl.name} ! JsonError {
-                let value = try json_parse(text)
-                return try #{decl.name}.from_json(value)
+            /// The same, read straight from text, or `none` where it isn't plainly one.
+            fn read_json(text: String, at: mut usize, depth: usize) -> #{decl.name}? {
+                if not json_read_object(text, mut at, depth) {
+                    return none
+                }
+        #{slots}        var json_end: usize = 0
+                var json_more = not json_read_empty(text, mut at, 125)
+                while json_more {
+                    let #{key_name} = json_read_key(text, mut at, mut json_end) else return none
+                    #{reads}
+                    let json_next = json_read_more(text, mut at, 125) else return none
+                    json_more = json_next
+                }
+        #{takes}        return some(#{decl.name} {
+        #{made}        })
             }
         }
         "#)
@@ -972,7 +1319,7 @@ pub fn json(decl: StructDecl) -> Generated ! String {
     return g
 }
 
-/// Writes `to_json` and `from_json` for an enum whose variants hold nothing, as their names, so a
+/// Writes `to_json` and `FromJson` for an enum whose variants hold nothing, as their names, so a
 /// field of the enum's type can be in a struct with `@json`. See docs/std/json.md.
 @attribute
 pub fn json_enum(decl: EnumDecl) -> Generated ! String {
@@ -984,6 +1331,7 @@ pub fn json_enum(decl: EnumDecl) -> Generated ! String {
     }
     var to = String()
     var from = String()
+    var read = String()
     var names = String()
     for v in decl.variants {
         if not v.payload.is_empty() or not v.fields.is_empty() {
@@ -993,13 +1341,15 @@ pub fn json_enum(decl: EnumDecl) -> Generated ! String {
         to.push('\n')
         from.push_str(#"                    if s == "#{v.name}" { return #{decl.name}.#{v.name} }"#)
         from.push('\n')
+        read.push_str(#"                if text[json_start..json_end] == "#{v.name}" { return some(#{decl.name}.#{v.name}) }"#)
+        read.push('\n')
         if not names.is_empty() {
             names.push_str(", ")
         }
         names.push_str("`{v.name}`")
     }
     var g = Generated.new()
-    g.add("import std.json.\{Json, JsonError, json_not_one_of\}")
+    g.add("import std.json.\{Json, JsonError, json_not_one_of, FromJson, json_read_name\}")
     g.add(#"
         impl #{decl.name} {
             /// This, as the name of its variant.
@@ -1007,17 +1357,26 @@ pub fn json_enum(decl: EnumDecl) -> Generated ! String {
                 return Json.Str(match self {
         #{to}            })
             }
+        }
 
+        impl FromJson for #{decl.name} {
             /// The variant a JSON string names.
-            pub fn from_json(value: Json) -> #{decl.name} ! JsonError {
+            fn from_json(value: Json) -> #{decl.name} ! JsonError {
                 return try #{decl.name}.from_json_at(value, "#{decl.name}")
             }
 
             /// The same, for the value at `path` in a bigger document, which errors name.
-            pub fn from_json_at(value: Json, path: String) -> #{decl.name} ! JsonError {
+            fn from_json_at(value: Json, path: String) -> #{decl.name} ! JsonError {
                 if let Json.Str(s) = value {
         #{from}        }
                 fail json_not_one_of(value, "#{names}", path)
+            }
+
+            /// The same, read straight from text, or `none` where it isn't plainly one.
+            fn read_json(text: String, at: mut usize, depth: usize) -> #{decl.name}? {
+                var json_end: usize = 0
+                let json_start = json_read_name(text, mut at, mut json_end) else return none
+        #{read}        return none
             }
         }
         "#)
@@ -1154,6 +1513,105 @@ impl Writer {
         }
         // A type with `@json` of its own.
         return "{value}.to_json()"
+    }
+
+    // Statements that read a `t` straight from the text at `at`, nested `depth` deep, where `depth`
+    // is an expression, and give it to `put` and `close`, the code before and after the value. They
+    // `return none` where the text isn't plainly a `t`.
+    fn reader(mut self, t: TypeRef, put: String, close: String, depth: String) -> String ! String {
+        if t.kind == TypeKind.Optional {
+            self.use_name("json_read_null")
+            let inner = try self.reader(t.args[0], "{put}some(", "){close}", depth)
+            return "if json_read_null(text, mut at) \{\n{put}none{close}\n\} else \{\n{inner}\n\}"
+        }
+        if t.kind != TypeKind.Named {
+            fail "`@json` can't read a `{t.text}` field yet"
+        }
+        let n = t.name.copy()
+        var get = String()
+        var value = String("json_v")
+        let range = int_range(n)
+        if n == "bool" {
+            self.use_name("json_read_bool")
+            get.push_str("json_read_bool(text, mut at)")
+        } else if let (lo, hi) = range {
+            self.use_name("json_read_int")
+            get.push_str("json_read_int(text, mut at, {lo}, {hi})")
+            if n != "i64" {
+                value = "{n}.wrap(json_v)"
+            }
+        } else if n == "u64" or n == "usize" {
+            self.use_name("json_read_u64")
+            get.push_str("json_read_u64(text, mut at)")
+            if n == "usize" {
+                value = "usize.wrap(json_v)"
+            }
+        } else if n == "f64" or n == "f32" {
+            self.use_name("json_read_f64")
+            get.push_str("json_read_f64(text, mut at)")
+            if n == "f32" {
+                value = "f32.nearest(json_v)"
+            }
+        } else if n == "String" {
+            self.use_name("json_read_str")
+            get.push_str("json_read_str(text, mut at)")
+        } else if n == "Json" {
+            self.use_name("json_read_value")
+            get.push_str("json_read_value(text, mut at, {depth})")
+        } else if n == "List" {
+            let inner = try self.reader(t.args[0], "json_out.push(", ")", "depth + 1")
+            let name = self.fresh()
+            self.use_name("json_read_array")
+            self.use_name("json_read_empty")
+            self.use_name("json_read_more")
+            self.add_helper(#"
+                fn #{name}(text: String, at: mut usize, depth: usize) -> #{t.text}? {
+                    if not json_read_array(text, mut at, depth) {
+                        return none
+                    }
+                    var json_out = #{t.text}()
+                    var json_more = not json_read_empty(text, mut at, 93)
+                    while json_more {
+                        #{inner}
+                        let json_next = json_read_more(text, mut at, 93) else return none
+                        json_more = json_next
+                    }
+                    return some(json_out)
+                }
+                "#)
+            get.push_str("{name}(text, mut at, {depth})")
+        } else if n == "Map" or n == "LinkedMap" or n == "SortedMap" {
+            let inner = try self.reader(t.args[1], "json_out.insert(text[json_key..json_end].copy(), ", ")", "depth + 1")
+            let name = self.fresh()
+            self.use_name("json_read_object")
+            self.use_name("json_read_empty")
+            self.use_name("json_read_key")
+            self.use_name("json_read_more")
+            self.add_helper(#"
+                fn #{name}(text: String, at: mut usize, depth: usize) -> #{t.text}? {
+                    if not json_read_object(text, mut at, depth) {
+                        return none
+                    }
+                    var json_out = #{t.text}()
+                    var json_end: usize = 0
+                    var json_more = not json_read_empty(text, mut at, 125)
+                    while json_more {
+                        let json_key = json_read_key(text, mut at, mut json_end) else return none
+                        #{inner}
+                        let json_next = json_read_more(text, mut at, 125) else return none
+                        json_more = json_next
+                    }
+                    return some(json_out)
+                }
+                "#)
+            get.push_str("{name}(text, mut at, {depth})")
+        } else if not t.args.is_empty() {
+            fail "`@json` can't read a `{t.text}` field yet"
+        } else {
+            // A type with `@json` or `@json_enum` of its own.
+            get.push_str("{n}.read_json(text, mut at, {depth})")
+        }
+        return "let json_v = {get} else return none\n{put}{value}{close}"
     }
 
     // An expression that's the `Json` `value` as a `t`, failing with a `JsonError` for the place

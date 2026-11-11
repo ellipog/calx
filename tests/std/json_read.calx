@@ -1,0 +1,147 @@
+// `from_json_text` and `from_text` read `@json` structs straight from the text, and fall back to
+// the tree where the text isn't plainly one (CLX-263). Whatever the text, they give what the tree
+// gives: the same value, or the same error.
+import std.json.{json, json_enum, from_text, parse, FromJson, Json, JsonError}
+
+@json_enum
+enum Mode {
+    Survival
+    Creative
+}
+
+@json
+struct Pos {
+    x: f64
+    z: f32
+}
+
+@json
+struct Rec {
+    id: i64
+    small: i8
+    byte: u8
+    big: u64
+    count: usize
+    name: String
+    @json_key("isOn")
+    on: bool
+    pos: Pos
+    home: Pos?
+    nick: String?
+    mode: Mode
+    tags: List<String?>
+    grid: List<List<i32>>
+    scores: SortedMap<String, i64>
+    order: LinkedMap<String, Mode>
+    extra: Json
+    limit: i32 = 10
+}
+
+// What reading `text` gives, through `from_json_text` and through the tree, as text.
+fn direct(text: String) -> String {
+    return match Rec.from_json_text(text) {
+        ok(r) => "ok {r.to_json_text()}",
+        err(e) => "err {e}",
+    }
+}
+
+fn tree(text: String) -> String {
+    return match parse(text) {
+        ok(v) => match Rec.from_json(v) {
+            ok(r) => "ok {r.to_json_text()}",
+            err(e) => "err {e}",
+        },
+        err(e) => "err {e}",
+    }
+}
+
+// Whether `read_json` reads all of `text` by itself, between the white space around it, without
+// the tree.
+fn plain(text: String) -> bool {
+    var at = text.len() - text.trim_start().len()
+    if let _ = Rec.read_json(text, mut at, 0) {
+        return at == text.trim_end().len()
+    }
+    return false
+}
+
+fn main() ! JsonError {
+    let base = String(#"{"id": 7, "small": -128, "byte": 255, "big": 18446744073709551615, "count": 3, "name": "steve", "isOn": true, "pos": {"x": 1.5, "z": -2}, "home": null, "mode": "Creative", "tags": ["a", null], "grid": [[1, 2], []], "scores": {"b": 2, "a": 1}, "order": {"z": "Survival"}, "extra": {"any": [1, null]}}"#)
+    let opens = "[".repeat(600)
+    let closes = "]".repeat(600)
+    let deep = "{opens}{closes}"
+    let texts: List<String> = [
+        base.copy(),
+        // White space everywhere, and members in another order.
+        "  \n\{ \"extra\" : 1 ,\"id\":0,\"small\":0,\"byte\":0,\"big\":0,\"count\":0,\"name\":\"\",\"isOn\":false,\"pos\":\{\"z\":0,\"x\":0\},\"mode\":\"Survival\",\"tags\":[],\"grid\":[],\"scores\":\{\},\"order\":\{\} \}\t\r\n",
+        // Escapes in a value, and in a key, which the tree reads.
+        base.replace(#""steve""#, #""st\u00e9\"ve\n""#),
+        base.replace(#""name""#, #""n\u0061me""#),
+        // A member given twice, the first wrong: the last one counts.
+        base.replace(#""id": 7"#, #""id": "seven", "id": 8"#),
+        base.replace(#""id": 7"#, #""id": 8, "id": 9"#),
+        // A member no field reads, of every kind, and one nested too deep for `parse`.
+        base.replace(#""id": 7"#, #""unknown": [1, {"a": [true, null, "x", 2.5e3]}], "id": 7"#),
+        base.replace(#""id": 7"#, "\"unknown\": {deep}, \"id\": 7"),
+        // Numbers: a big one where an i64 should be, one past `i8`, a fraction, an exponent, `-0`,
+        // 19 digits, leading zeros, and a `-` with nothing after it.
+        base.replace(#""id": 7"#, #""id": 9223372036854775808"#),
+        base.replace(#""id": 7"#, #""id": -9223372036854775808"#),
+        base.replace(#""id": 7"#, #""id": 1234567890123456789"#),
+        base.replace(#""small": -128"#, #""small": -129"#),
+        base.replace(#""id": 7"#, #""id": 7.0"#),
+        base.replace(#""id": 7"#, #""id": 7e0"#),
+        base.replace(#""id": 7"#, #""id": -0"#),
+        base.replace(#""id": 7"#, #""id": 07"#),
+        base.replace(#""id": 7"#, #""id": -"#),
+        base.replace(#""count": 3"#, #""count": -3"#),
+        base.replace(#""x": 1.5"#, #""x": 123456789012345678901234567890"#),
+        // Wrong kinds, `null` where a value is needed, a missing member, an unknown variant.
+        base.replace(#""isOn": true"#, #""isOn": 1"#),
+        base.replace(#""name": "steve""#, #""name": null"#),
+        base.replace(#""id": 7, "#, ""),
+        base.replace(#""mode": "Creative""#, #""mode": "Adventure""#),
+        base.replace(#""mode": "Creative""#, #""mode": "Cre\u0061tive""#),
+        base.replace(#""tags": ["a", null]"#, #""tags": ["a", 2]"#),
+        base.replace(#""scores": {"b": 2, "a": 1}"#, #""scores": {"b": 2, "a": "1"}"#),
+        // Text that isn't JSON: trailing text, a trailing comma, an unclosed object, nothing.
+        "{base} x",
+        base.replace(#""id": 7, "#, #""id": 7,, "#),
+        base[..base.len() - 1],
+        "",
+        "[]",
+    ]
+    var same: usize = 0
+    var plains = String()
+    for (i, t) in texts.enumerate() {
+        let a = direct(t)
+        let b = tree(t)
+        if a == b {
+            same += 1
+        } else {
+            println("text {i}: direct {a}, tree {b}")
+        }
+        if plain(t) {
+            plains.push_str(" {i}")
+        }
+    }
+    println("{same} of {texts.len()} the same")    // out: 31 of 31 the same
+    println("read without the tree:{plains}")      // out: read without the tree: 0 1 2 5 6 9 10 14 18
+    println(direct(base))
+    // out: ok {"id":7,"small":-128,"byte":255,"big":18446744073709551615,"count":3,"name":"steve","isOn":true,"pos":{"x":1.5,"z":-2.0},"home":null,"nick":null,"mode":"Creative","tags":["a",null],"grid":[[1,2],[]],"scores":{"a":1,"b":2},"order":{"z":"Survival"},"extra":{"any":[1,null]},"limit":10}
+    println(direct(base.replace(#""id": 7"#, #""id": 7.0"#)))    // out: err `Rec.id` should be an integer, not a number
+    // A list of them, straight from the text, and its errors' paths.
+    let list = try from_text<List<Rec>>("[{base}, {base}]")
+    println("{list.len()} {list[1].name}")    // out: 2 steve
+    let bad = "[{base}, {base.replace(#""isOn": true"#, #""isOn": 1"#)}]"
+    match from_text<List<Rec>>(bad) {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),    // out: `[1].isOn` should be true or false, not a number
+    }
+    match from_text<List<Pos>>("\{\}") {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),    // out: the text should be an array, not an object
+    }
+    let modes = try from_text<List<Mode>>(#"["Survival", "Creative"]"#)
+    println("{modes.len()} {Mode.from_json(Json.Str("Creative"))! == Mode.Creative}")    // out: 2 true
+}

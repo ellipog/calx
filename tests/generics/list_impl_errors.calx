@@ -1,0 +1,36 @@
+// What an interface's impl for lists can't do: have a method a list has of its own, or overlap
+// another impl for the same lists (CLX-263).
+interface Sized {
+    fn size(self) -> usize
+    fn len(self) -> usize
+}
+
+interface Named {
+    fn label(self) -> String
+}
+
+impl Sized for List<i32> {    // error: is missing `len`
+    fn size(self) -> usize {
+        return 1
+    }
+    fn len(self) -> usize {    // error: a list has a method `len` of its own
+        return 99
+    }
+}
+
+impl<T> Named for List<T> {
+    fn label(self) -> String {
+        return "list"
+    }
+}
+
+impl Named for List<u8> {    // error: `Named` is already implemented for `List<u8>`
+    fn label(self) -> String {
+        return "bytes"
+    }
+}
+
+fn main() {
+    let xs: List<i32> = [1, 2]
+    println("{xs.size()} {xs.label()}")
+}

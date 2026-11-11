@@ -61,10 +61,10 @@ There's no inheritance and there are no classes. A type gets behavior from its o
 - Each function matches the interface's exactly, parameter names included, with `Self` replaced by the type. Since the interface fixes the names, an impl that doesn't use a parameter isn't an error.
 - A constant can leave its type out, since the interface gives it.
 - An impl has only the interface's members. Anything else goes in a separate `impl Square` block.
-- Structs, enums and the primitive types (integers, floats, `bool`, `char`, `rune` and `str`) can implement interfaces.
+- Structs, enums, lists and the primitive types (integers, floats, `bool`, `char`, `rune` and `str`) can implement interfaces. An impl for lists is in the interface's module, since a list's is the standard library's, and its functions can't be named like a list's own methods, such as `len`, which a call of `xs.len()` would find first.
 - A type implements an interface at most once.
 - A type has one function of each name, as in Java. Its own `impl` blocks can't have a function named like one an interface gives it, a default included. To replace a default, put the function in the interface's impl.
-- An impl for a generic type can have bounds of its own. `impl<T: Code> Code for Wrapper<T>` gives `Wrapper<T>` a code whenever `T` has one.
+- An impl for a generic type can have bounds of its own. `impl<T: Code> Code for Wrapper<T>` gives `Wrapper<T>` a code whenever `T` has one, and `impl<T: Code> Code for List<T>` gives every list of them one.
 - `Equal`, `Display`, `Hash`, `Order` and `JavaHash` are interfaces too, built in, which a struct or an enum implements to write its own property ([comparing and printing](comparing.md#writing-your-own)).
 
 ```calx
@@ -95,9 +95,21 @@ impl<T: Code> Code for Wrapper<T> {
     }
 }
 
+impl<T: Code> Code for List<T> {
+    fn code(self) -> i64 {
+        var sum: i64 = 0
+        for x in self {
+            sum += x.code()
+        }
+        return sum
+    }
+}
+
 fn main() {
     let w = Wrapper { inner: 5, extra: 2 }
     println("{7.code()} {true.code()} {w.code()} {Wrapper { inner: w }.code()}")    // out: 70 1 52 52
+    let xs: List<i32> = [1, 2, 3]
+    println("{xs.code()}")                                                           // out: 60
 }
 ```
 

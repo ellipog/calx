@@ -5,7 +5,7 @@ description: JSON text parsed into a Json tree with the line and column of any m
 
 # `std.json`
 
-JSON as RFC 8259 defines it: text parsed into a tree of `Json` values, with the line and column of what's wrong when it isn't JSON, values written back as compact or indented text, and `@json`, which writes a struct's `to_json` and `from_json` from its fields' types, as serde's derives and Python's dataclasses do.
+JSON as RFC 8259 defines it: text parsed into a tree of `Json` values, with the line and column of what's wrong when it isn't JSON, values written back as compact or indented text, and `@json`, which writes a struct's `to_json` and `from_json` from its fields' types, as serde's derives and Python's dataclasses do, and reads it straight from text, without a tree.
 
 ```calx
 import std.json.{json, Json, JsonError, parse, pretty}
@@ -59,8 +59,10 @@ fn main() ! JsonError {
 | `v.keys() -> List<String>` | An object's keys, in order |
 | `v.kind() -> String` | `null`, `a bool`, `a number`, `a string`, `an array` or `an object`, for messages |
 | `v.walk(f)` | Calls `f` with each value in `v` and its JSON Pointer, `v` first, then depth first in order, without copying them. See [Walking](#walking) |
-| `@json` | On a struct: its `to_json`, `to_json_text`, `from_json`, `from_json_at` and `from_json_text`. See [`@json`](#json) |
-| `@json_enum` | On an enum whose variants hold nothing: its `to_json`, `from_json` and `from_json_at`, as the variants' names |
+| `@json` | On a struct: its `to_json`, `to_json_text` and `from_json_text`, and its `FromJson`. See [`@json`](#json) |
+| `@json_enum` | On an enum whose variants hold nothing: its `to_json` and its `FromJson`, as the variants' names |
+| `FromJson` | What a type with `@json` or `@json_enum` has, and a `List` of them: `from_json`, `from_json_at` and `read_json`. See [Typed reads](#typed-reads) |
+| `from_text<T: FromJson>(text: String) -> T ! JsonError` | The `T` the text describes, read straight from it: `from_text<List<Player>>(text)` |
 
 ## Values
 
@@ -188,17 +190,18 @@ fn main() {
 
 ## `@json`
 
-`@json` on a struct writes five functions for it, from its fields' types:
+`@json` on a struct writes these functions for it, from its fields' types. The last three are its impl of `FromJson`:
 
 | Function | Does |
 | --- | --- |
 | `s.to_json() -> Json` | The struct as an object with a member for each field, in the fields' order |
 | `s.to_json_text() -> String` | That, as compact text |
+| `T.from_json_text(text: String) -> T ! JsonError` | The struct JSON text describes, read straight from the text, as `from_text<T>` reads it |
 | `T.from_json(value: Json) -> T ! JsonError` | The struct an object describes. Members it has no field for are passed over |
 | `T.from_json_at(value: Json, path: String) -> T ! JsonError` | The same for a value deep in a document, whose errors start with `path` |
-| `T.from_json_text(text: String) -> T ! JsonError` | The struct JSON text describes |
+| `T.read_json(text: String, at: mut usize, depth: usize) -> T?` | The struct at byte `at` of the text, nested `depth` deep, with `at` moved past it, or `none` where the text isn't plainly one. See [Typed reads](#typed-reads) |
 
-`@json_enum` on an enum whose variants hold nothing writes `to_json`, `from_json` and `from_json_at` for it, as the names of its variants, so a struct with `@json` can have a field of its type: `"Survival"`. A string that names no variant is an error that lists them, `` `Player.mode` should be one of `Survival`, `Creative`, not `Adventure` ``.
+`@json_enum` on an enum whose variants hold nothing writes `to_json` and `FromJson` for it, as the names of its variants, so a struct with `@json` can have a field of its type: `"Survival"`. A string that names no variant is an error that lists them, `` `Player.mode` should be one of `Survival`, `Creative`, not `Adventure` ``.
 
 The fields can be of these types:
 
@@ -255,6 +258,35 @@ fn main() {
 }
 ```
 
+## Typed reads
+
+`T.from_json_text(text)` and `from_text<T>(text)` read a struct straight from the text, as serde's derives do, without making a tree first: each member's value goes into its field as it's read, and members no field reads are read and dropped, so text that isn't JSON is never taken. `from_text` reads anything that's `FromJson`, a list of structs too, `from_text<List<Player>>(text)`, whose errors start with the item's index, `` `[3].level` ``.
+
+What reads straight from the text is text that's plainly a `T`. Anything else, an escape in a key, a member given twice whose first value is wrong, or text that isn't a `T` at all, is read again into a tree, and from that, as `from_json` reads it. So a read gives the same value or the same error either way, with the line and column of what isn't JSON, and only what's wrong or unusual pays for the tree. On our benchmark's 12.6 MB of 100,000 player records, the typed read took a quarter of the time it took through the tree.
+
+```calx
+import std.json.{json, from_text, JsonError}
+
+@json
+struct Block {
+    id: String
+    count: u8 = 1
+}
+
+fn main() ! JsonError {
+    let blocks = try from_text<List<Block>>(#"[{"id": "stone", "count": 64}, {"id": "dirt"}]"#)
+    println("{blocks.len()} {blocks[0].id} {blocks[1].count}")    // out: 2 stone 1
+    match from_text<List<Block>>(#"[{"id": "stone"}, {"id": "dirt", "count": 300}]"#) {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),    // out: `[1].count` should be from 0 to 255, not 300
+    }
+    match from_text<List<Block>>(#"[{"id": "stone"}, {"id": "dirt"},]"#) {
+        ok(_) => println("read"),
+        err(e) => println("{e}"),    // out: line 1, column 34: `]` where a value should be
+    }
+}
+```
+
 ## How it works
 
 `std.json` is written in Calx: [std/json.calx](../../std/json.calx).
@@ -263,4 +295,5 @@ fn main() {
 - Object keys are [interned](../reference/strings.md#interned-strings), as Python's parser shares them: the objects of an array share one copy of each key. On our benchmark's 18.7 MB file of 120,000 objects, that held 15 MB less at the most, and looking a key up in each object took 17% less time.
 - `\u` escapes are joined as UTF-16 surrogate pairs, and half a pair alone is an error, since a `String` holds only valid UTF-8.
 - The writer adds to one `String`, and copies a string a run at a time between the characters it escapes.
-- `@json` is an [attribute](../reference/attributes.md), written in Calx with [`std.meta`](meta.md). The code it writes reads through the tree: `from_json_text` parses the text first, then reads the struct from the `Json` value, a field at a time.
+- `@json` is an [attribute](../reference/attributes.md), written in Calx with [`std.meta`](meta.md). Its `read_json` reads an object's members into a slot for each field, matching each key to a field by its bytes in the text, and makes the struct from the slots at the `}`. Integers of up to 18 digits are added up as they're read, and others are read as `parse` reads them. Where `read_json` meets anything it doesn't read plainly, it gives `none`, and `from_text` reads the text again through the tree, so the two never disagree.
+- `List<T>`'s `FromJson` is in `std.json`, as an [impl for every list](../reference/interfaces.md#implementing-one) whose items have one.
