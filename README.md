@@ -62,7 +62,7 @@ On Linux:
 curl -fsSL https://calxlang.com/install.sh | sh
 ```
 
-Then `calx update` keeps it up to date. Programs need clang and lld, from LLVM 18 or later; [Install Calx](docs/guide/install.md) says how to get them.
+Each brings the toolchain it builds programs with, clang and lld from LLVM 23, so there's nothing else to install. Then `calx update` keeps it up to date ([Install Calx](docs/guide/install.md)).
 
 ## Building
 

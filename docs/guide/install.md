@@ -19,7 +19,11 @@ On Linux:
 curl -fsSL https://calxlang.com/install.sh | sh
 ```
 
-Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), and the [toolchain](#clang) it builds programs with, checks them against the SHA-256s published with them, unpacks them into `.calx` in your home folder, and puts `.calx/bin` on your PATH. In a terminal, Calx's mark dissolves in, each download shows a progress bar, and the script then builds and runs a first program, which checks that everything works and compiles Calx's runtime, so your first program builds as quickly as the rest. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls.
+Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/releases), and the [toolchain](#clang) it builds programs with, checks them against the SHA-256s published with them, unpacks them into `.calx` in your home folder, and puts `.calx/bin` on your PATH. Neither needs administrator rights or root. Open a new terminal afterwards, so it sees the new PATH. Running one again reinstalls, and downloads the toolchain again only if the release builds with a different one.
+
+In a terminal, Calx's mark dissolves in, each download draws a bar with how much has come and how fast, and a scanner sweeps while the toolchain unpacks. The script then builds and runs a first program, which checks that everything works and compiles Calx's runtime, so your first program builds as quickly as the rest. Into a pipe or a file, in CI, or with `NO_COLOR` set, the scripts print plain lines, one a step, and leave that first build to your first program ([in a terminal](../reference/command.md#in-a-terminal)).
+
+On Linux, the script needs `curl` or `wget`, `sha256sum`, and `tar` with `xz` for the toolchain, which most systems have. It says how to install the C library's headers if they're missing ([clang](#clang)), and libcurl, which `calx update` downloads with: on Ubuntu or Debian, `sudo apt install libcurl4`.
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
 
@@ -56,9 +60,9 @@ and run it:
 calx run hello.calx
 ```
 
-The first run builds Calx's runtime as well as the program, which takes a moment. After that, a program that hasn't changed starts in milliseconds.
+Unless the install script's first program already did it, the first run builds Calx's runtime as well as the program, which takes a moment. After that, a program that hasn't changed starts in milliseconds.
 
-If it says it can't find clang, put clang on your PATH, or set `CALX_CC` to its full path. `calx doctor` checks everything a build needs and says how to fix what's wrong.
+If it says it can't find clang, `calx update --toolchain` installs the toolchain again. `calx doctor` checks everything a build needs and says how to fix what's wrong.
 
 `calx new hello` starts a program of your own: a folder `hello` with `hello.calx`, which reads its arguments and has a test, and a `.gitignore` ([starting a program](../reference/command.md#starting-a-program)).
 
