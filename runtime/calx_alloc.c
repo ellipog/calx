@@ -31,8 +31,13 @@
  *
  * Debug builds use malloc instead, with a header that holds each block's size, so a free with
  * the wrong size or a second free stops the program: either is a compiler bug. So do builds
- * with AddressSanitizer or CX_SYSTEM_ALLOC, so tools that watch malloc see every block. */
+ * with AddressSanitizer or CX_SYSTEM_ALLOC, so tools that watch malloc see every block. With
+ * CALX_LEAKS=1, a debug build also keeps where each block was allocated, so a program that ends
+ * with blocks still allocated can say where (CLX-261). */
 
+#ifndef _WIN32
+#define _GNU_SOURCE /* pthread_getattr_np, for a thread's stack */
+#endif
 #include "calx_rt.h"
 
 #include <stdio.h>
@@ -74,21 +79,156 @@ static block_head* head_of(void* p, cx_usize size) {
     return h;
 }
 
+/* With CALX_LEAKS=1, each block has a record in front of its header: the return addresses of the
+ * calls that allocated it, innermost first, and its place in a list of every block allocated, so
+ * the leak check can say where each block left was allocated. Whether to keep them is settled at
+ * the first allocation, so every block has a record or none does. */
+#define TRACK_FRAMES 14
+
+typedef struct track_rec {
+    struct track_rec* prev;
+    struct track_rec* next;
+    void* at[TRACK_FRAMES];
+} track_rec; /* 128 bytes, so the block after it is still as aligned as malloc's */
+
+static track_rec tracked = {&tracked, &tracked, {0}};
+static int tracking = -1; /* -1 until the first allocation looks */
+
+static int track_on(void) {
+    int t = __atomic_load_n(&tracking, __ATOMIC_RELAXED);
+    if (t < 0) {
+        const char* v = getenv("CALX_LEAKS");
+        t = v && strcmp(v, "1") == 0;
+        __atomic_store_n(&tracking, t, __ATOMIC_RELAXED);
+    }
+    return t;
+}
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static SRWLOCK track_lock = SRWLOCK_INIT;
+static void track_take(void) { AcquireSRWLockExclusive(&track_lock); }
+static void track_give(void) { ReleaseSRWLockExclusive(&track_lock); }
+
+/* Windows unwinds from the program's tables: clang's x64 frame pointer doesn't point at the one
+ * before it. */
+static __attribute__((noinline)) void track_stack(void** at) {
+    USHORT n = RtlCaptureStackBackTrace(1, TRACK_FRAMES, at, NULL);
+    for (USHORT i = n; i < TRACK_FRAMES; i++) at[i] = 0;
+}
+#else
+#include <pthread.h>
+#include <stdint.h>
+static pthread_mutex_t track_lock = PTHREAD_MUTEX_INITIALIZER;
+static void track_take(void) { pthread_mutex_lock(&track_lock); }
+static void track_give(void) { pthread_mutex_unlock(&track_lock); }
+
+/* This thread's stack, which the walk below never reads outside of; `track_hi` is 1 if it isn't
+ * known, so the walk reads nothing. */
+static _Thread_local uintptr_t track_lo, track_hi;
+
+/* The frame pointers' chain, which a debug build keeps, since it's compiled at -O0: each frame
+ * holds the one before it and the return address after that. */
+static __attribute__((noinline)) void track_stack(void** at) {
+    if (!track_hi) {
+        pthread_attr_t a;
+        void* lo;
+        size_t size;
+        track_hi = 1;
+        if (pthread_getattr_np(pthread_self(), &a) == 0) {
+            if (pthread_attr_getstack(&a, &lo, &size) == 0) {
+                track_lo = (uintptr_t)lo;
+                track_hi = (uintptr_t)lo + size;
+            }
+            pthread_attr_destroy(&a);
+        }
+    }
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    int i = 0;
+    while (i < TRACK_FRAMES && fp >= track_lo && fp + 2 * sizeof(void*) <= track_hi && fp % sizeof(void*) == 0) {
+        void** frame = (void**)fp;
+        if (!frame[1]) break;
+        at[i++] = frame[1];
+        uintptr_t up = (uintptr_t)frame[0];
+        if (up <= fp) break;
+        fp = up;
+    }
+    while (i < TRACK_FRAMES) at[i++] = 0;
+}
+#endif
+
+static void track_link(track_rec* r) {
+    track_take();
+    r->prev = &tracked;
+    r->next = tracked.next;
+    tracked.next->prev = r;
+    tracked.next = r;
+    track_give();
+}
+
+static void track_unlink(track_rec* r) {
+    track_take();
+    r->prev->next = r->next;
+    r->next->prev = r->prev;
+    track_give();
+}
+
+static void to_stderr(const char* s) { fputs(s, stderr); }
+
+int cx_alloc_report(void) {
+    if (__atomic_load_n(&tracking, __ATOMIC_RELAXED) != 1) return 0;
+    track_take();
+    /* Oldest first, which is the list's end, and at most 20. */
+    int shown = 0;
+    cx_usize left = 0;
+    for (track_rec* r = tracked.prev; r != &tracked; r = r->prev) {
+        if (shown == 20) {
+            left++;
+            continue;
+        }
+        block_head* h = (block_head*)(r + 1);
+        int n = 0;
+        while (n < TRACK_FRAMES && r->at[n]) n++;
+        fprintf(stderr, "a block of %llu bytes, allocated\n", (unsigned long long)h->size);
+        cx_trace_frames(to_stderr, r->at, n);
+        shown++;
+    }
+    if (left) fprintf(stderr, "and %llu more\n", (unsigned long long)left);
+    track_give();
+    return 1;
+}
+
 void* cx_alloc(cx_usize size) {
-    if (size >= TOO_BIG - sizeof(block_head)) cx_panic_capacity();
-    block_head* h = (block_head*)malloc(sizeof(block_head) + size);
-    if (!h) cx_panic_capacity();
+    int t = track_on();
+    cx_usize extra = t ? sizeof(track_rec) : 0;
+    if (size >= TOO_BIG - sizeof(block_head) - extra) cx_panic_capacity();
+    char* m = (char*)malloc(extra + sizeof(block_head) + size);
+    if (!m) cx_panic_capacity();
+    block_head* h = (block_head*)(m + extra);
     h->size = size;
     h->state = LIVE;
     __atomic_fetch_add(&live, 1, __ATOMIC_RELAXED);
+    if (t) {
+        track_rec* r = (track_rec*)m;
+        track_stack(r->at);
+        track_link(r);
+    }
     return h + 1;
 }
 
 void* cx_realloc(void* p, cx_usize old, cx_usize size) {
     if (!p) return cx_alloc(size);
-    if (size >= TOO_BIG - sizeof(block_head)) cx_panic_capacity();
-    block_head* h = (block_head*)realloc(head_of(p, old), sizeof(block_head) + size);
-    if (!h) cx_panic_capacity();
+    int t = track_on();
+    cx_usize extra = t ? sizeof(track_rec) : 0;
+    if (size >= TOO_BIG - sizeof(block_head) - extra) cx_panic_capacity();
+    block_head* was = head_of(p, old);
+    /* The block keeps where it was first allocated, and its place in the list moves with it. */
+    if (t) track_unlink((track_rec*)was - 1);
+    char* m = (char*)realloc((char*)was - extra, extra + sizeof(block_head) + size);
+    if (!m) cx_panic_capacity();
+    if (t) track_link((track_rec*)m);
+    block_head* h = (block_head*)(m + extra);
     h->size = size;
     return h + 1;
 }
@@ -104,7 +244,13 @@ void cx_free(void* p, cx_usize size) {
     block_head* h = head_of(p, size);
     h->state = FREED;
     __atomic_fetch_sub(&live, 1, __ATOMIC_RELAXED);
-    free(h);
+    if (__atomic_load_n(&tracking, __ATOMIC_RELAXED) == 1) {
+        track_rec* r = (track_rec*)h - 1;
+        track_unlink(r);
+        free(r);
+    } else {
+        free(h);
+    }
 }
 
 cx_usize cx_alloc_live(void) { return __atomic_load_n(&live, __ATOMIC_RELAXED); }
@@ -804,6 +950,7 @@ void* cx_realloc_keep(void* p, cx_usize old, cx_usize n, cx_usize keep) {
 }
 
 cx_usize cx_alloc_live(void) { return 0; }
+int cx_alloc_report(void) { return 0; }
 
 /* Gives the system back what freed blocks hold that it can: this thread's free blocks are shared
  * first, then each small class's whole free pages go, with `with_holes` the free system pages of

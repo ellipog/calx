@@ -135,6 +135,9 @@ CX_INLINE cx_str cx_caller_str(const char* at) {
  * all of them (`mode` 0), or for a panic in a `parallel for`, the part of them this thread has
  * (1 to 3, which `cx_trace_write` explains). */
 __attribute__((cold)) CX_FN(void, cx_trace_write, (void (*text)(const char*), int mode, int ending));
+/* Writes the Calx frames of a stack taken earlier, `n` return addresses with the innermost first,
+ * as `cx_trace_write` writes a thread's own. Called in the runtime only. */
+__attribute__((cold)) void cx_trace_frames(void (*text)(const char*), void* const* frames, int n);
 CX_COLD CX_FN(void, cx_panic_index, (cx_usize index, cx_usize length, const char* at));
 CX_COLD CX_FN(void, cx_panic_div_zero, (const char* at));
 CX_COLD CX_FN(void, cx_panic_unwrap, (const char* at));
@@ -166,6 +169,10 @@ CX_FN(void, cx_free, (void* p, cx_usize size));
 void* cx_realloc_keep(void* p, cx_usize old, cx_usize size, cx_usize keep);
 /* How many blocks are allocated, in debug builds; 0 in others. */
 CX_FN(cx_usize, cx_alloc_live, (void));
+/* For a debug build that ends with blocks allocated: with `CALX_LEAKS=1` in the environment when
+ * the program started, writes each one's size and where it was allocated to standard error, and
+ * returns 1; otherwise returns 0. Called in the runtime only. */
+int cx_alloc_report(void);
 /* Gives the system back the memory of freed blocks that it can, and returns how many bytes. */
 CX_FN(cx_usize, cx_alloc_trim, (void));
 /* Makes room for `extra` more elements of `size` bytes in a list's buffer of `*cap`, holding

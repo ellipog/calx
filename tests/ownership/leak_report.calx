@@ -1,0 +1,78 @@
+// A debug build that ends with blocks still allocated says how many and exits with status 102,
+// and with CALX_LEAKS=1 it also says where each was allocated, as a panic's trace does (CLX-261).
+// The program here leaks two blocks on purpose, through the runtime's own allocator, which only
+// C can call. Before that it grows a list, builds strings and runs a `parallel for`, all freed,
+// so the report holds only the two.
+import std.env.{variable}
+import std.fs.{temp_dir, write_text, remove_dir_all}
+import std.process.{Command}
+
+// What the program printed, how it ended, and its standard error, a line each.
+fn run(dir: String, leaks: bool) -> List<String> {
+    let exe = variable("CALX") ?? String("calx")
+    var c = Command.new(exe).args(["run", "leaky.calx"]).dir(dir.copy())
+    if leaks {
+        c = c.env("CALX_LEAKS", "1")
+    } else {
+        c = c.env_remove("CALX_LEAKS")
+    }
+    match c.output() {
+        ok(o) => {
+            var lines: List<String> = [o.text().trim_end(), "[{o.status}]"]
+            for line in o.error_text().replace("\r", "").lines() {
+                lines.push(line.copy())
+            }
+            return lines
+        },
+        err(e) => return ["{e}"],
+    }
+}
+
+fn main() {
+    let dir = temp_dir()!
+    let leaky = #"
+        extern "C" fn cx_alloc(size: usize) -> *u8
+
+        fn keep(n: usize) {
+            unsafe {
+                _ = cx_alloc(n)
+            }
+        }
+
+        fn main() {
+            var xs: List<i32> = []
+            for k in 0..1000 {
+                xs.push(k)
+            }
+            var lens: List<usize> = [0; 64]
+            parallel for k in 0usize..lens.len() {
+                let s = "item {k}"
+                lens[k] = s.len()
+            }
+            println("{xs.len()} {lens[63]}")
+            keep(48)
+            keep(16)
+        }
+        "#
+    write_text("{dir}/leaky.calx", leaky)!
+    for line in run(dir.copy(), false) {
+        println(line)
+    }
+    // out: 1000 7
+    // out: [exited with status 102]
+    // out: calx: 2 allocations were never freed; this is a bug in calx, please report it
+    // out: calx: run it with CALX_LEAKS=1 to see where each was allocated
+    for line in run(dir.copy(), true) {
+        println(line)
+    }
+    // out: 1000 7
+    // out: [exited with status 102]
+    // out: calx: 2 allocations were never freed; this is a bug in calx, please report it
+    // out: a block of 48 bytes, allocated
+    // out: 	at leaky.keep(leaky.calx:5)
+    // out: 	at leaky.main(leaky.calx:20)
+    // out: a block of 16 bytes, allocated
+    // out: 	at leaky.keep(leaky.calx:5)
+    // out: 	at leaky.main(leaky.calx:21)
+    remove_dir_all(dir)!
+}

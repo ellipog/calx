@@ -166,6 +166,7 @@ static void show_range(void (*text)(const char*), const found* f, int from, int 
 }
 
 static void found_frames(found* f);
+static void name_frames(found* f, void* const* frames, int n);
 
 /* The first frame from `from` on that is a chunk's body: called by the runtime's `par_claim`, not
  * by a loop that runs where it is. -1 if there's none. */
@@ -222,6 +223,19 @@ void cx_trace_write(void (*text)(const char*), int mode, int ending) {
             show_range(text, &f, inner + 1, body >= 0 ? body + 1 : f.n);
         }
     }
+    free(f.list);
+}
+
+/* The Calx frames of a stack taken earlier, as return addresses, the innermost first, as a panic's
+ * trace writes them: where a debug build's leaked blocks were allocated (CLX-261). */
+void cx_trace_frames(void (*text)(const char*), void* const* frames, int n) {
+    found f;
+    f.n = 0;
+    f.cwd[0] = 0;
+    f.list = malloc(MAX_FOUND * sizeof *f.list);
+    if (!f.list) return;
+    name_frames(&f, frames, n);
+    show_range(text, &f, 0, f.n);
     free(f.list);
 }
 
@@ -309,6 +323,10 @@ static void add(found* f, const symbol* s, const IMAGEHLP_LINEW64* line) {
 static void found_frames(found* f) {
     void* frames[MAX_FRAMES];
     USHORT n = RtlCaptureStackBackTrace(0, MAX_FRAMES, frames, NULL);
+    name_frames(f, frames, n);
+}
+
+static void name_frames(found* f, void* const* frames, int n) {
     AcquireSRWLockExclusive(&trace_lock);
     HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
     if (!dbghelp) goto done;
@@ -331,12 +349,12 @@ static void found_frames(found* f) {
     ready = 1;
     /* Set before any symbols load, which deferred loading leaves until a frame needs them. */
     static wchar_t folders[8192];
-    module_folders(frames, n, folders, sizeof folders / sizeof folders[0]);
+    module_folders(frames, (USHORT)n, folders, sizeof folders / sizeof folders[0]);
     if (set_search && folders[0]) set_search(process, folders);
     wchar_t wcwd[MAX_PATH];
     if (GetCurrentDirectoryW(MAX_PATH, wcwd) == 0) wcwd[0] = 0;
     utf8_path(wcwd, f->cwd, sizeof f->cwd);
-    for (USHORT i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         /* A return address is just past its call, which may end the call's line. */
         DWORD64 at = (DWORD64)(uintptr_t)frames[i] - 1;
         symbol sym;
@@ -1167,6 +1185,10 @@ static int find_object(struct dl_phdr_info* info, size_t size, void* data) {
 static void found_frames(found* f) {
     void* frames[MAX_FRAMES];
     int n = backtrace(frames, MAX_FRAMES);
+    name_frames(f, frames, n);
+}
+
+static void name_frames(found* f, void* const* frames, int n) {
     pthread_mutex_lock(&trace_lock);
     /* Each object is opened once, when a frame is first in it; one without line tables, such as
      * the C library, is remembered so it isn't opened again. */

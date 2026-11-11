@@ -664,8 +664,11 @@ int cx_finish(void) {
      * A thread still running owns what it holds, and stops where it is, so then there's no check. */
     cx_usize live = cx_alloc_live();
     if (live && !__atomic_load_n(&services_live, __ATOMIC_ACQUIRE)) {
-        fprintf(stderr, "calx: %llu allocations were never freed; this is a bug in calx, please report it\n",
-                (unsigned long long)live);
+        fprintf(stderr, "calx: %llu allocation%s never freed; this is a bug in calx, please report it\n",
+                (unsigned long long)live, live == 1 ? " was" : "s were");
+        /* With CALX_LEAKS=1, where each was allocated (CLX-261). */
+        if (!cx_alloc_report()) fputs("calx: run it with CALX_LEAKS=1 to see where each was allocated\n", stderr);
+        fflush(stderr);
         return 102;
     }
 #endif

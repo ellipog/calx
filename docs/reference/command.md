@@ -257,6 +257,17 @@ A program carries only what it can reach. Each function and each piece of data i
 
 In debug builds the runtime checks memory: a block freed twice or with the wrong size stops the program, and a program that ends with blocks still allocated says so. Either way it exits with status 102. The compiler frees every value exactly once ([ownership](ownership.md#in-c)), so that's a bug in Calx, worth reporting. Release builds don't check, and use Calx's own allocator, which is faster than the system's.
 
+With `CALX_LEAKS=1` in its environment, a debug build also keeps where each block was allocated. A program that ends with blocks still allocated then writes each one's size and the Calx calls that allocated it, as a [panic's trace](printing.md#panics) does, oldest first and up to 20 (CLX-261):
+
+```
+calx: 1 allocation was never freed; this is a bug in calx, please report it
+a block of 48 bytes, allocated
+	at game.load(game.calx:12)
+	at game.main(game.calx:30)
+```
+
+Keeping them takes a lock and a look at the stack for each allocation. On Calcite's play test, which starts and stops servers on many threads for 83 s, that made no difference to how long it took. Without the variable, the report says how to turn it on.
+
 Both modes have line tables, which don't change the generated code, so a debugger or profiler shows Calx source lines. On Windows they're in a PDB next to the executable in the cache, which the executable records.
 
 On Windows, a release builds with the toolchain it carries in `toolchain\` ([install](../guide/install.md#clang)): clang and lld from LLVM, with mingw-w64's headers and libraries, so programs use the UCRT, the C runtime DLL every Windows from 10 on has, in both modes. They run as fast as with Visual Studio's C runtime: on the [tick benchmark](../benchmarks.md), 18.6 ms a tick on one worker and 2.45 ms on 24, against 18.8 ms and 2.47 ms. With a clang that builds with Visual Studio's C runtime instead, such as one from LLVM's installer, debug builds use its DLL, since linking the static one puts its debug information into every PDB and doubles the link time, and release builds link it statically.
@@ -297,6 +308,7 @@ Windows Defender scans every new executable the first time it starts, which cost
 | `CALX_HOME` | Where the runtime and the [standard library](modules.md#the-standard-library) are. Otherwise, the installation `calx` is in: the folder above its `bin`, which holds `runtime` and `std`. A compiler built from source that isn't in one uses the checkout it was built from |
 | `CALX_CACHE` | The object cache. Otherwise `%LOCALAPPDATA%\calx\cache` on Windows, and `$XDG_CACHE_HOME/calx` or `~/.cache/calx` on Linux. On Windows it can be at any length: past 100 characters, calx names what's under it in the `\\?\` form, which Windows, clang and lld take past the usual 260 |
 | `CALX_CACHE_MB` | How many megabytes the cache keeps of compiled files, and of programs, however many files that is. Otherwise the limits below hold. For a CI job that builds more than they hold and keeps the cache for its next run |
+| `CALX_LEAKS` | Set to `1`, a program built in debug keeps where each block of memory was allocated, so if it ends with blocks still allocated, it says where each came from ([build modes](#build-modes)). The program reads it, not `calx` |
 | `CALX_LTO` | Set to `0`, release builds leave out ThinLTO and optimize each file alone, as they do without lld. Each file's machine code is then kept in the object cache, so a build that finds all its files there only links, where ThinLTO makes the machine code again in every link. That suits a test run that builds many programs and keeps its cache. Their code can be slower, since a call to another module no longer inlines |
 | `CALX_NO_UPDATE_CHECK` | Set to anything, turns off the [daily check](#updating) for a newer release |
 | `CALX_PROFILE` | Set to `1`, builds keep every function's frame pointer, so a sampling profiler such as `perf record -g` sees the calls that led to each sample. It costs a register, a few percent of speed, so it's off otherwise |
