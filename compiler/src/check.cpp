@@ -1117,6 +1117,20 @@ private:
                     std::vector<Type*> own(params.begin() + 1, params.end());
                     std::vector<Item*> bound{iface_instance(it, own)};
                     self->bounds = ctx_.arena.copy(bound);
+                    // A generic function's own parameters come after the interface's (CLX-72).
+                    for (Item* m : it->members) {
+                        if (m->kind != ItemKind::fn || m->generics.empty()) continue;
+                        for (const GenericParam& g : m->generics) {
+                            for (const GenericParam& outer : it->generics) {
+                                if (g.name == outer.name) {
+                                    error(g.span, q(text(g.name)) + " is already a parameter of the interface; Calx doesn't allow shadowing");
+                                }
+                            }
+                        }
+                        std::vector<Type*> all(params.begin(), params.end());
+                        for (Type* p : make_params(m)) all.push_back(p);
+                        m->type_params = ctx_.arena.copy(all);
+                    }
                     interfaces_.push_back(it);
                     break;
                 }
@@ -1329,7 +1343,6 @@ private:
                 p.default_value = nullptr;
             }
             if (m->kind == ItemKind::const_) {
-                if (m->value) not_yet(m->value->span, "default values for an interface's constants");
                 if (!m->type) {
                     error(m->name_span, "give the constant a type: " + q("const " + std::string(text(m->name)) + ": i32"));
                     m->declared = T.error;
@@ -1343,17 +1356,10 @@ private:
                 current_impl_type_ = saved;
                 continue;
             }
-            std::size_t mark = env_.size();
-            if (!m->generics.empty()) {
-                not_yet(m->generics[0].span, "generic functions in interfaces");
-                // Its own parameters stand for nothing, so its signature has no further errors.
-                for (const GenericParam& g : m->generics) env_.push_back({g.name, T.error});
-            }
-            m->type_params = it->type_params;
+            if (m->generics.empty()) m->type_params = it->type_params;
             m->c_name = c_name({text(it->name), text(m->name)});
             check_signature(m);
-            pop_env(mark);
-            if (m->body && m->generics.empty()) all_fns_.push_back(m);
+            if (m->body) all_fns_.push_back(m);
         }
         report_unused_params(it, "isn't used by any of its members");
     }
@@ -1379,6 +1385,49 @@ private:
     // parameter names included, since calls can name their arguments.
     void check_conforms(Item* m, Item* want, Type* t, Item* iface) {
         Subst s = iface_subst(iface, t);
+        // A generic function's own parameters, in order: the interface's for the impl's.
+        std::size_t own = want->generics.size();
+        if (m->generics.size() != own) {
+            error(m->name_span, q(text(m->name)) + " takes " + std::to_string(own) + (own == 1 ? " generic parameter" : " generic parameters") +
+                                    " in " + q(iface_text(iface)) + ", so its impl does too");
+            return;
+        }
+        std::vector<Type*> theirs, mine;
+        for (std::size_t k = 0; k < own; k++) {
+            Type* w = want->type_params[want->type_params.size() - own + k];
+            Type* x = m->type_params[m->type_params.size() - own + k];
+            s[w] = x;
+            theirs.push_back(w);
+            mine.push_back(x);
+        }
+        // The interface's bounds are all a caller through it knows of, so the impl can't need more.
+        Subst back;
+        for (std::size_t k = 0; k < own; k++) back[mine[k]] = theirs[k];
+        for (std::size_t k = 0; k < own; k++) {
+            Type* x = mine[k];
+            Type* w = theirs[k];
+            std::string lack;
+            auto flag = [&](bool need, bool has, const char* name) {
+                if (need && !has) lack += (lack.empty() ? "" : ", ") + q(name);
+            };
+            flag(x->copy_bound, w->copy_bound, "Copy");
+            flag(x->equal_bound, w->equal_bound || w->hash_bound || w->order_bound || w->java_hash_bound, "Equal");
+            flag(x->display_bound, w->display_bound, "Display");
+            flag(x->hash_bound, w->hash_bound, "Hash");
+            flag(x->order_bound, w->order_bound, "Order");
+            flag(x->java_hash_bound, w->java_hash_bound, "JavaHash");
+            flag(x->send_bound, w->send_bound, "Send");
+            for (Item* b : x->bounds) {
+                Item* need = subst_iface(b, back);
+                if (std::find(w->bounds.begin(), w->bounds.end(), need) == w->bounds.end()) {
+                    lack += (lack.empty() ? "" : ", ") + q(iface_text(need));
+                }
+            }
+            if (!lack.empty()) {
+                error(param_spans_[x], q(text(m->name)) + "'s " + q(x->name) + " needs " + lack + ", which " + q(iface_text(iface)) +
+                                           " doesn't give its " + q(w->name) + ", so a call through the interface couldn't have it");
+            }
+        }
         bool ok = m->params.size() == want->params.size();
         for (std::size_t i = 0; ok && i < m->params.size(); i++) {
             const Param& a = m->params[i];
@@ -1572,7 +1621,6 @@ private:
                 error(m->name_span, "function " + q(text(m->name)) + " needs a body");
                 continue;
             }
-            if (iface && !m->generics.empty()) not_yet(m->generics[0].span, "generic functions in interfaces");
             m->impl_type = t;
             m->c_name = c_name({owner, text(m->name)});
             if (t->kind == TypeKind::struct_) {
@@ -1605,6 +1653,22 @@ private:
             all_fns_.push_back(m);
         }
         if (iface) {
+            // A constant the impl leaves out takes the interface's default, worked out for its
+            // type, so `Self.SIDES` in it is the impl's (CLX-72).
+            for (Item* w : iface->members) {
+                if (w->kind != ItemKind::const_ || !w->value || info->members.count(w->name) || !w->declared) continue;
+                Item* c = ctx_.arena.make<Item>(*w);
+                c->value = clone(w->value);
+                c->type = nullptr;
+                c->declared = nullptr;
+                c->interface_item = iface;
+                c->impl_type = t;
+                c->c_name = c_name({mangle(t) + "__" + iface_mangle(iface), text(w->name)});
+                c->result_type = subst(w->declared, iface_subst(iface, t));
+                c->generated = true;
+                info->members.emplace(w->name, c);
+                consts_.push_back(c);
+            }
             std::string missing;
             for (Item* w : iface->members) {
                 bool needed = (w->kind == ItemKind::fn && !w->body) || w->kind == ItemKind::const_;
@@ -8941,8 +9005,17 @@ private:
                 if (m == info->members.end()) break;
                 Item* x = m->second;
                 if (x->type_params.empty()) return x;
+                // The impl's parameters, from its type, then the function's own, from the call.
+                std::size_t own = x->generics.size(), first = x->type_params.size() - own;
                 std::vector<Type*> xs;
-                for (Type* p : x->type_params) xs.push_back(s.count(p) ? s.at(p) : T.error);
+                for (std::size_t i = 0; i < first; i++) {
+                    Type* p = x->type_params[i];
+                    xs.push_back(s.count(p) ? s.at(p) : T.error);
+                }
+                for (std::size_t k = 0; k < own; k++) {
+                    std::size_t at = g->type_params.size() + k;
+                    xs.push_back(at < args.size() ? args[at] : T.error);
+                }
                 return instance_fn(x, xs, site);
             }
         }

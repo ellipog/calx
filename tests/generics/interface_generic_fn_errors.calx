@@ -1,0 +1,49 @@
+// What a generic function in an interface checks (CLX-72).
+
+pub interface Store {
+    const SIZE: i32 = 3
+
+    fn keep<T: Display>(mut self, x: T)
+
+    fn count(self) -> i32
+}
+
+pub struct Flat {
+    n: i32,
+}
+
+impl Store for Flat {
+    fn keep(mut self, x: i32) {    // error: `keep` takes 1 generic parameter in `Store`, so its impl does too
+        self.n += x
+    }
+
+    fn count(self) -> i32 {
+        return self.n
+    }
+}
+
+pub struct Keyed {
+    n: i32,
+}
+
+impl Store for Keyed {
+    const SIZE: i32 = "big"    // error: expected `i32`
+
+    fn keep<T: Display + Hash>(mut self, x: T) {    // error: `keep`'s `T` needs `Hash`, which `Store` doesn't give its `T`, so a call through the interface couldn't have it
+        println("{x}")
+        self.n += 1
+    }
+
+    fn count(self) -> i32 {
+        return self.n
+    }
+}
+
+fn main() {
+    let d: dyn Store = Flat { n: 0 }
+    _ = d.count()
+    var k = Keyed { n: 0 }
+    k.keep(1)
+    let dd: dyn Store = Keyed { n: 0 }
+    dd.keep(1)    // error: `keep` can't be called through a `dyn`, since it's generic
+}

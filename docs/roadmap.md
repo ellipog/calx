@@ -27,7 +27,7 @@ The [spec](CALX_SPEC.md) has the design of each of these:
 
 - **Handles**: `Handle<T>`, a checked reference to an object in a slot map, which says when the object is gone instead of reading freed memory ([spec](CALX_SPEC.md#handles)).
 - **More parallel loops**: a `parallel for` over the values of a slot map or a map, and on a pool the program picks ([spec](CALX_SPEC.md#parallel-loops)).
-- **More of interfaces**: generic functions and constants' defaults in interfaces, and `Index` for `a[i]` on a type of one's own ([spec](CALX_SPEC.md#interfaces-and-generics)).
+- **`Index`**, for `a[i]` on a type of one's own ([spec](CALX_SPEC.md#interfaces-and-generics)).
 - **`java.ArrayList`**, a list that grows as Java's does, for code that must match Java's capacities ([spec](CALX_SPEC.md#collections)).
 - **Plugins that fail alone**: a plugin's panic stops only that plugin, and its memory is all freed when it stops ([spec](CALX_SPEC.md#arenas-and-plugin-memory)).
 

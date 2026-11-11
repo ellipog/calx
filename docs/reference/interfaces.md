@@ -48,7 +48,8 @@ There's no inheritance and there are no classes. A type gets behavior from its o
 
 - `fn m(self, ...)` is a method, called on a value: `s.area()`.
 - A function without `self` is called on a type: `T.name()`, `Square.name()`.
-- `const name: Type` is a constant each impl gives. It's a constant wherever it's used, so `T.sides` can be a field's default.
+- `const name: Type` is a constant each impl gives. It's a constant wherever it's used, so `T.sides` can be a field's default. With a value, `const width: i32 = 4`, it's a default, which an impl that leaves it out takes, worked out for its type, so `Self.other` in it is the impl's.
+- A function can be generic, `fn put<T: Display>(mut self, x: T)`. Each impl's is generic the same way, with no more bounds than the interface gives, since a call through the interface knows only those. A call works out `T`, as a generic function's does, and calls the impl's copy for it.
 - A function with a body is a default, as `size` is above. Impls get it without writing it, and can replace it.
 - `Self` is the type implementing the interface: `fn bigger(self, other: Self) -> bool`, `fn unit() -> Self`.
 - `type Item` is a type each impl gives, which the interface's functions can name as `Self.Item` ([associated types](#associated-types)).

@@ -1,0 +1,84 @@
+// Generic functions in interfaces, and defaults for an interface's constants (CLX-72). A call
+// through a bound works out the function's own types and calls the impl's copy for them.
+
+interface Writer {
+    const WIDTH: i32 = 4
+    const FILL: str = "."
+
+    fn put<T: Display>(mut self, x: T)
+
+    fn text(self) -> String
+
+    // A default can be generic too, and can use the constants.
+    fn put_padded<T: Display>(mut self, x: T) {
+        let s = "{x}"
+        var n = i64.wrap(s.len())
+        while n < i64(Self.WIDTH) {
+            self.put(Self.FILL)
+            n += 1
+        }
+        self.put(s)
+    }
+}
+
+struct Line {
+    parts: List<String>,
+}
+
+impl Writer for Line {
+    fn put<T: Display>(mut self, x: T) {
+        self.parts.push("{x}")
+    }
+
+    fn text(self) -> String {
+        var out = String("")
+        for p in self.parts {
+            out.push_str(p)
+        }
+        return out
+    }
+}
+
+struct Csv {
+    cells: List<String>,
+}
+
+impl Writer for Csv {
+    const WIDTH: i32 = 6
+    const FILL: str = "_"
+
+    fn put<U: Display>(mut self, x: U) {
+        self.cells.push("{x}")
+    }
+
+    fn text(self) -> String {
+        var out = String("")
+        for c in self.cells {
+            if out.len() > 0 {
+                out.push_str(",")
+            }
+            out.push_str(c)
+        }
+        return out
+    }
+}
+
+// Through the bound: `w.put` takes whatever can be shown.
+fn fill<W: Writer>(w: mut W) {
+    w.put(1)
+    w.put(true)
+    w.put_padded(2.5)
+    w.put(W.WIDTH)
+}
+
+fn main() {
+    var l = Line { parts: [] }
+    fill(mut l)
+    println(l.text())    // out: 1true.2.54
+    var c = Csv { cells: [] }
+    fill(mut c)
+    println(c.text())    // out: 1,true,_,_,_,2.5,6
+    c.put("x")
+    c.put<i64>(7)
+    println("{Line.WIDTH} {Csv.FILL} {c.cells.len()}")    // out: 4 _ 9
+}
