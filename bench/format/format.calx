@@ -1,0 +1,54 @@
+// Numbers written as text, as a script writes a report or a CSV: 200,000 doubles to three places,
+// 200,000 integers padded to 8, a million integers, and 200,000 doubles in their shortest digits,
+// each onto a new string. The values are a xorshift's: doubles from 1 to 1,000 and integers below
+// 1,048,576. bench/format/format.rs and format.py do the same.
+import std.time.{Instant}
+
+fn main() {
+    var x: u64 = 88172645463325252
+    var ints: List<i64> = []
+    var doubles: List<f64> = []
+    for k in 0..1000000 {
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        ints.push(i64.wrap(x >> 44))
+        if k < 200000 {
+            doubles.push(1.0 + f64.nearest(x >> 11) * 999.0 / 9007199254740992.0)
+        }
+    }
+    var fixed: u64 = u64.MAX
+    var padded: u64 = u64.MAX
+    var plain: u64 = u64.MAX
+    var shortest: u64 = u64.MAX
+    var total: usize = 0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var a = String()
+        for v in doubles {
+            a.push_str("{v:.3},")
+        }
+        let t1 = unsafe { Instant.now() }
+        var b = String()
+        for i in 0usize..200000 {
+            b.push_str("{ints[i]:>8},")
+        }
+        let t2 = unsafe { Instant.now() }
+        var c = String()
+        for n in ints {
+            c.push_str("{n},")
+        }
+        let t3 = unsafe { Instant.now() }
+        var d = String()
+        for v in doubles {
+            d.push_str("{v},")
+        }
+        let t4 = unsafe { Instant.now() }
+        total += a.len() + b.len() + c.len() + d.len()
+        fixed = fixed.min(t1.nanos_since(t0) / 1000)
+        padded = padded.min(t2.nanos_since(t1) / 1000)
+        plain = plain.min(t3.nanos_since(t2) / 1000)
+        shortest = shortest.min(t4.nanos_since(t3) / 1000)
+    }
+    println("calx: fixed {fixed} us, padded {padded} us, integers {plain} us, shortest {shortest} us, total {total}")
+}

@@ -1,0 +1,5 @@
+// The smallest script: what it costs a program to start, print a line and end. bench/start/hello.rs
+// and hello.py are the same.
+fn main() {
+    println("hello")
+}

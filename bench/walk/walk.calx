@@ -1,0 +1,60 @@
+// A tree of files gone through as a script does: every file and directory in it, walked, and the
+// paths `**/*.calx` matches. Given a folder, `walk <dir>` makes the tree there if it isn't yet: 20
+// directories of 20 of 25 files each, a third each .calx, .txt and .json, so 10,000 files in
+// 420 directories. Each language sorts the names, as `walk` and `glob` do. bench/walk/rust and
+// walk.py do the same on the same tree.
+import std.env.{args}
+import std.fs.{Kind, glob, is_dir, make_dir_all, walk, write_text}
+import std.time.{Instant}
+
+fn make_tree(root: String) {
+    let kinds = ["calx", "txt", "json"]
+    for a in 0..20 {
+        for b in 0..20 {
+            let dir = "{root}/d{a:02}/e{b:02}"
+            make_dir_all(dir.copy())!
+            for f in 0..25 {
+                write_text("{dir}/f{f:03}.{kinds[usize.wrap(f % 3)]}", "{a} {b} {f}\n")!
+            }
+        }
+    }
+}
+
+fn main() {
+    let root = args()[0].copy()
+    if not is_dir("{root}/d19/e19") {
+        make_tree(root.copy())
+    }
+    var walked: u64 = u64.MAX
+    var globbed: u64 = u64.MAX
+    var total: usize = 0
+    for _ in 0..7 {
+        let t0 = unsafe { Instant.now() }
+        var files: usize = 0
+        var dirs: usize = 0
+        var chars: usize = 0
+        for e in walk(root.copy())! {
+            match e.kind {
+                Kind.File => {
+                    files += 1
+                },
+                Kind.Dir => {
+                    dirs += 1
+                },
+                _ => {},
+            }
+            chars += e.path.len()
+        }
+        let t1 = unsafe { Instant.now() }
+        var found: usize = 0
+        for p in glob("{root}/**/*.calx")! {
+            found += 1
+            chars += p.len()
+        }
+        let t2 = unsafe { Instant.now() }
+        total += files + dirs + found + chars
+        walked = walked.min(t1.nanos_since(t0) / 1000)
+        globbed = globbed.min(t2.nanos_since(t1) / 1000)
+    }
+    println("calx: walk {walked} us, glob {globbed} us, total {total}")
+}

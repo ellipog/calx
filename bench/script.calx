@@ -1,0 +1,410 @@
+// Times Calx as a scripting language against Rust and Python, each with the same algorithms.
+//
+//     calx run bench/script.calx -- [--rounds 5] [--only text,format,json,walk,start] [--record]
+//
+// Each benchmark is a program in each language, run --rounds times as a fresh process, the
+// languages taking turns, in the other order every other round. A program times its own steps,
+// the best of 7 in each process, and prints them with a total its work came to, which must be the
+// same in every language. The tables give each step's best over the rounds, and for the whole
+// process its CPU time and the most memory it held, the median over the rounds. `start` is the
+// smallest program, which starts, prints a line and ends, timed from outside: built, then a
+// script changed and run, and run again unchanged.
+//
+// It doesn't pin itself to cores: on a processor with two kinds, start it pinned, and the programs
+// it runs are too. On Windows, `start /affinity 5554 /b /wait calx run bench/script.calx` puts it
+// on the i9-13900K's performance cores; on Linux, `taskset -c 4`.
+//
+// What it builds and the tree it walks go in a folder of its own in the temp folder, removed at
+// the end: under WSL that's on Linux's own file system, where through /mnt/c the walk would time
+// WSL's file sharing and every program would start from it. --record writes
+// bench/results/script-<os>.json, with the machine, the toolchains and the commit (D34).
+import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
+import std.cli.{cli}
+import std.env
+import std.fs
+import std.json.{Json, pretty}
+import std.process
+import std.process.{Command}
+import std.stats
+import std.time.{Instant}
+
+/// Times Calx as a scripting language against Rust and Python.
+@cli(name: "bench/script.calx")
+struct Args {
+    /// Fresh processes of each program.
+    rounds: u32 = 5
+    /// The benchmarks, with commas between: text, format, json, walk, start. All of them if empty.
+    only: String = ""
+    /// Write bench/results/script-<os>.json.
+    record: bool
+}
+
+// The languages, in the order of the tables' columns.
+fn lang(i: usize) -> String {
+    return if i == 0 { String("Calx") } else if i == 1 { String("Rust") } else { String("Python") }
+}
+
+fn stop(why: String) -> never {
+    eprintln("script: {why}")
+    process.exit(1)
+}
+
+// Runs a command in `dir`, stopping if it can't start or fails, and gives what it printed, the CPU
+// time it used in nanoseconds and the most memory it held in bytes.
+fn run(cmd: List<String>, dir: String) -> (String, u64, u64) {
+    var rest: List<String> = []
+    for k in 1usize..cmd.len() {
+        rest.push(cmd[k].copy())
+    }
+    let out = match Command.new(cmd[0].copy()).args(rest).dir(dir).output() {
+        ok(o) => o,
+        err(e) => stop("can't run {cmd[0]}: {e}"),
+    }
+    if not out.status.success() {
+        stop("{cmd.join(" ")} {out.status}: {out.error_text()}")
+    }
+    let u = unsafe { out.status.usage() }
+    return (out.text(), u.cpu_ns, u.peak_memory)
+}
+
+// Builds with `cmd`, stopping if it fails.
+fn build(cmd: List<String>, dir: String) {
+    _ = run(cmd, dir)
+}
+
+// Builds a Cargo project for x86-64-v3, as Calx builds, into its own target folder.
+fn cargo(manifest: String, target: String) {
+    match Command.new("cargo").args(["build", "--release", "--quiet", "--manifest-path", manifest.copy()]).env("CARGO_TARGET_DIR", target).env("RUSTFLAGS", "-C target-cpu=x86-64-v3").status() {
+        ok(s) => {
+            if not s.success() {
+                stop("cargo build of {manifest} failed: {s}")
+            }
+        },
+        err(e) => stop("can't run cargo: {e}"),
+    }
+}
+
+// A program's line, `lang: step 123 us, other step 45 us, total 678`: each step's microseconds,
+// in order, and the total. Parts that aren't times, as `12700000 bytes`, are passed over.
+fn parse_line(text: String) -> (List<String>, List<u64>, String) {
+    var names: List<String> = []
+    var times: List<u64> = []
+    var total = String()
+    var body = text.trim()
+    if let (_, rest) = body.split_once(": ") {
+        body = rest
+    }
+    for part in body.split(", ") {
+        let words = part.trim().split(" ")
+        let n = words.len()
+        if n >= 3 and words[n - 1] == "us" {
+            var name = String()
+            for k in 0..n - 2 {
+                if k > 0 {
+                    name.push(' ')
+                }
+                name.push_str(words[k])
+            }
+            names.push(name)
+            times.push(u64.parse(words[n - 2].copy()) ?? 0)
+        } else if n == 2 and words[0] == "total" {
+            total = words[1].copy()
+        }
+    }
+    return (names, times, total)
+}
+
+// A benchmark's numbers in one language: each step's best, and each round's CPU time and peak
+// memory.
+struct Lang {
+    names: List<String>
+    best: List<u64>
+    cpu: List<f64>
+    peak: List<f64>
+    total: String
+}
+
+fn new_lang() -> Lang {
+    return Lang { names: [], best: [], cpu: [], peak: [], total: String() }
+}
+
+// Runs each language's program `rounds` times, in turns, after one run each that isn't counted,
+// which makes what a program needs and warms the file cache.
+fn measure(name: String, progs: List<List<String>>, root: String, rounds: u32) -> List<Lang> {
+    var langs: List<Lang> = [new_lang(), new_lang(), new_lang()]
+    for p in progs {
+        _ = run(p.copy(), root.copy())
+    }
+    for r in 0..rounds {
+        var order: List<usize> = [0, 1, 2]
+        if r % 2 == 1 {
+            order = [2, 1, 0]
+        }
+        for i in order {
+            let o = run(progs[i].copy(), root.copy())
+            let p = parse_line(o.0.copy())
+            if langs[i].names.is_empty() {
+                langs[i].names = p.0.copy()
+                langs[i].best = p.1.copy()
+                langs[i].total = p.2.copy()
+            } else {
+                if p.2 != langs[i].total {
+                    stop("{name}: {lang(i)} came to {p.2} this time, and {langs[i].total} before")
+                }
+                for k in 0usize..p.1.len().min(langs[i].best.len()) {
+                    langs[i].best[k] = langs[i].best[k].min(p.1[k])
+                }
+            }
+            langs[i].cpu.push(f64.nearest(o.1) / 1e6)
+            langs[i].peak.push(f64.nearest(o.2) / 1048576.0)
+        }
+        println("  {name}: round {r + 1}/{rounds}")
+    }
+    for i in 1usize..3 {
+        if langs[i].total != langs[0].total {
+            stop("{name}: {lang(i)} came to {langs[i].total}, and Calx to {langs[0].total}; they don't do the same work")
+        }
+    }
+    return langs
+}
+
+// Milliseconds, with fewer decimals the bigger they are.
+fn ms(v: f64) -> String {
+    if v < 10.0 {
+        return "{v:.2} ms"
+    }
+    if v < 100.0 {
+        return "{v:.1} ms"
+    }
+    return "{v:.0} ms"
+}
+
+fn mb(v: f64) -> String {
+    return "{v:.1} MB"
+}
+
+fn median(v: List<f64>) -> f64 {
+    return stats.median(v) ?? 0.0
+}
+
+// A benchmark's table, and its record.
+fn report(title: String, langs: List<Lang>) -> Json {
+    println("")
+    println(title.copy())
+    println("")
+    println("| | Calx | Rust | Python |")
+    println("| --- | --- | --- | --- |")
+    for k in 0usize..langs[0].names.len() {
+        var row = "| {langs[0].names[k]} |"
+        for l in langs {
+            row.push_str(" {ms(f64.nearest(l.best[k]) / 1000.0)} |")
+        }
+        println(row)
+    }
+    var cpu = String("| CPU time, the whole run |")
+    var peak = String("| Most memory held |")
+    for l in langs {
+        cpu.push_str(" {ms(median(l.cpu.copy()))} |")
+        peak.push_str(" {mb(median(l.peak.copy()))} |")
+    }
+    println(cpu)
+    println(peak)
+    var r = LinkedMap<String, Json>()
+    r.insert("title", Json.Str(title.copy()))
+    for i in 0usize..3 {
+        var m = LinkedMap<String, Json>()
+        var steps = LinkedMap<String, Json>()
+        for k in 0usize..langs[i].names.len() {
+            steps.insert(langs[i].names[k].copy(), Json.Int(i64.wrap(langs[i].best[k])))
+        }
+        m.insert("best_us", Json.Object(steps))
+        m.insert("cpu_ms", Json.Array(langs[i].cpu.map(|v| Json.Float(round_to(v, 2)))))
+        m.insert("peak_mb", Json.Array(langs[i].peak.map(|v| Json.Float(round_to(v, 2)))))
+        m.insert("total", Json.Str(langs[i].total.copy()))
+        r.insert(lang(i).to_lower_root(), Json.Object(m))
+    }
+    return Json.Object(r)
+}
+
+// The best wall time of `n` runs of a command, in milliseconds, and the median CPU time and peak
+// memory.
+fn timed(cmd: List<String>, dir: String, n: u32) -> (f64, f64, f64) {
+    var best = 1e18
+    var cpu: List<f64> = []
+    var peak: List<f64> = []
+    for _ in 0..n {
+        let t0 = unsafe { Instant.now() }
+        let o = run(cmd.copy(), dir.copy())
+        best = best.min(f64.nearest(unsafe { Instant.now() }.nanos_since(t0)) / 1e6)
+        cpu.push(f64.nearest(o.1) / 1e6)
+        peak.push(f64.nearest(o.2) / 1048576.0)
+    }
+    return (best, median(cpu), median(peak))
+}
+
+// The smallest program, from outside: started, a line printed, ended; and as a script, changed
+// and run, then run again unchanged.
+fn start(root: String, work: String, calx: String, python: String, rounds: u32) -> Json {
+    let hello: List<String> = ["{work}/hello-calx{exe()}", "{work}/hello-rust{exe()}"]
+    build([calx.copy(), "build", "--release", "{root}/bench/start/hello.calx", "-o", hello[0].copy()], root.copy())
+    build(["rustc", "-C", "opt-level=3", "-C", "codegen-units=1", "-C", "panic=abort", "-C", "target-cpu=x86-64-v3", "-o", hello[1].copy(), "{root}/bench/start/hello.rs"], root.copy())
+    fs.write_text("{work}/hello.py", fs.read_text("{root}/bench/start/hello.py")! ?? String())!
+    let progs: List<List<String>> = [[hello[0].copy()], [hello[1].copy()], [python.copy(), "-I", "{work}/hello.py"]]
+    let edit = "{work}/edit"
+    fs.make_dir_all(edit.copy())!
+    var started: List<(f64, f64, f64)> = [(1e18, 0.0, 0.0), (1e18, 0.0, 0.0), (1e18, 0.0, 0.0)]
+    var changed: List<f64> = [1e18, 1e18]
+    var again: List<f64> = [1e18, 1e18]
+    var n: u32 = 0
+    // The cache gets the standard library and the runtime, which a script then doesn't build again.
+    fs.write_text("{edit}/hello.calx", #"fn main() { println("hello") }"#)!
+    _ = timed([calx.copy(), "run", "{edit}/hello.calx"], edit.copy(), 1)
+    for r in 0..rounds {
+        for i in 0usize..3 {
+            let t = timed(progs[i].copy(), work.copy(), 20)
+            if t.0 < started[i].0 {
+                started[i] = t
+            }
+        }
+        for _ in 0..5 {
+            n += 1
+            fs.write_text("{edit}/hello.calx", #"fn main() { println("hello #{n}") }"#)!
+            fs.write_text("{edit}/hello.rs", #"fn main() { println!("hello #{n}"); }"#)!
+            let t0 = unsafe { Instant.now() }
+            _ = run([calx.copy(), "run", "{edit}/hello.calx"], edit.copy())
+            let t1 = unsafe { Instant.now() }
+            _ = run([calx.copy(), "run", "{edit}/hello.calx"], edit.copy())
+            let t2 = unsafe { Instant.now() }
+            _ = run(["rustc", "-o", "{edit}/hello{exe()}", "{edit}/hello.rs"], edit.copy())
+            _ = run(["{edit}/hello{exe()}"], edit.copy())
+            let t3 = unsafe { Instant.now() }
+            _ = run(["{edit}/hello{exe()}"], edit.copy())
+            let t4 = unsafe { Instant.now() }
+            changed[0] = changed[0].min(f64.nearest(t1.nanos_since(t0)) / 1e6)
+            again[0] = again[0].min(f64.nearest(t2.nanos_since(t1)) / 1e6)
+            changed[1] = changed[1].min(f64.nearest(t3.nanos_since(t2)) / 1e6)
+            again[1] = again[1].min(f64.nearest(t4.nanos_since(t3)) / 1e6)
+        }
+        println("  start: round {r + 1}/{rounds}")
+    }
+    println("")
+    println("The smallest program: it starts, prints a line and ends")
+    println("")
+    println("| | Calx | Rust | Python |")
+    println("| --- | --- | --- | --- |")
+    println("| Built, then run | {ms(started[0].0)} | {ms(started[1].0)} | {ms(started[2].0)} |")
+    println("| CPU time | {ms(started[0].1)} | {ms(started[1].1)} | {ms(started[2].1)} |")
+    println("| Most memory held | {mb(started[0].2)} | {mb(started[1].2)} | {mb(started[2].2)} |")
+    println("| Changed, then built and run: `calx run`, `rustc` and the program, `python` | {ms(changed[0])} | {ms(changed[1])} | {ms(started[2].0)} |")
+    println("| Run again, unchanged | {ms(again[0])} | {ms(again[1])} | {ms(started[2].0)} |")
+    var r = LinkedMap<String, Json>()
+    for i in 0usize..3 {
+        var m = LinkedMap<String, Json>()
+        m.insert("run_ms", Json.Float(round_to(started[i].0, 3)))
+        m.insert("cpu_ms", Json.Float(round_to(started[i].1, 3)))
+        m.insert("peak_mb", Json.Float(round_to(started[i].2, 2)))
+        if i < 2 {
+            m.insert("changed_ms", Json.Float(round_to(changed[i], 2)))
+            m.insert("again_ms", Json.Float(round_to(again[i], 2)))
+        }
+        r.insert(lang(i).to_lower_root(), Json.Object(m))
+    }
+    return Json.Object(r)
+}
+
+// Python's own program, not the `py` launcher, which would be what's measured on Windows.
+fn find_python() -> String {
+    if env.os() == "windows" {
+        if let p = output_of(Command.new("py").args(["-c", "import sys; print(sys.executable)"])) {
+            return p
+        }
+        return String("python")
+    }
+    return String("python3")
+}
+
+fn main() {
+    let a = Args.parse()
+    let root = repo_root()
+    let calx = compiler(root.copy())
+    let python = find_python()
+    let work = fs.temp_dir()!.replace("\\", "/")
+    let all: List<String> = ["text", "format", "json", "walk", "start"]
+    var want: List<String> = []
+    for w in a.only.split(",") {
+        let t = w.trim()
+        if not t.is_empty() {
+            if not all.contains(t.copy()) {
+                stop("there's no benchmark `{t}`: it's one of {all.join(", ")}")
+            }
+            want.push(t)
+        }
+    }
+    if want.is_empty() {
+        for w in all {
+            want.push(w.copy())
+        }
+    }
+    let rflags = ["-C", "opt-level=3", "-C", "codegen-units=1", "-C", "panic=abort", "-C", "target-cpu=x86-64-v3"]
+    var results = LinkedMap<String, Json>()
+    for w in want {
+        if w == "start" {
+            results.insert("start", start(root.copy(), work.copy(), calx.copy(), python.copy(), a.rounds))
+            continue
+        }
+        let c = "{work}/{w}-calx{exe()}"
+        build([calx.copy(), "build", "--release", "{root}/bench/{w}/{w}.calx", "-o", c.copy()], root.copy())
+        var rust = String()
+        if w == "json" or w == "walk" {
+            cargo("{root}/bench/{w}/rust/Cargo.toml", "{work}/cargo-{w}")
+            rust = "{work}/cargo-{w}/release/{w}bench{exe()}"
+        } else {
+            rust = "{work}/{w}-rust{exe()}"
+            var cmd: List<String> = ["rustc"]
+            for f in rflags {
+                cmd.push(String(f))
+            }
+            cmd.push("-o")
+            cmd.push(rust.copy())
+            cmd.push("{root}/bench/{w}/{w}.rs")
+            build(cmd, root.copy())
+        }
+        var progs: List<List<String>> = [[c.copy()], [rust.copy()], [python.copy(), "-I", "{root}/bench/{w}/{w}.py"]]
+        if w == "walk" {
+            for k in 0usize..3 {
+                progs[k].push("{work}/tree")
+            }
+        }
+        let langs = measure(w.copy(), progs, work.copy(), a.rounds)
+        let title = if w == "text" {
+            String("Taking text apart: 200,000 CSV lines")
+        } else if w == "format" {
+            String("Writing numbers as text")
+        } else if w == "json" {
+            String("Reading and writing JSON: 100,000 records")
+        } else {
+            String("A tree of 10,000 files")
+        }
+        results.insert(w.copy(), report(title, langs))
+    }
+
+    if a.record {
+        var tc = LinkedMap<String, Json>()
+        tc.insert("calx", Json.Str(output_of(Command.new(calx.copy()).arg("version")) ?? String()))
+        tc.insert("rustc", Json.Str(output_of(Command.new("rustc").arg("--version")) ?? String()))
+        tc.insert("python", Json.Str(output_of(Command.new(python.copy()).arg("--version")) ?? String()))
+        var r = LinkedMap<String, Json>()
+        r.insert("recorded", Json.Str(now_utc()))
+        r.insert("commit", commit(root.copy()))
+        r.insert("machine", machine())
+        r.insert("toolchain", Json.Object(tc))
+        r.insert("rounds", Json.Int(i64(a.rounds)))
+        r.insert("results", Json.Object(results))
+        let out = "{root}/bench/results/script-{env.os()}.json"
+        fs.make_dir_all("{root}/bench/results")!
+        fs.write_text(out.copy(), "{pretty(Json.Object(r), 2)}\n")!
+        println("")
+        println("script: wrote {out}")
+    }
+    fs.remove_dir_all(work)!
+}
