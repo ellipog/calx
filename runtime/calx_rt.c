@@ -2785,7 +2785,9 @@ static void par_setup(par_pool* p, par_job* j, cx_u64 base, cx_u64 n, par_body b
     j->slots = (cx_u32)threads;
     for (cx_u32 t = 0; t < j->slots; t++) {
         cx_u64 w = 0;
-        if (spread) w = PAR_RANGE(chunks * t / threads, chunks * (t + 1) / threads);
+        /* Rounded up, so the owner's range has a chunk even with fewer chunks than threads, and
+         * the owner measures the loop. */
+        if (spread) w = PAR_RANGE((chunks * t + threads - 1) / threads, (chunks * (t + 1) + threads - 1) / threads);
         else if (t == par_slot) w = PAR_JOINED | PAR_RANGE(0, chunks);
         __atomic_store_n(&j->ranges[t].word, w, __ATOMIC_RELAXED);
     }

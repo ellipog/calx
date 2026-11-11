@@ -279,7 +279,7 @@ Waking the threads and waiting for them all costs a few microseconds, which is m
 
 - **What's left goes to the pool once it looks big.** After each batch, the loop works out how long what's left would take at the rate so far. Once that's more than 3 µs, it hands what's left to the pool. A small loop costs about what a `for` does, and a big one starts on the pool an iteration or so late.
 - **A loop's first run starts on the pool,** and so does a loop whose iterations were slow last time.
-- **The time an iteration takes is kept for each loop.** It's measured on the thread that runs the loop, and kept in a table of 1,024 loops.
+- **The time an iteration takes is kept for each loop.** It's measured on the thread that runs the loop, and kept in a table of 1,024 loops. On the pool, that thread's range always has a chunk, even in a loop with fewer iterations than threads, so a loop that went to the pool comes back off it once its iterations are quick again (CLX-260).
 - **It changes how long a loop takes, never what it does.** The output still comes in order, a panic still reports the first iteration that panicked, and the loops inside it still use the pool: the outer loop's pool, whichever it names.
 
 Per loop, on an i9-13900K with 32 threads, on a quiet machine. "Cheap" is `xs[k] += k` over `i64`s, a slow iteration is about 20 µs of hashing, and in the uneven loop iteration `k` hashes `200 * k` times. The cheap loops are the best of 5, the others the median of 15, each over three runs:
