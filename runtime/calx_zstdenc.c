@@ -1432,16 +1432,14 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
     for (;;) {
         cx_usize step = step0;
         const cx_u8* grow = ip0 + STEP_RUN;
-        const cx_u8* ip1 = ip0 + 1;
         const cx_u8* ip2 = ip0 + step;
-        const cx_u8* ip3 = ip2 + 1;
-        if (ip3 >= ilimit) break;
-        cx_u32 h0 = hash_at(ip0, mls, hl), h1 = hash_at(ip1, mls, hl);
+        if (ip2 + 1 >= ilimit) break;
+        cx_u32 h0 = hash_at(ip0, mls, hl), h1 = hash_at(ip0 + 1, mls, hl);
         cx_u32 m = ht[h0], c0, ml, off;
         const cx_u8* mp;
         do {
-            /* ip0, ip1 = ip0 + 1, ip2 = ip0 + step and ip3 = ip2 + 1; h0 and h1 are ip0's and
-             * ip1's hashes, m ip0's entry. */
+            /* ip0 and ip0 + 1, then ip2 = ip0 + step and ip2 + 1; h0 and h1 are ip0's and
+             * ip0 + 1's hashes, m ip0's entry. */
             const cx_u32 rv = ld32(ip2 - rt);
             c0 = (cx_u32)(ip0 - base);
             ht[h0] = c0;
@@ -1460,29 +1458,25 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
             m = ht[h1];
             h0 = h1;
             h1 = hash_at(ip2, mls, hl);
-            ip0 = ip1;
-            ip1 = ip2;
-            ip2 = ip3;
-            c0 = (cx_u32)(ip0 - base);
+            c0++;
             ht[h0] = c0;
-            if (CAND4(m, ip0)) {
-                /* ip1 is ip0 + step - 1, which the match reaches past only if the step is 4 or
+            if (CAND4(m, ip0 + 1)) {
+                ip0++;
+                /* ip2 is ip0 + step - 1, which the match reaches past only if the step is 4 or
                  * less: the table mustn't hold a position after where the next search starts. */
-                if (step <= 4) ht[h1] = (cx_u32)(ip1 - base);
+                if (step <= 4) ht[h1] = (cx_u32)(ip2 - base);
                 goto fresh;
             }
             m = ht[h1];
             h0 = h1;
-            h1 = hash_at(ip2, mls, hl);
-            ip0 = ip1;
-            ip1 = ip2;
-            ip2 = ip0 + step;
-            ip3 = ip1 + step;
+            h1 = hash_at(ip2 + 1, mls, hl);
+            ip0 = ip2;
+            ip2 += step;
             if (ip2 >= grow) {
                 step++;
                 grow += STEP_RUN;
             }
-        } while (ip3 < ilimit);
+        } while (ip2 + 1 < ilimit);
         break;
     fresh:
         mp = base + m;
