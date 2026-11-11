@@ -1407,15 +1407,20 @@ static inline cx_u32 hash_at(const cx_u8* p, cx_u32 mls, cx_u32 hl) {
  * taken only if it's in the window from all of the block, so one bound serves every position. */
 #define STEP_RUN 128
 
-/* Whether table entry m's first four bytes are ip's, the position c0, and it's a match there. */
-#define CAND4(m, ip) (ld32(base + (m)) == ld32(ip) && IN_WINDOW(m, low, c0))
+/* Whether table entry m's first four bytes are ip's, the position c0, and it's a match there. That's
+ * rare, so it's marked so, as a repeat is. */
+#define CAND4(m, ip) __builtin_expect(ld32(base + (m)) == ld32(ip) && IN_WINDOW(m, low, c0), 0)
 
 static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 at, cx_u32 end, cx_u32* rp, const cx_u32 mls) {
     const cx_u8* const base = J->base;
     cx_u32* const ht = J->hash;
     const cx_u32 hl = J->p.hlog, start = J->start;
-    const cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
-    const cx_u8* const prefix = base + start;
+    /* The window's low end, and where the text starts, are read only once a candidate's bytes
+     * agree, so they're kept in memory, leaving the registers to what the loop uses at each
+     * position: it has more values than x86-64 has registers. With that and the rare branches
+     * marked, levels -1 and 1 took about 2% less time on src.tar (CLX-212). */
+    volatile cx_u32 low = end - start > J->wsize ? end - J->wsize : start;
+    const cx_u8* volatile prefix_at = base + start;
     /* The repeated offsets and the sequence store are copies of the job's, which nothing the loop
      * stores to the table or the literals can be, so they needn't be read again after each. */
     cx_u32 r[3] = {rp[0], rp[1], rp[2]};
@@ -1443,7 +1448,7 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
             const cx_u32 rv = ld32(ip2 - rt);
             c0 = (cx_u32)(ip0 - base);
             ht[h0] = c0;
-            if ((ld32(ip2) == rv) & (rt != 0)) {
+            if (__builtin_expect((ld32(ip2) == rv) & (rt != 0), 0)) {
                 ht[h1] = c0 + 1;
                 const cx_u32 back = ip2[-1] == (ip2 - rt)[-1];
                 ml = count(ip2 + 4, ip2 + 4 - rt, iend) + 4 + back;
@@ -1472,7 +1477,7 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
             h1 = hash_at(ip2 + 1, mls, hl);
             ip0 = ip2;
             ip2 += step;
-            if (ip2 >= grow) {
+            if (__builtin_expect(ip2 >= grow, 0)) {
                 step++;
                 grow += STEP_RUN;
             }
@@ -1481,6 +1486,7 @@ static inline __attribute__((always_inline)) void mf_fast_with(job_t* J, cx_u32 
     fresh:
         mp = base + m;
         ml = 4;
+        const cx_u8* const prefix = prefix_at;
         while (ip0 > anchor && mp > prefix && ip0[-1] == mp[-1]) {
             ip0--;
             mp--;
