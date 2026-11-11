@@ -386,7 +386,7 @@ static inline __attribute__((always_inline)) void copy_match(cx_u8* out, cx_usiz
  * at an end marker, if `eopm` allows one; -1 for data that's corrupt; -2 when the input ends first.
  * With `partial`, it gives 2 instead where fewer than FAST_INPUT bytes are left, between symbols,
  * with all it needs to carry on stored. d->pos and d->at say how far it got. */
-static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_usize stop, cx_usize limit, int eopm, int partial) {
+static inline __attribute__((always_inline)) int lzma_run_with(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_usize stop, cx_usize limit, int eopm, int partial, const cx_u32 lc, const cx_usize lit_mask, const cx_usize pb_mask) {
     cx_u32 range = d->range, code = d->code;
     const cx_u8* in = in_base + d->at;
     const cx_u8* end = in_base + n;
@@ -397,8 +397,6 @@ static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_u
     const cx_usize ustop = stop - d->start, ulimit = limit - d->start;
     const cx_u64 reach = d->dict;
     cx_u32 state = d->state, rep0 = d->rep0;
-    const cx_u32 lc = d->lc;
-    const cx_usize lit_mask = ((cx_usize)0x100 << d->lp) - ((cx_usize)0x100 >> lc), pb_mask = ((cx_usize)1 << d->pb) - 1;
     cx_u32 prev = upos > 0 ? base[upos - 1] : 0;
     int status = 0;
     for (;;) {
@@ -440,6 +438,17 @@ short_input:
     d->pos = d->start + upos;
     d->at = n;
     return -2;
+}
+
+/* Every xz preset writes lc=3, lp=0 and pb=2, and with those as constants the loop has three
+ * values fewer to keep in registers, and finds a literal's probabilities with a constant mask and
+ * shift. Other properties take the same loop with them as values. */
+static int lzma_run(dec_t* d, const cx_u8* in_base, cx_usize n, cx_u8* out, cx_usize stop, cx_usize limit, int eopm, int partial) {
+    if (d->lc == 3 && d->lp == 0 && d->pb == 2) {
+        return lzma_run_with(d, in_base, n, out, stop, limit, eopm, partial, 3, 0x100 - (0x100 >> 3), 3);
+    }
+    return lzma_run_with(d, in_base, n, out, stop, limit, eopm, partial, d->lc,
+                         ((cx_usize)0x100 << d->lp) - ((cx_usize)0x100 >> d->lc), ((cx_usize)1 << d->pb) - 1);
 }
 
 /* At the end of a .lzma file's text, where its header said it ends: an end marker may follow, as
