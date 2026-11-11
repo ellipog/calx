@@ -269,7 +269,7 @@ fn main() {
 
 Each thread's stack is 8 MiB, as the main thread's is, so an iteration can recurse as deep as the code outside the loop can (D135).
 
-The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread. Each thread starts with an equal range of them, which it runs in order, and a thread that runs out takes half of what's left of another's. So a slow chunk doesn't hold the others up, and threads don't all wait on one counter (CLX-257). A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
+The threads are started by the first `parallel for` that needs them, and then wait for the next loop: they spin for a fifth of a millisecond, since loops often come one after another, then sleep until one starts. A loop's iterations are split into up to 8 chunks per thread. Each thread starts with an equal range of them, which it runs in order, and a thread that runs out takes half of what's left of another's. So a slow chunk doesn't hold the others up, and threads don't all wait on one counter (CLX-257). A thread says it has joined a loop, and then how many chunks it ran, in a cache line of its own, and the thread that started the loop adds those up. So joining a loop and leaving it write nothing another thread writes (CLX-258). A loop with one iteration, or with one thread to run it, runs on the thread that reaches it, and the loops inside it still use the pool.
 
 Up to 64 inner loops can be open at once, each in a slot of its own that threads with nothing to do look at. A thread that has looked for a fifth of a millisecond and found nothing sleeps until an inner loop opens or the outer loop's last chunk finishes. With every slot taken, an inner loop runs on the thread that reaches it.
 
@@ -296,6 +296,8 @@ Per loop, on an i9-13900K with 32 threads, on a quiet machine. "Cheap" is `xs[k]
 
 - **The loop of 4,096 still goes to the pool.** On one thread, its elements would be in the other threads' caches from the run before, so its first batches look slow.
 - **Loops of slow iterations are about 4% slower at the median.** At their best they're the same as before.
+
+Joining and leaving through each thread's own cache line (CLX-258) took the loop of 4,096 cheap iterations from 7.9–8.0 µs to 5.9–6.2 µs, best of 5 over three runs, measured against the runtime just before it on the same machine at 3–9% load. The other loops came out the same within noise: over three sessions, the slow and uneven loops' medians were ahead in two and behind in one.
 
 ## In C
 

@@ -2152,10 +2152,13 @@ void cx_table_free(cx_u8* ctrl, cx_usize buckets, cx_usize size, cx_usize extra)
  *
  * The outermost loop is the top job, which the main thread opens. Workers wait for it on its
  * word, which is odd while it's open: they spin for a while, since loops often come one after
- * another, then sleep on it. A thread joins a job by counting itself in the job's `active` and
- * then checking that the word hasn't changed. The job's owner closes it once every chunk is
- * claimed and waits for `active` to reach 0, so no thread reads a job after that, and a
- * sleeping thread is never waited for.
+ * another, then sleep on it. A worker joins the top job by writing the job's word into its own
+ * line, a cache line no other thread writes, and then checking that the word hasn't changed, and
+ * once it has no chunks left to run it adds how many it ran (CLX-258). The job's owner adds those
+ * up until every chunk has run, closes the job, and waits for each worker's line to let go of it,
+ * so no thread reads a job after that, a sleeping thread is never waited for, and no two threads
+ * write the same cache line to join and leave. An inner job counts its helpers in its `active`
+ * instead, since few threads come to one.
  *
  * A loop whose iterations each took less than `PAR_ALONE_NS` the last time it ran starts on the
  * thread that reaches it, in batches that double, and hands the rest to the pool once what's
@@ -2227,10 +2230,15 @@ typedef struct par_job {
     int up_owner;
     unsigned slot;
     PAR_SHARED cx_u32 word;   /* jobs opened * 2, plus 1 while one is open */
-    PAR_SHARED cx_u32 active; /* threads in it besides its owner */
+    PAR_SHARED cx_u32 active; /* an inner job: threads in it besides its owner */
     PAR_SHARED cx_u64 panic;  /* the first chunk that panicked */
-    PAR_SHARED cx_u64 left;   /* the top job: chunks that haven't finished */
 } par_job;
+
+/* A worker's own cache line: the top job it's in, `word << 32`, plus 1 and the chunks of it the
+ * worker ran once it has none left to run, or 0 outside one. Only the worker writes it. */
+typedef struct {
+    PAR_SHARED cx_u64 in;
+} par_line;
 
 /* A pool of threads: the main thread's, which a `parallel for` runs on unless it names another,
  * or one a program made with std.pool's `Pool.new`, which `parallel(pool) for` runs on (CLX-71).
@@ -2249,6 +2257,8 @@ typedef struct par_pool {
     PAR_SHARED cx_u32 busy_sleepers; /* threads asleep waiting for it */
     PAR_SHARED cx_u32 alive;         /* a program's pool: workers that haven't stopped */
     cx_u32 stop;                     /* a program's pool: its workers stop */
+    par_line** lines;                /* each worker's, by its number, which only the owner reads */
+    cx_usize lines_cap;
     cx_usize target;  /* threads to use, its owner included; 0 in the main pool until set or read */
     cx_usize started; /* worker threads started */
 } par_pool;
@@ -2263,6 +2273,7 @@ static _Thread_local int par_ending;   /* the inner jobs this thread is ending a
 /* This thread's range in its pool's jobs: 0 for the top job's owner, a worker's number + 1. */
 static _Thread_local cx_u32 par_slot;
 static _Thread_local cx_u32 par_victim; /* the range it last took chunks from */
+static _Thread_local par_line* par_mine; /* a worker's own line */
 /* The pool of the loop this thread runs alone, outside a chunk. */
 static _Thread_local struct par_pool* par_home;
 
@@ -2459,7 +2470,7 @@ typedef struct {
  * are left, as its owner or as a helper. After a panic it skips the chunks from the first one
  * that panicked on. Its owner passes `m`. Never inlined, so a stack trace tells a chunk's body
  * from a loop that runs where it is. */
-static __attribute__((noinline)) void par_claim(par_job* j, int owner, par_meter* m) {
+static __attribute__((noinline)) cx_u64 par_claim(par_job* j, int owner, par_meter* m) {
     par_job* was = par_cur;
     cx_u64 was_chunk = par_chunk;
     int was_owner = par_owner;
@@ -2491,13 +2502,11 @@ static __attribute__((noinline)) void par_claim(par_job* j, int owner, par_meter
         ran++;
         iters += end - begin;
     }
-    /* The top job's chunks are counted off once a thread has none left to run, rather than one by
-     * one, so its threads don't all wait on `left`. */
-    if (ran && j == &j->pool->top && __atomic_sub_fetch(&j->left, ran, __ATOMIC_ACQ_REL) == 0) par_nudge(j->pool);
     par_cur = was;
     par_chunk = was_chunk;
     par_owner = was_owner;
     par_buffered = was != 0;
+    return ran;
 }
 
 /* Runs chunks of every open inner job of `p` once. Returns whether there were any. */
@@ -2519,12 +2528,13 @@ static int par_help_once(par_pool* p) {
     return helped;
 }
 
-/* On a worker whose chunks of `p`'s top job are claimed: helps inner jobs until every chunk of
- * the top job has finished, sleeping when there's been nothing to help for a while. */
-static void par_help(par_pool* p) {
+/* On a worker with no chunks of `p`'s top job left to run, its word `w`: helps inner jobs until
+ * the owner closes the job, once every chunk has run, sleeping when there's been nothing to help
+ * for a while. */
+static void par_help(par_pool* p, cx_u32 w) {
     cx_u64 start = cx_clock_ns();
     for (unsigned spins = 1;; spins++) {
-        if (!__atomic_load_n(&p->top.left, __ATOMIC_ACQUIRE)) return;
+        if (__atomic_load_n(&p->top.word, __ATOMIC_ACQUIRE) != w) return;
         if (__atomic_load_n(&p->top.panic, __ATOMIC_RELAXED) != PAR_NONE) return;
         cx_u32 seen = __atomic_load_n(&p->help_word, __ATOMIC_SEQ_CST);
         if (par_help_once(p)) {
@@ -2534,7 +2544,7 @@ static void par_help(par_pool* p) {
         par_pause();
         if (spins % 64 || cx_clock_ns() - start <= PAR_SPIN_NS) continue;
         __atomic_fetch_add(&p->help_sleepers, 1, __ATOMIC_SEQ_CST);
-        if (__atomic_load_n(&p->help_word, __ATOMIC_SEQ_CST) == seen && __atomic_load_n(&p->top.left, __ATOMIC_SEQ_CST)) {
+        if (__atomic_load_n(&p->help_word, __ATOMIC_SEQ_CST) == seen && __atomic_load_n(&p->top.word, __ATOMIC_SEQ_CST) == w) {
             par_sleep(&p->help_word, seen);
         }
         __atomic_fetch_sub(&p->help_sleepers, 1, __ATOMIC_RELAXED);
@@ -2614,7 +2624,8 @@ static CX_COLD void par_panicked(void) {
         par_end_inner(j);
     }
     /* A helper leaves the job, and its owner takes the panic from there. */
-    __atomic_fetch_sub(&j->active, 1, __ATOMIC_RELEASE);
+    if (j == &p->top) __atomic_store_n(&par_mine->in, 0, __ATOMIC_RELEASE);
+    else __atomic_fetch_sub(&j->active, 1, __ATOMIC_RELEASE);
     if (!par_worker) {
         /* The thread that owns the pool's top job, helping an inner job: the panic reaches the
          * top job through the inner job's owner, and this thread ends the program then. */
@@ -2644,9 +2655,10 @@ static void par_wait(par_pool* p, cx_u32 seen) {
     __atomic_fetch_sub(&p->sleepers, 1, __ATOMIC_RELAXED);
 }
 
-static void par_work(par_pool* p, cx_usize id) {
+static void par_work(par_pool* p, cx_usize id, par_line* mine) {
     par_worker = 1;
     par_slot = (cx_u32)id + 1;
+    par_mine = mine;
     cx_u32 seen = 0;
     for (;;) {
         par_wait(p, seen);
@@ -2654,14 +2666,18 @@ static void par_work(par_pool* p, cx_usize id) {
         cx_u32 w = __atomic_load_n(&p->top.word, __ATOMIC_SEQ_CST);
         seen = w;
         if (!(w & 1)) continue; /* a job that closed before this worker saw it */
-        __atomic_fetch_add(&p->top.active, 1, __ATOMIC_SEQ_CST);
-        if (__atomic_load_n(&p->top.word, __ATOMIC_SEQ_CST) == w && id + 1 < p->target) {
+        if (id + 1 >= p->target) continue; /* a loop that runs on fewer threads */
+        cx_u64 in = (cx_u64)w << 32;
+        __atomic_store_n(&mine->in, in, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&p->top.word, __ATOMIC_SEQ_CST) == w) {
             par_depth = 1;
-            par_claim(&p->top, 0, 0);
-            par_help(p);
+            cx_u64 ran = par_claim(&p->top, 0, 0);
+            /* Release, so the owner sees what the chunks wrote. */
+            __atomic_store_n(&mine->in, in + 1 + ran, __ATOMIC_RELEASE);
+            par_help(p, w);
             par_depth = 0;
         }
-        __atomic_fetch_sub(&p->top.active, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&mine->in, 0, __ATOMIC_RELEASE);
     }
     __atomic_fetch_sub(&p->alive, 1, __ATOMIC_SEQ_CST);
 }
@@ -2670,12 +2686,13 @@ static void par_work(par_pool* p, cx_usize id) {
 typedef struct {
     par_pool* p;
     cx_usize id;
+    par_line* line;
 } par_start;
 
 static void par_begin(void* arg) {
     par_start s = *(par_start*)arg;
     free(arg);
-    par_work(s.p, s.id);
+    par_work(s.p, s.id, s.line);
 }
 
 #ifdef _WIN32
@@ -2732,26 +2749,6 @@ void cx_set_workers(cx_usize n) {
     par_main.target = n;
 }
 
-static void par_start_workers(par_pool* p, cx_usize threads) {
-    while (p->started + 1 < threads) {
-        par_start* s = malloc(sizeof *s);
-        if (!s) par_fail("panic at <memory>: out of memory\n");
-        s->p = p;
-        s->id = p->started;
-        __atomic_fetch_add(&p->alive, 1, __ATOMIC_SEQ_CST);
-#ifdef _WIN32
-        HANDLE h;
-        if (cx_os_thread(&h, par_thread, s)) par_fail("panic at <parallel>: can't start a worker thread\n");
-        CloseHandle(h);
-#else
-        pthread_t t;
-        if (cx_os_thread(&t, par_thread, s)) par_fail("panic at <parallel>: can't start a worker thread\n");
-        pthread_detach(t);
-#endif
-        p->started++;
-    }
-}
-
 static void* par_aligned(size_t size) {
 #ifdef _WIN32
     void* q = _aligned_malloc(size, 128);
@@ -2768,6 +2765,37 @@ static void par_aligned_free(void* q) {
 #else
     free(q);
 #endif
+}
+
+static void par_start_workers(par_pool* p, cx_usize threads) {
+    while (p->started + 1 < threads) {
+        if (p->started == p->lines_cap) {
+            cx_usize cap = p->lines_cap ? p->lines_cap * 2 : 16;
+            par_line** lines = realloc(p->lines, cap * sizeof *lines);
+            if (!lines) par_fail("panic at <memory>: out of memory\n");
+            p->lines = lines;
+            p->lines_cap = cap;
+        }
+        par_line* line = par_aligned(sizeof(par_line));
+        line->in = 0;
+        p->lines[p->started] = line;
+        par_start* s = malloc(sizeof *s);
+        if (!s) par_fail("panic at <memory>: out of memory\n");
+        s->p = p;
+        s->id = p->started;
+        s->line = line;
+        __atomic_fetch_add(&p->alive, 1, __ATOMIC_SEQ_CST);
+#ifdef _WIN32
+        HANDLE h;
+        if (cx_os_thread(&h, par_thread, s)) par_fail("panic at <parallel>: can't start a worker thread\n");
+        CloseHandle(h);
+#else
+        pthread_t t;
+        if (cx_os_thread(&t, par_thread, s)) par_fail("panic at <parallel>: can't start a worker thread\n");
+        pthread_detach(t);
+#endif
+        p->started++;
+    }
 }
 
 /* Sets up `j` of `p` for iterations `base` to `base + n` of `body`, as its owner, on `threads`
@@ -2866,25 +2894,37 @@ static void par_top(par_pool* p, cx_usize threads, cx_u64 base, cx_u64 n, par_bo
     par_slot = 0;
     par_setup(p, j, base, n - base, body, ctx, threads, 1);
     j->up = 0;
-    __atomic_store_n(&j->left, j->chunks, __ATOMIC_RELAXED);
-    __atomic_store_n(&j->word, j->word + 1, __ATOMIC_SEQ_CST);
+    cx_u32 w = j->word + 1;
+    __atomic_store_n(&j->word, w, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&p->sleepers, __ATOMIC_SEQ_CST)) par_wake(&j->word);
 
     int depth = par_depth;
     par_depth = depth + 1;
-    par_claim(j, 1, &m);
-    /* Helps the chunks still running with their inner loops, until they finish. */
-    for (unsigned spins = 0; __atomic_load_n(&j->left, __ATOMIC_ACQUIRE); spins++) {
+    cx_u64 ran = par_claim(j, 1, &m);
+    /* Helps the chunks still running with their inner loops, until the workers that came have
+     * run every chunk. */
+    cx_usize workers = threads - 1;
+    for (unsigned spins = 0;; spins++) {
         if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic(p);
+        cx_u64 all = ran;
+        for (cx_usize k = 0; k < workers; k++) {
+            cx_u64 in = __atomic_load_n(&p->lines[k]->in, __ATOMIC_ACQUIRE);
+            if (in >> 32 == w && (cx_u32)in) all += (cx_u32)in - 1;
+        }
+        if (all == j->chunks) break;
         if (par_help_once(p)) spins = 0;
         else if (spins < 4096) par_pause();
         else par_yield();
     }
     par_close(j);
-    for (unsigned spins = 0; __atomic_load_n(&j->active, __ATOMIC_SEQ_CST); spins++) {
-        if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic(p);
-        if (spins < 4096) par_pause();
-        else par_yield();
+    par_nudge(p);
+    /* Waits for each worker to let go of the job. */
+    for (cx_usize k = 0; k < workers; k++) {
+        for (unsigned spins = 0; __atomic_load_n(&p->lines[k]->in, __ATOMIC_SEQ_CST) >> 32 == w; spins++) {
+            if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic(p);
+            if (spins < 4096) par_pause();
+            else par_yield();
+        }
     }
     par_depth = depth;
     if (__atomic_load_n(&j->panic, __ATOMIC_ACQUIRE) != PAR_NONE) par_end_panic(p);
@@ -2997,6 +3037,8 @@ void cx_pool_close(cx_u64 pool) {
     free(p->top.done);
     free(p->top.outs);
     if (p->top.ranges) par_aligned_free(p->top.ranges);
+    for (cx_usize k = 0; k < p->started; k++) par_aligned_free(p->lines[k]);
+    free(p->lines);
     for (int k = 0; k < PAR_NESTED; k++) {
         free(p->nest[k].done);
         free(p->nest[k].outs);
