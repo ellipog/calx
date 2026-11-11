@@ -1642,7 +1642,19 @@ CX_INT_ABS(i16, cx_u32)
 CX_INT_ABS(i32, cx_u32)
 CX_INT_ABS(i64, cx_u64)
 
-/* Java's Math.min and Math.max on floats: NaN if either is NaN, and -0.0 is less than 0.0. */
+/* Java's Math.min and Math.max on floats: NaN if either is NaN, and -0.0 is less than 0.0. Those
+ * are IEEE 754-2019's minimum and maximum, which clang gives without a branch: on x86-64-v3 six
+ * instructions, fewer against a constant, where the tests below took three branches (CLX-217). */
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_elementwise_minimum) && __has_builtin(__builtin_elementwise_maximum)
+#define CX_FLOAT_MINMAX_BUILTIN 1
+#endif
+#endif
+#ifdef CX_FLOAT_MINMAX_BUILTIN
+#define CX_FLOAT_MINMAX(T, SIGNBIT)                                                                       \
+    CX_INLINE cx_##T cx_min_##T(cx_##T a, cx_##T b) { return __builtin_elementwise_minimum(a, b); } \
+    CX_INLINE cx_##T cx_max_##T(cx_##T a, cx_##T b) { return __builtin_elementwise_maximum(a, b); }
+#else
 #define CX_FLOAT_MINMAX(T, SIGNBIT)                                                      \
     CX_INLINE cx_##T cx_min_##T(cx_##T a, cx_##T b) {                                    \
         if (a != a) return a;                                                            \
@@ -1656,6 +1668,7 @@ CX_INT_ABS(i64, cx_u64)
         if (a == b) return SIGNBIT(a) ? b : a;                                           \
         return a > b ? a : b;                                                            \
     }
+#endif
 CX_FLOAT_MINMAX(f32, __builtin_signbit)
 CX_FLOAT_MINMAX(f64, __builtin_signbit)
 CX_INLINE cx_f32 cx_abs_f32(cx_f32 a) { return __builtin_fabsf(a); }

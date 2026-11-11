@@ -1552,6 +1552,15 @@ impl Raster {
             return
         }
         let i1 = usize.wrap(i32.saturate(hi.floor()))
+        if i1 == i0 {
+            // Within one pixel, the part of it right of the line is 1 less where the line is on
+            // average, its middle: the loop below's one step, without its two areas. At small
+            // sizes most of a glyph's lines cross a row in one pixel.
+            let frac = (lo + hi) * 0.5f32 - f32.nearest(i0)
+            self.acc[base + i0] += d * (1.0f32 - frac)
+            self.acc[base + i0 + 1] += d * frac
+            return
+        }
         let s = d / (hi - lo)
         var before = 0.0f32
         for i in i0..i1 + 1 {
@@ -1564,15 +1573,16 @@ impl Raster {
     }
 
     fn coverage(self) -> List<u8> {
-        var out: List<u8> = []
-        out.reserve(self.w * self.h)
+        var out: List<u8> = [0u8; self.w * self.h]
+        var k: usize = 0
         for row in 0..self.h {
             let base = row * self.stride
             var sum = 0.0f32
             for i in 0..self.w {
                 sum += self.acc[base + i]
                 let v = sum.abs().min(1.0f32)
-                out.push(u8.wrap(i32.saturate(v * 255.0f32 + 0.5f32)))
+                out[k] = u8.wrap(i32.saturate(v * 255.0f32 + 0.5f32))
+                k += 1
             }
         }
         return out
