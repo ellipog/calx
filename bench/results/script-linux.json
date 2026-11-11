@@ -1,0 +1,319 @@
+{
+  "recorded": "2026-11-11T13:13:11Z",
+  "commit": "c98398fd893f70d8f8b539a8a40ce989c9021130",
+  "machine": {
+    "platform": "linux",
+    "os": "Ubuntu 26.04 LTS",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "cores": 16,
+    "threads": 1,
+    "memory_gib": 23.3,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "note": "WSL2: the guest's CPU topology isn't the host's, so the thread counts come from Windows"
+  },
+  "toolchain": {
+    "calx": "calx 0.1.0-dev (built from source)",
+    "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+    "python": "Python 3.14.4"
+  },
+  "rounds": 5,
+  "results": {
+    "text": {
+      "title": "Taking text apart: 200,000 CSV lines",
+      "calx": {
+        "best_us": {
+          "fields": 3867,
+          "lines joined": 1307,
+          "replace": 2308
+        },
+        "cpu_ms": [
+          74.83,
+          82.11,
+          75.52,
+          78.65,
+          71.03
+        ],
+        "peak_mb": [
+          41.38,
+          41.38,
+          41.38,
+          41.39,
+          41.38
+        ],
+        "total": "130466651"
+      },
+      "rust": {
+        "best_us": {
+          "fields": 8239,
+          "lines joined": 5645,
+          "replace": 4321
+        },
+        "cpu_ms": [
+          152.8,
+          153.6,
+          158.18,
+          157.07,
+          151.48
+        ],
+        "peak_mb": [
+          35.09,
+          35.03,
+          35.09,
+          35.09,
+          35.09
+        ],
+        "total": "130466651"
+      },
+      "python": {
+        "best_us": {
+          "fields": 66342,
+          "lines joined": 12064,
+          "replace": 3278
+        },
+        "cpu_ms": [
+          653.37,
+          666.54,
+          700.97,
+          668.7,
+          741.45
+        ],
+        "peak_mb": [
+          69.37,
+          69.13,
+          69.39,
+          69.28,
+          69.3
+        ],
+        "total": "130466651"
+      }
+    },
+    "format": {
+      "title": "Writing numbers as text",
+      "calx": {
+        "best_us": {
+          "fixed": 8380,
+          "padded": 1553,
+          "integers": 5692,
+          "shortest": 5374
+        },
+        "cpu_ms": [
+          173.69,
+          163.75,
+          162.5,
+          161.56,
+          162.25
+        ],
+        "peak_mb": [
+          39.64,
+          39.63,
+          39.64,
+          39.61,
+          39.6
+        ],
+        "total": "97660052"
+      },
+      "rust": {
+        "best_us": {
+          "fixed": 16229,
+          "padded": 3899,
+          "integers": 13456,
+          "shortest": 11668
+        },
+        "cpu_ms": [
+          341.38,
+          330.19,
+          333.71,
+          329.28,
+          326.09
+        ],
+        "peak_mb": [
+          24.67,
+          24.67,
+          24.67,
+          24.67,
+          24.67
+        ],
+        "total": "97660052"
+      },
+      "python": {
+        "best_us": {
+          "fixed": 28402,
+          "padded": 25484,
+          "integers": 60566,
+          "shortest": 54270
+        },
+        "cpu_ms": [
+          1460.28,
+          1411.16,
+          1411.79,
+          1400.58,
+          1375.16
+        ],
+        "peak_mb": [
+          141.99,
+          141.93,
+          142.07,
+          141.86,
+          142.09
+        ],
+        "total": "97660052"
+      }
+    },
+    "json": {
+      "title": "Reading and writing JSON: 100,000 records",
+      "calx": {
+        "best_us": {
+          "parse": 31125,
+          "write": 21212,
+          "typed": 55223
+        },
+        "cpu_ms": [
+          948.82,
+          927.98,
+          910.79,
+          939.63,
+          910.4
+        ],
+        "peak_mb": [
+          290.11,
+          290.15,
+          290.11,
+          290.15,
+          290.16
+        ],
+        "total": "90269620"
+      },
+      "rust": {
+        "best_us": {
+          "parse": 34687,
+          "write": 19397,
+          "typed": 18316
+        },
+        "cpu_ms": [
+          747.86,
+          756.68,
+          751.86,
+          774.14,
+          760.79
+        ],
+        "peak_mb": [
+          231.49,
+          231.53,
+          231.49,
+          231.53,
+          231.46
+        ],
+        "total": "90269620"
+      },
+      "python": {
+        "best_us": {
+          "parse": 78203,
+          "write": 88088,
+          "typed": 101926
+        },
+        "cpu_ms": [
+          2397.7,
+          2391.52,
+          2421.19,
+          2411.95,
+          2417.5
+        ],
+        "peak_mb": [
+          289.41,
+          289.41,
+          289.68,
+          289.46,
+          289.68
+        ],
+        "total": "90269620"
+      }
+    },
+    "walk": {
+      "title": "A tree of 10,000 files",
+      "calx": {
+        "best_us": {
+          "walk": 1623,
+          "glob": 1869
+        },
+        "cpu_ms": [
+          29.63,
+          35.02,
+          30.8,
+          29.28,
+          27.49
+        ],
+        "peak_mb": [
+          3.62,
+          3.63,
+          3.64,
+          3.65,
+          3.64
+        ],
+        "total": "3873240"
+      },
+      "rust": {
+        "best_us": {
+          "walk": 2728,
+          "glob": 2559
+        },
+        "cpu_ms": [
+          43.0,
+          54.4,
+          49.84,
+          55.57,
+          50.03
+        ],
+        "peak_mb": [
+          2.93,
+          2.93,
+          2.93,
+          2.93,
+          2.93
+        ],
+        "total": "3873240"
+      },
+      "python": {
+        "best_us": {
+          "walk": 5203,
+          "glob": 7122
+        },
+        "cpu_ms": [
+          105.87,
+          117.82,
+          111.65,
+          115.94,
+          108.14
+        ],
+        "peak_mb": [
+          11.42,
+          11.44,
+          11.4,
+          11.38,
+          11.46
+        ],
+        "total": "3873240"
+      }
+    },
+    "start": {
+      "calx": {
+        "run_ms": 0.294,
+        "cpu_ms": 0.262,
+        "peak_mb": 2.93,
+        "changed_ms": 50.64,
+        "again_ms": 15.38
+      },
+      "rust": {
+        "run_ms": 0.316,
+        "cpu_ms": 0.278,
+        "peak_mb": 2.93,
+        "changed_ms": 148.09,
+        "again_ms": 0.35
+      },
+      "python": {
+        "run_ms": 6.21,
+        "cpu_ms": 6.446,
+        "peak_mb": 9.08
+      }
+    }
+  }
+}

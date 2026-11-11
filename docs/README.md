@@ -145,6 +145,7 @@ Hash tables that iterate in exactly the order Java's or fastutil's do, for code 
 1. [Roadmap](roadmap.md): what's built, what's being built now, and what comes after
 2. [Calx spec](CALX_SPEC.md): the design of every feature that isn't built yet
 3. [Tick-loop benchmark](benchmarks.md): the workload Calx is timed against Rust on, how it's measured, and how the two versions are kept comparable
+4. [Scripting benchmarks](scripting-benchmarks.md): Calx against Rust and Python on taking text apart, writing numbers, JSON, a tree of files and starting up, with the CPU time and memory each used
 
 
 ## How the docs are organized

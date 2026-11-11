@@ -48,6 +48,7 @@ Each pass is a `parallel for` over the regions, on the runtime's pool, and `--th
 | `results/calx-windows.json` | The Calx version on Windows 11 |
 | `results/calx-linux.json` | The Calx version on Ubuntu under WSL2 |
 | `results/build-windows.json`, `results/build-linux.json` | How fast Calx builds, from [`build.calx`](build.calx) |
+| `results/script-windows.json`, `results/script-linux.json` | Calx against Rust and Python as scripting languages, from [`script.calx`](script.calx) |
 
 Each file names the commit, the machine (CPU, cores, memory, OS), the toolchain (rustc and its LLVM), and every run's mean tick time. The numbers in the gate are the medians.
 
@@ -144,4 +145,26 @@ cargo build --release --manifest-path bench/json/rust/Cargo.toml
 py -I bench/json/json.py
 ```
 
-The times aren't recorded yet.
+The times are in [Scripting benchmarks](../docs/scripting-benchmarks.md).
+
+## Calx as a scripting language
+
+[`script.calx`](script.calx) times Calx against Rust and Python on what scripts do. Each benchmark is a program in each language, with the same algorithms, written as that language usually writes it:
+
+| Folder | What it does |
+| --- | --- |
+| [`text/`](text/) | 200,000 CSV lines taken apart, joined and a word replaced, as above |
+| [`format/`](format/) | Numbers written as text: doubles to three places, integers padded, integers and doubles in their shortest digits |
+| [`json/`](json/) | 100,000 records parsed, written and read into structs, as above |
+| [`walk/`](walk/) | A tree of 10,000 files in 420 directories walked, and `**/*.calx` globbed, with the walkdir and glob crates in Rust |
+| [`start/`](start/) | The smallest program, which prints a line, from outside: started, and as a script changed and run again |
+
+```sh
+calx run bench/script.calx                        # 5 rounds of each, the tables in Markdown
+calx run bench/script.calx -- --only json,walk    # some of them
+calx run bench/script.calx -- --record            # written to bench/results/script-<os>.json
+```
+
+Each program is run as a fresh process, the languages taking turns, in the other order every other round. A program times its own steps, the best of 7, and prints them with a total its work came to, which must be the same in all three languages, or the runner stops. The tables give each step's best over the rounds, and for the whole process its CPU time and the most memory it held, the median over the rounds, from [`std.process`](../docs/std/process.md#what-it-used). It builds the Calx programs with `calx build --release`, the Rust ones with `-C opt-level=3`, one codegen unit, `panic = "abort"` and `x86-64-v3`, and thin LTO for the two with crates, and runs Python's own program, not the `py` launcher. Everything it makes goes in a folder of its own in the temp folder, removed at the end.
+
+It doesn't pin itself to cores. On a processor with two kinds, start it pinned, and the programs it runs are too: on Windows, `start /affinity 5554 /b /wait calx run bench/script.calx` puts it on the i9-13900K's performance cores, and on Linux `taskset -c 4` on one of them.
