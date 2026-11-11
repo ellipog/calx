@@ -72,7 +72,45 @@ fn main() {
 }
 ```
 
-Nothing in the body reaches the list except through the element, so no iteration can reach another's. Without `mut`, each iteration reads its element, and the body can read the list as well, since no iteration changes it. Elements go to the threads in chunks, as a range's numbers do. Deques, maps and sets go through a range of indexes, or a list made from them.
+Nothing in the body reaches the list except through the element, so no iteration can reach another's. Without `mut`, each iteration reads its element, and the body can read the list as well, since no iteration changes it. Elements go to the threads in chunks, as a range's numbers do.
+
+## Over slot maps, maps and sets
+
+A `parallel for` goes over a [slot map's](slot-maps.md) values as it goes over a list's elements, and over a map's keys and values, or a set's values, as a `for` loop does. `m.values()` gives a map's values alone, and with `mut` each iteration changes its own value where it is (CLX-71):
+
+```calx
+struct Mob {
+    hp: i32,
+}
+
+fn main() {
+    var mobs = SlotMap<Mob>()
+    var hp = Map<String, i32>()
+    for k in 0..100 {
+        _ = mobs.insert(Mob { hp: k })
+        hp.insert("mob{k}", k)
+    }
+    let regen = 5
+    parallel for m in mut mobs {
+        m.hp += regen
+    }
+    parallel for v in mut hp.values() {
+        v *= 2
+    }
+    var total = 0
+    for m in mobs {
+        total += m.hp
+    }
+    parallel for (name, v) in hp {
+        assert(name.starts_with("mob") and v % 2 == 0)
+    }
+    println("{total} {hp["mob7"]}")    // out: 5450 14
+}
+```
+
+- The iterations are the slots, or a `JavaHashMap`'s bins, in chunks; one with a free slot or an empty bin does nothing. What a loop computes doesn't depend on the order, so it's the same as a `for` loop's, whatever the table's order.
+- A map's keys can't change, since a change could move one: `parallel for (k, v) in mut m` is an error that says to write `m.values()`.
+- A `SortedMap` or a `SortedSet` keeps its keys in a tree, so a `parallel for` doesn't go over one. Nor does it go over a deque: go over a range of indexes, or a list made from it.
 
 ## What an iteration can touch
 

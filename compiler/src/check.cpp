@@ -2881,6 +2881,23 @@ private:
         c->let_unwraps = false;
         c->loop_id = 0;
         c->elem_type = nullptr;
+        if (s->kind == StmtKind::for_ && s->written) {
+            // The loop as written, which the instance takes apart again: what the definition
+            // found, such as the range of `m.range(a..b)`, has the definition's types.
+            c->value = clone(s->written);
+            c->written = nullptr;
+            c->text_iter = BMethod::none;
+            c->text_sep = nullptr;
+            c->range_of = nullptr;
+            c->map_values = false;
+            c->rev = false;
+            c->enumerate = 0;
+            c->zip_with = nullptr;
+            c->step = nullptr;
+            c->item_type = nullptr;
+            c->iter_next = nullptr;
+            c->captures = {};
+        }
         return c;
     }
 
@@ -4698,6 +4715,7 @@ private:
     void check_for(Stmt* s) {
         if (s->pool) not_yet(s->pool->span, "pools for `parallel for`");
         Pattern* p = s->pattern;
+        s->written = s->value;
         peel_adaptors(s);
         Expr* it = s->value;
         bool par = s->is_parallel;
@@ -4726,7 +4744,15 @@ private:
             for_iter_ = it;
             Type* t = check(it, nullptr);
             for_iter_ = nullptr;
-            if (it->kind == ExprKind::call && it->bmethod == BMethod::range && !is_bad(t)) {
+            if (it->kind == ExprKind::call && it->bmethod == BMethod::values && !is_bad(t) && t->kind == TypeKind::map) {
+                // `for v in m.values()`: the loop goes over `m`, and gives each value alone, which
+                // `in mut` changes where it is (CLX-71).
+                s->value = it->callee->lhs;
+                s->map_values = true;
+                elem = t->elem;
+                over = s->value;
+                borrowed = place_root(s->value);
+            } else if (it->kind == ExprKind::call && it->bmethod == BMethod::range && !is_bad(t)) {
                 // `for (k, v) in m.range(a..b)`: the loop goes over `m`, from `a` (D112).
                 s->range_of = it->args[0].value;
                 elem = t->kind == TypeKind::map ? t->entry : t->elem;
@@ -4781,9 +4807,17 @@ private:
         bool elements = par && it->kind != ExprKind::range;
         if (elements && !is_bad(it->type)) {
             TypeKind k = it->type->kind;
-            if (s->range_of || s->text_iter != BMethod::none || (k != TypeKind::list && k != TypeKind::array)) {
+            bool table = k == TypeKind::map || k == TypeKind::set;
+            if (table && it->type->table == TableKind::sorted && !s->range_of) {
+                // Its keys are in a tree's leaves, which can't be split among threads without a
+                // walk along them first.
+                error(s->value->span, "a `parallel for` doesn't go over a sorted table, whose keys are in a tree; go over it "
+                                      "with `for`, or put what each iteration needs in a list and go over that");
+                par = elements = false;
+            } else if (s->range_of || s->text_iter != BMethod::none ||
+                       (k != TypeKind::list && k != TypeKind::array && k != TypeKind::slot_map && !table)) {
                 error(s->value->span, "a `parallel for` goes over a range of indexes, such as " + q("0..xs.len()") +
-                                          ", or the elements of a list or an array, not " +
+                                          ", or the elements of a list, an array, a slot map, a map or a set, not " +
                                           (s->range_of ? std::string("a part of a sorted table")
                                            : s->text_iter != BMethod::none ? "the text's " + text_iter_name(s->text_iter)
                                                                            : a_type(it->type)));
@@ -4883,8 +4917,8 @@ private:
         Expr* it = s->value;
         if (is_bad(item)) return T.error;
         if (by_mut) {
-            error(it->span, "`for x in mut` changes the elements of a list, an array or a deque where they are, and an "
-                            "iterator gives values, not places");
+            error(it->span, "`for x in mut` changes the elements of a list, an array, a deque or a slot map, or a map's values, "
+                            "where they are, and an iterator gives values, not places");
             by_mut = false;
         }
         if (par) {
@@ -5071,7 +5105,8 @@ private:
         Expr* it = s->value;
         Type* t = it->type;
         if (s->range_of || s->text_iter != BMethod::none) {
-            error(it->span, std::string("`for x in mut` changes the elements of a list, an array or a deque, not ") +
+            error(it->span, std::string("`for x in mut` changes the elements of a list, an array, a deque or a slot map, or a map's "
+                                        "values, not ") +
                                 (s->range_of ? std::string("a part of a sorted table") : "a text's " + text_iter_name(s->text_iter)));
             return false;
         }
@@ -5080,8 +5115,9 @@ private:
                             "and insert the new value");
             return false;
         }
-        if (t->kind == TypeKind::map) {
-            error(it->span, "changing a map's values with `for ... in mut` isn't implemented yet; change one with " + q("m[k] = v"));
+        if (t->kind == TypeKind::map && !s->map_values) {
+            error(it->span, "a map's keys can't be changed where they are, since a change could move one; change its values with " +
+                                q("for v in mut " + place_text(it) + ".values()"));
             return false;
         }
         if (!root) {
@@ -10576,6 +10612,24 @@ private:
     // `m.range(a..b)`, only as what a `for` loop goes over: the keys from `a` up to but not
     // including `b`, or to `b` with `a..=b`, and from the least or to the greatest when an end is
     // left out (D112). The ends are looked up as keys are.
+    // `m.values()`, only as what a `for` loop goes over: the map's values, without their keys,
+    // which `for v in mut m.values()` changes where they are (CLX-71).
+    Type* values_method(Expr* e, Type* recv) {
+        e->call = CallKind::builtin_method;
+        e->bmethod = BMethod::values;
+        check_args(e);
+        if (e != for_iter_) {
+            error(e->callee->span, "`values` goes over a map's values in a `for` loop: " + q("for v in m.values()") +
+                                       ", or " + q("for v in mut m.values()") + " to change them");
+            return T.error;
+        }
+        if (!e->args.empty()) {
+            error(e->span, "`values` takes no arguments");
+            return T.error;
+        }
+        return recv;
+    }
+
     Type* range_method(Expr* e, Type* recv, Type* look) {
         e->call = CallKind::builtin_method;
         e->bmethod = BMethod::range;
@@ -10913,6 +10967,7 @@ private:
             else if (m == "contains") b = BMethod::contains, params = {look}, result = T.bool_;
             else if (m == "get" && map) b = BMethod::get, params = {look}, result = T.optional_of(recv->elem);
             else if (m == "find" && map) return find_method(e, recv, look);
+            else if (m == "values" && map) return values_method(e, recv);
             else if (m == "clear") b = BMethod::clear, changes = true;
             // A tree grows a node at a time, so there's no room to make.
             else if (m == "reserve" && recv->table != TableKind::sorted) b = BMethod::reserve, changes = true, params = {T.usize};

@@ -26,16 +26,38 @@ pub fn same_list(xs: mut List<i32>) {
     }
 }
 
-pub fn kinds(d: Deque<i32>, m: Map<i32, i32>, s: String) {
-    parallel for x in d {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not a `Deque<i32>`
+pub fn kinds(d: Deque<i32>, m: SortedMap<i32, i32>, s: String) {
+    parallel for x in d {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list, an array, a slot map, a map or a set, not a `Deque<i32>`
         println("{x}")
     }
-    parallel for e in m {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not a `Map<i32, i32>`
+    parallel for e in m {    // error: a `parallel for` doesn't go over a sorted table, whose keys are in a tree; go over it with `for`, or put what each iteration needs in a list and go over that
         println("{e}")
     }
-    parallel for r in s.runes() {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list or an array, not the text's runes
+    parallel for r in s.runes() {    // error: a `parallel for` goes over a range of indexes, such as `0..xs.len()`, or the elements of a list, an array, a slot map, a map or a set, not the text's runes
         println("{r}")
     }
+}
+
+// Over a map's values or a slot map's, as over a list's elements (CLX-71).
+pub fn tables(m: mut Map<i32, i32>, sm: mut SlotMap<i32>) {
+    var total = 0
+    parallel for (k, v) in mut m {    // error: a map's keys can't be changed where they are, since a change could move one; change its values with `for v in mut m.values()`
+        _ = k
+        _ = v
+    }
+    parallel for v in mut m.values() {
+        v += 1
+        total += v    // error: `total` is shared by every iteration of the `parallel for`, so it can't be changed here; an iteration can change only its own element, through `v`
+    }
+    parallel for v in mut m.values() {
+        v += i32.wrap(m.len())    // error: `m` can't be used while a `for ... in mut` loop changes its elements; reach them through `v`
+    }
+    parallel for x in mut sm {
+        x += 1
+        sm.clear()    // error: `sm` can't be used while a `for ... in mut` loop changes its elements; reach them through `x`
+    }
+    _ = m.values()    // error: `values` goes over a map's values in a `for` loop: `for v in m.values()`, or `for v in mut m.values()` to change them
+    println("{total}")
 }
 
 fn main() {

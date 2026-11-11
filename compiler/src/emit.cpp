@@ -1173,6 +1173,11 @@ private:
         }
         return s + indent + "    }\n" + indent + "}\n";
     }
+    // The value in a map's slot `slot`, which holds its key and value (CLX-71). A sorted table's
+    // loop gives the value already.
+    static std::string map_value_at(const Type* t, const std::string& slot) {
+        return t->table == TableKind::sorted ? slot : slot + ".f1";
+    }
     // What slot `i` of the table `tab` holds.
     std::string slot_at(const Type* t, const std::string& tab, const std::string& i) {
         if (t->table == TableKind::java) return tab + "nodes[" + i + "].v";
@@ -3999,6 +4004,7 @@ $dropall    m->len = 0;
                 Expr* r = s->range_of;
                 std::string key_at = l + "->k[" + i + "]";
                 elem_at = at->kind == TypeKind::map ? "((" + ctype(at->entry) + "){ " + key_at + ", " + l + "->v[" + i + "] })" : key_at;
+                if (s->map_values) elem_at = l + "->v[" + i + "]";
                 if (r && r->lhs) line(lookup_ctype(at) + " " + lo + " = " + lookup_value(r->lhs, at) + ";");
                 if (r && r->rhs) line(lookup_ctype(at) + " " + hi + " = " + lookup_value(r->rhs, at) + ";");
                 // As Java's `subMap` throws and Rust's `range` panics.
@@ -4095,6 +4101,9 @@ $dropall    m->len = 0;
                 if (s->enumerate == 2) count = i;
                 indent_++;
             }
+            // `m.values()`: the value of each key's slot, without the key (CLX-71). A sorted
+            // table's are beside its keys in the leaf.
+            if (s->map_values) elem_at = map_value_at(at, elem_at);
             // An element that owns memory is a view in the body, which can't change the list it's
             // in, so the name points at it where it is rather than copying it each pass, as a
             // view parameter does: a struct of several fields copied to the stack each pass cost a
@@ -4102,9 +4111,11 @@ $dropall    m->len = 0;
             bool in_place = !var.empty() && !s->iter_mut && !s->zip_with && !s->enumerate && !is_copy(elem) &&
                             is_view_type(elem) &&
                             (at->kind == TypeKind::list || at->kind == TypeKind::array || at->kind == TypeKind::deque ||
-                             at->kind == TypeKind::slot_map);
+                             at->kind == TypeKind::slot_map || s->map_values);
             if (!var.empty() && s->iter_mut) {
-                line(ctype(elem) + "* " + var + " = &" + elem_at + ";");
+                // A sorted table's leaves are read through `const` pointers.
+                std::string cast = s->map_values ? "(" + ctype(elem) + "*)" : "";
+                line(ctype(elem) + "* " + var + " = " + cast + "&" + elem_at + ";");
             } else if (in_place) {
                 s->local->is_view = true;
                 s->local->mode = ParamMode::read;
@@ -4136,6 +4147,15 @@ $dropall    m->len = 0;
         Type* elem = s->elem_type;
         Expr* it = s->value;
         bool elements = it->kind != ExprKind::range;  // `parallel for x in xs`, or `in mut xs`
+        // Over a slot map's values, which are in its slots, by slot, and a table's keys or
+        // values, by slot or by Java's bin, as the table has them (CLX-71). An iteration with a free
+        // slot or an empty bin does nothing.
+        bool slots = elements && it->type->kind == TypeKind::slot_map;
+        bool table = elements && is_table(it->type);
+        std::string at_type = !elements ? std::string()
+                              : slots   ? "struct " + ctype(it->type) + "_slot"
+                              : table   ? ctype(it->type)
+                                        : ctype(elem);
         std::string id = std::to_string(s->loop_id);
         std::string name = "cx_par_" + std::string(fn_->c_name) + "_" + id;
         std::string ctx_t = "struct " + name + "_c";
@@ -4175,7 +4195,7 @@ $dropall    m->len = 0;
             indent_ = 0;
             std::string fields;
             for (const Cap& c : caps) fields += " " + c.type + " " + local_name(c.l) + ";";
-            if (elements) fields += std::string(" ") + (s->iter_mut ? "" : "const ") + ctype(elem) + "* cx__at;";
+            if (elements) fields += std::string(" ") + (s->iter_mut ? "" : "const ") + at_type + "* cx__at;";
             line(ctx_t + " {" + fields + " cx_u64 cx__lo; };");
             directive(s->span);
             line("static void " + name + "(void* cx__v, cx_u64 cx__begin, cx_u64 cx__end) {");
@@ -4192,23 +4212,51 @@ $dropall    m->len = 0;
                     if (!c.l->is_view && par_pointers_.insert(c.l).second) pointed.push_back(c.l);
                 }
             }
-            if (elements) line(std::string(s->iter_mut ? "" : "const ") + ctype(elem) + "* restrict cx__at = cx__c->cx__at;");
+            if (elements) line(std::string(s->iter_mut ? "" : "const ") + at_type + "* restrict cx__at = cx__c->cx__at;");
             line("for (cx_u64 cx__i = cx__begin; cx__i < cx__end; cx__i++) {");
             indent_ = 2;
             loop_frames_[s->loop_id] = frames_.size();
+            // A slot map's free slots, whose generations are even, have no value (CLX-69).
+            if (slots) line("if (!(cx__at[cx__i].gen & 1)) continue;");
+            std::string elem_at = slots ? "cx__at[cx__i].v" : "cx__at[cx__i]";
+            Type* tt = it->type;
+            bool bin = table && tt->table == TableKind::java;
+            if (table && tt->table == TableKind::fastutil) {
+                // fastutil's key 0, if it's there, is in slot `n`.
+                elem_at = "cx__at->slots[cx__i]";
+                if (int_keys(tt)) {
+                    line("if (cx__i == cx__at->n ? !cx__at->zero : " + slot_key(tt, elem_at) + " == 0) continue;");
+                } else {
+                    line("if (!cx__at->hash[cx__i]) continue;");
+                }
+            } else if (bin) {
+                // Along the bin's list or tree.
+                line("for (cx_i32 cx__j = cx_jt_first(cx__at->heads[cx__i]); cx__j >= 0; cx__j = cx__at->nodes[cx__j].next) {");
+                indent_ = 3;
+                elem_at = "cx__at->nodes[cx__j].v";
+            } else if (table) {
+                // A full slot's control byte has its top bit clear.
+                line("if (cx__at->ctrl[cx__i] & 0x80) continue;");
+                elem_at = own_slot(tt, "cx__at->", "cx__i");
+            }
+            if (s->map_values) elem_at = map_value_at(tt, elem_at);
             if (elements && s->local && s->iter_mut) {
-                line(ctype(elem) + "* " + local_name(s->local) + " = &cx__at[cx__i];");
+                line(ctype(elem) + "* " + local_name(s->local) + " = &" + elem_at + ";");
             } else if (elements && s->local) {
-                line(ctype(elem) + " " + local_name(s->local) + " = cx__at[cx__i];");
+                line(ctype(elem) + " " + local_name(s->local) + " = " + elem_at + ";");
             } else if (elements && s->pattern->kind != PatternKind::wildcard) {
                 Match m;
-                walk(s->pattern, "cx__at[cx__i]", m);
+                walk(s->pattern, elem_at, m);
                 bind(m);
             } else if (s->local) {
                 line(ctype(elem) + " " + local_name(s->local) + " = (" + ctype(elem) + ")(cx__c->cx__lo + cx__i);");
             }
             stmts(s->body, false);
             line("cx_cont" + id + ":;");
+            if (bin) {
+                indent_ = 2;
+                line("}");
+            }
             indent_ = 1;
             line("}");
             indent_ = 0;
@@ -4233,13 +4281,29 @@ $dropall    m->len = 0;
             // The elements, from the list or array worked out once, by index. Nothing in the body
             // changes it, so its length and memory stay as they are.
             Type* at = it->type;
-            bool list = at->kind == TypeKind::list;
+            bool list = at->kind == TypeKind::list || slots;
             std::string arr = tmp(), c = tmp();
             line("{");
             indent_++;
             line(std::string(s->iter_mut ? "" : "const ") + ctype(at) + "* " + arr + " = &" + place(it) + ";");
+            if (table) {
+                // Every slot or bin, once there are keys: an empty table may have none.
+                std::string n = at->table == TableKind::java      ? "(cx_u64)" + arr + "->cap"
+                                : at->table == TableKind::fastutil ? "(cx_u64)" + arr + "->n" + (int_keys(at) ? " + 1" : "")
+                                                                   : "(cx_u64)" + arr + "->mask + 1";
+                line("if (" + arr + "->len) {");
+                indent_++;
+                line(ctx_t + " " + c + " = {" + inits + arr + ", 0};");
+                line("cx_parallel(" + n + ", " + name + ", &" + c + ");");
+                indent_--;
+                line("}");
+                indent_--;
+                line("}");
+                return;
+            }
             std::string n = list ? arr + "->len" : std::to_string(at->length);
-            line("if (" + n + ") {");
+            // A slot map with no values has nothing to do, whatever its slots.
+            line("if (" + (slots ? arr + "->count" : n) + ") {");
             indent_++;
             line(ctx_t + " " + c + " = {" + inits + arr + (list ? "->ptr" : "->v") + ", 0};");
             line("cx_parallel((cx_u64)" + n + ", " + name + ", &" + c + ");");

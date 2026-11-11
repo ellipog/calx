@@ -209,6 +209,7 @@ enum class BMethod : std::uint8_t {
     // On a `SlotMap`, which has `insert`, `remove`, `get` and the rest too: a list of the handles
     // of its values; and on a `Handle`, its slot's index and generation (CLX-69).
     handles, handle_index, handle_generation,
+    values,  // on a map, only as what a `for` loop goes over: its values, which `in mut` changes (CLX-71)
 };
 
 enum class Conv : std::uint8_t { none, exact, wrap, saturate, nearest, round };
@@ -411,6 +412,7 @@ struct Stmt {
     BMethod text_iter = BMethod::none;  // for: `s.runes()`, `s.chars()`, `s.split(sep)`, `s.lines()` or `s.split_whitespace()`, with `value` now `s`
     Expr* text_sep = nullptr;      // for: the `sep` of `s.split(sep)`
     Expr* range_of = nullptr;      // for: the range of `m.range(a..b)`, with `value` now `m` (D112)
+    bool map_values = false;       // for: `m.values()`, with `value` now `m`, so the loop gives the values alone (CLX-71)
     // for: what's around what it goes over, with `value` now that (CLX-101).
     bool rev = false;              // `.rev()`: from the last to the first
     std::uint8_t enumerate = 0;    // `.enumerate()`: 1 counts the passes, 2 gives each element's index, as in `.enumerate().rev()`
@@ -418,6 +420,9 @@ struct Stmt {
     Expr* step = nullptr;          // `(a..b).step_by(n)`: `n`
     Type* item_type = nullptr;     // with `enumerate`: what each count is paired with
     Expr* iter_next = nullptr;     // over an `Iterator`: the call of `next`, on `value` or on `hidden`
+    // for: what it goes over as written, before the checker took adaptors and methods such as
+    // `m.range(a..b)` off it, so a generic instance's copy checks that again with its own types.
+    Expr* written = nullptr;
     Slice<Capture> captures;       // parallel for: the outer locals its body uses, in order of first use
     // Filled in by the ownership pass (D76).
     Slice<Local*> drops;           // return, break, continue: what's dropped before leaving

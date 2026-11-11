@@ -25,9 +25,6 @@ fn main() {
     let fixed = SlotMap<i32>()
     _ = fixed.insert(1)    // error: `fixed` can't be changed; declare it with `var` to change it
     _ = h < h
-    parallel for q in ps {    // error: a `parallel for` goes over a range of indexes
-        _ = q.x
-    }
     _ = ps[p].x
     _ = unknown
     _ = listed

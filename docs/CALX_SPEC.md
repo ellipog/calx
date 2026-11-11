@@ -281,14 +281,15 @@ Built: see [Parallel loops](reference/parallel.md) and [std.pool](std/pool.md). 
 
 ```calx
 fn step(counters: mut SlotMap<Counter>, bonus: Shared<Config>) {
-    parallel for c in mut counters.values() {
+    parallel(pool) for c in mut counters {
         c.total += bonus.value.amount // bonus is Share, so every iteration may read it
     }
 }
 ```
 
-- Going over the values of a slot map or a map with `in mut`, as above.
-- `parallel(pool) for` picks a pool.
+- `parallel(pool) for` picks a pool, as above.
+
+Built: going over a slot map's values, and a map's or a set's keys and values, with `in mut` over `m.values()` ([over slot maps, maps and sets](reference/parallel.md#over-slot-maps-maps-and-sets), CLX-71).
 - Reading values that are `Share` while something else changes the collection they came from, once shared values exist.
 
 ### Lockstep ticks

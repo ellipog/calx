@@ -115,7 +115,7 @@ Changing `r.scheduled`, or `r` as a whole, is still an error in the loop: `r.sch
 
 ### Changing the elements
 
-`for x in mut xs` goes over the elements of a list, an array or a deque, and `x` is a view of each one: changing `x` changes the element, as a [`mut` parameter](functions.md#parameter-modes) changes the caller's value (D116).
+`for x in mut xs` goes over the elements of a list, an array, a deque or a [slot map](slot-maps.md#loops), and `x` is a view of each one: changing `x` changes the element, as a [`mut` parameter](functions.md#parameter-modes) changes the caller's value (D116).
 
 ```calx
 struct Mob {
@@ -142,7 +142,7 @@ fn main() {
 - `x` can be passed on as `mut x`, given a new value, which drops the old one, or changed in part, as in `m.tags.push(...)`. It can't move, since the element stays in the list: move a copy with `x.copy()`.
 - It's an error if the body never changes `x`, as for a `mut` parameter: go over the elements without `mut`.
 - The variable is one name. Take an element apart in the body, as in `let (a, b) = p`, or change its parts with `p.0 += 1`.
-- A set's elements can't change where they are, since a change could move one, and a range's numbers can't change at all. Changing a map's values in place isn't built yet: change one with `m[k] = v`.
+- A set's elements can't change where they are, since a change could move one, and a range's numbers can't change at all. A map's values change where they are with `for v in mut m.values()` ([maps](maps.md#loops)), but its keys can't.
 
 In C, `x` is a pointer to the element, and the list's length and memory are read once before the loop, since nothing in the body can change them.
 

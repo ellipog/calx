@@ -1,0 +1,75 @@
+// Loops a generic function's instances take apart again with their own types: over text's runes
+// and parts, a sorted map's range, a map's values, and with `rev`, `enumerate`, `zip` and
+// `step_by`. Each instance had the definition's types before (CLX-71).
+fn count_parts<T: Display>(tag: T, s: String) -> String {
+    var n = 0
+    for r in s.runes() {
+        _ = r
+        n += 1
+    }
+    for p in s.split(",") {
+        _ = p
+        n += 1
+    }
+    return "{tag}:{n}"
+}
+
+fn between<K: Order + Display, V: Display>(m: SortedMap<K, V>, a: K, b: K) -> String {
+    var out = String("")
+    for (k, v) in m.range(a..b) {
+        out.push_str("{k}={v} ")
+    }
+    return out
+}
+
+fn total<K: Hash>(m: mut Map<K, i32>) -> i32 {
+    for v in mut m.values() {
+        v += 1
+    }
+    var n = 0
+    for v in m.values() {
+        n += v
+    }
+    return n
+}
+
+fn shapes<T: Display + Copy>(xs: List<T>, ys: List<T>) -> String {
+    var out = String("")
+    for x in xs.rev() {
+        out.push_str("{x}")
+    }
+    for (i, x) in xs.enumerate() {
+        out.push_str(" {i}:{x}")
+    }
+    for (x, y) in xs.zip(ys) {
+        out.push_str(" {x}{y}")
+    }
+    for i in (0usize..xs.len()).step_by(2) {
+        out.push_str(" {xs[i]}")
+    }
+    return out
+}
+
+fn main() {
+    println("{count_parts(1, String("a,b"))} {count_parts("t", String("xyz"))}")    // out: 1:5 t:4
+    var m = SortedMap<i32, String>()
+    m.insert(1, String("a"))
+    m.insert(5, String("e"))
+    m.insert(9, String("i"))
+    var s = SortedMap<String, i32>()
+    s.insert(String("x"), 1)
+    s.insert(String("y"), 2)
+    println("{between(m, 2, 10)}| {between(s, String("a"), String("y"))}|")    // out: 5=e 9=i | x=1 |
+    var h = Map<String, i32>()
+    h.insert(String("p"), 4)
+    h.insert(String("q"), 6)
+    var g = Map<i32, i32>()
+    g.insert(1, 1)
+    println("{total(mut h)} {total(mut g)}")    // out: 12 2
+    let xs: List<i32> = [1, 2, 3]
+    let ys: List<i32> = [7, 8, 9]
+    let cs: List<rune> = ['a', 'b', 'c']
+    let ds: List<rune> = ['x', 'y', 'z']
+    println("{shapes(xs, ys)}")    // out: 321 0:1 1:2 2:3 17 28 39 1 3
+    println("{shapes(cs, ds)}")    // out: cba 0:a 1:b 2:c ax by cz a c
+}

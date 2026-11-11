@@ -146,6 +146,24 @@ fn main() {
 
 `for (k, v) in m` goes over a map's keys and values, and `for x in s` over a set's values. Each is a view. The table can't be changed or moved during the loop, so it can't grow under the loop and leave it reading freed memory. A loop over a table in a field leaves the other fields free to change ([looping over a field](control-flow.md#looping-over-a-field)).
 
+`for v in m.values()` goes over a map's values alone, and `for v in mut m.values()` changes each one where it is. The keys can't change, since a change could move one, so `for (k, v) in mut m` is an error that says to write `m.values()`. Both work on every kind of map, and in a [`parallel for`](parallel.md#over-slot-maps-maps-and-sets).
+
+```calx
+fn main() {
+    var stock = Map<String, i32>()
+    stock.insert(String("apples"), 3)
+    stock.insert(String("pears"), 5)
+    for n in mut stock.values() {
+        n += 10
+    }
+    var total = 0
+    for n in stock.values() {
+        total += n
+    }
+    println("{total} {stock["pears"]}")    // out: 28 15
+}
+```
+
 ```calx
 fn main() {
     var stock = Map<String, i32>()

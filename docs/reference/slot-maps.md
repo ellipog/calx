@@ -104,7 +104,8 @@ fn main() {
 ```
 
 - `enumerate` counts the values the loop goes over, not slots.
-- `rev`, `zip` and `step_by` don't go over a slot map, and nor does a `parallel for` yet.
+- `rev`, `zip` and `step_by` don't go over a slot map.
+- A [`parallel for`](parallel.md#over-slot-maps-maps-and-sets) goes over a slot map's values, and with `mut` each iteration changes its own value (CLX-71).
 - To remove values while going over them, go over `m.handles()`, which is a list of its own: `for h in m.handles() { if m[h].hp <= 0 { _ = m.remove(h) } }`.
 
 ## Handles

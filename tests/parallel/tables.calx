@@ -1,0 +1,104 @@
+// `parallel for` over a slot map's values, and over a map's or a set's keys and values, for each
+// kind of table that can be split among threads, with values removed so some slots are free
+// (CLX-71). `parallel for v in mut m.values()` changes each value where it is.
+struct Stat {
+    hits: i32,
+    name: String,
+}
+
+fn main() {
+    var mobs = SlotMap<Stat>()
+    var hs = List<Handle<Stat>>()
+    var m = Map<i32, Stat>()
+    var lm = LinkedMap<i32, i32>()
+    var jm = JavaHashMap<i32, i32>()
+    var om = OpenHashMap<i32, i32>()
+    var os = OpenHashSet<String>()
+    var s = Set<i32>()
+    for i in 0..3000 {
+        hs.push(mobs.insert(Stat { hits: i, name: "m{i}" }))
+        m.insert(i, Stat { hits: i, name: "n{i}" })
+        lm.insert(i, i)
+        jm.insert(i, i)
+        om.insert(i, i)
+        os.insert("k{i}")
+        s.insert(i)
+    }
+    // Keys whose Java hashes all land in one bin, which turns into a tree.
+    for i in 1..20 {
+        jm.insert(i << 22, 1)
+    }
+    for i in 0..3000 {
+        if i % 3 == 1 {
+            _ = mobs.remove(hs[usize.wrap(i)])
+            _ = m.remove(i)
+            _ = lm.remove(i)
+            _ = jm.remove(i)
+            _ = om.remove(i)
+        }
+    }
+
+    let bonus = 2
+    parallel for x in mut mobs {
+        x.hits *= bonus
+        x.name.push_str("!")
+    }
+    parallel for v in mut m.values() {
+        v.hits *= bonus
+        v.name.push_str("?")
+    }
+    parallel for v in mut lm.values() {
+        v += 1
+    }
+    parallel for v in mut jm.values() {
+        v += 1
+    }
+    parallel for v in mut om.values() {
+        v += 1
+    }
+
+    var a = 0
+    for x in mobs {
+        a += x.hits
+    }
+    var b = 0
+    for v in m.values() {
+        b += v.hits
+    }
+    var c = 0
+    for v in lm.values() {
+        c += v
+    }
+    var d = 0
+    for v in jm.values() {
+        d += v
+    }
+    var e = 0
+    for v in om.values() {
+        e += v
+    }
+    println("{a} {b} {c} {d} {e}")    // out: 5998000 5998000 3001000 3001038 3001000
+    println("{mobs[hs[3]].name} {m[3].name} {om[0]} {jm[3 << 22]}")    // out: m3! n3? 1 2
+
+    // Reading every key and value: what each iteration finds is the same with any thread count.
+    var counts = [0; 3]
+    parallel for k in 0usize..3 {
+        var n = 0
+        for (key, v) in m {
+            if usize.wrap(key % 3) == k {
+                n += v.hits
+            }
+        }
+        counts[k] = n
+    }
+    println("{counts}")    // out: [2997000, 0, 3001000]
+    parallel for (k, v) in m {
+        assert(v.hits == k * 2)
+    }
+    parallel for x in os {
+        assert(x.starts_with("k"))
+    }
+    parallel for x in s {
+        assert(x >= 0)
+    }
+}

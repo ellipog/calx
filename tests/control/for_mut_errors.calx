@@ -67,10 +67,10 @@ pub fn kinds() {
     }
     var m = Map<i32, i32>()
     m[1] = 2
-    for e in mut m {    // error: changing a map's values with `for ... in mut` isn't implemented yet; change one with `m[k] = v`
+    for e in mut m {    // error: a map's keys can't be changed where they are, since a change could move one; change its values with `for v in mut m.values()`
         println("{e}")
     }
-    for r in mut st.runes() {    // error: `for x in mut` changes the elements of a list, an array or a deque, not a text's runes
+    for r in mut st.runes() {    // error: `for x in mut` changes the elements of a list, an array, a deque or a slot map, or a map's values, not a text's runes
         r = 'a'
     }
     for x in mut [1, 2] {    // error: `for x in mut` changes the elements where they are, so it goes over a variable or a part of one, not a value made here
