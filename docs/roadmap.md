@@ -25,7 +25,6 @@ Everything in the [reference](README.md#reference) and the [standard library](RE
 
 The [spec](CALX_SPEC.md) has the design of each of these:
 
-- **`java.ArrayList`**, a list that grows as Java's does, for code that must match Java's capacities ([spec](CALX_SPEC.md#collections)).
 - **Plugins that fail alone**: a plugin's panic stops only that plugin, and its memory is all freed when it stops ([spec](CALX_SPEC.md#arenas-and-plugin-memory)).
 
 ## Later
