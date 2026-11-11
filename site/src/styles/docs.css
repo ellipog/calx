@@ -277,6 +277,129 @@ html {
 	}
 }
 
+/* ---------- a terminal ----------
+   What the install scripts draw, played back (src/terminal.mjs), in a card like a code block's,
+   with its tabs. The text shrinks to fit the widest line the recordings draw, so on a phone it's
+   a picture of the whole terminal, which zooming in reads, rather than a part of it to scroll; and
+   the screen is as tall as the tallest of them, so nothing moves as one plays. A run of the
+   scripts' shades, ░ ▒ ▓ and █, is filled with the dither of that shade, a quarter, a half and
+   three quarters of a 4 by 4 Bayer matrix in 2px dots, and all of it, in the run's color. The
+   chip a result sits on keeps the scripts' dark text on amber in both themes. */
+.calx-term {
+	margin: 20px 0 26px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--code);
+	overflow: hidden;
+	container-type: inline-size;
+}
+.calx-replay {
+	font: 500 13px/1 var(--f-body);
+	padding: 8px 11px;
+	border-radius: 7px;
+	border: 0;
+	background: none;
+	color: var(--ink-3);
+	cursor: pointer;
+}
+.calx-replay:hover {
+	background: var(--sunk);
+	color: var(--ink);
+}
+.calx-screen {
+	margin: 0;
+	--pad: 20px;
+	padding: 16px var(--pad);
+	font: clamp(4px, calc((100cqw - 2 * var(--pad)) / (var(--cols) * 0.6)), 13.5px) / 1.25 var(--f-mono);
+	min-height: calc(var(--rows) * 1.25em + 32px);
+	color: var(--ink);
+	white-space: pre;
+	overflow-x: auto;
+}
+.calx-screen[hidden] {
+	display: none;
+}
+.calx-screen .l {
+	display: block;
+}
+.calx-screen .b {
+	font-weight: 700;
+}
+.calx-screen .f-a,
+.calx-screen .f-y {
+	color: var(--amber-ink);
+}
+.calx-screen .f-g {
+	color: var(--ok);
+}
+.calx-screen .f-r {
+	color: var(--err);
+}
+.calx-screen .f-d {
+	color: var(--ink-3);
+}
+.calx-screen .f-w {
+	color: var(--ink);
+}
+/* A result's chip: dark text on amber, in both themes. */
+.calx-screen .f-k {
+	color: #1E1F24;
+}
+.calx-screen .g-a {
+	background: var(--calx);
+}
+.calx-screen [style*='--fg'] {
+	color: var(--fg);
+}
+.calx-screen [style*='--bg'] {
+	background: var(--bg);
+}
+.calx-screen .q {
+	display: inline-block;
+	height: 1.25em;
+	vertical-align: top;
+	color: transparent;
+	background: var(--q, var(--ink-2));
+	-webkit-mask: var(--m, none) 0 0 / 8px 8px;
+	mask: var(--m, none) 0 0 / 8px 8px;
+}
+.calx-screen .q.f-a {
+	--q: var(--calx);
+}
+.calx-screen .q.f-d {
+	--q: var(--ink-3);
+}
+.calx-screen .q[style*='--fg'] {
+	--q: var(--fg);
+}
+.calx-screen .q1 {
+	--m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM4 0h2v2H4zM0 4h2v2H0zM4 4h2v2H4z'/%3E%3C/svg%3E");
+}
+.calx-screen .q2 {
+	--m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM4 0h2v2H4zM2 2h2v2H2zM6 2h2v2H6zM0 4h2v2H0zM4 4h2v2H4zM2 6h2v2H2zM6 6h2v2H6z'/%3E%3C/svg%3E");
+}
+.calx-screen .q3 {
+	--m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h8v2H0zM2 2h2v2H2zM6 2h2v2H6zM0 4h8v2H0zM2 6h2v2H2zM6 6h2v2H6z'/%3E%3C/svg%3E");
+}
+.calx-term figcaption {
+	margin: 0;
+	padding: 10px 20px 12px;
+	border-top: 1px solid var(--line);
+	font: 13px/1.5 var(--f-body);
+	color: var(--ink-3);
+}
+@container (max-width: 560px) {
+	/* As narrow as a phone, the text is a few pixels high, so the screen's edges and the dither's
+	   dots are smaller too: 1px dots, which are still whole pixels of a phone's screen. */
+	.calx-screen {
+		--pad: 12px;
+	}
+	.calx-screen .q {
+		-webkit-mask-size: 4px 4px;
+		mask-size: 4px 4px;
+	}
+}
+
 /* ---------- tables ---------- */
 .sl-markdown-content table {
 	display: table;

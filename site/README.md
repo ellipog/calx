@@ -69,11 +69,18 @@ Each is the page as the site shows it: the front matter's title and description 
 
 It's [Astro](https://astro.build) with [Starlight](https://starlight.astro.build), the docs theme.
 
-- **Docs pages.** Starlight renders every page of `docs/` (`src/content.config.ts` points it there). [`src/markdown.mjs`](src/markdown.mjs) changes four things as it does:
+- **Docs pages.** Starlight renders every page of `docs/` (`src/content.config.ts` points it there). [`src/markdown.mjs`](src/markdown.mjs) changes five things as it does:
   - links to `.md` files become the pages' URLs;
   - links to the rest of the repo go to GitHub;
   - the `# Title` heading goes, since the page shows the front matter's title;
-  - a decision the text cites, "(D21)", is left out, since the site's readers don't have the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) beside them. The docs cite decisions only in parentheses, so each sentence reads the same without one (`docs/README.md` has the rule).
+  - a decision the text cites, "(D21)", is left out, since the site's readers don't have the [decision log](https://github.com/ellipog/calcite/blob/main/docs/decisions.md) beside them. The docs cite decisions only in parentheses, so each sentence reads the same without one (`docs/README.md` has the rule);
+  - a comment on a line of its own, `<!-- terminal: install -->`, becomes [a terminal](#a-terminal). GitHub shows nothing for it, and the page's Markdown for language models leaves it out.
+- <a id="a-terminal"></a>**A terminal.** The install page shows what the install scripts draw in a terminal, played back, with a tab for Windows and one for Linux ([`src/terminal.mjs`](src/terminal.mjs)). It's text, in the site's colors, and the mark's and the bars' shades are the site's dither, so it reads in both themes and at any size; on a phone the text shrinks to show the whole terminal. It plays once when it comes into view, typing the command first, and again from Replay or a tab; with reduced motion on, or without JavaScript, it shows how the install ends, which the build draws with the same emulator. The recordings are [`src/terminal/`](src/terminal/)`install-windows.json` and `install-linux.json`, made by [`src/terminal/record.py`](src/terminal/record.py): it runs this checkout's install script with colour forced on, installing the newest nightly into a folder of its own in the system's temp folder, deletes that folder, and keeps what the script wrote and when, with the folder shown as `~/.calx`. A step that redraws itself for more than 2.5 seconds plays faster, so the replay takes about ten seconds. Record them again when the scripts' look changes, on each system:
+
+  ```sh
+  py -I site/src/terminal/record.py site/src/terminal/install-windows.json      # on Windows
+  python3 -I site/src/terminal/record.py site/src/terminal/install-linux.json   # on Linux
+  ```
 - **Page order.** [`src/docs-index.mjs`](src/docs-index.mjs) reads the page list in `docs/README.md`, for the sidebar and for the `/docs/` overview. Adding a page to that list adds it to the site.
 - **Code.** Expressive Code highlights Calx with the VS Code extension's grammar, in the site's colors ([`ec.config.mjs`](ec.config.mjs)). On the light paper, a color dark enough to read is close to the ink, so the light theme's colors are as saturated as they can be at WCAG's 4.5:1, and Expressive Code is told to keep them rather than darken them to its own 5.5:1. [`src/ec-calx.mjs`](src/ec-calx.mjs) gives each docs block a bar of its own:
   - a block `tests/run.calx` tests has Calx and Output tabs, its `// out:` comments come out of the code and become the Output tab, and a "Tested" badge says CI runs it;

@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { docsIndex, fileOf } from './docs-index.mjs';
-import { siteUrl, withoutDecisions } from './markdown.mjs';
+import { siteUrl, TERMINAL, withoutDecisions } from './markdown.mjs';
 import { DOCS } from './paths.mjs';
 import { ABOUT, ORIGIN } from './seo.mjs';
 
@@ -35,13 +35,19 @@ export function pageMarkdown(slug) {
 	};
 	let fence = null;
 	let titleGone = false;
+	let terminalGone = false;
 	const body = text
 		.slice(front[0].length)
 		.split('\n')
 		.filter((line) => {
 			// The page's "# Title" goes, as on the site: the front matter's title takes its place.
 			if (!fence && !titleGone && line.startsWith('# ')) return !(titleGone = true);
-			return true;
+			// A terminal's recording is for the eye, and its comment says nothing as text, so it
+			// goes, with the empty line after it.
+			if (TERMINAL.test(line.trim())) return !(terminalGone = true);
+			const keep = !(terminalGone && line.trim() === '');
+			terminalGone = false;
+			return keep;
 		})
 		.map((line) => {
 			const mark = line.match(/^\s*(`{3,}|~{3,})/)?.[1];

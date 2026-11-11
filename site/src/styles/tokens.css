@@ -20,6 +20,8 @@
 	--amber: #B9802F; --amber-ink: #8A5A17; --amber-wash: rgba(185, 128, 47, .13);
 	--calx: #B9802F; --rust: #3F6EA8;
 	--err: #B3261E; --err-wash: rgba(179, 38, 30, .07);
+	/* A step that's done, as a terminal's green: the code's string color, 4.5:1 on --code. */
+	--ok: #3C7A12;
 	--dither-ink: #1E1F24; --dither-vein: #D6AC70;
 	--header-bg: #F7F3EC;
 	--shadow: 0 1px 0 rgba(30, 31, 36, .03), 0 12px 32px -18px rgba(30, 31, 36, .28);
@@ -35,6 +37,7 @@
 	--amber: #BC8536; --amber-ink: #E2AF63; --amber-wash: rgba(226, 175, 99, .12);
 	--calx: #BC8536; --rust: #5F8FD0;
 	--err: #F2766B; --err-wash: rgba(242, 118, 107, .09);
+	--ok: #A8C987;
 	--dither-ink: #DED8CC; --dither-vein: #C49658;
 	--header-bg: #0E1218;
 	--shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 14px 36px -18px rgba(0, 0, 0, .8);

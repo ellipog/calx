@@ -10,12 +10,15 @@
 // - A decision the docs cite, "(D21)", is for the people working on Calx, who read the docs on
 //   GitHub beside the decision log. The site leaves it out, so its readers don't meet ids that
 //   mean nothing to them. The text of links keeps its words as written.
+// - A comment that asks for a terminal, `<!-- terminal: install -->`, becomes a replay of what the
+//   install scripts draw in one (src/terminal.mjs). GitHub shows nothing for the comment.
 import { statSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { slugOf } from './docs-index.mjs';
 import { DOCS } from './paths.mjs';
 import { sectionPath } from './seo.mjs';
+import { terminalHtml } from './terminal.mjs';
 
 export const GITHUB = 'https://github.com/ellipog/calx';
 const docsDir = fileURLToPath(DOCS);
@@ -73,6 +76,10 @@ const CITES = [
 	[/\(D\d+(?:,\s*D\d+)*,\s*/g, '('],
 ];
 
+/** A comment on a line of its own that asks for a recording of a terminal, `<!-- terminal: install -->`,
+ *  which src/terminal.mjs makes. GitHub shows nothing for it, and the page's Markdown leaves it out. */
+export const TERMINAL = /^<!--\s*terminal:\s*([a-z-]+)\s*-->$/;
+
 /** The text without the decisions it cites. */
 export function withoutDecisions(value) {
 	return CITES.reduce((text, [re, by]) => text.replace(re, by), value);
@@ -99,6 +106,10 @@ export function calxDocs() {
 			definition(node, ctx) {
 				const url = siteUrl(node.url, file);
 				if (url !== node.url) ctx.setProperty(node, 'url', url);
+			},
+			html(node, ctx) {
+				const name = node.value.trim().match(TERMINAL)?.[1];
+				if (name) ctx.replaceNode(node, { raw: terminalHtml(name), mdxExpressions: false });
 			},
 			text(node, ctx) {
 				if (!/\bD\d+\b/.test(node.value)) return;

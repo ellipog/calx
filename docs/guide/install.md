@@ -23,6 +23,8 @@ Each downloads the newest release from [GitHub](https://github.com/ellipog/calx/
 
 In a terminal, Calx's mark dissolves in, each download draws a bar with how much has come and how fast, and a scanner sweeps while the toolchain unpacks. The script then builds and runs a first program, which checks that everything works and compiles Calx's runtime, so your first program builds as quickly as the rest. Into a pipe or a file, in CI, or with `NO_COLOR` set, the scripts print plain lines, one a step, and leave that first build to your first program ([in a terminal](../reference/command.md#in-a-terminal)).
 
+<!-- terminal: install -->
+
 On Linux, the script needs `curl` or `wget`, `sha256sum`, and `tar` with `xz` for the toolchain, which most systems have. It says how to install the C library's headers if they're missing ([clang](#clang)), and libcurl, which `calx update` downloads with: on Ubuntu or Debian, `sudo apt install libcurl4`.
 
 Calx is pre-release, so until the first stable release, the scripts install the newest nightly: the newest build of `main` that passed every test.
