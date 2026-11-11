@@ -170,12 +170,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - name: Install LLVM 20 and Ninja
-        if: runner.os == 'Linux'
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
-          sudo apt-get install -y ninja-build
-          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
       - name: Install Ninja
         if: runner.os == 'Windows'
         shell: pwsh
@@ -242,6 +236,36 @@ jobs:
             "$llvm/bin/llvm-strip" "$llvm/bin/llvm-objcopy" "$llvm/lib/clang/23" "$llvm/include/llvm/Support/LICENSE.TXT"
           rm "$RUNNER_TEMP/$llvm.tar.zst"
           echo "LLVM_RELEASE=$RUNNER_TEMP/$llvm" >> "$GITHUB_ENV"
+      # The compiler is built with clang 20 from LLVM's apt repository, and lld beside it: those
+      # alone, since llvm.sh adds lldb, whose libraries come from Ubuntu's mirrors, which the
+      # runners can't always reach (CLX-268). When apt can't install them, it's built with the
+      # clang 23 just fetched for the toolchain.
+      - name: Install clang, lld and Ninja
+        if: runner.os == 'Linux'
+        run: |
+          apt_opts="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          codename=$(lsb_release -cs)
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list > /dev/null
+          if timeout 300 sudo apt-get $apt_opts update && timeout 600 sudo apt-get $apt_opts install -y --no-install-recommends clang-20 lld-20 ninja-build; then
+            echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+            exit 0
+          fi
+          echo "::warning::apt couldn't install clang 20, so the compiler is built with the toolchain's clang 23"
+          bin="$RUNNER_TEMP/llvm-bin"
+          mkdir -p "$bin"
+          ln -s "$LLVM_RELEASE/bin/clang-23" "$bin/clang"
+          ln -s "$LLVM_RELEASE/bin/clang-23" "$bin/clang++"
+          ln -s "$LLVM_RELEASE/bin/lld" "$bin/ld.lld"
+          if ! command -v ninja > /dev/null; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/ninja-linux.zip" https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip
+            echo "6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255  $RUNNER_TEMP/ninja-linux.zip" | sha256sum -c
+            unzip -q "$RUNNER_TEMP/ninja-linux.zip" -d "$bin"
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/clang++" --version | head -1
+          "$bin/ld.lld" --version
+          PATH="$bin:$PATH" ninja --version
       - name: Fetch the toolchain
         if: runner.os == 'Windows'
         shell: pwsh
