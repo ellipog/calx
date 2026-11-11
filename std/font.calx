@@ -394,6 +394,8 @@ impl Font {
         let top = m.ascent.ceil()
         let step = m.height()
         var placed: List<Glyph> = []
+        var scratch = new_scratch()
+        var cut = Map<u32, Lines>()
         var at: List<(i64, i64)> = []
         var pen = 0.0
         var line = 0.0
@@ -412,7 +414,7 @@ impl Font {
             let px = pen.floor()
             let base = top + line
             let py = base.floor()
-            let glyph = self.render_index(g, size, pen - px, base - py)
+            let glyph = self.draw_cut(g, size, pen - px, base - py, mut scratch, mut cut)
             if glyph.width > 0 {
                 at.push((i64.saturate(px) + glyph.x, i64.saturate(py) + glyph.y))
                 placed.push(glyph)
@@ -532,7 +534,7 @@ impl Font {
         if start != end and i16_at(self.data, start) >= 0 {
             shift = f32.nearest(self.left_bearing(g) - i16_at(self.data, start + 2))
         }
-        var raw = Raw { xs: [], ys: [], on: [], ends: [] }
+        var raw = Raw { xs: [], ys: [], on: [], ends: [], flags: [] }
         // A budget of points and components, so a composite that uses itself many times over
         // ends, as FreeType limits it.
         var budget: u32 = 1000000
@@ -581,7 +583,7 @@ impl Font {
         }
         // A composite: each component a glyph, placed by offsets or by matching points, and
         // perhaps scaled, gathered in the composite's own units before t moves them all.
-        var mine = Raw { xs: [], ys: [], on: [], ends: [] }
+        var mine = Raw { xs: [], ys: [], on: [], ends: [], flags: [] }
         var at = start + 10
         var more = true
         while more {
@@ -633,7 +635,7 @@ impl Font {
             }
             // The component, scaled in its own units.
             let inner = Transform { a: a, b: b, c: c, d: dd, e: 0.0, f: 0.0 }
-            var part = Raw { xs: [], ys: [], on: [], ends: [] }
+            var part = Raw { xs: [], ys: [], on: [], ends: [], flags: [] }
             self.glyph_points(child, inner, depth + 1, mut part, mut budget)
             var dx = 0.0f32
             var dy = 0.0f32
@@ -680,39 +682,121 @@ impl Font {
 
     // Glyph g at `size`, its pen (ox, oy) pixels right of and below a whole pixel.
     fn render_index(self, g: u32, size: f64, ox: f64, oy: f64) -> Glyph {
+        var scratch = new_scratch()
+        return self.draw(g, size, ox, oy, mut scratch)
+    }
+
+    // render_index, working in `scratch`. The outline goes into pixels, y down, cut into lines,
+    // so the box is the lines' own; a TrueType one goes there from its points, without an Outline
+    // between (CLX-262).
+    fn draw(self, g: u32, size: f64, ox: f64, oy: f64, scratch: mut Scratch) -> Glyph {
         let s = size / f64(self.em)
         let advance = f64(self.advance_units(g)) * s
-        let o = self.glyph_outline(g)
-        if o.points.len() == 0 {
-            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
-        }
-        // In pixels, y down, and cut into lines, so the box is the lines' own.
-        let lines = flatten(o, f32.nearest(s), f32.nearest(ox), f32.nearest(oy))
-        if lines.len() == 0 {
-            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
-        }
-        var minx = f32.INFINITY
-        var miny = f32.INFINITY
-        var maxx = f32.NEG_INFINITY
-        var maxy = f32.NEG_INFINITY
-        var i: usize = 0
-        while i < lines.len() {
-            minx = minx.min(lines[i])
-            maxx = maxx.max(lines[i])
-            miny = miny.min(lines[i + 1])
-            maxy = maxy.max(lines[i + 1])
-            i += 2
-        }
-        let left = minx.floor()
-        let top = miny.floor()
-        let w = usize.wrap(i64.saturate(maxx.ceil() - left)).max(1)
-        let h = usize.wrap(i64.saturate(maxy.ceil() - top)).max(1)
-        if w > 16384 or h > 16384 or w * h > 16777216 {
-            return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
-        }
-        let cov = raster(lines, left, top, w, h)
-        return Glyph { width: w, height: h, x: i64.saturate(left), y: i64.saturate(top), advance: advance, coverage: cov }
+        self.cut(g, f32.nearest(s), f32.nearest(ox), f32.nearest(oy), mut scratch)
+        return place(scratch.lines, 0.0f32, 0.0f32, advance, mut scratch.raster)
     }
+
+    // draw for `mask`, which draws a glyph each time it comes in the text: its lines are cut once,
+    // with the pen on a whole pixel, kept in `cut`, and moved to each place (CLX-262).
+    fn draw_cut(self, g: u32, size: f64, ox: f64, oy: f64, scratch: mut Scratch, cut: mut Map<u32, Lines>) -> Glyph {
+        let s = size / f64(self.em)
+        let advance = f64(self.advance_units(g)) * s
+        if not cut.contains(g) {
+            self.cut(g, f32.nearest(s), 0.0f32, 0.0f32, mut scratch)
+            let l = Lines {
+                xy: scratch.lines.xy.copy(),
+                x: 0.0f32,
+                y: 0.0f32,
+                minx: scratch.lines.minx,
+                miny: scratch.lines.miny,
+                maxx: scratch.lines.maxx,
+                maxy: scratch.lines.maxy,
+            }
+            cut.insert(g, l)
+        }
+        let lines = cut.find(g) else {
+            return blank(advance)
+        }
+        return place(lines, f32.nearest(ox), f32.nearest(oy), advance, mut scratch.raster)
+    }
+
+    // Glyph g's outline scaled by s, its pen at (ox, oy), cut into lines in scratch.lines.
+    fn cut(self, g: u32, s: f32, ox: f32, oy: f32, scratch: mut Scratch) {
+        scratch.lines.clear()
+        if self.cff.len() > 0 {
+            flatten(self.glyph_outline(g), s, ox, oy, mut scratch.lines)
+        } else if usize(g) < self.glyphs {
+            self.glyph_lines(g, s, ox, oy, mut scratch)
+        }
+    }
+
+    // Glyph g's TrueType outline, as glyph_outline reads it, cut into lines in pixels.
+    fn glyph_lines(self, g: u32, s: f32, ox: f32, oy: f32, scratch: mut Scratch) {
+        let (start, end) = self.glyph_range(g)
+        var shift = 0.0f32
+        if start != end and i16_at(self.data, start) >= 0 {
+            shift = f32.nearest(self.left_bearing(g) - i16_at(self.data, start + 2))
+        }
+        scratch.raw.clear()
+        var budget: u32 = 1000000
+        self.glyph_points(g, Transform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: shift, f: 0.0 }, 0, mut scratch.raw, mut budget)
+        raw_lines(scratch.raw, s, ox, oy, mut scratch.lines)
+    }
+}
+
+// The glyph `lines` make, moved by (dx, dy), drawn in `raster`.
+fn place(lines: Lines, dx: f32, dy: f32, advance: f64, raster: mut Raster) -> Glyph {
+    if lines.xy.len() == 0 {
+        return blank(advance)
+    }
+    let left = (lines.minx + dx).floor()
+    let top = (lines.miny + dy).floor()
+    let w = usize.wrap(i64.saturate((lines.maxx + dx).ceil() - left)).max(1)
+    let h = usize.wrap(i64.saturate((lines.maxy + dy).ceil() - top)).max(1)
+    if w > 16384 or h > 16384 or w * h > 16777216 {
+        return blank(advance)
+    }
+    raster.reset(w, h)
+    let mx = dx - left
+    let my = dy - top
+    let n = lines.xy.len()
+    unsafe {
+        let q = lines.xy.as_ptr()
+        var i: usize = 0
+        while i < n {
+            raster.edge(q.add(i).read() + mx, q.add(i + 1).read() + my, q.add(i + 2).read() + mx, q.add(i + 3).read() + my)
+            i += 4
+        }
+    }
+    return Glyph { width: w, height: h, x: i64.saturate(left), y: i64.saturate(top), advance: advance, coverage: raster.coverage() }
+}
+
+// A glyph with nothing to draw, such as a space.
+fn blank(advance: f64) -> Glyph {
+    return Glyph { width: 0, height: 0, x: 0, y: 0, advance: advance, coverage: [] }
+}
+
+// What drawing a glyph works in, kept from one glyph to the next: a TrueType glyph's points, its
+// lines and the raster's sums (CLX-262).
+struct Scratch {
+    raw: Raw
+    lines: Lines
+    raster: Raster
+}
+
+fn new_scratch() -> Scratch {
+    var s = Scratch {
+        raw: Raw { xs: [], ys: [], on: [], ends: [], flags: [] },
+        lines: Lines { xy: [], x: 0.0f32, y: 0.0f32, minx: 0.0f32, miny: 0.0f32, maxx: 0.0f32, maxy: 0.0f32 },
+        raster: Raster { w: 0, h: 0, stride: 0, acc: [] },
+    }
+    s.raw.xs.reserve(64)
+    s.raw.ys.reserve(64)
+    s.raw.on.reserve(64)
+    s.raw.ends.reserve(8)
+    s.raw.flags.reserve(64)
+    s.lines.xy.reserve(512)
+    return s
 }
 
 // A 2 by 3 transform: (x, y) to (a x + c y + e, b x + d y + f).
@@ -725,12 +809,23 @@ struct Transform {
     f: f32
 }
 
-// A TrueType glyph's points, on the curve or off it, and the last point of each contour.
+// A TrueType glyph's points, on the curve or off it, and the last point of each contour, with
+// room for a simple glyph's flags as they're read.
 struct Raw {
     xs: List<f32>
     ys: List<f32>
     on: List<bool>
     ends: List<usize>
+    flags: List<u8>
+}
+
+impl Raw {
+    fn clear(mut self) {
+        self.xs.clear()
+        self.ys.clear()
+        self.on.clear()
+        self.ends.clear()
+    }
 }
 
 // --- Reading -----------------------------------------------------------------------------------
@@ -1215,14 +1310,14 @@ fn name_of(d: List<u8>, name: usize, len: usize, want: u32, fallback: u32) -> St
 
 // --- TrueType outlines -------------------------------------------------------------------------
 
-// A simple glyph's points, moved by t, onto raw.
+// A simple glyph's points, moved by t, onto raw, its flags read into raw's room for them.
 fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Transform, raw: mut Raw) {
     var at = start + 10
     if at + 2 * contours + 2 > end {
         return
     }
-    let base = raw.xs.len()
-    var ends: List<usize> = []
+    // The last point of each contour, which go up.
+    let ends = at
     var last: usize = 0
     for i in 0..contours {
         let e = usize(u16_at(d, at + 2 * i))
@@ -1230,7 +1325,6 @@ fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Tran
             return
         }
         last = e
-        ends.push(e)
     }
     if contours == 0 {
         return
@@ -1239,15 +1333,15 @@ fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Tran
     at += 2 * contours
     at += 2 + usize(u16_at(d, at))
     // The flags, with their repeats.
-    var flags: List<u8> = []
-    flags.reserve(n)
-    while flags.len() < n {
+    raw.flags.clear()
+    raw.flags.reserve(n)
+    while raw.flags.len() < n {
         if at >= end {
             return
         }
         let f = d[at]
         at += 1
-        flags.push(f)
+        raw.flags.push(f)
         if f & 8 != 0 {
             if at >= end {
                 return
@@ -1255,19 +1349,19 @@ fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Tran
             let r = usize(d[at])
             at += 1
             var k: usize = 0
-            while k < r and flags.len() < n {
-                flags.push(f)
+            while k < r and raw.flags.len() < n {
+                raw.flags.push(f)
                 k += 1
             }
         }
     }
-    var xs: List<f32> = []
-    var ys: List<f32> = []
-    xs.reserve(n)
-    ys.reserve(n)
+    let base = raw.xs.len()
+    raw.xs.reserve(n)
+    raw.ys.reserve(n)
+    raw.on.reserve(n)
     var x: i32 = 0
     for i in 0..n {
-        let f = flags[i]
+        let f = raw.flags[i]
         if f & 2 != 0 {
             let v = i32.wrap(u8_at(d, at))
             at += 1
@@ -1276,11 +1370,11 @@ fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Tran
             x += i16_at(d, at)
             at += 2
         }
-        xs.push(f32.nearest(x))
+        raw.xs.push(f32.nearest(x))
     }
     var y: i32 = 0
     for i in 0..n {
-        let f = flags[i]
+        let f = raw.flags[i]
         if f & 4 != 0 {
             let v = i32.wrap(u8_at(d, at))
             at += 1
@@ -1289,15 +1383,17 @@ fn simple_points(d: List<u8>, start: usize, end: usize, contours: usize, t: Tran
             y += i16_at(d, at)
             at += 2
         }
-        ys.push(f32.nearest(y))
+        raw.ys.push(f32.nearest(y))
     }
     for i in 0..n {
-        raw.xs.push(t.a * xs[i] + t.c * ys[i] + t.e)
-        raw.ys.push(t.b * xs[i] + t.d * ys[i] + t.f)
-        raw.on.push(flags[i] & 1 != 0)
+        let px = raw.xs[base + i]
+        let py = raw.ys[base + i]
+        raw.xs[base + i] = t.a * px + t.c * py + t.e
+        raw.ys[base + i] = t.b * px + t.d * py + t.f
+        raw.on.push(raw.flags[i] & 1 != 0)
     }
-    for e in ends {
-        raw.ends.push(base + e)
+    for i in 0..contours {
+        raw.ends.push(base + usize(u16_at(d, ends + 2 * i)))
     }
 }
 
@@ -1392,105 +1488,186 @@ fn cubic_to(out: mut Outline, ax: f32, ay: f32, bx: f32, by: f32, x: f32, y: f32
 
 // --- Drawing -----------------------------------------------------------------------------------
 
-// The outline in pixels, scaled by s and with y down, its origin at (ox, oy), as lines: x0, y0,
-// x1, y1 for each. Curves are cut into lines no more than 1/128 of a pixel from them.
-fn flatten(o: Outline, s: f32, ox: f32, oy: f32) -> List<f32> {
-    var out: List<f32> = []
-    out.reserve(o.points.len() * 2)
+// A glyph's lines in pixels, y down, x0, y0, x1, y1 each, and their box, as its outline is cut into
+// them. Curves are cut into lines no more than 1/128 of a pixel from them.
+struct Lines {
+    xy: List<f32>
+    // Where the last line ended.
+    x: f32
+    y: f32
+    minx: f32
+    miny: f32
+    maxx: f32
+    maxy: f32
+}
+
+impl Lines {
+    fn clear(mut self) {
+        self.xy.clear()
+        self.minx = f32.INFINITY
+        self.miny = f32.INFINITY
+        self.maxx = f32.NEG_INFINITY
+        self.maxy = f32.NEG_INFINITY
+    }
+
+    fn move_to(mut self, x: f32, y: f32) {
+        self.x = x
+        self.y = y
+    }
+
+    fn line_to(mut self, x: f32, y: f32) {
+        let x0 = self.x
+        let y0 = self.y
+        self.xy.reserve(4)
+        unsafe {
+            let n = self.xy.len()
+            let p = self.xy.as_mut_ptr().add(n)
+            p.write(x0)
+            p.add(1).write(y0)
+            p.add(2).write(x)
+            p.add(3).write(y)
+            self.xy.set_len(n + 4)
+        }
+        // Compared, where min and max would keep a NaN: a point that isn't a number stays out of
+        // the box, and its line draws nothing, as the raster takes it.
+        let (lx, hx) = if x0 < x { (x0, x) } else { (x, x0) }
+        let (ly, hy) = if y0 < y { (y0, y) } else { (y, y0) }
+        if lx < self.minx {
+            self.minx = lx
+        }
+        if hx > self.maxx {
+            self.maxx = hx
+        }
+        if ly < self.miny {
+            self.miny = ly
+        }
+        if hy > self.maxy {
+            self.maxy = hy
+        }
+        self.x = x
+        self.y = y
+    }
+
+    // n lines are at most |p0 - 2 p1 + p2| / (4 n^2) from the curve.
+    fn quad_to(mut self, cx: f32, cy: f32, nx: f32, ny: f32) {
+        let x = self.x
+        let y = self.y
+        let ddx = x - 2.0f32 * cx + nx
+        let ddy = y - 2.0f32 * cy + ny
+        let n = segments((ddx * ddx + ddy * ddy).sqrt() * 0.25f32)
+        let step = 1.0f32 / f32.nearest(n)
+        for k in 1..n {
+            let t = f32.nearest(k) * step
+            let u = 1.0f32 - t
+            self.line_to(u * u * x + 2.0f32 * u * t * cx + t * t * nx, u * u * y + 2.0f32 * u * t * cy + t * t * ny)
+        }
+        self.line_to(nx, ny)
+    }
+
+    // n lines are at most 3/4 of the larger second difference over n^2 from the curve.
+    fn cubic_to(mut self, ax: f32, ay: f32, bx: f32, by: f32, nx: f32, ny: f32) {
+        let x = self.x
+        let y = self.y
+        let d1x = x - 2.0f32 * ax + bx
+        let d1y = y - 2.0f32 * ay + by
+        let d2x = ax - 2.0f32 * bx + nx
+        let d2y = ay - 2.0f32 * by + ny
+        let n = segments((d1x * d1x + d1y * d1y).max(d2x * d2x + d2y * d2y).sqrt() * 0.75f32)
+        let step = 1.0f32 / f32.nearest(n)
+        for k in 1..n {
+            let t = f32.nearest(k) * step
+            let u = 1.0f32 - t
+            let qx = u * u * u * x + 3.0f32 * u * u * t * ax + 3.0f32 * u * t * t * bx + t * t * t * nx
+            let qy = u * u * u * y + 3.0f32 * u * u * t * ay + 3.0f32 * u * t * t * by + t * t * t * ny
+            self.line_to(qx, qy)
+        }
+        self.line_to(nx, ny)
+    }
+}
+
+// The outline in pixels, scaled by s and with y down, its origin at (ox, oy), as lines.
+fn flatten(o: Outline, s: f32, ox: f32, oy: f32, out: mut Lines) {
     var at: usize = 0
-    var x = 0.0f32
-    var y = 0.0f32
     for v in o.verbs {
+        let p = o.points[at] * s + ox
+        let q = oy - o.points[at + 1] * s
         if v == 0 {
-            x = o.points[at] * s + ox
-            y = oy - o.points[at + 1] * s
+            out.move_to(p, q)
             at += 2
         } else if v == 1 {
-            let nx = o.points[at] * s + ox
-            let ny = oy - o.points[at + 1] * s
-            push_line(mut out, x, y, nx, ny)
-            x = nx
-            y = ny
+            out.line_to(p, q)
             at += 2
         } else if v == 2 {
-            let cx = o.points[at] * s + ox
-            let cy = oy - o.points[at + 1] * s
-            let nx = o.points[at + 2] * s + ox
-            let ny = oy - o.points[at + 3] * s
-            // n lines are at most |p0 - 2 p1 + p2| / (4 n^2) from the curve.
-            let ddx = x - 2.0f32 * cx + nx
-            let ddy = y - 2.0f32 * cy + ny
-            let n = segments((ddx * ddx + ddy * ddy).sqrt() * 0.25f32)
-            let step = 1.0f32 / f32.nearest(n)
-            var px = x
-            var py = y
-            for k in 1..n {
-                let t = f32.nearest(k) * step
-                let u = 1.0f32 - t
-                let qx = u * u * x + 2.0f32 * u * t * cx + t * t * nx
-                let qy = u * u * y + 2.0f32 * u * t * cy + t * t * ny
-                push_line(mut out, px, py, qx, qy)
-                px = qx
-                py = qy
-            }
-            push_line(mut out, px, py, nx, ny)
-            x = nx
-            y = ny
+            out.quad_to(p, q, o.points[at + 2] * s + ox, oy - o.points[at + 3] * s)
             at += 4
         } else {
-            let ax = o.points[at] * s + ox
-            let ay = oy - o.points[at + 1] * s
-            let bx = o.points[at + 2] * s + ox
-            let by = oy - o.points[at + 3] * s
-            let nx = o.points[at + 4] * s + ox
-            let ny = oy - o.points[at + 5] * s
-            // n lines are at most 3/4 of the larger second difference over n^2 from the curve.
-            let d1x = x - 2.0f32 * ax + bx
-            let d1y = y - 2.0f32 * ay + by
-            let d2x = ax - 2.0f32 * bx + nx
-            let d2y = ay - 2.0f32 * by + ny
-            let n = segments((d1x * d1x + d1y * d1y).max(d2x * d2x + d2y * d2y).sqrt() * 0.75f32)
-            let step = 1.0f32 / f32.nearest(n)
-            var px = x
-            var py = y
-            for k in 1..n {
-                let t = f32.nearest(k) * step
-                let u = 1.0f32 - t
-                let qx = u * u * u * x + 3.0f32 * u * u * t * ax + 3.0f32 * u * t * t * bx + t * t * t * nx
-                let qy = u * u * u * y + 3.0f32 * u * u * t * ay + 3.0f32 * u * t * t * by + t * t * t * ny
-                push_line(mut out, px, py, qx, qy)
-                px = qx
-                py = qy
-            }
-            push_line(mut out, px, py, nx, ny)
-            x = nx
-            y = ny
+            out.cubic_to(p, q, o.points[at + 2] * s + ox, oy - o.points[at + 3] * s, o.points[at + 4] * s + ox, oy - o.points[at + 5] * s)
             at += 6
         }
     }
-    return out
 }
 
-fn push_line(out: mut List<f32>, x0: f32, y0: f32, x1: f32, y1: f32) {
-    out.push(x0)
-    out.push(y0)
-    out.push(x1)
-    out.push(y1)
-}
-
-// The coverage of lines in pixels, moved by (-left, -top), inside w by h. Each line adds the
-// signed area it leaves to its right in each pixel of each row it crosses, as differences from
-// the pixel before, so a running sum along the row is the area covered. The sum's size, at most
-// 1, is the coverage, so contours that wind the same way and overlap don't count twice, and a
-// hole, wound the other way, takes away.
-fn raster(lines: List<f32>, left: f32, top: f32, w: usize, h: usize) -> List<u8> {
-    var r = Raster { w: w, h: h, stride: w + 2, acc: [0.0f32; (w + 2) * h] }
-    var i: usize = 0
-    while i < lines.len() {
-        r.edge(lines[i] - left, lines[i + 1] - top, lines[i + 2] - left, lines[i + 3] - top)
-        i += 4
+// TrueType's points as lines in pixels, as raw_outline and flatten make them together, without
+// the outline between them.
+fn raw_lines(raw: Raw, s: f32, ox: f32, oy: f32, out: mut Lines) {
+    var first: usize = 0
+    for e in raw.ends {
+        if e < first or e >= raw.xs.len() {
+            return
+        }
+        let m = e - first + 1
+        if m < 2 {
+            first = e + 1
+            continue
+        }
+        var sx = 0.0f32
+        var sy = 0.0f32
+        var from = first
+        var count = m
+        if raw.on[first] {
+            sx = raw.xs[first]
+            sy = raw.ys[first]
+            from = first + 1
+            count = m - 1
+        } else if raw.on[e] {
+            sx = raw.xs[e]
+            sy = raw.ys[e]
+            count = m - 1
+        } else {
+            sx = (raw.xs[first] + raw.xs[e]) * 0.5f32
+            sy = (raw.ys[first] + raw.ys[e]) * 0.5f32
+        }
+        out.move_to(sx * s + ox, oy - sy * s)
+        var held = false
+        var cx = 0.0f32
+        var cy = 0.0f32
+        for k in 0..count {
+            let i = from + k
+            let x = raw.xs[i]
+            let y = raw.ys[i]
+            if raw.on[i] {
+                if held {
+                    out.quad_to(cx * s + ox, oy - cy * s, x * s + ox, oy - y * s)
+                    held = false
+                } else {
+                    out.line_to(x * s + ox, oy - y * s)
+                }
+            } else {
+                if held {
+                    out.quad_to(cx * s + ox, oy - cy * s, (cx + x) * 0.5f32 * s + ox, oy - (cy + y) * 0.5f32 * s)
+                }
+                cx = x
+                cy = y
+                held = true
+            }
+        }
+        if held {
+            out.quad_to(cx * s + ox, oy - cy * s, sx * s + ox, oy - sy * s)
+        } else {
+            out.line_to(sx * s + ox, oy - sy * s)
+        }
+        first = e + 1
     }
-    return r.coverage()
 }
 
 // How many lines keep a curve whose lines would be `dev` from it, as one, within 1/128 of a pixel.
@@ -1502,14 +1679,32 @@ fn segments(dev: f32) -> u32 {
     return if n > 64.0f32 { 64 } else { u32.wrap(i32.saturate(n)) }
 }
 
+// The coverage of lines in pixels, inside w by h. Each line adds the signed area it leaves to its
+// right in each pixel of each row it crosses, as differences from the pixel before, so a running
+// sum along the row is the area covered. The sum's size, at most 1, is the coverage, so contours
+// that wind the same way and overlap don't count twice, and a hole, wound the other way, takes
+// away. Lines are drawn as font-rs draws them, and the sums are 0 again once the coverage is read,
+// so the next glyph finds them clear (CLX-262).
 struct Raster {
     w: usize
     h: usize
+    // Each row's sums, two more than its pixels: a line at the right edge adds past them.
     stride: usize
     acc: List<f32>
 }
 
 impl Raster {
+    // Room for w by h, all 0.
+    fn reset(mut self, w: usize, h: usize) {
+        self.w = w
+        self.h = h
+        self.stride = w + 2
+        let n = self.stride * h
+        if self.acc.len() < n {
+            self.acc = [0.0f32; n]
+        }
+    }
+
     // A line from (x0, y0) to (x1, y1): in each row it crosses, the area it leaves to its right.
     fn edge(mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         if y0 == y1 {
@@ -1517,87 +1712,111 @@ impl Raster {
         }
         let (dir, ax, ay, bx, by) = if y0 < y1 { (1.0f32, x0, y0, x1, y1) } else { (-1.0f32, x1, y1, x0, y0) }
         let dxdy = (bx - ax) / (by - ay)
-        let hf = f32.nearest(self.h)
         let wf = f32.nearest(self.w)
         let top = ay.max(0.0f32)
-        let bottom = by.min(hf)
+        let bottom = by.min(f32.nearest(self.h))
         if top >= bottom {
             return
         }
         var row = usize.wrap(i32.saturate(top.floor()))
+        var next = f32.nearest(row + 1)
         var ya = top
+        var x = ax + (top - ay) * dxdy
         while ya < bottom and row < self.h {
-            let yb = bottom.min(f32.nearest(row + 1))
-            let xa = (ax + (ya - ay) * dxdy).max(0.0f32).min(wf)
-            let xb = (ax + (yb - ay) * dxdy).max(0.0f32).min(wf)
-            self.span(row, xa, xb, (yb - ya) * dir)
+            let yb = bottom.min(next)
+            let xn = x + (yb - ya) * dxdy
+            self.span(row, clamp(x, wf), clamp(xn, wf), (yb - ya) * dir)
+            x = xn
             ya = yb
             row += 1
+            next += 1.0f32
         }
     }
 
-    // Within one row, a line from xa to xb, d of the row high, signed by its direction. The
-    // coverage it gives pixel i is d times the part of the pixel right of it, on average over its
-    // height: d / (hi - lo) (Q(i + 1 - lo) - Q(i + 1 - hi)), Q(v) the integral of v clamped to
-    // 0 to 1. The row holds the differences from one pixel to the next.
+    // Within one row, a line from xa to xb, both 0 to w, d of the row high, signed by its
+    // direction. The coverage it gives pixel i is d times the part of the pixel right of it, on
+    // average over its height, which the row holds as differences from one pixel to the next.
     fn span(mut self, row: usize, xa: f32, xb: f32, d: f32) {
-        let base = row * self.stride
-        let lo = xa.min(xb)
-        let hi = xa.max(xb)
-        let i0 = usize.wrap(i32.saturate(lo.floor()))
-        if hi - lo < 1.0e-6f32 {
-            let frac = lo - f32.nearest(i0)
-            self.acc[base + i0] += d * (1.0f32 - frac)
-            self.acc[base + i0 + 1] += d * frac
-            return
+        let (lo, hi) = if xa < xb { (xa, xb) } else { (xb, xa) }
+        let lo_floor = lo.floor()
+        let i0 = usize.wrap(i32.saturate(lo_floor))
+        let hi_ceil = hi.ceil()
+        let i1 = usize.wrap(i32.saturate(hi_ceil))
+        unsafe {
+            // i0 <= i1 <= w, and a row has w + 2 sums, so each place below is in the row.
+            let p = self.acc.as_mut_ptr().add(row * self.stride)
+            if i1 <= i0 + 1 {
+                // Within one pixel, the part of it right of the line is 1 less where the line is on
+                // average, its middle. At small sizes most of a glyph's lines cross a row so.
+                let mid = (xa + xb) * 0.5f32 - lo_floor
+                let a = p.add(i0)
+                a.write(a.read() + (d - d * mid))
+                let b = p.add(i0 + 1)
+                b.write(b.read() + d * mid)
+                return
+            }
+            // Across pixels: the first and last get the corners the line cuts off them, and those
+            // between a rise of d / (hi - lo) each.
+            let s = 1.0f32 / (hi - lo)
+            let f0 = lo - lo_floor
+            let first = 0.5f32 * s * (1.0f32 - f0) * (1.0f32 - f0)
+            let f1 = hi - hi_ceil + 1.0f32
+            let last = 0.5f32 * s * f1 * f1
+            let a = p.add(i0)
+            a.write(a.read() + d * first)
+            if i1 == i0 + 2 {
+                let b = p.add(i0 + 1)
+                b.write(b.read() + d * (1.0f32 - first - last))
+            } else {
+                let second = s * (1.5f32 - f0)
+                let b = p.add(i0 + 1)
+                b.write(b.read() + d * (second - first))
+                let step = d * s
+                for i in i0 + 2..i1 - 1 {
+                    let c = p.add(i)
+                    c.write(c.read() + step)
+                }
+                let before = second + f32.nearest(i1 - i0 - 3) * s
+                let c = p.add(i1 - 1)
+                c.write(c.read() + d * (1.0f32 - before - last))
+            }
+            let z = p.add(i1)
+            z.write(z.read() + d * last)
         }
-        let i1 = usize.wrap(i32.saturate(hi.floor()))
-        if i1 == i0 {
-            // Within one pixel, the part of it right of the line is 1 less where the line is on
-            // average, its middle: the loop below's one step, without its two areas. At small
-            // sizes most of a glyph's lines cross a row in one pixel.
-            let frac = (lo + hi) * 0.5f32 - f32.nearest(i0)
-            self.acc[base + i0] += d * (1.0f32 - frac)
-            self.acc[base + i0 + 1] += d * frac
-            return
-        }
-        let s = d / (hi - lo)
-        var before = 0.0f32
-        for i in i0..i1 + 1 {
-            let u = f32.nearest(i + 1)
-            let c = s * (area_left(u - lo) - area_left(u - hi))
-            self.acc[base + i] += c - before
-            before = c
-        }
-        self.acc[base + i1 + 1] += d - before
     }
 
-    fn coverage(self) -> List<u8> {
-        var out: List<u8> = [0u8; self.w * self.h]
-        var k: usize = 0
-        for row in 0..self.h {
-            let base = row * self.stride
-            var sum = 0.0f32
-            for i in 0..self.w {
-                sum += self.acc[base + i]
-                let v = sum.abs().min(1.0f32)
-                out[k] = u8.wrap(i32.saturate(v * 255.0f32 + 0.5f32))
-                k += 1
+    // The running sums' sizes as coverage, 0 to 255, each sum set back to 0 as it's read.
+    fn coverage(mut self) -> List<u8> {
+        let n = self.w * self.h
+        var out: List<u8> = []
+        out.reserve(n)
+        unsafe {
+            let o = out.as_mut_ptr()
+            var k: usize = 0
+            for row in 0..self.h {
+                let p = self.acc.as_mut_ptr().add(row * self.stride)
+                var sum = 0.0f32
+                for i in 0..self.w {
+                    let c = p.add(i)
+                    sum += c.read()
+                    c.write(0.0f32)
+                    let a = sum.abs()
+                    let v = if a < 1.0f32 { a } else { 1.0f32 }
+                    o.add(k).write(u8.wrap(i32.saturate(v * 255.0f32 + 0.5f32)))
+                    k += 1
+                }
+                p.add(self.w).write(0.0f32)
+                p.add(self.w + 1).write(0.0f32)
             }
+            out.set_len(n)
         }
         return out
     }
 }
 
-// The integral from 0 to v of x clamped to 0 to 1.
-fn area_left(v: f32) -> f32 {
-    if v <= 0.0f32 {
-        return 0.0f32
-    }
-    if v < 1.0f32 {
-        return v * v * 0.5f32
-    }
-    return v - 0.5f32
+// x within 0 to w. A NaN stays one, and its place in a row comes out 0.
+fn clamp(x: f32, w: f32) -> f32 {
+    return if x < 0.0f32 { 0.0f32 } else if x > w { w } else { x }
 }
 
 // --- CFF outlines ------------------------------------------------------------------------------

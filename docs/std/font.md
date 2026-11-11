@@ -128,7 +128,7 @@ Some things aren't done:
 
 Drawing scales the outline to pixels and cuts its curves into lines no more than 1/128 of a pixel from them. Then each line adds the signed area it leaves to its right, in each pixel of each row it crosses, as a difference from the pixel before. A running sum along each row is then the area covered. Its size, at most 1, is the coverage: contours wound the same way don't count twice where they overlap, and a hole, wound the other way, takes away.
 
-It was checked against fontTools on 22 fonts, Windows' and some CFF ones, from Arial to Segoe UI Emoji's 64,883 glyphs and the CJK collections. Every glyph's outline, every character in the Unicode character map, every advance and every kerning pair of ASCII were the same, but for one rotated emoji component, a hundredth of a unit apart. The kerning was worked out from fontTools' reading of each font's `GPOS` or `kern` table. The coverage was checked against a reference that finds, in 64 rows a pixel, exactly where the winding number isn't 0: the largest difference was 2.2 in 255, and the mean 0.23.
+It was checked against fontTools on 22 fonts, Windows' and some CFF ones, from Arial to Segoe UI Emoji's 64,883 glyphs and the CJK collections. Every glyph's outline, every character in the Unicode character map, every advance and every kerning pair of ASCII were the same, but for one rotated emoji component, a hundredth of a unit apart. The kerning was worked out from fontTools' reading of each font's `GPOS` or `kern` table. The coverage was checked against a reference that finds, in 64 rows a pixel, exactly where the winding number isn't 0: the largest difference was 2.2 in 255, and the mean 0.23. Drawing has been made faster since, and differs from what was checked only by rounding: of the 21 million pixels of Arial's glyphs below U+2000 at eight sizes, on their own and in a line, 336 are 1 in 255 apart, and none more.
 
 ## Speed
 
@@ -136,13 +136,14 @@ Arial, on our benchmark, on the performance cores of an i9-13900K under Windows,
 
 | Work | Calx | fontdue | Pillow |
 | --- | --- | --- | --- |
-| Opening the font | 0.02 ms | 14.52 ms | 0.06 ms |
-| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.17 ms | 0.03 ms | 4.33 ms |
-| The same at 24 pixels | 0.24 ms | 0.05 ms | 1.14 ms |
-| The same at 72 pixels | 0.54 ms | 0.12 ms | 1.62 ms |
-| A line of 180 characters at 16 pixels, drawn on an image | 0.41 ms | 0.08 ms | 10.96 ms |
+| Opening the font | 0.02 ms | 14.46 ms | 0.06 ms |
+| Drawing the 94 printable ASCII glyphs at 12 pixels | 0.11 ms | 0.03 ms | 4.33 ms |
+| The same at 24 pixels | 0.17 ms | 0.05 ms | 1.14 ms |
+| The same at 72 pixels | 0.38 ms | 0.12 ms | 1.62 ms |
+| A line of 180 characters at 16 pixels, drawn on an image | 0.23 ms | 0.09 ms | 10.96 ms |
 
-- fontdue reads every glyph's outline into lines of its own when it opens the font, which is most of its 14.5 ms, and draws from those, 4 to 6 times as fast as Calx, which reads a glyph's outline from the file each time it draws it. So a program that opens a font and draws fewer than 3,000 glyphs from it at 72 pixels, or 10,000 at 12, is done sooner in Calx.
-- fontdue's line is laid out by its own `Layout` and blended by the benchmark as `draw_text` blends, black over white.
+- fontdue reads every glyph's outline into lines of its own when it opens the font, which is most of its 14.5 ms, and draws from those, 3 to 4 times as fast as Calx draws a glyph on its own, reading its outline from the file each time. So a program that opens a font and draws fewer than 5,000 glyphs from it at 72 pixels, or 17,000 at 12, is done sooner in Calx.
+- fontdue's line is laid out by its own `Layout` and blended by the benchmark as `draw_text` blends, black over white. fontdue draws each glyph with its pen on a whole pixel, and Calx at its pen's fraction of a pixel.
+- Since [CLX-262](https://acta.aaenz.no/aaen-studios/clx#CLX-262), drawing is 1.4 to 1.8 times as fast as before: a TrueType glyph's points go straight into lines, with no outline between and the box kept as they're cut; the lines are drawn as font-rs draws them; and the buffers stay from one glyph to the next. For a whole text, as `mask` and `draw_text` draw it, each glyph is cut into lines once and moved to each place it's drawn.
 - Pillow's times include FreeType's hinting, which Calx doesn't do.
 - Drawing a line that crosses a row within one pixel from where it is on average, its middle, and taking the minimum and maximum of floats without a branch, made the drawing 5 to 17% faster than before ([CLX-217](https://acta.aaenz.no/aaen-studios/clx#CLX-217)).

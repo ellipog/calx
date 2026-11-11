@@ -162,7 +162,7 @@ fn main() {
     // Drawn on an image, and on a clear one, where the ink keeps its color and gets alpha.
     var im = Image.new(30, 14, Kind.Rgb, Color.rgb(255, 255, 255))
     im.draw_text(2, 1, "AV", ttf, 10.0, Color.rgb(0, 0, 0))
-    println("{im.get(3, 4)} {im.get(4, 6)} {crc32(im.pixels)}")    // out: #000000 #ffffff 870154642
+    println("{im.get(3, 4)} {im.get(4, 6)} {crc32(im.pixels)}")    // out: #000000 #ffffff 206026499
     var clear = Image.new(30, 14, Kind.Rgba, Color.rgba(0, 0, 0, 0))
     clear.draw_text(2, 1, "AV", ttf, 10.0, Color.rgba(24, 56, 208, 128))
     println("{clear.get(3, 4)} {clear.get(4, 6)}")    // out: #1838d080 #00000000
