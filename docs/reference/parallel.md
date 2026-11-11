@@ -299,6 +299,28 @@ Per loop, on an i9-13900K with 32 threads, on a quiet machine. "Cheap" is `xs[k]
 
 Joining and leaving through each thread's own cache line (CLX-258) took the loop of 4,096 cheap iterations from 7.9–8.0 µs to 5.9–6.2 µs, best of 5 over three runs, measured against the runtime just before it on the same machine at 3–9% load. The other loops came out the same within noise: over three sessions, the slow and uneven loops' medians were ahead in two and behind in one.
 
+#### Against Rayon
+
+The same loops in Rust with Rayon 1.12's `par_iter_mut().enumerate()`, built for x86-64-v3 as a Calx release build is, with thin LTO and one codegen unit (CLX-259). Same machine, at 10–16% load from other programs, so these are rough. The cheap loops and the 32 slow iterations are the best of 5 over three runs, taking turns; the rest are the median of 15 over two runs:
+
+| Loop | Calx | Rayon |
+| --- | --- | --- |
+| 16 cheap iterations | 0.09–0.10 µs | 7.1–8.4 µs |
+| 64 cheap iterations | 0.14 µs | 16.6–18.2 µs |
+| 256 cheap iterations | 0.28–0.31 µs | 24.5–25.6 µs |
+| 4,096 cheap iterations | 6.0–6.9 µs | 54–57 µs |
+| 1,048,576 cheap iterations | 36–38 µs | 158–168 µs |
+| 32 slow iterations | 46–66 µs | 54–58 µs |
+| 64 slow iterations | 96–118 µs | 111–114 µs |
+| 256 slow iterations | 296–302 µs | 259–260 µs |
+| 4,096 iterations of 1,000 rounds | 242–252 µs | 219–220 µs |
+| 256 uneven iterations | 394–429 µs | 367–371 µs |
+
+- **Cheap loops cost a small fraction of what Rayon's do,** from about 80 times less at 16 to 256 iterations, where Calx runs them on the thread that reaches them, to 4 times less at a million. Rayon splits each loop into tasks for its pool however small it is.
+- **Loops of slow iterations come out the same at their best,** 238 µs each for 256 of them, but Calx's medians are 7 to 16% longer at 256 and more iterations, and about 10% shorter at 64.
+
+These are our benchmark's loops, not a general comparison.
+
 ## In C
 
 The body becomes a C function of its own, which the runtime calls for each chunk of the range, `[begin, end)`. The locals the body uses from outside reach it through a context struct. Numbers are copied in, since the body can't change them. Everything else is a pointer, which the function declares `restrict`, since the checker made sure no iteration reaches what another changes, and asserts whole and live with `CX_VIEW`, as for [view parameters](ownership.md#in-c). So clang optimizes the body as it would a function's.
