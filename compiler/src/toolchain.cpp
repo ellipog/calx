@@ -183,9 +183,12 @@ struct Redirect {
     const std::string* errors = nullptr;
 };
 
+// Shared for deleting, too: a linker that has finished can hold its log open a while longer as
+// it exits (run_linker), and the log is deleted then.
 HANDLE open_for(const std::string& path, bool write) {
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-    return CreateFileW(widen(path.size() >= 248 ? verbatim(path) : path).c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, &sa,
+    return CreateFileW(widen(path.size() >= 248 ? verbatim(path) : path).c_str(), write ? GENERIC_WRITE : GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_DELETE, &sa,
                        write ? CREATE_ALWAYS : OPEN_EXISTING, write ? FILE_ATTRIBUTE_TEMPORARY : FILE_ATTRIBUTE_NORMAL,
                        nullptr);
 }
@@ -604,6 +607,70 @@ int run_redirected(const std::vector<std::string>& argv, const std::string& inpu
     if (h < 0) return -1;
 #endif
     return finish(h);
+}
+
+// Runs a linker, its output to `output` or the compiler's own, and returns its status as soon as
+// it has one. On Windows a process's handle is only signalled once every handle it held is
+// closed, and lld holds each ThinLTO cache entry it wrote, of 16 KB or more, mapped from the
+// writable file until it exits. Defender scans each such file as that last handle closes, one
+// after another: a cold release build of 64 modules for mingw-w64 waited ~380 ms after its link
+// was done, ~6 ms an entry (CLX-252). Its job hears that it exited before that, with its exit
+// status set. The message isn't guaranteed, so the status is also looked at every 50 ms.
+static int run_linker(const std::vector<std::string>& argv, const std::string* output) {
+#ifdef _WIN32
+    Redirect r;
+    r.output = output;
+    HANDLE job = kill_on_close_job();
+    HANDLE port = job ? CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1) : nullptr;
+    if (port) {
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT link{};
+        link.CompletionPort = port;
+        if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &link, sizeof link)) {
+            CloseHandle(port);
+            port = nullptr;
+        }
+    }
+    HANDLE h = start(argv, r, job);
+    if (!h) {
+        if (port) CloseHandle(port);
+        if (job) CloseHandle(job);
+        return -1;
+    }
+    BOOL in_job = FALSE;
+    if (port && !(IsProcessInJob(h, job, &in_job) && in_job)) {
+        CloseHandle(port);  // it runs outside the job, which hears nothing of it
+        port = nullptr;
+    }
+    int status = -1;
+    bool known = false;
+    DWORD pid = GetProcessId(h);
+    while (port && !known) {
+        DWORD message = 0;
+        ULONG_PTR key = 0;
+        LPOVERLAPPED data = nullptr;
+        bool exited = GetQueuedCompletionStatus(port, &message, &key, &data, 50) &&
+                      (message == JOB_OBJECT_MSG_EXIT_PROCESS || message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS) &&
+                      static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(data)) == pid;
+        DWORD code = STILL_ACTIVE;
+        if (GetExitCodeProcess(h, &code) && code != STILL_ACTIVE) {
+            status = static_cast<int>(code);
+            known = true;
+        } else if (exited || WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {
+            break;
+        }
+    }
+    if (known) CloseHandle(h);
+    else status = finish(h);
+    if (port) CloseHandle(port);
+    if (job) let_go(job);  // a linker still closing its files finishes doing so
+    return status;
+#else
+    Redirect r;
+    r.output = output;
+    pid_t pid = start(argv, r);
+    if (pid < 0) return -1;
+    return finish(pid);
+#endif
 }
 
 namespace {
@@ -1039,10 +1106,10 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
     std::error_code ec;
 
     // Runs a step of the link, its output to `to` or the compiler's own, through a response file
-    // when it's too long for a command line.
-    auto run = [&](const std::vector<std::string>& args, const std::string* to) {
+    // when it's too long for a command line. The linker itself is done when it says it is.
+    auto run = [&](const std::vector<std::string>& args, const std::string* to, bool linker = false) {
         std::vector<std::string> fit = fit_command(args, rsp);
-        int status = to ? run_to_file(fit, *to) : run_process(fit);
+        int status = linker ? run_linker(fit, to) : to ? run_to_file(fit, *to) : run_process(fit);
         if (fit != args) fs::remove(rsp, ec);
         return status;
     };
@@ -1076,7 +1143,7 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
         }
         args = fill(std::move(args));
         if (verbose) print_command(args);
-        if (!args.empty() && run(args, &log) == 0) {
+        if (!args.empty() && run(args, &log, true) == 0) {
             if (verbose) print_file(log);
             fs::remove(log, ec);
             return true;
@@ -1101,7 +1168,7 @@ bool link_program(const Toolchain& tc, const std::vector<std::string>& inputs, c
         if (!file_exists(args[0]) && file_exists(args[0] + ".exe")) args[0] += ".exe";
 #endif
         if (verbose) print_command(args);
-        int status = run(args, nullptr);
+        int status = run(args, nullptr, true);
         if (status > 0) return false;
         if (status < 0) return by_driver();
         // Cached only if the inputs appear once each, whole and in order, so one placeholder can
