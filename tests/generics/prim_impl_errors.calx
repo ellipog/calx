@@ -1,0 +1,42 @@
+// An impl for a primitive can't have a function, method or constant named like one of the type's
+// own, which would come first in a call of `T.parse(...)` in generic code, or hide the type's
+// own in `x.abs()` (CLX-270).
+interface Read {
+    fn parse(text: String) -> Self ! String
+    fn label(self) -> String
+}
+
+interface Size {
+    fn abs(self) -> i64
+    const MAX: i64
+}
+
+interface Words {
+    fn split(self) -> i64
+}
+
+impl Read for i64 {    // error: is missing `parse`
+    fn parse(text: String) -> i64 ! String {    // error: `i64` has a function `parse` of its own, so its impl of `Read` can't have one
+        fail "no {text}"
+    }
+    fn label(self) -> String {
+        return "i64"
+    }
+}
+
+impl Size for f32 {    // error: is missing `abs`, `MAX`
+    fn abs(self) -> i64 {    // error: `f32` has a method `abs` of its own, so its impl of `Size` can't have one
+        return 0
+    }
+    const MAX = 3    // error: `f32` has a constant `MAX` of its own
+}
+
+impl Words for str {    // error: is missing `split`
+    fn split(self) -> i64 {    // error: `str` has a method `split` of its own
+        return 0
+    }
+}
+
+fn main() {
+    println("{7i64.label()} {1.5f32.abs()}")
+}

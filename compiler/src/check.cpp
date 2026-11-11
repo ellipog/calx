@@ -1617,11 +1617,14 @@ private:
                                         " named " + q(text(m->name)) + " here");
                 continue;
             }
-            // A list's own methods come first in a call, so an impl's of the same name would
-            // only run through generic code: `xs.len()` and a generic `x.len()` would differ.
-            if (t->kind == TypeKind::list && m->kind == ItemKind::fn && list_method(text(m->name))) {
-                error(m->name_span, "a list has a method " + q(text(m->name)) + " of its own, so an impl for " + name_of(t) +
+            // A list's or a primitive's own names would hide the impl's or be hidden by it: a
+            // list's `len` came first in `xs.len()` but not in a generic `x.len()`, and `i64.parse`
+            // came first in a generic `T.parse(...)`, which then gave an `i64?` (CLX-270).
+            if (const char* what = own_name(t, text(m->name))) {
+                error(m->name_span, name_of(t) + " has " + what + " " + q(text(m->name)) + " of its own, so its impl of " +
+                                        q(iface ? iface_text(iface) : std::string(t->name)) +
                                         " can't have one; give the interface's another name");
+                info->used = true;  // so it isn't "never used" on top of this
                 continue;
             }
             // An interface's members carry its name in C, so a profile or a stack trace says which
@@ -11349,6 +11352,43 @@ private:
             error(lhs->span, "`extend` changes " + name_of(recv) + ", so call it on a variable");
         }
         return T.unit;
+    }
+
+    // What `n` is, if it's one of the names a list or a primitive has of its own, as
+    // `static_call`, `prim_method`, `builtin_method` and the constants read them: "a method", "a
+    // function" or "a constant", for an error; or null.
+    static const char* own_name(const Type* t, std::string_view n) {
+        auto in = [&](std::initializer_list<const char*> names) {
+            for (const char* x : names) {
+                if (n == x) return true;
+            }
+            return false;
+        };
+        if (t->kind == TypeKind::list) return list_method(n) ? "a method" : nullptr;
+        if (t->kind == TypeKind::str) {
+            if (in({"as_ptr", "byte_at", "chars", "contains", "ends_with", "find", "find_last", "interned", "is_empty", "len",
+                    "lines", "pad_end", "pad_start", "repeat", "replace", "runes", "split", "split_once", "split_whitespace",
+                    "starts_with", "to_bytes", "to_lower_root", "to_upper_root", "trim", "trim_end", "trim_prefix",
+                    "trim_start", "trim_suffix", "utf16_len", "copy", "java_hash"})) {
+                return "a method";
+            }
+            return nullptr;
+        }
+        bool num = t->kind == TypeKind::int_ || t->kind == TypeKind::float_;
+        if (num || t->kind == TypeKind::char_ || t->kind == TypeKind::rune) {
+            if (in({"wrap", "saturate", "nearest", "round", "try_from"})) return "a function";
+        }
+        if (num) {
+            if (in({"parse", "parse_radix", "div_wide", "from_bits"})) return "a function";
+            if (in({"MIN", "MAX", "INFINITY", "NEG_INFINITY", "NAN", "MIN_POSITIVE"})) return "a constant";
+            if (in({"abs", "ceil", "checked_add", "checked_div", "checked_mul", "checked_rem", "checked_sub", "count_ones",
+                    "floor", "floor_div", "floor_mod", "is_nan", "leading_zeros", "max", "min", "mul_add", "rint",
+                    "rotate_left", "rotate_right", "saturating_add", "saturating_mul", "saturating_sub", "sqrt", "to_bits",
+                    "total_cmp", "trailing_zeros", "widening_mul", "wrapping_add", "wrapping_mul", "wrapping_sub"})) {
+                return "a method";
+            }
+        }
+        return nullptr;
     }
 
     // Whether a list has a method named `m` of its own, as `builtin_method` reads them.

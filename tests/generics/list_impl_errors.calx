@@ -13,7 +13,7 @@ impl Sized for List<i32> {    // error: is missing `len`
     fn size(self) -> usize {
         return 1
     }
-    fn len(self) -> usize {    // error: a list has a method `len` of its own
+    fn len(self) -> usize {    // error: `List<i32>` has a method `len` of its own
         return 99
     }
 }
