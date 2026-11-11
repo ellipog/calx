@@ -1,0 +1,52 @@
+// A generic call that can fail learns its types from what's expected of `try` around it: a typed
+// `let`, a `return`, an argument (CLX-269).
+interface Decode {
+    fn decode(text: String) -> Self ! String
+}
+
+impl Decode for i64 {
+    fn decode(text: String) -> i64 ! String {
+        if let n = i64.parse(text) {
+            return n
+        }
+        fail "`{text}` isn't a number"
+    }
+}
+
+impl Decode for bool {
+    fn decode(text: String) -> bool ! String {
+        if text == "yes" {
+            return true
+        }
+        if text == "no" {
+            return false
+        }
+        fail "`{text}` isn't yes or no"
+    }
+}
+
+fn read<T: Decode>(text: String) -> T ! String {
+    return try T.decode(text)
+}
+
+fn twice(n: i64) -> i64 {
+    return n * 2
+}
+
+// From the function's result.
+fn flag(text: String) -> bool ! String {
+    return try read(text)
+}
+
+fn sum(a: String, b: String) -> i64 ! String {
+    let x: i64 = try read(a)
+    return x + twice(try read(b))
+}
+
+fn main() ! String {
+    println("{try sum("3", "4")} {try flag("yes")}")    // out: 11 true
+    match sum("3", "four") {
+        ok(n) => println("{n}"),
+        err(e) => println(e),                              // out: `four` isn't a number
+    }
+}

@@ -5207,15 +5207,22 @@ private:
         return T.error;
     }
 
-    // `try f()`: the call's value, or its error returned from this function.
-    Type* check_try(Expr* e) {
+    // `try f()`: the call's value, or its error returned from this function. What's expected of it
+    // is expected of the call's value, so a generic call can learn its types from it.
+    Type* check_try(Expr* e, Type* expected) {
         if (!closures_.empty()) {
             error(e->span, "a closure can't fail yet, so it can't pass an error up with `try`; handle it in its body, "
                            "with `match` or `!`");
             check(e->lhs, nullptr);
             return T.error;
         }
+        Expr* was_call = try_call_;
+        Type* was_expected = try_expected_;
+        try_call_ = e->lhs;
+        try_expected_ = expected;
         Type* t = handled(e->lhs);
+        try_call_ = was_call;
+        try_expected_ = was_expected;
         if (is_bad(t)) return T.error;
         if (!t->is_result) {
             error(e->span, "`try` passes up the error of a call that can fail, but this is " + a_type(t) + ", which can't fail");
@@ -5460,7 +5467,7 @@ private:
                 }
                 return t->elem;
             }
-            case ExprKind::try_: return check_try(e);
+            case ExprKind::try_: return check_try(e, expected);
             case ExprKind::unsafe_block: return check_unsafe(e, expected, false);
         }
         return T.error;
@@ -9000,9 +9007,16 @@ private:
         if (generic && receiver && !f->params.empty() && f->params[0].local) {
             unify(f->params[0].local->type, receiver->type, s, vars);
         }
-        if (generic && expected && !is_bad(expected) && f->result_type && mentions_any(f->result_type, vars)) {
+        // Under `try`, what's expected of the `try` is expected of the call's value (CLX-269).
+        Type* want = expected;
+        Type* result_type = f->result_type;
+        if (!want && e == try_call_ && result_type && result_type->is_result) {
+            want = try_expected_;
+            result_type = ok_type(result_type);
+        }
+        if (generic && want && !is_bad(want) && result_type && mentions_any(result_type, vars)) {
             Subst trial = s;
-            if (unify(f->result_type, expected, trial, vars)) s = std::move(trial);
+            if (unify(result_type, want, trial, vars)) s = std::move(trial);
         }
         std::size_t first = receiver ? 1 : 0;
         std::size_t n = f->params.size();
@@ -12141,6 +12155,8 @@ private:
     Item* result_item_ = nullptr;  // the enum behind `T ! E`, made when first needed
     Item* ordering_item_ = nullptr;  // `Ordering`, made when first needed
     Expr* result_ok_ = nullptr;    // the one expression that may be a `T ! E` here: what `try`, `match` or `!` handles
+    Expr* try_call_ = nullptr;     // the call a `try` holds, and what's expected of the `try`, which
+    Type* try_expected_ = nullptr; // a generic call learns its types from (CLX-269)
     Expr* str_view_ok_ = nullptr;  // the argument that may be a `str` for a `String` it only looks at (CLX-141)
     std::vector<Name> builtin_names_, reserved_names_;
     std::unordered_map<const Module*, std::unique_ptr<Scope>> scopes_;

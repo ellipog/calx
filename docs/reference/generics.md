@@ -122,7 +122,7 @@ A call looks in this order:
 1. The types written in `<...>`.
 2. The value a method is called on.
 3. The arguments, left to right, except untyped literals such as `1` and `none`, which wait for the others.
-4. The type the result is expected to have.
+4. The type the result is expected to have. For a call that can fail, with `try` in front, that's its value's type, so `let n: i64 = try read(text)` and `return try read(text)` give `read` its `T`.
 
 ```calx
 fn choose<T>(c: bool, a: own T, b: own T) -> T {
