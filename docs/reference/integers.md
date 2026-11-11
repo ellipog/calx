@@ -10,7 +10,7 @@ Calx integers behave exactly as Java's, so code ported from Java computes what i
 | Rule | Calx | Emitted C |
 | --- | --- | --- |
 | Overflow | `+`, `-`, `*` and unary `-` wrap (two's complement) for every integer type, as in Java | Arithmetic on the unsigned type of the same width, then conversion back. Also built with `-fwrapv` |
-| Shifts | `<<`, `>>` and `>>>` work on `i32`, `i64`, `u32` and `u64`. A variable count is masked to 31 or 63, as in Java. `>>` is arithmetic on signed types, and `>>>` is logical | `x << (n & 31)` |
+| Shifts | `<<`, `>>` and `>>>` work on `i32`, `i64`, `u32` and `u64`, and `<<` and `>>` on `usize`. A variable count is masked to 31 or 63, as in Java, and on a `usize` to its width less one. `>>` is arithmetic on signed types, and `>>>` is logical | `x << (n & 31)` |
 | `MIN / -1` | Gives `MIN`. `MIN % -1` gives `0` | A branch on `-1` before dividing, which traps on x86 otherwise |
 | Division by zero | **Panics**, for `/` and `%` on every integer type (D55). Java throws `ArithmeticException`, which ends the program where nothing catches it, as a panic does | A branch on zero, then the runtime's panic |
 | Rounding | Division truncates toward zero, and the remainder takes the dividend's sign. `floor_div` and `floor_mod` are Java's `Math.floorDiv` and `Math.floorMod` | `/` and `%` after the checks |
@@ -69,7 +69,8 @@ fn main() {
 
 - Both sides of `+`, `-`, `*`, `/`, `%`, `&`, `|` and `^` have the same type. There's no mixing an `i32` with an `i64` ([conversions](conversions.md)).
 - A shift's count can be any integer type. A constant count must be from 0 to the width minus one, since Java masks `x << 32` on an `int` to a shift by 0, which is never what was meant.
-- `i8`, `i16`, `u8` and `u16` don't shift. Java promotes them to `int` first, and Calx makes that explicit: `i32(b) << 2`.
+- `i8`, `i16`, `u8` and `u16` don't shift. Java promotes them to `int` first, and Calx makes that explicit: `i32(b) << 2`. Otherwise `u8(1) << 8` would be `0`, where Java's is `256`.
+- A `usize` shifts as the unsigned type of its width does, so a size can be written as a power of two: `let limit: usize = 1 << 30`. Java has no unsigned type to match, and a `usize` is 64 bits on every system a release is for, where its shifts are `u64`'s.
 - Unary `-` doesn't apply to unsigned types. `~` is bitwise not, for integers only.
 - `>>>` on an unsigned type would be the same as `>>`, so it's an error there.
 

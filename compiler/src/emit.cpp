@@ -5113,8 +5113,9 @@ $dropall    m->len = 0;
             case Op::shl:
             case Op::shr:
             case Op::ushr: {
-                std::string count = rhs->has_bits ? std::to_string(rhs->const_bits)
-                                                  : "((cx_u32)" + b + " & " + (lt->bits == 64 ? "63u" : "31u") + ")";
+                // A variable count is masked to the width, as Java does; `usize`'s is the target's.
+                std::string mask = lt->is_usize ? "(cx_u32)(sizeof(cx_usize) * 8 - 1)" : lt->bits == 64 ? "63u" : "31u";
+                std::string count = rhs->has_bits ? std::to_string(rhs->const_bits) : "((cx_u32)" + b + " & " + mask + ")";
                 (void)rt;
                 if (op == Op::shl) return "((" + c + ")((" + u + ")" + a + " << " + count + "))";
                 if (op == Op::shr) return "((" + c + ")(" + a + " >> " + count + "))";

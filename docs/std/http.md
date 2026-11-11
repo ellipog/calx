@@ -74,7 +74,7 @@ fn main() {
         println("give a URL to download")    // out: give a URL to download
         return
     }
-    var r = get(a[0].copy(), [], 600000, 1073741824)    // 1 GiB at most
+    var r = get(a[0].copy(), [], 600000, 1 << 30)    // 1 GiB at most
     while not r.done() {
         let p = r.progress()
         match p.total {

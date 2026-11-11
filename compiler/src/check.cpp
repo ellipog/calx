@@ -5868,11 +5868,14 @@ private:
         if (is_bad(lt) || is_bad(rt)) return T.error;
         std::string o = q(op_text(op));
         if (is_shift(op)) {
-            if (!(lt == T.i32 || lt == T.i64 || lt == T.u32 || lt == T.u64)) {
-                if (is_int(lt) && !lt->is_usize) {
-                    error(span, "shifts work on i32, i64, u32 and u64; convert the " + name_of(lt) + " first, as Java does");
+            // `usize` shifts as the unsigned type of its width does, so `1 << 30` can be a byte
+            // count. The narrower types don't: Java shifts them as an `int`, and here that's
+            // written out, `i32(b) << 2`, as `u8(1) << 8` would otherwise be 0 (CLX-253).
+            if (!(lt == T.i32 || lt == T.i64 || lt == T.u32 || lt == T.u64 || lt->is_usize)) {
+                if (is_int(lt)) {
+                    error(span, "shifts work on i32, i64, u32, u64 and usize; convert the " + name_of(lt) + " first, as Java does");
                 } else {
-                    error(span, o + " needs i32, i64, u32 or u64 on the left, not " + name_of(lt));
+                    error(span, o + " needs i32, i64, u32, u64 or usize on the left, not " + name_of(lt));
                 }
                 return T.error;
             }

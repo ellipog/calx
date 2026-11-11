@@ -266,6 +266,6 @@ pub fn post(url: String, headers: List<Header>, body: List<u8>, timeout_ms: u32,
 /// Any status is an answer, so a 404 comes back as a `Response` with that status; only no answer
 /// is an error.
 pub fn fetch(url: String, timeout_ms: u32 = 60000) -> Response ! Error {
-    var r = start(false, url, List<Header>(), List<u8>(), timeout_ms, 1073741824)
+    var r = start(false, url, List<Header>(), List<u8>(), timeout_ms, 1 << 30)
     return try r.wait()
 }

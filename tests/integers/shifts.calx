@@ -9,4 +9,12 @@ fn main() {
     println("{u >> 31} {u >> n}")                             // out: 1 1073741824
     let count: u8 = 4
     println("{1 << count}")                                   // out: 16
+    // `usize` shifts as the unsigned type of its width does (CLX-253).
+    let limit: usize = 1 << 30
+    let big: usize = 1 << 40
+    let w: usize = 0x80
+    var x: usize = 1
+    x <<= 3
+    println("{limit} {big} {w >> 3} {x}")                     // out: 1073741824 1099511627776 16 8
+    println("{w << n} {big >> n}")                            // out: 1099511627776 128
 }
