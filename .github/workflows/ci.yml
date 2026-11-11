@@ -32,9 +32,39 @@ jobs:
       CALX_BIN: ${{ matrix.calx }}
     steps:
       - uses: actions/checkout@v7
+      # clang, lld and Ninja from Ubuntu's archive. On 2026-11-11 the runners couldn't resolve its
+      # mirrors for over an hour, so if apt can't install them this takes the image's own: its
+      # newest clang, with lld from the same LLVM if the image has it, or else from the toolchain
+      # the nightly release carries, checked against its SHA-256, and the image's Ninja.
       - name: Install clang, lld and Ninja
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang lld ninja-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apt_opts="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          if timeout 300 sudo apt-get $apt_opts update && timeout 600 sudo apt-get $apt_opts install -y clang lld ninja-build; then
+            exit 0
+          fi
+          echo "::warning::apt couldn't install clang, lld and Ninja, so this uses the runner image's own"
+          llvm=$(ls -d /usr/lib/llvm-[0-9]* | sort -t- -k2 -n | tail -1)
+          bin="$RUNNER_TEMP/llvm-bin"
+          mkdir -p "$bin"
+          ln -s "$llvm/bin/clang" "$bin/clang"
+          ln -s "$llvm/bin/clang++" "$bin/clang++"
+          if [ -x "$llvm/bin/ld.lld" ]; then
+            ln -s "$llvm/bin/ld.lld" "$bin/ld.lld"
+          else
+            tc="$RUNNER_TEMP/calx-toolchain"
+            mkdir -p "$tc"
+            gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern 'calx-toolchain-*-linux-x64.tar.xz*' --dir "$tc"
+            (cd "$tc" && sha256sum -c ./*.sha256)
+            tar -xJf "$tc"/*.tar.xz -C "$tc" --wildcards '*bin/ld.lld'
+            cp "$(find "$tc" -path '*bin/ld.lld' -type f | head -1)" "$bin/ld.lld"
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/clang" --version | head -1
+          "$bin/ld.lld" --version
+          ninja --version
       # Ninja's own release, pinned and checked. GitHub's release downloads fail for minutes at a
       # time now and then, so after a few tries this falls back to the Ninja Visual Studio ships.
       - name: Install Ninja
