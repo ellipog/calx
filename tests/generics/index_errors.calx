@@ -1,0 +1,44 @@
+// What `a[k]` on a type of one's own checks (CLX-72).
+
+struct Pos {
+    x: i32,
+}
+
+struct Cells {
+    v: List<Pos>,
+}
+
+impl Index<usize> for Cells {
+    type Value = Pos
+
+    fn index(self, key: usize) -> Pos {
+        return self.v[key]
+    }
+}
+
+struct Plain {
+    n: i32,
+}
+
+fn pick(_c: Cells) -> usize {
+    return 0
+}
+
+fn generic<T>(t: T) -> i32 {
+    _ = t[0]    // error: `T` can't be indexed; give it a bound that can, such as `T: Index<usize>`
+    return 0
+}
+
+fn main() {
+    var c = Cells { v: [Pos { x: 1 }] }
+    _ = c[0]
+    let p = Plain { n: 1 }
+    _ = p[0]    // error: `Plain` can't be indexed; implement `Index<K>` for it, where `K` is the type of the index
+    c[0] = Pos { x: 2 }    // error: `Cells` can't be set by index; implement `SetIndex<K, V>` for it
+    c[0].x = 3    // error: is a value its `Index` gives, so a part of it can't be set
+    _ = c.index(0)    // error: `index` is what `a[k]` calls; write `a[k]`
+    c[pick(c)] += Pos { x: 1 }    // error: so its key can't be a call, which would run twice
+    _ = c["a"]    // error: expected `usize`, found `str`
+    _ = generic(1)
+    _ = p.n
+}

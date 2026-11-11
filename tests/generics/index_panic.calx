@@ -1,0 +1,21 @@
+// An `Index` impl can be `@track_caller`, so a read past the end names the line that indexed,
+// as a list's does (CLX-72).
+
+struct Row {
+    v: List<i32>,
+}
+
+impl Index<usize> for Row {
+    type Value = i32
+
+    @track_caller
+    fn index(self, key: usize) -> i32 {
+        return self.v[key]
+    }
+}
+
+fn main() {
+    let r = Row { v: [1] }
+    println("{r[0]}")    // out: 1
+    println("{r[5]}")    // panic: index 5 is out of bounds
+}

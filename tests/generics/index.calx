@@ -1,0 +1,65 @@
+// `a[k]` on a type of one's own (CLX-72): `Index<K>` gives a value for a key, and
+// `SetIndex<K, V>` sets one, so `g[p] = v` and `g[p] += v` work as they do on a list.
+
+struct Pos {
+    x: i32,
+    y: i32,
+}
+
+struct Grid {
+    w: i32,
+    cells: List<i32>,
+}
+
+impl Index<Pos> for Grid {
+    type Value = i32
+
+    fn index(self, key: Pos) -> i32 {
+        return self.cells[usize.wrap(key.y * self.w + key.x)]
+    }
+}
+
+impl SetIndex<Pos, i32> for Grid {
+    fn set_index(mut self, key: Pos, value: own i32) {
+        self.cells[usize.wrap(key.y * self.w + key.x)] = value
+    }
+}
+
+// Two keys: a row by number, and a cell by position.
+impl Index<i32> for Grid {
+    type Value = List<i32>
+
+    fn index(self, key: i32) -> List<i32> {
+        let start = usize.wrap(key * self.w)
+        return self.cells[start..start + usize.wrap(self.w)]
+    }
+}
+
+struct Names {
+    all: List<String>,
+}
+
+impl Index<usize> for Names {
+    type Value = String
+
+    fn index(self, key: usize) -> String {
+        return self.all[key].copy()
+    }
+}
+
+// Generic code indexes through the bound, and gets the bound's `Value`.
+fn first<C: Index<usize>>(c: C) -> C.Value {
+    return c[0]
+}
+
+fn main() {
+    var g = Grid { w: 3, cells: [0, 0, 0, 0, 0, 0] }
+    let p = Pos { x: 1, y: 1 }
+    g[p] = 5
+    g[Pos { x: 2, y: 0 }] = 7
+    g[p] += 10
+    println("{g[p]} {g[Pos { x: 2, y: 0 }]}")    // out: 15 7
+    println("{g[0]} {g[1]}")    // out: [0, 0, 7] [0, 15, 0]
+    let n = Names { all: ["ada", "grace"] }
+    println("{n[1]} {first(n)}")    // out: grace ada
+}

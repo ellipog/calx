@@ -430,7 +430,58 @@ fn main() {
 - The value on the left is the one whose impl is called, and a number can't have one, so `2.0 * v` is an error that says to write `v * 2.0`.
 - In generic code, a bound such as `T: Add<T>` lets the body use `+` on `T`. Every number satisfies `Add`, `Sub`, `Mul`, `Div` and `Rem` with its own type, and signed integers and floats satisfy `Neg`, so an instance for numbers uses their own operators, which wrap, as they do anywhere.
 - `add` and the others are what the operators call, as `eq` is what `==` calls, so `a.add(b)` is an error that says to write `a + b`. A type's own `add`, in its own impl, is a method like any other.
-- Comparisons come from [`Equal` and `Order`](comparing.md), which a type usually gets without writing them. Bitwise operators, shifts and indexing don't call interfaces.
+- Comparisons come from [`Equal` and `Order`](comparing.md), which a type usually gets without writing them. Bitwise operators and shifts don't call interfaces; [indexing](#indexing) does.
+
+## Indexing
+
+`a[k]` on a struct, an enum or a type parameter calls its `Index<K>`, where `K` is the type of `k`, and `a[k] = v` calls its `SetIndex<K, V>`. They're built in, as the operators are (CLX-72):
+
+```calx
+struct Pos {
+    x: i32,
+    y: i32,
+}
+
+struct Grid {
+    w: i32,
+    cells: List<i32>,
+}
+
+impl Index<Pos> for Grid {
+    type Value = i32
+
+    fn index(self, key: Pos) -> i32 {
+        return self.cells[usize.wrap(key.y * self.w + key.x)]
+    }
+}
+
+impl SetIndex<Pos, i32> for Grid {
+    fn set_index(mut self, key: Pos, value: own i32) {
+        self.cells[usize.wrap(key.y * self.w + key.x)] = value
+    }
+}
+
+fn main() {
+    var g = Grid { w: 2, cells: [0, 0, 0, 0] }
+    let p = Pos { x: 1, y: 1 }
+    g[p] = 5
+    g[p] += 10
+    println("{g[p]} {g.cells}")    // out: 15 [0, 0, 0, 15]
+}
+```
+
+| Interface | Function | Written |
+| --- | --- | --- |
+| `Index<K>`, with `type Value` | `fn index(self, key: K) -> Self.Value` | `a[k]` |
+| `SetIndex<K, V>` | `fn set_index(mut self, key: K, value: own V)` | `a[k] = v` |
+
+- `a[k]` gives a value, the `Value` its `index` returns, where a list's gives the element in its place. So a part of it can't be set, `g[p].x = 1`, and it can't be passed as `mut`. Set the whole of it with `a[k] = v`.
+- `a[k] += v` reads through `Index` and sets through `SetIndex`, so the key is worked out twice, and can't be a call.
+- The value `a[k] = v` sets is worked out before the call, and moved into it, so it can read `a`: `g[p] = g[q]`.
+- A type can implement them for more than one type of key, `Index<Pos>` and `Index<i32>`, and the key's type chooses, as for any [generic interface](#generic-interfaces).
+- In generic code, a bound `C: Index<usize>` lets the body write `c[i]`, which is a `C.Value`.
+- `index` and `set_index` are what the brackets call, so `g.index(p)` is an error that says to write `g[p]`.
+- They aren't reserved, so a module can declare its own `Index`, as `std.font` does, though then it can't name these to implement them.
 
 ## Errors
 

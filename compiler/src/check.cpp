@@ -142,6 +142,10 @@ public:
         n_LinkedSet_ = ctx.names.intern("LinkedSet");
         n_JavaHash_ = ctx.names.intern("JavaHash");
         n_Iterator_ = ctx.names.intern("Iterator");
+        n_Index_ = ctx.names.intern("Index");
+        n_SetIndex_ = ctx.names.intern("SetIndex");
+        n_index_ = ctx.names.intern("index");
+        n_set_index_ = ctx.names.intern("set_index");
         n_next_ = ctx.names.intern("next");
         n_Send_ = ctx.names.intern("Send");
         n_java_hash_ = ctx.names.intern("java_hash");
@@ -381,6 +385,8 @@ private:
         if (core_scope_ && n == n_Error_) return error_item_;
         // Nor is `Caller`, what `caller()` gives (CLX-175).
         if (core_scope_ && n == n_Caller_) return core_scope_->items.at(n_Caller_);
+        // Nor are `Index` and `SetIndex`, which `a[k]` calls on a type of one's own (CLX-72).
+        if (core_scope_ && (n == n_Index_ || n == n_SetIndex_)) return core_scope_->items.at(n);
         return nullptr;
     }
 
@@ -395,6 +401,8 @@ private:
         prog_.hasher = hasher_type_;
         from_iface_ = core_scope_->items.at(n_From_);
         iterator_iface_ = core_scope_->items.at(n_Iterator_);
+        index_iface_ = core_scope_->items.at(n_Index_);
+        set_index_iface_ = core_scope_->items.at(n_SetIndex_);
         for (int k = 0; k < kOperators; k++) op_iface_[k] = core_scope_->items.at(n_op_iface_[k]);
         error_item_ = core_scope_->items.at(n_Error_);
         error_from_fn_ = core_scope_->items.at(ctx_.names.intern("error_from"));
@@ -1587,13 +1595,13 @@ private:
                 // Other interfaces' functions are also called by the code the compiler writes, for
                 // a map's hashing or a string's `Display`, which has no place to give. Once `dyn`
                 // comes, a call through it passes its own place, as a direct call does.
-                if (m->track_caller && operator_of(iface) < 0) {
+                if (m->track_caller && operator_of(iface) < 0 && !indexing(iface)) {
                     Span at = m->name_span;
                     for (const Attribute& a : m->attributes) {
                         if (a.name.parts.size() == 1 && text(a.name.parts[0]) == "track_caller") at = a.span;
                     }
-                    error(at, "`@track_caller` is for a function, a type's own method or an operator's impl, such as " + q("Div") +
-                                  "'s, not " + q(text(iface->name)) + "'s");
+                    error(at, "`@track_caller` is for a function, a type's own method, or an operator's or `Index`'s impl, such as " +
+                                  q("Div") + "'s, not " + q(text(iface->name)) + "'s");
                     m->track_caller = false;
                 }
             } else if (m->kind != ItemKind::fn) {
@@ -4133,9 +4141,20 @@ private:
             return;
         }
         // A copy of the place, read again if `a op= b` turns out to call an operator interface.
-        Expr* reread = s->compound && operator_index(s->op) >= 0 ? copy_place(target) : nullptr;
+        Expr* reread = s->compound && (operator_index(s->op) >= 0 || target->kind == ExprKind::index) ? copy_place(target) : nullptr;
         Local* root = nullptr;
-        Type* tt = check_place(target, &root);
+        Type* tt;
+        if (target->kind == ExprKind::index) {
+            // `a[k] = v` on a struct, an enum or a type parameter calls `SetIndex` (CLX-72).
+            Type* base = check_place(target->lhs, &root);
+            if (operator_type(base) && !target->box_value) {
+                index_assign(s, base, reread);
+                return;
+            }
+            tt = target->type = index_type(target, base);
+        } else {
+            tt = check_place(target, &root);
+        }
         bool whole = target->kind == ExprKind::name || target->kind == ExprKind::self;
         if (tt->arena_list) {
             error(target->span, "an `ArenaList` can't be assigned to, since it stays with the arena it was made from; "
@@ -4181,6 +4200,99 @@ private:
     }
 
     static bool is_shift(Op op) { return op == Op::shl || op == Op::shr || op == Op::ushr; }
+
+    // --- `Index` and `SetIndex` (CLX-72) ------------------------------------------------------
+    //
+    // `a[k]` on a struct, an enum or a type parameter is `a.index(k)`, a call of the `Index<K>`
+    // it implements for `k`'s type, which gives a value, its `Value`. `a[k] = v` is
+    // `a.set_index(k, v)`, through `SetIndex<K, V>`, and `a[k] += v` reads and then sets. Both
+    // become calls, as the operators do, so the passes after this see calls.
+
+    bool indexing(const Item* iface) const {
+        return iface && (iface_root(iface) == index_iface_ || iface_root(iface) == set_index_iface_);
+    }
+
+    // `e` as a call of the method `name` of `iface` on `recv`, with `args`.
+    Expr* method_call_expr(Expr* e, Expr* recv, Name name, Item* iface, const std::vector<Expr*>& args) {
+        Expr* f = ctx_.arena.make<Expr>();
+        f->kind = ExprKind::field;
+        f->span = e->span;
+        f->lhs = recv;
+        f->member = name;
+        e->kind = ExprKind::call;
+        e->from_index = true;
+        e->callee = f;
+        e->lhs = e->rhs = nullptr;
+        std::vector<Arg> as;
+        for (Expr* x : args) {
+            Arg a;
+            a.value = x;
+            a.span = x->span;
+            as.push_back(a);
+        }
+        e->args = ctx_.arena.copy(as);
+        e->only_interface = iface;
+        return e;
+    }
+
+    Type* index_call(Expr* e, Type* t, Type* expected) {
+        Expr* recv = e->lhs;
+        method_call_expr(e, recv, n_index_, index_iface_, {e->rhs});
+        Member mem = lookup(t, n_index_, index_iface_);
+        if (!mem.fn) {
+            error(e->span, t->kind == TypeKind::param
+                               ? name_of(t) + " can't be indexed; give it a bound that can, such as " + q(std::string(t->name) + ": Index<usize>")
+                               : name_of(t) + " can't be indexed; implement " + q("Index<K>") + " for it, where `K` is the type of the index");
+            check_args(e);
+            return T.error;
+        }
+        if (t->kind == TypeKind::param && !mem.ambiguous) e->only_interface = mem.iface;
+        use_item(mem.fn);
+        return fn_call(e, mem.fn, recv, expected, std::move(mem.s), {});
+    }
+
+    void index_assign(Stmt* s, Type* t, Expr* reread) {
+        Expr* target = s->target;
+        Expr* value = s->value;
+        if (s->compound) {
+            if (!reread) {
+                error(target->span, q(place_text(target) + " " + std::string(op_text(s->op)) + "=") + " reads " + q(place_text(target)) +
+                                        " through `Index` and then sets it through `SetIndex`, so its key can't be a call, which " +
+                                        "would run twice; keep the key in a variable first");
+                check(target->rhs, nullptr);
+                check(value, nullptr);
+                return;
+            }
+            Expr* b = ctx_.arena.make<Expr>();
+            b->kind = ExprKind::binary;
+            b->op = s->op;
+            b->span = s->span;
+            b->lhs = reread;
+            b->rhs = value;
+            value = b;
+        }
+        Expr* call = ctx_.arena.make<Expr>();
+        call->span = target->span;
+        Expr* recv = target->lhs;
+        method_call_expr(call, recv, n_set_index_, set_index_iface_, {target->rhs, value});
+        s->kind = StmtKind::expr;
+        s->value = call;
+        s->target = nullptr;
+        s->compound = false;
+        Member mem = lookup(t, n_set_index_, set_index_iface_);
+        if (!mem.fn) {
+            error(target->span, t->kind == TypeKind::param
+                                    ? name_of(t) + " can't be set by index; give it a bound that can, such as " +
+                                          q(std::string(t->name) + ": SetIndex<usize, i32>")
+                                    : name_of(t) + " can't be set by index; implement " + q("SetIndex<K, V>") +
+                                          " for it, where `K` is the type of the index and `V` of the value");
+            check_args(call);
+            return;
+        }
+        if (t->kind == TypeKind::param && !mem.ambiguous) call->only_interface = mem.iface;
+        use_item(mem.fn);
+        call->type = fn_call(call, mem.fn, recv, nullptr, std::move(mem.s), {});
+    }
 
     // An unchecked copy of a place such as `a.b[i]`, to read it as well as set it, or null if
     // reading it again could do something: an index that's more than a variable, a field of one,
@@ -4237,6 +4349,12 @@ private:
             }
             case ExprKind::index: {
                 Type* base = check_place(e->lhs, root);
+                if (operator_type(base) && !e->box_value) {
+                    check(e->rhs, nullptr);
+                    error(e->span, q(place_text(e)) + " on " + a_type(base) + " is a value its `Index` gives, so a part of it "
+                                   "can't be set; set the whole of it with " + q(place_text(e) + " = ...") + ", through `SetIndex`");
+                    return e->type = T.error;
+                }
                 return e->type = index_type(e, base);
             }
             case ExprKind::slice: {
@@ -5251,6 +5369,8 @@ private:
             case ExprKind::index: {
                 place_lhs_ = e->lhs;
                 Type* base = check(e->lhs, nullptr);
+                // `a[k]` on a struct, an enum or a type parameter calls `Index` (CLX-72).
+                if (operator_type(base) && !e->box_value) return index_call(e, base, expected);
                 return index_type(e, base);
             }
             case ExprKind::slice: return slice_type(e);
@@ -8461,7 +8581,7 @@ private:
                 check_args(e);
                 return T.error;
             }
-            if (mem.fn && (prop_of(mem.iface) >= 0 || operator_of(mem.iface) >= 0)) {
+            if (mem.fn && (prop_of(mem.iface) >= 0 || operator_of(mem.iface) >= 0 || (indexing(mem.iface) && !e->from_index))) {
                 error(callee->span, called_by_name(mem.iface));
                 check_args(e);
                 return T.error;
@@ -8527,7 +8647,7 @@ private:
     Type* interface_call(Expr* e, Item* iface) {
         Expr* callee = e->callee;
         use_item(iface);
-        if (prop_of(iface) >= 0 || operator_of(iface) >= 0) {
+        if (prop_of(iface) >= 0 || operator_of(iface) >= 0 || indexing(iface)) {
             error(callee->span, called_by_name(iface));
             check_args(e);
             return T.error;
@@ -8564,6 +8684,8 @@ private:
     // A derived property's function is called by what it's behind, so there's one way to compare,
     // show or hash a value whether its type writes its own or not.
     std::string called_by_name(const Item* iface) {
+        if (iface && iface_root(iface) == index_iface_) return "`index` is what `a[k]` calls; write `a[k]`";
+        if (iface && iface_root(iface) == set_index_iface_) return "`set_index` is what `a[k] = v` calls; write `a[k] = v`";
         if (int k = operator_of(iface); k >= 0) {
             static const char* const use[kOperators] = {"a + b", "a - b", "a * b", "a / b", "a % b", "-a"};
             static const char* const sign[kOperators] = {"+", "-", "*", "/", "%", "-a"};
@@ -8912,7 +9034,15 @@ private:
         for (std::size_t i = first; i < n && ok; i++) {
             if (!ordered[i]) error(e->span, "missing argument " + q(text(f->params[i].name)) + " for " + q(text(f->name)));
         }
-        distinct_muts(ordered, is_mut);
+        // `a[k] = v` and `a[k] += v`: the value is worked out before the call, and moved into it,
+        // so it can read `a` (CLX-72).
+        if (e->from_index && ordered.size() == 3) {
+            std::vector<Expr*> but_value = ordered;
+            but_value[2] = nullptr;
+            distinct_muts(but_value, is_mut);
+        } else {
+            distinct_muts(ordered, is_mut);
+        }
         changed_captures(ordered);
         e->ordered_args = ctx_.arena.copy(ordered);
         Type* result = f->result_type ? f->result_type : T.error;
@@ -11738,6 +11868,9 @@ private:
     Name n_Hasher_, n_add_, n_From_, n_Error_, n_Caller_, n_context_, n_Iterator_, n_next_;
     Item* from_iface_ = nullptr;
     Item* iterator_iface_ = nullptr;  // `Iterator<T>`, which a `for` loop calls `next` on (CLX-101)
+    Item* index_iface_ = nullptr;     // `Index<K>`, which `a[k]` calls on a type of one's own (CLX-72)
+    Item* set_index_iface_ = nullptr; // `SetIndex<K, V>`, which `a[k] = v` calls
+    Name n_Index_, n_SetIndex_, n_index_, n_set_index_;
     std::uint32_t held_iterators_ = 0;  // the loops that hold an iterator made for them
     // CLX-143: `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`, which the operators call on a struct,
     // an enum or a type parameter, and their functions' names, in the order of `kOperators`.

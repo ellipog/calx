@@ -189,7 +189,7 @@ From loosest to tightest:
 
 `a op= b` is `a = a op b` for every arithmetic, bitwise and shift operator.
 
-On a struct or an enum, `+`, `-`, `*`, `/`, `%` and a prefix `-` call its impl of [`Add`, `Sub`, `Mul`, `Div`, `Rem` or `Neg`](interfaces.md#operators).
+On a struct or an enum, `+`, `-`, `*`, `/`, `%` and a prefix `-` call its impl of [`Add`, `Sub`, `Mul`, `Div`, `Rem` or `Neg`](interfaces.md#operators), and `a[k]` and `a[k] = v` call its [`Index` and `SetIndex`](interfaces.md#indexing).
 
 The logical operators are words. `&&`, `||` and a prefix `!` are errors that say to write `and`, `or` and `not`, since `!` after a value unwraps an optional.
 

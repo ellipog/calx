@@ -82,6 +82,16 @@ pub interface Neg {
     fn neg(self) -> Self
 }
 
+pub interface Index<K> {
+    type Value
+
+    fn index(self, key: K) -> Self.Value
+}
+
+pub interface SetIndex<K, V> {
+    fn set_index(mut self, key: K, value: own V)
+}
+
 pub struct Error {
     text: String
     doing: List<String>

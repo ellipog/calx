@@ -90,9 +90,12 @@ Built: see [Errors](reference/errors.md). `-> T ! E` and `fn f() ! E`, `fail e`,
 
 ### Interfaces and generics
 
-Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103), and [operators](reference/interfaces.md#operators) from `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>`, `Rem<T>` and `Neg`. Their operands are views, so a type that owns memory, such as a big integer, can have them as a value type can, and numbers satisfy them in generic code (CLX-143). [`dyn Shape`](reference/interfaces.md#holding-any-type-dyn) is an owned value of any type implementing `Shape`, called through a table, which a value becomes where one is wanted, and a view of the value where it is for an argument that's only looked at (CLX-72), [associated types](reference/interfaces.md#associated-types), `type Item` in an interface, which `C.Item` names, and generic functions and constants' defaults in interfaces ([declaring one](reference/interfaces.md#declaring-one)). Still to build:
+Built: see [Generics](reference/generics.md) and [Interfaces](reference/interfaces.md), including [generic interfaces](reference/interfaces.md#generic-interfaces) such as `From<T>`, implemented once for each list of arguments, with calls that choose between the impls by their types (D103), and [operators](reference/interfaces.md#operators) from `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>`, `Rem<T>` and `Neg`. Their operands are views, so a type that owns memory, such as a big integer, can have them as a value type can, and numbers satisfy them in generic code (CLX-143). The rest came in CLX-72:
 
-- **`Index`**, for `a[i]` on a type of one's own.
+- [`dyn Shape`](reference/interfaces.md#holding-any-type-dyn), an owned value of any type implementing `Shape`, called through a table. A value becomes one where one is wanted, and for an argument that's only looked at, it's a view of the value where it is.
+- [Associated types](reference/interfaces.md#associated-types), `type Item` in an interface, which `C.Item` names.
+- Generic functions and constants' defaults in interfaces ([declaring one](reference/interfaces.md#declaring-one)).
+- [`Index` and `SetIndex`](reference/interfaces.md#indexing), for `a[k]` on a type of one's own.
 
 ### Derived properties
 

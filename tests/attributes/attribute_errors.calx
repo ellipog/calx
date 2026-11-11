@@ -17,7 +17,7 @@ interface Shape {
 }
 
 impl Shape for Pos {
-    @track_caller    // error: `@track_caller` is for a function, a type's own method or an operator's impl, such as `Div`'s, not `Shape`'s
+    @track_caller    // error: `@track_caller` is for a function, a type's own method, or an operator's or `Index`'s impl, such as `Div`'s, not `Shape`'s
     fn area(self) -> i32 {
         return self.x
     }
