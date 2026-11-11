@@ -184,10 +184,17 @@ public:
         // can a bound's own arguments, as in `T: From<Wrapper<U>>`.
         defer_bounds_ = true;
         resolve_params();
+        for (Item* it : interfaces_) resolve_assoc_decls(it);
+        // Each impl's type and interface before any field or signature, which can name a type's
+        // associated types, then its members once the interfaces' are known (CLX-72).
+        std::vector<ImplInfo*> collected;
+        for (Item* it : impls_) {
+            if (ImplInfo* info = collect_impl(it)) collected.push_back(info);
+        }
         for (Item* it : structs_) resolve_fields(it);
         for (Item* it : enums_) resolve_enum(it);
         for (Item* it : interfaces_) collect_interface(it);
-        for (Item* it : impls_) collect_impl(it);
+        for (ImplInfo* info : collected) collect_impl_members(info);
         check_one_name();
         // What was worked out about the derived properties before every impl was known could be
         // wrong for a type that writes its own.
@@ -1297,19 +1304,22 @@ private:
 
     // An interface's functions are generic over `Self`. One with a body is a default, which is
     // checked once for every `Self` and copied for each type that doesn't write its own.
+    struct ImplInfo;
+
     void collect_interface(Item* it) {
         InModule in(*this, it);
         Type* self = it->type_params[0];
         std::unordered_map<Name, Item*> seen;
         for (Item* m : it->members) {
-            if (m->kind != ItemKind::fn && m->kind != ItemKind::const_) {
-                error(m->span, "an interface holds functions and constants");
+            if (m->kind != ItemKind::fn && m->kind != ItemKind::const_ && m->kind != ItemKind::type_alias) {
+                error(m->span, "an interface holds functions, constants and types");
                 continue;
             }
             if (!seen.emplace(m->name, m).second) {
                 error(m->name_span, q(text(m->name)) + " is already in " + q(text(it->name)));
                 continue;
             }
+            if (m->kind == ItemKind::type_alias) continue;  // resolve_assoc_decls
             m->interface_item = it;
             m->impl_type = self;
             if (m->is_unsafe) error(m->name_span, "an interface's functions can't be `unsafe`");
@@ -1385,15 +1395,15 @@ private:
         }
     }
 
-    void collect_impl(Item* impl) {
+    ImplInfo* collect_impl(Item* impl) {
         InModule in(*this, impl);
         Item* iface = nullptr;
         std::size_t mark = push_env(impl);
         if (impl->interface) iface = resolve_interface(impl->interface);
         Type* t = resolve_type(impl->self_type);
         pop_env(mark);
-        if (impl->interface && !iface) return;
-        if (is_bad(t)) return;
+        if (impl->interface && !iface) return nullptr;
+        if (is_bad(t)) return nullptr;
         // Every parameter must be in the type, or a use couldn't tell what it stands for.
         for (Type* p : impl->type_params) {
             std::vector<Type*> one{p};
@@ -1405,11 +1415,11 @@ private:
         if (prop_of(iface) >= 0 && !nominal) {
             error(impl->self_type->span, name_of(t) + "'s " + q(text(iface->name)) +
                                              " is built in; only a struct or an enum can write its own");
-            return;
+            return nullptr;
         }
         if (!iface && !nominal) {
             error(impl->self_type->span, "methods can only be added to structs and enums declared in this module");
-            return;
+            return nullptr;
         }
         // An impl is in the module of its type or its interface, so there's one place to look
         // for it, and two modules can't both implement an interface for a type.
@@ -1417,25 +1427,25 @@ private:
         bool type_here = owner && owner->module == scope_->module;
         if (!iface && nominal && !type_here) {
             error(impl->self_type->span, "methods for " + name_of(t) + " go in its module, " + q(module_name(owner->module)));
-            return;
+            return nullptr;
         }
         if (iface && !type_here && iface->module != scope_->module) {
             error(impl->self_type->span, "an impl of " + q(text(iface->name)) + " for " + name_of(t) + " goes in " +
                                              q(text(iface->name)) + "'s module, " + q(module_name(iface->module)) +
                                              (owner ? ", or in " + name_of(t) + "'s, " + q(module_name(owner->module)) : std::string()));
-            return;
+            return nullptr;
         }
         if (iface && !nominal && !is_numeric(t) && t->kind != TypeKind::bool_ && t->kind != TypeKind::char_ &&
             t->kind != TypeKind::rune && t->kind != TypeKind::str) {
             not_yet(impl->self_type->span, "interfaces for this kind of type");
-            return;
+            return nullptr;
         }
         auto& same_head = impls_by_head_[head(t)];
         if (iface) {
             if (iface_root(iface) == from_iface_ && iface->type_args[0] == t) {
                 error(impl->interface->span, "a value is already its own type; `try` passes " + name_of(t) +
                                                  " up as it is, so it needs no " + q(iface_text(iface)));
-                return;
+                return nullptr;
             }
             // Two impls of `From` are separate interfaces when their arguments differ.
             auto args_unify = [&](Item* pattern, Item* actual, Subst& s, const Slice<Type*>& vars) {
@@ -1452,7 +1462,7 @@ private:
                     (unify(t, other->self, b, mine) && args_unify(iface, other->iface, b, mine))) {
                     error(impl->self_type->span, q(iface_text(iface)) + " is already implemented for " + name_of(t));
                     note(other->impl->self_type->span, "the other impl is here");
-                    return;
+                    return nullptr;
                 }
             }
         }
@@ -1462,11 +1472,49 @@ private:
         info->self = t;
         info->iface = iface;
         impl->interface_item = iface;
+        // Its associated types, which are worked out when something first names them.
+        for (Item* m : impl->members) {
+            if (m->kind != ItemKind::type_alias) continue;
+            if (!iface) {
+                error(m->span, "a type in an impl gives an interface's associated type, so it goes in an impl of the interface");
+                continue;
+            }
+            Item* want = assoc_member(iface, m->name);
+            if (!want) {
+                error(m->name_span, q(text(m->name)) + " isn't a type of " + q(text(iface->name)));
+                continue;
+            }
+            if (!m->generics.empty()) not_yet(m->generics[0].span, "generic associated types");
+            if (!m->type_bounds.empty()) {
+                error(m->type_bounds[0]->span, "the interface gives the bounds of " + q(text(m->name)) + "; an impl says which type it is");
+            }
+            if (!m->self_type) {
+                error(m->name_span, "say which type " + q(text(m->name)) + " is: " + q("type " + std::string(text(m->name)) + " = i32"));
+                continue;
+            }
+            if (!info->types.emplace(m->name, m).second) {
+                error(m->name_span, name_of(t) + " already has a type named " + q(text(m->name)) + " here");
+                continue;
+            }
+            m->interface_item = iface;
+        }
+        impls_by_head_[head(t)].push_back(info);
+        return info;
+    }
+
+    void collect_impl_members(ImplInfo* info) {
+        Item* impl = info->impl;
+        InModule in(*this, impl);
+        Item* iface = info->iface;
+        Type* t = info->self;
+        auto& same_head = impls_by_head_[head(t)];
+        for (auto& [n, m] : info->types) impl_assoc(info, m);
         for (Item* m : impl->members) {
             Item* want = nullptr;
+            if (m->kind == ItemKind::type_alias) continue;
             if (iface) {
                 if (m->kind != ItemKind::fn && m->kind != ItemKind::const_) {
-                    error(m->span, "an impl of an interface holds its functions and constants");
+                    error(m->span, "an impl of an interface holds its functions, constants and types");
                     continue;
                 }
                 want = interface_member(iface, m->name);
@@ -1542,7 +1590,7 @@ private:
             // interfaces, that's checked once every impl is known (check_one_name).
             bool clash = false;
             for (ImplInfo* other : same_head) {
-                if (iface || other->iface || !other->members.count(m->name)) continue;
+                if (other == info || iface || other->iface || !other->members.count(m->name)) continue;
                 Subst a, b;
                 if (unify(other->self, t, a, other->impl->type_params) || unify(t, other->self, b, impl->type_params)) {
                     error(m->name_span, name_of(t) + " already has a function named " + q(text(m->name)));
@@ -1559,15 +1607,14 @@ private:
         if (iface) {
             std::string missing;
             for (Item* w : iface->members) {
-                if ((w->kind == ItemKind::fn && !w->body) || w->kind == ItemKind::const_) {
-                    if (!info->members.count(w->name)) missing += (missing.empty() ? "" : ", ") + q(text(w->name));
-                }
+                bool needed = (w->kind == ItemKind::fn && !w->body) || w->kind == ItemKind::const_;
+                bool has = w->kind == ItemKind::type_alias ? info->types.count(w->name) != 0 : info->members.count(w->name) != 0;
+                if ((needed || w->kind == ItemKind::type_alias) && !has) missing += (missing.empty() ? "" : ", ") + q(text(w->name));
             }
             if (!missing.empty()) {
                 error(impl->self_type->span, "the impl of " + q(iface_text(iface)) + " for " + name_of(t) + " is missing " + missing);
             }
         }
-        same_head.push_back(info);
     }
 
     // A type has one function of each name, as in Java: its own impls can't reuse a name an
@@ -1615,6 +1662,7 @@ private:
         Type* self = nullptr;   // the type it's for, which can mention the impl's parameters
         Item* iface = nullptr;  // null for an impl without an interface
         std::unordered_map<Name, Item*> members;
+        std::unordered_map<Name, Item*> types;  // its associated types, `type Item = i32` (CLX-72)
         bool used = false;
     };
 
@@ -1697,59 +1745,231 @@ private:
             } else if (is_builtin_name(g->name)) {
                 error(g->span, q(text(g->name)) + " is a built-in name");
             }
-            std::vector<Item*> bounds;
             // A bound can mention the other parameters: `U: From<T>`.
             std::size_t env_mark = push_env(param_owner_[p]);
-            for (TypeExpr* b : g->bounds) {
-                // `Fn(A) -> R`: what a closure or a function passed for it is called as (CLX-98).
-                if (b->kind == TypeExprKind::fn && b->callable) {
-                    callable_ok_ = true;
-                    Type* call = resolve_type(b);
-                    callable_ok_ = false;
-                    if (is_bad(call)) continue;
-                    if (p->call) {
-                        error(b->span, q(text(g->name)) + " already has an `Fn` bound");
-                        continue;
-                    }
-                    bool read = true;
-                    for (std::uint8_t m : call->modes) read = read && m == static_cast<std::uint8_t>(ParamMode::read);
-                    if (!read) {
-                        error(b->span, "a closure's parameters are only read, so `Fn` takes no `mut` or `own`");
-                        continue;
-                    }
-                    if (call->elem->is_result) {
-                        error(b->span, "a closure can't fail yet, so `Fn` takes no `!`");
-                        continue;
-                    }
-                    p->call = call;
-                    p->call_mut = b->callable_mut;
-                    continue;
-                }
-                // The derived properties, which every type that can have them has without an impl.
-                bool* flag = nullptr;
-                if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
-                    Name n = b->path.parts[0];
-                    flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
-                         : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound
-                         : n == n_Order_ ? &p->order_bound : n == n_JavaHash_ ? &p->java_hash_bound
-                         : n == n_Send_ ? &p->send_bound : nullptr;
-                }
-                if (flag) {
-                    if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(g->name)));
-                    *flag = true;
-                    continue;
-                }
-                Item* iface = resolve_interface(b);
-                if (!iface) continue;
-                if (std::find(bounds.begin(), bounds.end(), iface) != bounds.end()) {
-                    error(b->span, q(iface_text(iface)) + " is already a bound of " + q(text(g->name)));
-                    continue;
-                }
-                bounds.push_back(iface);
-            }
+            resolve_bounds(p, g->bounds, g->name);
             pop_env(env_mark);
+        }
+    }
+
+    // A parameter's bounds, or an associated type's: the interfaces, the derived properties, and
+    // an `Fn` bound.
+    void resolve_bounds(Type* p, const Slice<TypeExpr*>& written, Name name) {
+        std::vector<Item*> bounds;
+        for (TypeExpr* b : written) {
+            // `Fn(A) -> R`: what a closure or a function passed for it is called as (CLX-98).
+            if (b->kind == TypeExprKind::fn && b->callable) {
+                callable_ok_ = true;
+                Type* call = resolve_type(b);
+                callable_ok_ = false;
+                if (is_bad(call)) continue;
+                if (p->call) {
+                    error(b->span, q(text(name)) + " already has an `Fn` bound");
+                    continue;
+                }
+                bool read = true;
+                for (std::uint8_t m : call->modes) read = read && m == static_cast<std::uint8_t>(ParamMode::read);
+                if (!read) {
+                    error(b->span, "a closure's parameters are only read, so `Fn` takes no `mut` or `own`");
+                    continue;
+                }
+                if (call->elem->is_result) {
+                    error(b->span, "a closure can't fail yet, so `Fn` takes no `!`");
+                    continue;
+                }
+                p->call = call;
+                p->call_mut = b->callable_mut;
+                continue;
+            }
+            // The derived properties, which every type that can have them has without an impl.
+            bool* flag = nullptr;
+            if (b->kind == TypeExprKind::named && b->path.parts.size() == 1 && b->args.empty()) {
+                Name n = b->path.parts[0];
+                flag = n == n_Copy_ ? &p->copy_bound : n == n_Equal_ ? &p->equal_bound
+                     : n == n_Display_ ? &p->display_bound : n == n_Hash_ ? &p->hash_bound
+                     : n == n_Order_ ? &p->order_bound : n == n_JavaHash_ ? &p->java_hash_bound
+                     : n == n_Send_ ? &p->send_bound : nullptr;
+            }
+            if (flag) {
+                if (*flag) error(b->span, q(text(b->path.parts[0])) + " is already a bound of " + q(text(name)));
+                *flag = true;
+                continue;
+            }
+            Item* iface = resolve_interface(b);
+            if (!iface) continue;
+            if (std::find(bounds.begin(), bounds.end(), iface) != bounds.end()) {
+                error(b->span, q(iface_text(iface)) + " is already a bound of " + q(text(name)));
+                continue;
+            }
+            bounds.push_back(iface);
+        }
+        p->bounds = ctx_.arena.copy(bounds);
+    }
+
+    // --- associated types (CLX-72) ------------------------------------------------------------
+    //
+    // `type Item` in an interface is a type each impl gives, `type Item = i32`. `C.Item` names it
+    // for a type `C`: a real type's impl gives it, and for a parameter it's a parameter of its
+    // own, with the bounds the interface gives it, `type Item: Display`, until an instance says
+    // what `C` is.
+
+    // The interface's associated type `n`, or null.
+    static Item* assoc_member(const Item* iface, Name n) {
+        for (Item* m : iface_root(iface)->members) {
+            if (m->kind == ItemKind::type_alias && m->name == n) return m;
+        }
+        return nullptr;
+    }
+
+    // Each `type Item: Bounds` of an interface, as `Self.Item`.
+    void resolve_assoc_decls(Item* it) {
+        InModule in(*this, it);
+        Type* self = it->type_params[0];
+        for (Item* m : it->members) {
+            if (m->kind != ItemKind::type_alias || m->declared) continue;
+            if (!m->generics.empty()) not_yet(m->generics[0].span, "generic associated types");
+            if (m->self_type) not_yet(m->self_type->span, "defaults for an interface's types");
+            m->interface_item = it;
+            Type* p = projection(self, self->bounds[0], m);
+            m->declared = p;
+            Type* saved = current_impl_type_;
+            current_impl_type_ = self;
+            std::size_t mark = push_env(it);
+            resolve_bounds(p, m->type_bounds, m->name);
+            pop_env(mark);
+            current_impl_type_ = saved;
+        }
+    }
+
+    // `base.Item` while `base` is a parameter, or another type that mentions one: a parameter
+    // with the bounds the interface gives the type.
+    Type* projection(Type* base, Item* iface, Item* m) {
+        auto key = std::make_tuple(base, iface, m);
+        if (auto f = projections_.find(key); f != projections_.end()) return f->second;
+        Type* p = T.make_param(ctx_.arena.copy(std::string(base->name) + "." + std::string(text(m->name))));
+        p->assoc_base = base;
+        p->item = iface;
+        p->assoc = m;
+        projections_.emplace(key, p);
+        if (Type* d = m->declared; d && d != p) {
+            p->copy_bound = d->copy_bound;
+            p->equal_bound = d->equal_bound;
+            p->display_bound = d->display_bound;
+            p->hash_bound = d->hash_bound;
+            p->order_bound = d->order_bound;
+            p->java_hash_bound = d->java_hash_bound;
+            p->send_bound = d->send_bound;
+            Subst s = iface_subst(iface, base);
+            std::vector<Item*> bounds;
+            for (Item* b : d->bounds) bounds.push_back(subst_iface(b, s));
             p->bounds = ctx_.arena.copy(bounds);
         }
+        return p;
+    }
+
+    // The type `base` gives the interface's associated type `m`.
+    Type* assoc_type(Type* base, Item* iface, Item* m, Span site, bool report) {
+        if (is_bad(base)) return T.error;
+        if (base->kind == TypeKind::param) return projection(base, iface, m);
+        if (auto found = impls_by_head_.find(head(base)); found != impls_by_head_.end()) {
+            for (ImplInfo* info : found->second) {
+                Subst s;
+                if (!impl_matches(info, base, iface, s)) continue;
+                auto v = info->types.find(m->name);
+                if (v == info->types.end()) return T.error;  // the impl says it's missing
+                return subst(impl_assoc(info, v->second), s);
+            }
+        }
+        if (base->open) return projection(base, iface, m);
+        if (report) {
+            error(site, name_of(base) + " doesn't implement " + q(iface_text(iface)) + ", so it has no " + q(text(m->name)));
+        }
+        return T.error;
+    }
+
+    // What an impl's `type Item = ...` says, worked out the first time it's needed.
+    Type* impl_assoc(ImplInfo* info, Item* m) {
+        if (m->declared) return m->declared;
+        if (m->resolving) {
+            error(m->name_span, q(text(m->name)) + " is defined through itself");
+            return m->declared = T.error;
+        }
+        m->resolving = true;
+        InModule in(*this, info->impl);
+        std::size_t mark = push_env(info->impl);
+        Type* saved = current_impl_type_;
+        current_impl_type_ = info->self;
+        Type* v = resolve_type(m->self_type);
+        current_impl_type_ = saved;
+        pop_env(mark);
+        m->resolving = false;
+        if (v->kind == TypeKind::unit || v->kind == TypeKind::never) {
+            error(m->self_type->span, name_of(v) + " can't be an associated type");
+            v = T.error;
+        }
+        m->declared = v;
+        Item* want = assoc_member(info->iface, m->name);
+        if (!is_bad(v) && want && want->declared) {
+            std::vector<Type*> one{want->declared};
+            check_bounds(ctx_.arena.copy(one), {v}, m->self_type->span, q(iface_text(info->iface)));
+        }
+        return v;
+    }
+
+    // `C.Item`, `Self.Item` or `Bag.Item`, or null when `C` isn't a type, so the path is
+    // something else.
+    Type* assoc_path(TypeExpr* t) {
+        Name b = t->path.parts[0], n = t->path.parts[1];
+        Type* base = nullptr;
+        // An instance's parameter is its type, and the definition said what was wrong already.
+        bool instance = false;
+        if (b == n_Self_ && current_impl_type_) {
+            base = current_impl_type_;
+        } else if (Type* p = env_type(b)) {
+            base = p;
+            instance = p->kind != TypeKind::param;
+        } else if (Type* prim = T.primitive(text(b))) {
+            base = prim;
+        } else if (Item* it = find_item(b); it && is_type_item(it) && it->type_params.empty()) {
+            base = it->declared;
+            if (it != current_item_) it->used = true;
+        }
+        if (!base) return nullptr;
+        if (is_bad(base)) return T.error;
+        Item* iface = nullptr;
+        Item* member = nullptr;
+        bool ambiguous = false;
+        auto consider = [&](Item* i) {
+            Item* m = assoc_member(i, n);
+            if (!m || i == iface) return;
+            if (member) ambiguous = true;
+            iface = i;
+            member = m;
+        };
+        if (base->kind == TypeKind::param) {
+            for (Item* bound : base->bounds) consider(bound);
+        } else if (auto found = impls_by_head_.find(head(base)); found != impls_by_head_.end()) {
+            for (ImplInfo* info : found->second) {
+                Subst u;
+                if (!info->iface || !unify(info->self, base, u, info->impl->type_params)) continue;
+                consider(subst_iface(info->iface, u));
+            }
+        }
+        if (instance && (ambiguous || !member)) return T.error;
+        if (ambiguous) {
+            error(t->span, q(text(n)) + " is a type of more than one interface " + name_of(base) + " implements");
+            return T.error;
+        }
+        if (!member) {
+            std::string hint;
+            if (base->kind == TypeKind::param && !base->assoc_base) {
+                hint = base->bounds.empty() ? "; give it a bound whose interface has one, as in " + q("<" + std::string(base->name) + ": Container>")
+                                            : "; none of its bounds' interfaces has one";
+            }
+            error(t->span, name_of(base) + " has no type " + q(text(n)) + hint);
+            return T.error;
+        }
+        return assoc_type(base, iface, member, t->span, !instance);
     }
 
     // `Shape`, or `From<IoError>`: the interface, with its arguments if it's generic.
@@ -1899,7 +2119,13 @@ private:
     static bool unresolved(const Type* t, const Slice<Type*>& vars, const Subst& s) {
         if (!t->open) return false;
         switch (t->kind) {
-            case TypeKind::param: return contains(vars, t) && !s.count(const_cast<Type*>(t));
+            case TypeKind::param:
+                if (t->assoc_base) {
+                    if (unresolved(t->assoc_base, vars, s)) return true;
+                    for (Type* a : t->item->type_args) if (unresolved(a, vars, s)) return true;
+                    return false;
+                }
+                return contains(vars, t) && !s.count(const_cast<Type*>(t));
             case TypeKind::optional: case TypeKind::array: case TypeKind::list: case TypeKind::deque: case TypeKind::set:
             case TypeKind::sender: case TypeKind::receiver:
                 return unresolved(t->elem, vars, s);
@@ -1934,7 +2160,14 @@ private:
         switch (t->kind) {
             case TypeKind::param: {
                 auto it = s.find(t);
-                return it == s.end() ? t : it->second;
+                if (it != s.end()) return it->second;
+                if (t->assoc_base) {
+                    Type* b = subst(t->assoc_base, s);
+                    Item* i = subst_iface(t->item, s);
+                    if (b == t->assoc_base && i == t->item) return t;
+                    return assoc_type(b, i, t->assoc, Span{}, false);
+                }
+                return t;
             }
             case TypeKind::optional: return T.optional_of(subst(t->elem, s));
             case TypeKind::array: return T.array_of(subst(t->elem, s), t->length);
@@ -1978,6 +2211,12 @@ private:
     // in `s`. A parameter already bound must match what it's bound to.
     bool unify(Type* pattern, Type* actual, Subst& s, const Slice<Type*>& vars) {
         if (is_bad(actual) || is_bad(pattern) || actual->kind == TypeKind::never) return true;
+        if (pattern->kind == TypeKind::param && pattern->assoc_base) {
+            // `C.Item` matches what it is once `C` is known.
+            Type* r = subst(pattern, s);
+            if (r == pattern) return pattern == actual;
+            return unify(r, actual, s, vars);
+        }
         if (pattern->kind == TypeKind::param && contains(vars, pattern)) {
             auto it = s.find(pattern);
             if (it == s.end()) {
@@ -2736,6 +2975,9 @@ private:
     Type* resolve_type(TypeExpr* t, bool pointer_ok = false, bool scoped_ok = false) {
         switch (t->kind) {
             case TypeExprKind::named: {
+                if (t->path.parts.size() == 2 && t->args.empty()) {
+                    if (Type* a = assoc_path(t)) return a;
+                }
                 if (t->path.parts.size() != 1) {
                     error(t->span, "unknown type " + q(path_text(t->path)));
                     return T.error;
@@ -11523,6 +11765,7 @@ private:
     bool defer_bounds_ = false;
     bool instance_mode_ = false;
     bool dyn_self_ = false;  // the next `fn_call` is through a `dyn`, from `dyn_call`
+    std::map<std::tuple<Type*, Item*, Item*>, Type*> projections_;  // `C.Item`, by `C`, interface and member
 };
 
 }  // namespace

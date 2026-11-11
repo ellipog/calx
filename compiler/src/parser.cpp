@@ -671,6 +671,12 @@ private:
         it->name_span = peek().span;
         it->name = ident("as the type's name");
         it->generics = slice(generics());
+        if (accept(Tok::colon)) {
+            std::vector<TypeExpr*> bounds;
+            bounds.push_back(type());
+            while (accept(Tok::plus)) bounds.push_back(type());
+            it->type_bounds = slice(bounds);
+        }
         if (accept(Tok::eq)) it->self_type = type();
         end_line();
         return it;
@@ -804,7 +810,8 @@ private:
         switch (peek().kind) {
             case Tok::ident: {
                 TypeExpr* t = new_type(TypeExprKind::named, start);
-                if (ctx_.names.text(peek().name) == "Self") {
+                // `Self.Item` is a path, an associated type of `Self` (CLX-72).
+                if (ctx_.names.text(peek().name) == "Self" && peek(1).kind != Tok::dot) {
                     next();
                     t->kind = TypeExprKind::self;
                     return t;

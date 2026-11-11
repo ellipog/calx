@@ -115,6 +115,12 @@ struct Type {
     // param: its bound is `FnMut(A) -> R`, so what it stands for can change what it captures and
     // is called one call at a time; closure: it changes what it captures (CLX-161).
     bool call_mut = false;
+    // param: an associated type of a type that's still a parameter, as `C.Item` is for
+    // `C: Container` (CLX-72): `assoc_base` is the type, `item` the interface, an instance for a
+    // generic one, and `assoc` its `type` member. It has the bounds the interface gives it, and
+    // stands for the type an impl gives once `assoc_base` is a real type.
+    Type* assoc_base = nullptr;
+    Item* assoc = nullptr;
     std::uint32_t id = 0;    // a number unique to the type, for naming it in C
     std::string_view name;   // what messages call it
 };

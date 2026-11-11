@@ -1,6 +1,6 @@
 ---
 title: Interfaces
-description: Interfaces with methods, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; dyn values of any type with an interface; and naming the interface.
+description: Interfaces with methods, constants and defaults; impls for structs, enums and primitives; generic interfaces such as Into<T>; associated types; dyn values of any type with an interface; and naming the interface.
 ---
 
 # Interfaces
@@ -51,6 +51,7 @@ There's no inheritance and there are no classes. A type gets behavior from its o
 - `const name: Type` is a constant each impl gives. It's a constant wherever it's used, so `T.sides` can be a field's default.
 - A function with a body is a default, as `size` is above. Impls get it without writing it, and can replace it.
 - `Self` is the type implementing the interface: `fn bigger(self, other: Self) -> bool`, `fn unit() -> Self`.
+- `type Item` is a type each impl gives, which the interface's functions can name as `Self.Item` ([associated types](#associated-types)).
 
 ## Implementing one
 
@@ -232,6 +233,55 @@ fn main() {
 - [`Iterator<T>`](control-flow.md#iterators) is another, with `fn next(mut self) -> T?`, which a `for` loop calls until it gives `none`.
 - So are the [operators'](#operators): `Add<T>`, `Sub<T>`, `Mul<T>`, `Div<T>` and `Rem<T>`.
 
+## Associated types
+
+`type Item` in an interface is a type each impl gives, `type Item = i32`, where a generic interface would need a parameter that every use repeats. `C.Item` names it for any type `C` that implements the interface, and `Self.Item` names it in the interface and its impls (CLX-72):
+
+```calx
+interface Container {
+    type Item: Display
+
+    fn get(self, i: usize) -> Self.Item?
+
+    fn len(self) -> usize
+}
+
+struct Bag {
+    items: List<i32>,
+}
+
+impl Container for Bag {
+    type Item = i32
+
+    fn get(self, i: usize) -> i32? {
+        return if i < self.items.len() { some(self.items[i]) } else { none }
+    }
+
+    fn len(self) -> usize {
+        return self.items.len()
+    }
+}
+
+// Generic code knows only the bounds the interface gives `Item`: it can be shown.
+fn last<C: Container>(c: C) -> C.Item? {
+    return if c.len() == 0 { none } else { c.get(c.len() - 1) }
+}
+
+fn main() {
+    let b = Bag { items: [3, 1, 4] }
+    let l: i32 = last(b)!
+    let n: Bag.Item = 7
+    println("{l} {n}")    // out: 4 7
+}
+```
+
+- An impl gives each of the interface's types, after `type` and `=`. Its functions can write the type itself, `i32`, or `Self.Item`, which is the same.
+- `type Item: Display + Copy` gives the type bounds, as a generic parameter's are. Each impl's type must have them, and generic code can use only them: in `last`, a `C.Item` can be shown, and nothing more.
+- For a real type, `Bag.Item` is the type its impl gives, here `i32`. For a parameter, `C.Item` is a type of its own until a call says what `C` is, so `last(b)` gives back an `i32?`.
+- A field can be one, `held: C.Item` in a `struct Holder<C: Container>`, and an impl for a generic type can give its parameter, `type Item = T`.
+- A generic interface can have them too, `interface Codec<In> { type Out }`, and `C.Out` is for the bound `C: Codec<u8>`.
+- A method that mentions `Self.Item` mentions `Self`, so it isn't in a [`dyn`](#holding-any-type-dyn)'s table.
+
 ## Holding any type: `dyn`
 
 A generic parameter is one type for each copy of the code. `dyn Shape` is a value of any type that implements `Shape`, so a list can hold a circle and a square together, a field can hold either, and a function can return either (CLX-72):
@@ -389,6 +439,7 @@ Besides mismatched and missing members (D72):
 - A member that isn't in the interface.
 - An interface used as a type, as in `fn f(s: Shape)`. Take a generic parameter with it as a bound instead, `fn f<T: Shape>(s: T)`, or a [`dyn Shape`](#holding-any-type-dyn) to take any type with it.
 - A call through a `dyn` of a function that isn't in its table, and a value for a `dyn` whose type doesn't implement the interface.
+- An impl without one of the interface's types, a type the interface doesn't have, or one without the bounds the interface gives it; and `C.Item` for a `C` whose bounds have no `Item`.
 - An impl that's never used, when neither the interface nor the type is `pub`.
 
 ## In C
@@ -397,4 +448,4 @@ Interface calls are direct calls. Generic code has a copy for each type, and eac
 
 A `dyn Shape` is two addresses: its value's, and a table of its type's functions, which is a constant. The table has the type's drop and copy, then each method in the order the interface declares them, and a call is one load and an indirect call: `s.area()` is `s->vt->m0(s->data)`. A view for an argument that's only looked at is a `dyn` made in place, with the value's own address. Each file that makes a `dyn` of a type has that type's table, so a program has one for each type and interface it uses together.
 
-Associated types are designed but not built yet ([spec](../CALX_SPEC.md#interfaces-and-generics)).
+An associated type is only a name for a type: in each generic function's copy, `C.Item` is the type the impl gives, so it costs nothing.

@@ -1,0 +1,130 @@
+// Associated types (CLX-72): `type Item` in an interface is a type each impl gives, and
+// `C.Item` names it, for a real type or for a parameter, which then has the bounds the
+// interface gives it.
+
+interface Container {
+    type Item: Display + Copy
+
+    fn get(self, i: usize) -> Self.Item?
+
+    fn len(self) -> usize
+
+    fn first(self) -> Self.Item? {
+        return self.get(0)
+    }
+}
+
+struct Bag {
+    items: List<i32>,
+}
+
+impl Container for Bag {
+    type Item = i32
+
+    fn get(self, i: usize) -> i32? {
+        if i < self.items.len() {
+            return some(self.items[i])
+        }
+        return none
+    }
+
+    fn len(self) -> usize {
+        return self.items.len()
+    }
+}
+
+struct Word {
+    text: String,
+}
+
+impl Container for Word {
+    type Item = u8
+
+    fn get(self, i: usize) -> Self.Item? {
+        if i < self.text.len() {
+            return some(self.text.byte_at(i))
+        }
+        return none
+    }
+
+    fn len(self) -> usize {
+        return self.text.len()
+    }
+}
+
+// A generic impl's type can be its parameter.
+struct Pair<T> {
+    a: T,
+    b: T,
+}
+
+impl<T: Display + Copy> Container for Pair<T> {
+    type Item = T
+
+    fn get(self, i: usize) -> T? {
+        if i == 0 {
+            return some(self.a)
+        }
+        if i == 1 {
+            return some(self.b)
+        }
+        return none
+    }
+
+    fn len(self) -> usize {
+        return 2
+    }
+}
+
+// Generic code knows only the bounds: `C.Item` can be shown and copied.
+fn show_all<C: Container>(c: C) -> String {
+    var out = String("")
+    for i in 0..c.len() {
+        if let x = c.get(i) {
+            if out.len() > 0 {
+                out.push_str(" ")
+            }
+            out.push_str("{x}")
+        }
+    }
+    return out
+}
+
+fn last<C: Container>(c: C) -> C.Item? {
+    if c.len() == 0 {
+        return none
+    }
+    return c.get(c.len() - 1)
+}
+
+fn main() {
+    let b = Bag { items: [3, 1, 4] }
+    println(show_all(b))    // out: 3 1 4
+    let w = Word { text: "hi" }
+    println(show_all(w))    // out: 104 105
+    let n: Bag.Item = 7
+    println("{n + 1}")    // out: 8
+    let l: i32 = last(b)!
+    println("{l}")    // out: 4
+    let f: u8 = w.first()!
+    println("{f}")    // out: 104
+    let p = Pair { a: 1.5, b: 2.5 }
+    let pl: f64 = last(p)!
+    println("{pl} {show_all(p)}")    // out: 2.5 1.5 2.5
+    println("{Bag { items: [] }.first() == none}")    // out: true
+    println("{shelf()}")    // out: 6
+}
+
+// A field can name one, and so can an instance of a generic struct that's a field.
+struct Holder<C: Container> {
+    held: C.Item,
+}
+
+struct Shelf {
+    h: Holder<Bag>,
+}
+
+fn shelf() -> i32 {
+    let s = Shelf { h: Holder { held: 5 } }
+    return s.h.held + 1
+}

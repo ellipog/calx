@@ -1,0 +1,66 @@
+// What associated types (CLX-72) check.
+
+pub interface Container {
+    type Item: Copy
+
+    fn get(self) -> Self.Item
+}
+
+struct Bag {
+    v: i32,
+}
+
+impl Container for Bag {    // error: the impl of `Container` for `Bag` is missing `Item`
+    fn get(self) -> i32 {
+        return self.v
+    }
+}
+
+struct Names {
+    v: List<String>,
+}
+
+impl Container for Names {
+    type Item = List<String>    // error: `List<String>` isn't `Copy`, which `Container` needs for `Self.Item`
+    type Other = i32    // error: `Other` isn't a type of `Container`
+
+    fn get(self) -> List<String> {
+        return self.v.copy()
+    }
+}
+
+struct Flag {
+    on: bool,
+}
+
+impl Container for Flag {
+    type Item: Copy = bool    // error: the interface gives the bounds of `Item`; an impl says which type it is
+
+    fn get(self) -> bool {
+        return self.on
+    }
+}
+
+struct Plain {
+    v: i32,
+}
+
+fn add_one<C: Container>(c: C) -> C.Item {
+    let x = c.get()
+    return x + 1    // error: `+`
+}
+
+fn nope<C: Container>(_c: C) -> C.Nope {    // error: `C` has no type `Nope`; none of its bounds' interfaces has one
+    panic("no")
+}
+
+fn unbound<T>(_t: T) -> T.Item {    // error: `T` has no type `Item`; give it a bound whose interface has one
+    panic("no")
+}
+
+fn main() {
+    let _p: Plain.Item = 1    // error: `Plain` has no type `Item`
+    _ = add_one(Flag { on: true })
+    _ = nope(Flag { on: true })
+    _ = unbound(1)
+}

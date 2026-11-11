@@ -532,6 +532,7 @@ struct Item {
     TypeExpr* interface = nullptr;  // impl: `impl Shape for Square`
     TypeExpr* self_type = nullptr;  // impl: the type; type_alias: the aliased type
     Slice<Item*> members;           // interface, impl, extern_block, attribute_block
+    Slice<TypeExpr*> type_bounds;   // type_alias in an interface: `type Item: Display + Hash`
     // const
     TypeExpr* type = nullptr;
     Expr* value = nullptr;

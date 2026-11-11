@@ -1,0 +1,57 @@
+// Associated types (CLX-72) of a generic interface, declared in another module, with a default
+// that uses one, and generic code there that gives back a list of them.
+// file: main.calx
+import codec.{Codec, decode_all}
+
+struct Num {
+    scale: i32,
+}
+
+impl Codec<u8> for Num {
+    type Out = i32
+
+    fn decode(self, b: u8) -> i32 {
+        return i32(b) * self.scale
+    }
+}
+
+struct Tag {
+    open: bool,
+}
+
+impl Codec<u8> for Tag {
+    type Out = String
+
+    fn decode(self, b: u8) -> String {
+        return if self.open { "<{b}>" } else { "{b}" }
+    }
+}
+
+fn main() {
+    let nums: List<i32> = decode_all(Num { scale: 2 }, [1u8, 2u8])
+    println("{nums}")    // out: [2, 4]
+    println("{decode_all(Tag { open: true }, [7u8])}")    // out: [<7>]
+    let x: Num.Out = 3
+    println("{x * 2}")    // out: 6
+    println(Tag { open: false }.twice(9u8))    // out: 9 9
+}
+
+// file: codec.calx
+pub interface Codec<In> {
+    type Out: Display
+
+    fn decode(self, b: In) -> Self.Out
+
+    fn twice(self, b: In) -> String {
+        let one: Self.Out = self.decode(b)
+        return "{one} {self.decode(b)}"
+    }
+}
+
+pub fn decode_all<C: Codec<u8>>(c: C, bytes: List<u8>) -> List<C.Out> {
+    var out: List<C.Out> = []
+    for b in bytes {
+        out.push(c.decode(b))
+    }
+    return out
+}
