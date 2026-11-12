@@ -90,7 +90,7 @@ Why bytes don't inflate, as `Error`:
 | Copying a match | 16 bytes at a time when the distance is 16 or more. For shorter distances, the pattern is built once and then copied 8 bytes at a time |
 | Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. From level 4 the match at the last match's distance is tried too, which finds an image's row above when the chains are too full of commoner strings to reach it. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
 | Adler-32 | 32 bytes a step with AVX2 where the processor has it, and with NEON on Arm64. Otherwise a byte at a time, 8 to a loop |
-| CRC-32 | From 64 bytes on, folded 64 bytes at a time with carry-less multiplies, PCLMUL on x86; Arm64's CRC32 instructions, 8 bytes each. Otherwise, and for the last bytes, 8 tables, 8 bytes a step |
+| CRC-32 | From 64 bytes on, folded 64 bytes at a time with carry-less multiplies: PCLMUL on x86, PMULL on Arm64. Then the last bytes, and shorter inputs, with Arm64's CRC32 instructions, 8 bytes each, or otherwise 8 tables, 8 bytes a step |
 | The output | `decompress` guesses the length from how the first bytes inflated, and for gzip, from the length in its trailer, so most streams inflate in one call without copying |
 
 On an i9-13900K, one run each over the corpus (level 1 and inflating; the lazy levels have been rebuilt since, and are measured below):

@@ -105,7 +105,7 @@ static void crc_init(void) {
 #ifdef CX_ARM
 /* CRC-32 with Arm64's CRC32 instructions, which are gzip's polynomial, reflected as zlib's
  * table is: eight bytes an instruction (CLX-281). Four go in a row, each waiting on the last,
- * which is still several times the table's speed. */
+ * which is still several times the table's speed. Below 64 bytes, and after crc32_pmull. */
 __attribute__((target("crc"))) static cx_u32 crc32_arm(cx_u32 crc, const cx_u8* p, cx_usize n) {
     while (n && ((uintptr_t)p & 7)) {
         crc = __crc32b(crc, *p++);
@@ -141,6 +141,49 @@ static cx_u32 crc_tables(cx_u32 crc, const cx_u8* p, cx_usize n) {
     while (n--) crc = (crc >> 8) ^ crc_table[0][(crc ^ *p++) & 0xff];
     return crc;
 }
+
+#ifdef CX_ARM
+/* From 64 bytes on, crc32_clmul's folds, below, with Arm64's PMULL, which comes with its AES
+ * instructions, and the same constants: four lanes take 64 bytes in about the time the CRC32
+ * instructions, each waiting on the last, take 8 to 16. The last 16 bytes and what's after them
+ * go through the CRC32 instructions where there are some, else the tables (CLX-281). */
+static inline uint64x2_t crc_load(const cx_u8* p) { return vreinterpretq_u64_u8(vld1q_u8(p)); }
+
+__attribute__((target("aes"))) static inline uint64x2_t crc_fold(uint64x2_t x, uint64x2_t k, uint64x2_t y) {
+    poly64x2_t px = vreinterpretq_p64_u64(x), pk = vreinterpretq_p64_u64(k);
+    uint64x2_t lo = vreinterpretq_u64_p128(vmull_p64(vgetq_lane_p64(px, 0), vgetq_lane_p64(pk, 0)));
+    uint64x2_t hi = vreinterpretq_u64_p128(vmull_high_p64(px, pk));
+    return veorq_u64(veorq_u64(lo, hi), y);
+}
+
+__attribute__((target("aes"))) static cx_u32 crc32_pmull(cx_u32 crc, const cx_u8* p, cx_usize n, int has_crc32) {
+    static const cx_u64 ks[8] = {0x653d982200000000ull, 0xcad38e8f00000000ull, 0x69ccfc0d00000000ull, 0x2a28386200000000ull,
+                                 0x9570d49500000000ull, 0x01b5fd1d00000000ull, 0x65673b4600000000ull, 0x9ba54c6f00000000ull};
+    const uint64x2_t k64 = vld1q_u64(ks), k48 = vld1q_u64(ks + 2), k32 = vld1q_u64(ks + 4), k16 = vld1q_u64(ks + 6);
+    uint64x2_t a = veorq_u64(crc_load(p), vcombine_u64(vcreate_u64(crc), vcreate_u64(0)));
+    uint64x2_t b = crc_load(p + 16), c = crc_load(p + 32), d = crc_load(p + 48);
+    p += 64;
+    n -= 64;
+    while (n >= 64) {
+        a = crc_fold(a, k64, crc_load(p));
+        b = crc_fold(b, k64, crc_load(p + 16));
+        c = crc_fold(c, k64, crc_load(p + 32));
+        d = crc_fold(d, k64, crc_load(p + 48));
+        p += 64;
+        n -= 64;
+    }
+    uint64x2_t x = crc_fold(a, k48, crc_fold(b, k32, crc_fold(c, k16, d)));
+    while (n >= 16) {
+        x = crc_fold(x, k16, crc_load(p));
+        p += 16;
+        n -= 16;
+    }
+    cx_u8 last[16];
+    vst1q_u8(last, vreinterpretq_u8_u64(x));
+    if (has_crc32) return crc32_arm(crc32_arm(0, last, 16), p, n);
+    return crc_tables(crc_tables(0, last, 16), p, n);
+}
+#endif
 
 #ifdef CX_X86
 /* Whether the processor has PCLMULQDQ. It's asked once, as cpuid traps out to a hypervisor and
@@ -199,7 +242,12 @@ __attribute__((target("pclmul"))) static cx_u32 crc32_clmul(cx_u32 crc, const cx
 
 cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n) {
 #ifdef CX_ARM
-    if (cx_arm_features() & CX_ARM_CRC32) return ~crc32_arm(~crc, p, n);
+    const cx_u32 arm = cx_arm_features();
+    if (n >= 64 && (arm & CX_ARM_AES)) {
+        if (!(arm & CX_ARM_CRC32)) once(&crc_ready, crc_init);
+        return ~crc32_pmull(~crc, p, n, (arm & CX_ARM_CRC32) != 0);
+    }
+    if (arm & CX_ARM_CRC32) return ~crc32_arm(~crc, p, n);
 #endif
     once(&crc_ready, crc_init);
 #ifdef CX_X86
