@@ -162,38 +162,57 @@ jobs:
         shell: bash
         run: |
           mkdir -p build/probe
-          "$CALX_BIN" build tests/panics/trace.calx -o build/probe/trace.exe && ls -la build/probe
-          ./build/probe/trace.exe; echo "status $?"
+          CALX_LTO=0 "$CALX_BIN" build --verbose tests/panics/trace.calx -o build/probe/trace.exe 2>&1 | cut -c 1-1500 || true
+          ls -la build/probe
+          ./build/probe/trace.exe || echo "status $?"
           cat > build/probe/probe.c <<'EOF'
           #include <windows.h>
           #include <dbghelp.h>
           #include <stdio.h>
+          static BOOL CALLBACK said(HANDLE p, ULONG action, ULONG64 data, ULONG64 ctx) {
+              if (action == CBA_DEBUG_INFO) printf("dbghelp: %ls", (const wchar_t*)(uintptr_t)data);
+              return FALSE;
+          }
           __declspec(noinline) void inner(void) {
-              void* f[32];
-              USHORT n = RtlCaptureStackBackTrace(0, 32, f, NULL);
+              void* f[64];
+              USHORT n = RtlCaptureStackBackTrace(0, 64, f, NULL);
               printf("frames %u\n", n);
               HANDLE p = GetCurrentProcess();
-              SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
+              SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS | SYMOPT_DEBUG);
               if (!SymInitializeW(p, NULL, TRUE)) printf("SymInitializeW failed: %lu\n", GetLastError());
+              SymRegisterCallbackW64(p, said, 0);
+              wchar_t dir[MAX_PATH];
+              GetModuleFileNameW(NULL, dir, MAX_PATH);
+              wchar_t* slash = wcsrchr(dir, L'\\');
+              if (slash) *slash = 0;
+              printf("search %ls: %d\n", dir, SymSetSearchPathW(p, dir));
               for (USHORT i = 0; i < n; i++) {
-                  char buf[sizeof(SYMBOL_INFO) + 256] = {0};
-                  SYMBOL_INFO* s = (SYMBOL_INFO*)buf;
-                  s->SizeOfStruct = sizeof(SYMBOL_INFO);
-                  s->MaxNameLen = 255;
-                  DWORD64 off, at = (DWORD64)f[i] - 1;
-                  IMAGEHLP_LINE64 l = {sizeof l};
-                  DWORD col;
-                  BOOL a = SymFromAddr(p, at, &off, s);
+                  DWORD64 at = (DWORD64)(uintptr_t)f[i] - 1, off = 0;
+                  union { SYMBOL_INFOW info; char room[sizeof(SYMBOL_INFOW) + 512]; } s;
+                  memset(&s, 0, sizeof s);
+                  s.info.SizeOfStruct = sizeof(SYMBOL_INFOW);
+                  s.info.MaxNameLen = 255;
+                  IMAGEHLP_LINEW64 l;
+                  memset(&l, 0, sizeof l);
+                  l.SizeOfStruct = sizeof l;
+                  DWORD col = 0;
+                  BOOL a = SymFromAddrW(p, at, &off, &s.info);
                   DWORD ea = a ? 0 : GetLastError();
-                  BOOL b = SymGetLineFromAddr64(p, at, &col, &l);
+                  BOOL b = SymGetLineFromAddrW64(p, at, &col, &l);
                   DWORD eb = b ? 0 : GetLastError();
-                  printf("%2u %p %s (%lu) %s:%lu (%lu)\n", i, f[i], a ? s->Name : "?", ea, b ? l.FileName : "?", b ? l.LineNumber : 0, eb);
+                  IMAGEHLP_MODULEW64 m;
+                  memset(&m, 0, sizeof m);
+                  m.SizeOfStruct = sizeof m;
+                  BOOL c = SymGetModuleInfoW64(p, at, &m);
+                  printf("%2u %p %ls (%lu) %ls:%lu (%lu) in %ls, symbols %d from %ls\n", i, f[i], a ? s.info.Name : L"?", ea,
+                         b ? l.FileName : L"?", b ? l.LineNumber : 0, eb, c ? m.ModuleName : L"?", c ? (int)m.SymType : -1,
+                         c ? m.LoadedPdbName : L"?");
               }
           }
           int main(void) { inner(); return 0; }
           EOF
-          clang -gline-tables-only -gcodeview build/probe/probe.c -o build/probe/probe.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe.exe
-          clang -O2 -gline-tables-only -gcodeview build/probe/probe.c -o build/probe/probe2.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe2.exe
+          clang -gline-tables-only build/probe/probe.c -o build/probe/probe.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe.exe || echo "status $?"
+          clang -O2 -gline-tables-only build/probe/probe.c -o build/probe/probe2.exe -fuse-ld=lld -g -ldbghelp && ./build/probe/probe2.exe || echo "status $?"
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again
