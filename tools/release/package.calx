@@ -4,12 +4,13 @@
 //
 // OS is `windows` or `linux`. CALX and UPDATER are the built compiler and calx-update. TOOLCHAIN
 // is the folder tools/release/toolchain.calx made, with clang, lld and what they build with, which
-// an installation keeps as toolchain/, so nothing else needs installing (CLX-110). It writes to the
-// folder OUT:
+// an installation keeps as toolchain/, so nothing else needs installing (CLX-110). The processor
+// is the one this runs on, which CI builds each release on: CPU, `x64` or `arm64` (D612). It
+// writes to the folder OUT:
 //
-// - calx-VERSION-windows-x64.zip, or calx-VERSION-linux-x64.tar.gz, holding calx/ with bin/calx
+// - calx-VERSION-windows-CPU.zip, or calx-VERSION-linux-CPU.tar.gz, holding calx/ with bin/calx
 //   and bin/calx-update, runtime/, std/, LICENSE, VERSION, and with a toolchain, toolchain.txt;
-// - with a toolchain, calx-toolchain-NAME-OS-x64.tar.xz, holding toolchain/, NAME being the
+// - with a toolchain, calx-toolchain-NAME-OS-CPU.tar.xz, holding toolchain/, NAME being the
 //   toolchain's VERSION in lower case with `-` between its words, such as
 //   `llvm-23.1.5-llvm-mingw-20261104`. toolchain.txt names it, with its SHA-256 and its VERSION,
 //   on three lines. The toolchain is a download of its own, since it's most of a release and
@@ -20,7 +21,7 @@
 //
 // Files are added in sorted order with fixed dates, so the same inputs make the same archives.
 
-import std.env.{args}
+import std.env.{arch, args}
 import std.fs.{is_dir, list, make_dir_all, metadata, read, write}
 import std.hash.{sha256}
 import std.process.{exit}
@@ -59,7 +60,7 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
     files.push((String("calx/LICENSE"), try load("LICENSE"), 0o644))
     files.push((String("calx/VERSION"), "{version}\n".to_bytes(), 0o644))
 
-    let name = "calx-{version}-{os}-x64.{if windows { "zip" } else { "tar.gz" }}"
+    let name = "calx-{version}-{os}-{cpu()}.{if windows { "zip" } else { "tar.gz" }}"
     var bytes = List<u8>()
     if windows {
         var z = ZipWriter.new()
@@ -83,6 +84,11 @@ fn package(version: String, os: String, calx: String, updater: String, out: Stri
     println("{name}: {files.len()} files, {bytes.len()} bytes, sha256 {sum}")
 }
 
+// The processor in the archives' names, as Windows names it: `x64` or `arm64`.
+fn cpu() -> String {
+    return if arch() == "aarch64" { "arm64" } else { "x64" }
+}
+
 // Every file under the folder `dir`, as `prefix/...`, in sorted order: the runtime's C and its
 // headers, std's Calx, the tables and the font it embeds, and their notices. All of them, so a
 // file std starts to embed is never one the release leaves out.
@@ -101,7 +107,7 @@ fn add_tree(files: mut List<(String, List<u8>, u32)>, dir: String, prefix: Strin
     }
 }
 
-// The toolchain in `dir` as calx-toolchain-NAME-OS-x64.tar.xz in `out`, with its .sha256: its name,
+// The toolchain in `dir` as calx-toolchain-NAME-OS-CPU.tar.xz in `out`, with its .sha256: its name,
 // its SHA-256 and its VERSION.
 fn toolchain_archive(os: String, dir: String, out: String) -> (String, String, String) ! String {
     let text = String.from_utf8(try load("{dir}/VERSION")) ?? String()
@@ -109,7 +115,7 @@ fn toolchain_archive(os: String, dir: String, out: String) -> (String, String, S
     if name.is_empty() {
         fail "{dir}/VERSION is empty"
     }
-    let asset = "calx-toolchain-{slug(name)}-{os}-x64.tar.xz"
+    let asset = "calx-toolchain-{slug(name)}-{os}-{cpu()}.tar.xz"
     var files = List<(String, List<u8>, u32)>()
     try add_all(mut files, dir, "toolchain")
     var t = TarWriter.new()

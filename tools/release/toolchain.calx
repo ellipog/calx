@@ -4,25 +4,25 @@
 //     calx run tools/release/toolchain.calx -- windows MINGW LLVM OUT NAME
 //     calx run tools/release/toolchain.calx -- linux LLVM OUT NAME
 //
-// LLVM is LLVM's own release for the system, and MINGW llvm-mingw's x86_64 UCRT release of the
-// same LLVM version, unpacked; OUT is the folder to make. NAME, such as `LLVM 23.1.5, llvm-mingw
-// 20261104`, goes in OUT/VERSION, which builds put in their cache keys, so a release with a new
-// toolchain compiles everything again, and which names the archive package.calx makes of it. A
-// change to what's kept needs a new NAME, such as with `r2` after it.
+// LLVM is LLVM's own release for the system and processor this runs on, and MINGW llvm-mingw's
+// UCRT release of the same LLVM version, unpacked; OUT is the folder to make. NAME, such as
+// `LLVM 23.1.5, llvm-mingw 20261104`, goes in OUT/VERSION, which builds put in their cache keys,
+// so a release with a new toolchain compiles everything again, and which names the archive
+// package.calx makes of it. A change to what's kept needs a new NAME, such as with `r2` after it.
 //
 // clang and lld come from LLVM's release, one program each, linked statically with an allocator
 // of their own. On Windows, llvm-mingw's load LLVM from DLLs and use the C runtime's heap, which
 // made a module's debug build about 10% slower and a release build from an empty cache 20%
 // slower. From llvm-mingw come what clang builds for mingw-w64 and the UCRT with: the
-// configuration that picks them, mingw-w64's headers, the import libraries for x86_64 and
-// compiler-rt's builtins, with the licenses, LLVM's and mingw-w64's. It leaves out the other
+// configuration that picks them, mingw-w64's headers, and the import libraries and compiler-rt's
+// builtins for the processor, with the licenses, LLVM's and mingw-w64's. It leaves out the other
 // targets and tools, C++'s headers and libraries, and the DDK's headers, some of which are LGPL.
 //
 // On Linux, programs use the system's C library, its headers and start files, which libc6-dev or
 // glibc-devel has, and compiler-rt's builtins and start files rather than GCC's, so GCC needn't
 // be installed. clang and lld are stripped of their symbols, a fifth of clang and a third of lld.
 
-import std.env.{args}
+import std.env.{arch, args}
 import std.fs.{Entry, Kind, copy, is_file, make_dir_all, metadata, walk, write_text}
 import std.process.{Command, exit}
 
@@ -53,18 +53,19 @@ fn windows(mingw: String, llvm: String, out: String, name: String) ! String {
     try put(mut kept, lld, "{out}/bin/ld.lld.exe")
     try tree(mut kept, llvm, out, "lib/clang", |rel: String| { rel.contains("/include/") })
     // The configuration clang loads for the target: the C runtime and unwinder LLVM's, and lld.
-    try put(mut kept, "{mingw}/bin/x86_64-w64-windows-gnu.cfg", "{out}/bin/x86_64-w64-windows-gnu.cfg")
+    try put(mut kept, "{mingw}/bin/{arch()}-w64-windows-gnu.cfg", "{out}/bin/{arch()}-w64-windows-gnu.cfg")
     try put(mut kept, "{mingw}/bin/mingw32-common.cfg", "{out}/bin/mingw32-common.cfg")
     try put(mut kept, "{mingw}/LICENSE.TXT", "{out}/LICENSE.TXT")
     try tree(mut kept, mingw, out, "include", |rel: String| {
         not rel.starts_with("include/c++/") and not rel.starts_with("include/ddk/") and not rel.ends_with(".idl")
     })
-    try tree(mut kept, mingw, out, "x86_64-w64-mingw32", |rel: String| {
-        (rel.starts_with("x86_64-w64-mingw32/lib/") and not rel.contains("/libc++")) or
-            rel.starts_with("x86_64-w64-mingw32/share/mingw32/COPYING")
+    let target = "{arch()}-w64-mingw32"
+    try tree(mut kept, mingw, out, target.copy(), |rel: String| {
+        (rel.starts_with("{target}/lib/") and not rel.contains("/libc++")) or
+            rel.starts_with("{target}/share/mingw32/COPYING")
     })
     try tree(mut kept, mingw, out, "lib/clang", |rel: String| {
-        rel.ends_with("/lib/windows/libclang_rt.builtins-x86_64.a")
+        rel.ends_with("/lib/windows/libclang_rt.builtins-{arch()}.a")
     })
     try finish(out, name, kept)
 }
@@ -105,8 +106,9 @@ fn linux(llvm: String, out: String, name: String) ! String {
         -fuse-ld=lld
         --end-no-unused-arguments
         "#
-    if let err(e) = write_text("{out}/bin/x86_64-unknown-linux-gnu.cfg", cfg) {
-        fail "can't write {out}/bin/x86_64-unknown-linux-gnu.cfg: {e}"
+    let cfg_path = "{out}/bin/{arch()}-unknown-linux-gnu.cfg"
+    if let err(e) = write_text(cfg_path.copy(), cfg) {
+        fail "can't write {cfg_path}: {e}"
     }
     kept.files += 1
     try put(mut kept, "{llvm}/include/llvm/Support/LICENSE.TXT", "{out}/LICENSE.TXT")

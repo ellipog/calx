@@ -10,20 +10,20 @@
 //                 [--force] [--rollback] [--toolchain] [--background CACHE_FILE]
 //
 // A release is `version.txt`, holding its version, and for each platform
-// `calx-VERSION-OS-x64.zip` or `.tar.gz` with a `.sha256` beside it. Stable releases are tagged
-// `vVERSION` and are what `releases/latest` points to; nightlies replace the `nightly` release
-// on every push to main that passes CI, and upload version.txt last, so the archive it names is
-// already there.
+// `calx-VERSION-OS-CPU.zip` or `.tar.gz`, CPU being `x64` or `arm64` (D612), with a `.sha256`
+// beside it. Stable releases are tagged `vVERSION` and are what `releases/latest` points to;
+// nightlies replace the `nightly` release on every push to main that passes CI, and upload
+// version.txt last, so the archive it names is already there.
 //
 // A release's archive can name, in toolchain.txt, the toolchain it builds programs with: an
-// archive of its own in the release, `calx-toolchain-NAME-OS-x64.tar.xz`, its SHA-256, and its
+// archive of its own in the release, `calx-toolchain-NAME-OS-CPU.tar.xz`, its SHA-256, and its
 // VERSION (CLX-110, CLX-251). An update downloads it only when toolchain/VERSION isn't that
 // VERSION, which is when LLVM changes, and keeps the one it replaces for `--rollback`.
 // `--toolchain` installs the one the installed release names, if it isn't there: the install
 // scripts run that, and it mends an installation whose toolchain went missing. With CALX_INSTALLER=1,
 // as install.ps1 runs it, it leaves out its closing line, since the script says the rest.
 
-import std.env.{args, variable}
+import std.env.{arch, args, variable}
 import std.fs.{FsError, is_dir, is_file, list, make_dir_all, read, remove_dir_all, rename, separator, write}
 import std.hash.{sha256}
 import std.http.{Header, get}
@@ -134,7 +134,9 @@ fn run(o: Options, l: Look) ! String {
         return
     }
     let tag = tag_of(target)
-    let file = "calx-{target}-{if windows { "windows-x64.zip" } else { "linux-x64.tar.gz" }}"
+    // This calx-update was built for the processor the installation is for.
+    let cpu = if arch() == "aarch64" { "arm64" } else { "x64" }
+    let file = "calx-{target}-{if windows { "windows" } else { "linux" }}-{cpu}.{if windows { "zip" } else { "tar.gz" }}"
     let url = "{releases()}/download/{tag}/{file}"
     if not l.color {
         println("Downloading {file}...")

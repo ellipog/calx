@@ -226,9 +226,12 @@ stop() {
     exit 1
 }
 
+# The release for the processor: x64, or Arm64, which a Raspberry Pi 5 or an Arm server runs, and
+# which its release counts on ARMv8.2 from (D612).
 case "$(uname -s) $(uname -m)" in
-    "Linux x86_64") ;;
-    *) stop "Calx releases are for 64-bit x86 Linux and Windows; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/guide/install/#building-from-source" ;;
+    "Linux x86_64") cpu=x64 ;;
+    "Linux aarch64" | "Linux arm64") cpu=arm64 ;;
+    *) stop "Calx releases are for Linux on x64 and Arm64, and Windows on x64; on $(uname -s) $(uname -m), build it from source: https://calxlang.com/guide/install/#building-from-source" ;;
 esac
 
 if command -v curl > /dev/null 2>&1; then
@@ -281,7 +284,7 @@ case "$version" in
     *-nightly.*) tag=nightly ;;
     *) tag="v$version" ;;
 esac
-file="calx-$version-linux-x64.tar.gz"
+file="calx-$version-linux-$cpu.tar.gz"
 url="$releases/download/$tag/$file"
 
 temp=$(mktemp -d)
