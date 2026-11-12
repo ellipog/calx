@@ -51,9 +51,11 @@ extern char** environ;
 #ifdef __APPLE__
 #include <libproc.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <sys/event.h>
 #else
+#include <sched.h>
 #include <sys/syscall.h>
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
@@ -230,7 +232,9 @@ typedef struct {
  * starts empty, a byte each; the timeout in ms as a u64; the program; the arguments, a u32 count
  * of them; whether there's a folder, a byte, and the folder; then a u32 count of changes to the
  * environment, each a byte that's 1 to set the variable and 0 to remove it, its name, and its
- * value if it's set. Integers are little-endian, and each text is a u32 length and its bytes. */
+ * value if it's set; then the processors it may run on, a u32 count and a u32 each, none for any;
+ * and a byte that's 1 to take it out of power throttling. Integers are little-endian, and each
+ * text is a u32 length and its bytes. */
 typedef struct {
     cx_u32 io[3];
     int clear_env;
@@ -242,6 +246,9 @@ typedef struct {
     span dir;
     env_change* env;
     size_t envc;
+    cx_u32* cpus;
+    size_t ncpus;
+    int full_speed;
 } spec;
 
 typedef struct {
@@ -277,6 +284,7 @@ static span rd_span(reader* r) {
 static void spec_free(spec* sp) {
     free(sp->args);
     free(sp->env);
+    free(sp->cpus);
 }
 
 static int spec_read(spec* sp, const cx_u8* p, size_t n) {
@@ -302,6 +310,11 @@ static int spec_read(spec* sp, const cx_u8* p, size_t n) {
         sp->env[i].value.n = 0;
         if (sp->env[i].set) sp->env[i].value = rd_span(&r);
     }
+    sp->ncpus = (size_t)rd_int(&r, 4);
+    if (r.bad || sp->ncpus > n) return 0;
+    sp->cpus = (cx_u32*)grow(NULL, sp->ncpus * sizeof(cx_u32));
+    for (size_t i = 0; i < sp->ncpus; i++) sp->cpus[i] = (cx_u32)rd_int(&r, 4);
+    sp->full_speed = (int)rd_int(&r, 1);
     return !r.bad;
 }
 
@@ -982,6 +995,20 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
             quote_arg(&line, arg.p, arg.len);
         }
     }
+    /* The processors it may run on, as a mask, each one the machine has: this processor group's,
+     * up to 64. */
+    DWORD_PTR pin = 0;
+    if (sp->ncpus) {
+        DWORD_PTR mine, machine;
+        if (!GetProcessAffinityMask(GetCurrentProcess(), &mine, &machine)) machine = 0;
+        for (size_t i = 0; i < sp->ncpus; i++) {
+            if (sp->cpus[i] >= 8 * sizeof(DWORD_PTR) || !((machine >> sp->cpus[i]) & 1)) {
+                fail(E_BAD_ARG, 5);
+                goto done;
+            }
+            pin |= (DWORD_PTR)1 << sp->cpus[i];
+        }
+    }
     static const DWORD STD[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
     for (int i = 0; i < 3; i++) {
         switch (sp->io[i]) {
@@ -1036,6 +1063,8 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
      * an editor or a service often has, shares it: making each child one costs 15 ms. */
     DWORD console;
     if (GetConsoleProcessList(&console, 1) == 0) flags |= CREATE_NO_WINDOW;
+    /* A child to pin, or to run at full speed, starts suspended, so it runs no instruction before. */
+    if (pin || sp->full_speed) flags |= CREATE_SUSPENDED;
     PROCESS_INFORMATION pi;
     BOOL made = CreateProcessW(exe.p, line.p, NULL, NULL, count > 0, flags, changes ? env.p : NULL, sp->has_dir ? dir.p : NULL,
                                &si.StartupInfo, &pi);
@@ -1052,6 +1081,24 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
     if (!made) {
         fail_win(GetLastError());
         goto done;
+    }
+    if (flags & CREATE_SUSPENDED) {
+        if (pin && !SetProcessAffinityMask(pi.hProcess, pin)) {
+            DWORD e = GetLastError();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            fail_win(e);
+            goto done;
+        }
+        if (sp->full_speed) {
+            /* Out of power throttling, EcoQoS: version 1, the execution speed's control, off. So
+             * Windows doesn't move it to the efficiency cores, or run them slower, to save power.
+             * ProcessPowerThrottling is 4; older SDKs don't name it. */
+            struct { ULONG version, control, state; } speed = {1, 1, 0};
+            SetProcessInformation(pi.hProcess, (PROCESS_INFORMATION_CLASS)4, &speed, sizeof speed);
+        }
+        ResumeThread(pi.hThread);
     }
     CloseHandle(pi.hThread);
     p->process = pi.hProcess;
@@ -1624,9 +1671,45 @@ static int spawn_os(proc* p, const spec* sp, const cx_u8* input, size_t input_n)
 #else
     posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
 #endif
+#ifdef __APPLE__
+    /* macOS has no affinity a program can set: its scheduler places threads itself. */
+    if (sp->ncpus) {
+        fail(E_BAD_ARG, 6);
+        goto done;
+    }
+#else
+    /* A child to pin is started from this thread pinned to its processors, and takes the thread's
+     * affinity with it, so it's pinned before its first instruction. posix_spawn has no attribute
+     * for it, and the thread's own goes back after. */
+    cpu_set_t was, want;
+    int pinned = 0;
+    if (sp->ncpus) {
+        CPU_ZERO(&want);
+        for (size_t i = 0; i < sp->ncpus; i++) {
+            if (sp->cpus[i] >= CPU_SETSIZE) {
+                fail(E_BAD_ARG, 5);
+                goto done;
+            }
+            CPU_SET(sp->cpus[i], &want);
+        }
+        if (sched_getaffinity(0, sizeof was, &was) != 0) {
+            fail(E_OS, errno);
+            goto done;
+        }
+        if (sched_setaffinity(0, sizeof want, &want) != 0) {
+            /* EINVAL: none of them is a processor this program may use. */
+            fail(errno == EINVAL ? E_BAD_ARG : E_OS, errno == EINVAL ? 5 : errno);
+            goto done;
+        }
+        pinned = 1;
+    }
+#endif
     if (sp->io[1] == IO_INHERIT || sp->io[2] == IO_INHERIT || (sp->io[2] == IO_STDOUT && sp->io[1] == IO_INHERIT)) cx_out_flush();
     pid_t pid;
     int e = posix_spawn(&pid, exe.p, &fa, &at, argv, envp);
+#ifndef __APPLE__
+    if (pinned) sched_setaffinity(0, sizeof was, &was);
+#endif
     if (e) {
         fail(e == ENOENT ? E_NOT_FOUND : e == EACCES || e == ENOEXEC || e == EPERM ? E_DENIED : E_OS, e);
         goto done;
@@ -1981,5 +2064,103 @@ cx_i32 cx_proc_exe(void) {
         }
         cap *= 2;
     }
+#endif
+}
+
+/* Pins this program to the `n` processors at `cpus`, which std.process checked are some: on
+ * Windows the whole process, and on Linux the thread that calls, which the programs and threads it
+ * starts after take with them, as Python's `os.sched_setaffinity(0, ...)` does. 0 when it's done,
+ * or why not, as `cx_proc_spawn` says. */
+cx_i32 cx_proc_set_affinity(const cx_u32* cpus, cx_usize n) {
+#ifdef _WIN32
+    DWORD_PTR mine, machine, pin = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &mine, &machine)) machine = 0;
+    for (cx_usize i = 0; i < n; i++) {
+        if (cpus[i] >= 8 * sizeof(DWORD_PTR) || !((machine >> cpus[i]) & 1)) {
+            fail(E_BAD_ARG, 5);
+            return -1;
+        }
+        pin |= (DWORD_PTR)1 << cpus[i];
+    }
+    if (!SetProcessAffinityMask(GetCurrentProcess(), pin)) {
+        fail(E_OS, (cx_i32)GetLastError());
+        return -1;
+    }
+    return 0;
+#elif defined(__APPLE__)
+    (void)cpus;
+    (void)n;
+    fail(E_BAD_ARG, 6);
+    return -1;
+#else
+    cpu_set_t want;
+    CPU_ZERO(&want);
+    for (cx_usize i = 0; i < n; i++) {
+        if (cpus[i] >= CPU_SETSIZE) {
+            fail(E_BAD_ARG, 5);
+            return -1;
+        }
+        CPU_SET(cpus[i], &want);
+    }
+    if (sched_setaffinity(0, sizeof want, &want) != 0) {
+        fail(errno == EINVAL ? E_BAD_ARG : E_OS, errno == EINVAL ? 5 : errno);
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+/* Takes this program out of Windows' power throttling, as a child's `full_speed` does. Elsewhere
+ * there's none to take it out of. */
+void cx_proc_full_speed(void) {
+#ifdef _WIN32
+    struct { ULONG version, control, state; } speed = {1, 1, 0};
+    SetProcessInformation(GetCurrentProcess(), (PROCESS_INFORMATION_CLASS)4, &speed, sizeof speed);
+#endif
+}
+
+/* The machine's CPU time since it started, summed over its processors, in ns: how much went to
+ * running anything, `out[0]`, and how much was idle, `out[1]`. Both 0 where the system can't say.
+ * Windows counts in 100 ns; Linux and macOS in clock ticks, 100 a second on most. */
+void cx_proc_machine_cpu(cx_u64* out) {
+    out[0] = out[1] = 0;
+#ifdef _WIN32
+    FILETIME idle, kernel, user;
+    if (!GetSystemTimes(&idle, &kernel, &user)) return;
+    cx_u64 i = ((cx_u64)idle.dwHighDateTime << 32) | idle.dwLowDateTime;
+    cx_u64 k = ((cx_u64)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+    cx_u64 u = ((cx_u64)user.dwHighDateTime << 32) | user.dwLowDateTime;
+    /* The kernel's time has the idle time in it. */
+    out[0] = (k + u - i) * 100;
+    out[1] = i * 100;
+#elif defined(__APPLE__)
+    host_cpu_load_info_data_t info;
+    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&info, &count) != KERN_SUCCESS) return;
+    long hz = sysconf(_SC_CLK_TCK);
+    cx_u64 tick = hz > 0 ? 1000000000ull / (cx_u64)hz : 10000000ull;
+    out[0] = ((cx_u64)info.cpu_ticks[CPU_STATE_USER] + info.cpu_ticks[CPU_STATE_SYSTEM] + info.cpu_ticks[CPU_STATE_NICE]) * tick;
+    out[1] = (cx_u64)info.cpu_ticks[CPU_STATE_IDLE] * tick;
+#else
+    /* /proc/stat's first line: user, nice, system, idle, iowait, irq, softirq, steal, then guest
+     * and guest_nice, which user and nice count already. */
+    char b[512];
+    int fd = open("/proc/stat", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    ssize_t got = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (got < 5 || memcmp(b, "cpu ", 4) != 0) return;
+    b[got] = 0;
+    cx_u64 f[8] = {0};
+    char* s = b + 4;
+    for (int i = 0; i < 8; i++) {
+        while (*s == ' ') s++;
+        if (*s < '0' || *s > '9') break;
+        while (*s >= '0' && *s <= '9') f[i] = f[i] * 10 + (cx_u64)(*s++ - '0');
+    }
+    long hz = sysconf(_SC_CLK_TCK);
+    cx_u64 tick = hz > 0 ? 1000000000ull / (cx_u64)hz : 10000000ull;
+    out[0] = (f[0] + f[1] + f[2] + f[5] + f[6] + f[7]) * tick;
+    out[1] = (f[3] + f[4]) * tick;
 #endif
 }

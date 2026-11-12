@@ -1230,10 +1230,15 @@ cx_u64 cx_process_cpu_ns(void) {
 #endif
 }
 
-/* The processors this process may run on, as `parallel for` counts them. */
+/* The processors this process may run on, as `parallel for` counts them: on Windows and Linux,
+ * those its affinity allows. A Windows process pinned within its group has a mask of its own;
+ * one that isn't may run in every group. */
 cx_u32 cx_process_processors(void) {
 #ifdef _WIN32
-    long n = (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    DWORD_PTR mine, machine;
+    long n = GetProcessAffinityMask(GetCurrentProcess(), &mine, &machine) && mine && mine != machine
+                 ? (long)__builtin_popcountll((unsigned long long)mine)
+                 : (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
 #elif defined(__APPLE__)
     long n = sysconf(_SC_NPROCESSORS_ONLN); /* macOS has no affinity masks */
 #else

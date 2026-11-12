@@ -21,12 +21,12 @@
 // was over 10% is run again, up to twice, and the least disturbed one kept; the record says how
 // busy each run's machine was. Under WSL only Linux's own processes can be seen.
 //
-// On Windows the runner pins itself, and so the programs it starts, to the performance cores of a
-// processor with two kinds (the i9-13900K's mask 0x5554, one thread on each of 7 cores) and out of
-// power throttling, through the system's own functions, since std.process can't yet (CLX-291).
-// Parallel benchmarks run at each of `--threads`, pinned to as many performance cores, and at
-// `all` on every processor. On Linux, `taskset` pins them. Run it with --release: the Windows
-// functions are linked only where a release build can see they're called.
+// The runner pins itself, and so the programs it starts, to the performance cores of a processor
+// with two kinds (the i9-13900K's processors 2, 4 to 14, one thread on each of 7 cores), and on
+// Windows takes itself out of power throttling, with std.process's `set_affinity` and
+// `set_full_speed` (CLX-291). On Linux that pins the thread that starts them, which they take
+// with them. Parallel benchmarks run at each of `--threads`, pinned to as many performance cores,
+// and at `all` on every processor.
 //
 // Builds: Calx with `calx build --release`; C with clang at Calx's release flags, `-O3
 // -march=x86-64-v3 -ffp-contract=off -fno-math-errno -flto=thin`; Rust with Cargo's release
@@ -72,13 +72,6 @@ struct Args {
     keep: bool
     /// Print the tables docs/language-benchmarks.md gives, from bench/results, and run nothing.
     tables: bool
-}
-
-extern "C" {
-    fn GetCurrentProcess() -> *u8
-    fn SetProcessAffinityMask(process: *u8, mask: u64) -> i32
-    fn SetProcessInformation(process: *u8, class: i32, info: *u32, size: u32) -> i32
-    fn GetSystemTimes(idle: *u64, kernel: *u64, user: *u64) -> i32
 }
 
 const LANGS: [str; 5] = ["calx", "c", "rust", "go", "python"]
@@ -165,12 +158,10 @@ fn benches() -> List<Bench> {
     return b
 }
 
-// Where the programs run: a mask of processors on Windows, and the same as a list for `taskset`
-// on Linux. On Linux each program starts through `meter` (bench/meter.calx), which says what it
-// used, when that's set.
+// Where the programs run: the processors they're pinned to. On Linux each program starts through
+// `meter` (bench/meter.calx), which says what it used, when that's set.
 struct Pin {
-    mask: u64
-    cpus: String
+    cpus: List<u32>
     threads: u32
     meter: String
 }
@@ -180,63 +171,31 @@ struct Pin {
 // 8; more get every processor.
 fn pin_for(threads: u32, processors: u32) -> Pin {
     if threads <= 7 {
-        return Pin { mask: 0x5554, cpus: String("2,4,6,8,10,12,14"), threads: threads, meter: String() }
+        return Pin { cpus: [2, 4, 6, 8, 10, 12, 14], threads: threads, meter: String() }
     }
     if threads == 8 {
-        return Pin { mask: 0x5555, cpus: String("0,2,4,6,8,10,12,14"), threads: threads, meter: String() }
+        return Pin { cpus: [0, 2, 4, 6, 8, 10, 12, 14], threads: threads, meter: String() }
     }
-    var mask: u64 = 0
-    for k in 0u32..processors.min(64) {
-        mask |= 1u64 << u64(k)
+    var all: List<u32> = []
+    for k in 0u32..processors {
+        all.push(k)
     }
-    return Pin { mask: mask, cpus: "0-{processors - 1}", threads: threads, meter: String() }
+    return Pin { cpus: all, threads: threads, meter: String() }
 }
 
-// Pins this program, and so what it starts, on Windows; Linux pins each command with `taskset`.
+// Pins this program, and so what it starts, out of power throttling on Windows.
 fn apply_pin(p: Pin) {
-    if env.os() == "windows" {
-        unsafe {
-            let me = GetCurrentProcess()
-            if SetProcessAffinityMask(me, p.mask) == 0 {
-                stop("can't pin to processors {p.mask:x}")
-            }
-            // Out of power throttling (EcoQoS): version 1, the execution-speed control, off.
-            var throttle: List<u32> = [1, 1, 0]
-            _ = SetProcessInformation(me, 4, throttle.as_mut_ptr(), 12)
-        }
+    match process.set_affinity(p.cpus.copy()) {
+        ok => {},
+        err(e) => stop("{e}"),
     }
+    process.set_full_speed()
 }
 
 // The machine's CPU time, busy and in all, in nanoseconds, summed over its processors.
 fn cpu_times() -> (u64, u64) {
-    if env.os() == "windows" {
-        var t: List<u64> = [0, 0, 0]
-        unsafe {
-            let p = t.as_mut_ptr()
-            _ = GetSystemTimes(p, p.add(1), p.add(2))
-        }
-        // The kernel's time includes the idle time; both count in 100 ns.
-        let total = t[1] + t[2]
-        return ((total - t[0]) * 100, total * 100)
-    }
-    let stat = fs.read_text("/proc/stat")! ?? String()
-    for line in stat.lines() {
-        if line.starts_with("cpu ") {
-            let f = line.split_whitespace()
-            var total: u64 = 0
-            var idle: u64 = 0
-            for k in 1usize..f.len() {
-                let v = u64.parse(f[k].copy()) ?? 0
-                total += v
-                if k == 4 or k == 5 {
-                    idle += v
-                }
-            }
-            // USER_HZ, 100 ticks a second.
-            return ((total - idle) * 10000000, total * 10000000)
-        }
-    }
-    return (0, 0)
+    let t = unsafe { process.machine_cpu() }
+    return (t.busy_ns, t.busy_ns + t.idle_ns)
 }
 
 // One run of a program.
@@ -253,11 +212,6 @@ fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: P
     var full: List<String> = []
     let report = "{pin.meter}.report"
     let metered = env.os() == "linux" and not pin.meter.is_empty()
-    if env.os() == "linux" {
-        full.push("taskset")
-        full.push("-c")
-        full.push(pin.cpus.copy())
-    }
     if metered {
         full.push(pin.meter.copy())
         full.push(report.copy())
@@ -294,7 +248,7 @@ fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: P
     let load = if total > 0.0 { (busy / total).max(0.0) } else { 0.0 }
     var run = Run { wall: wall, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
     if metered {
-        // The program's own wall time, CPU time and peak, without taskset's or meter's.
+        // The program's own wall time, CPU time and peak, without meter's.
         let text = fs.read_text(report.copy())! ?? String()
         let f = text.split_whitespace()
         if f.len() != 3 {

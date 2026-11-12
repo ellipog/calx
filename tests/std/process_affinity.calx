@@ -1,0 +1,49 @@
+// A program pinned to processors, by a Command or itself, and the machine's CPU time (CLX-291).
+// macOS can't pin a program, so there pinning fails, saying so, and every line below still says
+// true.
+
+import std.env.{args, os}
+import std.process.{Command, ProcessError, current_exe, machine_cpu, processors, set_affinity, set_full_speed}
+
+fn main() {
+    if args().len() > 0 {
+        // The copy says how many processors it may run on.
+        println("{unsafe { processors() }}")
+        return
+    }
+    let mac = os() == "macos"
+
+    // Pinned to processor 0, and out of power throttling, it may run on that one alone.
+    let one = match Command.new(current_exe()).arg("child").affinity([0]).full_speed().read() {
+        ok(text) => text == "1",
+        err(e) => mac and "{e}" == "macOS can't pin a program to processors",
+    }
+    println("{one}")    // out: true
+
+    // A processor the machine doesn't have.
+    let far = match Command.new(current_exe()).arg("child").affinity([100000]).read() {
+        ok(_) => false,
+        err(e) => match e {
+            ProcessError.BadArgument(why) => why.starts_with(if mac { "macOS" } else { "can't run only on processors [100000]" }),
+            _ => false,
+        },
+    }
+    println("{far}")    // out: true
+
+    // The machine's CPU time only goes up.
+    let a = unsafe { machine_cpu() }
+    var spin: u64 = 0
+    for i in 0u64..20000000 {
+        spin = spin ^ (i * 2654435761)
+    }
+    let b = unsafe { machine_cpu() }
+    println("{a.busy_ns + a.idle_ns > 0} {b.busy_ns >= a.busy_ns} {b.idle_ns >= a.idle_ns} {spin != 1}")    // out: true true true true
+
+    // This program pinned to processor 0, which the programs it starts take with them.
+    set_full_speed()
+    let me = match set_affinity([0]) {
+        ok => unsafe { processors() } == 1 and Command.new(current_exe()).arg("child").read()! == "1",
+        err(e) => mac and "{e}" == "macOS can't pin a program to processors",
+    }
+    println("{me}")    // out: true
+}

@@ -45,6 +45,9 @@ extern "C" {
     fn cx_proc_exe() -> i32
     fn cx_proc_result_len() -> usize
     fn cx_proc_result_copy(to: *u8)
+    fn cx_proc_set_affinity(cpus: *const u32, n: usize) -> i32
+    fn cx_proc_full_speed()
+    fn cx_proc_machine_cpu(out: *u64)
 }
 
 /// Where a program's input comes from, or where its output goes.
@@ -200,6 +203,8 @@ pub struct Command {
     err_mode: Stdio?,
     given: List<u8>,
     limit_ms: u64,
+    cpus: List<u32>,
+    fast: bool,
 }
 
 impl Command {
@@ -217,6 +222,8 @@ impl Command {
             err_mode: none,
             given: List<u8>(),
             limit_ms: 0,
+            cpus: List<u32>(),
+            fast: false,
         }
     }
 
@@ -321,6 +328,30 @@ impl Command {
     pub fn timeout(own self, ms: u64) -> Command {
         var c = self
         c.limit_ms = ms
+        return c
+    }
+
+    /// Runs it only on these processors, numbered from 0 as the system numbers them, as a
+    /// benchmark pins what it times to the performance cores. It's pinned before it runs anything:
+    /// on Windows it starts suspended until it is, and on Linux it starts from a thread pinned to
+    /// them. Starting it fails with `BadArgument` if the machine doesn't have them all or this
+    /// program may not use them, and on macOS, which can't pin a program. Panics if there are none.
+    @track_caller
+    pub fn affinity(own self, cpus: List<u32>) -> Command {
+        if cpus.is_empty() {
+            panic("a program is pinned to at least one processor")
+        }
+        var c = self
+        c.cpus = cpus.copy()
+        return c
+    }
+
+    /// Takes it out of Windows' power throttling, EcoQoS, so Windows neither moves it to the
+    /// efficiency cores nor runs it slower to save power, as a benchmark wants. Other systems have
+    /// none, so it does nothing there.
+    pub fn full_speed(own self) -> Command {
+        var c = self
+        c.fast = true
         return c
     }
 
@@ -776,6 +807,11 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
             },
         }
     }
+    push_u32(mut spec, u32.wrap(c.cpus.len()))
+    for k in c.cpus {
+        push_u32(mut spec, k)
+    }
+    spec.push(if c.fast { 1 } else { 0 })
     let h = unsafe { cx_proc_spawn(spec.as_ptr(), spec.len(), c.given.as_ptr(), c.given.len(), group) }
     if h != 0 {
         return h
@@ -790,10 +826,22 @@ fn start(c: Command, in_default: Stdio, out_default: Stdio, err_default: Stdio, 
         }),
         4 => ProcessError.BadArgument(if code == 2 {
             "an argument to the batch file {c.program} has a line break in it, which cmd.exe can't be given"
+        } else if code == 5 or code == 6 {
+            pin_trouble(c.cpus, code)
         } else {
             "the batch file {c.program} has a name cmd.exe can't be given"
         }),
         _ => ProcessError.Os(code),
+    }
+}
+
+// Why a program can't be pinned to `cpus`: the runtime's code 5, a processor it can't have, or 6,
+// a system that can't pin.
+fn pin_trouble(cpus: List<u32>, code: i32) -> String {
+    return if code == 6 {
+        String("macOS can't pin a program to processors")
+    } else {
+        "can't run only on processors {cpus}: this machine doesn't have them all, or this program may not use them"
     }
 }
 
@@ -889,6 +937,51 @@ pub unsafe fn cpu_time() -> u64 {
 /// affinity allows.
 pub unsafe fn processors() -> u32 {
     return unsafe { cx_process_processors() }
+}
+
+/// Pins this program to these processors, numbered from 0 as the system numbers them, as
+/// Python's `os.sched_setaffinity(0, cpus)` does: on Windows the whole process, and on Linux the
+/// thread that calls it, which the programs and threads it starts after take with them. Fails
+/// with `BadArgument` if the machine doesn't have them all or this program may not use them, and
+/// on macOS, which can't pin a program. Panics if there are none.
+@track_caller
+pub fn set_affinity(cpus: List<u32>) ! ProcessError {
+    if cpus.is_empty() {
+        panic("a program is pinned to at least one processor")
+    }
+    if unsafe { cx_proc_set_affinity(cpus.as_ptr(), cpus.len()) } != 0 {
+        let code = unsafe { cx_proc_error_code() }
+        fail if unsafe { cx_proc_error_kind() } == 4 { ProcessError.BadArgument(pin_trouble(cpus, code)) } else { ProcessError.Os(code) }
+    }
+}
+
+/// Takes this program out of Windows' power throttling, as `Command.full_speed` does a program it
+/// starts. Other systems have none, so it does nothing there.
+pub fn set_full_speed() {
+    unsafe {
+        cx_proc_full_speed()
+    }
+}
+
+/// The machine's CPU time since it started, summed over its processors, as Python's
+/// `psutil.cpu_times()` gives it: two readings apart say how busy the machine was between them.
+pub struct MachineCpu {
+    /// The nanoseconds its processors spent running anything, in the kernel and out.
+    pub busy_ns: u64,
+    /// The nanoseconds they spent idle, waiting for I/O too.
+    pub idle_ns: u64,
+}
+
+/// The machine's CPU time so far, busy and idle, from `GetSystemTimes` on Windows, `/proc/stat` on
+/// Linux and the host's load on macOS. Both are 0 where the system can't say. Linux and macOS
+/// count it in clock ticks, a hundredth of a second, so it's for rates over a second or so. It's
+/// `unsafe`, as reading the clock is.
+pub unsafe fn machine_cpu() -> MachineCpu {
+    var out: List<u64> = [0, 0]
+    unsafe {
+        cx_proc_machine_cpu(out.as_mut_ptr())
+    }
+    return MachineCpu { busy_ns: out[0], idle_ns: out[1] }
 }
 
 /// Ends the program now, with the status `code`, from any thread: the terminal is put back, as

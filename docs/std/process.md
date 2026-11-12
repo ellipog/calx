@@ -43,6 +43,8 @@ Each method gives the command back with one more thing said, so they chain. A co
 | `c.stdin(mode: Stdio)`, `c.stdout(mode: Stdio)`, `c.stderr(mode: Stdio)` | Where a stream goes, in place of the default of the method that runs it |
 | `c.input(bytes: List<u8>)`, `c.input_text(text: String)` | Gives it this as its standard input, which then ends |
 | `c.timeout(ms: u64)` | Kills it if it's still running that many milliseconds after it started. 0, how a command starts, is no limit |
+| `c.affinity(cpus: List<u32>)` | Runs it only on these processors, numbered from 0 as the system numbers them, pinned before it runs anything. Panics if the list is empty: see [Pinning](#pinning-and-the-machines-load) |
+| `c.full_speed()` | Takes it out of Windows' power throttling, so Windows doesn't move it to the efficiency cores or slow it down to save power. Other systems have none, so it does nothing there |
 
 `Stdio` is where a stream goes:
 
@@ -183,7 +185,7 @@ fn main() {
 | `NotFound(program)` | Nothing by that name is on PATH, or nothing is at that path |
 | `Denied(program)` | The system won't run it: it can't be run, or isn't a program |
 | `BadDirectory(folder)` | The folder to run it in isn't there |
-| `BadArgument(why)` | It can't be given what the command says: a name that's empty, a zero byte in an argument, a variable's name with `=` in it, or a line break in an argument to a batch file |
+| `BadArgument(why)` | It can't be given what the command says: a name that's empty, a zero byte in an argument, a variable's name with `=` in it, a line break in an argument to a batch file, or processors to pin it to that the machine doesn't have, or that macOS can't pin it to |
 | `Failed { command, status }` | It ran, and didn't succeed. Only `run` and `read` fail with it |
 | `InputClosed` | It stopped reading before all of its input was written. Only `Child.write` fails with it |
 | `Os(code)` | Something else, with the system's error code |
@@ -251,7 +253,7 @@ fn main() {
 | `unsafe memory() -> u64` | The bytes of this process's memory in RAM now: its working set on Windows, its resident set on Linux and macOS, `top`'s `RES` |
 | `unsafe memory_limit() -> u64` | The bytes of RAM it may use: the machine's, or less where a job object's limit on Windows, or a cgroup's on Linux, says |
 | `unsafe cpu_time() -> u64` | The nanoseconds of CPU time all its threads have used since it started, in the kernel and out |
-| `unsafe processors() -> u32` | The processors it may run on, as `parallel for` counts them |
+| `unsafe processors() -> u32` | The processors it may run on, as `parallel for` counts them: on Windows and Linux, those its affinity allows |
 | `exit(code: u8) -> never` | Doesn't return: it ends the program now, with the status `code` |
 
 - **A share of the CPU** over a second is the change in `cpu_time()` over the change in a monotonic clock, divided by `processors()`. Windows adds to the CPU time at each tick of its clock, about every 15.6 ms, so it's for rates over a second or so, not for timing code.
@@ -259,5 +261,47 @@ fn main() {
 - **They're `unsafe`**, as the clock is (D88): each changes as the program runs, or with the machine it runs on. `exit` isn't: it reads nothing. Starting other programs isn't either, as reading files and the network aren't, though what they say may change from run to run.
 - **`exit` ends the program from any thread**, as returning from `main` does: the terminal is put back, with what [`std.term.at_exit`](term.md) says, and what was printed is written. Nothing else runs: other threads stop where they are, no value is dropped, and a debug build doesn't check for leaks. The status is the same on every system, since it's a `u8`. Inside a `parallel for` it [panics](../reference/printing.md#panics), at `<exit>`, since which iteration ended the program would depend on timing.
 - **`exit` returns [`never`](../reference/functions.md#functions-that-never-return)**, so a function that returns a value needs no `return` after it, it can stand in for a value, as in `variable("HOME") ?? exit(1)`, and code right after it is an error, since it can't run.
+
+## Pinning and the machine's load
+
+A program can be kept to some of the machine's processors, its own or one it starts, and can read how busy the whole machine is. A benchmark does both: it pins what it times to the same cores each run, and notes how much else was running meanwhile.
+
+```calx
+import std.process.{machine_cpu, processors, set_affinity, set_full_speed}
+
+fn main() {
+    // This program on processor 0 alone, out of Windows' power throttling.
+    set_full_speed()
+    let pinned = match set_affinity([0]) {
+        ok => unsafe { processors() } == 1,
+        err(e) => "{e}" == "macOS can't pin a program to processors",
+    }
+    println("{pinned}")    // out: true
+
+    // How busy the whole machine was while this ran, every program's work counted.
+    let before = unsafe { machine_cpu() }
+    var spin: u64 = 0
+    for i in 0u64..20000000 {
+        spin = spin ^ (i * 2654435761)
+    }
+    let after = unsafe { machine_cpu() }
+    let busy = f64.nearest(after.busy_ns - before.busy_ns)
+    let all = busy + f64.nearest(after.idle_ns - before.idle_ns)
+    let share = if all > 0.0 { busy / all } else { 0.0 }
+    println("{share >= 0.0 and share <= 1.0} {spin != 1}")    // out: true true
+}
+```
+
+| Function | Does |
+| --- | --- |
+| `set_affinity(cpus: List<u32>) ! ProcessError` | Keeps this program to these processors, numbered from 0 as the system numbers them, and so the programs it starts after. Panics if the list is empty |
+| `set_full_speed()` | Takes this program out of Windows' power throttling, as `c.full_speed()` does a program it starts, and does nothing elsewhere |
+| `unsafe machine_cpu() -> MachineCpu` | The CPU time of the whole machine since it started, summed over its processors: `busy_ns`, spent running anything, and `idle_ns`, spent idle |
+
+- **Which processors are which** is the system's numbering. Windows numbers a core's two threads next to each other, so on the i9-13900K 0, 2, 4 and on to 14 is one thread on each performance core. Linux often does too, but not always: `lscpu --extended` shows which are which.
+- **Processors the machine doesn't have** give `BadArgument`, and nothing changes. On Windows they're those of the program's processor group, up to 64. On Linux, a container that allows only some of them keeps the program to those it allows, and it's `BadArgument` only if it allows none.
+- **macOS can't pin a program to processors**: there `set_affinity` and a command with `affinity` give `BadArgument`, saying so. It runs where the system puts it, and `full_speed` does nothing, as on Linux.
+- **The share busy** over a stretch is the change in `busy_ns` over the change in both. A program's own work counts in it, so take its `cpu_time()` out to see what else was running. Under WSL, `machine_cpu` sees only the Linux system's processes, not Windows'. Windows adds to the times at each tick of its clock, as with `cpu_time()`.
+- **`machine_cpu` is `unsafe`** for the reason `cpu_time` is, and gives zeros where the system can't say. Setting affinity isn't: it changes where the program runs, not what it computes.
 
 `std.process` is written in Calx over the runtime: [std/process.calx](../../std/process.calx), and [runtime/calx_proc.c](../../runtime/calx_proc.c), which starts programs and reads and writes their pipes.
