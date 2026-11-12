@@ -310,6 +310,8 @@ struct Prog {
     runs: List<Run>
     again: u32
     rounds: u32
+    // Whether its `info` lines changed from one run to the next, as a parallel float sum's can.
+    varied: bool
 }
 
 fn median(v: List<f64>) -> f64 {
@@ -338,8 +340,8 @@ fn digest(text: String) -> String {
 
 // The output most of the programs gave, which the others must match; ties go to the language
 // first in LANGS. Lines that start with `info ` are left out: what may rightly differ between
-// languages, such as a compressor's output size or a parallel sum's exact bits. They must still be
-// the same from one run of a program to the next, and the record keeps them.
+// languages, such as a compressor's output size or a parallel sum's exact bits. The record keeps
+// them, and says when a program's changed from one run to the next, as a parallel sum's can.
 fn checked_part(out: String) -> String {
     var s = String()
     for line in out.lines() {
@@ -410,11 +412,15 @@ fn measure(progs: mut List<Prog>, dir: String, pin: Pin, rounds: u32, title: Str
             }
             match run_quiet(progs[k].cmd.copy(), dir.copy(), progs[k].envs.copy(), pin.copy()) {
                 ok(got) => {
-                    if got.0.out != progs[k].out {
+                    if checked_part(got.0.out.copy()) != checked_part(progs[k].out.copy()) {
                         progs[k].status = String("output differs")
                         progs[k].why = String("its output changed from one run to the next")
                         eprintln("suite: {title}: {lang_name(progs[k].lang.copy())}'s output changed between runs, so it's left out")
                     } else {
+                        if got.0.out != progs[k].out and not progs[k].varied {
+                            progs[k].varied = true
+                            eprintln("suite: {title}: {lang_name(progs[k].lang.copy())}'s info lines changed between runs, as the record says")
+                        }
                         progs[k].runs.push(got.0)
                         progs[k].again += got.1
                     }
@@ -463,6 +469,9 @@ fn prog_json(p: Prog) -> Json {
     m.insert("peak_mb_runs", Json.Array(p.runs.map(|r| Json.Float(round_to(r.peak, 2)))))
     m.insert("machine_busy", Json.Array(p.runs.map(|r| Json.Float(round_to(r.load, 3)))))
     m.insert("runs_repeated", Json.Int(i64(p.again)))
+    if p.varied {
+        m.insert("info_changed_between_runs", Json.Bool(true))
+    }
     m.insert("output_sha256", Json.Str(digest(p.out.copy())))
     var info: List<Json> = []
     for line in p.out.lines() {
@@ -621,7 +630,7 @@ fn resolve(args: List<String>, inputs: mut LinkedMap<String, String>, work: Stri
 }
 
 fn new_prog(lang: own String, cmd: own List<String>, envs: own List<(String, String)>) -> Prog {
-    return Prog { lang: lang, cmd: cmd, envs: envs, status: String("ok"), why: String(), out: String(), runs: [], again: 0, rounds: 0 }
+    return Prog { lang: lang, cmd: cmd, envs: envs, status: String("ok"), why: String(), out: String(), runs: [], again: 0, rounds: 0, varied: false }
 }
 
 // The programs for one benchmark, at one thread count for a parallel one.
@@ -1413,6 +1422,9 @@ fn main() {
         r.insert("commit", commit(root.copy()))
         var by_count = LinkedMap<String, Json>()
         var outs = LinkedMap<String, List<String>>()
+        // Languages whose output changed between runs at some count, so isn't the same at every
+        // count either.
+        var varied = Set<String>()
         for t in thread_counts {
             let pin = pin_for(t, processors)
             apply_pin(pin.copy())
@@ -1428,6 +1440,9 @@ fn main() {
                     var seen: List<String> = outs.remove(p.lang.copy()) ?? []
                     seen.push(p.out.copy())
                     outs.insert(p.lang.copy(), seen)
+                    if p.varied {
+                        varied.insert(p.lang.copy())
+                    }
                 }
                 per.insert(p.lang.copy(), prog_json(p.copy()))
             }
@@ -1437,7 +1452,7 @@ fn main() {
         var same = LinkedMap<String, Json>()
         for (l, seen) in outs {
             if seen.len() == thread_counts.len() {
-                var all_same = true
+                var all_same = not varied.contains(l.copy())
                 for o in seen {
                     if o != seen[0] {
                         all_same = false
