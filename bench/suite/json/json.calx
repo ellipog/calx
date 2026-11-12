@@ -1,0 +1,45 @@
+// JSON: 200,000 player records read from a file, parsed into a tree, the tree written back as
+// compact text, and the text read again into typed records, as a script reads and writes JSON.
+// Calx uses std.json and `@json` structs, Rust serde_json's `Value` and derive, Go encoding/json,
+// and Python json with dataclasses. C has no JSON library in its standard library.
+import std.env.{args}
+import std.fs
+import std.json.{json, from_text, JsonError, parse}
+
+@json
+struct Pos {
+    x: f64
+    z: f64
+}
+
+@json
+struct Player {
+    id: i64
+    name: String
+    pos: Pos
+    tags: List<String>
+    active: bool
+    level: i32
+}
+
+fn main() ! JsonError {
+    let text = fs.read_text(args()[0].copy())! ?? String()
+    let tree = try parse(text)
+    let written = "{tree}"
+    let players = try from_text<List<Player>>(text)
+    var active: i64 = 0
+    var levels: i64 = 0
+    var x = 0.0
+    var tags: usize = 0
+    for p in players {
+        if p.active {
+            active += 1
+        }
+        levels += i64(p.level)
+        x += p.pos.x
+        tags += p.tags.len()
+    }
+    println("records {tree.len()} {players.len()}")
+    println("active {active}\nlevels {levels}\nx {x:.2}\ntags {tags}")
+    println("written {written.len()}")
+}

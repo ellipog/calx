@@ -1,0 +1,212 @@
+// The inputs bench/suite.calx's benchmarks read, made once per run into the work folder: each the
+// same bytes on every machine, from a seeded generator, so every language reads the same file.
+import std.fs
+import std.process
+
+fn stop(why: String) -> never {
+    eprintln("inputs: {why}")
+    process.exit(1)
+}
+
+/// Makes the input `kind` in `dir`, smaller with `quick`, and gives its path.
+pub fn make_input(kind: String, dir: String, quick: bool) -> String {
+    fs.make_dir_all(dir.copy())!
+    let path = "{dir}/{kind}{if quick { "-quick" } else { "" }}.txt"
+    if kind == "fasta" {
+        fs.write(path.copy(), fasta(if quick { 10000 } else { 1000000 }))!
+    } else if kind == "json" {
+        fs.write_text(path.copy(), json_records(if quick { 1000 } else { 200000 }))!
+    } else if kind == "csv" {
+        fs.write_text(path.copy(), sales(if quick { 2000 } else { 1000000 }))!
+    } else if kind == "log" {
+        fs.write_text(path.copy(), access_log(if quick { 2000 } else { 1000000 }))!
+    } else if kind == "words" {
+        fs.write_text(path.copy(), words(if quick { 20000 } else { 5000000 }))!
+    } else {
+        stop("there's no input `{kind}`")
+    }
+    return path
+}
+
+// xorshift64*, from a seed, for the inputs: the same numbers everywhere.
+struct Rng {
+    s: u64
+}
+
+impl Rng {
+    fn next(mut self) -> u64 {
+        self.s ^= self.s >> 12
+        self.s ^= self.s << 25
+        self.s ^= self.s >> 27
+        return self.s * 0x2545F4914F6CDD1D
+    }
+
+    fn below(mut self, n: u64) -> u64 {
+        return (self.next() >> 11) % n
+    }
+}
+
+// `n` player records as a JSON array, as bench/json writes them: an id, a name, a position, two
+// tags, one with an escaped é, a flag and a level.
+fn json_records(n: i64) -> String {
+    var text = String()
+    text.push('[')
+    for i in 0i64..n {
+        if i > 0 {
+            text.push(',')
+        }
+        let active = if i % 2 == 0 { "true" } else { "false" }
+        text.push_str(#"{"id":#{i},"name":"player #{i}","pos":{"x":#{i}.5,"z":-#{i}.25},"tags":["builder","modérateur"],"active":#{active},"level":#{i % 100}}"#)
+    }
+    text.push_str("]\n")
+    return text
+}
+
+// `n` rows of sales, after a header: a date, a region, a product, a quantity and a price. Some
+// products have commas and quotes in their names, so they're quoted, with quotes doubled.
+fn sales(n: u64) -> String {
+    let regions = ["north", "south", "east", "west", "central"]
+    let products = ["widget", "gadget", "\"bolt, large\"", "\"nut, small\"", "\"gizmo \"\"pro\"\"\"", "sprocket", "flange", "\"pipe, 2 m\""]
+    var rng = Rng { s: 20261112 }
+    var text = String("date,region,product,quantity,price\n")
+    for _ in 0u64..n {
+        let month = 1 + rng.below(12)
+        let day = 1 + rng.below(28)
+        let region = regions[usize.wrap(rng.below(5))]
+        let product = products[usize.wrap(rng.below(8))]
+        let quantity = 1 + rng.below(50)
+        let cents = 99 + rng.below(99900)
+        text.push_str("2026-{month:02}-{day:02},{region},{product},{quantity},{cents / 100}.{cents % 100:02}\n")
+    }
+    return text
+}
+
+// `n` lines of a web server's access log, in the combined format.
+fn access_log(n: u64) -> String {
+    let methods = ["GET", "GET", "GET", "GET", "POST", "PUT", "DELETE"]
+    let paths = ["/", "/index.html", "/api/items", "/api/items/", "/api/users/", "/static/app.js", "/static/style.css", "/login", "/search?q=", "/api/orders/"]
+    let statuses = [200, 200, 200, 200, 200, 200, 304, 301, 404, 500, 201, 204]
+    let agents = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Mozilla/5.0 (X11; Linux x86_64)", "curl/8.4.0", "Go-http-client/1.1", "python-requests/2.32"]
+    var rng = Rng { s: 1112 }
+    var text = String()
+    var seconds: u64 = 0
+    for _ in 0u64..n {
+        seconds += rng.below(3)
+        let hour = (seconds / 3600) % 24
+        let minute = (seconds / 60) % 60
+        let second = seconds % 60
+        let ip = "10.{rng.below(4)}.{rng.below(256)}.{rng.below(256)}"
+        var path = String(paths[usize.wrap(rng.below(10))])
+        if (path.ends_with("/") and path.len() > 1) or path.ends_with("=") {
+            path.push_str("{rng.below(5000)}")
+        }
+        let status = statuses[usize.wrap(rng.below(12))]
+        let size = if status == 304 or status == 204 { 0u64 } else { 200 + rng.below(50000) }
+        let agent = agents[usize.wrap(rng.below(5))]
+        text.push_str(#"#{ip} - - [12/Nov/2026:#{hour:02}:#{minute:02}:#{second:02} +0000] "#{methods[usize.wrap(rng.below(7))]} #{path} HTTP/1.1" #{status} #{size} "-" "#{agent}""#)
+        text.push('\n')
+    }
+    return text
+}
+
+// `n` words of English-like text: 50,000 made-up words drawn by Zipf's law, some capitalized,
+// with punctuation, about a dozen words to a line.
+fn words(n: u64) -> String {
+    var rng = Rng { s: 777 }
+    let letters = "etaoinshrdlucmfwypvbgkqjxz".to_bytes()
+    var vocab: List<String> = []
+    for _ in 0..50000 {
+        let len = 2 + rng.below(9) + rng.below(4)
+        var w = String()
+        for _ in 0u64..len {
+            // Earlier letters more often, as in English.
+            let k = rng.below(26).min(rng.below(26))
+            w.push(rune(letters[usize.wrap(k)]))
+        }
+        vocab.push(w)
+    }
+    var cumulative: List<f64> = []
+    var sum = 0.0
+    for r in 0..50000 {
+        sum += 1.0 / f64(r + 1)
+        cumulative.push(sum)
+    }
+    var text = String()
+    for i in 0u64..n {
+        let x = f64.nearest(rng.next() >> 11) / 9007199254740992.0 * sum
+        var lo: usize = 0
+        var hi = cumulative.len() - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if cumulative[mid] < x {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        let w = vocab[lo].copy()
+        if rng.below(10) == 0 {
+            text.push_str(w[..1].to_upper_root())
+            text.push_str(w[1..])
+        } else {
+            text.push_str(w)
+        }
+        let p = rng.below(20)
+        if p == 0 {
+            text.push_str(".")
+        } else if p == 1 {
+            text.push_str(",")
+        } else if p == 2 {
+            text.push_str("'s")
+        }
+        text.push(if i % 12 == 11 { '\n' } else { ' ' })
+    }
+    return text
+}
+
+// fasta's output for n, as bench/suite/fasta writes it: the input of k-nucleotide,
+// reverse-complement and regex-redux, as the Benchmarks Game makes theirs.
+fn fasta(n: usize) -> List<u8> {
+    let alu = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA".to_bytes()
+    var out: List<u8> = []
+    out.extend(">ONE Homo sapiens alu\n".to_bytes())
+    var k: usize = 0
+    var left = n * 2
+    while left > 0 {
+        let len = left.min(60)
+        for _ in 0usize..len {
+            out.push(alu[k])
+            k = (k + 1) % alu.len()
+        }
+        out.push(b'\n')
+        left -= len
+    }
+    var last: u32 = 42
+    for part in 0usize..2 {
+        let codes = if part == 0 { "acgtBDHKMNRSVWY".to_bytes() } else { "acgt".to_bytes() }
+        let probs: List<f64> = if part == 0 { [0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02] } else { [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008] }
+        out.extend((if part == 0 { ">TWO IUB ambiguity codes\n" } else { ">THREE Homo sapiens frequency\n" }).to_bytes())
+        var cumulative: List<f64> = []
+        var sum = 0.0
+        for p in probs {
+            sum += p
+            cumulative.push(sum)
+        }
+        left = n * (if part == 0 { 3usize } else { 5usize })
+        while left > 0 {
+            let len = left.min(60)
+            for _ in 0usize..len {
+                last = (last * 3877 + 29573) % 139968
+                let r = f64(last) / 139968.0
+                var i: usize = 0
+                while i < cumulative.len() - 1 and r >= cumulative[i] {
+                    i += 1
+                }
+                out.push(codes[i])
+            }
+            out.push(b'\n')
+            left -= len
+        }
+    }
+    return out
+}

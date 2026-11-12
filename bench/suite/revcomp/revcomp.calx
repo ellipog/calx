@@ -1,0 +1,63 @@
+// reverse-complement: the Benchmarks Game's sequence reversal. Each sequence of fasta's output is
+// read whole, turned into its reverse complement, every base its pair and in the other order, and
+// written 60 to a line under its header.
+import std.env.{args}
+import std.fs
+import std.io.{write}
+
+fn flush_sequence(seq: mut List<u8>, pair: List<u8>, out: mut List<u8>) {
+    seq.reverse()
+    for b in mut seq {
+        b = pair[usize(b)]
+    }
+    var at: usize = 0
+    while at < seq.len() {
+        let end = (at + 60).min(seq.len())
+        out.clear()
+        out.extend(seq[at..end])
+        out.push(b'\n')
+        write(out)
+        at = end
+    }
+    seq.clear()
+}
+
+fn main() {
+    var pair: List<u8> = []
+    for i in 0usize..256 {
+        pair.push(u8.wrap(i))
+    }
+    let from = "ACGTUMRWSYKVHDBN".to_bytes()
+    let to = "TGCAAKYWSRMBDHVN".to_bytes()
+    for i in 0usize..from.len() {
+        pair[usize(from[i])] = to[i]
+        pair[usize(from[i]) + 32] = to[i]
+    }
+    let text = fs.read(args()[0].copy())!
+    var seq: List<u8> = []
+    seq.reserve(text.len())
+    var out: List<u8> = []
+    var i: usize = 0
+    while i < text.len() {
+        var end = i
+        while end < text.len() and text[end] != b'\n' {
+            end += 1
+        }
+        let line_end = if end > i and text[end - 1] == b'\r' { end - 1 } else { end }
+        if text[i] == b'>' {
+            if not seq.is_empty() {
+                flush_sequence(mut seq, pair, mut out)
+            }
+            out.clear()
+            out.extend(text[i..line_end])
+            out.push(b'\n')
+            write(out)
+        } else {
+            seq.extend(text[i..line_end])
+        }
+        i = end + 1
+    }
+    if not seq.is_empty() {
+        flush_sequence(mut seq, pair, mut out)
+    }
+}

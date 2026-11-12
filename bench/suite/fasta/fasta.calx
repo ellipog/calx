@@ -1,0 +1,80 @@
+// fasta: the Benchmarks Game's DNA sequence generator. A repeated sequence of 2n bases, then 3n and
+// 5n bases drawn from two weighted alphabets with its linear congruential generator, written 60 to
+// a line. k-nucleotide, reverse-complement and regex-redux read what it writes.
+import std.env.{args}
+import std.io.{write}
+
+const ALU: str = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+const WIDTH: usize = 60
+
+struct Random {
+    last: u32
+}
+
+impl Random {
+    fn next(mut self) -> f64 {
+        self.last = (self.last * 3877 + 29573) % 139968
+        return f64(self.last) / 139968.0
+    }
+}
+
+fn repeat(seq: str, n: usize) {
+    let bytes = seq.to_bytes()
+    var line: List<u8> = []
+    var k: usize = 0
+    var left = n
+    while left > 0 {
+        let len = left.min(WIDTH)
+        line.clear()
+        for _ in 0usize..len {
+            line.push(bytes[k])
+            k += 1
+            if k == bytes.len() {
+                k = 0
+            }
+        }
+        line.push(b'\n')
+        write(line)
+        left -= len
+    }
+}
+
+fn random(codes: str, probs: List<f64>, n: usize, rng: mut Random) {
+    let bytes = codes.to_bytes()
+    var cumulative: List<f64> = []
+    var sum = 0.0
+    for p in probs {
+        sum += p
+        cumulative.push(sum)
+    }
+    var line: List<u8> = []
+    var left = n
+    while left > 0 {
+        let len = left.min(WIDTH)
+        line.clear()
+        for _ in 0usize..len {
+            let r = rng.next()
+            var i: usize = 0
+            while i < cumulative.len() - 1 and r >= cumulative[i] {
+                i += 1
+            }
+            line.push(bytes[i])
+        }
+        line.push(b'\n')
+        write(line)
+        left -= len
+    }
+}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { usize.parse(given[0].copy()) ?? 1000 } else { 1000 }
+    var rng = Random { last: 42 }
+    println(">ONE Homo sapiens alu")
+    repeat(ALU, n * 2)
+    println(">TWO IUB ambiguity codes")
+    random("acgtBDHKMNRSVWY", [0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02], n * 3, mut rng)
+    println(">THREE Homo sapiens frequency")
+    random("acgt", [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008], n * 5, mut rng)
+}

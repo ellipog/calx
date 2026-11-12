@@ -1,0 +1,48 @@
+// binary-trees: the Benchmarks Game's allocation test. Perfect binary trees are made node by node
+// on the heap, counted and freed: a stretch tree, a long-lived one, and many short-lived ones of
+// each depth. Every node is its own allocation, as each language allocates one.
+import std.env.{args}
+
+struct Node {
+    left: Box<Node>?
+    right: Box<Node>?
+}
+
+fn make(depth: i32) -> Node {
+    if depth <= 0 {
+        return Node { left: none, right: none }
+    }
+    return Node { left: some(Box(make(depth - 1))), right: some(Box(make(depth - 1))) }
+}
+
+fn check(n: Node) -> i32 {
+    var c: i32 = 1
+    if let l = n.left {
+        c += check(l.value)
+    }
+    if let r = n.right {
+        c += check(r.value)
+    }
+    return c
+}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { i32.parse(given[0].copy()) ?? 10 } else { 10 }
+    let min_depth: i32 = 4
+    let max_depth = (min_depth + 2).max(n)
+    let stretch = max_depth + 1
+    println("stretch tree of depth {stretch}\t check: {check(make(stretch))}")
+    let long_lived = make(max_depth)
+    var d = min_depth
+    while d <= max_depth {
+        let iterations: i32 = 1 << (max_depth - d + min_depth)
+        var total: i32 = 0
+        for _ in 0..iterations {
+            total += check(make(d))
+        }
+        println("{iterations}\t trees of depth {d}\t check: {total}")
+        d += 2
+    }
+    println("long lived tree of depth {max_depth}\t check: {check(long_lived)}")
+}

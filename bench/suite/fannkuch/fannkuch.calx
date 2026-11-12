@@ -1,0 +1,57 @@
+// fannkuch-redux: the Benchmarks Game's pancake flips over every permutation of 1..n, in the order
+// its counting algorithm makes them, with the checksum and the most flips any permutation took.
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { usize.parse(given[0].copy()) ?? 7 } else { 7 }
+    var perm: List<usize> = [0; n]
+    var perm1: List<usize> = []
+    for i in 0usize..n {
+        perm1.push(i)
+    }
+    var count: List<usize> = [0; n]
+    var max_flips: i32 = 0
+    var checksum: i32 = 0
+    var perm_count: i32 = 0
+    var r = n
+    loop {
+        while r != 1 {
+            count[r - 1] = r
+            r -= 1
+        }
+        for i in 0usize..n {
+            perm[i] = perm1[i]
+        }
+        var flips: i32 = 0
+        while perm[0] != 0 {
+            var i: usize = 0
+            var j = perm[0]
+            while i < j {
+                perm.swap(i, j)
+                i += 1
+                j -= 1
+            }
+            flips += 1
+        }
+        max_flips = max_flips.max(flips)
+        checksum += if perm_count % 2 == 0 { flips } else { -flips }
+        loop {
+            if r == n {
+                println("{checksum}\nPfannkuchen({n}) = {max_flips}")
+                return
+            }
+            let perm0 = perm1[0]
+            for i in 0usize..r {
+                perm1[i] = perm1[i + 1]
+            }
+            perm1[r] = perm0
+            count[r] -= 1
+            if count[r] > 0 {
+                break
+            }
+            r += 1
+        }
+        perm_count += 1
+    }
+}

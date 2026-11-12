@@ -1,0 +1,54 @@
+// spectral-norm: the Benchmarks Game's power method for the spectral norm of an infinite matrix,
+// cut to n by n, with 10 rounds of u = AᵀA v, v = AᵀA u. Every version sums in the same order.
+import std.env.{args}
+
+fn a(i: usize, j: usize) -> f64 {
+    let ij = i + j
+    return 1.0 / f64.nearest(ij * (ij + 1) / 2 + i + 1)
+}
+
+fn times(v: List<f64>, out: mut List<f64>) {
+    let n = v.len()
+    for i in 0usize..n {
+        var s = 0.0
+        for j in 0usize..n {
+            s += a(i, j) * v[j]
+        }
+        out[i] = s
+    }
+}
+
+fn times_transposed(v: List<f64>, out: mut List<f64>) {
+    let n = v.len()
+    for i in 0usize..n {
+        var s = 0.0
+        for j in 0usize..n {
+            s += a(j, i) * v[j]
+        }
+        out[i] = s
+    }
+}
+
+fn times_ata(v: List<f64>, out: mut List<f64>, tmp: mut List<f64>) {
+    times(v, mut tmp)
+    times_transposed(tmp, mut out)
+}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { usize.parse(given[0].copy()) ?? 100 } else { 100 }
+    var u: List<f64> = [1.0; n]
+    var v: List<f64> = [0.0; n]
+    var tmp: List<f64> = [0.0; n]
+    for _ in 0..10 {
+        times_ata(u, mut v, mut tmp)
+        times_ata(v, mut u, mut tmp)
+    }
+    var vbv = 0.0
+    var vv = 0.0
+    for i in 0usize..n {
+        vbv += u[i] * v[i]
+        vv += v[i] * v[i]
+    }
+    println("{(vbv / vv).sqrt():.9}")
+}

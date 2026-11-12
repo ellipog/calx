@@ -1,0 +1,42 @@
+// pidigits: the Benchmarks Game's digits of π from the unbounded spigot, ten to a line, with
+// integers of any size. Each language uses its own big integers: std.bigint here, num-bigint in
+// Rust, math/big in Go and Python's int. C has none in its standard library.
+import std.bigint.{BigInt}
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { i32.parse(given[0].copy()) ?? 27 } else { 27 }
+    var numer = BigInt.from(1)
+    var accum = BigInt.zero()
+    var denom = BigInt.from(1)
+    var line = String()
+    var i: i32 = 0
+    var k: i32 = 0
+    while i < n {
+        k += 1
+        let k2 = k * 2 + 1
+        accum = (accum + numer * 2) * k2
+        denom = denom * k2
+        numer = numer * k
+        if numer > accum {
+            continue
+        }
+        let d = (numer * 3 + accum) / denom
+        if d != (numer * 4 + accum) / denom {
+            continue
+        }
+        let digit = d.to_i64() ?? 0
+        line.push_str("{digit}")
+        i += 1
+        if i % 10 == 0 {
+            println("{line}\t:{i}")
+            line.clear()
+        }
+        accum = (accum - denom * digit) * 10
+        numer = numer * 10
+    }
+    if not line.is_empty() {
+        println("{line:<10}\t:{n}")
+    }
+}

@@ -1,0 +1,884 @@
+// Times Calx against C, Rust, Go and Python on the same programs: the Benchmarks Game's classic
+// compute, programs shaped like real work, parallel loops, and what building and starting cost.
+//
+//     calx run --release bench/suite.calx -- [--rounds 5] [--only nbody,json] [--groups compute]
+//         [--langs calx,c] [--threads 1,4,8,all] [--quick] [--record] [--keep]
+//
+// Each benchmark is a folder in bench/suite with one program per language, `<name>.calx`, `.c`,
+// `.rs`, `.go` and `.py`, which do the same work with the same algorithm. A program prints what its
+// work came to, and every language's output must be the same, byte for byte once `\r\n` is read as
+// `\n`, or that language's result is dropped and the run says so. bench/README.md lists them.
+//
+// Each program runs once to warm up and to check its output, then `--rounds` times, the languages
+// taking turns, in the other order every other round. A program that took more than 10 s to warm
+// up runs 3 rounds. Each run is timed from outside, as a fresh process: its wall time, the CPU
+// time of all its threads, and the most memory it held (peak working set on Windows, peak resident
+// set on Linux). The tables give the median wall time and the median peak memory; the record has
+// every run.
+//
+// The machine is shared, so each run also measures how busy the rest of the machine was while it
+// ran: the CPU time every other program used, as a share of all the processors. A run where that
+// was over 10% is run again, up to twice, and the least disturbed one kept; the record says how
+// busy each run's machine was. Under WSL only Linux's own processes can be seen.
+//
+// On Windows the runner pins itself, and so the programs it starts, to the performance cores of a
+// processor with two kinds (the i9-13900K's mask 0x5554, one thread on each of 7 cores) and out of
+// power throttling, through the system's own functions, since std.process can't yet (CLX-291).
+// Parallel benchmarks run at each of `--threads`, pinned to as many performance cores, and at
+// `all` on every processor. On Linux, `taskset` pins them. Run it with --release: the Windows
+// functions are linked only where a release build can see they're called.
+//
+// Builds: Calx with `calx build --release`; C with clang at Calx's release flags, `-O3
+// -march=x86-64-v3 -ffp-contract=off -fno-math-errno -flto=thin`; Rust with Cargo's release
+// profile in bench/suite/rust (opt-level 3, thin LTO, one codegen unit, panic=abort) and
+// `-C target-cpu=x86-64-v3`; Go with `go build`, GOAMD64=v3 and cgo off; Python 3 as it is.
+//
+// What it builds and the inputs it writes go in a folder of its own in the temp folder, removed at
+// the end unless --keep. --record writes bench/results/suite-<os>.json with the machine, the
+// toolchains and the commit; with --only or --groups, the benchmarks left out keep their results.
+import inputs.{make_input}
+import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
+import std.bytes
+import std.cli.{cli}
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.json.{Json, parse, pretty}
+import std.process
+import std.process.{Command}
+import std.stats
+import std.time.{Instant}
+
+/// Times Calx against C, Rust, Go and Python on the same programs.
+@cli(name: "bench/suite.calx")
+struct Args {
+    /// Timed runs of each program, after one to warm up.
+    rounds: u32 = 5
+    /// The benchmarks, with commas between. All of them if empty.
+    only: String = ""
+    /// The groups, with commas between: compute, realistic, parallel, dx. All of them if empty.
+    groups: String = ""
+    /// The languages, with commas between: calx, c, rust, go, python. All of them if empty.
+    langs: String = ""
+    /// The parallel benchmarks' thread counts, with commas between; `all` is every processor.
+    threads: String = "1,4,8,all"
+    /// Small inputs and one round, to check that every program builds and agrees, as CI does.
+    quick: bool
+    /// Write bench/results/suite-<os>.json.
+    record: bool
+    /// Keep the folder with the builds and inputs, and say where it is.
+    keep: bool
+}
+
+extern "C" {
+    fn GetCurrentProcess() -> *u8
+    fn SetProcessAffinityMask(process: *u8, mask: u64) -> i32
+    fn SetProcessInformation(process: *u8, class: i32, info: *u32, size: u32) -> i32
+    fn GetSystemTimes(idle: *u64, kernel: *u64, user: *u64) -> i32
+}
+
+const LANGS: [str; 5] = ["calx", "c", "rust", "go", "python"]
+
+// A run whose machine was busier than this, other programs' CPU time over all the processors', is
+// run again.
+const BUSY: f64 = 0.10
+
+fn lang_name(l: String) -> String {
+    return if l == "calx" {
+        String("Calx")
+    } else if l == "c" {
+        String("C")
+    } else if l == "rust" {
+        String("Rust")
+    } else if l == "go" {
+        String("Go")
+    } else {
+        String("Python")
+    }
+}
+
+fn ext(l: String) -> String {
+    return if l == "python" { String("py") } else if l == "rust" { String("rs") } else { l.copy() }
+}
+
+fn stop(why: String) -> never {
+    eprintln("suite: {why}")
+    process.exit(1)
+}
+
+// One benchmark: its folder in bench/suite, its group, its title, and its arguments at full size
+// and with --quick. An argument `@kind` is the path of a generated input (inputs.calx), and
+// `@threads` the thread count of a parallel benchmark.
+struct Bench {
+    name: String
+    group: String
+    title: String
+    args: List<String>
+    quick: List<String>
+    // Extra flags for clang, such as -fopenmp.
+    cflags: List<String>
+}
+
+fn bench(name: str, group: str, title: str, args: own List<String>, quick: own List<String>) -> Bench {
+    return Bench { name: String(name), group: String(group), title: String(title), args: args, quick: quick, cflags: [] }
+}
+
+fn benches() -> List<Bench> {
+    var b: List<Bench> = []
+    b.push(bench("nbody", "compute", "n-body, 10 million steps", ["10000000"], ["1000"]))
+    b.push(bench("spectralnorm", "compute", "spectral-norm, n = 3,000", ["3000"], ["100"]))
+    b.push(bench("fannkuch", "compute", "fannkuch-redux, n = 11", ["11"], ["7"]))
+    b.push(bench("binarytrees", "compute", "binary-trees, depth 18", ["18"], ["10"]))
+    b.push(bench("mandelbrot", "compute", "mandelbrot, 4,000 by 4,000", ["4000"], ["200"]))
+    b.push(bench("fasta", "compute", "fasta, n = 2.5 million", ["2500000"], ["1000"]))
+    b.push(bench("knucleotide", "compute", "k-nucleotide, fasta n = 1 million", ["@fasta"], ["@fasta"]))
+    b.push(bench("revcomp", "compute", "reverse-complement, fasta n = 1 million", ["@fasta"], ["@fasta"]))
+    b.push(bench("regexredux", "compute", "regex-redux, fasta n = 1 million", ["@fasta"], ["@fasta"]))
+    b.push(bench("pidigits", "compute", "pidigits, 10,000 digits", ["10000"], ["30"]))
+    b.push(bench("json", "realistic", "JSON: 200,000 records parsed, written, read typed", ["@json"], ["@json"]))
+    b.push(bench("csv", "realistic", "CSV report: a million rows summed by group", ["@csv"], ["@csv"]))
+    b.push(bench("logs", "realistic", "Log analysis: a million access-log lines", ["@log"], ["@log"]))
+    b.push(bench("wordcount", "realistic", "Word count: 5 million words", ["@words"], ["@words"]))
+    return b
+}
+
+// Where the programs run: a mask of processors on Windows, and the same as a list for `taskset`
+// on Linux.
+struct Pin {
+    mask: u64
+    cpus: String
+    threads: u32
+}
+
+// The processors a run of `threads` threads gets. A single-threaded program, or a parallel one at
+// up to 7 threads, gets the performance cores but the first, one thread on each; 8 threads get all
+// 8; more get every processor.
+fn pin_for(threads: u32, processors: u32) -> Pin {
+    if threads <= 7 {
+        return Pin { mask: 0x5554, cpus: String("2,4,6,8,10,12,14"), threads: threads }
+    }
+    if threads == 8 {
+        return Pin { mask: 0x5555, cpus: String("0,2,4,6,8,10,12,14"), threads: threads }
+    }
+    var mask: u64 = 0
+    for k in 0u32..processors.min(64) {
+        mask |= 1u64 << u64(k)
+    }
+    return Pin { mask: mask, cpus: "0-{processors - 1}", threads: threads }
+}
+
+// Pins this program, and so what it starts, on Windows; Linux pins each command with `taskset`.
+fn apply_pin(p: Pin) {
+    if env.os() == "windows" {
+        unsafe {
+            let me = GetCurrentProcess()
+            if SetProcessAffinityMask(me, p.mask) == 0 {
+                stop("can't pin to processors {p.mask:x}")
+            }
+            // Out of power throttling (EcoQoS): version 1, the execution-speed control, off.
+            var throttle: List<u32> = [1, 1, 0]
+            _ = SetProcessInformation(me, 4, throttle.as_mut_ptr(), 12)
+        }
+    }
+}
+
+// The machine's CPU time, busy and in all, in nanoseconds, summed over its processors.
+fn cpu_times() -> (u64, u64) {
+    if env.os() == "windows" {
+        var t: List<u64> = [0, 0, 0]
+        unsafe {
+            let p = t.as_mut_ptr()
+            _ = GetSystemTimes(p, p.add(1), p.add(2))
+        }
+        // The kernel's time includes the idle time; both count in 100 ns.
+        let total = t[1] + t[2]
+        return ((total - t[0]) * 100, total * 100)
+    }
+    let stat = fs.read_text("/proc/stat")! ?? String()
+    for line in stat.lines() {
+        if line.starts_with("cpu ") {
+            let f = line.split_whitespace()
+            var total: u64 = 0
+            var idle: u64 = 0
+            for k in 1usize..f.len() {
+                let v = u64.parse(f[k].copy()) ?? 0
+                total += v
+                if k == 4 or k == 5 {
+                    idle += v
+                }
+            }
+            // USER_HZ, 100 ticks a second.
+            return ((total - idle) * 10000000, total * 10000000)
+        }
+    }
+    return (0, 0)
+}
+
+// One run of a program.
+struct Run {
+    wall: f64
+    cpu: f64
+    peak: f64
+    load: f64
+    out: String
+}
+
+// Runs a command, stopping on nothing: an error comes back as the text of what went wrong.
+fn run_once(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: Pin) -> Run ! String {
+    var full: List<String> = []
+    if env.os() == "linux" {
+        full.push("taskset")
+        full.push("-c")
+        full.push(pin.cpus.copy())
+    }
+    for c in cmd {
+        full.push(c.copy())
+    }
+    var rest: List<String> = []
+    for k in 1usize..full.len() {
+        rest.push(full[k].copy())
+    }
+    var c = Command.new(full[0].copy()).args(rest).dir(dir).timeout(1800000)
+    for (k, v) in envs {
+        c = c.env(k.copy(), v.copy())
+    }
+    let before = cpu_times()
+    let t0 = unsafe { Instant.now() }
+    let out = match c.output() {
+        ok(o) => o,
+        err(e) => fail "can't run {full[0]}: {e}",
+    }
+    let wall = f64.nearest(unsafe { Instant.now() }.nanos_since(t0)) / 1e6
+    let after = cpu_times()
+    if not out.status.success() {
+        let why = out.error_text().trim()
+        fail "{full.join(" ")} {out.status}: {why[..why.len().min(2000usize)]}"
+    }
+    let u = unsafe { out.status.usage() }
+    let busy = f64.nearest(after.0 - before.0) - f64.nearest(u.cpu_ns)
+    let total = f64.nearest(after.1 - before.1)
+    let load = if total > 0.0 { (busy / total).max(0.0) } else { 0.0 }
+    return Run { wall: wall, cpu: f64.nearest(u.cpu_ns) / 1e6, peak: f64.nearest(u.peak_memory) / 1048576.0, load: load, out: out.text().replace("\r\n", "\n") }
+}
+
+// Runs it until the machine was quiet enough, at most three times, and keeps the quietest run.
+fn run_quiet(cmd: List<String>, dir: String, envs: List<(String, String)>, pin: Pin) -> (Run, u32) ! String {
+    var best = try run_once(cmd.copy(), dir.copy(), envs.copy(), pin.copy())
+    var again: u32 = 0
+    while best.load > BUSY and again < 2 {
+        again += 1
+        let r = try run_once(cmd.copy(), dir.copy(), envs.copy(), pin.copy())
+        if r.load < best.load {
+            best = r
+        }
+    }
+    return (best, again)
+}
+
+// A language's program for one benchmark: how to run it, and what its runs gave.
+struct Prog {
+    lang: String
+    cmd: List<String>
+    envs: List<(String, String)>
+    // "ok", or why it has no results: "no program", "didn't build", "failed", "output differs".
+    status: String
+    why: String
+    out: String
+    runs: List<Run>
+    again: u32
+    rounds: u32
+}
+
+fn median(v: List<f64>) -> f64 {
+    return stats.median(v) ?? 0.0
+}
+
+fn best_of(v: List<f64>) -> f64 {
+    return v.min() ?? 0.0
+}
+
+fn walls(p: Prog) -> List<f64> {
+    return p.runs.map(|r| r.wall)
+}
+
+fn peaks(p: Prog) -> List<f64> {
+    return p.runs.map(|r| r.peak)
+}
+
+fn cpus(p: Prog) -> List<f64> {
+    return p.runs.map(|r| r.cpu)
+}
+
+fn digest(text: String) -> String {
+    return bytes.hex(sha256(text.to_bytes()))
+}
+
+// The output most of the programs gave, which the others must match; ties go to the language
+// first in LANGS. Lines that start with `info ` are left out: what may rightly differ between
+// languages, such as a compressor's output size or a parallel sum's exact bits. They must still be
+// the same from one run of a program to the next, and the record keeps them.
+fn checked_part(out: String) -> String {
+    var s = String()
+    for line in out.lines() {
+        if not line.starts_with("info ") {
+            s.push_str(line)
+            s.push('\n')
+        }
+    }
+    return s
+}
+
+fn agree(progs: mut List<Prog>, title: String) {
+    var counts = LinkedMap<String, u32>()
+    for p in progs {
+        if p.status == "ok" {
+            let k = checked_part(p.out.copy())
+            counts.insert(k.copy(), (counts.get(k) ?? 0) + 1)
+        }
+    }
+    var want = String()
+    var most: u32 = 0
+    for (k, n) in counts {
+        if n > most {
+            most = n
+            want = k.copy()
+        }
+    }
+    for p in mut progs {
+        if p.status == "ok" and checked_part(p.out.copy()) != want {
+            p.status = String("output differs")
+            let got = p.out.trim()
+            p.why = "printed {got[..got.len().min(300usize)]}"
+            eprintln("suite: {title}: {lang_name(p.lang.copy())}'s output differs from the others', so it's left out")
+            eprintln("  it printed: {got[..got.len().min(300usize)]}")
+            let w = want.trim()
+            eprintln("  the others: {w[..w.len().min(300usize)]}")
+        }
+    }
+}
+
+// Warms each program up and checks it, then times them in turns.
+fn measure(progs: mut List<Prog>, dir: String, pin: Pin, rounds: u32, title: String) {
+    for p in mut progs {
+        if p.status != "ok" {
+            continue
+        }
+        match run_once(p.cmd.copy(), dir.copy(), p.envs.copy(), pin.copy()) {
+            ok(r) => {
+                p.out = r.out.copy()
+                p.rounds = if r.wall > 10000.0 { rounds.min(3) } else { rounds }
+            }
+            err(e) => {
+                p.status = String("failed")
+                p.why = e.copy()
+                eprintln("suite: {title}: {lang_name(p.lang.copy())} failed: {e}")
+            }
+        }
+    }
+    agree(mut progs, title.copy())
+    for r in 0u32..rounds {
+        var order: List<usize> = []
+        for k in 0usize..progs.len() {
+            order.push(if r % 2 == 0 { k } else { progs.len() - 1 - k })
+        }
+        for k in order {
+            if progs[k].status != "ok" or r >= progs[k].rounds {
+                continue
+            }
+            match run_quiet(progs[k].cmd.copy(), dir.copy(), progs[k].envs.copy(), pin.copy()) {
+                ok(got) => {
+                    if got.0.out != progs[k].out {
+                        progs[k].status = String("output differs")
+                        progs[k].why = String("its output changed from one run to the next")
+                        eprintln("suite: {title}: {lang_name(progs[k].lang.copy())}'s output changed between runs, so it's left out")
+                    } else {
+                        progs[k].runs.push(got.0)
+                        progs[k].again += got.1
+                    }
+                }
+                err(e) => {
+                    progs[k].status = String("failed")
+                    progs[k].why = e.copy()
+                    eprintln("suite: {title}: {lang_name(progs[k].lang.copy())} failed: {e}")
+                }
+            }
+        }
+    }
+}
+
+// Milliseconds, with fewer decimals the bigger they are.
+fn ms(v: f64) -> String {
+    if v < 10.0 {
+        return "{v:.2} ms"
+    }
+    if v < 100.0 {
+        return "{v:.1} ms"
+    }
+    return "{v:,.0} ms"
+}
+
+fn mb(v: f64) -> String {
+    return if v < 10.0 { "{v:.1} MB" } else { "{v:,.0} MB" }
+}
+
+// A program's record: its status, every run, and the medians.
+fn prog_json(p: Prog) -> Json {
+    var m = LinkedMap<String, Json>()
+    m.insert("status", Json.Str(p.status.copy()))
+    if p.status != "ok" {
+        if not p.why.is_empty() {
+            m.insert("why", Json.Str(p.why.copy()))
+        }
+        return Json.Object(m)
+    }
+    m.insert("median_ms", Json.Float(round_to(median(walls(p)), 3)))
+    m.insert("best_ms", Json.Float(round_to(best_of(walls(p)), 3)))
+    m.insert("cpu_ms", Json.Float(round_to(median(cpus(p)), 1)))
+    m.insert("peak_mb", Json.Float(round_to(median(peaks(p)), 2)))
+    m.insert("wall_ms", Json.Array(p.runs.map(|r| Json.Float(round_to(r.wall, 3)))))
+    m.insert("cpu_ms_runs", Json.Array(p.runs.map(|r| Json.Float(round_to(r.cpu, 1)))))
+    m.insert("peak_mb_runs", Json.Array(p.runs.map(|r| Json.Float(round_to(r.peak, 2)))))
+    m.insert("machine_busy", Json.Array(p.runs.map(|r| Json.Float(round_to(r.load, 3)))))
+    m.insert("runs_repeated", Json.Int(i64(p.again)))
+    m.insert("output_sha256", Json.Str(digest(p.out.copy())))
+    var info: List<Json> = []
+    for line in p.out.lines() {
+        if line.starts_with("info ") {
+            info.push(Json.Str(line["info ".len()..]))
+        }
+    }
+    if not info.is_empty() {
+        m.insert("info", Json.Array(info))
+    }
+    return Json.Object(m)
+}
+
+// What a build left: the programs that built, by language, and why the others didn't.
+struct Built {
+    paths: LinkedMap<String, String>
+    failed: LinkedMap<String, String>
+}
+
+fn exists_source(root: String, b: Bench, lang: String) -> bool {
+    return fs.is_file("{root}/bench/suite/{b.name}/{b.name}.{ext(lang)}")
+}
+
+fn build_all(root: String, work: String, calx: String, list: List<Bench>, langs: List<String>) -> Built {
+    var built = Built { paths: LinkedMap<String, String>(), failed: LinkedMap<String, String>() }
+    let bin = "{work}/bin"
+    fs.make_dir_all(bin.copy())!
+    let suite = "{root}/bench/suite"
+    var any_rust = false
+    for b in list {
+        for l in langs {
+            if not exists_source(root.copy(), b.copy(), l.copy()) {
+                continue
+            }
+            let key = "{b.name}/{l}"
+            let src = "{suite}/{b.name}/{b.name}.{ext(l.copy())}"
+            let out = "{bin}/{b.name}-{l}{exe()}"
+            var cmd: List<String> = []
+            var envs: List<(String, String)> = []
+            var dir = root.copy()
+            if l == "calx" {
+                cmd = [calx.copy(), "build", "--release", src.copy(), "-o", out.copy()]
+            } else if l == "c" {
+                cmd = ["clang", "-O3", "-march=x86-64-v3", "-ffp-contract=off", "-fno-math-errno", "-flto=thin", "-fuse-ld=lld"]
+                for f in b.cflags {
+                    cmd.push(f.copy())
+                }
+                cmd.push("-o")
+                cmd.push(out.copy())
+                cmd.push(src.copy())
+                if env.os() != "windows" {
+                    cmd.push("-lm")
+                }
+            } else if l == "go" {
+                cmd = ["go", "build", "-o", out.copy(), "./{b.name}/{b.name}.go"]
+                dir = suite.copy()
+                envs = [(String("GOAMD64"), String("v3")), (String("CGO_ENABLED"), String("0"))]
+            } else if l == "rust" {
+                any_rust = true
+                continue
+            } else {
+                built.paths.insert(key.copy(), src.copy())
+                continue
+            }
+            println("  building {b.name} in {lang_name(l.copy())}")
+            var rest: List<String> = []
+            for k in 1usize..cmd.len() {
+                rest.push(cmd[k].copy())
+            }
+            var c = Command.new(cmd[0].copy()).args(rest).dir(dir)
+            for (k, v) in envs {
+                c = c.env(k.copy(), v.copy())
+            }
+            match c.output() {
+                ok(o) => {
+                    if o.status.success() {
+                        built.paths.insert(key.copy(), out.copy())
+                    } else {
+                        let why = "{o.text()}{o.error_text()}".trim()
+                        built.failed.insert(key.copy(), why[..why.len().min(2000usize)])
+                        eprintln("suite: {b.name} didn't build in {lang_name(l.copy())}:\n{why}")
+                    }
+                }
+                err(e) => {
+                    built.failed.insert(key.copy(), "{e}")
+                    eprintln("suite: can't build {b.name} in {lang_name(l.copy())}: {e}")
+                }
+            }
+        }
+    }
+    if any_rust {
+        println("  building the Rust programs")
+        let target = "{work}/cargo"
+        var why = String()
+        match Command.new("cargo").args(["build", "--release", "--quiet", "--manifest-path", "{suite}/rust/Cargo.toml"]).env("CARGO_TARGET_DIR", target.copy()).env("RUSTFLAGS", "-C target-cpu=x86-64-v3").output() {
+            ok(out) => {
+                if not out.status.success() {
+                    why = "{out.error_text()}".trim()
+                }
+            }
+            err(e) => {
+                why = "{e}"
+            }
+        }
+        if not why.is_empty() {
+            eprintln("suite: the Rust programs didn't build:\n{why}")
+        }
+        for b in list {
+            if not exists_source(root.copy(), b.copy(), String("rust")) {
+                continue
+            }
+            let path = "{target}/release/{b.name}{exe()}"
+            if fs.is_file(path.copy()) and why.is_empty() {
+                built.paths.insert("{b.name}/rust", path)
+            } else {
+                built.failed.insert("{b.name}/rust", if why.is_empty() { String("no binary; is it a [[bin]] in bench/suite/rust/Cargo.toml?") } else { why[..why.len().min(2000usize)] })
+            }
+        }
+    }
+    return built
+}
+
+// The command that runs a language's program with these arguments.
+fn command(lang: String, path: String, python: String, args: List<String>) -> List<String> {
+    var cmd: List<String> = []
+    if lang == "python" {
+        cmd = [python.copy(), "-I", path.copy()]
+    } else {
+        cmd = [path.copy()]
+    }
+    for a in args {
+        cmd.push(a.copy())
+    }
+    return cmd
+}
+
+// The benchmark's arguments, with each `@kind` the path of its input and `@threads` the count.
+fn resolve(args: List<String>, inputs: mut LinkedMap<String, String>, work: String, quick: bool, threads: String) -> List<String> {
+    var out: List<String> = []
+    for a in args {
+        if a == "@threads" {
+            out.push(threads.copy())
+        } else if a.starts_with("@") {
+            let kind = a[1..]
+            if not inputs.contains(kind.copy()) {
+                println("  making the input {kind}")
+                let p = make_input(kind.copy(), "{work}/inputs", quick)
+                inputs.insert(kind.copy(), p)
+            }
+            out.push(inputs[kind].copy())
+        } else {
+            out.push(a.copy())
+        }
+    }
+    return out
+}
+
+fn new_prog(lang: own String, cmd: own List<String>, envs: own List<(String, String)>) -> Prog {
+    return Prog { lang: lang, cmd: cmd, envs: envs, status: String("ok"), why: String(), out: String(), runs: [], again: 0, rounds: 0 }
+}
+
+// The programs for one benchmark, at one thread count for a parallel one.
+fn progs_for(b: Bench, langs: List<String>, built: Built, python: String, args: List<String>, threads: u32) -> List<Prog> {
+    var progs: List<Prog> = []
+    for l in langs {
+        let key = "{b.name}/{l}"
+        var envs: List<(String, String)> = []
+        if b.group == "parallel" and l == "c" {
+            envs.push((String("OMP_NUM_THREADS"), "{threads}"))
+        }
+        if let path = built.paths.find(key.copy()) {
+            progs.push(new_prog(l.copy(), command(l.copy(), path.copy(), python.copy(), args.copy()), envs))
+        } else if let why = built.failed.find(key.copy()) {
+            var p = new_prog(l.copy(), [], [])
+            p.status = String("didn't build")
+            p.why = why.copy()
+            progs.push(p)
+        } else {
+            var p = new_prog(l.copy(), [], [])
+            p.status = String("no program")
+            p.why = why_none(b.name.copy(), l.copy())
+            progs.push(p)
+        }
+    }
+    return progs
+}
+
+// Why a language has no program for a benchmark, for the record.
+fn why_none(name: String, lang: String) -> String {
+    if lang == "c" {
+        if name == "regexredux" {
+            return String("C's standard library has no regular expressions, and Windows has no POSIX regex.h")
+        }
+        if name == "pidigits" {
+            return String("C's standard library has no big integers")
+        }
+        if name == "json" {
+            return String("C's standard library has no JSON")
+        }
+        if name == "compress" {
+            return String("C's standard library has no compression or hashes")
+        }
+        if name == "image" {
+            return String("C's standard library has no image formats")
+        }
+    }
+    if lang == "python" and name.starts_with("par") {
+        return String("CPython's threads take turns under its lock (the GIL), so a parallel loop runs on one core")
+    }
+    return String("no program in this language")
+}
+
+// The table of one group, its median wall times and peak memory, the fastest in bold.
+fn table(title: String, rows: List<(String, List<Prog>)>, langs: List<String>) {
+    println("")
+    println("{title}, the median wall time and the most memory held")
+    println("")
+    var head = String("| Benchmark |")
+    var line = String("| --- |")
+    for l in langs {
+        head.push_str(" {lang_name(l.copy())} |")
+        line.push_str(" --- |")
+    }
+    println(head)
+    println(line)
+    for (name, progs) in rows {
+        var fastest = 1e300
+        for p in progs {
+            if p.status == "ok" and not p.runs.is_empty() {
+                fastest = fastest.min(median(walls(p)))
+            }
+        }
+        var row = "| {name} |"
+        for l in langs {
+            var cell = String(" — |")
+            for p in progs {
+                if p.lang == l {
+                    if p.status == "ok" and not p.runs.is_empty() {
+                        let t = median(walls(p))
+                        let tm = ms(t)
+                        let shown = if t == fastest { "**{tm}**" } else { tm }
+                        cell = " {shown}, {mb(median(peaks(p)))} |"
+                    } else {
+                        cell = " {p.status} |"
+                    }
+                }
+            }
+            row.push_str(cell)
+        }
+        println(row)
+    }
+}
+
+// Python's own program, not the `py` launcher, which would be what's measured on Windows.
+fn find_python() -> String {
+    if env.os() == "windows" {
+        if let p = output_of(Command.new("py").args(["-c", "import sys; print(sys.executable)"])) {
+            return p.replace("\\", "/")
+        }
+        return String("python")
+    }
+    return String("python3")
+}
+
+fn first_line(text: String?) -> Json {
+    return match text {
+        some(t) => Json.Str((t.split_once("\n") ?? (t.copy(), String())).0.trim()),
+        none => Json.Null,
+    }
+}
+
+fn toolchains(calx: String, python: String) -> Json {
+    var tc = LinkedMap<String, Json>()
+    tc.insert("calx", Json.Str(output_of(Command.new(calx.copy()).arg("version")) ?? String()))
+    tc.insert("clang", first_line(output_of(Command.new("clang").arg("--version"))))
+    tc.insert("rustc", Json.Str(output_of(Command.new("rustc").arg("--version")) ?? String()))
+    var llvm = String()
+    for line in (output_of(Command.new("rustc").arg("-vV")) ?? String()).lines() {
+        if line.starts_with("LLVM version: ") {
+            llvm = line["LLVM version: ".len()..]
+        }
+    }
+    tc.insert("rustc_llvm", Json.Str(llvm))
+    tc.insert("go", Json.Str(output_of(Command.new("go").arg("version")) ?? String()))
+    tc.insert("python", Json.Str(output_of(Command.new(python).arg("--version")) ?? String()))
+    var flags = LinkedMap<String, Json>()
+    flags.insert("calx", Json.Str("calx build --release: clang -O3 -march=x86-64-v3 -ffp-contract=off, ThinLTO"))
+    flags.insert("c", Json.Str("clang -O3 -march=x86-64-v3 -ffp-contract=off -fno-math-errno -flto=thin -fuse-ld=lld"))
+    flags.insert("rust", Json.Str("cargo build --release: opt-level 3, lto thin, codegen-units 1, panic abort; RUSTFLAGS=-C target-cpu=x86-64-v3"))
+    flags.insert("go", Json.Str("go build, GOAMD64=v3, CGO_ENABLED=0"))
+    flags.insert("python", Json.Str("python -I"))
+    tc.insert("flags", Json.Object(flags))
+    return Json.Object(tc)
+}
+
+// The list a comma-separated option names, or `all` when it's empty, each checked against `all`.
+fn chosen(option: String, all: List<String>, what: String) -> List<String> {
+    var want: List<String> = []
+    for w in option.split(",") {
+        let t = w.trim()
+        if not t.is_empty() {
+            if not all.contains(t.copy()) {
+                stop("there's no {what} `{t}`: it's one of {all.join(", ")}")
+            }
+            want.push(t)
+        }
+    }
+    return if want.is_empty() { all.copy() } else { want }
+}
+
+// The results `path` holds, if it's there and reads as a record.
+fn kept(path: String) -> Json {
+    let ok(read) = fs.read_text(path) else {
+        return Json.Null
+    }
+    let text = read else {
+        return Json.Null
+    }
+    let ok(doc) = parse(text) else {
+        return Json.Null
+    }
+    return doc.get("results") ?? Json.Null
+}
+
+fn main() {
+    let a = Args.parse()
+    let root = repo_root()
+    let calx = compiler(root.copy())
+    let python = find_python()
+    var all_langs: List<String> = []
+    for l in LANGS {
+        all_langs.push(String(l))
+    }
+    let langs = chosen(a.langs.copy(), all_langs, String("language"))
+    let groups = chosen(a.groups.copy(), ["compute", "realistic", "parallel", "dx"], String("group"))
+    var names: List<String> = []
+    for b in benches() {
+        names.push(b.name.copy())
+    }
+    let only = chosen(a.only.copy(), names, String("benchmark"))
+    var list: List<Bench> = []
+    for b in benches() {
+        if only.contains(b.name.copy()) and groups.contains(b.group.copy()) {
+            list.push(b.copy())
+        }
+    }
+    let rounds = if a.quick { 1u32 } else { a.rounds }
+    let processors = unsafe { process.processors() }
+    var thread_counts: List<u32> = []
+    for t in a.threads.split(",") {
+        let w = t.trim()
+        if w == "all" {
+            thread_counts.push(processors)
+        } else if let n = u32.parse(w.copy()) {
+            if n > 0 {
+                thread_counts.push(n.min(processors))
+            }
+        } else {
+            stop("--threads takes numbers and `all`, with commas between")
+        }
+    }
+
+    let work = fs.temp_dir()!.replace("\\", "/")
+    let single = pin_for(1, processors)
+    apply_pin(single.copy())
+    let quiet = cpu_times()
+    println("suite: building in {work}")
+    let built = build_all(root.copy(), work.copy(), calx.copy(), list.copy(), langs.copy())
+    let after = cpu_times()
+    if after.1 > quiet.1 {
+        println("suite: the machine was {f64.nearest(after.0 - quiet.0) / f64.nearest(after.1 - quiet.1) * 100.0:.0}% busy while it built")
+    }
+
+    var inputs = LinkedMap<String, String>()
+    var results = LinkedMap<String, Json>()
+    var rows = LinkedMap<String, List<(String, List<Prog>)>>()
+    for b in list {
+        if b.group == "parallel" {
+            continue
+        }
+        let args = resolve(if a.quick { b.quick.copy() } else { b.args.copy() }, mut inputs, work.copy(), a.quick, String("1"))
+        var progs = progs_for(b.copy(), langs.copy(), built.copy(), python.copy(), args, 1)
+        println("{b.title}")
+        measure(mut progs, work.copy(), single.copy(), rounds, b.title.copy())
+        for p in progs {
+            if p.status == "ok" and not p.runs.is_empty() {
+                println("  {lang_name(p.lang.copy())}: {ms(median(walls(p)))} median, {ms(best_of(walls(p)))} best, {mb(median(peaks(p)))}, {p.runs.len()} runs, {p.again} repeated")
+            }
+        }
+        var r = LinkedMap<String, Json>()
+        r.insert("title", Json.Str(b.title.copy()))
+        r.insert("group", Json.Str(b.group.copy()))
+        r.insert("args", Json.Array((if a.quick { b.quick.copy() } else { b.args.copy() }).map(|s| Json.Str(s.copy()))))
+        r.insert("recorded", Json.Str(now_utc()))
+        r.insert("commit", commit(root.copy()))
+        for p in progs {
+            r.insert(p.lang.copy(), prog_json(p.copy()))
+        }
+        results.insert(b.name.copy(), Json.Object(r))
+        var g: List<(String, List<Prog>)> = rows.remove(b.group.copy()) ?? []
+        g.push((b.title.copy(), progs))
+        rows.insert(b.group.copy(), g)
+    }
+
+    for (group, g) in rows {
+        table(if group == "compute" { String("Classic compute") } else { String("Realistic programs") }, g.copy(), langs.copy())
+    }
+
+    if a.record and not a.quick {
+        let out = "{root}/bench/results/suite-{env.os()}.json"
+        var merged = LinkedMap<String, Json>()
+        let old = kept(out.copy())
+        for b in benches() {
+            match results.remove(b.name.copy()) {
+                some(j) => {
+                    merged.insert(b.name.copy(), j)
+                }
+                none => {
+                    if let j = old.get(b.name.copy()) {
+                        merged.insert(b.name.copy(), j)
+                    }
+                }
+            }
+        }
+        var r = LinkedMap<String, Json>()
+        r.insert("recorded", Json.Str(now_utc()))
+        r.insert("commit", commit(root.copy()))
+        r.insert("machine", machine())
+        r.insert("toolchain", toolchains(calx.copy(), python.copy()))
+        r.insert("rounds", Json.Int(i64(a.rounds)))
+        r.insert("results", Json.Object(merged))
+        fs.make_dir_all("{root}/bench/results")!
+        fs.write_text(out.copy(), "{pretty(Json.Object(r), 2)}\n")!
+        println("")
+        println("suite: wrote {out}")
+    }
+    if a.keep {
+        println("suite: kept {work}")
+    } else {
+        fs.remove_dir_all(work)!
+    }
+}

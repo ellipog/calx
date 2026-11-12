@@ -1,0 +1,78 @@
+# The Rust versions of bench/suite's programs, one binary each, built as bench/suite.calx builds
+# them: `cargo build --release` with RUSTFLAGS="-C target-cpu=x86-64-v3", the CPU level Calx's
+# release builds use. Each program's source is in its benchmark's own folder.
+[package]
+name = "suite"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+
+[[bin]]
+name = "nbody"
+path = "../nbody/nbody.rs"
+
+[[bin]]
+name = "spectralnorm"
+path = "../spectralnorm/spectralnorm.rs"
+
+[[bin]]
+name = "fannkuch"
+path = "../fannkuch/fannkuch.rs"
+
+[[bin]]
+name = "binarytrees"
+path = "../binarytrees/binarytrees.rs"
+
+[[bin]]
+name = "mandelbrot"
+path = "../mandelbrot/mandelbrot.rs"
+
+[[bin]]
+name = "fasta"
+path = "../fasta/fasta.rs"
+
+[[bin]]
+name = "knucleotide"
+path = "../knucleotide/knucleotide.rs"
+
+[[bin]]
+name = "revcomp"
+path = "../revcomp/revcomp.rs"
+
+[[bin]]
+name = "regexredux"
+path = "../regexredux/regexredux.rs"
+
+[[bin]]
+name = "pidigits"
+path = "../pidigits/pidigits.rs"
+
+[[bin]]
+name = "json"
+path = "../json/json.rs"
+
+[[bin]]
+name = "csv"
+path = "../csv/csv.rs"
+
+[[bin]]
+name = "logs"
+path = "../logs/logs.rs"
+
+[[bin]]
+name = "wordcount"
+path = "../wordcount/wordcount.rs"

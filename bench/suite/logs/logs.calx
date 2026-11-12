@@ -1,0 +1,97 @@
+// Log analysis: a million lines of a web server's access log taken apart by splitting, no regular
+// expressions, and summed: requests by status and by method, requests and bytes by path, with
+// query strings dropped and numeric ids folded, and by hour, and the distinct client addresses.
+import std.env.{args}
+import std.fs
+
+fn is_number(s: String) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b in s.to_bytes() {
+        if b < b'0' or b > b'9' {
+            return false
+        }
+    }
+    return true
+}
+
+fn main() {
+    let text = fs.read_text(args()[0].copy())! ?? String()
+    var lines: i64 = 0
+    var statuses = Map<i32, i64>()
+    var methods = Map<String, i64>()
+    var paths = Map<String, (i64, i64)>()
+    var hours: List<(i64, i64)> = [(0, 0); 24]
+    var ips = Set<String>()
+    for line in text.lines() {
+        lines += 1
+        let (ip, rest) = line.split_once(" ") ?? (String(), String())
+        if not ips.contains(ip) {
+            ips.insert(ip.copy())
+        }
+        let at = rest.find(":") ?? 0
+        let hour = usize.parse(rest[at + 1..at + 3]) ?? 0
+        let (_, after) = rest.split_once("\"") ?? (String(), String())
+        let (request, tail) = after.split_once("\"") ?? (String(), String())
+        let parts = request.split(" ")
+        var path = parts[1].copy()
+        if let q = path.find("?") {
+            path = path[..q]
+        }
+        if let slash = path.find_last("/") {
+            if is_number(path[slash + 1..]) {
+                path = "{path[..slash + 1]}\{id\}"
+            }
+        }
+        let fields = tail.trim().split(" ")
+        let status = i32.parse(fields[0]) ?? 0
+        let size = i64.parse(fields[1]) ?? 0
+        if let n = mut statuses.find(status) {
+            n += 1
+        } else {
+            statuses.insert(status, 1)
+        }
+        if let n = mut methods.find(parts[0]) {
+            n += 1
+        } else {
+            methods.insert(parts[0].copy(), 1)
+        }
+        if let p = mut paths.find(path) {
+            p.0 += 1
+            p.1 += size
+        } else {
+            paths.insert(path, (1, size))
+        }
+        hours[hour].0 += 1
+        hours[hour].1 += size
+    }
+    println("lines {lines}\nips {ips.len()}")
+    var codes: List<i32> = []
+    for (code, _) in statuses {
+        codes.push(code)
+    }
+    codes.sort()
+    for code in codes {
+        println("status {code} {statuses[code]}")
+    }
+    var names: List<String> = []
+    for (name, _) in methods {
+        names.push(name.copy())
+    }
+    names.sort()
+    for name in names {
+        println("method {name} {methods[name]}")
+    }
+    var by_count: List<(String, i64, i64)> = []
+    for (p, n) in paths {
+        by_count.push((p.copy(), n.0, n.1))
+    }
+    by_count.sort_by(|a, b| if a.1 != b.1 { b.1.cmp(a.1) } else { a.0.cmp(b.0) })
+    for (p, n, bytes) in by_count {
+        println("path {p} {n} {bytes}")
+    }
+    for h in 0usize..24 {
+        println("hour {h:02} {hours[h].0} {hours[h].1}")
+    }
+}

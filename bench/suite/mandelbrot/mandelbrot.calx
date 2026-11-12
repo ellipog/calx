@@ -1,0 +1,54 @@
+// mandelbrot: the Benchmarks Game's n by n bitmap of the Mandelbrot set, 50 iterations a pixel,
+// one bit a pixel, eight to a byte, as a PBM holds it. It prints the bitmap's FNV-1a hash rather
+// than the bitmap.
+import std.env.{args}
+
+fn main() {
+    let given = args()
+    let n = if given.len() > 0 { usize.parse(given[0].copy()) ?? 200 } else { 200 }
+    let row_bytes = (n + 7) / 8
+    var bits: List<u8> = [0; row_bytes * n]
+    let size = f64.nearest(n)
+    for y in 0usize..n {
+        let ci = 2.0 * f64.nearest(y) / size - 1.0
+        var acc: u32 = 0
+        var count: u32 = 0
+        var at = y * row_bytes
+        for x in 0usize..n {
+            let cr = 2.0 * f64.nearest(x) / size - 1.5
+            var zr = 0.0
+            var zi = 0.0
+            var tr = 0.0
+            var ti = 0.0
+            var i = 0
+            while i < 50 and tr + ti <= 4.0 {
+                zi = 2.0 * zr * zi + ci
+                zr = tr - ti + cr
+                tr = zr * zr
+                ti = zi * zi
+                i += 1
+            }
+            acc = acc << 1
+            if tr + ti <= 4.0 {
+                acc |= 1
+            }
+            count += 1
+            if count == 8 {
+                bits[at] = u8.wrap(acc)
+                at += 1
+                acc = 0
+                count = 0
+            } else if x == n - 1 {
+                bits[at] = u8.wrap(acc << u32.wrap(8 - n % 8))
+                at += 1
+                acc = 0
+                count = 0
+            }
+        }
+    }
+    var h: u64 = 0xcbf29ce484222325
+    for b in bits {
+        h = (h ^ u64(b)) * 0x100000001b3
+    }
+    println("P4 {n} {n}\nfnv1a {h:016x}")
+}

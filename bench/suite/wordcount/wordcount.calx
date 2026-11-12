@@ -1,0 +1,40 @@
+// Word count: 5 million words of text, about 30 MB, lowercased, split into runs of ASCII letters,
+// counted in the language's hash map, and the 20 most common printed, ties by the word.
+import std.env.{args}
+import std.fs
+
+fn main() {
+    let text = (fs.read_text(args()[0].copy())! ?? String()).to_lower_root()
+    let bytes = text.to_bytes()
+    var counts = Map<String, i32>()
+    var total: i64 = 0
+    var i: usize = 0
+    let n = bytes.len()
+    while i < n {
+        while i < n and (bytes[i] < b'a' or bytes[i] > b'z') {
+            i += 1
+        }
+        let start = i
+        while i < n and bytes[i] >= b'a' and bytes[i] <= b'z' {
+            i += 1
+        }
+        if i > start {
+            total += 1
+            let word = text[start..i]
+            if let c = mut counts.find(word) {
+                c += 1
+            } else {
+                counts.insert(word.copy(), 1)
+            }
+        }
+    }
+    var top: List<(String, i32)> = []
+    for (w, c) in counts {
+        top.push((w.copy(), c))
+    }
+    top.sort_by(|a, b| if a.1 != b.1 { b.1.cmp(a.1) } else { a.0.cmp(b.0) })
+    println("words {total}\ndistinct {counts.len()}")
+    for (w, c) in top[..20usize.min(top.len())] {
+        println("{c} {w}")
+    }
+}

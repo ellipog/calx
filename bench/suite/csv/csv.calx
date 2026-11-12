@@ -1,0 +1,46 @@
+// CSV report: a million rows of sales read with the language's CSV reader, some fields quoted with
+// commas and doubled quotes inside, and summed by region and product and by month: the rows, the
+// quantity and the revenue, in the order of the file. Calx uses std.csv, Rust the csv crate, Go
+// encoding/csv and Python csv; C has none, so it reads the fields by hand.
+import std.csv.{Reader}
+import std.env.{args}
+import std.fs
+
+struct Group {
+    rows: i64
+    quantity: i64
+    revenue: f64
+}
+
+fn main() {
+    var reader = Reader.new(fs.read_text(args()[0].copy())! ?? String())
+    var row = List<String>()
+    _ = reader.read(mut row)
+    var groups = Map<String, Group>()
+    var months: List<f64> = [0.0; 13]
+    while reader.read(mut row) {
+        let quantity = i64.parse(row[3]) ?? 0
+        let revenue = f64.nearest(quantity) * (f64.parse(row[4]) ?? 0.0)
+        let key = "{row[1]}|{row[2]}"
+        if let g = mut groups.find(key) {
+            g.rows += 1
+            g.quantity += quantity
+            g.revenue += revenue
+        } else {
+            groups.insert(key, Group { rows: 1, quantity: quantity, revenue: revenue })
+        }
+        months[usize.parse(row[0][5..7]) ?? 0] += revenue
+    }
+    var keys: List<String> = []
+    for (k, _) in groups {
+        keys.push(k.copy())
+    }
+    keys.sort()
+    for k in keys {
+        let g = groups[k]
+        println("{k}|{g.rows}|{g.quantity}|{g.revenue:.2}")
+    }
+    for m in 1usize..13 {
+        println("month {m} {months[m]:.2}")
+    }
+}
