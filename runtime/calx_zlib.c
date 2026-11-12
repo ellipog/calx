@@ -129,12 +129,8 @@ __attribute__((target("crc"))) static cx_u32 crc32_arm(cx_u32 crc, const cx_u8* 
 }
 #endif
 
-cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n) {
-#ifdef CX_ARM
-    if (cx_arm_features() & CX_ARM_CRC32) return ~crc32_arm(~crc, p, n);
-#endif
-    once(&crc_ready, crc_init);
-    crc = ~crc;
+/* The CRC's register, before it's inverted, carried over the bytes by the tables. */
+static cx_u32 crc_tables(cx_u32 crc, const cx_u8* p, cx_usize n) {
     while (n >= 8) {
         cx_u64 v = load64(p) ^ crc;
         crc = crc_table[7][v & 0xff] ^ crc_table[6][v >> 8 & 0xff] ^ crc_table[5][v >> 16 & 0xff] ^ crc_table[4][v >> 24 & 0xff] ^
@@ -143,7 +139,73 @@ cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n) {
         n -= 8;
     }
     while (n--) crc = (crc >> 8) ^ crc_table[0][(crc ^ *p++) & 0xff];
-    return ~crc;
+    return crc;
+}
+
+#ifdef CX_X86
+/* Whether the processor has PCLMULQDQ. It's asked once, as cpuid traps out to a hypervisor and
+ * costs about a microsecond. */
+static int clmul_ok(void) {
+    static int known = -1; /* threads that race here store the same answer */
+    int k = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (k < 0) {
+        unsigned a, b, c, d;
+        k = __get_cpuid(1, &a, &b, &c, &d) && (c >> 1 & 1);
+        __atomic_store_n(&known, k, __ATOMIC_RELAXED);
+    }
+    return k;
+}
+
+/* One 16-byte lane folded forward and added to `y`. */
+__attribute__((target("pclmul"))) static inline __m128i crc_fold(__m128i x, __m128i k, __m128i y) {
+    return _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128(x, k, 0x00), _mm_clmulepi64_si128(x, k, 0x11)), y);
+}
+
+/* The register over n bytes, n at least 64, with carry-less multiplies: the folds of calx_xz.c's
+ * CRC-64, four lanes 64 bytes at a time and then one, with the constants x^(8d+63) and x^(8d-1)
+ * modulo gzip's polynomial, bit-reversed, to fold a lane d bytes on. A remainder has degree under
+ * 32, so each is in its constant's top half. The last 16 bytes go through the tables. The tables
+ * alone did 2.6 GB/s on an i9-13900K, a fifth of what Python's zlib does there (CLX-281). */
+__attribute__((target("pclmul"))) static cx_u32 crc32_clmul(cx_u32 crc, const cx_u8* p, cx_usize n) {
+    const __m128i k64 = _mm_set_epi64x((long long)0xcad38e8f00000000ull, (long long)0x653d982200000000ull);
+    const __m128i k48 = _mm_set_epi64x((long long)0x2a28386200000000ull, (long long)0x69ccfc0d00000000ull);
+    const __m128i k32 = _mm_set_epi64x((long long)0x01b5fd1d00000000ull, (long long)0x9570d49500000000ull);
+    const __m128i k16 = _mm_set_epi64x((long long)0x9ba54c6f00000000ull, (long long)0x65673b4600000000ull);
+    __m128i a = _mm_xor_si128(_mm_loadu_si128((const __m128i*)p), _mm_cvtsi32_si128((int)crc));
+    __m128i b = _mm_loadu_si128((const __m128i*)(p + 16));
+    __m128i c = _mm_loadu_si128((const __m128i*)(p + 32));
+    __m128i d = _mm_loadu_si128((const __m128i*)(p + 48));
+    p += 64;
+    n -= 64;
+    while (n >= 64) {
+        a = crc_fold(a, k64, _mm_loadu_si128((const __m128i*)p));
+        b = crc_fold(b, k64, _mm_loadu_si128((const __m128i*)(p + 16)));
+        c = crc_fold(c, k64, _mm_loadu_si128((const __m128i*)(p + 32)));
+        d = crc_fold(d, k64, _mm_loadu_si128((const __m128i*)(p + 48)));
+        p += 64;
+        n -= 64;
+    }
+    __m128i x = crc_fold(a, k48, crc_fold(b, k32, crc_fold(c, k16, d)));
+    while (n >= 16) {
+        x = crc_fold(x, k16, _mm_loadu_si128((const __m128i*)p));
+        p += 16;
+        n -= 16;
+    }
+    cx_u8 last[16];
+    _mm_storeu_si128((__m128i*)last, x);
+    return crc_tables(crc_tables(0, last, 16), p, n);
+}
+#endif
+
+cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n) {
+#ifdef CX_ARM
+    if (cx_arm_features() & CX_ARM_CRC32) return ~crc32_arm(~crc, p, n);
+#endif
+    once(&crc_ready, crc_init);
+#ifdef CX_X86
+    if (n >= 64 && clmul_ok()) return ~crc32_clmul(~crc, p, n);
+#endif
+    return ~crc_tables(~crc, p, n);
 }
 
 #ifdef CX_X86

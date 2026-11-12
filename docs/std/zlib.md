@@ -89,8 +89,8 @@ Why bytes don't inflate, as `Error`:
 | Inflating | Lookup tables of 10 bits for literals and lengths, and 8 for distances, with second tables under them for longer codes. A fast loop takes 64 bits of input at a time, and up to three literals for each read, while there are 16 bytes of input and 274 of room left. A slow loop takes the last bytes one code at a time |
 | Copying a match | 16 bytes at a time when the distance is 16 or more. For shorter distances, the pattern is built once and then copied 8 bytes at a time |
 | Compressing | Hash chains on 4 bytes, searched further at each level. From level 4, as libdeflate does: matches of 3 bytes too, within 8 KiB, from a table of their own; before a match is taken, the next position searched half as hard, and its match taken if it's longer by more than its distance costs; and a block ended where the kinds of its symbols change. From level 4 the match at the last match's distance is tried too, which finds an image's row above when the chains are too full of commoner strings to reach it. Each block is written stored, with the fixed codes or with its own codes, whichever is smallest |
-| Adler-32 | AVX2 where the processor has it, 32 bytes a step. Otherwise a byte at a time, 8 to a loop |
-| CRC-32 | 8 tables, 8 bytes a step |
+| Adler-32 | 32 bytes a step with AVX2 where the processor has it, and with NEON on Arm64. Otherwise a byte at a time, 8 to a loop |
+| CRC-32 | From 64 bytes on, folded 64 bytes at a time with carry-less multiplies, PCLMUL on x86; Arm64's CRC32 instructions, 8 bytes each. Otherwise, and for the last bytes, 8 tables, 8 bytes a step |
 | The output | `decompress` guesses the length from how the first bytes inflated, and for gzip, from the length in its trailer, so most streams inflate in one call without copying |
 
 On an i9-13900K, one run each over the corpus (level 1 and inflating; the lazy levels have been rebuilt since, and are measured below):
@@ -103,6 +103,15 @@ On an i9-13900K, one run each over the corpus (level 1 and inflating; the lazy l
 | A packet-sized record inflated | 2.1 µs | 4.1 µs |
 
 At level 1 the output is 1.3% smaller than Java's.
+
+The checksums, from [bench/digest](../../bench/README.md#hashes-checksums-and-aes) on the i9-13900K's performance cores, over 64 MiB, the best of 5, against Python 3.14.6's `zlib`, which is zlib-ng's:
+
+| | Calx | Python |
+| --- | --- | --- |
+| CRC-32 | 14,500 MiB/s | 12,300 MiB/s |
+| Adler-32 | 17,000 MiB/s | 16,100 MiB/s |
+
+The tables alone did CRC-32 at 2,600 MiB/s, before it was folded with PCLMUL (CLX-281).
 
 Minecraft's region files, compressed again: 2,000 of the chunks vanilla 26.3 saved, 68.9 MB inflated, each deflated as a zlib stream on one P-core, best of five runs for Calx and of up to three for Java 25's `Deflater`. Java's level 6 gives back vanilla's own bytes exactly.
 
