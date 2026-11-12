@@ -73,6 +73,11 @@ static void par_write(int stream, const void* p, size_t n);
  * wrongly and ends the walk (CLX-276): RtlCaptureStackBackTrace gave a panic no Calx frames. So
  * each caller's entry is found at its call, 4 bytes before where it returns to, as debuggers find
  * it. A function with no entry is a leaf, which returns through LR. */
+#if _WIN32_WINNT < 0x0602
+/* mingw-w64's headers aim at Windows 7 unless told otherwise, and declare this only from 8 on.
+ * Windows on Arm is 10 or later, so it is always there. */
+WINBASEAPI VOID WINAPI GetCurrentThreadStackLimits(PULONG_PTR low, PULONG_PTR high);
+#endif
 __attribute__((noinline)) int cx_stack_capture(void** frames, int max, int skip) {
     CONTEXT c;
     RtlCaptureContext(&c);
