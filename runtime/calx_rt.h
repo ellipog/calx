@@ -150,6 +150,12 @@ __attribute__((cold)) CX_FN(void, cx_trace_write, (void (*text)(const char*), in
 /* Writes the Calx frames of a stack taken earlier, `n` return addresses with the innermost first,
  * as `cx_trace_write` writes a thread's own. Called in the runtime only. */
 __attribute__((cold)) void cx_trace_frames(void (*text)(const char*), void* const* frames, int n);
+#ifdef _WIN32
+/* Up to `max` return addresses of the calling thread's stack into `frames`, the innermost first,
+ * from its caller's caller on after skipping `skip`: Windows' RtlCaptureStackBackTrace, or on Arm64
+ * a walk of its own (calx_rt.c). Gives how many. Called in the runtime only. */
+int cx_stack_capture(void** frames, int max, int skip);
+#endif
 CX_COLD CX_FN(void, cx_panic_index, (cx_usize index, cx_usize length, const char* at));
 CX_COLD CX_FN(void, cx_panic_div_zero, (const char* at));
 CX_COLD CX_FN(void, cx_panic_unwrap, (const char* at));

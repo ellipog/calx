@@ -156,65 +156,18 @@ jobs:
         shell: bash
         run: '"$CALX_BIN" run --release tests/run.calx -- --modes debug,release'
       # While Windows on Arm's stack traces are brought up (CLX-276): what a panic's trace writes
-      # there, and what dbghelp gives a C program for each frame of its own stack.
+      # there, and what dbghelp says of each frame, with CALX_TRACE_DEBUG.
       - name: Stack traces on Windows on Arm
         if: always() && runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: bash
         run: |
           mkdir -p build/probe
-          clang --version | head -3
-          "$CALX_BIN" build tests/panics/trace.calx -o build/probe/trace.exe >/dev/null 2>&1 || true
-          cat > build/probe/probe.c <<'EOF'
-          #include <windows.h>
-          #include <stdio.h>
-          #include <intrin.h>
-          static void entry(const char* what, void* at) {
-              DWORD64 base = 0;
-              PRUNTIME_FUNCTION f = RtlLookupFunctionEntry((DWORD64)(uintptr_t)at, &base, NULL);
-              printf("%s %p: entry %p, begin %lx, unwind %lx\n", what, at, (void*)f, f ? (unsigned long)f->BeginAddress : 0ul,
-                     f ? (unsigned long)f->UnwindData : 0ul);
-          }
-          __declspec(noinline) void inner(void);
-          int main(void);
-          __declspec(noinline) void inner(void) {
-          #if defined(_M_ARM64) || defined(__aarch64__)
-              printf("arm64\n");
-              void* f[64];
-              USHORT n = RtlCaptureStackBackTrace(0, 64, f, NULL);
-              printf("captured %u:", n);
-              for (USHORT i = 0; i < n; i++) printf(" %p", f[i]);
-              printf("\n");
-              entry("inner", (void*)inner);
-              entry("main", (void*)main);
-              CONTEXT c;
-              RtlCaptureContext(&c);
-              for (int i = 0; i < 12 && c.Pc; i++) {
-                  DWORD64 base = 0;
-                  PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Pc, &base, NULL);
-                  printf("unwind %d: pc %llx sp %llx fp %llx lr %llx entry %p\n", i, c.Pc, c.Sp, c.Fp, c.Lr, (void*)fn);
-                  if (!fn) {
-                      c.Pc = c.Lr;
-                      continue;
-                  }
-                  void* data;
-                  DWORD64 frame;
-                  RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Pc, fn, &c, &data, &frame, NULL);
-              }
-              void** fp = (void**)__builtin_frame_address(0);
-              for (int i = 0; i < 12 && fp; i++) {
-                  printf("frame %d: fp %p lr %p\n", i, (void*)fp, fp[1]);
-                  fp = (void**)fp[0];
-              }
-          #else
-              printf("not arm64\n");
-          #endif
-          }
-          int main(void) { inner(); return 0; }
-          EOF
-          clang -gline-tables-only build/probe/probe.c -o build/probe/probe.exe -fuse-ld=lld -g && ./build/probe/probe.exe || echo "status $?"
-          clang -O2 -gline-tables-only build/probe/probe.c -o build/probe/probe2.exe -fuse-ld=lld -g && ./build/probe/probe2.exe || echo "status $?"
-          llvm-readobj --unwind build/probe/probe.exe 2>&1 | head -60 || true
-          llvm-readobj --unwind build/probe/trace.exe 2>&1 | grep -E "Function:|ExceptionData|^ *Prologue|Epilogue|Unwind" | head -40 || true
+          for mode in debug release; do
+            flag=""
+            if [ "$mode" = release ]; then flag="--release"; fi
+            "$CALX_BIN" build $flag tests/panics/trace.calx -o "build/probe/trace-$mode.exe" > /dev/null 2>&1 || true
+            CALX_TRACE_DEBUG=1 "./build/probe/trace-$mode.exe" || echo "status $?"
+          done
       # A handoff between threads that's missing its ordering fails only now and then, so on Arm
       # the parallel and thread tests run 20 more times (CLX-274).
       - name: Threads, again and again

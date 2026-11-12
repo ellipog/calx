@@ -114,10 +114,10 @@ static void track_take(void) { AcquireSRWLockExclusive(&track_lock); }
 static void track_give(void) { ReleaseSRWLockExclusive(&track_lock); }
 
 /* Windows unwinds from the program's tables: clang's x64 frame pointer doesn't point at the one
- * before it. */
-static __attribute__((noinline)) void track_stack(void** at) {
-    USHORT n = RtlCaptureStackBackTrace(1, TRACK_FRAMES, at, NULL);
-    for (USHORT i = n; i < TRACK_FRAMES; i++) at[i] = 0;
+ * before it. The walk is the runtime's, which on Arm finds each caller as debuggers do. */
+static __attribute__((noinline, disable_tail_calls)) void track_stack(void** at) {
+    int n = cx_stack_capture(at, TRACK_FRAMES, 1);
+    for (int i = n; i < TRACK_FRAMES; i++) at[i] = 0;
 }
 #else
 #include <pthread.h>

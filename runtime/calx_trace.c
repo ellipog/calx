@@ -322,8 +322,21 @@ static void add(found* f, const symbol* s, const IMAGEHLP_LINEW64* line) {
 
 static void found_frames(found* f) {
     void* frames[MAX_FRAMES];
-    USHORT n = RtlCaptureStackBackTrace(0, MAX_FRAMES, frames, NULL);
+    int n = cx_stack_capture(frames, MAX_FRAMES, 0);
     name_frames(f, frames, n);
+}
+
+typedef BOOL(WINAPI* module_fn)(HANDLE, DWORD64, PIMAGEHLP_MODULEW64);
+
+/* With CALX_TRACE_DEBUG=1, what dbghelp said of each frame, on standard error: for bringing
+ * traces up on a new system, such as Windows on Arm (CLX-276). */
+static int trace_debug(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("CALX_TRACE_DEBUG");
+        on = v && v[0] == '1';
+    }
+    return on;
 }
 
 static void name_frames(found* f, void* const* frames, int n) {
@@ -354,6 +367,9 @@ static void name_frames(found* f, void* const* frames, int n) {
     wchar_t wcwd[MAX_PATH];
     if (GetCurrentDirectoryW(MAX_PATH, wcwd) == 0) wcwd[0] = 0;
     utf8_path(wcwd, f->cwd, sizeof f->cwd);
+    int debug = trace_debug();
+    module_fn module_info = debug ? (module_fn)(void*)GetProcAddress(dbghelp, "SymGetModuleInfoW64") : NULL;
+    if (debug) fprintf(stderr, "trace: %d frames, symbols searched for in %ls\n", n, folders);
     for (int i = 0; i < n; i++) {
         /* A return address is just past its call, which may end the call's line. */
         DWORD64 at = (DWORD64)(uintptr_t)frames[i] - 1;
@@ -361,6 +377,24 @@ static void name_frames(found* f, void* const* frames, int n) {
         IMAGEHLP_LINEW64 line;
         DWORD64 offset;
         DWORD column;
+        if (debug) {
+            clear_symbol(&sym);
+            memset(&line, 0, sizeof line);
+            line.SizeOfStruct = sizeof line;
+            BOOL named = from_addr(process, at, &offset, &sym.info);
+            DWORD name_error = named ? 0 : GetLastError();
+            BOOL lined = line_of(process, at, &column, &line);
+            DWORD line_error = lined ? 0 : GetLastError();
+            IMAGEHLP_MODULEW64 m;
+            memset(&m, 0, sizeof m);
+            m.SizeOfStruct = sizeof m;
+            BOOL moduled = module_info && module_info(process, at, &m);
+            fprintf(stderr, "trace: %2d %p %ls (%lu) %ls:%lu (%lu) in %ls, symbols %d from %ls, %lu inlined\n", i, frames[i],
+                    named ? sym.info.Name : L"?", (unsigned long)name_error, lined ? line.FileName : L"?",
+                    lined ? (unsigned long)line.LineNumber : 0ul, (unsigned long)line_error, moduled ? m.ModuleName : L"?",
+                    moduled ? (int)m.SymType : -1, moduled ? m.LoadedPdbName : L"?",
+                    inline_count ? (unsigned long)inline_count(process, at) : 0ul);
+        }
         /* The calls inlined at this address, innermost first, each at its own line. */
         DWORD inlined = inline_count && inline_query && inline_from && inline_line ? inline_count(process, at) : 0;
         DWORD context = 0, index = 0;

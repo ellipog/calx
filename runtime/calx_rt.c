@@ -62,6 +62,56 @@ static _Thread_local int par_buffered; /* output goes to the running chunk's buf
 static _Thread_local int par_depth;    /* inside a `parallel for`, even one run on this thread alone */
 static void par_write(int stream, const void* p, size_t n);
 
+#ifdef _WIN32
+#if defined(_M_ARM64) || defined(__aarch64__)
+/* Windows on Arm unwinds each frame from its function's table entry, found by address. A call to
+ * a function that never returns, such as a panic's, can be a function's last instruction, so its
+ * return address is past the function's end, in the next one, whose entry unwinds the frame
+ * wrongly and ends the walk (CLX-276): RtlCaptureStackBackTrace gave a panic no Calx frames. So
+ * each caller's entry is found at its call, 4 bytes before where it returns to, as debuggers find
+ * it. A function with no entry is a leaf, which returns through LR. */
+__attribute__((noinline)) int cx_stack_capture(void** frames, int max, int skip) {
+    CONTEXT c;
+    RtlCaptureContext(&c);
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    int n = 0;
+    for (int depth = 0; depth < 4096 && c.Pc; depth++) {
+        DWORD64 pc = c.Pc, sp = c.Sp;
+        if (depth > 0) {  /* depth 0 is this function's own */
+            if (skip > 0) {
+                skip--;
+            } else if (n < max) {
+                frames[n++] = (void*)(uintptr_t)pc;
+            } else {
+                break;
+            }
+        }
+        DWORD64 at = depth > 0 ? pc - 4 : pc;
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(at, &base, NULL);
+        if (fn) {
+            void* data;
+            DWORD64 frame;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, at, fn, &c, &data, &frame, NULL);
+        } else {
+            c.Pc = c.Lr;
+            c.Lr = 0;
+        }
+        /* A stack only grows down, so each caller's frame is above the last, within the stack. */
+        if (c.Sp < sp || c.Sp < low || c.Sp >= high || (c.Pc == pc && c.Sp == sp)) break;
+    }
+    return n;
+}
+#else
+/* Not inlined or tail-called, so the frame it skips is its own. */
+__attribute__((noinline, disable_tail_calls)) int cx_stack_capture(void** frames, int max, int skip) {
+    USHORT n = RtlCaptureStackBackTrace((ULONG)skip + 1, (ULONG)max, frames, NULL);
+    return (int)n;
+}
+#endif
+#endif
+
 static int out_shared; /* a thread has been spawned, so writing takes the lock */
 #ifdef _WIN32
 static SRWLOCK out_mutex = SRWLOCK_INIT;
