@@ -1,0 +1,183 @@
+// A `Map` or `Set` keyed by String keeps a key of up to 15 bytes in its slot, and a longer one as a
+// pointer to bytes it owns, allocated at their length (CLX-316). Keys of every length from 0 to 40,
+// with NUL bytes and runes, from literals, interned strings, views and copies, through growing,
+// removing, putting back, loops, copies, equality, printing and a linked table's ends, against a
+// list that holds the same keys.
+import std.random.{Random}
+
+fn key(r: mut Random, n: usize) -> String {
+    let alphabet: List<String> = ["a", "b", "z", "0", "\u{0}", "é", "-", " "]
+    var s = String()
+    while s.len() < n {
+        s.push_str(alphabet[r.index(alphabet.len())])
+    }
+    return s
+}
+
+// Adds to the text, and gives its old length.
+fn grow(s: mut String) -> usize {
+    let n = s.len()
+    s.push_str("xyz")
+    return n
+}
+
+fn main() {
+    // Each length, short and long, and the 15 and 16 bytes either side of the line.
+    var r = Random.new(316)
+    var keys: List<String> = []
+    for n in 0usize..41 {
+        for _ in 0..6 {
+            keys.push(key(mut r, n))
+        }
+    }
+    var m = Map<String, usize>()
+    var s = Set<String>()
+    for i in 0usize..keys.len() {
+        m.insert(keys[i].copy(), i)
+        s.insert(keys[i].copy())
+    }
+    var right = 0usize
+    for i in 0usize..keys.len() {
+        // The value is the last index that key went in at.
+        var last = i
+        for j in 0usize..keys.len() {
+            if keys[j] == keys[i] {
+                last = j
+            }
+        }
+        if m.get(keys[i]) == some(last) and s.contains(keys[i]) {
+            right += 1
+        }
+    }
+    println("{right == keys.len()} {m.len() == s.len()}")    // out: true true
+    // Keys that aren't in it: one byte more or less, or a byte changed.
+    var missing = 0usize
+    for k in keys {
+        var longer = k.copy()
+        longer.push_str("x")
+        if not m.contains(longer) and not s.contains(longer) {
+            missing += 1
+        }
+    }
+    println("{missing == keys.len()}")    // out: true
+    println("{m.contains("")} {s.contains("aaaaaaaaaaaaaaab")} {m.get("nope")}")    // out: true false none
+
+    // Taking out every other one, then putting them back, across growing and shrinking.
+    var gone = 0usize
+    for i in 0usize..keys.len() {
+        if i % 2 == 0 {
+            if let _ = m.remove(keys[i]) {
+                gone += 1
+            }
+        }
+    }
+    let after_remove = m.len()
+    for i in 0usize..keys.len() {
+        if i % 2 == 0 {
+            m.insert(keys[i].copy(), 0)
+        }
+    }
+    println("{gone > 0} {after_remove + gone == m.len()}")    // out: true true
+
+    // Loops see each key once, as the String it is.
+    var seen = 0usize
+    var bytes = 0usize
+    for (k, _) in m {
+        if s.contains(k) {
+            seen += 1
+        }
+        bytes += k.len()
+    }
+    var set_bytes = 0usize
+    for k in s {
+        set_bytes += k.len()
+    }
+    println("{seen == m.len()} {bytes == set_bytes}")    // out: true true
+
+    // Literal keys, short and long, interned ones, a view and one put twice.
+    var lit = Map<String, i32>()
+    lit.insert("short", 1)
+    lit.insert("a literal longer than fifteen bytes", 2)
+    lit.insert(String("sixteen bytes!!!").interned(), 3)
+    lit.insert(String("an interned key that's long").interned(), 4)
+    let line = "GET /index.html HTTP/1.1"
+    let (method, rest) = line.split_once(" ") ?? (String(), String())
+    lit.insert(method.copy(), 5)
+    lit.insert(rest.copy(), 6)
+    lit.insert("short", 7)
+    println("{lit.len()} {lit["short"]} {lit["a literal longer than fifteen bytes"]} {lit["sixteen bytes!!!"]}")    // out: 6 7 2 3
+    println("{lit["an interned key that's long"]} {lit["GET"]} {lit["/index.html HTTP/1.1"]}")    // out: 4 5 6
+
+    // A copy is equal and its own; a table with one key changed isn't equal.
+    var copy = lit.copy()
+    println("{copy == lit}")    // out: true
+    copy.insert("a literal longer than fifteen bytes", 20)
+    _ = copy.remove("short")
+    println("{copy == lit} {lit["a literal longer than fifteen bytes"]} {lit.contains("short")}")    // out: false 2 true
+    var words = Set<String>()
+    var same = Set<String>()
+    for w in ["x", "a key that is quite long", ""] {
+        words.insert(String(w))
+    }
+    for w in ["", "a key that is quite long", "x"] {
+        same.insert(String(w))
+    }
+    println("{words == same} {words.len()}")    // out: true 3
+
+    // Printing, in the order a loop goes.
+    var one = Map<String, i32>()
+    one.insert("a key of more than fifteen", 1)
+    println("{one}")    // out: {a key of more than fifteen: 1}
+    var tiny = Set<String>()
+    tiny.insert("")
+    println("{tiny} {tiny.len()}")    // out: {} 1
+
+    // Taking a key out of a linked table's ends gives it back as a string of its own.
+    var order = LinkedMap<String, i32>()
+    order.insert("first, and longer than fifteen", 1)
+    order.insert("mid", 2)
+    order.insert("last", 3)
+    let popped = order.pop_first()
+    let tail = order.pop_last()
+    println("{popped} {tail} {order}")    // out: some((first, and longer than fifteen, 1)) some((last, 3)) {mid: 2}
+    var names = LinkedSet<String>()
+    names.insert("a name longer than fifteen bytes")
+    names.insert("b")
+    if let n = names.pop_first() {
+        var owned = n
+        owned.push_str("!")
+        println(owned)    // out: a name longer than fifteen bytes!
+    }
+    println("{names}")    // out: {b}
+
+    // A key put in as `x.copy()` is the table's own: changing `x` after doesn't change it, short or
+    // long, in a map and a set, and with a value worked out by a call in between.
+    var buf = String("abc")
+    var long_buf = String("a key of more than fifteen bytes")
+    var held = Map<String, i32>()
+    var held_set = Set<String>()
+    held.insert(buf.copy(), 1)
+    held.insert(long_buf.copy(), 2)
+    held_set.insert(buf.copy())
+    held_set.insert(long_buf.copy())
+    held.insert(buf.copy(), i32.wrap(grow(mut buf)))
+    long_buf.push_str("!")
+    println("{held.contains("abc")} {held["abc"]} {held.contains("abcxyz")} {held_set.contains("abc")}")    // out: true 3 false true
+    println("{held.contains("a key of more than fifteen bytes")} {held_set.contains(long_buf)} {buf}")    // out: true false abcxyz
+
+    // A map in a map, and clearing.
+    var nested = Map<String, Map<String, i32>>()
+    for k in keys {
+        if let inner = mut nested.find(k) {
+            inner.insert(k.copy(), 1)
+        } else {
+            var inner = Map<String, i32>()
+            inner.insert(k.copy(), 0)
+            nested.insert(k.copy(), inner)
+        }
+    }
+    println("{nested.len() == m.len()}")    // out: true
+    nested.clear()
+    s.clear()
+    println("{nested.len()} {s.len()} {s.contains("")}")    // out: 0 0 false
+}

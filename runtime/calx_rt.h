@@ -462,6 +462,101 @@ CX_INLINE cx_String cx_string_part_of(cx_str v, cx_usize cap) {
     }
     return (cx_i64)cap < 0 ? cx_str_view(v) : cx_string_from(v);
 }
+
+/* A `String` key as a `Map` or `Set` keeps it in its slot, in 16 bytes (CLX-316). A key of up to
+ * 15 bytes is in the key itself: its bytes, then zeros, with 0x80 | its length in the last byte, so
+ * finding it allocates nothing, and comparing it is two words, with no pointer to follow. A longer
+ * one is a pointer to its bytes, which the key owns, allocated at exactly their length so a free
+ * knows the size, and the length, below 2^56, so the last byte, the length's top one, is 0. */
+typedef union {
+    struct {
+        cx_u8* ptr;
+        cx_usize len;
+    } h;
+    cx_u8 b[16];
+    cx_u64 w[2];
+} cx_skey;
+_Static_assert(sizeof(cx_usize) == 8 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "cx_skey's last byte is its length's top byte");
+#define CX_SKEY_SHORT 15
+CX_INLINE cx_bool cx_skey_short(const cx_skey* k) { return (k->b[15] & 0x80) != 0; }
+/* The key `s` would be, to look for: a short one in place, and a long one pointing at `s`'s own
+ * bytes. A short one's bytes are read as words that overlap, never past its end. */
+CX_INLINE cx_skey cx_skey_probe(cx_str s) {
+    cx_skey k;
+    cx_usize n = s.len;
+    const cx_u8* p = s.ptr;
+    if (n > CX_SKEY_SHORT) {
+        k.h.ptr = (cx_u8*)p;
+        k.h.len = n;
+        return k;
+    }
+    cx_u64 lo = 0, hi = 0;
+    if (n >= 8) {
+        __builtin_memcpy(&lo, p, 8);
+        if (n > 8) {
+            __builtin_memcpy(&hi, p + n - 8, 8);
+            hi >>= 8 * (16 - n);
+        }
+    } else if (n >= 4) {
+        cx_u32 a, b;
+        __builtin_memcpy(&a, p, 4);
+        __builtin_memcpy(&b, p + n - 4, 4);
+        lo = (cx_u64)a | ((cx_u64)b << (8 * (n - 4)));
+    } else if (n) {
+        lo = (cx_u64)p[0] | ((cx_u64)p[n >> 1] << (8 * (n >> 1))) | ((cx_u64)p[n - 1] << (8 * (n - 1)));
+    }
+    k.w[0] = lo;
+    k.w[1] = hi | ((cx_u64)(0x80 | n) << 56);
+    return k;
+}
+/* Whether the key in a slot, `k`, is the one `q`, from `cx_skey_probe`, is for. A short key and a
+ * long one never have the same last word: one's top byte has 0x80 set, and the other's is 0. */
+CX_INLINE cx_bool cx_skey_eq(const cx_skey* k, const cx_skey* q) {
+    if (k->w[1] != q->w[1]) return 0;
+    if (cx_skey_short(q)) return k->w[0] == q->w[0];
+    return __builtin_memcmp(k->h.ptr, q->h.ptr, q->h.len) == 0;
+}
+/* The key's text, where it is: in the key for a short one. */
+CX_INLINE cx_str cx_skey_str(const cx_skey* k) {
+    cx_str s;
+    if (cx_skey_short(k)) {
+        s.ptr = k->b;
+        s.len = k->b[15] & 0x7f;
+    } else {
+        s.ptr = k->h.ptr;
+        s.len = k->h.len;
+    }
+    return s;
+}
+/* A view of the key, for a loop or a lookup to hand out: a `String` that doesn't own its bytes. */
+CX_INLINE cx_String cx_skey_view(const cx_skey* k) { return cx_str_view(cx_skey_str(k)); }
+/* A long key from `s`, which it takes. */
+CX_FN(cx_skey, cx_skey_long, (cx_String s));
+/* The key a table keeps for `s`, which it takes: a short one's bytes are copied into it and its
+ * buffer freed. */
+CX_INLINE cx_skey cx_skey_own(cx_String s) {
+    if (s.len > CX_SKEY_SHORT) return cx_skey_long(s);
+    cx_skey k = cx_skey_probe(cx_sv(s));
+    cx_drop_String(&s);
+    return k;
+}
+CX_INLINE void cx_drop_skey(cx_skey* k) {
+    if (!cx_skey_short(k)) cx_free(k->h.ptr, k->h.len);
+}
+CX_INLINE cx_skey cx_copy_skey(const cx_skey* k) {
+    if (cx_skey_short(k)) return *k;
+    cx_skey r;
+    r.h.ptr = (cx_u8*)cx_alloc(k->h.len);
+    __builtin_memcpy(r.h.ptr, k->h.ptr, k->h.len);
+    r.h.len = k->h.len;
+    return r;
+}
+/* The key as a `String` of its own, for one taken out of its table, which then drops nothing. */
+CX_INLINE cx_String cx_skey_take(const cx_skey* k) {
+    if (cx_skey_short(k)) return cx_string_from(cx_skey_str(k));
+    cx_String s = {k->h.ptr, k->h.len, k->h.len};
+    return s;
+}
 /* `s.interned()`: a `String` with a capacity of 0, as a literal's, sharing one copy of a short
  * text that's never freed with every other interned string of it, or a copy past the limits. */
 CX_FN(cx_String, cx_string_interned, (cx_str s));

@@ -1189,7 +1189,7 @@ private:
     // Slot `i` of a `Map`'s, a `Set`'s or a linked table's `tab` (`m->` or `v.`), whose slots end
     // where its control bytes start (CLX-234).
     std::string own_slot(const Type* t, const std::string& tab, const std::string& i) {
-        return "CX_SLOT(" + ctype(slot_type(t)) + ", " + tab + "ctrl, " + tab + "mask, " + i + ")";
+        return "CX_SLOT(" + slot_ctype(t) + ", " + tab + "ctrl, " + tab + "mask, " + i + ")";
     }
     // A linked table's list, after its control bytes (D109).
     static std::string links(const std::string& tab) { return "cx_lk_links(" + tab + "ctrl, " + tab + "mask)"; }
@@ -1222,6 +1222,44 @@ private:
     }
     // What a slot holds: a map's `(K, V)`, or a set's value.
     static Type* slot_type(const Type* t) { return t->kind == TypeKind::map ? t->entry : t->elem; }
+
+    // A `Map` or `Set` of Calx's own, or a linked one, keyed by `String` keeps each key as a
+    // `cx_skey`, 16 bytes that hold a short key's text in place (CLX-316). A set's slot is the key,
+    // and a map's a struct of the key and the value, `.f0` and `.f1`, as the entry's are.
+    static bool skey(const Type* t) { return own_table(t) && str_key(t); }
+    std::string slot_ctype(const Type* t) {
+        if (!skey(t)) return ctype(slot_type(t));
+        return t->kind == TypeKind::map ? ctype(t) + "_kv" : std::string("cx_skey");
+    }
+    // Whether a slot owns nothing, so it's copied and dropped as bytes.
+    bool slot_plain(const Type* t) { return !skey(t) && is_copy(slot_type(t)); }
+    // Dropping the slot at `at`, and a copy of the one at `from`.
+    std::string drop_slot(const Type* t, const std::string& at) {
+        if (!skey(t)) return drop_fn(slot_type(t)) + "(&" + at + ");";
+        if (t->kind == TypeKind::set) return "cx_drop_skey(&" + at + ");";
+        std::string s = "cx_drop_skey(&" + at + ".f0);";
+        if (!is_copy(t->elem)) s += " " + drop_fn(t->elem) + "(&" + at + ".f1);";
+        return s;
+    }
+    std::string copy_slot(const Type* t, const std::string& from) {
+        if (!skey(t)) return copy_fn(slot_type(t)) + "(&" + from + ")";
+        if (t->kind == TypeKind::set) return "cx_copy_skey(&" + from + ")";
+        std::string v = is_copy(t->elem) ? from + ".f1" : copy_fn(t->elem) + "(&" + from + ".f1)";
+        return "((" + slot_ctype(t) + "){ .f0 = cx_copy_skey(&" + from + ".f0), .f1 = " + v + " })";
+    }
+    // A slot's key `k`, from `slot_key`, as a lookup has it, its hash, and as a `String`: a view
+    // for a String key.
+    std::string key_lookup(const Type* t, const std::string& k) { return skey(t) ? "cx_skey_str(&" + k + ")" : as_lookup(t, k); }
+    std::string key_hash(const Type* t, const std::string& k) {
+        return skey(t) ? "cx_hash_str(cx_skey_str(&" + k + "))" : hash_value(table_key(t), k);
+    }
+    static std::string key_value(const Type* t, const std::string& k) { return skey(t) ? "cx_skey_view(&" + k + ")" : k; }
+    // What a loop sees in the slot `s`: a map's entry, with a view of a String key.
+    std::string slot_value(const Type* t, const std::string& s) {
+        if (!skey(t)) return s;
+        if (t->kind == TypeKind::set) return key_value(t, s);
+        return "((" + ctype(t->entry) + "){ " + key_value(t, s + ".f0") + ", " + s + ".f1 })";
+    }
     // The key in the slot `s`.
     static std::string slot_key(const Type* t, const std::string& s) { return t->kind == TypeKind::map ? s + ".f0" : s; }
     // A `String` key is looked up as a `cx_str`, so a lookup never makes a `String`.
@@ -1366,7 +1404,7 @@ private:
         return {
             {"$find", table_fn("find", t)}, {"$grow", table_fn("grow", t)}, {"$putend", table_fn("putend", t)}, {"$put", table_fn("put", t)},
             {"$clear", table_fn("clear", t)}, {"$reserve", table_fn("reserve", t)}, {"$T", ctype(t)},
-            {"$S", ctype(slot_type(t))}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
+            {"$S", slot_ctype(t)}, {"$KL", lookup_ctype(t)}, {"$K", ctype(table_key(t))},
             {"$V", map ? ctype(t->elem) : std::string()},
         };
     }
@@ -1583,7 +1621,9 @@ private:
         if (t->table == TableKind::fastutil) return otable_decls(t);
         if (t->table == TableKind::java) return jtable_decls(t);
         bool map = t->kind == TypeKind::map;
-        return fill(std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
+        // A map keyed by String: its slot, the key and the value (CLX-316).
+        std::string kv = skey(t) && map ? "typedef struct $S { cx_skey f0; $V f1; } $S;\n" : "";
+        return fill(kv + std::string("CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h);\n"
                                 "static void $grow($T* m, cx_usize buckets);\n") +
                         (map ? std::string(inline_put(t) ? "CX_INLINE" : "static inline") + " void $put($T* m, $K k, $V v);\n"
                              : "static inline void $put($T* m, $K k);\n") +
@@ -1608,12 +1648,18 @@ private:
         if (t->table == TableKind::java) return jtable_bodies(t);
         bool map = t->kind == TypeKind::map, linked = t->table == TableKind::linked;
         const Type* k = table_key(t);
-        const Type* slot = slot_type(t);
+        bool sk = skey(t);
         std::string at_i = own_slot(t, "m->", "i"), at_j = own_slot(t, "m->", "j");
-        std::string eq = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_i) + "), k)" : equal(k, slot_key(t, at_i), "k");
-        std::string eqj = str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_j) + "), cx_sv(k))" : equal(k, slot_key(t, at_j), "k");
-        std::string drop_slots = is_copy(slot) ? std::string() : each_full("m->", "    ", "        " + drop_fn(slot) + "(&" + at_i + ");\n");
-        std::string move_slot = "            cx_u64 h = " + hash_value(k, slot_key(t, at_i)) +
+        // A String key is compared with the key it would be, worked out once for the lookup
+        // (CLX-316).
+        std::string eq = sk          ? "cx_skey_eq(&" + slot_key(t, at_i) + ", &q)"
+                         : str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_i) + "), k)"
+                                      : equal(k, slot_key(t, at_i), "k");
+        std::string eqj = sk          ? "cx_skey_eq(&" + slot_key(t, at_j) + ", &q)"
+                          : str_key(t) ? "cx_str_eq(cx_sv(" + slot_key(t, at_j) + "), cx_sv(k))"
+                                       : equal(k, slot_key(t, at_j), "k");
+        std::string drop_slots = slot_plain(t) ? std::string() : each_full("m->", "    ", "        " + drop_slot(t, at_i) + "\n");
+        std::string move_slot = "            cx_u64 h = " + key_hash(t, slot_key(t, at_i)) +
                                 ";\n            cx_usize j = cx_table_free_slot(ctrl, mask, h);\n"
                                 "            cx_table_set(ctrl, mask, j, cx_table_tag(h));\n"
                                 "            CX_SLOT($S, ctrl, mask, j) = " + at_i + ";\n";
@@ -1650,7 +1696,7 @@ private:
                                             : "static inline void $put($T* m, $params) {\n";
             s += R"(    cx_u64 h = $hash;
     cx_u8 tag = cx_table_tag(h);
-    cx_usize pos = (cx_usize)h & m->mask, stride = 0, i = CX_NOT_FOUND;
+$probeput    cx_usize pos = (cx_usize)h & m->mask, stride = 0, i = CX_NOT_FOUND;
     // One probe finds the key, or the first free slot on the way to where it would be.
     for (;;) {
         const cx_u8* g = m->ctrl + pos;
@@ -1686,7 +1732,10 @@ $replace)";
         auto names = table_names(t);
         names.insert(names.begin(), {
             {"$eqj", eqj}, {"$eq", eq}, {"$hash", hash_value(k, "k")}, {"$lookup", as_lookup(t, "k")}, {"$replace", replace},
-            {"$dropall", drop_slots}, {"$params", map ? "$K k, $V v" : "$K k"}, {"$new", map ? "($S){ .f0 = k, .f1 = v }" : "k"},
+            {"$probeput", sk ? "    cx_skey q = cx_skey_probe(cx_sv(k));\n" : ""},
+            {"$probe", sk ? "    cx_skey q = cx_skey_probe(k);\n" : ""},
+            {"$dropall", drop_slots}, {"$params", map ? "$K k, $V v" : "$K k"},
+            {"$new", map ? (sk ? "($S){ .f0 = cx_skey_own(k), .f1 = v }" : "($S){ .f0 = k, .f1 = v }") : (sk ? "cx_skey_own(k)" : "k")},
             {"$moveall", move_slots}, {"$xnew", table_extra(t, "buckets")}, {"$xold", table_extra(t, "m->mask + 1")},
             // A linked table's list's slots are `cx_u32`s, and its head starts empty.
             {"$growhead", linked ? "    if (buckets > (cx_usize)1 << 31) cx_panic_capacity();\n" : ""},
@@ -1695,7 +1744,7 @@ $replace)";
         });
         return fill(R"(CX_INLINE cx_usize $find(const $T* m, $KL k, cx_u64 h) {
     cx_u8 tag = cx_table_tag(h);
-    cx_usize pos = (cx_usize)h & m->mask, stride = 0;
+$probe    cx_usize pos = (cx_usize)h & m->mask, stride = 0;
     for (;;) {
         const cx_u8* g = m->ctrl + pos;
         for (cx_u32 bits = cx_group_match(g, tag); bits; bits &= bits - 1) {
@@ -2444,13 +2493,23 @@ $dropall    m->len = 0;
         // A linked table's key comes off its list first (D109).
         std::string erase = (t->table == TableKind::linked ? "cx_lk_unlink(" + links(p + "->") + ", " + i + "); " : std::string()) + p +
                             "->growth += cx_table_erase(" + p + "->ctrl, " + p + "->mask, " + i + "); " + p + "->len--; ";
+        // The key `a` that goes in, before the value `later`. A String key that's `x.copy()` goes
+        // in as a view of `x`, which the table copies into its slot as it takes it: a short key
+        // has no buffer made and freed (CLX-316). Only where nothing between can change `x`: a
+        // set's key, or a map's whose value has no effects.
+        auto key_in = [&](Expr* a, Expr* later) {
+            bool copied = skey(t) && a->kind == ExprKind::call && a->call == CallKind::builtin_method && a->bmethod == BMethod::copy &&
+                          a->callee->lhs->type->kind == TypeKind::string && !effects(later);
+            if (!copied) return held_key(a, k, later, key);
+            return HeldKey{"cx_String " + key + " = cx_str_view(cx_sv(*" + address(a->callee->lhs) + ")); ", std::string()};
+        };
         switch (e->bmethod) {
             // A linked table's counts are `cx_u32`s.
             case BMethod::len: return "((cx_usize)(" + expr(recv) + ").len)";
             case BMethod::is_empty: return "((" + expr(recv) + ").len == 0)";
             case BMethod::capacity: return view + "(cx_usize)" + p + "->len + " + p + "->growth; })";
             case BMethod::insert: {
-                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                HeldKey hk = key_in(e->args[0].value, map ? e->args[1].value : nullptr);
                 std::string s = head + hk.first;
                 if (!map) return s + table_fn("put", t) + "(" + p + ", " + key + "); })";
                 std::string v = tmp();
@@ -2465,7 +2524,9 @@ $dropall    m->len = 0;
             }
             case BMethod::remove: {
                 std::string s = head + found(e->args[0].value);
-                std::string drop_key = is_copy(k) ? std::string() : drop_fn(k) + "(&" + slot_key(t, slot) + "); ";
+                std::string drop_key = skey(t)     ? "cx_drop_skey(&" + slot_key(t, slot) + "); "
+                                       : is_copy(k) ? std::string()
+                                                    : drop_fn(k) + "(&" + slot_key(t, slot) + "); ";
                 if (!map) return s + "if (" + i + " != CX_NOT_FOUND) { " + drop_key + erase + "} })";
                 std::string o = ctype(e->type), r = tmp();
                 return s + o + " " + r + " = {0}; if (" + i + " != CX_NOT_FOUND) { " + r + ".v = " + slot + ".f1; " + r +
@@ -2480,12 +2541,16 @@ $dropall    m->len = 0;
                 std::string o = ctype(e->type), at = tmp();
                 return view + "cx_u32 " + at + " = cx_lk_end(" + p + "->ctrl, " + p + "->mask, " +
                        (e->bmethod == BMethod::first ? "1" : "0") + "); " + at + " ? (" + o + "){ .v = " +
-                       slot_key(t, own_slot(t, p + "->", at + " - 1")) + ", .has = 1 } : (" + o + "){0}; })";
+                       key_value(t, slot_key(t, own_slot(t, p + "->", at + " - 1"))) + ", .has = 1 } : (" + o + "){0}; })";
             }
             case BMethod::pop_first: case BMethod::pop_last: {
+                // A String key comes out as a string of its own (CLX-316).
                 std::string o = ctype(e->type), r = tmp();
+                std::string taken = !skey(t) ? slot
+                                    : map    ? "(" + ctype(t->entry) + "){ cx_skey_take(&" + slot + ".f0), " + slot + ".f1 }"
+                                             : "cx_skey_take(&" + slot + ")";
                 return head + o + " " + r + " = {0}; cx_usize " + i + " = (cx_usize)cx_lk_end(" + p + "->ctrl, " + p + "->mask, " +
-                       (e->bmethod == BMethod::pop_first ? "1" : "0") + ") - 1; if (" + i + " != CX_NOT_FOUND) { " + r + ".v = " + slot +
+                       (e->bmethod == BMethod::pop_first ? "1" : "0") + ") - 1; if (" + i + " != CX_NOT_FOUND) { " + r + ".v = " + taken +
                        "; " + r + ".has = 1; " + erase + "} " + r + "; })";
             }
             case BMethod::move_to_first: case BMethod::move_to_last: {
@@ -2495,7 +2560,7 @@ $dropall    m->len = 0;
             }
             case BMethod::insert_first: case BMethod::insert_last: {
                 std::string front = e->bmethod == BMethod::insert_first ? "1" : "0";
-                HeldKey hk = held_key(e->args[0].value, k, map ? e->args[1].value : nullptr, key);
+                HeldKey hk = key_in(e->args[0].value, map ? e->args[1].value : nullptr);
                 std::string s = head + hk.first;
                 if (!map) return s + table_fn("putend", t) + "(" + p + ", " + key + ", " + front + "); })";
                 std::string v = tmp();
@@ -2584,8 +2649,8 @@ $dropall    m->len = 0;
                 }
                 // The same keys, each with an equal value, whatever order they're in.
                 std::string key = slot_key(t, own_slot(t, "a.", "i"));
-                std::string body = "        cx_usize j = " + table_fn("find", t) + "(&b, " + as_lookup(t, key) + ", " +
-                                   hash_value(table_key(t), key) + ");\n        if (j == CX_NOT_FOUND) return 0;\n";
+                std::string body = "        cx_usize j = " + table_fn("find", t) + "(&b, " + key_lookup(t, key) + ", " + key_hash(t, key) +
+                                   ");\n        if (j == CX_NOT_FOUND) return 0;\n";
                 if (t->kind == TypeKind::map) {
                     body += "        if (!" + equal(t->elem, own_slot(t, "a.", "i") + ".f1", own_slot(t, "b.", "j") + ".f1") + ") return 0;\n";
                 }
@@ -2657,7 +2722,7 @@ $dropall    m->len = 0;
                 // `{a: 1, b: 2}` and `{1, 2}`, in the order a loop goes.
                 std::string at = slot_at(t, "v.", "i");
                 std::string body = "        if (!first) cx_print_str(" + str_const(", ") + ");\n        first = 0;\n        " +
-                                   show_value(table_key(t), slot_key(t, at)) + "\n";
+                                   show_value(table_key(t), key_value(t, slot_key(t, at))) + "\n";
                 if (t->kind == TypeKind::map) {
                     body += "        cx_print_str(" + str_const(": ") + ");\n        " + show_value(t->elem, at + ".f1") + "\n";
                 }
@@ -2828,8 +2893,8 @@ $dropall    m->len = 0;
                 }
                 // A table that was never filled, or was moved out of, has no slots.
                 s += "    if (!p->mask) return;\n";
-                if (!is_copy(slot_type(t))) s += each_full("p->", "    ", "        " + drop_fn(slot_type(t)) + "(&" + own_slot(t, "p->", "i") + ");\n");
-                s += "    cx_table_free(p->ctrl, p->mask + 1, sizeof(" + ctype(slot_type(t)) + "), " + table_extra(t, "p->mask + 1") + ");\n";
+                if (!slot_plain(t)) s += each_full("p->", "    ", "        " + drop_slot(t, own_slot(t, "p->", "i")) + "\n");
+                s += "    cx_table_free(p->ctrl, p->mask + 1, sizeof(" + slot_ctype(t) + "), " + table_extra(t, "p->mask + 1") + ");\n";
                 break;
             case TypeKind::struct_:
                 for (const FieldDecl& f : t->item->fields) part_drop(f.resolved, "p->" + ident(f.name));
@@ -2903,14 +2968,14 @@ $dropall    m->len = 0;
                 }
                 // The control bytes, and a linked table's list after them: the same slots, so the
                 // same links (D109).
-                std::string e = ctype(st), extra = table_extra(t, "p->mask + 1");
+                std::string e = slot_ctype(t), extra = table_extra(t, "p->mask + 1");
                 s += "    if (!p->mask) return r;\n    r.ctrl = cx_table_alloc(p->mask + 1, sizeof(" + e + "), " + extra +
                      ");\n    __builtin_memcpy(r.ctrl, p->ctrl, p->mask + 1 + CX_GROUP + " + extra + ");\n";
-                if (is_copy(st)) {
+                if (slot_plain(t)) {
                     s += "    __builtin_memcpy(r.ctrl - (p->mask + 1) * sizeof(" + e + "), p->ctrl - (p->mask + 1) * sizeof(" + e + "), (p->mask + 1) * sizeof(" +
                          e + "));\n";
                 } else {
-                    s += each_full("p->", "    ", "        " + own_slot(t, "r.", "i") + " = " + copy_fn(st) + "(&" + own_slot(t, "p->", "i") + ");\n");
+                    s += each_full("p->", "    ", "        " + own_slot(t, "r.", "i") + " = " + copy_slot(t, own_slot(t, "p->", "i")) + ";\n");
                 }
                 break;
             }
@@ -4128,8 +4193,10 @@ $dropall    m->len = 0;
                 indent_++;
             }
             // `m.values()`: the value of each key's slot, without the key (CLX-71). A sorted
-            // table's are beside its keys in the leaf.
+            // table's are beside its keys in the leaf. A String key is handed out as a view
+            // (CLX-316).
             if (s->map_values) elem_at = map_value_at(at, elem_at);
+            else if (is_table(at)) elem_at = slot_value(at, elem_at);
             // An element that owns memory is a view in the body, which can't change the list it's
             // in, so the name points at it where it is rather than copying it each pass, as a
             // view parameter does: a struct of several fields copied to the stack each pass cost a
@@ -4266,6 +4333,7 @@ $dropall    m->len = 0;
                 elem_at = own_slot(tt, "cx__at->", "cx__i");
             }
             if (s->map_values) elem_at = map_value_at(tt, elem_at);
+            else if (table) elem_at = slot_value(tt, elem_at);
             if (elements && s->local && s->iter_mut) {
                 line(ctype(elem) + "* " + local_name(s->local) + " = &" + elem_at + ";");
             } else if (elements && s->local) {

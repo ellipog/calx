@@ -1497,6 +1497,21 @@ cx_String cx_string_from(cx_str s) {
     return r;
 }
 
+/* A long key takes the string's buffer, cut to the text's length so the key knows its size, or a
+ * copy of bytes the string doesn't own: a literal's, an interned string's or a view's (CLX-316). */
+cx_skey cx_skey_long(cx_String s) {
+    if (s.len >> 56) cx_panic_capacity();
+    cx_skey k;
+    if ((cx_i64)s.cap > 0) {
+        k.h.ptr = s.cap == s.len ? s.ptr : (cx_u8*)cx_realloc(s.ptr, s.cap, s.len);
+    } else {
+        k.h.ptr = (cx_u8*)cx_alloc(s.len);
+        memcpy(k.h.ptr, s.ptr, s.len);
+    }
+    k.h.len = s.len;
+    return k;
+}
+
 /* `s.interned()` (CLX-202): a string that shares one copy of its text with every other interned
  * string of that text, as a literal's string shares the literal. Its capacity is 0, so dropping it
  * frees nothing, a copy of it shares it, and a push copies the bytes first. The copies are never
