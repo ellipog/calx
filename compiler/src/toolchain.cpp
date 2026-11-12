@@ -469,8 +469,10 @@ bool find_toolchain(Toolchain& tc, std::string& error) {
         tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("lld-link");
     }
 #else
-    tc.lld_beside = (dir / "ld.lld").string();
-    tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path("ld.lld");
+    // clang's -fuse-ld=lld starts lld as ld64.lld for macOS, with ld64's options (CLX-279).
+    const char* lld_name = kTarget.os == Os::macos ? "ld64.lld" : "ld.lld";
+    tc.lld_beside = (dir / lld_name).string();
+    tc.lld_path = plain_file(tc.lld_beside) ? tc.lld_beside : find_on_path(lld_name);
 #endif
     tc.lld = !tc.lld_path.empty();
     auto size = fs::file_size(clang_path, ec);
@@ -1818,6 +1820,10 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
         // The driver always names the static C runtime when linking; the objects name the DLL one.
         if (mode == BuildMode::debug) link_flags.push_back("-Wl,-nodefaultlib:libcmt");
     }
+#elif defined(__APPLE__)
+    // ld64 drops what nothing reaches with -dead_strip, as ld.lld does with --gc-sections, and the
+    // C library holds the math library (CLX-279).
+    link_flags.push_back("-Wl,-dead_strip");
 #else
     link_flags.push_back("-lm");
     link_flags.push_back("-Wl,--gc-sections");
@@ -1845,6 +1851,15 @@ BuildResult build_program(const Toolchain& tc, const std::vector<std::string>& c
             }
             link_flags.push_back("-Xlinker");
             link_flags.push_back("/lldltocache:" + lto_cache);
+        }
+#elif defined(__APPLE__)
+        // ld64.lld takes ld64's name for the cache's folder, and lld's for its policy.
+        link_flags.push_back("-O3");
+        link_flags.push_back(release_cpu_flag(kTarget));
+        for (const std::string& f : {std::string("--thinlto-cache-policy=cache_size_bytes=512m"), std::string("-cache_path_lto"),
+                                     lto_cache}) {
+            link_flags.push_back("-Xlinker");
+            link_flags.push_back(f);
         }
 #else
         link_flags.push_back("-O3");
