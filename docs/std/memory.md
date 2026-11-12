@@ -48,6 +48,8 @@ With one value in 16 of a size kept and the rest freed, so every page has some i
 
 A thread that ends shares the free blocks it kept in the same way, but not once the program is exiting. By then the system may have stopped the other threads wherever they were, one of them perhaps holding a size's lock, and the memory goes back with the process anyway. On Windows, a program whose `main` returned could hang on its way out, its last thread spinning on a lock a stopped thread held. A server stopped while it was generating hung on the first of 25 tries.
 
+On macOS a thread that ends shares them before the system frees the memory its thread-local variables were in, since the blocks it kept are listed there. Shared from a pthread key's destructor, as on Linux, they were read from that memory after macOS had freed it, and once something else had been allocated there, the next thread to take those blocks crashed: in 26 runs of 5,000 of a test that sends blocks between 4 threads while `trim` runs, and in none since.
+
 What a busy thread keeps of each size was 256 KiB until it was cut to 64 KiB. Generating a world with 31 threads, a server's peak went from 1,204 MB to 1,132 MB, and it generated as fast; keeping less than 64 KiB saved little more.
 
 What `trim` gives back depends on what every thread has freed, and when, so it doesn't say. A program's results never depend on it. Debug builds, and builds with AddressSanitizer, use `malloc`, and there `trim` does nothing.

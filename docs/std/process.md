@@ -134,8 +134,8 @@ Reading its output panics if the output isn't `Stdio.Pipe`, and writing panics i
 | `out.status: Status` | How it ended |
 | `out.stdout: List<u8>`, `out.stderr: List<u8>` | What it wrote to each stream that was `Pipe` |
 | `out.text() -> String`, `out.error_text() -> String` | The same as text, each byte that doesn't start valid UTF-8 becoming U+FFFD |
-| `status.code: i32?` | The status it exited with, or `none` if it was killed: by `kill`, at its timeout, or on Linux by a signal. On Windows it's all 32 bits, so an access violation is `-1073741819`, `0xC0000005` |
-| `status.signal: i32?` | On Linux, the signal that ended it, such as 9 for `SIGKILL` |
+| `status.code: i32?` | The status it exited with, or `none` if it was killed: by `kill`, at its timeout, or on Linux and macOS by a signal. On Windows it's all 32 bits, so an access violation is `-1073741819`, `0xC0000005` |
+| `status.signal: i32?` | On Linux and macOS, the signal that ended it, such as 9 for `SIGKILL` or 11 for `SIGSEGV` |
 | `status.timed_out: bool` | Whether its timeout ran out, so it was killed |
 | `status.success() -> bool` | Whether it exited with 0 |
 | `unsafe status.usage() -> Usage` | What it used in all, as the system recorded it when the program ended: see [What it used](#what-it-used) |

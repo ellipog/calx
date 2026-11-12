@@ -644,10 +644,12 @@ static cx_usize trim_class(unsigned c, int with_holes) {
     cx_usize bits_bytes = 0, gone_bytes = 0;
     cx_usize holed = 0;
     lock(&s->lock);
+    /* Pages taken since `most` was read can have blocks in the lists by now, but are past the end
+     * of `seen` and `slot`: they're left as they are, for the next trim (CLX-294). */
     for (cx_u32 i = 0; i < s->n; i++) {
         for (void* q = s->b[i].head; q; q = *(void**)q) {
             cx_u32 n = page_number(q);
-            if (n == NO_PAGE || __atomic_load_n(&page_of[n].state, __ATOMIC_ACQUIRE) != PAGE_SEALED) continue;
+            if (n >= most || __atomic_load_n(&page_of[n].state, __ATOMIC_ACQUIRE) != PAGE_SEALED) continue;
             if (page_of[n].seen++ == 0) seen[nseen++] = n;
         }
     }
@@ -674,7 +676,7 @@ static cx_usize trim_class(unsigned c, int with_holes) {
         for (cx_u32 i = 0; i < s->n; i++) {
             for (void* q = s->b[i].head; q; q = *(void**)q) {
                 cx_u32 n = page_number(q);
-                if (n == NO_PAGE || !slot[n]) continue;
+                if (n >= most || !slot[n]) continue;
                 cx_u32 b = (cx_u32)((cx_usize)((cx_u8*)q - (arena + ((cx_usize)n << PAGE_SHIFT))) / size);
                 free_bits[(cx_usize)(slot[n] - 1) * bits_each + b / 8] |= (cx_u8)(1u << (b % 8));
             }
@@ -709,7 +711,7 @@ static cx_usize trim_class(unsigned c, int with_holes) {
                 void* next = *(void**)q;
                 cx_u32 n = page_number(q);
                 int keep = n == NO_PAGE || page_of[n].state != PAGE_FREE;
-                if (keep && n != NO_PAGE && slot && slot[n]) {
+                if (keep && n < most && slot && slot[n]) {
                     cx_u32 b = (cx_u32)((cx_usize)((cx_u8*)q - (arena + ((cx_usize)n << PAGE_SHIFT))) / size);
                     keep = !(block_span(b, size) & gone[slot[n] - 1]);
                 }
@@ -822,6 +824,17 @@ static void NTAPI thread_ends(void* h) {
     if (shutting_down && shutting_down()) return;
     give_back((heap*)h);
 }
+#elif defined(__APPLE__)
+/* macOS keeps a thread's _Thread_local variables, `tls` among them, in memory that dyld frees in
+ * a pthread key destructor of its own, which runs before one this file would make: giving back
+ * from there read the freed heap, and once malloc had reused it, shared garbage as free blocks,
+ * which crashed the next thread to take them, or died in `seal` itself (CLX-294). What `_tlv_atexit` is given runs before that memory goes, as C++'s thread_local
+ * destructors do. The main thread's runs as the process exits, when what it would give back
+ * goes with the process, as on Linux, where it doesn't run at all. */
+extern void _tlv_atexit(void (*fn)(void*), void* arg);
+static void thread_ends(void* h) {
+    if (h && !pthread_main_np()) give_back((heap*)h);
+}
 #else
 static pthread_key_t key;
 static void thread_ends(void* h) {
@@ -840,7 +853,7 @@ static void know(heap* h) {
             HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
             if (ntdll) shutting_down = (shutdown_check)(void*)GetProcAddress(ntdll, "RtlDllShutdownInProgress");
             fls_index = FlsAlloc(thread_ends);
-#else
+#elif !defined(__APPLE__)
             pthread_key_create(&key, thread_ends);
 #endif
             __atomic_store_n(&ready, 1, __ATOMIC_RELEASE);
@@ -849,6 +862,8 @@ static void know(heap* h) {
     }
 #ifdef _WIN32
     if (fls_index != FLS_OUT_OF_INDEXES) FlsSetValue(fls_index, h);
+#elif defined(__APPLE__)
+    _tlv_atexit(thread_ends, h);
 #else
     pthread_setspecific(key, h);
 #endif

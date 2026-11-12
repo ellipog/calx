@@ -562,12 +562,39 @@ fn find_root() -> String {
     process.exit(2)
 }
 
+// The names of the signals a crash or a kill ends a program with, as " (SIGSEGV)"; their numbers
+// are the same on Linux and macOS, but for SIGBUS, which is 7 on Linux and 10 on macOS.
+fn signal_name(s: i32) -> String {
+    let name = match s {
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        15 => "SIGTERM",
+        7 => if env.os() == "macos" { "SIGEMT" } else { "SIGBUS" },
+        10 => if env.os() == "macos" { "SIGBUS" } else { "SIGUSR1" },
+        _ => "",
+    }
+    return if name.is_empty() { String() } else { " ({name})" }
+}
+
 fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<String>) {
     if o.status.timed_out {
         problems.push("still running after {RUN_SECONDS} seconds, so it was stopped")
         return
     }
     let code = o.status.code ?? -1
+    // A program with no status was killed: on Linux and macOS, by the signal it names, so a crash
+    // says so instead of "exit status -1" (CLX-294).
+    let ended = match o.status.code {
+        some(c) => "status {c}",
+        none => match o.status.signal {
+            some(s) => "killed by signal {s}{signal_name(s)}",
+            none => String("killed, with no status"),
+        },
+    }
     let stdout = o.text()
     var stderr = o.error_text()
     if not t.files.is_empty() {
@@ -577,7 +604,7 @@ fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<S
     let err_lines = stderr.lines()
     if let pan = t.panics {
         if code != 101 {
-            problems.push("expected a panic (status 101), got status {code}")
+            problems.push("expected a panic (status 101), got {ended}")
         }
         if let place = p.place.captures(pan.1) {
             let want_place = place.get(1) ?? String()
@@ -634,7 +661,7 @@ fn check_run(t: Test, job: Job, o: Output, p: mut Patterns, problems: mut List<S
         }
     } else if code != t.status {
         let expected = if t.status != 0 { ", expected {t.status}" } else { String() }
-        problems.push("exit status {code}{expected}")
+        problems.push("exit {ended}{expected}")
     }
     let got = stdout.lines()
     if got != t.out {
