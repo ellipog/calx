@@ -53,6 +53,7 @@
 #endif
 #if defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_acle.h>
+#include <arm_neon.h>
 #define CX_ARM 1
 #endif
 
@@ -198,6 +199,48 @@ __attribute__((target("avx2"))) static cx_u32 adler32_avx2(cx_u32 a, cx_u32 b, c
 }
 #endif
 
+#ifdef CX_ARM
+/* CLX-281: Adler-32 32 bytes a step with NEON, which every Arm64 processor has. The weighted sum
+ * is worked out once a stretch rather than each step: each step adds its bytes to 32 column sums,
+ * in 16-bit lanes, and at the stretch's end column i is multiplied by 32 - i. The bytes' sum goes
+ * in 32-bit lanes and the sum of it before each step in another. A stretch is 256 steps, the most
+ * a column holds: 256 * 255 is under 2^16. */
+static cx_u32 adler32_neon(cx_u32 a, cx_u32 b, const cx_u8* p, cx_usize n, cx_usize* left) {
+    static const cx_u16 weight[32] = {32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+                                      16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+    while (n >= 32) {
+        cx_usize steps = n / 32 < 256 ? n / 32 : 256;
+        n -= steps * 32;
+        uint32x4_t sum = vdupq_n_u32(0), before = vdupq_n_u32(0);
+        uint16x8_t c0 = vdupq_n_u16(0), c1 = c0, c2 = c0, c3 = c0;
+        for (cx_usize k = 0; k < steps; k++) {
+            uint8x16_t v0 = vld1q_u8(p), v1 = vld1q_u8(p + 16);
+            before = vaddq_u32(before, sum);
+            sum = vpadalq_u16(sum, vpadalq_u8(vpaddlq_u8(v0), v1));
+            c0 = vaddw_u8(c0, vget_low_u8(v0));
+            c1 = vaddw_high_u8(c1, v0);
+            c2 = vaddw_u8(c2, vget_low_u8(v1));
+            c3 = vaddw_high_u8(c3, v1);
+            p += 32;
+        }
+        uint16x8_t w0 = vld1q_u16(weight), w1 = vld1q_u16(weight + 8), w2 = vld1q_u16(weight + 16), w3 = vld1q_u16(weight + 24);
+        uint32x4_t wt = vmull_u16(vget_low_u16(c0), vget_low_u16(w0));
+        wt = vmlal_high_u16(wt, c0, w0);
+        wt = vmlal_u16(wt, vget_low_u16(c1), vget_low_u16(w1));
+        wt = vmlal_high_u16(wt, c1, w1);
+        wt = vmlal_u16(wt, vget_low_u16(c2), vget_low_u16(w2));
+        wt = vmlal_high_u16(wt, c2, w2);
+        wt = vmlal_u16(wt, vget_low_u16(c3), vget_low_u16(w3));
+        wt = vmlal_high_u16(wt, c3, w3);
+        cx_u64 s = vaddvq_u32(sum), sb = vaddvq_u32(before), w = vaddvq_u32(wt);
+        b = (cx_u32)((b + (cx_u64)a * 32 * steps + 32 * sb + w) % 65521);
+        a = (cx_u32)((a + s) % 65521);
+    }
+    *left = n;
+    return b << 16 | a;
+}
+#endif
+
 /* Adler-32. 5552 bytes is the most that can be summed before the 32-bit sums could overflow, so
  * the remainders are taken once per 5552 bytes. */
 cx_u32 cx_zlib_adler32(cx_u32 adler, const cx_u8* p, cx_usize n) {
@@ -206,6 +249,13 @@ cx_u32 cx_zlib_adler32(cx_u32 adler, const cx_u8* p, cx_usize n) {
     if (n >= 64 && avx2()) {
         cx_usize left;
         cx_u32 r = adler32_avx2(a, b, p, n, &left);
+        p += n - left, n = left;
+        a = r & 0xffff, b = r >> 16;
+    }
+#elif defined(CX_ARM)
+    if (n >= 64) {
+        cx_usize left;
+        cx_u32 r = adler32_neon(a, b, p, n, &left);
         p += n - left, n = left;
         a = r & 0xffff, b = r >> 16;
     }

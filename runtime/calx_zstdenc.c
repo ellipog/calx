@@ -76,6 +76,8 @@ static cx_u64 zse_cycles[8];
 #endif
 #if defined(__SSE2__)
 #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
 #endif
 
 #define BLOCK_MAX ((cx_u32)1 << 17)
@@ -1730,6 +1732,26 @@ static inline cx_u64 row_tags(const cx_u8* tags, cx_u32 tag, cx_u32 rlog) {
     cx_u64 m = 0;
     for (cx_u32 k = 0; k < (1u << rlog); k += 16) m |= (cx_u64)(cx_u32)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)(tags + k)), t)) << k;
     return m;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    /* CLX-281: NEON has no movemask, so each equal byte keeps its own bit of eight, 1 to 128, and
+     * pairwise adds, ors here as no two bits meet, gather each eight bytes' into one: three
+     * rounds of them take 16 bytes to two, 32 to four and 64 to eight, in the row's order. */
+    const uint8x16_t t = vdupq_n_u8((cx_u8)tag);
+    const uint8x16_t bits = vreinterpretq_u8_u64(vdupq_n_u64(0x8040201008040201ull));
+    uint8x16_t a = vandq_u8(vceqq_u8(vld1q_u8(tags), t), bits);
+    if (rlog == 4) {
+        a = vpaddq_u8(a, a);
+        a = vpaddq_u8(a, a);
+        return vgetq_lane_u16(vreinterpretq_u16_u8(vpaddq_u8(a, a)), 0);
+    }
+    a = vpaddq_u8(a, vandq_u8(vceqq_u8(vld1q_u8(tags + 16), t), bits));
+    if (rlog == 5) {
+        a = vpaddq_u8(a, a);
+        return vgetq_lane_u32(vreinterpretq_u32_u8(vpaddq_u8(a, a)), 0);
+    }
+    uint8x16_t b = vpaddq_u8(vandq_u8(vceqq_u8(vld1q_u8(tags + 32), t), bits), vandq_u8(vceqq_u8(vld1q_u8(tags + 48), t), bits));
+    a = vpaddq_u8(a, b);
+    return vgetq_lane_u64(vreinterpretq_u64_u8(vpaddq_u8(a, a)), 0);
 #else
     cx_u64 m = 0;
     for (cx_u32 k = 0; k < (1u << rlog); k++) m |= (cx_u64)(tags[k] == tag) << k;
