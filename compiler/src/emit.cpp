@@ -5698,6 +5698,29 @@ $dropall    m->len = 0;
         return name;
     }
 
+    // Whether `ft`, given to `sort_by` on a list of floats `et`, is the closure `|a, b|
+    // a.total_cmp(b)`, 1, or `|a, b| b.total_cmp(a)`, 2, and nothing else, which the runtime sorts
+    // as their bits, five times as fast as the stable sort calling it (CLX-292); or 0.
+    static int total_cmp_sort(const Type* ft, const Type* et) {
+        if (ft->kind != TypeKind::closure || !is_float(et) || !ft->item) return 0;
+        const Item* c = ft->item;
+        if (c->params.size() != 2 || !c->body) return 0;
+        // A closure's expression is its body's value, or the one statement returning it.
+        const Expr* t = c->body->tail;
+        if (!t && c->body->stmts.size() == 1 && c->body->stmts[0]->kind == StmtKind::return_) t = c->body->stmts[0]->value;
+        else if (!t || c->body->stmts.size() != 0) return 0;
+        if (!t || t->kind != ExprKind::call || t->prim != PrimMethod::total_cmp || t->args.size() != 1 || !t->callee) return 0;
+        const Expr* r = t->callee->lhs;
+        const Expr* a = t->args[0].value;
+        if (!r || !a || r->kind != ExprKind::name || a->kind != ExprKind::name || !r->local || !a->local) return 0;
+        const Local* p0 = c->params[0].local;
+        const Local* p1 = c->params[1].local;
+        if (!p0 || !p1) return 0;
+        if (r->local == p0 && a->local == p1) return 1;
+        if (r->local == p1 && a->local == p0) return 2;
+        return 0;
+    }
+
     // `xs.map(|x| ...)` and the other methods of a list that call a closure on its elements: the
     // list, then the closure's captures, then a loop over the elements (CLX-98).
     std::string list_closure_method(Expr* e) {
@@ -5755,6 +5778,10 @@ $dropall    m->len = 0;
                 return out + ctype(e->type) + " " + r + " = {0}; " + loop + "if (" + call + ") { " + r + ".v = " + i + "; " + r +
                        ".has = 1; break; } " + r + "; })";
             case BMethod::sort_by: case BMethod::sort_by_key: {
+                // Floats by `total_cmp`, ascending or descending, are radix sorted as their bits.
+                if (int way = b == BMethod::sort_by ? total_cmp_sort(ft, et) : 0) {
+                    return out + "cx_sort_total_" + helper(et) + "(" + ptr + ", " + len + ", " + (way == 2 ? "1" : "0") + "); })";
+                }
                 std::string env = ft->kind == TypeKind::closure ? f : "(const void* const*)&" + f;
                 return out + sort_by_fn(e, ft, et) + "(" + ptr + ", " + len + ", " + location(e->span) + ", " + env + "); })";
             }

@@ -426,6 +426,10 @@ CX_FN(void, cx_sort_usize, (cx_usize* v, cx_usize n));
 CX_FN(void, cx_sort_char, (cx_char* v, cx_usize n));
 CX_FN(void, cx_sort_rune, (cx_rune* v, cx_usize n));
 CX_FN(void, cx_sort_bool, (cx_bool* v, cx_usize n));
+/* `xs.sort_by(|a, b| a.total_cmp(b))` on a list of floats, or `b.total_cmp(a)` with `descending`
+ * set, from calx_sort.c (CLX-292). */
+CX_FN(void, cx_sort_total_f32, (cx_f32* v, cx_usize n, cx_bool descending));
+CX_FN(void, cx_sort_total_f64, (cx_f64* v, cx_usize n, cx_bool descending));
 /* The capacity of a `String` that views bytes it doesn't own, which aren't a literal's: a part a
  * loop over `split` or `lines` gives. It's never freed, and `copy` copies it, where a capacity of 0,
  * a literal's, is shared. Only the top bit is set, so a drop's test costs what it did. */
@@ -1773,10 +1777,21 @@ CX_FLOAT_MINMAX(f64, __builtin_signbit)
 CX_INLINE cx_f32 cx_abs_f32(cx_f32 a) { return __builtin_fabsf(a); }
 CX_INLINE cx_f64 cx_abs_f64(cx_f64 a) { return __builtin_fabs(a); }
 /* Java's `Double.compare` and `Float.compare`, a total order: -0.0 comes before 0.0, and NaN after
- * everything, equal to itself. Values that `<` orders take the first two tests; for the rest,
- * every NaN is made the same, and the bits ordered as a signed integer, which puts -0.0 first. */
-#define CX_TOTAL_CMP(T, I, U, NAN_BITS)                                                      CX_INLINE int cx_total_cmp_##T(cx_##T a, cx_##T b) {                                        if (a < b) return -1;                                                                    if (a > b) return 1;                                                                     I x, y;                                                                                  __builtin_memcpy(&x, &a, sizeof x);                                                      __builtin_memcpy(&y, &b, sizeof y);                                                      if (a != a) x = (I)(U)NAN_BITS;                                                          if (b != b) y = (I)(U)NAN_BITS;                                                          return (x > y) - (x < y);                                                            }
-CX_TOTAL_CMP(f32, cx_i32, cx_u32, 0x7fc00000u)
-CX_TOTAL_CMP(f64, cx_i64, cx_u64, 0x7ff8000000000000ull)
+ * everything, equal to itself. Every NaN is made the same, and a negative value's bits but the
+ * sign are flipped, so the bits order as a signed integer as the values do, -0.0 first. With no
+ * branches, since a sort of random values would mispredict half of them (CLX-292). */
+#define CX_TOTAL_CMP(T, I, U, NAN_BITS, TOP)               \
+    CX_INLINE int cx_total_cmp_##T(cx_##T a, cx_##T b) {   \
+        I x, y;                                            \
+        __builtin_memcpy(&x, &a, sizeof x);                \
+        __builtin_memcpy(&y, &b, sizeof y);                \
+        x = a != a ? (I)(U)NAN_BITS : x;                   \
+        y = b != b ? (I)(U)NAN_BITS : y;                   \
+        x ^= (I)((U)(x >> TOP) >> 1);                      \
+        y ^= (I)((U)(y >> TOP) >> 1);                      \
+        return (x > y) - (x < y);                          \
+    }
+CX_TOTAL_CMP(f32, cx_i32, cx_u32, 0x7fc00000u, 31)
+CX_TOTAL_CMP(f64, cx_i64, cx_u64, 0x7ff8000000000000ull, 63)
 
 #endif

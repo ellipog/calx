@@ -191,6 +191,30 @@ Against Rust's `sort_by` on a `key` field, its stable sort, in the same setup, f
 | 1,000,000 in order | 0.76 | 1.02 |
 | 1,000,000 in reverse | 1.44 | 1.64 |
 
+### Sorting floats
+
+Floats have no `Order`, since `NaN` is neither less nor greater than anything ([comparing](comparing.md#order)), so a list of them is sorted with [`total_cmp`](floats.md#methods), which puts `-0.0` before `0.0` and every `NaN` last:
+
+```calx
+fn main() {
+    var xs: List<f64> = [2.5, f64.NAN, -1.0, 0.0, -0.0]
+    xs.sort_by(|a, b| a.total_cmp(b))
+    println("{xs}")    // out: [-1.0, -0.0, 0.0, 2.5, NaN]
+    xs.sort_by(|a, b| b.total_cmp(a))
+    println("{xs}")    // out: [NaN, 2.5, 0.0, -0.0, -1.0]
+}
+```
+
+A list of `f64` or `f32` sorted by exactly that closure, or by `b.total_cmp(a)` for largest first, is radix sorted as integers are (CLX-292). The NaNs go last, or first, in the order they were in, as a stable sort leaves them. Every other value's bits, with a negative value's flipped and a positive one's sign, order as unsigned integers as the values do, so they're sorted as those and turned back. Two values with the same bits are the same value, so it's as stable as the closure asks. Any other closure is called for each comparison by the stable sort, and `total_cmp` there has no branches.
+
+Sorting 5,000,000 random `f64` on the reference machine, pinned to one core:
+
+| | ms |
+| --- | --- |
+| Calx `sort_by(\|a, b\| a.total_cmp(b))` | 60 to 66 |
+| Rust 1.91 `sort_unstable_by(f64::total_cmp)` | 92 to 93 |
+| Rust 1.91 `sort_by(f64::total_cmp)` | 121 |
+
 ## Sum, min and max
 
 `xs.sum()`, `xs.min()` and `xs.max()` are Python's `sum`, `min` and `max` on a list or an array:
