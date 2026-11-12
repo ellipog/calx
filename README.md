@@ -29,24 +29,16 @@ The [reference](docs/README.md#reference) lists what's built.
 
 ## Performance
 
-Milliseconds per tick on the [tick-loop benchmark](bench/README.md), measured on an i9-13900K. Each figure is the median of 10 runs of 1,000 ticks. The Rust reference was built with rustc 1.91.1, and Calx with clang 23.
+On the [language benchmarks](docs/language-benchmarks.md), Calx against C, Rust, Go and Python on 25 programs, from the Benchmarks Game to JSON, CSV, compression and parallel loops, each written in each language with the same algorithm and measured on an i9-13900K: how many programs Calx took less time on, how many came within 5% either way, and how many took it longer. The parallel loops count on every processor.
 
-| Platform | Calx, 1 worker | Rust, 1 worker | Calx, 24 workers | Rust, 24 workers |
-| --- | --- | --- | --- | --- |
-| Windows 11 | **18.06** | 25.75 | **2.25** | 3.41 |
-| Linux (WSL2) | **18.01** | 26.04 | **2.46** | 3.52 |
-
-Build times on the same machine:
-
-| | Windows 11 | Linux (WSL2) |
+| Calx against | Windows 11 | Linux (WSL2) |
 | --- | --- | --- |
-| `calx check`, 64 modules (9,900 lines) | 32 ms | 24 ms |
-| Debug build of those 64 modules, empty cache | 520 ms | 278 ms |
-| Debug rebuild after changing one module | 123 ms | 78 ms |
-| `calx run` of a small program, empty cache | 274 ms | 302 ms |
-| `calx run` of it again, nothing changed | 16 ms | 21 ms |
+| C | 13 faster, 5 even, 1 slower | 8 faster, 7 even, 4 slower |
+| Rust | 15 faster, 5 even, 5 slower | 13 faster, 7 even, 5 slower |
+| Go | 17 faster, 3 even, 5 slower | 17 faster, 4 even, 4 slower |
+| Python | 21 faster | 21 faster |
 
-CI runs the benchmark and checks its checksum on every push. It also times the builds. The raw results are in [bench/results](bench/results).
+The page has every median, the memory each program held, why Calx is slower where it is, and how long each language takes to build a program and to start one. [calxlang.com/performance](https://calxlang.com/performance/) draws them, for either system.
 
 On the [scripting benchmarks](docs/scripting-benchmarks.md), against Rust and Python on the same machine, each figure is the best times of a benchmark's steps added up, from 5 runs. The page has each step, and the CPU time and memory each program used:
 
@@ -62,6 +54,25 @@ On the [scripting benchmarks](docs/scripting-benchmarks.md), against Rust and Py
 | | Linux (WSL2) | **3.59 ms** | 5.35 ms | 13.2 ms |
 | The smallest program, run | Windows 11 | **7.27 ms** | 7.74 ms | 22.5 ms |
 | | Linux (WSL2) | **0.31 ms** | 0.32 ms | 6.27 ms |
+
+Build times on the same machine:
+
+| | Windows 11 | Linux (WSL2) |
+| --- | --- | --- |
+| `calx check`, 64 modules (9,900 lines) | 32 ms | 24 ms |
+| Debug build of those 64 modules, empty cache | 520 ms | 278 ms |
+| Debug rebuild after changing one module | 123 ms | 78 ms |
+| `calx run` of a small program, empty cache | 274 ms | 302 ms |
+| `calx run` of it again, nothing changed | 16 ms | 21 ms |
+
+Milliseconds per tick on the [tick-loop benchmark](docs/benchmarks.md), a fixed simulation written in Calx and in Rust with the same algorithms, measured on an i9-13900K. Each figure is the median of 10 runs of 1,000 ticks. The Rust reference was built with rustc 1.91.1, and Calx with clang 23.
+
+| Platform | Calx, 1 worker | Rust, 1 worker | Calx, 24 workers | Rust, 24 workers |
+| --- | --- | --- | --- | --- |
+| Windows 11 | **18.06** | 25.75 | **2.25** | 3.41 |
+| Linux (WSL2) | **18.01** | 26.04 | **2.46** | 3.52 |
+
+CI runs the tick loop and checks its checksum on every push. It also times the builds. The raw results are in [bench/results](bench/results).
 
 ## Installing
 
