@@ -162,6 +162,13 @@ __attribute__((cold)) void cx_trace_frames(void (*text)(const char*), void* cons
  * a walk of its own (calx_rt.c). Gives how many. Called in the runtime only. */
 int cx_stack_capture(void** frames, int max, int skip);
 #endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+/* Arm64's optional instructions that the runtime has paths for (CLX-281), as x86's are asked of
+ * cpuid: CRC32, AES with PMULL, SHA-1 and SHA-256, and SHA-512. Asked of the system once. Called in
+ * the runtime only. */
+enum { CX_ARM_CRC32 = 1, CX_ARM_AES = 2, CX_ARM_SHA2 = 4, CX_ARM_SHA512 = 8 };
+cx_u32 cx_arm_features(void);
+#endif
 CX_COLD CX_FN(void, cx_panic_index, (cx_usize index, cx_usize length, const char* at));
 CX_COLD CX_FN(void, cx_panic_div_zero, (const char* at));
 CX_COLD CX_FN(void, cx_panic_unwrap, (const char* at));

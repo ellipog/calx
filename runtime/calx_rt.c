@@ -45,6 +45,9 @@ extern int __ulock_wake(uint32_t operation, void* addr, uint64_t wake_value);
 #else
 #include <linux/futex.h>
 #include <sys/syscall.h>
+#if defined(__aarch64__)
+#include <sys/auxv.h>
+#endif
 #endif
 #endif
 
@@ -578,6 +581,35 @@ cx_u32 cx_env_arch(void) {
     return 1;
 #endif
 }
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+/* What the system says the processor has, in calx_rt.h's CX_ARM_ bits: on Linux the auxiliary
+ * vector's HWCAP bits, on Windows IsProcessorFeaturePresent, whose crypto flag is AES, PMULL,
+ * SHA-1 and SHA-256 together, and on macOS everything, as every Apple Silicon processor has it
+ * all, from the M1 on. 0 is not asked yet; the answer has bit 31 set so it never is 0. */
+static cx_u32 arm_features;
+
+cx_u32 cx_arm_features(void) {
+    cx_u32 f = __atomic_load_n(&arm_features, __ATOMIC_RELAXED);
+    if (f) return f & ~0x80000000u;
+    f = 0x80000000u;
+#if defined(__APPLE__)
+    f |= CX_ARM_CRC32 | CX_ARM_AES | CX_ARM_SHA2 | CX_ARM_SHA512;
+#elif defined(_WIN32)
+    if (IsProcessorFeaturePresent(31)) f |= CX_ARM_CRC32; /* PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE */
+    if (IsProcessorFeaturePresent(30)) f |= CX_ARM_AES | CX_ARM_SHA2; /* PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE */
+    if (IsProcessorFeaturePresent(65)) f |= CX_ARM_SHA512; /* PF_ARM_SHA512_INSTRUCTIONS_AVAILABLE */
+#else
+    unsigned long hw = getauxval(AT_HWCAP);
+    if (hw & (1ul << 7)) f |= CX_ARM_CRC32;                          /* HWCAP_CRC32 */
+    if ((hw & (1ul << 3)) && (hw & (1ul << 4))) f |= CX_ARM_AES;     /* HWCAP_AES, HWCAP_PMULL */
+    if ((hw & (1ul << 5)) && (hw & (1ul << 6))) f |= CX_ARM_SHA2;    /* HWCAP_SHA1, HWCAP_SHA2 */
+    if (hw & (1ul << 21)) f |= CX_ARM_SHA512;                        /* HWCAP_SHA512 */
+#endif
+    __atomic_store_n(&arm_features, f, __ATOMIC_RELAXED);
+    return f & ~0x80000000u;
+}
+#endif
 
 /* Declared by std/env.calx: the processor the system has, numbered as cx_env_arch's, which is
  * Arm64 for an x64 program that Windows on Arm or macOS's Rosetta translates (CLX-276). Windows
@@ -1780,15 +1812,38 @@ static inline int bytes_same(const cx_u8* s, const cx_u8* needle, cx_usize n) {
 /* `cx_bytes_find`, given what `cx_bytes_rare` says of the needle, for a search that looks for the
  * same needle again and again. With SIMD, each step tests 32 places the needle could start, or
  * 16, for both of its rarest bytes at once, and only where both are there is the rest compared:
- * that's rarely, even when each byte alone is common. Without it, `memchr` finds the rarest. */
+ * that's rarely, even when each byte alone is common. Without it, `memchr` finds the rarest.
+ *
+ * FIND_MASK gives a step's comparison as a mask, of type find_m, with one bit for each byte that
+ * matched; FIND_AT is the first one's place in the step, and FIND_ALL the mask of every byte. x86
+ * has a bit a byte. Arm64 has no such instruction, so NEON narrows each 16 bits to 8, leaving four
+ * bits a byte, of which the mask keeps the top one (CLX-281). */
 #if defined(__AVX2__)
 typedef char find_v __attribute__((vector_size(32), aligned(1)));
+typedef cx_u32 find_m;
 #define FIND_STEP 32
 #define FIND_MASK(v) ((cx_u32)__builtin_ia32_pmovmskb256(v))
+#define FIND_AT(m) ((cx_usize)__builtin_ctz(m))
+#define FIND_ALL 0xFFFFFFFFu
 #elif defined(__SSE2__)
 typedef char find_v __attribute__((vector_size(16), aligned(1)));
+typedef cx_u32 find_m;
 #define FIND_STEP 16
 #define FIND_MASK(v) ((cx_u32)__builtin_ia32_pmovmskb128(v))
+#define FIND_AT(m) ((cx_usize)__builtin_ctz(m))
+#define FIND_ALL 0xFFFFu
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+typedef char find_v __attribute__((vector_size(16), aligned(1)));
+typedef cx_u64 find_m;
+#define FIND_STEP 16
+static inline find_m find_mask_neon(find_v v) {
+    uint8x8_t nibbles = vshrn_n_u16(vreinterpretq_u16_u8((uint8x16_t)v), 4);
+    return vget_lane_u64(vreinterpret_u64_u8(nibbles), 0) & 0x8888888888888888ull;
+}
+#define FIND_MASK(v) find_mask_neon(v)
+#define FIND_AT(m) ((cx_usize)(__builtin_ctzll(m) >> 2))
+#define FIND_ALL 0x8888888888888888ull
 #endif
 cx_usize cx_bytes_find_rare(const cx_u8* hay, cx_usize len, const cx_u8* needle, cx_usize n, cx_usize k) {
     if (n == 0) return 0;
@@ -1807,9 +1862,9 @@ cx_usize cx_bytes_find_rare(const cx_u8* hay, cx_usize len, const cx_u8* needle,
     while (p <= last && last - p >= FIND_STEP - 1) {
         find_v a = *(const find_v*)(hay + p + k1);
         find_v b = *(const find_v*)(hay + p + k2);
-        cx_u32 m = FIND_MASK((a == (char)c1) & (b == (char)c2));
+        find_m m = FIND_MASK((a == (char)c1) & (b == (char)c2));
         while (m) {
-            cx_usize j = p + (cx_usize)__builtin_ctz(m);
+            cx_usize j = p + FIND_AT(m);
             if (bytes_same(hay + j, needle, n)) return j;
             m &= m - 1;
         }
@@ -1884,8 +1939,8 @@ cx_usize cx_bytes_find3(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, 
 #if defined(FIND_STEP)
     while (end - p >= FIND_STEP) {
         find_v w = *(const find_v*)p;
-        cx_u32 m = FIND_MASK((w == (char)a) | (w == (char)b) | (w == (char)c));
-        if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        find_m m = FIND_MASK((w == (char)a) | (w == (char)b) | (w == (char)c));
+        if (m) return (cx_usize)(p - hay) + FIND_AT(m);
         p += FIND_STEP;
     }
 #endif
@@ -1900,8 +1955,8 @@ cx_usize cx_bytes_find5(const cx_u8* hay, cx_usize len, cx_usize from, cx_u8 a, 
 #if defined(FIND_STEP)
     while (end - p >= FIND_STEP) {
         find_v w = *(const find_v*)p;
-        cx_u32 m = FIND_MASK((w == (char)a) | (w == (char)b) | (w == (char)c) | (w == (char)d) | (w == (char)e));
-        if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        find_m m = FIND_MASK((w == (char)a) | (w == (char)b) | (w == (char)c) | (w == (char)d) | (w == (char)e));
+        if (m) return (cx_usize)(p - hay) + FIND_AT(m);
         p += FIND_STEP;
     }
 #endif
@@ -1918,8 +1973,8 @@ cx_usize cx_bytes_find_break(const cx_u8* hay, cx_usize len, cx_usize from) {
 #if defined(FIND_STEP)
     while (end - p >= FIND_STEP) {
         find_v w = *(const find_v*)p;
-        cx_u32 m = FIND_MASK(((w > (char)-1) & (w < (char)0x1F)) | (w == (char)0xC2) | (w == (char)0xE2));
-        if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+        find_m m = FIND_MASK(((w > (char)-1) & (w < (char)0x1F)) | (w == (char)0xC2) | (w == (char)0xE2));
+        if (m) return (cx_usize)(p - hay) + FIND_AT(m);
         p += FIND_STEP;
     }
 #endif
@@ -1939,7 +1994,7 @@ cx_usize cx_bytes_skip_starters(const cx_u8* hay, cx_usize len, cx_usize from, c
     const cx_u8* end = hay + len;
 #if defined(FIND_STEP)
     typedef cx_u8 skip_u __attribute__((vector_size(FIND_STEP), aligned(1)));
-    cx_u32 all = FIND_STEP == 32 ? 0xFFFFFFFFu : 0xFFFFu;
+    find_m all = FIND_ALL;
     while (end - p >= FIND_STEP + 1) {
         skip_u w = *(const skip_u*)p;
         find_v ok = (find_v)(w < low);
@@ -1950,8 +2005,8 @@ cx_usize cx_bytes_skip_starters(const cx_u8* hay, cx_usize len, cx_usize from, c
             if (kinds & 1) ok |= (find_v)(((w >= 0xE5) & (w <= 0xE9)) | ((w == 0xE4) & (x >= 0xB8)));
             if (kinds & 2) ok |= (find_v)(((w >= 0xEB) & (w <= 0xED)) | ((w == 0xEA) & (x >= 0xB0)));
             if (kinds & 4) ok |= (find_v)((w == 0xE1) & (x >= 0xB8) & (x <= 0xBB));
-            cx_u32 m = ~FIND_MASK(ok) & all;
-            if (m) return (cx_usize)(p - hay) + (cx_usize)__builtin_ctz(m);
+            find_m m = ~FIND_MASK(ok) & all;
+            if (m) return (cx_usize)(p - hay) + FIND_AT(m);
         }
         p += FIND_STEP;
     }
@@ -1973,6 +2028,8 @@ cx_usize cx_bytes_skip_starters(const cx_u8* hay, cx_usize len, cx_usize from, c
 #undef RX_HAS_ZERO
 #undef FIND_STEP
 #undef FIND_MASK
+#undef FIND_AT
+#undef FIND_ALL
 
 cx_usize cx_str_find_last(cx_str hay, cx_str needle) {
     if (needle.len > hay.len) return CX_NOT_FOUND;

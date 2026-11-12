@@ -51,6 +51,10 @@
 #include <immintrin.h>
 #define CX_X86 1
 #endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_acle.h>
+#define CX_ARM 1
+#endif
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "calx_zlib.c reads and writes words as little-endian"
@@ -97,7 +101,37 @@ static void crc_init(void) {
         for (int k = 1; k < 8; k++) crc_table[k][b] = (crc_table[k - 1][b] >> 8) ^ crc_table[0][crc_table[k - 1][b] & 0xff];
 }
 
+#ifdef CX_ARM
+/* CRC-32 with Arm64's CRC32 instructions, which are gzip's polynomial, reflected as zlib's
+ * table is: eight bytes an instruction (CLX-281). Four go in a row, each waiting on the last,
+ * which is still several times the table's speed. */
+__attribute__((target("crc"))) static cx_u32 crc32_arm(cx_u32 crc, const cx_u8* p, cx_usize n) {
+    while (n && ((uintptr_t)p & 7)) {
+        crc = __crc32b(crc, *p++);
+        n--;
+    }
+    while (n >= 32) {
+        crc = __crc32d(crc, load64(p));
+        crc = __crc32d(crc, load64(p + 8));
+        crc = __crc32d(crc, load64(p + 16));
+        crc = __crc32d(crc, load64(p + 24));
+        p += 32;
+        n -= 32;
+    }
+    while (n >= 8) {
+        crc = __crc32d(crc, load64(p));
+        p += 8;
+        n -= 8;
+    }
+    while (n--) crc = __crc32b(crc, *p++);
+    return crc;
+}
+#endif
+
 cx_u32 cx_zlib_crc32(cx_u32 crc, const cx_u8* p, cx_usize n) {
+#ifdef CX_ARM
+    if (cx_arm_features() & CX_ARM_CRC32) return ~crc32_arm(~crc, p, n);
+#endif
     once(&crc_ready, crc_init);
     crc = ~crc;
     while (n >= 8) {
