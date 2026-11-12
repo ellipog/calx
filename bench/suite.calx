@@ -37,7 +37,8 @@
 //
 // What it builds and the inputs it writes go in a folder of its own in the temp folder, removed at
 // the end unless --keep. --record writes bench/results/suite-<os>.json with the machine, the
-// toolchains and the commit; with --only or --groups, the benchmarks left out keep their results.
+// toolchains and the commit; with --only or --groups, the benchmarks left out keep their results,
+// and with --langs, the languages left out keep theirs, each with the commit it was recorded at.
 import dx.{MODULES, c_flags, edit_big, write_big, write_hello, write_ninja}
 import inputs.{make_input}
 import machine.{commit, compiler, exe, machine, now_utc, output_of, repo_root, round_to}
@@ -1303,6 +1304,37 @@ fn print_tables(root: String) {
 }
 
 // The results `path` holds, if it's there and reads as a record.
+// A benchmark's new record, `now`, with the results of the languages this run left out, with
+// `--langs`, kept from its old record, `before`, each with the commit and time it was recorded
+// at: a language that can't run here this time, such as Go missing under WSL, keeps its numbers.
+fn with_langs_kept(now: own Json, before: own Json?, langs: List<String>) -> Json {
+    let Json.Object(fresh) = now else {
+        return now
+    }
+    let Json.Object(old) = before ?? Json.Null else {
+        return Json.Object(fresh)
+    }
+    var out = fresh.copy()
+    for l in LANGS {
+        if langs.contains(l) or out.contains(l) {
+            continue
+        }
+        let Json.Object(entry) = old.find(l) else {
+            continue
+        }
+        var e = entry.copy()
+        if not e.contains("recorded") {
+            for key in ["recorded", "commit"] {
+                if let v = old.find(key) {
+                    e.insert(String(key), v.copy())
+                }
+            }
+        }
+        out.insert(String(l), Json.Object(e))
+    }
+    return Json.Object(out)
+}
+
 fn kept(path: String) -> Json {
     let ok(read) = fs.read_text(path) else {
         return Json.Null
@@ -1508,7 +1540,7 @@ fn main() {
         for b in benches() {
             match results.remove(b.name.copy()) {
                 some(j) => {
-                    merged.insert(b.name.copy(), j)
+                    merged.insert(b.name.copy(), with_langs_kept(j, old.get(b.name.copy()), langs.copy()))
                 }
                 none => {
                     if let j = old.get(b.name.copy()) {
