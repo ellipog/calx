@@ -28,7 +28,6 @@ const times = (f: number) => (f < 10 ? f.toFixed(1) : Math.round(f).toString());
 // to its notes until it's written here.
 const WHY: Record<string, string> = {
 	compress: "Go's gzip and xz write bigger files than the others', so they do less work.",
-	logs: "C scans each line in place. Calx checks that the file is UTF-8 and makes a list for each <code>split</code>; its set of addresses takes less time than C's.",
 	parmandel: "Go's loop over a row takes less time on one thread too, by about as much; how the rows are shared out is even now (CLX-296).",
 	parsum: 'On all 32 processors under WSL the times swing by a fifth from one recording to the next.',
 	binarytrees: "It times the allocator: Go's collector is a little faster than Calx's allocator, and C's and Rust's are slower.",
