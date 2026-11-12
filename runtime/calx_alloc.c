@@ -134,6 +134,12 @@ static _Thread_local uintptr_t track_lo, track_hi;
  * holds the one before it and the return address after that. */
 static __attribute__((noinline)) void track_stack(void** at) {
     if (!track_hi) {
+#if defined(__APPLE__)
+        /* macOS gives a thread's stack by its top (CLX-277). */
+        pthread_t self = pthread_self();
+        track_hi = (uintptr_t)pthread_get_stackaddr_np(self);
+        track_lo = track_hi - pthread_get_stacksize_np(self);
+#else
         pthread_attr_t a;
         void* lo;
         size_t size;
@@ -145,6 +151,7 @@ static __attribute__((noinline)) void track_stack(void** at) {
             }
             pthread_attr_destroy(&a);
         }
+#endif
     }
     uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
     int i = 0;
@@ -453,8 +460,13 @@ static cx_u8* take_page(unsigned c, cx_u32* number) {
         reserve_arena();
     }
     cx_u32 n = NO_PAGE;
-    if (free_count) n = free_pages[--free_count];
-    else if (arena && next_page < ARENA_PAGES && table_room_for(next_page)) n = next_page++;
+    int given_back = 0;
+    if (free_count) {
+        n = free_pages[--free_count];
+        given_back = 1;
+    } else if (arena && next_page < ARENA_PAGES && table_room_for(next_page)) {
+        n = next_page++;
+    }
     if (n != NO_PAGE) {
         page_of[n].state = PAGE_CUTTING;
         page_of[n].cls = (cx_u8)c;
@@ -467,16 +479,27 @@ static cx_u8* take_page(unsigned c, cx_u32* number) {
     if (n == NO_PAGE) return (cx_u8*)os_alloc(PAGE);
     cx_u8* p = arena + ((cx_usize)n << PAGE_SHIFT);
 #ifdef _WIN32
+    (void)given_back;
     if (!VirtualAlloc(p, PAGE, MEM_COMMIT, PAGE_READWRITE)) cx_panic_capacity();
+#elif defined(__APPLE__)
+    /* Counted as the program's again, as `decommit` stopped it being. */
+    if (given_back) madvise(p, PAGE, MADV_FREE_REUSE);
+#else
+    (void)given_back;
 #endif
     return p;
 }
 
 /* Gives `n` bytes at `p` back to the system, a multiple of OS_PAGE in the range; the range's
- * memory is committed again when its page is next taken. */
+ * memory is committed again when its page is next taken. Nothing counts on what it reads as then:
+ * Linux gives zeros, and macOS what was there or zeros. macOS takes the memory back, and stops
+ * counting it as the program's, only for MADV_FREE_REUSABLE, as mimalloc and jemalloc use there
+ * (CLX-277). */
 static void decommit(cx_u8* p, cx_usize n) {
 #ifdef _WIN32
     VirtualFree(p, n, MEM_DECOMMIT);
+#elif defined(__APPLE__)
+    madvise(p, n, MADV_FREE_REUSABLE);
 #else
     madvise(p, n, MADV_DONTNEED);
 #endif

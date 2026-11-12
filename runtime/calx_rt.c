@@ -26,15 +26,26 @@
 #else
 #include <errno.h>
 #include <limits.h>
-#include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/syscall.h>
 #include <termios.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+/* The wait and wake on an address that libc++'s atomic waits and Rust's std use, which every
+ * macOS since 10.12 has; os_sync_wait_on_address is the same from 14.4 (CLX-277). */
+extern int __ulock_wait(uint32_t operation, void* addr, uint64_t value, uint32_t timeout_us);
+extern int __ulock_wake(uint32_t operation, void* addr, uint64_t wake_value);
+#define CX_UL_COMPARE_AND_WAIT 1u
+#define CX_ULF_WAKE_ALL 0x100u
+#else
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 /* --- output ------------------------------------------------------------------------------- */
@@ -232,7 +243,16 @@ static void overflow_handler(int sig, siginfo_t* info, void* context) {
     if (info->si_code <= 0) raise(sig);
 }
 
+#ifndef MAP_STACK
+#define MAP_STACK 0 /* macOS's stacks are plain memory */
+#endif
+
 static void overflow_thread_begin(void) {
+#if defined(__APPLE__)
+    /* macOS gives a thread's stack by its top. */
+    pthread_t self = pthread_self();
+    stack_low = (uintptr_t)pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self);
+#else
     pthread_attr_t attr;
     if (pthread_getattr_np(pthread_self(), &attr) == 0) {
         void* low;
@@ -240,6 +260,7 @@ static void overflow_thread_begin(void) {
         if (pthread_attr_getstack(&attr, &low, &size) == 0) stack_low = (uintptr_t)low;
         pthread_attr_destroy(&attr);
     }
+#endif
     void* p = mmap(NULL, CX_PANIC_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (p == MAP_FAILED) return;
     stack_t s = {.ss_sp = p, .ss_size = CX_PANIC_STACK, .ss_flags = 0};
@@ -998,11 +1019,17 @@ cx_usize cx_term_read(cx_u8* p, cx_usize n) {
 
 /* --- std.process: this process ------------------------------------------------------------- */
 
-/* The memory of this process that's in RAM: its working set on Windows, its resident set on Linux. */
+/* The memory of this process that's in RAM: its working set on Windows, its resident set on Linux
+ * and macOS. */
 cx_u64 cx_process_memory(void) {
 #ifdef _WIN32
     PROCESS_MEMORY_COUNTERS c;
     return K32GetProcessMemoryInfo(GetCurrentProcess(), &c, sizeof c) ? (cx_u64)c.WorkingSetSize : 0;
+#elif defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return 0;
+    return (cx_u64)info.resident_size;
 #else
     FILE* f = fopen("/proc/self/statm", "r");
     if (!f) return 0;
@@ -1014,7 +1041,7 @@ cx_u64 cx_process_memory(void) {
 #endif
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 /* A cgroup's memory limit, or 0 if it has none: `max`, or no such file. */
 static cx_u64 cgroup_limit(const char* path) {
     FILE* f = fopen(path, "r");
@@ -1030,9 +1057,13 @@ static cx_u64 lower(cx_u64 a, cx_u64 b) { return a && (!b || a < b) ? a : b; }
 
 /* The memory this process may use: the machine's RAM, or less where a limit says, a job object's
  * on Windows, or the cgroup's on Linux, as a container has, the lowest of its own and its
- * parents'. 0 where it can't say. */
+ * parents'. macOS has no such limit. 0 where it can't say. */
 cx_u64 cx_process_memory_limit(void) {
-#ifdef _WIN32
+#if defined(__APPLE__)
+    uint64_t bytes = 0;
+    size_t len = sizeof bytes;
+    return sysctlbyname("hw.memsize", &bytes, &len, NULL, 0) == 0 ? (cx_u64)bytes : 0;
+#elif defined(_WIN32)
     MEMORYSTATUSEX m;
     m.dwLength = sizeof m;
     cx_u64 limit = GlobalMemoryStatusEx(&m) ? (cx_u64)m.ullTotalPhys : 0;
@@ -1095,6 +1126,8 @@ cx_u64 cx_process_cpu_ns(void) {
 cx_u32 cx_process_processors(void) {
 #ifdef _WIN32
     long n = (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+#elif defined(__APPLE__)
+    long n = sysconf(_SC_NPROCESSORS_ONLN); /* macOS has no affinity masks */
 #else
     cpu_set_t set;
     long n = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : sysconf(_SC_NPROCESSORS_ONLN);
@@ -2349,6 +2382,10 @@ static int par_cheap(cx_u64 cost) {
 static void par_sleep(cx_u32* word, cx_u32 seen) { WaitOnAddress(word, &seen, sizeof seen, INFINITE); }
 static void par_wake(cx_u32* word) { WakeByAddressAll(word); }
 static void par_yield(void) { SwitchToThread(); }
+#elif defined(__APPLE__)
+static void par_sleep(cx_u32* word, cx_u32 seen) { __ulock_wait(CX_UL_COMPARE_AND_WAIT, word, seen, 0); }
+static void par_wake(cx_u32* word) { __ulock_wake(CX_UL_COMPARE_AND_WAIT | CX_ULF_WAKE_ALL, word, 0); }
+static void par_yield(void) { sched_yield(); }
 #else
 static void par_sleep(cx_u32* word, cx_u32 seen) { syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, seen, NULL, NULL, 0); }
 static void par_wake(cx_u32* word) { syscall(SYS_futex, word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0); }
@@ -2723,15 +2760,7 @@ static void* par_thread(void* arg) {
 /* The threads each loop on the main pool uses: the number of logical processors, unless
  * `set_workers` changed it. */
 static cx_usize par_threads(void) {
-    if (!par_main.target) {
-#ifdef _WIN32
-        long n = (long)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-#else
-        cpu_set_t set;
-        long n = sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-        par_main.target = n > 0 ? (cx_usize)n : 1;
-    }
+    if (!par_main.target) par_main.target = cx_process_processors();
     return par_main.target;
 }
 

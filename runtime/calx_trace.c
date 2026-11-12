@@ -387,6 +387,33 @@ done:
     ReleaseSRWLockExclusive(&trace_lock);
 }
 
+#elif defined(__APPLE__)
+
+/* macOS, until its traces read the dSYM's DWARF (CLX-278): each frame's name from dladdr, without
+ * a line, so a panic's trace has no frames to show yet. */
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <pthread.h>
+#include <unistd.h>
+
+static pthread_mutex_t trace_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void found_frames(found* f) {
+    void* frames[MAX_FRAMES];
+    int n = backtrace(frames, MAX_FRAMES);
+    name_frames(f, frames, n);
+}
+
+static void name_frames(found* f, void* const* frames, int n) {
+    pthread_mutex_lock(&trace_lock);
+    if (!getcwd(f->cwd, sizeof f->cwd)) f->cwd[0] = 0;
+    for (int i = 0; i < n; i++) {
+        Dl_info info;
+        if (dladdr((const char*)frames[i] - 1, &info) && info.dli_sname) frame(f, info.dli_sname, "", 0);
+    }
+    pthread_mutex_unlock(&trace_lock);
+}
+
 #else
 
 #include <elf.h>
